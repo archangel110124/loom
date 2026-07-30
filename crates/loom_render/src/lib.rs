@@ -11,6 +11,7 @@
 //! and Slang. If a feature here grows much beyond that, it is the obsolete
 //! pre-1.3 style and should be reconsidered.
 
+mod debug_names;
 mod device;
 mod instance;
 mod renderer;
@@ -20,6 +21,7 @@ mod renderer;
 /// `Mat4` types that look identical and do not unify.
 pub use glam;
 
+pub use debug_names::DebugNames;
 pub use device::{Device, DeviceError};
 pub use renderer::{Camera, Object, RenderError, Renderer};
 pub use instance::{Instance, InstanceError, take_validation_messages};
@@ -174,12 +176,15 @@ mod tests {
 
     #[test]
     fn push_constants_match_the_shader_block() {
-        // mat4 + 3 padded rows + vec4 = 64 + 48 + 16 = 128, exactly Vulkan's
-        // guaranteed minimum push-constant size. A mismatch with `Push` in
-        // scene.slang is garbage on screen with no diagnostic (brief §7.7),
-        // and exceeding 128 would fail on conformant hardware we cannot test.
-        let size = size_of::<[f32; 16]>() + size_of::<[[f32; 4]; 3]>() + size_of::<[f32; 4]>();
-        assert_eq!(size, 128, "push block must fit the guaranteed minimum");
+        // Push constants now carry only two device addresses: 16 bytes against
+        // a guaranteed minimum of 128. Per-object data lives in a buffer, so
+        // adding fields to it can never push this over the limit — which is the
+        // point of the buffer-device-address model.
+        assert_eq!(size_of::<u64>() * 2, 16);
+        // std430 for a PhysicalStorageBuffer block: every member 16-aligned.
+        // `[f32; 3]` would put a vertex normal at offset 12 and spirv-val
+        // rejects it, so the vertex is two vec4s.
+        assert_eq!(size_of::<[f32; 4]>() * 2, 32, "Vertex must stay 16-aligned");
     }
 
     #[test]

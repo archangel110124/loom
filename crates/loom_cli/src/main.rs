@@ -145,7 +145,9 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     };
 
     let objects = scene_to_objects(&scene);
-    let camera = frame_scene(&objects);
+    let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok()).unwrap_or(35.0);
+    let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok()).unwrap_or(28.0);
+    let camera = frame_scene(&objects, yaw, pitch);
 
     let result = (|| -> Result<String, String> {
         let instance = Instance::new(c"loom").map_err(|e| e.to_string())?;
@@ -240,7 +242,7 @@ fn palette(index: usize) -> [f32; 3] {
 /// Auto-framing rather than a fixed camera because the agent's first render of
 /// a scene it just authored should show the whole thing — a hardcoded camera
 /// produces an empty image and a confused retry loop.
-fn frame_scene(objects: &[Object]) -> Camera {
+fn frame_scene(objects: &[Object], yaw_degrees: f32, pitch_degrees: f32) -> Camera {
     if objects.is_empty() {
         return Camera { eye: Vec3::new(4.0, 4.0, 8.0), target: Vec3::ZERO, fov_y_degrees: 45.0 };
     }
@@ -262,8 +264,18 @@ fn frame_scene(objects: &[Object]) -> Camera {
     let center = (min + max) * 0.5;
     let radius = (max - min).length() * 0.5;
     let distance = (radius / (22.5_f32).to_radians().tan()).max(3.0);
+
+    // Orbit the framed bounds. Design doc §2.10: one render is a lie — an
+    // object inside another object is invisible from exactly one angle, so the
+    // agent should always look from more than one.
+    let (yaw, pitch) = (yaw_degrees.to_radians(), pitch_degrees.to_radians());
+    let direction = Vec3::new(
+        yaw.sin() * pitch.cos(),
+        pitch.sin(),
+        yaw.cos() * pitch.cos(),
+    );
     Camera {
-        eye: center + Vec3::new(0.55, 0.5, 1.0).normalize() * distance,
+        eye: center + direction * distance,
         target: center,
         fov_y_degrees: 45.0,
     }

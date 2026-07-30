@@ -16,6 +16,7 @@ use gpu_allocator::vulkan::{
     Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc,
 };
 
+use crate::debug_names::DebugNames;
 use crate::{Device, Instance};
 
 const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
@@ -38,16 +39,69 @@ pub struct Camera {
     pub fov_y_degrees: f32,
 }
 
-/// Push-constant block. Must match `Push` in `scene.slang` exactly — a mismatch
-/// here is garbage on screen with no diagnostic (brief §7.7), which is why the
-/// size is asserted in a test.
+/// Push-constant block: two device addresses, nothing else.
+///
+/// Must match `Push` in `scene.slang` exactly — a mismatch is garbage on screen
+/// with no diagnostic (brief §7.7), so the sizes are asserted in a test.
+/// Keeping only pointers here means per-object fields can grow without ever
+/// running into the 128-byte push-constant limit.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Push {
+    vertices: vk::DeviceAddress,
+    objects: vk::DeviceAddress,
+}
+
+/// One cube vertex. 16-byte aligned members: `[f32; 3]` would place `normal`
+/// at offset 12 and violate std430 for a `PhysicalStorageBuffer` block, which
+/// `spirv-val` rejects outright.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Vertex {
+    position: [f32; 4],
+    normal: [f32; 4],
+}
+
+/// Per-object data, indexed by `SV_InstanceID`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ObjectData {
     mvp: [f32; 16],
     /// Rows of inverse-transpose(model)'s upper 3x3, padded to `vec4`.
     normal: [[f32; 4]; 3],
     color: [f32; 4],
+}
+
+/// The unit cube, expanded to 36 vertices with per-face normals.
+///
+/// Built on the CPU now that geometry lives in a buffer. Real meshes replace
+/// this at M5; the buffer and the address plumbing do not change.
+fn cube_vertices() -> Vec<Vertex> {
+    const CORNERS: [[f32; 3]; 8] = [
+        [-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [-1.0, 1.0, -1.0],
+        [-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0],
+    ];
+    // 6 faces x 2 triangles, counter-clockwise seen from outside.
+    const INDICES: [usize; 36] = [
+        0, 2, 1, 0, 3, 2, 5, 7, 4, 5, 6, 7, 4, 3, 0, 4, 7, 3,
+        1, 6, 5, 1, 2, 6, 4, 1, 5, 4, 0, 1, 3, 6, 2, 3, 7, 6,
+    ];
+    const NORMALS: [[f32; 3]; 6] = [
+        [0.0, 0.0, -1.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 1.0, 0.0],
+    ];
+    INDICES
+        .iter()
+        .enumerate()
+        .map(|(i, &corner)| {
+            let p = CORNERS[corner];
+            let n = NORMALS[i / 6];
+            Vertex {
+                position: [p[0], p[1], p[2], 1.0],
+                normal: [n[0], n[1], n[2], 0.0],
+            }
+        })
+        .collect()
 }
 
 /// Anything that can go wrong rendering.
@@ -96,6 +150,13 @@ pub struct Renderer {
     depth_alloc: Option<Allocation>,
     readback: vk::Buffer,
     readback_alloc: Option<Allocation>,
+    vertices: vk::Buffer,
+    vertices_alloc: Option<Allocation>,
+    vertex_address: vk::DeviceAddress,
+    objects: vk::Buffer,
+    objects_alloc: Option<Allocation>,
+    object_address: vk::DeviceAddress,
+    max_objects: usize,
 
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -103,6 +164,7 @@ pub struct Renderer {
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
+    cache_path: Option<std::path::PathBuf>,
 }
 
 impl Renderer {
@@ -118,6 +180,8 @@ impl Renderer {
         height: u32,
     ) -> Result<Self, RenderError> {
         let raw = device.handle().clone();
+        // Enabled exactly when the instance enabled the extension.
+        let names = DebugNames::new(instance.handle(), &raw, cfg!(debug_assertions));
 
         let mut allocator = Allocator::new(&AllocatorCreateDesc {
             instance: instance.handle().clone(),
@@ -174,7 +238,42 @@ impl Renderer {
         // SAFETY: the allocation matches the buffer's requirements.
         unsafe { raw.bind_buffer_memory(readback, readback_alloc.memory(), readback_alloc.offset()) }?;
 
-        let (pipeline_layout, pipeline, pipeline_cache) = create_pipeline(&raw)?;
+        // Geometry, uploaded once. Host-visible rather than device-local with a
+        // staging copy: 36 vertices is far below the point where that matters,
+        // and the transfer queue + staging ring arrive with real assets at M5.
+        // `ponytail:` host-visible upload, upgrade when meshes get big.
+        let cube = cube_vertices();
+        let (vertices, vertices_alloc, vertex_address) = create_address_buffer(
+            &raw,
+            &mut allocator,
+            std::mem::size_of_val(cube.as_slice()) as u64,
+            "loom.cube_vertices",
+        )?;
+        write_slice(&vertices_alloc, &cube)?;
+
+        // Per-object array. Sized once; the draw is a single instanced call.
+        const MAX_OBJECTS: usize = 4096;
+        let (objects, objects_alloc, object_address) = create_address_buffer(
+            &raw,
+            &mut allocator,
+            (MAX_OBJECTS * size_of::<ObjectData>()) as u64,
+            "loom.object_data",
+        )?;
+
+        let cache_path = pipeline_cache_path(instance, device);
+        let (pipeline_layout, pipeline, pipeline_cache) =
+            create_pipeline(&raw, cache_path.as_deref())?;
+
+        names.set(color, "loom.color_target");
+        names.set(depth, "loom.depth_target");
+        names.set(color_view, "loom.color_target.view");
+        names.set(depth_view, "loom.depth_target.view");
+        names.set(readback, "loom.readback_buffer");
+        names.set(vertices, "loom.cube_vertices");
+        names.set(objects, "loom.object_data");
+        names.set(pipeline, "loom.scene_pipeline");
+        names.set(pipeline_layout, "loom.scene_pipeline_layout");
+        names.set(pipeline_cache, "loom.pipeline_cache");
 
         let pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(device.queue_family())
@@ -192,6 +291,10 @@ impl Renderer {
         // SAFETY: default create-info is valid.
         let fence = unsafe { raw.create_fence(&vk::FenceCreateInfo::default(), None) }?;
 
+        names.set(command_pool, "loom.command_pool");
+        names.set(command_buffer, "loom.command_buffer");
+        names.set(fence, "loom.frame_fence");
+
         Ok(Self {
             device: raw,
             queue: device.queue(),
@@ -206,12 +309,20 @@ impl Renderer {
             depth_alloc: Some(depth_alloc),
             readback,
             readback_alloc: Some(readback_alloc),
+            vertices,
+            vertices_alloc: Some(vertices_alloc),
+            vertex_address,
+            objects,
+            objects_alloc: Some(objects_alloc),
+            object_address,
+            max_objects: MAX_OBJECTS,
             pipeline_layout,
             pipeline,
             pipeline_cache,
             command_pool,
             command_buffer,
             fence,
+            cache_path,
         })
     }
 
@@ -221,7 +332,13 @@ impl Renderer {
     /// [`RenderError`] on any Vulkan failure.
     #[allow(clippy::too_many_lines)]
     pub fn render(&mut self, objects: &[Object], camera: &Camera) -> Result<Vec<u8>, RenderError> {
-        let d = &self.device;
+        if objects.len() > self.max_objects {
+            return Err(RenderError::Allocator(format!(
+                "{} objects exceeds the {} the object buffer was sized for",
+                objects.len(),
+                self.max_objects
+            )));
+        }
         let cmd = self.command_buffer;
 
         #[allow(clippy::cast_precision_loss)]
@@ -237,6 +354,34 @@ impl Renderer {
         );
         proj.y_axis.y *= -1.0;
         let view_proj = proj * view;
+
+        // Per-object data goes to the GPU once, not once per draw.
+        let object_data: Vec<ObjectData> = objects
+            .iter()
+            .map(|object| {
+                // Inverse-transpose, because non-uniform scale skews normals.
+                let normal_matrix = glam::Mat3::from_mat4(object.model).inverse().transpose();
+                // Transposing gives columns that are the original's rows.
+                let rows = normal_matrix.transpose();
+                ObjectData {
+                    mvp: (view_proj * object.model).to_cols_array(),
+                    normal: [
+                        rows.x_axis.extend(0.0).to_array(),
+                        rows.y_axis.extend(0.0).to_array(),
+                        rows.z_axis.extend(0.0).to_array(),
+                    ],
+                    color: [object.color[0], object.color[1], object.color[2], 1.0],
+                }
+            })
+            .collect();
+        write_slice(
+            self.objects_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("object buffer missing".into()))?,
+            &object_data,
+        )?;
+
+        let d = &self.device;
 
         // SAFETY: the buffer is not in flight — the previous submit was waited on.
         unsafe {
@@ -333,33 +478,25 @@ impl Renderer {
                 }],
             );
 
-            for object in objects {
-                // Inverse-transpose, because non-uniform scale skews normals.
-                let normal_matrix = glam::Mat3::from_mat4(object.model).inverse().transpose();
-                // Transposing gives columns that are the original's rows.
-                let rows = normal_matrix.transpose();
-                let push = Push {
-                    mvp: (view_proj * object.model).to_cols_array(),
-                    normal: [
-                        rows.x_axis.extend(0.0).to_array(),
-                        rows.y_axis.extend(0.0).to_array(),
-                        rows.z_axis.extend(0.0).to_array(),
-                    ],
-                    color: [object.color[0], object.color[1], object.color[2], 1.0],
-                };
-                let bytes = std::slice::from_raw_parts(
-                    std::ptr::from_ref(&push).cast::<u8>(),
-                    size_of::<Push>(),
-                );
-                d.cmd_push_constants(
-                    cmd,
-                    self.pipeline_layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    bytes,
-                );
-                d.cmd_draw(cmd, 36, 1, 0, 0);
-            }
+            // Two pointers, then ONE draw for the whole scene. CPU work per
+            // frame is constant in object count (graphics doc §B.1), which
+            // matters here because `render_preview` runs the full pipeline
+            // dozens of times per agent task.
+            let push = Push {
+                vertices: self.vertex_address,
+                objects: self.object_address,
+            };
+            let bytes =
+                std::slice::from_raw_parts(std::ptr::from_ref(&push).cast::<u8>(), size_of::<Push>());
+            d.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                bytes,
+            );
+            let instances = u32::try_from(objects.len()).unwrap_or(0);
+            d.cmd_draw(cmd, 36, instances, 0, 0);
 
             d.cmd_end_rendering(cmd);
 
@@ -459,6 +596,7 @@ impl Drop for Renderer {
         // use-after-free the compiler cannot see.
         unsafe {
             let _ = self.device.device_wait_idle();
+            self.save_pipeline_cache();
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline(self.pipeline, None);
@@ -473,6 +611,8 @@ impl Drop for Renderer {
                     self.color_alloc.take(),
                     self.depth_alloc.take(),
                     self.readback_alloc.take(),
+                    self.vertices_alloc.take(),
+                    self.objects_alloc.take(),
                 ]
                 .into_iter()
                 .flatten()
@@ -483,10 +623,115 @@ impl Drop for Renderer {
             self.device.destroy_image(self.color, None);
             self.device.destroy_image(self.depth, None);
             self.device.destroy_buffer(self.readback, None);
+            self.device.destroy_buffer(self.vertices, None);
+            self.device.destroy_buffer(self.objects, None);
             // The allocator must go before the device it borrows.
             self.allocator = None;
         }
     }
+}
+
+impl Renderer {
+    /// Write the pipeline cache back to disk (Vulkan doc §9 step 3).
+    ///
+    /// Best-effort: a cache that cannot be written costs a recompile next run,
+    /// which is not worth failing over.
+    fn save_pipeline_cache(&self) {
+        let Some(path) = &self.cache_path else { return };
+        // SAFETY: the cache is live and idle.
+        // SAFETY: the cache is live and the device is idle.
+        let Ok(data) = (unsafe { self.device.get_pipeline_cache_data(self.pipeline_cache) }) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, data);
+    }
+}
+
+/// Where this device's pipeline cache lives.
+///
+/// Vulkan doc §9 step 4: **key the file by driver version + device ID**, plus a
+/// hash of the shader set. A stale cache is silently ignored at best and a
+/// correctness hazard at worst, so a driver update must not be able to load the
+/// previous driver's blob.
+fn pipeline_cache_path(instance: &Instance, device: &Device) -> Option<std::path::PathBuf> {
+    // SAFETY: the physical device came from this instance.
+    let props = unsafe {
+        instance
+            .handle()
+            .get_physical_device_properties(device.physical())
+    };
+
+    // FNV-1a over the shader bytes: not cryptographic, just needs to change
+    // when the shaders do.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in crate::SCENE_SPV.iter().chain(crate::TRIANGLE_SPV) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+
+    let key = format!(
+        "{:08x}-{:08x}-{:08x}-{:016x}",
+        props.vendor_id, props.device_id, props.driver_version, hash
+    );
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?;
+    Some(base.join("loom").join(format!("pipeline-{key}.bin")))
+}
+
+/// A host-visible buffer that the shader reaches by device address.
+fn create_address_buffer(
+    device: &ash::Device,
+    allocator: &mut Allocator,
+    size: u64,
+    name: &str,
+) -> Result<(vk::Buffer, Allocation, vk::DeviceAddress), RenderError> {
+    let info = vk::BufferCreateInfo::default()
+        .size(size)
+        // SHADER_DEVICE_ADDRESS is what makes `vkGetBufferDeviceAddress` legal
+        // on this buffer; without it the call is a validation error.
+        .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    // SAFETY: `info` is fully initialised and outlives the call.
+    let buffer = unsafe { device.create_buffer(&info, None) }?;
+    // SAFETY: `buffer` was just created on this device.
+    let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+    let allocation = allocator
+        .allocate(&AllocationCreateDesc {
+            name,
+            requirements,
+            location: MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })
+        .map_err(|e| RenderError::Allocator(e.to_string()))?;
+    // SAFETY: the allocation matches the buffer's requirements.
+    unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }?;
+
+    let address_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
+    // SAFETY: the buffer is bound and was created with SHADER_DEVICE_ADDRESS.
+    let address = unsafe { device.get_buffer_device_address(&address_info) };
+    Ok((buffer, allocation, address))
+}
+
+/// Copy a `#[repr(C)]` slice into a mapped allocation.
+fn write_slice<T: Copy>(allocation: &Allocation, data: &[T]) -> Result<(), RenderError> {
+    let mapped = allocation
+        .mapped_ptr()
+        .ok_or_else(|| RenderError::Allocator("buffer is not host-visible".into()))?;
+    // SAFETY: the allocation was sized for at least `data`, `T` is `Copy` and
+    // `#[repr(C)]`, and the destination is uninitialised bytes we fully write.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            data.as_ptr().cast::<u8>(),
+            mapped.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(data),
+        );
+    }
+    Ok(())
 }
 
 fn create_image(
@@ -557,6 +802,7 @@ fn create_view(
 /// Build the graphics pipeline. Dynamic rendering, so no render pass object.
 fn create_pipeline(
     device: &ash::Device,
+    cache_path: Option<&std::path::Path>,
 ) -> Result<(vk::PipelineLayout, vk::Pipeline, vk::PipelineCache), RenderError> {
     let module = create_shader_module(device, crate::SCENE_SPV)?;
 
@@ -571,8 +817,11 @@ fn create_pipeline(
 
     // Vulkan doc §9: create the cache up front and pass it to every pipeline
     // creation. Retrofitting means auditing every creation site.
-    let cache_info = vk::PipelineCacheCreateInfo::default();
-    // SAFETY: default create-info is valid.
+    let previous = cache_path.and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
+    let cache_info = vk::PipelineCacheCreateInfo::default().initial_data(&previous);
+    // SAFETY: `previous` outlives the call. A corrupt or foreign blob is
+    // rejected by the driver and simply ignored, which is why the path is
+    // keyed by driver and device (see `pipeline_cache_path`).
     let cache = unsafe { device.create_pipeline_cache(&cache_info, None) }?;
 
     let stages = [

@@ -126,19 +126,19 @@ change, so your edits appear live. Two consequences:
 
 ## Current milestone
 
-> **M2 — Vulkan headless.** Update this line at every milestone. See §6 of the build brief.
+> **M3 — ECS + fixed timestep.** Update this line at every milestone. See §6 of the build brief.
 >
-> M0, M1 done — exit criteria met and under test (`scripts/green.sh`). `loom validate` and
-> `loom describe` run; `office.loom` round-trips byte-identically.
+> M0, M1, M2 done. `loom render <scene.loom> --out x.png` draws a real scene headless with zero
+> validation messages, via dynamic rendering + buffer device address + a single instanced draw.
+> Toolchain (validation layer, slangc, spirv-val) installed — see `docs/design/README.md`.
 >
-> **M2 is BLOCKED on tooling** — see `docs/design/README.md` "Environment prerequisites".
-> `VK_LAYER_KHRONOS_validation` is absent, so definition-of-green check #2 would pass
-> *vacuously*. Install it, `spirv-tools`, and `slangc` before writing any Vulkan code.
-> Then: instance/device → `gpu-allocator` → Slang in `build.rs` → offscreen target → PNG.
-> Exit: `loom render triangle.loom --out t.png` writes a triangle, zero validation messages,
-> no window. Read brief §7.1–7.4 and the Vulkan doc first; never write `ash` from memory.
-
-Do not start the next milestone until the current one's exit criterion actually runs.
+> Next: archetype storage, queries, `Local` -> `Global` transform propagation, fixed-timestep loop,
+> `loom sim <scene> --ticks N` printing a deterministic state hash.
+> Exit: the same scene simulated twice produces identical hashes. Watch §7.5 — no `HashMap`
+> iteration, no `thread_rng`, no wall clock in sim code. `clippy.toml` already enforces all three.
+>
+> Transform propagation currently lives in `loom_cli::scene_to_objects` as a temporary parent-chain
+> walk. M3 is where it moves into a real system; delete it from the CLI when it does.
 
 ---
 
