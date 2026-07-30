@@ -15,6 +15,7 @@ mod debug_names;
 mod device;
 mod instance;
 mod renderer;
+mod viewer;
 
 /// Re-exported because this crate's public API is expressed in `glam` types.
 /// A consumer depending on its own copy would hit a silent version skew — two
@@ -24,6 +25,12 @@ pub use glam;
 pub use debug_names::DebugNames;
 pub use device::{Device, DeviceError};
 pub use renderer::{Camera, Object, RenderError, Renderer};
+pub use viewer::Viewer;
+
+/// Re-exported so `loom_cli` can create a surface without its own `ash` dep
+/// (the dependency rule: nothing outside `loom_render*` imports ash).
+pub use ash;
+pub use ash_window;
 pub use instance::{Instance, InstanceError, take_validation_messages};
 
 /// The compiled triangle shader, embedded at build time by `build.rs`.

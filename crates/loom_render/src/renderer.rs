@@ -19,8 +19,8 @@ use gpu_allocator::vulkan::{
 use crate::debug_names::DebugNames;
 use crate::{Device, Instance};
 
-const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
-const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
+pub(crate) const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+pub(crate) const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 /// One object to draw: a cube with a transform and a colour.
 #[derive(Debug, Clone, Copy)]
@@ -47,9 +47,9 @@ pub struct Camera {
 /// running into the 128-byte push-constant limit.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Push {
-    vertices: vk::DeviceAddress,
-    objects: vk::DeviceAddress,
+pub(crate) struct Push {
+    pub(crate) vertices: vk::DeviceAddress,
+    pub(crate) objects: vk::DeviceAddress,
 }
 
 /// One cube vertex. 16-byte aligned members: `[f32; 3]` would place `normal`
@@ -57,7 +57,7 @@ struct Push {
 /// `spirv-val` rejects outright.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-struct Vertex {
+pub(crate) struct Vertex {
     position: [f32; 4],
     normal: [f32; 4],
 }
@@ -65,7 +65,7 @@ struct Vertex {
 /// Per-object data, indexed by `SV_InstanceID`.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct ObjectData {
+pub(crate) struct ObjectData {
     mvp: [f32; 16],
     /// Rows of inverse-transpose(model)'s upper 3x3, padded to `vec4`.
     normal: [[f32; 4]; 3],
@@ -76,7 +76,7 @@ struct ObjectData {
 ///
 /// Built on the CPU now that geometry lives in a buffer. Real meshes replace
 /// this at M5; the buffer and the address plumbing do not change.
-fn cube_vertices() -> Vec<Vertex> {
+pub(crate) fn cube_vertices() -> Vec<Vertex> {
     const CORNERS: [[f32; 3]; 8] = [
         [-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [-1.0, 1.0, -1.0],
         [-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0],
@@ -262,7 +262,7 @@ impl Renderer {
 
         let cache_path = pipeline_cache_path(instance, device);
         let (pipeline_layout, pipeline, pipeline_cache) =
-            create_pipeline(&raw, cache_path.as_deref())?;
+            create_pipeline(&raw, cache_path.as_deref(), COLOR_FORMAT)?;
 
         names.set(color, "loom.color_target");
         names.set(depth, "loom.depth_target");
@@ -343,37 +343,10 @@ impl Renderer {
 
         #[allow(clippy::cast_precision_loss)]
         let aspect = self.width as f32 / self.height as f32;
-        let view = Mat4::look_at_rh(camera.eye, camera.target, Vec3::Y);
-        // Reverse-Y projection: Vulkan's NDC has +Y down, so flipping here
-        // keeps world-space Y-up (the convention pinned in the format spec).
-        let mut proj = Mat4::perspective_rh(
-            camera.fov_y_degrees.to_radians(),
-            aspect,
-            0.1,
-            1000.0,
-        );
-        proj.y_axis.y *= -1.0;
-        let view_proj = proj * view;
+        let view_proj = view_projection(camera, aspect);
 
         // Per-object data goes to the GPU once, not once per draw.
-        let object_data: Vec<ObjectData> = objects
-            .iter()
-            .map(|object| {
-                // Inverse-transpose, because non-uniform scale skews normals.
-                let normal_matrix = glam::Mat3::from_mat4(object.model).inverse().transpose();
-                // Transposing gives columns that are the original's rows.
-                let rows = normal_matrix.transpose();
-                ObjectData {
-                    mvp: (view_proj * object.model).to_cols_array(),
-                    normal: [
-                        rows.x_axis.extend(0.0).to_array(),
-                        rows.y_axis.extend(0.0).to_array(),
-                        rows.z_axis.extend(0.0).to_array(),
-                    ],
-                    color: [object.color[0], object.color[1], object.color[2], 1.0],
-                }
-            })
-            .collect();
+        let object_data = pack_objects(objects, view_proj);
         write_slice(
             self.objects_alloc
                 .as_ref()
@@ -656,7 +629,7 @@ impl Renderer {
 /// hash of the shader set. A stale cache is silently ignored at best and a
 /// correctness hazard at worst, so a driver update must not be able to load the
 /// previous driver's blob.
-fn pipeline_cache_path(instance: &Instance, device: &Device) -> Option<std::path::PathBuf> {
+pub(crate) fn pipeline_cache_path(instance: &Instance, device: &Device) -> Option<std::path::PathBuf> {
     // SAFETY: the physical device came from this instance.
     let props = unsafe {
         instance
@@ -682,8 +655,40 @@ fn pipeline_cache_path(instance: &Instance, device: &Device) -> Option<std::path
     Some(base.join("loom").join(format!("pipeline-{key}.bin")))
 }
 
+/// Build the per-object array the shader indexes with `SV_InstanceID`.
+pub(crate) fn pack_objects(objects: &[Object], view_proj: Mat4) -> Vec<ObjectData> {
+    objects
+        .iter()
+        .map(|object| {
+            // Inverse-transpose, because non-uniform scale skews normals.
+            let normal_matrix = glam::Mat3::from_mat4(object.model).inverse().transpose();
+            // Transposing gives columns that are the original's rows.
+            let rows = normal_matrix.transpose();
+            ObjectData {
+                mvp: (view_proj * object.model).to_cols_array(),
+                normal: [
+                    rows.x_axis.extend(0.0).to_array(),
+                    rows.y_axis.extend(0.0).to_array(),
+                    rows.z_axis.extend(0.0).to_array(),
+                ],
+                color: [object.color[0], object.color[1], object.color[2], 1.0],
+            }
+        })
+        .collect()
+}
+
+/// The camera's view-projection, with Vulkan's Y flip applied.
+pub(crate) fn view_projection(camera: &Camera, aspect: f32) -> Mat4 {
+    let view = Mat4::look_at_rh(camera.eye, camera.target, Vec3::Y);
+    let mut proj = Mat4::perspective_rh(camera.fov_y_degrees.to_radians(), aspect, 0.1, 1000.0);
+    // Vulkan NDC has +Y down; flipping here keeps world space Y-up, which is
+    // the convention pinned in the format spec.
+    proj.y_axis.y *= -1.0;
+    proj * view
+}
+
 /// A host-visible buffer that the shader reaches by device address.
-fn create_address_buffer(
+pub(crate) fn create_address_buffer(
     device: &ash::Device,
     allocator: &mut Allocator,
     size: u64,
@@ -718,7 +723,7 @@ fn create_address_buffer(
 }
 
 /// Copy a `#[repr(C)]` slice into a mapped allocation.
-fn write_slice<T: Copy>(allocation: &Allocation, data: &[T]) -> Result<(), RenderError> {
+pub(crate) fn write_slice<T: Copy>(allocation: &Allocation, data: &[T]) -> Result<(), RenderError> {
     let mapped = allocation
         .mapped_ptr()
         .ok_or_else(|| RenderError::Allocator("buffer is not host-visible".into()))?;
@@ -734,7 +739,7 @@ fn write_slice<T: Copy>(allocation: &Allocation, data: &[T]) -> Result<(), Rende
     Ok(())
 }
 
-fn create_image(
+pub(crate) fn create_image(
     device: &ash::Device,
     allocator: &mut Allocator,
     width: u32,
@@ -777,7 +782,7 @@ fn create_image(
     Ok((image, allocation))
 }
 
-fn create_view(
+pub(crate) fn create_view(
     device: &ash::Device,
     image: vk::Image,
     format: vk::Format,
@@ -800,9 +805,10 @@ fn create_view(
 }
 
 /// Build the graphics pipeline. Dynamic rendering, so no render pass object.
-fn create_pipeline(
+pub(crate) fn create_pipeline(
     device: &ash::Device,
     cache_path: Option<&std::path::Path>,
+    color_format: vk::Format,
 ) -> Result<(vk::PipelineLayout, vk::Pipeline, vk::PipelineCache), RenderError> {
     let module = create_shader_module(device, crate::SCENE_SPV)?;
 
@@ -861,7 +867,7 @@ fn create_pipeline(
     let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-    let color_formats = [COLOR_FORMAT];
+    let color_formats = [color_format];
     let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
         .color_attachment_formats(&color_formats)
         .depth_attachment_format(DEPTH_FORMAT);
@@ -907,7 +913,7 @@ fn create_shader_module(
 
 /// One image layout transition, using synchronization2.
 #[allow(clippy::too_many_arguments)]
-fn image_barrier(
+pub(crate) fn image_barrier(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
     image: vk::Image,

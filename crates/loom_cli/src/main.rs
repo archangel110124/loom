@@ -10,6 +10,8 @@
 //! parser dependency. Switch to `clap` when M9 lands `scene place/measure/...`
 //! and the count goes past four — `run` is the seam, so it is a local change.
 
+mod run;
+
 use std::process::ExitCode;
 
 use loom_ecs::{FixedTimestep, World};
@@ -54,6 +56,15 @@ fn run(args: &[String]) -> (u8, String) {
         },
         Some("sim") => match args.get(1) {
             Some(path) => sim(path, args),
+            None => (2, USAGE.to_owned()),
+        },
+        Some("run") => match args.get(1) {
+            Some(path) => match run::open_scene(path, world_to_objects) {
+                Ok(()) => (0, String::new()),
+                Err(e) => (1, json_line(&serde_json::json!({
+                    "error": "run_failed", "constraint": e,
+                }))),
+            },
             None => (2, USAGE.to_owned()),
         },
         _ => (2, USAGE.to_owned()),

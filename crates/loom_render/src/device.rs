@@ -55,7 +55,29 @@ impl Device {
     /// # Errors
     /// [`DeviceError`] if nothing meets the locked requirements.
     pub fn new(instance: &Instance) -> Result<Self, DeviceError> {
-        let (physical, queue_family, name) = select_physical_device(instance)?;
+        Self::select(instance, None)
+    }
+
+    /// Select a device that can also present to `surface`.
+    ///
+    /// This is the M5 seam the headless module promised: one extra predicate in
+    /// device selection, and the swapchain extension enabled. Nothing else in
+    /// this file changes.
+    ///
+    /// # Errors
+    /// [`DeviceError`] if nothing meets the requirements.
+    pub fn for_surface(
+        instance: &Instance,
+        surface: (&ash::khr::surface::Instance, vk::SurfaceKHR),
+    ) -> Result<Self, DeviceError> {
+        Self::select(instance, Some(surface))
+    }
+
+    fn select(
+        instance: &Instance,
+        surface: Option<(&ash::khr::surface::Instance, vk::SurfaceKHR)>,
+    ) -> Result<Self, DeviceError> {
+        let (physical, queue_family, name) = select_physical_device(instance, surface)?;
 
         let priorities = [1.0_f32];
         let queue_info = vk::DeviceQueueCreateInfo::default()
@@ -80,8 +102,16 @@ impl Device {
         let mut features11 =
             vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 
+        // Only when presenting; a headless device must not request it.
+        let device_extensions: Vec<*const i8> = if surface.is_some() {
+            vec![ash::khr::swapchain::NAME.as_ptr()]
+        } else {
+            Vec::new()
+        };
+
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
+            .enabled_extension_names(&device_extensions)
             .push_next(&mut features13)
             .push_next(&mut features12)
             .push_next(&mut features11);
@@ -151,6 +181,7 @@ impl Drop for Device {
 /// never the whole story.
 fn select_physical_device(
     instance: &Instance,
+    surface: Option<(&ash::khr::surface::Instance, vk::SurfaceKHR)>,
 ) -> Result<(vk::PhysicalDevice, u32, String), DeviceError> {
     // SAFETY: enumeration takes no user handles.
     let devices = unsafe { instance.handle().enumerate_physical_devices() }
@@ -226,10 +257,23 @@ fn select_physical_device(
         };
         // Graphics implies transfer, so one family covers M2's whole path:
         // draw offscreen, then copy to a host-visible buffer.
-        let Some(family) = families.iter().position(|f| {
-            f.queue_flags.contains(vk::QueueFlags::GRAPHICS) && f.queue_count > 0
+        let Some(family) = families.iter().enumerate().position(|(index, f)| {
+            if !f.queue_flags.contains(vk::QueueFlags::GRAPHICS) || f.queue_count == 0 {
+                return false;
+            }
+            // The M5 predicate. Queried per family rather than assumed: on some
+            // drivers not every graphics family can present.
+            match surface {
+                None => true,
+                Some((loader, surface)) => {
+                    let index = u32::try_from(index).unwrap_or(u32::MAX);
+                    // SAFETY: `physical` and `surface` are both live.
+                    unsafe { loader.get_physical_device_surface_support(physical, index, surface) }
+                        .unwrap_or(false)
+                }
+            }
         }) else {
-            rejections.push(format!("{name}: no graphics queue family"));
+            rejections.push(format!("{name}: no graphics queue family that can present"));
             continue;
         };
 

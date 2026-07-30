@@ -51,7 +51,7 @@ const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 /// immediately. The `Drop` impl is the only place these are destroyed.
 pub struct Instance {
     /// Kept alive: the loader owns the function pointers everything else uses.
-    _entry: Entry,
+    entry: Entry,
     pub(crate) raw: ash::Instance,
     debug: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 }
@@ -94,6 +94,22 @@ impl Instance {
     /// [`InstanceError`] if the loader is absent, the validation layer is
     /// missing in a debug build, or the driver rejects the instance.
     pub fn new(app_name: &CStr) -> Result<Self, InstanceError> {
+        Self::with_extensions(app_name, &[])
+    }
+
+    /// Create an instance that can also present to a window.
+    ///
+    /// The surface extensions are platform-specific, so the caller supplies
+    /// them (via `ash_window::enumerate_required_extensions`) rather than this
+    /// crate guessing. Headless stays the default — brief §7.1's ordering is
+    /// about which path is primary, and it still is.
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    pub fn with_extensions(
+        app_name: &CStr,
+        extra_extensions: &[*const i8],
+    ) -> Result<Self, InstanceError> {
         // SAFETY: loading the system Vulkan loader. Unsound only if the
         // installed loader is itself broken.
         let entry = unsafe { Entry::load() }
@@ -120,6 +136,7 @@ impl Instance {
             // *agent* feedback rather than human-only noise (brief §7.3).
             extensions.push(ash::ext::debug_utils::NAME.as_ptr());
         }
+        extensions.extend_from_slice(extra_extensions);
 
         // Attaching the messenger create-info to the instance chain is what
         // catches errors *during* vkCreateInstance/vkDestroyInstance, which a
@@ -149,10 +166,16 @@ impl Instance {
         };
 
         Ok(Self {
-            _entry: entry,
+            entry,
             raw,
             debug,
         })
+    }
+
+    /// The loader, for extensions that need it (surface creation).
+    #[must_use]
+    pub fn entry(&self) -> &Entry {
+        &self.entry
     }
 
     /// The underlying handle, for the rest of `loom_render`.
