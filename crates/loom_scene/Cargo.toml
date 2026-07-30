@@ -10,3 +10,4 @@ loom_reflect = { version = "0.0.0", path = "../loom_reflect" }
 schemars = "=1.2.2"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
+toml_edit = "=0.25.13"

@@ -3,10 +3,134 @@
 //! Depends only on `loom_reflect` (see `scripts/check-deps.sh`).
 
 pub mod components;
+mod scene;
+
+pub use scene::{Node, Scene, SceneError};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OFFICE: &str = include_str!("../../../assets/test/office.loom");
+    const BAD_INTENSITY: &str = include_str!("../../../assets/test/bad_intensity.loom");
+
+    /// Node paths include the root and are slash-separated (§3).
+    #[test]
+    fn parse_builds_node_paths_from_the_root() {
+        let scene = Scene::parse(OFFICE).expect("fixture is valid");
+
+        let paths: Vec<&str> = scene.nodes().iter().map(|n| n.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["Office", "Office/Desk", "Office/Desk/DeskLamp", "Office/CeilingLight"]
+        );
+    }
+
+    /// **The M1 exit criterion.** A canonical file round-trips byte-identically,
+    /// comments and all.
+    #[test]
+    fn canonical_scene_round_trips_byte_identically() {
+        let scene = Scene::parse(OFFICE).expect("fixture is valid");
+
+        assert_eq!(scene.to_loom_string(), OFFICE);
+    }
+
+    /// **The other half of the M1 exit criterion.** The rejection names the
+    /// node, the field, the value, and the constraint.
+    #[test]
+    fn out_of_range_field_is_reported_with_its_node_path() {
+        let errs = Scene::parse(BAD_INTENSITY).expect_err("intensity is 40000");
+
+        assert_eq!(errs.len(), 1, "one violation, got: {errs:#?}");
+        let e = &errs[0];
+        assert_eq!(e.error, "field_out_of_range");
+        assert_eq!(e.node, "Office/CeilingLight");
+        assert_eq!(e.field, "Light.intensity");
+        assert_eq!(e.constraint, "0.0..=10000.0");
+        assert!(e.hint.is_some(), "the doc comment should reach the agent");
+    }
+
+    /// Godot's one-root rule — it is what makes scenes composable as instances.
+    #[test]
+    fn two_roots_is_an_error() {
+        let src = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[node]]
+name = \"A\"
+
+[[node]]
+name = \"B\"
+";
+        let errs = Scene::parse(src).expect_err("two nodes omit `parent`");
+
+        assert_eq!(errs[0].error, "multiple_roots");
+    }
+
+    #[test]
+    fn duplicate_sibling_names_are_an_error() {
+        let src = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[node]]
+name = \"Root\"
+
+[[node]]
+name = \"Dup\"
+parent = \"Root\"
+
+[[node]]
+name = \"Dup\"
+parent = \"Root\"
+";
+        let errs = Scene::parse(src).expect_err("two siblings named Dup");
+
+        assert_eq!(errs[0].error, "duplicate_sibling_name");
+    }
+
+    /// Forward references are rejected so the file reads top-to-bottom and
+    /// cycles are unrepresentable rather than merely detected (§3).
+    #[test]
+    fn forward_parent_reference_is_an_error() {
+        let src = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[node]]
+name = \"Root\"
+
+[[node]]
+name = \"Child\"
+parent = \"Root/Later\"
+
+[[node]]
+name = \"Later\"
+parent = \"Root\"
+";
+        let errs = Scene::parse(src).expect_err("parent declared after child");
+
+        assert_eq!(errs[0].error, "unknown_parent");
+    }
+
+    #[test]
+    fn a_newer_format_version_is_refused_rather_than_guessed_at() {
+        let src = "\
+[scene]
+format = 99
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[node]]
+name = \"Root\"
+";
+        let errs = Scene::parse(src).expect_err("format 99 is from the future");
+
+        assert_eq!(errs[0].error, "format_version_unsupported");
+    }
 
     #[test]
     fn all_six_components_are_registered() {

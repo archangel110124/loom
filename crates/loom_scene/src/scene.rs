@@ -1,0 +1,295 @@
+//! `.loom` parse and serialize, per `docs/format/README.md`.
+//!
+//! The document is kept as a format-preserving DOM and re-emitted verbatim.
+//! That is not an optimization — it is the reason an agent's write cannot
+//! delete a human's comments, which `CLAUDE.md` never-do #15 calls the worst
+//! bug class in this project. Reading is validated; writing preserves.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use loom_reflect::TypeRegistry;
+use serde::Serialize;
+use serde_json::Value;
+use toml_edit::{DocumentMut, Item};
+
+use crate::components;
+
+/// The format version this build understands.
+const FORMAT_VERSION: i64 = 1;
+
+/// A validated scene, plus the exact bytes it was parsed from.
+#[derive(Debug, Clone)]
+pub struct Scene {
+    doc: DocumentMut,
+    nodes: Vec<Node>,
+}
+
+/// One node in the tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Node {
+    /// Unique among siblings.
+    pub name: String,
+    /// Parent's path. `None` for the root.
+    pub parent: Option<String>,
+    /// Slash-separated path from the root, including it: `Office/Desk`.
+    pub path: String,
+}
+
+/// A rejection, shaped per `docs/format/README.md` §6.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SceneError {
+    /// Machine-readable code.
+    pub error: String,
+    /// Node path, or empty for a file-level problem.
+    pub node: String,
+    /// `TypeName.field`, or empty when not field-specific.
+    pub field: String,
+    /// What was supplied.
+    pub value: Value,
+    /// The bound or rule that was broken.
+    pub constraint: String,
+    /// Guidance, from the field's doc comment where there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+impl SceneError {
+    fn new(error: &str, node: &str) -> Self {
+        Self {
+            error: error.to_owned(),
+            node: node.to_owned(),
+            field: String::new(),
+            value: Value::Null,
+            constraint: String::new(),
+            hint: None,
+        }
+    }
+}
+
+impl Scene {
+    /// Parse and validate.
+    ///
+    /// Returns **every** problem found, not just the first — an agent that has
+    /// to round-trip once per error is the retry loop §6 exists to avoid.
+    /// Structural problems short-circuit component validation, because a node
+    /// whose parent is unknown has no meaningful path to report against.
+    ///
+    /// # Errors
+    /// One [`SceneError`] per violation.
+    pub fn parse(src: &str) -> Result<Self, Vec<SceneError>> {
+        let doc: DocumentMut = src.parse().map_err(|e: toml_edit::TomlError| {
+            let mut err = SceneError::new("parse_error", "");
+            err.constraint = e.to_string();
+            vec![err]
+        })?;
+
+        check_format_version(&doc)?;
+        let nodes = build_tree(&doc)?;
+
+        let registry = components::registry();
+        let errors = validate_components(&doc, &nodes, &registry);
+        if errors.is_empty() {
+            Ok(Self { doc, nodes })
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// The validated node tree, in declaration order (depth-first, parents
+    /// before children — enforced by the forward-reference rule).
+    #[must_use]
+    pub fn nodes(&self) -> &[Node] {
+        &self.nodes
+    }
+
+    /// Serialize back to `.loom`.
+    ///
+    /// For an unmodified scene this is byte-identical to the input, comments
+    /// and spacing included — that is the M1 exit criterion and it holds by
+    /// construction rather than by careful re-emission.
+    #[must_use]
+    pub fn to_loom_string(&self) -> String {
+        self.doc.to_string()
+    }
+}
+
+impl std::fmt::Display for Scene {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_loom_string())
+    }
+}
+
+fn check_format_version(doc: &DocumentMut) -> Result<(), Vec<SceneError>> {
+    let found = doc
+        .get("scene")
+        .and_then(|s| s.get("format"))
+        .and_then(Item::as_integer);
+
+    match found {
+        Some(FORMAT_VERSION) => Ok(()),
+        // A file from the future is refused, never parsed best-effort (§3).
+        Some(other) => {
+            let mut err = SceneError::new("format_version_unsupported", "");
+            err.value = Value::from(other);
+            err.constraint = FORMAT_VERSION.to_string();
+            Err(vec![err])
+        }
+        None => {
+            let mut err = SceneError::new("parse_error", "");
+            err.constraint = "[scene] requires an integer `format` key".to_owned();
+            Err(vec![err])
+        }
+    }
+}
+
+/// Resolve every node's path, enforcing the structural rules from §3.
+fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
+    let Some(entries) = doc.get("node").and_then(Item::as_array_of_tables) else {
+        return Err(vec![SceneError::new("no_root", "")]);
+    };
+
+    let mut errors = Vec::new();
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut known: BTreeSet<String> = BTreeSet::new();
+    let mut children: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut root: Option<String> = None;
+
+    for table in entries {
+        let Some(name) = table.get("name").and_then(Item::as_str) else {
+            errors.push(SceneError::new("parse_error", ""));
+            continue;
+        };
+
+        if name.is_empty() || name.contains('/') || name.trim() != name {
+            let mut err = SceneError::new("parse_error", name);
+            err.constraint = "name must be non-empty, untrimmed, and contain no `/`".to_owned();
+            errors.push(err);
+            continue;
+        }
+
+        let parent = table.get("parent").and_then(Item::as_str);
+        let path = match parent {
+            None => {
+                if let Some(existing) = &root {
+                    let mut err = SceneError::new("multiple_roots", name);
+                    err.constraint = format!("`{existing}` is already the root");
+                    errors.push(err);
+                    continue;
+                }
+                root = Some(name.to_owned());
+                name.to_owned()
+            }
+            Some(parent) => {
+                // Forward references are rejected, which is what makes cycles
+                // unrepresentable rather than merely detected (§3).
+                if !known.contains(parent) {
+                    let mut err = SceneError::new("unknown_parent", name);
+                    err.value = Value::from(parent);
+                    err.constraint = "parent must be a node declared earlier".to_owned();
+                    errors.push(err);
+                    continue;
+                }
+                format!("{parent}/{name}")
+            }
+        };
+
+        let sibling_key = (parent.unwrap_or_default().to_owned(), name.to_owned());
+        if !children.insert(sibling_key) {
+            let mut err = SceneError::new("duplicate_sibling_name", &path);
+            err.constraint = "sibling names must be unique".to_owned();
+            errors.push(err);
+            continue;
+        }
+
+        known.insert(path.clone());
+        nodes.push(Node {
+            name: name.to_owned(),
+            parent: parent.map(str::to_owned),
+            path,
+        });
+    }
+
+    if root.is_none() && errors.is_empty() {
+        errors.push(SceneError::new("no_root", ""));
+    }
+
+    if errors.is_empty() {
+        Ok(nodes)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Check every component on every node against its registered schema.
+fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistry) -> Vec<SceneError> {
+    let Some(entries) = doc.get("node").and_then(Item::as_array_of_tables) else {
+        return Vec::new();
+    };
+
+    let mut errors = Vec::new();
+    for (table, node) in entries.iter().zip(nodes) {
+        let Some(components) = table.get("components").and_then(Item::as_table_like) else {
+            continue;
+        };
+
+        for (type_name, item) in components.iter() {
+            let Some(fields) = item.as_table_like() else {
+                continue;
+            };
+
+            let mut object = serde_json::Map::new();
+            for (field, value) in fields.iter() {
+                if let Some(v) = item_to_json(value) {
+                    object.insert(field.to_owned(), v);
+                }
+            }
+
+            if let Err(field_errors) = registry.validate(type_name, &Value::Object(object)) {
+                errors.extend(field_errors.into_iter().map(|f| SceneError {
+                    error: f.error,
+                    node: node.path.clone(),
+                    field: f.field,
+                    value: f.value,
+                    constraint: f.constraint,
+                    hint: f.hint,
+                }));
+            }
+        }
+    }
+    errors
+}
+
+/// Bridge a TOML item into `serde_json`, which is what the registry validates
+/// against. Only the shapes the format permits in a component field.
+fn item_to_json(item: &Item) -> Option<Value> {
+    if let Some(v) = item.as_str() {
+        return Some(Value::from(v));
+    }
+    if let Some(v) = item.as_bool() {
+        return Some(Value::from(v));
+    }
+    if let Some(v) = item.as_integer() {
+        // Integers coerce to floats where a float is expected (§7).
+        return Some(Value::from(v));
+    }
+    if let Some(v) = item.as_float() {
+        return Some(Value::from(v));
+    }
+    if let Some(array) = item.as_array() {
+        let elements: Vec<Value> = array
+            .iter()
+            .filter_map(|v| item_to_json(&Item::Value(v.clone())))
+            .collect();
+        return Some(Value::Array(elements));
+    }
+    if let Some(table) = item.as_table_like() {
+        let mut object: BTreeMap<String, Value> = BTreeMap::new();
+        for (k, v) in table.iter() {
+            if let Some(v) = item_to_json(v) {
+                object.insert(k.to_owned(), v);
+            }
+        }
+        return serde_json::to_value(object).ok();
+    }
+    None
+}
