@@ -62,6 +62,10 @@ fn run(args: &[String]) -> (u8, String) {
             Some(path) => scene_tx(path, args),
             None => (2, USAGE.to_owned()),
         },
+        Some("explode") => match args.get(1) {
+            Some(path) => explode(path, args),
+            None => (2, USAGE.to_owned()),
+        },
         Some("place") => match args.get(1) {
             Some(path) => place(path, args),
             None => (2, USAGE.to_owned()),
@@ -745,6 +749,231 @@ fn scene_tx(path: &str, args: &[String]) -> (u8, String) {
         }
         Err(e) => (1, json_line(&e)),
     }
+}
+
+/// Blast a voxel surface and render the aftermath.
+///
+/// The destructible loop end to end: a CSG subtract carves the crater, the
+/// removed material becomes debris with outward velocity, the remaining
+/// surface becomes a static collider for it to land on, and a frame is
+/// rendered per step.
+///
+/// Debris is boxes, never trimeshes (never-do #10), and capped — uncapped
+/// debris is the classic way a destructible game dies.
+#[allow(clippy::too_many_lines)]
+fn explode(path: &str, args: &[String]) -> (u8, String) {
+    const DEBRIS_CAP: usize = 160;
+
+    let Some(at) = flag(args, "--at").and_then(|s| parse_vec3(&s)) else {
+        return (2, json_line(&serde_json::json!({
+            "error": "missing_argument", "hint": "--at X,Y,Z is the blast centre",
+        })));
+    };
+    let radius = flag(args, "--radius").and_then(|v| v.parse::<f32>().ok()).unwrap_or(3.0);
+    let out = flag(args, "--out").unwrap_or_else(|| "blast".to_owned());
+    let frames = flag(args, "--frames").and_then(|v| v.parse::<u32>().ok()).unwrap_or(5);
+    let (width, height) = flag(args, "--size")
+        .and_then(|s| parse_size(&s))
+        .unwrap_or((760, 520));
+
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => return (2, json_line(&serde_json::json!({
+            "error": "io_error", "path": path, "constraint": e.to_string(),
+        }))),
+    };
+    let scene = match Scene::parse(&src) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+
+    // Find the voxel volume to blast.
+    let Some((node, component)) = scene
+        .nodes()
+        .iter()
+        .find_map(|n| n.components.get("VoxelVolume").map(|c| (n.path.clone(), c)))
+    else {
+        return (1, json_line(&serde_json::json!({
+            "error": "no_voxel_volume", "path": path,
+            "hint": "Add a VoxelVolume component to a node first.",
+        })));
+    };
+
+    let Some((mut volume, _)) = build_volume(component) else {
+        return (1, json_line(&serde_json::json!({
+            "error": "voxel_bake_failed", "node": node,
+        })));
+    };
+
+    // 1. Carve. The edit layer records only the chunks the blast touches.
+    let blast = loom_voxel::VoxelOp::Sphere {
+        center: at,
+        radius,
+        mode: loom_voxel::CsgMode::Subtract,
+    };
+    let touched = volume.edit(&blast);
+    // §7.9: an edit dirties its chunks AND their neighbours, or the remesh
+    // cracks at the seams.
+    let dirty = volume.dirty_with_neighbours(&touched);
+
+    // 2. Remesh and build a static collider from what survived.
+    let surface = loom_voxel::mesh::mesh_volume(&volume, &loom_voxel::SurfaceNets);
+    let mut physics = loom_physics::Physics::new(1.0 / 60.0);
+    let positions: Vec<[f32; 3]> = surface
+        .vertices
+        .iter()
+        .map(|v| [v.position[0], v.position[1], v.position[2]])
+        .collect();
+    physics.add_static_trimesh(&positions, &surface.indices);
+
+    // 3. The removed material becomes debris, thrown outward from the centre.
+    let mut rng = loom_terrain::noise::Rng::new(0xB1A57);
+    let mut debris = Vec::new();
+    let chunk_size = radius * 0.16;
+    for _ in 0..DEBRIS_CAP {
+        // Sample inside the blast sphere; reject-sample so the distribution is
+        // even rather than clustered at the centre.
+        let dir = [
+            rng.next_f32() * 2.0 - 1.0,
+            rng.next_f32() * 2.0 - 1.0,
+            rng.next_f32() * 2.0 - 1.0,
+        ];
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        if !(0.2..=1.0).contains(&len) {
+            continue;
+        }
+        let unit = [dir[0] / len, dir[1] / len, dir[2] / len];
+        let spawn = [
+            at[0] + unit[0] * radius * 0.85,
+            at[1] + unit[1] * radius * 0.85,
+            at[2] + unit[2] * radius * 0.85,
+        ];
+        // Outward, biased upward — a blast that only pushes sideways looks
+        // like a shove rather than an explosion.
+        let speed = 6.0 + rng.next_f32() * 9.0;
+        let velocity = [
+            unit[0] * speed,
+            unit[1].mul_add(speed, 6.0),
+            unit[2] * speed,
+        ];
+        if let Some(handle) = physics.spawn_debris(spawn, chunk_size, velocity, DEBRIS_CAP + 1) {
+            debris.push(handle);
+        }
+    }
+
+    // 4. Step and render.
+    let meshes = vec![surface, loom_asset::primitives::box_mesh()];
+    let instance = match loom_render::Instance::new(c"loom") {
+        Ok(i) => i,
+        Err(e) => return (1, json_line(&serde_json::json!({ "error": "render_failed", "constraint": e.to_string() }))),
+    };
+    let device = match loom_render::Device::new(&instance) {
+        Ok(d) => d,
+        Err(e) => return (1, json_line(&serde_json::json!({ "error": "render_failed", "constraint": e.to_string() }))),
+    };
+    let mut renderer = match Renderer::new(&instance, &device, width, height, &meshes) {
+        Ok(r) => r,
+        Err(e) => return (1, json_line(&serde_json::json!({ "error": "render_failed", "constraint": e.to_string() }))),
+    };
+
+    // Framed once, from the terrain, and held still — a camera that reframes
+    // every step would hide the debris flying by moving with it.
+    let camera = Camera {
+        eye: Vec3::new(at[0] + radius * 4.0, at[1] + radius * 2.6, at[2] + radius * 5.5),
+        target: Vec3::new(at[0], at[1], at[2]),
+        fov_y_degrees: 50.0,
+    };
+
+    let mut written = Vec::new();
+    // Steps between frames. Enough that consecutive frames differ visibly —
+    // a frame per tick would be sixty near-identical images.
+    let steps_per_frame = flag(args, "--steps")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(6);
+    for frame in 0..frames {
+        if frame > 0 {
+            for _ in 0..steps_per_frame {
+                physics.step();
+            }
+        }
+        let mut objects = vec![Object {
+            model: Mat4::IDENTITY,
+            color: [0.42, 0.46, 0.52],
+            mesh: 0,
+        }];
+        for handle in &debris {
+            let (Some(p), Some(r)) = (physics.position(*handle), physics.rotation_euler(*handle))
+            else {
+                continue;
+            };
+            objects.push(Object {
+                model: Mat4::from_scale_rotation_translation(
+                    Vec3::splat(chunk_size),
+                    loom_render::glam::Quat::from_euler(
+                        loom_render::glam::EulerRot::YXZ,
+                        r[1].to_radians(),
+                        r[0].to_radians(),
+                        r[2].to_radians(),
+                    ),
+                    Vec3::from_array(p),
+                ),
+                color: [0.78, 0.42, 0.24],
+                mesh: 1,
+            });
+        }
+
+        let file = format!("{out}_{frame}.png");
+        if let Err(e) = renderer.render_to_png(&objects, &camera, std::path::Path::new(&file)) {
+            return (1, json_line(&serde_json::json!({
+                "error": "render_failed", "constraint": e.to_string(),
+            })));
+        }
+        written.push(file);
+    }
+
+    (
+        0,
+        json_line(&serde_json::json!({
+            "ok": true,
+            "node": node,
+            "chunks_carved": touched.len(),
+            "chunks_remeshed": dirty.len(),
+            "debris": debris.len(),
+            "frames": written,
+        })),
+    )
+}
+
+/// Build a voxel volume from a component, returning it and its mesh.
+fn build_volume(component: &serde_json::Value) -> Option<(loom_voxel::Volume, ())> {
+    #[allow(clippy::cast_possible_truncation)]
+    let voxel_size = component.get("voxel_size").and_then(serde_json::Value::as_f64)? as f32;
+    let dims: Vec<usize> = component
+        .get("chunks")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_u64().map(|n| n as usize))
+        .collect();
+    if dims.len() != 3 {
+        return None;
+    }
+    let ops: Vec<loom_voxel::VoxelOp> = component
+        .get("ops")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect();
+    if ops.is_empty() {
+        return None;
+    }
+    let mut volume = loom_voxel::Volume::new([dims[0], dims[1], dims[2]], voxel_size);
+    volume.bake(&ops);
+    Some((volume, ()))
+}
+
+fn parse_vec3(spec: &str) -> Option<[f32; 3]> {
+    let parts: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+    (parts.len() == 3).then(|| [parts[0], parts[1], parts[2]])
 }
 
 /// Resolve a semantic placement into ops and apply them.

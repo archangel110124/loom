@@ -120,6 +120,69 @@ impl Physics {
         handle
     }
 
+    /// Spawn a debris chunk with an initial velocity.
+    ///
+    /// **Convex, never a trimesh** (never-do #10, voxel doc §4): a
+    /// surface-extracted mesh is an infinitely thin membrane with nothing
+    /// behind it, and putting one on a dynamic body gives ghost collisions and
+    /// tunnelling. A box is solid volume and cannot do either.
+    ///
+    /// Returns `None` once `cap` bodies exist. **Uncapped debris is the
+    /// classic way a destructible game dies** — the voxel doc is blunt about
+    /// pooling aggressively with a hard limit, so the cap is a parameter here
+    /// rather than a thing callers are trusted to remember.
+    pub fn spawn_debris(
+        &mut self,
+        position: [f32; 3],
+        half_extent: f32,
+        velocity: [f32; 3],
+        cap: usize,
+    ) -> Option<RigidBodyHandle> {
+        if self.bodies.len() >= cap {
+            return None;
+        }
+        let body = RigidBodyBuilder::dynamic()
+            .translation(Vector::new(position[0], position[1], position[2]))
+            .linvel(Vector::new(velocity[0], velocity[1], velocity[2]))
+            // Debris tumbling is most of what sells destruction, so rotation
+            // stays free — unlike the character capsule, which locks it.
+            .angular_damping(0.4)
+            .build();
+        let handle = self.bodies.insert(body);
+        let collider = ColliderBuilder::cuboid(half_extent, half_extent, half_extent)
+            .friction(0.8)
+            .restitution(0.05)
+            .build();
+        self.colliders
+            .insert_with_parent(collider, handle, &mut self.bodies);
+        Some(handle)
+    }
+
+    /// A static collider built from a mesh's triangles.
+    ///
+    /// Legal here and **only** here: this is static terrain. Rapier's own
+    /// guidance is against trimesh colliders on DYNAMIC bodies, and never-do
+    /// #10 forbids it outright — debris uses boxes.
+    pub fn add_static_trimesh(&mut self, vertices: &[[f32; 3]], indices: &[u32]) -> Option<ColliderHandle> {
+        if indices.len() < 3 {
+            return None;
+        }
+        // rapier 0.34 takes `Vector`, not `Point` — glam-backed, not nalgebra.
+        let points: Vec<Vector> = vertices
+            .iter()
+            .map(|v| Vector::new(v[0], v[1], v[2]))
+            .collect();
+        let triangles: Vec<[u32; 3]> = indices.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+        let collider = ColliderBuilder::trimesh(points, triangles).ok()?.build();
+        Some(self.colliders.insert(collider))
+    }
+
+    /// How many bodies exist, for the debris cap.
+    #[must_use]
+    pub fn body_count(&self) -> usize {
+        self.bodies.len()
+    }
+
     /// Advance one fixed step.
     pub fn step(&mut self) {
         self.pipeline.step(
@@ -230,6 +293,42 @@ mod tests {
 
         let y = physics.position(capsule).expect("capsule exists")[1];
         assert!(y > -1.0, "capsule fell through the floor to y={y}");
+    }
+
+    /// The debris cap is not advisory. Uncapped debris is how a destructible
+    /// game dies, so the limit is enforced where debris is created.
+    #[test]
+    fn debris_stops_spawning_at_the_cap() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        let mut spawned = 0;
+        for i in 0..50 {
+            #[allow(clippy::cast_precision_loss)]
+            if physics
+                .spawn_debris([i as f32, 5.0, 0.0], 0.2, [0.0, 1.0, 0.0], 12)
+                .is_some()
+            {
+                spawned += 1;
+            }
+        }
+
+        assert_eq!(spawned, 12, "the cap must hold");
+    }
+
+    #[test]
+    fn debris_launched_upward_actually_moves() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, -0.5, 0.0], [20.0, 0.5, 20.0]);
+        let chunk = physics
+            .spawn_debris([0.0, 1.0, 0.0], 0.2, [4.0, 9.0, 0.0], 100)
+            .expect("under the cap");
+
+        for _ in 0..15 {
+            physics.step();
+        }
+
+        let p = physics.position(chunk).unwrap();
+        assert!(p[1] > 1.5, "should have risen, y={}", p[1]);
+        assert!(p[0] > 0.3, "should have travelled, x={}", p[0]);
     }
 
     /// **The other half of M7's exit criterion**: determinism survives physics.
