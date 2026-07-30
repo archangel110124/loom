@@ -3,10 +3,12 @@
 //! Depends only on `loom_reflect` (see `scripts/check-deps.sh`).
 
 pub mod components;
+pub mod edit;
 pub mod ops;
 pub mod place;
 mod scene;
 
+pub use edit::Session;
 pub use ops::{Applied, SceneOp, Transaction, TransactionError, VersionToken, apply};
 pub use place::{Anchor, Axis, PlaceOp};
 pub use scene::{Node, Scene, SceneError};

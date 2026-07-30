@@ -79,7 +79,7 @@ fn run(args: &[String]) -> (u8, String) {
             None => (2, USAGE.to_owned()),
         },
         Some("run") => match args.get(1) {
-            Some(path) => match run::open_scene(path) {
+            Some(path) => match run::open_scene(path, args.iter().any(|a| a == "--edit")) {
                 Ok(()) => (0, String::new()),
                 Err(e) => (1, json_line(&serde_json::json!({
                     "error": "run_failed", "constraint": e,

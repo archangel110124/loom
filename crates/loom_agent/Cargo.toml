@@ -4,3 +4,15 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+# A BINARY, not a library the engine links. `scripts/check-deps.sh` enforces
+# that nothing depends on this crate; making it an executable is how that stays
+# true by construction rather than by discipline. Delete the crate and the
+# engine is unaffected, which is the property design doc §2.13 is after.
+[[bin]]
+name = "loom-mcp"
+path = "src/main.rs"

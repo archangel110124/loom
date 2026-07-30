@@ -23,3 +23,18 @@ look     = [{ button = "MouseRight" }, { button = "MouseLeft" }]
 
 reframe  = [{ button = "KeyF", trigger = "pressed" }]
 quit     = [{ button = "Escape", trigger = "pressed" }]
+
+# Editing (M12). The editor issues the same SceneOps the agent does, so a
+# twelve-op agent transaction undoes in one press of the same key.
+[contexts.edit.actions]
+select_next   = [{ button = "Tab", trigger = "pressed" }]
+select_prev   = [{ button = "Backquote", trigger = "pressed" }]
+nudge_left    = [{ button = "KeyJ", trigger = "pressed" }]
+nudge_right   = [{ button = "KeyL", trigger = "pressed" }]
+nudge_forward = [{ button = "KeyI", trigger = "pressed" }]
+nudge_back    = [{ button = "KeyK", trigger = "pressed" }]
+nudge_up      = [{ button = "KeyU", trigger = "pressed" }]
+nudge_down    = [{ button = "KeyO", trigger = "pressed" }]
+undo          = [{ button = "KeyZ", modifiers = ["ControlLeft"], trigger = "pressed" }]
+redo          = [{ button = "KeyY", modifiers = ["ControlLeft"], trigger = "pressed" }]
+save          = [{ button = "KeyS", modifiers = ["ControlLeft"], trigger = "pressed" }]

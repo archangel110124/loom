@@ -71,9 +71,22 @@ impl FlyCamera {
 
 /// The context the viewer runs in. A menu would push another.
 const FLY: &str = "fly";
+/// Editing actions, live only when `--edit` was passed.
+const EDIT: &str = "edit";
+/// How far one nudge moves a node, in metres.
+const NUDGE: f32 = 0.25;
 
 struct App {
     objects: Vec<Object>,
+    /// `Some` when `--edit` was passed. Read-only otherwise, which is the
+    /// default because a viewer that cannot write cannot race the agent.
+    session: Option<loom_scene::Session>,
+    /// Index into `editable` of the selected node.
+    selected: usize,
+    /// Scene paths that can be moved, in scene order.
+    editable: Vec<String>,
+    /// Where the scene lives, for reloading after a rejected write.
+    scene_path: std::path::PathBuf,
     /// Real world bounds, so framing does not assume unit cubes.
     scene_bounds: (Vec3, f32),
     meshes: Vec<loom_asset::Mesh>,
@@ -91,16 +104,24 @@ struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         objects: Vec<Object>,
         meshes: Vec<loom_asset::Mesh>,
         scene_bounds: (Vec3, f32),
         title: String,
+        session: Option<loom_scene::Session>,
+        editable: Vec<String>,
+        scene_path: std::path::PathBuf,
     ) -> Self {
         Self {
             camera: FlyCamera::framing(scene_bounds),
             scene_bounds,
             objects,
+            session,
+            selected: 0,
+            editable,
+            scene_path,
             meshes,
             // Prefer a project-local file, fall back to the shipped defaults,
             // so a fresh checkout has a working camera with no config to write.
@@ -195,6 +216,7 @@ impl ApplicationHandler for App {
                 if self.input.is_active(&self.bindings, FLY, "reframe") {
                     self.camera = FlyCamera::framing(self.scene_bounds);
                 }
+                self.handle_editing();
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
@@ -255,6 +277,109 @@ impl ApplicationHandler for App {
             // degenerates, which makes strafing snap around.
             self.camera.pitch =
                 (self.camera.pitch - dy * LOOK_SENSITIVITY).clamp(-FRAC_PI_2 + 0.01, FRAC_PI_2 - 0.01);
+        }
+    }
+}
+
+impl App {
+    /// Editing actions, when a session is open.
+    ///
+    /// Every change goes through `Session::apply`, which is the same
+    /// `loom_scene::apply` the agent calls — so a human edit and an agent edit
+    /// produce the same bytes and share one undo stack (never-do #16).
+    fn handle_editing(&mut self) {
+        if self.session.is_none() || self.editable.is_empty() {
+            return;
+        }
+        // Sampled up front rather than through a closure borrowing `self`,
+        // because the handlers below need `&mut self`.
+        let act = |a: &str| self.input.is_active(&self.bindings, EDIT, a);
+        let (next, prev) = (act("select_next"), act("select_prev"));
+        let delta = Vec3::new(
+            f32::from(act("nudge_right")) - f32::from(act("nudge_left")),
+            f32::from(act("nudge_up")) - f32::from(act("nudge_down")),
+            f32::from(act("nudge_back")) - f32::from(act("nudge_forward")),
+        ) * NUDGE;
+        let (undo, redo, save) = (act("undo"), act("redo"), act("save"));
+
+        if next {
+            self.selected = (self.selected + 1) % self.editable.len();
+            eprintln!("loom: selected {}", self.editable[self.selected]);
+        }
+        if prev {
+            self.selected = (self.selected + self.editable.len() - 1) % self.editable.len();
+            eprintln!("loom: selected {}", self.editable[self.selected]);
+        }
+        if delta != Vec3::ZERO {
+            self.nudge(delta);
+        }
+        if undo {
+            let session = self.session.as_mut().expect("checked above");
+            eprintln!("loom: undo {}", if session.undo() { "ok" } else { "(nothing)" });
+        }
+        if redo {
+            let session = self.session.as_mut().expect("checked above");
+            eprintln!("loom: redo {}", if session.redo() { "ok" } else { "(nothing)" });
+        }
+        if save {
+            let session = self.session.as_ref().expect("checked above");
+            match session.save() {
+                Ok(()) => eprintln!("loom: saved {}", self.scene_path.display()),
+                Err(e) => eprintln!("loom: save failed: {e}"),
+            }
+        }
+    }
+
+    /// Move the selected node by issuing a transaction.
+    fn nudge(&mut self, delta: Vec3) {
+        let node = self.editable[self.selected].clone();
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+
+        // Read the current transform from the scene rather than tracking it
+        // separately — a second copy of the truth is a second answer.
+        let Ok(scene) = loom_scene::Scene::parse(session.text()) else {
+            return;
+        };
+        let Some(current) = scene
+            .nodes()
+            .iter()
+            .find(|n| n.path == node)
+            .map(|n| n.transform.pos)
+        else {
+            return;
+        };
+        let pos = [
+            current[0] + delta.x,
+            current[1] + delta.y,
+            current[2] + delta.z,
+        ];
+
+        let transaction = loom_scene::Transaction {
+            // Labelled usefully: this shows up in the human's log panel and in
+            // git history. "Move Room/Desk" beats "update scene".
+            label: format!("Move {node}"),
+            ops: vec![loom_scene::SceneOp::SetTransform {
+                node: node.clone(),
+                pos: Some(pos),
+                rot_euler: None,
+                scale: None,
+            }],
+            dry_run: false,
+            expect_version: None,
+        };
+
+        match session.apply(transaction) {
+            Ok(_) => {}
+            Err(e) if e.error == "stale_version" => {
+                // §7.17: reload, never force, never merge.
+                eprintln!("loom: the scene changed on disk — reloading rather than overwriting");
+                if let Err(e) = session.reload() {
+                    eprintln!("loom: reload failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("loom: {e}"),
         }
     }
 }
@@ -323,18 +448,29 @@ fn load_bindings() -> ActionMap {
 ///
 /// # Errors
 /// A message describing what stopped it.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     path: &str,
     objects: Vec<Object>,
     meshes: Vec<loom_asset::Mesh>,
     scene_bounds: (Vec3, f32),
+    session: Option<loom_scene::Session>,
+    editable: Vec<String>,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
     // Poll, not Wait: the camera animates continuously while keys are held.
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let title = format!("loom — {path}");
-    let mut app = App::new(objects, meshes, scene_bounds, title);
+    let mut app = App::new(
+        objects,
+        meshes,
+        scene_bounds,
+        title,
+        session,
+        editable,
+        std::path::PathBuf::from(path),
+    );
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))
@@ -344,7 +480,7 @@ pub fn run(
 ///
 /// # Errors
 /// A message describing what stopped it.
-pub fn open_scene(path: &str) -> Result<(), String> {
+pub fn open_scene(path: &str, editable: bool) -> Result<(), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let scene = Scene::parse(&src).map_err(|errors| {
         serde_json::to_string_pretty(&serde_json::json!({ "errors": errors }))
@@ -358,5 +494,15 @@ pub fn open_scene(path: &str) -> Result<(), String> {
     let objects = crate::world_to_objects(&world, &library);
     let boxes = crate::node_bounds(&world, &library);
     let scene_bounds = crate::scene_bounds(&boxes);
-    run(path, objects, library.into_meshes(), scene_bounds)
+
+    // Read-only unless asked. Brief §2 puts the editable editor at M12 and a
+    // read-only viewer at M5.5, and a viewer that cannot write cannot race the
+    // agent's writes at all.
+    let session = editable
+        .then(|| loom_scene::Session::open(std::path::Path::new(path)))
+        .transpose()
+        .map_err(|e| format!("{path}: {e}"))?;
+    let names: Vec<String> = scene.nodes().iter().map(|n| n.path.clone()).collect();
+
+    run(path, objects, library.into_meshes(), scene_bounds, session, names)
 }

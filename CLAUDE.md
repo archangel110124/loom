@@ -126,20 +126,17 @@ change, so your edits appear live. Two consequences:
 
 ## Current milestone
 
-> **M11 — terrain.** Update this line at every milestone. See §6 of the build brief.
+> **M0–M12 complete.** Update this line at every milestone. See §6 of the build brief.
 >
-> M0–M10 done. M9's gate passed: the agent blocked out a lab through the CLI, detected 21
-> interpenetrations with `loom measure`, fixed them with semantic placement, and proved behaviour
-> with `loom sim --assert`. M10 voxels: `i8` SDF, uniform collapse, op-list scenes, Surface Nets
-> with the seam test from §7.9, and an edit layer so destruction costs the chunks it touches.
+> All milestone exit criteria met. `loom` has: validate, describe, render (--sim), sim (--assert),
+> run (--edit), scene (--tx), place (--op), measure, terrain, explode. `loom-mcp` wraps them.
 >
-> Next: recipe parse; fBm/ridged/multifractal with domain warping and analytical derivatives; art
-> layers (spline carve, flatten, peak, escarpment, corridor); particle hydraulic + thermal erosion,
-> **baked and content-hashed, never re-simulated at load** (§4.4 — GPU erosion is order-dependent
-> and not bit-reproducible, so the ARTIFACT is authoritative for determinism while the recipe is
-> authoritative for authoring); `terrain_analyze` returning slope/flow/hillshade PNGs.
-> Exit: *"a mountain valley with a buildable plateau for a fort and a walkable path from the
-> south"* — agent authors it, reads its own slope map, adjusts, verifies the path.
+> Post-M12 work, in the brief's own order of priority: shadows / SDFGI / the post stack (all
+> deliberately deferred past M12 by §7.16), Dual Contouring behind the existing `Mesher` trait for
+> sharp-cornered structures, LOD octree for the open world, and archetype ECS storage when
+> profiling demands it (ADR 0003 names the trigger).
+>
+> The knowledge graph is still deferred — ADR 0003, option 1, awaiting a decision.
 
 ---
 
