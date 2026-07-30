@@ -50,26 +50,35 @@ Precedence and the full list of corrections: [ADR 0002](../decisions/0002-compan
 - **M12 — editing** → design doc §2.8 transactions; brief §7.17 and never-do #16 (one undo stack,
   shared with the agent).
 
-## Environment prerequisites — checked 2026-07-30
+## Environment prerequisites — satisfied 2026-07-30
 
-M0/M1 need nothing beyond the pinned toolchain. **M2 is blocked on three things this box does not
-have yet**, all cheap to install but painful to discover in week five:
+M0/M1 need nothing beyond the pinned toolchain. M2 needs three more things, all now installed
+and verified end-to-end:
 
 | Need | Status | Source |
 | --- | --- | --- |
-| `VK_LAYER_KHRONOS_validation` | **MISSING** — `/usr/share/vulkan/explicit_layer.d/` is empty | `dnf install vulkan-validation-layers` (1.4.341.0-2.fc44, exactly matches the installed loader) |
-| `slangc` (Slang → SPIR-V) | **MISSING** | Not packaged for Fedora. GitHub releases (`shader-slang/slang`) or the Vulkan SDK. |
-| `spirv-val` (brief §7.7) | **MISSING** | `dnf install spirv-tools` (2026.1-1.fc44) |
+| `VK_LAYER_KHRONOS_validation` | **1.4.341**, enumerated by the loader | `dnf install vulkan-validation-layers` |
+| `slangc` (Slang → SPIR-V) | **2026.14.1**, `~/.local/slang`, symlinked into `~/.local/bin` | GitHub release — not packaged for Fedora |
+| `spirv-val` (brief §7.7) | **2026.1** | `dnf install spirv-tools` |
 
-**Trap:** Fedora's `slang` package — which *is* installed here — is **S-Lang, the terminal extension
-library**. Completely unrelated to the Slang shader language. `rpm -q slang` succeeding proves
-nothing; check for the `slangc` binary.
+Verified as a chain, not as three package queries: a two-entry-point `.slang` file compiles to
+SPIR-V with `slangc -target spirv`, and `spirv-val` accepts the output.
 
-Present and correct: mold, clang, `vulkan-loader` 1.4.341, RTX 4090 on driver 610.43.03 at the
-deliberate 300W cap. Loader is 1.4, target is Vulkan 1.3 — as intended (Vulkan doc §1).
+**Trap, still live:** Fedora's `slang` package — installed here — is **S-Lang, the terminal
+extension library**. Nothing to do with the Slang shader language. `rpm -q slang` succeeding
+proves nothing; check for the `slangc` binary.
 
-Without the validation layer, **definition-of-green check #2 cannot run at all** — `cargo xtask
-validate` would pass vacuously, which is worse than failing. Install before writing M2 code.
+**Why this mattered more than it looks:** without the validation layer there are no validation
+messages, so definition-of-green check #2 (*"zero Vulkan validation messages"*) would have passed
+**vacuously**. A green check that cannot fail is worse than one that fails. Brief §7.3 is blunt
+that the validation layers are the real compiler here — Rust catches none of the bugs Vulkan
+introduces.
+
+Also present: mold, clang, `vulkan-loader` 1.4.341, RTX 4090 on driver 610.43.03 at the deliberate
+300W cap. Loader is 1.4, target is Vulkan **1.3** — as intended (Vulkan doc §1).
+
+Slang is the one piece outside `dnf`, so it updates manually. Pinned by the shader build step
+failing loudly if it is missing (brief §7.7 / never-do #9), rather than by silently skipping.
 
 ## Where the docs disagree with each other
 
