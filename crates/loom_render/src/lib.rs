@@ -179,6 +179,25 @@ mod tests {
             "image looks blank — only {} distinct colours",
             distinct.len()
         );
+
+        // The graph must actually have placed barriers. A render that looks
+        // right with no transitions emitted would mean the graph is inert and
+        // the driver happened to forgive us — which it will not on other
+        // hardware (Vulkan doc §14).
+        let transitions: Vec<(&str, &str)> = renderer
+            .last_transitions()
+            .iter()
+            .map(|t| (t.pass, t.image))
+            .collect();
+        assert_eq!(
+            transitions,
+            [
+                ("forward", "loom.color_target"),
+                ("forward", "loom.depth_target"),
+                ("readback", "loom.color_target"),
+            ],
+            "graph did not place the expected barriers"
+        );
     }
 
     #[test]

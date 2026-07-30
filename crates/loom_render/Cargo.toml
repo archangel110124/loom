@@ -10,6 +10,7 @@ ash = "=0.38.0"
 ash-window = "=0.13.0"
 glam = "=0.31.1"
 gpu-allocator = { version = "=0.28.0", default-features = false, features = ["std", "vulkan"] }
+loom_render_graph = { version = "0.0.0", path = "../loom_render_graph" }
 png = "=0.18.1"
 raw-window-handle = "=0.6.2"
 winit = "=0.30.13"

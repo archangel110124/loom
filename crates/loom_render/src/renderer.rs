@@ -16,6 +16,8 @@ use gpu_allocator::vulkan::{
     Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc,
 };
 
+use loom_render_graph::{Access, RenderGraph, Transition};
+
 use crate::debug_names::DebugNames;
 use crate::{Device, Instance};
 
@@ -165,6 +167,9 @@ pub struct Renderer {
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
     cache_path: Option<std::path::PathBuf>,
+    /// What the graph decided last frame. Exposed so a test can assert the
+    /// barriers actually happened rather than trusting that they did.
+    last_transitions: Vec<Transition>,
 }
 
 impl Renderer {
@@ -323,6 +328,7 @@ impl Renderer {
             command_buffer,
             fence,
             cache_path,
+            last_transitions: Vec::new(),
         })
     }
 
@@ -354,139 +360,51 @@ impl Renderer {
             &object_data,
         )?;
 
-        let d = &self.device;
+        // Every barrier below is chosen by the graph, not written here.
+        // never-do #4: no barrier lives outside it. What each pass *touches*
+        // is declared; what that requires is derived.
+        let mut graph = RenderGraph::new();
+        let color = graph.import("loom.color_target", self.color);
+        let depth = graph.import("loom.depth_target", self.depth);
 
-        // SAFETY: the buffer is not in flight — the previous submit was waited on.
-        unsafe {
-            d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
-            let begin = vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            d.begin_command_buffer(cmd, &begin)?;
+        let (width, height) = (self.width, self.height);
+        let (color_view, depth_view) = (self.color_view, self.depth_view);
+        let (pipeline, layout) = (self.pipeline, self.pipeline_layout);
+        let push = Push {
+            vertices: self.vertex_address,
+            objects: self.object_address,
+        };
+        let instances = u32::try_from(objects.len()).unwrap_or(0);
+        let (readback, image) = (self.readback, self.color);
 
-            // UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL, and depth likewise.
-            // Dynamic rendering does not transition layouts for you; every
-            // barrier in this file is explicit, and moves into the render graph
-            // at M4 (never-do #4 — nothing hand-places barriers after that).
-            image_barrier(
-                d,
-                cmd,
-                self.color,
-                vk::ImageAspectFlags::COLOR,
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::AccessFlags2::empty(),
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-            );
-            image_barrier(
-                d,
-                cmd,
-                self.depth,
-                vk::ImageAspectFlags::DEPTH,
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::AccessFlags2::empty(),
-                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
-                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            );
+        graph.pass(
+            "forward",
+            &[(color, Access::ColorWrite), (depth, Access::DepthWrite)],
+            move |d, cmd| {
+                // SAFETY: the graph has already transitioned both attachments
+                // into the layouts this recording requires.
+                unsafe {
+                    begin_rendering(d, cmd, color_view, depth_view, width, height);
+                    d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                    set_viewport(d, cmd, width, height);
+                    let bytes = std::slice::from_raw_parts(
+                        std::ptr::from_ref(&push).cast::<u8>(),
+                        size_of::<Push>(),
+                    );
+                    d.cmd_push_constants(
+                        cmd,
+                        layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0,
+                        bytes,
+                    );
+                    d.cmd_draw(cmd, 36, instances, 0, 0);
+                    d.cmd_end_rendering(cmd);
+                }
+            },
+        );
 
-            let color_attachment = vk::RenderingAttachmentInfo::default()
-                .image_view(self.color_view)
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.05, 0.06, 0.08, 1.0],
-                    },
-                });
-            let depth_attachment = vk::RenderingAttachmentInfo::default()
-                .image_view(self.depth_view)
-                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .clear_value(vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: 1.0,
-                        stencil: 0,
-                    },
-                });
-            let color_attachments = [color_attachment];
-            let rendering = vk::RenderingInfo::default()
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: vk::Extent2D {
-                        width: self.width,
-                        height: self.height,
-                    },
-                })
-                .layer_count(1)
-                .color_attachments(&color_attachments)
-                .depth_attachment(&depth_attachment);
-
-            d.cmd_begin_rendering(cmd, &rendering);
-            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-
-            #[allow(clippy::cast_precision_loss)]
-            let viewport = vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: self.width as f32,
-                height: self.height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
-            d.cmd_set_viewport(cmd, 0, &[viewport]);
-            d.cmd_set_scissor(
-                cmd,
-                0,
-                &[vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: vk::Extent2D {
-                        width: self.width,
-                        height: self.height,
-                    },
-                }],
-            );
-
-            // Two pointers, then ONE draw for the whole scene. CPU work per
-            // frame is constant in object count (graphics doc §B.1), which
-            // matters here because `render_preview` runs the full pipeline
-            // dozens of times per agent task.
-            let push = Push {
-                vertices: self.vertex_address,
-                objects: self.object_address,
-            };
-            let bytes =
-                std::slice::from_raw_parts(std::ptr::from_ref(&push).cast::<u8>(), size_of::<Push>());
-            d.cmd_push_constants(
-                cmd,
-                self.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                bytes,
-            );
-            let instances = u32::try_from(objects.len()).unwrap_or(0);
-            d.cmd_draw(cmd, 36, instances, 0, 0);
-
-            d.cmd_end_rendering(cmd);
-
-            // COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL for the copy.
-            image_barrier(
-                d,
-                cmd,
-                self.color,
-                vk::ImageAspectFlags::COLOR,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-                vk::PipelineStageFlags2::COPY,
-                vk::AccessFlags2::TRANSFER_READ,
-            );
-
+        graph.pass("readback", &[(color, Access::TransferSrc)], move |d, cmd| {
             let region = vk::BufferImageCopy::default()
                 .buffer_offset(0)
                 .buffer_row_length(0)
@@ -499,26 +417,42 @@ impl Renderer {
                         .layer_count(1),
                 )
                 .image_extent(vk::Extent3D {
-                    width: self.width,
-                    height: self.height,
+                    width,
+                    height,
                     depth: 1,
                 });
-            d.cmd_copy_image_to_buffer(
-                cmd,
-                self.color,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                self.readback,
-                &[region],
-            );
+            // SAFETY: the graph put the image in TRANSFER_SRC_OPTIMAL.
+            unsafe {
+                d.cmd_copy_image_to_buffer(
+                    cmd,
+                    image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    readback,
+                    &[region],
+                );
+            }
+        });
 
+        let d = &self.device;
+        // SAFETY: the buffer is not in flight — the previous submit was waited on.
+        unsafe {
+            d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
+            let begin = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            d.begin_command_buffer(cmd, &begin)?;
+        }
+
+        self.last_transitions = graph.execute(d, cmd);
+
+        // SAFETY: recording is complete; nothing else uses this buffer.
+        unsafe {
             d.end_command_buffer(cmd)?;
-
             let buffers = [cmd];
             let submit = vk::SubmitInfo::default().command_buffers(&buffers);
             d.reset_fences(&[self.fence])?;
             d.queue_submit(self.queue, &[submit], self.fence)?;
-            // Headless and single-frame, so a full stall is correct here rather
-            // than lazy: nothing else can proceed until the pixels exist.
+            // Headless and single-frame, so a full stall is correct rather than
+            // lazy: nothing can proceed until the pixels exist.
             d.wait_for_fences(&[self.fence], true, u64::MAX)?;
         }
 
@@ -535,6 +469,12 @@ impl Renderer {
         // been waited on, so the write is visible to the host.
         let pixels = unsafe { std::slice::from_raw_parts(mapped.as_ptr().cast::<u8>(), len) };
         Ok(pixels.to_vec())
+    }
+
+    /// The layout transitions the graph emitted on the last [`Self::render`].
+    #[must_use]
+    pub fn last_transitions(&self) -> &[Transition] {
+        &self.last_transitions
     }
 
     /// Render and write a PNG.
@@ -653,6 +593,79 @@ pub(crate) fn pipeline_cache_path(instance: &Instance, device: &Device) -> Optio
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?;
     Some(base.join("loom").join(format!("pipeline-{key}.bin")))
+}
+
+/// Begin dynamic rendering with a colour and depth attachment, both cleared.
+///
+/// # Safety
+/// Both views must already be in the layouts named here — which is the graph's
+/// job, not this function's.
+pub(crate) unsafe fn begin_rendering(
+    d: &ash::Device,
+    cmd: vk::CommandBuffer,
+    color_view: vk::ImageView,
+    depth_view: vk::ImageView,
+    width: u32,
+    height: u32,
+) {
+    let color_attachment = vk::RenderingAttachmentInfo::default()
+        .image_view(color_view)
+        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .clear_value(vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [0.05, 0.06, 0.08, 1.0],
+            },
+        });
+    let depth_attachment = vk::RenderingAttachmentInfo::default()
+        .image_view(depth_view)
+        .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .clear_value(vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                depth: 1.0,
+                stencil: 0,
+            },
+        });
+    let color_attachments = [color_attachment];
+    let rendering = vk::RenderingInfo::default()
+        .render_area(vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: vk::Extent2D { width, height },
+        })
+        .layer_count(1)
+        .color_attachments(&color_attachments)
+        .depth_attachment(&depth_attachment);
+    unsafe { d.cmd_begin_rendering(cmd, &rendering) };
+}
+
+/// # Safety
+/// `cmd` must be recording, with a pipeline bound that uses dynamic state.
+pub(crate) unsafe fn set_viewport(
+    d: &ash::Device,
+    cmd: vk::CommandBuffer,
+    width: u32,
+    height: u32,
+) {
+    #[allow(clippy::cast_precision_loss)]
+    let viewport = vk::Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: width as f32,
+        height: height as f32,
+        min_depth: 0.0,
+        max_depth: 1.0,
+    };
+    let scissor = vk::Rect2D {
+        offset: vk::Offset2D { x: 0, y: 0 },
+        extent: vk::Extent2D { width, height },
+    };
+    unsafe {
+        d.cmd_set_viewport(cmd, 0, &[viewport]);
+        d.cmd_set_scissor(cmd, 0, &[scissor]);
+    }
 }
 
 /// Build the per-object array the shader indexes with `SV_InstanceID`.
@@ -911,40 +924,3 @@ fn create_shader_module(
     Ok(unsafe { device.create_shader_module(&info, None) }?)
 }
 
-/// One image layout transition, using synchronization2.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn image_barrier(
-    device: &ash::Device,
-    cmd: vk::CommandBuffer,
-    image: vk::Image,
-    aspect: vk::ImageAspectFlags,
-    from: vk::ImageLayout,
-    to: vk::ImageLayout,
-    src_stage: vk::PipelineStageFlags2,
-    src_access: vk::AccessFlags2,
-    dst_stage: vk::PipelineStageFlags2,
-    dst_access: vk::AccessFlags2,
-) {
-    let barrier = vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(src_stage)
-        .src_access_mask(src_access)
-        .dst_stage_mask(dst_stage)
-        .dst_access_mask(dst_access)
-        .old_layout(from)
-        .new_layout(to)
-        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(image)
-        .subresource_range(
-            vk::ImageSubresourceRange::default()
-                .aspect_mask(aspect)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1),
-        );
-    let barriers = [barrier];
-    let dependency = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-    // SAFETY: `barriers` outlives the call and the image is live.
-    unsafe { device.cmd_pipeline_barrier2(cmd, &dependency) };
-}

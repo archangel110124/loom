@@ -676,9 +676,17 @@ dependencies = [
  "ash-window",
  "glam",
  "gpu-allocator",
+ "loom_render_graph",
  "png",
  "raw-window-handle",
  "winit",
+]
+
+[[package]]
+name = "loom_render_graph"
+version = "0.0.0"
+dependencies = [
+ "ash",
 ]
 
 [[package]]

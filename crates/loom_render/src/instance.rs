@@ -142,12 +142,24 @@ impl Instance {
         // catches errors *during* vkCreateInstance/vkDestroyInstance, which a
         // messenger created afterwards cannot see.
         let mut messenger_info = debug_messenger_info();
+
+        // Synchronization validation, enabled explicitly (brief §7.3, Vulkan
+        // doc §10). This is the sub-layer that catches missing and wrong
+        // barriers — the exact bug class the render graph exists to prevent,
+        // and the one that otherwise shows up as intermittent corruption on
+        // hardware we cannot test.
+        let enabled_features = [vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION];
+        let mut validation_features =
+            vk::ValidationFeaturesEXT::default().enabled_validation_features(&enabled_features);
+
         let mut create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_layer_names(&layers)
             .enabled_extension_names(&extensions);
         if want_validation {
-            create_info = create_info.push_next(&mut messenger_info);
+            create_info = create_info
+                .push_next(&mut messenger_info)
+                .push_next(&mut validation_features);
         }
 
         // SAFETY: all pointers above outlive this call, and the layer and

@@ -126,18 +126,16 @@ change, so your edits appear live. Two consequences:
 
 ## Current milestone
 
-> **M4 — render graph.** Update this line at every milestone. See §6 of the build brief.
+> **M5 — assets.** Update this line at every milestone. See §6 of the build brief.
 >
-> M0–M3 done. `loom render` draws a scene headless; `loom sim --ticks N` prints a deterministic
-> state hash (verified: same scene twice, identical hash; different scenes differ).
+> M0–M4 done, plus M5's swapchain early (`loom run`). Every barrier in the engine is placed by
+> `loom_render_graph`; there is no `cmd_pipeline_barrier` call anywhere else, and synchronization
+> validation is enabled and silent.
 >
-> Next: pass declaration, transient resource allocation, **automatic barrier and layout-transition
-> placement**, queue ownership transfers. Read `caldera` (sjb3d) first — it has already solved this
-> in Rust. Exit: a 3-pass graph (depth prepass → forward → post) renders correctly headless with
-> synchronization validation enabled and silent.
->
-> When the graph lands, every hand-placed barrier in `loom_render::renderer` moves into it and
-> never comes back (never-do #4).
+> Next: `.meta` sidecars with UUIDs + content hashes, import cache, `manifest.bin`, glTF static
+> meshes, and the procedural primitive library. Then real geometry replaces the procedural cube.
+> Exit: `loom run office.loom` shows a glTF mesh and a primitive; `loom render` still produces the
+> same image headless.
 
 ---
 

@@ -12,10 +12,11 @@ use ash::vk;
 
 use crate::debug_names::DebugNames;
 use crate::renderer::{
-    Camera, DEPTH_FORMAT, Object, ObjectData, RenderError, create_address_buffer, create_image,
-    create_pipeline, create_view, cube_vertices, image_barrier, pack_objects, pipeline_cache_path,
-    view_projection, write_slice,
+    Camera, DEPTH_FORMAT, Object, ObjectData, RenderError, begin_rendering, create_address_buffer,
+    create_image, create_pipeline, create_view, cube_vertices, pack_objects, pipeline_cache_path,
+    set_viewport, view_projection, write_slice,
 };
+use loom_render_graph::{Access, RenderGraph};
 use crate::{Device, Instance};
 use gpu_allocator::vulkan::{Allocation, Allocator, AllocatorCreateDesc};
 
@@ -236,6 +237,55 @@ impl Viewer {
         let view = self.views[index as usize];
         let cmd = self.command_buffer;
 
+        // Barriers belong to the graph here as well (never-do #4). The
+        // swapchain image starts UNDEFINED every frame — its contents are not
+        // preserved between presents, and pretending otherwise would make the
+        // driver keep them for nothing.
+        let mut graph = RenderGraph::new();
+        let target = graph.import("loom.swapchain_image", image);
+
+        let extent = self.extent;
+        let depth_view = self.depth_view;
+        let (pipeline, layout) = (self.pipeline, self.pipeline_layout);
+        let push = crate::renderer::Push {
+            vertices: self.vertex_address,
+            objects: self.object_address,
+        };
+        let instances = u32::try_from(objects.len()).unwrap_or(0);
+        let depth_image = self.depth;
+        let depth_id = graph.import("loom.viewer_depth", depth_image);
+
+        graph.pass(
+            "forward",
+            &[(target, Access::ColorWrite), (depth_id, Access::DepthWrite)],
+            move |d, cmd| {
+                // SAFETY: the graph transitioned both attachments already.
+                unsafe {
+                    begin_rendering(d, cmd, view, depth_view, extent.width, extent.height);
+                    d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                    set_viewport(d, cmd, extent.width, extent.height);
+                    let bytes = std::slice::from_raw_parts(
+                        std::ptr::from_ref(&push).cast::<u8>(),
+                        size_of::<crate::renderer::Push>(),
+                    );
+                    d.cmd_push_constants(
+                        cmd,
+                        layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0,
+                        bytes,
+                    );
+                    d.cmd_draw(cmd, 36, instances, 0, 0);
+                    d.cmd_end_rendering(cmd);
+                }
+            },
+        );
+
+        // Presentable layout. Declared as a pass with no work, because the
+        // transition IS the work — and forgetting it is the classic first
+        // swapchain bug that validation catches immediately.
+        graph.pass("present", &[(target, Access::Present)], |_, _| {});
+
         // SAFETY: the fence above guarantees this buffer is no longer in flight.
         unsafe {
             d.reset_fences(&[self.in_flight])?;
@@ -243,116 +293,12 @@ impl Viewer {
             let begin = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             d.begin_command_buffer(cmd, &begin)?;
+        }
 
-            image_barrier(
-                &d,
-                cmd,
-                image,
-                vk::ImageAspectFlags::COLOR,
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::AccessFlags2::empty(),
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-            );
-            image_barrier(
-                &d,
-                cmd,
-                self.depth,
-                vk::ImageAspectFlags::DEPTH,
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::AccessFlags2::empty(),
-                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
-                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            );
+        graph.execute(&d, cmd);
 
-            let color_attachment = vk::RenderingAttachmentInfo::default()
-                .image_view(view)
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.05, 0.06, 0.08, 1.0],
-                    },
-                });
-            let depth_attachment = vk::RenderingAttachmentInfo::default()
-                .image_view(self.depth_view)
-                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .clear_value(vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: 1.0,
-                        stencil: 0,
-                    },
-                });
-            let color_attachments = [color_attachment];
-            let rendering = vk::RenderingInfo::default()
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: self.extent,
-                })
-                .layer_count(1)
-                .color_attachments(&color_attachments)
-                .depth_attachment(&depth_attachment);
-
-            d.cmd_begin_rendering(cmd, &rendering);
-            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            #[allow(clippy::cast_precision_loss)]
-            let viewport = vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: self.extent.width as f32,
-                height: self.extent.height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
-            d.cmd_set_viewport(cmd, 0, &[viewport]);
-            d.cmd_set_scissor(
-                cmd,
-                0,
-                &[vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: self.extent,
-                }],
-            );
-
-            let push = crate::renderer::Push {
-                vertices: self.vertex_address,
-                objects: self.object_address,
-            };
-            let bytes = std::slice::from_raw_parts(
-                std::ptr::from_ref(&push).cast::<u8>(),
-                size_of::<crate::renderer::Push>(),
-            );
-            d.cmd_push_constants(
-                cmd,
-                self.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                bytes,
-            );
-            d.cmd_draw(cmd, 36, u32::try_from(objects.len()).unwrap_or(0), 0, 0);
-            d.cmd_end_rendering(cmd);
-
-            // Presentable layout. Skipping this is the classic first-swapchain
-            // bug and validation catches it immediately.
-            image_barrier(
-                &d,
-                cmd,
-                image,
-                vk::ImageAspectFlags::COLOR,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                vk::ImageLayout::PRESENT_SRC_KHR,
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
-                vk::AccessFlags2::empty(),
-            );
+        // SAFETY: recording is complete.
+        unsafe {
             d.end_command_buffer(cmd)?;
 
             let wait = [self.acquired];
