@@ -32,6 +32,36 @@ is accepted (liberal in what we accept, §7) and normalizes to `90.0` on write.
 in a transform, colour, or intensity means them, and they poison the determinism hashes M3 depends
 on. Rejection message names the field.
 
+### 1.1 Coordinate system and rotation
+
+**Right-handed, Y-up, −Z forward, +X right.** This is glTF's convention, and matching it means the
+M5 mesh importer needs no axis conversion — the most common source of silently mirrored or
+90°-rotated assets in every engine that picked something else.
+
+**Rotation is authored as euler angles in degrees, and the authored value is the source of truth.**
+
+```toml
+transform = { pos = [0.0, 0.0, -2.5], rot_euler = [0.0, 90.0, 0.0] }
+#                                                   ^X    ^Y    ^Z
+```
+
+- **Order: intrinsic Y-X-Z** — yaw about Y, then pitch about X, then roll about Z. Written in the
+  array as `[pitch_x, yaw_y, roll_z]` so the array index matches the axis. Gimbal lock sits at
+  pitch = ±90°, which is "looking straight up or down" — the singularity every camera controller
+  already handles, rather than an arbitrary one.
+- **Conversion to quaternion is one-directional**, at the ECS boundary. The scene layer never
+  converts a quaternion back to euler, so **round-trip is exact by construction rather than by
+  luck**. Quaternions are a runtime representation and never appear in a `.loom` file.
+- **Canonical form normalizes each angle into `(-180.0, 180.0]` by adding or subtracting integral
+  multiples of 360.** Pure addition — no trig, no matrix, no drift.
+
+> `ponytail:` normalization is modulo-360 per axis only, *not* full canonicalization of the euler
+> triple. A pitch outside ±90° is a legal rotation expressed unusually, and reducing it would mean
+> going through a quaternion — reintroducing exactly the drift this design avoids. Two different
+> euler triples can therefore denote the same rotation and hash differently. Upgrade path if that
+> ever matters: canonicalize at author time in the `SceneOp` layer, where a quaternion is already
+> in hand, never in the emitter.
+
 ---
 
 ## 2. Canonical form
@@ -61,6 +91,10 @@ Canonical rules, all of them:
    fields all fit on one line under 100 columns. Everything else is a sub-table.
 8. **Arrays** are inline when under 100 columns, one element per line otherwise.
 9. **One blank line** between top-level tables; none inside a table.
+10. **`name` and `transform` are always written as node-key sugar**, never as
+    `[node.components.Name]` / `[node.components.Transform]` (§3). Both spellings parse; only one
+    is canonical.
+11. **Euler angles are normalized** into `(-180.0, 180.0]` per axis (§1.1).
 
 ### Comments and hand formatting survive writes
 
@@ -138,10 +172,13 @@ entry. An unresolved alias is an error naming the alias and listing the declared
 
 | Key | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `name` | string | yes | Unique among siblings. |
+| `name` | string | yes | Unique among siblings. Sugar for the `Name` component. |
 | `parent` | node path | no | Absent ⇒ this is the root. **Exactly one node may omit it.** |
-| `transform` | inline table | no | Defaults to identity. |
+| `transform` | inline table | no | Sugar for the `Transform` component. Defaults to identity, and is omitted when identity. |
 | `prefab` | prefab alias | no | Makes this a prefab instance (§5). |
+
+`parent` and `prefab` are structural — they describe the tree, not the node's data, so they are
+genuinely node keys rather than sugar. `name` and `transform` are data, and desugar to components.
 
 Zero roots or two roots is an error. Godot's one-root rule, and it is what makes scenes composable
 as instances.
@@ -166,8 +203,34 @@ registered; an unknown type is an error listing near-matches by edit distance.
 A node may hold at most one component of a given type. Field values are validated against the
 registry entry (§6).
 
-`Name` is **not** a component here, despite design doc §2.2 — the node's `name` key already is it.
-Registering both invites them to disagree.
+### `name` and `transform` are sugar for real components
+
+`Name` and `Transform` are registered components like any other — they are two of M1's six. The
+node keys are **file-level sugar** for them, and nothing else in the system knows the difference:
+
+| Sugar in the file | Desugars to |
+| --- | --- |
+| `name = "Desk"` | `[node.components.Name]` with `value = "Desk"` |
+| `transform = { pos = [...], rot_euler = [...] }` | `[node.components.Transform]` with those fields |
+
+This is the only special case in the parser and the emitter, and it buys uniformity everywhere
+else. Addressing is component addressing, with no second scheme to remember:
+
+```
+overrides     "Transform.pos" = [0.55, 0.74, 0.1]
+SceneOp       SetField { node: "Office/Desk", field: "Transform.pos", ... }
+CLI           loom describe Transform
+inspector     generated from the registry entry, like every other component
+rhai          node.Transform.pos
+```
+
+Rules:
+
+- **Both spellings parse; canonical form always writes the sugar.** Otherwise there would be two
+  canonical forms for one scene, and the version token (§8) would disagree with itself.
+- Declaring both `name = "X"` and `[node.components.Name]` on one node is an error naming both.
+- `name` is required on every node (§3). `transform` defaults to identity and is omitted when
+  identity, per §4 — so a node that is not moved costs zero lines.
 
 ---
 
@@ -321,11 +384,14 @@ what the scene format has to accommodate:
 
 ---
 
-## Open, to settle before the parser is finished
+## 11. Settled, and where
 
-- **Rotation representation on the wire.** `rot_euler` in degrees reads well in a diff and is what
-  the design doc shows; quaternions avoid gimbal ambiguity and round-trip exactly. Leaning
-  euler-degrees on the wire, quaternion in memory, with the canonicalizer pinning the euler
-  convention (order and range) so round-trip is stable.
-- **Whether `transform` is a component or a node key.** Spec'd above as a node key, matching the
-  design doc's example. It is a component in the ECS. Worth confirming the asymmetry is wanted.
+Both questions this spec opened were closed on 2026-07-30:
+
+- **Rotation** — euler degrees on the wire, authoritative; quaternion derived one-way at the ECS
+  boundary; intrinsic Y-X-Z; right-handed Y-up −Z-forward. §1.1.
+- **`name` / `transform`** — node-key sugar over the real `Name` and `Transform` components, which
+  restores brief M1's six-component list and keeps addressing uniform. §3.
+
+Nothing in this document is open. If a decision here turns out wrong, it gets an ADR and a `format`
+bump per §9 — not a silent edit.
