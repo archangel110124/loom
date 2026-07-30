@@ -50,6 +50,27 @@ Precedence and the full list of corrections: [ADR 0002](../decisions/0002-compan
 - **M12 — editing** → design doc §2.8 transactions; brief §7.17 and never-do #16 (one undo stack,
   shared with the agent).
 
+## Environment prerequisites — checked 2026-07-30
+
+M0/M1 need nothing beyond the pinned toolchain. **M2 is blocked on three things this box does not
+have yet**, all cheap to install but painful to discover in week five:
+
+| Need | Status | Source |
+| --- | --- | --- |
+| `VK_LAYER_KHRONOS_validation` | **MISSING** — `/usr/share/vulkan/explicit_layer.d/` is empty | `dnf install vulkan-validation-layers` (1.4.341.0-2.fc44, exactly matches the installed loader) |
+| `slangc` (Slang → SPIR-V) | **MISSING** | Not packaged for Fedora. GitHub releases (`shader-slang/slang`) or the Vulkan SDK. |
+| `spirv-val` (brief §7.7) | **MISSING** | `dnf install spirv-tools` (2026.1-1.fc44) |
+
+**Trap:** Fedora's `slang` package — which *is* installed here — is **S-Lang, the terminal extension
+library**. Completely unrelated to the Slang shader language. `rpm -q slang` succeeding proves
+nothing; check for the `slangc` binary.
+
+Present and correct: mold, clang, `vulkan-loader` 1.4.341, RTX 4090 on driver 610.43.03 at the
+deliberate 300W cap. Loader is 1.4, target is Vulkan 1.3 — as intended (Vulkan doc §1).
+
+Without the validation layer, **definition-of-green check #2 cannot run at all** — `cargo xtask
+validate` would pass vacuously, which is worse than failing. Install before writing M2 code.
+
 ## Where the docs disagree with each other
 
 Recorded in ADR 0002 rather than fixed in place — the reasoning record is worth more intact than
