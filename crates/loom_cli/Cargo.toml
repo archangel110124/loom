@@ -10,6 +10,7 @@ name = "loom"
 path = "src/main.rs"
 
 [dependencies]
+loom_asset = { version = "0.0.0", path = "../loom_asset" }
 loom_ecs = { version = "0.0.0", path = "../loom_ecs" }
 loom_render = { version = "0.0.0", path = "../loom_render" }
 loom_scene = { version = "0.0.0", path = "../loom_scene" }

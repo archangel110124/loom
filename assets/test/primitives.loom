@@ -1,0 +1,58 @@
+# Every procedural primitive, to prove the library renders.
+# `mesh = { asset = "sphere" }` resolves procedurally — no file on disk.
+
+[scene]
+format = 1
+id = "5e1c9a04-2b77-4f3e-9d61-8c0a4b25f7e2"
+
+[[node]]
+name = "Showcase"
+
+[[node]]
+name = "Ground"
+parent = "Showcase"
+transform = { pos = [0.0, -1.2, 0.0], scale = [7.0, 1.0, 4.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "plane" }
+
+[[node]]
+name = "Box"
+parent = "Showcase"
+transform = { pos = [-4.5, 0.0, 0.0], scale = [0.9, 0.9, 0.9] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+[[node]]
+name = "Sphere"
+parent = "Showcase"
+transform = { pos = [-2.2, 0.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+[[node]]
+name = "Cylinder"
+parent = "Showcase"
+transform = { pos = [0.2, 0.0, 0.0], scale = [0.8, 1.0, 0.8] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+[[node]]
+name = "Capsule"
+parent = "Showcase"
+transform = { pos = [2.6, 0.5, 0.0], scale = [0.7, 0.7, 0.7] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+# Rotated, to show the primitives are real geometry rather than billboards.
+[[node]]
+name = "TiltedBox"
+parent = "Showcase"
+transform = { pos = [4.8, 0.2, 0.0], rot_euler = [25.0, 35.0, 0.0], scale = [0.8, 0.8, 0.8] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }

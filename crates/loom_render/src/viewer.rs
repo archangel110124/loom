@@ -12,9 +12,10 @@ use ash::vk;
 
 use crate::debug_names::DebugNames;
 use crate::renderer::{
-    Camera, DEPTH_FORMAT, Object, ObjectData, RenderError, begin_rendering, create_address_buffer,
-    create_image, create_pipeline, create_view, cube_vertices, pack_objects, pipeline_cache_path,
-    set_viewport, view_projection, write_slice,
+    Camera, DEPTH_FORMAT, MeshRange, Object, ObjectData, RenderError, batch_by_mesh,
+    begin_rendering, combine, create_address_buffer, create_image, create_index_buffer,
+    create_pipeline, create_view, pack_objects, pipeline_cache_path, set_viewport,
+    view_projection, write_slice,
 };
 use loom_render_graph::{Access, RenderGraph};
 use crate::{Device, Instance};
@@ -44,6 +45,9 @@ pub struct Viewer {
     vertices: vk::Buffer,
     vertices_alloc: Option<Allocation>,
     vertex_address: vk::DeviceAddress,
+    indices: vk::Buffer,
+    indices_alloc: Option<Allocation>,
+    ranges: Vec<MeshRange>,
     objects: vk::Buffer,
     objects_alloc: Option<Allocation>,
     object_address: vk::DeviceAddress,
@@ -73,6 +77,7 @@ impl Viewer {
         surface: vk::SurfaceKHR,
         width: u32,
         height: u32,
+        meshes: &[loom_asset::Mesh],
     ) -> Result<Self, RenderError> {
         let raw = device.handle().clone();
         let names = DebugNames::new(instance.handle(), &raw, cfg!(debug_assertions));
@@ -90,14 +95,22 @@ impl Viewer {
         })
         .map_err(|e| RenderError::Allocator(e.to_string()))?;
 
-        let cube = cube_vertices();
+        let (combined_vertices, combined_indices, ranges) = combine(meshes);
         let (vertices, vertices_alloc, vertex_address) = create_address_buffer(
             &raw,
             &mut allocator,
-            std::mem::size_of_val(cube.as_slice()) as u64,
-            "loom.cube_vertices",
+            (std::mem::size_of_val(combined_vertices.as_slice()) as u64).max(4),
+            "loom.mesh_vertices",
         )?;
-        write_slice(&vertices_alloc, &cube)?;
+        write_slice(&vertices_alloc, &combined_vertices)?;
+
+        let (indices, indices_alloc, _) = create_index_buffer(
+            &raw,
+            &mut allocator,
+            (std::mem::size_of_val(combined_indices.as_slice()) as u64).max(4),
+            "loom.mesh_indices",
+        )?;
+        write_slice(&indices_alloc, &combined_indices)?;
 
         let (objects, objects_alloc, object_address) = create_address_buffer(
             &raw,
@@ -175,6 +188,9 @@ impl Viewer {
             vertices,
             vertices_alloc: Some(vertices_alloc),
             vertex_address,
+            indices,
+            indices_alloc: Some(indices_alloc),
+            ranges,
             objects,
             objects_alloc: Some(objects_alloc),
             object_address,
@@ -225,7 +241,10 @@ impl Viewer {
 
         #[allow(clippy::cast_precision_loss)]
         let aspect = self.extent.width as f32 / self.extent.height as f32;
-        let object_data = pack_objects(objects, view_projection(camera, aspect));
+        let mut sorted: Vec<Object> = objects.to_vec();
+        sorted.sort_by_key(|o| o.mesh);
+        let object_data = pack_objects(&sorted, view_projection(camera, aspect));
+        let batches = batch_by_mesh(&sorted);
         write_slice(
             self.objects_alloc
                 .as_ref()
@@ -247,11 +266,18 @@ impl Viewer {
         let extent = self.extent;
         let depth_view = self.depth_view;
         let (pipeline, layout) = (self.pipeline, self.pipeline_layout);
-        let push = crate::renderer::Push {
+        let base_push = crate::renderer::Push {
             vertices: self.vertex_address,
             objects: self.object_address,
+            object_offset: 0,
         };
-        let instances = u32::try_from(objects.len()).unwrap_or(0);
+        let index_buffer = self.indices;
+        let draws: Vec<(MeshRange, u32, u32)> = batches
+            .iter()
+            .filter_map(|(mesh, first, count)| {
+                self.ranges.get(*mesh as usize).map(|r| (*r, *first, *count))
+            })
+            .collect();
         let depth_image = self.depth;
         let depth_id = graph.import("loom.viewer_depth", depth_image);
 
@@ -264,18 +290,32 @@ impl Viewer {
                     begin_rendering(d, cmd, view, depth_view, extent.width, extent.height);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
                     set_viewport(d, cmd, extent.width, extent.height);
-                    let bytes = std::slice::from_raw_parts(
-                        std::ptr::from_ref(&push).cast::<u8>(),
-                        size_of::<crate::renderer::Push>(),
-                    );
-                    d.cmd_push_constants(
-                        cmd,
-                        layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        0,
-                        bytes,
-                    );
-                    d.cmd_draw(cmd, 36, instances, 0, 0);
+                    d.cmd_bind_index_buffer(cmd, index_buffer, 0, vk::IndexType::UINT32);
+                    for (range, first_instance, instances) in draws {
+                        let push = crate::renderer::Push {
+                            object_offset: first_instance,
+                            ..base_push
+                        };
+                        let bytes = std::slice::from_raw_parts(
+                            std::ptr::from_ref(&push).cast::<u8>(),
+                            size_of::<crate::renderer::Push>(),
+                        );
+                        d.cmd_push_constants(
+                            cmd,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            bytes,
+                        );
+                        d.cmd_draw_indexed(
+                            cmd,
+                            range.index_count(),
+                            instances,
+                            range.first_index(),
+                            0,
+                            0,
+                        );
+                    }
                     d.cmd_end_rendering(cmd);
                 }
             },
@@ -428,6 +468,7 @@ impl Drop for Viewer {
                 for allocation in [
                     self.depth_alloc.take(),
                     self.vertices_alloc.take(),
+                    self.indices_alloc.take(),
                     self.objects_alloc.take(),
                 ]
                 .into_iter()
@@ -438,6 +479,7 @@ impl Drop for Viewer {
             }
             self.device.destroy_image(self.depth, None);
             self.device.destroy_buffer(self.vertices, None);
+            self.device.destroy_buffer(self.indices, None);
             self.device.destroy_buffer(self.objects, None);
             self.allocator = None;
 

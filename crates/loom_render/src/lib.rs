@@ -143,16 +143,25 @@ mod tests {
         };
         let _ = instance.check_validation();
 
-        let mut renderer = Renderer::new(&instance, &device, 256, 192).expect("renderer");
+        // Two meshes, so the test also covers batching by mesh — a single-mesh
+        // scene would pass even if the per-batch object offset were wrong.
+        let meshes = [
+            loom_asset::primitives::box_mesh(),
+            loom_asset::primitives::sphere(16, 12),
+        ];
+        let mut renderer =
+            Renderer::new(&instance, &device, 256, 192, &meshes).expect("renderer");
         let objects = [
             Object {
                 model: glam::Mat4::from_translation(glam::Vec3::new(-2.2, 0.0, 0.0))
                     * glam::Mat4::from_scale(glam::Vec3::splat(0.8)),
                 color: [0.9, 0.3, 0.3],
+                mesh: 0,
             },
             Object {
                 model: glam::Mat4::from_scale(glam::Vec3::splat(0.8)),
                 color: [0.3, 0.9, 0.4],
+                mesh: 1,
             },
         ];
         let camera = Camera {

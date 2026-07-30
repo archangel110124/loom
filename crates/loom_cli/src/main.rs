@@ -59,7 +59,7 @@ fn run(args: &[String]) -> (u8, String) {
             None => (2, USAGE.to_owned()),
         },
         Some("run") => match args.get(1) {
-            Some(path) => match run::open_scene(path, world_to_objects) {
+            Some(path) => match run::open_scene(path) {
                 Ok(()) => (0, String::new()),
                 Err(e) => (1, json_line(&serde_json::json!({
                     "error": "run_failed", "constraint": e,
@@ -161,7 +161,9 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     };
 
     let world = World::from_scene(&scene);
-    let objects = world_to_objects(&world);
+    let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+    let library = MeshLibrary::for_scene(&scene, base);
+    let objects = world_to_objects(&world, &library);
     let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok()).unwrap_or(35.0);
     let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok()).unwrap_or(28.0);
     let camera = frame_scene(&objects, yaw, pitch);
@@ -170,8 +172,8 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         let instance = Instance::new(c"loom").map_err(|e| e.to_string())?;
         let device = Device::new(&instance).map_err(|e| e.to_string())?;
         let name = device.name().to_owned();
-        let mut renderer =
-            Renderer::new(&instance, &device, width, height).map_err(|e| e.to_string())?;
+        let mut renderer = Renderer::new(&instance, &device, width, height, &library.meshes)
+            .map_err(|e| e.to_string())?;
         renderer
             .render_to_png(&objects, &camera, std::path::Path::new(&out))
             .map_err(|e| e.to_string())?;
@@ -202,7 +204,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
 /// Transform propagation lives in `loom_ecs` as of M3; this only reads the
 /// resolved `GlobalTransform`. The parent-chain walk that used to live here
 /// was a stand-in until the ECS existed, and is gone.
-fn world_to_objects(world: &World) -> Vec<Object> {
+fn world_to_objects(world: &World, library: &MeshLibrary) -> Vec<Object> {
     world
         .entities()
         .iter()
@@ -213,9 +215,86 @@ fn world_to_objects(world: &World) -> Vec<Object> {
             Some(Object {
                 model: Mat4::from_cols_array(&global.matrix),
                 color: palette(index),
+                mesh: library.index_for(world.mesh_asset(*entity)),
             })
         })
         .collect()
+}
+
+/// Every mesh a scene needs, plus the mapping from asset alias to draw index.
+///
+/// Built per scene rather than globally: an agent iterating on one level
+/// should not pay to load every asset in the project.
+struct MeshLibrary {
+    meshes: Vec<loom_asset::Mesh>,
+    by_name: std::collections::BTreeMap<String, u32>,
+}
+
+impl MeshLibrary {
+    /// Resolve every asset a scene references.
+    ///
+    /// A primitive name resolves procedurally; anything else is a path to
+    /// import. An asset that cannot be resolved falls back to a box rather
+    /// than failing the render — a missing mesh should be *visible*, not
+    /// fatal (design doc §2.6: degrade, do not crash).
+    fn for_scene(scene: &Scene, base: &std::path::Path) -> Self {
+        let mut meshes = vec![loom_asset::primitives::box_mesh()];
+        let mut by_name = std::collections::BTreeMap::new();
+        by_name.insert("box".to_owned(), 0_u32);
+
+        let mut wanted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for node in scene.nodes() {
+            if let Some(asset) = node
+                .components
+                .get("MeshRenderer")
+                .and_then(|m| m.get("mesh"))
+                .and_then(|m| m.get("asset"))
+                .and_then(serde_json::Value::as_str)
+            {
+                wanted.insert(asset.to_owned());
+            }
+        }
+
+        for name in wanted {
+            if by_name.contains_key(&name) {
+                continue;
+            }
+            let mesh = loom_asset::primitives::build(&name).or_else(|| {
+                let path = scene_asset_path(scene, &name).map(|p| base.join(p))?;
+                match loom_asset::mesh::import_gltf(&path) {
+                    Ok(mesh) => Some(mesh),
+                    Err(e) => {
+                        eprintln!("loom: {name}: {e}; falling back to a box");
+                        None
+                    }
+                }
+            });
+            if let Some(mesh) = mesh {
+                by_name.insert(name, u32::try_from(meshes.len()).unwrap_or(0));
+                meshes.push(mesh);
+            }
+        }
+
+        Self { meshes, by_name }
+    }
+
+    /// Hand the mesh data to a renderer.
+    fn into_meshes(self) -> Vec<loom_asset::Mesh> {
+        self.meshes
+    }
+
+    /// Draw index for an asset alias; 0 (the box) when unknown.
+    fn index_for(&self, asset: Option<&str>) -> u32 {
+        asset
+            .and_then(|a| self.by_name.get(a))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// The advisory `path` an `[[asset]]` entry carries, for importing.
+fn scene_asset_path(scene: &Scene, key: &str) -> Option<String> {
+    scene.asset_path(key).map(str::to_owned)
 }
 
 /// Distinct per-object colours until materials exist (M5).
@@ -420,6 +499,34 @@ mod tests {
     }
 
     /// A different scene must hash differently, or the check proves nothing.
+    /// The M5 exit criterion, end to end: a scene mixing an imported glTF
+    /// mesh with procedural primitives renders every object.
+    #[test]
+    fn a_scene_mixing_gltf_and_primitives_resolves_every_mesh() {
+        let src = std::fs::read_to_string("../../assets/test/workshop.loom").unwrap();
+        let scene = Scene::parse(&src).expect("workshop.loom is valid");
+        let library = MeshLibrary::for_scene(&scene, std::path::Path::new("../../assets/test"));
+
+        // plane, pyramid (imported), box, sphere, cylinder — plus the default
+        // box the library always carries at index 0.
+        assert!(
+            library.meshes.len() >= 5,
+            "only resolved {} meshes",
+            library.meshes.len()
+        );
+        // The imported one is not a primitive, so a name lookup proves the
+        // glTF path ran rather than falling back.
+        assert!(
+            loom_asset::primitives::build("pyramid").is_none(),
+            "pyramid must not be a primitive, or this proves nothing"
+        );
+        assert_ne!(
+            library.index_for(Some("pyramid")),
+            0,
+            "pyramid fell back to the default box — the glTF import failed"
+        );
+    }
+
     #[test]
     fn a_different_scene_hashes_differently() {
         let hash_of = |path: &str| {

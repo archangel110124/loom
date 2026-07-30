@@ -82,6 +82,7 @@ struct Keys {
 
 struct App {
     objects: Vec<Object>,
+    meshes: Vec<loom_asset::Mesh>,
     camera: FlyCamera,
     keys: Keys,
     looking: bool,
@@ -95,10 +96,11 @@ struct App {
 }
 
 impl App {
-    fn new(objects: Vec<Object>, title: String) -> Self {
+    fn new(objects: Vec<Object>, meshes: Vec<loom_asset::Mesh>, title: String) -> Self {
         Self {
             camera: FlyCamera::framing(&objects),
             objects,
+            meshes,
             keys: Keys::default(),
             looking: false,
             window: None,
@@ -169,7 +171,7 @@ impl ApplicationHandler for App {
             }
         };
 
-        match build_viewer(&window) {
+        match build_viewer(&window, &self.meshes) {
             Ok((instance, device, viewer)) => {
                 eprintln!("loom: rendering on {}", device.name());
                 self.gpu = Some((instance, device));
@@ -266,7 +268,10 @@ impl ApplicationHandler for App {
     }
 }
 
-fn build_viewer(window: &Arc<Window>) -> Result<(Instance, Device, Viewer), String> {
+fn build_viewer(
+    window: &Arc<Window>,
+    meshes: &[loom_asset::Mesh],
+) -> Result<(Instance, Device, Viewer), String> {
     use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
     let display = window
@@ -300,7 +305,7 @@ fn build_viewer(window: &Arc<Window>) -> Result<(Instance, Device, Viewer), Stri
         .map_err(|e| e.to_string())?;
 
     let size = window.inner_size();
-    let viewer = Viewer::new(&instance, &device, surface, size.width, size.height)
+    let viewer = Viewer::new(&instance, &device, surface, size.width, size.height, meshes)
         .map_err(|e| e.to_string())?;
 
     Ok((instance, device, viewer))
@@ -332,13 +337,13 @@ fn bounds(objects: &[Object]) -> (Vec3, f32) {
 ///
 /// # Errors
 /// A message describing what stopped it.
-pub fn run(path: &str, objects: Vec<Object>) -> Result<(), String> {
+pub fn run(path: &str, objects: Vec<Object>, meshes: Vec<loom_asset::Mesh>) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
     // Poll, not Wait: the camera animates continuously while keys are held.
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let title = format!("loom — {path}");
-    let mut app = App::new(objects, title);
+    let mut app = App::new(objects, meshes, title);
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))
@@ -348,12 +353,17 @@ pub fn run(path: &str, objects: Vec<Object>) -> Result<(), String> {
 ///
 /// # Errors
 /// A message describing what stopped it.
-pub fn open_scene(path: &str, to_objects: impl Fn(&World) -> Vec<Object>) -> Result<(), String> {
+pub fn open_scene(path: &str) -> Result<(), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let scene = Scene::parse(&src).map_err(|errors| {
         serde_json::to_string_pretty(&serde_json::json!({ "errors": errors }))
             .unwrap_or_else(|_| "invalid scene".to_owned())
     })?;
     let world = World::from_scene(&scene);
-    run(path, to_objects(&world))
+    let base = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let library = crate::MeshLibrary::for_scene(&scene, base);
+    let objects = crate::world_to_objects(&world, &library);
+    run(path, objects, library.into_meshes())
 }

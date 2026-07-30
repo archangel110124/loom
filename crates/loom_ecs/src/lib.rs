@@ -106,6 +106,8 @@ pub struct World {
     parents: Storage<Entity>,
     /// Tag component: presence is the whole payload.
     renderable: Storage<()>,
+    /// The asset alias a node's `MeshRenderer` names.
+    mesh_asset: Storage<String>,
     /// Insertion order. Iterated instead of a `HashMap` so every traversal is
     /// reproducible — the most common source of "works on my machine"
     /// nondeterminism in Rust engines, and it hides for months (§7.5).
@@ -250,8 +252,15 @@ impl World {
                 world.set_parent(entity, *parent);
             }
             by_path.insert(node.path.as_str(), entity);
-            if node.components.contains_key("MeshRenderer") {
+            if let Some(renderer) = node.components.get("MeshRenderer") {
                 world.mark_renderable(entity);
+                if let Some(asset) = renderer
+                    .get("mesh")
+                    .and_then(|m| m.get("asset"))
+                    .and_then(|a| a.as_str())
+                {
+                    world.mesh_asset.insert(entity, asset.to_owned());
+                }
             }
         }
 
@@ -268,6 +277,12 @@ impl World {
     #[must_use]
     pub fn is_renderable(&self, entity: Entity) -> bool {
         self.renderable.get(entity).is_some()
+    }
+
+    /// The asset alias this entity's mesh comes from.
+    #[must_use]
+    pub fn mesh_asset(&self, entity: Entity) -> Option<&str> {
+        self.mesh_asset.get(entity).map(String::as_str)
     }
 
     /// A hash of everything the simulation can observe.

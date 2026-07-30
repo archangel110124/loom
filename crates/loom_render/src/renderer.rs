@@ -24,13 +24,35 @@ use crate::{Device, Instance};
 pub(crate) const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 pub(crate) const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
-/// One object to draw: a cube with a transform and a colour.
+/// One object to draw.
 #[derive(Debug, Clone, Copy)]
 pub struct Object {
     /// World transform.
     pub model: Mat4,
     /// Linear RGB.
     pub color: [f32; 3],
+    /// Index into the mesh library the renderer was built with.
+    pub mesh: u32,
+}
+
+/// Where one mesh lives inside the combined index buffer.
+///
+/// Indices are absolute into the shared vertex buffer, so `vertexOffset` is
+/// always zero and the shader can read `vertices[SV_VertexID]` unchanged.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MeshRange {
+    first_index: u32,
+    index_count: u32,
+}
+
+impl MeshRange {
+    pub(crate) fn first_index(self) -> u32 {
+        self.first_index
+    }
+
+    pub(crate) fn index_count(self) -> u32 {
+        self.index_count
+    }
 }
 
 /// What the camera looks at.
@@ -52,16 +74,8 @@ pub struct Camera {
 pub(crate) struct Push {
     pub(crate) vertices: vk::DeviceAddress,
     pub(crate) objects: vk::DeviceAddress,
-}
-
-/// One cube vertex. 16-byte aligned members: `[f32; 3]` would place `normal`
-/// at offset 12 and violate std430 for a `PhysicalStorageBuffer` block, which
-/// `spirv-val` rejects outright.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Vertex {
-    position: [f32; 4],
-    normal: [f32; 4],
+    /// First object this draw should read. See the note in `scene.slang`.
+    pub(crate) object_offset: u32,
 }
 
 /// Per-object data, indexed by `SV_InstanceID`.
@@ -72,38 +86,6 @@ pub(crate) struct ObjectData {
     /// Rows of inverse-transpose(model)'s upper 3x3, padded to `vec4`.
     normal: [[f32; 4]; 3],
     color: [f32; 4],
-}
-
-/// The unit cube, expanded to 36 vertices with per-face normals.
-///
-/// Built on the CPU now that geometry lives in a buffer. Real meshes replace
-/// this at M5; the buffer and the address plumbing do not change.
-pub(crate) fn cube_vertices() -> Vec<Vertex> {
-    const CORNERS: [[f32; 3]; 8] = [
-        [-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [-1.0, 1.0, -1.0],
-        [-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0],
-    ];
-    // 6 faces x 2 triangles, counter-clockwise seen from outside.
-    const INDICES: [usize; 36] = [
-        0, 2, 1, 0, 3, 2, 5, 7, 4, 5, 6, 7, 4, 3, 0, 4, 7, 3,
-        1, 6, 5, 1, 2, 6, 4, 1, 5, 4, 0, 1, 3, 6, 2, 3, 7, 6,
-    ];
-    const NORMALS: [[f32; 3]; 6] = [
-        [0.0, 0.0, -1.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0],
-        [1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 1.0, 0.0],
-    ];
-    INDICES
-        .iter()
-        .enumerate()
-        .map(|(i, &corner)| {
-            let p = CORNERS[corner];
-            let n = NORMALS[i / 6];
-            Vertex {
-                position: [p[0], p[1], p[2], 1.0],
-                normal: [n[0], n[1], n[2], 0.0],
-            }
-        })
-        .collect()
 }
 
 /// Anything that can go wrong rendering.
@@ -155,6 +137,9 @@ pub struct Renderer {
     vertices: vk::Buffer,
     vertices_alloc: Option<Allocation>,
     vertex_address: vk::DeviceAddress,
+    indices: vk::Buffer,
+    indices_alloc: Option<Allocation>,
+    ranges: Vec<MeshRange>,
     objects: vk::Buffer,
     objects_alloc: Option<Allocation>,
     object_address: vk::DeviceAddress,
@@ -183,6 +168,7 @@ impl Renderer {
         device: &Device,
         width: u32,
         height: u32,
+        meshes: &[loom_asset::Mesh],
     ) -> Result<Self, RenderError> {
         let raw = device.handle().clone();
         // Enabled exactly when the instance enabled the extension.
@@ -243,18 +229,29 @@ impl Renderer {
         // SAFETY: the allocation matches the buffer's requirements.
         unsafe { raw.bind_buffer_memory(readback, readback_alloc.memory(), readback_alloc.offset()) }?;
 
-        // Geometry, uploaded once. Host-visible rather than device-local with a
-        // staging copy: 36 vertices is far below the point where that matters,
-        // and the transfer queue + staging ring arrive with real assets at M5.
-        // `ponytail:` host-visible upload, upgrade when meshes get big.
-        let cube = cube_vertices();
+        // The whole mesh library in one vertex buffer and one index buffer,
+        // so switching mesh between draws costs an offset rather than a bind.
+        //
+        // `ponytail:` host-visible upload, no staging copy. Fine at blockout
+        // scale; the dedicated transfer queue and a staging ring (Vulkan doc
+        // §6) arrive when a scene streams more geometry than fits comfortably
+        // in host-visible memory.
+        let (combined_vertices, combined_indices, ranges) = combine(meshes);
         let (vertices, vertices_alloc, vertex_address) = create_address_buffer(
             &raw,
             &mut allocator,
-            std::mem::size_of_val(cube.as_slice()) as u64,
-            "loom.cube_vertices",
+            (std::mem::size_of_val(combined_vertices.as_slice()) as u64).max(4),
+            "loom.mesh_vertices",
         )?;
-        write_slice(&vertices_alloc, &cube)?;
+        write_slice(&vertices_alloc, &combined_vertices)?;
+
+        let (indices, indices_alloc, _) = create_index_buffer(
+            &raw,
+            &mut allocator,
+            (std::mem::size_of_val(combined_indices.as_slice()) as u64).max(4),
+            "loom.mesh_indices",
+        )?;
+        write_slice(&indices_alloc, &combined_indices)?;
 
         // Per-object array. Sized once; the draw is a single instanced call.
         const MAX_OBJECTS: usize = 4096;
@@ -274,7 +271,8 @@ impl Renderer {
         names.set(color_view, "loom.color_target.view");
         names.set(depth_view, "loom.depth_target.view");
         names.set(readback, "loom.readback_buffer");
-        names.set(vertices, "loom.cube_vertices");
+        names.set(vertices, "loom.mesh_vertices");
+        names.set(indices, "loom.mesh_indices");
         names.set(objects, "loom.object_data");
         names.set(pipeline, "loom.scene_pipeline");
         names.set(pipeline_layout, "loom.scene_pipeline_layout");
@@ -317,6 +315,9 @@ impl Renderer {
             vertices,
             vertices_alloc: Some(vertices_alloc),
             vertex_address,
+            indices,
+            indices_alloc: Some(indices_alloc),
+            ranges,
             objects,
             objects_alloc: Some(objects_alloc),
             object_address,
@@ -351,8 +352,14 @@ impl Renderer {
         let aspect = self.width as f32 / self.height as f32;
         let view_proj = view_projection(camera, aspect);
 
-        // Per-object data goes to the GPU once, not once per draw.
-        let object_data = pack_objects(objects, view_proj);
+        // Grouped by mesh so each mesh is one instanced draw. Sorting here
+        // rather than asking callers to is deliberate: the agent authors
+        // scenes in whatever order reads well, and draw batching is not its
+        // problem.
+        let mut sorted: Vec<Object> = objects.to_vec();
+        sorted.sort_by_key(|o| o.mesh);
+        let object_data = pack_objects(&sorted, view_proj);
+        let batches = batch_by_mesh(&sorted);
         write_slice(
             self.objects_alloc
                 .as_ref()
@@ -370,12 +377,19 @@ impl Renderer {
         let (width, height) = (self.width, self.height);
         let (color_view, depth_view) = (self.color_view, self.depth_view);
         let (pipeline, layout) = (self.pipeline, self.pipeline_layout);
-        let push = Push {
+        let base_push = Push {
             vertices: self.vertex_address,
             objects: self.object_address,
+            object_offset: 0,
         };
-        let instances = u32::try_from(objects.len()).unwrap_or(0);
         let (readback, image) = (self.readback, self.color);
+        let index_buffer = self.indices;
+        let draws: Vec<(MeshRange, u32, u32)> = batches
+            .iter()
+            .filter_map(|(mesh, first, count)| {
+                self.ranges.get(*mesh as usize).map(|r| (*r, *first, *count))
+            })
+            .collect();
 
         graph.pass(
             "forward",
@@ -387,18 +401,34 @@ impl Renderer {
                     begin_rendering(d, cmd, color_view, depth_view, width, height);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
                     set_viewport(d, cmd, width, height);
-                    let bytes = std::slice::from_raw_parts(
-                        std::ptr::from_ref(&push).cast::<u8>(),
-                        size_of::<Push>(),
-                    );
-                    d.cmd_push_constants(
-                        cmd,
-                        layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        0,
-                        bytes,
-                    );
-                    d.cmd_draw(cmd, 36, instances, 0, 0);
+                    d.cmd_bind_index_buffer(cmd, index_buffer, 0, vk::IndexType::UINT32);
+                    for (range, first_instance, instances) in draws {
+                        let push = Push {
+                            object_offset: first_instance,
+                            ..base_push
+                        };
+                        let bytes = std::slice::from_raw_parts(
+                            std::ptr::from_ref(&push).cast::<u8>(),
+                            size_of::<Push>(),
+                        );
+                        d.cmd_push_constants(
+                            cmd,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            bytes,
+                        );
+                        // firstInstance stays 0: the offset is in the push
+                        // block, so the shader's indexing is unambiguous.
+                        d.cmd_draw_indexed(
+                            cmd,
+                            range.index_count(),
+                            instances,
+                            range.first_index(),
+                            0,
+                            0,
+                        );
+                    }
                     d.cmd_end_rendering(cmd);
                 }
             },
@@ -525,6 +555,7 @@ impl Drop for Renderer {
                     self.depth_alloc.take(),
                     self.readback_alloc.take(),
                     self.vertices_alloc.take(),
+                    self.indices_alloc.take(),
                     self.objects_alloc.take(),
                 ]
                 .into_iter()
@@ -537,6 +568,7 @@ impl Drop for Renderer {
             self.device.destroy_image(self.depth, None);
             self.device.destroy_buffer(self.readback, None);
             self.device.destroy_buffer(self.vertices, None);
+            self.device.destroy_buffer(self.indices, None);
             self.device.destroy_buffer(self.objects, None);
             // The allocator must go before the device it borrows.
             self.allocator = None;
@@ -666,6 +698,82 @@ pub(crate) unsafe fn set_viewport(
         d.cmd_set_viewport(cmd, 0, &[viewport]);
         d.cmd_set_scissor(cmd, 0, &[scissor]);
     }
+}
+
+/// Concatenate a mesh library into one vertex buffer and one index buffer.
+///
+/// Indices are rewritten to be absolute, so a draw needs only a first-index
+/// and a count — no per-mesh vertex offset to keep in sync.
+pub(crate) fn combine(
+    meshes: &[loom_asset::Mesh],
+) -> (Vec<loom_asset::Vertex>, Vec<u32>, Vec<MeshRange>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut ranges = Vec::new();
+
+    for mesh in meshes {
+        let base = u32::try_from(vertices.len()).unwrap_or(0);
+        let first_index = u32::try_from(indices.len()).unwrap_or(0);
+        vertices.extend_from_slice(&mesh.vertices);
+        indices.extend(mesh.indices.iter().map(|i| i + base));
+        ranges.push(MeshRange {
+            first_index,
+            index_count: u32::try_from(mesh.indices.len()).unwrap_or(0),
+        });
+    }
+
+    // An empty library would make a zero-sized buffer, which Vulkan rejects.
+    if vertices.is_empty() {
+        vertices.push(loom_asset::Vertex::default());
+        indices.push(0);
+    }
+    (vertices, indices, ranges)
+}
+
+/// Runs of consecutive objects sharing a mesh: `(mesh, first_instance, count)`.
+///
+/// Assumes `objects` is already sorted by mesh, which [`Renderer::render`]
+/// guarantees.
+pub(crate) fn batch_by_mesh(objects: &[Object]) -> Vec<(u32, u32, u32)> {
+    let mut batches: Vec<(u32, u32, u32)> = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        let index = u32::try_from(index).unwrap_or(0);
+        match batches.last_mut() {
+            Some((mesh, _, count)) if *mesh == object.mesh => *count += 1,
+            _ => batches.push((object.mesh, index, 1)),
+        }
+    }
+    batches
+}
+
+/// An index buffer, reached by binding rather than by address — index fetch is
+/// fixed-function and cannot go through a pointer.
+pub(crate) fn create_index_buffer(
+    device: &ash::Device,
+    allocator: &mut Allocator,
+    size: u64,
+    name: &str,
+) -> Result<(vk::Buffer, Allocation, vk::DeviceAddress), RenderError> {
+    let info = vk::BufferCreateInfo::default()
+        .size(size)
+        .usage(vk::BufferUsageFlags::INDEX_BUFFER)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    // SAFETY: `info` is fully initialised and outlives the call.
+    let buffer = unsafe { device.create_buffer(&info, None) }?;
+    // SAFETY: `buffer` was just created on this device.
+    let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+    let allocation = allocator
+        .allocate(&AllocationCreateDesc {
+            name,
+            requirements,
+            location: MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })
+        .map_err(|e| RenderError::Allocator(e.to_string()))?;
+    // SAFETY: the allocation matches the buffer's requirements.
+    unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }?;
+    Ok((buffer, allocation, 0))
 }
 
 /// Build the per-object array the shader indexes with `SV_InstanceID`.

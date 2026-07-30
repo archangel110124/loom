@@ -1,0 +1,66 @@
+# M5's exit criterion: an imported glTF mesh and procedural primitives together.
+#
+# `pyramid` resolves by importing assets/test/gltf/pyramid.gltf.
+# `plane`, `box`, `sphere`, `cylinder` resolve procedurally — no file on disk.
+
+[scene]
+format = 1
+id = "7d2b6e14-3f89-4a05-b6c3-91e0d4a87f22"
+
+[[asset]]
+key = "pyramid"
+id = "a41f0c2e-1b3d-4e5f-8a90-0c1d2e3f4a59"
+path = "gltf/pyramid.gltf"
+
+[[node]]
+name = "Workshop"
+
+[[node]]
+name = "Floor"
+parent = "Workshop"
+transform = { pos = [0.0, -0.8, 0.0], scale = [5.0, 1.0, 3.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "plane" }
+
+# The imported glTF mesh — a shape no primitive produces.
+[[node]]
+name = "Monument"
+parent = "Workshop"
+transform = { pos = [0.0, 0.4, 0.0], scale = [1.1, 1.1, 1.1] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "pyramid" }
+
+[[node]]
+name = "Bench"
+parent = "Workshop"
+transform = { pos = [-2.8, -0.3, 0.6], scale = [1.0, 0.4, 0.6] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+[[node]]
+name = "Globe"
+parent = "Workshop"
+transform = { pos = [2.8, 0.0, 0.4], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+[[node]]
+name = "Column"
+parent = "Workshop"
+transform = { pos = [2.9, 0.2, -2.0], scale = [0.35, 1.2, 0.35] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+[[node]]
+name = "CeilingLight"
+parent = "Workshop"
+transform = { pos = [0.0, 2.6, 0.0] }
+
+  [node.components.Light]
+  intensity = 700.0
+  color = [1.0, 0.96, 0.9]

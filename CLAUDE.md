@@ -126,16 +126,15 @@ change, so your edits appear live. Two consequences:
 
 ## Current milestone
 
-> **M5 — assets.** Update this line at every milestone. See §6 of the build brief.
+> **M6 — input + camera.** Update this line at every milestone. See §6 of the build brief.
 >
-> M0–M4 done, plus M5's swapchain early (`loom run`). Every barrier in the engine is placed by
-> `loom_render_graph`; there is no `cmd_pipeline_barrier` call anywhere else, and synchronization
-> validation is enabled and silent.
+> M0–M5 done. `loom run workshop.loom` shows an imported glTF mesh and four procedural
+> primitives in a window; `loom render` produces the same scene headless. Assets carry `.meta`
+> sidecars with stable UUIDs and BLAKE3 content hashes.
 >
-> Next: `.meta` sidecars with UUIDs + content hashes, import cache, `manifest.bin`, glTF static
-> meshes, and the procedural primitive library. Then real geometry replaces the procedural cube.
-> Exit: `loom run office.loom` shows a glTF mesh and a primitive; `loom render` still produces the
-> same image headless.
+> Next: action/context/modifier/trigger model over winit + gilrs, rebindable from TOML. The fly
+> camera in `loom_cli/src/run.rs` is hardcoded to WASD and moves there when actions exist.
+> Exit: rebindable actions loaded from TOML; camera flies.
 
 ---
 

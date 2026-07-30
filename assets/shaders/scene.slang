@@ -29,6 +29,14 @@ struct ObjectData {
 struct Push {
     Vertex* vertices;
     ObjectData* objects;
+    // Index of this draw's first object.
+    //
+    // NOT derived from SV_InstanceID + firstInstance: HLSL's SV_InstanceID is
+    // zero-based per draw and excludes StartInstanceLocation, while Vulkan's
+    // InstanceIndex includes it. Which one Slang emits is a detail worth not
+    // depending on, so the offset is passed explicitly and the arithmetic is
+    // ours.
+    uint objectOffset;
 };
 [[vk::push_constant]] Push push;
 
@@ -41,7 +49,7 @@ struct VSOutput {
 [shader("vertex")]
 VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) {
     Vertex v = push.vertices[vertexID];
-    ObjectData o = push.objects[instanceID];
+    ObjectData o = push.objects[push.objectOffset + instanceID];
 
     float3x3 normalMatrix = float3x3(
         o.normalRow0.xyz, o.normalRow1.xyz, o.normalRow2.xyz);

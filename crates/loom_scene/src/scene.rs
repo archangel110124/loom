@@ -114,6 +114,22 @@ impl Scene {
         &self.nodes
     }
 
+    /// The advisory `path` of an `[[asset]]` entry, by its file-local alias.
+    ///
+    /// Advisory is the operative word (`docs/format/README.md` §3): identity is
+    /// the UUID. This is what an *importer* uses to find the source file, and
+    /// nothing resolves a reference through it at runtime.
+    #[must_use]
+    pub fn asset_path(&self, key: &str) -> Option<&str> {
+        self.doc
+            .get("asset")?
+            .as_array_of_tables()?
+            .iter()
+            .find(|t| t.get("key").and_then(Item::as_str) == Some(key))?
+            .get("path")?
+            .as_str()
+    }
+
     /// Serialize back to `.loom`.
     ///
     /// For an unmodified scene this is byte-identical to the input, comments
