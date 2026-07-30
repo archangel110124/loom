@@ -126,7 +126,12 @@ change, so your edits appear live. Two consequences:
 
 ## Current milestone
 
-> **M0 — skeleton.** Update this line at every milestone. See §6 of the build brief.
+> **M1 — reflection + scene format.** Update this line at every milestone. See §6 of the build brief.
+>
+> M0 done (green passes). Format spec written and normative: `docs/format/README.md`.
+> Next: `loom_reflect` derive macro → type registry → `loom_scene` parser → `loom validate`.
+> Exit: `assets/test/office.loom` round-trips byte-identically; `bad_intensity.loom` is rejected
+> with field, value, and constraint named.
 
 Do not start the next milestone until the current one's exit criterion actually runs.
 
