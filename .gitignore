@@ -1,0 +1,3 @@
+/target
+*.spv
+/assets/test/**/*.actual.png

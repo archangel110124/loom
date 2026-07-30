@@ -1,0 +1,16 @@
+name: green
+
+on: [push, pull_request]
+
+jobs:
+  green:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show   # honours rust-toolchain.toml
+      - run: sudo apt-get update && sudo apt-get install -y mold clang
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo test --workspace
+      # Third green check — `cargo xtask validate` — needs a GPU and the Vulkan
+      # validation layers. Hosted runners have neither. It runs locally via
+      # scripts/green.sh and is the gate that actually matters (brief §7.3).

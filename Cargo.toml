@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["crates/loom_cli"]
+
+# Crates land per milestone (see docs/design/LOOM-BUILD-BRIEF.md §3):
+#   M1  loom_reflect, loom_scene
+#   M2  loom_render
+#   M3  loom_ecs
+#   M4  loom_render_graph
+#   M5  loom_asset
+# Dependency rule, non-negotiable: loom_reflect and loom_scene depend on nothing
+# else in the workspace; loom_agent is depended on by nothing; nothing outside
+# loom_render* imports ash.
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Pin exactly. Never float a version. Add with `cargo add`.
+[workspace.dependencies]

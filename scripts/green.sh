@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# The definition of green. All three, every time. `cargo check` passing is not green.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+cargo clippy --workspace -- -D warnings
+cargo test --workspace
+
+# Vulkan validation. Needs a GPU + the validation layers; xtask lands with loom_render (M2).
+if cargo metadata --no-deps --format-version 1 | grep -q '"name":"xtask"'; then
+  cargo xtask validate
+else
+  echo "skip: cargo xtask validate — xtask crate does not exist yet (M2)"
+fi
