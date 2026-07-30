@@ -155,6 +155,40 @@ name = \"Root\"
         }
     }
 
+    /// `[[component.list]]` is an array of tables, which is neither an array
+    /// nor a table to `toml_edit`. Missing that case dropped a voxel volume's
+    /// entire op list — the scene parsed, validated, and rendered nothing.
+    #[test]
+    fn a_component_keeps_its_array_of_tables() {
+        let src = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[node]]
+name = \"Hill\"
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.25
+
+  [[node.components.VoxelVolume.ops]]
+  kind = \"sphere\"
+  radius = 8.5
+
+  [[node.components.VoxelVolume.ops]]
+  kind = \"capsule\"
+  radius = 2.0
+";
+        let scene = Scene::parse(src).expect("valid");
+        let ops = scene.nodes()[0].components["VoxelVolume"]["ops"]
+            .as_array()
+            .expect("ops must survive parsing");
+
+        assert_eq!(ops.len(), 2, "both ops must be there");
+        assert_eq!(ops[0]["kind"], "sphere");
+        assert_eq!(ops[1]["kind"], "capsule");
+    }
+
     /// Scale defaults to 1, not 0. A zero-scale default silently collapses
     /// every node that omits the field — the classic version of this bug.
     #[test]

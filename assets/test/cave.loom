@@ -1,0 +1,57 @@
+# A destructible voxel hillside with a tunnel carved through it.
+#
+# The scene stores the RECIPE, never the voxels (never-do #11). A 128³ field is
+# two million voxels; this file is 40 lines. Replaying these ops produces
+# bit-identical geometry, which is what makes assertions against a voxel world
+# stable.
+#
+# ORDER MATTERS. The sphere adds the hill; the capsules carve through it.
+# Reversing them would fill the tunnel back in.
+
+[scene]
+format = 1
+id = "ca4e5c07-8b1d-4f26-9a30-6e7c2b48d915"
+
+[[node]]
+name = "Terrain"
+
+[[node]]
+name = "Hillside"
+parent = "Terrain"
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.25
+  chunks = [4, 3, 4]
+
+  # Every op stays INSIDE the volume with margin. An op that reaches the
+  # boundary gets sealed by a wall, because outside the volume reads as air and
+  # the mesher closes the surface there.
+
+  # The ground slab.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 3.0, 16.0]
+  half_extents = [12.0, 3.0, 12.0]
+  mode = "union"
+
+  # The hill on top of it.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [16.0, 7.0, 16.0]
+  radius = 8.5
+  mode = "union"
+
+  # The tunnel, bored straight through.
+  [[node.components.VoxelVolume.ops]]
+  kind = "capsule"
+  a = [5.0, 7.0, 16.0]
+  b = [27.0, 7.0, 16.0]
+  radius = 2.0
+  mode = "subtract"
+
+  # A chamber opening off the tunnel.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [16.0, 7.5, 21.0]
+  radius = 3.2
+  mode = "subtract"

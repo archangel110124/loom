@@ -327,6 +327,17 @@ fn item_to_json(item: &Item) -> Option<Value> {
             .collect();
         return Some(Value::Array(elements));
     }
+    // `[[component.list]]` — an array of tables, which is NOT `as_array` and
+    // NOT `as_table_like`. Missing this case silently DROPS the whole list,
+    // which is how a voxel volume's op list vanished and left a scene that
+    // parsed cleanly and rendered nothing.
+    if let Some(tables) = item.as_array_of_tables() {
+        let elements: Vec<Value> = tables
+            .iter()
+            .filter_map(|t| item_to_json(&Item::Table(t.clone())))
+            .collect();
+        return Some(Value::Array(elements));
+    }
     if let Some(table) = item.as_table_like() {
         let mut object: BTreeMap<String, Value> = BTreeMap::new();
         for (k, v) in table.iter() {

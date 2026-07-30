@@ -35,8 +35,8 @@ struct FlyCamera {
 impl FlyCamera {
     /// Frame the scene, then look at its centre — so the window opens on the
     /// content rather than on empty space.
-    fn framing(objects: &[Object]) -> Self {
-        let (center, radius) = bounds(objects);
+    fn framing(bounds: (Vec3, f32)) -> Self {
+        let (center, radius) = bounds;
         let distance = (radius * 2.2).max(4.0);
         let position = center + Vec3::new(0.6, 0.45, 1.0).normalize() * distance;
 
@@ -74,6 +74,8 @@ const FLY: &str = "fly";
 
 struct App {
     objects: Vec<Object>,
+    /// Real world bounds, so framing does not assume unit cubes.
+    scene_bounds: (Vec3, f32),
     meshes: Vec<loom_asset::Mesh>,
     camera: FlyCamera,
     /// Loaded from TOML, so rebinding needs no rebuild.
@@ -89,9 +91,15 @@ struct App {
 }
 
 impl App {
-    fn new(objects: Vec<Object>, meshes: Vec<loom_asset::Mesh>, title: String) -> Self {
+    fn new(
+        objects: Vec<Object>,
+        meshes: Vec<loom_asset::Mesh>,
+        scene_bounds: (Vec3, f32),
+        title: String,
+    ) -> Self {
         Self {
-            camera: FlyCamera::framing(&objects),
+            camera: FlyCamera::framing(scene_bounds),
+            scene_bounds,
             objects,
             meshes,
             // Prefer a project-local file, fall back to the shipped defaults,
@@ -185,7 +193,7 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
                 if self.input.is_active(&self.bindings, FLY, "reframe") {
-                    self.camera = FlyCamera::framing(&self.objects);
+                    self.camera = FlyCamera::framing(self.scene_bounds);
                 }
             }
 
@@ -311,39 +319,22 @@ fn load_bindings() -> ActionMap {
     ActionMap::from_toml(loom_input::DEFAULT_BINDINGS).unwrap_or_default()
 }
 
-fn bounds(objects: &[Object]) -> (Vec3, f32) {
-    if objects.is_empty() {
-        return (Vec3::ZERO, 4.0);
-    }
-    let mut min = Vec3::splat(f32::MAX);
-    let mut max = Vec3::splat(f32::MIN);
-    for object in objects {
-        for i in 0..8 {
-            let corner = Vec3::new(
-                if i & 1 == 0 { -1.0 } else { 1.0 },
-                if i & 2 == 0 { -1.0 } else { 1.0 },
-                if i & 4 == 0 { -1.0 } else { 1.0 },
-            );
-            let p = object.model.transform_point3(corner);
-            min = min.min(p);
-            max = max.max(p);
-        }
-    }
-    let center = (min + max) * 0.5;
-    (center, (max - min).length() * 0.5)
-}
-
 /// Open a window showing `path`.
 ///
 /// # Errors
 /// A message describing what stopped it.
-pub fn run(path: &str, objects: Vec<Object>, meshes: Vec<loom_asset::Mesh>) -> Result<(), String> {
+pub fn run(
+    path: &str,
+    objects: Vec<Object>,
+    meshes: Vec<loom_asset::Mesh>,
+    scene_bounds: (Vec3, f32),
+) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
     // Poll, not Wait: the camera animates continuously while keys are held.
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let title = format!("loom — {path}");
-    let mut app = App::new(objects, meshes, title);
+    let mut app = App::new(objects, meshes, scene_bounds, title);
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))
@@ -365,5 +356,7 @@ pub fn open_scene(path: &str) -> Result<(), String> {
         .unwrap_or(std::path::Path::new("."));
     let library = crate::MeshLibrary::for_scene(&scene, base);
     let objects = crate::world_to_objects(&world, &library);
-    run(path, objects, library.into_meshes())
+    let boxes = crate::node_bounds(&world, &library);
+    let scene_bounds = crate::scene_bounds(&boxes);
+    run(path, objects, library.into_meshes(), scene_bounds)
 }

@@ -273,6 +273,9 @@ impl World {
                 world.scripts.insert(entity, path.to_owned());
             }
             by_path.insert(node.path.as_str(), entity);
+            if node.components.contains_key("VoxelVolume") {
+                world.mark_renderable(entity);
+            }
             if let Some(renderer) = node.components.get("MeshRenderer") {
                 world.mark_renderable(entity);
                 if let Some(asset) = renderer

@@ -126,21 +126,20 @@ change, so your edits appear live. Two consequences:
 
 ## Current milestone
 
-> **M9 — the agent loop. THE GATE THAT MATTERS.** See §6 of the build brief.
+> **M11 — terrain.** Update this line at every milestone. See §6 of the build brief.
 >
-> M0–M8 done. Sandbox verified adversarially: file, process, network, infinite loop, deep
-> recursion, and huge allocation each have a test asserting they FAIL.
+> M0–M10 done. M9's gate passed: the agent blocked out a lab through the CLI, detected 21
+> interpenetrations with `loom measure`, fixed them with semantic placement, and proved behaviour
+> with `loom sim --assert`. M10 voxels: `i8` SDF, uniform collapse, op-list scenes, Surface Nets
+> with the seam test from §7.9, and an edit layer so destruction costs the chunks it touches.
 >
-> Next: `loom scene` subcommands for every mutation, transactions with one undo step and
-> `--dry-run`, `loom render` multi-angle, `loom sim --assert`, semantic placement
-> (`place_on`, `align_to`, `grid_on`, `face_toward`), `scene_measure`. Then the MCP server
-> **wrapping the CLI** (§7.10 — CLI first, or building the agent interface with the agent is
-> circular).
->
-> Exit: *"Block out a computer lab: 6 desks in two rows, a monitor on each, a teacher desk facing
-> them, overhead lights. Then make the monitors turn on when the player walks in."* — produced,
-> self-corrected from its own render, behaviour proven by a headless assertion.
-> **If this fails, stop and fix the loop. Everything after is worthless without it.**
+> Next: recipe parse; fBm/ridged/multifractal with domain warping and analytical derivatives; art
+> layers (spline carve, flatten, peak, escarpment, corridor); particle hydraulic + thermal erosion,
+> **baked and content-hashed, never re-simulated at load** (§4.4 — GPU erosion is order-dependent
+> and not bit-reproducible, so the ARTIFACT is authoritative for determinism while the recipe is
+> authoritative for authoring); `terrain_analyze` returning slope/flow/hillshade PNGs.
+> Exit: *"a mountain valley with a buildable plateau for a fort and a walkable path from the
+> south"* — agent authors it, reads its own slope map, adjusts, verifies the path.
 
 ---
 

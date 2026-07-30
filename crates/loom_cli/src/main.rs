@@ -196,7 +196,10 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     let objects = world_to_objects(&world, &library);
     let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok()).unwrap_or(35.0);
     let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok()).unwrap_or(28.0);
-    let camera = frame_scene(&objects, yaw, pitch);
+    // Framed from REAL mesh bounds. Assuming a unit cube was fine while every
+    // mesh was one; a voxel volume spans tens of units and put the camera
+    // inside the terrain.
+    let camera = frame_scene(&node_bounds(&world, &library), yaw, pitch);
 
     let result = (|| -> Result<String, String> {
         let instance = Instance::new(c"loom").map_err(|e| e.to_string())?;
@@ -245,7 +248,7 @@ fn world_to_objects(world: &World, library: &MeshLibrary) -> Vec<Object> {
             Some(Object {
                 model: Mat4::from_cols_array(&global.matrix),
                 color: palette(index),
-                mesh: library.index_for(world.mesh_asset(*entity)),
+                mesh: mesh_index_for(world, library, *entity),
             })
         })
         .collect()
@@ -282,6 +285,25 @@ impl MeshLibrary {
                 .and_then(serde_json::Value::as_str)
             {
                 wanted.insert(asset.to_owned());
+            }
+        }
+
+        // Voxel volumes bake into a mesh at load, from the op list the scene
+        // stores. never-do #11: the scene holds the recipe, never the voxels.
+        for node in scene.nodes() {
+            let Some(volume) = node.components.get("VoxelVolume") else {
+                continue;
+            };
+            let key = format!("voxel:{}", node.path);
+            if by_name.contains_key(&key) {
+                continue;
+            }
+            match bake_voxel(volume) {
+                Some(mesh) => {
+                    by_name.insert(key, u32::try_from(meshes.len()).unwrap_or(0));
+                    meshes.push(mesh);
+                }
+                None => eprintln!("loom: {}: voxel volume produced no surface", node.path),
             }
         }
 
@@ -322,6 +344,37 @@ impl MeshLibrary {
     }
 }
 
+/// Bake a `VoxelVolume` component into a mesh.
+fn bake_voxel(component: &serde_json::Value) -> Option<loom_asset::Mesh> {
+    #[allow(clippy::cast_possible_truncation)]
+    let voxel_size = component.get("voxel_size").and_then(serde_json::Value::as_f64)? as f32;
+    let chunks = component.get("chunks").and_then(|c| c.as_array())?;
+    let dims: Vec<usize> = chunks
+        .iter()
+        .filter_map(|v| v.as_u64().map(|n| n as usize))
+        .collect();
+    if dims.len() != 3 {
+        return None;
+    }
+    let ops: Vec<loom_voxel::VoxelOp> = component
+        .get("ops")
+        .and_then(|o| o.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    if ops.is_empty() {
+        return None;
+    }
+
+    let mut volume = loom_voxel::Volume::new([dims[0], dims[1], dims[2]], voxel_size);
+    volume.bake(&ops);
+    let mesh = loom_voxel::mesh::mesh_volume(&volume, &loom_voxel::SurfaceNets);
+    (!mesh.indices.is_empty()).then_some(mesh)
+}
+
 /// The advisory `path` an `[[asset]]` entry carries, for importing.
 fn scene_asset_path(scene: &Scene, key: &str) -> Option<String> {
     scene.asset_path(key).map(str::to_owned)
@@ -345,24 +398,19 @@ fn palette(index: usize) -> [f32; 3] {
 /// Auto-framing rather than a fixed camera because the agent's first render of
 /// a scene it just authored should show the whole thing — a hardcoded camera
 /// produces an empty image and a confused retry loop.
-fn frame_scene(objects: &[Object], yaw_degrees: f32, pitch_degrees: f32) -> Camera {
-    if objects.is_empty() {
+fn frame_scene(
+    boxes: &std::collections::BTreeMap<String, loom_scene::place::Bounds>,
+    yaw_degrees: f32,
+    pitch_degrees: f32,
+) -> Camera {
+    if boxes.is_empty() {
         return Camera { eye: Vec3::new(4.0, 4.0, 8.0), target: Vec3::ZERO, fov_y_degrees: 45.0 };
     }
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
-    for object in objects {
-        // Cube spans -1..1 locally, so transform all eight corners.
-        for i in 0..8 {
-            let corner = Vec3::new(
-                if i & 1 == 0 { -1.0 } else { 1.0 },
-                if i & 2 == 0 { -1.0 } else { 1.0 },
-                if i & 4 == 0 { -1.0 } else { 1.0 },
-            );
-            let p = object.model.transform_point3(corner);
-            min = min.min(p);
-            max = max.max(p);
-        }
+    for b in boxes.values() {
+        min = min.min(Vec3::from_array(b.min));
+        max = max.max(Vec3::from_array(b.max));
     }
     let center = (min + max) * 0.5;
     let radius = (max - min).length() * 0.5;
@@ -835,8 +883,41 @@ fn measure(path: &str, args: &[String]) -> (u8, String) {
     )
 }
 
+/// Which mesh an entity draws.
+///
+/// **One lookup, used by both the renderer and the measurer.** They disagreed
+/// once — bounds resolved a voxel node to the default unit box while the draw
+/// used the real mesh — and the result was a camera framed four units from a
+/// twenty-four-unit hill, i.e. inside it. Two copies of a lookup is two
+/// answers.
+fn mesh_index_for(world: &World, library: &MeshLibrary, entity: loom_ecs::Entity) -> u32 {
+    if let Some(path) = world.path(entity) {
+        let voxel = format!("voxel:{path}");
+        if library.by_name.contains_key(&voxel) {
+            return library.index_for(Some(&voxel));
+        }
+    }
+    library.index_for(world.mesh_asset(entity))
+}
+
+/// Centre and radius of everything in the scene, from real mesh bounds.
+pub(crate) fn scene_bounds(
+    boxes: &std::collections::BTreeMap<String, loom_scene::place::Bounds>,
+) -> (Vec3, f32) {
+    if boxes.is_empty() {
+        return (Vec3::ZERO, 4.0);
+    }
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    for b in boxes.values() {
+        min = min.min(Vec3::from_array(b.min));
+        max = max.max(Vec3::from_array(b.max));
+    }
+    ((min + max) * 0.5, (max - min).length() * 0.5)
+}
+
 /// World bounds per renderable node, from its mesh and its global transform.
-fn node_bounds(
+pub(crate) fn node_bounds(
     world: &World,
     library: &MeshLibrary,
 ) -> std::collections::BTreeMap<String, loom_scene::place::Bounds> {
@@ -849,7 +930,7 @@ fn node_bounds(
         else {
             continue;
         };
-        let index = library.index_for(world.mesh_asset(*entity)) as usize;
+        let index = mesh_index_for(world, library, *entity) as usize;
         let Some(mesh) = library.meshes.get(index) else {
             continue;
         };

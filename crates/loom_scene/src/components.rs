@@ -122,6 +122,40 @@ impl Default for RigidBody {
     }
 }
 
+/// A destructible voxel volume, stored as a **recipe** rather than voxels.
+///
+/// never-do #11: a 512³ volume is 134 million voxels and must never enter a
+/// `.loom` file. The scene stores the ordered op list; the field is baked from
+/// it on load. That keeps the scene diffable, keeps it small, and gives
+/// determinism for free — the same ops with the same seed produce bit-identical
+/// voxels, so `loom sim --assert` against a voxel world is stable.
+///
+/// **The list is ordered and NOT commutative**: subtract-then-union differs
+/// from union-then-subtract. Said here because an agent will otherwise assume
+/// it can reorder freely (voxel doc §5.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct VoxelVolume {
+    /// World units per voxel. Smaller is finer and costs cubically.
+    #[schemars(range(min = 0.01, max = 4.0))]
+    pub voxel_size: f32,
+    /// Volume size in 32³ chunks per axis.
+    #[schemars(inner(range(min = 1, max = 64)))]
+    pub chunks: [u32; 3],
+    /// Ordered CSG operations. Order matters.
+    pub ops: Vec<serde_json::Value>,
+}
+
+impl Default for VoxelVolume {
+    fn default() -> Self {
+        Self {
+            voxel_size: 0.25,
+            chunks: [4, 4, 4],
+            ops: Vec::new(),
+        }
+    }
+}
+
 /// Attaches a sandboxed Rhai script to the node.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -144,6 +178,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<BoxCollider>("BoxCollider");
     reg.register::<Light>("Light");
     reg.register::<RigidBody>("RigidBody");
+    reg.register::<VoxelVolume>("VoxelVolume");
     reg.register::<Script>("Script");
     reg
 }

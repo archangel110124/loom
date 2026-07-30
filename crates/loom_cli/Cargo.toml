@@ -17,6 +17,7 @@ loom_physics = { version = "0.0.0", path = "../loom_physics" }
 loom_render = { version = "0.0.0", path = "../loom_render" }
 loom_scene = { version = "0.0.0", path = "../loom_scene" }
 loom_script = { version = "0.0.0", path = "../loom_script" }
+loom_voxel = { version = "0.0.0", path = "../loom_voxel" }
 serde = "=1.0.229"
 serde_json = "=1.0.151"
 winit = "=0.30.13"
