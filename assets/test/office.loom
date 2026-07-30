@@ -1,0 +1,52 @@
+# M1 round-trip fixture. This file is in CANONICAL form (docs/format/README.md §2):
+# reading and re-writing it must produce these exact bytes.
+#
+# These comments are part of the test. The write path preserves them.
+
+[scene]
+format = 1
+id = "0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f"
+
+[[asset]]
+key = "office_desk"
+id = "a41f0c2e-1b3d-4e5f-8a90-0c1d2e3f4a59"
+path = "assets/props/desk.glb"
+
+[[prefab]]
+key = "lamp"
+id = "7b22e910-2c4d-4a6b-9f81-3e5d7a9c0b41"
+path = "prefabs/desk_lamp.loom"
+
+[[node]]
+name = "Office"
+
+[[node]]
+name = "Desk"
+parent = "Office"
+transform = { pos = [0.0, 0.0, -2.5], rot_euler = [0.0, 90.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "office_desk" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.8, 0.37, 0.4]
+
+[[node]]
+name = "DeskLamp"
+parent = "Office/Desk"
+prefab = "lamp"
+transform = { pos = [0.55, 0.74, 0.1] }
+
+  # Per-instance tweak: warmer and dimmer than the prefab default.
+  [node.overrides]
+  "Light.intensity" = 420.0
+  "Light.color" = [1.0, 0.92, 0.78]
+
+[[node]]
+name = "CeilingLight"
+parent = "Office"
+transform = { pos = [0.0, 2.8, 0.0] }
+
+  [node.components.Light]
+  intensity = 800.0
+  color = [1.0, 0.98, 0.94]

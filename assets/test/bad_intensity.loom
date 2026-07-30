@@ -1,0 +1,25 @@
+# M1 error-path fixture. Parses as TOML; must FAIL validation.
+#
+# Expected rejection (docs/format/README.md §6):
+#   error      = "field_out_of_range"
+#   node       = "Office/CeilingLight"
+#   field      = "Light.intensity"
+#   value      = 40000.0
+#   constraint = "0.0..=10000.0"
+#
+# The M1 exit criterion is that the error names the field, the value, AND the
+# constraint. An error that says only "invalid scene" fails this test.
+
+[scene]
+format = 1
+id = "3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13"
+
+[[node]]
+name = "Office"
+
+[[node]]
+name = "CeilingLight"
+parent = "Office"
+
+  [node.components.Light]
+  intensity = 40000.0
