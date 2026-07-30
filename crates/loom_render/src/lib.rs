@@ -11,8 +11,10 @@
 //! and Slang. If a feature here grows much beyond that, it is the obsolete
 //! pre-1.3 style and should be reconsidered.
 
+mod device;
 mod instance;
 
+pub use device::{Device, DeviceError};
 pub use instance::{Instance, InstanceError, take_validation_messages};
 
 /// The compiled triangle shader, embedded at build time by `build.rs`.
@@ -79,6 +81,32 @@ mod tests {
     /// VALIDATION branch gets its proof from the first genuine mistake in the
     /// device and render work, where errors are ordinary rather than absurd —
     /// and that is the normal case this mechanism exists for.
+    /// Device creation must be validation-clean, and must report a real GPU.
+    #[test]
+    fn device_creation_is_validation_clean() {
+        let Ok(instance) = Instance::new(c"loom-device-test") else {
+            eprintln!("skipping: no Vulkan loader");
+            return;
+        };
+        let _ = instance.check_validation();
+
+        let device = match Device::new(&instance) {
+            Ok(d) => d,
+            Err(DeviceError::NoDevices) => {
+                eprintln!("skipping: no Vulkan device");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        eprintln!("selected device: {}", device.name());
+        assert!(!device.name().is_empty());
+
+        drop(device);
+        if let Err(messages) = instance.check_validation() {
+            panic!("validation was not silent:\n  {}", messages.join("\n  "));
+        }
+    }
+
     #[test]
     fn the_collector_drains_and_clears() {
         let _ = take_validation_messages();
