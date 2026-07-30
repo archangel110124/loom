@@ -3,7 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo clippy --workspace -- -D warnings
+./scripts/check-deps.sh
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
 # Vulkan validation. Needs a GPU + the validation layers; xtask lands with loom_render (M2).

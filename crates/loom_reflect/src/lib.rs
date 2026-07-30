@@ -86,23 +86,47 @@ impl TypeRegistry {
             let Some(field_schema) = props.get(field) else {
                 continue;
             };
-            let Some(n) = actual.as_f64() else { continue };
+            // The doc comment becomes the hint. A rejection message is the
+            // agent's teacher (§6), so the docs do double duty.
+            let hint = field_schema
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
 
-            let min = field_schema.get("minimum").and_then(Value::as_f64);
-            let max = field_schema.get("maximum").and_then(Value::as_f64);
-            if min.is_some_and(|m| n < m) || max.is_some_and(|m| n > m) {
-                errors.push(FieldError {
-                    error: "field_out_of_range".to_owned(),
-                    field: format!("{type_name}.{field}"),
-                    value: actual.clone(),
-                    constraint: format_range(min, max),
-                    // The doc comment becomes the hint. A rejection message is
-                    // the agent's teacher (§6), so the docs do double duty.
-                    hint: field_schema
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                });
+            match actual {
+                // Vec3-shaped fields carry their bounds on `items`, so a colour
+                // channel written as 255 is caught per-channel rather than
+                // slipping through because the field as a whole is an array.
+                Value::Array(elements) => {
+                    let (min, max) = bounds(field_schema.get("items"));
+                    for (i, element) in elements.iter().enumerate() {
+                        if let Some(n) = element.as_f64()
+                            && out_of_range(n, min, max)
+                        {
+                            errors.push(FieldError {
+                                error: "field_out_of_range".to_owned(),
+                                field: format!("{type_name}.{field}[{i}]"),
+                                value: element.clone(),
+                                constraint: format_range(min, max),
+                                hint: hint.clone(),
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    let (min, max) = bounds(Some(field_schema));
+                    if let Some(n) = actual.as_f64()
+                        && out_of_range(n, min, max)
+                    {
+                        errors.push(FieldError {
+                            error: "field_out_of_range".to_owned(),
+                            field: format!("{type_name}.{field}"),
+                            value: actual.clone(),
+                            constraint: format_range(min, max),
+                            hint,
+                        });
+                    }
+                }
             }
         }
 
@@ -112,6 +136,18 @@ impl TypeRegistry {
             Err(errors)
         }
     }
+}
+
+/// `minimum` / `maximum` off a schema node, if present.
+fn bounds(schema: Option<&Value>) -> (Option<f64>, Option<f64>) {
+    (
+        schema.and_then(|s| s.get("minimum")).and_then(Value::as_f64),
+        schema.and_then(|s| s.get("maximum")).and_then(Value::as_f64),
+    )
+}
+
+fn out_of_range(n: f64, min: Option<f64>, max: Option<f64>) -> bool {
+    min.is_some_and(|m| n < m) || max.is_some_and(|m| n > m)
 }
 
 /// A single field-level validation failure, shaped per `docs/format/README.md` §6.
