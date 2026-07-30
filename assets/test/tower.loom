@@ -1,0 +1,84 @@
+# A physics demo: a stack of crates, a ramp, and a ball that knocks it over.
+#
+# Nodes with RigidBody { dynamic = true } fall. Everything else is scenery to
+# land on — static by default, because a blockout whose every box fell would
+# be useless.
+
+[scene]
+format = 1
+id = "b0d1e5c7-4a2f-4b83-9e16-7d3c5a09f4b1"
+
+[[node]]
+name = "Yard"
+
+[[node]]
+name = "Ground"
+parent = "Yard"
+transform = { pos = [0.0, -0.5, 0.0], scale = [8.0, 0.5, 6.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.BoxCollider]
+  half_extents = [8.0, 0.5, 6.0]
+
+[[node]]
+name = "Crate0"
+parent = "Yard"
+transform = { pos = [0.0, 0.5, 0.0], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 4.0
+
+[[node]]
+name = "Crate1"
+parent = "Yard"
+transform = { pos = [0.05, 1.6, 0.0], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 4.0
+
+[[node]]
+name = "Crate2"
+parent = "Yard"
+transform = { pos = [-0.05, 2.7, 0.0], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 4.0
+
+[[node]]
+name = "Crate3"
+parent = "Yard"
+transform = { pos = [0.0, 3.8, 0.0], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 4.0
+
+# Dropped from higher and off-centre, so it topples the stack.
+[[node]]
+name = "Wrecker"
+parent = "Yard"
+transform = { pos = [0.35, 7.0, 0.15], scale = [0.7, 0.7, 0.7] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 40.0

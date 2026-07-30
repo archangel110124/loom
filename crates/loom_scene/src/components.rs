@@ -98,6 +98,30 @@ impl Default for Light {
     }
 }
 
+/// Makes a node participate in physics.
+///
+/// Static is the default because most of a blockout is scenery: if every box
+/// an agent placed started falling, the first render of any scene would be a
+/// pile on the floor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct RigidBody {
+    /// `true` to fall and collide; `false` to stay put and be collided with.
+    pub dynamic: bool,
+    /// Kilograms. Only meaningful when dynamic.
+    #[schemars(range(min = 0.001, max = 100000.0))]
+    pub mass: f32,
+}
+
+impl Default for RigidBody {
+    fn default() -> Self {
+        Self {
+            dynamic: false,
+            mass: 1.0,
+        }
+    }
+}
+
 /// Attaches a sandboxed Rhai script to the node.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -106,7 +130,7 @@ pub struct Script {
     pub path: String,
 }
 
-/// A registry with the six M1 components registered.
+/// A registry with the engine's component types registered.
 ///
 /// `ponytail:` hand-maintained list. Six entries is not a drift risk; roughly
 /// twenty is. Upgrade path is in ADR 0004 — a derive emitting only a
@@ -119,6 +143,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<MeshRenderer>("MeshRenderer");
     reg.register::<BoxCollider>("BoxCollider");
     reg.register::<Light>("Light");
+    reg.register::<RigidBody>("RigidBody");
     reg.register::<Script>("Script");
     reg
 }

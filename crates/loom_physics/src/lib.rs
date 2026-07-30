@@ -97,6 +97,29 @@ impl Physics {
         handle
     }
 
+    /// A dynamic box — what a `RigidBody { dynamic = true }` node becomes.
+    ///
+    /// Rotation is NOT locked here, unlike the character capsule: a falling
+    /// crate tumbling is correct, and a crate that refuses to tip looks wrong.
+    pub fn add_box_body(
+        &mut self,
+        position: [f32; 3],
+        half_extents: [f32; 3],
+        mass: f32,
+    ) -> RigidBodyHandle {
+        let body = RigidBodyBuilder::dynamic()
+            .translation(Vector::new(position[0], position[1], position[2]))
+            .build();
+        let handle = self.bodies.insert(body);
+        let collider =
+            ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2])
+                .mass(mass.max(0.001))
+                .build();
+        self.colliders
+            .insert_with_parent(collider, handle, &mut self.bodies);
+        handle
+    }
+
     /// Advance one fixed step.
     pub fn step(&mut self) {
         self.pipeline.step(
@@ -120,6 +143,29 @@ impl Physics {
     pub fn position(&self, handle: RigidBodyHandle) -> Option<[f32; 3]> {
         let t = self.bodies.get(handle)?.translation();
         Some([t.x, t.y, t.z])
+    }
+
+    /// A body's orientation as euler degrees, in the scene format's
+    /// convention: intrinsic Y-X-Z, ordered `[pitch_x, yaw_y, roll_z]`
+    /// (`docs/format/README.md` §1.1).
+    ///
+    /// Converted here rather than exposing a quaternion, so the physics
+    /// boundary speaks the same language as the scene files and nothing
+    /// downstream has to know which convention rapier uses.
+    #[must_use]
+    pub fn rotation_euler(&self, handle: RigidBodyHandle) -> Option<[f32; 3]> {
+        let q = self.bodies.get(handle)?.rotation();
+        let (x, y, z, w) = (q.x, q.y, q.z, q.w);
+
+        // Y-X-Z extraction. The pitch term is clamped because floating-point
+        // drift can push it just past ±1, and asin of that is NaN — which
+        // would silently poison every transform downstream.
+        let sin_pitch = (2.0 * (w * x - y * z)).clamp(-1.0, 1.0);
+        let pitch = sin_pitch.asin();
+        let yaw = (2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (x * x + y * y));
+        let roll = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (x * x + z * z));
+
+        Some([pitch.to_degrees(), yaw.to_degrees(), roll.to_degrees()])
     }
 
     /// Fold every body's position into a hash, for the determinism check.

@@ -916,6 +916,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "loom_agent"
+version = "0.0.0"
+
+[[package]]
 name = "loom_asset"
 version = "0.0.0"
 dependencies = [
@@ -936,6 +940,7 @@ dependencies = [
  "loom_physics",
  "loom_render",
  "loom_scene",
+ "loom_script",
  "serde",
  "serde_json",
  "winit",
@@ -1000,6 +1005,7 @@ dependencies = [
 name = "loom_scene"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "loom_reflect",
  "schemars",
  "serde",

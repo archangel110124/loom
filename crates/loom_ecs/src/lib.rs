@@ -108,6 +108,12 @@ pub struct World {
     renderable: Storage<()>,
     /// The asset alias a node's `MeshRenderer` names.
     mesh_asset: Storage<String>,
+    /// Scene path, so callers can address an entity the way a `.loom` file does.
+    paths: Storage<String>,
+    /// The `.rhai` file a node's `Script` component names.
+    scripts: Storage<String>,
+    /// `RigidBody`: whether it falls, and its mass.
+    bodies: Storage<(bool, f32)>,
     /// Insertion order. Iterated instead of a `HashMap` so every traversal is
     /// reproducible — the most common source of "works on my machine"
     /// nondeterminism in Rust engines, and it hides for months (§7.5).
@@ -251,6 +257,21 @@ impl World {
             if let Some(parent) = node.parent.as_deref().and_then(|p| by_path.get(p)) {
                 world.set_parent(entity, *parent);
             }
+            world.paths.insert(entity, node.path.clone());
+            if let Some(body) = node.components.get("RigidBody") {
+                let dynamic = body.get("dynamic").and_then(|d| d.as_bool()).unwrap_or(false);
+                #[allow(clippy::cast_possible_truncation)]
+                let mass = body.get("mass").and_then(|m| m.as_f64()).unwrap_or(1.0) as f32;
+                world.bodies.insert(entity, (dynamic, mass));
+            }
+            if let Some(path) = node
+                .components
+                .get("Script")
+                .and_then(|s| s.get("path"))
+                .and_then(|p| p.as_str())
+            {
+                world.scripts.insert(entity, path.to_owned());
+            }
             by_path.insert(node.path.as_str(), entity);
             if let Some(renderer) = node.components.get("MeshRenderer") {
                 world.mark_renderable(entity);
@@ -277,6 +298,30 @@ impl World {
     #[must_use]
     pub fn is_renderable(&self, entity: Entity) -> bool {
         self.renderable.get(entity).is_some()
+    }
+
+    /// This entity's scene path, e.g. `Office/Desk`.
+    #[must_use]
+    pub fn path(&self, entity: Entity) -> Option<&str> {
+        self.paths.get(entity).map(String::as_str)
+    }
+
+    /// Whether this entity falls under gravity.
+    #[must_use]
+    pub fn is_dynamic(&self, entity: Entity) -> bool {
+        self.bodies.get(entity).is_some_and(|(d, _)| *d)
+    }
+
+    /// This entity's mass, or 1.0 when it has no `RigidBody`.
+    #[must_use]
+    pub fn body_mass(&self, entity: Entity) -> f32 {
+        self.bodies.get(entity).map_or(1.0, |(_, m)| *m)
+    }
+
+    /// The `.rhai` file this entity runs, if any.
+    #[must_use]
+    pub fn script_path(&self, entity: Entity) -> Option<&str> {
+        self.scripts.get(entity).map(String::as_str)
     }
 
     /// The asset alias this entity's mesh comes from.

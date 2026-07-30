@@ -58,6 +58,18 @@ fn run(args: &[String]) -> (u8, String) {
             Some(path) => sim(path, args),
             None => (2, USAGE.to_owned()),
         },
+        Some("scene") => match args.get(1) {
+            Some(path) => scene_tx(path, args),
+            None => (2, USAGE.to_owned()),
+        },
+        Some("place") => match args.get(1) {
+            Some(path) => place(path, args),
+            None => (2, USAGE.to_owned()),
+        },
+        Some("measure") => match args.get(1) {
+            Some(path) => measure(path, args),
+            None => (2, USAGE.to_owned()),
+        },
         Some("run") => match args.get(1) {
             Some(path) => match run::open_scene(path) {
                 Ok(()) => (0, String::new()),
@@ -171,9 +183,16 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
     };
 
-    let world = World::from_scene(&scene);
+    let mut world = World::from_scene(&scene);
     let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
     let library = MeshLibrary::for_scene(&scene, base);
+
+    // --sim steps physics before drawing, which is what makes a still image a
+    // useful view of a simulation rather than only of its initial state.
+    if let Some(ticks) = flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()) {
+        simulate_physics(&mut world, ticks);
+    }
+
     let objects = world_to_objects(&world, &library);
     let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok()).unwrap_or(35.0);
     let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok()).unwrap_or(28.0);
@@ -394,12 +413,85 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     let mut world = World::from_scene(&scene);
     let mut clock = FixedTimestep::new(60.0);
 
+    // Scripts attached via a `Script` component run every tick. This is the
+    // second verification channel (brief §5): a render tells you a script
+    // *looks* fine while it leaks entities on frame 900; only simulation
+    // catches behaviour.
+    let mut host = loom_script::ScriptHost::default();
+    let mut scripted: Vec<(loom_ecs::Entity, String)> = Vec::new();
+    let base = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    for entity in world.entities() {
+        let Some(script) = world.script_path(*entity) else {
+            continue;
+        };
+        let source = match std::fs::read_to_string(base.join(script)) {
+            Ok(s) => s,
+            Err(e) => {
+                return (1, json_line(&serde_json::json!({
+                    "error": "io_error", "script": script, "constraint": e.to_string(),
+                })));
+            }
+        };
+        if let Err(e) = host.compile(script, &source) {
+            return (1, json_line(&e));
+        }
+        scripted.push((*entity, script.to_owned()));
+    }
+
     // Elapsed time is fed in as an exact constant, never read from the wall
     // clock (never-do #8). That is what makes this reproducible, and it is why
     // `advance` takes the delta as an argument.
     for _ in 0..ticks {
         clock.advance(clock.step_seconds());
+        for (entity, script) in &scripted {
+            let Some(transform) = world.transform(*entity).cloned() else {
+                continue;
+            };
+            let state = loom_script::NodeState {
+                position: transform.pos,
+                rotation: transform.rot_euler,
+                scale: transform.scale,
+            };
+            match host.tick(script, clock.tick, &state) {
+                Ok(next) => {
+                    if let Some(t) = world.transform_mut(*entity) {
+                        t.pos = next.position;
+                        t.rot_euler = next.rotation;
+                        t.scale = next.scale;
+                    }
+                }
+                Err(e) => return (1, json_line(&e)),
+            }
+        }
         world.propagate_transforms();
+    }
+
+    // Assertions are checked after the run, against final world state. This is
+    // what makes an agent's claim about behaviour checkable rather than
+    // asserted (design doc §2.10).
+    let mut failures = Vec::new();
+    for spec in flags(args, "--assert") {
+        match check_assertion(&world, &spec) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                let actual = assertion_actual(&world, &spec);
+                failures.push(serde_json::json!({
+                    "assert": spec,
+                    "actual": actual,
+                    "hint": "Format is `Node/Path.axis OP value`, axis one of x/y/z, \
+                             OP one of > >= < <= == ~=",
+                }));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        return (1, json_line(&serde_json::json!({
+            "ok": false,
+            "ticks": clock.tick,
+            "failed_assertions": failures,
+        })));
     }
 
     (
@@ -411,8 +503,126 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
             "entities": world.entities().len(),
             // Hex so two runs are trivially eyeball-comparable.
             "state_hash": format!("{:016x}", world.state_hash()),
+            "assertions": flags(args, "--assert").len(),
         })),
     )
+}
+
+/// Build a physics world from the scene, step it, and write positions back.
+///
+/// Nodes carrying `RigidBody { dynamic = true }` fall; everything with a
+/// `BoxCollider` is something to land on. Static by default, because most of a
+/// blockout is scenery and a scene whose every box fell would be useless.
+fn simulate_physics(world: &mut World, ticks: u32) {
+    let mut physics = loom_physics::Physics::new(1.0 / 60.0);
+    let mut dynamic = Vec::new();
+
+    for entity in world.entities() {
+        let Some(global) = world.global_transform(*entity) else {
+            continue;
+        };
+        let pos = [global.matrix[12], global.matrix[13], global.matrix[14]];
+        // Half-extents come from the node's scale: a unit box scaled by s has
+        // half-extents s, which is what the renderer draws.
+        let Some(transform) = world.transform(*entity) else {
+            continue;
+        };
+        let half = [
+            transform.scale[0].abs().max(1e-3),
+            transform.scale[1].abs().max(1e-3),
+            transform.scale[2].abs().max(1e-3),
+        ];
+
+        if world.is_dynamic(*entity) {
+            // A capsule sized to the box, so it tumbles less and does not
+            // catch on seams between floor colliders.
+            let handle = physics.add_box_body(pos, half, world.body_mass(*entity));
+            dynamic.push((*entity, handle));
+        } else if world.is_renderable(*entity) {
+            physics.add_static_box(pos, half);
+        }
+    }
+
+    for _ in 0..ticks {
+        physics.step();
+    }
+
+    for (entity, handle) in dynamic {
+        let Some(pos) = physics.position(handle) else {
+            continue;
+        };
+        let rotation = physics.rotation_euler(handle);
+        if let Some(transform) = world.transform_mut(entity) {
+            // Written back as a LOCAL transform. Correct only for nodes whose
+            // parent is the root, which is every dynamic body a blockout makes
+            // today. Nested dynamic bodies need the parent's inverse — noted
+            // rather than silently wrong.
+            transform.pos = pos;
+            // Rotation too, or a toppling crate slides instead of tipping —
+            // the simulation would be right and the picture would be a lie.
+            if let Some(rot) = rotation {
+                transform.rot_euler = rot;
+            }
+        }
+    }
+    world.propagate_transforms();
+}
+
+/// Every value given for a repeated flag.
+fn flags(args: &[String], name: &str) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, a)| *a == name)
+        .filter_map(|(i, _)| args.get(i + 1).cloned())
+        .collect()
+}
+
+/// The world-space value an assertion refers to.
+fn assertion_value(world: &World, path: &str, axis: &str) -> Option<f32> {
+    let entity = world
+        .entities()
+        .iter()
+        .find(|e| world.path(**e) == Some(path))?;
+    let global = world.global_transform(*entity)?;
+    // Translation is the last column of a column-major matrix.
+    let index = match axis {
+        "x" => 12,
+        "y" => 13,
+        "z" => 14,
+        _ => return None,
+    };
+    Some(global.matrix[index])
+}
+
+fn parse_assertion(spec: &str) -> Option<(String, String, String, f32)> {
+    let mut parts = spec.split_whitespace();
+    let target = parts.next()?;
+    let op = parts.next()?.to_owned();
+    let value: f32 = parts.next()?.parse().ok()?;
+    let (path, axis) = target.rsplit_once('.')?;
+    Some((path.to_owned(), axis.to_owned(), op, value))
+}
+
+/// Evaluate one assertion against final world state.
+fn check_assertion(world: &World, spec: &str) -> Result<bool, ()> {
+    let (path, axis, op, expected) = parse_assertion(spec).ok_or(())?;
+    let actual = assertion_value(world, &path, &axis).ok_or(())?;
+    Ok(match op.as_str() {
+        ">" => actual > expected,
+        ">=" => actual >= expected,
+        "<" => actual < expected,
+        "<=" => actual <= expected,
+        "==" => (actual - expected).abs() < 1e-4,
+        // Approximate, for values a simulation lands near rather than on.
+        "~=" => (actual - expected).abs() < 0.05,
+        _ => return Err(()),
+    })
+}
+
+fn assertion_actual(world: &World, spec: &str) -> serde_json::Value {
+    parse_assertion(spec)
+        .and_then(|(path, axis, _, _)| assertion_value(world, &path, &axis))
+        .map_or(serde_json::Value::Null, |v| serde_json::json!(v))
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -422,6 +632,249 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 fn parse_size(spec: &str) -> Option<(u32, u32)> {
     let (w, h) = spec.split_once(['x', 'X'])?;
     Some((w.parse().ok()?, h.parse().ok()?))
+}
+
+/// Apply a transaction to a scene.
+///
+/// Reads the transaction as JSON so the same payload works from a shell, from
+/// a test, and from the MCP adapter — CLI first, MCP second (§7.10).
+fn scene_tx(path: &str, args: &[String]) -> (u8, String) {
+    let Some(tx_path) = flag(args, "--tx") else {
+        return (
+            2,
+            json_line(&serde_json::json!({
+                "error": "missing_argument",
+                "hint": "--tx <file.json> holds the transaction: { label, ops }",
+            })),
+        );
+    };
+
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => return (2, json_line(&serde_json::json!({
+            "error": "io_error", "path": path, "constraint": e.to_string(),
+        }))),
+    };
+    let tx_text = match std::fs::read_to_string(&tx_path) {
+        Ok(s) => s,
+        Err(e) => return (2, json_line(&serde_json::json!({
+            "error": "io_error", "path": tx_path, "constraint": e.to_string(),
+        }))),
+    };
+    let mut transaction: loom_scene::Transaction = match serde_json::from_str(&tx_text) {
+        Ok(t) => t,
+        Err(e) => return (2, json_line(&serde_json::json!({
+            "error": "invalid_transaction",
+            "constraint": e.to_string(),
+            "hint": "Expected { \"label\": \"...\", \"ops\": [ { \"op\": \"spawn_node\", ... } ] }",
+        }))),
+    };
+    if args.iter().any(|a| a == "--dry-run") {
+        transaction.dry_run = true;
+    }
+
+    match loom_scene::apply(&src, &transaction) {
+        Ok(applied) => {
+            // --dry-run prints the diff and touches nothing. This is how the
+            // human reviews a large change before it lands.
+            if !transaction.dry_run
+                && let Err(e) = std::fs::write(path, &applied.scene)
+            {
+                return (1, json_line(&serde_json::json!({
+                    "error": "io_error", "path": path, "constraint": e.to_string(),
+                })));
+            }
+            (
+                0,
+                json_line(&serde_json::json!({
+                    "ok": true,
+                    "label": applied.label,
+                    "dry_run": transaction.dry_run,
+                    "version": applied.version,
+                    "diff": applied.diff,
+                })),
+            )
+        }
+        Err(e) => (1, json_line(&e)),
+    }
+}
+
+/// Resolve a semantic placement into ops and apply them.
+///
+/// Design doc §2.8: the agent says "put the monitor on the desk", and engine
+/// code does the arithmetic. It never computes a world coordinate, which is
+/// the failure that leaves a monitor floating above a desk — or, as the
+/// unplaced state here shows, buried inside one.
+fn place(path: &str, args: &[String]) -> (u8, String) {
+    let Some(op_path) = flag(args, "--op") else {
+        return (2, json_line(&serde_json::json!({
+            "error": "missing_argument",
+            "hint": "--op <file.json>, e.g. { \"place\": \"place_on\", \"node\": ..., \"surface\": ... }",
+        })));
+    };
+    let (src, op_text) = match (std::fs::read_to_string(path), std::fs::read_to_string(&op_path)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (a, b) => {
+            let e = a.err().or(b.err()).map(|e| e.to_string()).unwrap_or_default();
+            return (2, json_line(&serde_json::json!({ "error": "io_error", "constraint": e })));
+        }
+    };
+    let ops: Vec<loom_scene::PlaceOp> = match serde_json::from_str::<serde_json::Value>(&op_text)
+        .and_then(|v| if v.is_array() { serde_json::from_value(v) } else { serde_json::from_value(v).map(|o| vec![o]) })
+    {
+        Ok(o) => o,
+        Err(e) => return (2, json_line(&serde_json::json!({
+            "error": "invalid_placement", "constraint": e.to_string(),
+        }))),
+    };
+
+    let scene = match Scene::parse(&src) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+    let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+    let library = MeshLibrary::for_scene(&scene, base);
+    let world = World::from_scene(&scene);
+    let boxes = node_bounds(&world, &library);
+
+    let lookup = |name: &str| boxes.get(name).copied();
+    let geometry = loom_scene::place::Geometry {
+        bounds_of: &lookup,
+        parent: scene.nodes().first().map(|n| n.path.clone()).unwrap_or_default(),
+    };
+
+    let mut scene_ops = Vec::new();
+    for op in &ops {
+        match loom_scene::place::resolve(op, &geometry) {
+            Ok(mut resolved) => scene_ops.append(&mut resolved),
+            Err(e) => return (1, json_line(&e)),
+        }
+    }
+
+    let transaction = loom_scene::Transaction {
+        label: format!("Place: {} op(s)", ops.len()),
+        ops: scene_ops,
+        dry_run: args.iter().any(|a| a == "--dry-run"),
+        expect_version: None,
+    };
+    match loom_scene::apply(&src, &transaction) {
+        Ok(applied) => {
+            if !transaction.dry_run
+                && let Err(e) = std::fs::write(path, &applied.scene)
+            {
+                return (1, json_line(&serde_json::json!({
+                    "error": "io_error", "constraint": e.to_string(),
+                })));
+            }
+            (0, json_line(&serde_json::json!({
+                "ok": true, "placed": ops.len(),
+                "dry_run": transaction.dry_run,
+                "version": applied.version,
+            })))
+        }
+        Err(e) => (1, json_line(&e)),
+    }
+}
+
+/// Bounds and overlaps, so the agent can check itself numerically.
+///
+/// Cheaper than a render and catches what one camera angle hides — an object
+/// inside another object (design doc §2.8).
+fn measure(path: &str, args: &[String]) -> (u8, String) {
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => return (2, json_line(&serde_json::json!({
+            "error": "io_error", "path": path, "constraint": e.to_string(),
+        }))),
+    };
+    let scene = match Scene::parse(&src) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+
+    let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+    let library = MeshLibrary::for_scene(&scene, base);
+    let world = World::from_scene(&scene);
+    let boxes = node_bounds(&world, &library);
+
+    if let Some(node) = flag(args, "--node") {
+        return match boxes.get(&node) {
+            Some(b) => (0, json_line(&serde_json::json!({
+                "node": node, "min": b.min, "max": b.max,
+                "center": b.center(), "size": b.size(),
+            }))),
+            None => (1, json_line(&serde_json::json!({
+                "error": "no_geometry", "node": node,
+                "hint": "The node must exist and carry a MeshRenderer.",
+            }))),
+        };
+    }
+
+    // Every interpenetrating pair. This is the check that catches a monitor
+    // buried in a desk, which a single camera angle would hide.
+    let names: Vec<&String> = boxes.keys().collect();
+    let mut overlaps = Vec::new();
+    for (i, a) in names.iter().enumerate() {
+        for b in names.iter().skip(i + 1) {
+            if boxes[*a].overlaps(&boxes[*b]) {
+                overlaps.push(serde_json::json!({ "a": a, "b": b }));
+            }
+        }
+    }
+
+    (
+        0,
+        json_line(&serde_json::json!({
+            "ok": true,
+            "nodes": names.len(),
+            "bounds": boxes.iter().map(|(k, v)| serde_json::json!({
+                "node": k, "center": v.center(), "size": v.size(),
+            })).collect::<Vec<_>>(),
+            "overlaps": overlaps,
+        })),
+    )
+}
+
+/// World bounds per renderable node, from its mesh and its global transform.
+fn node_bounds(
+    world: &World,
+    library: &MeshLibrary,
+) -> std::collections::BTreeMap<String, loom_scene::place::Bounds> {
+    let mut out = std::collections::BTreeMap::new();
+    for entity in world.entities() {
+        if !world.is_renderable(*entity) {
+            continue;
+        }
+        let (Some(global), Some(path)) = (world.global_transform(*entity), world.path(*entity))
+        else {
+            continue;
+        };
+        let index = library.index_for(world.mesh_asset(*entity)) as usize;
+        let Some(mesh) = library.meshes.get(index) else {
+            continue;
+        };
+        let (lo, hi) = mesh.bounds();
+        let model = Mat4::from_cols_array(&global.matrix);
+
+        // Transform all eight corners: a rotated box's world AABB is not its
+        // local AABB rotated.
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        for i in 0..8 {
+            let corner = Vec3::new(
+                if i & 1 == 0 { lo[0] } else { hi[0] },
+                if i & 2 == 0 { lo[1] } else { hi[1] },
+                if i & 4 == 0 { lo[2] } else { hi[2] },
+            );
+            let p = model.transform_point3(corner);
+            for axis in 0..3 {
+                min[axis] = min[axis].min(p[axis]);
+                max[axis] = max[axis].max(p[axis]);
+            }
+        }
+        out.insert(path.to_owned(), loom_scene::place::Bounds { min, max });
+    }
+    out
 }
 
 fn json_line<T: serde::Serialize>(value: &T) -> String {

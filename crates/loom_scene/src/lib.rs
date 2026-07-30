@@ -3,8 +3,12 @@
 //! Depends only on `loom_reflect` (see `scripts/check-deps.sh`).
 
 pub mod components;
+pub mod ops;
+pub mod place;
 mod scene;
 
+pub use ops::{Applied, SceneOp, Transaction, TransactionError, VersionToken, apply};
+pub use place::{Anchor, Axis, PlaceOp};
 pub use scene::{Node, Scene, SceneError};
 
 #[cfg(test)]
@@ -132,8 +136,10 @@ name = \"Root\"
         assert_eq!(errs[0].error, "format_version_unsupported");
     }
 
+    /// M1 specified six; `RigidBody` joined them at M7 when physics needed a
+    /// way to say "this one falls".
     #[test]
-    fn all_six_components_are_registered() {
+    fn every_component_is_registered() {
         let reg = components::registry();
 
         for name in [
@@ -143,6 +149,7 @@ name = \"Root\"
             "BoxCollider",
             "Light",
             "Script",
+            "RigidBody",
         ] {
             assert!(reg.describe(name).is_some(), "{name} is not registered");
         }
