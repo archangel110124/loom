@@ -1,0 +1,25 @@
+# Default input bindings. Rebind by editing this file — no rebuild.
+#
+# Button names are winit `KeyCode` variants (KeyW, ShiftLeft, ArrowUp, Escape)
+# plus MouseLeft / MouseRight. An action fires if ANY of its bindings fires.
+#
+# trigger:  held (default) · pressed (the frame it goes down) · released
+# modifiers: buttons that must ALSO be held. A requirement, not an exclusion —
+#            plain KeyW still fires while Shift is down, because sprinting
+#            forward is still moving forward.
+
+[contexts.fly.actions]
+move_forward = [{ button = "KeyW" }, { button = "ArrowUp" }]
+move_back    = [{ button = "KeyS" }, { button = "ArrowDown" }]
+move_left    = [{ button = "KeyA" }, { button = "ArrowLeft" }]
+move_right   = [{ button = "KeyD" }, { button = "ArrowRight" }]
+move_up      = [{ button = "KeyE" }, { button = "Space" }]
+move_down    = [{ button = "KeyQ" }]
+sprint       = [{ button = "ShiftLeft" }, { button = "ShiftRight" }]
+
+# Hold to look, so the cursor stays usable otherwise. This is a viewer, not a
+# game — taking the pointer hostage would be wrong here.
+look     = [{ button = "MouseRight" }, { button = "MouseLeft" }]
+
+reframe  = [{ button = "KeyF", trigger = "pressed" }]
+quit     = [{ button = "Escape", trigger = "pressed" }]

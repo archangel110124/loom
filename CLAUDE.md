@@ -126,15 +126,16 @@ change, so your edits appear live. Two consequences:
 
 ## Current milestone
 
-> **M6 — input + camera.** Update this line at every milestone. See §6 of the build brief.
+> **M7 — physics.** Update this line at every milestone. See §6 of the build brief.
 >
-> M0–M5 done. `loom run workshop.loom` shows an imported glTF mesh and four procedural
-> primitives in a window; `loom render` produces the same scene headless. Assets carry `.meta`
-> sidecars with stable UUIDs and BLAKE3 content hashes.
+> M0–M6 done. Actions load from `assets/input/default.toml`; rebinding needs no rebuild.
 >
-> Next: action/context/modifier/trigger model over winit + gilrs, rebindable from TOML. The fly
-> camera in `loom_cli/src/run.rs` is hardcoded to WASD and moves there when actions exist.
-> Exit: rebindable actions loaded from TOML; camera flies.
+> Next: `rapier3d`, fixed-step, colliders from components, character controller.
+> Exit: a capsule walks on a mesh floor; M3's determinism hash stays stable with physics active.
+> **Put the §7.15 physical sanity checks in the validator now, not later** — mass ratio, degenerate
+> collider scale, interpenetration at spawn. The agent generates pathological scenes with no idea
+> anything is wrong, and "the physics is broken" is unattributable without them.
+> Never put a trimesh collider on a dynamic body (never-do #10).
 
 ---
 

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/loom_asset","crates/loom_cli", "crates/loom_ecs", "crates/loom_reflect", "crates/loom_render", "crates/loom_render_graph", "crates/loom_scene"]
+members = ["crates/loom_asset","crates/loom_cli", "crates/loom_ecs", "crates/loom_input", "crates/loom_reflect", "crates/loom_render", "crates/loom_render_graph", "crates/loom_scene"]
 
 # Crates land per milestone (see docs/design/LOOM-BUILD-BRIEF.md §3):
 #   M1  loom_reflect, loom_scene

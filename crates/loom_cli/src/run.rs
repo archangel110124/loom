@@ -9,13 +9,14 @@ use std::f32::consts::FRAC_PI_2;
 use std::sync::Arc;
 
 use loom_ecs::World;
+use loom_input::{ActionMap, InputState};
 use loom_render::glam::Vec3;
 use loom_render::{Camera, Device, Instance, Object, Viewer, ash, ash_window};
 use loom_scene::Scene;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 /// Metres per second.
@@ -68,24 +69,16 @@ impl FlyCamera {
     }
 }
 
-/// Which movement keys are currently held.
-#[derive(Default)]
-struct Keys {
-    forward: bool,
-    back: bool,
-    left: bool,
-    right: bool,
-    up: bool,
-    down: bool,
-    sprint: bool,
-}
+/// The context the viewer runs in. A menu would push another.
+const FLY: &str = "fly";
 
 struct App {
     objects: Vec<Object>,
     meshes: Vec<loom_asset::Mesh>,
     camera: FlyCamera,
-    keys: Keys,
-    looking: bool,
+    /// Loaded from TOML, so rebinding needs no rebuild.
+    bindings: ActionMap,
+    input: InputState,
     window: Option<Arc<Window>>,
     viewer: Option<Viewer>,
     /// Kept alive for the whole session: destroying the device before the
@@ -101,8 +94,10 @@ impl App {
             camera: FlyCamera::framing(&objects),
             objects,
             meshes,
-            keys: Keys::default(),
-            looking: false,
+            // Prefer a project-local file, fall back to the shipped defaults,
+            // so a fresh checkout has a working camera with no config to write.
+            bindings: load_bindings(),
+            input: InputState::new(),
             window: None,
             viewer: None,
             gpu: None,
@@ -119,37 +114,27 @@ impl App {
     }
 
     fn step_camera(&mut self, dt: f32) {
-        let speed = if self.keys.sprint {
+        let active = |a: &str| self.input.is_active(&self.bindings, FLY, a);
+        let axis = |p: &str, n: &str| self.input.axis(&self.bindings, FLY, p, n);
+
+        let speed = if active("sprint") {
             MOVE_SPEED * SPRINT_MULTIPLIER
         } else {
             MOVE_SPEED
         } * dt;
 
-        let forward = self.camera.forward();
-        let right = self.camera.right();
-        let mut delta = Vec3::ZERO;
-        if self.keys.forward {
-            delta += forward;
-        }
-        if self.keys.back {
-            delta -= forward;
-        }
-        if self.keys.right {
-            delta += right;
-        }
-        if self.keys.left {
-            delta -= right;
-        }
-        // World up, not camera up: holding E should rise vertically even when
-        // looking down, which is what every fly camera does.
-        if self.keys.up {
-            delta += Vec3::Y;
-        }
-        if self.keys.down {
-            delta -= Vec3::Y;
-        }
+        // World up for vertical, not camera up: rising should be vertical even
+        // when looking down, which is what every fly camera does.
+        let delta = self.camera.forward() * axis("move_forward", "move_back")
+            + self.camera.right() * axis("move_right", "move_left")
+            + Vec3::Y * axis("move_up", "move_down");
 
         self.camera.position += delta.normalize_or_zero() * speed;
+    }
+
+    /// Whether the look-around action is held.
+    fn looking(&self) -> bool {
+        self.input.is_active(&self.bindings, FLY, "look")
     }
 }
 
@@ -189,34 +174,29 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
+            // Keys are recorded by NAME and interpreted by the action map.
+            // Nothing here knows what W means.
             WindowEvent::KeyboardInput { event, .. } => {
-                let pressed = event.state == ElementState::Pressed;
-                match event.physical_key {
-                    PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
-                    PhysicalKey::Code(KeyCode::KeyW) => self.keys.forward = pressed,
-                    PhysicalKey::Code(KeyCode::KeyS) => self.keys.back = pressed,
-                    PhysicalKey::Code(KeyCode::KeyA) => self.keys.left = pressed,
-                    PhysicalKey::Code(KeyCode::KeyD) => self.keys.right = pressed,
-                    PhysicalKey::Code(KeyCode::KeyE | KeyCode::Space) => self.keys.up = pressed,
-                    PhysicalKey::Code(KeyCode::KeyQ) => self.keys.down = pressed,
-                    PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight) => {
-                        self.keys.sprint = pressed;
-                    }
-                    PhysicalKey::Code(KeyCode::KeyF) if pressed => {
-                        self.camera = FlyCamera::framing(&self.objects);
-                    }
-                    _ => {}
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    self.input
+                        .set_button(&format!("{code:?}"), event.state == ElementState::Pressed);
+                }
+                if self.input.is_active(&self.bindings, FLY, "quit") {
+                    event_loop.exit();
+                }
+                if self.input.is_active(&self.bindings, FLY, "reframe") {
+                    self.camera = FlyCamera::framing(&self.objects);
                 }
             }
 
-            // Hold a mouse button to look, so the cursor stays usable
-            // otherwise — this is a viewer, not a game.
-            WindowEvent::MouseInput {
-                state,
-                button: MouseButton::Right | MouseButton::Left,
-                ..
-            } => {
-                self.looking = state == ElementState::Pressed;
+            WindowEvent::MouseInput { state, button, .. } => {
+                let name = match button {
+                    MouseButton::Left => "MouseLeft",
+                    MouseButton::Right => "MouseRight",
+                    MouseButton::Middle => "MouseMiddle",
+                    _ => return,
+                };
+                self.input.set_button(name, state == ElementState::Pressed);
             }
 
             WindowEvent::Resized(_) => {
@@ -243,6 +223,9 @@ impl ApplicationHandler for App {
                     eprintln!("loom: draw failed: {e}");
                     event_loop.exit();
                 }
+                // Transitions are per-frame, so clearing them is what makes
+                // `pressed` mean "this frame" rather than "ever".
+                self.input.end_frame();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -254,7 +237,7 @@ impl ApplicationHandler for App {
 
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event
-            && self.looking
+            && self.looking()
         {
             #[allow(clippy::cast_possible_truncation)]
             let (dx, dy) = (delta.0 as f32, delta.1 as f32);
@@ -309,6 +292,23 @@ fn build_viewer(
         .map_err(|e| e.to_string())?;
 
     Ok((instance, device, viewer))
+}
+
+/// Bindings from `assets/input/default.toml` if present, else the compiled-in
+/// copy of the same file.
+///
+/// The on-disk file wins so rebinding needs no rebuild — which is the point of
+/// M6. A malformed file is reported and then ignored rather than being fatal:
+/// losing your camera because of a typo in a config is a bad trade.
+fn load_bindings() -> ActionMap {
+    let path = std::path::Path::new("assets/input/default.toml");
+    if path.exists() {
+        match ActionMap::load(path) {
+            Ok(map) => return map,
+            Err(e) => eprintln!("loom: {}: {e}; using built-in bindings", path.display()),
+        }
+    }
+    ActionMap::from_toml(loom_input::DEFAULT_BINDINGS).unwrap_or_default()
 }
 
 fn bounds(objects: &[Object]) -> (Vec3, f32) {
