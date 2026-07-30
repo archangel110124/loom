@@ -6,10 +6,12 @@
 //! shipped — no parallel system, no surprise at ship time.
 
 pub mod mesh;
+pub mod packed;
 pub mod meta;
 pub mod primitives;
 
 pub use mesh::{Mesh, Vertex};
+pub use packed::{PackedBounds, PackedVertex};
 pub use meta::{AssetId, Manifest, Meta};
 
 /// Why an import failed.

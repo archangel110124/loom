@@ -9,15 +9,28 @@
 // per frame is one draw call regardless of object count, which is the property
 // §B.1 of the graphics doc is after.
 
-// 16-byte aligned members. `float3` would place `normal` at offset 12 and
-// violate std430 for a PhysicalStorageBuffer block — spirv-val rejects it.
+// A vertex in 8 bytes, not 32.
+//
+// Blocky-voxel renderers pack a vertex into one 32-bit int because corners sit
+// on integer lattice points and normals are one of six axis directions. Smooth
+// SDF voxels have neither property — Surface Nets puts a vertex anywhere in its
+// cell with an arbitrary normal — so the same idea needs different arithmetic:
+// quantise against the mesh's own bounds, and encode the normal octahedrally.
+//
+// Both members are 4-byte, and the struct is 8, which still satisfies std430
+// for a PhysicalStorageBuffer block: the requirement is that each member is
+// aligned to its own size, not to 16.
 struct Vertex {
-    float4 position;
-    float4 normal;
+    uint packedPosition;   // 10 bits per axis, 2 spare
+    uint packedNormal;     // octahedral, 16 bits per component
 };
 
 struct ObjectData {
     float4x4 mvp;
+    // Decode parameters for this object's packed vertices: xyz origin, w step.
+    // One per object rather than per vertex, which is what makes the
+    // compression free rather than moving the cost somewhere else.
+    float4 unpack;
     // Rows of inverse-transpose(model)'s upper 3x3. Non-uniform scale is
     // everywhere in a blockout, and it skews normals unless corrected.
     float4 normalRow0;
@@ -46,6 +59,31 @@ struct VSOutput {
     float3 color : COLOR;
 };
 
+// Mirrors `loom_asset::packed::unpack`. Kept in step by a Rust-side test that
+// round-trips through the same arithmetic — a decoder that exists only in
+// shader source cannot be tested.
+float3 unpackPosition(uint packed, float4 unpackParams) {
+    float3 q = float3(
+        float(packed & 0x3FF),
+        float((packed >> 10) & 0x3FF),
+        float((packed >> 20) & 0x3FF));
+    return unpackParams.xyz + q * unpackParams.w;
+}
+
+float3 unpackNormal(uint packed) {
+    float u = float(packed & 0xFFFF) / 65535.0 * 2.0 - 1.0;
+    float v = float((packed >> 16) & 0xFFFF) / 65535.0 * 2.0 - 1.0;
+    float z = 1.0 - abs(u) - abs(v);
+    float2 xy = float2(u, v);
+    if (z < 0.0) {
+        // Fold the lower hemisphere back.
+        xy = float2(
+            (1.0 - abs(v)) * (u >= 0.0 ? 1.0 : -1.0),
+            (1.0 - abs(u)) * (v >= 0.0 ? 1.0 : -1.0));
+    }
+    return normalize(float3(xy, z));
+}
+
 [shader("vertex")]
 VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) {
     Vertex v = push.vertices[vertexID];
@@ -55,8 +93,8 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
         o.normalRow0.xyz, o.normalRow1.xyz, o.normalRow2.xyz);
 
     VSOutput out;
-    out.position = mul(o.mvp, float4(v.position.xyz, 1.0));
-    out.normal = normalize(mul(normalMatrix, v.normal.xyz));
+    out.position = mul(o.mvp, float4(unpackPosition(v.packedPosition, o.unpack), 1.0));
+    out.normal = normalize(mul(normalMatrix, unpackNormal(v.packedNormal)));
     out.color = o.color.rgb;
     return out;
 }

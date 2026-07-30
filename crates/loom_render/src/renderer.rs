@@ -83,6 +83,8 @@ pub(crate) struct Push {
 #[derive(Clone, Copy)]
 pub(crate) struct ObjectData {
     mvp: [f32; 16],
+    /// Decode parameters for this object's packed vertices: xyz origin, w step.
+    unpack: [f32; 4],
     /// Rows of inverse-transpose(model)'s upper 3x3, padded to `vec4`.
     normal: [[f32; 4]; 3],
     color: [f32; 4],
@@ -140,6 +142,7 @@ pub struct Renderer {
     indices: vk::Buffer,
     indices_alloc: Option<Allocation>,
     ranges: Vec<MeshRange>,
+    unpack: UnpackParams,
     objects: vk::Buffer,
     objects_alloc: Option<Allocation>,
     object_address: vk::DeviceAddress,
@@ -236,7 +239,7 @@ impl Renderer {
         // scale; the dedicated transfer queue and a staging ring (Vulkan doc
         // §6) arrive when a scene streams more geometry than fits comfortably
         // in host-visible memory.
-        let (combined_vertices, combined_indices, ranges) = combine(meshes);
+        let (combined_vertices, combined_indices, ranges, unpack) = combine(meshes);
         let (vertices, vertices_alloc, vertex_address) = create_address_buffer(
             &raw,
             &mut allocator,
@@ -318,6 +321,7 @@ impl Renderer {
             indices,
             indices_alloc: Some(indices_alloc),
             ranges,
+            unpack,
             objects,
             objects_alloc: Some(objects_alloc),
             object_address,
@@ -358,7 +362,7 @@ impl Renderer {
         // problem.
         let mut sorted: Vec<Object> = objects.to_vec();
         sorted.sort_by_key(|o| o.mesh);
-        let object_data = pack_objects(&sorted, view_proj);
+        let object_data = pack_objects(&sorted, view_proj, &self.unpack);
         let batches = batch_by_mesh(&sorted);
         write_slice(
             self.objects_alloc
@@ -700,21 +704,37 @@ pub(crate) unsafe fn set_viewport(
     }
 }
 
+/// Per-mesh decode parameters, produced alongside the packed vertices.
+pub(crate) type UnpackParams = Vec<[f32; 4]>;
+
 /// Concatenate a mesh library into one vertex buffer and one index buffer.
 ///
 /// Indices are rewritten to be absolute, so a draw needs only a first-index
 /// and a count — no per-mesh vertex offset to keep in sync.
 pub(crate) fn combine(
     meshes: &[loom_asset::Mesh],
-) -> (Vec<loom_asset::Vertex>, Vec<u32>, Vec<MeshRange>) {
+) -> (
+    Vec<loom_asset::PackedVertex>,
+    Vec<u32>,
+    Vec<MeshRange>,
+    UnpackParams,
+) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     let mut ranges = Vec::new();
+    let mut unpack = Vec::new();
 
     for mesh in meshes {
         let base = u32::try_from(vertices.len()).unwrap_or(0);
         let first_index = u32::try_from(indices.len()).unwrap_or(0);
-        vertices.extend_from_slice(&mesh.vertices);
+
+        // Packed per MESH, so each gets quantisation steps sized to its own
+        // extent. Packing the whole library against one global bound would
+        // give a small prop the precision of the largest terrain.
+        let (packed, bounds) = loom_asset::packed::pack(&mesh.vertices);
+        vertices.extend_from_slice(&packed);
+        unpack.push([bounds.origin[0], bounds.origin[1], bounds.origin[2], bounds.step]);
+
         indices.extend(mesh.indices.iter().map(|i| i + base));
         ranges.push(MeshRange {
             first_index,
@@ -724,10 +744,11 @@ pub(crate) fn combine(
 
     // An empty library would make a zero-sized buffer, which Vulkan rejects.
     if vertices.is_empty() {
-        vertices.push(loom_asset::Vertex::default());
+        vertices.push(loom_asset::PackedVertex::default());
         indices.push(0);
+        unpack.push([0.0, 0.0, 0.0, 1.0]);
     }
-    (vertices, indices, ranges)
+    (vertices, indices, ranges, unpack)
 }
 
 /// Runs of consecutive objects sharing a mesh: `(mesh, first_instance, count)`.
@@ -777,7 +798,11 @@ pub(crate) fn create_index_buffer(
 }
 
 /// Build the per-object array the shader indexes with `SV_InstanceID`.
-pub(crate) fn pack_objects(objects: &[Object], view_proj: Mat4) -> Vec<ObjectData> {
+pub(crate) fn pack_objects(
+    objects: &[Object],
+    view_proj: Mat4,
+    unpack: &UnpackParams,
+) -> Vec<ObjectData> {
     objects
         .iter()
         .map(|object| {
@@ -787,6 +812,10 @@ pub(crate) fn pack_objects(objects: &[Object], view_proj: Mat4) -> Vec<ObjectDat
             let rows = normal_matrix.transpose();
             ObjectData {
                 mvp: (view_proj * object.model).to_cols_array(),
+                unpack: unpack
+                    .get(object.mesh as usize)
+                    .copied()
+                    .unwrap_or([0.0, 0.0, 0.0, 1.0]),
                 normal: [
                     rows.x_axis.extend(0.0).to_array(),
                     rows.y_axis.extend(0.0).to_array(),

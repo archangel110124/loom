@@ -48,6 +48,7 @@ pub struct Viewer {
     indices: vk::Buffer,
     indices_alloc: Option<Allocation>,
     ranges: Vec<MeshRange>,
+    unpack: crate::renderer::UnpackParams,
     objects: vk::Buffer,
     objects_alloc: Option<Allocation>,
     object_address: vk::DeviceAddress,
@@ -95,7 +96,7 @@ impl Viewer {
         })
         .map_err(|e| RenderError::Allocator(e.to_string()))?;
 
-        let (combined_vertices, combined_indices, ranges) = combine(meshes);
+        let (combined_vertices, combined_indices, ranges, unpack) = combine(meshes);
         let (vertices, vertices_alloc, vertex_address) = create_address_buffer(
             &raw,
             &mut allocator,
@@ -191,6 +192,7 @@ impl Viewer {
             indices,
             indices_alloc: Some(indices_alloc),
             ranges,
+            unpack,
             objects,
             objects_alloc: Some(objects_alloc),
             object_address,
@@ -243,7 +245,7 @@ impl Viewer {
         let aspect = self.extent.width as f32 / self.extent.height as f32;
         let mut sorted: Vec<Object> = objects.to_vec();
         sorted.sort_by_key(|o| o.mesh);
-        let object_data = pack_objects(&sorted, view_projection(camera, aspect));
+        let object_data = pack_objects(&sorted, view_projection(camera, aspect), &self.unpack);
         let batches = batch_by_mesh(&sorted);
         write_slice(
             self.objects_alloc

@@ -211,6 +211,13 @@ mod tests {
 
     #[test]
     fn push_constants_match_the_shader_block() {
+        // A packed vertex is 8 bytes, not 32 — 10-10-10 position quantised
+        // against the mesh bounds plus an octahedral normal. Blocky-voxel
+        // engines pack into 4 bytes by exploiting an integer lattice and six
+        // axis normals; smooth SDF surfaces have neither, so 8 is the honest
+        // floor here.
+        assert_eq!(size_of::<loom_asset::PackedVertex>(), 8);
+
         // Push constants now carry only two device addresses: 16 bytes against
         // a guaranteed minimum of 128. Per-object data lives in a buffer, so
         // adding fields to it can never push this over the limit — which is the
