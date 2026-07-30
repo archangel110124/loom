@@ -12,7 +12,8 @@
 
 use std::process::ExitCode;
 
-use loom_render::glam::{EulerRot, Mat4, Quat, Vec3};
+use loom_ecs::{FixedTimestep, World};
+use loom_render::glam::{Mat4, Vec3};
 use loom_render::{Camera, Device, Instance, Object, Renderer};
 use loom_scene::{Scene, components};
 
@@ -49,6 +50,10 @@ fn run(args: &[String]) -> (u8, String) {
         },
         Some("render") => match args.get(1) {
             Some(path) => render(path, args),
+            None => (2, USAGE.to_owned()),
+        },
+        Some("sim") => match args.get(1) {
+            Some(path) => sim(path, args),
             None => (2, USAGE.to_owned()),
         },
         _ => (2, USAGE.to_owned()),
@@ -144,7 +149,8 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
     };
 
-    let objects = scene_to_objects(&scene);
+    let world = World::from_scene(&scene);
+    let objects = world_to_objects(&world);
     let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok()).unwrap_or(35.0);
     let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok()).unwrap_or(28.0);
     let camera = frame_scene(&objects, yaw, pitch);
@@ -180,48 +186,25 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     }
 }
 
-/// Flatten the node tree into draw calls, composing world transforms.
+/// Flatten the world into draw calls.
 ///
-/// Transform propagation properly belongs to the ECS at M3; this walks the
-/// parent chain directly because M2 has no ECS yet. Nodes are declared
-/// parents-first (the forward-reference rule), so one pass suffices.
-fn scene_to_objects(scene: &Scene) -> Vec<Object> {
-    let mut world: std::collections::BTreeMap<String, Mat4> = std::collections::BTreeMap::new();
-    let mut objects = Vec::new();
-
-    for (index, node) in scene.nodes().iter().enumerate() {
-        let t = &node.transform;
-        let local = Mat4::from_scale_rotation_translation(
-            Vec3::from_array(t.scale),
-            // Intrinsic Y-X-Z, array ordered [pitch_x, yaw_y, roll_z]
-            // (docs/format/README.md §1.1).
-            Quat::from_euler(
-                EulerRot::YXZ,
-                t.rot_euler[1].to_radians(),
-                t.rot_euler[0].to_radians(),
-                t.rot_euler[2].to_radians(),
-            ),
-            Vec3::from_array(t.pos),
-        );
-        let parent = node
-            .parent
-            .as_ref()
-            .and_then(|p| world.get(p))
-            .copied()
-            .unwrap_or(Mat4::IDENTITY);
-        let model = parent * local;
-        world.insert(node.path.clone(), model);
-
-        // Only nodes that declare a MeshRenderer are drawn — a Light or a bare
-        // grouping node is not geometry.
-        if node.components.contains_key("MeshRenderer") {
-            objects.push(Object {
-                model,
+/// Transform propagation lives in `loom_ecs` as of M3; this only reads the
+/// resolved `GlobalTransform`. The parent-chain walk that used to live here
+/// was a stand-in until the ECS existed, and is gone.
+fn world_to_objects(world: &World) -> Vec<Object> {
+    world
+        .entities()
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| world.is_renderable(**e))
+        .filter_map(|(index, entity)| {
+            let global = world.global_transform(*entity)?;
+            Some(Object {
+                model: Mat4::from_cols_array(&global.matrix),
                 color: palette(index),
-            });
-        }
-    }
-    objects
+            })
+        })
+        .collect()
 }
 
 /// Distinct per-object colours until materials exist (M5).
@@ -279,6 +262,56 @@ fn frame_scene(objects: &[Object], yaw_degrees: f32, pitch_degrees: f32) -> Came
         target: center,
         fov_y_degrees: 45.0,
     }
+}
+
+/// Simulate headless and print a deterministic state hash.
+///
+/// The second of the agent's two verification channels (brief §5). A render
+/// tells you a script *looks* fine while it leaks entities on frame 900; only
+/// simulation catches that.
+fn sim(path: &str, args: &[String]) -> (u8, String) {
+    let ticks: u64 = flag(args, "--ticks")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                2,
+                json_line(&serde_json::json!({
+                    "error": "io_error", "path": path, "constraint": e.to_string(),
+                })),
+            );
+        }
+    };
+    let scene = match Scene::parse(&src) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+
+    let mut world = World::from_scene(&scene);
+    let mut clock = FixedTimestep::new(60.0);
+
+    // Elapsed time is fed in as an exact constant, never read from the wall
+    // clock (never-do #8). That is what makes this reproducible, and it is why
+    // `advance` takes the delta as an argument.
+    for _ in 0..ticks {
+        clock.advance(clock.step_seconds());
+        world.propagate_transforms();
+    }
+
+    (
+        0,
+        json_line(&serde_json::json!({
+            "ok": true,
+            "path": path,
+            "ticks": clock.tick,
+            "entities": world.entities().len(),
+            // Hex so two runs are trivially eyeball-comparable.
+            "state_hash": format!("{:016x}", world.state_hash()),
+        })),
+    )
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -358,6 +391,37 @@ mod tests {
 
         assert_eq!(code, 2, "2 means 'you called it wrong', 1 means 'invalid'");
         assert!(out.contains("io_error"));
+    }
+
+    /// **The M3 exit criterion, end to end.** The same scene simulated twice
+    /// must produce the same hash — otherwise every `--assert` the agent writes
+    /// is flaky, and flaky assertions train it to ignore failures (§7.5).
+    #[test]
+    fn simulating_the_same_scene_twice_gives_the_same_hash() {
+        let run = || {
+            let (code, out) = run(&args(&["sim", "../../assets/test/blockout.loom", "--ticks", "240"]));
+            assert_eq!(code, 0, "{out}");
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            v["state_hash"].as_str().unwrap().to_owned()
+        };
+
+        assert_eq!(run(), run());
+    }
+
+    /// A different scene must hash differently, or the check proves nothing.
+    #[test]
+    fn a_different_scene_hashes_differently() {
+        let hash_of = |path: &str| {
+            let (_, out) = run(&args(&["sim", path, "--ticks", "60"]));
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            v["state_hash"].as_str().map(str::to_owned)
+        };
+
+        assert_ne!(
+            hash_of("../../assets/test/blockout.loom"),
+            hash_of("../../assets/test/office.loom"),
+            "two different scenes must not collide"
+        );
     }
 
     #[test]

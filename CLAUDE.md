@@ -126,19 +126,18 @@ change, so your edits appear live. Two consequences:
 
 ## Current milestone
 
-> **M3 — ECS + fixed timestep.** Update this line at every milestone. See §6 of the build brief.
+> **M4 — render graph.** Update this line at every milestone. See §6 of the build brief.
 >
-> M0, M1, M2 done. `loom render <scene.loom> --out x.png` draws a real scene headless with zero
-> validation messages, via dynamic rendering + buffer device address + a single instanced draw.
-> Toolchain (validation layer, slangc, spirv-val) installed — see `docs/design/README.md`.
+> M0–M3 done. `loom render` draws a scene headless; `loom sim --ticks N` prints a deterministic
+> state hash (verified: same scene twice, identical hash; different scenes differ).
 >
-> Next: archetype storage, queries, `Local` -> `Global` transform propagation, fixed-timestep loop,
-> `loom sim <scene> --ticks N` printing a deterministic state hash.
-> Exit: the same scene simulated twice produces identical hashes. Watch §7.5 — no `HashMap`
-> iteration, no `thread_rng`, no wall clock in sim code. `clippy.toml` already enforces all three.
+> Next: pass declaration, transient resource allocation, **automatic barrier and layout-transition
+> placement**, queue ownership transfers. Read `caldera` (sjb3d) first — it has already solved this
+> in Rust. Exit: a 3-pass graph (depth prepass → forward → post) renders correctly headless with
+> synchronization validation enabled and silent.
 >
-> Transform propagation currently lives in `loom_cli::scene_to_objects` as a temporary parent-chain
-> walk. M3 is where it moves into a real system; delete it from the CLI when it does.
+> When the graph lands, every hand-placed barrier in `loom_render::renderer` moves into it and
+> never comes back (never-do #4).
 
 ---
 

@@ -129,10 +129,18 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 name = "loom_cli"
 version = "0.0.0"
 dependencies = [
+ "loom_ecs",
  "loom_render",
  "loom_scene",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "loom_ecs"
+version = "0.0.0"
+dependencies = [
+ "loom_scene",
 ]
 
 [[package]]
