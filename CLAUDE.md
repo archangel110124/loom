@@ -126,12 +126,17 @@ change, so your edits appear live. Two consequences:
 
 ## Current milestone
 
-> **M1 — reflection + scene format.** Update this line at every milestone. See §6 of the build brief.
+> **M2 — Vulkan headless.** Update this line at every milestone. See §6 of the build brief.
 >
-> M0 done (green passes). Format spec written and normative: `docs/format/README.md`.
-> Next: `loom_reflect` derive macro → type registry → `loom_scene` parser → `loom validate`.
-> Exit: `assets/test/office.loom` round-trips byte-identically; `bad_intensity.loom` is rejected
-> with field, value, and constraint named.
+> M0, M1 done — exit criteria met and under test (`scripts/green.sh`). `loom validate` and
+> `loom describe` run; `office.loom` round-trips byte-identically.
+>
+> **M2 is BLOCKED on tooling** — see `docs/design/README.md` "Environment prerequisites".
+> `VK_LAYER_KHRONOS_validation` is absent, so definition-of-green check #2 would pass
+> *vacuously*. Install it, `spirv-tools`, and `slangc` before writing any Vulkan code.
+> Then: instance/device → `gpu-allocator` → Slang in `build.rs` → offscreen target → PNG.
+> Exit: `loom render triangle.loom --out t.png` writes a triangle, zero validation messages,
+> no window. Read brief §7.1–7.4 and the Vulkan doc first; never write `ash` from memory.
 
 Do not start the next milestone until the current one's exit criterion actually runs.
 

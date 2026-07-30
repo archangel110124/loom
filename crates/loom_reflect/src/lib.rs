@@ -46,6 +46,15 @@ impl TypeRegistry {
         self.types.get(name)
     }
 
+    /// Every registered type name, sorted.
+    ///
+    /// Sorted because it backs `list_types` and the "did you mean" list on a
+    /// failed lookup, and unstable ordering there would make CLI output and
+    /// golden tests flap. `BTreeMap` gives this for free.
+    pub fn type_names(&self) -> impl Iterator<Item = &str> {
+        self.types.keys().map(String::as_str)
+    }
+
     /// Check a component's field values against its registered schema.
     ///
     /// Returns every violation, not just the first — an agent correcting one
