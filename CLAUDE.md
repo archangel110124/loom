@@ -5,6 +5,8 @@ sculpts destructible voxel terrain, and writes scripts — through a tool API, a
 with schema validation and visual + simulation verification.
 
 Full plan: `docs/design/LOOM-BUILD-BRIEF.md`. Traps: §7 of that document. Read it before Vulkan work.
+Five companion docs sit alongside it — **start at `docs/design/README.md`**, which routes by
+milestone and flags the superseded wgpu-era passages you must not build against.
 
 Platform: Fedora 44, RTX 4090 (power-capped to 300W), Vulkan 1.3 target on a 1.4 loader.
 No web target. Single developer + agent.

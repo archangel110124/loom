@@ -33,8 +33,13 @@ Three properties define the architecture. Everything else follows from them:
    simulation with assertions.
 3. **The runtime is deterministic**, so those assertions are trustworthy.
 
-Target platform: Arch Linux, NVIDIA RTX 4090, Vulkan 1.3. No web target. Single developer plus
-agent.
+Target platform: Fedora 44, NVIDIA RTX 4090 (power-capped to 300W), Vulkan 1.3 target on a 1.4
+loader. No web target. Single developer plus agent.
+<!-- Corrected 2026-07-30: originally read "Arch Linux". Reality wins (§7.13); CLAUDE.md was
+     already corrected at M0. -->
+
+**New here? Read [`README.md`](README.md) first** — it maps the six design docs and flags which
+passages are superseded.
 
 ---
 
@@ -45,7 +50,7 @@ re-deciding them mid-build costs weeks.
 
 | Area | Decision |
 | --- | --- |
-| Language | Rust, 2021 edition, pinned toolchain |
+| Language | Rust, **2024 edition** (was 2021 — see ADR 0001), pinned toolchain |
 | Graphics API | **Vulkan 1.3 via `ash`.** No wgpu. No portability abstraction layer. |
 | Render pass model | **Dynamic rendering only.** Never create `VkRenderPass` or `VkFramebuffer`. |
 | Binding model | **Descriptor indexing + buffer device address.** No per-draw descriptor sets. |
