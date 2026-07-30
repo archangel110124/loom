@@ -16,6 +16,3 @@ members = ["crates/loom_cli", "crates/loom_reflect", "crates/loom_render", "crat
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
-
-# Pin exactly. Never float a version. Add with `cargo add`.
-[workspace.dependencies]

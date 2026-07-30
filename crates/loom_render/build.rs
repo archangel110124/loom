@@ -53,9 +53,11 @@ fn compile(shader: &Path, out_dir: &Path) {
         .arg(shader)
         .args(["-target", "spirv"])
         .args(["-profile", "spirv_1_5"])
-        // Matrix layout must match what the Rust side writes. Pinning it here
-        // rather than relying on the default keeps the two from drifting.
-        .arg("-matrix-layout-row-major")
+        // Column-major, to match glam's `to_cols_array()` on the Rust side and
+        // the SPIR-V/GLSL convention. Pinned explicitly rather than left to the
+        // default: getting this wrong transposes every matrix, which validation
+        // cannot see and which looks like exploding geometry in the render.
+        .arg("-matrix-layout-column-major")
         .arg("-g2")
         .args(["-o".as_ref(), spv.as_os_str()])
         .output()

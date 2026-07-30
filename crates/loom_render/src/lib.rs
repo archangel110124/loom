@@ -13,12 +13,22 @@
 
 mod device;
 mod instance;
+mod renderer;
+
+/// Re-exported because this crate's public API is expressed in `glam` types.
+/// A consumer depending on its own copy would hit a silent version skew — two
+/// `Mat4` types that look identical and do not unify.
+pub use glam;
 
 pub use device::{Device, DeviceError};
+pub use renderer::{Camera, Object, RenderError, Renderer};
 pub use instance::{Instance, InstanceError, take_validation_messages};
 
 /// The compiled triangle shader, embedded at build time by `build.rs`.
 pub const TRIANGLE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/triangle.spv"));
+
+/// The scene shader (one lit cube per object), embedded at build time.
+pub const SCENE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scene.spv"));
 
 #[cfg(test)]
 mod tests {
@@ -105,6 +115,71 @@ mod tests {
         if let Err(messages) = instance.check_validation() {
             panic!("validation was not silent:\n  {}", messages.join("\n  "));
         }
+    }
+
+    /// The M2 payoff: objects rendered offscreen, validation silent, pixels real.
+    #[test]
+    fn renders_objects_to_a_non_blank_image() {
+        let Ok(instance) = Instance::new(c"loom-render-test") else {
+            eprintln!("skipping: no Vulkan loader");
+            return;
+        };
+        let device = match Device::new(&instance) {
+            Ok(d) => d,
+            Err(DeviceError::NoDevices) => {
+                eprintln!("skipping: no Vulkan device");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let _ = instance.check_validation();
+
+        let mut renderer = Renderer::new(&instance, &device, 256, 192).expect("renderer");
+        let objects = [
+            Object {
+                model: glam::Mat4::from_translation(glam::Vec3::new(-2.2, 0.0, 0.0))
+                    * glam::Mat4::from_scale(glam::Vec3::splat(0.8)),
+                color: [0.9, 0.3, 0.3],
+            },
+            Object {
+                model: glam::Mat4::from_scale(glam::Vec3::splat(0.8)),
+                color: [0.3, 0.9, 0.4],
+            },
+        ];
+        let camera = Camera {
+            eye: glam::Vec3::new(3.0, 3.0, 6.0),
+            target: glam::Vec3::ZERO,
+            fov_y_degrees: 45.0,
+        };
+
+        let pixels = renderer.render(&objects, &camera).expect("render");
+
+        if let Err(messages) = instance.check_validation() {
+            panic!("validation was not silent:\n  {}", messages.join("\n  "));
+        }
+
+        assert_eq!(pixels.len(), 256 * 192 * 4);
+        // Something was actually drawn: more than one distinct colour means
+        // geometry landed, not just the clear.
+        let distinct: std::collections::BTreeSet<[u8; 3]> = pixels
+            .chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2]])
+            .collect();
+        assert!(
+            distinct.len() > 4,
+            "image looks blank — only {} distinct colours",
+            distinct.len()
+        );
+    }
+
+    #[test]
+    fn push_constants_match_the_shader_block() {
+        // mat4 + 3 padded rows + vec4 = 64 + 48 + 16 = 128, exactly Vulkan's
+        // guaranteed minimum push-constant size. A mismatch with `Push` in
+        // scene.slang is garbage on screen with no diagnostic (brief §7.7),
+        // and exceeding 128 would fail on conformant hardware we cannot test.
+        let size = size_of::<[f32; 16]>() + size_of::<[[f32; 4]; 3]>() + size_of::<[f32; 4]>();
+        assert_eq!(size, 128, "push block must fit the guaranteed minimum");
     }
 
     #[test]

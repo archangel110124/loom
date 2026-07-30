@@ -25,7 +25,7 @@ pub struct Scene {
 }
 
 /// One node in the tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     /// Unique among siblings.
     pub name: String,
@@ -33,6 +33,18 @@ pub struct Node {
     pub parent: Option<String>,
     /// Slash-separated path from the root, including it: `Office/Desk`.
     pub path: String,
+    /// Local transform relative to the parent. Identity when omitted.
+    ///
+    /// Local, not world: composing the parent chain is transform propagation,
+    /// which belongs to the ECS at M3. Keeping it local here means `loom_scene`
+    /// needs no matrix math and no linear-algebra dependency.
+    pub transform: components::Transform,
+    /// Attached components, keyed by registered type name.
+    ///
+    /// Kept as JSON rather than typed fields so consumers can read any
+    /// component without this struct growing one accessor per type — the same
+    /// reason the registry is schema-driven.
+    pub components: BTreeMap<String, Value>,
 }
 
 /// A rejection, shaped per `docs/format/README.md` §6.
@@ -201,11 +213,28 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
             continue;
         }
 
+        let transform = table
+            .get("transform")
+            .and_then(item_to_json)
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+
+        let mut component_map = BTreeMap::new();
+        if let Some(table_like) = table.get("components").and_then(Item::as_table_like) {
+            for (type_name, item) in table_like.iter() {
+                if let Some(value) = item_to_json(item) {
+                    component_map.insert(type_name.to_owned(), value);
+                }
+            }
+        }
+
         known.insert(path.clone());
         nodes.push(Node {
             name: name.to_owned(),
             parent: parent.map(str::to_owned),
             path,
+            transform,
+            components: component_map,
         });
     }
 

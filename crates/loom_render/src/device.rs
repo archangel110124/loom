@@ -73,11 +73,18 @@ impl Device {
             .descriptor_indexing(true)
             .runtime_descriptor_array(true)
             .descriptor_binding_partially_bound(true);
+        // Slang emits the SPIR-V `DrawParameters` capability for shaders that
+        // read SV_VertexID. Without this the module is rejected with
+        // VUID-VkShaderModuleCreateInfo-pCode-08740 — found by validation, not
+        // by the compiler, which is exactly brief §7.3's point.
+        let mut features11 =
+            vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .push_next(&mut features13)
-            .push_next(&mut features12);
+            .push_next(&mut features12)
+            .push_next(&mut features11);
 
         // SAFETY: `physical` came from this instance; all borrows outlive the call.
         let raw = unsafe { instance.handle().create_device(physical, &create_info, None) }
@@ -175,9 +182,11 @@ fn select_physical_device(
 
         let mut features13 = vk::PhysicalDeviceVulkan13Features::default();
         let mut features12 = vk::PhysicalDeviceVulkan12Features::default();
+        let mut features11 = vk::PhysicalDeviceVulkan11Features::default();
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut features13)
-            .push_next(&mut features12);
+            .push_next(&mut features12)
+            .push_next(&mut features11);
         // SAFETY: the chain above outlives this call.
         unsafe {
             instance
@@ -200,6 +209,9 @@ fn select_physical_device(
         }
         if features12.runtime_descriptor_array == vk::FALSE {
             missing.push("runtimeDescriptorArray");
+        }
+        if features11.shader_draw_parameters == vk::FALSE {
+            missing.push("shaderDrawParameters");
         }
         if !missing.is_empty() {
             rejections.push(format!("{name}: missing {}", missing.join(", ")));
