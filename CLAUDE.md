@@ -126,16 +126,17 @@ change, so your edits appear live. Two consequences:
 
 ## Current milestone
 
-> **M7 — physics.** Update this line at every milestone. See §6 of the build brief.
+> **M8 — scripting.** Update this line at every milestone. See §6 of the build brief.
 >
-> M0–M6 done. Actions load from `assets/input/default.toml`; rebinding needs no rebuild.
+> M0–M7 done. A capsule rests on a floor and does not tunnel; physics replays identically;
+> `loom validate` reports physical sanity findings alongside schema errors.
 >
-> Next: `rapier3d`, fixed-step, colliders from components, character controller.
-> Exit: a capsule walks on a mesh floor; M3's determinism hash stays stable with physics active.
-> **Put the §7.15 physical sanity checks in the validator now, not later** — mass ratio, degenerate
-> collider scale, interpenetration at spawn. The agent generates pathological scenes with no idea
-> anything is wrong, and "the physics is broken" is unattributable without them.
-> Never put a trimesh collider on a dynamic body (never-do #10).
+> Next: `rhai` host, API registration generated from the type registry, hard op/depth limits,
+> file-watcher hot reload, structured script errors.
+> Exit: a `.rhai` file rotates a cube; editing it takes effect without restart; **a script
+> attempting file I/O fails a test that asserts it fails** (§7.8 — the sandbox needs an
+> adversarial test, not a review; "safe because we only registered safe functions" is a claim
+> about absence and absence is not testable by reading).
 
 ---
 

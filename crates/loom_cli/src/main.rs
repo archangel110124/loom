@@ -87,14 +87,25 @@ fn validate(path: &str) -> (u8, String) {
     };
 
     match Scene::parse(&src) {
-        Ok(scene) => (
-            0,
-            json_line(&serde_json::json!({
-                "ok": true,
-                "path": path,
-                "nodes": scene.nodes().len(),
-            })),
-        ),
+        Ok(scene) => {
+            // Physical sanity runs after schema validation, because a scene
+            // that will not load cannot be reasoned about physically. These
+            // are warnings by design (graphics doc §C.5): an unusual scene is
+            // not an invalid one, but the agent should be told what is odd.
+            let findings = loom_physics::check_scene(&scene);
+            let blocking = findings
+                .iter()
+                .any(|f| f.severity == loom_physics::Severity::Error);
+            (
+                u8::from(blocking),
+                json_line(&serde_json::json!({
+                    "ok": !blocking,
+                    "path": path,
+                    "nodes": scene.nodes().len(),
+                    "physics": findings,
+                })),
+            )
+        }
         // Every violation, not just the first — one round-trip per fix is the
         // retry loop `docs/format/README.md` §6 exists to avoid.
         Err(errors) => (1, json_line(&serde_json::json!({ "errors": errors }))),
