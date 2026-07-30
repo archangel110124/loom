@@ -126,17 +126,21 @@ change, so your edits appear live. Two consequences:
 
 ## Current milestone
 
-> **M8 — scripting.** Update this line at every milestone. See §6 of the build brief.
+> **M9 — the agent loop. THE GATE THAT MATTERS.** See §6 of the build brief.
 >
-> M0–M7 done. A capsule rests on a floor and does not tunnel; physics replays identically;
-> `loom validate` reports physical sanity findings alongside schema errors.
+> M0–M8 done. Sandbox verified adversarially: file, process, network, infinite loop, deep
+> recursion, and huge allocation each have a test asserting they FAIL.
 >
-> Next: `rhai` host, API registration generated from the type registry, hard op/depth limits,
-> file-watcher hot reload, structured script errors.
-> Exit: a `.rhai` file rotates a cube; editing it takes effect without restart; **a script
-> attempting file I/O fails a test that asserts it fails** (§7.8 — the sandbox needs an
-> adversarial test, not a review; "safe because we only registered safe functions" is a claim
-> about absence and absence is not testable by reading).
+> Next: `loom scene` subcommands for every mutation, transactions with one undo step and
+> `--dry-run`, `loom render` multi-angle, `loom sim --assert`, semantic placement
+> (`place_on`, `align_to`, `grid_on`, `face_toward`), `scene_measure`. Then the MCP server
+> **wrapping the CLI** (§7.10 — CLI first, or building the agent interface with the agent is
+> circular).
+>
+> Exit: *"Block out a computer lab: 6 desks in two rows, a monitor on each, a teacher desk facing
+> them, overhead lights. Then make the monitors turn on when the player walks in."* — produced,
+> self-corrected from its own render, behaviour proven by a headless assertion.
+> **If this fails, stop and fix the loop. Everything after is worthless without it.**
 
 ---
 
