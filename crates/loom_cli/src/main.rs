@@ -62,6 +62,10 @@ fn run(args: &[String]) -> (u8, String) {
             Some(path) => scene_tx(path, args),
             None => (2, USAGE.to_owned()),
         },
+        Some("terrain") => match args.get(1) {
+            Some(path) => terrain(path, args),
+            None => (2, USAGE.to_owned()),
+        },
         Some("explode") => match args.get(1) {
             Some(path) => explode(path, args),
             None => (2, USAGE.to_owned()),
@@ -749,6 +753,98 @@ fn scene_tx(path: &str, args: &[String]) -> (u8, String) {
         }
         Err(e) => (1, json_line(&e)),
     }
+}
+
+/// Bake a terrain recipe and report what it produced.
+///
+/// **The terrain feedback channel** (terrain doc §7). `render_preview` verifies
+/// placement and `run_scene` verifies behaviour; terrain needs its own, and it
+/// is mostly not visual — most terrain mistakes are invisible in a render and
+/// obvious in a slope map. The stats matter more than the pretty picture: a
+/// gorgeous mountain range with 3% buildable ground is a failed level, and
+/// nothing in a hillshade reveals that.
+fn terrain(path: &str, args: &[String]) -> (u8, String) {
+    let recipe = match loom_terrain::Recipe::load(std::path::Path::new(path)) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                1,
+                json_line(&serde_json::json!({
+                    "error": "invalid_recipe", "path": path, "constraint": e.to_string(),
+                })),
+            );
+        }
+    };
+
+    let map = recipe.bake();
+    let stats = loom_terrain::analyze(&map);
+
+    let mut written = Vec::new();
+    if let Some(prefix) = flag(args, "--out") {
+        for (kind, name) in [
+            (loom_terrain::analyze::MapKind::Hillshade, "hillshade"),
+            (loom_terrain::analyze::MapKind::Slope, "slope"),
+            (loom_terrain::analyze::MapKind::Buildable, "buildable"),
+            (loom_terrain::analyze::MapKind::Height, "height"),
+        ] {
+            let file = format!("{prefix}_{name}.png");
+            if let Err(e) = loom_terrain::analyze::write_png(&map, kind, std::path::Path::new(&file))
+            {
+                return (1, json_line(&serde_json::json!({
+                    "error": "io_error", "path": file, "constraint": e.to_string(),
+                })));
+            }
+            written.push(file);
+        }
+    }
+
+    // Traversability, when asked. This closes the loop on the Corridor layer:
+    // generate, verify the route, adjust — an agent working on gameplay rather
+    // than on aesthetics.
+    let reachable = match (
+        flag(args, "--from").and_then(|s| parse_vec2(&s)),
+        flag(args, "--to").and_then(|s| parse_vec2(&s)),
+    ) {
+        (Some(from), Some(to)) => Some(loom_terrain::analyze::is_reachable(
+            &map,
+            from,
+            to,
+            flag(args, "--max-slope")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20.0),
+        )),
+        _ => None,
+    };
+
+    (
+        0,
+        json_line(&serde_json::json!({
+            "ok": true,
+            "recipe": path,
+            "content_hash": recipe.content_hash(),
+            "size": recipe.size,
+            "height": {
+                "min": stats.height_min, "max": stats.height_max, "mean": stats.height_mean,
+            },
+            "slope": {
+                "mean": stats.slope_mean, "over_45_pct": stats.slope_over_45_pct,
+            },
+            "buildable_pct": stats.buildable_pct,
+            "largest_flat": stats.largest_flat.map(|(c, area)| serde_json::json!({
+                "center": c, "area_px": area,
+            })),
+            "reachable": reachable,
+            // Legal but almost certainly unintended layer ordering. A rejection
+            // is the agent's teacher; so is a warning it can act on.
+            "warnings": recipe.order_warnings(),
+            "maps": written,
+        })),
+    )
+}
+
+fn parse_vec2(spec: &str) -> Option<[usize; 2]> {
+    let parts: Vec<usize> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+    (parts.len() == 2).then(|| [parts[0], parts[1]])
 }
 
 /// Blast a voxel surface and render the aftermath.

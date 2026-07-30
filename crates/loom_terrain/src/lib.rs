@@ -334,6 +334,42 @@ impl Recipe {
         Self::from_toml(&text)
     }
 
+    /// Layer-order problems that are legal but almost certainly unintended.
+    ///
+    /// The terrain doc's ordering — noise, then art direction, then erosion —
+    /// is right for *shape* layers: place the landforms gameplay needs, then
+    /// let erosion make them look real. It is **wrong for constraint layers**.
+    ///
+    /// A [`Layer::Corridor`] is a guarantee, not a shape. Measured: a corridor
+    /// carved before 30 iterations of thermal erosion stops being traversable,
+    /// because erosion happily slides material back into it. The guarantee
+    /// holds at the moment it is applied and not afterwards.
+    ///
+    /// An agent hits this exactly once and has no way to see why, so the
+    /// recipe says so rather than leaving it to be discovered.
+    #[must_use]
+    pub fn order_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let erosion_at = self
+            .layer
+            .iter()
+            .position(|l| matches!(l, Layer::Hydraulic { .. } | Layer::Thermal { .. }));
+
+        if let Some(erosion) = erosion_at {
+            for (index, layer) in self.layer.iter().enumerate() {
+                if index < erosion && matches!(layer, Layer::Corridor { .. }) {
+                    warnings.push(
+                        "a `corridor` layer runs BEFORE erosion, which will erode the route \
+                         it guarantees. A corridor is a constraint, not a shape — move it \
+                         after the erosion layers."
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        warnings
+    }
+
     /// Content hash of the recipe.
     ///
     /// **Erosion is baked once and keyed by this** (§4.4). GPU erosion with
@@ -681,6 +717,46 @@ mod tests {
         let after = steepest(&eroded.bake());
 
         assert!(after < before, "thermal should soften: {before}° -> {after}°");
+    }
+
+    /// A corridor before erosion is legal and almost certainly wrong: the
+    /// route it guarantees does not survive. Measured before it was warned
+    /// about — reachable went true to false purely by adding thermal.
+    #[test]
+    fn a_corridor_before_erosion_is_warned_about() {
+        let bad = recipe(
+            "[[layer]]\nkind = \"ridged\"\n\n\
+             [[layer]]\nkind = \"corridor\"\nfrom = [4.0, 32.0]\nto = [59.0, 32.0]\nwidth = 4.0\n\n\
+             [[layer]]\nkind = \"thermal\"\n",
+        );
+        let good = recipe(
+            "[[layer]]\nkind = \"ridged\"\n\n\
+             [[layer]]\nkind = \"thermal\"\n\n\
+             [[layer]]\nkind = \"corridor\"\nfrom = [4.0, 32.0]\nto = [59.0, 32.0]\nwidth = 4.0\n",
+        );
+
+        assert_eq!(bad.order_warnings().len(), 1, "must warn");
+        assert!(bad.order_warnings()[0].contains("after the erosion"));
+        assert!(good.order_warnings().is_empty(), "correct order is silent");
+    }
+
+    /// The guarantee itself: a corridor applied last survives.
+    #[test]
+    fn a_corridor_after_erosion_stays_traversable() {
+        let r = Recipe::from_toml(
+            "size = [96, 96]\nworld_scale = [768.0, 768.0]\n\
+             height_range = [0.0, 300.0]\nseed = 4\n\n\
+             [[layer]]\nkind = \"ridged\"\noctaves = 6\n\n\
+             [[layer]]\nkind = \"thermal\"\ntalus_degrees = 34.0\niterations = 25\n\n\
+             [[layer]]\nkind = \"corridor\"\n\
+             from = [8.0, 48.0]\nto = [87.0, 48.0]\nwidth = 7.0\nmax_slope = 10.0\n",
+        )
+        .unwrap();
+
+        assert!(
+            analyze::is_reachable(&r.bake(), [8, 48], [87, 48], 20.0),
+            "a corridor applied after erosion must survive it"
+        );
     }
 
     #[test]

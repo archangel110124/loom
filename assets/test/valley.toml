@@ -1,0 +1,51 @@
+# "A mountain valley with a buildable plateau for a fort and a walkable path
+#  from the south."
+#
+# Layer order is the whole design: noise makes mountains, art direction places
+# what gameplay needs, then erosion makes it look real. Reversed, erosion sands
+# off exactly the features placed on purpose.
+
+size = [192, 192]
+world_scale = [1536.0, 1536.0]
+height_range = [0.0, 420.0]
+seed = 20260730
+
+# --- the mountains -------------------------------------------------
+[[layer]]
+kind = "ridged"
+amplitude = 1.0
+frequency = 0.010
+octaves = 7
+warp = 40.0
+
+# --- art direction -------------------------------------------------
+# The valley, running north-south through the range.
+[[layer]]
+kind = "spline_carve"
+points = [[96.0, 190.0], [92.0, 140.0], [98.0, 100.0], [96.0, 60.0]]
+width = 26.0
+depth = 210.0
+
+# The plateau the fort sits on, beside the valley.
+[[layer]]
+kind = "flatten_disc"
+center = [120.0, 96.0]
+radius = 26.0
+blend = 0.45
+
+# --- erosion, last -------------------------------------------------
+[[layer]]
+kind = "thermal"
+talus_degrees = 34.0
+iterations = 30
+
+# --- the guarantee, LAST ---------------------------------------------
+# A corridor is a constraint, not a shape. Applied before erosion, the
+# route it guarantees gets eroded away — measured, and now warned about.
+[[layer]]
+kind = "corridor"
+from = [96.0, 188.0]
+to = [120.0, 96.0]
+width = 9.0
+max_slope = 11.0
+
