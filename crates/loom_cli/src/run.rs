@@ -169,6 +169,13 @@ struct App {
     /// Smoothed, because a number that changes sixty times a second is not a
     /// number anyone can read.
     fps: f32,
+    /// Frames still to draw before shutting down, when `--frames` was passed.
+    ///
+    /// Exists so the **whole lifecycle** — create, draw, tear down — can be
+    /// run unattended under the validation layers. Every teardown bug found so
+    /// far needed a human to open a window and close it; this is what lets
+    /// `cargo xtask validate` do that instead.
+    frames_left: Option<u32>,
     title: String,
 }
 
@@ -267,6 +274,7 @@ impl App {
             #[allow(clippy::disallowed_methods)]
             last_frame: std::time::Instant::now(),
             fps: 0.0,
+            frames_left: None,
             title,
         }
     }
@@ -647,6 +655,16 @@ impl ApplicationHandler for App {
                 // Transitions are per-frame, so clearing them is what makes
                 // `pressed` mean "this frame" rather than "ever".
                 self.input.end_frame();
+
+                if let Some(left) = self.frames_left {
+                    let left = left.saturating_sub(1);
+                    self.frames_left = Some(left);
+                    if left == 0 {
+                        crate::log::info("frame budget reached — closing");
+                        self.shutdown(event_loop);
+                        return;
+                    }
+                }
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -790,7 +808,7 @@ impl App {
     }
 
     fn save(&mut self) {
-        let Some(session) = self.session.as_ref() else {
+        let Some(session) = self.session.as_mut() else {
             return;
         };
         match session.save() {
@@ -801,6 +819,14 @@ impl App {
                 self.dirty = false;
                 self.conflict = None;
                 crate::log::info(format!("saved {}", self.scene_path.display()));
+            }
+            // The file moved under us between watcher ticks. Both versions are
+            // intact; raise the same banner the watcher would have, rather
+            // than overwriting somebody else's work (never-do #15).
+            Err(loom_scene::SaveRejected::Stale { current }) => {
+                crate::log::warn("not saved: the scene changed on disk — choose which version to keep");
+                self.disk_seen = loom_scene::VersionToken::of(&current);
+                self.conflict = Some(current);
             }
             Err(e) => crate::log::error(format!("save failed: {e}")),
         }
@@ -1439,6 +1465,7 @@ pub fn run(
     view: SceneView,
     session: Option<loom_scene::Session>,
     disk_seen: loom_scene::VersionToken,
+    frames: Option<u32>,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
     // Poll, not Wait: the camera animates continuously while keys are held, and
@@ -1455,6 +1482,7 @@ pub fn run(
         std::path::PathBuf::from(path),
         disk_seen,
     );
+    app.frames_left = frames.filter(|n| *n > 0);
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))
@@ -1464,7 +1492,7 @@ pub fn run(
 ///
 /// # Errors
 /// A message describing what stopped it.
-pub fn open_scene(path: &str, editable: bool) -> Result<(), String> {
+pub fn open_scene(path: &str, editable: bool, frames: Option<u32>) -> Result<(), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let base = std::path::Path::new(path)
         .parent()
@@ -1479,5 +1507,5 @@ pub fn open_scene(path: &str, editable: bool) -> Result<(), String> {
         .transpose()
         .map_err(|e| format!("{path}: {e}"))?;
 
-    run(path, view, session, disk_seen)
+    run(path, view, session, disk_seen, frames)
 }

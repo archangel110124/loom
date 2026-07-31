@@ -8,7 +8,7 @@ pub mod ops;
 pub mod place;
 mod scene;
 
-pub use edit::Session;
+pub use edit::{SaveRejected, Session};
 pub use ops::{Applied, SceneOp, Transaction, TransactionError, VersionToken, apply};
 pub use place::{Anchor, Axis, PlaceOp};
 pub use scene::{Node, Scene, SceneError};

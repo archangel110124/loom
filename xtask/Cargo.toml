@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# No dependencies on purpose. This drives the real `loom` binary as a
+# subprocess rather than linking the engine: a gate that shares code with the
+# thing it checks can be fooled by the same bug twice.
+[dependencies]

@@ -427,11 +427,28 @@ fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
             let array = doc["node"].as_array_of_tables_mut().unwrap();
             let table = array.get_mut(index).unwrap();
 
-            let mut inline = table
+            // Read whichever spelling is on disk. `transform` may be an
+            // inline table or a `[node.transform]` sub-table, and the parser
+            // accepts both — but only the inline form was read here, so for a
+            // sub-table this started from `Transform::default()` and wiped
+            // every axis the op was not setting. Setting a rotation deleted
+            // the position.
+            let existing: Vec<(String, Item)> = table
                 .get("transform")
-                .and_then(Item::as_inline_table)
-                .cloned()
+                .and_then(Item::as_table_like)
+                .map(|t| {
+                    t.iter()
+                        .map(|(k, v)| (k.to_owned(), v.clone()))
+                        .collect()
+                })
                 .unwrap_or_default();
+
+            let mut inline = toml_edit::InlineTable::new();
+            for (key, item) in existing {
+                if let Some(v) = item.as_value() {
+                    inline.insert(&key, v.clone());
+                }
+            }
             for (key, values) in [("pos", pos), ("rot_euler", rot_euler), ("scale", scale)] {
                 if let Some(v) = values {
                     let mut array = toml_edit::Array::new();
@@ -463,12 +480,29 @@ fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
                 components.set_implicit(true);
                 table["components"] = Item::Table(components);
             }
-            let components = table["components"].as_table_mut().unwrap();
+            // `as_table_like_mut` covers both the sub-table and the inline
+            // spelling. `as_table_mut().unwrap()` covered only one of them, so
+            // editing a field on a node the parser accepts killed the process
+            // and took any unsaved editor work with it.
+            let malformed = |what: &str| {
+                (
+                    "malformed_node".to_owned(),
+                    format!("`{node}` has a `{what}` that is not a table"),
+                    node.clone(),
+                    Some("Components must be tables.".to_owned()),
+                )
+            };
+            let components = table["components"]
+                .as_table_like_mut()
+                .ok_or_else(|| malformed("components"))?;
             if components.get(type_name).is_none() {
-                components[type_name] = Item::Table(Table::new());
+                components.insert(type_name, Item::Table(Table::new()));
             }
-            let component = components[type_name].as_table_mut().unwrap();
-            component[field_name] = json_to_item(new);
+            let component = components
+                .get_mut(type_name)
+                .and_then(Item::as_table_like_mut)
+                .ok_or_else(|| malformed(type_name))?;
+            component.insert(field_name, toml_edit::Item::Value(json_to_toml(new, field)?));
             Ok(())
         }
 
@@ -619,28 +653,62 @@ fn find_node(doc: &DocumentMut, path: &str) -> Option<usize> {
     })
 }
 
-fn json_to_item(value: &Value) -> Item {
-    match value {
-        Value::Bool(b) => toml_edit::value(*b),
-        Value::Number(n) => n.as_f64().map_or_else(
-            || toml_edit::value(n.as_i64().unwrap_or(0)),
-            toml_edit::value,
-        ),
-        Value::String(s) => toml_edit::value(s.as_str()),
+/// A JSON value as TOML, or a refusal.
+///
+/// **Total, and fallible.** This used to fall through to `value("")` for
+/// anything that was not a scalar, which meant an object became the empty
+/// string and an array of objects became `[]` — silently, with the transaction
+/// reporting success and the result still parsing. That is how clicking an
+/// asset in the editor destroyed a node's mesh reference, and how duplicating
+/// a terrain node erased the op list that never-do #11 makes the only
+/// representation of its shape.
+///
+/// The read side already knew about this failure mode: `item_to_json` in
+/// `scene.rs` carries a comment about a voxel op list vanishing. Only the
+/// write side was left flattening.
+fn json_to_toml(value: &Value, field: &str) -> Result<toml_edit::Value, OpFailure> {
+    let unrepresentable = |what: &str| {
+        (
+            "unrepresentable_value".to_owned(),
+            format!("`{field}` cannot hold {what}: TOML has no such value"),
+            field.to_owned(),
+            Some("Use a number, string, boolean, array, or table.".to_owned()),
+        )
+    };
+
+    Ok(match value {
+        Value::Bool(b) => (*b).into(),
+        // Integer-ness is load-bearing: TOML distinguishes 4 from 4.0, and the
+        // voxel reader takes `chunks` through `as_u64`. Writing every number as
+        // a float made those fields stop parsing.
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i.into()
+            } else if let Some(f) = n.as_f64() {
+                f.into()
+            } else {
+                return Err(unrepresentable("a number this large"));
+            }
+        }
+        Value::String(s) => s.as_str().into(),
         Value::Array(items) => {
             let mut array = toml_edit::Array::new();
             for item in items {
-                match item {
-                    Value::Number(n) => array.push(n.as_f64().unwrap_or(0.0)),
-                    Value::Bool(b) => array.push(*b),
-                    Value::String(s) => array.push(s.as_str()),
-                    _ => {}
-                }
+                array.push(json_to_toml(item, field)?);
             }
-            toml_edit::value(array)
+            array.into()
         }
-        _ => toml_edit::value(""),
-    }
+        Value::Object(map) => {
+            let mut table = toml_edit::InlineTable::new();
+            for (key, item) in map {
+                table.insert(key, json_to_toml(item, field)?);
+            }
+            table.into()
+        }
+        // Nothing in TOML is null. Refusing is the only honest answer; writing
+        // an empty string is how a field quietly becomes the wrong type.
+        Value::Null => return Err(unrepresentable("null")),
+    })
 }
 
 /// Line-level diff, so `--dry-run` shows what would land.
@@ -907,6 +975,192 @@ transform = { pos = [0.0, 0.0, 0.0] }
         .expect("should apply");
 
         assert!(applied.scene.contains("A human wrote this comment"));
+    }
+
+    /// **The worst bug class in this project, reached from a toolbar button.**
+    /// `json_to_item` flattened anything that was not a scalar: an object
+    /// became `""`, an array of objects became `[]`. The editor's Assets panel
+    /// sends `MeshRenderer.mesh = {"asset": "box"}`, so clicking it destroyed
+    /// the asset reference and reported success; Duplicate re-emits every
+    /// component field, so duplicating a terrain node wrote `ops = []` and
+    /// erased the CSG recipe that never-do #11 makes its only representation.
+    #[test]
+    fn setting_an_object_field_keeps_the_object() {
+        let scene = format!("{SCENE}\n  [node.components.MeshRenderer]\n  mesh = {{ asset = \"desk\" }}\n");
+        let applied = apply(
+            &scene,
+            &tx(
+                "Assign a mesh",
+                vec![SceneOp::SetField {
+                    node: "Room/Desk".into(),
+                    field: "MeshRenderer.mesh".into(),
+                    value: serde_json::json!({ "asset": "box" }),
+                }],
+            ),
+        )
+        .expect("should apply");
+
+        let parsed = crate::Scene::parse(&applied.scene).expect("still valid");
+        let node = parsed.nodes().iter().find(|n| n.path == "Room/Desk").expect("node");
+        assert_eq!(
+            node.components["MeshRenderer"]["mesh"]["asset"],
+            serde_json::json!("box"),
+            "the asset reference must survive: {}",
+            applied.scene
+        );
+    }
+
+    /// The voxel case, which loses the most: an op list is a whole terrain.
+    #[test]
+    fn setting_an_array_of_objects_keeps_every_entry() {
+        let ops = serde_json::json!([
+            { "kind": "sphere", "center": [1.0, 2.0, 3.0], "radius": 4.0, "mode": "union" },
+            { "kind": "capsule", "a": [0.0, 0.0, 0.0], "b": [1.0, 0.0, 0.0], "radius": 2.0, "mode": "subtract" },
+        ]);
+        let applied = apply(
+            SCENE,
+            &tx(
+                "Carve",
+                vec![SceneOp::SetField {
+                    node: "Room/Desk".into(),
+                    field: "VoxelVolume.ops".into(),
+                    value: ops.clone(),
+                }],
+            ),
+        )
+        .expect("should apply");
+
+        let parsed = crate::Scene::parse(&applied.scene).expect("still valid");
+        let node = parsed.nodes().iter().find(|n| n.path == "Room/Desk").expect("node");
+        assert_eq!(node.components["VoxelVolume"]["ops"], ops, "{}", applied.scene);
+    }
+
+    /// TOML distinguishes 4 from 4.0 and the voxel reader uses `as_u64`, so an
+    /// integer that comes back as a float is a field that silently stops
+    /// parsing.
+    #[test]
+    fn integers_do_not_become_floats() {
+        let applied = apply(
+            SCENE,
+            &tx(
+                "Size it",
+                vec![SceneOp::SetField {
+                    node: "Room/Desk".into(),
+                    field: "VoxelVolume.chunks".into(),
+                    value: serde_json::json!([4, 3, 4]),
+                }],
+            ),
+        )
+        .expect("should apply");
+
+        assert!(
+            applied.scene.contains("chunks = [4, 3, 4]"),
+            "integers must stay integers: {}",
+            applied.scene
+        );
+    }
+
+    /// Nothing in TOML represents null. Refusing is the only honest answer;
+    /// writing `""` is how a field quietly becomes the wrong type.
+    #[test]
+    fn a_null_field_is_refused_rather_than_flattened() {
+        let err = apply(
+            SCENE,
+            &tx(
+                "Null it",
+                vec![SceneOp::SetField {
+                    node: "Room/Desk".into(),
+                    field: "Light.color".into(),
+                    value: serde_json::Value::Null,
+                }],
+            ),
+        )
+        .expect_err("must be refused");
+
+        assert_eq!(err.error, "unrepresentable_value");
+    }
+
+    /// The format accepts a component written as an inline table. `SetField`
+    /// assumed the sub-table spelling and `unwrap()`ed, so editing a field on a
+    /// node the parser was perfectly happy with killed the process — taking any
+    /// unsaved editor work with it.
+    #[test]
+    fn setting_a_field_on_an_inline_component_does_not_panic() {
+        let scene = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[node]]
+name = \"Room\"
+
+[[node]]
+name = \"Lamp\"
+parent = \"Room\"
+components = { Light = { intensity = 400.0 } }
+";
+        assert!(crate::Scene::parse(scene).is_ok(), "the parser accepts this spelling");
+
+        let result = apply(
+            scene,
+            &tx(
+                "Dim it",
+                vec![SceneOp::SetField {
+                    node: "Room/Lamp".into(),
+                    field: "Light.intensity".into(),
+                    value: serde_json::json!(120.0),
+                }],
+            ),
+        );
+
+        let applied = result.expect("must not panic, and should apply");
+        let parsed = crate::Scene::parse(&applied.scene).expect("still valid");
+        let node = parsed.nodes().iter().find(|n| n.path == "Room/Lamp").expect("node");
+        assert_eq!(node.components["Light"]["intensity"], serde_json::json!(120.0));
+    }
+
+    /// Same shape of bug on the transform: only the inline spelling was read,
+    /// so for a `[node.transform]` sub-table the op started from the default
+    /// and silently wiped the axes it was not setting.
+    #[test]
+    fn setting_one_transform_axis_keeps_the_others() {
+        let scene = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[node]]
+name = \"Room\"
+
+[[node]]
+name = \"Desk\"
+parent = \"Room\"
+
+  [node.transform]
+  pos = [1.0, 2.0, 3.0]
+  scale = [2.0, 2.0, 2.0]
+";
+        assert!(crate::Scene::parse(scene).is_ok(), "the parser accepts this spelling");
+
+        let applied = apply(
+            scene,
+            &tx(
+                "Rotate only",
+                vec![SceneOp::SetTransform {
+                    node: "Room/Desk".into(),
+                    pos: None,
+                    rot_euler: Some([0.0, 90.0, 0.0]),
+                    scale: None,
+                }],
+            ),
+        )
+        .expect("should apply");
+
+        let parsed = crate::Scene::parse(&applied.scene).expect("still valid");
+        let desk = parsed.nodes().iter().find(|n| n.path == "Room/Desk").expect("node");
+        assert_eq!(desk.transform.pos, [1.0, 2.0, 3.0], "position must survive");
+        assert_eq!(desk.transform.scale, [2.0, 2.0, 2.0], "scale must survive");
+        assert_eq!(desk.transform.rot_euler, [0.0, 90.0, 0.0]);
     }
 
     #[test]

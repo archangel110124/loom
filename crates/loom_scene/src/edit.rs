@@ -16,6 +16,30 @@
 
 use crate::{Applied, Transaction, TransactionError, VersionToken, apply};
 
+/// Why a save did not happen.
+#[derive(Debug)]
+pub enum SaveRejected {
+    /// The file moved since this session last read it. Its current contents
+    /// come back so the caller can offer both versions — never merge them.
+    Stale { current: String },
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for SaveRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stale { .. } => write!(
+                f,
+                "the scene changed on disk since it was opened; saving would \
+                 overwrite that. Reload, or keep yours and save again."
+            ),
+            Self::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for SaveRejected {}
+
 /// An open scene being edited.
 pub struct Session {
     path: std::path::PathBuf,
@@ -32,6 +56,12 @@ pub struct Session {
     history: Vec<String>,
     /// The gesture the last transaction belonged to, if it was part of one.
     gesture: Option<String>,
+    /// The version this session last read from, or wrote to, the file.
+    ///
+    /// `save` compares the file against this before overwriting. Without it an
+    /// unconditional `fs::write` destroys whatever landed on disk since — and
+    /// the agent writes on a 250 ms watcher tick, so the window is real.
+    disk: VersionToken,
 }
 
 impl Session {
@@ -44,6 +74,7 @@ impl Session {
         Ok(Self {
             path: path.to_path_buf(),
             version: VersionToken::of(&text),
+            disk: VersionToken::of(&text),
             text,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -58,6 +89,7 @@ impl Session {
         Self {
             path: path.to_path_buf(),
             version: VersionToken::of(&text),
+            disk: VersionToken::of(&text),
             text,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -178,9 +210,29 @@ impl Session {
     ///
     /// # Errors
     /// [`std::io::Error`] if the file cannot be written.
-    pub fn save(&self) -> Result<(), std::io::Error> {
-        std::fs::write(&self.path, &self.text)
+    pub fn save(&mut self) -> Result<(), SaveRejected> {
+        // Re-read before writing. §7.17 is about the agent's writes being
+        // rejected rather than merged; an unconditional `fs::write` from the
+        // editor is the same collision with the roles reversed, and it was
+        // reachable from Ctrl+S while the conflict banner was on screen.
+        //
+        // A missing file is not a conflict — it means the scene was moved or
+        // deleted, and writing it back is the useful thing to do.
+        if let Ok(on_disk) = std::fs::read_to_string(&self.path) {
+            let current = VersionToken::of(&on_disk);
+            if current != self.disk {
+                return Err(SaveRejected::Stale { current: on_disk });
+            }
+        }
+        std::fs::write(&self.path, &self.text).map_err(SaveRejected::Io)?;
+        self.disk = self.version.clone();
+        Ok(())
     }
+
+    /// Take the file as it now is, discarding this session's edits.
+    ///
+    /// # Errors
+    /// [`std::io::Error`] if the file cannot be read.
 
     /// Re-read from disk after a rejected write.
     ///
@@ -193,6 +245,7 @@ impl Session {
     pub fn reload(&mut self) -> Result<(), std::io::Error> {
         self.text = std::fs::read_to_string(&self.path)?;
         self.version = VersionToken::of(&self.text);
+        self.disk = self.version.clone();
         // History is about *this* session's transactions; the file moving under
         // us invalidates the undo chain, and offering it anyway would let a
         // user undo their way onto someone else's work.
@@ -328,6 +381,37 @@ name = \"Room\"
         session.apply_coalescing(move_to(2.0), "drag:Room").unwrap();
 
         assert_eq!(session.history().len(), 3);
+    }
+
+    /// **Ctrl+S must not be a data-loss button.** `save` was an unconditional
+    /// `fs::write`, so anything the agent landed since the editor opened the
+    /// file was gone — silently, with a "saved" message. §7.17 rejects the
+    /// agent's stale writes; this is the same collision with the roles
+    /// reversed, and it was reachable even while the conflict banner was up.
+    #[test]
+    fn saving_over_a_file_that_moved_is_refused() {
+        let dir = std::env::temp_dir().join("loom_save_conflict");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("scene.loom");
+        std::fs::write(&path, SCENE).expect("write");
+
+        let mut session = Session::open(&path).expect("open");
+        session.apply(spawn("Lamp")).expect("edit applies");
+
+        // Somebody else — the agent — writes the file underneath.
+        std::fs::write(&path, format!("{SCENE}\n# the agent was here\n")).expect("write");
+
+        let err = session.save().expect_err("must be refused");
+        assert!(matches!(err, crate::SaveRejected::Stale { .. }));
+        assert!(
+            std::fs::read_to_string(&path).expect("read").contains("the agent was here"),
+            "the other version must still be on disk"
+        );
+
+        // After taking their version, saving is allowed again.
+        session.reload().expect("reload");
+        session.save().expect("saving is fine once in sync");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
