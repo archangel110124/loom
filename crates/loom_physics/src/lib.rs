@@ -14,6 +14,9 @@
 pub mod sanity;
 
 pub use sanity::{Severity, check_scene};
+// Re-exported so callers can hold a body handle without taking a direct
+// dependency on rapier. The engine choice stays behind this crate's door.
+pub use rapier3d::prelude::RigidBodyHandle;
 
 use rapier3d::prelude::*;
 

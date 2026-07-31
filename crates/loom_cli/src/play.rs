@@ -1,0 +1,298 @@
+//! Play mode: the simulation running inside the editor.
+//!
+//! Unity's Play button, and the same discipline the headless `loom sim` path
+//! has. **The simulation never sees the frame time.** It advances in whole
+//! fixed ticks or not at all, so what the human watches in the window and what
+//! the agent asserts on in `loom sim --assert` are the same run — which is the
+//! only reason a determinism hash is worth anything (never-do #8, §7.5).
+//!
+//! Play mode never writes the scene file. Unity's oldest usability wound is
+//! edits made in play mode quietly vanishing at Stop; here nothing is at risk
+//! because nothing was written.
+
+use loom_ecs::World;
+use loom_physics::{Physics, RigidBodyHandle};
+
+/// The fixed tick. Simulation time is counted in these, never in seconds of
+/// wall clock.
+pub const TICK_SECONDS: f32 = 1.0 / 60.0;
+
+/// A physics world built from a scene, ready to be stepped.
+pub struct Sim {
+    physics: Physics,
+    /// Entities with a body, and the body they got.
+    dynamic: Vec<(loom_ecs::Entity, RigidBodyHandle)>,
+}
+
+impl Sim {
+    /// Build colliders and bodies for everything in `world`.
+    ///
+    /// Static geometry becomes a collider, dynamic nodes get a body. Both the
+    /// editor's Play button and the headless `loom sim` come through here, so
+    /// there is one description of what a scene means physically.
+    #[must_use]
+    pub fn new(world: &World) -> Self {
+        let mut physics = Physics::new(TICK_SECONDS);
+        let mut dynamic = Vec::new();
+
+        for entity in world.entities() {
+            let Some(global) = world.global_transform(*entity) else {
+                continue;
+            };
+            let pos = [global.matrix[12], global.matrix[13], global.matrix[14]];
+            // Half-extents come from the node's scale: a unit box scaled by s
+            // has half-extents s, which is what the renderer draws.
+            let Some(transform) = world.transform(*entity) else {
+                continue;
+            };
+            let half = [
+                transform.scale[0].abs().max(1e-3),
+                transform.scale[1].abs().max(1e-3),
+                transform.scale[2].abs().max(1e-3),
+            ];
+
+            if world.is_dynamic(*entity) {
+                let handle = physics.add_box_body(pos, half, world.body_mass(*entity));
+                dynamic.push((*entity, handle));
+            } else if world.is_renderable(*entity) {
+                physics.add_static_box(pos, half);
+            }
+        }
+
+        Self { physics, dynamic }
+    }
+
+    /// Advance whole ticks.
+    pub fn step(&mut self, ticks: u32) {
+        for _ in 0..ticks {
+            self.physics.step();
+        }
+    }
+
+    /// Copy body positions back onto the world's transforms.
+    pub fn write_back(&self, world: &mut World) {
+        for (entity, handle) in &self.dynamic {
+            let Some(pos) = self.physics.position(*handle) else {
+                continue;
+            };
+            let rotation = self.physics.rotation_euler(*handle);
+            if let Some(transform) = world.transform_mut(*entity) {
+                // Written back as a LOCAL transform. Correct only for nodes
+                // whose parent is the root, which is every dynamic body a
+                // blockout makes today. Nested dynamic bodies need the
+                // parent's inverse — noted rather than silently wrong.
+                transform.pos = pos;
+                // Rotation too, or a toppling crate slides instead of tipping
+                // — the simulation would be right and the picture a lie.
+                if let Some(rot) = rotation {
+                    transform.rot_euler = rot;
+                }
+            }
+        }
+        world.propagate_transforms();
+    }
+
+    #[must_use]
+    pub fn body_count(&self) -> usize {
+        self.physics.body_count()
+    }
+
+    /// The determinism hash — the same number `loom sim` prints.
+    #[must_use]
+    pub fn state_hash(&self) -> u64 {
+        self.physics.state_hash()
+    }
+}
+
+/// Play mode as the editor holds it: a scene's world, its simulation, and how
+/// far it has been run.
+pub struct Play {
+    pub world: World,
+    sim: Sim,
+    /// Whole ticks run. Time is counted here, not in seconds.
+    pub ticks: u32,
+    pub paused: bool,
+    /// Left over from the last frame's real elapsed time. Fixed timestep with
+    /// an accumulator: the wall clock decides *how many* ticks to run, and
+    /// never what a tick is worth.
+    leftover: f32,
+}
+
+impl Play {
+    #[must_use]
+    pub fn start(world: World) -> Self {
+        let sim = Sim::new(&world);
+        Self {
+            world,
+            sim,
+            ticks: 0,
+            paused: false,
+            leftover: 0.0,
+        }
+    }
+
+    /// Advance by real elapsed time, in whole ticks.
+    ///
+    /// Returns whether anything moved, so the caller only re-derives draw calls
+    /// when there is something new to draw.
+    pub fn advance(&mut self, dt: f32) -> bool {
+        if self.paused {
+            return false;
+        }
+        // Clamped: a stall must not cause a thousand catch-up ticks, which
+        // would stall the next frame too and spiral.
+        self.leftover += dt.min(0.25);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let ticks = (self.leftover / TICK_SECONDS) as u32;
+        if ticks == 0 {
+            return false;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.leftover -= ticks as f32 * TICK_SECONDS;
+        }
+        self.run(ticks);
+        true
+    }
+
+    /// Advance exactly `ticks`, ignoring pause. The Step button.
+    pub fn run(&mut self, ticks: u32) {
+        self.sim.step(ticks);
+        self.sim.write_back(&mut self.world);
+        self.ticks += ticks;
+    }
+
+    #[must_use]
+    pub fn seconds(&self) -> f32 {
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.ticks as f32 * TICK_SECONDS
+        }
+    }
+
+    #[must_use]
+    pub fn bodies(&self) -> usize {
+        self.sim.body_count()
+    }
+
+    #[must_use]
+    pub fn state_hash(&self) -> u64 {
+        self.sim.state_hash()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loom_scene::Scene;
+
+    const FALLING: &str = r#"
+[scene]
+format = 1
+id = "0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f"
+
+[[node]]
+name = "Stage"
+
+[[node]]
+name = "Ground"
+parent = "Stage"
+transform = { pos = [0.0, -0.5, 0.0], scale = [10.0, 0.5, 10.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+[[node]]
+name = "Crate"
+parent = "Stage"
+transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 10.0
+"#;
+
+    fn world() -> World {
+        World::from_scene(&Scene::parse(FALLING).expect("valid scene"))
+    }
+
+    fn height(world: &World, path: &str) -> f32 {
+        world
+            .entities()
+            .iter()
+            .find(|e| world.path(**e) == Some(path))
+            .and_then(|e| world.transform(*e))
+            .map(|t| t.pos[1])
+            .expect("node exists")
+    }
+
+    #[test]
+    fn playing_makes_a_crate_fall() {
+        let mut play = Play::start(world());
+        let before = height(&play.world, "Stage/Crate");
+
+        play.run(60);
+
+        assert!(
+            height(&play.world, "Stage/Crate") < before - 1.0,
+            "a second of gravity should be visible"
+        );
+    }
+
+    /// The property the whole module is for: what the human watches and what
+    /// `loom sim --assert` checks are the same run. Frame times differ between
+    /// the two; the answer must not.
+    ///
+    /// Compared at equal tick counts rather than equal wall time, because the
+    /// tick count is the thing that determines the state — accumulating float
+    /// seconds two different ways is allowed to land a tick apart, and that is
+    /// the accumulator working, not a determinism failure.
+    #[test]
+    fn pacing_does_not_change_the_outcome_only_the_tick_count_does() {
+        let mut stuttering = Play::start(world());
+        // Roughly a second, delivered in uneven lumps.
+        for dt in [0.05_f32, 0.002, 0.13, 0.008, 0.24, 0.06, 0.21, 0.09, 0.21] {
+            stuttering.advance(dt);
+        }
+        assert!(stuttering.ticks > 50, "about a second ran: {}", stuttering.ticks);
+
+        // The same number of ticks, delivered as a clean 60 fps.
+        let mut steady = Play::start(world());
+        while steady.ticks < stuttering.ticks {
+            steady.advance(TICK_SECONDS);
+        }
+
+        assert_eq!(steady.ticks, stuttering.ticks);
+        assert_eq!(
+            steady.state_hash(),
+            stuttering.state_hash(),
+            "same ticks, bit-identical state, whatever the frame times were"
+        );
+    }
+
+    #[test]
+    fn pausing_stops_time() {
+        let mut play = Play::start(world());
+        play.paused = true;
+
+        play.advance(1.0);
+
+        assert_eq!(play.ticks, 0);
+        // Step works anyway — that is what a step button is.
+        play.run(1);
+        assert_eq!(play.ticks, 1);
+    }
+
+    /// A stall must not turn into a thousand catch-up ticks.
+    #[test]
+    fn a_long_stall_is_clamped() {
+        let mut play = Play::start(world());
+
+        play.advance(30.0);
+
+        assert!(play.ticks <= 15, "clamped, not caught up: {}", play.ticks);
+    }
+}

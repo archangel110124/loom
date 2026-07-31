@@ -13,6 +13,7 @@
 mod gizmo;
 mod log;
 mod panels;
+mod play;
 mod scene_view;
 mod run;
 
@@ -379,10 +380,11 @@ impl MeshLibrary {
         Self { meshes, by_name }
     }
 
-    /// Hand the mesh data to a renderer.
-    pub(crate) fn into_meshes(self) -> Vec<loom_asset::Mesh> {
-        self.meshes
+    /// The mesh data, for a renderer to upload.
+    pub(crate) fn meshes(&self) -> &[loom_asset::Mesh] {
+        &self.meshes
     }
+
 
     /// Identity of the mesh **set**, for deciding whether the GPU buffers a
     /// viewer already uploaded are still the right ones.
@@ -644,64 +646,16 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     )
 }
 
-/// Build a physics world from the scene, step it, and write positions back.
+/// Step physics and write the result back onto the world.
 ///
-/// Nodes carrying `RigidBody { dynamic = true }` fall; everything with a
-/// `BoxCollider` is something to land on. Static by default, because most of a
-/// blockout is scenery and a scene whose every box fell would be useless.
+/// One line, because the substance moved to `play::Sim` when the editor grew a
+/// Play button — the headless path and the interactive one must agree about
+/// what a scene means physically, and the only way to guarantee that is for
+/// there to be one of them.
 fn simulate_physics(world: &mut World, ticks: u32) {
-    let mut physics = loom_physics::Physics::new(1.0 / 60.0);
-    let mut dynamic = Vec::new();
-
-    for entity in world.entities() {
-        let Some(global) = world.global_transform(*entity) else {
-            continue;
-        };
-        let pos = [global.matrix[12], global.matrix[13], global.matrix[14]];
-        // Half-extents come from the node's scale: a unit box scaled by s has
-        // half-extents s, which is what the renderer draws.
-        let Some(transform) = world.transform(*entity) else {
-            continue;
-        };
-        let half = [
-            transform.scale[0].abs().max(1e-3),
-            transform.scale[1].abs().max(1e-3),
-            transform.scale[2].abs().max(1e-3),
-        ];
-
-        if world.is_dynamic(*entity) {
-            // A capsule sized to the box, so it tumbles less and does not
-            // catch on seams between floor colliders.
-            let handle = physics.add_box_body(pos, half, world.body_mass(*entity));
-            dynamic.push((*entity, handle));
-        } else if world.is_renderable(*entity) {
-            physics.add_static_box(pos, half);
-        }
-    }
-
-    for _ in 0..ticks {
-        physics.step();
-    }
-
-    for (entity, handle) in dynamic {
-        let Some(pos) = physics.position(handle) else {
-            continue;
-        };
-        let rotation = physics.rotation_euler(handle);
-        if let Some(transform) = world.transform_mut(entity) {
-            // Written back as a LOCAL transform. Correct only for nodes whose
-            // parent is the root, which is every dynamic body a blockout makes
-            // today. Nested dynamic bodies need the parent's inverse — noted
-            // rather than silently wrong.
-            transform.pos = pos;
-            // Rotation too, or a toppling crate slides instead of tipping —
-            // the simulation would be right and the picture would be a lie.
-            if let Some(rot) = rotation {
-                transform.rot_euler = rot;
-            }
-        }
-    }
-    world.propagate_transforms();
+    let mut sim = play::Sim::new(world);
+    sim.step(ticks);
+    sim.write_back(world);
 }
 
 /// Every value given for a repeated flag.

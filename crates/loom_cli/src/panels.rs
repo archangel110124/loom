@@ -40,6 +40,12 @@ pub enum UiAction {
     ReloadFromDisk,
     KeepMine,
     ClearLog,
+    Play,
+    /// Toggle pause while playing.
+    Pause,
+    /// One tick, whether paused or not.
+    StepOnce,
+    Stop,
 }
 
 /// State the panels need that is not in the scene.
@@ -63,6 +69,8 @@ pub struct PanelState<'a> {
     /// edge-on, and an index would then highlight a different one.
     pub dragging: Option<usize>,
     pub fps: f32,
+    /// Ticks run, whether paused, and how many bodies — `None` in edit mode.
+    pub playing: Option<(u32, bool, usize)>,
 }
 
 const AXIS_COLORS: [egui::Color32; 3] = [
@@ -99,6 +107,7 @@ fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiActi
             ui.label(egui::RichText::new("loom").strong());
             ui.separator();
 
+            let editing = state.editable && state.playing.is_none();
             for mode in [Mode::Move, Mode::Rotate, Mode::Scale] {
                 if ui
                     .selectable_label(state.mode == mode, mode.label())
@@ -122,14 +131,14 @@ fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiActi
                 actions.push(UiAction::Focus);
             }
             if ui
-                .add_enabled(state.editable, egui::Button::new("Duplicate"))
+                .add_enabled(editing, egui::Button::new("Duplicate"))
                 .on_hover_text("Ctrl+D")
                 .clicked()
             {
                 actions.push(UiAction::Duplicate);
             }
             if ui
-                .add_enabled(state.editable, egui::Button::new("Delete"))
+                .add_enabled(editing, egui::Button::new("Delete"))
                 .on_hover_text("Del — children go with it, in one transaction")
                 .clicked()
             {
@@ -137,27 +146,40 @@ fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiActi
             }
 
             ui.separator();
+            transport(ui, state, actions);
+
+            ui.separator();
             if ui
-                .add_enabled(state.can_undo, egui::Button::new("Undo"))
+                .add_enabled(state.can_undo && state.playing.is_none(), egui::Button::new("Undo"))
                 .on_hover_text("One transaction, however many ops it held")
                 .clicked()
             {
                 actions.push(UiAction::Undo);
             }
             if ui
-                .add_enabled(state.can_redo, egui::Button::new("Redo"))
+                .add_enabled(state.can_redo && state.playing.is_none(), egui::Button::new("Redo"))
                 .clicked()
             {
                 actions.push(UiAction::Redo);
             }
             if ui
-                .add_enabled(state.editable, egui::Button::new("Save"))
+                .add_enabled(editing, egui::Button::new("Save"))
                 .clicked()
             {
                 actions.push(UiAction::Save);
             }
 
-            if !state.editable {
+            if let Some((ticks, paused, bodies)) = state.playing {
+                let seconds = f64::from(ticks) * f64::from(crate::play::TICK_SECONDS);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} tick {ticks} · {seconds:.2}s · {bodies} bodies",
+                        if paused { "⏸" } else { "▶" }
+                    ))
+                    .color(egui::Color32::from_rgb(120, 200, 140))
+                    .monospace(),
+                );
+            } else if !state.editable {
                 ui.label(
                     egui::RichText::new("read-only — pass --edit to change anything")
                         .color(egui::Color32::from_rgb(150, 150, 160)),
@@ -183,6 +205,47 @@ fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiActi
             });
         });
     });
+}
+
+/// Play / Pause / Step / Stop.
+///
+/// The tick counter beside them is the point: this is the same fixed-tick
+/// simulation `loom sim` runs headless, so what the human watches here and
+/// what the agent asserts on there are the same run.
+fn transport(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+    match state.playing {
+        None => {
+            if ui
+                .button("▶ Play")
+                .on_hover_text("Simulate the scene. Nothing is written; Stop restores it.")
+                .clicked()
+            {
+                actions.push(UiAction::Play);
+            }
+        }
+        Some((_, paused, _)) => {
+            if ui
+                .button(if paused { "▶ Resume" } else { "⏸ Pause" })
+                .clicked()
+            {
+                actions.push(UiAction::Pause);
+            }
+            if ui
+                .button("⏭ Step")
+                .on_hover_text("Exactly one tick — the unit the simulation is defined in")
+                .clicked()
+            {
+                actions.push(UiAction::StepOnce);
+            }
+            if ui
+                .button("⏹ Stop")
+                .on_hover_text("Back to the scene as authored")
+                .clicked()
+            {
+                actions.push(UiAction::Stop);
+            }
+        }
+    }
 }
 
 /// The one thing in this editor that must not be resolved for the human.

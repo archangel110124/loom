@@ -19,7 +19,9 @@ use loom_scene::Scene;
 pub struct SceneView {
     pub scene: Scene,
     pub objects: Vec<Object>,
-    pub meshes: Vec<loom_asset::Mesh>,
+    /// Kept rather than consumed, so play mode can turn a *simulated* world
+    /// into draw calls with the same meshes the authored one uses.
+    library: crate::MeshLibrary,
     /// World AABB per node, for picking and framing.
     pub picks: BTreeMap<String, loom_scene::place::Bounds>,
     /// Centre and radius of everything.
@@ -69,13 +71,26 @@ impl SceneView {
         Ok(Self {
             scene,
             objects,
-            meshes: library.into_meshes(),
+            library,
             picks,
             bounds,
             paths,
             assets,
             mesh_key,
         })
+    }
+
+    /// The geometry this scene needs, for the renderer to upload.
+    #[must_use]
+    pub fn meshes(&self) -> &[loom_asset::Mesh] {
+        self.library.meshes()
+    }
+
+    /// Draw calls for a world that is not the authored one — play mode's
+    /// simulated transforms, drawn with the authored scene's meshes.
+    #[must_use]
+    pub fn objects_of(&self, world: &World) -> Vec<Object> {
+        crate::world_to_objects(world, &self.library)
     }
 
     /// The world AABB of a node, if it draws anything.

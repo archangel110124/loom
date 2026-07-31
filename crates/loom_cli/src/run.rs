@@ -137,8 +137,16 @@ struct App {
     uploaded: u64,
     /// The handle being dragged, if one is.
     drag: Option<Drag>,
+    /// The running simulation, when Play is on. `None` is edit mode.
+    ///
+    /// Play mode holds its own world and never writes the file, so Stop cannot
+    /// lose work — the authored scene was never touched.
+    play: Option<crate::play::Play>,
     /// What the gizmo edits: Unity's W/E/R, on digits here.
     mode: Mode,
+    /// Draw calls for the simulated world, refreshed only on ticks that
+    /// actually ran.
+    play_objects: Vec<loom_render::Object>,
     /// Handles as of the last frame, so a mouse press can hit-test them
     /// against exactly what was drawn.
     handles: Vec<gizmo::Handle>,
@@ -183,8 +191,10 @@ impl App {
             scene_path,
             disk_seen,
             drag: None,
+            play: None,
             mode: Mode::Move,
             handles: Vec::new(),
+            play_objects: Vec::new(),
             ui: None,
             cursor: (0.0, 0.0),
             registry: loom_scene::components::registry(),
@@ -238,7 +248,7 @@ impl App {
         if view.mesh_key != self.uploaded
             && let Some(viewer) = self.viewer.as_mut()
         {
-            match viewer.set_meshes(&view.meshes) {
+            match viewer.set_meshes(view.meshes()) {
                 Ok(()) => self.uploaded = view.mesh_key,
                 Err(e) => crate::log::error(format!("could not upload the new geometry: {e}")),
             }
@@ -400,7 +410,7 @@ impl ApplicationHandler for App {
             }
         };
 
-        match build_viewer(&window, &self.view.meshes) {
+        match build_viewer(&window, self.view.meshes()) {
             Ok((instance, device, viewer)) => {
                 crate::log::info(format!("rendering on {}", device.name()));
                 match Ui::new(&instance, &device, &window, viewer.color_format()) {
@@ -501,7 +511,15 @@ impl ApplicationHandler for App {
                 }
                 // Clamp: a stall must not teleport the camera across the map.
                 self.step_camera(dt.min(0.1));
-                self.poll_file(now);
+                // Watching the file while a simulation runs would reload the
+                // authored scene out from under it; the sim owns the world
+                // until Stop.
+                if self.play.is_none() {
+                    self.poll_file(now);
+                }
+                if self.play.as_mut().is_some_and(|p| p.advance(dt)) {
+                    self.refresh_play_objects();
+                }
 
                 let camera = self.camera.camera();
                 let extent = self.viewer.as_ref().map_or((1, 1), Viewer::extent);
@@ -510,7 +528,9 @@ impl ApplicationHandler for App {
 
                 // Handles for the focused node, recomputed each frame and kept
                 // so the next mouse press hit-tests exactly what was drawn.
-                self.handles = match (self.session.is_some(), self.focused()) {
+                // No handles while the sim runs: they would move a node the
+                // physics engine is about to move back.
+                self.handles = match (self.session.is_some() && self.play.is_none(), self.focused()) {
                     (true, Some(path)) => self
                         .view
                         .node_bounds(&path)
@@ -522,9 +542,15 @@ impl ApplicationHandler for App {
                     _ => Vec::new(),
                 };
 
+                let drawn = match self.play.as_ref() {
+                    Some(_) => &self.play_objects,
+                    None => &self.view.objects,
+                };
+
                 let mut actions = Vec::new();
                 let state = PanelState {
                     view: &self.view,
+                    playing: self.play.as_ref().map(|p| (p.ticks, p.paused, p.bodies())),
                     selected: &self.selected,
                     history: self.session.as_ref().map_or(&[][..], |s| s.history()),
                     can_undo: self.session.as_ref().is_some_and(loom_scene::Session::can_undo),
@@ -541,12 +567,12 @@ impl ApplicationHandler for App {
 
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
                     (Some(viewer), Some(ui), Some(window)) => viewer.draw_with_ui(
-                        &self.view.objects,
+                        drawn,
                         &camera,
                         Some((ui, window)),
                         |root| actions.extend(crate::panels::draw(root, &state)),
                     ),
-                    (Some(viewer), _, _) => viewer.draw(&self.view.objects, &camera),
+                    (Some(viewer), _, _) => viewer.draw(drawn, &camera),
                     _ => Ok(()),
                 };
                 if let Err(e) = result {
@@ -602,6 +628,19 @@ impl App {
             UiAction::ReloadFromDisk => self.accept_disk(),
             UiAction::KeepMine => self.keep_mine(),
             UiAction::ClearLog => crate::log::clear(),
+            UiAction::Play => self.start_play(),
+            UiAction::Pause => {
+                if let Some(play) = self.play.as_mut() {
+                    play.paused = !play.paused;
+                }
+            }
+            UiAction::StepOnce => {
+                if let Some(play) = self.play.as_mut() {
+                    play.run(1);
+                    self.refresh_play_objects();
+                }
+            }
+            UiAction::Stop => self.stop_play(),
             UiAction::Undo => {
                 if let Some(s) = self.session.as_mut() {
                     let stepped = s.undo();
@@ -621,6 +660,46 @@ impl App {
                 }
             }
             UiAction::Save => self.save(),
+        }
+    }
+
+    /// Start simulating the scene as authored.
+    ///
+    /// The file is not touched, now or at Stop. Unity's oldest usability wound
+    /// is edits made during play quietly vanishing when you stop; nothing here
+    /// is at risk because nothing was written.
+    fn start_play(&mut self) {
+        let world = loom_ecs::World::from_scene(&self.view.scene);
+        let play = crate::play::Play::start(world);
+        crate::log::info(format!("play — {} bodies", play.bodies()));
+        self.play = Some(play);
+        self.refresh_play_objects();
+        self.drag = None;
+    }
+
+    /// Stop, and go back to the authored scene exactly as it was.
+    fn stop_play(&mut self) {
+        if let Some(play) = self.play.take() {
+            crate::log::info(format!(
+                "stopped after {} ticks ({:.2}s) — state {:016x}",
+                play.ticks,
+                play.seconds(),
+                play.state_hash()
+            ));
+        }
+        self.play_objects.clear();
+        // The file may have moved while the sim was running and the watcher
+        // was asleep; pick that up now rather than sitting on a stale view.
+        #[allow(clippy::disallowed_methods)]
+        {
+            self.next_watch = std::time::Instant::now();
+        }
+    }
+
+    /// Re-derive draw calls from the simulated world.
+    fn refresh_play_objects(&mut self) {
+        if let Some(play) = self.play.as_ref() {
+            self.play_objects = self.view.objects_of(&play.world);
         }
     }
 
