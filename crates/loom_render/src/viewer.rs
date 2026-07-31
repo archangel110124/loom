@@ -55,6 +55,8 @@ pub struct Viewer {
 
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    /// Fills the frame before the scene draws over it.
+    sky_pipeline: vk::Pipeline,
     pipeline_cache: vk::PipelineCache,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
@@ -148,6 +150,8 @@ impl Viewer {
         // the attachment format into the pipeline, so this cannot be shared.
         let (pipeline_layout, pipeline, pipeline_cache) =
             create_pipeline(&raw, cache_path.as_deref(), format)?;
+        let sky_pipeline =
+            crate::renderer::create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, format)?;
 
         let pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(device.queue_family())
@@ -212,6 +216,7 @@ impl Viewer {
             object_address,
             pipeline_layout,
             pipeline,
+            sky_pipeline,
             pipeline_cache,
             command_pool,
             command_buffer,
@@ -352,7 +357,8 @@ impl Viewer {
         let aspect = self.extent.width as f32 / self.extent.height as f32;
         let mut sorted: Vec<Object> = objects.to_vec();
         sorted.sort_by_key(|o| o.mesh);
-        let object_data = pack_objects(&sorted, view_projection(camera, aspect), &self.unpack);
+        let view_proj = view_projection(camera, aspect);
+        let object_data = pack_objects(&sorted, view_proj, &self.unpack);
         let batches = batch_by_mesh(&sorted);
         write_slice(
             self.objects_alloc
@@ -380,7 +386,9 @@ impl Viewer {
             vertices: self.vertex_address,
             objects: self.object_address,
             object_offset: 0,
+            inv_view_proj: view_proj.inverse().to_cols_array(),
         };
+        let sky = self.sky_pipeline;
         let index_buffer = self.indices;
         let draws: Vec<(MeshRange, u32, u32)> = batches
             .iter()
@@ -398,6 +406,8 @@ impl Viewer {
                 // SAFETY: the graph transitioned both attachments already.
                 unsafe {
                     begin_rendering(d, cmd, view, depth_view, extent.width, extent.height);
+                    set_viewport(d, cmd, extent.width, extent.height);
+                    crate::renderer::draw_sky(d, cmd, sky, layout, &base_push);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
                     set_viewport(d, cmd, extent.width, extent.height);
                     d.cmd_bind_index_buffer(cmd, index_buffer, 0, vk::IndexType::UINT32);
@@ -625,6 +635,7 @@ impl Drop for Viewer {
             self.device.destroy_fence(self.in_flight, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_pipeline(self.sky_pipeline, None);
             self.device.destroy_pipeline_cache(self.pipeline_cache, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);

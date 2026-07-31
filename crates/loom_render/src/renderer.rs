@@ -72,10 +72,29 @@ pub struct Camera {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(crate) struct Push {
+    /// NDC to world, for the sky's per-pixel ray.
+    ///
+    /// **First, matching `scene.slang`.** A 4x4 needs 16-byte alignment, so
+    /// putting it after the pointers needs padding — and a `uint3` pad in
+    /// Slang aligns to 16 itself, which silently moves the matrix somewhere
+    /// the Rust side is not writing it. Leading with it removes the padding
+    /// and the mistake.
+    pub(crate) inv_view_proj: [f32; 16],
     pub(crate) vertices: vk::DeviceAddress,
     pub(crate) objects: vk::DeviceAddress,
     /// First object this draw should read. See the note in `scene.slang`.
     pub(crate) object_offset: u32,
+}
+
+impl Push {
+    /// The bytes to push, as Vulkan wants them.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        // SAFETY: `#[repr(C)]`, all fields are plain data, and the slice
+        // borrows from `self`.
+        unsafe {
+            std::slice::from_raw_parts(std::ptr::from_ref(self).cast::<u8>(), size_of::<Self>())
+        }
+    }
 }
 
 /// Per-object data, indexed by `SV_InstanceID`.
@@ -150,6 +169,8 @@ pub struct Renderer {
 
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    /// Fills the frame before the scene draws over it.
+    sky_pipeline: vk::Pipeline,
     pipeline_cache: vk::PipelineCache,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
@@ -268,6 +289,7 @@ impl Renderer {
         let cache_path = pipeline_cache_path(instance, device);
         let (pipeline_layout, pipeline, pipeline_cache) =
             create_pipeline(&raw, cache_path.as_deref(), COLOR_FORMAT)?;
+        let sky_pipeline = create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
 
         names.set(color, "loom.color_target");
         names.set(depth, "loom.depth_target");
@@ -328,6 +350,7 @@ impl Renderer {
             max_objects: MAX_OBJECTS,
             pipeline_layout,
             pipeline,
+            sky_pipeline,
             pipeline_cache,
             command_pool,
             command_buffer,
@@ -385,7 +408,9 @@ impl Renderer {
             vertices: self.vertex_address,
             objects: self.object_address,
             object_offset: 0,
+            inv_view_proj: view_proj.inverse().to_cols_array(),
         };
+        let sky = self.sky_pipeline;
         let (readback, image) = (self.readback, self.color);
         let index_buffer = self.indices;
         let draws: Vec<(MeshRange, u32, u32)> = batches
@@ -403,6 +428,8 @@ impl Renderer {
                 // into the layouts this recording requires.
                 unsafe {
                     begin_rendering(d, cmd, color_view, depth_view, width, height);
+                    set_viewport(d, cmd, width, height);
+                    draw_sky(d, cmd, sky, layout, &base_push);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
                     set_viewport(d, cmd, width, height);
                     d.cmd_bind_index_buffer(cmd, index_buffer, 0, vk::IndexType::UINT32);
@@ -547,6 +574,7 @@ impl Drop for Renderer {
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_pipeline(self.sky_pipeline, None);
             self.device.destroy_pipeline_cache(self.pipeline_cache, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
@@ -636,6 +664,35 @@ pub(crate) fn pipeline_cache_path(instance: &Instance, device: &Device) -> Optio
 /// # Safety
 /// Both views must already be in the layouts named here — which is the graph's
 /// job, not this function's.
+/// Fill the frame with the sky, before anything else is drawn.
+///
+/// Three vertices, no buffers, depth writes off. Drawn first rather than last
+/// so nothing has to know whether a pixel was covered; the cost is one
+/// fullscreen fill, which at blockout scale is not worth a depth-equal trick.
+///
+/// # Safety
+/// `cmd` must be recording inside a rendering pass whose viewport is set.
+pub(crate) unsafe fn draw_sky(
+    d: &ash::Device,
+    cmd: vk::CommandBuffer,
+    sky: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    push: &Push,
+) {
+    // SAFETY: the caller guarantees an active pass; the handles are ours.
+    unsafe {
+        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, sky);
+        d.cmd_push_constants(
+            cmd,
+            layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            push.bytes(),
+        );
+        d.cmd_draw(cmd, 3, 1, 0, 0);
+    }
+}
+
 pub(crate) unsafe fn begin_rendering(
     d: &ash::Device,
     cmd: vk::CommandBuffer,
@@ -1043,6 +1100,84 @@ pub(crate) fn create_pipeline(
     unsafe { device.destroy_shader_module(module, None) };
 
     Ok((layout, pipeline, cache))
+}
+
+/// A pipeline that fills the frame with the sky, sharing the scene's layout.
+///
+/// Differs from the scene pipeline in exactly three ways, and each matters:
+/// no depth test or write (it is the backdrop, drawn first), no culling (the
+/// fullscreen triangle's winding is whatever `SV_VertexID` produces), and the
+/// sky entry points.
+pub(crate) fn create_sky_pipeline(
+    device: &ash::Device,
+    layout: vk::PipelineLayout,
+    cache: vk::PipelineCache,
+    color_format: vk::Format,
+) -> Result<vk::Pipeline, RenderError> {
+    let module = create_shader_module(device, crate::SCENE_SPV)?;
+
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(module)
+            .name(c"skyVertexMain"),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(module)
+            .name(c"skyFragmentMain"),
+    ];
+
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(false)
+        .depth_write_enable(false);
+    let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(false);
+    let attachments = [blend_attachment];
+    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let color_formats = [color_format];
+    // The depth format still has to be declared even though depth is unused:
+    // the pass has a depth attachment, and a pipeline that disagrees with its
+    // pass is VUID-...-08914 on every draw.
+    let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&color_formats)
+        .depth_attachment_format(DEPTH_FORMAT);
+
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterizer)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth_stencil)
+        .color_blend_state(&blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering_info);
+
+    // SAFETY: every borrowed struct above outlives this call.
+    let pipeline = unsafe { device.create_graphics_pipelines(cache, &[info], None) }
+        .map_err(|(_, r)| RenderError::Vulkan(r))?[0];
+    // SAFETY: baked into the pipeline, no longer needed.
+    unsafe { device.destroy_shader_module(module, None) };
+    Ok(pipeline)
 }
 
 fn create_shader_module(
