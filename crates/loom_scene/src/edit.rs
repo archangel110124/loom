@@ -229,11 +229,6 @@ impl Session {
         Ok(())
     }
 
-    /// Take the file as it now is, discarding this session's edits.
-    ///
-    /// # Errors
-    /// [`std::io::Error`] if the file cannot be read.
-
     /// Re-read from disk after a rejected write.
     ///
     /// The **only** correct response to `stale_version` (§7.17). Never force

@@ -365,7 +365,50 @@ impl Renderer {
     /// # Errors
     /// [`RenderError`] on any Vulkan failure.
     #[allow(clippy::too_many_lines)]
+    /// Make sure the object buffer can hold `wanted` objects, growing it if
+    /// not. Doubling, so a growing scene reallocates a handful of times.
+    ///
+    /// # Errors
+    /// [`RenderError`] if the device will not idle or the buffer cannot be
+    /// reallocated.
+    pub fn reserve_objects(&mut self, wanted: usize) -> Result<(), RenderError> {
+        if wanted <= self.max_objects {
+            return Ok(());
+        }
+        let mut capacity = self.max_objects.max(1);
+        while capacity < wanted {
+            capacity = capacity.saturating_mul(2);
+        }
+        let Some(allocator) = self.allocator.as_mut() else {
+            return Ok(());
+        };
+        // SAFETY: nothing is in flight on this path — `render` submits and
+        // waits within one call — but idling costs nothing and makes the
+        // invariant local rather than remembered.
+        unsafe { self.device.device_wait_idle() }?;
+        if let Some(old) = self.objects_alloc.take() {
+            let _ = allocator.free(old);
+        }
+        // SAFETY: idle, and the handle is ours.
+        unsafe { self.device.destroy_buffer(self.objects, None) };
+
+        let (objects, objects_alloc, object_address) = create_address_buffer(
+            &self.device,
+            allocator,
+            (capacity * size_of::<ObjectData>()) as u64,
+            "loom.object_data",
+        )?;
+        self.objects = objects;
+        self.objects_alloc = Some(objects_alloc);
+        self.object_address = object_address;
+        self.max_objects = capacity;
+        Ok(())
+    }
+
     pub fn render(&mut self, objects: &[Object], camera: &Camera) -> Result<Vec<u8>, RenderError> {
+        // Grow rather than refuse, matching the windowed path. A ceiling the
+        // caller cannot see is not a useful answer to "draw my scene".
+        self.reserve_objects(objects.len())?;
         if objects.len() > self.max_objects {
             return Err(RenderError::Allocator(format!(
                 "{} objects exceeds the {} the object buffer was sized for",
@@ -934,8 +977,28 @@ pub(crate) fn write_slice<T: Copy>(allocation: &Allocation, data: &[T]) -> Resul
     let mapped = allocation
         .mapped_ptr()
         .ok_or_else(|| RenderError::Allocator("buffer is not host-visible".into()))?;
-    // SAFETY: the allocation was sized for at least `data`, `T` is `Copy` and
-    // `#[repr(C)]`, and the destination is uninitialised bytes we fully write.
+
+    // **The bound check belongs here**, not in the callers. The old SAFETY note
+    // below asserted "the allocation was sized for at least `data`" and nothing
+    // enforced it: the offscreen path checked its object count, the windowed
+    // path did not, and a scene with more than 4096 renderable nodes wrote past
+    // the end of a suballocation. Because gpu-allocator hands out slices of a
+    // shared host-visible block, that overflow lands on a neighbouring buffer
+    // rather than segfaulting — geometry corrupts, the GPU reads nonsense
+    // indices, and no validation layer says a word, because it is a plain host
+    // memcpy.
+    //
+    // One guard at the choke point every writer already routes through.
+    let bytes = std::mem::size_of_val(data) as u64;
+    if bytes > allocation.size() {
+        return Err(RenderError::Allocator(format!(
+            "tried to write {bytes} bytes into a {}-byte allocation",
+            allocation.size()
+        )));
+    }
+
+    // SAFETY: the write fits, checked immediately above; `T` is `Copy` and
+    // `#[repr(C)]`; the destination is uninitialised bytes we fully write.
     unsafe {
         std::ptr::copy_nonoverlapping(
             data.as_ptr().cast::<u8>(),

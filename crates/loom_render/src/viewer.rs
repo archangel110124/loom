@@ -21,7 +21,10 @@ use loom_render_graph::{Access, RenderGraph};
 use crate::{Device, Instance};
 use gpu_allocator::vulkan::{Allocation, Allocator, AllocatorCreateDesc};
 
-const MAX_OBJECTS: usize = 4096;
+/// Objects the buffer starts out able to hold. Not a ceiling — see
+/// [`Viewer::reserve_objects`], which grows it. Chosen so a blockout never
+/// reallocates and a big scene pays once.
+const INITIAL_OBJECTS: usize = 4096;
 
 /// A window's swapchain and everything needed to draw into it.
 pub struct Viewer {
@@ -52,6 +55,8 @@ pub struct Viewer {
     objects: vk::Buffer,
     objects_alloc: Option<Allocation>,
     object_address: vk::DeviceAddress,
+    /// How many objects the buffer can currently hold; grown on demand.
+    object_capacity: usize,
 
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -126,7 +131,7 @@ impl Viewer {
         let (objects, objects_alloc, object_address) = create_address_buffer(
             &raw,
             &mut allocator,
-            (MAX_OBJECTS * size_of::<ObjectData>()) as u64,
+            (INITIAL_OBJECTS * size_of::<ObjectData>()) as u64,
             "loom.object_data",
         )?;
 
@@ -214,6 +219,7 @@ impl Viewer {
             objects,
             objects_alloc: Some(objects_alloc),
             object_address,
+            object_capacity: INITIAL_OBJECTS,
             pipeline_layout,
             pipeline,
             sky_pipeline,
@@ -225,6 +231,50 @@ impl Viewer {
             in_flight,
             physical: device.physical(),
         })
+    }
+
+    /// Make sure the object buffer can hold `wanted` objects.
+    ///
+    /// Doubling, so a scene that grows steadily reallocates a handful of times
+    /// rather than every frame. Each object is 144 bytes: the initial 4096 is
+    /// 590 KB and even a hundred thousand is 14 MB, which is why growing is the
+    /// right answer and a hard ceiling was not.
+    ///
+    /// # Errors
+    /// [`RenderError`] if the device will not idle or the buffer cannot be
+    /// reallocated.
+    pub fn reserve_objects(&mut self, wanted: usize) -> Result<(), RenderError> {
+        if wanted <= self.object_capacity {
+            return Ok(());
+        }
+        let mut capacity = self.object_capacity.max(1);
+        while capacity < wanted {
+            capacity = capacity.saturating_mul(2);
+        }
+
+        let Some(allocator) = self.allocator.as_mut() else {
+            return Ok(());
+        };
+        // SAFETY: the frame in flight may still be reading the old buffer.
+        unsafe { self.device.device_wait_idle() }?;
+
+        if let Some(old) = self.objects_alloc.take() {
+            let _ = allocator.free(old);
+        }
+        // SAFETY: the device is idle and the handle is ours.
+        unsafe { self.device.destroy_buffer(self.objects, None) };
+
+        let (objects, objects_alloc, object_address) = create_address_buffer(
+            &self.device,
+            allocator,
+            (capacity * size_of::<ObjectData>()) as u64,
+            "loom.object_data",
+        )?;
+        self.objects = objects;
+        self.objects_alloc = Some(objects_alloc);
+        self.object_address = object_address;
+        self.object_capacity = capacity;
+        Ok(())
     }
 
     /// Replace the geometry this viewer draws from.
@@ -357,6 +407,11 @@ impl Viewer {
         let aspect = self.extent.width as f32 / self.extent.height as f32;
         let mut sorted: Vec<Object> = objects.to_vec();
         sorted.sort_by_key(|o| o.mesh);
+        // Grow rather than refuse. An agent that generates a five-thousand
+        // node scene should see it, not an error about a buffer size it has no
+        // way to know about. `write_slice` still guards the memory.
+        self.reserve_objects(objects.len())?;
+
         let view_proj = view_projection(camera, aspect);
         let object_data = pack_objects(&sorted, view_proj, &self.unpack);
         let batches = batch_by_mesh(&sorted);
