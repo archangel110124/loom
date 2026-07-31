@@ -41,6 +41,57 @@ impl Default for Physics {
     }
 }
 
+
+/// Quaternion product, `(x, y, z, w)`.
+fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let ([ax, ay, az, aw], [bx, by, bz, bw]) = (a, b);
+    [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
+}
+
+/// Euler degrees to rapier's scaled axis-angle, in the scene format's
+/// convention: intrinsic Y-X-Z, ordered `[pitch_x, yaw_y, roll_z]`.
+///
+/// The exact inverse of [`Physics::rotation_euler`], and a round-trip test
+/// holds them to it. Without this, a node authored with a rotation simulated
+/// as though it were upright — a tilted crate snapped flat the moment physics
+/// touched it, and the render disagreed with the simulation about where its
+/// faces were.
+///
+/// Composed from the three axis quaternions rather than written out as a
+/// closed form: the closed form is where sign errors hide, and this is a
+/// handful of multiplies once per body.
+fn scaled_axis_from_euler(euler: [f32; 3]) -> AngVector {
+    let (half_pitch, half_yaw, half_roll) = (
+        euler[0].to_radians() * 0.5,
+        euler[1].to_radians() * 0.5,
+        euler[2].to_radians() * 0.5,
+    );
+    let qx = [half_pitch.sin(), 0.0, 0.0, half_pitch.cos()];
+    let qy = [0.0, half_yaw.sin(), 0.0, half_yaw.cos()];
+    let qz = [0.0, 0.0, half_roll.sin(), half_roll.cos()];
+    // Y then X then Z, matching the extraction order in `rotation_euler`.
+    let [x, y, z, w] = quat_mul(quat_mul(qy, qx), qz);
+
+    // Scaled axis-angle is what `RigidBodyBuilder::rotation` wants in 3D
+    // (rapier's own doc: "axis * angle"). Near identity the axis is
+    // degenerate, so return zero rather than dividing by ~0.
+    let sin_half = (1.0 - w * w).max(0.0).sqrt();
+    if sin_half < 1e-6 {
+        return AngVector::new(0.0, 0.0, 0.0);
+    }
+    let angle = 2.0 * w.clamp(-1.0, 1.0).acos();
+    AngVector::new(
+        x / sin_half * angle,
+        y / sin_half * angle,
+        z / sin_half * angle,
+    )
+}
+
 impl Physics {
     /// A world stepping at `dt` seconds.
     ///
@@ -69,9 +120,15 @@ impl Physics {
     }
 
     /// A static box collider — the shape a `BoxCollider` component becomes.
-    pub fn add_static_box(&mut self, position: [f32; 3], half_extents: [f32; 3]) -> ColliderHandle {
+    pub fn add_static_box(
+        &mut self,
+        position: [f32; 3],
+        rotation: [f32; 3],
+        half_extents: [f32; 3],
+    ) -> ColliderHandle {
         let collider = ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2])
             .translation(Vector::new(position[0], position[1], position[2]))
+            .rotation(scaled_axis_from_euler(rotation))
             .build();
         self.colliders.insert(collider)
     }
@@ -107,17 +164,55 @@ impl Physics {
     pub fn add_box_body(
         &mut self,
         position: [f32; 3],
+        rotation: [f32; 3],
         half_extents: [f32; 3],
         mass: f32,
     ) -> RigidBodyHandle {
         let body = RigidBodyBuilder::dynamic()
             .translation(Vector::new(position[0], position[1], position[2]))
+            .rotation(scaled_axis_from_euler(rotation))
             .build();
         let handle = self.bodies.insert(body);
         let collider =
             ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2])
                 .mass(mass.max(0.001))
                 .build();
+        self.colliders
+            .insert_with_parent(collider, handle, &mut self.bodies);
+        handle
+    }
+
+    /// A static sphere.
+    pub fn add_static_ball(&mut self, position: [f32; 3], radius: f32) -> ColliderHandle {
+        let collider = ColliderBuilder::ball(radius.max(1e-3))
+            .translation(Vector::new(position[0], position[1], position[2]))
+            .build();
+        self.colliders.insert(collider)
+    }
+
+    /// A dynamic sphere.
+    ///
+    /// **The shape has to match the mesh.** A sphere simulated as a cuboid
+    /// rests on whichever face is down, so a tilted one settles its centre at
+    /// `radius * sqrt(2)` rather than `radius` — and the drawn sphere then
+    /// hangs above the thing it landed on or sinks into it. The simulation is
+    /// self-consistent and the picture is a lie, which is the failure mode the
+    /// brief cares most about.
+    pub fn add_ball_body(
+        &mut self,
+        position: [f32; 3],
+        rotation: [f32; 3],
+        radius: f32,
+        mass: f32,
+    ) -> RigidBodyHandle {
+        let body = RigidBodyBuilder::dynamic()
+            .translation(Vector::new(position[0], position[1], position[2]))
+            .rotation(scaled_axis_from_euler(rotation))
+            .build();
+        let handle = self.bodies.insert(body);
+        let collider = ColliderBuilder::ball(radius.max(1e-3))
+            .mass(mass.max(0.001))
+            .build();
         self.colliders
             .insert_with_parent(collider, handle, &mut self.bodies);
         handle
@@ -260,13 +355,39 @@ impl Physics {
 
 #[cfg(test)]
 mod tests {
+    /// The writer and the reader must be inverses. They are hand-rolled Y-X-Z
+    /// conversions on opposite sides of the physics boundary, and nothing else
+    /// would notice if they drifted: a scene would simply simulate at a
+    /// slightly different angle than it was authored at.
+    #[test]
+    fn euler_survives_a_round_trip_through_the_body() {
+        for euler in [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 45.0],
+            [30.0, 0.0, 0.0],
+            [0.0, 90.0, 0.0],
+            [15.0, -40.0, 70.0],
+            [-25.0, 160.0, -80.0],
+        ] {
+            let mut physics = super::Physics::new(1.0 / 60.0);
+            let handle = physics.add_box_body([0.0, 0.0, 0.0], euler, [0.5, 0.5, 0.5], 1.0);
+            let back = physics.rotation_euler(handle).expect("body exists");
+            for axis in 0..3 {
+                assert!(
+                    (back[axis] - euler[axis]).abs() < 0.01,
+                    "{euler:?} came back as {back:?}"
+                );
+            }
+        }
+    }
+
     use super::*;
 
     /// **The M7 exit criterion.** A capsule falls onto a floor and stays on it.
     #[test]
     fn a_capsule_comes_to_rest_on_a_floor() {
         let mut physics = Physics::new(1.0 / 60.0);
-        physics.add_static_box([0.0, -0.5, 0.0], [10.0, 0.5, 10.0]);
+        physics.add_static_box([0.0, -0.5, 0.0], [0.0, 0.0, 0.0], [10.0, 0.5, 10.0]);
         let capsule = physics.add_capsule([0.0, 4.0, 0.0], 0.5, 0.4);
 
         for _ in 0..240 {
@@ -287,7 +408,7 @@ mod tests {
     #[test]
     fn a_falling_capsule_does_not_tunnel_through_a_thin_floor() {
         let mut physics = Physics::new(1.0 / 60.0);
-        physics.add_static_box([0.0, 0.0, 0.0], [10.0, 0.05, 10.0]);
+        physics.add_static_box([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [10.0, 0.05, 10.0]);
         let capsule = physics.add_capsule([0.0, 6.0, 0.0], 0.5, 0.4);
 
         for _ in 0..300 {
@@ -320,7 +441,7 @@ mod tests {
     #[test]
     fn debris_launched_upward_actually_moves() {
         let mut physics = Physics::new(1.0 / 60.0);
-        physics.add_static_box([0.0, -0.5, 0.0], [20.0, 0.5, 20.0]);
+        physics.add_static_box([0.0, -0.5, 0.0], [0.0, 0.0, 0.0], [20.0, 0.5, 20.0]);
         let chunk = physics
             .spawn_debris([0.0, 1.0, 0.0], 0.2, [4.0, 9.0, 0.0], 100)
             .expect("under the cap");
@@ -339,7 +460,7 @@ mod tests {
     fn the_same_simulation_twice_produces_the_same_hash() {
         let run = || {
             let mut physics = Physics::new(1.0 / 60.0);
-            physics.add_static_box([0.0, -0.5, 0.0], [10.0, 0.5, 10.0]);
+            physics.add_static_box([0.0, -0.5, 0.0], [0.0, 0.0, 0.0], [10.0, 0.5, 10.0]);
             for i in 0..8 {
                 #[allow(clippy::cast_precision_loss)]
                 physics.add_capsule([i as f32 * 0.35, 3.0 + i as f32, 0.0], 0.5, 0.4);

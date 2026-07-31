@@ -581,8 +581,21 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     // Elapsed time is fed in as an exact constant, never read from the wall
     // clock (never-do #8). That is what makes this reproducible, and it is why
     // `advance` takes the delta as an argument.
+    // Physics runs here, through the **same** `play::Sim` the editor's Play
+    // button drives. It used to not run at all: `simulate_physics` was called
+    // only by `loom render --sim`, so the picture had gravity and the
+    // assertions did not — `--assert` was quietly checking authored positions.
+    //
+    // Built from the world as authored, before the loop. A script that moves a
+    // body after this point is not fed back into the solver; scripted
+    // kinematic bodies are not wired yet, and that is a gap rather than a
+    // silent approximation.
+    let mut physics = play::Sim::new(&world);
+
     for _ in 0..ticks {
         clock.advance(clock.step_seconds());
+        physics.step(1);
+        physics.write_back(&mut world);
         for (entity, script) in &scripted {
             let Some(transform) = world.transform(*entity).cloned() else {
                 continue;
@@ -1327,6 +1340,39 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// **`loom sim` must actually simulate.** It stepped scripts and nothing
+    /// else, so `--assert` on a physics scene checked the *authored*
+    /// positions: a wrecking ball asserted to be on the floor after four
+    /// seconds passed while still sitting at its starting height. The picture
+    /// (`loom render --sim`) had physics and the assertions did not, which is
+    /// the worse half of that pair — a render you can eyeball versus a claim
+    /// you cannot.
+    #[test]
+    fn sim_steps_physics_so_assertions_mean_something() {
+        let tower = "../../assets/test/tower.loom";
+        // Authored at y = 7.0, above a stack it knocks over.
+        let (code, out) = run(&args(&[
+            "sim",
+            tower,
+            "--ticks",
+            "300",
+            "--assert",
+            "Yard/Wrecker.y < 3.0",
+        ]));
+
+        assert_eq!(code, 0, "the ball should have fallen: {out}");
+    }
+
+    /// And the same run must still be reproducible.
+    #[test]
+    fn simulating_physics_twice_gives_the_same_hash() {
+        let tower = "../../assets/test/tower.loom";
+        let (_, a) = run(&args(&["sim", tower, "--ticks", "180"]));
+        let (_, b) = run(&args(&["sim", tower, "--ticks", "180"]));
+
+        assert_eq!(a, b, "physics must be deterministic across runs");
     }
 
     #[test]

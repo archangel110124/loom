@@ -51,11 +51,38 @@ impl Sim {
                 transform.scale[2].abs().max(1e-3),
             ];
 
+            // **The collider follows the mesh.** Everything used to get a
+            // cuboid, so a sphere rested on whichever face was down: tilted,
+            // its centre settled at `radius * sqrt(2)` and the drawn sphere
+            // sank into whatever it landed on. The simulation was
+            // self-consistent and the picture was a lie.
+            //
+            // `ponytail:` keyed off the mesh alias rather than an explicit
+            // collider component, because the shape a thing *is* is the shape
+            // it should collide as, and scenes already say that. Add a
+            // `SphereCollider` when something needs to differ from its mesh.
+            let rotation = transform.rot_euler;
+            let ball = world.mesh_asset(*entity) == Some("sphere");
+            // The enclosing radius, not the smallest: a non-uniformly scaled
+            // sphere is an ellipsoid that no ball matches, and of the two
+            // wrong answers a collider that contains the drawn shape is the
+            // one that does not let geometry poke through.
+            let radius = half[0].max(half[1]).max(half[2]);
+
             if world.is_dynamic(*entity) {
-                let handle = physics.add_box_body(pos, half, world.body_mass(*entity));
+                let mass = world.body_mass(*entity);
+                let handle = if ball {
+                    physics.add_ball_body(pos, rotation, radius, mass)
+                } else {
+                    physics.add_box_body(pos, rotation, half, mass)
+                };
                 dynamic.push((*entity, handle));
             } else if world.is_renderable(*entity) {
-                physics.add_static_box(pos, half);
+                if ball {
+                    physics.add_static_ball(pos, radius);
+                } else {
+                    physics.add_static_box(pos, rotation, half);
+                }
             }
         }
 
@@ -227,6 +254,77 @@ transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
             .and_then(|e| world.transform(*e))
             .map(|t| t.pos[1])
             .expect("node exists")
+    }
+
+    const TILTED_BALL: &str = r#"
+[scene]
+format = 1
+id = "0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f"
+
+[[node]]
+name = "Stage"
+
+[[node]]
+name = "Ground"
+parent = "Stage"
+transform = { pos = [0.0, -0.5, 0.0], scale = [10.0, 0.5, 10.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+[[node]]
+name = "Ball"
+parent = "Stage"
+transform = { pos = [0.0, 4.0, 0.0], rot_euler = [0.0, 0.0, 45.0], scale = [0.7, 0.7, 0.7] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 10.0
+"#;
+
+    /// **The collider has to match the mesh.** A sphere simulated as a cube
+    /// rests on whichever face is down, so a tilted one settles its centre at
+    /// `radius * sqrt(2)` instead of `radius` — and the rendered sphere then
+    /// hangs in the air or sinks into whatever it landed on, which is exactly
+    /// what a screenshot of the tower scene showed.
+    ///
+    /// Rotation is what makes this test discriminating: an axis-aligned cube
+    /// and a ball of the same radius rest at the same height, so an upright
+    /// sphere proves nothing.
+    #[test]
+    fn a_sphere_rests_at_its_radius_however_it_is_turned() {
+        let world = World::from_scene(&Scene::parse(TILTED_BALL).expect("valid scene"));
+        let mut play = Play::start(world);
+
+        play.run(240);
+        let y = height(&play.world, "Stage/Ball");
+
+        // Ground top is y = 0, so a ball of radius 0.7 rests at 0.7.
+        // A 45-degree cube of half-extent 0.7 would rest at 0.99.
+        assert!(
+            (y - 0.7).abs() < 0.05,
+            "a ball should rest at its radius, not at a cube corner: y = {y}"
+        );
+    }
+
+    /// The other half of the same rule: a box must keep its box. Turning every
+    /// collider into a ball would pass the test above and be just as wrong.
+    #[test]
+    fn a_tilted_box_still_rests_on_its_corner() {
+        let source = TILTED_BALL.replace("asset = \"sphere\"", "asset = \"box\"");
+        let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+        let mut play = Play::start(world);
+
+        play.run(240);
+        let y = height(&play.world, "Stage/Ball");
+
+        assert!(
+            y > 0.85,
+            "a cube tilted 45 degrees rests on an edge, higher than its half-extent: y = {y}"
+        );
     }
 
     #[test]
