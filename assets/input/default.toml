@@ -19,7 +19,11 @@ sprint       = [{ button = "ShiftLeft" }, { button = "ShiftRight" }]
 
 # Hold to look, so the cursor stays usable otherwise. This is a viewer, not a
 # game — taking the pointer hostage would be wrong here.
-look     = [{ button = "MouseRight" }, { button = "MouseLeft" }]
+#
+# RIGHT button only. The left one selects nodes and drags gizmo handles, and a
+# button that both orbits the camera and moves the thing you clicked is how you
+# fling a wall across the map.
+look     = [{ button = "MouseRight" }]
 
 reframe  = [{ button = "KeyF", trigger = "pressed" }]
 quit     = [{ button = "Escape", trigger = "pressed" }]
@@ -38,3 +42,15 @@ nudge_down    = [{ button = "KeyO", trigger = "pressed" }]
 undo          = [{ button = "KeyZ", modifiers = ["ControlLeft"], trigger = "pressed" }]
 redo          = [{ button = "KeyY", modifiers = ["ControlLeft"], trigger = "pressed" }]
 save          = [{ button = "KeyS", modifiers = ["ControlLeft"], trigger = "pressed" }]
+
+# Gizmo modes. Digits rather than Unity's W/E/R, because W and E are already
+# fly-camera movement and a viewer you cannot fly is worse than one whose
+# shortcuts differ.
+mode_move     = [{ button = "Digit1", trigger = "pressed" }]
+mode_rotate   = [{ button = "Digit2", trigger = "pressed" }]
+mode_scale    = [{ button = "Digit3", trigger = "pressed" }]
+
+duplicate     = [{ button = "KeyD", modifiers = ["ControlLeft"], trigger = "pressed" }]
+delete        = [{ button = "Delete", trigger = "pressed" }]
+# Held while clicking to add to the selection rather than replace it.
+extend        = [{ button = "ControlLeft" }, { button = "ControlRight" }]

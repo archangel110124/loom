@@ -10,7 +10,10 @@
 //! parser dependency. Switch to `clap` when M9 lands `scene place/measure/...`
 //! and the count goes past four — `run` is the seam, so it is a local change.
 
+mod gizmo;
+mod log;
 mod panels;
+mod scene_view;
 mod run;
 
 use std::process::ExitCode;
@@ -246,7 +249,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
 /// Transform propagation lives in `loom_ecs` as of M3; this only reads the
 /// resolved `GlobalTransform`. The parent-chain walk that used to live here
 /// was a stand-in until the ECS existed, and is gone.
-fn world_to_objects(world: &World, library: &MeshLibrary) -> Vec<Object> {
+pub(crate) fn world_to_objects(world: &World, library: &MeshLibrary) -> Vec<Object> {
     world
         .entities()
         .iter()
@@ -263,11 +266,14 @@ fn world_to_objects(world: &World, library: &MeshLibrary) -> Vec<Object> {
         .collect()
 }
 
+/// Baked voxel meshes, keyed by the op list that produced them.
+pub(crate) type VoxelCache = std::collections::BTreeMap<u64, loom_asset::Mesh>;
+
 /// Every mesh a scene needs, plus the mapping from asset alias to draw index.
 ///
 /// Built per scene rather than globally: an agent iterating on one level
 /// should not pay to load every asset in the project.
-struct MeshLibrary {
+pub(crate) struct MeshLibrary {
     meshes: Vec<loom_asset::Mesh>,
     by_name: std::collections::BTreeMap<String, u32>,
 }
@@ -279,7 +285,22 @@ impl MeshLibrary {
     /// import. An asset that cannot be resolved falls back to a box rather
     /// than failing the render — a missing mesh should be *visible*, not
     /// fatal (design doc §2.6: degrade, do not crash).
-    fn for_scene(scene: &Scene, base: &std::path::Path) -> Self {
+    pub(crate) fn for_scene(scene: &Scene, base: &std::path::Path) -> Self {
+        Self::with_cache(scene, base, &mut VoxelCache::default())
+    }
+
+    /// As [`Self::for_scene`], reusing voxel meshes whose recipe has not
+    /// changed.
+    ///
+    /// The editor rebuilds this on **every** edit so the viewport can follow
+    /// the file. Re-baking a 128³ volume at that rate is the difference between
+    /// an editor and a slideshow, and the op list is the recipe — equal recipe,
+    /// equal geometry, by construction (never-do #11).
+    pub(crate) fn with_cache(
+        scene: &Scene,
+        base: &std::path::Path,
+        cache: &mut VoxelCache,
+    ) -> Self {
         let mut meshes = vec![loom_asset::primitives::box_mesh()];
         let mut by_name = std::collections::BTreeMap::new();
         by_name.insert("box".to_owned(), 0_u32);
@@ -307,7 +328,26 @@ impl MeshLibrary {
             if by_name.contains_key(&key) {
                 continue;
             }
-            match bake_voxel(volume) {
+            // Keyed by the recipe, not the node path: renaming a node must not
+            // force a re-bake, and two nodes with the same ops share one mesh.
+            let recipe = fnv(0xcbf2_9ce4_8422_2325, volume.to_string().as_bytes());
+            let baked = match cache.get(&recipe) {
+                Some(mesh) => Some(mesh.clone()),
+                None => {
+                    let mesh = bake_voxel(volume);
+                    if let Some(mesh) = mesh.clone() {
+                        // `ponytail:` unbounded until it isn't. Each entry is
+                        // one volume's geometry and an edit session touches a
+                        // handful; drop the lot rather than track ages.
+                        if cache.len() >= 8 {
+                            cache.clear();
+                        }
+                        cache.insert(recipe, mesh);
+                    }
+                    mesh
+                }
+            };
+            match baked {
                 Some(mesh) => {
                     by_name.insert(key, u32::try_from(meshes.len()).unwrap_or(0));
                     meshes.push(mesh);
@@ -340,17 +380,56 @@ impl MeshLibrary {
     }
 
     /// Hand the mesh data to a renderer.
-    fn into_meshes(self) -> Vec<loom_asset::Mesh> {
+    pub(crate) fn into_meshes(self) -> Vec<loom_asset::Mesh> {
         self.meshes
     }
 
+    /// Identity of the mesh **set**, for deciding whether the GPU buffers a
+    /// viewer already uploaded are still the right ones.
+    ///
+    /// Names alone are not enough: a re-baked voxel volume keeps its alias and
+    /// changes its geometry entirely, so the sizes and bounds go in too.
+    pub(crate) fn key(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for (name, index) in &self.by_name {
+            h = fnv(h, name.as_bytes());
+            h = fnv(h, &index.to_le_bytes());
+        }
+        for mesh in &self.meshes {
+            h = fnv(h, &mesh.vertices.len().to_le_bytes());
+            h = fnv(h, &mesh.indices.len().to_le_bytes());
+            let (lo, hi) = mesh.bounds();
+            for f in lo.iter().chain(hi.iter()) {
+                // Bit patterns, not values — the determinism rule from §7.5
+                // applies to any hash the engine compares across runs.
+                h = fnv(h, &f.to_bits().to_le_bytes());
+            }
+        }
+        h
+    }
+
+    /// Asset aliases this scene resolved, for the asset browser.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.by_name.keys().map(String::as_str)
+    }
+
     /// Draw index for an asset alias; 0 (the box) when unknown.
-    fn index_for(&self, asset: Option<&str>) -> u32 {
+    pub(crate) fn index_for(&self, asset: Option<&str>) -> u32 {
         asset
             .and_then(|a| self.by_name.get(a))
             .copied()
             .unwrap_or(0)
     }
+}
+
+/// FNV-1a over bytes. The engine's one hash, so every fingerprint it compares
+/// is stable across runs and machines.
+fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// Bake a `VoxelVolume` component into a mesh.

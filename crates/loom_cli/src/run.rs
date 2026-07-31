@@ -1,20 +1,25 @@
-//! `loom run` — a window showing the scene, with a fly camera.
+//! `loom run` — a window showing the scene, with a fly camera and the editor.
 //!
-//! Read-only by design. Brief §2 puts the editable editor at M12 and a
-//! **read-only** viewer at M5.5; this is the camera half of that, early. It
-//! cannot modify the scene, so it cannot race the agent's writes — the
-//! split-brain problem §7.17 is about does not exist until editing does.
+//! The window is a **live view of the file**, not a snapshot of it. Every edit
+//! — a human dragging a gizmo, or the agent applying a transaction through the
+//! CLI while this window is open — re-derives the scene and shows up in the
+//! viewport. That is what `--watch` in brief §2's M5.5 is for, and it is what
+//! makes the human's oversight of the agent real rather than nominal.
+//!
+//! §7.17 governs the collision: the watcher reloads, and it never merges. When
+//! the human has unsaved work and the file moves underneath, both versions are
+//! kept and the human picks which one survives.
 
 use std::f32::consts::FRAC_PI_2;
 use std::sync::Arc;
 
-use loom_ecs::World;
 use loom_input::{ActionMap, InputState};
 use loom_render::glam::Vec3;
-use loom_render::{Camera, Device, Instance, Object, Ui, Viewer, ash, ash_window};
+use loom_render::{Camera, Device, Instance, Ui, Viewer, ash, ash_window};
 
+use crate::gizmo::{self, Mode};
 use crate::panels::{PanelState, UiAction};
-use loom_scene::Scene;
+use crate::scene_view::SceneView;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -26,6 +31,14 @@ const MOVE_SPEED: f32 = 6.0;
 const SPRINT_MULTIPLIER: f32 = 3.0;
 /// Radians per pixel of mouse motion.
 const LOOK_SENSITIVITY: f32 = 0.0025;
+/// Degrees per world-unit of drag, in rotate mode.
+const ROTATE_PER_UNIT: f32 = 45.0;
+
+/// How often the scene file is checked for someone else's writes.
+///
+/// A human reads a quarter second as "immediate" and it costs one small read of
+/// a text file. Fast enough to feel live, cheap enough to be free.
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// An orbit-free fly camera: position plus yaw/pitch.
 struct FlyCamera {
@@ -35,8 +48,8 @@ struct FlyCamera {
 }
 
 impl FlyCamera {
-    /// Frame the scene, then look at its centre — so the window opens on the
-    /// content rather than on empty space.
+    /// Frame some bounds, then look at their centre — so the window opens on
+    /// the content rather than on empty space.
     fn framing(bounds: (Vec3, f32)) -> Self {
         let (center, radius) = bounds;
         let distance = (radius * 2.2).max(4.0);
@@ -78,28 +91,59 @@ const EDIT: &str = "edit";
 /// How far one nudge moves a node, in metres.
 const NUDGE: f32 = 0.25;
 
+/// A gizmo handle being dragged.
+struct Drag {
+    /// The handle as it was when grabbed. Frozen, so the gearing does not
+    /// change under the cursor as the node moves away from where it started.
+    handle: gizmo::Handle,
+    /// Where the press landed, in window pixels.
+    from: (f32, f32),
+    /// The node's transform when the drag started. Every frame sets an
+    /// absolute value derived from this rather than accumulating deltas, so a
+    /// dropped frame cannot make the node drift.
+    start: [[f32; 3]; 3],
+    node: String,
+}
+
 struct App {
-    objects: Vec<Object>,
-    /// `Some` when `--edit` was passed. Read-only otherwise, which is the
-    /// default because a viewer that cannot write cannot race the agent.
+    /// Everything derived from the scene text. Rebuilt on every change, which
+    /// is what makes the window follow the file.
+    view: SceneView,
+    /// Directory the scene lives in, for resolving its assets on rebuild.
+    base: std::path::PathBuf,
+    /// Reused across rebuilds so a drag does not re-bake voxel volumes.
+    voxels: crate::VoxelCache,
+    /// `Some` when `--edit` was passed. Read-only otherwise.
     session: Option<loom_scene::Session>,
-    /// Index into `editable` of the selected node.
-    selected: usize,
-    /// Scene paths that can be moved, in scene order.
-    editable: Vec<String>,
-    /// Where the scene lives, for reloading after a rejected write.
+    /// Selected node paths. Paths rather than indices: the agent can insert a
+    /// node above yours between frames, and an index would then be pointing at
+    /// somebody else's object.
+    selected: Vec<String>,
+    /// Where the scene lives, for watching and for reloading.
     scene_path: std::path::PathBuf,
     /// egui, when editing. `None` in read-only mode, so a viewer costs no UI.
     ui: Option<Ui>,
-    /// World bounds per node, for click-to-select.
-    picks: std::collections::BTreeMap<String, loom_scene::place::Bounds>,
-    /// Cursor position, for picking.
+    /// Cursor position in window pixels, for picking and for gizmo drags.
     cursor: (f32, f32),
     registry: loom_reflect::TypeRegistry,
     dirty: bool,
-    /// Real world bounds, so framing does not assume unit cubes.
-    scene_bounds: (Vec3, f32),
-    meshes: Vec<loom_asset::Mesh>,
+    /// The disk's version of the scene, held back because taking it would
+    /// discard unsaved work. §7.17: never merge — let the human choose.
+    conflict: Option<String>,
+    /// Version of the file as we last read or wrote it. Anything else on disk
+    /// is somebody else's write.
+    disk_seen: loom_scene::VersionToken,
+    /// Mesh set currently on the GPU, so a moved node costs no re-upload.
+    uploaded: u64,
+    /// The handle being dragged, if one is.
+    drag: Option<Drag>,
+    /// What the gizmo edits: Unity's W/E/R, on digits here.
+    mode: Mode,
+    /// Handles as of the last frame, so a mouse press can hit-test them
+    /// against exactly what was drawn.
+    handles: Vec<gizmo::Handle>,
+    /// When to next look at the file.
+    next_watch: std::time::Instant,
     camera: FlyCamera,
     /// Loaded from TOML, so rebinding needs no rebuild.
     bindings: ActionMap,
@@ -110,35 +154,51 @@ struct App {
     /// viewer's resources would be a use-after-free.
     gpu: Option<(Instance, Device)>,
     last_frame: std::time::Instant,
+    /// Smoothed, because a number that changes sixty times a second is not a
+    /// number anyone can read.
+    fps: f32,
     title: String,
 }
 
 impl App {
-    #[allow(clippy::too_many_arguments)]
     fn new(
-        objects: Vec<Object>,
-        meshes: Vec<loom_asset::Mesh>,
-        scene_bounds: (Vec3, f32),
+        view: SceneView,
         title: String,
         session: Option<loom_scene::Session>,
-        editable: Vec<String>,
         scene_path: std::path::PathBuf,
-        picks: std::collections::BTreeMap<String, loom_scene::place::Bounds>,
+        disk_seen: loom_scene::VersionToken,
     ) -> Self {
+        let base = scene_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
         Self {
-            camera: FlyCamera::framing(scene_bounds),
-            scene_bounds,
-            objects,
+            camera: FlyCamera::framing(view.bounds),
+            uploaded: view.mesh_key,
+            selected: view.paths.first().cloned().into_iter().collect(),
+            view,
+            base,
+            voxels: crate::VoxelCache::default(),
             session,
-            selected: 0,
-            editable,
             scene_path,
+            disk_seen,
+            drag: None,
+            mode: Mode::Move,
+            handles: Vec::new(),
             ui: None,
-            picks,
             cursor: (0.0, 0.0),
             registry: loom_scene::components::registry(),
             dirty: false,
-            meshes,
+            conflict: None,
+            // `clippy.toml` disallows `Instant::now`, and it is right to fire.
+            // The rule is that SIMULATION must not read the wall clock
+            // (never-do #8, §7.5) — a deterministic tick cannot depend on how
+            // fast the machine is. This is the presentation loop: frame pacing
+            // and file polling for a human at a window, which is exactly what
+            // wall time is for. Scoped to these reads rather than weakening the
+            // lint for the crate.
+            #[allow(clippy::disallowed_methods)]
+            next_watch: std::time::Instant::now(),
             // Prefer a project-local file, fall back to the shipped defaults,
             // so a fresh checkout has a working camera with no config to write.
             bindings: load_bindings(),
@@ -146,16 +206,136 @@ impl App {
             window: None,
             viewer: None,
             gpu: None,
-            // `clippy.toml` disallows Instant::now, and it is right to fire.
-            // The rule is that SIMULATION must not read the wall clock
-            // (never-do #8, §7.5) — a deterministic tick cannot depend on how
-            // fast the machine is. This is the presentation loop: frame pacing
-            // for a camera a human is flying, which is exactly what wall time
-            // is for. Scoped to these two reads rather than weakening the lint.
             #[allow(clippy::disallowed_methods)]
             last_frame: std::time::Instant::now(),
+            fps: 0.0,
             title,
         }
+    }
+
+    /// The one selected node, when exactly one is.
+    fn focused(&self) -> Option<String> {
+        (self.selected.len() == 1)
+            .then(|| self.selected.first().cloned())
+            .flatten()
+    }
+
+    /// Re-derive the view from scene text and hand any new geometry to the GPU.
+    ///
+    /// Invalid text — which is what a scene looks like halfway through somebody
+    /// else's write — leaves the last good view on screen and says so. Blanking
+    /// the viewport because a file was caught mid-save would be worse than
+    /// useless.
+    fn show(&mut self, text: &str) {
+        let view = match SceneView::build_cached(text, &self.base, &mut self.voxels) {
+            Ok(view) => view,
+            Err(e) => {
+                crate::log::error(format!("scene did not parse; showing the last good one: {e}"));
+                return;
+            }
+        };
+
+        if view.mesh_key != self.uploaded
+            && let Some(viewer) = self.viewer.as_mut()
+        {
+            match viewer.set_meshes(&view.meshes) {
+                Ok(()) => self.uploaded = view.mesh_key,
+                Err(e) => crate::log::error(format!("could not upload the new geometry: {e}")),
+            }
+        }
+
+        // A node the agent deleted cannot stay selected.
+        self.selected.retain(|p| view.paths.contains(p));
+        if self.selected.is_empty() {
+            self.selected.extend(view.paths.first().cloned());
+        }
+        self.view = view;
+    }
+
+    /// Re-derive from whatever the session currently holds.
+    fn resync(&mut self) {
+        let Some(text) = self.session.as_ref().map(|s| s.text().to_owned()) else {
+            return;
+        };
+        self.show(&text);
+    }
+
+    /// Notice somebody else writing the scene.
+    ///
+    /// `ponytail:` polls and re-reads the file rather than taking an inotify
+    /// dependency. A scene is kilobytes and this runs four times a second.
+    /// Switch to `notify` if scenes reach megabytes, or if watching a whole
+    /// asset tree starts to matter.
+    fn poll_file(&mut self, now: std::time::Instant) {
+        if now < self.next_watch {
+            return;
+        }
+        self.next_watch = now + WATCH_INTERVAL;
+
+        let Ok(disk) = std::fs::read_to_string(&self.scene_path) else {
+            return;
+        };
+        // Against the version we last read or wrote — comparing against our own
+        // in-memory text would flag every unsaved edit as somebody else's write.
+        let version = loom_scene::VersionToken::of(&disk);
+        if version == self.disk_seen {
+            return;
+        }
+
+        if self.session.is_some() && self.dirty {
+            // Two divergent versions. never-do #15 and §7.17: reject, and let
+            // the human choose — do NOT merge, and do NOT drop either side.
+            if self.conflict.is_none() {
+                crate::log::warn("the scene changed on disk while you have unsaved edits");
+            }
+            self.conflict = Some(disk);
+            return;
+        }
+
+        self.disk_seen = version;
+        self.conflict = None;
+        crate::log::info("the scene changed on disk — reloaded");
+        match self.session.as_mut() {
+            Some(session) => {
+                if let Err(e) = session.reload() {
+                    crate::log::error(format!("reload failed: {e}"));
+                    return;
+                }
+                self.resync();
+            }
+            // Read-only. Nothing of ours to lose, so just follow the file.
+            None => self.show(&disk),
+        }
+    }
+
+    /// Take the disk's version, discarding unsaved edits. The human's call.
+    fn accept_disk(&mut self) {
+        let Some(disk) = self.conflict.take() else {
+            return;
+        };
+        self.disk_seen = loom_scene::VersionToken::of(&disk);
+        self.dirty = false;
+        match self.session.as_mut() {
+            Some(session) => {
+                if let Err(e) = session.reload() {
+                    crate::log::error(format!("reload failed: {e}"));
+                    return;
+                }
+                self.resync();
+            }
+            None => self.show(&disk),
+        }
+        crate::log::info("reloaded from disk; unsaved edits discarded");
+    }
+
+    /// Keep the in-memory version. Saving will then overwrite the file, which
+    /// is why this says so rather than doing it quietly.
+    fn keep_mine(&mut self) {
+        let Some(disk) = self.conflict.take() else {
+            return;
+        };
+        self.disk_seen = loom_scene::VersionToken::of(&disk);
+        crate::log::warn("keeping your version — saving will overwrite what is on disk");
     }
 
     fn step_camera(&mut self, dt: f32) {
@@ -181,6 +361,25 @@ impl App {
     fn looking(&self) -> bool {
         self.input.is_active(&self.bindings, FLY, "look")
     }
+
+    /// Bounds of the selection, or of the whole scene when nothing is picked.
+    fn focus_bounds(&self) -> (Vec3, f32) {
+        let mut min = Vec3::splat(f32::MAX);
+        let mut max = Vec3::splat(f32::MIN);
+        let mut any = false;
+        for path in &self.selected {
+            if let Some(b) = self.view.node_bounds(path) {
+                min = min.min(Vec3::from_array(b.min));
+                max = max.max(Vec3::from_array(b.max));
+                any = true;
+            }
+        }
+        if any {
+            ((min + max) * 0.5, ((max - min).length() * 0.5).max(0.5))
+        } else {
+            self.view.bounds
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -191,7 +390,7 @@ impl ApplicationHandler for App {
 
         let attributes = Window::default_attributes()
             .with_title(&self.title)
-            .with_inner_size(winit::dpi::LogicalSize::new(1280, 800));
+            .with_inner_size(winit::dpi::LogicalSize::new(1440, 900));
         let window = match event_loop.create_window(attributes) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -201,14 +400,12 @@ impl ApplicationHandler for App {
             }
         };
 
-        match build_viewer(&window, &self.meshes) {
+        match build_viewer(&window, &self.view.meshes) {
             Ok((instance, device, viewer)) => {
-                eprintln!("loom: rendering on {}", device.name());
-                if self.session.is_some() {
-                    match Ui::new(&instance, &device, &window, viewer.color_format()) {
-                        Ok(ui) => self.ui = Some(ui),
-                        Err(e) => eprintln!("loom: no editor UI ({e}); continuing read-only"),
-                    }
+                crate::log::info(format!("rendering on {}", device.name()));
+                match Ui::new(&instance, &device, &window, viewer.color_format()) {
+                    Ok(ui) => self.ui = Some(ui),
+                    Err(e) => crate::log::error(format!("no editor UI ({e}); continuing bare")),
                 }
                 self.gpu = Some((instance, device));
                 self.viewer = Some(viewer);
@@ -247,26 +444,32 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
                 if self.input.is_active(&self.bindings, FLY, "reframe") {
-                    self.camera = FlyCamera::framing(self.scene_bounds);
+                    // Unity's F: frame the selection, or the scene when there
+                    // is none. Framing the whole level when you meant one desk
+                    // is the more annoying of the two mistakes.
+                    self.camera = FlyCamera::framing(self.focus_bounds());
                 }
                 self.handle_editing();
             }
 
-            // Click to select, when editing and not over a panel.
             WindowEvent::CursorMoved { position, .. } => {
                 #[allow(clippy::cast_possible_truncation)]
                 {
                     self.cursor = (position.x as f32, position.y as f32);
                 }
+                self.drag_gizmo();
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                if button == MouseButton::Left
-                    && state == ElementState::Pressed
-                    && self.session.is_some()
-                    && !self.ui.as_ref().is_some_and(Ui::wants_pointer)
-                {
-                    self.pick_at_cursor();
+                let over_panel = self.ui.as_ref().is_some_and(Ui::wants_pointer);
+                if button == MouseButton::Left && !over_panel {
+                    match state {
+                        ElementState::Pressed => self.press_in_viewport(),
+                        ElementState::Released => self.drag = None,
+                    }
+                }
+                if button == MouseButton::Left && state == ElementState::Released {
+                    self.drag = None;
                 }
                 let name = match button {
                     MouseButton::Left => "MouseLeft",
@@ -292,42 +495,64 @@ impl ApplicationHandler for App {
                 let now = std::time::Instant::now();
                 let dt = now.duration_since(self.last_frame).as_secs_f32();
                 self.last_frame = now;
+                if dt > 0.0 {
+                    // Exponential smoothing: readable, and one line.
+                    self.fps = self.fps.mul_add(0.9, (1.0 / dt) * 0.1);
+                }
                 // Clamp: a stall must not teleport the camera across the map.
                 self.step_camera(dt.min(0.1));
+                self.poll_file(now);
 
                 let camera = self.camera.camera();
-                let mut actions = Vec::new();
-                let scene = self
-                    .session
-                    .as_ref()
-                    .and_then(|s| loom_scene::Scene::parse(s.text()).ok());
+                let extent = self.viewer.as_ref().map_or((1, 1), Viewer::extent);
+                #[allow(clippy::cast_precision_loss)]
+                let projection = gizmo::View::new(&camera, extent.0 as f32, extent.1 as f32);
 
+                // Handles for the focused node, recomputed each frame and kept
+                // so the next mouse press hit-tests exactly what was drawn.
+                self.handles = match (self.session.is_some(), self.focused()) {
+                    (true, Some(path)) => self
+                        .view
+                        .node_bounds(&path)
+                        .map(|b| {
+                            let c = (Vec3::from_array(b.min) + Vec3::from_array(b.max)) * 0.5;
+                            gizmo::handles(&projection, c)
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+
+                let mut actions = Vec::new();
                 let state = PanelState {
-                    paths: &self.editable,
-                    selected: self.selected,
+                    view: &self.view,
+                    selected: &self.selected,
                     history: self.session.as_ref().map_or(&[][..], |s| s.history()),
                     can_undo: self.session.as_ref().is_some_and(loom_scene::Session::can_undo),
                     can_redo: self.session.as_ref().is_some_and(loom_scene::Session::can_redo),
                     dirty: self.dirty,
-                    scene: scene.as_ref(),
+                    conflict: self.conflict.is_some(),
+                    editable: self.session.is_some(),
                     registry: &self.registry,
+                    mode: self.mode,
+                    handles: &self.handles,
+                    dragging: self.drag.as_ref().map(|d| d.handle.axis),
+                    fps: self.fps,
                 };
 
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
                     (Some(viewer), Some(ui), Some(window)) => viewer.draw_with_ui(
-                        &self.objects,
+                        &self.view.objects,
                         &camera,
                         Some((ui, window)),
                         |root| actions.extend(crate::panels::draw(root, &state)),
                     ),
-                    (Some(viewer), _, _) => viewer.draw(&self.objects, &camera),
+                    (Some(viewer), _, _) => viewer.draw(&self.view.objects, &camera),
                     _ => Ok(()),
                 };
                 if let Err(e) = result {
                     eprintln!("loom: draw failed: {e}");
                     event_loop.exit();
                 }
-                drop(scene);
                 for action in actions {
                     self.act(action);
                 }
@@ -353,99 +578,341 @@ impl ApplicationHandler for App {
             // Clamp just short of straight up/down: at exactly ±90° the
             // forward vector becomes parallel to world up and `right()`
             // degenerates, which makes strafing snap around.
-            self.camera.pitch =
-                (self.camera.pitch - dy * LOOK_SENSITIVITY).clamp(-FRAC_PI_2 + 0.01, FRAC_PI_2 - 0.01);
+            self.camera.pitch = (self.camera.pitch - dy * LOOK_SENSITIVITY)
+                .clamp(-FRAC_PI_2 + 0.01, FRAC_PI_2 - 0.01);
         }
     }
 }
 
 impl App {
-    /// Apply one UI action. Every path funnels through `nudge`/`set_field`,
-    /// which funnel through `Session::apply` — one transaction path, one undo
-    /// stack, whether the request came from a panel, a key, or the agent.
+    /// Apply one UI action. Every path that changes the scene funnels through
+    /// `transact`, which funnels through `Session::apply` — one transaction
+    /// path, one undo stack, whether the request came from a panel, a key, a
+    /// gizmo, or the agent.
     fn act(&mut self, action: UiAction) {
         match action {
-            UiAction::Select(index) => self.selected = index,
+            UiAction::Select { path, extend } => self.select(&path, extend),
             UiAction::SetField(node, field, value) => self.set_field(&node, &field, value),
+            UiAction::SetMode(mode) => self.mode = mode,
+            UiAction::Focus => self.camera = FlyCamera::framing(self.focus_bounds()),
+            UiAction::AddChild(parent) => self.add_child(&parent),
+            UiAction::Duplicate => self.duplicate_selection(),
+            UiAction::Delete => self.delete_selection(),
+            UiAction::AssignMesh(asset) => self.assign_mesh(&asset),
+            UiAction::ReloadFromDisk => self.accept_disk(),
+            UiAction::KeepMine => self.keep_mine(),
+            UiAction::ClearLog => crate::log::clear(),
             UiAction::Undo => {
                 if let Some(s) = self.session.as_mut() {
-                    s.undo();
+                    let stepped = s.undo();
                     self.dirty = true;
+                    if stepped {
+                        self.resync();
+                    }
                 }
             }
             UiAction::Redo => {
                 if let Some(s) = self.session.as_mut() {
-                    s.redo();
+                    let stepped = s.redo();
                     self.dirty = true;
-                }
-            }
-            UiAction::Save => {
-                if let Some(s) = self.session.as_ref() {
-                    match s.save() {
-                        Ok(()) => {
-                            eprintln!("loom: saved {}", self.scene_path.display());
-                            self.dirty = false;
-                        }
-                        Err(e) => eprintln!("loom: save failed: {e}"),
+                    if stepped {
+                        self.resync();
                     }
                 }
             }
+            UiAction::Save => self.save(),
+        }
+    }
+
+    fn save(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        match session.save() {
+            Ok(()) => {
+                // Record what we just wrote, or the watcher reads our own save
+                // back as somebody else's edit a quarter second later.
+                self.disk_seen = session.version().clone();
+                self.dirty = false;
+                self.conflict = None;
+                crate::log::info(format!("saved {}", self.scene_path.display()));
+            }
+            Err(e) => crate::log::error(format!("save failed: {e}")),
+        }
+    }
+
+    fn select(&mut self, path: &str, extend: bool) {
+        if !extend {
+            self.selected.clear();
+            self.selected.push(path.to_owned());
+            return;
+        }
+        if let Some(at) = self.selected.iter().position(|p| p == path) {
+            self.selected.remove(at);
+        } else {
+            self.selected.push(path.to_owned());
+        }
+    }
+
+    /// Run a transaction and re-derive the view from the result.
+    ///
+    /// The single write path. Everything the editor does arrives here, which is
+    /// why a gizmo drag and an agent transaction are indistinguishable in the
+    /// file and share one undo stack (never-do #16).
+    fn transact(&mut self, label: String, ops: Vec<loom_scene::SceneOp>) {
+        if ops.is_empty() {
+            return;
+        }
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let outcome = session.apply(loom_scene::Transaction {
+            label,
+            ops,
+            dry_run: false,
+            expect_version: None,
+        });
+        match outcome {
+            Ok(_) => {
+                self.dirty = true;
+                self.resync();
+            }
+            // A dragged slider can leave the schema's range mid-drag; the
+            // rejection is correct, and the console collapses the repeats.
+            Err(e) if e.error == "would_produce_invalid_scene" => {
+                crate::log::warn(format!("rejected: {}", e.constraint));
+            }
+            Err(e) if e.error == "stale_version" => {
+                // §7.17: reload, never force, never merge.
+                crate::log::warn("the scene moved underneath — reloading rather than overwriting");
+                if let Some(session) = self.session.as_mut()
+                    && let Err(e) = session.reload()
+                {
+                    crate::log::error(format!("reload failed: {e}"));
+                    return;
+                }
+                self.resync();
+            }
+            Err(e) => crate::log::error(format!("{}: {}", e.error, e.constraint)),
         }
     }
 
     /// Set one field through a transaction.
     fn set_field(&mut self, node: &str, field: &str, value: serde_json::Value) {
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
         // `Transform.pos` is the sugar's desugared name; the op layer writes
         // the node key back out, so the file keeps its canonical form.
-        let transaction = if let Some(component_field) = field.strip_prefix("Transform.") {
-            let v: Vec<f32> = serde_json::from_value(value.clone()).unwrap_or_default();
+        let op = if let Some(component_field) = field.strip_prefix("Transform.") {
+            let v: Vec<f32> = serde_json::from_value(value).unwrap_or_default();
             if v.len() != 3 {
                 return;
             }
             let axis = [v[0], v[1], v[2]];
-            loom_scene::Transaction {
-                label: format!("Set {node} transform {component_field}"),
-                ops: vec![match component_field {
-                    "pos" => loom_scene::SceneOp::SetTransform {
-                        node: node.to_owned(), pos: Some(axis), rot_euler: None, scale: None,
-                    },
-                    "rot_euler" => loom_scene::SceneOp::SetTransform {
-                        node: node.to_owned(), pos: None, rot_euler: Some(axis), scale: None,
-                    },
-                    _ => loom_scene::SceneOp::SetTransform {
-                        node: node.to_owned(), pos: None, rot_euler: None, scale: Some(axis),
-                    },
-                }],
-                dry_run: false,
-                expect_version: None,
+            match component_field {
+                "pos" => transform_op(node, Some(axis), None, None),
+                "rot_euler" => transform_op(node, None, Some(axis), None),
+                _ => transform_op(node, None, None, Some(axis)),
             }
         } else {
-            loom_scene::Transaction {
-                label: format!("Set {node} {field}"),
-                ops: vec![loom_scene::SceneOp::SetField {
-                    node: node.to_owned(),
-                    field: field.to_owned(),
-                    value,
-                }],
-                dry_run: false,
-                expect_version: None,
+            loom_scene::SceneOp::SetField {
+                node: node.to_owned(),
+                field: field.to_owned(),
+                value,
             }
         };
+        self.transact(format!("Set {node} {field}"), vec![op]);
+    }
 
-        match session.apply(transaction) {
-            Ok(_) => self.dirty = true,
-            // A dragged slider can leave the schema range mid-drag; the
-            // rejection is correct and should not spam the log every frame.
-            Err(e) if e.error == "would_produce_invalid_scene" => {}
-            Err(e) if e.error == "stale_version" => {
-                eprintln!("loom: the scene changed on disk — reloading rather than overwriting");
-                let _ = session.reload();
-            }
-            Err(e) => eprintln!("loom: {e}"),
+    /// Add an empty child under `parent`, named so it does not collide.
+    fn add_child(&mut self, parent: &str) {
+        let mut name = "Node".to_owned();
+        let mut n = 1;
+        while self
+            .view
+            .paths
+            .iter()
+            .any(|p| p == &format!("{parent}/{name}"))
+        {
+            n += 1;
+            name = format!("Node{n}");
         }
+        self.transact(
+            format!("Add {parent}/{name}"),
+            vec![loom_scene::SceneOp::SpawnNode {
+                parent: parent.to_owned(),
+                name: name.clone(),
+                mesh: Some("box".to_owned()),
+            }],
+        );
+        self.selected = vec![format!("{parent}/{name}")];
+    }
+
+    /// Copy the selection, offset a little so the copy is visible.
+    ///
+    /// Built out of the ops that already exist rather than a `DuplicateNode`
+    /// op: spawn, then set what the original had. One transaction, so it is
+    /// still one Ctrl+Z.
+    fn duplicate_selection(&mut self) {
+        let mut ops = Vec::new();
+        let mut created = Vec::new();
+        for path in self.selected.clone() {
+            let Some(node) = self.view.scene.nodes().iter().find(|n| n.path == path) else {
+                continue;
+            };
+            let (parent, name) = match path.rsplit_once('/') {
+                Some((parent, name)) => (parent.to_owned(), name.to_owned()),
+                // A root node has nowhere to be a sibling of.
+                None => {
+                    crate::log::warn(format!("{path} is a root node; nothing to duplicate it into"));
+                    continue;
+                }
+            };
+            let mut copy = format!("{name}Copy");
+            let mut n = 1;
+            while self.view.paths.iter().any(|p| p == &format!("{parent}/{copy}")) {
+                n += 1;
+                copy = format!("{name}Copy{n}");
+            }
+            let new_path = format!("{parent}/{copy}");
+
+            ops.push(loom_scene::SceneOp::SpawnNode {
+                parent: parent.clone(),
+                name: copy.clone(),
+                mesh: None,
+            });
+            let t = &node.transform;
+            ops.push(transform_op(
+                &new_path,
+                Some([t.pos[0] + 1.0, t.pos[1], t.pos[2]]),
+                Some(t.rot_euler),
+                Some(t.scale),
+            ));
+            for (type_name, value) in &node.components {
+                if let Some(fields) = value.as_object() {
+                    for (field, v) in fields {
+                        ops.push(loom_scene::SceneOp::SetField {
+                            node: new_path.clone(),
+                            field: format!("{type_name}.{field}"),
+                            value: v.clone(),
+                        });
+                    }
+                }
+            }
+            created.push(new_path);
+        }
+        if created.is_empty() {
+            return;
+        }
+        self.transact(format!("Duplicate {} node(s)", created.len()), ops);
+        self.selected = created;
+    }
+
+    /// Delete the selection, children first.
+    ///
+    /// Deepest-first because removing a parent that still has children is
+    /// refused — correctly, since it would produce an unloadable scene. Sorting
+    /// here means the human does not have to.
+    fn delete_selection(&mut self) {
+        let mut doomed: Vec<String> = Vec::new();
+        for path in &self.selected {
+            let prefix = format!("{path}/");
+            for candidate in &self.view.paths {
+                if candidate == path || candidate.starts_with(&prefix) {
+                    doomed.push(candidate.clone());
+                }
+            }
+        }
+        doomed.sort_by_key(|p| std::cmp::Reverse(p.matches('/').count()));
+        doomed.dedup();
+        if doomed.is_empty() {
+            return;
+        }
+        let label = format!("Delete {} node(s)", doomed.len());
+        let ops = doomed
+            .into_iter()
+            .map(|node| loom_scene::SceneOp::RemoveNode { node })
+            .collect();
+        self.selected.clear();
+        self.transact(label, ops);
+    }
+
+    /// Point the selection's `MeshRenderer` at an asset.
+    fn assign_mesh(&mut self, asset: &str) {
+        let ops: Vec<_> = self
+            .selected
+            .iter()
+            .map(|node| loom_scene::SceneOp::SetField {
+                node: node.clone(),
+                field: "MeshRenderer.mesh".to_owned(),
+                value: serde_json::json!({ "asset": asset }),
+            })
+            .collect();
+        self.transact(format!("Set mesh to {asset}"), ops);
+    }
+
+    /// A left press in the viewport: grab a handle if one is under the cursor,
+    /// otherwise select whatever is.
+    fn press_in_viewport(&mut self) {
+        if self.session.is_none() {
+            return;
+        }
+        if let Some(index) = gizmo::grab(&self.handles, self.cursor) {
+            let Some(node) = self.focused() else { return };
+            let Some(transform) = self.view.transform_of(&node) else {
+                return;
+            };
+            self.drag = Some(Drag {
+                handle: self.handles[index].clone(),
+                from: self.cursor,
+                start: [transform.pos, transform.rot_euler, transform.scale],
+                node,
+            });
+            return;
+        }
+        self.pick_at_cursor();
+    }
+
+    /// Continue a gizmo drag.
+    fn drag_gizmo(&mut self) {
+        let Some(drag) = self.drag.as_ref() else {
+            return;
+        };
+        // Absolute from the drag's start, not accumulated: a dropped frame then
+        // costs nothing instead of leaving the node permanently off. The same
+        // function the gizmo tests exercise — a second copy of this arithmetic
+        // is a second answer, and only one of them would be under test.
+        let travelled = gizmo::drag_distance(&drag.handle, drag.from, self.cursor);
+        if travelled == 0.0 {
+            return;
+        }
+
+        let (axis, node) = (drag.handle.axis, drag.node.clone());
+        let (start_pos, start_rot, start_scale) = (drag.start[0], drag.start[1], drag.start[2]);
+        let (label, op) = match self.mode {
+            Mode::Move => {
+                let mut pos = start_pos;
+                pos[axis] += travelled;
+                (format!("Move {node}"), transform_op(&node, Some(pos), None, None))
+            }
+            Mode::Rotate => {
+                let mut rot = start_rot;
+                rot[axis] += travelled * ROTATE_PER_UNIT;
+                (
+                    format!("Rotate {node}"),
+                    transform_op(&node, None, Some(rot), None),
+                )
+            }
+            Mode::Scale => {
+                let mut scale = start_scale;
+                // Additive, not multiplicative: a scale of zero would otherwise
+                // be a trap you cannot drag back out of.
+                scale[axis] = (start_scale[axis] + travelled).max(0.01);
+                (
+                    format!("Scale {node}"),
+                    transform_op(&node, None, None, Some(scale)),
+                )
+            }
+        };
+        self.transact(label, vec![op]);
     }
 
     /// Select whatever the cursor is over.
@@ -460,42 +927,33 @@ impl App {
         };
         let (w, h) = viewer.extent();
         #[allow(clippy::cast_precision_loss)]
-        let (w, h) = (w as f32, h as f32);
-
-        // Cursor to a world-space ray through the camera.
-        let ndc_x = (self.cursor.0 / w) * 2.0 - 1.0;
-        let ndc_y = 1.0 - (self.cursor.1 / h) * 2.0;
-        let camera = self.camera.camera();
-        let forward = (camera.target - camera.eye).normalize_or_zero();
-        let right = forward.cross(Vec3::Y).normalize_or_zero();
-        let up = right.cross(forward);
-        let tan = (camera.fov_y_degrees.to_radians() * 0.5).tan();
-        let dir = (forward + right * (ndc_x * tan * (w / h)) + up * (ndc_y * tan)).normalize_or_zero();
+        let projection = gizmo::View::new(&self.camera.camera(), w as f32, h as f32);
+        let dir = projection.ray(self.cursor.0, self.cursor.1);
 
         let mut best: Option<(f32, &String)> = None;
-        for (path, bounds) in &self.picks {
-            if let Some(t) = ray_box(camera.eye, dir, bounds)
+        for (path, bounds) in &self.view.picks {
+            if let Some(t) = ray_box(projection.eye(), dir, bounds)
                 && best.is_none_or(|(d, _)| t < d)
             {
                 best = Some((t, path));
             }
         }
 
-        if let Some((_, path)) = best
-            && let Some(index) = self.editable.iter().position(|p| p == path)
-        {
-            self.selected = index;
-            eprintln!("loom: selected {}", self.editable[self.selected]);
+        let extend = self.input.is_active(&self.bindings, EDIT, "extend");
+        match best.map(|(_, path)| path.clone()) {
+            Some(path) => {
+                self.select(&path, extend);
+                crate::log::info(format!("selected {path}"));
+            }
+            // Clicking empty space clears, the way every editor does.
+            None if !extend => self.selected.clear(),
+            None => {}
         }
     }
 
-    /// Editing actions, when a session is open.
-    ///
-    /// Every change goes through `Session::apply`, which is the same
-    /// `loom_scene::apply` the agent calls — so a human edit and an agent edit
-    /// produce the same bytes and share one undo stack (never-do #16).
+    /// Editing actions bound to keys.
     fn handle_editing(&mut self) {
-        if self.session.is_none() || self.editable.is_empty() {
+        if self.session.is_none() || self.view.paths.is_empty() {
             return;
         }
         // Sampled up front rather than through a closure borrowing `self`,
@@ -508,86 +966,103 @@ impl App {
             f32::from(act("nudge_back")) - f32::from(act("nudge_forward")),
         ) * NUDGE;
         let (undo, redo, save) = (act("undo"), act("redo"), act("save"));
+        let (duplicate, delete) = (act("duplicate"), act("delete"));
+        let mode = if act("mode_move") {
+            Some(Mode::Move)
+        } else if act("mode_rotate") {
+            Some(Mode::Rotate)
+        } else if act("mode_scale") {
+            Some(Mode::Scale)
+        } else {
+            None
+        };
 
-        if next {
-            self.selected = (self.selected + 1) % self.editable.len();
-            eprintln!("loom: selected {}", self.editable[self.selected]);
+        if next || prev {
+            self.step_selection(next);
         }
-        if prev {
-            self.selected = (self.selected + self.editable.len() - 1) % self.editable.len();
-            eprintln!("loom: selected {}", self.editable[self.selected]);
+        if let Some(mode) = mode {
+            self.mode = mode;
+            crate::log::info(format!("{} mode", mode.label()));
         }
         if delta != Vec3::ZERO {
             self.nudge(delta);
         }
+        if duplicate {
+            self.duplicate_selection();
+        }
+        if delete {
+            self.delete_selection();
+        }
         if undo {
-            let session = self.session.as_mut().expect("checked above");
-            eprintln!("loom: undo {}", if session.undo() { "ok" } else { "(nothing)" });
+            self.act(UiAction::Undo);
         }
         if redo {
-            let session = self.session.as_mut().expect("checked above");
-            eprintln!("loom: redo {}", if session.redo() { "ok" } else { "(nothing)" });
+            self.act(UiAction::Redo);
         }
         if save {
-            let session = self.session.as_ref().expect("checked above");
-            match session.save() {
-                Ok(()) => eprintln!("loom: saved {}", self.scene_path.display()),
-                Err(e) => eprintln!("loom: save failed: {e}"),
-            }
+            self.save();
         }
     }
 
-    /// Move the selected node by issuing a transaction.
-    fn nudge(&mut self, delta: Vec3) {
-        let node = self.editable[self.selected].clone();
-        let Some(session) = self.session.as_mut() else {
+    /// Tab through the hierarchy.
+    fn step_selection(&mut self, forward: bool) {
+        let paths = &self.view.paths;
+        if paths.is_empty() {
             return;
-        };
-
-        // Read the current transform from the scene rather than tracking it
-        // separately — a second copy of the truth is a second answer.
-        let Ok(scene) = loom_scene::Scene::parse(session.text()) else {
-            return;
-        };
-        let Some(current) = scene
-            .nodes()
-            .iter()
-            .find(|n| n.path == node)
-            .map(|n| n.transform.pos)
-        else {
-            return;
-        };
-        let pos = [
-            current[0] + delta.x,
-            current[1] + delta.y,
-            current[2] + delta.z,
-        ];
-
-        let transaction = loom_scene::Transaction {
-            // Labelled usefully: this shows up in the human's log panel and in
-            // git history. "Move Room/Desk" beats "update scene".
-            label: format!("Move {node}"),
-            ops: vec![loom_scene::SceneOp::SetTransform {
-                node: node.clone(),
-                pos: Some(pos),
-                rot_euler: None,
-                scale: None,
-            }],
-            dry_run: false,
-            expect_version: None,
-        };
-
-        match session.apply(transaction) {
-            Ok(_) => {}
-            Err(e) if e.error == "stale_version" => {
-                // §7.17: reload, never force, never merge.
-                eprintln!("loom: the scene changed on disk — reloading rather than overwriting");
-                if let Err(e) = session.reload() {
-                    eprintln!("loom: reload failed: {e}");
-                }
-            }
-            Err(e) => eprintln!("loom: {e}"),
         }
+        let current = self
+            .focused()
+            .and_then(|p| paths.iter().position(|c| c == &p))
+            .unwrap_or(0);
+        let next = if forward {
+            (current + 1) % paths.len()
+        } else {
+            (current + paths.len() - 1) % paths.len()
+        };
+        self.selected = vec![paths[next].clone()];
+        crate::log::info(format!("selected {}", paths[next]));
+    }
+
+    /// Move the selection by issuing one transaction for all of it.
+    fn nudge(&mut self, delta: Vec3) {
+        let mut ops = Vec::new();
+        for path in self.selected.clone() {
+            let Some(current) = self.view.transform_of(&path).map(|t| t.pos) else {
+                continue;
+            };
+            ops.push(transform_op(
+                &path,
+                Some([
+                    current[0] + delta.x,
+                    current[1] + delta.y,
+                    current[2] + delta.z,
+                ]),
+                None,
+                None,
+            ));
+        }
+        // Labelled usefully: this shows up in the human's log panel and in git
+        // history. "Move Room/Desk" beats "update scene".
+        let label = match self.focused() {
+            Some(node) => format!("Move {node}"),
+            None => format!("Move {} nodes", ops.len()),
+        };
+        self.transact(label, ops);
+    }
+}
+
+/// A `SetTransform` op. Omitted fields are left alone by the op layer.
+fn transform_op(
+    node: &str,
+    pos: Option<[f32; 3]>,
+    rot_euler: Option<[f32; 3]>,
+    scale: Option<[f32; 3]>,
+) -> loom_scene::SceneOp {
+    loom_scene::SceneOp::SetTransform {
+        node: node.to_owned(),
+        pos,
+        rot_euler,
+        scale,
     }
 }
 
@@ -649,8 +1124,8 @@ fn build_viewer(
     .map_err(|e| format!("could not create a surface: {e:?}"))?;
 
     let surface_loader = ash::khr::surface::Instance::new(instance.entry(), instance.handle());
-    let device = Device::for_surface(&instance, (&surface_loader, surface))
-        .map_err(|e| e.to_string())?;
+    let device =
+        Device::for_surface(&instance, (&surface_loader, surface)).map_err(|e| e.to_string())?;
 
     let size = window.inner_size();
     let viewer = Viewer::new(&instance, &device, surface, size.width, size.height, meshes)
@@ -680,30 +1155,26 @@ fn load_bindings() -> ActionMap {
 ///
 /// # Errors
 /// A message describing what stopped it.
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     path: &str,
-    objects: Vec<Object>,
-    meshes: Vec<loom_asset::Mesh>,
-    scene_bounds: (Vec3, f32),
+    view: SceneView,
     session: Option<loom_scene::Session>,
-    editable: Vec<String>,
-    picks: std::collections::BTreeMap<String, loom_scene::place::Bounds>,
+    disk_seen: loom_scene::VersionToken,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
-    // Poll, not Wait: the camera animates continuously while keys are held.
+    // Poll, not Wait: the camera animates continuously while keys are held, and
+    // the file watcher has to keep ticking whether or not the human touches
+    // anything — a window that only redraws on input would never show the
+    // agent's writes.
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let title = format!("loom — {path}");
     let mut app = App::new(
-        objects,
-        meshes,
-        scene_bounds,
+        view,
         title,
         session,
-        editable,
         std::path::PathBuf::from(path),
-        picks,
+        disk_seen,
     );
     event_loop
         .run_app(&mut app)
@@ -716,28 +1187,18 @@ pub fn run(
 /// A message describing what stopped it.
 pub fn open_scene(path: &str, editable: bool) -> Result<(), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    let scene = Scene::parse(&src).map_err(|errors| {
-        serde_json::to_string_pretty(&serde_json::json!({ "errors": errors }))
-            .unwrap_or_else(|_| "invalid scene".to_owned())
-    })?;
-    let world = World::from_scene(&scene);
     let base = std::path::Path::new(path)
         .parent()
         .unwrap_or(std::path::Path::new("."));
-    let library = crate::MeshLibrary::for_scene(&scene, base);
-    let objects = crate::world_to_objects(&world, &library);
-    let boxes = crate::node_bounds(&world, &library);
-    let scene_bounds = crate::scene_bounds(&boxes);
-    let picks = boxes.clone();
+    let view = SceneView::build(&src, base)?;
+    let disk_seen = loom_scene::VersionToken::of(&src);
 
-    // Read-only unless asked. Brief §2 puts the editable editor at M12 and a
-    // read-only viewer at M5.5, and a viewer that cannot write cannot race the
-    // agent's writes at all.
+    // Read-only unless asked. A viewer that cannot write cannot race the
+    // agent's writes at all — but it still follows them.
     let session = editable
         .then(|| loom_scene::Session::open(std::path::Path::new(path)))
         .transpose()
         .map_err(|e| format!("{path}: {e}"))?;
-    let names: Vec<String> = scene.nodes().iter().map(|n| n.path.clone()).collect();
 
-    run(path, objects, library.into_meshes(), scene_bounds, session, names, picks)
+    run(path, view, session, disk_seen)
 }

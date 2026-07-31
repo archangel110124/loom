@@ -208,6 +208,69 @@ impl Viewer {
         })
     }
 
+    /// Replace the geometry this viewer draws from.
+    ///
+    /// This is what lets a window follow a file that is still being written —
+    /// by the human in the editor or by the agent through the CLI. Moving a
+    /// node does **not** come through here; only a changed mesh *set* does,
+    /// because reallocating buffers per slider frame would be absurd.
+    ///
+    /// Idles the device first. The frame in flight is reading the buffers about
+    /// to be freed, and per-buffer fences are not worth it for something that
+    /// happens when a file changes rather than every frame.
+    ///
+    /// # Errors
+    /// [`RenderError`] if the device will not idle or the buffers cannot be
+    /// reallocated.
+    pub fn set_meshes(&mut self, meshes: &[loom_asset::Mesh]) -> Result<(), RenderError> {
+        let Some(allocator) = self.allocator.as_mut() else {
+            return Ok(());
+        };
+        // SAFETY: idling is precisely what makes freeing in-use buffers legal.
+        unsafe { self.device.device_wait_idle() }?;
+
+        let (combined_vertices, combined_indices, ranges, unpack) = combine(meshes);
+
+        // Free the old before allocating the new: a scene being edited upward
+        // in size would otherwise hold both peaks at once.
+        for allocation in [self.vertices_alloc.take(), self.indices_alloc.take()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = allocator.free(allocation);
+        }
+        // SAFETY: the device is idle and these handles are ours.
+        unsafe {
+            self.device.destroy_buffer(self.vertices, None);
+            self.device.destroy_buffer(self.indices, None);
+        }
+
+        let (vertices, vertices_alloc, vertex_address) = create_address_buffer(
+            &self.device,
+            allocator,
+            (std::mem::size_of_val(combined_vertices.as_slice()) as u64).max(4),
+            "loom.mesh_vertices",
+        )?;
+        write_slice(&vertices_alloc, &combined_vertices)?;
+
+        let (indices, indices_alloc, _) = create_index_buffer(
+            &self.device,
+            allocator,
+            (std::mem::size_of_val(combined_indices.as_slice()) as u64).max(4),
+            "loom.mesh_indices",
+        )?;
+        write_slice(&indices_alloc, &combined_indices)?;
+
+        self.vertices = vertices;
+        self.vertices_alloc = Some(vertices_alloc);
+        self.vertex_address = vertex_address;
+        self.indices = indices;
+        self.indices_alloc = Some(indices_alloc);
+        self.ranges = ranges;
+        self.unpack = unpack;
+        Ok(())
+    }
+
     /// Draw one frame and present it.
     ///
     /// # Errors
