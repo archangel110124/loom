@@ -218,6 +218,40 @@ impl Physics {
         handle
     }
 
+    /// A static collider made of solid voxel cells.
+    ///
+    /// **This is the locked decision in CLAUDE.md finally wired up**: "rapier3d;
+    /// voxel colliders for terrain". Before it, a `VoxelVolume` node was given
+    /// a cuboid sized from its `scale` — a 1x1x1 box standing in for a whole
+    /// hillside — and everything fell through the terrain.
+    ///
+    /// A trimesh is the obvious alternative and the wrong one (never-do #10):
+    /// a surface-extracted mesh is an infinitely thin membrane, so a fast body
+    /// tunnels through it and a body that ends up inside has nothing pushing
+    /// it out. Voxels are solid volume, and parry culls the interior itself.
+    ///
+    /// `grid` holds the integer cell coordinates of solid voxels. parry places
+    /// cell `k` at `(k + 0.5) * voxel_size`, which is exactly what
+    /// `loom_voxel::Volume::world_of` computes — so the collider lands on the
+    /// same coordinates as the drawn surface with no offset applied here.
+    /// `voxel_grid_matches_parry` in `loom_voxel` holds those two conventions
+    /// together.
+    pub fn add_static_voxels(
+        &mut self,
+        position: [f32; 3],
+        voxel_size: f32,
+        grid: &[[i32; 3]],
+    ) -> Option<ColliderHandle> {
+        if grid.is_empty() {
+            return None;
+        }
+        let cells: Vec<IVector> = grid.iter().map(|c| IVector::new(c[0], c[1], c[2])).collect();
+        let collider = ColliderBuilder::voxels(Vector::splat(voxel_size.max(1e-4)), &cells)
+            .translation(Vector::new(position[0], position[1], position[2]))
+            .build();
+        Some(self.colliders.insert(collider))
+    }
+
     /// Spawn a debris chunk with an initial velocity.
     ///
     /// **Convex, never a trimesh** (never-do #10, voxel doc §4): a

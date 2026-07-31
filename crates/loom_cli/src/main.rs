@@ -1088,7 +1088,7 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
 }
 
 /// Build a voxel volume from a component, returning it and its mesh.
-fn build_volume(component: &serde_json::Value) -> Option<(loom_voxel::Volume, ())> {
+pub(crate) fn build_volume(component: &serde_json::Value) -> Option<(loom_voxel::Volume, ())> {
     #[allow(clippy::cast_possible_truncation)]
     let voxel_size = component.get("voxel_size").and_then(serde_json::Value::as_f64)? as f32;
     let dims: Vec<usize> = component

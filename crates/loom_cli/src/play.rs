@@ -69,6 +69,33 @@ impl Sim {
             // one that does not let geometry poke through.
             let radius = half[0].max(half[1]).max(half[2]);
 
+            // A voxel volume is terrain, not a box. Its recipe rides on the
+            // world (never-do #11: the scene stores the op list, never the
+            // voxels), so the field is rebuilt here and handed to parry as
+            // solid cells. Static only: a destructible hillside is scenery,
+            // and a trimesh on a dynamic body is never-do #10.
+            if let Some(recipe) = world.voxel_recipe(*entity) {
+                match crate::build_volume(recipe) {
+                    Some((volume, ())) => {
+                        let cells = volume.solid_cells();
+                        if physics
+                            .add_static_voxels(pos, volume.voxel_size, &cells)
+                            .is_none()
+                        {
+                            crate::log::warn(format!(
+                                "{}: voxel volume has no solid cells; nothing to collide with",
+                                world.path(*entity).unwrap_or("?")
+                            ));
+                        }
+                    }
+                    None => crate::log::warn(format!(
+                        "{}: voxel recipe did not rebuild; terrain will not collide",
+                        world.path(*entity).unwrap_or("?")
+                    )),
+                }
+                continue;
+            }
+
             if world.is_dynamic(*entity) {
                 let mass = world.body_mass(*entity);
                 let handle = if ball {
@@ -325,6 +352,35 @@ transform = { pos = [0.0, 4.0, 0.0], rot_euler = [0.0, 0.0, 45.0], scale = [0.7,
             y > 0.85,
             "a cube tilted 45 degrees rests on an edge, higher than its half-extent: y = {y}"
         );
+    }
+
+    /// **Destructible terrain has to be solid.** A `VoxelVolume` node carried
+    /// no collider matching its shape — it was marked renderable, so it got a
+    /// cuboid sized from its `scale`, which for an untransformed node is a
+    /// 1x1x1 box standing in for a 32x24x32 hillside. Everything else fell
+    /// straight through it, in the editor and in `loom sim` alike.
+    ///
+    /// `CLAUDE.md`'s locked decision has said "voxel colliders for terrain"
+    /// since M0; this is that, finally wired up.
+    #[test]
+    fn a_voxel_volume_is_solid_to_physics() {
+        let cave = std::fs::read_to_string("../../assets/test/cave.loom").expect("fixture");
+        let source = format!(
+            "{cave}\n[[node]]\nname = \"Probe\"\nparent = \"Terrain\"\n\
+             transform = {{ pos = [16.0, 26.0, 16.0], scale = [0.5, 0.5, 0.5] }}\n\n\
+               [node.components.MeshRenderer]\n  mesh = {{ asset = \"box\" }}\n\n\
+               [node.components.RigidBody]\n  dynamic = true\n  mass = 5.0\n"
+        );
+        let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+        let mut play = Play::start(world);
+
+        play.run(400);
+        let y = height(&play.world, "Terrain/Probe");
+
+        // The hill's summit is around y = 15.5; the ground slab spans 0..6.
+        // Anything above zero means it landed on the terrain rather than
+        // through it.
+        assert!(y > 1.0, "the probe fell through the voxel terrain: y = {y}");
     }
 
     #[test]

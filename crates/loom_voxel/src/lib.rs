@@ -291,6 +291,34 @@ impl Volume {
         }
     }
 
+    /// Integer coordinates of every solid cell, for a voxel collider.
+    ///
+    /// Solid is `sdf < 0` — the same sign the mesher and the bake early-out
+    /// use, so the collider and the drawn surface agree on what is inside.
+    ///
+    /// Returned as grid coordinates rather than world positions because that
+    /// is what parry's voxel shape wants, and because it places cell `k` at
+    /// `(k + 0.5) * voxel_size` — identical to [`Self::world_of`]. The test
+    /// `voxel_grid_matches_parry` pins those two conventions together; if
+    /// either side ever changes, the collider would silently sit half a cell
+    /// away from the geometry.
+    #[must_use]
+    pub fn solid_cells(&self) -> Vec<[i32; 3]> {
+        let [rx, ry, rz] = self.resolution();
+        let mut cells = Vec::new();
+        for z in 0..rz {
+            for y in 0..ry {
+                for x in 0..rx {
+                    if self.voxel(x, y, z) < 0 {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                        cells.push([x as i32, y as i32, z as i32]);
+                    }
+                }
+            }
+        }
+        cells
+    }
+
     /// Voxels per axis.
     #[must_use]
     pub fn resolution(&self) -> [usize; 3] {
@@ -608,6 +636,24 @@ fn length(a: [f32; 3]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// parry places voxel cell `k` at `(k + 0.5) * voxel_size`. So do we. If
+    /// either convention drifts the collider sits half a cell from the mesh —
+    /// a gap or an overlap that looks like a physics bug and is not one.
+    #[test]
+    fn voxel_grid_matches_parry() {
+        let volume = super::Volume::new([1, 1, 1], 0.25);
+        for cell in [[0_usize, 0, 0], [3, 5, 7], [31, 31, 31]] {
+            let ours = volume.world_of(cell[0], cell[1], cell[2]);
+            #[allow(clippy::cast_precision_loss)]
+            let parry = [
+                (cell[0] as f32 + 0.5) * 0.25,
+                (cell[1] as f32 + 0.5) * 0.25,
+                (cell[2] as f32 + 0.5) * 0.25,
+            ];
+            assert_eq!(ours, parry, "cell {cell:?}");
+        }
+    }
+
     use super::*;
 
     fn sphere(center: [f32; 3], radius: f32, mode: CsgMode) -> VoxelOp {

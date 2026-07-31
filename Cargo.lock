@@ -1207,6 +1207,7 @@ name = "loom_ecs"
 version = "0.0.0"
 dependencies = [
  "loom_scene",
+ "serde_json",
 ]
 
 [[package]]

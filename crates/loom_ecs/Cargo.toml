@@ -7,3 +7,4 @@ publish.workspace = true
 
 [dependencies]
 loom_scene = { version = "0.0.0", path = "../loom_scene" }
+serde_json = "=1.0.151"

@@ -106,6 +106,11 @@ pub struct World {
     parents: Storage<Entity>,
     /// Tag component: presence is the whole payload.
     renderable: Storage<()>,
+    /// The `VoxelVolume` component, verbatim, for whoever needs to rebuild the
+    /// field. Carried rather than baked here so `loom_ecs` stays free of a
+    /// dependency on the voxel crate; physics and rendering each bake their
+    /// own from the same recipe (never-do #11: the recipe, never the voxels).
+    voxel_recipe: Storage<serde_json::Value>,
     /// The asset alias a node's `MeshRenderer` names.
     mesh_asset: Storage<String>,
     /// Scene path, so callers can address an entity the way a `.loom` file does.
@@ -273,8 +278,9 @@ impl World {
                 world.scripts.insert(entity, path.to_owned());
             }
             by_path.insert(node.path.as_str(), entity);
-            if node.components.contains_key("VoxelVolume") {
+            if let Some(volume) = node.components.get("VoxelVolume") {
                 world.mark_renderable(entity);
+                world.voxel_recipe.insert(entity, volume.clone());
             }
             if let Some(renderer) = node.components.get("MeshRenderer") {
                 world.mark_renderable(entity);
@@ -290,6 +296,12 @@ impl World {
 
         world.propagate_transforms();
         world
+    }
+
+    /// This entity's `VoxelVolume` recipe, if it has one.
+    #[must_use]
+    pub fn voxel_recipe(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.voxel_recipe.get(entity)
     }
 
     /// Flag an entity as having geometry to draw.
