@@ -11,7 +11,9 @@ use std::sync::Arc;
 use loom_ecs::World;
 use loom_input::{ActionMap, InputState};
 use loom_render::glam::Vec3;
-use loom_render::{Camera, Device, Instance, Object, Viewer, ash, ash_window};
+use loom_render::{Camera, Device, Instance, Object, Ui, Viewer, ash, ash_window};
+
+use crate::panels::{PanelState, UiAction};
 use loom_scene::Scene;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
@@ -87,6 +89,14 @@ struct App {
     editable: Vec<String>,
     /// Where the scene lives, for reloading after a rejected write.
     scene_path: std::path::PathBuf,
+    /// egui, when editing. `None` in read-only mode, so a viewer costs no UI.
+    ui: Option<Ui>,
+    /// World bounds per node, for click-to-select.
+    picks: std::collections::BTreeMap<String, loom_scene::place::Bounds>,
+    /// Cursor position, for picking.
+    cursor: (f32, f32),
+    registry: loom_reflect::TypeRegistry,
+    dirty: bool,
     /// Real world bounds, so framing does not assume unit cubes.
     scene_bounds: (Vec3, f32),
     meshes: Vec<loom_asset::Mesh>,
@@ -113,6 +123,7 @@ impl App {
         session: Option<loom_scene::Session>,
         editable: Vec<String>,
         scene_path: std::path::PathBuf,
+        picks: std::collections::BTreeMap<String, loom_scene::place::Bounds>,
     ) -> Self {
         Self {
             camera: FlyCamera::framing(scene_bounds),
@@ -122,6 +133,11 @@ impl App {
             selected: 0,
             editable,
             scene_path,
+            ui: None,
+            picks,
+            cursor: (0.0, 0.0),
+            registry: loom_scene::components::registry(),
+            dirty: false,
             meshes,
             // Prefer a project-local file, fall back to the shipped defaults,
             // so a fresh checkout has a working camera with no config to write.
@@ -188,6 +204,12 @@ impl ApplicationHandler for App {
         match build_viewer(&window, &self.meshes) {
             Ok((instance, device, viewer)) => {
                 eprintln!("loom: rendering on {}", device.name());
+                if self.session.is_some() {
+                    match Ui::new(&instance, &device, &window, viewer.color_format()) {
+                        Ok(ui) => self.ui = Some(ui),
+                        Err(e) => eprintln!("loom: no editor UI ({e}); continuing read-only"),
+                    }
+                }
                 self.gpu = Some((instance, device));
                 self.viewer = Some(viewer);
                 self.window = Some(window);
@@ -200,6 +222,17 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // egui sees every event first. If it consumed one, the viewport must
+        // NOT also act on it — otherwise clicking a panel also moves the camera
+        // behind it and typing a number in the inspector flies the camera.
+        let consumed = match (self.ui.as_mut(), self.window.as_ref()) {
+            (Some(ui), Some(window)) => ui.on_window_event(window, &event),
+            _ => false,
+        };
+        if consumed && !matches!(event, WindowEvent::RedrawRequested | WindowEvent::Resized(_)) {
+            return;
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
@@ -219,7 +252,22 @@ impl ApplicationHandler for App {
                 self.handle_editing();
             }
 
+            // Click to select, when editing and not over a panel.
+            WindowEvent::CursorMoved { position, .. } => {
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    self.cursor = (position.x as f32, position.y as f32);
+                }
+            }
+
             WindowEvent::MouseInput { state, button, .. } => {
+                if button == MouseButton::Left
+                    && state == ElementState::Pressed
+                    && self.session.is_some()
+                    && !self.ui.as_ref().is_some_and(Ui::wants_pointer)
+                {
+                    self.pick_at_cursor();
+                }
                 let name = match button {
                     MouseButton::Left => "MouseLeft",
                     MouseButton::Right => "MouseRight",
@@ -247,11 +295,41 @@ impl ApplicationHandler for App {
                 // Clamp: a stall must not teleport the camera across the map.
                 self.step_camera(dt.min(0.1));
 
-                if let Some(viewer) = self.viewer.as_mut()
-                    && let Err(e) = viewer.draw(&self.objects, &self.camera.camera())
-                {
+                let camera = self.camera.camera();
+                let mut actions = Vec::new();
+                let scene = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| loom_scene::Scene::parse(s.text()).ok());
+
+                let state = PanelState {
+                    paths: &self.editable,
+                    selected: self.selected,
+                    history: self.session.as_ref().map_or(&[][..], |s| s.history()),
+                    can_undo: self.session.as_ref().is_some_and(loom_scene::Session::can_undo),
+                    can_redo: self.session.as_ref().is_some_and(loom_scene::Session::can_redo),
+                    dirty: self.dirty,
+                    scene: scene.as_ref(),
+                    registry: &self.registry,
+                };
+
+                let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
+                    (Some(viewer), Some(ui), Some(window)) => viewer.draw_with_ui(
+                        &self.objects,
+                        &camera,
+                        Some((ui, window)),
+                        |root| actions.extend(crate::panels::draw(root, &state)),
+                    ),
+                    (Some(viewer), _, _) => viewer.draw(&self.objects, &camera),
+                    _ => Ok(()),
+                };
+                if let Err(e) = result {
                     eprintln!("loom: draw failed: {e}");
                     event_loop.exit();
+                }
+                drop(scene);
+                for action in actions {
+                    self.act(action);
                 }
                 // Transitions are per-frame, so clearing them is what makes
                 // `pressed` mean "this frame" rather than "ever".
@@ -282,6 +360,135 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    /// Apply one UI action. Every path funnels through `nudge`/`set_field`,
+    /// which funnel through `Session::apply` — one transaction path, one undo
+    /// stack, whether the request came from a panel, a key, or the agent.
+    fn act(&mut self, action: UiAction) {
+        match action {
+            UiAction::Select(index) => self.selected = index,
+            UiAction::SetField(node, field, value) => self.set_field(&node, &field, value),
+            UiAction::Undo => {
+                if let Some(s) = self.session.as_mut() {
+                    s.undo();
+                    self.dirty = true;
+                }
+            }
+            UiAction::Redo => {
+                if let Some(s) = self.session.as_mut() {
+                    s.redo();
+                    self.dirty = true;
+                }
+            }
+            UiAction::Save => {
+                if let Some(s) = self.session.as_ref() {
+                    match s.save() {
+                        Ok(()) => {
+                            eprintln!("loom: saved {}", self.scene_path.display());
+                            self.dirty = false;
+                        }
+                        Err(e) => eprintln!("loom: save failed: {e}"),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Set one field through a transaction.
+    fn set_field(&mut self, node: &str, field: &str, value: serde_json::Value) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        // `Transform.pos` is the sugar's desugared name; the op layer writes
+        // the node key back out, so the file keeps its canonical form.
+        let transaction = if let Some(component_field) = field.strip_prefix("Transform.") {
+            let v: Vec<f32> = serde_json::from_value(value.clone()).unwrap_or_default();
+            if v.len() != 3 {
+                return;
+            }
+            let axis = [v[0], v[1], v[2]];
+            loom_scene::Transaction {
+                label: format!("Set {node} transform {component_field}"),
+                ops: vec![match component_field {
+                    "pos" => loom_scene::SceneOp::SetTransform {
+                        node: node.to_owned(), pos: Some(axis), rot_euler: None, scale: None,
+                    },
+                    "rot_euler" => loom_scene::SceneOp::SetTransform {
+                        node: node.to_owned(), pos: None, rot_euler: Some(axis), scale: None,
+                    },
+                    _ => loom_scene::SceneOp::SetTransform {
+                        node: node.to_owned(), pos: None, rot_euler: None, scale: Some(axis),
+                    },
+                }],
+                dry_run: false,
+                expect_version: None,
+            }
+        } else {
+            loom_scene::Transaction {
+                label: format!("Set {node} {field}"),
+                ops: vec![loom_scene::SceneOp::SetField {
+                    node: node.to_owned(),
+                    field: field.to_owned(),
+                    value,
+                }],
+                dry_run: false,
+                expect_version: None,
+            }
+        };
+
+        match session.apply(transaction) {
+            Ok(_) => self.dirty = true,
+            // A dragged slider can leave the schema range mid-drag; the
+            // rejection is correct and should not spam the log every frame.
+            Err(e) if e.error == "would_produce_invalid_scene" => {}
+            Err(e) if e.error == "stale_version" => {
+                eprintln!("loom: the scene changed on disk — reloading rather than overwriting");
+                let _ = session.reload();
+            }
+            Err(e) => eprintln!("loom: {e}"),
+        }
+    }
+
+    /// Select whatever the cursor is over.
+    ///
+    /// `ponytail:` ray against node AABBs, not a GPU ID buffer. Pixel-perfect
+    /// picking needs a second pass writing entity ids and a readback; an AABB
+    /// test is thirty lines and is right for a blockout editor where nodes are
+    /// boxes. Upgrade when picking a thin or concave mesh matters.
+    fn pick_at_cursor(&mut self) {
+        let Some(viewer) = self.viewer.as_ref() else {
+            return;
+        };
+        let (w, h) = viewer.extent();
+        #[allow(clippy::cast_precision_loss)]
+        let (w, h) = (w as f32, h as f32);
+
+        // Cursor to a world-space ray through the camera.
+        let ndc_x = (self.cursor.0 / w) * 2.0 - 1.0;
+        let ndc_y = 1.0 - (self.cursor.1 / h) * 2.0;
+        let camera = self.camera.camera();
+        let forward = (camera.target - camera.eye).normalize_or_zero();
+        let right = forward.cross(Vec3::Y).normalize_or_zero();
+        let up = right.cross(forward);
+        let tan = (camera.fov_y_degrees.to_radians() * 0.5).tan();
+        let dir = (forward + right * (ndc_x * tan * (w / h)) + up * (ndc_y * tan)).normalize_or_zero();
+
+        let mut best: Option<(f32, &String)> = None;
+        for (path, bounds) in &self.picks {
+            if let Some(t) = ray_box(camera.eye, dir, bounds)
+                && best.is_none_or(|(d, _)| t < d)
+            {
+                best = Some((t, path));
+            }
+        }
+
+        if let Some((_, path)) = best
+            && let Some(index) = self.editable.iter().position(|p| p == path)
+        {
+            self.selected = index;
+            eprintln!("loom: selected {}", self.editable[self.selected]);
+        }
+    }
+
     /// Editing actions, when a session is open.
     ///
     /// Every change goes through `Session::apply`, which is the same
@@ -384,6 +591,31 @@ impl App {
     }
 }
 
+/// Slab test: distance along `dir` where the ray enters the box, if it does.
+fn ray_box(origin: Vec3, dir: Vec3, bounds: &loom_scene::place::Bounds) -> Option<f32> {
+    let (mut near, mut far) = (f32::NEG_INFINITY, f32::INFINITY);
+    for axis in 0..3 {
+        let d = dir[axis];
+        let (lo, hi) = (bounds.min[axis], bounds.max[axis]);
+        if d.abs() < 1e-6 {
+            // Parallel to this slab: a miss unless the origin is already inside.
+            if origin[axis] < lo || origin[axis] > hi {
+                return None;
+            }
+            continue;
+        }
+        let t0 = (lo - origin[axis]) / d;
+        let t1 = (hi - origin[axis]) / d;
+        let (t0, t1) = if t0 > t1 { (t1, t0) } else { (t0, t1) };
+        near = near.max(t0);
+        far = far.min(t1);
+        if near > far {
+            return None;
+        }
+    }
+    (far > 0.0).then(|| near.max(0.0))
+}
+
 fn build_viewer(
     window: &Arc<Window>,
     meshes: &[loom_asset::Mesh],
@@ -456,6 +688,7 @@ pub fn run(
     scene_bounds: (Vec3, f32),
     session: Option<loom_scene::Session>,
     editable: Vec<String>,
+    picks: std::collections::BTreeMap<String, loom_scene::place::Bounds>,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
     // Poll, not Wait: the camera animates continuously while keys are held.
@@ -470,6 +703,7 @@ pub fn run(
         session,
         editable,
         std::path::PathBuf::from(path),
+        picks,
     );
     event_loop
         .run_app(&mut app)
@@ -494,6 +728,7 @@ pub fn open_scene(path: &str, editable: bool) -> Result<(), String> {
     let objects = crate::world_to_objects(&world, &library);
     let boxes = crate::node_bounds(&world, &library);
     let scene_bounds = crate::scene_bounds(&boxes);
+    let picks = boxes.clone();
 
     // Read-only unless asked. Brief §2 puts the editable editor at M12 and a
     // read-only viewer at M5.5, and a viewer that cannot write cannot race the
@@ -504,5 +739,5 @@ pub fn open_scene(path: &str, editable: bool) -> Result<(), String> {
         .map_err(|e| format!("{path}: {e}"))?;
     let names: Vec<String> = scene.nodes().iter().map(|n| n.path.clone()).collect();
 
-    run(path, objects, library.into_meshes(), scene_bounds, session, names)
+    run(path, objects, library.into_meshes(), scene_bounds, session, names, picks)
 }

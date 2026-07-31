@@ -126,9 +126,12 @@ change, so your edits appear live. Two consequences:
 
 ## Current milestone
 
-> **M0–M12 complete.** Update this line at every milestone. See §6 of the build brief.
+> **M0–M12 complete, editor included.** See §6 of the build brief.
 >
-> All milestone exit criteria met. `loom` has: validate, describe, render (--sim), sim (--assert),
+> All milestone exit criteria met, and M12's body as well: `loom run --edit` has a scene tree, an
+> inspector generated from the type registry, a transaction log, and click-to-select.
+> Still not built from M12's list: gizmo handles, multi-selection, the asset browser, and the
+> knowledge-graph view (which depends on ADR 0003, still undecided). `loom` has: validate, describe, render (--sim), sim (--assert),
 > run (--edit), scene (--tx), place (--op), measure, terrain, explode. `loom-mcp` wraps them.
 >
 > Post-M12 work, in the brief's own order of priority: shadows / SDFGI / the post stack (all

@@ -215,6 +215,26 @@ impl Viewer {
     /// is not an error.
     #[allow(clippy::too_many_lines)]
     pub fn draw(&mut self, objects: &[Object], camera: &Camera) -> Result<(), RenderError> {
+        self.draw_with_ui(objects, camera, None, |_| {})
+    }
+
+    /// Draw a frame with an optional UI layer over it.
+    ///
+    /// The UI records into the **same** dynamic-rendering pass as the scene, so
+    /// there is no second pass and no render-pass object (never-do #1). It is
+    /// recorded after the geometry and before the present transition, which is
+    /// what puts panels on top.
+    ///
+    /// # Errors
+    /// [`RenderError`] on Vulkan failure.
+    #[allow(clippy::too_many_lines)]
+    pub fn draw_with_ui(
+        &mut self,
+        objects: &[Object],
+        camera: &Camera,
+        ui: Option<(&mut crate::Ui, &winit::window::Window)>,
+        build: impl FnMut(&mut egui::Ui),
+    ) -> Result<(), RenderError> {
         let d = self.device.clone();
 
         // SAFETY: waiting on the previous frame's fence before touching any
@@ -267,6 +287,7 @@ impl Viewer {
 
         let extent = self.extent;
         let depth_view = self.depth_view;
+        let (queue, pool) = (self.queue, self.command_pool);
         let (pipeline, layout) = (self.pipeline, self.pipeline_layout);
         let base_push = crate::renderer::Push {
             vertices: self.vertex_address,
@@ -317,6 +338,12 @@ impl Viewer {
                             0,
                             0,
                         );
+                    }
+                    // The UI goes inside the same rendering pass, after the
+                    // geometry, so panels draw over the scene without a second
+                    // pass or a render-pass object.
+                    if let Some((ui, window)) = ui {
+                        let _ = ui.draw(window, cmd, extent, queue, pool, build);
                     }
                     d.cmd_end_rendering(cmd);
                 }
@@ -440,6 +467,12 @@ impl Viewer {
             self.depth_view = depth_view;
         }
         Ok(())
+    }
+
+    /// The swapchain's colour format, for building a matching UI pipeline.
+    #[must_use]
+    pub fn color_format(&self) -> vk::Format {
+        self.format
     }
 
     #[must_use]

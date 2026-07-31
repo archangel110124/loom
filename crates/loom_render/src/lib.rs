@@ -15,6 +15,7 @@ mod debug_names;
 mod device;
 mod instance;
 mod renderer;
+mod ui;
 mod viewer;
 
 /// Re-exported because this crate's public API is expressed in `glam` types.
@@ -25,7 +26,11 @@ pub use glam;
 pub use debug_names::DebugNames;
 pub use device::{Device, DeviceError};
 pub use renderer::{Camera, Object, RenderError, Renderer};
+pub use ui::Ui;
 pub use viewer::Viewer;
+
+/// Re-exported so the CLI builds panels without its own egui dependency.
+pub use egui;
 
 /// Re-exported so `loom_cli` can create a surface without its own `ash` dep
 /// (the dependency rule: nothing outside `loom_render*` imports ash).
