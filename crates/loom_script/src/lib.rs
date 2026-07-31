@@ -271,6 +271,27 @@ impl ScriptWatcher {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The wall clock must not be reachable from a script.** `Engine::new()`
+    /// installs rhai's `StandardPackage`, which includes `BasicTimePackage` —
+    /// so an agent-authored script could call `timestamp()` and make the
+    /// simulation depend on how fast the machine is. That is never-do #8, and
+    /// it would break the determinism every `--assert` rests on: two runs of
+    /// the same scene could legitimately disagree.
+    #[test]
+    fn a_script_cannot_read_the_clock() {
+        let mut host = host();
+        // Compiled AND run: the first version of this test used a script that
+        // also touched `pos`, which failed for an unrelated reason and made the
+        // test pass while `timestamp()` was perfectly callable. A sandbox test
+        // that can pass for the wrong reason is worse than none.
+        let compiled = host.compile("clock", "let t = timestamp();");
+        let reachable = match compiled {
+            Err(_) => false,
+            Ok(()) => host.tick("clock", 0, &NodeState::default()).is_ok(),
+        };
+        assert!(!reachable, "timestamp() must not be callable from a script");
+    }
     use super::*;
 
     fn host() -> ScriptHost {

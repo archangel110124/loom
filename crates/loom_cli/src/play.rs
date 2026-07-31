@@ -45,11 +45,20 @@ impl Sim {
             let Some(transform) = world.transform(*entity) else {
                 continue;
             };
-            let half = [
-                transform.scale[0].abs().max(1e-3),
-                transform.scale[1].abs().max(1e-3),
-                transform.scale[2].abs().max(1e-3),
-            ];
+            // An authored `BoxCollider` wins over the mesh's scale. It is a
+            // documented, schema-validated component that the simulation used
+            // to ignore entirely, so a node could declare one size and collide
+            // as another with nothing reporting the discrepancy.
+            let half = world.collider_half_extents(*entity).map_or_else(
+                || {
+                    [
+                        transform.scale[0].abs().max(1e-3),
+                        transform.scale[1].abs().max(1e-3),
+                        transform.scale[2].abs().max(1e-3),
+                    ]
+                },
+                |h| [h[0].abs().max(1e-3), h[1].abs().max(1e-3), h[2].abs().max(1e-3)],
+            );
 
             // **The collider follows the mesh.** Everything used to get a
             // cuboid, so a sphere rested on whichever face was down: tilted,
@@ -381,6 +390,64 @@ transform = { pos = [0.0, 4.0, 0.0], rot_euler = [0.0, 0.0, 45.0], scale = [0.7,
         // Anything above zero means it landed on the terrain rather than
         // through it.
         assert!(y > 1.0, "the probe fell through the voxel terrain: y = {y}");
+    }
+
+    /// `BoxCollider` is documented and schema-validated, and the simulation
+    /// ignored it — collider size always came from the node's scale. A scene
+    /// could declare a collider twice the size of its mesh and collide as the
+    /// mesh, with nothing reporting the discrepancy.
+    #[test]
+    fn an_authored_box_collider_beats_the_mesh_scale() {
+        let scene = |collider: &str| {
+            format!(
+                r#"
+[scene]
+format = 1
+id = "0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f"
+
+[[node]]
+name = "Stage"
+
+[[node]]
+name = "Ground"
+parent = "Stage"
+transform = {{ pos = [0.0, -0.5, 0.0], scale = [10.0, 0.5, 10.0] }}
+
+  [node.components.MeshRenderer]
+  mesh = {{ asset = "box" }}
+
+[[node]]
+name = "Crate"
+parent = "Stage"
+transform = {{ pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }}
+
+  [node.components.MeshRenderer]
+  mesh = {{ asset = "box" }}
+{collider}
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 4.0
+"#
+            )
+        };
+
+        let rest = |source: &str| {
+            let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
+            let mut play = Play::start(world);
+            play.run(400);
+            height(&play.world, "Stage/Crate")
+        };
+
+        let from_scale = rest(&scene(""));
+        let declared = rest(&scene(
+            "\n  [node.components.BoxCollider]\n  half_extents = [0.5, 2.0, 0.5]\n",
+        ));
+
+        assert!((from_scale - 0.5).abs() < 0.05, "scale-sized: {from_scale}");
+        assert!(
+            (declared - 2.0).abs() < 0.05,
+            "the declared collider is 2.0 tall, so it rests at 2.0, not {declared}"
+        );
     }
 
     #[test]

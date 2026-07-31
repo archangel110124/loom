@@ -7,5 +7,9 @@ publish.workspace = true
 
 [dependencies]
 loom_scene = { version = "0.0.0", path = "../loom_scene" }
-rhai = "=1.25.1"
+# `no_time` removes rhai's `timestamp()`/`elapsed`. Not disabled at runtime —
+# not compiled in, so it cannot come back through a package we register later.
+# A script that can read the wall clock makes the simulation depend on how fast
+# the machine is, which is never-do #8 and would quietly break every `--assert`.
+rhai = { version = "=1.25.1", features = ["no_time"] }
 serde = { version = "=1.0.229", features = ["derive"] }

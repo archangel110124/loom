@@ -379,7 +379,19 @@ impl Physics {
         // insertion order — deterministic for a given scene load.
         for (_, body) in self.bodies.iter() {
             let t = body.translation();
-            for value in [t.x, t.y, t.z] {
+            let r = body.rotation();
+            let v = body.linvel();
+            let w = body.angvel();
+            // **Position alone is not the state.** A hash over translation only
+            // called two runs identical when a body had settled in the same
+            // place spinning a different way, or was passing through the same
+            // point at a different speed — so `loom sim`'s determinism hash
+            // could agree while the simulations genuinely disagreed. Rotation
+            // and both velocities are part of what the next tick depends on,
+            // so they are part of what the hash has to cover.
+            for value in [
+                t.x, t.y, t.z, r.x, r.y, r.z, r.w, v.x, v.y, v.z, w.x, w.y, w.z,
+            ] {
                 eat(&mut hash, &value.to_bits().to_le_bytes());
             }
         }
@@ -389,6 +401,27 @@ impl Physics {
 
 #[cfg(test)]
 mod tests {
+    /// The hash has to notice everything the next tick depends on. It covered
+    /// translation only, so a body resting in the same place with a different
+    /// orientation — or moving through it at a different speed — hashed the
+    /// same, and `loom sim`'s determinism check would have missed a real
+    /// divergence.
+    #[test]
+    fn the_state_hash_notices_rotation_and_velocity() {
+        let spun = |euler: [f32; 3], velocity: f32| {
+            let mut physics = super::Physics::new(1.0 / 60.0);
+            let handle = physics.add_box_body([0.0, 0.0, 0.0], euler, [0.5, 0.5, 0.5], 1.0);
+            if let Some(body) = physics.bodies.get_mut(handle) {
+                body.set_linvel(super::Vector::new(velocity, 0.0, 0.0), true);
+            }
+            physics.state_hash()
+        };
+
+        let base = spun([0.0, 0.0, 0.0], 0.0);
+        assert_ne!(base, spun([0.0, 45.0, 0.0], 0.0), "rotation must count");
+        assert_ne!(base, spun([0.0, 0.0, 0.0], 3.0), "velocity must count");
+    }
+
     /// The writer and the reader must be inverses. They are hand-rolled Y-X-Z
     /// conversions on opposite sides of the physics boundary, and nothing else
     /// would notice if they drifted: a scene would simply simulate at a

@@ -111,6 +111,8 @@ pub struct World {
     /// dependency on the voxel crate; physics and rendering each bake their
     /// own from the same recipe (never-do #11: the recipe, never the voxels).
     voxel_recipe: Storage<serde_json::Value>,
+    /// Authored `BoxCollider` half-extents, when a node declares them.
+    collider: Storage<[f32; 3]>,
     /// The asset alias a node's `MeshRenderer` names.
     mesh_asset: Storage<String>,
     /// Scene path, so callers can address an entity the way a `.loom` file does.
@@ -278,6 +280,21 @@ impl World {
                 world.scripts.insert(entity, path.to_owned());
             }
             by_path.insert(node.path.as_str(), entity);
+            if let Some(half) = node
+                .components
+                .get("BoxCollider")
+                .and_then(|c| c.get("half_extents"))
+                .and_then(serde_json::Value::as_array)
+            {
+                #[allow(clippy::cast_possible_truncation)]
+                let values: Vec<f32> = half
+                    .iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect();
+                if let [x, y, z] = values[..] {
+                    world.collider.insert(entity, [x, y, z]);
+                }
+            }
             if let Some(volume) = node.components.get("VoxelVolume") {
                 world.mark_renderable(entity);
                 world.voxel_recipe.insert(entity, volume.clone());
@@ -296,6 +313,17 @@ impl World {
 
         world.propagate_transforms();
         world
+    }
+
+    /// Authored collider half-extents, if the node declares a `BoxCollider`.
+    ///
+    /// Physics used to derive every collider from `transform.scale` and never
+    /// look at this, so a documented, schema-validated component silently did
+    /// nothing — a node could declare a collider twice the size of its mesh and
+    /// collide as the mesh.
+    #[must_use]
+    pub fn collider_half_extents(&self, entity: Entity) -> Option<[f32; 3]> {
+        self.collider.get(entity).copied()
     }
 
     /// This entity's `VoxelVolume` recipe, if it has one.
