@@ -71,6 +71,10 @@ pub enum SceneOp {
     },
     /// Delete a node. Requires the `destructive` scope (§7.17).
     RemoveNode { node: String },
+    /// Give a node a new name, keeping it where it is.
+    RenameNode { node: String, name: String },
+    /// Move a node — and everything under it — to a new parent.
+    ReparentNode { node: String, parent: String },
 }
 
 /// A batch of ops applied together, undone together.
@@ -211,6 +215,146 @@ pub fn apply(source: &str, transaction: &Transaction) -> Result<Applied, Box<Tra
     })
 }
 
+/// A node name must be usable as one path segment.
+fn check_name(name: &str) -> Result<(), OpFailure> {
+    if name.is_empty() || name.contains('/') {
+        return Err((
+            "invalid_name".to_owned(),
+            "a node name must be non-empty and contain no `/`".to_owned(),
+            name.to_owned(),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn nodes_mut<'a>(
+    doc: &'a mut DocumentMut,
+    context: &str,
+) -> Result<&'a mut toml_edit::ArrayOfTables, OpFailure> {
+    doc.get_mut("node")
+        .and_then(Item::as_array_of_tables_mut)
+        .ok_or_else(|| {
+            (
+                "parse_error".to_owned(),
+                "`node` is not an array of tables".to_owned(),
+                context.to_owned(),
+                None,
+            )
+        })
+}
+
+fn set_name(doc: &mut DocumentMut, index: usize, name: &str) -> Result<(), OpFailure> {
+    let array = nodes_mut(doc, name)?;
+    if let Some(table) = array.get_mut(index) {
+        table["name"] = value(name);
+    }
+    Ok(())
+}
+
+/// Repoint every node beneath `from` at `to`.
+///
+/// Paths are how this format expresses parentage, so moving or renaming a node
+/// is not one edit — it is one edit plus every descendant's. Prefix-matched on
+/// `from/` specifically, so a sibling called `RoomService` is not caught by a
+/// rename of `Room`.
+fn rewrite_descendants(doc: &mut DocumentMut, from: &str, to: &str) {
+    if from == to {
+        return;
+    }
+    let prefix = format!("{from}/");
+    let Some(array) = doc.get_mut("node").and_then(Item::as_array_of_tables_mut) else {
+        return;
+    };
+    for table in array.iter_mut() {
+        let Some(parent) = table.get("parent").and_then(Item::as_str) else {
+            continue;
+        };
+        let moved = if parent == from {
+            to.to_owned()
+        } else if let Some(rest) = parent.strip_prefix(&prefix) {
+            format!("{to}/{rest}")
+        } else {
+            continue;
+        };
+        table["parent"] = value(moved);
+    }
+}
+
+/// Indices of a node and everything under it, in declaration order.
+fn subtree_indices(doc: &DocumentMut, root: &str) -> Vec<usize> {
+    let prefix = format!("{root}/");
+    let Some(array) = doc.get("node").and_then(Item::as_array_of_tables) else {
+        return Vec::new();
+    };
+    array
+        .iter()
+        .enumerate()
+        .filter(|(_, table)| {
+            let name = table.get("name").and_then(Item::as_str).unwrap_or_default();
+            let path = match table.get("parent").and_then(Item::as_str) {
+                Some(parent) => format!("{parent}/{name}"),
+                None => name.to_owned(),
+            };
+            path == root || path.starts_with(&prefix)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// One past the last table belonging to `root`'s subtree.
+fn subtree_end(doc: &DocumentMut, root: &str) -> usize {
+    subtree_indices(doc, root)
+        .last()
+        .map_or(0, |last| last + 1)
+}
+
+/// Move these tables so they sit directly after `after_subtree_of`, keeping
+/// their relative order.
+///
+/// Two rules force this. The format requires a parent to be declared before
+/// its children (§3), and canonical form requires node order to be depth-first
+/// (§2 rule 3) — so a reparented subtree does not just need to be *later* than
+/// its new parent, it needs to be immediately after that parent's own subtree.
+/// Appending to the end would satisfy the loader and quietly leave the file
+/// non-canonical, which shows up later as a diff nobody asked for.
+fn move_after(
+    doc: &mut DocumentMut,
+    indices: &[usize],
+    after_subtree_of: &str,
+    context: &str,
+) -> Result<(), OpFailure> {
+    let array = nodes_mut(doc, context)?;
+    // `toml_edit` writes tables in the order it recorded when parsing, not in
+    // array order, so reordering the array alone changes nothing on disk. The
+    // slots are collected here and handed back out in the new order below.
+    let mut slots: Vec<isize> = array.iter().filter_map(toml_edit::Table::position).collect();
+    slots.sort_unstable();
+
+    let mut moved = Vec::with_capacity(indices.len());
+    // Descending, so each removal cannot shift an index still to be removed.
+    for index in indices.iter().rev() {
+        if *index < array.len() {
+            moved.push(array.remove(*index));
+        }
+    }
+    // Recomputed after the removals, because every index above a removed one
+    // has shifted down.
+    let destination = subtree_end(doc, after_subtree_of);
+    let array = nodes_mut(doc, context)?;
+    let at = destination.min(array.len());
+    for (offset, table) in moved.into_iter().rev().enumerate() {
+        array.insert(at + offset, table);
+    }
+
+    if slots.len() == array.len() {
+        for (table, position) in array.iter_mut().zip(slots) {
+            table.set_position(Some(position));
+        }
+    }
+    Ok(())
+}
+
 type OpFailure = (String, String, String, Option<String>);
 
 fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
@@ -322,6 +466,81 @@ fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
             }
             let component = components[type_name].as_table_mut().unwrap();
             component[field_name] = json_to_item(new);
+            Ok(())
+        }
+
+        SceneOp::RenameNode { node, name } => {
+            let index = require_node(doc, node)?;
+            check_name(name)?;
+            let parent = node.rsplit_once('/').map(|(p, _)| p.to_owned());
+            let destination = match &parent {
+                Some(parent) => format!("{parent}/{name}"),
+                None => name.clone(),
+            };
+            if destination != *node && find_node(doc, &destination).is_some() {
+                return Err((
+                    "duplicate_sibling_name".to_owned(),
+                    format!("`{destination}` already exists"),
+                    destination,
+                    Some("Sibling names must be unique.".to_owned()),
+                ));
+            }
+
+            set_name(doc, index, name)?;
+            // A parent is stored as a path, so renaming a node rewrites every
+            // descendant's `parent`. Skip this and the children are orphaned —
+            // the scene stops loading, and the op looked like it worked.
+            rewrite_descendants(doc, node, &destination);
+            Ok(())
+        }
+
+        SceneOp::ReparentNode { node, parent } => {
+            let index = require_node(doc, node)?;
+            if find_node(doc, parent).is_none() {
+                return Err((
+                    "unknown_parent".to_owned(),
+                    format!("no node at `{parent}`"),
+                    parent.clone(),
+                    Some("Parents must exist.".to_owned()),
+                ));
+            }
+            // Under itself or under its own descendant. Either leaves the node
+            // with no path at all, which writes a file that cannot be loaded
+            // and cannot be repaired by re-reading it.
+            if parent == node || parent.starts_with(&format!("{node}/")) {
+                return Err((
+                    "would_create_a_cycle".to_owned(),
+                    format!("`{parent}` is `{node}` or lives inside it"),
+                    node.clone(),
+                    Some("Move the subtree out first, or pick a parent outside it.".to_owned()),
+                ));
+            }
+
+            let name = node.rsplit('/').next().unwrap_or(node).to_owned();
+            let destination = format!("{parent}/{name}");
+            if destination != *node && find_node(doc, &destination).is_some() {
+                return Err((
+                    "duplicate_sibling_name".to_owned(),
+                    format!("`{parent}` already has a child named `{name}`"),
+                    destination,
+                    Some("Rename it first, or pick another parent.".to_owned()),
+                ));
+            }
+
+            // Collected before anything moves, using the paths as they are now.
+            let subtree = subtree_indices(doc, node);
+
+            let array = nodes_mut(doc, node)?;
+            if let Some(table) = array.get_mut(index) {
+                table["parent"] = value(parent.as_str());
+            }
+            rewrite_descendants(doc, node, &destination);
+            // The format requires a parent to be declared before its children
+            // (`docs/format/README.md` §3), so moving a node under a parent
+            // that comes later in the file has to move the node's tables too.
+            // Sending the subtree to the end satisfies the rule for any legal
+            // destination and leaves every other node's position alone.
+            move_after(doc, &subtree, parent, node)?;
             Ok(())
         }
 
@@ -460,6 +679,158 @@ transform = { pos = [0.0, 0.0, 0.0] }
             dry_run: false,
             expect_version: None,
         }
+    }
+
+    /// Renaming has to rewrite every descendant's `parent`, because a parent
+    /// is stored as a path. Miss that and the children are orphaned — the
+    /// scene stops loading and the op looked like it worked.
+    #[test]
+    fn renaming_a_node_carries_its_children() {
+        let applied = apply(
+            SCENE,
+            &tx(
+                "Rename Room",
+                vec![SceneOp::RenameNode {
+                    node: "Room".into(),
+                    name: "Studio".into(),
+                }],
+            ),
+        )
+        .expect("should apply");
+
+        let scene = crate::Scene::parse(&applied.scene).expect("still valid");
+        let paths: Vec<&str> = scene.nodes().iter().map(|n| n.path.as_str()).collect();
+        assert_eq!(paths, ["Studio", "Studio/Desk"]);
+    }
+
+    #[test]
+    fn renaming_onto_an_existing_sibling_is_refused() {
+        let scene = format!("{SCENE}\n[[node]]\nname = \"Chair\"\nparent = \"Room\"\n");
+        let err = apply(
+            &scene,
+            &tx(
+                "Collide",
+                vec![SceneOp::RenameNode {
+                    node: "Room/Desk".into(),
+                    name: "Chair".into(),
+                }],
+            ),
+        )
+        .expect_err("must be refused");
+
+        assert_eq!(err.error, "duplicate_sibling_name");
+    }
+
+    #[test]
+    fn reparenting_moves_a_node_and_its_children() {
+        let scene = format!("{SCENE}\n[[node]]\nname = \"Alcove\"\nparent = \"Room\"\n");
+        let applied = apply(
+            &scene,
+            &tx(
+                "Move the desk into the alcove",
+                vec![SceneOp::ReparentNode {
+                    node: "Room/Desk".into(),
+                    parent: "Room/Alcove".into(),
+                }],
+            ),
+        )
+        .expect("should apply");
+
+        let parsed = crate::Scene::parse(&applied.scene).expect("still valid");
+        let paths: Vec<&str> = parsed.nodes().iter().map(|n| n.path.as_str()).collect();
+        assert!(paths.contains(&"Room/Alcove/Desk"), "{paths:?}");
+        assert!(!paths.contains(&"Room/Desk"));
+    }
+
+    /// A node reparented under its own child has no path at all. Left
+    /// unchecked this writes a scene that cannot be loaded and cannot be
+    /// undone by re-reading, because the file itself is now nonsense.
+    /// Canonical form is depth-first (§2 rule 3), so a moved subtree belongs
+    /// directly after its new parent — not appended to the end, which would
+    /// load fine and leave the file quietly non-canonical.
+    #[test]
+    fn a_reparented_subtree_lands_next_to_its_new_parent() {
+        let scene = format!(
+            "{SCENE}\n[[node]]\nname = \"Alcove\"\nparent = \"Room\"\n\n\
+             [[node]]\nname = \"Drawer\"\nparent = \"Room/Desk\"\n\n\
+             [[node]]\nname = \"Window\"\nparent = \"Room\"\n"
+        );
+        let applied = apply(
+            &scene,
+            &tx(
+                "Into the alcove",
+                vec![SceneOp::ReparentNode {
+                    node: "Room/Desk".into(),
+                    parent: "Room/Alcove".into(),
+                }],
+            ),
+        )
+        .expect("should apply");
+
+        let parsed = crate::Scene::parse(&applied.scene).expect("still valid");
+        let paths: Vec<&str> = parsed.nodes().iter().map(|n| n.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "Room",
+                "Room/Alcove",
+                "Room/Alcove/Desk",
+                "Room/Alcove/Desk/Drawer",
+                "Room/Window",
+            ],
+            "the subtree travels together and stays depth-first"
+        );
+    }
+
+    #[test]
+    fn reparenting_a_node_under_its_own_descendant_is_refused() {
+        let err = apply(
+            SCENE,
+            &tx(
+                "Cycle",
+                vec![SceneOp::ReparentNode {
+                    node: "Room".into(),
+                    parent: "Room/Desk".into(),
+                }],
+            ),
+        )
+        .expect_err("must be refused");
+
+        assert_eq!(err.error, "would_create_a_cycle");
+    }
+
+    #[test]
+    fn reparenting_a_node_under_itself_is_refused() {
+        let err = apply(
+            SCENE,
+            &tx(
+                "Self",
+                vec![SceneOp::ReparentNode {
+                    node: "Room/Desk".into(),
+                    parent: "Room/Desk".into(),
+                }],
+            ),
+        )
+        .expect_err("must be refused");
+
+        assert_eq!(err.error, "would_create_a_cycle");
+    }
+
+    #[test]
+    fn renaming_preserves_the_humans_comment() {
+        let applied = apply(
+            SCENE,
+            &tx(
+                "Rename",
+                vec![SceneOp::RenameNode {
+                    node: "Room/Desk".into(),
+                    name: "Workbench".into(),
+                }],
+            ),
+        )
+        .expect("should apply");
+
+        assert!(applied.scene.contains("A human wrote this comment"));
     }
 
     #[test]

@@ -137,6 +137,10 @@ struct App {
     uploaded: u64,
     /// The handle being dragged, if one is.
     drag: Option<Drag>,
+    /// Bumped whenever a mouse button comes up. Part of every gesture key, so
+    /// letting go and dragging the same handle again is a second undo step
+    /// rather than a continuation of the first.
+    gesture_epoch: u32,
     /// The running simulation, when Play is on. `None` is edit mode.
     ///
     /// Play mode holds its own world and never writes the file, so Stop cannot
@@ -191,6 +195,7 @@ impl App {
             scene_path,
             disk_seen,
             drag: None,
+            gesture_epoch: 0,
             play: None,
             mode: Mode::Move,
             handles: Vec::new(),
@@ -478,8 +483,9 @@ impl ApplicationHandler for App {
                         ElementState::Released => self.drag = None,
                     }
                 }
-                if button == MouseButton::Left && state == ElementState::Released {
+                if state == ElementState::Released {
                     self.drag = None;
+                    self.gesture_epoch = self.gesture_epoch.wrapping_add(1);
                 }
                 let name = match button {
                     MouseButton::Left => "MouseLeft",
@@ -628,6 +634,8 @@ impl App {
             UiAction::ReloadFromDisk => self.accept_disk(),
             UiAction::KeepMine => self.keep_mine(),
             UiAction::ClearLog => crate::log::clear(),
+            UiAction::Rename(node, name) => self.rename(&node, &name),
+            UiAction::Reparent { node, parent } => self.reparent(&node, &parent),
             UiAction::Play => self.start_play(),
             UiAction::Pause => {
                 if let Some(play) = self.play.as_mut() {
@@ -720,6 +728,65 @@ impl App {
         }
     }
 
+    /// Rename a node, keeping the selection on it under its new path.
+    fn rename(&mut self, node: &str, name: &str) {
+        if name.is_empty() || name == node.rsplit('/').next().unwrap_or(node) {
+            return;
+        }
+        let moved = match node.rsplit_once('/') {
+            Some((parent, _)) => format!("{parent}/{name}"),
+            None => name.to_owned(),
+        };
+        self.transact(
+            format!("Rename {node} to {name}"),
+            vec![loom_scene::SceneOp::RenameNode {
+                node: node.to_owned(),
+                name: name.to_owned(),
+            }],
+        );
+        self.reselect(node, &moved);
+    }
+
+    /// Move a node under a new parent.
+    fn reparent(&mut self, node: &str, parent: &str) {
+        // A child inherits its parent's scale, so a non-uniformly scaled
+        // parent squashes whatever you drop into it. The blockout fixture
+        // carries a comment warning about exactly this; saying it at the
+        // moment it happens is more use than saying it in a file.
+        if let Some(t) = self.view.transform_of(parent) {
+            let s = t.scale;
+            if (s[0] - s[1]).abs() > 1e-4 || (s[1] - s[2]).abs() > 1e-4 {
+                crate::log::warn(format!(
+                    "{parent} is scaled {s:?} — children inherit that and will be squashed"
+                ));
+            }
+        }
+        let name = node.rsplit('/').next().unwrap_or(node);
+        let moved = format!("{parent}/{name}");
+        self.transact(
+            format!("Move {node} into {parent}"),
+            vec![loom_scene::SceneOp::ReparentNode {
+                node: node.to_owned(),
+                parent: parent.to_owned(),
+            }],
+        );
+        self.reselect(node, &moved);
+    }
+
+    /// Follow a node whose path just changed — but only if the change landed.
+    fn reselect(&mut self, from: &str, to: &str) {
+        if !self.view.paths.iter().any(|p| p == to) {
+            return;
+        }
+        for path in &mut self.selected {
+            if path == from {
+                *path = to.to_owned();
+            } else if let Some(rest) = path.strip_prefix(&format!("{from}/")) {
+                *path = format!("{to}/{rest}");
+            }
+        }
+    }
+
     fn select(&mut self, path: &str, extend: bool) {
         if !extend {
             self.selected.clear();
@@ -739,18 +806,31 @@ impl App {
     /// why a gizmo drag and an agent transaction are indistinguishable in the
     /// file and share one undo stack (never-do #16).
     fn transact(&mut self, label: String, ops: Vec<loom_scene::SceneOp>) {
+        self.transact_as(label, ops, None);
+    }
+
+    /// As [`Self::transact`], but as one frame of a continuing gesture.
+    ///
+    /// A gizmo drag or a scrubbed slider fires every frame. Without this the
+    /// undo stack fills with a thousand entries for one movement of the hand;
+    /// with it, one gesture is one Ctrl+Z.
+    fn transact_as(&mut self, label: String, ops: Vec<loom_scene::SceneOp>, gesture: Option<&str>) {
         if ops.is_empty() {
             return;
         }
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        let outcome = session.apply(loom_scene::Transaction {
+        let transaction = loom_scene::Transaction {
             label,
             ops,
             dry_run: false,
             expect_version: None,
-        });
+        };
+        let outcome = match gesture {
+            Some(gesture) => session.apply_coalescing(transaction, gesture),
+            None => session.apply(transaction),
+        };
         match outcome {
             Ok(_) => {
                 self.dirty = true;
@@ -798,7 +878,9 @@ impl App {
                 value,
             }
         };
-        self.transact(format!("Set {node} {field}"), vec![op]);
+        // Scrubbing a DragValue fires per frame, exactly like a gizmo drag.
+        let gesture = format!("field:{node}:{field}:{}", self.gesture_epoch);
+        self.transact_as(format!("Set {node} {field}"), vec![op], Some(&gesture));
     }
 
     /// Add an empty child under `parent`, named so it does not collide.
@@ -991,7 +1073,8 @@ impl App {
                 )
             }
         };
-        self.transact(label, vec![op]);
+        let gesture = format!("gizmo:{node}:{axis}:{}", self.gesture_epoch);
+        self.transact_as(label, vec![op], Some(&gesture));
     }
 
     /// Select whatever the cursor is over.

@@ -30,6 +30,8 @@ pub struct Session {
     redo: Vec<String>,
     /// Labels, newest last — this is what the human's log panel shows.
     history: Vec<String>,
+    /// The gesture the last transaction belonged to, if it was part of one.
+    gesture: Option<String>,
 }
 
 impl Session {
@@ -46,6 +48,7 @@ impl Session {
             undo: Vec::new(),
             redo: Vec::new(),
             history: Vec::new(),
+            gesture: None,
         })
     }
 
@@ -59,6 +62,7 @@ impl Session {
             undo: Vec::new(),
             redo: Vec::new(),
             history: Vec::new(),
+            gesture: None,
         }
     }
 
@@ -97,7 +101,44 @@ impl Session {
     /// # Errors
     /// [`TransactionError`] as [`apply`], including `stale_version` when the
     /// file changed underneath.
-    pub fn apply(&mut self, mut transaction: Transaction) -> Result<Applied, Box<TransactionError>> {
+    pub fn apply(&mut self, transaction: Transaction) -> Result<Applied, Box<TransactionError>> {
+        self.gesture = None;
+        self.commit(transaction)
+    }
+
+    /// Apply as one frame of a continuing gesture — a gizmo drag, a slider
+    /// being scrubbed.
+    ///
+    /// Such a gesture produces a transaction per frame. Kept as written that
+    /// is a thousand undo steps for one movement of the hand, and Ctrl+Z stops
+    /// meaning anything. Frames sharing a `gesture` key collapse into a single
+    /// entry that undoes the whole movement, which is what never-do #16 asks
+    /// for at the scale of one gesture rather than one op.
+    ///
+    /// Any ordinary [`apply`](Self::apply) in between ends the run, so an
+    /// agent write landing mid-drag cannot be swallowed into the human's undo
+    /// entry and lost on one keystroke.
+    ///
+    /// # Errors
+    /// As [`apply`](Self::apply).
+    pub fn apply_coalescing(
+        &mut self,
+        transaction: Transaction,
+        gesture: &str,
+    ) -> Result<Applied, Box<TransactionError>> {
+        let continuing = self.gesture.as_deref() == Some(gesture);
+        let applied = self.commit(transaction)?;
+        if continuing {
+            // Drop what this frame added, keeping the snapshot from the frame
+            // that began the gesture — so one undo rewinds the whole thing.
+            self.undo.pop();
+            self.history.pop();
+        }
+        self.gesture = Some(gesture.to_owned());
+        Ok(applied)
+    }
+
+    fn commit(&mut self, mut transaction: Transaction) -> Result<Applied, Box<TransactionError>> {
         transaction.expect_version = Some(self.version.clone());
         let applied = apply(&self.text, &transaction)?;
 
@@ -113,6 +154,7 @@ impl Session {
 
     /// Step back one **transaction**, however many ops it held.
     pub fn undo(&mut self) -> bool {
+        self.gesture = None;
         let Some(previous) = self.undo.pop() else {
             return false;
         };
@@ -123,6 +165,7 @@ impl Session {
     }
 
     pub fn redo(&mut self) -> bool {
+        self.gesture = None;
         let Some(next) = self.redo.pop() else {
             return false;
         };
@@ -155,6 +198,7 @@ impl Session {
         // user undo their way onto someone else's work.
         self.undo.clear();
         self.redo.clear();
+        self.gesture = None;
         Ok(())
     }
 }
@@ -176,6 +220,20 @@ name = \"Room\"
 
     fn session() -> Session {
         Session::from_text(std::path::Path::new("/tmp/loom_edit_test.loom"), SCENE.to_owned())
+    }
+
+    fn move_to(x: f32) -> Transaction {
+        Transaction {
+            label: "Move Room".into(),
+            ops: vec![SceneOp::SetTransform {
+                node: "Room".into(),
+                pos: Some([x, 0.0, 0.0]),
+                rot_euler: None,
+                scale: None,
+            }],
+            dry_run: false,
+            expect_version: None,
+        }
     }
 
     fn spawn(name: &str) -> Transaction {
@@ -228,6 +286,48 @@ name = \"Room\"
         let agent = crate::apply(SCENE, &spawn("Lamp")).expect("agent applies");
 
         assert_eq!(editor.text(), agent.scene, "same bytes, same path");
+    }
+
+    /// A drag produces a transaction per frame. Left alone that is a thousand
+    /// undo steps for one gesture, and Ctrl+Z stops meaning anything — so
+    /// frames of the same gesture fold into one entry.
+    #[test]
+    fn a_dragged_gesture_is_one_undo_step() {
+        let mut session = session();
+        for i in 1..=50 {
+            session
+                .apply_coalescing(move_to(i as f32), "drag:Room")
+                .expect("applies");
+        }
+
+        assert_eq!(session.history().len(), 1, "one gesture, one entry");
+        assert!(session.undo(), "one undo");
+        assert_eq!(session.text(), SCENE, "and the whole drag is gone");
+        assert!(!session.can_undo());
+    }
+
+    /// A different gesture must not be folded into the previous one.
+    #[test]
+    fn two_gestures_stay_two_undo_steps() {
+        let mut session = session();
+        session.apply_coalescing(move_to(1.0), "drag:Room").unwrap();
+        session.apply_coalescing(move_to(2.0), "drag:Room").unwrap();
+        session.apply_coalescing(move_to(3.0), "drag:Other").unwrap();
+
+        assert_eq!(session.history().len(), 2);
+    }
+
+    /// An ordinary transaction between two frames of the same key ends the
+    /// gesture — otherwise an agent write landing mid-drag would be swallowed
+    /// into the human's undo entry and lost on one Ctrl+Z.
+    #[test]
+    fn an_uncoalesced_transaction_breaks_the_run() {
+        let mut session = session();
+        session.apply_coalescing(move_to(1.0), "drag:Room").unwrap();
+        session.apply(spawn("Lamp")).unwrap();
+        session.apply_coalescing(move_to(2.0), "drag:Room").unwrap();
+
+        assert_eq!(session.history().len(), 3);
     }
 
     #[test]

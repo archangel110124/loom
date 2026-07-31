@@ -40,6 +40,10 @@ pub enum UiAction {
     ReloadFromDisk,
     KeepMine,
     ClearLog,
+    /// Give a node a new name.
+    Rename(String, String),
+    /// Move `node` under `parent`.
+    Reparent { node: String, parent: String },
     Play,
     /// Toggle pause while playing.
     Pause,
@@ -303,9 +307,26 @@ fn hierarchy(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAc
                         } else {
                             "·"
                         };
+                        // A row is both a drag source and a drop target, which
+                        // is what makes reparenting a drag rather than a menu.
+                        // The op layer refuses cycles and name collisions, so
+                        // an impossible drop is rejected with a reason rather
+                        // than prevented by duplicated rules here.
+                        let id = egui::Id::new(("hierarchy", path));
                         let response = ui
-                            .selectable_label(selected, format!("{marker} {name}"))
+                            .dnd_drag_source(id, path.clone(), |ui| {
+                                ui.selectable_label(selected, format!("{marker} {name}"))
+                            })
+                            .response
                             .on_hover_text(path);
+                        if let Some(dragged) = response.dnd_release_payload::<String>()
+                            && *dragged != *path
+                        {
+                            actions.push(UiAction::Reparent {
+                                node: (*dragged).clone(),
+                                parent: path.clone(),
+                            });
+                        }
                         if response.clicked() {
                             actions.push(UiAction::Select {
                                 path: path.clone(),
@@ -364,7 +385,21 @@ fn inspector(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAc
                 return;
             };
 
-            ui.label(egui::RichText::new(path).monospace());
+            let short = path.rsplit('/').next().unwrap_or(path);
+            let mut renamed = short.to_owned();
+            ui.horizontal(|ui| {
+                ui.label("name");
+                let response = ui.add_enabled(
+                    state.editable && state.playing.is_none(),
+                    egui::TextEdit::singleline(&mut renamed).desired_width(180.0),
+                );
+                // On commit, not per keystroke: a transaction per character
+                // would bury the log and make undo useless.
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    actions.push(UiAction::Rename(path.clone(), renamed.clone()));
+                }
+            });
+            ui.label(egui::RichText::new(path).monospace().weak());
             ui.add_space(6.0);
 
             egui::ScrollArea::vertical().show(ui, |ui| {
