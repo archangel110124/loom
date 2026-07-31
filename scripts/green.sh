@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
-# Vulkan validation. Needs a GPU + the validation layers; xtask lands with loom_render (M2).
+# Vulkan validation. Needs a GPU + the layers; skips honestly without either.
 if cargo metadata --no-deps --format-version 1 | grep -q '"name":"xtask"'; then
   cargo xtask validate
 else

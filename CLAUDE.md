@@ -48,7 +48,7 @@ Changing one of these requires an ADR in `docs/decisions/` and human approval.
 
 ```bash
 cargo clippy --workspace -- -D warnings   # 1. clean
-cargo xtask validate                      # 2. ZERO Vulkan validation messages
+cargo xtask validate                      # 2. ZERO Vulkan validation messages — REAL as of today
 cargo test --workspace                    # 3. golden images + determinism hashes match
 ```
 
