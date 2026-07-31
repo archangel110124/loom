@@ -75,6 +75,9 @@ pub enum SceneOp {
     RenameNode { node: String, name: String },
     /// Move a node — and everything under it — to a new parent.
     ReparentNode { node: String, parent: String },
+    /// Take a component off a node. Adding one is [`SceneOp::SetField`],
+    /// which creates the component table it writes into.
+    RemoveComponent { node: String, component: String },
 }
 
 /// A batch of ops applied together, undone together.
@@ -469,6 +472,25 @@ fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
             Ok(())
         }
 
+        SceneOp::RemoveComponent { node, component } => {
+            let index = require_node(doc, node)?;
+            let array = nodes_mut(doc, node)?;
+            let removed = array
+                .get_mut(index)
+                .and_then(|table| table.get_mut("components"))
+                .and_then(Item::as_table_mut)
+                .and_then(|components| components.remove(component));
+            if removed.is_none() {
+                return Err((
+                    "unknown_component".to_owned(),
+                    format!("`{node}` has no `{component}`"),
+                    node.clone(),
+                    Some("Only components the node actually carries can be removed.".to_owned()),
+                ));
+            }
+            Ok(())
+        }
+
         SceneOp::RenameNode { node, name } => {
             let index = require_node(doc, node)?;
             check_name(name)?;
@@ -814,6 +836,60 @@ transform = { pos = [0.0, 0.0, 0.0] }
         .expect_err("must be refused");
 
         assert_eq!(err.error, "would_create_a_cycle");
+    }
+
+    #[test]
+    fn removing_a_component_leaves_the_node() {
+        let scene = apply(
+            SCENE,
+            &tx(
+                "Light it",
+                vec![SceneOp::SetField {
+                    node: "Room/Desk".into(),
+                    field: "Light.intensity".into(),
+                    value: serde_json::json!(300.0),
+                }],
+            ),
+        )
+        .expect("added")
+        .scene;
+
+        let applied = apply(
+            &scene,
+            &tx(
+                "Unlight it",
+                vec![SceneOp::RemoveComponent {
+                    node: "Room/Desk".into(),
+                    component: "Light".into(),
+                }],
+            ),
+        )
+        .expect("removed");
+
+        let parsed = crate::Scene::parse(&applied.scene).expect("still valid");
+        let desk = parsed
+            .nodes()
+            .iter()
+            .find(|n| n.path == "Room/Desk")
+            .expect("node survives");
+        assert!(!desk.components.contains_key("Light"));
+    }
+
+    #[test]
+    fn removing_a_component_a_node_does_not_have_is_refused() {
+        let err = apply(
+            SCENE,
+            &tx(
+                "Nope",
+                vec![SceneOp::RemoveComponent {
+                    node: "Room/Desk".into(),
+                    component: "Light".into(),
+                }],
+            ),
+        )
+        .expect_err("must be refused");
+
+        assert_eq!(err.error, "unknown_component");
     }
 
     #[test]

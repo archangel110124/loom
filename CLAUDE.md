@@ -128,10 +128,20 @@ change, so your edits appear live. Two consequences:
 
 > **M0–M12 complete, editor included.** See §6 of the build brief.
 >
-> All milestone exit criteria met, and M12's body as well: `loom run --edit` has a scene tree, an
-> inspector generated from the type registry, a transaction log, and click-to-select.
-> Still not built from M12's list: gizmo handles, multi-selection, the asset browser, and the
-> knowledge-graph view (which depends on ADR 0003, still undecided). `loom` has: validate, describe, render (--sim), sim (--assert),
+> All milestone exit criteria met, and M12's body as well. `loom run --edit` has a hierarchy with
+> drag-to-reparent and multi-selection, an inspector generated from the type registry (including
+> Add Component), transform gizmos with Move/Rotate/Scale, an asset panel, a console, a transaction
+> log, click-to-select, and Play/Pause/Step/Stop.
+>
+> **The window is a live view of the file.** It polls the scene four times a second, so a
+> transaction the agent applies through the CLI appears in the viewport while the human watches.
+> A divergence between unsaved edits and a changed file raises a banner offering both versions and
+> merges neither (never-do #15).
+>
+> Gestures coalesce: a gizmo drag or a scrubbed slider is **one** undo step, not one per frame.
+>
+> Still not built from M12's list: the knowledge-graph view, which depends on ADR 0003 — still
+> undecided. `loom` has: validate, describe, render (--sim), sim (--assert),
 > run (--edit), scene (--tx), place (--op), measure, terrain, explode. `loom-mcp` wraps them.
 >
 > Post-M12 work, in the brief's own order of priority: shadows / SDFGI / the post stack (all

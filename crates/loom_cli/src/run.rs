@@ -635,6 +635,14 @@ impl App {
             UiAction::KeepMine => self.keep_mine(),
             UiAction::ClearLog => crate::log::clear(),
             UiAction::Rename(node, name) => self.rename(&node, &name),
+            UiAction::AddComponent(type_name) => self.add_component(&type_name),
+            UiAction::RemoveComponent(node, type_name) => self.transact(
+                format!("Remove {type_name} from {node}"),
+                vec![loom_scene::SceneOp::RemoveComponent {
+                    node,
+                    component: type_name,
+                }],
+            ),
             UiAction::Reparent { node, parent } => self.reparent(&node, &parent),
             UiAction::Play => self.start_play(),
             UiAction::Pause => {
@@ -726,6 +734,43 @@ impl App {
             }
             Err(e) => crate::log::error(format!("save failed: {e}")),
         }
+    }
+
+    /// Add a component to the selection, at the defaults its schema declares.
+    ///
+    /// The defaults come from the registry, not from a table here — a second
+    /// list of what a component starts as is a second answer, and the schema
+    /// is the one the validator uses.
+    fn add_component(&mut self, type_name: &str) {
+        let Some(schema) = self.registry.describe(type_name) else {
+            crate::log::error(format!("no component type named {type_name}"));
+            return;
+        };
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object);
+        let mut ops = Vec::new();
+        for node in self.selected.clone() {
+            // A component whose schema declares no properties has nothing to
+            // write, and is reported below rather than silently doing nothing.
+            if let Some(properties) = properties {
+                for (field, spec) in properties {
+                    let Some(default) = spec.get("default") else {
+                        continue;
+                    };
+                    ops.push(loom_scene::SceneOp::SetField {
+                        node: node.clone(),
+                        field: format!("{type_name}.{field}"),
+                        value: default.clone(),
+                    });
+                }
+            }
+        }
+        if ops.is_empty() {
+            crate::log::warn(format!("{type_name} declares no defaults to write"));
+            return;
+        }
+        self.transact(format!("Add {type_name}"), ops);
     }
 
     /// Rename a node, keeping the selection on it under its new path.

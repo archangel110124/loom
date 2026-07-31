@@ -42,6 +42,9 @@ pub enum UiAction {
     ClearLog,
     /// Give a node a new name.
     Rename(String, String),
+    /// Add a component of this type to the selection, at its defaults.
+    AddComponent(String),
+    RemoveComponent(String, String),
     /// Move `node` under `parent`.
     Reparent { node: String, parent: String },
     Play,
@@ -207,6 +210,56 @@ fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiActi
                     .monospace(),
                 );
             });
+        });
+    });
+}
+
+/// Unity's Add Component, straight off the type registry.
+///
+/// The list is every registered type the node does not already carry — there
+/// is no second list to keep in step, and a new component type appears here
+/// the moment it is registered, exactly as it appears in `loom describe`.
+fn add_component_menu(
+    ui: &mut egui::Ui,
+    node: &loom_scene::Node,
+    state: &PanelState<'_>,
+    editing: bool,
+    actions: &mut Vec<UiAction>,
+) {
+    ui.add_enabled_ui(editing, |ui| {
+        ui.menu_button("Add Component", |ui| {
+            let mut offered = 0;
+            for type_name in state.registry.type_names() {
+                // `Name` and `Transform` are node-key sugar (format §3), not
+                // components anyone adds by hand.
+                if matches!(type_name, "Name" | "Transform")
+                    || node.components.contains_key(type_name)
+                {
+                    continue;
+                }
+                offered += 1;
+                let description = state
+                    .registry
+                    .describe(type_name)
+                    .and_then(|s| s.get("description").cloned())
+                    .and_then(|d| d.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                let button = ui.button(type_name);
+                let button = if description.is_empty() {
+                    button
+                } else {
+                    // The doc comment again: one act writes the schema, the
+                    // agent's hint, and this tooltip.
+                    button.on_hover_text(description.lines().next().unwrap_or_default())
+                };
+                if button.clicked() {
+                    actions.push(UiAction::AddComponent(type_name.to_owned()));
+                    ui.close();
+                }
+            }
+            if offered == 0 {
+                ui.weak("this node has every component");
+            }
         });
     });
 }
@@ -385,12 +438,13 @@ fn inspector(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAc
                 return;
             };
 
+            let editable_now = state.editable && state.playing.is_none();
             let short = path.rsplit('/').next().unwrap_or(path);
             let mut renamed = short.to_owned();
             ui.horizontal(|ui| {
                 ui.label("name");
                 let response = ui.add_enabled(
-                    state.editable && state.playing.is_none(),
+                    editable_now,
                     egui::TextEdit::singleline(&mut renamed).desired_width(180.0),
                 );
                 // On commit, not per keystroke: a transaction per character
@@ -401,25 +455,37 @@ fn inspector(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAc
             });
             ui.label(egui::RichText::new(path).monospace().weak());
             ui.add_space(6.0);
+            let editing = state.editable && state.playing.is_none();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 // Transform first — it is what a human reaches for, and it is
                 // the node-key sugar rather than a component table.
-                inspect_transform(ui, path, &node.transform, state.editable, actions);
+                inspect_transform(ui, path, &node.transform, editing, actions);
 
                 for (type_name, value) in &node.components {
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new(type_name).strong());
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(type_name).strong());
+                        if editing && ui.small_button("✖").on_hover_text("remove").clicked() {
+                            actions.push(UiAction::RemoveComponent(
+                                path.clone(),
+                                type_name.clone(),
+                            ));
+                        }
+                    });
                     inspect_component(
                         ui,
                         path,
                         type_name,
                         value,
                         state.registry,
-                        state.editable,
+                        editing,
                         actions,
                     );
                 }
+
+                ui.add_space(12.0);
+                add_component_menu(ui, node, state, editing, actions);
             });
         });
 }
