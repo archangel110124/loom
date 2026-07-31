@@ -172,6 +172,49 @@ struct App {
     title: String,
 }
 
+/// Tear down in an order the driver can survive.
+///
+/// Struct fields drop in **declaration order**, and this struct's had `window`
+/// before `viewer` — so the X11 window was destroyed first and then
+/// `Viewer::drop` destroyed a `VkSurfaceKHR` that still referenced it. The
+/// `SAFETY` note on `create_surface` asserted the opposite of what was
+/// happening, which is how it survived review.
+///
+/// Written out rather than fixed by reordering fields, because a reorder is
+/// invisible and someone alphabetising this struct in a year would put the
+/// use-after-free straight back.
+impl Drop for App {
+    fn drop(&mut self) {
+        // **The viewer before the UI.** egui records its draws into the
+        // viewer's command buffer, so egui's pipeline and descriptor pool are
+        // still referenced by it until the viewer destroys its command pool.
+        // Dropping the UI first is VUID-vkDestroyPipeline-pipeline-00765 and
+        // VUID-vkDestroyDescriptorPool-descriptorPool-00303.
+        //
+        // The surface's window must still exist here, which is why the window
+        // is released further down rather than by field order.
+        self.viewer = None;
+        self.ui = None;
+
+        // **A device is a child of its instance and must die first.** This was
+        // held as `Option<(Instance, Device)>`, and a tuple drops `.0` before
+        // `.1` — so `vkDestroyInstance` ran while the `VkDevice` was still
+        // alive, and `vkDestroyDevice` then ran against an instance that no
+        // longer existed. On this box that segfaults inside the NVIDIA driver
+        // at process teardown and briefly wedges the display.
+        //
+        // The headless path got this right by accident: it holds them as two
+        // locals, and locals drop in reverse declaration order.
+        if let Some((instance, device)) = self.gpu.take() {
+            drop(device);
+            drop(instance);
+        }
+
+        // The window last. Nothing Vulkan-side refers to it any more.
+        self.window = None;
+    }
+}
+
 impl App {
     fn new(
         view: SceneView,
@@ -434,6 +477,15 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Once the close has been accepted the X window is already gone, but
+        // winit still delivers the events queued behind it — including a
+        // `RedrawRequested`. Drawing one asks the window for its size, X
+        // answers `BadDrawable`, and winit unwraps that into a panic. So stop
+        // touching the window the moment we are on the way out.
+        if event_loop.exiting() {
+            return;
+        }
+
         // egui sees every event first. If it consumed one, the viewport must
         // NOT also act on it — otherwise clicking a panel also moves the camera
         // behind it and typing a number in the inspector flies the camera.
@@ -446,7 +498,11 @@ impl ApplicationHandler for App {
         }
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                crate::log::info("closing");
+                self.shutdown(event_loop);
+            }
+            WindowEvent::Destroyed => self.shutdown(event_loop),
 
             // Keys are recorded by NAME and interpreted by the action map.
             // Nothing here knows what W means.
@@ -717,6 +773,20 @@ impl App {
         if let Some(play) = self.play.as_ref() {
             self.play_objects = self.view.objects_of(&play.world);
         }
+    }
+
+    /// Stop drawing, then leave.
+    ///
+    /// The X window can be gone before the event that says so reaches us, and
+    /// egui asks the window for its size on every frame — winit turns the
+    /// resulting `BadDrawable` into a panic. Dropping our reference to the
+    /// window here means the redraw path has nothing to ask.
+    fn shutdown(&mut self, event_loop: &ActiveEventLoop) {
+        // Same order as `Drop`, and for the same reason.
+        self.viewer = None;
+        self.ui = None;
+        self.window = None;
+        event_loop.exit();
     }
 
     fn save(&mut self) {
@@ -1317,8 +1387,10 @@ fn build_viewer(
         .map_err(|e| format!("surface extensions unavailable: {e}"))?;
     let instance = Instance::with_extensions(c"loom", required).map_err(|e| e.to_string())?;
 
-    // SAFETY: the window outlives the surface — both are owned by `App`, and
-    // the viewer is dropped before the window.
+    // SAFETY: the window outlives the surface. `App`'s `Drop` destroys the
+    // viewer — and with it this surface — before releasing the window. That is
+    // written out explicitly there rather than left to field order, because
+    // field order is what got this wrong the first time.
     let surface = unsafe {
         ash_window::create_surface(
             instance.entry(),

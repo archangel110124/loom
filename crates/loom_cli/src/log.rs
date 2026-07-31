@@ -38,17 +38,21 @@ fn store() -> &'static Mutex<Vec<Entry>> {
 }
 
 fn push(level: Level, text: String) {
-    eprintln!("loom: {text}");
     let Ok(mut entries) = store().lock() else {
+        eprintln!("loom: {text}");
         return;
     };
     if let Some(last) = entries.last_mut()
         && last.level == level
         && last.text == text
     {
+        // Repeats are counted, not reprinted. The view is re-derived on every
+        // frame of a drag, so a scene with one missing asset was writing the
+        // same line hundreds of times a second into the log file.
         last.repeats += 1;
         return;
     }
+    eprintln!("loom: {text}");
     if entries.len() >= CAPACITY {
         entries.remove(0);
     }

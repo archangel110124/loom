@@ -353,7 +353,7 @@ impl MeshLibrary {
                     by_name.insert(key, u32::try_from(meshes.len()).unwrap_or(0));
                     meshes.push(mesh);
                 }
-                None => eprintln!("loom: {}: voxel volume produced no surface", node.path),
+                None => crate::log::warn(format!("{}: voxel volume produced no surface", node.path)),
             }
         }
 
@@ -366,7 +366,7 @@ impl MeshLibrary {
                 match loom_asset::mesh::import_gltf(&path) {
                     Ok(mesh) => Some(mesh),
                     Err(e) => {
-                        eprintln!("loom: {name}: {e}; falling back to a box");
+                        crate::log::warn(format!("{name}: {e}; falling back to a box"));
                         None
                     }
                 }

@@ -60,8 +60,16 @@ pub struct Viewer {
     command_buffer: vk::CommandBuffer,
     /// Signalled when the presentation engine hands us an image.
     acquired: vk::Semaphore,
-    /// Signalled when rendering finishes, waited on by present.
-    rendered: vk::Semaphore,
+    /// Signalled when rendering finishes, waited on by present — **one per
+    /// swapchain image**.
+    ///
+    /// A single shared semaphore is the classic version of this bug: the
+    /// presentation engine may still be waiting on it for the previous image
+    /// when the next submit signals it again. Validation says so plainly
+    /// ("is being signaled by VkQueue, but it may still be in use by
+    /// VkSwapchainKHR"), and on this box it aborts inside the driver at
+    /// teardown roughly one close in three.
+    rendered: Vec<vk::Semaphore>,
     in_flight: vk::Fence,
     physical: vk::PhysicalDevice,
 }
@@ -158,18 +166,24 @@ impl Viewer {
         // will never be submitted.
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         // SAFETY: default create-infos are valid.
-        let (acquired, rendered, in_flight) = unsafe {
+        let (acquired, in_flight) = unsafe {
             (
-                raw.create_semaphore(&semaphore_info, None)?,
                 raw.create_semaphore(&semaphore_info, None)?,
                 raw.create_fence(&fence_info, None)?,
             )
         };
+        let mut rendered = Vec::with_capacity(images.len());
+        for _ in 0..images.len() {
+            // SAFETY: a default semaphore create-info is always valid.
+            rendered.push(unsafe { raw.create_semaphore(&semaphore_info, None) }?);
+        }
 
         names.set(pipeline, "loom.viewer_pipeline");
         names.set(depth, "loom.viewer_depth");
         names.set(acquired, "loom.sem_image_acquired");
-        names.set(rendered, "loom.sem_render_finished");
+        for semaphore in &rendered {
+            names.set(*semaphore, "loom.sem_render_finished");
+        }
 
         Ok(Self {
             device: raw,
@@ -226,8 +240,18 @@ impl Viewer {
         let Some(allocator) = self.allocator.as_mut() else {
             return Ok(());
         };
-        // SAFETY: idling is precisely what makes freeing in-use buffers legal.
+        // SAFETY: idling is what makes freeing these legal.
         unsafe { self.device.device_wait_idle() }?;
+        // Idle is not enough on its own: the command buffer still *references*
+        // the old buffers until it is reset, and validation rightly refuses a
+        // `vkDestroyBuffer` on something a recorded command buffer holds
+        // (VUID-vkDestroyBuffer-buffer-00922).
+        //
+        // SAFETY: the device is idle, so this command buffer is not executing.
+        unsafe {
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+        }?;
 
         let (combined_vertices, combined_indices, ranges, unpack) = combine(meshes);
 
@@ -434,8 +458,21 @@ impl Viewer {
             d.end_command_buffer(cmd)?;
 
             let wait = [self.acquired];
-            let signal = [self.rendered];
-            let stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            // The semaphore belonging to *this* image, so a present still
+            // pending on another image is never signalled a second time.
+            let signal = [self.rendered[index as usize]];
+            // ALL_COMMANDS, not COLOR_ATTACHMENT_OUTPUT. The first thing the
+            // command buffer does is a layout transition on the acquired
+            // image, and a barrier executes earlier in the pipeline than the
+            // colour stage — so waiting only at COLOR_ATTACHMENT_OUTPUT lets
+            // that write race the acquire, which sync validation reports as
+            // SYNC-HAZARD-WRITE-AFTER-READ.
+            //
+            // `ponytail:` the tighter fix is to give the graph's first barrier
+            // a matching srcStageMask, but barriers belong to the graph
+            // (never-do #4) and this is one wait per frame. Revisit if the
+            // stall ever shows up in a profile.
+            let stages = [vk::PipelineStageFlags::ALL_COMMANDS];
             let buffers = [cmd];
             let submit = vk::SubmitInfo::default()
                 .wait_semaphores(&wait)
@@ -510,6 +547,21 @@ impl Viewer {
         self.format = format;
         self.extent = extent;
         self.swapchain = swapchain;
+        // The recreated swapchain can hand back a different number of images,
+        // and each needs its own render-finished semaphore.
+        while self.rendered.len() < images.len() {
+            let info = vk::SemaphoreCreateInfo::default();
+            // SAFETY: nothing is in flight — the device was idled above.
+            self.rendered
+                .push(unsafe { self.device.create_semaphore(&info, None) }?);
+        }
+        while self.rendered.len() > images.len() {
+            if let Some(extra) = self.rendered.pop() {
+                // SAFETY: as above, and this handle is ours.
+                unsafe { self.device.destroy_semaphore(extra, None) };
+            }
+        }
+
         self.images = images;
         self.views = views;
 
@@ -546,20 +598,36 @@ impl Viewer {
 
 impl Drop for Viewer {
     fn drop(&mut self) {
-        // SAFETY: idle first, then destroy in reverse creation order.
+        // SAFETY: idle first, then destroy in an order that respects what is
+        // still using what.
+        //
+        // **The swapchain goes before the semaphores.** `rendered` is the
+        // semaphore `vkQueuePresentKHR` waits on, and `vkDeviceWaitIdle` says
+        // nothing about the *presentation engine* — it only drains the queues.
+        // Destroying a semaphore a pending present still waits on is
+        // VUID-vkDestroySemaphore-semaphore-01137, and on this box it aborts
+        // inside the driver perhaps one close in three. Once the swapchain is
+        // gone there is no outstanding present to wait on anything.
         unsafe {
             let _ = self.device.device_wait_idle();
+
+            // Image views first: they are views *of* the swapchain's images.
+            for view in self.views.drain(..) {
+                self.device.destroy_image_view(view, None);
+            }
+            self.swapchain_loader.destroy_swapchain(self.swapchain, None);
+
+            // Now nothing can be waiting on these.
             self.device.destroy_semaphore(self.acquired, None);
-            self.device.destroy_semaphore(self.rendered, None);
+            for semaphore in self.rendered.drain(..) {
+                self.device.destroy_semaphore(semaphore, None);
+            }
             self.device.destroy_fence(self.in_flight, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline_cache(self.pipeline_cache, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
-            for view in self.views.drain(..) {
-                self.device.destroy_image_view(view, None);
-            }
             self.device.destroy_image_view(self.depth_view, None);
 
             if let Some(allocator) = self.allocator.as_mut() {
@@ -581,7 +649,7 @@ impl Drop for Viewer {
             self.device.destroy_buffer(self.objects, None);
             self.allocator = None;
 
-            self.swapchain_loader.destroy_swapchain(self.swapchain, None);
+            // The surface last: the swapchain was built from it.
             self.surface_loader.destroy_surface(self.surface, None);
         }
     }

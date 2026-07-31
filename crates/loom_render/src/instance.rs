@@ -226,9 +226,14 @@ pub fn take_validation_messages() -> Vec<String> {
 
 impl Drop for Instance {
     fn drop(&mut self) {
-        // SAFETY: destroyed exactly once, messenger before instance, and no
-        // child objects outlive this — enforced by ownership, since nothing
-        // else holds these handles.
+        // SAFETY: destroyed exactly once, and the messenger goes before the
+        // instance.
+        //
+        // **The caller must drop its `Device` first.** A device is a child of
+        // its instance, and Rust's drop order will not do this for you: a
+        // `(Instance, Device)` tuple destroys the instance first, which is a
+        // use-after-free that segfaults inside the driver at teardown. This
+        // used to claim ownership enforced the order; it does not.
         unsafe {
             if let Some((loader, messenger)) = self.debug.take() {
                 loader.destroy_debug_utils_messenger(messenger, None);
@@ -288,7 +293,13 @@ unsafe extern "system" fn debug_callback(
 
     use vk::DebugUtilsMessageTypeFlagsEXT as Type;
     if kind.intersects(Type::VALIDATION | Type::PERFORMANCE) {
-        with_collected(|m| m.push(format!("[{kind:?} {severity:?}] {id}: {message}")));
+        let line = format!("[{kind:?} {severity:?}] {id}: {message}");
+        // Collected for `check_validation`, and *also* printed. A validation
+        // message that only a test can see is no use while chasing a teardown
+        // crash in a live window — and these are rare enough that printing
+        // them costs nothing.
+        eprintln!("vulkan validation {line}");
+        with_collected(|m| m.push(line));
     } else {
         // Informational, and deliberately visible rather than swallowed.
         eprintln!("vulkan loader [{severity:?}] {id}: {message}");

@@ -69,7 +69,12 @@ impl Ui {
             device.handle().clone(),
             egui_ash_renderer::RenderMode::DynamicRendering(DynamicRendering {
                 color_attachment_format: color_format,
-                depth_attachment_format: None,
+                // The UI draws inside the *scene's* rendering pass, which has a
+                // depth attachment — so egui's pipeline has to declare the same
+                // format or every UI draw is VUID-...-08914. It still neither
+                // tests nor writes depth (see `Options` below); declaring the
+                // format is about matching the pass, not about using it.
+                depth_attachment_format: Some(crate::renderer::DEPTH_FORMAT),
                 stencil_attachment_format: None,
             }),
             Options {
