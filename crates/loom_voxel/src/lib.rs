@@ -319,6 +319,43 @@ impl Volume {
         cells
     }
 
+    /// Whether any of the six neighbouring chunks is solid where this one is
+    /// air, or the reverse — i.e. whether a surface runs along a shared face.
+    ///
+    /// A `Detailed` neighbour counts too: its surface may reach the boundary,
+    /// and meshing one extra chunk is cheaper than a hole in the world.
+    fn neighbour_differs(&self, cx: usize, cy: usize, cz: usize) -> bool {
+        let solid = matches!(self.chunks[self.chunk_index(cx, cy, cz)], Chunk::Solid);
+        let air = matches!(self.chunks[self.chunk_index(cx, cy, cz)], Chunk::Air);
+        if !solid && !air {
+            return false;
+        }
+        let offsets: [[isize; 3]; 6] = [
+            [-1, 0, 0], [1, 0, 0],
+            [0, -1, 0], [0, 1, 0],
+            [0, 0, -1], [0, 0, 1],
+        ];
+        for [dx, dy, dz] in offsets {
+            let (Some(nx), Some(ny), Some(nz)) = (
+                cx.checked_add_signed(dx),
+                cy.checked_add_signed(dy),
+                cz.checked_add_signed(dz),
+            ) else {
+                continue;
+            };
+            if nx >= self.dims[0] || ny >= self.dims[1] || nz >= self.dims[2] {
+                continue;
+            }
+            match &self.chunks[self.chunk_index(nx, ny, nz)] {
+                Chunk::Detailed(_) => return true,
+                Chunk::Solid if air => return true,
+                Chunk::Air if solid => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// Voxels per axis.
     #[must_use]
     pub fn resolution(&self) -> [usize; 3] {
@@ -606,7 +643,14 @@ impl Volume {
             for cy in 0..self.dims[1] {
                 for cx in 0..self.dims[0] {
                     let index = self.chunk_index(cx, cy, cz);
-                    if self.chunks[index].has_surface() || self.edits.contains_key(&index) {
+                    // A uniform chunk still borders a surface when a neighbour
+                    // is uniformly the other thing: the face between them is
+                    // the surface. Testing only `has_surface` skipped both
+                    // sides, so a wall that happened to land exactly on a
+                    // 32-voxel line came out invisible.
+                    let borders_a_seam = self.chunks[index].has_surface()
+                        || self.neighbour_differs(cx, cy, cz);
+                    if borders_a_seam || self.edits.contains_key(&index) {
                         out.push([cx, cy, cz]);
                     }
                 }
@@ -646,6 +690,38 @@ fn length(a: [f32; 3]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// A surface lying exactly on a chunk boundary is still a surface. Both
+    /// sides collapse to uniform — one all solid, one all air — so neither
+    /// reported `has_surface`, `surface_chunks` skipped both, and the shared
+    /// face was never meshed. A flat wall that happens to land on a 32-voxel
+    /// line came out invisible, and invisible geometry is the hardest kind of
+    /// bug to attribute.
+    #[test]
+    fn a_surface_on_a_chunk_boundary_is_meshed() {
+        let voxel_size = 0.25;
+        let boundary = super::CHUNK as f32 * voxel_size;
+
+        // Fills chunk 0 exactly and stops on the seam with chunk 1.
+        let mut volume = super::Volume::new([2, 1, 1], voxel_size);
+        volume.bake(&[super::VoxelOp::Box {
+            center: [boundary * 0.5, boundary * 0.5, boundary * 0.5],
+            half_extents: [boundary * 0.5, boundary * 0.5, boundary * 0.5],
+            mode: super::CsgMode::Union,
+        }]);
+
+        let chunks = volume.surface_chunks();
+        assert!(
+            !chunks.is_empty(),
+            "the seam between a solid chunk and an empty one is a surface"
+        );
+
+        let mesh = super::mesh::mesh_volume(&volume, &super::SurfaceNets);
+        assert!(
+            !mesh.indices.is_empty(),
+            "a wall on a chunk boundary must produce geometry"
+        );
+    }
+
     /// **A second edit must not undo the first.** `edit` took a chunk's stored
     /// edits out of the map up front and only put them back when *this* op
     /// changed something — so an op that clipped an already-carved chunk
