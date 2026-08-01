@@ -229,6 +229,27 @@ impl Session {
         Ok(())
     }
 
+    /// Accept the file's current state as this session's baseline **without**
+    /// taking its contents.
+    ///
+    /// The one legitimate way past a stale-save refusal, and it exists because
+    /// making `save` conditional otherwise turned the editor's "Keep mine"
+    /// button into a dead end: every subsequent save was refused, and the only
+    /// escape offered was the one that discards the human's work.
+    ///
+    /// This is not a violation of never-do #15. That rule forbids *silent*
+    /// force-writes against a stale token and automatic merges. Here the human
+    /// has been shown both versions and has explicitly chosen one; nothing is
+    /// merged and nothing is silent.
+    ///
+    /// # Errors
+    /// [`std::io::Error`] if the file cannot be read.
+    pub fn accept_disk_version(&mut self) -> Result<(), std::io::Error> {
+        let on_disk = std::fs::read_to_string(&self.path)?;
+        self.disk = VersionToken::of(&on_disk);
+        Ok(())
+    }
+
     /// Re-read from disk after a rejected write.
     ///
     /// The **only** correct response to `stale_version` (§7.17). Never force
@@ -406,6 +427,34 @@ name = \"Room\"
         // After taking their version, saving is allowed again.
         session.reload().expect("reload");
         session.save().expect("saving is fine once in sync");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Refusing a stale save must not trap the human. Making `save` conditional
+    /// fixed a data-loss bug and created a dead end: "Keep mine" left the
+    /// session's baseline stale, so every later save was refused and the only
+    /// way out discarded the very edits the human had chosen to keep.
+    #[test]
+    fn keeping_your_version_lets_you_save_it() {
+        let dir = std::env::temp_dir().join("loom_keep_mine");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("scene.loom");
+        std::fs::write(&path, SCENE).expect("write");
+
+        let mut session = Session::open(&path).expect("open");
+        session.apply(spawn("Lamp")).expect("edit applies");
+        std::fs::write(&path, format!("{SCENE}\n# the agent was here\n")).expect("write");
+
+        assert!(session.save().is_err(), "still refused before the human chooses");
+
+        // The human looks at both versions and keeps theirs.
+        session.accept_disk_version().expect("acknowledge");
+        session.save().expect("their choice must be writable");
+
+        assert!(
+            std::fs::read_to_string(&path).expect("read").contains("\"Lamp\""),
+            "the kept version reached disk"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -158,4 +158,15 @@ impl Ui {
     pub fn wants_keyboard(&self) -> bool {
         self.context.egui_wants_keyboard_input()
     }
+
+    /// Whether a **text field** has focus, as opposed to any widget at all.
+    ///
+    /// The distinction matters for keys egui claims structurally. Tab is its
+    /// focus key, so `wants_keyboard` is true the moment focus lands anywhere
+    /// — including a toolbar button — and using it to decide whether the
+    /// viewport may see Tab latched the key permanently held.
+    #[must_use]
+    pub fn wants_text_input(&self) -> bool {
+        self.context.text_edit_focused()
+    }
 }

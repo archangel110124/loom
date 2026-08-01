@@ -192,7 +192,15 @@ impl SceneView {
             .and_then(|e| self.world.parent(*e))
             .and_then(|parent| self.world.global_transform(parent))
             .map_or(Mat4::IDENTITY, |g| {
-                Mat4::from_cols_array(&g.matrix).inverse()
+                let matrix = Mat4::from_cols_array(&g.matrix);
+                // A parent scaled to zero on any axis is singular, and its
+                // `inverse()` is all NaN — which would flow straight into the
+                // node's transform on the next gizmo drag.
+                if matrix.determinant().abs() < 1e-12 {
+                    Mat4::IDENTITY
+                } else {
+                    matrix.inverse()
+                }
             })
     }
 

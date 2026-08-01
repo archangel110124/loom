@@ -386,18 +386,24 @@ impl Renderer {
         // waits within one call — but idling costs nothing and makes the
         // invariant local rather than remembered.
         unsafe { self.device.device_wait_idle() }?;
-        if let Some(old) = self.objects_alloc.take() {
-            let _ = allocator.free(old);
-        }
-        // SAFETY: idle, and the handle is ours.
-        unsafe { self.device.destroy_buffer(self.objects, None) };
-
+        // **Build before destroying.** Freeing first leaves `self.objects`
+        // holding a destroyed handle if the re-create fails, which `Drop` then
+        // destroys again — the exact double-free fixed in `set_meshes`, which
+        // I reintroduced here while adding buffer growth. A transient
+        // allocation spike is the cheaper mistake.
         let (objects, objects_alloc, object_address) = create_address_buffer(
             &self.device,
             allocator,
             (capacity * size_of::<ObjectData>()) as u64,
             "loom.object_data",
         )?;
+        // Everything fallible is done; retire the old buffer now.
+        if let Some(old) = self.objects_alloc.take() {
+            let _ = allocator.free(old);
+        }
+        // SAFETY: the device is idle and the handle is ours.
+        unsafe { self.device.destroy_buffer(self.objects, None) };
+
         self.objects = objects;
         self.objects_alloc = Some(objects_alloc);
         self.object_address = object_address;

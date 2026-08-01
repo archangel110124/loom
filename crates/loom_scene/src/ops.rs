@@ -514,17 +514,33 @@ fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
                 .get_mut(type_name)
                 .and_then(Item::as_table_like_mut)
                 .ok_or_else(|| malformed(type_name))?;
-            component.insert(field_name, toml_edit::Item::Value(json_to_toml(new, field)?));
+            // Assign through the existing entry when there is one. `insert`
+            // replaces the *key* as well as the value, and a key carries its
+            // decor — so editing a field the human had commented deleted the
+            // comment and the indentation with it. Preserving human annotation
+            // is the entire reason this layer edits a format-preserving DOM
+            // instead of re-emitting the file.
+            let value = toml_edit::Item::Value(json_to_toml(new, field)?);
+            match component.get_mut(field_name) {
+                Some(existing) => *existing = value,
+                None => {
+                    component.insert(field_name, value);
+                }
+            }
             Ok(())
         }
 
         SceneOp::RemoveComponent { node, component } => {
             let index = require_node(doc, node)?;
             let array = nodes_mut(doc, node)?;
+            // `as_table_like_mut`, matching `SetField`. Using `as_table_mut`
+            // here meant the inline `components = { ... }` spelling reported
+            // `unknown_component` for a component the node demonstrably has —
+            // the same blind spot, one function over.
             let removed = array
                 .get_mut(index)
                 .and_then(|table| table.get_mut("components"))
-                .and_then(Item::as_table_mut)
+                .and_then(Item::as_table_like_mut)
                 .and_then(|components| components.remove(component));
             if removed.is_none() {
                 return Err((
@@ -1212,6 +1228,82 @@ parent = \"Room\"
             "depth-first, parent before child: {}",
             applied.scene
         );
+    }
+
+    /// Editing a field must not delete the note the human left on it. The
+    /// switch to `TableLike::insert` replaced the key as well as the value,
+    /// and a key carries its decor — so the comment went with it. That is the
+    /// same class of loss this whole layer exists to prevent.
+    #[test]
+    fn editing_a_field_keeps_the_comment_above_it() {
+        let scene = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[node]]
+name = \"Room\"
+
+[[node]]
+name = \"Lamp\"
+parent = \"Room\"
+
+  [node.components.Light]
+  # Dimmed on purpose: this room is meant to feel like evening.
+  intensity = 400.0
+";
+        let applied = apply(
+            scene,
+            &tx(
+                "Dim it further",
+                vec![SceneOp::SetField {
+                    node: "Room/Lamp".into(),
+                    field: "Light.intensity".into(),
+                    value: serde_json::json!(120.0),
+                }],
+            ),
+        )
+        .expect("should apply");
+
+        assert!(
+            applied.scene.contains("meant to feel like evening"),
+            "the human's comment must survive an edit to the field it annotates:\n{}",
+            applied.scene
+        );
+    }
+
+    /// The inline spelling must be removable too — `SetField` learned to read
+    /// it and `RemoveComponent` did not.
+    #[test]
+    fn removing_a_component_written_inline_works() {
+        let scene = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[node]]
+name = \"Room\"
+
+[[node]]
+name = \"Lamp\"
+parent = \"Room\"
+components = { Light = { intensity = 400.0 } }
+";
+        let applied = apply(
+            scene,
+            &tx(
+                "Unlight it",
+                vec![SceneOp::RemoveComponent {
+                    node: "Room/Lamp".into(),
+                    component: "Light".into(),
+                }],
+            ),
+        )
+        .expect("must find the component it can plainly see");
+
+        let parsed = crate::Scene::parse(&applied.scene).expect("still valid");
+        let lamp = parsed.nodes().iter().find(|n| n.path == "Room/Lamp").expect("node");
+        assert!(!lamp.components.contains_key("Light"));
     }
 
     #[test]

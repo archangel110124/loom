@@ -82,6 +82,21 @@ pub fn euler_from_quat(q: [f32; 4]) -> [f32; 3] {
     // transform downstream.
     let sin_pitch = (2.0 * (w * x - y * z)).clamp(-1.0, 1.0);
     let pitch = sin_pitch.asin();
+
+    // Straight up or straight down, yaw and roll describe the same rotation and
+    // the general formulas both collapse to `atan2(0, 0)` — which returns zero
+    // and silently re-orients the node by however much roll it actually had.
+    // Fold the pair into yaw and zero the roll, which is the conventional and
+    // reversible choice.
+    if sin_pitch.abs() > 0.999_999 {
+        // `2*atan2(y, w)` for this composition order — derived numerically
+        // against `quat_from_euler` at both poles rather than copied from a
+        // reference for some other convention, which is how the first attempt
+        // here silently dropped the yaw entirely.
+        let yaw = 2.0 * y.atan2(w);
+        return [pitch.to_degrees(), yaw.to_degrees(), 0.0];
+    }
+
     let yaw = (2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (x * x + y * y));
     let roll = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (x * x + z * z));
     [pitch.to_degrees(), yaw.to_degrees(), roll.to_degrees()]
@@ -297,8 +312,13 @@ impl Physics {
             .build();
         let handle = self.bodies.insert(body);
         let (half_height, radius) = (half_height.max(1e-3), radius.max(1e-3));
+        // `half_height` is already the straight section — `primitives::capsule`
+        // draws two hemispheres of `radius` at ±`half_height`, so the drawn
+        // shape spans `half_height + radius`. Subtracting the radius here made
+        // every capsule one radius too short, and at the default scale
+        // collapsed the straight section to nothing.
         let shape = if capped {
-            ColliderBuilder::capsule_y((half_height - radius).max(1e-3), radius)
+            ColliderBuilder::capsule_y(half_height, radius)
         } else {
             ColliderBuilder::cylinder(half_height, radius)
         };
@@ -318,8 +338,9 @@ impl Physics {
         capped: bool,
     ) -> ColliderHandle {
         let (half_height, radius) = (half_height.max(1e-3), radius.max(1e-3));
+        // See `add_round_body`: the straight section is what the caller passes.
         let shape = if capped {
-            ColliderBuilder::capsule_y((half_height - radius).max(1e-3), radius)
+            ColliderBuilder::capsule_y(half_height, radius)
         } else {
             ColliderBuilder::cylinder(half_height, radius)
         };
@@ -499,12 +520,15 @@ mod tests {
         assert_ne!(base, spun([0.0, 0.0, 0.0], 3.0), "velocity must count");
     }
 
-    /// The writer and the reader must be inverses. They are hand-rolled Y-X-Z
-    /// conversions on opposite sides of the physics boundary, and nothing else
-    /// would notice if they drifted: a scene would simply simulate at a
-    /// slightly different angle than it was authored at.
+    /// The writer and the reader must be inverses **as rotations**.
+    ///
+    /// Not as euler triples: a triple is a spelling, not a rotation, and at
+    /// gimbal lock several spellings denote the same orientation. Comparing
+    /// components would fail on a correct implementation and pass on one that
+    /// merely echoed its input. Re-encoding what came back and comparing
+    /// quaternions tests the property that actually matters.
     #[test]
-    fn euler_survives_a_round_trip_through_the_body() {
+    fn euler_survives_a_round_trip_as_a_rotation() {
         for euler in [
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 45.0],
@@ -512,16 +536,29 @@ mod tests {
             [0.0, 90.0, 0.0],
             [15.0, -40.0, 70.0],
             [-25.0, 160.0, -80.0],
+            // Gimbal lock: the general extraction degenerates here.
+            [90.0, 0.0, 0.0],
+            [-90.0, 0.0, 0.0],
+            [90.0, 30.0, 0.0],
         ] {
             let mut physics = super::Physics::new(1.0 / 60.0);
-            let handle = physics.add_box_body([0.0, 0.0, 0.0], quat_from_euler(euler), [0.5, 0.5, 0.5], 1.0);
-            let back = physics.rotation_euler(handle).expect("body exists");
-            for axis in 0..3 {
-                assert!(
-                    (back[axis] - euler[axis]).abs() < 0.01,
-                    "{euler:?} came back as {back:?}"
-                );
-            }
+            let handle = physics.add_box_body(
+                [0.0, 0.0, 0.0],
+                super::quat_from_euler(euler),
+                [0.5, 0.5, 0.5],
+                1.0,
+            );
+            let round_tripped = super::quat_from_euler(
+                physics.rotation_euler(handle).expect("body exists"),
+            );
+            let original = super::quat_from_euler(euler);
+
+            // q and -q are the same rotation, so compare |dot|.
+            let dot: f32 = (0..4).map(|i| original[i] * round_tripped[i]).sum();
+            assert!(
+                dot.abs() > 0.9999,
+                "{euler:?} came back as a different rotation (dot {dot})"
+            );
         }
     }
 

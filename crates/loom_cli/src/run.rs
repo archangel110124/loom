@@ -490,6 +490,15 @@ impl App {
             return;
         };
         self.disk_seen = loom_scene::VersionToken::of(&disk);
+        // The session has to be told too, or the next Ctrl+S is refused and
+        // the human is locked out of saving the version they just chose —
+        // with the only escape being the button that discards it.
+        if let Some(session) = self.session.as_mut()
+            && let Err(e) = session.accept_disk_version()
+        {
+            crate::log::error(format!("could not take the disk version as a baseline: {e}"));
+            return;
+        }
         crate::log::warn("keeping your version — saving will overwrite what is on disk");
     }
 
@@ -591,22 +600,24 @@ impl ApplicationHandler for App {
             _ => false,
         };
         // egui reports Tab as consumed unconditionally — it is its focus key —
-        // so `select_next` bound to Tab never reached the input map and
-        // tabbing through the hierarchy did nothing. Only honour that when
-        // egui actually wants the keyboard, i.e. a text field has focus.
-        if consumed
-            && !self.ui.as_ref().is_some_and(Ui::wants_keyboard)
-            && matches!(
-                event,
-                WindowEvent::KeyboardInput {
-                    event: winit::event::KeyEvent {
-                        physical_key: PhysicalKey::Code(winit::keyboard::KeyCode::Tab),
-                        ..
-                    },
+        // so `select_next` bound to Tab never reached the input map.
+        //
+        // `wants_keyboard` is the wrong question: it is true whenever *any*
+        // widget has focus, including a toolbar button, so after the first Tab
+        // moved focus it stayed true and the release event was swallowed. The
+        // key then latched held forever and every subsequent frame re-fired
+        // `select_next`. Both press and release have to arrive, or neither.
+        let is_tab = matches!(
+            event,
+            WindowEvent::KeyboardInput {
+                event: winit::event::KeyEvent {
+                    physical_key: PhysicalKey::Code(winit::keyboard::KeyCode::Tab),
                     ..
-                }
-            )
-        {
+                },
+                ..
+            }
+        );
+        if consumed && is_tab && !self.ui.as_ref().is_some_and(Ui::wants_text_input) {
             consumed = false;
         }
         if consumed && !matches!(event, WindowEvent::RedrawRequested | WindowEvent::Resized(_)) {
@@ -691,11 +702,16 @@ impl ApplicationHandler for App {
                 }
                 // Clamp: a stall must not teleport the camera across the map.
                 self.step_camera(dt.min(0.1));
-                // Once per frame, not once per keyboard event. `end_frame`
+                // Once per frame, not once per keyboard event: `end_frame`
                 // clears the pressed-this-frame transitions per redraw, so
                 // running this per event fired a single keypress once for
                 // every further event in the same frame — one tap of Delete
                 // could remove several nodes.
+                //
+                // `InputState` latches a press until the frame ends (see
+                // `pressed_this_frame`), so a key tapped and released between
+                // two redraws is still seen exactly once here rather than
+                // missed entirely.
                 self.handle_editing();
                 // Watching the file while a simulation runs would reload the
                 // authored scene out from under it; the sim owns the world

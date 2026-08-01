@@ -142,6 +142,7 @@ impl ActionMap {
         action: &str,
         held: &BTreeSet<String>,
         just_changed: &BTreeSet<String>,
+        pressed_this_frame: &BTreeSet<String>,
     ) -> bool {
         let Some(bindings) = self.contexts.get(context).and_then(|c| c.actions.get(action)) else {
             return false;
@@ -159,7 +160,9 @@ impl ActionMap {
             let changed = just_changed.contains(&binding.button);
             match binding.trigger {
                 Trigger::Held => down,
-                Trigger::Pressed => down && changed,
+                // Not `down && changed`: a key can go down and come back up
+                // inside one frame, and that is still a press.
+                Trigger::Pressed => pressed_this_frame.contains(&binding.button),
                 Trigger::Released => !down && changed,
             }
         })
@@ -171,6 +174,9 @@ impl ActionMap {
 pub struct InputState {
     held: BTreeSet<String>,
     just_changed: BTreeSet<String>,
+    /// Buttons that went down at any point this frame, whether or not they are
+    /// still down when the frame is read.
+    pressed_this_frame: BTreeSet<String>,
 }
 
 impl InputState {
@@ -191,6 +197,11 @@ impl InputState {
         self.just_changed.insert(button.to_owned());
         if down {
             self.held.insert(button.to_owned());
+            // Remembered for the whole frame, not just until the release.
+            // `Pressed` used to mean "down AND changed", so a key tapped and
+            // released between two redraws was never seen at all — the faster
+            // you typed, the more input the editor dropped.
+            self.pressed_this_frame.insert(button.to_owned());
         } else {
             self.held.remove(button);
         }
@@ -198,13 +209,20 @@ impl InputState {
 
     /// Clear the per-frame transition set. Call once per frame, after reading.
     pub fn end_frame(&mut self) {
+        self.pressed_this_frame.clear();
         self.just_changed.clear();
     }
 
     /// Whether an action is firing in `context`.
     #[must_use]
     pub fn is_active(&self, map: &ActionMap, context: &str, action: &str) -> bool {
-        map.is_active(context, action, &self.held, &self.just_changed)
+        map.is_active(
+            context,
+            action,
+            &self.held,
+            &self.just_changed,
+            &self.pressed_this_frame,
+        )
     }
 
     /// `+1` for `positive`, `-1` for `negative`, `0` for both or neither —
@@ -223,6 +241,25 @@ pub const DEFAULT_BINDINGS: &str = include_str!("../../../assets/input/default.t
 
 #[cfg(test)]
 mod tests {
+    /// A key tapped and released between two redraws is still a press. It used
+    /// to be `down && changed`, so the release erased it and the action never
+    /// fired — the faster you typed, the more the editor dropped.
+    #[test]
+    fn a_key_pressed_and_released_in_one_frame_still_fires() {
+        let map = super::ActionMap::from_toml(super::DEFAULT_BINDINGS).expect("shipped bindings");
+        let mut input = super::InputState::new();
+
+        input.set_button("Delete", true);
+        input.set_button("Delete", false);
+
+        assert!(
+            input.is_active(&map, "edit", "delete"),
+            "a full tap inside one frame must register"
+        );
+        input.end_frame();
+        assert!(!input.is_active(&map, "edit", "delete"), "and only once");
+    }
+
     use super::*;
 
     fn set(items: &[&str]) -> BTreeSet<String> {
@@ -251,9 +288,12 @@ close = [{ button = "Escape", trigger = "pressed" }]
     fn an_action_fires_from_any_of_its_bindings() {
         let map = map();
 
-        assert!(map.is_active("fly", "move_forward", &set(&["KeyW"]), &set(&[])));
-        assert!(map.is_active("fly", "move_forward", &set(&["ArrowUp"]), &set(&[])));
-        assert!(!map.is_active("fly", "move_forward", &set(&["KeyS"]), &set(&[])));
+        assert!(map.is_active("fly", "move_forward", &set(&["KeyW"]), &set(&[]),
+            &set(&[])));
+        assert!(map.is_active("fly", "move_forward", &set(&["ArrowUp"]), &set(&[]),
+            &set(&[])));
+        assert!(!map.is_active("fly", "move_forward", &set(&["KeyS"]), &set(&[]),
+            &set(&[])));
     }
 
     /// The point of contexts: the same action name is inert outside its own.
@@ -261,7 +301,8 @@ close = [{ button = "Escape", trigger = "pressed" }]
     fn an_action_is_inert_in_another_context() {
         let map = map();
 
-        assert!(!map.is_active("menu", "move_forward", &set(&["KeyW"]), &set(&[])));
+        assert!(!map.is_active("menu", "move_forward", &set(&["KeyW"]), &set(&[]),
+            &set(&[])));
     }
 
     /// `Pressed` fires on the transition only. Auto-repeat must not retrigger.
@@ -340,6 +381,7 @@ close = [{ button = "Escape", trigger = "pressed" }]
             "fly",
             "move_forward",
             &set(&["KeyW", "ShiftLeft"]),
+            &set(&[]),
             &set(&[])
         ));
     }

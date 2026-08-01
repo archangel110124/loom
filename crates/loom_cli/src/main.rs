@@ -1357,7 +1357,15 @@ fn to_parent_space(ops: &mut [loom_scene::SceneOp], world: &World) {
             .find(|e| world.path(**e) == Some(node.as_str()))
             .and_then(|e| world.parent(*e))
             .and_then(|parent| world.global_transform(parent))
-            .map_or(Mat4::IDENTITY, |g| Mat4::from_cols_array(&g.matrix).inverse());
+            .map_or(Mat4::IDENTITY, |g| {
+                let matrix = Mat4::from_cols_array(&g.matrix);
+                // Singular parents (any axis scaled to zero) invert to NaN.
+                if matrix.determinant().abs() < 1e-12 {
+                    Mat4::IDENTITY
+                } else {
+                    matrix.inverse()
+                }
+            });
 
         // A position, so `transform_point3` — translation included. Using the
         // vector form here would drop the parent's offset and look almost

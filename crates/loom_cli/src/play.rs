@@ -201,7 +201,7 @@ impl Sim {
                 .parent(*entity)
                 .and_then(|parent| world.global_transform(parent))
                 .map_or(Mat4::IDENTITY, |g| {
-                    Mat4::from_cols_array(&g.matrix).inverse()
+                    invertible_parent(Mat4::from_cols_array(&g.matrix))
                 });
 
             let body_world = Mat4::from_rotation_translation(
@@ -239,6 +239,22 @@ impl Sim {
     pub fn state_hash(&self) -> u64 {
         self.physics.state_hash()
     }
+}
+
+/// The inverse of a parent's global transform, or identity when it has none
+/// that can be inverted.
+///
+/// A node scaled to zero on any axis — `scale = [1, 0, 1]`, which the format
+/// permits — gives a singular matrix whose `inverse()` is all NaN. That NaN
+/// then flows into the child's position and rotation, through
+/// `propagate_transforms` into the whole subtree, and surfaces to the agent as
+/// `"actual": null` on an assertion, which reads as "no such node" rather than
+/// "your scene is degenerate".
+fn invertible_parent(matrix: Mat4) -> Mat4 {
+    if matrix.determinant().abs() < 1e-12 {
+        return Mat4::IDENTITY;
+    }
+    matrix.inverse()
 }
 
 /// Whether any ancestor of this node is a dynamic body.
@@ -790,6 +806,54 @@ transform = {{ pos = [4.0, {drop_from}, 4.0], scale = [0.25, 0.25, 0.25] }}
         assert!(
             doubled > plain + 1.0,
             "a volume scaled 2x must collide twice as tall: {doubled} vs {plain}"
+        );
+    }
+
+    /// The capsule collider must be as tall as the capsule that is drawn.
+    /// `primitives::capsule` puts hemispheres of `radius` at ±`half_height`,
+    /// so the shape spans `half_height + radius`; subtracting the radius before
+    /// handing it to parry made every capsule one radius short and, at the
+    /// default scale, collapsed the straight section to nothing.
+    #[test]
+    fn a_capsule_rests_at_the_height_it_is_drawn() {
+        let source = r#"
+[scene]
+format = 1
+id = "0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f"
+
+[[node]]
+name = "Stage"
+
+[[node]]
+name = "Ground"
+parent = "Stage"
+transform = { pos = [0.0, -0.5, 0.0], scale = [20.0, 0.5, 20.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+[[node]]
+name = "Pill"
+parent = "Stage"
+transform = { pos = [0.0, 6.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 5.0
+"#;
+        let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
+        let mut play = Play::start(world);
+        play.run(400);
+
+        // Unit capsule: straight half-height 1, radius 1, so it spans ±2 and
+        // its centre rests at 2 on a floor whose top is y = 0.
+        let y = height(&play.world, "Stage/Pill");
+        assert!(
+            (y - 2.0).abs() < 0.15,
+            "a unit capsule rests at 2.0, not {y} — the collider is the wrong height"
         );
     }
 
