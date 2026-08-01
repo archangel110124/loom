@@ -76,8 +76,20 @@ pub struct PanelState<'a> {
     /// edge-on, and an index would then highlight a different one.
     pub dragging: Option<usize>,
     pub fps: f32,
+    /// What somebody else just changed: screen-space box, label, and how
+    /// faded it is (1.0 fresh, 0.0 gone).
+    pub agent_marks: &'a [AgentMark],
     /// Ticks run, whether paused, and how many bodies — `None` in edit mode.
     pub playing: Option<(u32, bool, usize)>,
+}
+
+/// A node an agent just touched, ready to draw over the viewport.
+pub struct AgentMark {
+    /// Screen-space bounds in **window pixels**, as the viewport projected them.
+    pub rect: (f32, f32, f32, f32),
+    pub label: String,
+    /// 1.0 when it just happened, fading to 0.0.
+    pub freshness: f32,
 }
 
 const AXIS_COLORS: [egui::Color32; 3] = [
@@ -104,6 +116,7 @@ pub fn draw(root: &mut egui::Ui, state: &PanelState<'_>) -> Vec<UiAction> {
     console(root, state, &mut actions);
     assets(root, state, &mut actions);
     gizmo_overlay(root, state);
+    agent_overlay(root, state);
 
     actions
 }
@@ -614,6 +627,50 @@ fn transactions(ui: &mut egui::Ui, history: &[String]) {
                 ui.label(format!("{:>3}  {label}", index + 1));
             }
         });
+}
+
+/// Outline what somebody else just changed.
+///
+/// **This is the point of the whole editor.** An agent is authoring the file
+/// while a human watches, and until now the only signal was a console line
+/// saying the scene had changed — true, and useless for finding *what*. A box
+/// around the nodes that moved, fading over a few seconds, answers "what did
+/// it just do" at a glance and then gets out of the way.
+///
+/// Deliberately not a modal, not a list to acknowledge, not a notification to
+/// dismiss: the human is looking at the viewport already.
+fn agent_overlay(root: &mut egui::Ui, state: &PanelState<'_>) {
+    if state.agent_marks.is_empty() {
+        return;
+    }
+    let ctx = root.ctx().clone();
+    let scale = ctx.pixels_per_point();
+    let painter = ctx.layer_painter(egui::LayerId::background());
+
+    for mark in state.agent_marks {
+        let (x0, y0, x1, y1) = mark.rect;
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(x0 / scale, y0 / scale),
+            egui::pos2(x1 / scale, y1 / scale),
+        );
+        // One hue for "somebody else did this", distinct from the axis colours
+        // so it cannot be mistaken for a gizmo.
+        let alpha = (mark.freshness.clamp(0.0, 1.0) * 220.0) as u8;
+        let colour = egui::Color32::from_rgba_unmultiplied(120, 200, 255, alpha);
+        painter.rect_stroke(
+            rect,
+            2.0,
+            egui::Stroke::new(1.5, colour),
+            egui::StrokeKind::Outside,
+        );
+        painter.text(
+            rect.left_top() + egui::vec2(2.0, -14.0),
+            egui::Align2::LEFT_TOP,
+            &mark.label,
+            egui::FontId::monospace(11.0),
+            colour,
+        );
+    }
 }
 
 /// Draw the transform handles over the viewport.

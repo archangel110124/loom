@@ -15,6 +15,37 @@ use loom_render::glam::Vec3;
 use loom_render::Object;
 use loom_scene::Scene;
 
+/// One node's worth of difference between two versions of a scene.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    pub path: String,
+    pub kind: ChangeKind,
+}
+
+/// What happened to a node. Deliberately coarse: the human wants to know where
+/// to look, and the transaction label already says why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    Added,
+    Removed,
+    Moved,
+    Edited,
+    MovedAndEdited,
+}
+
+impl ChangeKind {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Removed => "removed",
+            Self::Moved => "moved",
+            Self::Edited => "edited",
+            Self::MovedAndEdited => "moved + edited",
+        }
+    }
+}
+
 /// The renderable form of a scene.
 pub struct SceneView {
     pub scene: Scene,
@@ -96,6 +127,52 @@ impl SceneView {
     #[must_use]
     pub fn objects_of(&self, world: &World) -> Vec<Object> {
         crate::world_to_objects(world, &self.library)
+    }
+
+    /// Which nodes differ between two versions of a scene, and how.
+    ///
+    /// The point of an AI-native editor is that somebody else is authoring the
+    /// file while you watch it. "The scene changed on disk" is true and
+    /// useless; *what* changed is the thing a human needs, and the scene is
+    /// structured text, so it can be said exactly.
+    #[must_use]
+    pub fn changes_from(&self, previous: &[loom_scene::Node]) -> Vec<Change> {
+        let mut out = Vec::new();
+        for node in self.scene.nodes() {
+            match previous.iter().find(|n| n.path == node.path) {
+                None => out.push(Change {
+                    path: node.path.clone(),
+                    kind: ChangeKind::Added,
+                }),
+                Some(before) => {
+                    let moved = before.transform.pos != node.transform.pos
+                        || before.transform.rot_euler != node.transform.rot_euler
+                        || before.transform.scale != node.transform.scale;
+                    let recomposed = before.components != node.components;
+                    if moved || recomposed {
+                        out.push(Change {
+                            path: node.path.clone(),
+                            kind: if moved && recomposed {
+                                ChangeKind::MovedAndEdited
+                            } else if moved {
+                                ChangeKind::Moved
+                            } else {
+                                ChangeKind::Edited
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        for node in previous {
+            if !self.scene.nodes().iter().any(|n| n.path == node.path) {
+                out.push(Change {
+                    path: node.path.clone(),
+                    kind: ChangeKind::Removed,
+                });
+            }
+        }
+        out
     }
 
     /// The transform that takes a point from world space into `path`'s parent's

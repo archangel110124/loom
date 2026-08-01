@@ -19,7 +19,7 @@ use loom_render::{Camera, Device, Instance, Ui, Viewer, ash, ash_window};
 
 use crate::gizmo::{self, Mode};
 use crate::panels::{PanelState, UiAction};
-use crate::scene_view::SceneView;
+use crate::scene_view::{Change, SceneView};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -169,6 +169,12 @@ struct App {
     /// Smoothed, because a number that changes sixty times a second is not a
     /// number anyone can read.
     fps: f32,
+    /// What somebody else changed, and when we noticed.
+    ///
+    /// The whole premise of this editor is that an agent is authoring the file
+    /// while a human watches. "The scene changed on disk" is true and useless;
+    /// this is which nodes, so the viewport can point at them.
+    agent_changes: Vec<(Change, std::time::Instant)>,
     /// Frames still to draw before shutting down, when `--frames` was passed.
     ///
     /// Exists so the **whole lifecycle** — create, draw, tear down — can be
@@ -275,8 +281,62 @@ impl App {
             last_frame: std::time::Instant::now(),
             fps: 0.0,
             frames_left: None,
+            agent_changes: Vec::new(),
             title,
         }
+    }
+
+    /// How long an agent's change stays outlined in the viewport.
+    ///
+    /// Long enough to look up from what you were doing, short enough that a
+    /// busy agent does not leave the screen permanently boxed.
+    const CHANGE_FADE: f32 = 6.0;
+
+    /// Screen-space boxes for whatever somebody else changed recently.
+    fn agent_marks(
+        &mut self,
+        projection: &gizmo::View,
+        now: std::time::Instant,
+    ) -> Vec<crate::panels::AgentMark> {
+        self.agent_changes
+            .retain(|(_, at)| now.duration_since(*at).as_secs_f32() < Self::CHANGE_FADE);
+
+        let mut marks = Vec::new();
+        for (change, at) in &self.agent_changes {
+            // A removed node has no bounds left to point at; the console line
+            // is the only honest thing to show for it.
+            let Some(bounds) = self.view.node_bounds(&change.path) else {
+                continue;
+            };
+            let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+            let (mut x1, mut y1) = (f32::MIN, f32::MIN);
+            let mut visible = false;
+            for corner in 0..8 {
+                let point = Vec3::new(
+                    if corner & 1 == 0 { bounds.min[0] } else { bounds.max[0] },
+                    if corner & 2 == 0 { bounds.min[1] } else { bounds.max[1] },
+                    if corner & 4 == 0 { bounds.min[2] } else { bounds.max[2] },
+                );
+                if let Some((sx, sy)) = projection.project(point) {
+                    x0 = x0.min(sx);
+                    y0 = y0.min(sy);
+                    x1 = x1.max(sx);
+                    y1 = y1.max(sy);
+                    visible = true;
+                }
+            }
+            if !visible {
+                continue;
+            }
+            let age = now.duration_since(*at).as_secs_f32();
+            let name = change.path.rsplit('/').next().unwrap_or(&change.path);
+            marks.push(crate::panels::AgentMark {
+                rect: (x0, y0, x1, y1),
+                label: format!("{name} · {}", change.kind.label()),
+                freshness: 1.0 - (age / Self::CHANGE_FADE),
+            });
+        }
+        marks
     }
 
     /// The one selected node, when exactly one is.
@@ -284,6 +344,32 @@ impl App {
         (self.selected.len() == 1)
             .then(|| self.selected.first().cloned())
             .flatten()
+    }
+
+    /// Re-derive, and remember what somebody else changed while doing it.
+    fn show_external(&mut self, text: &str) {
+        // Snapshot the nodes, not the whole view: rebuilding the previous
+        // scene just to compare it would re-bake every voxel volume.
+        let before: Vec<loom_scene::Node> = self.view.scene.nodes().to_vec();
+        self.show(text);
+        {
+            let changes = self.view.changes_from(&before);
+            if !changes.is_empty() {
+                crate::log::info(format!(
+                    "the agent changed {} node(s): {}",
+                    changes.len(),
+                    changes
+                        .iter()
+                        .take(4)
+                        .map(|c| c.path.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            #[allow(clippy::disallowed_methods)]
+            let now = std::time::Instant::now();
+            self.agent_changes = changes.into_iter().map(|c| (c, now)).collect();
+        }
     }
 
     /// Re-derive the view from scene text and hand any new geometry to the GPU.
@@ -367,10 +453,13 @@ impl App {
                     crate::log::error(format!("reload failed: {e}"));
                     return;
                 }
-                self.resync();
+                let text = self.session.as_ref().map(|s| s.text().to_owned());
+                if let Some(text) = text {
+                    self.show_external(&text);
+                }
             }
             // Read-only. Nothing of ours to lose, so just follow the file.
-            None => self.show(&disk),
+            None => self.show_external(&disk),
         }
     }
 
@@ -639,6 +728,10 @@ impl ApplicationHandler for App {
                     _ => Vec::new(),
                 };
 
+                // Before `drawn` borrows the object list: this prunes the
+                // faded entries, so it needs `&mut self`.
+                let marks = self.agent_marks(&projection, now);
+
                 let drawn = match self.play.as_ref() {
                     Some(_) => &self.play_objects,
                     None => &self.view.objects,
@@ -646,6 +739,7 @@ impl ApplicationHandler for App {
 
                 let mut actions = Vec::new();
                 let state = PanelState {
+                    agent_marks: &marks,
                     view: &self.view,
                     playing: self.play.as_ref().map(|p| (p.ticks, p.paused, p.bodies())),
                     selected: &self.selected,
