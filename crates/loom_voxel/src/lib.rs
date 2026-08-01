@@ -451,6 +451,12 @@ impl Volume {
                     }
 
                     let index = self.chunk_index(cx, cy, cz);
+                    // Whether this chunk already carried damage. Taking the
+                    // entry out and only putting it back `if changed` meant an
+                    // op that altered nothing here — a second identical carve,
+                    // or one that merely clips an already-hollow chunk —
+                    // dropped every earlier edit and the terrain healed itself.
+                    let had_edits = self.edits.contains_key(&index);
                     let mut voxels = self.edits.remove(&index).unwrap_or_else(|| {
                         let mut v = Box::new([127_i8; VOXELS]);
                         for z in 0..CHUNK {
@@ -504,8 +510,12 @@ impl Volume {
                         }
                     }
 
-                    if changed {
+                    if changed || had_edits {
                         self.edits.insert(index, voxels);
+                    }
+                    // Only a real change dirties the mesh. Re-meshing a chunk
+                    // nothing happened to would be pure cost.
+                    if changed {
                         touched.push([cx, cy, cz]);
                     }
                 }
@@ -636,6 +646,40 @@ fn length(a: [f32; 3]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// **A second edit must not undo the first.** `edit` took a chunk's stored
+    /// edits out of the map up front and only put them back when *this* op
+    /// changed something — so an op that clipped an already-carved chunk
+    /// without altering a voxel dropped the earlier damage and the terrain
+    /// healed itself. Applying the same carve twice is the simplest way to
+    /// reach it: the second one is a no-op by definition.
+    #[test]
+    fn a_no_op_edit_does_not_erase_earlier_damage() {
+        let carve = super::VoxelOp::Sphere {
+            center: [4.0, 4.0, 4.0],
+            radius: 1.5,
+            mode: super::CsgMode::Subtract,
+        };
+        let fill = super::VoxelOp::Box {
+            center: [4.0, 4.0, 4.0],
+            half_extents: [4.0, 4.0, 4.0],
+            mode: super::CsgMode::Union,
+        };
+
+        let mut volume = super::Volume::new([1, 1, 1], 0.25);
+        volume.bake(&[fill]);
+        volume.edit(&carve);
+        let after_first = volume.solid_cells().len();
+
+        // Exactly the same carve again: nothing left to remove.
+        volume.edit(&carve);
+        let after_second = volume.solid_cells().len();
+
+        assert_eq!(
+            after_first, after_second,
+            "the crater healed: {after_first} solid cells became {after_second}"
+        );
+    }
+
     /// parry places voxel cell `k` at `(k + 0.5) * voxel_size`. So do we. If
     /// either convention drifts the collider sits half a cell from the mesh —
     /// a gap or an overlap that looks like a physics bug and is not one.
