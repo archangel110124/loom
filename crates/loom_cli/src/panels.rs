@@ -440,17 +440,31 @@ fn inspector(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAc
 
             let editable_now = state.editable && state.playing.is_none();
             let short = path.rsplit('/').next().unwrap_or(path);
-            let mut renamed = short.to_owned();
+            // **The buffer has to outlive the frame.** It used to be rebuilt
+            // from the node's name every frame, so each typed character was
+            // overwritten before the next repaint and Rename could never fire —
+            // the field looked editable and was inert. egui's own per-id store
+            // keeps it across frames; keying it on the path means selecting a
+            // different node starts a fresh buffer rather than carrying the
+            // previous node's half-typed name over.
+            let buffer_id = egui::Id::new(("rename", path));
+            let mut renamed = ui
+                .data_mut(|d| d.get_temp::<String>(buffer_id))
+                .unwrap_or_else(|| short.to_owned());
             ui.horizontal(|ui| {
                 ui.label("name");
                 let response = ui.add_enabled(
                     editable_now,
                     egui::TextEdit::singleline(&mut renamed).desired_width(180.0),
                 );
+                if response.changed() {
+                    ui.data_mut(|d| d.insert_temp(buffer_id, renamed.clone()));
+                }
                 // On commit, not per keystroke: a transaction per character
                 // would bury the log and make undo useless.
                 if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     actions.push(UiAction::Rename(path.clone(), renamed.clone()));
+                    ui.data_mut(|d| d.remove::<String>(buffer_id));
                 }
             });
             ui.label(egui::RichText::new(path).monospace().weak());

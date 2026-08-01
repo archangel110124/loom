@@ -497,10 +497,29 @@ impl ApplicationHandler for App {
         // egui sees every event first. If it consumed one, the viewport must
         // NOT also act on it — otherwise clicking a panel also moves the camera
         // behind it and typing a number in the inspector flies the camera.
-        let consumed = match (self.ui.as_mut(), self.window.as_ref()) {
+        let mut consumed = match (self.ui.as_mut(), self.window.as_ref()) {
             (Some(ui), Some(window)) => ui.on_window_event(window, &event),
             _ => false,
         };
+        // egui reports Tab as consumed unconditionally — it is its focus key —
+        // so `select_next` bound to Tab never reached the input map and
+        // tabbing through the hierarchy did nothing. Only honour that when
+        // egui actually wants the keyboard, i.e. a text field has focus.
+        if consumed
+            && !self.ui.as_ref().is_some_and(Ui::wants_keyboard)
+            && matches!(
+                event,
+                WindowEvent::KeyboardInput {
+                    event: winit::event::KeyEvent {
+                        physical_key: PhysicalKey::Code(winit::keyboard::KeyCode::Tab),
+                        ..
+                    },
+                    ..
+                }
+            )
+        {
+            consumed = false;
+        }
         if consumed && !matches!(event, WindowEvent::RedrawRequested | WindowEvent::Resized(_)) {
             return;
         }
@@ -528,7 +547,6 @@ impl ApplicationHandler for App {
                     // is the more annoying of the two mistakes.
                     self.camera = FlyCamera::framing(self.focus_bounds());
                 }
-                self.handle_editing();
             }
 
             WindowEvent::CursorMoved { position, .. } => {
@@ -581,6 +599,12 @@ impl ApplicationHandler for App {
                 }
                 // Clamp: a stall must not teleport the camera across the map.
                 self.step_camera(dt.min(0.1));
+                // Once per frame, not once per keyboard event. `end_frame`
+                // clears the pressed-this-frame transitions per redraw, so
+                // running this per event fired a single keypress once for
+                // every further event in the same frame — one tap of Delete
+                // could remove several nodes.
+                self.handle_editing();
                 // Watching the file while a simulation runs would reload the
                 // authored scene out from under it; the sim owns the world
                 // until Stop.
@@ -1257,6 +1281,14 @@ impl App {
     /// Editing actions bound to keys.
     fn handle_editing(&mut self) {
         if self.session.is_none() || self.view.paths.is_empty() {
+            return;
+        }
+        // Play mode shows the simulation, not the file. Editing the authored
+        // scene from behind that — Delete, Duplicate, nudge, Undo, Save — was
+        // reachable by keyboard and invisible, because the viewport was
+        // drawing the simulated world. The toolbar already refuses; the keys
+        // did not.
+        if self.play.is_some() {
             return;
         }
         // Sampled up front rather than through a closure borrowing `self`,
