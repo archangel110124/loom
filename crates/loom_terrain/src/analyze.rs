@@ -122,6 +122,14 @@ fn largest_region(mask: &[bool], width: usize, height: usize) -> Option<([usize;
 /// aesthetics, which is the entire point of the channel.
 #[must_use]
 pub fn is_reachable(map: &Heightmap, from: [usize; 2], to: [usize; 2], max_slope: f32) -> bool {
+    // Bounds first. `slope_degrees` goes through `Heightmap::get`, which
+    // clamps, so `passable` cannot reject an off-map coordinate — and the
+    // index below would then panic. These coordinates arrive straight from
+    // `loom terrain --from/--to`, so a typo was a crash rather than an error.
+    if from[0] >= map.width || from[1] >= map.height || to[0] >= map.width || to[1] >= map.height {
+        return false;
+    }
+
     let passable = |x: usize, y: usize| map.slope_degrees(x, y) <= max_slope;
     if !passable(from[0], from[1]) || !passable(to[0], to[1]) {
         return false;
@@ -230,6 +238,14 @@ pub enum MapKind {
 
 #[cfg(test)]
 mod tests {
+    /// `loom terrain --from 999,999` is a typo, not a crash.
+    #[test]
+    fn an_off_map_endpoint_is_unreachable_not_a_panic() {
+        let map = crate::Heightmap::new(16, 16, [10.0, 10.0]);
+        assert!(!super::is_reachable(&map, [999, 999], [0, 0], 40.0));
+        assert!(!super::is_reachable(&map, [0, 0], [999, 999], 40.0));
+    }
+
     use super::*;
     use crate::Recipe;
 

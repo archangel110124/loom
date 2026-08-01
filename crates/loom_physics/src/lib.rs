@@ -265,6 +265,61 @@ impl Physics {
         Some(self.colliders.insert(collider))
     }
 
+    /// A dynamic cylinder or capsule, upright along Y.
+    ///
+    /// The last of the mesh/collider mismatches: `capsule` and `cylinder`
+    /// meshes were both simulated as cuboids, so a cylinder stood on a square
+    /// footprint and a capsule refused to roll. `half_height` is the straight
+    /// section for a capsule — rapier adds the two hemispheres on top, exactly
+    /// as `loom_asset::primitives::capsule` draws them.
+    pub fn add_round_body(
+        &mut self,
+        position: [f32; 3],
+        rotation: [f32; 4],
+        half_height: f32,
+        radius: f32,
+        capped: bool,
+        mass: f32,
+    ) -> RigidBodyHandle {
+        let body = RigidBodyBuilder::dynamic()
+            .translation(Vector::new(position[0], position[1], position[2]))
+            .rotation(scaled_axis_from_quat(rotation))
+            .build();
+        let handle = self.bodies.insert(body);
+        let (half_height, radius) = (half_height.max(1e-3), radius.max(1e-3));
+        let shape = if capped {
+            ColliderBuilder::capsule_y((half_height - radius).max(1e-3), radius)
+        } else {
+            ColliderBuilder::cylinder(half_height, radius)
+        };
+        let collider = shape.mass(mass.max(0.001)).build();
+        self.colliders
+            .insert_with_parent(collider, handle, &mut self.bodies);
+        handle
+    }
+
+    /// A static cylinder or capsule, upright along Y.
+    pub fn add_static_round(
+        &mut self,
+        position: [f32; 3],
+        rotation: [f32; 4],
+        half_height: f32,
+        radius: f32,
+        capped: bool,
+    ) -> ColliderHandle {
+        let (half_height, radius) = (half_height.max(1e-3), radius.max(1e-3));
+        let shape = if capped {
+            ColliderBuilder::capsule_y((half_height - radius).max(1e-3), radius)
+        } else {
+            ColliderBuilder::cylinder(half_height, radius)
+        };
+        let collider = shape
+            .translation(Vector::new(position[0], position[1], position[2]))
+            .rotation(scaled_axis_from_quat(rotation))
+            .build();
+        self.colliders.insert(collider)
+    }
+
     /// Spawn a debris chunk with an initial velocity.
     ///
     /// **Convex, never a trimesh** (never-do #10, voxel doc §4): a

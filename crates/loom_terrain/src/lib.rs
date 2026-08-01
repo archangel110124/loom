@@ -74,9 +74,19 @@ impl Heightmap {
     /// discrete grid, so nearest-neighbour would make erosion stair-step.
     #[must_use]
     pub fn sample(&self, x: f32, y: f32) -> f32 {
+        // Clamped into the grid *before* the cast. A saturating float cast
+        // yields usize::MAX for a huge coordinate, and `x0 + 1` then overflows
+        // — a debug panic, and a wrap to 0 in release, which silently samples
+        // the wrong corner of the map.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let (x0, y0) = (x.floor().max(0.0) as usize, y.floor().max(0.0) as usize);
-        let (x1, y1) = ((x0 + 1).min(self.width - 1), (y0 + 1).min(self.height - 1));
+        let (x0, y0) = (
+            (x.floor().max(0.0) as usize).min(self.width.saturating_sub(1)),
+            (y.floor().max(0.0) as usize).min(self.height.saturating_sub(1)),
+        );
+        let (x1, y1) = (
+            (x0 + 1).min(self.width.saturating_sub(1)),
+            (y0 + 1).min(self.height.saturating_sub(1)),
+        );
         #[allow(clippy::cast_precision_loss)]
         let (fx, fy) = (x - x0 as f32, y - y0 as f32);
 
@@ -612,6 +622,17 @@ fn distance_to_polyline(p: [f32; 2], points: &[[f32; 2]]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// Both of these arrive from CLI flags or from erosion particles that have
+    /// drifted, so "the caller will not do that" is not a defence.
+    #[test]
+    fn extreme_coordinates_do_not_panic() {
+        let map = super::Heightmap::new(8, 8, [10.0, 10.0]);
+        for (x, y) in [(0.0_f32, 0.0_f32), (7.9, 7.9), (1e20, 1e20), (-5.0, -5.0), (f32::MAX, 0.0)] {
+            let value = map.sample(x, y);
+            assert!(value.is_finite(), "sample({x}, {y}) = {value}");
+        }
+    }
+
     use super::*;
 
     fn recipe(layers: &str) -> Recipe {

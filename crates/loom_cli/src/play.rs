@@ -88,7 +88,13 @@ impl Sim {
             // collider component, because the shape a thing *is* is the shape
             // it should collide as, and scenes already say that. Add a
             // `SphereCollider` when something needs to differ from its mesh.
-            let ball = world.mesh_asset(*entity) == Some("sphere");
+            // Every primitive that has a matching shape gets it. A cylinder
+            // on a square footprint and a capsule that will not roll are the
+            // same bug as the sphere-as-cuboid, just less obvious.
+            let mesh = world.mesh_asset(*entity);
+            let ball = mesh == Some("sphere");
+            let round = matches!(mesh, Some("capsule" | "cylinder"));
+            let capped = mesh == Some("capsule");
             // The enclosing radius, not the smallest: a non-uniformly scaled
             // sphere is an ellipsoid that no ball matches, and of the two
             // wrong answers a collider that contains the drawn shape is the
@@ -126,6 +132,17 @@ impl Sim {
                 let mass = world.body_mass(*entity);
                 let handle = if ball {
                     physics.add_ball_body(pos, quat, radius, mass)
+                } else if round {
+                    // Radius from the horizontal axes, height from Y — which is
+                    // how both primitives are drawn.
+                    physics.add_round_body(
+                        pos,
+                        quat,
+                        half[1],
+                        half[0].max(half[2]),
+                        capped,
+                        mass,
+                    )
                 } else {
                     physics.add_box_body(pos, quat, half, mass)
                 };
@@ -133,6 +150,8 @@ impl Sim {
             } else if world.is_renderable(*entity) {
                 if ball {
                     physics.add_static_ball(pos, radius);
+                } else if round {
+                    physics.add_static_round(pos, quat, half[1], half[0].max(half[2]), capped);
                 } else {
                     physics.add_static_box(pos, quat, half);
                 }
@@ -555,6 +574,65 @@ transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
         assert!((x - 10.0).abs() < 0.2, "drifted in x: {x}");
         assert!((z + 4.0).abs() < 0.2, "drifted in z: {z}");
         assert!((y - 0.5).abs() < 0.1, "should rest on the floor: {y}");
+    }
+
+    /// A cylinder tipped past its balance point rolls off a ledge; a cuboid of
+    /// the same size sits there. Same bug as sphere-as-cuboid, one step less
+    /// obvious.
+    #[test]
+    fn a_cylinder_is_round_to_physics() {
+        let scene = |mesh: &str| {
+            format!(
+                r#"
+[scene]
+format = 1
+id = "0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f"
+
+[[node]]
+name = "Stage"
+
+[[node]]
+name = "Ground"
+parent = "Stage"
+transform = {{ pos = [0.0, -0.5, 0.0], scale = [20.0, 0.5, 20.0] }}
+
+  [node.components.MeshRenderer]
+  mesh = {{ asset = "box" }}
+
+[[node]]
+name = "Roller"
+parent = "Stage"
+transform = {{ pos = [0.0, 3.0, 0.0], rot_euler = [0.0, 0.0, 80.0], scale = [0.5, 0.5, 0.5] }}
+
+  [node.components.MeshRenderer]
+  mesh = {{ asset = "{mesh}" }}
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 6.0
+"#
+            )
+        };
+        let travel = |mesh: &str| {
+            let world = World::from_scene(&Scene::parse(&scene(mesh)).expect("valid scene"));
+            let mut play = Play::start(world);
+            play.run(300);
+            let entity = *play
+                .world
+                .entities()
+                .iter()
+                .find(|e| play.world.path(**e) == Some("Stage/Roller"))
+                .expect("node");
+            let g = play.world.global_transform(entity).expect("global");
+            g.matrix[12].abs() + g.matrix[14].abs()
+        };
+
+        let cylinder = travel("cylinder");
+        let cube = travel("box");
+        assert!(
+            cylinder > cube + 0.05,
+            "a tipped cylinder should roll further than a cube: {cylinder} vs {cube}"
+        );
     }
 
     #[test]
