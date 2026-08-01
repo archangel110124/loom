@@ -147,7 +147,7 @@ impl Sim {
                     physics.add_box_body(pos, quat, half, mass)
                 };
                 dynamic.push((*entity, handle));
-            } else if world.is_renderable(*entity) {
+            } else if world.is_renderable(*entity) && !has_dynamic_ancestor(world, *entity) {
                 if ball {
                     physics.add_static_ball(pos, radius);
                 } else if round {
@@ -229,6 +229,27 @@ impl Sim {
     pub fn state_hash(&self) -> u64 {
         self.physics.state_hash()
     }
+}
+
+/// Whether any ancestor of this node is a dynamic body.
+///
+/// A renderable child of a moving body used to get its own *static* collider,
+/// frozen at the position it spawned in — an invisible wall left behind
+/// wherever the parent started, that other bodies then collided with. The
+/// child moves because its parent does; it is not scenery.
+fn has_dynamic_ancestor(world: &World, entity: loom_ecs::Entity) -> bool {
+    let mut current = world.parent(entity);
+    // Bounded rather than `while let`: a malformed hierarchy with a cycle
+    // would otherwise hang the editor on load, and the scene layer's cycle
+    // check is one layer away from here.
+    for _ in 0..64 {
+        let Some(node) = current else { return false };
+        if world.is_dynamic(node) {
+            return true;
+        }
+        current = world.parent(node);
+    }
+    false
 }
 
 /// Play mode as the editor holds it: a scene's world, its simulation, and how
@@ -633,6 +654,70 @@ transform = {{ pos = [0.0, 3.0, 0.0], rot_euler = [0.0, 0.0, 80.0], scale = [0.5
             cylinder > cube + 0.05,
             "a tipped cylinder should roll further than a cube: {cylinder} vs {cube}"
         );
+    }
+
+    /// A child of a moving body is not scenery. It used to get its own static
+    /// collider at the position it spawned in — an invisible wall left where
+    /// the parent started, which everything else then bumped into.
+    #[test]
+    fn a_child_of_a_dynamic_body_leaves_no_ghost_behind() {
+        let source = r#"
+[scene]
+format = 1
+id = "0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f"
+
+[[node]]
+name = "Stage"
+
+[[node]]
+name = "Ground"
+parent = "Stage"
+transform = { pos = [0.0, -0.5, 0.0], scale = [20.0, 0.5, 20.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+[[node]]
+name = "Lift"
+parent = "Stage"
+transform = { pos = [0.0, 8.0, 0.0], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 4.0
+
+[[node]]
+name = "Flag"
+parent = "Stage/Lift"
+transform = { pos = [0.0, 2.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+[[node]]
+name = "Probe"
+parent = "Stage"
+transform = { pos = [0.0, 20.0, 0.0], scale = [0.3, 0.3, 0.3] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 2.0
+"#;
+        let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
+        let mut play = Play::start(world);
+        play.run(400);
+
+        // The flag spawned at world y = 10 and rode its parent down. Nothing
+        // should still be blocking that height: the probe must reach the pile
+        // on the floor, not perch on a ghost.
+        let y = height(&play.world, "Stage/Probe");
+        assert!(y < 4.0, "the probe stopped on something that is not there: {y}");
     }
 
     #[test]

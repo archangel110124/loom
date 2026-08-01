@@ -333,6 +333,18 @@ fn move_after(
     // slots are collected here and handed back out in the new order below.
     let mut slots: Vec<isize> = array.iter().filter_map(toml_edit::Table::position).collect();
     slots.sort_unstable();
+    // A table pushed earlier in this same transaction has no recorded position
+    // yet. Bailing out when any was missing meant a spawn-then-reparent pair
+    // never reordered at all — the child stayed declared before its new parent
+    // and the whole transaction was rejected as an invalid scene.
+    //
+    // Node tables are the last thing in the document, so extending past the
+    // highest existing slot cannot collide with `[scene]` or `[[asset]]`.
+    let mut next = slots.last().copied().unwrap_or(0);
+    while slots.len() < array.len() {
+        next += 1;
+        slots.push(next);
+    }
 
     let mut moved = Vec::with_capacity(indices.len());
     // Descending, so each removal cannot shift an index still to be removed.
@@ -1161,6 +1173,45 @@ parent = \"Room\"
         assert_eq!(desk.transform.pos, [1.0, 2.0, 3.0], "position must survive");
         assert_eq!(desk.transform.scale, [2.0, 2.0, 2.0], "scale must survive");
         assert_eq!(desk.transform.rot_euler, [0.0, 90.0, 0.0]);
+    }
+
+    /// Spawn and reparent in one transaction. A freshly pushed table has no
+    /// recorded document position, and the reorder bailed out entirely when any
+    /// table lacked one — so the subtree kept its old place and the file came
+    /// out non-canonical, or with a child declared before its parent.
+    #[test]
+    fn a_node_spawned_and_reparented_in_one_transaction_lands_in_order() {
+        let scene = format!("{SCENE}\n[[node]]\nname = \"Alcove\"\nparent = \"Room\"\n");
+        let applied = apply(
+            &scene,
+            &tx(
+                "Add a lamp, then hang it in the alcove",
+                vec![
+                    // The new parent is appended at the end of the file...
+                    SceneOp::SpawnNode {
+                        parent: "Room".into(),
+                        name: "Shelf".into(),
+                        mesh: Some("box".into()),
+                    },
+                    // ...and an existing node declared *before* it moves in,
+                    // so the subtree genuinely has to be reordered.
+                    SceneOp::ReparentNode {
+                        node: "Room/Desk".into(),
+                        parent: "Room/Shelf".into(),
+                    },
+                ],
+            ),
+        )
+        .expect("should apply");
+
+        let parsed = crate::Scene::parse(&applied.scene).expect("still valid");
+        let paths: Vec<&str> = parsed.nodes().iter().map(|n| n.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["Room", "Room/Alcove", "Room/Shelf", "Room/Shelf/Desk"],
+            "depth-first, parent before child: {}",
+            applied.scene
+        );
     }
 
     #[test]

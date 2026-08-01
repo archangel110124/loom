@@ -46,6 +46,20 @@ pub const SCENE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scene.spv
 
 #[cfg(test)]
 mod tests {
+    /// **The validation collector is process-global**, and `cargo test` runs
+    /// these concurrently. Without serialising, one test's `check_validation`
+    /// drains messages another test caused — so a real Vulkan error could be
+    /// swallowed by whichever test happened to drain first, and the suite
+    /// would go green on a broken renderer.
+    ///
+    /// Every test that creates an `Instance` or drains the collector takes
+    /// this first. Poisoning is ignored deliberately: if one test panics, the
+    /// rest should still run and report honestly rather than cascade.
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     use super::*;
 
     /// SPIR-V starts with the magic number `0x0723_0203` and is a whole number
@@ -69,6 +83,7 @@ mod tests {
     /// present.
     #[test]
     fn instance_creation_is_validation_clean() {
+        let _serialised = exclusive();
         match Instance::new(c"loom-test") {
             Ok(instance) => {
                 if let Err(messages) = instance.check_validation() {
@@ -108,6 +123,7 @@ mod tests {
     /// Device creation must be validation-clean, and must report a real GPU.
     #[test]
     fn device_creation_is_validation_clean() {
+        let _serialised = exclusive();
         let Ok(instance) = Instance::new(c"loom-device-test") else {
             eprintln!("skipping: no Vulkan loader");
             return;
@@ -134,6 +150,7 @@ mod tests {
     /// The M2 payoff: objects rendered offscreen, validation silent, pixels real.
     #[test]
     fn renders_objects_to_a_non_blank_image() {
+        let _serialised = exclusive();
         let Ok(instance) = Instance::new(c"loom-render-test") else {
             eprintln!("skipping: no Vulkan loader");
             return;
@@ -236,6 +253,7 @@ mod tests {
 
     #[test]
     fn the_collector_drains_and_clears() {
+        let _serialised = exclusive();
         let _ = take_validation_messages();
         assert!(take_validation_messages().is_empty(), "drain leaves it empty");
     }
