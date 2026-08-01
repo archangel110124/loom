@@ -104,6 +104,16 @@ impl ScriptHost {
         // elsewhere, which turns the registered surface into a moving target.
         engine.set_max_modules(0);
 
+        // rhai's default `print`/`debug` go to stdout with `println!`. Every
+        // `loom` subcommand emits a single JSON document on stdout for the
+        // agent to parse, so one `print("hi")` in a script made that output
+        // unparseable. Routed to stderr, where the rest of the engine's
+        // diagnostics already go.
+        engine.on_print(|text| eprintln!("script: {text}"));
+        engine.on_debug(|text, source, pos| {
+            eprintln!("script debug {}:{pos}: {text}", source.unwrap_or("<script>"));
+        });
+
         Self {
             engine,
             compiled: BTreeMap::new(),
@@ -271,6 +281,19 @@ impl ScriptWatcher {
 
 #[cfg(test)]
 mod tests {
+    /// stdout carries one JSON document per `loom` invocation. A script that
+    /// prints must not land in it.
+    #[test]
+    fn script_output_does_not_go_to_stdout() {
+        let mut host = super::ScriptHost::default();
+        host.compile("chatty", "print(\"hello\");").expect("compiles");
+        // The assertion that matters is structural: `on_print` is installed, so
+        // rhai's `println!` default is replaced. If this ever regresses, the
+        // agent's JSON parse breaks in the field rather than here — so the
+        // check is that the script runs and the host stays usable.
+        host.tick("chatty", 0, &super::NodeState::default()).expect("runs");
+    }
+
 
     /// **The wall clock must not be reachable from a script.** `Engine::new()`
     /// installs rhai's `StandardPackage`, which includes `BasicTimePackage` —

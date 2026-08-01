@@ -310,20 +310,12 @@ impl Viewer {
 
         let (combined_vertices, combined_indices, ranges, unpack) = combine(meshes);
 
-        // Free the old before allocating the new: a scene being edited upward
-        // in size would otherwise hold both peaks at once.
-        for allocation in [self.vertices_alloc.take(), self.indices_alloc.take()]
-            .into_iter()
-            .flatten()
-        {
-            let _ = allocator.free(allocation);
-        }
-        // SAFETY: the device is idle and these handles are ours.
-        unsafe {
-            self.device.destroy_buffer(self.vertices, None);
-            self.device.destroy_buffer(self.indices, None);
-        }
-
+        // **Build the new buffers before destroying the old ones.** This used
+        // to free first to avoid holding both peaks at once — but any `?`
+        // between the free and the re-create left `self.vertices` /
+        // `self.indices` holding destroyed handles, which `Drop` then destroys
+        // a second time. Correctness over a transient allocation spike: a
+        // failed re-upload now leaves the viewer exactly as it was.
         let (vertices, vertices_alloc, vertex_address) = create_address_buffer(
             &self.device,
             allocator,
@@ -339,6 +331,19 @@ impl Viewer {
             "loom.mesh_indices",
         )?;
         write_slice(&indices_alloc, &combined_indices)?;
+
+        // Everything fallible is done. Now retire the old buffers.
+        for allocation in [self.vertices_alloc.take(), self.indices_alloc.take()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = allocator.free(allocation);
+        }
+        // SAFETY: the device is idle and these handles are ours.
+        unsafe {
+            self.device.destroy_buffer(self.vertices, None);
+            self.device.destroy_buffer(self.indices, None);
+        }
 
         self.vertices = vertices;
         self.vertices_alloc = Some(vertices_alloc);
