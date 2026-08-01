@@ -1215,8 +1215,25 @@ impl App {
         let (start_pos, start_rot, start_scale) = (drag.start[0], drag.start[1], drag.start[2]);
         let (label, op) = match self.mode {
             Mode::Move => {
-                let mut pos = start_pos;
-                pos[axis] += travelled;
+                // The handle points along a **world** axis; the node stores a
+                // **local** transform. Adding the travel straight to the local
+                // component is only right at the root — under a turned or
+                // scaled parent the node moved in the wrong direction and by
+                // the wrong amount. Rotating the world delta by the parent's
+                // inverse (direction only, hence `transform_vector3`) puts it
+                // in the space the file is written in.
+                let mut world_delta = loom_render::glam::Vec3::ZERO;
+                world_delta[axis] = travelled;
+                let local_delta = self
+                    .view
+                    .parent_inverse(&node)
+                    .transform_vector3(world_delta);
+
+                let pos = [
+                    start_pos[0] + local_delta.x,
+                    start_pos[1] + local_delta.y,
+                    start_pos[2] + local_delta.z,
+                ];
                 (format!("Move {node}"), transform_op(&node, Some(pos), None, None))
             }
             Mode::Rotate => {

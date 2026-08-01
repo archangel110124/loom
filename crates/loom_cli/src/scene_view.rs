@@ -34,6 +34,10 @@ pub struct SceneView {
     /// valid, so a transform edit costs no re-upload while a new asset or a
     /// re-baked voxel volume does.
     pub mesh_key: u64,
+    /// The resolved hierarchy. Kept because anything that edits a node's
+    /// transform needs its parent's global to get from world space — where the
+    /// gizmo and the camera work — into the local space the file stores.
+    world: World,
 }
 
 impl SceneView {
@@ -77,6 +81,7 @@ impl SceneView {
             paths,
             assets,
             mesh_key,
+            world,
         })
     }
 
@@ -91,6 +96,27 @@ impl SceneView {
     #[must_use]
     pub fn objects_of(&self, world: &World) -> Vec<Object> {
         crate::world_to_objects(world, &self.library)
+    }
+
+    /// The transform that takes a point from world space into `path`'s parent's
+    /// space — identity when the node is at the root.
+    ///
+    /// A gizmo drags along a world axis and a node stores a *local* transform.
+    /// Without this the two are the same only for root-level nodes; under a
+    /// turned or scaled parent the node moved in the wrong direction and by the
+    /// wrong amount.
+    #[must_use]
+    pub fn parent_inverse(&self, path: &str) -> loom_render::glam::Mat4 {
+        use loom_render::glam::Mat4;
+        self.world
+            .entities()
+            .iter()
+            .find(|e| self.world.path(**e) == Some(path))
+            .and_then(|e| self.world.parent(*e))
+            .and_then(|parent| self.world.global_transform(parent))
+            .map_or(Mat4::IDENTITY, |g| {
+                Mat4::from_cols_array(&g.matrix).inverse()
+            })
     }
 
     /// The world AABB of a node, if it draws anything.
@@ -186,6 +212,45 @@ transform = { pos = [0.0, 0.0, 0.0] }
             .expect("valid");
 
         assert_ne!(small.mesh_key, large.mesh_key, "new geometry, new buffers");
+    }
+
+    /// A gizmo drags along a world axis and the file stores a local transform.
+    /// Under a parent turned 90 degrees about Y, a world +X drag has to become
+    /// a purely local +Z one — that rotation carries local +Z onto world +X —
+    /// and adding the travel straight to the local x moved the node sideways
+    /// relative to what the handle was pointing at.
+    #[test]
+    fn the_parent_inverse_turns_a_world_drag_into_a_local_one() {
+        let scene = r#"
+[scene]
+format = 1
+id = "0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f"
+
+[[node]]
+name = "Room"
+
+[[node]]
+name = "Rig"
+parent = "Room"
+transform = { rot_euler = [0.0, 90.0, 0.0] }
+
+[[node]]
+name = "Desk"
+parent = "Room/Rig"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+"#;
+        let view = view(scene);
+        let world_x = loom_render::glam::Vec3::new(1.0, 0.0, 0.0);
+        let local = view.parent_inverse("Room/Rig/Desk").transform_vector3(world_x);
+
+        assert!(local.x.abs() < 1e-4, "no local x component: {local:?}");
+        assert!((local.z - 1.0).abs() < 1e-4, "world +X is local +Z here: {local:?}");
+
+        // A root-level node is its own parent space.
+        let root = view.parent_inverse("Room").transform_vector3(world_x);
+        assert!((root.x - 1.0).abs() < 1e-4, "identity at the root: {root:?}");
     }
 
     #[test]

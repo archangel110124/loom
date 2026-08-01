@@ -1174,6 +1174,13 @@ fn place(path: &str, args: &[String]) -> (u8, String) {
             Err(e) => return (1, json_line(&e)),
         }
     }
+    // `resolve` reasons in world space, because that is where "on top of" and
+    // "facing" mean anything — but `SetTransform` writes a node's **local**
+    // transform. The two are the same only when the parent is identity, so a
+    // desk placed on a floor inside a moved room landed at the room's offset
+    // twice over. The conversion lives here rather than in `loom_scene`,
+    // which has no business knowing about the ECS hierarchy.
+    to_parent_space(&mut scene_ops, &world);
 
     let transaction = loom_scene::Transaction {
         label: format!("Place: {} op(s)", ops.len()),
@@ -1334,6 +1341,32 @@ pub(crate) fn node_bounds(
     out
 }
 
+/// Rewrite world-space `SetTransform` positions into each node's parent space.
+///
+/// Rotation and scale are left alone: semantic placement only ever sets a
+/// position, and silently reinterpreting an authored rotation would be a
+/// second bug wearing this one's clothes.
+fn to_parent_space(ops: &mut [loom_scene::SceneOp], world: &World) {
+    for op in ops {
+        let loom_scene::SceneOp::SetTransform { node, pos: Some(p), .. } = op else {
+            continue;
+        };
+        let parent_inverse = world
+            .entities()
+            .iter()
+            .find(|e| world.path(**e) == Some(node.as_str()))
+            .and_then(|e| world.parent(*e))
+            .and_then(|parent| world.global_transform(parent))
+            .map_or(Mat4::IDENTITY, |g| Mat4::from_cols_array(&g.matrix).inverse());
+
+        // A position, so `transform_point3` — translation included. Using the
+        // vector form here would drop the parent's offset and look almost
+        // right, which is worse.
+        let local = parent_inverse.transform_point3(Vec3::from_array(*p));
+        *p = local.to_array();
+    }
+}
+
 fn json_line<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
 }
@@ -1344,6 +1377,86 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// Semantic placement reasons in world space — "on top of" means nothing
+    /// otherwise — but `SetTransform` writes a node's local transform. Inside a
+    /// room that has been moved, the two differ, and the placed node landed at
+    /// the room's offset twice over.
+    #[test]
+    fn placing_inside_a_moved_parent_lands_on_the_surface() {
+        let dir = std::env::temp_dir().join("loom_place_nested");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let scene = dir.join("nested.loom");
+        std::fs::write(
+            &scene,
+            r#"
+[scene]
+format = 1
+id = "9e8d7c6b-5a49-4382-91f0-2b3c4d5e6f70"
+
+[[node]]
+name = "World"
+
+[[node]]
+name = "Room"
+parent = "World"
+transform = { pos = [30.0, 0.0, -12.0] }
+
+[[node]]
+name = "Floor"
+parent = "World/Room"
+transform = { scale = [4.0, 0.2, 4.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+[[node]]
+name = "Lamp"
+parent = "World/Room"
+transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+"#,
+        )
+        .expect("write scene");
+        let op = dir.join("op.json");
+        std::fs::write(
+            &op,
+            r#"{"place":"place_on","node":"World/Room/Lamp","surface":"World/Room/Floor","anchor":"center"}"#,
+        )
+        .expect("write op");
+
+        let (code, out) = run(&args(&[
+            "place",
+            scene.to_str().expect("path"),
+            "--op",
+            op.to_str().expect("path"),
+        ]));
+        assert_eq!(code, 0, "{out}");
+
+        let text = std::fs::read_to_string(&scene).expect("read back");
+        let parsed = Scene::parse(&text).expect("still valid");
+        let lamp = parsed
+            .nodes()
+            .iter()
+            .find(|n| n.path == "World/Room/Lamp")
+            .expect("lamp");
+
+        // Local, not world: the room's offset must not appear here.
+        assert!(
+            lamp.transform.pos[0].abs() < 0.01 && lamp.transform.pos[2].abs() < 0.01,
+            "the parent offset leaked into the local transform: {:?}",
+            lamp.transform.pos
+        );
+        // Floor top is 0.2, the lamp's half-height 0.3.
+        assert!(
+            (lamp.transform.pos[1] - 0.5).abs() < 0.01,
+            "should sit on the floor: {:?}",
+            lamp.transform.pos
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **`loom sim` must actually simulate.** It stepped scripts and nothing
