@@ -578,9 +578,12 @@ impl ApplicationHandler for App {
                 self.input.set_button(name, state == ElementState::Pressed);
             }
 
-            WindowEvent::Resized(_) => {
+            WindowEvent::Resized(size) => {
+                // The new size is passed along rather than discarded: a
+                // compositor may decline to state one, and then this is the
+                // only party that knows.
                 if let Some(viewer) = self.viewer.as_mut()
-                    && let Err(e) = viewer.recreate()
+                    && let Err(e) = viewer.recreate_sized(size.width, size.height)
                 {
                     eprintln!("loom: resize failed: {e}");
                     event_loop.exit();

@@ -57,6 +57,10 @@ pub struct Viewer {
     object_address: vk::DeviceAddress,
     /// How many objects the buffer can currently hold; grown on demand.
     object_capacity: usize,
+    /// The size the window last reported. Needed because a compositor may
+    /// decline to state one (Wayland's `0xFFFFFFFF`), and then this is the
+    /// only real answer available.
+    requested: vk::Extent2D,
 
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -220,6 +224,7 @@ impl Viewer {
             objects_alloc: Some(objects_alloc),
             object_address,
             object_capacity: INITIAL_OBJECTS,
+            requested: vk::Extent2D { width, height },
             pipeline_layout,
             pipeline,
             sky_pipeline,
@@ -572,6 +577,17 @@ impl Viewer {
     ///
     /// # Errors
     /// [`RenderError`] on Vulkan failure.
+    /// Rebuild the swapchain for a window that is now `width` x `height`.
+    ///
+    /// # Errors
+    /// [`RenderError`] on Vulkan failure.
+    pub fn recreate_sized(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
+        if width > 0 && height > 0 {
+            self.requested = vk::Extent2D { width, height };
+        }
+        self.recreate()
+    }
+
     pub fn recreate(&mut self) -> Result<(), RenderError> {
         // SAFETY: nothing may be in flight while swapchain resources are
         // destroyed — this is the use-after-free §7.3 says compiles fine.
@@ -584,7 +600,16 @@ impl Viewer {
             self.surface_loader
                 .get_physical_device_surface_capabilities(self.physical, self.surface)
         }?;
-        let extent = capabilities.current_extent;
+        // `current_extent` is the compositor telling us the size — except on
+        // Wayland, where it is defined to be `0xFFFFFFFF` meaning "you choose".
+        // Taking it raw asked for a swapchain of about four billion pixels a
+        // side. Fall back to the size winit last reported, which is the only
+        // party that actually knows.
+        let extent = if capabilities.current_extent.width == u32::MAX {
+            self.requested
+        } else {
+            capabilities.current_extent
+        };
         // Minimised: nothing to do, and a zero-extent swapchain is invalid.
         if extent.width == 0 || extent.height == 0 {
             return Ok(());
