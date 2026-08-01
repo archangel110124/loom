@@ -252,15 +252,25 @@ impl Physics {
     pub fn add_static_voxels(
         &mut self,
         position: [f32; 3],
-        voxel_size: f32,
+        rotation: [f32; 4],
+        voxel_size: [f32; 3],
         grid: &[[i32; 3]],
     ) -> Option<ColliderHandle> {
         if grid.is_empty() {
             return None;
         }
         let cells: Vec<IVector> = grid.iter().map(|c| IVector::new(c[0], c[1], c[2])).collect();
-        let collider = ColliderBuilder::voxels(Vector::splat(voxel_size.max(1e-4)), &cells)
+        // Per-axis voxel size, so a node's scale reaches the collider. parry's
+        // voxel shape takes a `Vector` rather than a scalar, so even a
+        // non-uniformly scaled volume is representable exactly.
+        let size = Vector::new(
+            voxel_size[0].max(1e-4),
+            voxel_size[1].max(1e-4),
+            voxel_size[2].max(1e-4),
+        );
+        let collider = ColliderBuilder::voxels(size, &cells)
             .translation(Vector::new(position[0], position[1], position[2]))
+            .rotation(scaled_axis_from_quat(rotation))
             .build();
         Some(self.colliders.insert(collider))
     }

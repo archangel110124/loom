@@ -110,8 +110,18 @@ impl Sim {
                 match crate::build_volume(recipe) {
                     Some((volume, ())) => {
                         let cells = volume.solid_cells();
+                        // The whole transform, not just the position: the mesh
+                        // is drawn with the node's global matrix, so a rotated
+                        // or scaled volume whose collider is axis-aligned and
+                        // unscaled is the same lie as a sphere colliding as a
+                        // cube — the bug most of today's physics work was about.
+                        let sized = [
+                            volume.voxel_size * world_scale.x.abs(),
+                            volume.voxel_size * world_scale.y.abs(),
+                            volume.voxel_size * world_scale.z.abs(),
+                        ];
                         if physics
-                            .add_static_voxels(pos, volume.voxel_size, &cells)
+                            .add_static_voxels(pos, quat, sized, &cells)
                             .is_none()
                         {
                             crate::log::warn(format!(
@@ -718,6 +728,69 @@ transform = { pos = [0.0, 20.0, 0.0], scale = [0.3, 0.3, 0.3] }
         // on the floor, not perch on a ghost.
         let y = height(&play.world, "Stage/Probe");
         assert!(y < 4.0, "the probe stopped on something that is not there: {y}");
+    }
+
+    /// A voxel volume is drawn with its node's full transform, so its collider
+    /// needs the same one. Passing only the position left a scaled hillside
+    /// colliding at its unscaled size — the same lie as a sphere colliding as
+    /// a cube, which is what most of today's physics work was about.
+    #[test]
+    fn a_scaled_voxel_volume_collides_at_its_drawn_size() {
+        let scene = |scale: f32, drop_from: f32| {
+            format!(
+                r#"
+[scene]
+format = 1
+id = "0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f"
+
+[[node]]
+name = "Stage"
+
+[[node]]
+name = "Hill"
+parent = "Stage"
+transform = {{ scale = [{scale}, {scale}, {scale}] }}
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.25
+  chunks = [1, 1, 1]
+
+    [[node.components.VoxelVolume.ops]]
+    kind = "box"
+    center = [4.0, 1.0, 4.0]
+    half_extents = [3.0, 1.0, 3.0]
+    mode = "union"
+
+[[node]]
+name = "Probe"
+parent = "Stage"
+transform = {{ pos = [4.0, {drop_from}, 4.0], scale = [0.25, 0.25, 0.25] }}
+
+  [node.components.MeshRenderer]
+  mesh = {{ asset = "box" }}
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 3.0
+"#
+            )
+        };
+        let rest = |scale: f32, drop_from: f32| {
+            let world = World::from_scene(&Scene::parse(&scene(scale, drop_from)).expect("valid"));
+            let mut play = Play::start(world);
+            play.run(500);
+            height(&play.world, "Stage/Probe")
+        };
+
+        // Unscaled the slab's top is y = 2; doubled it is y = 4.
+        let plain = rest(1.0, 8.0);
+        let doubled = rest(2.0, 12.0);
+
+        assert!((plain - 2.25).abs() < 0.3, "unscaled top ~2.0: {plain}");
+        assert!(
+            doubled > plain + 1.0,
+            "a volume scaled 2x must collide twice as tall: {doubled} vs {plain}"
+        );
     }
 
     #[test]
