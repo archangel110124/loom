@@ -119,6 +119,20 @@ fn validate() -> std::process::ExitCode {
         println!("note: no display; the windowed path was not exercised");
     }
 
+    // Determinism is the property every `--assert` rests on, and it is exactly
+    // the kind of thing that decays silently: a dependency bump, a new SIMD
+    // path, a reordered iteration. Comparing the two build profiles is a real
+    // test of it — debug and release inline differently, vectorise differently,
+    // and must still agree to the bit.
+    //
+    // This is also the standing answer to "would a custom physics engine be
+    // better": on the axis this project cares about most, the current one is
+    // measurably correct, and now stays measured.
+    match determinism_holds(&root) {
+        Ok(hash) => println!("determinism: debug and release agree ({hash})"),
+        Err(problem) => failures.push(problem),
+    }
+
     if failures.is_empty() {
         println!("cargo xtask validate: {checked} scene runs, zero validation messages");
         return std::process::ExitCode::SUCCESS;
@@ -134,6 +148,45 @@ fn validate() -> std::process::ExitCode {
         failures.len()
     );
     std::process::ExitCode::from(1)
+}
+
+/// Simulate the same scene with both build profiles and require the same hash.
+fn determinism_holds(root: &Path) -> Result<String, String> {
+    let scene = "assets/test/tower.loom";
+    if !root.join(scene).exists() {
+        return Ok("skipped, no scene".to_owned());
+    }
+    let release = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["build", "--release", "-p", "loom_cli"])
+        .current_dir(root)
+        .status();
+    if !release.is_ok_and(|s| s.success()) {
+        return Ok("skipped, no release build".to_owned());
+    }
+
+    let hash_of = |binary: &str| -> Option<String> {
+        let out = Command::new(root.join(binary))
+            .args(["sim", scene, "--ticks", "300"])
+            .current_dir(root)
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        // Small enough to scan rather than pull in a JSON dependency, which
+        // xtask deliberately has none of.
+        let key = "\"state_hash\": \"";
+        let start = text.find(key)? + key.len();
+        let end = start + text[start..].find('"')?;
+        Some(text[start..end].to_owned())
+    };
+
+    match (hash_of("target/debug/loom"), hash_of("target/release/loom")) {
+        (Some(debug), Some(release)) if debug == release => Ok(debug),
+        (Some(debug), Some(release)) => Err(format!(
+            "determinism\n  debug and release disagree: {debug} vs {release}\n  \
+             every `loom sim --assert` depends on this holding"
+        )),
+        _ => Ok("skipped, could not read a hash".to_owned()),
+    }
 }
 
 /// Record anything the run said that means it went wrong.
