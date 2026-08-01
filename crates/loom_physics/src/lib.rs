@@ -53,19 +53,13 @@ fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-/// Euler degrees to rapier's scaled axis-angle, in the scene format's
+/// Euler degrees to a quaternion `(x, y, z, w)`, in the scene format's
 /// convention: intrinsic Y-X-Z, ordered `[pitch_x, yaw_y, roll_z]`.
 ///
-/// The exact inverse of [`Physics::rotation_euler`], and a round-trip test
-/// holds them to it. Without this, a node authored with a rotation simulated
-/// as though it were upright — a tilted crate snapped flat the moment physics
-/// touched it, and the render disagreed with the simulation about where its
-/// faces were.
-///
 /// Composed from the three axis quaternions rather than written out as a
-/// closed form: the closed form is where sign errors hide, and this is a
-/// handful of multiplies once per body.
-fn scaled_axis_from_euler(euler: [f32; 3]) -> AngVector {
+/// closed form: the closed form is where sign errors hide.
+#[must_use]
+pub fn quat_from_euler(euler: [f32; 3]) -> [f32; 4] {
     let (half_pitch, half_yaw, half_roll) = (
         euler[0].to_radians() * 0.5,
         euler[1].to_radians() * 0.5,
@@ -74,12 +68,30 @@ fn scaled_axis_from_euler(euler: [f32; 3]) -> AngVector {
     let qx = [half_pitch.sin(), 0.0, 0.0, half_pitch.cos()];
     let qy = [0.0, half_yaw.sin(), 0.0, half_yaw.cos()];
     let qz = [0.0, 0.0, half_roll.sin(), half_roll.cos()];
-    // Y then X then Z, matching the extraction order in `rotation_euler`.
-    let [x, y, z, w] = quat_mul(quat_mul(qy, qx), qz);
+    // Y then X then Z, matching the extraction order in `euler_from_quat`.
+    quat_mul(quat_mul(qy, qx), qz)
+}
 
-    // Scaled axis-angle is what `RigidBodyBuilder::rotation` wants in 3D
-    // (rapier's own doc: "axis * angle"). Near identity the axis is
-    // degenerate, so return zero rather than dividing by ~0.
+/// A quaternion back to euler degrees, the exact inverse of
+/// [`quat_from_euler`]. A round-trip test holds the pair together.
+#[must_use]
+pub fn euler_from_quat(q: [f32; 4]) -> [f32; 3] {
+    let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+    // The pitch term is clamped because floating-point drift can push it just
+    // past ±1, and asin of that is NaN — which would silently poison every
+    // transform downstream.
+    let sin_pitch = (2.0 * (w * x - y * z)).clamp(-1.0, 1.0);
+    let pitch = sin_pitch.asin();
+    let yaw = (2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (x * x + y * y));
+    let roll = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (x * x + z * z));
+    [pitch.to_degrees(), yaw.to_degrees(), roll.to_degrees()]
+}
+
+/// A quaternion as rapier's scaled axis-angle (`axis * angle` in 3D).
+fn scaled_axis_from_quat(q: [f32; 4]) -> AngVector {
+    let [x, y, z, w] = q;
+    // Near identity the axis is degenerate, so return zero rather than
+    // dividing by ~0.
     let sin_half = (1.0 - w * w).max(0.0).sqrt();
     if sin_half < 1e-6 {
         return AngVector::new(0.0, 0.0, 0.0);
@@ -91,6 +103,7 @@ fn scaled_axis_from_euler(euler: [f32; 3]) -> AngVector {
         z / sin_half * angle,
     )
 }
+
 
 impl Physics {
     /// A world stepping at `dt` seconds.
@@ -123,12 +136,12 @@ impl Physics {
     pub fn add_static_box(
         &mut self,
         position: [f32; 3],
-        rotation: [f32; 3],
+        rotation: [f32; 4],
         half_extents: [f32; 3],
     ) -> ColliderHandle {
         let collider = ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2])
             .translation(Vector::new(position[0], position[1], position[2]))
-            .rotation(scaled_axis_from_euler(rotation))
+            .rotation(scaled_axis_from_quat(rotation))
             .build();
         self.colliders.insert(collider)
     }
@@ -164,13 +177,13 @@ impl Physics {
     pub fn add_box_body(
         &mut self,
         position: [f32; 3],
-        rotation: [f32; 3],
+        rotation: [f32; 4],
         half_extents: [f32; 3],
         mass: f32,
     ) -> RigidBodyHandle {
         let body = RigidBodyBuilder::dynamic()
             .translation(Vector::new(position[0], position[1], position[2]))
-            .rotation(scaled_axis_from_euler(rotation))
+            .rotation(scaled_axis_from_quat(rotation))
             .build();
         let handle = self.bodies.insert(body);
         let collider =
@@ -201,13 +214,13 @@ impl Physics {
     pub fn add_ball_body(
         &mut self,
         position: [f32; 3],
-        rotation: [f32; 3],
+        rotation: [f32; 4],
         radius: f32,
         mass: f32,
     ) -> RigidBodyHandle {
         let body = RigidBodyBuilder::dynamic()
             .translation(Vector::new(position[0], position[1], position[2]))
-            .rotation(scaled_axis_from_euler(rotation))
+            .rotation(scaled_axis_from_quat(rotation))
             .build();
         let handle = self.bodies.insert(body);
         let collider = ColliderBuilder::ball(radius.max(1e-3))
@@ -349,18 +362,17 @@ impl Physics {
     /// downstream has to know which convention rapier uses.
     #[must_use]
     pub fn rotation_euler(&self, handle: RigidBodyHandle) -> Option<[f32; 3]> {
+        self.rotation_quat(handle).map(euler_from_quat)
+    }
+
+    /// A body's orientation as a quaternion `(x, y, z, w)`.
+    ///
+    /// The boundary representation: composing a body's pose with a parent's
+    /// inverse needs a rotation that composes, and euler triples do not.
+    #[must_use]
+    pub fn rotation_quat(&self, handle: RigidBodyHandle) -> Option<[f32; 4]> {
         let q = self.bodies.get(handle)?.rotation();
-        let (x, y, z, w) = (q.x, q.y, q.z, q.w);
-
-        // Y-X-Z extraction. The pitch term is clamped because floating-point
-        // drift can push it just past ±1, and asin of that is NaN — which
-        // would silently poison every transform downstream.
-        let sin_pitch = (2.0 * (w * x - y * z)).clamp(-1.0, 1.0);
-        let pitch = sin_pitch.asin();
-        let yaw = (2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (x * x + y * y));
-        let roll = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (x * x + z * z));
-
-        Some([pitch.to_degrees(), yaw.to_degrees(), roll.to_degrees()])
+        Some([q.x, q.y, q.z, q.w])
     }
 
     /// Fold every body's position into a hash, for the determinism check.
@@ -410,7 +422,7 @@ mod tests {
     fn the_state_hash_notices_rotation_and_velocity() {
         let spun = |euler: [f32; 3], velocity: f32| {
             let mut physics = super::Physics::new(1.0 / 60.0);
-            let handle = physics.add_box_body([0.0, 0.0, 0.0], euler, [0.5, 0.5, 0.5], 1.0);
+            let handle = physics.add_box_body([0.0, 0.0, 0.0], quat_from_euler(euler), [0.5, 0.5, 0.5], 1.0);
             if let Some(body) = physics.bodies.get_mut(handle) {
                 body.set_linvel(super::Vector::new(velocity, 0.0, 0.0), true);
             }
@@ -437,7 +449,7 @@ mod tests {
             [-25.0, 160.0, -80.0],
         ] {
             let mut physics = super::Physics::new(1.0 / 60.0);
-            let handle = physics.add_box_body([0.0, 0.0, 0.0], euler, [0.5, 0.5, 0.5], 1.0);
+            let handle = physics.add_box_body([0.0, 0.0, 0.0], quat_from_euler(euler), [0.5, 0.5, 0.5], 1.0);
             let back = physics.rotation_euler(handle).expect("body exists");
             for axis in 0..3 {
                 assert!(
@@ -454,7 +466,7 @@ mod tests {
     #[test]
     fn a_capsule_comes_to_rest_on_a_floor() {
         let mut physics = Physics::new(1.0 / 60.0);
-        physics.add_static_box([0.0, -0.5, 0.0], [0.0, 0.0, 0.0], [10.0, 0.5, 10.0]);
+        physics.add_static_box([0.0, -0.5, 0.0], quat_from_euler([0.0, 0.0, 0.0]), [10.0, 0.5, 10.0]);
         let capsule = physics.add_capsule([0.0, 4.0, 0.0], 0.5, 0.4);
 
         for _ in 0..240 {
@@ -475,7 +487,7 @@ mod tests {
     #[test]
     fn a_falling_capsule_does_not_tunnel_through_a_thin_floor() {
         let mut physics = Physics::new(1.0 / 60.0);
-        physics.add_static_box([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [10.0, 0.05, 10.0]);
+        physics.add_static_box([0.0, 0.0, 0.0], quat_from_euler([0.0, 0.0, 0.0]), [10.0, 0.05, 10.0]);
         let capsule = physics.add_capsule([0.0, 6.0, 0.0], 0.5, 0.4);
 
         for _ in 0..300 {
@@ -508,7 +520,7 @@ mod tests {
     #[test]
     fn debris_launched_upward_actually_moves() {
         let mut physics = Physics::new(1.0 / 60.0);
-        physics.add_static_box([0.0, -0.5, 0.0], [0.0, 0.0, 0.0], [20.0, 0.5, 20.0]);
+        physics.add_static_box([0.0, -0.5, 0.0], quat_from_euler([0.0, 0.0, 0.0]), [20.0, 0.5, 20.0]);
         let chunk = physics
             .spawn_debris([0.0, 1.0, 0.0], 0.2, [4.0, 9.0, 0.0], 100)
             .expect("under the cap");
@@ -527,7 +539,7 @@ mod tests {
     fn the_same_simulation_twice_produces_the_same_hash() {
         let run = || {
             let mut physics = Physics::new(1.0 / 60.0);
-            physics.add_static_box([0.0, -0.5, 0.0], [0.0, 0.0, 0.0], [10.0, 0.5, 10.0]);
+            physics.add_static_box([0.0, -0.5, 0.0], quat_from_euler([0.0, 0.0, 0.0]), [10.0, 0.5, 10.0]);
             for i in 0..8 {
                 #[allow(clippy::cast_precision_loss)]
                 physics.add_capsule([i as f32 * 0.35, 3.0 + i as f32, 0.0], 0.5, 0.4);

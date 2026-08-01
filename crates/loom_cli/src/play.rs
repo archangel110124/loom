@@ -12,6 +12,7 @@
 
 use loom_ecs::World;
 use loom_physics::{Physics, RigidBodyHandle};
+use loom_render::glam::{Mat4, Quat, Vec3};
 
 /// The fixed tick. Simulation time is counted in these, never in seconds of
 /// wall clock.
@@ -39,22 +40,39 @@ impl Sim {
             let Some(global) = world.global_transform(*entity) else {
                 continue;
             };
-            let pos = [global.matrix[12], global.matrix[13], global.matrix[14]];
-            // Half-extents come from the node's scale: a unit box scaled by s
-            // has half-extents s, which is what the renderer draws.
-            let Some(transform) = world.transform(*entity) else {
+            // **Everything from the same space.** Position used to come from
+            // the global matrix while rotation and half-extents came from the
+            // local transform, so an ancestor's rotation or scale never
+            // reached the collider: a crate inside a turned rig collided
+            // axis-aligned while it was drawn turned.
+            let matrix = Mat4::from_cols_array(&global.matrix);
+            let (world_scale, world_rotation, world_position) =
+                matrix.to_scale_rotation_translation();
+            let pos = world_position.to_array();
+            let quat = [
+                world_rotation.x,
+                world_rotation.y,
+                world_rotation.z,
+                world_rotation.w,
+            ];
+            // A node with no local transform is not a thing physics can
+            // place; the global above would be meaningless for it.
+            if world.transform(*entity).is_none() {
                 continue;
-            };
+            }
             // An authored `BoxCollider` wins over the mesh's scale. It is a
             // documented, schema-validated component that the simulation used
             // to ignore entirely, so a node could declare one size and collide
             // as another with nothing reporting the discrepancy.
+            //
+            // Half-extents follow the *world* scale for the same reason: a
+            // unit box scaled by an ancestor is drawn at the ancestor's size.
             let half = world.collider_half_extents(*entity).map_or_else(
                 || {
                     [
-                        transform.scale[0].abs().max(1e-3),
-                        transform.scale[1].abs().max(1e-3),
-                        transform.scale[2].abs().max(1e-3),
+                        world_scale.x.abs().max(1e-3),
+                        world_scale.y.abs().max(1e-3),
+                        world_scale.z.abs().max(1e-3),
                     ]
                 },
                 |h| [h[0].abs().max(1e-3), h[1].abs().max(1e-3), h[2].abs().max(1e-3)],
@@ -70,7 +88,6 @@ impl Sim {
             // collider component, because the shape a thing *is* is the shape
             // it should collide as, and scenes already say that. Add a
             // `SphereCollider` when something needs to differ from its mesh.
-            let rotation = transform.rot_euler;
             let ball = world.mesh_asset(*entity) == Some("sphere");
             // The enclosing radius, not the smallest: a non-uniformly scaled
             // sphere is an ellipsoid that no ball matches, and of the two
@@ -108,16 +125,16 @@ impl Sim {
             if world.is_dynamic(*entity) {
                 let mass = world.body_mass(*entity);
                 let handle = if ball {
-                    physics.add_ball_body(pos, rotation, radius, mass)
+                    physics.add_ball_body(pos, quat, radius, mass)
                 } else {
-                    physics.add_box_body(pos, rotation, half, mass)
+                    physics.add_box_body(pos, quat, half, mass)
                 };
                 dynamic.push((*entity, handle));
             } else if world.is_renderable(*entity) {
                 if ball {
                     physics.add_static_ball(pos, radius);
                 } else {
-                    physics.add_static_box(pos, rotation, half);
+                    physics.add_static_box(pos, quat, half);
                 }
             }
         }
@@ -135,21 +152,49 @@ impl Sim {
     /// Copy body positions back onto the world's transforms.
     pub fn write_back(&self, world: &mut World) {
         for (entity, handle) in &self.dynamic {
-            let Some(pos) = self.physics.position(*handle) else {
+            let (Some(pos), Some(quat)) = (
+                self.physics.position(*handle),
+                self.physics.rotation_quat(*handle),
+            ) else {
                 continue;
             };
-            let rotation = self.physics.rotation_euler(*handle);
+
+            // **The solver works in world space; a node stores local.** This
+            // used to write the world pose straight into the local slot, which
+            // is only correct when the parent is identity. Under a parent
+            // offset by ten metres the body was re-composed twenty metres out,
+            // and walked one parent-offset further every tick.
+            //
+            // The parent's global is inverted rather than assumed, so a rig
+            // that is moved, turned or scaled behaves the same as one at the
+            // origin.
+            let parent_inverse = world
+                .parent(*entity)
+                .and_then(|parent| world.global_transform(parent))
+                .map_or(Mat4::IDENTITY, |g| {
+                    Mat4::from_cols_array(&g.matrix).inverse()
+                });
+
+            let body_world = Mat4::from_rotation_translation(
+                Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]),
+                Vec3::from_array(pos),
+            );
+            let local = parent_inverse * body_world;
+            let (_, local_rotation, local_position) = local.to_scale_rotation_translation();
+
             if let Some(transform) = world.transform_mut(*entity) {
-                // Written back as a LOCAL transform. Correct only for nodes
-                // whose parent is the root, which is every dynamic body a
-                // blockout makes today. Nested dynamic bodies need the
-                // parent's inverse — noted rather than silently wrong.
-                transform.pos = pos;
+                transform.pos = local_position.to_array();
                 // Rotation too, or a toppling crate slides instead of tipping
                 // — the simulation would be right and the picture a lie.
-                if let Some(rot) = rotation {
-                    transform.rot_euler = rot;
-                }
+                transform.rot_euler = loom_physics::euler_from_quat([
+                    local_rotation.x,
+                    local_rotation.y,
+                    local_rotation.z,
+                    local_rotation.w,
+                ]);
+                // Scale is authored, never simulated: the solver has no
+                // opinion about it and overwriting it here would silently
+                // resize whatever the physics touched.
             }
         }
         world.propagate_transforms();
@@ -448,6 +493,68 @@ transform = {{ pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }}
             (declared - 2.0).abs() < 0.05,
             "the declared collider is 2.0 tall, so it rests at 2.0, not {declared}"
         );
+    }
+
+    /// **World and local are different spaces.** Colliders were built from the
+    /// global matrix for position but the local transform for rotation and
+    /// scale, and results were written back into the local transform as if it
+    /// were world. Under a parent that is moved at all, the two disagree: a
+    /// crate under a parent at x = 10 was written back at world x = 10 into a
+    /// local slot, which re-composes to world x = 20, and it walks away one
+    /// parent-offset per tick.
+    #[test]
+    fn a_body_under_a_moved_parent_stays_where_the_physics_put_it() {
+        let source = r#"
+[scene]
+format = 1
+id = "0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f"
+
+[[node]]
+name = "Root"
+
+[[node]]
+name = "Ground"
+parent = "Root"
+transform = { pos = [0.0, -0.5, 0.0], scale = [40.0, 0.5, 40.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+[[node]]
+name = "Rig"
+parent = "Root"
+transform = { pos = [10.0, 0.0, -4.0] }
+
+[[node]]
+name = "Crate"
+parent = "Root/Rig"
+transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 4.0
+"#;
+        let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
+        let mut play = Play::start(world);
+        play.run(240);
+
+        let entity = *play
+            .world
+            .entities()
+            .iter()
+            .find(|e| play.world.path(**e) == Some("Root/Rig/Crate"))
+            .expect("crate exists");
+        let global = play.world.global_transform(entity).expect("has a global");
+        let (x, y, z) = (global.matrix[12], global.matrix[13], global.matrix[14]);
+
+        // It was dropped at world (10, 6, -4) over a floor whose top is y = 0.
+        // It should land under itself, not slide one parent-offset per tick.
+        assert!((x - 10.0).abs() < 0.2, "drifted in x: {x}");
+        assert!((z + 4.0).abs() < 0.2, "drifted in z: {z}");
+        assert!((y - 0.5).abs() < 0.1, "should rest on the floor: {y}");
     }
 
     #[test]
