@@ -9,8 +9,10 @@ pub mod mesh;
 pub mod packed;
 pub mod meta;
 pub mod primitives;
+pub mod texture;
 
 pub use mesh::{Mesh, Vertex};
+pub use texture::{ColorSpace, Texture};
 pub use packed::{PackedBounds, PackedVertex};
 pub use meta::{AssetId, Manifest, Meta};
 
