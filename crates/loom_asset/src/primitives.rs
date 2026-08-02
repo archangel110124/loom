@@ -124,8 +124,19 @@ pub fn sphere(segments: u32, rings: u32) -> Mesh {
         for segment in 0..segments {
             let a = ring * stride + segment;
             let b = a + stride;
+            // **Wound to face outward, which is not the obvious order here.**
+            // This grid's rings run top to bottom while its segments run
+            // counter-clockwise, so the naive `[a, b, a + 1]` crosses to the
+            // *inward* normal and every triangle on the sphere gets backface
+            // culled. The renderer then draws the inside of the far hemisphere
+            // instead: the silhouette still looks like a sphere, so it reads as
+            // a shading bug, and the visible surface depth-tests at the back of
+            // the ball, which is why other objects appeared to sink into it.
+            //
+            // The capsule below uses the opposite order for the same reason —
+            // its rings run bottom to top.
             mesh.indices
-                .extend([a, b, a + 1, a + 1, b, b + 1]);
+                .extend([a, a + 1, b, a + 1, b + 1, b]);
         }
     }
     mesh
@@ -175,10 +186,16 @@ pub fn cylinder(segments: u32) -> Mesh {
         for segment in 0..segments {
             let a = centre + 1 + segment;
             // Wind the bottom cap the other way so both face outward.
+            //
+            // These two were swapped. Going round the rim in increasing theta
+            // and fanning from the centre crosses to -Y, so it is the *top*
+            // cap that needs reversing, not the bottom. Both caps therefore
+            // faced inward and were culled, leaving a tube open at both ends
+            // with the far inner wall showing through.
             if y < 0.0 {
-                mesh.indices.extend([centre, a + 1, a]);
-            } else {
                 mesh.indices.extend([centre, a, a + 1]);
+            } else {
+                mesh.indices.extend([centre, a + 1, a]);
             }
         }
     }
@@ -262,6 +279,62 @@ mod tests {
                 assert!(
                     (-0.001..=1.001).contains(&min) && (-0.001..=1.001).contains(&max),
                     "{name} leaves the unit square on uv axis {axis}: {min}..{max}"
+                );
+            }
+        }
+    }
+
+    /// Every triangle must wind the same way its vertices claim to face.
+    ///
+    /// Winding decides which side the rasteriser keeps — the front face is
+    /// counter-clockwise and the back is culled. A triangle wound against its
+    /// own normals is therefore **invisible from the side it is lit on**, and
+    /// the hole it leaves looks like missing geometry rather than a winding
+    /// bug, which is a long way to walk from the symptom to the cause.
+    ///
+    /// Checked against the vertex normals rather than against a hand-written
+    /// expectation, because the normals are what the shader lights with: if
+    /// the two disagree, one of them is wrong whichever it is.
+    #[test]
+    fn every_triangle_winds_the_way_its_normals_face() {
+        for name in NAMES {
+            let mesh = build(name).expect("NAMES only holds real primitives");
+
+            for (triangle, corner) in mesh.indices.chunks_exact(3).enumerate() {
+                let v: Vec<&Vertex> = corner
+                    .iter()
+                    .map(|i| &mesh.vertices[*i as usize])
+                    .collect();
+                let edge = |a: &Vertex, b: &Vertex| {
+                    [
+                        b.position[0] - a.position[0],
+                        b.position[1] - a.position[1],
+                        b.position[2] - a.position[2],
+                    ]
+                };
+                let (e1, e2) = (edge(v[0], v[1]), edge(v[0], v[2]));
+                // Right-hand rule: this is the direction a counter-clockwise
+                // winding actually faces.
+                let wound = [
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ];
+                let claimed: Vec<f32> = (0..3)
+                    .map(|axis| v.iter().map(|x| x.normal[axis]).sum::<f32>() / 3.0)
+                    .collect();
+
+                let agreement: f32 = (0..3).map(|a| wound[a] * claimed[a]).sum();
+                let area: f32 = wound.iter().map(|c| c * c).sum::<f32>().sqrt();
+                // Degenerate slivers — a sphere's pole fan — have no meaningful
+                // winding direction and are skipped rather than guessed at.
+                if area < 1e-9 {
+                    continue;
+                }
+                assert!(
+                    agreement > 0.0,
+                    "{name} triangle {triangle} is wound {wound:?} but its \
+                     normals face {claimed:?} — it will be backface culled"
                 );
             }
         }

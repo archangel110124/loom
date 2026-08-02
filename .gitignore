@@ -9,3 +9,6 @@
 
 # Stray renders from manual checks. Renders belong in a temp dir.
 render.png
+
+# Worktrees live inside the repo but are separate checkouts, never content.
+.claude/worktrees/
