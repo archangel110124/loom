@@ -23,6 +23,7 @@
 struct Vertex {
     uint packedPosition;   // 10 bits per axis, 2 spare
     uint packedNormal;     // octahedral, 16 bits per component
+    uint packedUv;         // 16 bits per component, against the mesh's UV bounds
 };
 
 struct ObjectData {
@@ -34,6 +35,8 @@ struct ObjectData {
     // One per object rather than per vertex, which is what makes the
     // compression free rather than moving the cost somewhere else.
     float4 unpack;
+    // Decode parameters for this object's packed UVs: xy origin, z step.
+    float4 uvUnpack;
     // Rows of inverse-transpose(model)'s upper 3x3. Non-uniform scale is
     // everywhere in a blockout, and it skews normals unless corrected.
     float4 normalRow0;
@@ -138,6 +141,7 @@ struct VSOutput {
     float3 color : COLOR;
     // Where this pixel is in the world, which is where its shadow ray starts.
     float3 worldPos : WORLDPOS;
+    float2 uv : TEXCOORD0;
 };
 
 // Mirrors `loom_asset::packed::unpack`. Kept in step by a Rust-side test that
@@ -149,6 +153,14 @@ float3 unpackPosition(uint packed, float4 unpackParams) {
         float((packed >> 10) & 0x3FF),
         float((packed >> 20) & 0x3FF));
     return unpackParams.xyz + q * unpackParams.w;
+}
+
+// Mirrors `loom_asset::packed::unpack`'s UV half. Quantised against the mesh's
+// own UV range rather than 0..1, so a wall whose texture tiles eight times
+// keeps all 16 bits of precision instead of being clamped flat.
+float2 unpackUv(uint packed, float4 unpackParams) {
+    float2 q = float2(float(packed & 0xFFFF), float((packed >> 16) & 0xFFFF));
+    return unpackParams.xy + q * unpackParams.z;
 }
 
 float3 unpackNormal(uint packed) {
@@ -178,6 +190,7 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
     out.normal = normalize(mul(normalMatrix, unpackNormal(v.packedNormal)));
     out.color = o.color.rgb;
     out.worldPos = mul(o.model, float4(unpackPosition(v.packedPosition, o.unpack), 1.0)).xyz;
+    out.uv = unpackUv(v.packedUv, o.uvUnpack);
     return out;
 }
 

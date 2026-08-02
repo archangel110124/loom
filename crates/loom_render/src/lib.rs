@@ -234,22 +234,29 @@ mod tests {
 
     #[test]
     fn push_constants_match_the_shader_block() {
-        // A packed vertex is 8 bytes, not 32 — 10-10-10 position quantised
-        // against the mesh bounds plus an octahedral normal. Blocky-voxel
-        // engines pack into 4 bytes by exploiting an integer lattice and six
-        // axis normals; smooth SDF surfaces have neither, so 8 is the honest
-        // floor here.
-        assert_eq!(size_of::<loom_asset::PackedVertex>(), 8);
+        // A packed vertex is 12 bytes, not 40 — 10-10-10 position quantised
+        // against the mesh bounds, an octahedral normal, and a UV quantised
+        // against the mesh's UV bounds. Blocky-voxel engines pack into 4 bytes
+        // by exploiting an integer lattice and six axis normals; smooth SDF
+        // surfaces have neither, so this is the honest floor here.
+        //
+        // **The shader mirrors this as three `uint`s and indexes it as an
+        // array**, so the stride has to be exactly 12 with no tail padding.
+        // Nothing warns if it drifts: the vertex buffer is read through a raw
+        // device address, so a mismatched stride is not an error, it is a mesh
+        // that comes out sheared.
+        assert_eq!(size_of::<loom_asset::PackedVertex>(), 12);
+        assert_eq!(align_of::<loom_asset::PackedVertex>(), 4);
 
-        // Push constants now carry only two device addresses: 16 bytes against
-        // a guaranteed minimum of 128. Per-object data lives in a buffer, so
-        // adding fields to it can never push this over the limit — which is the
-        // point of the buffer-device-address model.
-        assert_eq!(size_of::<u64>() * 2, 16);
-        // std430 for a PhysicalStorageBuffer block: every member 16-aligned.
-        // `[f32; 3]` would put a vertex normal at offset 12 and spirv-val
-        // rejects it, so the vertex is two vec4s.
-        assert_eq!(size_of::<[f32; 4]>() * 2, 32, "Vertex must stay 16-aligned");
+        // Push constants carry a matrix, two device addresses and an index,
+        // against a guaranteed minimum of 128 bytes. Per-object data lives in
+        // a buffer, so adding fields *there* can never push this over the
+        // limit — which is the point of the buffer-device-address model.
+        assert!(
+            size_of::<crate::renderer::Push>() <= 128,
+            "push block is {} bytes, over the guaranteed 128",
+            size_of::<crate::renderer::Push>()
+        );
     }
 
     #[test]

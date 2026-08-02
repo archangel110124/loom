@@ -110,6 +110,8 @@ pub(crate) struct ObjectData {
     model: [f32; 16],
     /// Decode parameters for this object's packed vertices: xyz origin, w step.
     unpack: [f32; 4],
+    /// Decode parameters for this object's packed UVs: xy origin, z step.
+    uv_unpack: [f32; 4],
     /// Rows of inverse-transpose(model)'s upper 3x3, padded to `vec4`.
     normal: [[f32; 4]; 3],
     color: [f32; 4],
@@ -942,8 +944,32 @@ pub(crate) unsafe fn set_viewport(
     }
 }
 
+/// How to decode one mesh's packed vertices.
+///
+/// Both halves quantise against the mesh's own bounds, so a prop and a terrain
+/// each get the full precision of their own range rather than sharing one.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Unpack {
+    /// xyz quantisation origin, w step.
+    pub(crate) position: [f32; 4],
+    /// xy UV origin, z step, w unused.
+    pub(crate) uv: [f32; 4],
+}
+
+impl Default for Unpack {
+    fn default() -> Self {
+        Self {
+            // Step 1 rather than 0: a zero step collapses every vertex of a
+            // mesh with no entry onto its origin.
+            position: [0.0, 0.0, 0.0, 1.0],
+            uv: [0.0, 0.0, 1.0, 0.0],
+        }
+    }
+}
+
 /// Per-mesh decode parameters, produced alongside the packed vertices.
-pub(crate) type UnpackParams = Vec<[f32; 4]>;
+pub(crate) type UnpackParams = Vec<Unpack>;
 
 /// Concatenate a mesh library into one vertex buffer and one index buffer.
 ///
@@ -971,7 +997,10 @@ pub(crate) fn combine(
         // give a small prop the precision of the largest terrain.
         let (packed, bounds) = loom_asset::packed::pack(&mesh.vertices);
         vertices.extend_from_slice(&packed);
-        unpack.push([bounds.origin[0], bounds.origin[1], bounds.origin[2], bounds.step]);
+        unpack.push(Unpack {
+            position: [bounds.origin[0], bounds.origin[1], bounds.origin[2], bounds.step],
+            uv: [bounds.uv_origin[0], bounds.uv_origin[1], bounds.uv_step, 0.0],
+        });
 
         indices.extend(mesh.indices.iter().map(|i| i + base));
         ranges.push(MeshRange {
@@ -984,7 +1013,7 @@ pub(crate) fn combine(
     if vertices.is_empty() {
         vertices.push(loom_asset::PackedVertex::default());
         indices.push(0);
-        unpack.push([0.0, 0.0, 0.0, 1.0]);
+        unpack.push(Unpack::default());
     }
     (vertices, indices, ranges, unpack)
 }
@@ -1083,7 +1112,13 @@ pub(crate) fn pack_objects(
                 unpack: unpack
                     .get(object.mesh as usize)
                     .copied()
-                    .unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                    .unwrap_or_default()
+                    .position,
+                uv_unpack: unpack
+                    .get(object.mesh as usize)
+                    .copied()
+                    .unwrap_or_default()
+                    .uv,
                 normal: [
                     rows.x_axis.extend(0.0).to_array(),
                     rows.y_axis.extend(0.0).to_array(),

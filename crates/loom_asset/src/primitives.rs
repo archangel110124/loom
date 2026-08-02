@@ -63,7 +63,13 @@ pub fn box_mesh() -> Mesh {
                 normal[1] + u[1] * su + v[1] * sv,
                 normal[2] + u[2] * su + v[2] * sv,
             ];
-            mesh.vertices.push(Vertex::new(position, normal));
+            // Each face gets the whole unit square, so a texture reads at the
+            // same scale on all six regardless of how the cube is scaled.
+            mesh.vertices.push(Vertex::with_uv(
+                position,
+                normal,
+                [su.mul_add(0.5, 0.5), sv.mul_add(0.5, 0.5)],
+            ));
         }
         mesh.indices
             .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -78,10 +84,10 @@ pub fn plane() -> Mesh {
     Mesh {
         name: "plane".into(),
         vertices: vec![
-            Vertex::new([-1.0, 0.0, 1.0], n),
-            Vertex::new([1.0, 0.0, 1.0], n),
-            Vertex::new([1.0, 0.0, -1.0], n),
-            Vertex::new([-1.0, 0.0, -1.0], n),
+            Vertex::with_uv([-1.0, 0.0, 1.0], n, [0.0, 0.0]),
+            Vertex::with_uv([1.0, 0.0, 1.0], n, [1.0, 0.0]),
+            Vertex::with_uv([1.0, 0.0, -1.0], n, [1.0, 1.0]),
+            Vertex::with_uv([-1.0, 0.0, -1.0], n, [0.0, 1.0]),
         ],
         indices: vec![0, 1, 2, 0, 2, 3],
     }
@@ -107,8 +113,10 @@ pub fn sphere(segments: u32, rings: u32) -> Mesh {
                 phi.cos(),
                 phi.sin() * theta.sin(),
             ];
-            // On a unit sphere the position *is* the normal.
-            mesh.vertices.push(Vertex::new(position, position));
+            // On a unit sphere the position *is* the normal. The UV grid is
+            // the sphere's own parameterisation — longitude across, latitude
+            // down — which is the mapping an equirectangular texture expects.
+            mesh.vertices.push(Vertex::with_uv(position, position, [u, v]));
         }
     }
     let stride = segments + 1;
@@ -134,11 +142,12 @@ pub fn cylinder(segments: u32) -> Mesh {
     // Side wall: duplicated ring so the seam normal is not averaged.
     for segment in 0..=segments {
         #[allow(clippy::cast_precision_loss)]
-        let theta = (segment as f32 / segments as f32) * std::f32::consts::TAU;
+        let u = segment as f32 / segments as f32;
+        let theta = u * std::f32::consts::TAU;
         let (s, c) = theta.sin_cos();
         let normal = [c, 0.0, s];
-        mesh.vertices.push(Vertex::new([c, -1.0, s], normal));
-        mesh.vertices.push(Vertex::new([c, 1.0, s], normal));
+        mesh.vertices.push(Vertex::with_uv([c, -1.0, s], normal, [u, 0.0]));
+        mesh.vertices.push(Vertex::with_uv([c, 1.0, s], normal, [u, 1.0]));
     }
     for segment in 0..segments {
         let a = segment * 2;
@@ -150,12 +159,18 @@ pub fn cylinder(segments: u32) -> Mesh {
     // with the curved wall.
     for (y, normal) in [(-1.0_f32, [0.0, -1.0, 0.0]), (1.0, [0.0, 1.0, 0.0])] {
         let centre = u32::try_from(mesh.vertices.len()).unwrap_or(0);
-        mesh.vertices.push(Vertex::new([0.0, y, 0.0], normal));
+        // The cap is a disc, so its unwrap is the texture's inscribed circle
+        // rather than a strip: centre at the middle, rim on the unit circle.
+        mesh.vertices.push(Vertex::with_uv([0.0, y, 0.0], normal, [0.5, 0.5]));
         for segment in 0..=segments {
             #[allow(clippy::cast_precision_loss)]
             let theta = (segment as f32 / segments as f32) * std::f32::consts::TAU;
             let (s, c) = theta.sin_cos();
-            mesh.vertices.push(Vertex::new([c, y, s], normal));
+            mesh.vertices.push(Vertex::with_uv(
+                [c, y, s],
+                normal,
+                [c.mul_add(0.5, 0.5), s.mul_add(0.5, 0.5)],
+            ));
         }
         for segment in 0..segments {
             let a = centre + 1 + segment;
@@ -196,13 +211,20 @@ pub fn capsule(segments: u32, rings: u32) -> Mesh {
         };
         let offset = if top { 1.0 } else { -1.0 };
 
+        #[allow(clippy::cast_precision_loss)]
+        let v = ring as f32 / total_rings as f32;
         for segment in 0..=segments {
             #[allow(clippy::cast_precision_loss)]
-            let theta = (segment as f32 / segments as f32) * std::f32::consts::TAU;
+            let u = segment as f32 / segments as f32;
+            let theta = u * std::f32::consts::TAU;
             let (s, c) = theta.sin_cos();
             let normal = [phi.cos() * c, phi.sin(), phi.cos() * s];
             let position = [normal[0], normal[1] + offset, normal[2]];
-            mesh.vertices.push(Vertex::new(position, normal));
+            // Ring index rather than arc length, so the two hemispheres and
+            // the band share one continuous unwrap. The caps are slightly
+            // compressed against the band, which is what a capsule texture
+            // expects anyway.
+            mesh.vertices.push(Vertex::with_uv(position, normal, [u, v]));
         }
     }
     let stride = segments + 1;
@@ -219,6 +241,31 @@ pub fn capsule(segments: u32, rings: u32) -> Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every primitive is unwrapped across the full `0..1` range on both axes.
+    ///
+    /// A primitive whose UVs were all zero would sample a single texel of its
+    /// albedo map and render as one flat colour — which reads as a broken
+    /// texture rather than as a missing unwrap, and is the kind of thing that
+    /// gets debugged in the shader for an hour.
+    #[test]
+    fn every_primitive_is_unwrapped() {
+        for name in NAMES {
+            let mesh = build(name).expect("NAMES only holds real primitives");
+            for axis in 0..2 {
+                let min = mesh.vertices.iter().map(|v| v.uv[axis]).fold(f32::MAX, f32::min);
+                let max = mesh.vertices.iter().map(|v| v.uv[axis]).fold(f32::MIN, f32::max);
+                assert!(
+                    (max - min) > 0.99,
+                    "{name} spans only {min}..{max} on uv axis {axis}"
+                );
+                assert!(
+                    (-0.001..=1.001).contains(&min) && (-0.001..=1.001).contains(&max),
+                    "{name} leaves the unit square on uv axis {axis}: {min}..{max}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn every_named_primitive_builds_and_validates() {

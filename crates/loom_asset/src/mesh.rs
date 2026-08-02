@@ -12,14 +12,29 @@ use crate::AssetError;
 pub struct Vertex {
     pub position: [f32; 4],
     pub normal: [f32; 4],
+    /// Texture coordinates. `[0, 0]` for geometry that has none — voxel
+    /// meshes, which are textured triplanar because Surface Nets has no
+    /// surface to unwrap.
+    pub uv: [f32; 2],
 }
 
 impl Vertex {
+    /// A vertex with no texture coordinates.
+    ///
+    /// Kept as the short constructor because most callers are procedural
+    /// geometry that genuinely has no UVs, and writing `[0.0, 0.0]` at every
+    /// one of them would say nothing.
     #[must_use]
     pub fn new(position: [f32; 3], normal: [f32; 3]) -> Self {
+        Self::with_uv(position, normal, [0.0, 0.0])
+    }
+
+    #[must_use]
+    pub fn with_uv(position: [f32; 3], normal: [f32; 3], uv: [f32; 2]) -> Self {
         Self {
             position: [position[0], position[1], position[2], 1.0],
             normal: [normal[0], normal[1], normal[2], 0.0],
+            uv,
         }
     }
 }
@@ -118,11 +133,20 @@ pub fn import_gltf(path: &std::path::Path) -> Result<Mesh, AssetError> {
                 .read_normals()
                 .map_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()], Iterator::collect);
 
+            // UV set 0. A glTF may carry several, and may carry none at all —
+            // an untextured mesh legitimately has no unwrap. Missing UVs
+            // become `[0, 0]`, which a material can still handle by asking
+            // for triplanar projection instead.
+            let uvs: Vec<[f32; 2]> = reader
+                .read_tex_coords(0)
+                .map_or_else(Vec::new, |t| t.into_f32().collect());
+
             let base = u32::try_from(mesh.vertices.len()).unwrap_or(0);
             for (i, position) in positions.iter().enumerate() {
-                mesh.vertices.push(Vertex::new(
+                mesh.vertices.push(Vertex::with_uv(
                     *position,
                     normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+                    uvs.get(i).copied().unwrap_or([0.0, 0.0]),
                 ));
             }
 
@@ -176,12 +200,18 @@ mod tests {
         assert!(mesh.validate().is_err(), "2 indices is not a triangle");
     }
 
+    /// This type is CPU-side authoring data and no longer reaches the GPU —
+    /// [`crate::PackedVertex`] does, and carries the std430 constraint that
+    /// used to live here. What is still worth pinning is the field order,
+    /// because `renderer::combine` and the ray-tracing position buffer both
+    /// read `position` as the leading three floats.
     #[test]
-    fn vertex_stays_sixteen_byte_aligned() {
-        // std430 for a PhysicalStorageBuffer block. `[f32; 3]` members would
-        // put `normal` at offset 12 and spirv-val rejects the module.
-        assert_eq!(size_of::<Vertex>(), 32);
-        assert_eq!(align_of::<Vertex>(), 4);
+    fn a_vertex_leads_with_its_position() {
+        let v = Vertex::with_uv([1.0, 2.0, 3.0], [0.0, 1.0, 0.0], [0.25, 0.75]);
+
+        assert_eq!(std::mem::offset_of!(Vertex, position), 0);
+        assert_eq!(v.position[..3], [1.0, 2.0, 3.0]);
+        assert_eq!(v.uv, [0.25, 0.75]);
     }
 }
 
