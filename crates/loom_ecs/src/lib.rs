@@ -148,6 +148,10 @@ pub struct World {
     paths: Storage<String>,
     /// The `.rhai` file a node's `Script` component names.
     scripts: Storage<String>,
+    /// The `.rhai` file a node's `GameRules` component names. Separate from
+    /// `scripts` because it is a different entry point with a different
+    /// contract, and one node could legitimately carry both.
+    rules: Storage<String>,
     /// `RigidBody`: whether it falls, and its mass.
     bodies: Storage<(bool, f32)>,
     /// Field of view for every node carrying an active `Camera`. Resolved on
@@ -359,6 +363,14 @@ impl World {
             if let Some(character) = node.components.get("CharacterController") {
                 world.character.insert(entity, character.clone());
             }
+            if let Some(path) = node
+                .components
+                .get("GameRules")
+                .and_then(|s| s.get("path"))
+                .and_then(|p| p.as_str())
+            {
+                world.rules.insert(entity, path.to_owned());
+            }
             if let Some(blast) = node.components.get("Blast") {
                 world.blast.insert(entity, blast.clone());
             }
@@ -452,6 +464,28 @@ impl World {
     #[must_use]
     pub fn character(&self, entity: Entity) -> Option<&serde_json::Value> {
         self.character.get(entity)
+    }
+
+    /// The `.rhai` file this node's `GameRules` names, if it has one.
+    #[must_use]
+    pub fn rules_path(&self, entity: Entity) -> Option<&str> {
+        self.rules.get(entity).map(String::as_str)
+    }
+
+    /// Every node's world path and position, for the rules script.
+    ///
+    /// Built fresh rather than cached: a rules script runs after everything
+    /// has moved, so a cache would be one tick stale exactly where it matters.
+    #[must_use]
+    pub fn positions(&self) -> Vec<(String, [f32; 3])> {
+        self.order
+            .iter()
+            .filter_map(|e| {
+                let path = self.paths.get(*e)?;
+                let m = self.global.get(*e)?.matrix;
+                Some((path.clone(), [m[12], m[13], m[14]]))
+            })
+            .collect()
     }
 
     /// The `Blast` a node declares, if any.

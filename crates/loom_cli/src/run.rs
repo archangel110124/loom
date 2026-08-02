@@ -185,6 +185,9 @@ struct App {
     /// Draw calls for the simulated world, refreshed only on ticks that
     /// actually ran.
     play_objects: Vec<loom_render::Object>,
+    /// The game result already reported, so the log line is written once
+    /// rather than on every frame after the game ends.
+    reported_status: Option<&'static str>,
     /// How many script-fired explosions have already been given to the
     /// particle systems. The runner's list only grows, so the tail past this
     /// is what is new — no event queue, and nothing to miss if a frame is slow.
@@ -305,6 +308,7 @@ impl App {
             mode: Mode::Move,
             handles: Vec::new(),
             play_objects: Vec::new(),
+            reported_status: None,
             detonations_seen: 0,
             captured: false,
             plumes: None,
@@ -803,6 +807,7 @@ impl ApplicationHandler for App {
                     self.spawn_new_detonations();
                 }
                 let stepped = self.play.as_ref().map_or(0, |p| p.ticks.saturating_sub(before));
+                self.report_game_result();
 
                 // While driving a character the view is the scene's camera,
                 // which the character carries. The fly camera is still there
@@ -1119,6 +1124,7 @@ impl App {
         // too. Leaving the counter high would make the first shot of the next
         // run look like one already seen, and it would never be drawn.
         self.detonations_seen = 0;
+        self.reported_status = None;
         self.plumes = None;
         if let Some(play) = self.play.take() {
             crate::log::info(format!(
@@ -1135,6 +1141,35 @@ impl App {
         {
             self.next_watch = std::time::Instant::now();
         }
+    }
+
+    /// Say how the game ended, once.
+    ///
+    /// The window has no HUD, so the console is where a result goes. Without
+    /// it a game that ends simply stops moving, which is indistinguishable
+    /// from a simulation that broke.
+    fn report_game_result(&mut self) {
+        let Some(play) = self.play.as_ref() else {
+            return;
+        };
+        let status = play.state().status();
+        if !status.is_over() || self.reported_status == Some(status.as_str()) {
+            return;
+        }
+        self.reported_status = Some(status.as_str());
+        let message = play.state().message().to_owned();
+        let numbers: Vec<String> = play
+            .state()
+            .numbers()
+            .iter()
+            .map(|(name, value)| format!("{name} {value:.0}"))
+            .collect();
+        crate::log::info(format!(
+            "{} — {message}{}{}",
+            status.as_str().to_uppercase(),
+            if numbers.is_empty() { "" } else { " · " },
+            numbers.join(", ")
+        ));
     }
 
     /// Give the particle systems any explosion a script has just set off.

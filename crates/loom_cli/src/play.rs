@@ -501,6 +501,9 @@ pub struct Runner {
     character_scripts: std::collections::BTreeMap<loom_ecs::Entity, String>,
     /// Scripts on ordinary nodes, which write a transform directly.
     node_scripts: Vec<(loom_ecs::Entity, String)>,
+    /// The game's rules, if the scene has any, and the state they keep.
+    rules: Option<String>,
+    state: loom_script::GameState,
     /// Blasts that have not gone off yet: the tick they fire on, and what
     /// they do. Sorted by tick and drained from the front.
     ///
@@ -553,6 +556,29 @@ impl Runner {
             }
         }
 
+        // The rules script, compiled like any other. At most one: a game has
+        // one set of rules, and two scripts both deciding whether it is over
+        // is a race with no winner.
+        let mut rules = None;
+        for entity in world.entities() {
+            let Some(path) = world.rules_path(*entity) else {
+                continue;
+            };
+            if rules.is_some() {
+                crate::log::warn(format!(
+                    "more than one GameRules in this scene; ignoring {path}"
+                ));
+                continue;
+            }
+            let source = std::fs::read_to_string(base.join(path)).map_err(|e| {
+                crate::json_line(&serde_json::json!({
+                    "error": "io_error", "script": path, "constraint": e.to_string(),
+                }))
+            })?;
+            host.compile(path, &source).map_err(|e| crate::json_line(&e))?;
+            rules = Some(path.to_owned());
+        }
+
         // Blasts, in the order they go off.
         let mut pending_blasts = Vec::new();
         for entity in world.entities() {
@@ -602,10 +628,18 @@ impl Runner {
             host,
             character_scripts,
             node_scripts,
+            rules,
+            state: loom_script::GameState::default(),
             pending_blasts,
             fired: Vec::new(),
             input: loom_script::Motion::default(),
         })
+    }
+
+    /// The game's state: status, message and whatever the rules are keeping.
+    #[must_use]
+    pub fn state(&self) -> &loom_script::GameState {
+        &self.state
     }
 
     /// Blasts set off by scripts so far, with the tick each fired on.
@@ -623,6 +657,8 @@ impl Runner {
             host: loom_script::ScriptHost::default(),
             character_scripts: std::collections::BTreeMap::new(),
             node_scripts: Vec::new(),
+            rules: None,
+            state: loom_script::GameState::default(),
             pending_blasts: Vec::new(),
             fired: Vec::new(),
             input: loom_script::Motion::default(),
@@ -704,6 +740,24 @@ impl Runner {
             }
         }
         world.propagate_transforms();
+
+        // **The rules run last.** They judge the tick, so they have to see it
+        // finished: a rule reading a position before the character moved is
+        // reading last tick's world and would call the game a tick early.
+        if let Some(rules) = &self.rules {
+            let positions = world.positions();
+            let detonations: Vec<loom_script::Detonation> = self
+                .fired
+                .iter()
+                .filter(|(at, _)| *at == tick)
+                .map(|(_, blast)| *blast)
+                .collect();
+            let view = loom_script::WorldView {
+                positions: &positions,
+                detonations: &detonations,
+            };
+            self.host.rules(rules, tick, TICK_SECONDS, &view, &mut self.state)?;
+        }
         Ok(())
     }
 }
@@ -825,6 +879,12 @@ impl Play {
         self.world.active_camera()
     }
 
+    /// The game's status, message and numbers.
+    #[must_use]
+    pub fn state(&self) -> &loom_script::GameState {
+        self.runner.state()
+    }
+
     /// Blasts scripts have set off, with the tick each fired on.
     #[must_use]
     pub fn fired(&self) -> &[(u64, loom_script::Detonation)] {
@@ -913,6 +973,11 @@ impl Play {
     /// same failure sixty times a second, and the log line that matters would
     /// scroll away inside its own repeats.
     pub fn run(&mut self, ticks: u32) {
+        // A finished game does not keep running. Play stays open on the last
+        // frame so the human can see how it ended; Stop resets it.
+        if self.runner.state().status().is_over() {
+            return;
+        }
         for _ in 0..ticks {
             self.ticks += 1;
             self.apply_look();
@@ -931,6 +996,9 @@ impl Play {
             if let Err(e) = self.runner.tick(&mut self.world, u64::from(self.ticks)) {
                 crate::log::warn(format!("{}: {} — paused", e.script, e.message));
                 self.paused = true;
+                return;
+            }
+            if self.runner.state().status().is_over() {
                 return;
             }
         }
@@ -1762,6 +1830,101 @@ transform = { pos = [0.0, 6.0, 0.0] }
             (1..=2).contains(&shots),
             "a second of holding fire produced {shots} explosions"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // The game loop.
+    // ---------------------------------------------------------------
+
+    fn range() -> Play {
+        let source = std::fs::read_to_string("../../assets/test/range.loom").expect("fixture");
+        let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+        Play::start(world, std::path::Path::new("../../assets/test"))
+    }
+
+    /// **The whole loop.** A turret fires, a blast throws two targets off the
+    /// platform, and rules nobody compiled into the engine decide that means
+    /// the game is won.
+    #[test]
+    fn a_game_can_be_won() {
+        let mut play = range();
+
+        play.run(200);
+
+        assert_eq!(play.state().status(), loom_script::Status::Won);
+        assert_eq!(play.state().number("destroyed"), Some(2.0));
+        assert_eq!(play.state().number("score"), Some(200.0));
+        assert!(
+            play.state().message().contains("cleared"),
+            "message was {:?}",
+            play.state().message()
+        );
+    }
+
+    /// A won game stops. Left running, the world drifts on after the result
+    /// was decided — so a generous `--ticks` would report a different final
+    /// state than an exact one, and both would claim to be the same run.
+    #[test]
+    fn a_finished_game_stops_advancing() {
+        let mut play = range();
+        play.run(200);
+        let ended_at = play.ticks;
+
+        play.run(400);
+
+        assert_eq!(play.ticks, ended_at, "the game kept running after it ended");
+        assert!(ended_at < 200, "it should have ended early: {ended_at}");
+    }
+
+    /// The other outcome. The range always wins, so losing needs a scene whose
+    /// targets are never touched — the rules' clock has to be able to run out.
+    #[test]
+    fn a_game_can_be_lost_on_time() {
+        let source = std::fs::read_to_string("../../assets/test/range.loom").expect("fixture");
+        // The turret fires at tick 30; moving that past the limit means the
+        // targets are never hit and the clock decides it.
+        let never = source.replace("turret.rhai", "idle.rhai");
+        std::fs::write(
+            std::path::Path::new("../../assets/scripts/idle.rhai"),
+            "// A character that does nothing, so the rules' clock can run out.\n             velocity = [0.0, velocity[1] - 24.0 * dt, 0.0];\n",
+        )
+        .expect("write");
+        let world = World::from_scene(&Scene::parse(&never).expect("valid scene"));
+        let mut play = Play::start(world, std::path::Path::new("../../assets/test"));
+
+        play.run(700);
+
+        assert_eq!(play.state().status(), loom_script::Status::Lost);
+        assert_eq!(play.state().number("destroyed"), Some(0.0));
+        assert!(
+            play.state().message().contains("out of time"),
+            "message was {:?}",
+            play.state().message()
+        );
+    }
+
+    /// **Rules run last, and that is load-bearing.** They judge a tick, so
+    /// they have to see it finished: `detonations` holds what went off on
+    /// *this* tick, and a rules pass that ran before the characters acted
+    /// would find it empty every time. The game would simply never end, and
+    /// nothing about the ordering would look wrong in the code.
+    #[test]
+    fn rules_see_what_happened_on_the_tick_they_judge() {
+        let source = std::fs::read_to_string("../../assets/test/range.loom").expect("fixture");
+        let watching = source.replace("rules.rhai", "rules_on_blast.rhai");
+        let world = World::from_scene(&Scene::parse(&watching).expect("valid scene"));
+        let mut play = Play::start(world, std::path::Path::new("../../assets/test"));
+
+        play.run(200);
+
+        assert_eq!(
+            play.state().status(),
+            loom_script::Status::Won,
+            "the rules never saw the shot the turret fired"
+        );
+        // The turret fires at tick 30; the game must end on that tick, not a
+        // tick later and not never.
+        assert_eq!(play.ticks, 30, "ended on the wrong tick");
     }
 
     #[test]

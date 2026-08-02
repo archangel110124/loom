@@ -472,6 +472,29 @@ impl Default for Blast {
     }
 }
 
+/// The game's rules: a script that runs once per tick for the whole scene.
+///
+/// **This is the game loop, and none of it is in the engine.** The engine
+/// contributes the loop — run this every tick, after everything has moved,
+/// and stop when it says the game is over. What winning means, what health
+/// is, whether there is a score at all: rules, and rules are authored.
+///
+/// Distinct from `Script`, which belongs to a node. A `Script` on a character
+/// is its movement model and on anything else moves its transform; both are
+/// about one node. Rules are about the game, so they hang off no node in
+/// particular and keep their own state, which outlives any character.
+///
+/// The script reads `positions` and `detonations`, and writes `state`,
+/// `status` (`"playing"`, `"won"`, `"lost"`) and `message`. It cannot move
+/// anything — a rule that could teleport a node would be a movement model
+/// wearing a different hat, and that already has a seam.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct GameRules {
+    /// Project-relative path to a `.rhai` file.
+    pub path: String,
+}
+
 /// Attaches a sandboxed Rhai script to the node.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -500,6 +523,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<Camera>("Camera");
     reg.register::<CharacterController>("CharacterController");
     reg.register::<Blast>("Blast");
+    reg.register::<GameRules>("GameRules");
     reg.register::<Script>("Script");
     reg
 }

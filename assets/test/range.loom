@@ -24,14 +24,19 @@
 #   loom run assets/test/range.loom --edit     # Play, then left click
 #
 # Or headless, which is the version that is checked:
-#   loom sim assets/test/range.loom --ticks 120 --assert "Range/Target.x > 3.0"
+#   loom sim assets/test/range.loom --ticks 400 --assert "status == won"
 
 [scene]
 format = 1
 id = "a17d3f68-95c2-4e0b-b34a-6f81d05e2c93"
 
+# The rules. Not attached to anything in particular, because a game is not a
+# node: the score has to outlive the targets it counts.
 [[node]]
 name = "Range"
+
+  [node.components.GameRules]
+  path = "../scripts/rules.rhai"
 
 # ---------------------------------------------------------------------------
 # The shooter. Faces -Z down the range at the targets.

@@ -352,6 +352,7 @@ name = \"Root\"
             "Camera",
             "CharacterController",
             "Blast",
+            "GameRules",
         ] {
             assert!(reg.describe(name).is_some(), "{name} is not registered");
         }

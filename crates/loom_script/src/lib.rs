@@ -194,6 +194,99 @@ impl ScriptMemory {
     }
 }
 
+/// How a game ended, or that it has not.
+///
+/// **The engine has no idea what winning means.** It knows only that a game
+/// can be over and which way — enough to stop the simulation, report a result
+/// and let an assertion check it. What counts as a win is a rule, and rules
+/// are authored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    #[default]
+    Playing,
+    Won,
+    Lost,
+}
+
+impl Status {
+    #[must_use]
+    pub fn is_over(self) -> bool {
+        !matches!(self, Self::Playing)
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Playing => "playing",
+            Self::Won => "won",
+            Self::Lost => "lost",
+        }
+    }
+}
+
+/// The game's own state, across the whole run.
+///
+/// Distinct from [`ScriptMemory`], which belongs to one character. Health,
+/// score, ammo, how many objectives are left — none of that is any one node's
+/// business, and hanging it off a character means it dies when the character
+/// does.
+#[derive(Debug, Clone, Default)]
+pub struct GameState {
+    /// Whatever the rules script keeps. Opaque to the host, like memory.
+    values: rhai::Map,
+    status: Status,
+    /// One line for the human: what just happened, or why the game ended.
+    message: String,
+}
+
+impl GameState {
+    #[must_use]
+    pub fn status(&self) -> Status {
+        self.status
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// A named number the rules script is keeping, for assertions and for a
+    /// HUD. Only numbers: a score is checkable, an arbitrary object is not.
+    #[must_use]
+    pub fn number(&self, name: &str) -> Option<f64> {
+        self.values.get(name).and_then(|v| v.as_float().ok().or_else(|| {
+            #[allow(clippy::cast_precision_loss)]
+            v.as_int().ok().map(|i| i as f64)
+        }))
+    }
+
+    /// Every number it is keeping, in name order, for reporting.
+    #[must_use]
+    pub fn numbers(&self) -> Vec<(String, f64)> {
+        let mut out: Vec<(String, f64)> = self
+            .values
+            .keys()
+            .filter_map(|k| self.number(k).map(|v| (k.to_string(), v)))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+}
+
+/// What the rules script is allowed to see of the world this tick.
+///
+/// Positions by node path, and what has just happened. Handed in rather than
+/// queried, for the same reason the aim ray is: a script has no access to the
+/// scene or the physics world, and registering a host function that borrows
+/// either would put a live handle to the simulation inside the sandbox.
+pub struct WorldView<'a> {
+    /// Every node's world position, by path.
+    pub positions: &'a [(String, [f32; 3])],
+    /// Explosions that went off this tick.
+    pub detonations: &'a [Detonation],
+}
+
 /// A sandboxed script host.
 pub struct ScriptHost {
     engine: Engine,
@@ -375,6 +468,93 @@ impl ScriptHost {
                     .unwrap_or(300.0),
             }),
         })
+    }
+
+    /// Run the game's rules for one tick.
+    ///
+    /// **This is the game loop.** It runs once per tick after everything else
+    /// has moved, is attached to no particular node, and is the only thing in
+    /// the engine that can decide the game is over. Everything it does is a
+    /// rule, and every rule is authored — the engine contributes the loop and
+    /// nothing about what winning means.
+    ///
+    /// It reads the world (positions, and what exploded) and writes `state`,
+    /// `status` and `message`. It cannot move anything: a rule that could
+    /// teleport a node would be a movement model wearing a different hat, and
+    /// those already have a seam.
+    ///
+    /// # Errors
+    /// [`ScriptError`] if the script is unknown, traps a limit, or throws.
+    pub fn rules(
+        &self,
+        name: &str,
+        tick: u64,
+        dt: f32,
+        view: &WorldView,
+        state: &mut GameState,
+    ) -> Result<(), ScriptError> {
+        let Some(ast) = self.compiled.get(name) else {
+            return Err(ScriptError {
+                error: "unknown_script".to_owned(),
+                script: name.to_owned(),
+                line: None,
+                message: format!("no compiled script named `{name}`"),
+                hint: Some("Compile it before running it.".to_owned()),
+            });
+        };
+
+        let mut scope = Scope::new();
+        scope.push("tick", i64::try_from(tick).unwrap_or(i64::MAX));
+        scope.push("dt", f64::from(dt));
+        scope.push("state", std::mem::take(&mut state.values));
+        scope.push("status", state.status.as_str().to_owned());
+        scope.push("message", state.message.clone());
+
+        // Positions as a map from node path, built fresh each tick.
+        //
+        // `ponytail:` the whole scene, every tick. At blockout scale that is
+        // tens of entries and costs nothing; a hundred thousand nodes would
+        // want a registered query instead, which needs a borrow of the world
+        // that survives into the sandbox — a real design problem, and not one
+        // worth solving before something is actually slow.
+        let mut positions = rhai::Map::new();
+        for (path, at) in view.positions {
+            positions.insert(path.as_str().into(), to_dynamic_vec(*at));
+        }
+        scope.push("positions", positions);
+
+        let detonations: Vec<Dynamic> = view
+            .detonations
+            .iter()
+            .map(|d| {
+                let mut map = rhai::Map::new();
+                map.insert("at".into(), to_dynamic_vec(d.at));
+                map.insert("radius".into(), Dynamic::from_float(f64::from(d.radius)));
+                Dynamic::from_map(map)
+            })
+            .collect();
+        scope.push("detonations", Dynamic::from_array(detonations));
+
+        let result = self.engine.run_ast_with_scope(&mut scope, ast);
+
+        // State comes back even on failure, for the same reason a character's
+        // memory does: the run up to the throw really happened.
+        if let Some(map) = scope.get_value::<rhai::Map>("state") {
+            state.values = map;
+        }
+        result.map_err(|e| self.to_error(name, &e))?;
+
+        if let Some(text) = scope.get_value::<String>("status") {
+            state.status = match text.as_str() {
+                "won" => Status::Won,
+                "lost" => Status::Lost,
+                _ => Status::Playing,
+            };
+        }
+        if let Some(text) = scope.get_value::<String>("message") {
+            state.message = text;
+        }
+        Ok(())
     }
 
     /// Turn a Rhai failure into the project's structured error shape.
@@ -715,6 +895,107 @@ mod tests {
         let out = host.motion("quiet", &held, &mut ScriptMemory::default()).expect("runs");
 
         assert!(out.detonate.is_none(), "silence must stay silent");
+    }
+
+    // ---------------------------------------------------------------
+    // The game loop.
+    // ---------------------------------------------------------------
+
+    fn nowhere() -> Vec<(String, [f32; 3])> {
+        Vec::new()
+    }
+
+    #[test]
+    fn rules_can_end_the_game() {
+        let mut host = host();
+        host.compile("rules", r#"if tick > 10 { status = "won"; message = "cleared"; }"#)
+            .expect("valid");
+        let mut state = GameState::default();
+        let view = WorldView { positions: &nowhere(), detonations: &[] };
+
+        host.rules("rules", 5, 1.0 / 60.0, &view, &mut state).expect("runs");
+        assert_eq!(state.status(), Status::Playing, "not yet");
+
+        host.rules("rules", 20, 1.0 / 60.0, &view, &mut state).expect("runs");
+        assert_eq!(state.status(), Status::Won);
+        assert_eq!(state.message(), "cleared");
+    }
+
+    /// Score, ammo, objectives left — none of it belongs to a node, and all of
+    /// it has to survive the tick that set it.
+    #[test]
+    fn game_state_survives_between_ticks() {
+        let mut host = host();
+        host.compile(
+            "score",
+            r#"
+            let n = if "score" in state { state.score } else { 0 };
+            state.score = n + 5;
+            "#,
+        )
+        .expect("valid");
+        let mut state = GameState::default();
+        let view = WorldView { positions: &nowhere(), detonations: &[] };
+
+        for tick in 0..4 {
+            host.rules("score", tick, 1.0 / 60.0, &view, &mut state).expect("runs");
+        }
+
+        assert_eq!(state.number("score"), Some(20.0));
+    }
+
+    /// The rules have to be able to look at the world, or they can only count
+    /// ticks. This is how "is the target still standing" is expressible.
+    #[test]
+    fn rules_can_read_where_things_are() {
+        let mut host = host();
+        host.compile(
+            "watch",
+            r#"if positions["Range/Target"][1] < 0.0 { status = "won"; }"#,
+        )
+        .expect("valid");
+        let mut state = GameState::default();
+
+        let standing = vec![("Range/Target".to_owned(), [0.0, 1.0, 0.0])];
+        let view = WorldView { positions: &standing, detonations: &[] };
+        host.rules("watch", 1, 1.0 / 60.0, &view, &mut state).expect("runs");
+        assert_eq!(state.status(), Status::Playing, "still up");
+
+        let fallen = vec![("Range/Target".to_owned(), [0.0, -3.0, 0.0])];
+        let view = WorldView { positions: &fallen, detonations: &[] };
+        host.rules("watch", 2, 1.0 / 60.0, &view, &mut state).expect("runs");
+        assert_eq!(state.status(), Status::Won, "knocked into the pit");
+    }
+
+    #[test]
+    fn rules_see_what_exploded() {
+        let mut host = host();
+        host.compile("count", "state.blasts = detonations.len();").expect("valid");
+        let mut state = GameState::default();
+        let bangs = [
+            Detonation { at: [0.0; 3], radius: 3.0, impulse: 10.0 },
+            Detonation { at: [1.0; 3], radius: 3.0, impulse: 10.0 },
+        ];
+        let view = WorldView { positions: &nowhere(), detonations: &bangs };
+
+        host.rules("count", 1, 1.0 / 60.0, &view, &mut state).expect("runs");
+
+        assert_eq!(state.number("blasts"), Some(2.0));
+    }
+
+    /// A rules script is code an agent wrote, like any other. The limits are
+    /// not per-entry-point by accident.
+    #[test]
+    fn a_rules_script_cannot_loop_forever() {
+        let mut host = host();
+        host.compile("hang", "let n = 0; while true { n += 1; }").expect("compiles");
+        let view = WorldView { positions: &nowhere(), detonations: &[] };
+
+        let err = host
+            .rules("hang", 1, 1.0 / 60.0, &view, &mut GameState::default())
+            .expect_err("must be stopped");
+
+        assert_eq!(err.error, "script_op_limit");
     }
 
     /// The sandbox applies here too — this is a new entry point into the
