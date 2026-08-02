@@ -8,7 +8,7 @@ pub mod ops;
 pub mod place;
 mod scene;
 
-pub use edit::{SaveRejected, Session, write_atomically};
+pub use edit::{FileApplyError, SaveRejected, Session, apply_to_file, write_atomically};
 pub use ops::{Applied, SceneOp, Transaction, TransactionError, VersionToken, apply};
 pub use place::{Anchor, Axis, PlaceOp};
 pub use scene::{Node, Scene, SceneError};

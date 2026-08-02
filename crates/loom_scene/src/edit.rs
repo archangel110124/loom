@@ -42,7 +42,14 @@ pub fn write_atomically(path: &std::path::Path, text: &str) -> std::io::Result<(
         .file_name()
         .map_or_else(|| "scene.loom".into(), std::ffi::OsStr::to_string_lossy);
     // Same directory, because `rename` is only atomic within one filesystem.
-    let temporary = directory.join(format!(".{name}.{}.tmp", std::process::id()));
+    //
+    // The pid separates processes; the counter separates threads within one.
+    // Without the counter two threads pick the same temporary name, and the
+    // first rename moves the file out from under the second — which fails with
+    // ENOENT after having already reported nothing wrong.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = directory.join(format!(".{name}.{}.{unique}.tmp", std::process::id()));
 
     let write = || -> std::io::Result<()> {
         let mut file = std::fs::File::create(&temporary)?;
@@ -61,6 +68,69 @@ pub fn write_atomically(path: &std::path::Path, text: &str) -> std::io::Result<(
         return Err(e);
     }
     Ok(())
+}
+
+/// Apply a transaction to a scene file: read, apply, write, as one step.
+///
+/// **The version-token check is only as good as the window it covers.** Every
+/// writer used to read the whole scene, compare the token against that
+/// in-memory snapshot, and then write unconditionally — with nothing held
+/// across the three steps. Two processes interleaving their reads both wrote,
+/// the second silently erased the first, and both reported `ok: true`. The
+/// editor polls four times a second while the agent writes from another
+/// process, so that interleaving is the ordinary case.
+///
+/// Holding an exclusive lock across the whole cycle is what makes
+/// `expect_version` mean anything: the token is now compared against a scene
+/// that cannot change before the write lands.
+///
+/// # Errors
+/// [`FileApplyError::Io`] if the file cannot be read, locked or written;
+/// [`FileApplyError::Rejected`] if the transaction is invalid or stale.
+pub fn apply_to_file(
+    path: &std::path::Path,
+    transaction: &Transaction,
+) -> Result<Applied, FileApplyError> {
+    let _guard = lock_scene(path).map_err(FileApplyError::Io)?;
+
+    let source = std::fs::read_to_string(path).map_err(FileApplyError::Io)?;
+    let applied = apply(&source, transaction).map_err(FileApplyError::Rejected)?;
+    if !transaction.dry_run {
+        write_atomically(path, &applied.scene).map_err(FileApplyError::Io)?;
+    }
+    Ok(applied)
+}
+
+/// Take the exclusive lock guarding one scene file. Released on drop.
+///
+/// The lock lives on a sidecar rather than the scene itself, because
+/// [`write_atomically`] renames a new file over the target: a lock held on the
+/// scene's inode protects an inode that is about to stop being the scene, and
+/// the next process to open the path would get a different inode and lock
+/// that instead. The sidecar is never renamed, so everyone contends for the
+/// same object.
+///
+/// # Errors
+/// [`std::io::Error`] if the lock file cannot be created or locked.
+fn lock_scene(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let directory = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let name = path
+        .file_name()
+        .map_or_else(|| "scene.loom".into(), std::ffi::OsStr::to_string_lossy);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(directory.join(format!(".{name}.lock")))?;
+    file.lock()?;
+    Ok(file)
+}
+
+/// Why applying a transaction to a file did not happen.
+#[derive(Debug)]
+pub enum FileApplyError {
+    Io(std::io::Error),
+    Rejected(Box<TransactionError>),
 }
 
 /// Why a save did not happen.
@@ -503,6 +573,54 @@ name = \"Room\"
             "the kept version reached disk"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Two writers must not lose each other's work.** Every writer read the
+    /// whole scene, checked the version token against that in-memory snapshot,
+    /// and then wrote unconditionally. Nothing held the file across those three
+    /// steps, so two processes interleaving their reads both wrote, the second
+    /// silently erased the first, and both reported `ok: true`.
+    ///
+    /// The editor polls four times a second while the agent writes from another
+    /// process, so this is the ordinary case, not a rare one. never-do #15
+    /// makes losing the human's authored work the worst bug class here.
+    #[test]
+    fn concurrent_writers_do_not_lose_each_others_nodes() {
+        let dir = std::env::temp_dir().join("loom_concurrent_apply");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("scene.loom");
+        super::write_atomically(&path, SCENE).expect("seed");
+
+        const WRITERS: usize = 8;
+        let threads: Vec<_> = (0..WRITERS)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let transaction = Transaction {
+                        label: format!("writer {i}"),
+                        ops: vec![crate::SceneOp::SpawnNode {
+                            parent: "Room".to_owned(),
+                            name: format!("N{i}"),
+                            mesh: None,
+                        }],
+                        dry_run: false,
+                        expect_version: None,
+                    };
+                    super::apply_to_file(&path, &transaction)
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("writer thread").expect("write should succeed");
+        }
+
+        let final_text = std::fs::read_to_string(&path).expect("read back");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let missing: Vec<usize> = (0..WRITERS)
+            .filter(|i| !final_text.contains(&format!("\"N{i}\"")))
+            .collect();
+        assert!(missing.is_empty(), "these writers were silently erased: {missing:?}");
     }
 
     /// **A reader must never see a half-written scene.** `fs::write` truncates

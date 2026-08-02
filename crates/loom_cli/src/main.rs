@@ -131,6 +131,11 @@ fn validate(path: &str) -> (u8, String) {
                     "ok": !blocking,
                     "path": path,
                     "nodes": scene.nodes().len(),
+                    // The read side of read-modify-write. Without this no
+                    // command reported a token, so `expect_version` could not
+                    // be filled in through the intended interface and every
+                    // agent write ran with the staleness check disabled.
+                    "version": loom_scene::VersionToken::of(&src),
                     "physics": findings,
                 })),
             )
@@ -756,12 +761,9 @@ fn scene_tx(path: &str, args: &[String]) -> (u8, String) {
         );
     };
 
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => return (2, json_line(&serde_json::json!({
-            "error": "io_error", "path": path, "constraint": e.to_string(),
-        }))),
-    };
+    // No read of the scene here on purpose: `apply_to_file` reads it inside the
+    // lock. Reading it out here as well would reintroduce the window the lock
+    // exists to close, and the value would be stale by the time it was used.
     let tx_text = match std::fs::read_to_string(&tx_path) {
         Ok(s) => s,
         Err(e) => return (2, json_line(&serde_json::json!({
@@ -780,17 +782,12 @@ fn scene_tx(path: &str, args: &[String]) -> (u8, String) {
         transaction.dry_run = true;
     }
 
-    match loom_scene::apply(&src, &transaction) {
+    // --dry-run prints the diff and touches nothing. This is how the human
+    // reviews a large change before it lands. `apply_to_file` honours it and
+    // holds the scene lock across read-apply-write, so the version check is
+    // compared against a scene that cannot change before the write lands.
+    match loom_scene::apply_to_file(std::path::Path::new(path), &transaction) {
         Ok(applied) => {
-            // --dry-run prints the diff and touches nothing. This is how the
-            // human reviews a large change before it lands.
-            if !transaction.dry_run
-                && let Err(e) = loom_scene::write_atomically(std::path::Path::new(path), &applied.scene)
-            {
-                return (1, json_line(&serde_json::json!({
-                    "error": "io_error", "path": path, "constraint": e.to_string(),
-                })));
-            }
             (
                 0,
                 json_line(&serde_json::json!({
@@ -802,7 +799,21 @@ fn scene_tx(path: &str, args: &[String]) -> (u8, String) {
                 })),
             )
         }
-        Err(e) => (1, json_line(&e)),
+        Err(e) => file_apply_error(path, &e),
+    }
+}
+
+/// Render a failed file-apply as the CLI's two existing error shapes: an io
+/// error names the path, a rejected transaction carries its own JSON.
+fn file_apply_error(path: &str, error: &loom_scene::FileApplyError) -> (u8, String) {
+    match error {
+        loom_scene::FileApplyError::Io(e) => (
+            1,
+            json_line(&serde_json::json!({
+                "error": "io_error", "path": path, "constraint": e.to_string(),
+            })),
+        ),
+        loom_scene::FileApplyError::Rejected(e) => (1, json_line(e)),
     }
 }
 
@@ -1186,24 +1197,27 @@ fn place(path: &str, args: &[String]) -> (u8, String) {
         label: format!("Place: {} op(s)", ops.len()),
         ops: scene_ops,
         dry_run: args.iter().any(|a| a == "--dry-run"),
-        expect_version: None,
+        // Was hardcoded `None`, with no flag to set it, so a semantic
+        // placement could never be rejected as stale — it always overwrote
+        // whatever had landed since it read. `scene --tx` could carry a token
+        // in its JSON; this path had no way to express one at all.
+        // Defaults to the version this command actually read. Unlike
+        // `scene --tx`, placement resolves geometry — bounds, world
+        // transforms, what is "on top of" what — from a read taken *before*
+        // the lock, so the ops it computed only make sense against that
+        // content. Falling back to `None` here would apply geometry reasoned
+        // from one scene to a different one.
+        expect_version: flag(args, "--expect-version")
+            .map(loom_scene::VersionToken)
+            .or_else(|| Some(loom_scene::VersionToken::of(&src))),
     };
-    match loom_scene::apply(&src, &transaction) {
-        Ok(applied) => {
-            if !transaction.dry_run
-                && let Err(e) = loom_scene::write_atomically(std::path::Path::new(path), &applied.scene)
-            {
-                return (1, json_line(&serde_json::json!({
-                    "error": "io_error", "constraint": e.to_string(),
-                })));
-            }
-            (0, json_line(&serde_json::json!({
-                "ok": true, "placed": ops.len(),
-                "dry_run": transaction.dry_run,
-                "version": applied.version,
-            })))
-        }
-        Err(e) => (1, json_line(&e)),
+    match loom_scene::apply_to_file(std::path::Path::new(path), &transaction) {
+        Ok(applied) => (0, json_line(&serde_json::json!({
+            "ok": true, "placed": ops.len(),
+            "dry_run": transaction.dry_run,
+            "version": applied.version,
+        }))),
+        Err(e) => file_apply_error(path, &e),
     }
 }
 
