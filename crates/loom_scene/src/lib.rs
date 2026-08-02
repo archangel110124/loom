@@ -150,6 +150,40 @@ name = \"Root\"
         assert!(hint.contains("transform ="), "point at the real key: {hint}");
     }
 
+    /// §5 of the format spec describes prefab instances, `[node.overrides]`
+    /// and `extends`. **None of it is implemented**, and the parser did not
+    /// know the words — it ignored them. So a prefab instance node became a
+    /// node with no components at all: it drew nothing and lit nothing, and
+    /// the scene validated clean. The spec's own flagship fixture depended on
+    /// it, which is how it went unnoticed.
+    ///
+    /// Refusing them is not a decision to never build prefabs; it is a refusal
+    /// to accept text that means nothing today.
+    #[test]
+    fn an_unimplemented_prefab_key_is_refused_rather_than_ignored() {
+        for line in ["prefab = \"lamp\"", "extends = \"base\""] {
+            let scene = format!("{TRANSFORM_SCENE}{line}\n");
+
+            let Err(errs) = Scene::parse(&scene) else {
+                panic!("`{line}` does nothing today, so it must not be accepted")
+            };
+            assert_eq!(errs[0].error, "not_implemented", "for {line}: {errs:?}");
+            let hint = errs[0].hint.as_deref().unwrap_or_default();
+            assert!(hint.contains("§5"), "point at the spec section: {hint}");
+        }
+    }
+
+    #[test]
+    fn an_overrides_table_is_refused() {
+        let scene =
+            format!("{TRANSFORM_SCENE}\n  [node.overrides]\n  \"Light.intensity\" = 420.0\n");
+
+        let Err(errs) = Scene::parse(&scene) else {
+            panic!("overrides do nothing today, so they must not be accepted")
+        };
+        assert_eq!(errs[0].error, "not_implemented");
+    }
+
     /// Godot's one-root rule — it is what makes scenes composable as instances.
     #[test]
     fn two_roots_is_an_error() {

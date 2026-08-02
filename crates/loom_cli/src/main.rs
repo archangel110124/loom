@@ -223,6 +223,20 @@ fn validate(path: &str) -> (u8, String) {
 
     match Scene::parse(&src) {
         Ok(scene) => {
+            // An alias that resolves to nothing is a `docs/format/README.md` §6
+            // error code, but the renderer deliberately substitutes a box and
+            // carries on (design doc §2.6: degrade, do not crash). Both are
+            // right — a broken asset should not stop a render, and it must not
+            // be invisible to the agent that wrote the alias either. So the
+            // report lives here rather than in `MeshLibrary`.
+            let base = std::path::Path::new(path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let (unresolved, missing) = alias_report(&scene, base);
+            if !unresolved.is_empty() {
+                return (1, json_line(&serde_json::json!({ "errors": unresolved })));
+            }
+
             // Physical sanity runs after schema validation, because a scene
             // that will not load cannot be reasoned about physically. These
             // are warnings by design (graphics doc §C.5): an unusual scene is
@@ -243,6 +257,7 @@ fn validate(path: &str) -> (u8, String) {
                     // agent write ran with the staleness check disabled.
                     "version": loom_scene::VersionToken::of(&src),
                     "physics": findings,
+                    "assets": missing,
                 })),
             )
         }
@@ -250,6 +265,66 @@ fn validate(path: &str) -> (u8, String) {
         // retry loop `docs/format/README.md` §6 exists to avoid.
         Err(errors) => (1, json_line(&serde_json::json!({ "errors": errors }))),
     }
+}
+
+/// Aliases that do not resolve, split by whose problem they are.
+///
+/// **An alias nothing declares is an error** — a typo in the scene, and the
+/// scene is what the agent controls. **A declared alias whose file is not
+/// there is a warning**: the text is right and the workspace is incomplete,
+/// which is an ordinary state during import and not something to reject a
+/// scene over.
+///
+/// Either way it has to be *said*. The renderer substitutes mesh 0, a unit
+/// box, and carries on (design doc §2.6: degrade, do not crash) — which is
+/// right for a render and useless as feedback, because a scene full of
+/// stand-in boxes looks exactly like a scene that loaded.
+fn alias_report(
+    scene: &Scene,
+    base: &std::path::Path,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    for node in scene.nodes() {
+        let Some(alias) = node
+            .components
+            .get("MeshRenderer")
+            .and_then(|m| m.get("mesh"))
+            .and_then(|m| m.get("asset"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+
+        // Primitives resolve procedurally and need no `[[asset]]` entry.
+        if loom_asset::primitives::build(alias).is_some() {
+            continue;
+        }
+
+        match scene.asset_path(alias) {
+            None => errors.push(serde_json::json!({
+                "error": "unresolved_alias",
+                "node": node.path,
+                "field": "MeshRenderer.mesh.asset",
+                "value": alias,
+                "constraint": "an alias declared in [[asset]], or a primitive name",
+                "hint": format!(
+                    "no `[[asset]]` declares `{alias}`. Either add one, or use a \
+                     primitive: box, plane, sphere, cylinder, capsule."
+                ),
+            })),
+            Some(p) if !base.join(p).exists() => warnings.push(serde_json::json!({
+                "warning": "asset_file_missing",
+                "node": node.path,
+                "value": alias,
+                "path": p,
+                "hint": "the scene declares this asset but the file is not there; \
+                         a unit box is drawn in its place.",
+            })),
+            Some(_) => {}
+        }
+    }
+    (errors, warnings)
 }
 
 fn describe(name: &str) -> (u8, String) {
@@ -1696,6 +1771,47 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
             "explode", "run",
         ] {
             assert!(USAGE.contains(command), "usage should mention `{command}`");
+        }
+    }
+
+    /// **A missing asset must be reported, even though the render degrades.**
+    /// `docs/format/README.md` §6 makes `unresolved_alias` a normative M1 error
+    /// code; the renderer substitutes mesh 0 — a unit box — and says nothing.
+    /// Both behaviours are right for their own context: a broken asset should
+    /// not stop a render (design doc §2.6, degrade rather than crash), but it
+    /// must not be invisible to the agent that wrote the alias either. So
+    /// `validate` reports it and `render` keeps drawing a box.
+    #[test]
+    fn validate_reports_an_alias_that_resolves_to_nothing() {
+        let dir = std::env::temp_dir().join("loom_alias_check");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let scene = dir.join("a.loom");
+        std::fs::write(
+            &scene,
+            "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f\"\n\n\
+             [[node]]\nname = \"Root\"\n\n  [node.components.MeshRenderer]\n  \
+             mesh = { asset = \"crate_wooden\" }\n",
+        )
+        .expect("write");
+
+        let (code, out) = run(&args(&["validate", scene.to_str().unwrap()]));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(code, 1, "an unresolvable alias is invalid: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let e = &v["errors"][0];
+        assert_eq!(e["error"], "unresolved_alias");
+        assert_eq!(e["value"], "crate_wooden");
+        assert_eq!(e["node"], "Root");
+    }
+
+    /// Primitives resolve procedurally and need no `[[asset]]` entry, and the
+    /// real fixtures declare their assets. Neither may start failing.
+    #[test]
+    fn validate_still_accepts_primitives_and_declared_assets() {
+        for fixture in ["office.loom", "blockout.loom", "tower.loom", "primitives.loom"] {
+            let (code, out) = run(&args(&["validate", &format!("../../assets/test/{fixture}")]));
+            assert_eq!(code, 0, "{fixture} should be valid: {out}");
         }
     }
 

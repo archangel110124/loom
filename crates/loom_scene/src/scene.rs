@@ -195,6 +195,26 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
             continue;
         }
 
+        // §5 of the format spec — prefab instances, `[node.overrides]`,
+        // `extends` — is documented but not built. The parser did not know
+        // these words, so it ignored them: a prefab instance node ended up
+        // with no components at all, drew nothing, lit nothing, and validated
+        // clean. Silence is the one answer that is definitely wrong; refusing
+        // says so and costs nothing when prefabs do get built.
+        for key in ["prefab", "extends", "overrides"] {
+            if table.get(key).is_some() {
+                let mut err = SceneError::new("not_implemented", name);
+                err.field = key.to_owned();
+                err.constraint = "a key this build understands".to_owned();
+                err.hint = Some(format!(
+                    "`{key}` is described in docs/format/README.md §5 (prefab \
+                     instances and overrides), which is not implemented yet. \
+                     Write the components on the node directly."
+                ));
+                errors.push(err);
+            }
+        }
+
         let parent = table.get("parent").and_then(Item::as_str);
         let path = match parent {
             None => {

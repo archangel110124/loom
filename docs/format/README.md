@@ -250,6 +250,13 @@ Two consequences worth stating plainly:
 
 ## 5. Prefab instances and overrides
 
+> **NOT IMPLEMENTED.** Nothing in `crates/` reads `prefab`, `extends` or
+> `[node.overrides]`. Until it does, the parser **rejects** all three with
+> `not_implemented` rather than ignoring them — a node whose components come
+> from a prefab silently had no components at all, so it drew nothing, lit
+> nothing, and the scene still validated. This section is the design to build
+> against, not a description of the code.
+
 Unity's `PrefabInstance` delta model. The consuming file stores a **source reference plus explicit
 modifications** — never a copy of the prefab's contents.
 
@@ -310,7 +317,15 @@ retry loop into one correction. Every constraint that can carry a hint should.
 
 Error codes for M1: `parse_error`, `format_version_unsupported`, `duplicate_sibling_name`,
 `multiple_roots`, `no_root`, `unknown_parent`, `unknown_component_type`, `unknown_field`,
-`field_out_of_range`, `field_type_mismatch`, `unresolved_alias`, `non_finite_float`.
+`field_out_of_range`, `field_type_mismatch`, `unresolved_alias`, `non_finite_float`, and
+`not_implemented` for the §5 keys above.
+
+`unresolved_alias` is reserved for an alias that **nothing declares** — a typo in the scene, which
+is what the agent controls. A declared alias whose file is merely absent is reported as an
+`asset_file_missing` warning instead: the text is right and the workspace is incomplete, which is
+an ordinary state during import and not grounds to reject a scene. The renderer substitutes a unit
+box either way (design doc §2.6, degrade rather than crash) — which is right for a render and
+useless as feedback, because a scene full of stand-in boxes looks exactly like one that loaded.
 
 Every error carries the node path and, where applicable, the byte span in the source file.
 
