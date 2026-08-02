@@ -575,6 +575,11 @@ impl Viewer {
             vertices: self.vertex_address,
             objects: self.object_address,
             materials: self.materials.address(),
+            // The windowed path does not draw particles yet: the offscreen
+            // renderer is the primary one (brief §7.1) and gets the feature
+            // first. Null rather than a dangling address, so the field is
+            // honest about there being nothing there.
+            particles: 0,
             object_offset: 0,
             inv_view_proj: view_proj.inverse().to_cols_array(),
             eye: camera.eye.extend(0.0).to_array(),

@@ -1,0 +1,169 @@
+# A smoke test, in both senses.
+#
+# It exercises the particle system end to end — emitter component, deterministic
+# simulation, sorted alpha-blended billboards — and it does it by drawing actual
+# smoke, so a glance at the render says whether the thing works.
+#
+# Three plumes, differing in one parameter each, because a single plume proves
+# only that *something* was drawn:
+#
+#   Campfire   — hot, fast, tight cone, short-lived. Rises quickly and thins.
+#   Chimney    — the default: slow, buoyant, wide, heavily damped so it billows.
+#   Smoulder   — barely buoyant, very high drag, long-lived. Should hang and
+#                spread sideways rather than climb, which is the case that
+#                catches a drag term applied in the wrong direction.
+#
+# Determinism is the point of the `seed` on each. Same scene plus same tick
+# count gives the same plume on any machine, which is what lets a particle
+# effect appear in a `loom sim --assert` hash instead of being the one visual
+# layer nothing can assert on.
+
+[scene]
+format = 1
+id = "8f31d2a7-4b60-4e19-97c5-2d08a6f1b34e"
+
+[[asset]]
+key = "grass_albedo"
+id = "3b8e1f45-9c20-4d67-a8f1-5e0c2b7d9a36"
+path = "../textures/grass_albedo.png"
+
+[[asset]]
+key = "grass_normal"
+id = "6d21c908-4f73-4a5e-b39c-8071e5f24bc8"
+path = "../textures/grass_normal.png"
+
+[[node]]
+name = "Field"
+
+# Ground to sit the fires on, and to prove the particles depth-test against
+# real geometry rather than floating over everything.
+[[node]]
+name = "Ground"
+parent = "Field"
+transform = { pos = [0.0, -0.5, 0.0], scale = [26.0, 0.5, 16.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.92
+  albedo_map = { asset = "grass_albedo" }
+  normal_map = { asset = "grass_normal" }
+  uv_scale = [0.5, 0.5]
+  triplanar = true
+
+# ---------------------------------------------------------------------------
+# Campfire: hot and quick.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Fire"
+parent = "Field"
+transform = { pos = [-9.0, 0.2, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.09, 0.07, 0.06]
+  roughness = 0.85
+
+[[node]]
+name = "FireSmoke"
+parent = "Field"
+transform = { pos = [-9.0, 0.6, 0.0] }
+
+  [node.components.ParticleEmitter]
+  rate = 90.0
+  lifetime = 2.2
+  lifetime_jitter = 0.4
+  speed = 3.4
+  spread_degrees = 12.0
+  radius = 0.35
+  gravity = 2.6
+  drag = 0.55
+  turbulence = 2.2
+  turbulence_scale = 0.5
+  size = [0.5, 3.4]
+  # Warm and dark at the base, cooling to pale grey. Linear RGB, not 0-255.
+  color_start = [0.20, 0.14, 0.10]
+  color_end = [0.55, 0.55, 0.58]
+  alpha = [0.5, 0.0]
+  seed = 4211
+
+# ---------------------------------------------------------------------------
+# Chimney: the defaults, slow and billowing.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Stack"
+parent = "Field"
+transform = { pos = [0.0, 1.4, 0.0], scale = [0.6, 1.8, 0.6] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.28, 0.13, 0.10]
+  roughness = 0.8
+
+[[node]]
+name = "StackSmoke"
+parent = "Field"
+transform = { pos = [0.0, 3.3, 0.0] }
+
+  [node.components.ParticleEmitter]
+  rate = 70.0
+  lifetime = 4.0
+  speed = 1.9
+  spread_degrees = 20.0
+  radius = 0.5
+  gravity = 1.5
+  drag = 0.85
+  turbulence = 1.5
+  turbulence_scale = 0.3
+  size = [0.9, 4.6]
+  color_start = [0.26, 0.25, 0.25]
+  color_end = [0.66, 0.67, 0.70]
+  alpha = [0.45, 0.0]
+  seed = 90853
+
+# ---------------------------------------------------------------------------
+# Smoulder: heavy, reluctant, spreads instead of rising.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Embers"
+parent = "Field"
+transform = { pos = [9.0, 0.1, 0.0], scale = [1.4, 0.2, 1.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.12, 0.05, 0.03]
+  roughness = 0.9
+
+[[node]]
+name = "SmoulderSmoke"
+parent = "Field"
+transform = { pos = [9.0, 0.4, 0.0] }
+
+  [node.components.ParticleEmitter]
+  rate = 55.0
+  lifetime = 6.0
+  lifetime_jitter = 0.5
+  speed = 0.8
+  spread_degrees = 55.0
+  radius = 1.1
+  # Barely buoyant and very heavily damped: this one should sprawl, not climb.
+  gravity = 0.35
+  drag = 1.6
+  turbulence = 0.9
+  turbulence_scale = 0.22
+  size = [1.2, 5.0]
+  color_start = [0.30, 0.29, 0.27]
+  color_end = [0.58, 0.58, 0.56]
+  alpha = [0.34, 0.0]
+  seed = 17734

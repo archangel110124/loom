@@ -28,7 +28,7 @@ pub use glam;
 pub use debug_names::DebugNames;
 pub use device::{Device, DeviceError};
 pub use material::{FLAG_TRIPLANAR, MaterialData, NO_TEXTURE};
-pub use renderer::{Camera, Object, RenderError, Renderer};
+pub use renderer::{Camera, Object, ParticleInstance, RenderError, Renderer};
 pub use ui::Ui;
 pub use viewer::Viewer;
 
@@ -197,7 +197,7 @@ mod tests {
             fov_y_degrees: 45.0,
         };
 
-        let pixels = renderer.render(&objects, &camera).expect("render");
+        let pixels = renderer.render(&objects, &[], &camera).expect("render");
 
         if let Err(messages) = instance.check_validation() {
             panic!("validation was not silent:\n  {}", messages.join("\n  "));

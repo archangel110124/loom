@@ -1191,6 +1191,7 @@ dependencies = [
  "loom_asset",
  "loom_ecs",
  "loom_input",
+ "loom_particles",
  "loom_physics",
  "loom_reflect",
  "loom_render",
@@ -1217,6 +1218,13 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "toml",
+]
+
+[[package]]
+name = "loom_particles"
+version = "0.0.0"
+dependencies = [
+ "loom_terrain",
 ]
 
 [[package]]

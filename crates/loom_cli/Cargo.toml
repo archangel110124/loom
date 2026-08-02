@@ -13,6 +13,7 @@ path = "src/main.rs"
 loom_asset = { version = "0.0.0", path = "../loom_asset" }
 loom_ecs = { version = "0.0.0", path = "../loom_ecs" }
 loom_input = { version = "0.0.0", path = "../loom_input" }
+loom_particles = { version = "0.0.0", path = "../loom_particles" }
 loom_physics = { version = "0.0.0", path = "../loom_physics" }
 loom_reflect = { version = "0.0.0", path = "../loom_reflect" }
 loom_render = { version = "0.0.0", path = "../loom_render" }

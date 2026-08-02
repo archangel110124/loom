@@ -35,7 +35,10 @@ use std::process::{Command, Output};
 /// `terrain_stress.loom` is the largest mesh the project produces — 67 million
 /// voxels down to ~778k triangles — so it is where a buffer sized from a
 /// smaller scene would first overflow. It costs about 2.5 s of the run.
-const SCENES: [&str; 7] = [
+///
+/// `smoke.loom` is the only scene that exercises the particle pipeline — a
+/// second pipeline, alpha blending, and a draw with no vertex buffer at all.
+const SCENES: [&str; 8] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -43,6 +46,7 @@ const SCENES: [&str; 7] = [
     "assets/test/office.loom",
     "assets/test/materials.loom",
     "assets/test/terrain_stress.loom",
+    "assets/test/smoke.loom",
 ];
 
 /// How many frames a windowed run draws before shutting itself down. Enough to

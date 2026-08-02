@@ -14,6 +14,7 @@ mod gizmo;
 mod log;
 mod materials;
 mod panels;
+mod particles;
 mod play;
 mod scene_view;
 mod run;
@@ -429,6 +430,10 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     }
 
     let objects = world_to_objects(&world, &library, &material_library);
+    let particles = particles::simulate(
+        &world,
+        flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()),
+    );
     let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok()).unwrap_or(35.0);
     let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok()).unwrap_or(28.0);
     // Framed from REAL mesh bounds. Assuming a unit cube was fine while every
@@ -456,7 +461,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         )
         .map_err(|e| e.to_string())?;
         renderer
-            .render_to_png(&objects, &camera, std::path::Path::new(&out))
+            .render_to_png(&objects, &particles, &camera, std::path::Path::new(&out))
             .map_err(|e| e.to_string())?;
         // Zero validation messages is half the definition of green (brief §7.3).
         instance
@@ -469,7 +474,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         Ok((gpu, raytracing)) => (
             0,
             json_line(&serde_json::json!({
-                "ok": true, "out": out, "objects": objects.len(),
+                "ok": true, "out": out, "objects": objects.len(), "particles": particles.len(),
                 "size": [width, height], "gpu": gpu,
                 // Reported so the agent can tell a scene rendered without
                 // shadows from a scene that has none.
@@ -1322,7 +1327,7 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
         }
 
         let file = format!("{out}_{frame}.png");
-        if let Err(e) = renderer.render_to_png(&objects, &camera, std::path::Path::new(&file)) {
+        if let Err(e) = renderer.render_to_png(&objects, &[], &camera, std::path::Path::new(&file)) {
             return (1, json_line(&serde_json::json!({
                 "error": "render_failed", "constraint": e.to_string(),
             })));

@@ -59,6 +59,11 @@ struct MaterialData {
     uint4 maps;      // albedo index, normal index, flags, unused
 };
 
+struct ParticleInstance {
+    float4 position;   // xyz world, w radius
+    float4 color;      // rgb linear, a opacity
+};
+
 struct Push {
     // **First, and deliberately.** A `float4x4` needs 16-byte alignment; put
     // it after the pointers and it needs padding, and a `uint3` pad does not
@@ -80,6 +85,16 @@ struct Push {
     // The material table. A pointer rather than a descriptor: materials are
     // read by index and never bound, so adding one costs no API calls.
     MaterialData* materials;
+    // This frame's particles, sorted back to front by the CPU. Null when the
+    // scene has none.
+    //
+    // **Order matters and is checked by nothing.** This block is one memory
+    // layout described twice, in Rust and here, and the compiler sees neither
+    // half of the pair. Declaring this before `materials` — as it briefly was
+    // — makes the fragment shader read the particle buffer as materials: the
+    // ground turns black and a stray quad covers a third of the screen, with
+    // no validation message anywhere.
+    ParticleInstance* particles;
     // Index of this draw's first object.
     //
     // NOT derived from SV_InstanceID + firstInstance: HLSL's SV_InstanceID is
@@ -160,6 +175,22 @@ float3 skyColor(float3 dir) {
 float3 hemisphereAmbient(float3 normal) {
     float up = normal.y * 0.5 + 0.5;
     return lerp(skyGradient(float3(0.0, -1.0, 0.0)), skyGradient(float3(0.0, 1.0, 0.0)), up);
+}
+
+/// Cheap 2D value noise, for shaping things that are meant to look irregular.
+///
+/// Hash-based rather than sampled from a texture: it needs no descriptor, and
+/// the particle shader is the only caller.
+float valueHash(float2 p) {
+    return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453);
+}
+
+float valueNoise(float2 p) {
+    float2 i = floor(p);
+    float2 f = frac(p);
+    float2 u = f * f * (3.0 - 2.0 * f);
+    return lerp(lerp(valueHash(i), valueHash(i + float2(1, 0)), u.x),
+                lerp(valueHash(i + float2(0, 1)), valueHash(i + float2(1, 1)), u.x), u.y);
 }
 
 struct VSOutput {
@@ -496,6 +527,98 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     lit += environment * f0 * (1.0 - roughness * 0.7);
 
     return float4(lit, 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// Particles.
+//
+// **Six vertices per particle and no vertex buffer.** The quad is built from
+// SV_VertexID, the same way the sky's fullscreen triangle is: the instance
+// data is read through a device address and the corners are arithmetic. That
+// keeps the CPU cost of a plume at one draw call regardless of how many
+// particles are in it.
+//
+// The billboard faces the *eye*, not the near plane. A plane-facing billboard
+// is cheaper and is what most engines use, but it shears visibly when a plume
+// sits near the edge of a wide field of view — and these renders are framed
+// automatically, so things end up at the edge often.
+// ---------------------------------------------------------------------------
+
+struct ParticleOutput {
+    float4 position : SV_Position;
+    float2 local : TEXCOORD0;   // -1..1 across the quad
+    float4 color : COLOR;
+    nointerpolation float seed : SEED;
+};
+
+[shader("vertex")]
+ParticleOutput particleVertexMain(uint vertexID: SV_VertexID) {
+    uint index = vertexID / 6;
+    uint corner = vertexID % 6;
+    ParticleInstance p = push.particles[index];
+
+    // Two triangles, wound so the quad covers -1..1 on both axes.
+    const float2 CORNERS[6] = {
+        float2(-1, -1), float2(1, -1), float2(1, 1),
+        float2(-1, -1), float2(1, 1), float2(-1, 1),
+    };
+    float2 local = CORNERS[corner];
+
+    float3 forward = normalize(push.eye.xyz - p.position.xyz);
+    // Guard the degenerate case: a particle directly above the eye makes the
+    // cross product with world up vanish, and the quad collapses to a line.
+    float3 reference = abs(forward.y) > 0.99 ? float3(0, 0, 1) : float3(0, 1, 0);
+    float3 right = normalize(cross(reference, forward));
+    float3 up = cross(forward, right);
+
+    // Rotated per particle so a plume of identical round sprites does not read
+    // as a grid. Derived from the instance rather than stored: one fewer field
+    // uploaded every frame for every particle.
+    float angle = frac(sin(float(index) * 12.9898) * 43758.5453) * 6.2831853;
+    float sa = sin(angle), ca = cos(angle);
+    float2 spun = float2(local.x * ca - local.y * sa, local.x * sa + local.y * ca);
+
+    float3 world = p.position.xyz + (right * spun.x + up * spun.y) * p.position.w;
+
+    ParticleOutput out;
+    // `mvp` of the reserved object slot is the view-projection — see the note
+    // on `Push::object_offset` in the Rust mirror.
+    out.position = mul(push.objects[push.objectOffset].mvp, float4(world, 1.0));
+    out.local = local;
+    out.color = p.color;
+    out.seed = float(index);
+    return out;
+}
+
+/// A soft puff, generated rather than sampled.
+///
+/// A texture would be the usual answer and would look better close up. This
+/// costs no image, no descriptor and no asset to author, and for smoke — which
+/// is a soft blob with torn edges — the difference at plume distance is small.
+/// The wispiness comes from breaking up the radial falloff with value noise so
+/// the edge is ragged rather than a clean circle, which is the single tell
+/// that separates a smoke puff from a fuzzy ball.
+[shader("fragment")]
+float4 particleFragmentMain(ParticleOutput in) : SV_Target {
+    float r = length(in.local);
+    if (r > 1.0) {
+        discard;
+    }
+
+    // Two octaves of value noise in the quad's own space, offset per particle
+    // so neighbours do not share a pattern.
+    float2 q = in.local * 1.7 + in.seed * 7.31;
+    float wisp = 0.62 * valueNoise(q) + 0.38 * valueNoise(q * 2.4 + 3.7);
+
+    // Falloff from the centre, eaten into by the noise. `smoothstep` rather
+    // than a linear ramp: a linear edge on a translucent sprite reads as a
+    // visible disc boundary once several overlap.
+    float falloff = smoothstep(1.0, 0.15, r);
+    float alpha = in.color.a * falloff * (0.45 + 0.85 * wisp);
+    if (alpha <= 0.002) {
+        discard;
+    }
+    return float4(in.color.rgb, saturate(alpha));
 }
 
 // ---------------------------------------------------------------------------

@@ -115,6 +115,9 @@ pub struct World {
     collider: Storage<[f32; 3]>,
     /// The asset alias a node's `MeshRenderer` names.
     mesh_asset: Storage<String>,
+    /// The `ParticleEmitter` component, verbatim. Carried for the same reason
+    /// as `material`: resolving it needs crates this one must not depend on.
+    emitter: Storage<serde_json::Value>,
     /// The `Material` component, verbatim. Carried rather than resolved here
     /// for the same reason as `voxel_recipe`: resolving it needs the asset and
     /// render crates, and this one depends on neither.
@@ -299,6 +302,9 @@ impl World {
                     world.collider.insert(entity, [x, y, z]);
                 }
             }
+            if let Some(emitter) = node.components.get("ParticleEmitter") {
+                world.emitter.insert(entity, emitter.clone());
+            }
             if let Some(material) = node.components.get("Material") {
                 world.material.insert(entity, material.clone());
             }
@@ -320,6 +326,12 @@ impl World {
 
         world.propagate_transforms();
         world
+    }
+
+    /// The `ParticleEmitter` a node declares, if any.
+    #[must_use]
+    pub fn emitter(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.emitter.get(entity)
     }
 
     /// The `Material` component a node declares, if any.

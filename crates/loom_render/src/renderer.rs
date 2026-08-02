@@ -58,6 +58,20 @@ pub struct Object {
     pub material: u32,
 }
 
+/// One particle, as the GPU draws it.
+///
+/// Mirrors `ParticleInstance` in `scene.slang`. Two `vec4`s and nothing else:
+/// a plume is thousands of these uploaded every frame, so every byte here is
+/// paid per particle per frame.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ParticleInstance {
+    /// xyz world position, w radius in metres.
+    pub position: [f32; 4],
+    /// Linear RGB and opacity.
+    pub color: [f32; 4],
+}
+
 /// Where one mesh lives inside the combined index buffer.
 ///
 /// Indices are absolute into the shared vertex buffer, so `vertexOffset` is
@@ -111,7 +125,17 @@ pub(crate) struct Push {
     /// The material table. Another pointer rather than another descriptor:
     /// materials are read by index from the fragment stage and never bound.
     pub(crate) materials: vk::DeviceAddress,
+    /// The particle instances for this frame. Null when there are none.
+    pub(crate) particles: vk::DeviceAddress,
     /// First object this draw should read. See the note in `scene.slang`.
+    ///
+    /// **The particle pass borrows this too.** Its vertex shader needs the
+    /// view-projection matrix to place a billboard, and the push block has no
+    /// room for a second `float4x4` — 64 more bytes would put it over the 128
+    /// Vulkan guarantees. So the particle draw points this at a reserved
+    /// `ObjectData` slot whose `mvp` is the view-projection and whose other
+    /// fields are unused. The buffer is already bound; the matrix rides along
+    /// for free.
     pub(crate) object_offset: u32,
 }
 
@@ -208,6 +232,13 @@ pub struct Renderer {
     /// `None` when the device has no ray query; shadows are simply skipped.
     raytracer: Option<Raytracer>,
     materials: crate::material::Materials,
+    /// Particle instances, rewritten every frame that has any.
+    particle_buffer: vk::Buffer,
+    particle_alloc: Option<Allocation>,
+    particle_address: vk::DeviceAddress,
+    max_particles: usize,
+    /// Alpha-blended, depth-tested but not depth-writing.
+    particle_pipeline: vk::Pipeline,
     /// Unpacked positions the acceleration structures were built from.
     rt_positions: Option<(vk::Buffer, Allocation, vk::DeviceAddress)>,
     pipeline_layout: vk::PipelineLayout,
@@ -336,12 +367,22 @@ impl Renderer {
         write_slice(&indices_alloc, &combined_indices)?;
 
         // Per-object array. Sized once; the draw is a single instanced call.
+        // A plume is a few thousand; a scene with several is a few tens of
+        // thousands. Sized once rather than grown, so a frame never allocates.
+        const MAX_PARTICLES: usize = 65536;
         const MAX_OBJECTS: usize = 4096;
         let (objects, objects_alloc, object_address) = create_address_buffer(
             &raw,
             &mut allocator,
             (MAX_OBJECTS * size_of::<ObjectData>()) as u64,
             "loom.object_data",
+            vk::BufferUsageFlags::empty(),
+        )?;
+        let (particle_buffer, particle_alloc, particle_address) = create_address_buffer(
+            &raw,
+            &mut allocator,
+            (MAX_PARTICLES * size_of::<ParticleInstance>()) as u64,
+            "loom.particles",
             vk::BufferUsageFlags::empty(),
         )?;
 
@@ -381,6 +422,8 @@ impl Renderer {
                 materials.descriptor_layout(),
             )?;
         let sky_pipeline = create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
+        let particle_pipeline =
+            create_particle_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
 
         names.set(color, "loom.color_target");
         names.set(depth, "loom.depth_target");
@@ -453,6 +496,11 @@ impl Renderer {
         Ok(Self {
             raytracer,
             materials,
+            particle_buffer,
+            particle_alloc: Some(particle_alloc),
+            particle_address,
+            max_particles: MAX_PARTICLES,
+            particle_pipeline,
             rt_positions,
             device: raw,
             queue: device.queue(),
@@ -542,10 +590,16 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn render(&mut self, objects: &[Object], camera: &Camera) -> Result<Vec<u8>, RenderError> {
+    pub fn render(
+        &mut self,
+        objects: &[Object],
+        particles: &[ParticleInstance],
+        camera: &Camera,
+    ) -> Result<Vec<u8>, RenderError> {
         // Grow rather than refuse, matching the windowed path. A ceiling the
         // caller cannot see is not a useful answer to "draw my scene".
-        self.reserve_objects(objects.len())?;
+        // One slot past the objects, for the particle pass's view-projection.
+        self.reserve_objects(objects.len() + 1)?;
         if objects.len() > self.max_objects {
             return Err(RenderError::Allocator(format!(
                 "{} objects exceeds the {} the object buffer was sized for",
@@ -565,7 +619,53 @@ impl Renderer {
         // problem.
         let mut sorted: Vec<Object> = objects.to_vec();
         sorted.sort_by_key(|o| o.mesh);
-        let object_data = pack_objects(&sorted, view_proj, &self.unpack);
+        let mut object_data = pack_objects(&sorted, view_proj, &self.unpack);
+        // The reserved slot described on `Push::object_offset`: the particle
+        // vertex shader reads `mvp` from here as the view-projection, because
+        // the push block cannot hold a second matrix.
+        let particle_slot = u32::try_from(object_data.len()).unwrap_or(0);
+        object_data.push(ObjectData {
+            mvp: view_proj.to_cols_array(),
+            model: Mat4::IDENTITY.to_cols_array(),
+            unpack: [0.0, 0.0, 0.0, 1.0],
+            uv_unpack: [0.0, 0.0, 1.0, 0.0],
+            normal: [[0.0; 4]; 3],
+            color: [1.0; 4],
+            material: [crate::material::NO_TEXTURE, 0, 0, 0],
+        });
+
+        // **Sorted back to front, and that is not optional.** These blend, so
+        // the result depends on the order they are drawn in: nearest-first
+        // would have each particle blend under the ones behind it. Sorted on
+        // the CPU because the count is thousands, not millions.
+        //
+        // The comparison falls back to the original index when two particles
+        // are the same distance away, so the order is total and the same scene
+        // sorts the same way every run.
+        let mut ordered: Vec<(usize, ParticleInstance)> =
+            particles.iter().copied().enumerate().collect();
+        let eye = camera.eye;
+        ordered.sort_by(|(ai, a), (bi, b)| {
+            let d = |p: &ParticleInstance| {
+                let (dx, dy, dz) = (p.position[0] - eye.x, p.position[1] - eye.y, p.position[2] - eye.z);
+                dz.mul_add(dz, dx.mul_add(dx, dy * dy))
+            };
+            d(b).partial_cmp(&d(a)).unwrap_or(std::cmp::Ordering::Equal).then(ai.cmp(bi))
+        });
+        let drawn: Vec<ParticleInstance> = ordered
+            .into_iter()
+            .take(self.max_particles)
+            .map(|(_, p)| p)
+            .collect();
+        let particle_count = u32::try_from(drawn.len()).unwrap_or(0);
+        if !drawn.is_empty() {
+            write_slice(
+                self.particle_alloc
+                    .as_ref()
+                    .ok_or_else(|| RenderError::Allocator("particle buffer is gone".into()))?,
+                &drawn,
+            )?;
+        }
         let batches = batch_by_mesh(&sorted);
         write_slice(
             self.objects_alloc
@@ -614,11 +714,13 @@ impl Renderer {
             vertices: self.vertex_address,
             objects: self.object_address,
             materials: self.materials.address(),
+            particles: self.particle_address,
             object_offset: 0,
             inv_view_proj: view_proj.inverse().to_cols_array(),
             eye: camera.eye.extend(0.0).to_array(),
         };
         let sky = self.sky_pipeline;
+        let particle_pipeline = self.particle_pipeline;
         let (readback, image) = (self.readback, self.color);
         let index_buffer = self.indices;
         let draws: Vec<(MeshRange, u32, u32)> = batches
@@ -690,6 +792,35 @@ impl Renderer {
                             0,
                             0,
                         );
+                    }
+
+                    // Particles last, over finished opaque geometry, so the
+                    // depth test they read is the final one. Six vertices per
+                    // particle and no vertex buffer: the quad is built from
+                    // SV_VertexID in the shader, which is the same
+                    // no-vertex-input model the rest of this renderer uses.
+                    if particle_count > 0 {
+                        d.cmd_bind_pipeline(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            particle_pipeline,
+                        );
+                        let push = Push {
+                            object_offset: particle_slot,
+                            ..base_push
+                        };
+                        let bytes = std::slice::from_raw_parts(
+                            std::ptr::from_ref(&push).cast::<u8>(),
+                            size_of::<Push>(),
+                        );
+                        d.cmd_push_constants(
+                            cmd,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            bytes,
+                        );
+                        d.cmd_draw(cmd, particle_count * 6, 1, 0, 0);
                     }
                     d.cmd_end_rendering(cmd);
                 }
@@ -776,10 +907,11 @@ impl Renderer {
     pub fn render_to_png(
         &mut self,
         objects: &[Object],
+        particles: &[ParticleInstance],
         camera: &Camera,
         path: &std::path::Path,
     ) -> Result<(), RenderError> {
-        let pixels = self.render(objects, camera)?;
+        let pixels = self.render(objects, particles, camera)?;
         let file = std::fs::File::create(path).map_err(RenderError::Io)?;
         let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), self.width, self.height);
         encoder.set_color(png::ColorType::Rgba);
@@ -819,6 +951,13 @@ impl Drop for Renderer {
             {
                 let _ = allocator.free(allocation);
                 self.device.destroy_buffer(buffer, None);
+            }
+            self.device.destroy_pipeline(self.particle_pipeline, None);
+            self.device.destroy_buffer(self.particle_buffer, None);
+            if let (Some(allocation), Some(allocator)) =
+                (self.particle_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
             }
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
@@ -1493,6 +1632,97 @@ pub(crate) fn create_pipeline(
 /// no depth test or write (it is the backdrop, drawn first), no culling (the
 /// fullscreen triangle's winding is whatever `SV_VertexID` produces), and the
 /// sky entry points.
+/// The particle pipeline: alpha blended, depth tested, depth *not* written.
+///
+/// Three settings carry the whole effect and each is a bug if wrong.
+///
+/// - **Blending on**, source-alpha over one-minus-source-alpha. Particles are
+///   translucent; that is the entire point.
+/// - **Depth test on** so smoke is correctly hidden behind terrain.
+/// - **Depth write off.** This is the one that is easy to miss. A particle
+///   that writes depth occludes the particles behind it, so a plume renders as
+///   whichever billboard happened to be drawn first and the rest vanish — the
+///   volume collapses into one flat card.
+///
+/// Culling is off because a billboard faces the camera by construction and a
+/// back-facing one is a rounding error away, not an error.
+pub(crate) fn create_particle_pipeline(
+    device: &ash::Device,
+    layout: vk::PipelineLayout,
+    cache: vk::PipelineCache,
+    color_format: vk::Format,
+) -> Result<vk::Pipeline, RenderError> {
+    let module = create_shader_module(device, crate::SCENE_SPV)?;
+
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(module)
+            .name(c"particleVertexMain"),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(module)
+            .name(c"particleFragmentMain"),
+    ];
+
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(true)
+        .depth_write_enable(false)
+        .depth_compare_op(vk::CompareOp::LESS);
+    let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .alpha_blend_op(vk::BlendOp::ADD);
+    let attachments = [blend_attachment];
+    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let color_formats = [color_format];
+    let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&color_formats)
+        .depth_attachment_format(DEPTH_FORMAT);
+
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterizer)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth_stencil)
+        .color_blend_state(&blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering_info);
+
+    // SAFETY: every borrowed slice outlives the call.
+    let pipeline = unsafe { device.create_graphics_pipelines(cache, &[info], None) }
+        .map_err(|(_, e)| RenderError::Vulkan(e))?[0];
+    // SAFETY: the module is owned by this call and the pipeline holds no
+    // reference to it after creation.
+    unsafe { device.destroy_shader_module(module, None) };
+    Ok(pipeline)
+}
+
 pub(crate) fn create_sky_pipeline(
     device: &ash::Device,
     layout: vk::PipelineLayout,

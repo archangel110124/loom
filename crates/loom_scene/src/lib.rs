@@ -348,6 +348,7 @@ name = \"Root\"
             "Script",
             "RigidBody",
             "Material",
+            "ParticleEmitter",
         ] {
             assert!(reg.describe(name).is_some(), "{name} is not registered");
         }

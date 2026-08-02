@@ -218,6 +218,92 @@ impl Default for VoxelVolume {
     }
 }
 
+/// Emits particles from the node's position.
+///
+/// **Deterministic, like everything else that moves.** The `seed` is authored
+/// here rather than taken from the clock, so the same scene stepped the same
+/// number of ticks produces the same plume — which is what lets a particle
+/// effect appear in a `loom sim --assert` hash instead of being the one visual
+/// layer nobody can make an assertion about.
+///
+/// Defaults are a smoke plume, because that is the effect whose parameters are
+/// least obvious: buoyant rather than falling, slow, wide-lived, and heavily
+/// damped so it billows instead of shooting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct ParticleEmitter {
+    /// Particles born per second.
+    #[schemars(range(min = 0.0, max = 10000.0))]
+    pub rate: f32,
+    /// Seconds a particle lives.
+    #[schemars(range(min = 0.01, max = 120.0))]
+    pub lifetime: f32,
+    /// Fraction by which lifetime varies per particle. `0.0` makes a burst
+    /// vanish all at once, which reads as a light being switched off.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub lifetime_jitter: f32,
+    /// Initial speed, in metres per second.
+    #[schemars(range(min = 0.0, max = 1000.0))]
+    pub speed: f32,
+    /// Half-angle of the emission cone about +Y, in degrees.
+    #[schemars(range(min = 0.0, max = 180.0))]
+    pub spread_degrees: f32,
+    /// Radius of the disc particles are born on.
+    #[schemars(range(min = 0.0, max = 1000.0))]
+    pub radius: f32,
+    /// Vertical acceleration. **Positive rises** — smoke is hotter than the air
+    /// around it, and that buoyancy is the whole reason a plume goes up.
+    #[schemars(range(min = -100.0, max = 100.0))]
+    pub gravity: f32,
+    /// Fraction of velocity shed per second. High drag billows; low drag jets.
+    #[schemars(range(min = 0.0, max = 20.0))]
+    pub drag: f32,
+    /// Strength of the swirl, in metres per second squared.
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub turbulence: f32,
+    /// Spatial scale of that swirl, in cycles per metre. Small values make
+    /// broad slow curls; large ones make fine noise.
+    #[schemars(range(min = 0.001, max = 10.0))]
+    pub turbulence_scale: f32,
+    /// Diameter in metres at birth and at death. Smoke expands as it cools.
+    #[schemars(inner(range(min = 0.0, max = 1000.0)))]
+    pub size: [f32; 2],
+    /// Linear RGB at birth. Not 0-255.
+    #[schemars(inner(range(min = 0.0, max = 1.0)))]
+    pub color_start: [f32; 3],
+    /// Linear RGB at death.
+    #[schemars(inner(range(min = 0.0, max = 1.0)))]
+    pub color_end: [f32; 3],
+    /// Opacity at birth and at death. Ending above zero leaves a hard edge
+    /// where particles pop out of existence.
+    #[schemars(inner(range(min = 0.0, max = 1.0)))]
+    pub alpha: [f32; 2],
+    /// Reproducibility, authored rather than sampled from the clock.
+    pub seed: u32,
+}
+
+impl Default for ParticleEmitter {
+    fn default() -> Self {
+        Self {
+            rate: 40.0,
+            lifetime: 3.0,
+            lifetime_jitter: 0.35,
+            speed: 2.0,
+            spread_degrees: 18.0,
+            radius: 0.25,
+            gravity: 1.2,
+            drag: 0.8,
+            turbulence: 1.4,
+            turbulence_scale: 0.35,
+            size: [0.6, 3.2],
+            color_start: [0.32, 0.30, 0.29],
+            color_end: [0.62, 0.62, 0.64],
+            alpha: [0.55, 0.0],
+            seed: 1,
+        }
+    }
+}
+
 /// Attaches a sandboxed Rhai script to the node.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -242,6 +328,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<RigidBody>("RigidBody");
     reg.register::<VoxelVolume>("VoxelVolume");
     reg.register::<Material>("Material");
+    reg.register::<ParticleEmitter>("ParticleEmitter");
     reg.register::<Script>("Script");
     reg
 }
