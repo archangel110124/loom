@@ -874,22 +874,27 @@ impl App {
                 }
             }
             UiAction::Stop => self.stop_play(),
+            // `dirty` only when something actually moved. Setting it on a
+            // no-op Ctrl+Z latched it true forever — nothing clears it but a
+            // save — so the viewport stopped following the file, every agent
+            // write raised a conflict banner over edits that did not exist,
+            // and "Keep mine" then wrote back the text as it was when the
+            // editor opened. One reflexive undo could erase a whole session of
+            // the agent's work.
             UiAction::Undo => {
-                if let Some(s) = self.session.as_mut() {
-                    let stepped = s.undo();
+                if let Some(s) = self.session.as_mut()
+                    && s.undo()
+                {
                     self.dirty = true;
-                    if stepped {
-                        self.resync();
-                    }
+                    self.resync();
                 }
             }
             UiAction::Redo => {
-                if let Some(s) = self.session.as_mut() {
-                    let stepped = s.redo();
+                if let Some(s) = self.session.as_mut()
+                    && s.redo()
+                {
                     self.dirty = true;
-                    if stepped {
-                        self.resync();
-                    }
+                    self.resync();
                 }
             }
             UiAction::Save => self.save(),

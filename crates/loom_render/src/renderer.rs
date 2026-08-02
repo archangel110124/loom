@@ -889,6 +889,17 @@ pub(crate) fn create_index_buffer(
     let buffer = unsafe { device.create_buffer(&info, None) }?;
     // SAFETY: `buffer` was just created on this device.
     let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+    // From here on every `?` must destroy `buffer` first. These helpers used to
+    // run only during init, where a failure took the whole process down; the
+    // runtime growth path calls them on exactly the low-memory condition that
+    // makes `allocate` fail, and a leaked handle then trips the object-tracking
+    // check at teardown — reporting a leak instead of the out-of-memory that
+    // caused it.
+    let on_failure = |device: &ash::Device, e: String| {
+        // SAFETY: the buffer was just created here and nothing else holds it.
+        unsafe { device.destroy_buffer(buffer, None) };
+        RenderError::Allocator(e)
+    };
     let allocation = allocator
         .allocate(&AllocationCreateDesc {
             name,
@@ -897,9 +908,16 @@ pub(crate) fn create_index_buffer(
             linear: true,
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         })
-        .map_err(|e| RenderError::Allocator(e.to_string()))?;
+        .map_err(|e| on_failure(device, e.to_string()))?;
     // SAFETY: the allocation matches the buffer's requirements.
-    unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }?;
+    if let Err(e) = unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }
+    {
+        // The allocation goes back too — gpu-allocator's `Allocation` has no
+        // `Drop`, so dropping it here would leak the memory as well as the
+        // handle.
+        let _ = allocator.free(allocation);
+        return Err(on_failure(device, e.to_string()));
+    }
     Ok((buffer, allocation, 0))
 }
 
@@ -960,6 +978,17 @@ pub(crate) fn create_address_buffer(
     let buffer = unsafe { device.create_buffer(&info, None) }?;
     // SAFETY: `buffer` was just created on this device.
     let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+    // From here on every `?` must destroy `buffer` first. These helpers used to
+    // run only during init, where a failure took the whole process down; the
+    // runtime growth path calls them on exactly the low-memory condition that
+    // makes `allocate` fail, and a leaked handle then trips the object-tracking
+    // check at teardown — reporting a leak instead of the out-of-memory that
+    // caused it.
+    let on_failure = |device: &ash::Device, e: String| {
+        // SAFETY: the buffer was just created here and nothing else holds it.
+        unsafe { device.destroy_buffer(buffer, None) };
+        RenderError::Allocator(e)
+    };
     let allocation = allocator
         .allocate(&AllocationCreateDesc {
             name,
@@ -968,9 +997,16 @@ pub(crate) fn create_address_buffer(
             linear: true,
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         })
-        .map_err(|e| RenderError::Allocator(e.to_string()))?;
+        .map_err(|e| on_failure(device, e.to_string()))?;
     // SAFETY: the allocation matches the buffer's requirements.
-    unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }?;
+    if let Err(e) = unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }
+    {
+        // The allocation goes back too — gpu-allocator's `Allocation` has no
+        // `Drop`, so dropping it here would leak the memory as well as the
+        // handle.
+        let _ = allocator.free(allocation);
+        return Err(on_failure(device, e.to_string()));
+    }
 
     let address_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
     // SAFETY: the buffer is bound and was created with SHADER_DEVICE_ADDRESS.

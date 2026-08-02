@@ -520,12 +520,37 @@ fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
             // comment and the indentation with it. Preserving human annotation
             // is the entire reason this layer edits a format-preserving DOM
             // instead of re-emitting the file.
-            let value = toml_edit::Item::Value(json_to_toml(new, field)?);
+            let value = json_to_toml(new, field)?;
+            // Whether the thing being replaced was written in header form
+            // (`[node.components.X.field]` or `[[...]]`). Such a key carries no
+            // trailing space, because a header does not need one — so reusing
+            // its slot for a key-value pair emitted `ops= [...]`.
+            let replacing_header = component
+                .get(field_name)
+                .is_some_and(|item| !item.is_value());
             match component.get_mut(field_name) {
-                Some(existing) => *existing = value,
-                None => {
-                    component.insert(field_name, value);
+                Some(existing) => {
+                    // A comment on the *same line* as a value lives in that
+                    // value's own suffix decor, so replacing the Item drops it
+                    // — which is what `docs/format/README.md` promises will
+                    // not happen. Carried across explicitly. (A comment on the
+                    // line above lives on the key, which `get_mut` already
+                    // preserves by not touching it.)
+                    let carried = existing.as_value().map(|v| v.decor().clone());
+                    *existing = toml_edit::Item::Value(value);
+                    if let (Some(decor), Some(v)) = (carried, existing.as_value_mut()) {
+                        *v.decor_mut() = decor;
+                    }
                 }
+                None => {
+                    component.insert(field_name, toml_edit::Item::Value(value));
+                }
+            }
+            if replacing_header
+                && let Some(mut key) = component.key_mut(field_name)
+            {
+                // Canonical form on the first write rather than the second.
+                key.leaf_decor_mut().set_suffix(" ");
             }
             Ok(())
         }
@@ -1304,6 +1329,98 @@ components = { Light = { intensity = 400.0 } }
         let parsed = crate::Scene::parse(&applied.scene).expect("still valid");
         let lamp = parsed.nodes().iter().find(|n| n.path == "Room/Lamp").expect("node");
         assert!(!lamp.components.contains_key("Light"));
+    }
+
+    /// A comment on the *same line* as the value is still the human's note.
+    /// The previous fix only rescued comments on the line above, and the format
+    /// spec promises both survive.
+    #[test]
+    fn editing_a_field_keeps_a_trailing_comment() {
+        let scene = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[node]]
+name = \"Room\"
+
+[[node]]
+name = \"Lamp\"
+parent = \"Room\"
+
+  [node.components.Light]
+  intensity = 400.0 # dimmed on purpose: evening
+";
+        let applied = apply(
+            scene,
+            &tx(
+                "Dim it",
+                vec![SceneOp::SetField {
+                    node: "Room/Lamp".into(),
+                    field: "Light.intensity".into(),
+                    value: serde_json::json!(120.0),
+                }],
+            ),
+        )
+        .expect("should apply");
+
+        assert!(
+            applied.scene.contains("dimmed on purpose: evening"),
+            "a trailing comment is annotation too:\n{}",
+            applied.scene
+        );
+    }
+
+    /// Replacing a field that was written as a sub-table must still emit a
+    /// canonical `key = value`. The header form's key carries no trailing
+    /// space, so the first write came out as `ops= [...]`.
+    #[test]
+    fn replacing_a_sub_table_field_stays_canonical() {
+        let scene = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[node]]
+name = \"Room\"
+
+[[node]]
+name = \"Hill\"
+parent = \"Room\"
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.25
+  chunks = [1, 1, 1]
+
+    [[node.components.VoxelVolume.ops]]
+    kind = \"sphere\"
+    center = [4.0, 4.0, 4.0]
+    radius = 2.0
+    mode = \"union\"
+";
+        let applied = apply(
+            scene,
+            &tx(
+                "Recarve",
+                vec![SceneOp::SetField {
+                    node: "Room/Hill".into(),
+                    field: "VoxelVolume.ops".into(),
+                    value: serde_json::json!([
+                        { "kind": "box", "center": [4.0, 4.0, 4.0],
+                          "half_extents": [2.0, 2.0, 2.0], "mode": "union" }
+                    ]),
+                }],
+            ),
+        )
+        .expect("should apply");
+
+        assert!(
+            !applied.scene.contains("ops="),
+            "canonical form is `ops = [...]`, with the space:\n{}",
+            applied.scene
+        );
+        assert!(applied.scene.contains("ops = ["), "{}", applied.scene);
+        crate::Scene::parse(&applied.scene).expect("still valid");
     }
 
     #[test]
