@@ -1,0 +1,93 @@
+# A voxel world large enough to be a performance question rather than a demo.
+#
+# 512 x 256 x 512 voxels — 67 million — over 128 x 64 x 128 metres at 25 cm
+# resolution. The whole thing is the twenty lines below, because a scene stores
+# the recipe and never the voxels (never-do #11). The equivalent dense field
+# would be 64 MB of i8 and could not go in a text file at all.
+#
+# WHAT COSTS WHAT, measured with
+# `cargo run --release --example bench -p loom_voxel`:
+#
+#   bake                    ~1.0 s      scales with SURFACE, not volume
+#   mesh                    ~0.19 s
+#   resident field          10.7 MB     8-17% of the dense equivalent
+#   triangles               ~778,000
+#   runtime crater          ~0.1 ms     independent of world size
+#
+# The surface-not-volume point is the important one and easy to miss: a
+# 512x512x512 world costs exactly the same as this one, because the extra half
+# is empty sky and the bake's early-out fills a uniform chunk in O(1). Doubling
+# the *height* of a world is free. Doubling its footprint is not.
+#
+# Kept deliberately free of RigidBody. A voxel collider walks every voxel and
+# emits one cell per solid one: 8.2 million cells and 93 MB at a *quarter* of
+# this size. That path scales with volume while everything else scales with
+# area, and it is the first thing that will need attention when this world
+# needs to be stood on.
+
+[scene]
+format = 1
+id = "c4e07b93-1d68-4a52-9f30-8b6e2c5a41d7"
+
+[[node]]
+name = "World"
+
+[[node]]
+name = "Terrain"
+parent = "World"
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.25
+  chunks = [16, 8, 16]
+
+  # Ground. One op fills the entire world — the heightfield is unbounded in X
+  # and Z, so the volume is a window onto it rather than a container for it.
+  # Five octaves at 0.025 gives hills roughly 40 m across with detail down to
+  # about 2.5 m, which is the last octave still worth more than one voxel.
+  [[node.components.VoxelVolume.ops]]
+  kind = "heightfield"
+  base = 24.0
+  amplitude = 8.0
+  frequency = 0.025
+  octaves = 5
+  seed = 726431
+  mode = "union"
+
+  # A tunnel bored clean through a hillside, to prove CSG still composes at
+  # this scale and that subtraction is not confined to small volumes.
+  [[node.components.VoxelVolume.ops]]
+  kind = "capsule"
+  a = [20.0, 22.0, 64.0]
+  b = [108.0, 26.0, 64.0]
+  radius = 3.5
+  mode = "subtract"
+
+  # Two craters. Ordered after the tunnel on purpose: the op list is not
+  # commutative, and carving these first then boring through would leave
+  # different geometry where they overlap.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [40.0, 30.0, 40.0]
+  radius = 9.0
+  mode = "subtract"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [92.0, 28.0, 88.0]
+  radius = 12.0
+  mode = "subtract"
+
+# A marker at a known world position, so the render has something of a
+# recognisable size in it. A terrain with nothing beside it gives no sense of
+# scale at all, and "does this look right" is the whole point of the render.
+[[node]]
+name = "Marker"
+parent = "World"
+transform = { pos = [64.0, 40.0, 20.0], scale = [1.0, 6.0, 1.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.25, 0.2]
+  roughness = 0.5

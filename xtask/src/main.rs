@@ -31,13 +31,18 @@ use std::process::{Command, Output};
 /// index. Sampler creation, image layout transitions and array indexing are
 /// all things the validation layers have an opinion about and the compiler has
 /// none.
-const SCENES: [&str; 6] = [
+///
+/// `terrain_stress.loom` is the largest mesh the project produces — 67 million
+/// voxels down to ~778k triangles — so it is where a buffer sized from a
+/// smaller scene would first overflow. It costs about 2.5 s of the run.
+const SCENES: [&str; 7] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
     "assets/test/cave.loom",
     "assets/test/office.loom",
     "assets/test/materials.loom",
+    "assets/test/terrain_stress.loom",
 ];
 
 /// How many frames a windowed run draws before shutting itself down. Enough to

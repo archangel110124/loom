@@ -1299,6 +1299,7 @@ version = "0.0.0"
 dependencies = [
  "fast-surface-nets",
  "loom_asset",
+ "loom_terrain",
  "ndshape",
  "serde",
 ]

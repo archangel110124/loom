@@ -8,5 +8,6 @@ publish.workspace = true
 [dependencies]
 fast-surface-nets = "=0.2.1"
 loom_asset = { version = "0.0.0", path = "../loom_asset" }
+loom_terrain = { version = "0.0.0", path = "../loom_terrain" }
 ndshape = "=0.3.0"
 serde = { version = "=1.0.229", features = ["derive"] }
