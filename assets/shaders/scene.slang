@@ -27,6 +27,9 @@ struct Vertex {
 
 struct ObjectData {
     float4x4 mvp;
+    // The model matrix. Field order here mirrors the Rust `ObjectData` exactly;
+    // the two are one memory layout described twice, and a mismatch is silent.
+    float4x4 model;
     // Decode parameters for this object's packed vertices: xyz origin, w step.
     // One per object rather than per vertex, which is what makes the
     // compression free rather than moving the cost somewhere else.
@@ -93,6 +96,10 @@ static const float SUN_STRENGTH = 0.62;
 /// Split from `skyColor` because the ambient term wants the gradient but not
 /// the sun disc — a surface should not pick up a specular highlight from
 /// pointing vaguely skyward.
+// Enough to clear the surface a ray starts on without detaching contact
+// shadows from what casts them.
+static const float SHADOW_BIAS = 1e-3;
+
 float3 skyGradient(float3 dir) {
     float height = clamp(dir.y, -1.0, 1.0);
     if (height >= 0.0) {
@@ -129,6 +136,8 @@ struct VSOutput {
     float4 position : SV_Position;
     float3 normal : NORMAL;
     float3 color : COLOR;
+    // Where this pixel is in the world, which is where its shadow ray starts.
+    float3 worldPos : WORLDPOS;
 };
 
 // Mirrors `loom_asset::packed::unpack`. Kept in step by a Rust-side test that
@@ -168,7 +177,45 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
     out.position = mul(o.mvp, float4(unpackPosition(v.packedPosition, o.unpack), 1.0));
     out.normal = normalize(mul(normalMatrix, unpackNormal(v.packedNormal)));
     out.color = o.color.rgb;
+    out.worldPos = mul(o.model, float4(unpackPosition(v.packedPosition, o.unpack), 1.0)).xyz;
     return out;
+}
+
+// The scene, as the ray tracer sees it. Set 0, binding 0 — the renderer's only
+// descriptor, because an acceleration structure has no buffer-device-address
+// form to reach it by.
+[[vk::binding(0, 0)]]
+uniform RaytracingAccelerationStructure sceneTLAS;
+
+/// 1 where the sun reaches this point, 0 where something blocks it.
+///
+/// **Ray query, traced inline from this shader.** A shadow ray only asks
+/// *whether* anything is in the way, never what or how far, so the traversal
+/// can stop at the first hit it finds:
+///
+/// - `ACCEPT_FIRST_HIT_AND_END_SEARCH` ends traversal at the first blocker
+///   instead of continuing to find the nearest one.
+/// - `SKIP_PROCEDURAL_PRIMITIVES` is free here — every geometry in the scene
+///   is triangles, and saying so lets the hardware skip a branch.
+///
+/// The flags are template arguments rather than runtime values on purpose:
+/// static flags let the driver specialise the traversal, and passing them
+/// dynamically forfeits that.
+float sunVisibility(float3 position, float3 normal) {
+    RayDesc ray;
+    // Offset along the normal, not just by TMin: a ray starting exactly on the
+    // surface hits the surface it came from, and the whole scene self-shadows
+    // into acne.
+    ray.Origin = position + normal * SHADOW_BIAS;
+    ray.Direction = SUN_DIRECTION;
+    ray.TMin = SHADOW_BIAS;
+    ray.TMax = 1e4;
+
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+           | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    query.TraceRayInline(sceneTLAS, RAY_FLAG_NONE, 0xFF, ray);
+    query.Proceed();
+    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
 }
 
 [shader("fragment")]
@@ -180,7 +227,10 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     float3 normal = normalize(in.normal);
     float diffuse = max(dot(normal, SUN_DIRECTION), 0.0);
     float3 ambient = hemisphereAmbient(normal) * AMBIENT_STRENGTH;
-    float3 lit = in.color * (ambient + SUN_STRENGTH * diffuse);
+    // Only trace where the sun could reach anyway: a face turned away from the
+    // sun is already dark, and tracing from it costs a ray to learn nothing.
+    float sun = diffuse > 0.0 ? sunVisibility(in.worldPos, normal) : 0.0;
+    float3 lit = in.color * (ambient + SUN_STRENGTH * diffuse * sun);
     return float4(lit, 1.0);
 }
 

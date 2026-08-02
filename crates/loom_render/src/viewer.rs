@@ -29,6 +29,10 @@ const INITIAL_OBJECTS: usize = 4096;
 /// A window's swapchain and everything needed to draw into it.
 pub struct Viewer {
     device: ash::Device,
+    /// Whether this device can trace rays; see `Device::supports_raytracing`.
+    raytracing: bool,
+    raytracer: Option<crate::raytrace::Raytracer>,
+    rt_positions: Option<(vk::Buffer, Allocation, vk::DeviceAddress)>,
     queue: vk::Queue,
     allocator: Option<Allocator>,
 
@@ -100,6 +104,7 @@ impl Viewer {
         meshes: &[loom_asset::Mesh],
     ) -> Result<Self, RenderError> {
         let raw = device.handle().clone();
+        let raytracing = device.supports_raytracing();
         let names = DebugNames::new(instance.handle(), &raw, cfg!(debug_assertions));
 
         let surface_loader = ash::khr::surface::Instance::new(instance.entry(), instance.handle());
@@ -116,19 +121,29 @@ impl Viewer {
         .map_err(|e| RenderError::Allocator(e.to_string()))?;
 
         let (combined_vertices, combined_indices, ranges, unpack) = combine(meshes);
+        // Geometry the acceleration structures are built from must say so at
+        // creation. Conditional because asking for this bit without the
+        // extension enabled is itself a validation error.
+        let as_input = if raytracing {
+            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+        } else {
+            vk::BufferUsageFlags::empty()
+        };
         let (vertices, vertices_alloc, vertex_address) = create_address_buffer(
             &raw,
             &mut allocator,
             (std::mem::size_of_val(combined_vertices.as_slice()) as u64).max(4),
             "loom.mesh_vertices",
+            as_input,
         )?;
         write_slice(&vertices_alloc, &combined_vertices)?;
 
-        let (indices, indices_alloc, _) = create_index_buffer(
+        let (indices, indices_alloc, index_address) = create_index_buffer(
             &raw,
             &mut allocator,
             (std::mem::size_of_val(combined_indices.as_slice()) as u64).max(4),
             "loom.mesh_indices",
+            as_input | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         )?;
         write_slice(&indices_alloc, &combined_indices)?;
 
@@ -137,6 +152,7 @@ impl Viewer {
             &mut allocator,
             (INITIAL_OBJECTS * size_of::<ObjectData>()) as u64,
             "loom.object_data",
+            vk::BufferUsageFlags::empty(),
         )?;
 
         let (format, extent, swapchain, images, views) = create_swapchain(
@@ -153,12 +169,30 @@ impl Viewer {
         let (depth, depth_alloc, depth_view) =
             create_depth(&raw, &mut allocator, extent.width, extent.height)?;
 
+        // Same shader as the headless path, so the same descriptor must exist:
+        // the fragment stage declares the TLAS unconditionally, and a layout
+        // without it is VUID-VkGraphicsPipelineCreateInfo-layout-07988.
+        let mut raytracer = if raytracing {
+            Some(crate::raytrace::Raytracer::new(
+                instance.handle(),
+                &raw,
+                &mut allocator,
+            )?)
+        } else {
+            None
+        };
+
         let cache_path = pipeline_cache_path(instance, device);
         // The pipeline is built for the *swapchain's* format, which is usually
         // BGRA rather than the offscreen path's RGBA. Dynamic rendering bakes
         // the attachment format into the pipeline, so this cannot be shared.
         let (pipeline_layout, pipeline, pipeline_cache) =
-            create_pipeline(&raw, cache_path.as_deref(), format)?;
+            create_pipeline(
+                &raw,
+                cache_path.as_deref(),
+                format,
+                raytracer.as_ref().map(crate::raytrace::Raytracer::descriptor_layout),
+            )?;
         let sky_pipeline =
             crate::renderer::create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, format)?;
 
@@ -198,7 +232,38 @@ impl Viewer {
             names.set(*semaphore, "loom.sem_render_finished");
         }
 
+        let mut rt_positions = None;
+        if let Some(rt) = raytracer.as_mut() {
+            // Unpacked positions: the raster path's vertices are quantised and
+            // an acceleration structure cannot undo that. See `renderer.rs`.
+            let positions: Vec<[f32; 3]> = meshes
+                .iter()
+                .flat_map(|m| m.vertices.iter())
+                .map(|v| [v.position[0], v.position[1], v.position[2]])
+                .collect();
+            let (buffer, allocation, address) = create_address_buffer(
+                &raw,
+                &mut allocator,
+                (std::mem::size_of_val(positions.as_slice()) as u64).max(4),
+                "loom.rt_positions",
+                vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+            )?;
+            write_slice(&allocation, &positions)?;
+            rt.build_meshes(
+                &mut allocator,
+                crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
+                address,
+                index_address,
+                &ranges,
+                u32::try_from(combined_vertices.len()).unwrap_or(0),
+            )?;
+            rt_positions = Some((buffer, allocation, address));
+        }
+
         Ok(Self {
+            raytracing,
+            raytracer,
+            rt_positions,
             device: raw,
             queue: device.queue(),
             allocator: Some(allocator),
@@ -273,6 +338,7 @@ impl Viewer {
             allocator,
             (capacity * size_of::<ObjectData>()) as u64,
             "loom.object_data",
+            vk::BufferUsageFlags::empty(),
         )?;
         // Everything fallible is done; retire the old buffer now.
         if let Some(old) = self.objects_alloc.take() {
@@ -303,6 +369,7 @@ impl Viewer {
     /// [`RenderError`] if the device will not idle or the buffers cannot be
     /// reallocated.
     pub fn set_meshes(&mut self, meshes: &[loom_asset::Mesh]) -> Result<(), RenderError> {
+        let raytracing = self.raytracing;
         let Some(allocator) = self.allocator.as_mut() else {
             return Ok(());
         };
@@ -320,6 +387,14 @@ impl Viewer {
         }?;
 
         let (combined_vertices, combined_indices, ranges, unpack) = combine(meshes);
+        // Geometry the acceleration structures are built from must say so at
+        // creation. Conditional because asking for this bit without the
+        // extension enabled is itself a validation error.
+        let as_input = if raytracing {
+            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+        } else {
+            vk::BufferUsageFlags::empty()
+        };
 
         // **Build the new buffers before destroying the old ones.** This used
         // to free first to avoid holding both peaks at once — but any `?`
@@ -332,6 +407,7 @@ impl Viewer {
             allocator,
             (std::mem::size_of_val(combined_vertices.as_slice()) as u64).max(4),
             "loom.mesh_vertices",
+            as_input,
         )?;
         write_slice(&vertices_alloc, &combined_vertices)?;
 
@@ -340,6 +416,7 @@ impl Viewer {
             allocator,
             (std::mem::size_of_val(combined_indices.as_slice()) as u64).max(4),
             "loom.mesh_indices",
+            as_input | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         )?;
         write_slice(&indices_alloc, &combined_indices)?;
 
@@ -430,6 +507,23 @@ impl Viewer {
 
         let view_proj = view_projection(camera, aspect);
         let object_data = pack_objects(&sorted, view_proj, &self.unpack);
+        // The TLAS follows the objects; the BLAS holding the triangles does not
+        // move, which is what keeps this affordable per frame.
+        if self.raytracer.is_some() {
+            let pool = self.command_pool;
+            let queue = self.queue;
+            let mut allocator = self.allocator.take();
+            let result = match (self.raytracer.as_mut(), allocator.as_mut()) {
+                (Some(rt), Some(alloc)) => rt.build_instances(
+                    alloc,
+                    crate::raytrace::Submit { pool, queue },
+                    &sorted,
+                ),
+                _ => Ok(()),
+            };
+            self.allocator = allocator;
+            result?;
+        }
         let batches = batch_by_mesh(&sorted);
         write_slice(
             self.objects_alloc
@@ -453,6 +547,11 @@ impl Viewer {
         let depth_view = self.depth_view;
         let (queue, pool) = (self.queue, self.command_pool);
         let (pipeline, layout) = (self.pipeline, self.pipeline_layout);
+        let shadow_set = self
+            .raytracer
+            .as_ref()
+            .filter(|rt| rt.ready())
+            .map(crate::raytrace::Raytracer::descriptor_set);
         let base_push = crate::renderer::Push {
             vertices: self.vertex_address,
             objects: self.object_address,
@@ -480,6 +579,17 @@ impl Viewer {
                     set_viewport(d, cmd, extent.width, extent.height);
                     crate::renderer::draw_sky(d, cmd, sky, layout, &base_push);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                    // Bound once for the pass, never per draw (never-do #2).
+                    if let Some(set) = shadow_set {
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            0,
+                            &[set],
+                            &[],
+                        );
+                    }
                     set_viewport(d, cmd, extent.width, extent.height);
                     d.cmd_bind_index_buffer(cmd, index_buffer, 0, vk::IndexType::UINT32);
                     for (range, first_instance, instances) in draws {
@@ -711,6 +821,17 @@ impl Drop for Viewer {
         // gone there is no outstanding present to wait on anything.
         unsafe {
             let _ = self.device.device_wait_idle();
+            if let (Some(rt), Some(allocator)) =
+                (self.raytracer.as_mut(), self.allocator.as_mut())
+            {
+                rt.destroy(allocator);
+            }
+            if let (Some((buffer, allocation, _)), Some(allocator)) =
+                (self.rt_positions.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+                self.device.destroy_buffer(buffer, None);
+            }
 
             // Image views first: they are views *of* the swapchain's images.
             for view in self.views.drain(..) {

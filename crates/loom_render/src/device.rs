@@ -21,6 +21,12 @@ pub struct Device {
     pub(crate) queue_family: u32,
     physical: vk::PhysicalDevice,
     name: String,
+    /// Whether ray query and acceleration structures were actually enabled.
+    ///
+    /// Queried and branched on, never assumed (Vulkan doc §14). A device
+    /// without them still renders — it just renders without ray-traced
+    /// shadows, which is a worse picture rather than a dead engine.
+    pub(crate) raytracing: bool,
 }
 
 /// Why no usable device could be produced.
@@ -48,6 +54,31 @@ impl std::fmt::Display for DeviceError {
 }
 
 impl std::error::Error for DeviceError {}
+
+/// Whether `physical` advertises everything ray-queried shadows need.
+///
+/// All three or none: `ray_query` is the one used in the shader,
+/// `acceleration_structure` builds the structures it traverses, and
+/// `deferred_host_operations` is a hard dependency of the latter that the
+/// loader will refuse device creation without.
+fn raytracing_supported(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
+    // SAFETY: `physical` came from this instance.
+    let Ok(properties) = (unsafe {
+        instance
+            .handle()
+            .enumerate_device_extension_properties(physical)
+    }) else {
+        return false;
+    };
+    let has = |wanted: &std::ffi::CStr| {
+        properties
+            .iter()
+            .any(|p| p.extension_name_as_c_str() == Ok(wanted))
+    };
+    has(ash::khr::acceleration_structure::NAME)
+        && has(ash::khr::ray_query::NAME)
+        && has(ash::khr::deferred_host_operations::NAME)
+}
 
 impl Device {
     /// Select a device and create the logical device plus its queue.
@@ -103,18 +134,47 @@ impl Device {
             vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 
         // Only when presenting; a headless device must not request it.
-        let device_extensions: Vec<*const i8> = if surface.is_some() {
+        let mut device_extensions: Vec<*const i8> = if surface.is_some() {
             vec![ash::khr::swapchain::NAME.as_ptr()]
         } else {
             Vec::new()
         };
 
-        let create_info = vk::DeviceCreateInfo::default()
+        // Ray query, for shadows traced from the fragment shader.
+        //
+        // **Ray query rather than a ray tracing pipeline.** The rays here are
+        // secondary — "is this point lit" — and a ray query answers that
+        // inline from the shader that is already shading the pixel. The
+        // pipeline variant would add a shader binding table, three new shader
+        // stages and a second pipeline to reach the same answer more slowly.
+        // Hybrid raster-plus-ray-query is what the extension is for.
+        //
+        // Enabled only where supported: `raytracing_supported` reads the
+        // device's own extension list rather than trusting that a 4090 is what
+        // is running.
+        let raytracing = raytracing_supported(instance, physical);
+        if raytracing {
+            device_extensions.push(ash::khr::acceleration_structure::NAME.as_ptr());
+            device_extensions.push(ash::khr::ray_query::NAME.as_ptr());
+            // A dependency of acceleration_structure, not used directly: builds
+            // here are all device-side.
+            device_extensions.push(ash::khr::deferred_host_operations::NAME.as_ptr());
+        }
+        let mut accel_features =
+            vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
+        let mut query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
+
+        let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&device_extensions)
             .push_next(&mut features13)
             .push_next(&mut features12)
             .push_next(&mut features11);
+        if raytracing {
+            create_info = create_info
+                .push_next(&mut accel_features)
+                .push_next(&mut query_features);
+        }
 
         // SAFETY: `physical` came from this instance; all borrows outlive the call.
         let raw = unsafe { instance.handle().create_device(physical, &create_info, None) }
@@ -128,7 +188,17 @@ impl Device {
             queue_family,
             physical,
             name,
+            raytracing,
         })
+    }
+
+    /// Whether this device can trace rays.
+    ///
+    /// Branch on this rather than on the GPU's name: the same binary runs on
+    /// the software rasteriser in CI, which reports no ray query at all.
+    #[must_use]
+    pub fn supports_raytracing(&self) -> bool {
+        self.raytracing
     }
 
     /// The device as the driver reports it, for logs and PNG metadata.

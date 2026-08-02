@@ -10,6 +10,8 @@
 //! All memory through `gpu-allocator` (never-do #3).
 
 use ash::vk;
+
+use crate::raytrace::Raytracer;
 use glam::{Mat4, Vec3};
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{
@@ -102,6 +104,10 @@ impl Push {
 #[derive(Clone, Copy)]
 pub(crate) struct ObjectData {
     mvp: [f32; 16],
+    /// The model matrix, so the vertex stage can emit a world position for the
+    /// fragment stage to trace shadow rays from. The MVP alone cannot: it has
+    /// the view and projection baked in and is not cheaply invertible.
+    model: [f32; 16],
     /// Decode parameters for this object's packed vertices: xyz origin, w step.
     unpack: [f32; 4],
     /// Rows of inverse-transpose(model)'s upper 3x3, padded to `vec4`.
@@ -167,6 +173,10 @@ pub struct Renderer {
     object_address: vk::DeviceAddress,
     max_objects: usize,
 
+    /// `None` when the device has no ray query; shadows are simply skipped.
+    raytracer: Option<Raytracer>,
+    /// Unpacked positions the acceleration structures were built from.
+    rt_positions: Option<(vk::Buffer, Allocation, vk::DeviceAddress)>,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     /// Fills the frame before the scene draws over it.
@@ -195,6 +205,7 @@ impl Renderer {
         meshes: &[loom_asset::Mesh],
     ) -> Result<Self, RenderError> {
         let raw = device.handle().clone();
+        let raytracing = device.supports_raytracing();
         // Enabled exactly when the instance enabled the extension.
         let names = DebugNames::new(instance.handle(), &raw, cfg!(debug_assertions));
 
@@ -261,19 +272,29 @@ impl Renderer {
         // §6) arrive when a scene streams more geometry than fits comfortably
         // in host-visible memory.
         let (combined_vertices, combined_indices, ranges, unpack) = combine(meshes);
+        // Geometry the acceleration structures are built from must say so at
+        // creation. Conditional because asking for this bit without the
+        // extension enabled is itself a validation error.
+        let as_input = if raytracing {
+            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+        } else {
+            vk::BufferUsageFlags::empty()
+        };
         let (vertices, vertices_alloc, vertex_address) = create_address_buffer(
             &raw,
             &mut allocator,
             (std::mem::size_of_val(combined_vertices.as_slice()) as u64).max(4),
             "loom.mesh_vertices",
+            as_input,
         )?;
         write_slice(&vertices_alloc, &combined_vertices)?;
 
-        let (indices, indices_alloc, _) = create_index_buffer(
+        let (indices, indices_alloc, index_address) = create_index_buffer(
             &raw,
             &mut allocator,
             (std::mem::size_of_val(combined_indices.as_slice()) as u64).max(4),
             "loom.mesh_indices",
+            as_input | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         )?;
         write_slice(&indices_alloc, &combined_indices)?;
 
@@ -284,11 +305,26 @@ impl Renderer {
             &mut allocator,
             (MAX_OBJECTS * size_of::<ObjectData>()) as u64,
             "loom.object_data",
+            vk::BufferUsageFlags::empty(),
         )?;
+
+        // Built before the pipeline, because the pipeline layout needs its
+        // descriptor set layout. `None` on a device without ray query, which
+        // is the whole graceful-degradation path: same pipeline, no shadows.
+        let mut raytracer = if raytracing {
+            Some(Raytracer::new(instance.handle(), &raw, &mut allocator)?)
+        } else {
+            None
+        };
 
         let cache_path = pipeline_cache_path(instance, device);
         let (pipeline_layout, pipeline, pipeline_cache) =
-            create_pipeline(&raw, cache_path.as_deref(), COLOR_FORMAT)?;
+            create_pipeline(
+                &raw,
+                cache_path.as_deref(),
+                COLOR_FORMAT,
+                raytracer.as_ref().map(Raytracer::descriptor_layout),
+            )?;
         let sky_pipeline = create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
 
         names.set(color, "loom.color_target");
@@ -323,7 +359,51 @@ impl Renderer {
         names.set(command_buffer, "loom.command_buffer");
         names.set(fence, "loom.frame_fence");
 
+        // **Ray tracing needs real positions.** The vertex buffer the raster
+        // path reads holds `PackedVertex` — quantised, with a per-mesh origin
+        // and step the shader undoes. An acceleration structure has no such
+        // hook: it reads a plain vertex format at a fixed stride. Handing it
+        // the packed buffer as R32G32B32_SFLOAT makes it trace whatever those
+        // bits happen to look like as floats, which renders as shadows of a
+        // shape that is not in the scene.
+        //
+        // So the builds get their own buffer of unpacked positions, in the same
+        // order `combine` emitted vertices. Built once with the BLAS, never
+        // touched per frame.
+        let mut rt_positions = None;
+        if raytracing {
+            let positions: Vec<[f32; 3]> = meshes
+                .iter()
+                .flat_map(|m| m.vertices.iter())
+                .map(|v| [v.position[0], v.position[1], v.position[2]])
+                .collect();
+            let (buffer, allocation, address) = create_address_buffer(
+                &raw,
+                &mut allocator,
+                (std::mem::size_of_val(positions.as_slice()) as u64).max(4),
+                "loom.rt_positions",
+                vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+            )?;
+            write_slice(&allocation, &positions)?;
+            rt_positions = Some((buffer, allocation, address));
+        }
+
+        // BLAS per mesh, once. The TLAS is rebuilt per frame in `render`,
+        // because objects move and triangles do not.
+        if let Some(rt) = raytracer.as_mut() {
+            rt.build_meshes(
+                &mut allocator,
+                crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
+                rt_positions.as_ref().map_or(0, |(_, _, a)| *a),
+                index_address,
+                &ranges,
+                u32::try_from(combined_vertices.len()).unwrap_or(0),
+            )?;
+        }
+
         Ok(Self {
+            raytracer,
+            rt_positions,
             device: raw,
             queue: device.queue(),
             allocator: Some(allocator),
@@ -396,6 +476,7 @@ impl Renderer {
             allocator,
             (capacity * size_of::<ObjectData>()) as u64,
             "loom.object_data",
+            vk::BufferUsageFlags::empty(),
         )?;
         // Everything fallible is done; retire the old buffer now.
         if let Some(old) = self.objects_alloc.take() {
@@ -443,6 +524,25 @@ impl Renderer {
             &object_data,
         )?;
 
+        // The TLAS describes where things are, so it is rebuilt whenever they
+        // move. The BLAS holding the triangles is untouched, which is what
+        // makes a per-frame rebuild affordable.
+        if self.raytracer.is_some() {
+            let pool = self.command_pool;
+            let queue = self.queue;
+            let mut allocator = self.allocator.take();
+            let result = match (self.raytracer.as_mut(), allocator.as_mut()) {
+                (Some(rt), Some(alloc)) => rt.build_instances(
+                    alloc,
+                    crate::raytrace::Submit { pool, queue },
+                    &sorted,
+                ),
+                _ => Ok(()),
+            };
+            self.allocator = allocator;
+            result?;
+        }
+
         // Every barrier below is chosen by the graph, not written here.
         // never-do #4: no barrier lives outside it. What each pass *touches*
         // is declared; what that requires is derived.
@@ -453,6 +553,12 @@ impl Renderer {
         let (width, height) = (self.width, self.height);
         let (color_view, depth_view) = (self.color_view, self.depth_view);
         let (pipeline, layout) = (self.pipeline, self.pipeline_layout);
+        // `ready` is false until a TLAS exists — an empty scene traces nothing.
+        let shadow_set = self
+            .raytracer
+            .as_ref()
+            .filter(|rt| rt.ready())
+            .map(crate::raytrace::Raytracer::descriptor_set);
         let base_push = Push {
             vertices: self.vertex_address,
             objects: self.object_address,
@@ -480,6 +586,19 @@ impl Renderer {
                     set_viewport(d, cmd, width, height);
                     draw_sky(d, cmd, sky, layout, &base_push);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                    // The scene's one descriptor set: the TLAS the fragment
+                    // shader traces shadow rays against. Bound once for the
+                    // whole pass, never per draw (never-do #2).
+                    if let Some(set) = shadow_set {
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            0,
+                            &[set],
+                            &[],
+                        );
+                    }
                     set_viewport(d, cmd, width, height);
                     d.cmd_bind_index_buffer(cmd, index_buffer, 0, vk::IndexType::UINT32);
                     for (range, first_instance, instances) in draws {
@@ -620,6 +739,19 @@ impl Drop for Renderer {
         unsafe {
             let _ = self.device.device_wait_idle();
             self.save_pipeline_cache();
+            // Before the allocator goes away: acceleration structures own both
+            // Vulkan handles and allocations from it.
+            if let (Some(rt), Some(allocator)) =
+                (self.raytracer.as_mut(), self.allocator.as_mut())
+            {
+                rt.destroy(allocator);
+            }
+            if let (Some((buffer, allocation, _)), Some(allocator)) =
+                (self.rt_positions.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+                self.device.destroy_buffer(buffer, None);
+            }
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline(self.pipeline, None);
@@ -880,10 +1012,11 @@ pub(crate) fn create_index_buffer(
     allocator: &mut Allocator,
     size: u64,
     name: &str,
+    extra: vk::BufferUsageFlags,
 ) -> Result<(vk::Buffer, Allocation, vk::DeviceAddress), RenderError> {
     let info = vk::BufferCreateInfo::default()
         .size(size)
-        .usage(vk::BufferUsageFlags::INDEX_BUFFER)
+        .usage(vk::BufferUsageFlags::INDEX_BUFFER | extra)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
     // SAFETY: `info` is fully initialised and outlives the call.
     let buffer = unsafe { device.create_buffer(&info, None) }?;
@@ -918,7 +1051,17 @@ pub(crate) fn create_index_buffer(
         let _ = allocator.free(allocation);
         return Err(on_failure(device, e.to_string()));
     }
-    Ok((buffer, allocation, 0))
+    // Zero unless the caller asked for an address. Acceleration structure
+    // builds read indices by address, and a zero there is
+    // VUID-vkCmdBuildAccelerationStructuresKHR-pInfos-03806.
+    let address = if extra.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS) {
+        let info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
+        // SAFETY: the buffer was created with SHADER_DEVICE_ADDRESS.
+        unsafe { device.get_buffer_device_address(&info) }
+    } else {
+        0
+    };
+    Ok((buffer, allocation, address))
 }
 
 /// Build the per-object array the shader indexes with `SV_InstanceID`.
@@ -936,6 +1079,7 @@ pub(crate) fn pack_objects(
             let rows = normal_matrix.transpose();
             ObjectData {
                 mvp: (view_proj * object.model).to_cols_array(),
+                model: object.model.to_cols_array(),
                 unpack: unpack
                     .get(object.mesh as usize)
                     .copied()
@@ -967,12 +1111,22 @@ pub(crate) fn create_address_buffer(
     allocator: &mut Allocator,
     size: u64,
     name: &str,
+    extra: vk::BufferUsageFlags,
 ) -> Result<(vk::Buffer, Allocation, vk::DeviceAddress), RenderError> {
     let info = vk::BufferCreateInfo::default()
         .size(size)
         // SHADER_DEVICE_ADDRESS is what makes `vkGetBufferDeviceAddress` legal
         // on this buffer; without it the call is a validation error.
-        .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+        //
+        // `extra` carries the acceleration-structure bits when ray tracing is
+        // on. Passed in rather than always set: requesting
+        // ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR without the
+        // extension enabled is itself a validation error.
+        .usage(
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                | extra,
+        )
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
     // SAFETY: `info` is fully initialised and outlives the call.
     let buffer = unsafe { device.create_buffer(&info, None) }?;
@@ -1121,6 +1275,7 @@ pub(crate) fn create_pipeline(
     device: &ash::Device,
     cache_path: Option<&std::path::Path>,
     color_format: vk::Format,
+    set_layout: Option<vk::DescriptorSetLayout>,
 ) -> Result<(vk::PipelineLayout, vk::Pipeline, vk::PipelineCache), RenderError> {
     let module = create_shader_module(device, crate::SCENE_SPV)?;
 
@@ -1129,8 +1284,14 @@ pub(crate) fn create_pipeline(
         .offset(0)
         .size(u32::try_from(size_of::<Push>()).unwrap_or(128));
     let ranges = [push_range];
-    let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges);
-    // SAFETY: `ranges` outlives the call.
+    // The scene's only descriptor set: the TLAS the fragment shader traces
+    // shadow rays against. Empty when the device has no ray query, which keeps
+    // one pipeline layout for both paths.
+    let sets: Vec<vk::DescriptorSetLayout> = set_layout.into_iter().collect();
+    let layout_info = vk::PipelineLayoutCreateInfo::default()
+        .push_constant_ranges(&ranges)
+        .set_layouts(&sets);
+    // SAFETY: `ranges` and `sets` outlive the call.
     let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }?;
 
     // Vulkan doc §9: create the cache up front and pass it to every pipeline

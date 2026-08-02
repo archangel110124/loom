@@ -14,6 +14,7 @@
 mod debug_names;
 mod device;
 mod instance;
+mod raytrace;
 mod renderer;
 mod ui;
 mod viewer;

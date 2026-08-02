@@ -404,10 +404,15 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // inside the terrain.
     let camera = frame_scene(&node_bounds(&world, &library), yaw, pitch);
 
-    let result = (|| -> Result<String, String> {
+    let result = (|| -> Result<(String, bool), String> {
         let instance = Instance::new(c"loom").map_err(|e| e.to_string())?;
         let device = Device::new(&instance).map_err(|e| e.to_string())?;
-        let name = device.name().to_owned();
+        let name = format!(
+            "{}{}",
+            device.name(),
+            if device.supports_raytracing() { "" } else { " (no ray query)" }
+        );
+        let raytracing = device.supports_raytracing();
         let mut renderer = Renderer::new(&instance, &device, width, height, &library.meshes)
             .map_err(|e| e.to_string())?;
         renderer
@@ -417,15 +422,18 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         instance
             .check_validation()
             .map_err(|m| format!("validation was not silent: {}", m.join("; ")))?;
-        Ok(name)
+        Ok((name, raytracing))
     })();
 
     match result {
-        Ok(gpu) => (
+        Ok((gpu, raytracing)) => (
             0,
             json_line(&serde_json::json!({
                 "ok": true, "out": out, "objects": objects.len(),
                 "size": [width, height], "gpu": gpu,
+                // Reported so the agent can tell a scene rendered without
+                // shadows from a scene that has none.
+                "raytracing": raytracing,
             })),
         ),
         Err(e) => (
