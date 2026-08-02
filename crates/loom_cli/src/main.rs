@@ -1358,13 +1358,7 @@ fn to_parent_space(ops: &mut [loom_scene::SceneOp], world: &World) {
             .and_then(|e| world.parent(*e))
             .and_then(|parent| world.global_transform(parent))
             .map_or(Mat4::IDENTITY, |g| {
-                let matrix = Mat4::from_cols_array(&g.matrix);
-                // Singular parents (any axis scaled to zero) invert to NaN.
-                if matrix.determinant().abs() < 1e-12 {
-                    Mat4::IDENTITY
-                } else {
-                    matrix.inverse()
-                }
+                play::invertible_parent(Mat4::from_cols_array(&g.matrix))
             });
 
         // A position, so `transform_point3` — translation included. Using the

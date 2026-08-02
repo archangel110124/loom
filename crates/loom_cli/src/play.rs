@@ -250,11 +250,19 @@ impl Sim {
 /// `propagate_transforms` into the whole subtree, and surfaces to the agent as
 /// `"actual": null` on an assertion, which reads as "no such node" rather than
 /// "your scene is degenerate".
-fn invertible_parent(matrix: Mat4) -> Mat4 {
-    if matrix.determinant().abs() < 1e-12 {
-        return Mat4::IDENTITY;
+pub(crate) fn invertible_parent(matrix: Mat4) -> Mat4 {
+    // Invert, then ask whether the answer is usable — rather than guessing
+    // from the determinant. A determinant threshold is scale-dependent: a node
+    // uniformly scaled by 1e-5 has determinant 1e-15 and is perfectly
+    // invertible, so a 1e-12 cutoff would have silently snapped a legitimately
+    // tiny node back to its parent's origin. Testing the result is
+    // scale-independent and tests the property that actually matters.
+    let inverse = matrix.inverse();
+    if inverse.is_finite() {
+        inverse
+    } else {
+        Mat4::IDENTITY
     }
-    matrix.inverse()
 }
 
 /// Whether any ancestor of this node is a dynamic body.
@@ -855,6 +863,45 @@ transform = { pos = [0.0, 6.0, 0.0] }
             (y - 2.0).abs() < 0.15,
             "a unit capsule rests at 2.0, not {y} — the collider is the wrong height"
         );
+    }
+
+    /// A determinant threshold is scale-dependent and this is not. A node
+    /// uniformly scaled by 1e-5 has determinant 1e-15 — below the 1e-12 cutoff
+    /// that used to guard this — and is perfectly invertible; snapping it to
+    /// identity would have quietly moved a legitimately tiny node to its
+    /// parent's origin. Only a genuinely singular matrix falls back.
+    #[test]
+    fn only_a_truly_singular_parent_falls_back() {
+        use loom_render::glam::{Mat4, Quat, Vec3};
+
+        for scale in [1.0_f32, 1e-2, 1e-4, 1e-5, 1e-6] {
+            let m = Mat4::from_scale_rotation_translation(
+                Vec3::splat(scale),
+                Quat::IDENTITY,
+                Vec3::new(3.0, 4.0, 5.0),
+            );
+            let inverse = super::invertible_parent(m);
+            // Asserting `inverse * m == identity` would be testing f32
+            // precision, not the fallback: at scale 1e-6 the inverse carries
+            // entries around 1e6 and the product drifts. The property here is
+            // simply that it did NOT give up and return identity.
+            assert!(inverse.is_finite(), "scale {scale} produced a non-finite inverse");
+            assert_ne!(
+                inverse,
+                Mat4::IDENTITY,
+                "scale {scale} is invertible and must not fall back"
+            );
+        }
+
+        // Flattened on one axis: genuinely singular, and identity is the only
+        // finite answer available.
+        let flat = Mat4::from_scale_rotation_translation(
+            Vec3::new(1.0, 0.0, 1.0),
+            Quat::IDENTITY,
+            Vec3::ZERO,
+        );
+        assert_eq!(super::invertible_parent(flat), Mat4::IDENTITY);
+        assert!(super::invertible_parent(flat).is_finite());
     }
 
     #[test]
