@@ -328,6 +328,14 @@ impl Session {
     /// # Errors
     /// [`std::io::Error`] if the file cannot be written.
     pub fn save(&mut self) -> Result<(), SaveRejected> {
+        // Held across the re-read and the write, for the same reason
+        // `apply_to_file` holds it: checking a token against a snapshot and
+        // then writing is only a check if nothing can land in between. An
+        // agent write arriving in that window was overwritten and `save`
+        // returned Ok — the staleness check below is precisely what is meant
+        // to stop that.
+        let _guard = lock_scene(&self.path).map_err(SaveRejected::Io)?;
+
         // Re-read before writing. §7.17 is about the agent's writes being
         // rejected rather than merged; an unconditional `fs::write` from the
         // editor is the same collision with the roles reversed, and it was
@@ -621,6 +629,74 @@ name = \"Room\"
             .filter(|i| !final_text.contains(&format!("\"N{i}\"")))
             .collect();
         assert!(missing.is_empty(), "these writers were silently erased: {missing:?}");
+    }
+
+    /// **The editor's save had the same TOCTOU the CLI's writes did.** `save`
+    /// re-reads, compares the token, then writes — with nothing held across
+    /// the three steps. So an agent write landing between the check and the
+    /// write is overwritten, and `save` returns `Ok`: the staleness check it
+    /// performs is exactly the check that is supposed to prevent that.
+    ///
+    /// The invariant: if a save and an agent transaction both succeed, the
+    /// only legal ordering is save-then-apply, because after the apply the
+    /// session's baseline is stale and the save must be refused. So the
+    /// spawned node must be present at the end. If it is missing, a successful
+    /// save silently erased a successful transaction — never-do #15.
+    #[test]
+    fn a_save_racing_an_agent_write_cannot_erase_it() {
+        let dir = std::env::temp_dir().join("loom_save_race");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        for round in 0..64 {
+            let path = dir.join(format!("scene{round}.loom"));
+            super::write_atomically(&path, SCENE).expect("seed");
+
+            let mut session = Session::open(&path).expect("open");
+            session
+                .apply(Transaction {
+                    label: "the human's edit".to_owned(),
+                    ops: vec![SceneOp::SetTransform {
+                        node: "Room".to_owned(),
+                        pos: Some([1.0, 0.0, 0.0]),
+                        rot_euler: None,
+                        scale: None,
+                    }],
+                    dry_run: false,
+                    expect_version: None,
+                })
+                .expect("edit");
+
+            let agent = {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    super::apply_to_file(
+                        &path,
+                        &Transaction {
+                            label: "the agent's spawn".to_owned(),
+                            ops: vec![SceneOp::SpawnNode {
+                                parent: "Room".to_owned(),
+                                name: "AgentNode".to_owned(),
+                                mesh: None,
+                            }],
+                            dry_run: false,
+                            expect_version: None,
+                        },
+                    )
+                    .is_ok()
+                })
+            };
+            let saved = session.save().is_ok();
+            let applied = agent.join().expect("agent thread");
+
+            if saved && applied {
+                let text = std::fs::read_to_string(&path).expect("read back");
+                assert!(
+                    text.contains("AgentNode"),
+                    "round {round}: a successful save erased a successful transaction"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **A reader must never see a half-written scene.** `fs::write` truncates

@@ -445,6 +445,19 @@ fn non_finite(item: &Item, field: &str, out: &mut Vec<SceneError>, node: &str) {
         }
         return;
     }
+    // `[[component.list]]` — an array of tables, which is NOT `as_array` and
+    // NOT `as_table_like`. A voxel volume's op list is exactly this shape, and
+    // missing the case here meant a `radius = nan` in the recipe validated
+    // clean and was then dropped, silently changing the geometry the file
+    // claims to describe (never-do #11).
+    if let Some(tables) = item.as_array_of_tables() {
+        for (i, table) in tables.iter().enumerate() {
+            for (key, v) in table.iter() {
+                non_finite(v, &format!("{field}[{i}].{key}"), out, node);
+            }
+        }
+        return;
+    }
     // The §7 object spelling of a Vec3 is a table, so without this a
     // `{ x = nan, ... }` is only caught as a type error, not as the
     // `non_finite_float` §6 names.

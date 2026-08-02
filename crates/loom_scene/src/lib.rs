@@ -229,6 +229,27 @@ name = \"Root\"
         }
     }
 
+    /// A voxel volume's op list is `[[node.components.VoxelVolume.ops]]` — an
+    /// array of *tables*, which is neither `as_array` nor `as_table_like`, so
+    /// the finiteness walk did not descend into it. A `radius = nan` in there
+    /// validated clean and was then dropped, silently changing the recipe.
+    ///
+    /// never-do #11 is that the scene stores the recipe and never the voxels,
+    /// which only works if replaying the recipe is reproducible. A NaN that
+    /// disappears at load means the file no longer describes the geometry.
+    #[test]
+    fn a_non_finite_inside_a_voxel_op_list_is_rejected() {
+        let cave = std::fs::read_to_string("../../assets/test/cave.loom").expect("fixture");
+        let poisoned = cave.replacen("radius = 2.0", "radius = nan", 1);
+        assert_ne!(poisoned, cave, "the fixture should contain that op");
+
+        let Err(errs) = Scene::parse(&poisoned) else {
+            panic!("a NaN in the op list must not validate")
+        };
+        assert_eq!(errs[0].error, "non_finite_float");
+        assert!(errs[0].field.contains("ops"), "name the op list: {}", errs[0].field);
+    }
+
     /// Godot's one-root rule — it is what makes scenes composable as instances.
     #[test]
     fn two_roots_is_an_error() {
