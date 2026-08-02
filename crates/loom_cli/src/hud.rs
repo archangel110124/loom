@@ -115,23 +115,24 @@ pub(crate) fn elements(
 
 /// Draw the resolved elements into the viewport.
 ///
-/// **Anchored to the viewport, not the window.** The first version used
-/// `Area::anchor`, which measures from the edges of the whole screen — so in
-/// the editor the score sat on top of the hierarchy panel and the objective
-/// counter on top of the inspector. A HUD belongs to the game's view, and in
-/// an editor the game's view is the region the panels have left over.
+/// **Anchored to the viewport, and claiming none of it.** Anchoring to the
+/// whole window put the score on top of the hierarchy panel; the fix for that
+/// was a transparent `CentralPanel`, which fixed the position and broke
+/// clicking — a panel is an interactive region, so egui reported every click
+/// in the viewport as consumed and the viewer never saw it. The crosshair was
+/// visible and the trigger did nothing.
 ///
-/// A transparent `CentralPanel` *is* that region: egui hands it whatever the
-/// side and bottom panels did not take, at any window size and whether or not
-/// the panels are there at all. Its painter is clipped to it too, so a long
-/// line runs out of viewport rather than spilling across an inspector.
+/// `available_rect_before_wrap` is the same region a `CentralPanel` would
+/// take — whatever the side and bottom panels left over, at any window size
+/// and whether or not the panels are there — but *reading* it adds nothing to
+/// the layout and claims no input.
 ///
-/// Painted rather than laid out. A HUD is a fixed set of things pinned to
-/// known points — no interaction, no layout, nothing to click — and one
-/// `text` call each is both less code and less to go wrong than an `Area`
-/// per element that has to be told not to accept input.
-/// Returns the viewport it drew into and where each element landed — which is
-/// what makes the placement testable without a window or a GPU.
+/// Painted rather than laid out, and clipped to that rect by hand. A HUD is a
+/// fixed set of things pinned to known points with nothing to click, so one
+/// `Painter::text` each is both less code and incapable of stealing a click.
+///
+/// Returns the viewport and where each element landed, which is what makes
+/// the placement testable without a window.
 pub(crate) fn draw(
     root: &mut egui::Ui,
     elements: &[Element],
@@ -139,25 +140,24 @@ pub(crate) fn draw(
     if elements.is_empty() {
         return (egui::Rect::NOTHING, Vec::new());
     }
-    egui::CentralPanel::default()
-        .frame(egui::Frame::NONE)
-        .show(root, |ui| {
-            let viewport = ui.max_rect();
-            let painter = ui.painter();
-            let mut painted = Vec::with_capacity(elements.len());
-            for element in elements {
-                let at = element.anchor.pos_in_rect(&viewport) + element.offset;
-                painted.push(painter.text(
-                    at,
-                    element.anchor,
-                    &element.text,
-                    egui::FontId::proportional(element.size),
-                    element.color,
-                ));
-            }
-            (viewport, painted)
+    let viewport = root.available_rect_before_wrap();
+    let painter = root.painter().with_clip_rect(viewport);
+
+    let painted = elements
+        .iter()
+        .map(|element| {
+            let at = element.anchor.pos_in_rect(&viewport) + element.offset;
+            painter.text(
+                at,
+                element.anchor,
+                &element.text,
+                egui::FontId::proportional(element.size),
+                element.color,
+            )
         })
-        .inner
+        .collect();
+
+    (viewport, painted)
 }
 
 /// Replace `{name}` with the game's own numbers.
@@ -287,6 +287,69 @@ mod tests {
             });
         }
         result
+    }
+
+    /// Whether egui claims a pointer sitting at `x` in the viewport.
+    ///
+    /// If it does, the viewer's event loop treats the click as consumed and
+    /// returns before the mouse button ever reaches the input map — which is
+    /// how a visible crosshair ends up attached to a trigger that does
+    /// nothing.
+    fn pointer_claimed_at(x: f32, draw_hud: bool) -> bool {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            events: vec![egui::Event::PointerMoved(egui::pos2(x, 300.0))],
+            ..egui::RawInput::default()
+        };
+        let element = Element {
+            anchor: egui::Align2::CENTER_CENTER,
+            offset: egui::Vec2::ZERO,
+            text: "+".to_owned(),
+            size: 26.0,
+            color: egui::Color32::WHITE,
+        };
+
+        let mut claimed = false;
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input.clone(), |root| {
+                egui::Panel::left("panel").exact_size(240.0).show(root, |ui| {
+                    ui.label("hierarchy");
+                });
+                if draw_hud {
+                    let _ = draw(root, std::slice::from_ref(&element));
+                }
+            });
+            claimed = ctx.is_pointer_over_egui();
+        }
+        claimed
+    }
+
+    /// **The overlay must not eat the trigger.** Fixing the anchoring with a
+    /// transparent `CentralPanel` put the score in the right place and made
+    /// the whole viewport an interactive egui region — so every click was
+    /// reported as consumed, the viewer returned before recording the button,
+    /// and shooting silently stopped working while the crosshair kept
+    /// rendering.
+    #[test]
+    fn the_overlay_does_not_claim_clicks_in_the_viewport() {
+        assert!(
+            !pointer_claimed_at(600.0, true),
+            "the HUD swallowed a click in the middle of the viewport"
+        );
+    }
+
+    /// And the panels still do claim theirs, or clicking the hierarchy would
+    /// also shoot.
+    #[test]
+    fn a_click_on_a_panel_is_still_the_panels() {
+        assert!(
+            pointer_claimed_at(60.0, true),
+            "a click on the hierarchy should belong to the hierarchy"
+        );
     }
 
     /// **The bug this exists for.** `Area::anchor` measures from the edges of
