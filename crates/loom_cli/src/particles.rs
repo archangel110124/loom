@@ -385,6 +385,57 @@ mod tests {
         }
     }
 
+    fn explosion() -> World {
+        let source = std::fs::read_to_string("../../assets/test/explosion.loom").expect("fixture");
+        World::from_scene(&loom_scene::Scene::parse(&source).expect("valid scene"))
+    }
+
+    /// **Opening a scene must not set off its explosions.** A one-shot emitter
+    /// is an event; building the viewer's particle state is not that event.
+    /// The editor showed the blast the moment the file was opened, before Play
+    /// had been pressed.
+    #[test]
+    fn building_a_plume_does_not_fire_a_one_shot() {
+        let plumes = Plumes::new(&explosion());
+
+        assert!(
+            plumes.instances().is_empty(),
+            "{} particles from a scene nobody has played",
+            plumes.instances().len()
+        );
+    }
+
+    /// And the drag case, which is the same bug seen twice: the editor drops
+    /// its particle state whenever the scene changes, so every frame of a
+    /// gizmo drag rebuilt it. If building is idempotent, a drag cannot
+    /// re-detonate anything.
+    #[test]
+    fn rebuilding_a_plume_from_the_same_scene_gives_the_same_thing() {
+        let world = explosion();
+
+        let first = Plumes::new(&world);
+        let second = Plumes::new(&world);
+
+        assert_eq!(
+            first.instances().len(),
+            second.instances().len(),
+            "a rebuild must not be an event"
+        );
+    }
+
+    /// A continuous emitter still previews, warmed to its settled population,
+    /// because placing a chimney needs to show where its smoke goes. It is
+    /// the *advancing* that belongs to Play, not the preview.
+    #[test]
+    fn a_continuous_emitter_still_previews_without_playing() {
+        let source = std::fs::read_to_string("../../assets/test/smoke.loom").expect("fixture");
+        let world = World::from_scene(&loom_scene::Scene::parse(&source).expect("valid scene"));
+
+        let plumes = Plumes::new(&world);
+
+        assert!(!plumes.instances().is_empty(), "a chimney should preview");
+    }
+
     /// Nothing fired means nothing drawn, even in a scene that has a template.
     #[test]
     fn no_shot_means_no_fireball() {

@@ -794,10 +794,15 @@ impl ApplicationHandler for App {
                     self.poll_file(now);
                 }
                 self.feed_play_input();
+                // How many simulation ticks this frame actually ran. Particles
+                // advance by exactly this, so they keep time with the physics
+                // instead of with the frame rate.
+                let before = self.play.as_ref().map_or(0, |p| p.ticks);
                 if self.play.as_mut().is_some_and(|p| p.advance(dt)) {
                     self.refresh_play_objects();
                     self.spawn_new_detonations();
                 }
+                let stepped = self.play.as_ref().map_or(0, |p| p.ticks.saturating_sub(before));
 
                 // While driving a character the view is the scene's camera,
                 // which the character carries. The fly camera is still there
@@ -845,14 +850,31 @@ impl ApplicationHandler for App {
                     None => &self.view.objects,
                 };
 
-                // Advanced by one tick, not rebuilt. Re-simulating every
-                // plume's whole history each frame cost 9.5 ms on this scene —
-                // four times a 67-million-voxel terrain, for three props on a
-                // box. The state is kept instead and stepped forward.
+                // **Particles only run while the simulation does.** They used
+                // to advance one tick per frame whether or not Play was on, so
+                // opening a scene played its explosions before the human had
+                // pressed anything — and because the editor drops its particle
+                // state whenever the scene changes, every frame of a gizmo
+                // drag started the blast over again.
+                //
+                // Not playing, the plume is built and left alone: warmed to
+                // the settled population for a continuous emitter, which is
+                // what `loom render` shows and what makes placing a chimney
+                // possible, and empty for a one-shot, because a burst is an
+                // event and opening a file is not one.
+                //
+                // Advanced rather than rebuilt, for the reason it always was:
+                // re-simulating every plume's whole history each frame cost
+                // 9.5 ms on this scene — four times a 67-million-voxel
+                // terrain, for three props on a box.
+                let world = match self.play.as_ref() {
+                    Some(play) => &play.world,
+                    None => self.view.world(),
+                };
                 let plumes = self
                     .plumes
-                    .get_or_insert_with(|| crate::particles::Plumes::new(self.view.world()));
-                plumes.advance(1);
+                    .get_or_insert_with(|| crate::particles::Plumes::new(world));
+                plumes.advance(stepped);
                 let particles: &[loom_render::ParticleInstance] = plumes.instances();
 
                 let mut actions = Vec::new();
@@ -1025,6 +1047,10 @@ impl App {
         ));
         let drivable = play.has_player() && play.camera().is_some();
         self.play = Some(play);
+        // Effects restart with the simulation. Otherwise a one-shot that
+        // already ran in a previous session of Play would stay burnt out, and
+        // pressing Play twice would show the explosion only once.
+        self.plumes = None;
         // First person only when the scene actually has the rig for it: a
         // character to move and a camera to see through. Without both, Play
         // stays a spectator view and the fly camera keeps working.
@@ -1093,6 +1119,7 @@ impl App {
         // too. Leaving the counter high would make the first shot of the next
         // run look like one already seen, and it would never be drawn.
         self.detonations_seen = 0;
+        self.plumes = None;
         if let Some(play) = self.play.take() {
             crate::log::info(format!(
                 "stopped after {} ticks ({:.2}s) — state {:016x}",
