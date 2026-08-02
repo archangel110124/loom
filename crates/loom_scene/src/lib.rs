@@ -184,6 +184,51 @@ name = \"Root\"
         assert_eq!(errs[0].error, "not_implemented");
     }
 
+    /// §7: the three Vec3 spellings are "accepted interchangeably", and the
+    /// spec's own rationale is that this "removes a whole category of agent
+    /// retry loops for the cost of a few `From` impls".
+    ///
+    /// Only the array form was ever built. Before the validator was tightened
+    /// the other two deserialized to nothing and hit `unwrap_or_default()`, so
+    /// the node silently sat at the origin with `ok: true`; afterwards they
+    /// were a loud type error. Neither is what §7 promises.
+    #[test]
+    fn the_three_vec3_spellings_all_mean_the_same_thing() {
+        let forms = [
+            "[0.0, 1.0, 0.0]",
+            "{ x = 0.0, y = 1.0, z = 0.0 }",
+            "\"Vec3(0, 1, 0)\"",
+        ];
+
+        for form in forms {
+            let scene = format!("{TRANSFORM_SCENE}transform = {{ pos = {form} }}\n");
+
+            let parsed = Scene::parse(&scene)
+                .unwrap_or_else(|e| panic!("§7 accepts `{form}` for a Vec3: {e:?}"));
+
+            assert_eq!(parsed.nodes()[0].transform.pos, [0.0, 1.0, 0.0], "for {form}");
+        }
+    }
+
+    /// The coercion must not swallow a genuinely malformed Vec3, or it has
+    /// traded a loud error back for the silent default this all started with.
+    #[test]
+    fn a_vec3_lookalike_that_is_not_one_is_still_rejected() {
+        for bad in [
+            "{ x = 0.0, y = 1.0 }",           // missing z
+            "{ x = 0.0, y = 1.0, w = 2.0 }",  // wrong key
+            "\"Vec3(0, 1)\"",                 // two components
+            "\"Vec3(a, b, c)\"",              // not numbers
+        ] {
+            let scene = format!("{TRANSFORM_SCENE}transform = {{ pos = {bad} }}\n");
+
+            assert!(
+                Scene::parse(&scene).is_err(),
+                "`{bad}` is not a Vec3 and must not quietly become the default"
+            );
+        }
+    }
+
     /// Godot's one-root rule — it is what makes scenes composable as instances.
     #[test]
     fn two_roots_is_an_error() {

@@ -375,6 +375,51 @@ fn check(registry: &TypeRegistry, type_name: &str, item: &Item, node: &str) -> V
     }
 }
 
+/// `{ x = _, y = _, z = _ }` as `[x, y, z]`, per §7.
+///
+/// Exactly those three keys and nothing else: a table with a missing or extra
+/// key is not a Vec3, and must stay whatever it was so the validator can
+/// reject it rather than have it quietly become something valid.
+fn vec3_from_table(table: &dyn toml_edit::TableLike) -> Option<Value> {
+    if table.len() != 3 {
+        return None;
+    }
+    let mut axes = Vec::with_capacity(3);
+    for key in ["x", "y", "z"] {
+        let item = table.get(key)?;
+        // Integers coerce to floats where a float is expected (§7), so both
+        // are a Vec3 component. Routing through `item_to_json` rather than
+        // forcing f64 keeps that coercion in one place.
+        if item.as_float().is_none() && item.as_integer().is_none() {
+            return None;
+        }
+        axes.push(item_to_json(item)?);
+    }
+    Some(Value::Array(axes))
+}
+
+/// `"Vec3(0, 1, 0)"` as `[0.0, 1.0, 0.0]`, per §7.
+///
+/// Returns `None` for anything that is not exactly this shape, so an ordinary
+/// string field is untouched and a malformed one stays a string for the
+/// validator to reject.
+fn vec3_from_str(text: &str) -> Option<Value> {
+    let inner = text.trim().strip_prefix("Vec3(")?.strip_suffix(')')?;
+    let parts: Vec<&str> = inner.split(',').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(3);
+    for p in parts {
+        // `"nan".parse::<f64>()` succeeds. Refusing here leaves the text as a
+        // string, which the validator rejects — a non-finite component must
+        // never reach a transform (§1).
+        let n = p.trim().parse::<f64>().ok().filter(|n| n.is_finite())?;
+        out.push(Value::from(n));
+    }
+    Some(Value::Array(out))
+}
+
 /// Record every non-finite float reachable from `item`, named by its path.
 fn non_finite(item: &Item, field: &str, out: &mut Vec<SceneError>, node: &str) {
     if let Some(v) = item.as_float() {
@@ -398,6 +443,15 @@ fn non_finite(item: &Item, field: &str, out: &mut Vec<SceneError>, node: &str) {
         for (i, v) in array.iter().enumerate() {
             non_finite(&Item::Value(v.clone()), &format!("{field}[{i}]"), out, node);
         }
+        return;
+    }
+    // The §7 object spelling of a Vec3 is a table, so without this a
+    // `{ x = nan, ... }` is only caught as a type error, not as the
+    // `non_finite_float` §6 names.
+    if let Some(table) = item.as_table_like() {
+        for (key, v) in table.iter() {
+            non_finite(v, &format!("{field}.{key}"), out, node);
+        }
     }
 }
 
@@ -405,7 +459,8 @@ fn non_finite(item: &Item, field: &str, out: &mut Vec<SceneError>, node: &str) {
 /// against. Only the shapes the format permits in a component field.
 fn item_to_json(item: &Item) -> Option<Value> {
     if let Some(v) = item.as_str() {
-        return Some(Value::from(v));
+        // §7: `"Vec3(0, 1, 0)"` is one of three interchangeable spellings.
+        return Some(vec3_from_str(v).unwrap_or_else(|| Value::from(v)));
     }
     if let Some(v) = item.as_bool() {
         return Some(Value::from(v));
@@ -434,6 +489,13 @@ fn item_to_json(item: &Item) -> Option<Value> {
             .filter_map(|t| item_to_json(&Item::Table(t.clone())))
             .collect();
         return Some(Value::Array(elements));
+    }
+    // §7: `{ x = 0.0, y = 1.0, z = 0.0 }` is one of three interchangeable
+    // spellings. Normalising here rather than per-field means every Vec3
+    // field gets it — position, rotation, scale, colour, half-extents — and
+    // both the validator and serde see the one form they already understand.
+    if let Some(v) = item.as_table_like().and_then(vec3_from_table) {
+        return Some(v);
     }
     if let Some(table) = item.as_table_like() {
         let mut object: BTreeMap<String, Value> = BTreeMap::new();
