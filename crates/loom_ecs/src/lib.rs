@@ -30,6 +30,20 @@ impl Entity {
     }
 }
 
+/// Where a camera sits and what it looks at, resolved from its node.
+///
+/// Deliberately plain arrays and not the renderer's `Camera`: `loom_ecs` must
+/// not depend on `loom_render`, which would drag `ash` into every crate that
+/// simulates anything (the dependency rule in CLAUDE.md). The CLI converts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraView {
+    /// World position of the eye.
+    pub eye: [f32; 3],
+    /// A point one metre in front of the eye, along the node's −Z.
+    pub target: [f32; 3],
+    pub fov_y_degrees: f32,
+}
+
 /// Dense per-entity storage for one component type.
 ///
 /// `ponytail:` `Vec<Option<T>>` indexed by entity, not archetype storage.
@@ -128,6 +142,18 @@ pub struct World {
     scripts: Storage<String>,
     /// `RigidBody`: whether it falls, and its mass.
     bodies: Storage<(bool, f32)>,
+    /// Field of view for every node carrying an active `Camera`. Resolved on
+    /// load rather than carried verbatim like `material`: it is two numbers
+    /// and needs no crate this one lacks.
+    camera_fov: Storage<f32>,
+    /// The camera the view comes from, chosen once when the scene loads.
+    ///
+    /// Cached because this is read *per frame* and the alternative is a scan
+    /// over every entity to find the one node in a hundred thousand that has
+    /// a camera. Only which node is fixed here — where it is pointing is read
+    /// live from its global transform, so a camera parented to a moving head
+    /// still moves.
+    active_camera: Option<Entity>,
     /// Insertion order. Iterated instead of a `HashMap` so every traversal is
     /// reproducible — the most common source of "works on my machine"
     /// nondeterminism in Rust engines, and it hides for months (§7.5).
@@ -302,6 +328,26 @@ impl World {
                     world.collider.insert(entity, [x, y, z]);
                 }
             }
+            if let Some(camera) = node.components.get("Camera") {
+                // Absent `active` means active: a camera is written to be
+                // used, and the flag exists to switch a spare one *off*.
+                let active = camera
+                    .get("active")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+                if active {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let fov = camera
+                        .get("fov_y_degrees")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(60.0) as f32;
+                    world.camera_fov.insert(entity, fov);
+                    // First active one wins, in file order. Deterministic and
+                    // explainable; picking "the last" would mean appending a
+                    // node silently stole the view.
+                    world.active_camera.get_or_insert(entity);
+                }
+            }
             if let Some(emitter) = node.components.get("ParticleEmitter") {
                 world.emitter.insert(entity, emitter.clone());
             }
@@ -326,6 +372,47 @@ impl World {
 
         world.propagate_transforms();
         world
+    }
+
+    /// The viewpoint this scene authored, if it authored one.
+    ///
+    /// O(1): the node was chosen at load, and this reads its already-computed
+    /// global transform. Cheap enough to call every frame, which is the point
+    /// — a camera parented to a moving player has to be re-read every frame or
+    /// it does not follow.
+    ///
+    /// `None` when the scene has no camera, and also when the one it has has
+    /// been scaled to nothing. Both mean "fall back to framing the bounds",
+    /// which shows the scene; a NaN view direction would show nothing and say
+    /// nothing about why.
+    #[must_use]
+    pub fn active_camera(&self) -> Option<CameraView> {
+        let entity = self.active_camera?;
+        if !self.is_alive(entity) {
+            return None;
+        }
+        let fov_y_degrees = *self.camera_fov.get(entity)?;
+        let m = self.global.get(entity)?.matrix;
+
+        // Column-major, so the third column is the node's local +Z in world
+        // space. The scene format's forward is −Z (`Transform`'s docs), and
+        // the column carries the node's scale, so it needs normalising: the
+        // direction is the payload and its length is not.
+        let axis = [-m[8], -m[9], -m[10]];
+        let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+        if !length.is_finite() || length < 1e-6 {
+            return None;
+        }
+        let eye = [m[12], m[13], m[14]];
+        Some(CameraView {
+            eye,
+            target: [
+                eye[0] + axis[0] / length,
+                eye[1] + axis[1] / length,
+                eye[2] + axis[2] / length,
+            ],
+            fov_y_degrees,
+        })
     }
 
     /// The `ParticleEmitter` a node declares, if any.
@@ -651,6 +738,129 @@ mod tests {
         world.propagate_transforms();
 
         assert_ne!(before, world.state_hash(), "the hash must notice");
+    }
+
+    /// Build a world from scene text, so these exercise the whole path an
+    /// authored camera actually takes rather than a hand-populated storage.
+    fn world_from(nodes: &str) -> World {
+        let src = format!(
+            "[scene]\nformat = 1\nid = \"7f3a1c22-5d80-4e11-9b6a-2c4e08f5d913\"\n\n{nodes}"
+        );
+        World::from_scene(&loom_scene::Scene::parse(&src).expect("scene parses"))
+    }
+
+    /// Within a hair, per component. Camera maths goes through sin/cos, so
+    /// exact equality would fail on a value that is right.
+    #[track_caller]
+    fn close(actual: [f32; 3], expected: [f32; 3]) {
+        for axis in 0..3 {
+            assert!(
+                (actual[axis] - expected[axis]).abs() < 1e-5,
+                "{actual:?} != {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scene_with_no_camera_has_no_view() {
+        let world = world_from("[[node]]\nname = \"Box\"\n");
+
+        assert!(world.active_camera().is_none(), "auto-framing must stay");
+    }
+
+    #[test]
+    fn an_unrotated_camera_looks_down_negative_z() {
+        let world = world_from(
+            "[[node]]\nname = \"Eye\"\ntransform = { pos = [0.0, 2.0, 5.0] }\n\
+             [node.components.Camera]\n",
+        );
+
+        let view = world.active_camera().expect("the scene declares one");
+        close(view.eye, [0.0, 2.0, 5.0]);
+        close(view.target, [0.0, 2.0, 4.0]);
+    }
+
+    /// Catches reading the wrong matrix column, or the wrong sign of the
+    /// right one — both of which still produce a plausible-looking camera.
+    #[test]
+    fn a_yawed_camera_looks_where_it_is_turned() {
+        let world = world_from(
+            "[[node]]\nname = \"Eye\"\ntransform = { rot_euler = [0.0, 90.0, 0.0] }\n\
+             [node.components.Camera]\n",
+        );
+
+        let view = world.active_camera().expect("the scene declares one");
+        close(view.target, [-1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_pitched_camera_looks_up() {
+        let world = world_from(
+            "[[node]]\nname = \"Eye\"\ntransform = { rot_euler = [30.0, 0.0, 0.0] }\n\
+             [node.components.Camera]\n",
+        );
+
+        let view = world.active_camera().expect("the scene declares one");
+        close(view.target, [0.0, 0.5, -30.0_f32.to_radians().cos()]);
+    }
+
+    /// The whole point of putting the camera on a node: parent it to a head
+    /// and it rides along. Fails if the local transform is read instead of
+    /// the propagated one.
+    #[test]
+    fn a_camera_rides_its_parent() {
+        let world = world_from(
+            "[[node]]\nname = \"Player\"\ntransform = { pos = [10.0, 0.0, 0.0] }\n\n\
+             [[node]]\nname = \"Eye\"\nparent = \"Player\"\n\
+             transform = { pos = [0.0, 1.7, 0.0] }\n\
+             [node.components.Camera]\n",
+        );
+
+        let view = world.active_camera().expect("the scene declares one");
+        close(view.eye, [10.0, 1.7, 0.0]);
+    }
+
+    /// A scaled node must not stretch the step from eye to target: the
+    /// direction is the payload, its length is not. Fails without a normalize.
+    #[test]
+    fn scale_does_not_change_where_a_camera_looks() {
+        let world = world_from(
+            "[[node]]\nname = \"Eye\"\ntransform = { scale = [4.0, 4.0, 4.0] }\n\
+             [node.components.Camera]\n",
+        );
+
+        let view = world.active_camera().expect("the scene declares one");
+        close(view.target, [0.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn an_inactive_camera_is_passed_over_for_the_next_one() {
+        let world = world_from(
+            "[[node]]\nname = \"Stage\"\n\n\
+             [[node]]\nname = \"Spare\"\nparent = \"Stage\"\n\
+             transform = { pos = [0.0, 0.0, 99.0] }\n\
+             [node.components.Camera]\nactive = false\n\n\
+             [[node]]\nname = \"Eye\"\nparent = \"Stage\"\n\
+             transform = { pos = [0.0, 0.0, 7.0] }\n\
+             [node.components.Camera]\nfov_y_degrees = 75.0\n",
+        );
+
+        let view = world.active_camera().expect("the second one is active");
+        close(view.eye, [0.0, 0.0, 7.0]);
+        assert!((view.fov_y_degrees - 75.0).abs() < f32::EPSILON, "authored fov");
+    }
+
+    /// A zero-scaled node has no direction to look in. Reporting no camera
+    /// falls back to auto-framing, which shows the scene; a NaN target
+    /// renders a blank image with no clue why.
+    #[test]
+    fn a_camera_with_no_direction_is_ignored() {
+        let world = world_from(
+            "[[node]]\nname = \"Eye\"\ntransform = { scale = [0.0, 0.0, 0.0] }\n\
+             [node.components.Camera]\n",
+        );
+
+        assert!(world.active_camera().is_none(), "degenerate, not NaN");
     }
 
     #[test]

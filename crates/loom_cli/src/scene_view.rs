@@ -222,6 +222,12 @@ impl SceneView {
             })
     }
 
+    /// The viewpoint this scene authors, if it authors one.
+    #[must_use]
+    pub fn camera(&self) -> Option<loom_ecs::CameraView> {
+        self.world.active_camera()
+    }
+
     /// The world AABB of a node, if it draws anything.
     #[must_use]
     pub fn node_bounds(&self, path: &str) -> Option<&loom_scene::place::Bounds> {

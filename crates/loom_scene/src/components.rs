@@ -304,6 +304,41 @@ impl Default for ParticleEmitter {
     }
 }
 
+/// The viewpoint a render is taken from.
+///
+/// **The node's transform is the camera.** The eye is the node's world
+/// position and the view direction is its local −Z, so a camera is moved,
+/// parented and animated by exactly the same ops as anything else. A
+/// first-person view is a camera parented to the player's head and nothing in
+/// the engine has to know that; a security monitor is the same component on a
+/// node bolted to a wall.
+///
+/// **Absent, the renderer frames the whole scene automatically.** That is the
+/// behaviour worth keeping for an agent authoring a scene it has never seen —
+/// a scene with no camera renders to something visible rather than to an empty
+/// image (design doc §2.10). Adding this component is how you take that over.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Camera {
+    /// Vertical field of view in degrees. 60–90 reads as first person, 40–55
+    /// as cinematic; past about 120 the edges of the image visibly stretch.
+    #[schemars(range(min = 1.0, max = 179.0))]
+    pub fov_y_degrees: f32,
+    /// Whether this camera is eligible to be the view. When a scene holds
+    /// several, the first active one in file order is used — so alternate
+    /// viewpoints can be authored and left switched off.
+    pub active: bool,
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            fov_y_degrees: 60.0,
+            active: true,
+        }
+    }
+}
+
 /// Attaches a sandboxed Rhai script to the node.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -329,6 +364,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<VoxelVolume>("VoxelVolume");
     reg.register::<Material>("Material");
     reg.register::<ParticleEmitter>("ParticleEmitter");
+    reg.register::<Camera>("Camera");
     reg.register::<Script>("Script");
     reg
 }

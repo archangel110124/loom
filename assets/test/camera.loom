@@ -1,0 +1,136 @@
+# A scene whose camera is authored rather than derived.
+#
+# Everything else in `assets/test` is framed automatically: the renderer finds
+# the bounds and backs off far enough to fit them. That is the right default
+# for a scene the agent has just written and never seen, and it is useless for
+# a first-person view — the one thing auto-framing will never produce is a
+# camera standing *inside* the scene at eye height.
+#
+# So the check this scene exists for is: does `loom render` put the eye at
+# 1.7 m facing down the corridor, or does it back off and show the room from
+# outside? The two images are not subtly different.
+#
+# The camera is a child of Player, and that is the whole trick. Nothing in the
+# engine knows what a player is. Move the Player node and the view moves with
+# it, because the camera's position is its node's position and its node hangs
+# off that one.
+
+[scene]
+format = 1
+id = "0f5b8d31-6a24-4c7e-9d18-3b52e7a1c604"
+
+[[node]]
+name = "Level"
+
+# ---------------------------------------------------------------------------
+# The viewer. A body node at floor level, an eye node at head height.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Player"
+parent = "Level"
+transform = { pos = [0.0, 0.0, 6.0] }
+
+# 1.7 m above the Player's feet, and the yaw comes from the parent — turning
+# the body turns the view, which is what makes this a first-person rig rather
+# than two things that have to be kept in sync.
+#
+# 90 degrees vertical is wide for a still image and normal for a shooter; it
+# is here because the FOV has to come from the file, not from whatever the
+# viewer defaults to.
+[[node]]
+name = "Eye"
+parent = "Level/Player"
+transform = { pos = [0.0, 1.7, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 90.0
+
+# A second camera, switched off. Its only job is to prove `active = false` is
+# read: it sits above the room looking down, so if the render ever comes out
+# as a plan view, the flag is being ignored.
+[[node]]
+name = "Overhead"
+parent = "Level"
+transform = { pos = [0.0, 14.0, 0.0], rot_euler = [-90.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  active = false
+
+# ---------------------------------------------------------------------------
+# A corridor to stand in. Deliberately asymmetric — a symmetric room looks
+# identical from the wrong camera.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Floor"
+parent = "Level"
+transform = { pos = [0.0, -0.25, 0.0], scale = [12.0, 0.5, 24.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.35, 0.33, 0.30]
+  roughness = 0.9
+
+[[node]]
+name = "WallLeft"
+parent = "Level"
+transform = { pos = [-5.0, 1.5, 0.0], scale = [0.5, 3.0, 24.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.52, 0.16, 0.14]
+  roughness = 0.8
+
+[[node]]
+name = "WallRight"
+parent = "Level"
+transform = { pos = [5.0, 1.5, 0.0], scale = [0.5, 3.0, 24.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.14, 0.30, 0.48]
+  roughness = 0.8
+
+# Down the corridor, in front of the camera. If this is not in the image, the
+# camera is not where the file says it is.
+[[node]]
+name = "Marker"
+parent = "Level"
+transform = { pos = [0.0, 1.0, -6.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.80, 0.62, 0.12]
+  metallic = 1.0
+  roughness = 0.3
+
+# Off to one side, so left and right are distinguishable in the render.
+[[node]]
+name = "Crate"
+parent = "Level"
+transform = { pos = [-2.6, 0.6, -1.5], rot_euler = [0.0, 22.0, 0.0], scale = [1.2, 1.2, 1.2] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.26, 0.20]
+  roughness = 0.7
+
+[[node]]
+name = "Lamp"
+parent = "Level"
+transform = { pos = [0.0, 2.6, -2.0] }
+
+  [node.components.Light]
+  intensity = 240.0
+  color = [1.0, 0.95, 0.85]

@@ -41,7 +41,8 @@ USAGE:
 
     loom render <scene.loom> [--out <f.png>] [--size <WxH>] [--sim <ticks>]
                              [--yaw <deg>] [--pitch <deg>]
-        Render the scene headless to a PNG.
+        Render the scene headless to a PNG. Uses the scene's `Camera` node if
+        it has one; --yaw/--pitch overrides it and orbits the bounds instead.
 
     loom sim <scene.loom> [--ticks <n>] [--assert <expr>]
         Step physics deterministically and print the state hash.
@@ -434,12 +435,31 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         &world,
         flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()),
     );
-    let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok()).unwrap_or(35.0);
-    let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok()).unwrap_or(28.0);
-    // Framed from REAL mesh bounds. Assuming a unit cube was fine while every
-    // mesh was one; a voxel volume spans tens of units and put the camera
-    // inside the terrain.
-    let camera = frame_scene(&node_bounds(&world, &library), yaw, pitch);
+    let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok());
+    let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok());
+    // An authored `Camera` is the view, unless the caller asked for an angle.
+    //
+    // Both halves matter. A scene that places a camera means it, and rendering
+    // it from somewhere else makes the component useless for checking a shot.
+    // But `--yaw`/`--pitch` is how the agent looks at a scene from a second
+    // angle (design doc §2.10, "one render is a lie"), and that has to keep
+    // working on a scene that has a camera in it.
+    let orbiting = yaw.is_some() || pitch.is_some();
+    let camera = match world.active_camera().filter(|_| !orbiting) {
+        Some(view) => Camera {
+            eye: Vec3::from_array(view.eye),
+            target: Vec3::from_array(view.target),
+            fov_y_degrees: view.fov_y_degrees,
+        },
+        // Framed from REAL mesh bounds. Assuming a unit cube was fine while
+        // every mesh was one; a voxel volume spans tens of units and put the
+        // camera inside the terrain.
+        None => frame_scene(
+            &node_bounds(&world, &library),
+            yaw.unwrap_or(35.0),
+            pitch.unwrap_or(28.0),
+        ),
+    };
 
     let result = (|| -> Result<(String, bool), String> {
         let instance = Instance::new(c"loom").map_err(|e| e.to_string())?;

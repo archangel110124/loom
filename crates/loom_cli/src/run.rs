@@ -45,21 +45,53 @@ struct FlyCamera {
     position: Vec3,
     yaw: f32,
     pitch: f32,
+    /// Vertical FOV in degrees, taken from an authored `Camera` when the scene
+    /// has one. A first-person scene authored at 90 has to *look* like 90 here,
+    /// or the window is not showing what the scene says.
+    fov_y_degrees: f32,
 }
+
+/// What the window opens on when a scene has no camera of its own.
+const DEFAULT_FOV: f32 = 60.0;
 
 impl FlyCamera {
     /// Frame some bounds, then look at their centre — so the window opens on
     /// the content rather than on empty space.
     fn framing(bounds: (Vec3, f32)) -> Self {
+        Self::framing_at(bounds, DEFAULT_FOV)
+    }
+
+    /// Frame bounds while keeping a lens. Focusing on a node moves the camera;
+    /// it is not a reason to change the field of view the scene asked for.
+    fn framing_at(bounds: (Vec3, f32), fov_y_degrees: f32) -> Self {
         let (center, radius) = bounds;
         let distance = (radius * 2.2).max(4.0);
         let position = center + Vec3::new(0.6, 0.45, 1.0).normalize() * distance;
 
-        let to_center = (center - position).normalize_or_zero();
+        Self::looking(position, center - position, fov_y_degrees)
+    }
+
+    /// Start where the scene's `Camera` sits, looking where it looks.
+    ///
+    /// The fly camera is still free afterwards — this sets where the window
+    /// *opens*, it does not hand the view over. A human who wants to inspect
+    /// the level from behind the player must still be able to fly there.
+    fn at(view: loom_ecs::CameraView) -> Self {
+        let position = Vec3::from_array(view.eye);
+        Self::looking(
+            position,
+            Vec3::from_array(view.target) - position,
+            view.fov_y_degrees,
+        )
+    }
+
+    fn looking(position: Vec3, direction: Vec3, fov_y_degrees: f32) -> Self {
+        let direction = direction.normalize_or_zero();
         Self {
             position,
-            yaw: to_center.x.atan2(to_center.z),
-            pitch: to_center.y.asin(),
+            yaw: direction.x.atan2(direction.z),
+            pitch: direction.y.asin(),
+            fov_y_degrees,
         }
     }
 
@@ -79,7 +111,7 @@ impl FlyCamera {
         Camera {
             eye: self.position,
             target: self.position + self.forward(),
-            fov_y_degrees: 60.0,
+            fov_y_degrees: self.fov_y_degrees,
         }
     }
 }
@@ -244,7 +276,11 @@ impl App {
             .unwrap_or(std::path::Path::new("."))
             .to_path_buf();
         Self {
-            camera: FlyCamera::framing(view.bounds),
+            // The scene's own camera when it has one, the whole scene framed
+            // when it does not.
+            camera: view
+                .camera()
+                .map_or_else(|| FlyCamera::framing(view.bounds), FlyCamera::at),
             uploaded: view.mesh_key,
             selected: view.paths.first().cloned().into_iter().collect(),
             view,
@@ -729,7 +765,7 @@ impl ApplicationHandler for App {
                     // Unity's F: frame the selection, or the scene when there
                     // is none. Framing the whole level when you meant one desk
                     // is the more annoying of the two mistakes.
-                    self.camera = FlyCamera::framing(self.focus_bounds());
+                    self.camera = FlyCamera::framing_at(self.focus_bounds(), self.camera.fov_y_degrees);
                 }
                 self.handle_editing();
                 // Watching the file while a simulation runs would reload the
@@ -867,7 +903,9 @@ impl App {
             UiAction::Select { path, extend } => self.select(&path, extend),
             UiAction::SetField(node, field, value) => self.set_field(&node, &field, value),
             UiAction::SetMode(mode) => self.mode = mode,
-            UiAction::Focus => self.camera = FlyCamera::framing(self.focus_bounds()),
+            UiAction::Focus => {
+                self.camera = FlyCamera::framing_at(self.focus_bounds(), self.camera.fov_y_degrees);
+            }
             UiAction::AddChild(parent) => self.add_child(&parent),
             UiAction::Duplicate => self.duplicate_selection(),
             UiAction::Delete => self.delete_selection(),
