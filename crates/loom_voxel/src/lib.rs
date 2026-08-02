@@ -304,6 +304,33 @@ impl VoxelOp {
         gradient.mul_add(gradient, 1.0).sqrt()
     }
 
+    /// The surface height at a horizontal position, for a heightfield.
+    ///
+    /// Split out because it is **the only part of an op's distance that does
+    /// not depend on Y**, and a chunk asks for the same column 32 times. At a
+    /// billion voxels that redundancy was most of the bake.
+    ///
+    /// `None` for every other op: their distance depends on all three axes and
+    /// there is nothing to hoist.
+    #[must_use]
+    pub fn height_at(&self, x: f32, z: f32) -> Option<f32> {
+        let Self::Heightfield {
+            base,
+            amplitude,
+            frequency,
+            octaves,
+            seed,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(amplitude.mul_add(
+            loom_terrain::noise::fbm(x, z, *frequency, *octaves, 2.0, 0.5, *seed),
+            *base,
+        ))
+    }
+
     /// Signed distance from `p` to this shape, in world units.
     #[must_use]
     pub fn distance(&self, p: [f32; 3]) -> f32 {
@@ -330,19 +357,10 @@ impl VoxelOp {
                 let h = (dot(pa, ba) / dot(ba, ba).max(1e-6)).clamp(0.0, 1.0);
                 length(sub(pa, scale(ba, h))) - radius
             }
-            Self::Heightfield {
-                base,
-                amplitude,
-                frequency,
-                octaves,
-                seed,
-                ..
-            } => {
+            Self::Heightfield { .. } => {
                 // Height varies with X and Z; Y is up. Positive above ground.
-                let height = amplitude.mul_add(
-                    loom_terrain::noise::fbm(p[0], p[2], *frequency, *octaves, 2.0, 0.5, *seed),
-                    *base,
-                );
+                // `height_at` is `Some` for exactly this variant.
+                let height = self.height_at(p[0], p[2]).unwrap_or(p[1]);
                 // Returned raw. The early-out's soundness is restored by
                 // widening its threshold with `lipschitz`, not by shrinking
                 // this: dividing here would compress the whole field toward
@@ -357,8 +375,15 @@ impl VoxelOp {
 
 /// Combine one op's distance into an accumulated field value.
 fn combine(accumulated: f32, op: &VoxelOp, p: [f32; 3]) -> f32 {
-    let d = op.distance(p);
-    match op.mode() {
+    accumulate(accumulated, op.mode(), op.distance(p))
+}
+
+/// As [`combine`], for a distance that has already been computed.
+///
+/// Split so the bake's inner loop can supply a distance it derived from a
+/// cached column height instead of re-deriving it per voxel.
+fn accumulate(accumulated: f32, mode: CsgMode, d: f32) -> f32 {
+    match mode {
         CsgMode::Union => accumulated.min(d),
         CsgMode::Subtract => accumulated.max(-d),
         CsgMode::Intersect => accumulated.max(d),
@@ -529,18 +554,44 @@ impl Volume {
         let mut any_solid = false;
         let mut any_air = false;
 
+        // **Column-major, and Y innermost.** A heightfield's surface height
+        // depends on X and Z only, so evaluating it per voxel computes the
+        // same fBm 32 times over. Hoisting it to the column turned a
+        // billion-voxel bake from 17 s into something usable — it was most of
+        // the time at that scale, and invisible at the sizes tested before.
+        //
+        // Writes stride by 32 bytes instead of running sequentially, which
+        // costs nothing measurable: a chunk is 32 KB and stays in cache for
+        // the whole of this loop either way.
+        let mut column = vec![0.0_f32; ops.len()];
+
         for z in 0..CHUNK {
-            for y in 0..CHUNK {
-                for x in 0..CHUNK {
+            for x in 0..CHUNK {
+                #[allow(clippy::cast_precision_loss)]
+                let (px, pz) = (
+                    ((cx * CHUNK + x) as f32 + 0.5) * voxel_size,
+                    ((cz * CHUNK + z) as f32 + 0.5) * voxel_size,
+                );
+                for (slot, op) in column.iter_mut().zip(ops) {
+                    // `None` for every op whose distance needs all three axes;
+                    // the value is then unused and the op is asked directly.
+                    *slot = op.height_at(px, pz).unwrap_or(f32::NAN);
+                }
+
+                for y in 0..CHUNK {
                     #[allow(clippy::cast_precision_loss)]
-                    let p = [
-                        ((cx * CHUNK + x) as f32 + 0.5) * voxel_size,
-                        ((cy * CHUNK + y) as f32 + 0.5) * voxel_size,
-                        ((cz * CHUNK + z) as f32 + 0.5) * voxel_size,
-                    ];
+                    let py = ((cy * CHUNK + y) as f32 + 0.5) * voxel_size;
+                    let p = [px, py, pz];
                     let mut d = f32::MAX;
-                    for op in ops {
-                        d = combine(d, op, p);
+                    for (height, op) in column.iter().zip(ops) {
+                        // A cached height is the whole of a heightfield's
+                        // distance; anything else re-evaluates in full.
+                        let raw = if height.is_nan() {
+                            op.distance(p)
+                        } else {
+                            py - height
+                        };
+                        d = accumulate(d, op.mode(), raw);
                     }
                     // Distance is stored in VOXELS, not world units: the i8
                     // range is ±1 voxel, so scaling by world size would

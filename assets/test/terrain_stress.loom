@@ -8,8 +8,8 @@
 # WHAT COSTS WHAT, measured with
 # `cargo run --release --example bench -p loom_voxel`:
 #
-#   bake                    ~1.0 s      scales with SURFACE, not volume
-#   mesh                    ~0.19 s
+#   bake                    ~0.12 s     scales with SURFACE, not volume
+#   mesh                    ~0.20 s
 #   resident field          10.7 MB     8-17% of the dense equivalent
 #   triangles               ~778,000
 #   runtime crater          ~0.1 ms     independent of world size
@@ -18,6 +18,9 @@
 # 512x512x512 world costs exactly the same as this one, because the extra half
 # is empty sky and the bake's early-out fills a uniform chunk in O(1). Doubling
 # the *height* of a world is free. Doubling its footprint is not.
+#
+# See `terrain_billion.loom` for the same shape at a billion voxels, and for
+# where that argument ends up: 8.59 billion costs what 1.07 billion does.
 #
 # Kept deliberately free of RigidBody. A voxel collider walks every voxel and
 # emits one cell per solid one: 8.2 million cells and 93 MB at a *quarter* of

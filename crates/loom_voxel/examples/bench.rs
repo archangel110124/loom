@@ -9,7 +9,81 @@
 
 fn main() {
     terrain();
+    billions();
     carved_sphere();
+}
+
+/// Past a billion voxels, where the interesting answer is what *doesn't* cost.
+///
+/// Both rows below cover the same 512 x 512 m of ground. The second is eight
+/// times the voxels of the first purely because it is eight times taller, and
+/// the extra height is sky and deep rock — uniform chunks the early-out fills
+/// in O(1). If the two lines report the same numbers, voxel count is simply
+/// the wrong unit to think in.
+fn billions() {
+    use loom_voxel::{CsgMode, SurfaceNets, VoxelOp, Volume, mesh::mesh_volume};
+    let t = |label: &str, f: &mut dyn FnMut()| {
+        let start = std::time::Instant::now();
+        f();
+        println!("  {label:<34} {:>8.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+    };
+
+    for dims in [[64usize, 8, 64], [64, 64, 64]] {
+        let voxel_size = 0.25;
+        let res = [dims[0] * 32, dims[1] * 32, dims[2] * 32];
+        let voxels = res.iter().map(|r| *r as u64).product::<u64>();
+        let world: Vec<f32> = res.iter().map(|r| *r as f32 * voxel_size).collect();
+        println!(
+            "\n=== {}x{}x{} voxels ({:.2} BILLION) over {:.0}x{:.0}x{:.0} m ===",
+            res[0], res[1], res[2], voxels as f64 / 1e9, world[0], world[1], world[2]
+        );
+
+        let mut v = Volume::new(dims, voxel_size);
+        let ops = vec![VoxelOp::Heightfield {
+            base: world[1] * 0.5,
+            amplitude: 6.0,
+            frequency: 0.03,
+            octaves: 4,
+            seed: 0xB1A57,
+            mode: CsgMode::Union,
+        }];
+        t("bake", &mut || v.bake(&ops));
+
+        let (used, dense) = v.memory();
+        let surface = v.surface_chunks().len();
+        let total = dims[0] * dims[1] * dims[2];
+        println!(
+            "  {:<34} {:>8.1} MB  ({:.2}% of dense {:.1} GB)",
+            "resident field",
+            used as f64 / 1048576.0,
+            used as f64 / dense as f64 * 100.0,
+            dense as f64 / 1073741824.0
+        );
+        println!(
+            "  {:<34} {:>8} of {total}  ({:.2}%)",
+            "chunks holding a surface",
+            surface,
+            surface as f64 / total as f64 * 100.0
+        );
+
+        let mut tris = 0;
+        t("mesh", &mut || {
+            tris = mesh_volume(&v, &SurfaceNets).indices.len() / 3;
+        });
+        println!("  {:<34} {:>8}", "triangles", tris);
+
+        let mut touched = 0;
+        t("runtime edit (crater)", &mut || {
+            touched = v
+                .edit(&VoxelOp::Sphere {
+                    center: [world[0] * 0.5, world[1] * 0.5, world[2] * 0.5],
+                    radius: 3.0,
+                    mode: CsgMode::Subtract,
+                })
+                .len();
+        });
+        println!("  {:<34} {:>8} chunks", "crater cost", touched);
+    }
 }
 
 /// A world filled with ground, which is the shape that actually scales badly.

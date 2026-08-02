@@ -1,0 +1,84 @@
+# A billion voxels.
+#
+# 2048 x 256 x 2048 = 1,073,741,824 voxels over 512 x 64 x 512 metres at 25 cm
+# resolution — half a kilometre of ground, addressable to a quarter metre. The
+# file is thirty lines, because a scene stores the recipe and never the voxels
+# (never-do #11). The dense equivalent is 1 GB of i8 and could not be a text
+# file at all.
+#
+# MEASURED, `cargo run --release --example bench -p loom_voxel`:
+#
+#   bake                    ~1.9 s
+#   mesh                    ~3.0 s      <- now the bottleneck
+#   resident field          171 MB      16.7% of the dense 1 GB
+#   triangles               ~11,000,000
+#   runtime crater          ~0.1 ms     8 chunks, independent of world size
+#
+# THE POINT OF THIS FILE. A 2048^3 volume — 8.59 billion voxels, eight times
+# this one — reports the *same* numbers: same 1.9 s, same 171 MB, same 11M
+# triangles. The extra eight billion are sky and deep rock, uniform chunks the
+# bake fills in O(1). Voxel count is the wrong unit; surface area is the right
+# one. This world and one eight times its volume cost the same because they
+# have the same footprint.
+#
+# NOT in the validation gate. It is correct there in principle and takes about
+# ten seconds, which is too much to pay on every green run; `terrain_stress`
+# covers the same code paths at 67M voxels and 2.5 s.
+#
+# No RigidBody, deliberately. The voxel collider walks every voxel and emits a
+# cell per solid one — 8.2M cells and 93 MB at 16.8M voxels, so at this scale
+# it would be tens of gigabytes. It is the one path that still scales with
+# volume rather than area.
+
+[scene]
+format = 1
+id = "a9f24e60-7c13-4b8d-95e2-3f6081c7ad54"
+
+[[node]]
+name = "World"
+
+[[node]]
+name = "Terrain"
+parent = "World"
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.25
+  chunks = [64, 8, 64]
+
+  # Ground across the whole 512 m. Unbounded in X and Z, so this is a window
+  # onto the terrain rather than a box containing it.
+  [[node.components.VoxelVolume.ops]]
+  kind = "heightfield"
+  base = 30.0
+  amplitude = 9.0
+  frequency = 0.012
+  octaves = 6
+  seed = 20260802
+  mode = "union"
+
+  # A canyon cut end to end, to show subtraction still spans the world.
+  [[node.components.VoxelVolume.ops]]
+  kind = "capsule"
+  a = [40.0, 24.0, 180.0]
+  b = [470.0, 26.0, 300.0]
+  radius = 14.0
+  mode = "subtract"
+
+  # Three craters at increasing size, for a sense of scale against the terrain.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [140.0, 34.0, 400.0]
+  radius = 16.0
+  mode = "subtract"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [330.0, 32.0, 120.0]
+  radius = 26.0
+  mode = "subtract"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [420.0, 36.0, 430.0]
+  radius = 34.0
+  mode = "subtract"
