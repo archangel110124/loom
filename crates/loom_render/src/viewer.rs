@@ -1035,15 +1035,25 @@ fn create_swapchain(
     // SAFETY: as above.
     let formats = unsafe { surface_loader.get_physical_device_surface_formats(physical, surface) }?;
 
-    // UNORM rather than SRGB: the shader already writes linear colour, and an
-    // SRGB target would apply the transfer function a second time. Queried and
-    // matched rather than hardcoded (Vulkan doc §14).
+    // **SRGB, and the comment that used to be here had it backwards.** It read
+    // "UNORM rather than SRGB: the shader already writes linear colour, and an
+    // SRGB target would apply the transfer function a second time." Writing
+    // linear colour is precisely why the target has to encode: eight bits of
+    // linear light displayed as if it were sRGB is about a gamma too dark.
+    //
+    // The offscreen path was fixed when a real texture made it obvious there.
+    // This one kept the bug, so the window rendered darker than the PNG of the
+    // same scene — which is the worst version of it, because the window is
+    // what a human looks at and the PNG is what the agent checks.
+    //
+    // Queried and matched rather than hardcoded (Vulkan doc §14), falling back
+    // to whatever the surface offers if no sRGB format is available.
     let surface_format = formats
         .iter()
         .find(|f| {
             matches!(
                 f.format,
-                vk::Format::B8G8R8A8_UNORM | vk::Format::R8G8B8A8_UNORM
+                vk::Format::B8G8R8A8_SRGB | vk::Format::R8G8B8A8_SRGB
             ) && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
         })
         .copied()

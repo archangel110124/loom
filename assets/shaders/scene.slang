@@ -432,6 +432,42 @@ float4 triplanar(uint index, float3 position, float3 normal) {
          + sampleMap(index, position.xy) * weight.z;
 }
 
+/// Triplanar normal mapping, without a tangent frame at all.
+///
+/// **The cotangent frame cannot be used here, and using it was a bug.** That
+/// construction recovers a tangent basis from how position and UV change
+/// across the quad. For triplanar there is no single UV — there are three
+/// projections — so the earlier code fed it one of them, the XY plane. On flat
+/// ground `worldPos.y` is constant, so both derivatives of that coordinate are
+/// zero, the bitangent collapses, and the frame degenerates. The result is the
+/// perturbed normal shooting off in one direction across whole regions of the
+/// surface: hard vertical banding and long smears, worst on the flat meadows
+/// and steep faces that make up most of a terrain.
+///
+/// Whiteout blending is the standard answer and needs no basis. Each of the
+/// three sampled normals is treated as a perturbation of the world axis its
+/// projection looks down, the surface normal is folded into its tangent
+/// components, and the three are blended by the same weights the albedo uses.
+/// Cheap, stable at every orientation, and there is no frame to go singular.
+float3 triplanarNormal(uint index, float3 position, float3 geometric) {
+    float3 weight = pow(abs(geometric), 4.0);
+    weight /= max(weight.x + weight.y + weight.z, 1e-4);
+
+    float3 nx = sampleMap(index, position.yz).xyz * 2.0 - 1.0;
+    float3 ny = sampleMap(index, position.xz).xyz * 2.0 - 1.0;
+    float3 nz = sampleMap(index, position.xy).xyz * 2.0 - 1.0;
+
+    // Fold the surface normal into each sample's tangent plane, and keep the
+    // sample's Z positive so a projection looking down the negative side of an
+    // axis does not invert.
+    nx = float3(nx.xy + geometric.zy, abs(nx.z) * geometric.x);
+    ny = float3(ny.xy + geometric.xz, abs(ny.z) * geometric.y);
+    nz = float3(nz.xy + geometric.xy, abs(nz.z) * geometric.z);
+
+    // Swizzled back so each contribution is expressed in world axes.
+    return normalize(nx.zyx * weight.x + ny.xzy * weight.y + nz.xyz * weight.z);
+}
+
 /// A tangent frame built from screen-space derivatives, with no stored tangents.
 ///
 /// The mesh carries position, normal and UV — no tangent and no bitangent. The
@@ -461,7 +497,14 @@ float3x3 cotangentFrame(float3 normal, float3 position, float2 uv) {
     // Scale by the largest component rather than normalising each axis: that
     // keeps the frame orthogonal where the UVs are stretched, instead of
     // silently correcting a stretch the artist put there on purpose.
-    float invmax = rsqrt(max(dot(tangent, tangent), dot(bitangent, bitangent)));
+    // Guarded: a surface whose UVs do not vary along one axis — a wall of a
+    // box seen edge-on, an unwrapped seam — makes one of these vanish, and an
+    // unguarded `rsqrt` of zero is an infinity that propagates into the normal.
+    float extent = max(dot(tangent, tangent), dot(bitangent, bitangent));
+    if (extent < 1e-12) {
+        return float3x3(float3(1, 0, 0), float3(0, 1, 0), normal);
+    }
+    float invmax = rsqrt(extent);
     return float3x3(tangent * invmax, bitangent * invmax, normal);
 }
 
@@ -540,17 +583,16 @@ float4 fragmentMain(VSOutput in) : SV_Target {
         }
 
         if (m.maps.y != NO_TEXTURE) {
-            float3 tangentNormal = projected
-                ? triplanar(m.maps.y, projectedUv, normal).xyz
-                : sampleMap(m.maps.y, uv).xyz;
-            tangentNormal = tangentNormal * 2.0 - 1.0;
-            // Built from derivatives of the position and UV actually used, so
-            // the triplanar path gets a correct frame without ever having had
-            // a tangent to store.
-            float3x3 frame = projected
-                ? cotangentFrame(normal, in.worldPos, projectedUv.xy)
-                : cotangentFrame(normal, in.worldPos, uv);
-            normal = normalize(mul(tangentNormal, frame));
+            if (projected) {
+                // No tangent frame: triplanar geometry has no UVs to derive
+                // one from, and deriving it from one of the three projections
+                // degenerates wherever that projection is edge-on.
+                normal = triplanarNormal(m.maps.y, projectedUv, normal);
+            } else {
+                float3 tangentNormal = sampleMap(m.maps.y, uv).xyz * 2.0 - 1.0;
+                float3x3 frame = cotangentFrame(normal, in.worldPos, uv);
+                normal = normalize(mul(tangentNormal, frame));
+            }
         }
     }
 
