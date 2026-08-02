@@ -92,6 +92,41 @@ impl MeshRange {
     }
 }
 
+/// The sky, the sun and the haze, as a scene sets them.
+///
+/// These were shader constants: one blue afternoon, baked in, the same in
+/// every scene. A scene could place lights but could not turn the sun down,
+/// so "night" was not expressible at all — the ambient term alone lit
+/// everything to 95%.
+///
+/// Packed into four vectors because the trailing scalar of each is free and
+/// a push-constant block has 128 bytes total.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct EnvironmentData {
+    /// xyz sun direction (normalised), w its strength.
+    pub sun: [f32; 4],
+    /// rgb sun colour, a ambient strength.
+    pub sun_color: [f32; 4],
+    /// rgb sky overhead, a fog density.
+    pub zenith: [f32; 4],
+    /// rgb sky at the horizon, a fog falloff with height.
+    pub horizon: [f32; 4],
+}
+
+impl Default for EnvironmentData {
+    fn default() -> Self {
+        // The afternoon the constants used to hard-code, so a scene that says
+        // nothing looks exactly as it did.
+        Self {
+            sun: [0.3906, 0.8790, 0.2930, 0.62],
+            sun_color: [1.0, 0.98, 0.94, 0.95],
+            zenith: [0.0272, 0.0946, 0.3424, 0.0026],
+            horizon: [0.3931, 0.5071, 0.6038, 0.03],
+        }
+    }
+}
+
 /// What the camera looks at.
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
@@ -127,6 +162,10 @@ pub(crate) struct Push {
     pub(crate) materials: vk::DeviceAddress,
     /// The particle instances for this frame. Null when there are none.
     pub(crate) particles: vk::DeviceAddress,
+    /// The sky and sun. Placed before `object_offset`, not after: a device
+    /// address needs eight-byte alignment, and putting it last would pad the
+    /// block to exactly the 128 bytes Vulkan guarantees, with nothing spare.
+    pub(crate) environment: vk::DeviceAddress,
     /// First object this draw should read. See the note in `scene.slang`.
     ///
     /// **The particle pass borrows this too.** Its vertex shader needs the
@@ -227,6 +266,11 @@ pub struct Renderer {
     objects: vk::Buffer,
     objects_alloc: Option<Allocation>,
     object_address: vk::DeviceAddress,
+    environment_buffer: vk::Buffer,
+    environment_alloc: Option<Allocation>,
+    environment_address: vk::DeviceAddress,
+    /// What the next frame draws with. One struct, written per frame.
+    pub environment: EnvironmentData,
     max_objects: usize,
 
     /// `None` when the device has no ray query; shadows are simply skipped.
@@ -378,6 +422,13 @@ impl Renderer {
             "loom.object_data",
             vk::BufferUsageFlags::empty(),
         )?;
+        let (environment_buffer, environment_alloc, environment_address) = create_address_buffer(
+            &raw,
+            &mut allocator,
+            size_of::<EnvironmentData>() as u64,
+            "loom.environment",
+            vk::BufferUsageFlags::empty(),
+        )?;
         let (particle_buffer, particle_alloc, particle_address) = create_address_buffer(
             &raw,
             &mut allocator,
@@ -525,6 +576,10 @@ impl Renderer {
             objects,
             objects_alloc: Some(objects_alloc),
             object_address,
+            environment_buffer,
+            environment_alloc: Some(environment_alloc),
+            environment_address,
+            environment: EnvironmentData::default(),
             max_objects: MAX_OBJECTS,
             pipeline_layout,
             pipeline,
@@ -658,6 +713,12 @@ impl Renderer {
                 &drawn,
             )?;
         }
+        write_slice(
+            self.environment_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("environment buffer missing".into()))?,
+            std::slice::from_ref(&self.environment),
+        )?;
         let batches = batch_by_mesh(&sorted);
         write_slice(
             self.objects_alloc
@@ -705,6 +766,7 @@ impl Renderer {
         let base_push = Push {
             vertices: self.vertex_address,
             objects: self.object_address,
+            environment: self.environment_address,
             materials: self.materials.address(),
             particles: self.particle_address,
             object_offset: 0,
@@ -969,6 +1031,7 @@ impl Drop for Renderer {
                     self.vertices_alloc.take(),
                     self.indices_alloc.take(),
                     self.objects_alloc.take(),
+                    self.environment_alloc.take(),
                 ]
                 .into_iter()
                 .flatten()
@@ -982,6 +1045,7 @@ impl Drop for Renderer {
             self.device.destroy_buffer(self.vertices, None);
             self.device.destroy_buffer(self.indices, None);
             self.device.destroy_buffer(self.objects, None);
+            self.device.destroy_buffer(self.environment_buffer, None);
             // The allocator must go before the device it borrows.
             self.allocator = None;
         }

@@ -360,7 +360,7 @@ impl Sim {
         let player_index = self.player;
         let player = player_index
             .and_then(|i| self.characters.get(i))
-            .map(|w| (w.character.position(), w.character.body()));
+            .map(|w| (w.character.position(), w.character.body(), w.entity));
         let nav = self.nav.as_ref();
 
         for (index, walker) in self.characters.iter_mut().enumerate() {
@@ -376,7 +376,7 @@ impl Sim {
                 position: walker.character.position(),
                 velocity: walker.velocity,
                 grounded: walker.grounded,
-                ..input
+                ..input.clone()
             };
 
             // Where this character is looking, resolved here because a script
@@ -400,14 +400,14 @@ impl Sim {
             let hit = self.physics.raycast(eye, input.aim, AIM_RANGE);
             // What this character can perceive, and where its route goes.
             // Both are casts, and a script has no physics world.
-            let can_see_target = target.is_some_and(|(at, body)| {
+            let can_see_target = target.is_some_and(|(at, body, _)| {
                 // Neither capsule is cover: not theirs from them, and not
                 // this character's own from itself.
                 self.physics
                     .line_of_sight_between(eye, at, walker.character.body(), body)
             });
-            let target_at = target.map_or(motion.position, |(at, _)| at);
-            let target_distance = target.map_or(f32::INFINITY, |(at, _)| {
+            let target_at = target.map_or(motion.position, |(at, ..)| at);
+            let target_distance = target.map_or(f32::INFINITY, |(at, ..)| {
                 let d = [
                     at[0] - motion.position[0],
                     at[1] - motion.position[1],
@@ -420,6 +420,9 @@ impl Sim {
                 can_see_target,
                 target_at,
                 target_distance,
+                target_node: target
+                    .map(|(_, _, entity)| path_of(world, entity))
+                    .unwrap_or_default(),
                 path_next: walker.route.first().copied().unwrap_or(motion.position),
                 path_found: !walker.route.is_empty(),
                 aim_point: hit.map_or(
@@ -886,7 +889,7 @@ impl Runner {
         if self.physics.character_count() > 0 {
             let host = &self.host;
             let scripts = &self.character_scripts;
-            let input = self.input;
+            let input = self.input.clone();
             let (detonations, raised) =
                 self.physics
                     .drive_characters(world, tick, input, |entity, motion, memory| {

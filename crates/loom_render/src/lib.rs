@@ -28,7 +28,7 @@ pub use glam;
 pub use debug_names::DebugNames;
 pub use device::{Device, DeviceError};
 pub use material::{FLAG_TRIPLANAR, MaterialData, NO_TEXTURE};
-pub use renderer::{Camera, Object, ParticleInstance, RenderError, Renderer};
+pub use renderer::{Camera, EnvironmentData, Object, ParticleInstance, RenderError, Renderer};
 pub use ui::Ui;
 pub use viewer::Viewer;
 

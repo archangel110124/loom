@@ -63,6 +63,11 @@ pub struct Viewer {
     max_particles: usize,
     particle_pipeline: vk::Pipeline,
     objects: vk::Buffer,
+    environment_buffer: vk::Buffer,
+    environment_alloc: Option<gpu_allocator::vulkan::Allocation>,
+    environment_address: vk::DeviceAddress,
+    /// What the next frame draws with. Set from the scene each frame.
+    pub environment: crate::renderer::EnvironmentData,
     objects_alloc: Option<Allocation>,
     object_address: vk::DeviceAddress,
     /// How many objects the buffer can currently hold; grown on demand.
@@ -161,6 +166,13 @@ impl Viewer {
             &mut allocator,
             (INITIAL_OBJECTS * size_of::<ObjectData>()) as u64,
             "loom.object_data",
+            vk::BufferUsageFlags::empty(),
+        )?;
+        let (environment_buffer, environment_alloc, environment_address) = create_address_buffer(
+            &raw,
+            &mut allocator,
+            size_of::<crate::renderer::EnvironmentData>() as u64,
+            "loom.environment",
             vk::BufferUsageFlags::empty(),
         )?;
 
@@ -334,6 +346,10 @@ impl Viewer {
             objects,
             objects_alloc: Some(objects_alloc),
             object_address,
+            environment_buffer,
+            environment_alloc: Some(environment_alloc),
+            environment_address,
+            environment: crate::renderer::EnvironmentData::default(),
             object_capacity: INITIAL_OBJECTS,
             requested: vk::Extent2D { width, height },
             pipeline_layout,
@@ -611,6 +627,12 @@ impl Viewer {
         }
         let batches = batch_by_mesh(&sorted);
         write_slice(
+            self.environment_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("environment buffer missing".into()))?,
+            std::slice::from_ref(&self.environment),
+        )?;
+        write_slice(
             self.objects_alloc
                 .as_ref()
                 .ok_or_else(|| RenderError::Allocator("object buffer missing".into()))?,
@@ -641,6 +663,7 @@ impl Viewer {
         let base_push = crate::renderer::Push {
             vertices: self.vertex_address,
             objects: self.object_address,
+            environment: self.environment_address,
             materials: self.materials.address(),
             particles: self.particle_address,
             object_offset: 0,
@@ -991,6 +1014,7 @@ impl Drop for Viewer {
                     self.vertices_alloc.take(),
                     self.indices_alloc.take(),
                     self.objects_alloc.take(),
+                    self.environment_alloc.take(),
                 ]
                 .into_iter()
                 .flatten()
@@ -1002,6 +1026,7 @@ impl Drop for Viewer {
             self.device.destroy_buffer(self.vertices, None);
             self.device.destroy_buffer(self.indices, None);
             self.device.destroy_buffer(self.objects, None);
+            self.device.destroy_buffer(self.environment_buffer, None);
             self.allocator = None;
 
             // The surface last: the swapchain was built from it.

@@ -930,6 +930,17 @@ impl ApplicationHandler for App {
                     fps: self.fps,
                 };
 
+                // The scene's sky, from whichever world is current: play mode
+                // holds its own, and an environment edited during play should
+                // show up like any other edit.
+                let environment = crate::environment_of(match self.play.as_ref() {
+                    Some(play) => &play.world,
+                    None => self.view.world(),
+                });
+                if let Some(viewer) = self.viewer.as_mut() {
+                    viewer.environment = environment;
+                }
+
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
                     (Some(viewer), Some(ui), Some(window)) => viewer.draw_with_ui(
                         drawn,

@@ -22,7 +22,14 @@ let ACCEL = 30.0;
 let GRAVITY = 24.0;
 let REACH = 1.9;          // metres — close enough to hit the player
 let ATTACK_TICKS = 40;    // cooldown between swings
-let ATTACK_DAMAGE = 18.0;
+// Who this enemy hits. A path rather than a guess, so the same script works
+// in any scene that names its player.
+// Who this enemy hits. The host names the player, because it is the one that
+// knows which character a human drives — a script guessing a node path would
+// work in one scene and silently hit nobody in the next.
+// Reported as exposure, like a blast, so the rules turn it into health with
+// the same constant and health stays defined in exactly one place.
+let CLAW_EXPOSURE = 0.12;
 let GIVE_UP_TICKS = 240;  // four seconds hunting a place they are not
 
 // ---------------------------------------------------------------------------
@@ -113,7 +120,7 @@ let vy = velocity[1] - GRAVITY * dt;
 // ---------------------------------------------------------------------------
 
 if can_see_target && target_distance <= REACH && tick - last_attack >= ATTACK_TICKS {
-    emit.push(#{ kind: "damage", node: "Range/Player", exposure: ATTACK_DAMAGE / 150.0 });
+    emit.push(#{ kind: "damage", node: target_node, exposure: CLAW_EXPOSURE });
     last_attack = tick;
 }
 

@@ -68,6 +68,16 @@ struct ParticleInstance {
     float4 color;      // rgb linear, a opacity
 };
 
+// The sky, the sun and the haze, as the scene sets them. These were `static
+// const` — one blue afternoon baked into every scene — so a scene could place
+// lights but could not turn the sun down, and night was not expressible.
+struct EnvironmentData {
+    float4 sun;        // xyz direction, w strength
+    float4 sunColor;   // rgb, a ambient strength
+    float4 zenith;     // rgb sky overhead, a fog density
+    float4 horizon;    // rgb sky at the horizon, a fog falloff
+};
+
 struct Push {
     // **First, and deliberately.** A `float4x4` needs 16-byte alignment; put
     // it after the pointers and it needs padding, and a `uint3` pad does not
@@ -106,9 +116,26 @@ struct Push {
     // InstanceIndex includes it. Which one Slang emits is a detail worth not
     // depending on, so the offset is passed explicitly and the arithmetic is
     // ours.
+    // Before `objectOffset`, matching the Rust mirror: a pointer needs
+    // eight-byte alignment and putting it last would pad the block to the
+    // 128-byte limit exactly.
+    EnvironmentData* environment;
     uint objectOffset;
 };
 [[vk::push_constant]] Push push;
+
+// The sky, the sun and the haze. Read from the buffer rather than baked in as
+// constants, so a scene can be at night. Accessors rather than globals because
+// `push` is not in scope until here.
+float3 sunDirection() { return normalize(push.environment[0].sun.xyz); }
+float sunStrength() { return push.environment[0].sun.w; }
+float3 sunColor() { return push.environment[0].sunColor.rgb; }
+float ambientStrength() { return push.environment[0].sunColor.a; }
+float3 skyZenith() { return push.environment[0].zenith.rgb; }
+float3 skyHorizon() { return push.environment[0].horizon.rgb; }
+float fogDensity() { return push.environment[0].zenith.a; }
+float fogFalloff() { return push.environment[0].horizon.a; }
+
 
 // ---------------------------------------------------------------------------
 // The sky.
@@ -128,17 +155,13 @@ struct Push {
 // Fixing the encode made every one of them a gamma too bright. Each was passed
 // through the sRGB-to-linear transfer function once, so the sky looks exactly
 // as it did before while the arithmetic underneath it is now meaningful.
-static const float3 SUN_DIRECTION = normalize(float3(0.4, 0.9, 0.3));
-static const float3 SKY_ZENITH = float3(0.0272, 0.0946, 0.3424);
-static const float3 SKY_HORIZON = float3(0.3931, 0.5071, 0.6038);
+
 // Not near-black. Real ground bounces a great deal of light back up, and a
 // downward-facing surface lit by a black "ground" reads as a silhouette — which
 // defeats the point of a render the agent is supposed to be able to inspect.
 static const float3 GROUND_COLOR = float3(0.0550, 0.0432, 0.0331);
 /// How much of the sky's colour reaches a surface, and how much the sun adds.
 /// Tuned together so an unlit face stays readable without washing out.
-static const float AMBIENT_STRENGTH = 0.95;
-static const float SUN_STRENGTH = 0.62;
 
 /// The sky's colour in a direction, without the sun.
 ///
@@ -154,15 +177,15 @@ float3 skyGradient(float3 dir) {
     if (height >= 0.0) {
         // sqrt, not linear: the interesting part of a sky is near the horizon,
         // and a linear ramp spends most of its range on empty blue.
-        return lerp(SKY_HORIZON, SKY_ZENITH, sqrt(height));
+        return lerp(skyHorizon(), skyZenith(), sqrt(height));
     }
-    return lerp(SKY_HORIZON, GROUND_COLOR, sqrt(-height));
+    return lerp(skyHorizon(), GROUND_COLOR, sqrt(-height));
 }
 
 /// What the background shows: the gradient, plus the sun.
 float3 skyColor(float3 dir) {
     float3 base = skyGradient(dir);
-    float toSun = max(dot(dir, SUN_DIRECTION), 0.0);
+    float toSun = max(dot(dir, sunDirection()), 0.0);
     // A tight disc inside a wide glow. Both are additive and modest — a sun
     // that blows out to white makes every screenshot harder to read, which is
     // the opposite of what this render path is for.
@@ -217,10 +240,8 @@ float valueNoise(float2 p) {
 // ---------------------------------------------------------------------------
 
 /// Extinction per metre at y = 0.
-static const float FOG_DENSITY = 0.0026;
 /// How fast density decays with altitude, per metre. The scale height is its
 /// reciprocal — about 33 m here, so a hill twice that stands well clear.
-static const float FOG_FALLOFF = 0.03;
 
 /// Fraction of a surface's colour replaced by fog, for a ray between two
 /// points.
@@ -236,7 +257,7 @@ float fogAmount(float3 from, float3 to) {
         return 0.0;
     }
     float riseRate = delta.y / distance;
-    float atOrigin = FOG_DENSITY * exp(-FOG_FALLOFF * from.y);
+    float atOrigin = fogDensity() * exp(-fogFalloff() * from.y);
 
     float depth;
     // A near-horizontal ray stays at one altitude, and the general form
@@ -245,7 +266,7 @@ float fogAmount(float3 from, float3 to) {
     if (abs(riseRate) < 1e-4) {
         depth = atOrigin * distance;
     } else {
-        float climb = FOG_FALLOFF * riseRate;
+        float climb = fogFalloff() * riseRate;
         depth = atOrigin * (1.0 - exp(-climb * distance)) / climb;
     }
     return 1.0 - exp(-depth);
@@ -258,7 +279,7 @@ float fogAmount(float3 from, float3 to) {
 /// asymmetry is most of what makes it convincing.
 float3 fogColor(float3 direction) {
     float3 base = skyGradient(direction);
-    float toSun = max(dot(direction, SUN_DIRECTION), 0.0);
+    float toSun = max(dot(direction, sunDirection()), 0.0);
     return base + float3(1.0, 0.93, 0.80) * pow(toSun, 5.0) * 0.30;
 }
 
@@ -373,7 +394,7 @@ float sunVisibility(float3 position, float3 normal, float bias) {
     // surface hits the surface it came from, and the whole scene self-shadows
     // into acne.
     ray.Origin = position + normal * bias;
-    ray.Direction = SUN_DIRECTION;
+    ray.Direction = sunDirection();
     ray.TMin = bias;
     ray.TMax = 1e4;
 
@@ -600,8 +621,8 @@ float4 fragmentMain(VSOutput in) : SV_Target {
         }
     }
 
-    float diffuse = max(dot(normal, SUN_DIRECTION), 0.0);
-    float3 ambient = hemisphereAmbient(normal) * AMBIENT_STRENGTH;
+    float diffuse = max(dot(normal, sunDirection()), 0.0);
+    float3 ambient = hemisphereAmbient(normal) * ambientStrength();
     // Only trace where the sun could reach anyway: a face turned away from the
     // sun is already dark, and tracing from it costs a ray to learn nothing.
     //
@@ -617,9 +638,9 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     float3 diffuseColor = albedo * (1.0 - metallic);
     float3 f0 = lerp(float3(0.04), albedo, metallic);
 
-    float3 lit = diffuseColor * (ambient + SUN_STRENGTH * diffuse * sun);
+    float3 lit = diffuseColor * (ambient + sunStrength() * diffuse * sun);
     float3 view = normalize(push.eye.xyz - in.worldPos);
-    lit += specular(normal, view, SUN_DIRECTION, roughness, f0) * SUN_STRENGTH * diffuse * sun;
+    lit += specular(normal, view, sunDirection(), roughness, f0) * sunStrength() * diffuse * sun;
 
     // **Without this a metal renders black.** Metals have no diffuse response,
     // so a fully metallic surface lit by one directional sun is unlit

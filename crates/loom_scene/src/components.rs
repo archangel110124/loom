@@ -542,6 +542,67 @@ impl Default for Hud {
     }
 }
 
+/// The sky, the sun and the haze the whole scene sits in.
+///
+/// **Night was not expressible before this.** The sun's direction and
+/// strength, the sky's two colours and the fog were constants compiled into
+/// the shader — one blue afternoon, in every scene ever authored. A scene
+/// could place lights but could not turn the sun down, and the ambient term
+/// alone lit everything to 95%.
+///
+/// At most one per scene; the first is used. Absent, the afternoon those
+/// constants described is the default, so every existing scene looks the same
+/// as it did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Environment {
+    /// Direction *toward* the sun. Normalised on load, so any length works.
+    pub sun_direction: [f32; 3],
+    /// How strong the direct light is. `0.0` is a moonless overcast night.
+    #[schemars(range(min = 0.0, max = 20.0))]
+    pub sun_strength: f32,
+    /// Linear RGB of the direct light. Not 0-255.
+    #[schemars(inner(range(min = 0.0, max = 1.0)))]
+    pub sun_color: [f32; 3],
+    /// How much light arrives from everywhere at once.
+    ///
+    /// **The knob that makes a scene dark.** Point lights are local; this is
+    /// the floor under everything, and at the old default of `0.95` no amount
+    /// of turning the sun down produced night.
+    #[schemars(range(min = 0.0, max = 4.0))]
+    pub ambient: f32,
+    /// Linear RGB of the sky overhead.
+    #[schemars(inner(range(min = 0.0, max = 1.0)))]
+    pub sky_zenith: [f32; 3],
+    /// Linear RGB of the sky at the horizon.
+    #[schemars(inner(range(min = 0.0, max = 1.0)))]
+    pub sky_horizon: [f32; 3],
+    /// Haze per metre. Zero is perfectly clear air.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub fog_density: f32,
+    /// How fast the haze thins with height. Larger keeps it near the ground.
+    #[schemars(range(min = 0.0, max = 10.0))]
+    pub fog_falloff: f32,
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        // Exactly the constants the shader used to carry, so a scene that
+        // says nothing about its sky looks precisely as it did before this
+        // component existed.
+        Self {
+            sun_direction: [0.4, 0.9, 0.3],
+            sun_strength: 0.62,
+            sun_color: [1.0, 0.98, 0.94],
+            ambient: 0.95,
+            sky_zenith: [0.0272, 0.0946, 0.3424],
+            sky_horizon: [0.3931, 0.5071, 0.6038],
+            fog_density: 0.0026,
+            fog_falloff: 0.03,
+        }
+    }
+}
+
 /// A sound that plays from this node's position.
 ///
 /// **What it sounds like from where you stand is measured, not authored.**
@@ -638,6 +699,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<GameRules>("GameRules");
     reg.register::<Hud>("Hud");
     reg.register::<AudioSource>("AudioSource");
+    reg.register::<Environment>("Environment");
     reg.register::<Script>("Script");
     reg
 }

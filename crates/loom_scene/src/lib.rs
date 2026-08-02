@@ -355,6 +355,7 @@ name = \"Root\"
             "GameRules",
             "Hud",
             "AudioSource",
+            "Environment",
         ] {
             assert!(reg.describe(name).is_some(), "{name} is not registered");
         }

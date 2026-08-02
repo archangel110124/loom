@@ -82,7 +82,7 @@ pub struct NodeState {
 /// Position in particular is *not* writable, and that is the point — a script
 /// that could assign a position would walk straight through walls, because the
 /// collide-and-slide sweep happens after this and works from the velocity.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Motion {
     pub tick: u64,
     /// Seconds in one fixed step. Never a measured frame time (never-do #8).
@@ -148,6 +148,12 @@ pub struct Motion {
     pub target_at: [f32; 3],
     /// Metres to the player, straight line.
     pub target_distance: f32,
+    /// The player's scene path, so an enemy can name who it hit.
+    ///
+    /// Handed in for the same reason the position is: the engine knows which
+    /// character a human drives, and a script guessing at a node path would
+    /// work in one scene and silently hit nobody in the next.
+    pub target_node: String,
     /// The next place to walk to along the route to `goal`, or the character's
     /// own position when there is no route.
     ///
@@ -208,6 +214,7 @@ impl Default for Motion {
             can_see_target: false,
             target_at: [0.0; 3],
             target_distance: f32::INFINITY,
+            target_node: String::new(),
             path_next: [0.0; 3],
             path_found: false,
         }
@@ -577,6 +584,7 @@ impl ScriptHost {
         scope.push("can_see_target", motion.can_see_target);
         scope.push("target_at", to_dynamic_vec(motion.target_at));
         scope.push("target_distance", f64::from(motion.target_distance));
+        scope.push("target_node", motion.target_node.clone());
         scope.push("path_next", to_dynamic_vec(motion.path_next));
         scope.push("path_found", motion.path_found);
         // Where the character wants to go. The host routes to it and reports

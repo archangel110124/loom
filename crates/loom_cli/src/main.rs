@@ -469,6 +469,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         ),
     };
 
+    let environment = environment_of(&world);
     let result = (|| -> Result<(String, bool), String> {
         let instance = Instance::new(c"loom").map_err(|e| e.to_string())?;
         let device = Device::new(&instance).map_err(|e| e.to_string())?;
@@ -488,6 +489,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
             &material_library.materials,
         )
         .map_err(|e| e.to_string())?;
+        renderer.environment = environment;
         renderer
             .render_to_png(&objects, &particles, &camera, std::path::Path::new(&out))
             .map_err(|e| e.to_string())?;
@@ -744,6 +746,69 @@ fn bake_voxel(component: &serde_json::Value) -> Option<loom_asset::Mesh> {
 /// The advisory `path` an `[[asset]]` entry carries, for importing.
 fn scene_asset_path(scene: &Scene, key: &str) -> Option<String> {
     scene.asset_path(key).map(str::to_owned)
+}
+
+/// Read the scene's `Environment` into what the renderer wants.
+///
+/// Absent, the defaults are the constants the shader used to carry, so a
+/// scene that says nothing about its sky looks exactly as it did.
+pub(crate) fn environment_of(world: &World) -> loom_render::EnvironmentData {
+    let defaults = loom_scene::components::Environment::default();
+    let Some(component) = world.environment() else {
+        return loom_render::EnvironmentData::default();
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let scalar = |name: &str, fallback: f32| {
+        component
+            .get(name)
+            .and_then(serde_json::Value::as_f64)
+            .map_or(fallback, |v| v as f32)
+    };
+    let vector = |name: &str, fallback: [f32; 3]| {
+        let Some(values) = component.get(name).and_then(serde_json::Value::as_array) else {
+            return fallback;
+        };
+        let mut out = fallback;
+        for (slot, value) in out.iter_mut().zip(values) {
+            if let Some(v) = value.as_f64() {
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    *slot = v as f32;
+                }
+            }
+        }
+        out
+    };
+
+    // Normalised here rather than in the shader, so a scene can write
+    // `[0, 1, 0]` or `[0, 100, 0]` and mean the same thing.
+    let sun = vector("sun_direction", defaults.sun_direction);
+    let length = sun.iter().map(|c| c * c).sum::<f32>().sqrt();
+    let sun = if length < 1e-6 {
+        defaults.sun_direction
+    } else {
+        [sun[0] / length, sun[1] / length, sun[2] / length]
+    };
+    let sun_color = vector("sun_color", defaults.sun_color);
+    let zenith = vector("sky_zenith", defaults.sky_zenith);
+    let horizon = vector("sky_horizon", defaults.sky_horizon);
+
+    loom_render::EnvironmentData {
+        sun: [sun[0], sun[1], sun[2], scalar("sun_strength", defaults.sun_strength)],
+        sun_color: [
+            sun_color[0],
+            sun_color[1],
+            sun_color[2],
+            scalar("ambient", defaults.ambient),
+        ],
+        zenith: [zenith[0], zenith[1], zenith[2], scalar("fog_density", defaults.fog_density)],
+        horizon: [
+            horizon[0],
+            horizon[1],
+            horizon[2],
+            scalar("fog_falloff", defaults.fog_falloff),
+        ],
+    }
 }
 
 /// Distinct per-object colours until materials exist (M5).

@@ -1,0 +1,415 @@
+# PROVING GROUND — a whole game, in one text file.
+#
+#   loom run assets/games/proving_ground.loom --edit    # Play, then left click
+#
+# Three hunters walk out of the dark. Blow them off the platform before they
+# reach you. WASD moves, the mouse aims, left click fires, Escape frees the
+# pointer.
+#
+# ---------------------------------------------------------------------------
+# Why this file is the point
+# ---------------------------------------------------------------------------
+#
+# There is no build step and no code. The level, the lighting, the weapon, the
+# enemies' behaviour, the win condition and the score are this file and four
+# `.rhai` scripts beside it. Change the enemy's speed, the blast radius, the
+# time limit or the colour of the sky and the game is different on reload.
+#
+# And it is checkable without playing it:
+#
+#   loom sim assets/games/proving_ground.loom --ticks 3600 \
+#       --assert "status == lost" --assert "events.damage >= 1"
+#
+# That run has no keyboard, so nobody shoots and the hunters win — which is
+# the correct answer and the engine proves it. Give the player a script that
+# fights back and the same command proves the level is winnable. A design that
+# is a command that exits 0 or 1 is the whole reason to build on this.
+#
+# ---------------------------------------------------------------------------
+# What is deliberately not here
+# ---------------------------------------------------------------------------
+#
+# No waves — a scene cannot spawn nodes at runtime yet, so three hunters are
+# authored and that is the game. No animation: the hunters are capsules that
+# slide, because nothing is skinned. Both are stated rather than worked around.
+
+[scene]
+format = 1
+id = "6b93a2f0-4c17-4e85-b21d-7f0a5c8e3d94"
+
+[[asset]]
+key = "hum"
+id = "e70c4b18-25a9-4f36-8d51-3b6e9a0c7f42"
+path = "../audio/hum.wav"
+
+# ---------------------------------------------------------------------------
+# NIGHT
+#
+# The sun is off and the ambient floor is almost nothing, so the only light
+# that matters is what the scene places. Before `Environment` existed these
+# were shader constants — one blue afternoon in every scene ever authored —
+# and a dark game was not expressible at any setting.
+#
+# Fog is heavy and hugs the ground: it is what makes a hunter fade in out of
+# the dark rather than pop into view at the edge of the light.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Arena"
+
+  [node.components.Environment]
+  # Low and behind, so it rims the pillars without lighting the floor.
+  sun_direction = [-0.3, 0.08, -0.9]
+  sun_strength = 0.10
+  sun_color = [0.30, 0.42, 0.70]
+  # The knob that makes it dark. The old default was 0.95.
+  ambient = 0.055
+  sky_zenith = [0.006, 0.010, 0.022]
+  sky_horizon = [0.030, 0.038, 0.055]
+  fog_density = 0.030
+  fog_falloff = 0.10
+
+  [node.components.GameRules]
+  path = "../scripts/arena.rhai"
+
+# ---------------------------------------------------------------------------
+# YOU
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Player"
+parent = "Arena"
+transform = { pos = [0.0, 1.0, 6.0] }
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+
+  [node.components.Script]
+  path = "../scripts/fps.rhai"
+
+[[node]]
+name = "Eye"
+parent = "Arena/Player"
+transform = { pos = [0.0, 0.75, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 88.0
+
+# ---------------------------------------------------------------------------
+# THE ARENA
+#
+# A platform with nothing around it. The drop is the weapon: the blast throws
+# a hunter, and what kills it is the edge.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Floor"
+parent = "Arena"
+transform = { pos = [0.0, -0.4, 0.0], scale = [11.0, 0.4, 11.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.20, 0.20, 0.21]
+  roughness = 0.9
+
+# Pillars. Cover from the blast, and something for the hunters to route
+# around — which is the navigation being probed from the real geometry rather
+# than baked by a tool that would go stale the moment one of these moved.
+#
+# **Off the spawn sight lines, deliberately.** With one in front of each
+# hunter they never saw the player, never hunted, and stood in the dark for
+# the full minute — `enemy.rhai` behaving exactly as written, and a level
+# that never started. Cover belongs where the fight happens, not where it
+# begins.
+
+[[node]]
+name = "PillarA"
+parent = "Arena"
+transform = { pos = [-6.5, 1.6, 3.0], scale = [0.7, 1.6, 0.7] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.16, 0.16, 0.18]
+  roughness = 0.85
+
+[[node]]
+name = "PillarB"
+parent = "Arena"
+transform = { pos = [6.5, 1.6, 3.0], scale = [0.7, 1.6, 0.7] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.16, 0.16, 0.18]
+  roughness = 0.85
+
+[[node]]
+name = "PillarC"
+parent = "Arena"
+transform = { pos = [0.0, 1.6, 9.0], scale = [0.7, 1.6, 0.7] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.16, 0.16, 0.18]
+  roughness = 0.85
+
+# ---------------------------------------------------------------------------
+# LIGHT
+#
+# Three lamps and nothing else. In a scene this dark they are the level design:
+# the lit patches are where you can see a hunter coming, and everywhere else
+# you are listening.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "LampCentre"
+parent = "Arena"
+transform = { pos = [0.0, 4.2, 0.0] }
+
+  [node.components.Light]
+  intensity = 260.0
+  color = [1.0, 0.72, 0.40]
+
+[[node]]
+name = "LampNorth"
+parent = "Arena"
+transform = { pos = [0.0, 3.0, -8.5] }
+
+  [node.components.Light]
+  intensity = 150.0
+  color = [0.45, 0.65, 1.0]
+
+[[node]]
+name = "LampSouth"
+parent = "Arena"
+transform = { pos = [0.0, 3.0, 8.0] }
+
+  [node.components.Light]
+  intensity = 120.0
+  color = [0.50, 0.60, 0.95]
+
+# The generator. Its hum is how you know where the middle of the arena is when
+# you cannot see it — and nothing about how it sounds is authored. Step behind
+# a pillar and the engine's rays find the pillar, so it muffles.
+
+[[node]]
+name = "Generator"
+parent = "Arena"
+transform = { pos = [0.0, 0.5, 0.0], scale = [0.6, 0.5, 0.6] }
+
+  [node.components.AudioSource]
+  clip = { asset = "hum" }
+  volume = 0.55
+  range = 22.0
+  looping = true
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.24, 0.20, 0.10]
+  metallic = 0.8
+  roughness = 0.45
+
+# ---------------------------------------------------------------------------
+# THE EXPLOSION, DORMANT
+#
+# `armed = false` makes this a description rather than an event: nothing here
+# goes off where it sits. The runtime reproduces it wherever the weapon lands.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Boom"
+parent = "Arena"
+transform = { pos = [0.0, 0.5, 40.0] }
+
+  [node.components.Blast]
+  armed = false
+
+[[node]]
+name = "BoomFire"
+parent = "Arena/Boom"
+
+  [node.components.ParticleEmitter]
+  burst = 150
+  rate = 210.0
+  duration = 0.12
+  lifetime = 0.40
+  lifetime_jitter = 0.45
+  speed = 10.0
+  spread_degrees = 180.0
+  radius = 0.3
+  gravity = 3.0
+  drag = 4.5
+  turbulence = 6.0
+  turbulence_scale = 0.9
+  size = [1.0, 3.0]
+  color_start = [1.0, 0.85, 0.45]
+  color_end = [0.70, 0.14, 0.02]
+  # Additive, so it lights the dark instead of being a grey smear on it.
+  alpha = [0.35, 0.0]
+  additive = true
+  seed = 44
+
+[[node]]
+name = "BoomSmoke"
+parent = "Arena/Boom"
+
+  [node.components.ParticleEmitter]
+  burst = 150
+  rate = 200.0
+  delay = 0.1
+  duration = 0.8
+  lifetime = 3.2
+  lifetime_jitter = 0.4
+  speed = 4.5
+  spread_degrees = 120.0
+  radius = 0.4
+  gravity = 1.5
+  drag = 1.9
+  turbulence = 2.2
+  turbulence_scale = 0.45
+  size = [1.2, 5.5]
+  color_start = [0.05, 0.05, 0.05]
+  color_end = [0.20, 0.20, 0.22]
+  alpha = [0.55, 0.0]
+  seed = 12
+
+# ---------------------------------------------------------------------------
+# THE HUNTERS
+#
+# Same component the player has, and the same script seam. The engine has no
+# idea one of these is hostile — `enemy.rhai` is what makes it one.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Hunter1"
+parent = "Arena"
+transform = { pos = [-5.0, 1.0, -8.0] }
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+
+  [node.components.Script]
+  path = "../scripts/enemy.rhai"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.40, 0.05, 0.06]
+  roughness = 0.5
+
+[[node]]
+name = "Hunter2"
+parent = "Arena"
+transform = { pos = [5.0, 1.0, -8.0] }
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+
+  [node.components.Script]
+  path = "../scripts/enemy.rhai"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.40, 0.05, 0.06]
+  roughness = 0.5
+
+[[node]]
+name = "Hunter3"
+parent = "Arena"
+transform = { pos = [0.0, 1.0, -8.5] }
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+
+  [node.components.Script]
+  path = "../scripts/enemy.rhai"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.40, 0.05, 0.06]
+  roughness = 0.5
+
+# ---------------------------------------------------------------------------
+# THE HUD
+#
+# Screen space, authored here. `{name}` reads the rules script's own state, so
+# the display and the game cannot disagree about the score.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "HudHealth"
+parent = "Arena"
+
+  [node.components.Hud]
+  anchor = "bottom_left"
+  offset = [22.0, 18.0]
+  text = "{health} HP"
+  size = 30.0
+  color = [0.85, 0.22, 0.20]
+  only_in_play = true
+
+[[node]]
+name = "HudScore"
+parent = "Arena"
+
+  [node.components.Hud]
+  anchor = "top_left"
+  offset = [22.0, 16.0]
+  text = "SCORE {score}"
+  size = 26.0
+  color = [0.95, 0.80, 0.35]
+  only_in_play = true
+
+[[node]]
+name = "HudKills"
+parent = "Arena"
+
+  [node.components.Hud]
+  anchor = "top_right"
+  offset = [22.0, 16.0]
+  text = "{killed} / 3 down"
+  size = 22.0
+  color = [0.70, 0.72, 0.78]
+  only_in_play = true
+
+[[node]]
+name = "HudCrosshair"
+parent = "Arena"
+
+  [node.components.Hud]
+  anchor = "center"
+  offset = [0.0, 0.0]
+  text = "+"
+  size = 26.0
+  color = [0.85, 0.90, 0.85]
+  only_in_play = true
+
+[[node]]
+name = "HudOutcome"
+parent = "Arena"
+
+  [node.components.Hud]
+  anchor = "bottom_center"
+  offset = [0.0, 46.0]
+  text = "{message}"
+  size = 26.0
+  color = [0.95, 0.95, 0.95]
+  only_in_play = true
