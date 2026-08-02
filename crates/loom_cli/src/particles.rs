@@ -131,6 +131,11 @@ impl Plumes {
             else {
                 continue;
             };
+            // A dormant explosion is a description, not an event: its
+            // emitters play where one is triggered, never where it sits.
+            if in_dormant_blast(world, *entity) {
+                continue;
+            }
             let (emitter, visual) = parse(component);
             let origin = [global.matrix[12], global.matrix[13], global.matrix[14]];
             let mut system = loom_particles::System::new(emitter.seed);
@@ -154,6 +159,22 @@ impl Plumes {
         }
         plumes.rebuild_instances();
         plumes
+    }
+
+    /// Set off the scene's dormant explosion at a point.
+    ///
+    /// The systems are added live and then age out on their own, so a scene
+    /// can be shot up for as long as the human likes without anything to
+    /// clean up: a burst with a finite lifetime empties itself.
+    pub(crate) fn detonate(&mut self, world: &World, at: [f32; 3], seed_salt: u64) {
+        for (emitter, visual) in blast_template(world) {
+            self.live.push(Live {
+                system: loom_particles::System::new(emitter.seed ^ seed_salt),
+                emitter,
+                visual,
+                origin: at,
+            });
+        }
     }
 
     /// Advance every plume by `ticks` steps.
@@ -214,7 +235,49 @@ fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
 /// steady population after one particle lifetime, so twice that is comfortably
 /// past the transient.
 #[must_use]
-pub(crate) fn simulate(world: &World, ticks: Option<u32>) -> Vec<ParticleInstance> {
+/// Whether this node sits inside an explosion that has not been set off.
+///
+/// A dormant `Blast` marks a prefab: the emitters under it describe what an
+/// explosion of that kind *looks like*, and must not play where the prefab
+/// happens to sit. They play where one is triggered.
+///
+/// Bounded rather than `while let`, like every other ancestor walk here: a
+/// malformed hierarchy with a cycle must not hang a frame.
+pub(crate) fn in_dormant_blast(world: &World, entity: loom_ecs::Entity) -> bool {
+    let mut current = Some(entity);
+    for _ in 0..64 {
+        let Some(node) = current else { return false };
+        if let Some(blast) = world.blast(node)
+            && !blast
+                .get("armed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        {
+            return true;
+        }
+        current = world.parent(node);
+    }
+    false
+}
+
+/// The emitters of the scene's dormant explosion, if it has one.
+///
+/// One template per scene for now. A second would need the script to say
+/// which, and nothing yet has two kinds of explosion in it.
+fn blast_template(world: &World) -> Vec<(loom_particles::Emitter, Visual)> {
+    world
+        .entities()
+        .iter()
+        .filter(|e| world.emitter(**e).is_some() && in_dormant_blast(world, **e))
+        .filter_map(|e| world.emitter(*e).map(parse))
+        .collect()
+}
+
+pub(crate) fn simulate(
+    world: &World,
+    ticks: Option<u32>,
+    fired: &[(u64, loom_script::Detonation)],
+) -> Vec<ParticleInstance> {
     let mut out = Vec::new();
 
     for entity in world.entities() {
@@ -224,6 +287,10 @@ pub(crate) fn simulate(world: &World, ticks: Option<u32>) -> Vec<ParticleInstanc
         let Some(global) = world.global_transform(*entity) else {
             continue;
         };
+        // A prefab describes an explosion; it is not one.
+        if in_dormant_blast(world, *entity) {
+            continue;
+        }
         let (emitter, visual) = parse(component);
         // Column 3 of the model matrix is its translation.
         let origin = [global.matrix[12], global.matrix[13], global.matrix[14]];
@@ -240,5 +307,103 @@ pub(crate) fn simulate(world: &World, ticks: Option<u32>) -> Vec<ParticleInstanc
         }
     }
 
+    // Explosions a script set off during the run, replayed from the tick each
+    // fired on. Deterministic for the same reason everything else here is:
+    // the tick is data, not a clock reading, so `--sim N` means one thing.
+    let template = blast_template(world);
+    if !template.is_empty() {
+        for (at_tick, blast) in fired {
+            #[allow(clippy::cast_possible_truncation)]
+            let elapsed = ticks
+                .unwrap_or(0)
+                .saturating_sub(u32::try_from(*at_tick).unwrap_or(u32::MAX));
+            for (emitter, visual) in &template {
+                let mut system = loom_particles::System::new(emitter.seed ^ *at_tick);
+                for _ in 0..elapsed {
+                    system.step(DT, emitter, blast.at);
+                }
+                for p in system.particles() {
+                    out.push(instance(p, visual));
+                }
+            }
+        }
+    }
+
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range() -> World {
+        let source = std::fs::read_to_string("../../assets/test/range.loom").expect("fixture");
+        World::from_scene(&loom_scene::Scene::parse(&source).expect("valid scene"))
+    }
+
+    /// **A prefab is a description, not an event.** The scene's dormant
+    /// explosion sits at a real position with real emitters on it; if those
+    /// played there, every scene carrying a weapon's explosion would have a
+    /// permanent fireball parked somewhere in it.
+    #[test]
+    fn a_dormant_explosion_does_not_play_where_it_sits() {
+        let quiet = simulate(&range(), Some(60), &[]);
+
+        assert!(
+            quiet.is_empty(),
+            "{} particles from an explosion nobody set off",
+            quiet.len()
+        );
+    }
+
+    /// And the other half: set off, it plays at the point it was set off at,
+    /// not at the prefab's parked position.
+    #[test]
+    fn a_triggered_explosion_plays_where_it_was_set_off() {
+        let world = range();
+        let at = [2.0, 1.0, -7.0];
+        let fired = [(
+            10,
+            loom_script::Detonation {
+                at,
+                radius: 4.0,
+                impulse: 300.0,
+            },
+        )];
+
+        let out = simulate(&world, Some(30), &fired);
+
+        assert!(!out.is_empty(), "the explosion produced nothing");
+        // The prefab is parked at x = -14; every particle should be near the
+        // detonation instead. Generous, because a burst expands fast.
+        for p in &out {
+            assert!(
+                (p.position[0] - at[0]).abs() < 8.0,
+                "particle at {:?} is nowhere near the blast at {at:?}",
+                p.position
+            );
+        }
+    }
+
+    /// Nothing fired means nothing drawn, even in a scene that has a template.
+    #[test]
+    fn no_shot_means_no_fireball() {
+        let world = range();
+
+        let none = simulate(&world, Some(30), &[]);
+        let one = simulate(
+            &world,
+            Some(30),
+            &[(
+                5,
+                loom_script::Detonation {
+                    at: [0.0, 1.0, 0.0],
+                    radius: 4.0,
+                    impulse: 300.0,
+                },
+            )],
+        );
+
+        assert!(none.len() < one.len(), "firing must add particles");
+    }
 }

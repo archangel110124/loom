@@ -185,6 +185,10 @@ struct App {
     /// Draw calls for the simulated world, refreshed only on ticks that
     /// actually ran.
     play_objects: Vec<loom_render::Object>,
+    /// How many script-fired explosions have already been given to the
+    /// particle systems. The runner's list only grows, so the tail past this
+    /// is what is new — no event queue, and nothing to miss if a frame is slow.
+    detonations_seen: usize,
     /// Whether the pointer is captured for first-person play. Tracked rather
     /// than asked of the window because winit has no getter, and because
     /// releasing it must not depend on the platform honouring the request.
@@ -301,6 +305,7 @@ impl App {
             mode: Mode::Move,
             handles: Vec::new(),
             play_objects: Vec::new(),
+            detonations_seen: 0,
             captured: false,
             plumes: None,
             ui: None,
@@ -791,6 +796,7 @@ impl ApplicationHandler for App {
                 self.feed_play_input();
                 if self.play.as_mut().is_some_and(|p| p.advance(dt)) {
                     self.refresh_play_objects();
+                    self.spawn_new_detonations();
                 }
 
                 // While driving a character the view is the scene's camera,
@@ -1076,12 +1082,17 @@ impl App {
             ],
             jump: self.input.is_active(&self.bindings, PLAY, "jump"),
             sprint: self.input.is_active(&self.bindings, PLAY, "sprint"),
+            fire: self.input.is_active(&self.bindings, PLAY, "fire"),
         });
     }
 
     /// Stop, and go back to the authored scene exactly as it was.
     fn stop_play(&mut self) {
         self.capture_pointer(false);
+        // Stop discards the simulated world, so the explosions in it are gone
+        // too. Leaving the counter high would make the first shot of the next
+        // run look like one already seen, and it would never be drawn.
+        self.detonations_seen = 0;
         if let Some(play) = self.play.take() {
             crate::log::info(format!(
                 "stopped after {} ticks ({:.2}s) — state {:016x}",
@@ -1096,6 +1107,31 @@ impl App {
         #[allow(clippy::disallowed_methods)]
         {
             self.next_watch = std::time::Instant::now();
+        }
+    }
+
+    /// Give the particle systems any explosion a script has just set off.
+    fn spawn_new_detonations(&mut self) {
+        let Some(play) = self.play.as_ref() else {
+            return;
+        };
+        let fired = play.fired();
+        if fired.len() <= self.detonations_seen {
+            return;
+        }
+        let fresh: Vec<(u64, [f32; 3])> = fired[self.detonations_seen..]
+            .iter()
+            .map(|(tick, blast)| (*tick, blast.at))
+            .collect();
+        self.detonations_seen = fired.len();
+
+        // Against the play world, because that is where the dormant prefab is
+        // — the same scene, but the one the simulation is holding.
+        let world = &play.world;
+        if let Some(plumes) = self.plumes.as_mut() {
+            for (tick, at) in fresh {
+                plumes.detonate(world, at, tick);
+            }
         }
     }
 

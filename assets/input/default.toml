@@ -70,3 +70,6 @@ jump         = [{ button = "Space", trigger = "pressed" }]
 sprint       = [{ button = "ShiftLeft" }, { button = "ShiftRight" }]
 # Hands the pointer back without stopping the simulation.
 release      = [{ button = "Escape", trigger = "pressed" }]
+# Pressed, not held: one click is one shot. Holding to full-auto is a decision
+# for the weapon script, which can count ticks; it is not the binding's job.
+fire         = [{ button = "MouseLeft", trigger = "pressed" }]

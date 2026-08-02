@@ -1,0 +1,196 @@
+# A firing range: the trigger, end to end.
+#
+# Everything before this could author an explosion but not *cause* one. A
+# `Blast` fired on a schedule, which is fine for a scripted set-piece and no
+# use at all for a weapon. This scene closes that loop.
+#
+# Three pieces meet here.
+#
+# The host casts the aim ray, because a script cannot: the sandbox has no
+# physics world, and handing agent-authored code a live borrow of the
+# simulation is not a trade worth making. It reports `aim_point`, `aim_hit`
+# and `aim_distance` to the script.
+#
+# The script decides. `fps.rhai` reloads for 45 ticks, refuses to fire when the
+# ray struck nothing, and asks for a blast of its own chosen radius and
+# impulse. Everything about the weapon is in that file.
+#
+# The scene supplies the look. `Prefab` below is a `Blast` with `armed =
+# false` — an explosion nobody has set off yet. Its emitters never play where
+# it sits; they play wherever a detonation is triggered. That is how a scene
+# carries a *kind* of explosion rather than an event.
+#
+# Open it and shoot:
+#   loom run assets/test/range.loom --edit     # Play, then left click
+#
+# Or headless, which is the version that is checked:
+#   loom sim assets/test/range.loom --ticks 120 --assert "Range/Target.x > 3.0"
+
+[scene]
+format = 1
+id = "a17d3f68-95c2-4e0b-b34a-6f81d05e2c93"
+
+[[node]]
+name = "Range"
+
+# ---------------------------------------------------------------------------
+# The shooter. Faces -Z down the range at the targets.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Turret"
+parent = "Range"
+transform = { pos = [0.0, 1.0, 9.0] }
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+
+  [node.components.Script]
+  # A turret, not a player: it fires on a tick rather than on a mouse button,
+  # which is what makes the trigger checkable with no human at the keyboard.
+  # camera.loom is the same seam driven by a person.
+  path = "../scripts/turret.rhai"
+
+[[node]]
+name = "Eye"
+parent = "Range/Turret"
+transform = { pos = [0.0, 0.75, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 85.0
+
+# ---------------------------------------------------------------------------
+# The explosion, dormant. Neither its force nor its particles happen where it
+# sits — it is a description, and the runtime reproduces it at whatever point
+# a script detonates.
+#
+# Parked off to one side so that if it ever *did* go off in place, the mistake
+# would be obvious in a render rather than hidden inside the real blast.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Prefab"
+parent = "Range"
+transform = { pos = [-14.0, 0.5, 0.0] }
+
+  [node.components.Blast]
+  armed = false
+
+[[node]]
+name = "PrefabFire"
+parent = "Range/Prefab"
+
+  [node.components.ParticleEmitter]
+  burst = 150
+  rate = 200.0
+  duration = 0.12
+  lifetime = 0.40
+  lifetime_jitter = 0.45
+  speed = 10.0
+  spread_degrees = 180.0
+  radius = 0.3
+  gravity = 3.0
+  drag = 4.5
+  turbulence = 6.0
+  turbulence_scale = 0.9
+  size = [1.0, 3.0]
+  color_start = [1.0, 0.85, 0.45]
+  color_end = [0.65, 0.13, 0.02]
+  alpha = [0.3, 0.0]
+  additive = true
+  seed = 33
+
+[[node]]
+name = "PrefabSmoke"
+parent = "Range/Prefab"
+
+  [node.components.ParticleEmitter]
+  burst = 170
+  rate = 220.0
+  delay = 0.1
+  duration = 0.9
+  lifetime = 4.0
+  lifetime_jitter = 0.4
+  speed = 5.0
+  spread_degrees = 120.0
+  radius = 0.45
+  gravity = 1.6
+  drag = 1.9
+  turbulence = 2.2
+  turbulence_scale = 0.45
+  size = [1.4, 7.0]
+  color_start = [0.12, 0.10, 0.09]
+  color_end = [0.42, 0.41, 0.40]
+  alpha = [0.5, 0.0]
+  seed = 11
+
+# ---------------------------------------------------------------------------
+# What to shoot at. The backstop is what the ray lands on; the targets stand
+# in front of it and get thrown.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Backstop"
+parent = "Range"
+transform = { pos = [0.0, 1.6, -10.0], scale = [6.0, 1.6, 0.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.32, 0.30]
+  roughness = 0.9
+
+[[node]]
+name = "Target"
+parent = "Range"
+transform = { pos = [1.4, 0.5, -8.0], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 6.0
+
+  [node.components.Material]
+  albedo = [0.62, 0.24, 0.12]
+  roughness = 0.75
+
+[[node]]
+name = "TargetLeft"
+parent = "Range"
+transform = { pos = [-1.6, 0.5, -8.2], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 6.0
+
+  [node.components.Material]
+  albedo = [0.20, 0.42, 0.54]
+  roughness = 0.75
+
+[[node]]
+name = "Ground"
+parent = "Range"
+transform = { pos = [0.0, -0.25, 0.0], scale = [14.0, 0.25, 14.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.26, 0.25, 0.23]
+  roughness = 0.95
+
+[[node]]
+name = "Sun"
+parent = "Range"
+transform = { pos = [4.0, 8.0, 6.0] }
+
+  [node.components.Light]
+  intensity = 320.0
+  color = [1.0, 0.96, 0.9]

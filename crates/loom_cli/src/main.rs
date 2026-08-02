@@ -426,14 +426,20 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
 
     // --sim steps physics before drawing, which is what makes a still image a
     // useful view of a simulation rather than only of its initial state.
+    //
+    // Explosions a script set off during that run come back here, so the
+    // fireball is drawn where the blast happened rather than only its effect
+    // on the crates being visible.
+    let mut fired = Vec::new();
     if let Some(ticks) = flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()) {
-        simulate_physics(&mut world, base, ticks);
+        fired = simulate_physics(&mut world, base, ticks);
     }
 
     let objects = world_to_objects(&world, &library, &material_library);
     let particles = particles::simulate(
         &world,
         flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()),
+        &fired,
     );
     let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok());
     let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok());
@@ -892,7 +898,11 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
 /// the render: a picture of the scene up to the failure is more use to whoever
 /// has to fix the script than no picture at all, which is the same reasoning
 /// that makes a missing texture a warning.
-fn simulate_physics(world: &mut World, base: &std::path::Path, ticks: u32) {
+fn simulate_physics(
+    world: &mut World,
+    base: &std::path::Path,
+    ticks: u32,
+) -> Vec<(u64, loom_script::Detonation)> {
     let mut runner = match play::Runner::new(world, base) {
         Ok(r) => r,
         Err(json) => {
@@ -900,15 +910,16 @@ fn simulate_physics(world: &mut World, base: &std::path::Path, ticks: u32) {
             let mut sim = play::Sim::new(world);
             sim.step(ticks);
             sim.write_back(world);
-            return;
+            return Vec::new();
         }
     };
     for tick in 1..=u64::from(ticks) {
         if let Err(e) = runner.tick(world, tick) {
             log::warn(format!("{}: {}", e.script, e.message));
-            return;
+            break;
         }
     }
+    runner.fired().to_vec()
 }
 
 /// Every value given for a repeated flag.

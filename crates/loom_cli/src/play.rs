@@ -18,6 +18,13 @@ use loom_render::glam::{Mat4, Quat, Vec3};
 /// wall clock.
 pub const TICK_SECONDS: f32 = 1.0 / 60.0;
 
+/// How far a character's aim ray reaches, in metres.
+///
+/// Long enough to cross any blockout and short enough that a miss is a miss:
+/// a ray with no limit would report an aim point kilometres away, and a script
+/// that detonates at it would set off explosions in empty sky.
+const AIM_RANGE: f32 = 250.0;
+
 /// A physics world built from a scene, ready to be stepped.
 pub struct Sim {
     physics: Physics,
@@ -275,8 +282,9 @@ impl Sim {
             loom_ecs::Entity,
             &loom_script::Motion,
             &mut loom_script::ScriptMemory,
-        ) -> Result<[f32; 3], E>,
-    ) -> Result<(), E> {
+        ) -> Result<loom_script::Motive, E>,
+    ) -> Result<Vec<loom_script::Detonation>, E> {
+        let mut detonations = Vec::new();
         for walker in &mut self.characters {
             // State from the controller, input from whoever is driving.
             // Every character gets the same input for now: "which character
@@ -291,7 +299,41 @@ impl Sim {
                 grounded: walker.grounded,
                 ..input
             };
-            let velocity = velocity_for(walker.entity, &motion, &mut walker.memory)?;
+
+            // Where this character is looking, resolved here because a script
+            // cannot cast a ray: the sandbox has no physics world, and giving
+            // it one would hand agent-authored code a live borrow of the
+            // simulation.
+            //
+            // From the eye rather than the capsule's centre, so a shot leaves
+            // where the view does. The character is excluded by `raycast`
+            // only if it is not in the way — it is, being the thing the ray
+            // starts inside — so the ray starts a little in front of it.
+            let eye = [
+                motion.position[0] + input.forward[0] * (walker.character.shape().radius + 0.05),
+                motion.position[1] + walker.character.shape().half_height,
+                motion.position[2] + input.forward[2] * (walker.character.shape().radius + 0.05),
+            ];
+            let hit = self.physics.raycast(eye, input.forward, AIM_RANGE);
+            let motion = loom_script::Motion {
+                aim_point: hit.map_or(
+                    [
+                        eye[0] + input.forward[0] * AIM_RANGE,
+                        eye[1] + input.forward[1] * AIM_RANGE,
+                        eye[2] + input.forward[2] * AIM_RANGE,
+                    ],
+                    |h| h.point,
+                ),
+                aim_distance: hit.map_or(AIM_RANGE, |h| h.distance),
+                aim_hit: hit.is_some(),
+                ..motion
+            };
+
+            let motive = velocity_for(walker.entity, &motion, &mut walker.memory)?;
+            let velocity = motive.velocity;
+            if let Some(detonation) = motive.detonate {
+                detonations.push(detonation);
+            }
 
             let moved = self
                 .physics
@@ -315,7 +357,7 @@ impl Sim {
             }
         }
         world.propagate_transforms();
-        Ok(())
+        Ok(detonations)
     }
 
     /// Copy body positions back onto the world's transforms.
@@ -466,6 +508,10 @@ pub struct Runner {
     /// position is taken then too — a blast is an event at a place, and the
     /// place is where the node was when the scene started.
     pending_blasts: Vec<(u64, [f32; 3], f32, f32)>,
+    /// Every blast a script has set off, and when. Kept so the render path
+    /// can put a fireball where one went off — the simulation knows what
+    /// happened and the particles have to be told.
+    fired: Vec<(u64, loom_script::Detonation)>,
     /// This tick's player input, folded into every character's `Motion`.
     ///
     /// Headless it stays at its default of all-zero, which is right: nobody is
@@ -523,6 +569,15 @@ impl Runner {
                     .map_or(fallback, |v| v as f32)
             };
             let defaults = loom_scene::components::Blast::default();
+            // A dormant blast is a prefab, not an event: it waits to be set
+            // off rather than going off on its own.
+            if !component
+                .get("armed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(defaults.armed)
+            {
+                continue;
+            }
             let delay = scalar("delay", defaults.delay).max(0.0);
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             // Ticks, not seconds, because that is what the simulation counts.
@@ -548,8 +603,15 @@ impl Runner {
             character_scripts,
             node_scripts,
             pending_blasts,
+            fired: Vec::new(),
             input: loom_script::Motion::default(),
         })
+    }
+
+    /// Blasts set off by scripts so far, with the tick each fired on.
+    #[must_use]
+    pub fn fired(&self) -> &[(u64, loom_script::Detonation)] {
+        &self.fired
     }
 
     /// A runner that steps physics and runs nothing, for when the scripts
@@ -562,6 +624,7 @@ impl Runner {
             character_scripts: std::collections::BTreeMap::new(),
             node_scripts: Vec::new(),
             pending_blasts: Vec::new(),
+            fired: Vec::new(),
             input: loom_script::Motion::default(),
         }
     }
@@ -598,18 +661,30 @@ impl Runner {
             let host = &self.host;
             let scripts = &self.character_scripts;
             let input = self.input;
-            self.physics
-                .drive_characters(world, tick, input, |entity, motion, memory| {
-                    match scripts.get(&entity) {
-                        Some(script) => host.motion(script, motion, memory),
-                        // No script, so no movement model — it falls and does
-                        // nothing else. Not a default walk: inventing one in
-                        // Rust is what the script seam exists to avoid, and a
-                        // character that mysteriously strolls off is worse
-                        // than one that visibly stands still.
-                        None => Ok(fall_only(motion)),
-                    }
-                })?;
+            let detonations =
+                self.physics
+                    .drive_characters(world, tick, input, |entity, motion, memory| {
+                        match scripts.get(&entity) {
+                            Some(script) => host.motion(script, motion, memory),
+                            // No script, so no movement model — it falls and
+                            // does nothing else. Not a default walk: inventing
+                            // one in Rust is what the script seam exists to
+                            // avoid, and a character that mysteriously strolls
+                            // off is worse than one that visibly stands still.
+                            None => Ok(loom_script::Motive {
+                                velocity: fall_only(motion),
+                                detonate: None,
+                            }),
+                        }
+                    })?;
+
+            // What a script asked for, done. After the move, so a blast set
+            // off at the character's own feet acts on where it ended up.
+            for blast in detonations {
+                self.physics
+                    .apply_blast(blast.at, blast.radius, blast.impulse);
+                self.fired.push((tick, blast));
+            }
         }
 
         for (entity, script) in &self.node_scripts {
@@ -645,6 +720,7 @@ pub struct PlayerInput {
     pub move_axis: [f32; 2],
     pub jump: bool,
     pub sprint: bool,
+    pub fire: bool,
 }
 
 /// Play mode as the editor holds it: a scene's world, its simulation, and how
@@ -677,6 +753,8 @@ pub struct Play {
     /// because a press lasts one *frame* and might land between two ticks —
     /// dropping it is the "sometimes jump does nothing" bug.
     jump_pending: bool,
+    /// A fire press waiting for a tick, latched for the same reason as `jump`.
+    fire_pending: bool,
     /// The character a human drives, and the node the view comes from.
     /// Resolved once at Play: neither can appear mid-run.
     player: Option<loom_ecs::Entity>,
@@ -722,6 +800,7 @@ impl Play {
             pitch: pitch.clamp(-MAX_PITCH, MAX_PITCH),
             input: PlayerInput::default(),
             jump_pending: false,
+            fire_pending: false,
         }
     }
 
@@ -730,6 +809,7 @@ impl Play {
         // Latched, not overwritten: a press lasts one frame and the tick that
         // consumes it may not have run yet.
         self.jump_pending |= input.jump;
+        self.fire_pending |= input.fire;
         self.input = input;
     }
 
@@ -743,6 +823,12 @@ impl Play {
     #[must_use]
     pub fn camera(&self) -> Option<loom_ecs::CameraView> {
         self.world.active_camera()
+    }
+
+    /// Blasts scripts have set off, with the tick each fired on.
+    #[must_use]
+    pub fn fired(&self) -> &[(u64, loom_script::Detonation)] {
+        self.runner.fired()
     }
 
     /// Whether a human can drive anything here.
@@ -838,6 +924,7 @@ impl Play {
                 // Consumed here, so one press is one jump however the frames
                 // and ticks happen to line up.
                 jump: std::mem::take(&mut self.jump_pending),
+                fire: std::mem::take(&mut self.fire_pending),
                 sprint: self.input.sprint,
                 ..loom_script::Motion::default()
             };
@@ -1624,6 +1711,56 @@ transform = { pos = [0.0, 6.0, 0.0] }
             axis(&play.world, "Level/Player", 1) > resting + 0.3,
             "the jump was dropped: y {resting} -> {}",
             axis(&play.world, "Level/Player", 1)
+        );
+    }
+
+    /// **The trigger, end to end.** A button press reaches a script, the
+    /// script asks for an explosion where the host says it is aiming, and
+    /// something in the world moves because of it. Every link in that chain is
+    /// new and none of it is observable except at the far end.
+    #[test]
+    fn firing_sets_off_an_explosion_where_the_player_is_aiming() {
+        let source = std::fs::read_to_string("../../assets/test/camera.loom").expect("fixture");
+        let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+        let mut play = Play::start(world, std::path::Path::new("../../assets/test"));
+        // Settle on the floor first, so the shot is not fired mid-fall.
+        play.run(20);
+        // Down the corridor, which is where the shot goes and therefore the
+        // direction the target is thrown. Not up: the blast lands on the face
+        // of the target nearest the shooter, so it pushes away, not skyward.
+        let before = axis(&play.world, "Level/Marker", 2);
+
+        play.set_input(PlayerInput { fire: true, ..PlayerInput::default() });
+        play.run(30);
+
+        assert_eq!(play.fired().len(), 1, "exactly one shot from one press");
+        assert!(
+            axis(&play.world, "Level/Marker", 2) < before - 0.3,
+            "the blast did not throw the target: z {before} -> {}",
+            axis(&play.world, "Level/Marker", 2)
+        );
+    }
+
+    /// A weapon that fires every tick the button is down is not a weapon.
+    /// The reload lives in the script, which is the whole point — but it has
+    /// to actually be consulted.
+    #[test]
+    fn holding_fire_does_not_detonate_every_tick() {
+        let source = std::fs::read_to_string("../../assets/test/camera.loom").expect("fixture");
+        let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+        let mut play = Play::start(world, std::path::Path::new("../../assets/test"));
+        play.run(20);
+
+        // Held down for a full second.
+        for _ in 0..60 {
+            play.set_input(PlayerInput { fire: true, ..PlayerInput::default() });
+            play.run(1);
+        }
+
+        let shots = play.fired().len();
+        assert!(
+            (1..=2).contains(&shots),
+            "a second of holding fire produced {shots} explosions"
         );
     }
 

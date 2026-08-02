@@ -109,6 +109,45 @@ pub struct Motion {
     /// otherwise holding it jumps again the instant the character lands.
     pub jump: bool,
     pub sprint: bool,
+    /// True on the tick the fire button went down. Pressed, not held, for the
+    /// same reason as `jump`.
+    pub fire: bool,
+
+    /// Where the character's view ray lands: the first solid thing along
+    /// `forward`, or a point at the end of its range when nothing is there.
+    ///
+    /// **Resolved by the host, not the script.** A script cannot cast a ray —
+    /// the sandbox has no access to the physics world, and giving it one would
+    /// mean handing agent-authored code a live borrow of the simulation. The
+    /// host already knows how to cast, so it casts and passes the answer.
+    pub aim_point: [f32; 3],
+    /// Metres to `aim_point`.
+    pub aim_distance: f32,
+    /// Whether the aim ray actually struck something, as opposed to running
+    /// out of range. A weapon that detonates at max range in open air is a
+    /// different weapon from one that needs a target.
+    pub aim_hit: bool,
+}
+
+/// An explosion a script asked for this tick.
+///
+/// The script decides *whether* and *where*; the host does it. Requests rather
+/// than direct calls because a script is sandboxed by what it cannot reach
+/// (§7.8), and "can set off explosions anywhere" is a capability to grant
+/// deliberately, through a shape the host can inspect, clamp and log.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Detonation {
+    pub at: [f32; 3],
+    pub radius: f32,
+    pub impulse: f32,
+}
+
+/// What a movement script produced this tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Motive {
+    pub velocity: [f32; 3],
+    /// An explosion the script asked for, if it asked for one.
+    pub detonate: Option<Detonation>,
 }
 
 impl Default for Motion {
@@ -124,6 +163,10 @@ impl Default for Motion {
             right: [1.0, 0.0, 0.0],
             jump: false,
             sprint: false,
+            fire: false,
+            aim_point: [0.0, 0.0, -1.0],
+            aim_distance: 0.0,
+            aim_hit: false,
         }
     }
 }
@@ -271,7 +314,7 @@ impl ScriptHost {
         name: &str,
         motion: &Motion,
         memory: &mut ScriptMemory,
-    ) -> Result<[f32; 3], ScriptError> {
+    ) -> Result<Motive, ScriptError> {
         let Some(ast) = self.compiled.get(name) else {
             return Err(ScriptError {
                 error: "unknown_script".to_owned(),
@@ -296,6 +339,15 @@ impl ScriptHost {
         scope.push("right", to_dynamic_vec(motion.right));
         scope.push("jump", motion.jump);
         scope.push("sprint", motion.sprint);
+        scope.push("fire", motion.fire);
+        scope.push("aim_point", to_dynamic_vec(motion.aim_point));
+        scope.push("aim_distance", f64::from(motion.aim_distance));
+        scope.push("aim_hit", motion.aim_hit);
+        // The request slot. Empty means "no explosion this tick", which is
+        // almost every tick — so the default has to be the quiet one.
+        scope.push("detonate", Dynamic::from_array(Vec::new()));
+        scope.push("detonate_radius", 0.0_f64);
+        scope.push("detonate_impulse", 0.0_f64);
         scope.push("memory", std::mem::take(&mut memory.0));
 
         let result = self.engine.run_ast_with_scope(&mut scope, ast);
@@ -311,7 +363,18 @@ impl ScriptHost {
 
         // An untouched `velocity` means "keep going", not "stop". A script
         // still being written should coast, not freeze the character.
-        Ok(from_scope(&scope, "velocity").unwrap_or(motion.velocity))
+        Ok(Motive {
+            velocity: from_scope(&scope, "velocity").unwrap_or(motion.velocity),
+            detonate: from_scope(&scope, "detonate").map(|at| Detonation {
+                at,
+                // Zero is not a usable blast, so an unset radius means the
+                // script wanted the host's default rather than nothing at all.
+                radius: number(&scope, "detonate_radius").filter(|r| *r > 0.0).unwrap_or(4.0),
+                impulse: number(&scope, "detonate_impulse")
+                    .filter(|i| *i > 0.0)
+                    .unwrap_or(300.0),
+            }),
+        })
     }
 
     /// Turn a Rhai failure into the project's structured error shape.
@@ -366,6 +429,11 @@ fn to_dynamic_vec(v: [f32; 3]) -> Dynamic {
             .map(|c| Dynamic::from_float(f64::from(*c)))
             .collect(),
     )
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn number(scope: &Scope, name: &str) -> Option<f32> {
+    Some(scope.get_value::<f64>(name)? as f32)
 }
 
 fn from_scope(scope: &Scope, name: &str) -> Option<[f32; 3]> {
@@ -481,7 +549,7 @@ mod tests {
 
         let out = host
             .motion("walk", &walking(), &mut ScriptMemory::default())
-            .expect("runs");
+            .expect("runs").velocity;
 
         assert!((out[0] - 3.0).abs() < 1e-6 && (out[2] + 1.0).abs() < 1e-6, "{out:?}");
     }
@@ -494,9 +562,9 @@ mod tests {
         host.compile("jump", "if grounded { velocity[1] = 5.0; }").expect("valid");
 
         let mut memory = ScriptMemory::default();
-        let on_ground = host.motion("jump", &walking(), &mut memory).expect("runs");
+        let on_ground = host.motion("jump", &walking(), &mut memory).expect("runs").velocity;
         let airborne = Motion { grounded: false, ..walking() };
-        let in_air = host.motion("jump", &airborne, &mut memory).expect("runs");
+        let in_air = host.motion("jump", &airborne, &mut memory).expect("runs").velocity;
 
         assert!((on_ground[1] - 5.0).abs() < 1e-6, "{on_ground:?}");
         assert!(in_air[1].abs() < 1e-6, "{in_air:?}");
@@ -519,8 +587,8 @@ mod tests {
         .expect("valid");
 
         let mut memory = ScriptMemory::default();
-        let first = host.motion("count", &walking(), &mut memory).expect("runs");
-        let second = host.motion("count", &walking(), &mut memory).expect("runs");
+        let first = host.motion("count", &walking(), &mut memory).expect("runs").velocity;
+        let second = host.motion("count", &walking(), &mut memory).expect("runs").velocity;
 
         assert!((first[0] - 1.0).abs() < 1e-6, "{first:?}");
         assert!((second[0] - 2.0).abs() < 1e-6, "{second:?}");
@@ -544,7 +612,7 @@ mod tests {
         let mut second = ScriptMemory::default();
         host.motion("count", &walking(), &mut first).expect("runs");
         host.motion("count", &walking(), &mut first).expect("runs");
-        let other = host.motion("count", &walking(), &mut second).expect("runs");
+        let other = host.motion("count", &walking(), &mut second).expect("runs").velocity;
 
         assert!((other[0] - 1.0).abs() < 1e-6, "second character saw {other:?}");
     }
@@ -558,7 +626,7 @@ mod tests {
         host.compile("noop", "let unused = tick;").expect("valid");
 
         let motion = Motion { velocity: [2.0, 0.0, 4.0], ..walking() };
-        let out = host.motion("noop", &motion, &mut ScriptMemory::default()).expect("runs");
+        let out = host.motion("noop", &motion, &mut ScriptMemory::default()).expect("runs").velocity;
 
         assert_eq!(out, [2.0, 0.0, 4.0]);
     }
@@ -577,7 +645,7 @@ mod tests {
         .expect("valid");
 
         let north = Motion { move_axis: [0.0, 1.0], ..walking() };
-        let out = host.motion("walk", &north, &mut ScriptMemory::default()).expect("runs");
+        let out = host.motion("walk", &north, &mut ScriptMemory::default()).expect("runs").velocity;
         assert!((out[2] + 1.0).abs() < 1e-6, "facing -Z, W should go -Z: {out:?}");
 
         // Same key, character turned to face +X.
@@ -587,7 +655,7 @@ mod tests {
             right: [0.0, 0.0, 1.0],
             ..walking()
         };
-        let out = host.motion("walk", &east, &mut ScriptMemory::default()).expect("runs");
+        let out = host.motion("walk", &east, &mut ScriptMemory::default()).expect("runs").velocity;
         assert!((out[0] - 1.0).abs() < 1e-6, "facing +X, W should go +X: {out:?}");
     }
 
@@ -601,9 +669,52 @@ mod tests {
         .expect("valid");
 
         let pressed = Motion { jump: true, sprint: true, ..walking() };
-        let out = host.motion("keys", &pressed, &mut ScriptMemory::default()).expect("runs");
+        let out = host.motion("keys", &pressed, &mut ScriptMemory::default()).expect("runs").velocity;
 
         assert!((out[1] - 5.0).abs() < 1e-6 && (out[0] - 9.0).abs() < 1e-6, "{out:?}");
+    }
+
+    /// A weapon: the host casts the ray, the script decides what to do with
+    /// the answer. Neither half works alone.
+    #[test]
+    fn a_script_can_ask_for_an_explosion_where_it_is_aiming() {
+        let mut host = host();
+        host.compile(
+            "launcher",
+            r#"
+            if fire && aim_hit {
+                detonate = aim_point;
+                detonate_radius = 5.0;
+                detonate_impulse = 700.0;
+            }
+            "#,
+        )
+        .expect("valid");
+
+        let shot = Motion {
+            fire: true,
+            aim_hit: true,
+            aim_point: [3.0, 1.0, -8.0],
+            ..walking()
+        };
+        let out = host.motion("launcher", &shot, &mut ScriptMemory::default()).expect("runs");
+
+        let blast = out.detonate.expect("the script asked for one");
+        assert_eq!(blast.at, [3.0, 1.0, -8.0]);
+        assert!((blast.radius - 5.0).abs() < 1e-6 && (blast.impulse - 700.0).abs() < 1e-6);
+    }
+
+    /// Almost every tick is a quiet one. A script that says nothing must not
+    /// detonate anything — the default has to be silence, not a default blast.
+    #[test]
+    fn a_script_that_asks_for_nothing_detonates_nothing() {
+        let mut host = host();
+        host.compile("quiet", "velocity[0] = 1.0;").expect("valid");
+
+        let held = Motion { fire: true, aim_hit: true, ..walking() };
+        let out = host.motion("quiet", &held, &mut ScriptMemory::default()).expect("runs");
+
+        assert!(out.detonate.is_none(), "silence must stay silent");
     }
 
     /// The sandbox applies here too — this is a new entry point into the

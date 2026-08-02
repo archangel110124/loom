@@ -448,6 +448,17 @@ pub struct Blast {
     /// before it hits.
     #[schemars(range(min = 0.0, max = 3600.0))]
     pub delay: f32,
+    /// Whether this blast goes off on its own.
+    ///
+    /// **`false` makes the node an explosion nobody has set off yet.** Neither
+    /// its force nor the particles under it happen until something triggers
+    /// one — a script firing a weapon, typically. That is how a scene carries
+    /// a *kind* of explosion rather than an event: author it once, dormant,
+    /// and the runtime reproduces it wherever it is asked for.
+    ///
+    /// Armed is the default because a node that does nothing is a strange
+    /// thing to get by accident.
+    pub armed: bool,
 }
 
 impl Default for Blast {
@@ -456,6 +467,7 @@ impl Default for Blast {
             radius: 6.0,
             impulse: 400.0,
             delay: 0.0,
+            armed: true,
         }
     }
 }

@@ -98,6 +98,37 @@ if airborne_for <= COYOTE_TICKS && jump_buffered <= BUFFER_TICKS {
 }
 
 // ---------------------------------------------------------------------------
+// The weapon.
+//
+// A grenade launcher without the grenade: it detonates where the view ray
+// lands, this tick. The host casts that ray — a script has no access to the
+// physics world, and giving agent-authored code a live borrow of the
+// simulation is not a trade worth making — and hands back `aim_point`.
+//
+// The cooldown is why `memory` exists here too: without it, holding the button
+// would fire on every tick the binding reports, which is sixty explosions a
+// second.
+// ---------------------------------------------------------------------------
+
+let BLAST_RADIUS = 5.0;
+let BLAST_IMPULSE = 700.0;
+let RELOAD_TICKS = 45;
+
+let last_shot = if "last_shot" in memory { memory.last_shot } else { -9999 };
+
+// `aim_hit` and not merely `fire`: detonating at the end of the ray's range
+// when it struck nothing puts an explosion in empty sky, which reads as the
+// weapon being broken rather than as a miss.
+if fire && aim_hit && tick - last_shot >= RELOAD_TICKS {
+    detonate = aim_point;
+    detonate_radius = BLAST_RADIUS;
+    detonate_impulse = BLAST_IMPULSE;
+    last_shot = tick;
+}
+
+memory.last_shot = last_shot;
+
+// ---------------------------------------------------------------------------
 // Answer, and remember.
 // ---------------------------------------------------------------------------
 

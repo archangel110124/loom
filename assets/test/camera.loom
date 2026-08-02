@@ -128,10 +128,74 @@ transform = { pos = [0.0, 1.0, -6.0] }
   [node.components.MeshRenderer]
   mesh = { asset = "sphere" }
 
+  # Dynamic, so shooting near it does something visible. Left click in Play.
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 4.0
+
   [node.components.Material]
   albedo = [0.80, 0.62, 0.12]
   metallic = 1.0
   roughness = 0.3
+
+# The explosion this scene's weapon makes, dormant: neither its force nor its
+# particles happen here. `fps.rhai` asks for one at whatever the view ray hits,
+# and the runtime reproduces this description there.
+[[node]]
+name = "Boom"
+parent = "Level"
+transform = { pos = [0.0, 0.5, 20.0] }
+
+  [node.components.Blast]
+  armed = false
+
+[[node]]
+name = "BoomFire"
+parent = "Level/Boom"
+
+  [node.components.ParticleEmitter]
+  burst = 140
+  rate = 200.0
+  duration = 0.12
+  lifetime = 0.38
+  lifetime_jitter = 0.45
+  speed = 9.0
+  spread_degrees = 180.0
+  radius = 0.3
+  gravity = 3.0
+  drag = 4.5
+  turbulence = 6.0
+  turbulence_scale = 0.9
+  size = [0.9, 2.8]
+  color_start = [1.0, 0.85, 0.45]
+  color_end = [0.65, 0.13, 0.02]
+  alpha = [0.3, 0.0]
+  additive = true
+  seed = 5
+
+[[node]]
+name = "BoomSmoke"
+parent = "Level/Boom"
+
+  [node.components.ParticleEmitter]
+  burst = 150
+  rate = 200.0
+  delay = 0.1
+  duration = 0.8
+  lifetime = 3.5
+  lifetime_jitter = 0.4
+  speed = 4.5
+  spread_degrees = 120.0
+  radius = 0.4
+  gravity = 1.6
+  drag = 1.9
+  turbulence = 2.2
+  turbulence_scale = 0.45
+  size = [1.2, 6.0]
+  color_start = [0.12, 0.10, 0.09]
+  color_end = [0.42, 0.41, 0.40]
+  alpha = [0.5, 0.0]
+  seed = 17
 
 # Off to one side, so left and right are distinguishable in the render.
 [[node]]

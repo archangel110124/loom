@@ -90,6 +90,13 @@ impl Character {
     pub fn is_grounded(&self) -> bool {
         self.grounded
     }
+
+    /// The capsule this character occupies. The eye a shot leaves from is
+    /// derived from it, so a shorter character shoots from lower down.
+    #[must_use]
+    pub fn shape(&self) -> CharacterShape {
+        self.shape
+    }
 }
 
 /// What one step of movement actually did.
