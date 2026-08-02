@@ -542,6 +542,48 @@ impl Default for Hud {
     }
 }
 
+/// A sound that plays from this node's position.
+///
+/// **What it sounds like from where you stand is measured, not authored.**
+/// There are no reverb volumes to place and no occlusion flags to set: the
+/// engine casts rays through the actual level to work out how much of this
+/// reaches the listener, how much material it crossed, and how much the room
+/// sends back. Move a wall and the sound changes, because the wall is what
+/// was measured.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct AudioSource {
+    /// The `[[asset]]` alias of a 16-bit PCM WAV.
+    pub clip: AssetRef,
+    /// Loudness before anything the world does to it.
+    #[schemars(range(min = 0.0, max = 8.0))]
+    pub volume: f32,
+    /// Metres at which it has faded to nothing.
+    ///
+    /// Linear, not inverse-square. Inverse-square is correct and unusable —
+    /// deafening at a metre and inaudible at ten — so every game uses a curve
+    /// a level designer can reason about, and this is that curve.
+    #[schemars(range(min = 0.1, max = 10000.0))]
+    pub range: f32,
+    /// Start again when it ends. For a generator hum or a fire, not a gunshot.
+    pub looping: bool,
+    /// Play as soon as the scene runs. A one-shot triggered by an event
+    /// leaves this off.
+    pub autoplay: bool,
+}
+
+impl Default for AudioSource {
+    fn default() -> Self {
+        Self {
+            clip: AssetRef::default(),
+            volume: 1.0,
+            range: 25.0,
+            looping: false,
+            autoplay: true,
+        }
+    }
+}
+
 /// The game's rules: a script that runs once per tick for the whole scene.
 ///
 /// **This is the game loop, and none of it is in the engine.** The engine
@@ -595,6 +637,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<Blast>("Blast");
     reg.register::<GameRules>("GameRules");
     reg.register::<Hud>("Hud");
+    reg.register::<AudioSource>("AudioSource");
     reg.register::<Script>("Script");
     reg
 }

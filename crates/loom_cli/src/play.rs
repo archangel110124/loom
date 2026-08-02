@@ -585,6 +585,12 @@ impl Sim {
         self.physics.apply_blast(centre, radius, impulse)
     }
 
+    /// The collision world itself.
+    #[must_use]
+    pub fn world(&self) -> &Physics {
+        &self.physics
+    }
+
     #[must_use]
     pub fn body_count(&self) -> usize {
         self.physics.body_count()
@@ -1117,6 +1123,13 @@ impl Play {
     #[must_use]
     pub fn events(&self) -> &loom_script::EventLog {
         self.runner.events()
+    }
+
+    /// The collision world, for anything that needs to cast against what the
+    /// simulation is actually holding — the acoustics, in practice.
+    #[must_use]
+    pub fn physics(&self) -> &loom_physics::Physics {
+        self.runner.physics.world()
     }
 
     /// Whether a human can drive anything here.

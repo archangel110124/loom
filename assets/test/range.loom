@@ -37,6 +37,11 @@
 format = 1
 id = "a17d3f68-95c2-4e0b-b34a-6f81d05e2c93"
 
+[[asset]]
+key = "hum"
+id = "b4e17c92-3d58-4a06-9f21-7c80e5a3b14d"
+path = "../audio/hum.wav"
+
 # The rules. Not attached to anything in particular, because a game is not a
 # node: the score has to outlive the targets it counts.
 [[node]]
@@ -72,6 +77,29 @@ parent = "Range"
   size = 24.0
   color = [0.9, 0.35, 0.3]
   only_in_play = true
+
+# A sound in the world. Nothing about how it is heard is authored: no reverb
+# volume, no occlusion flag. The engine casts through the actual level to work
+# out how much reaches you, how much wall it crossed, and what the room sends
+# back — so walking behind the backstop muffles it, and moving the backstop
+# changes that with no edit here.
+[[node]]
+name = "Generator"
+parent = "Range"
+transform = { pos = [-5.0, 0.6, -8.5] }
+
+  [node.components.AudioSource]
+  clip = { asset = "hum" }
+  volume = 0.7
+  range = 26.0
+  looping = true
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.31, 0.26]
+  roughness = 0.85
 
 # An enemy. Same `CharacterController` the player has and the same script
 # seam — the engine has no idea one of these is hostile. What makes it an

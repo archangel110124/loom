@@ -136,6 +136,9 @@ pub struct World {
     /// resolved for the same reason as `material`: turning it into a capsule
     /// needs `loom_physics`, and this crate does not depend on it.
     character: Storage<serde_json::Value>,
+    /// The `AudioSource` component, verbatim. Resolving it needs a decoder
+    /// and a device, neither of which belongs in here.
+    audio: Storage<serde_json::Value>,
     /// The `Hud` component, verbatim. Resolving it needs egui, which lives
     /// several crates away.
     hud: Storage<serde_json::Value>,
@@ -374,6 +377,9 @@ impl World {
             {
                 world.rules.insert(entity, path.to_owned());
             }
+            if let Some(audio) = node.components.get("AudioSource") {
+                world.audio.insert(entity, audio.clone());
+            }
             if let Some(hud) = node.components.get("Hud") {
                 world.hud.insert(entity, hud.clone());
             }
@@ -515,6 +521,12 @@ impl World {
                 Some((path.clone(), [m[12], m[13], m[14]]))
             })
             .collect()
+    }
+
+    /// The `AudioSource` a node declares, if any.
+    #[must_use]
+    pub fn audio(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.audio.get(entity)
     }
 
     /// Every `Hud` element in the scene, in file order — which is also the

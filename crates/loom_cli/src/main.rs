@@ -18,6 +18,7 @@ mod panels;
 mod particles;
 mod play;
 mod scene_view;
+mod sound;
 mod run;
 
 use std::process::ExitCode;

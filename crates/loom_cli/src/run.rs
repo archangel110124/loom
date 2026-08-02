@@ -34,6 +34,15 @@ const LOOK_SENSITIVITY: f32 = 0.0025;
 /// Degrees per world-unit of drag, in rotate mode.
 const ROTATE_PER_UNIT: f32 = 45.0;
 
+/// A unit vector, or forward when there is nothing to normalise.
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if length < 1e-6 {
+        return [0.0, 0.0, -1.0];
+    }
+    [v[0] / length, v[1] / length, v[2] / length]
+}
+
 /// How often the scene file is checked for someone else's writes.
 ///
 /// A human reads a quarter second as "immediate" and it costs one small read of
@@ -185,6 +194,10 @@ struct App {
     /// Draw calls for the simulated world, refreshed only on ticks that
     /// actually ran.
     play_objects: Vec<loom_render::Object>,
+    /// Scene sounds, open only while Play is running. Silence belongs to the
+    /// editor: an ambience loop droning while you drag a gizmo is the audio
+    /// equivalent of particles animating before you press Play.
+    sound: Option<crate::sound::Sound>,
     /// The game result already reported, so the log line is written once
     /// rather than on every frame after the game ends.
     reported_status: Option<&'static str>,
@@ -308,6 +321,7 @@ impl App {
             mode: Mode::Move,
             handles: Vec::new(),
             play_objects: Vec::new(),
+            sound: None,
             reported_status: None,
             detonations_seen: 0,
             captured: false,
@@ -808,6 +822,9 @@ impl ApplicationHandler for App {
                 }
                 let stepped = self.play.as_ref().map_or(0, |p| p.ticks.saturating_sub(before));
                 self.report_game_result();
+                if stepped > 0 {
+                    self.update_sound();
+                }
 
                 // While driving a character the view is the scene's camera,
                 // which the character carries. The fly camera is still there
@@ -1075,6 +1092,10 @@ impl App {
         // already ran in a previous session of Play would stay burnt out, and
         // pressing Play twice would show the explosion only once.
         self.plumes = None;
+        self.sound = self
+            .play
+            .as_ref()
+            .and_then(|p| crate::sound::Sound::start(&p.world, &self.base, &self.view.scene));
         // First person only when the scene actually has the rig for it: a
         // character to move and a camera to see through. Without both, Play
         // stays a spectator view and the fly camera keeps working.
@@ -1147,6 +1168,11 @@ impl App {
         self.detonations_seen = 0;
         self.reported_status = None;
         self.plumes = None;
+        // Dropping the device closes the stream, so Stop is silent rather
+        // than leaving a loop running over an editor nobody is playing.
+        if let Some(sound) = self.sound.take() {
+            sound.silence();
+        }
         if let Some(play) = self.play.take() {
             crate::log::info(format!(
                 "stopped after {} ticks ({:.2}s) — state {:016x}",
@@ -1162,6 +1188,27 @@ impl App {
         {
             self.next_watch = std::time::Instant::now();
         }
+    }
+
+    /// Re-measure what every sound sounds like from where the listener is.
+    ///
+    /// The listener is the camera, not the character: you hear from where you
+    /// look, and in third person those differ.
+    fn update_sound(&mut self) {
+        let (Some(sound), Some(play)) = (self.sound.as_mut(), self.play.as_ref()) else {
+            return;
+        };
+        let Some(view) = play.camera() else {
+            return;
+        };
+        let forward = normalize([
+            view.target[0] - view.eye[0],
+            view.target[1] - view.eye[1],
+            view.target[2] - view.eye[2],
+        ]);
+        // Right-handed, world up: forward cross up.
+        let right = normalize([forward[2], 0.0, -forward[0]]);
+        sound.update(&play.world, play.physics(), view.eye, right, forward);
     }
 
     /// Say how the game ended, once.

@@ -30,6 +30,14 @@
 //! there" is this function, and it is a gameplay question as much as an audio
 //! one.
 
+pub mod clip;
+pub mod device;
+pub mod mix;
+
+pub use clip::{Clip, ClipError};
+pub use device::{Audio, AudioError};
+pub use mix::{Mixer, Voice};
+
 use loom_physics::Physics;
 
 /// What a listener hears from a source, and from the room around them.
