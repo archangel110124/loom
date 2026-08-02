@@ -920,10 +920,12 @@ impl ApplicationHandler for App {
                         &camera,
                         Some((ui, window)),
                         |root| {
-                            // The overlay first, so the editor's panels sit on
-                            // top of it rather than under a score.
-                            crate::hud::draw(root, &overlay);
+                            // Panels first. The overlay is anchored to
+                            // whatever they leave over, and before they are
+                            // added that is the entire window — which is how
+                            // the score ended up on top of the hierarchy.
                             actions.extend(crate::panels::draw(root, &state));
+                            let _ = crate::hud::draw(root, &overlay);
                         },
                     ),
                     (Some(viewer), _, _) => viewer.draw(drawn, &camera),

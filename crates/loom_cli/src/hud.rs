@@ -113,26 +113,51 @@ pub(crate) fn elements(
         .collect()
 }
 
-/// Draw the resolved elements.
-pub(crate) fn draw(ctx: &egui::Context, elements: &[Element]) {
-    for (index, element) in elements.iter().enumerate() {
-        // One `Area` each, so elements never push each other around: a HUD is
-        // a set of things pinned to the screen, not a layout.
-        egui::Area::new(egui::Id::new(("loom_hud", index)))
-            .anchor(element.anchor, element.offset)
-            // The overlay must not eat clicks. A score sitting over the
-            // viewport that swallowed a gizmo drag would be maddening, and
-            // the cause would not be obvious.
-            .interactable(false)
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new(&element.text)
-                        .size(element.size)
-                        .color(element.color),
-                );
-            });
+/// Draw the resolved elements into the viewport.
+///
+/// **Anchored to the viewport, not the window.** The first version used
+/// `Area::anchor`, which measures from the edges of the whole screen — so in
+/// the editor the score sat on top of the hierarchy panel and the objective
+/// counter on top of the inspector. A HUD belongs to the game's view, and in
+/// an editor the game's view is the region the panels have left over.
+///
+/// A transparent `CentralPanel` *is* that region: egui hands it whatever the
+/// side and bottom panels did not take, at any window size and whether or not
+/// the panels are there at all. Its painter is clipped to it too, so a long
+/// line runs out of viewport rather than spilling across an inspector.
+///
+/// Painted rather than laid out. A HUD is a fixed set of things pinned to
+/// known points — no interaction, no layout, nothing to click — and one
+/// `text` call each is both less code and less to go wrong than an `Area`
+/// per element that has to be told not to accept input.
+/// Returns the viewport it drew into and where each element landed — which is
+/// what makes the placement testable without a window or a GPU.
+pub(crate) fn draw(
+    root: &mut egui::Ui,
+    elements: &[Element],
+) -> (egui::Rect, Vec<egui::Rect>) {
+    if elements.is_empty() {
+        return (egui::Rect::NOTHING, Vec::new());
     }
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE)
+        .show(root, |ui| {
+            let viewport = ui.max_rect();
+            let painter = ui.painter();
+            let mut painted = Vec::with_capacity(elements.len());
+            for element in elements {
+                let at = element.anchor.pos_in_rect(&viewport) + element.offset;
+                painted.push(painter.text(
+                    at,
+                    element.anchor,
+                    &element.text,
+                    egui::FontId::proportional(element.size),
+                    element.color,
+                ));
+            }
+            (viewport, painted)
+        })
+        .inner
 }
 
 /// Replace `{name}` with the game's own numbers.
@@ -224,6 +249,131 @@ fn to_color(rgb: [f32; 3]) -> egui::Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lay out one element with a side panel taking the left of the window,
+    /// and report where it landed. No window, no GPU — egui runs headless.
+    fn placed(anchor: egui::Align2, offset: egui::Vec2, panel_width: f32) -> (egui::Rect, egui::Rect) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        };
+
+        let element = Element {
+            anchor,
+            offset,
+            text: "SCORE 0".to_owned(),
+            size: 20.0,
+            color: egui::Color32::WHITE,
+        };
+
+        let mut result = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+        // Two passes: egui settles panel sizes on the first, and fonts are
+        // laid out lazily. The second is the one that means anything.
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input.clone(), |root| {
+                if panel_width > 0.0 {
+                    egui::Panel::left("panel")
+                        .exact_size(panel_width)
+                        .show(root, |ui| {
+                            ui.label("hierarchy");
+                        });
+                }
+                let (viewport, painted) = draw(root, std::slice::from_ref(&element));
+                result = (viewport, painted[0]);
+            });
+        }
+        result
+    }
+
+    /// **The bug this exists for.** `Area::anchor` measures from the edges of
+    /// the whole window, so in the editor the score was drawn on top of the
+    /// hierarchy panel and the objective counter on top of the inspector. A
+    /// HUD belongs to the game's view, and in an editor that is whatever the
+    /// panels have left over.
+    #[test]
+    fn the_overlay_stays_inside_the_viewport_not_the_window() {
+        let panel = 240.0;
+        let (viewport, text) = placed(egui::Align2::LEFT_TOP, egui::vec2(16.0, 14.0), panel);
+
+        assert!(
+            viewport.left() >= panel,
+            "viewport started at {} with a {panel}px panel",
+            viewport.left()
+        );
+        assert!(
+            text.left() >= panel,
+            "the score was drawn over the panel: text at {}, panel is {panel} wide",
+            text.left()
+        );
+    }
+
+    /// With no panels the viewport is the window, so a bare viewer puts the
+    /// HUD in the corner it was authored in rather than inset by nothing.
+    #[test]
+    fn without_panels_the_viewport_is_the_whole_window() {
+        let (viewport, text) = placed(egui::Align2::LEFT_TOP, egui::vec2(16.0, 14.0), 0.0);
+
+        assert!(viewport.left() < 1.0, "viewport was inset: {viewport:?}");
+        assert!(text.left() < 20.0, "text was inset: {text:?}");
+    }
+
+    /// Offsets are inward from whichever edge was anchored to, so the same
+    /// number does not mean opposite things at the top and the bottom.
+    #[test]
+    fn a_right_anchored_element_is_inset_from_the_right() {
+        let (viewport, text) = placed(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, 14.0), 240.0);
+
+        assert!(
+            (viewport.right() - text.right() - 18.0).abs() < 1.0,
+            "expected 18px from the right edge: viewport {} text {}",
+            viewport.right(),
+            text.right()
+        );
+    }
+
+    #[test]
+    fn a_bottom_anchored_element_is_inset_from_the_bottom() {
+        let (viewport, text) = placed(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -40.0), 240.0);
+
+        assert!(
+            (viewport.bottom() - text.bottom() - 40.0).abs() < 1.0,
+            "expected 40px from the bottom: viewport {} text {}",
+            viewport.bottom(),
+            text.bottom()
+        );
+    }
+
+    /// The right and bottom tests above hand `draw` an already-signed offset,
+    /// so they say nothing about where that sign comes from. This covers the
+    /// authored side: a scene writes a positive number and means "inward",
+    /// whichever edge it anchored to.
+    #[test]
+    fn an_authored_offset_is_inward_from_every_edge() {
+        let world = loom_ecs::World::from_scene(
+            &loom_scene::Scene::parse(
+                "[scene]\nformat = 1\nid = \"7c1f0b52-9a34-4d68-b0e1-2f45a8c37d90\"\n\n\
+                 [[node]]\nname = \"Root\"\n\n\
+                   [node.components.Hud]\n  anchor = \"bottom_right\"\n\
+                   offset = [20.0, 30.0]\n  text = \"x\"\n",
+            )
+            .expect("valid scene"),
+        );
+
+        let resolved = elements(&world, &GameState::default(), false);
+
+        assert_eq!(resolved.len(), 1);
+        // Anchored bottom-right, so both components must point back into the
+        // screen. Written as they are, the element would sit off the corner.
+        assert!(
+            resolved[0].offset.x < 0.0 && resolved[0].offset.y < 0.0,
+            "offset was {:?}, which is outward",
+            resolved[0].offset
+        );
+    }
 
     #[test]
     fn a_state_number_lands_in_the_text() {
