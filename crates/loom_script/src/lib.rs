@@ -105,6 +105,13 @@ pub struct Motion {
     pub forward: [f32; 3],
     /// `forward` turned 90° right, for strafing.
     pub right: [f32; 3],
+    /// Where the character is actually *looking*, including up and down.
+    ///
+    /// Separate from `forward`, which is deliberately flat so that looking at
+    /// the sky does not make W walk into it. A weapon needs the opposite: a
+    /// shot has to go where the crosshair is, and aiming down a flat vector
+    /// means nothing above or below eye level can ever be hit.
+    pub aim: [f32; 3],
     /// True on the tick the jump button went down, not while it is held —
     /// otherwise holding it jumps again the instant the character lands.
     pub jump: bool,
@@ -161,6 +168,7 @@ impl Default for Motion {
             move_axis: [0.0; 2],
             forward: [0.0, 0.0, -1.0],
             right: [1.0, 0.0, 0.0],
+            aim: [0.0, 0.0, -1.0],
             jump: false,
             sprint: false,
             fire: false,
@@ -430,6 +438,7 @@ impl ScriptHost {
         scope.push("move_z", f64::from(motion.move_axis[1]));
         scope.push("forward", to_dynamic_vec(motion.forward));
         scope.push("right", to_dynamic_vec(motion.right));
+        scope.push("aim", to_dynamic_vec(motion.aim));
         scope.push("jump", motion.jump);
         scope.push("sprint", motion.sprint);
         scope.push("fire", motion.fire);

@@ -314,13 +314,17 @@ impl Sim {
                 motion.position[1] + walker.character.shape().half_height,
                 motion.position[2] + input.forward[2] * (walker.character.shape().radius + 0.05),
             ];
-            let hit = self.physics.raycast(eye, input.forward, AIM_RANGE);
+            // **Along the look direction, not the movement one.** `forward` is
+            // flattened so that looking up does not walk you into the sky; a
+            // shot fired along it can never hit anything above or below eye
+            // level, which is most of a level.
+            let hit = self.physics.raycast(eye, input.aim, AIM_RANGE);
             let motion = loom_script::Motion {
                 aim_point: hit.map_or(
                     [
-                        eye[0] + input.forward[0] * AIM_RANGE,
-                        eye[1] + input.forward[1] * AIM_RANGE,
-                        eye[2] + input.forward[2] * AIM_RANGE,
+                        eye[0] + input.aim[0] * AIM_RANGE,
+                        eye[1] + input.aim[1] * AIM_RANGE,
+                        eye[2] + input.aim[2] * AIM_RANGE,
                     ],
                     |h| h.point,
                 ),
@@ -925,6 +929,17 @@ impl Play {
         self.world.propagate_transforms();
     }
 
+    /// The full look direction, pitch included. What a shot travels along.
+    fn aim(&self) -> [f32; 3] {
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
+        [
+            -sin_yaw * cos_pitch,
+            sin_pitch,
+            -cos_yaw * cos_pitch,
+        ]
+    }
+
     /// The horizontal basis the player's input is expressed in.
     fn basis(&self) -> ([f32; 3], [f32; 3]) {
         // **The scene format's forward is −Z**, not +Z. These are exactly the
@@ -986,6 +1001,7 @@ impl Play {
                 move_axis: self.input.move_axis,
                 forward,
                 right,
+                aim: self.aim(),
                 // Consumed here, so one press is one jump however the frames
                 // and ticks happen to line up.
                 jump: std::mem::take(&mut self.jump_pending),
@@ -1809,6 +1825,36 @@ transform = { pos = [0.0, 6.0, 0.0] }
         );
     }
 
+    /// **A shot goes where the crosshair is.** The aim ray used `forward`,
+    /// which is deliberately flattened so that looking at the sky does not
+    /// walk you into it. Fired along that, nothing above or below eye level
+    /// could ever be hit: aiming at the floor put the explosion on a wall
+    /// twelve metres away.
+    #[test]
+    fn aiming_down_puts_the_shot_on_the_floor() {
+        let source = std::fs::read_to_string("../../assets/test/camera.loom").expect("fixture");
+        let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+        let mut play = Play::start(world, std::path::Path::new("../../assets/test"));
+        play.run(20);
+
+        // Steeply down, at the ground just in front of the player.
+        play.look(0.0, 1.2);
+        play.set_input(PlayerInput { fire: true, ..PlayerInput::default() });
+        play.run(2);
+
+        let (_, blast) = *play.fired().first().expect("it fired");
+        let at = axis(&play.world, "Level/Player", 1);
+        assert!(
+            blast.at[1] < at,
+            "the shot landed at {:?}, above a player standing at y = {at}",
+            blast.at
+        );
+        // The floor is right there; a flat ray would have carried on to the
+        // far end of the corridor instead.
+        let away = (blast.at[2] - axis(&play.world, "Level/Player", 2)).abs();
+        assert!(away < 4.0, "landed {away} m down the corridor, not underfoot");
+    }
+
     /// A weapon that fires every tick the button is down is not a weapon.
     /// The reload lives in the script, which is the whole point — but it has
     /// to actually be consulted.
@@ -1837,9 +1883,36 @@ transform = { pos = [0.0, 6.0, 0.0] }
     // ---------------------------------------------------------------
 
     fn range() -> Play {
-        let source = std::fs::read_to_string("../../assets/test/range.loom").expect("fixture");
+        let source = std::fs::read_to_string("../../assets/test/turret_range.loom").expect("fixture");
         let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
         Play::start(world, std::path::Path::new("../../assets/test"))
+    }
+
+    /// **The reported bug.** Every character is handed the same input,
+    /// including the look direction — so the "turret" aimed wherever the human
+    /// pointed the mouse. Look up at the sky before its firing tick and its
+    /// ray hits nothing, `aim_hit` is false, and because it only ever tried on
+    /// one exact tick it then never fired at all. Ten seconds later the game
+    /// reported LOST with zero shots, which is what the screenshot showed.
+    #[test]
+    fn a_turret_still_fires_after_the_view_has_been_moved() {
+        let source = std::fs::read_to_string("../../assets/test/turret_range.loom").expect("fixture");
+        let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+        let mut play = Play::start(world, std::path::Path::new("../../assets/test"));
+
+        // Turn away from the targets, the way a human does the moment the
+        // pointer is captured, and hold it there past the firing tick.
+        play.look(std::f32::consts::PI, 0.0);
+        play.run(60);
+        // Then look back. It should still take its shot.
+        play.look(std::f32::consts::PI, 0.0);
+        play.run(120);
+
+        assert!(
+            !play.fired().is_empty(),
+            "it never fired: {:?}",
+            play.state().numbers()
+        );
     }
 
     /// **The whole loop.** A turret fires, a blast throws two targets off the
@@ -1880,7 +1953,7 @@ transform = { pos = [0.0, 6.0, 0.0] }
     /// targets are never touched — the rules' clock has to be able to run out.
     #[test]
     fn a_game_can_be_lost_on_time() {
-        let source = std::fs::read_to_string("../../assets/test/range.loom").expect("fixture");
+        let source = std::fs::read_to_string("../../assets/test/turret_range.loom").expect("fixture");
         // The turret fires at tick 30; moving that past the limit means the
         // targets are never hit and the clock decides it.
         let never = source.replace("turret.rhai", "idle.rhai");
@@ -1910,7 +1983,7 @@ transform = { pos = [0.0, 6.0, 0.0] }
     /// nothing about the ordering would look wrong in the code.
     #[test]
     fn rules_see_what_happened_on_the_tick_they_judge() {
-        let source = std::fs::read_to_string("../../assets/test/range.loom").expect("fixture");
+        let source = std::fs::read_to_string("../../assets/test/turret_range.loom").expect("fixture");
         let watching = source.replace("rules.rhai", "rules_on_blast.rhai");
         let world = World::from_scene(&Scene::parse(&watching).expect("valid scene"));
         let mut play = Play::start(world, std::path::Path::new("../../assets/test"));

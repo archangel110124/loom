@@ -21,21 +21,14 @@
 # carries a *kind* of explosion rather than an event.
 #
 # Open it and shoot:
-#   loom run assets/test/range.loom --edit
-# then press Play. The pointer is captured, WASD moves, the mouse aims, and
-# LEFT CLICK fires. Escape hands the pointer back without stopping the run.
-#
-# `turret_range.loom` is the same level with a script that fires itself on a
-# tick instead of on a button — that is the one the tests use, because
-# `loom sim` has no mouse and a weapon nobody can click is a weapon nobody can
-# check.
+#   loom run assets/test/range.loom --edit     # Play, then left click
 #
 # Or headless, which is the version that is checked:
 #   loom sim assets/test/range.loom --ticks 400 --assert "status == won"
 
 [scene]
 format = 1
-id = "a17d3f68-95c2-4e0b-b34a-6f81d05e2c93"
+id = "c58b1e30-7a49-4d26-9f83-14e0b6c72a58"
 
 # The rules. Not attached to anything in particular, because a game is not a
 # node: the score has to outlive the targets it counts.
@@ -58,31 +51,6 @@ parent = "Range"
   text = "SCORE {score}"
   size = 26.0
   color = [1.0, 0.85, 0.35]
-
-# You cannot aim without one of these.
-[[node]]
-name = "Crosshair"
-parent = "Range"
-
-  [node.components.Hud]
-  anchor = "center"
-  offset = [0.0, 0.0]
-  text = "+"
-  size = 26.0
-  color = [0.9, 0.9, 0.9]
-  only_in_play = true
-
-[[node]]
-name = "Hint"
-parent = "Range"
-
-  [node.components.Hud]
-  anchor = "bottom_left"
-  offset = [18.0, 14.0]
-  text = "LEFT CLICK to fire  ·  WASD move  ·  ESC release pointer"
-  size = 16.0
-  color = [0.7, 0.7, 0.72]
-  only_in_play = true
 
 [[node]]
 name = "Targets"
@@ -113,7 +81,7 @@ parent = "Range"
 # ---------------------------------------------------------------------------
 
 [[node]]
-name = "Player"
+name = "Turret"
 parent = "Range"
 transform = { pos = [0.0, 1.0, 9.0] }
 
@@ -122,13 +90,14 @@ transform = { pos = [0.0, 1.0, 9.0] }
   radius = 0.35
 
   [node.components.Script]
-  # The player's movement model AND weapon. Left click fires; the reload is
-  # counted in the script's own memory, not by the engine.
-  path = "../scripts/fps.rhai"
+  # A turret, not a player: it fires on a tick rather than on a mouse button,
+  # which is what makes the trigger checkable with no human at the keyboard.
+  # camera.loom is the same seam driven by a person.
+  path = "../scripts/turret.rhai"
 
 [[node]]
 name = "Eye"
-parent = "Range/Player"
+parent = "Range/Turret"
 transform = { pos = [0.0, 0.75, 0.0] }
 
   [node.components.Camera]

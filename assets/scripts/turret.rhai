@@ -15,12 +15,25 @@ let FIRE_AT = 30;
 let vy = velocity[1] - 24.0 * dt;
 if grounded && vy < 0.0 { vy = 0.0; }
 
-// One shot, at a tick, at whatever the ray found. `aim_hit` still matters:
-// a turret pointed at open sky should not detonate the sky.
-if tick == FIRE_AT && aim_hit {
+// One shot, on the first tick at or after `FIRE_AT` where the ray actually
+// found something.
+//
+// **Not `tick == FIRE_AT`.** Every character is handed the same look
+// direction, so in the editor this turret aims wherever the human points the
+// mouse. Turn away on that one exact tick and `aim_hit` is false — and with an
+// equality test the turret then never fires again, ever. The game ran its full
+// ten seconds and reported LOST with zero shots, which is a broken weapon
+// rather than a missed shot.
+//
+// `aim_hit` still matters: a turret pointed at open sky should not detonate
+// the sky. It waits for a target instead of giving up.
+let fired = if "fired" in memory { memory.fired } else { false };
+if !fired && tick >= FIRE_AT && aim_hit {
     detonate = aim_point;
     detonate_radius = 5.0;
     detonate_impulse = 700.0;
+    fired = true;
 }
+memory.fired = fired;
 
 velocity = [0.0, vy, 0.0];

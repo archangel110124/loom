@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 12] = [
+const SCENES: [&str; 13] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -51,6 +51,7 @@ const SCENES: [&str; 12] = [
     "assets/test/walker.loom",
     "assets/test/explosion.loom",
     "assets/test/range.loom",
+    "assets/test/turret_range.loom",
 ];
 
 /// How many frames a windowed run draws before shutting itself down. Enough to

@@ -1080,7 +1080,9 @@ impl App {
         // stays a spectator view and the fly camera keeps working.
         if drivable {
             self.capture_pointer(true);
-            crate::log::info("WASD to move, mouse to look, Space to jump, Esc to free the pointer");
+            crate::log::info(
+                "WASD to move · mouse to look · left click to fire · Space to jump · Esc frees the pointer",
+            );
         } else {
             crate::log::info(
                 "no player rig (needs a CharacterController and a Camera) — flying instead",

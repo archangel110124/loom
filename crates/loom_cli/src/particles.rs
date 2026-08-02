@@ -337,7 +337,7 @@ mod tests {
     use super::*;
 
     fn range() -> World {
-        let source = std::fs::read_to_string("../../assets/test/range.loom").expect("fixture");
+        let source = std::fs::read_to_string("../../assets/test/turret_range.loom").expect("fixture");
         World::from_scene(&loom_scene::Scene::parse(&source).expect("valid scene"))
     }
 
