@@ -93,6 +93,22 @@ impl TypeRegistry {
         let mut errors = Vec::new();
         for (field, actual) in fields {
             let Some(field_schema) = props.get(field) else {
+                // **Not `continue`.** Skipping unrecognised names is what made
+                // this function a range check on correctly-spelled fields and
+                // nothing more: `intensty = 400.0` validated clean and was
+                // dropped at load, so the agent got `ok: true` and a dark room.
+                //
+                // Components have one to three fields, so listing them all *is*
+                // the near-match — no edit distance needed, and it matches the
+                // shape of the `unknown_component_type` hint.
+                let known: Vec<&str> = props.keys().map(String::as_str).collect();
+                errors.push(FieldError {
+                    error: "unknown_field".to_owned(),
+                    field: format!("{type_name}.{field}"),
+                    value: actual.clone(),
+                    constraint: format!("a field of {type_name}"),
+                    hint: Some(format!("known fields: {}", known.join(", "))),
+                });
                 continue;
             };
             // The doc comment becomes the hint. A rejection message is the
@@ -101,6 +117,14 @@ impl TypeRegistry {
                 .get("description")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
+
+            // The declared type, checked before any range: a range check on a
+            // value that is not a number silently passes, because `as_f64`
+            // returns `None` and every comparison below is skipped.
+            if let Some(mismatch) = type_mismatch(type_name, field, field_schema, actual) {
+                errors.push(FieldError { hint, ..mismatch });
+                continue;
+            }
 
             match actual {
                 // Vec3-shaped fields carry their bounds on `items`, so a colour
@@ -144,6 +168,82 @@ impl TypeRegistry {
         } else {
             Err(errors)
         }
+    }
+}
+
+/// The declared type of `field`, and whether `actual` is one.
+///
+/// Returns the `field_type_mismatch` to report, or `None` when the value is
+/// the right shape. Arity counts as shape: a two-element colour is not a
+/// colour, and it is nastier than a plain type error because it looks right at
+/// a glance and takes the whole component down with it at load.
+///
+/// `hint` is left empty and filled in by the caller, which has the field's doc
+/// comment to hand.
+fn type_mismatch(
+    type_name: &str,
+    field: &str,
+    schema: &Value,
+    actual: &Value,
+) -> Option<FieldError> {
+    let mismatch = |constraint: String| {
+        Some(FieldError {
+            error: "field_type_mismatch".to_owned(),
+            field: format!("{type_name}.{field}"),
+            value: actual.clone(),
+            constraint,
+            hint: None,
+        })
+    };
+
+    match schema.get("type").and_then(Value::as_str) {
+        // §7: integers coerce to floats where a float is expected, which
+        // `as_f64` already does. Anything `as_f64` refuses is not a number —
+        // including the null that a non-finite TOML float becomes, since JSON
+        // has no way to carry NaN.
+        Some("number" | "integer") if actual.as_f64().is_none() => {
+            mismatch("number".to_owned())
+        }
+        Some("boolean") if !actual.is_boolean() => mismatch("boolean".to_owned()),
+        Some("string") if !actual.is_string() => mismatch("string".to_owned()),
+        Some("array") => {
+            // Not `?` — that would report "no mismatch" for a value that is
+            // not an array at all, which is exactly the `color = 5` case.
+            let Some(elements) = actual.as_array() else {
+                return mismatch("an array".to_owned());
+            };
+            let arity = |key| schema.get(key).and_then(Value::as_u64);
+            let (low, high) = (arity("minItems"), arity("maxItems"));
+            let n = elements.len() as u64;
+            if low.is_some_and(|m| n < m) || high.is_some_and(|m| n > m) {
+                return mismatch(match (low, high) {
+                    (Some(a), Some(b)) if a == b => format!("an array of {a} numbers"),
+                    (Some(a), Some(b)) => format!("an array of {a} to {b} numbers"),
+                    (Some(a), None) => format!("an array of at least {a} numbers"),
+                    (None, Some(b)) => format!("an array of at most {b} numbers"),
+                    (None, None) => "an array".to_owned(),
+                });
+            }
+            // Element type, so `[1.0, "x", 3.0]` is caught rather than being
+            // skipped by the range check the way a non-number always was.
+            let element_type = schema
+                .get("items")
+                .and_then(|i| i.get("type"))
+                .and_then(Value::as_str);
+            if matches!(element_type, Some("number" | "integer"))
+                && let Some(i) = elements.iter().position(|e| e.as_f64().is_none())
+            {
+                return Some(FieldError {
+                    error: "field_type_mismatch".to_owned(),
+                    field: format!("{type_name}.{field}[{i}]"),
+                    value: elements[i].clone(),
+                    constraint: "number".to_owned(),
+                    hint: None,
+                });
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -207,12 +307,104 @@ mod tests {
         /// Luminous intensity. Interior lights are typically 100-800.
         #[schemars(range(min = 0.0, max = 10000.0))]
         intensity: f32,
+        /// Linear RGB, each channel normalized 0..=1. Not 0-255.
+        color: [f32; 3],
     }
 
     fn registry() -> TypeRegistry {
         let mut reg = TypeRegistry::new();
         reg.register::<Light>("Light");
         reg
+    }
+
+    /// **A typo must not be silent.** `docs/format/README.md` §6 makes
+    /// `unknown_field` a normative M1 error code, and the whole point of
+    /// schema validation as verification channel 1 is that an agent guessing
+    /// `intensty` learns it guessed wrong. Skipping unrecognised names turned
+    /// the validator into a range check on fields that happened to be spelled
+    /// right.
+    #[test]
+    fn a_misspelled_field_is_rejected_and_the_near_match_is_offered() {
+        let reg = registry();
+        let value = serde_json::json!({ "intensty": 400.0 });
+
+        let errs = reg
+            .validate("Light", &value)
+            .expect_err("`intensty` is not a field of Light");
+
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].error, "unknown_field");
+        assert_eq!(errs[0].field, "Light.intensty");
+        // A rejection is the agent's teacher (§6) — naming the field it almost
+        // spelled turns a retry loop into one correction.
+        let hint = errs[0].hint.as_deref().unwrap_or_default();
+        assert!(hint.contains("intensity"), "hint should suggest it: {hint}");
+    }
+
+    #[test]
+    fn a_wrongly_typed_field_is_rejected() {
+        let reg = registry();
+
+        let errs = reg
+            .validate("Light", &serde_json::json!({ "intensity": "very bright" }))
+            .expect_err("a string is not a number");
+        assert_eq!(errs[0].error, "field_type_mismatch");
+        assert_eq!(errs[0].field, "Light.intensity");
+        assert!(errs[0].constraint.contains("number"), "{:?}", errs[0].constraint);
+
+        // The mirror case: a scalar where the schema declares an array.
+        let errs = reg
+            .validate("Light", &serde_json::json!({ "color": 5 }))
+            .expect_err("a number is not a colour");
+        assert_eq!(errs[0].error, "field_type_mismatch");
+    }
+
+    /// A two-element colour is not a colour. This one is nastier than a plain
+    /// type error because the value looks right at a glance and the whole
+    /// component is silently dropped at load.
+    #[test]
+    fn an_array_of_the_wrong_length_is_rejected() {
+        let reg = registry();
+
+        let errs = reg
+            .validate("Light", &serde_json::json!({ "color": [1.0, 0.5] }))
+            .expect_err("colour has three channels");
+
+        assert_eq!(errs[0].error, "field_type_mismatch");
+        assert_eq!(errs[0].field, "Light.color");
+        assert!(errs[0].constraint.contains('3'), "{:?}", errs[0].constraint);
+    }
+
+    /// §1 of the format spec: non-finite floats "poison the determinism hashes
+    /// M3 depends on". JSON cannot carry NaN, so this arrives as null from the
+    /// TOML bridge — either way the field is not a number and must be refused
+    /// rather than quietly replaced by the default.
+    #[test]
+    fn a_non_numeric_scalar_does_not_pass_as_a_number() {
+        let reg = registry();
+
+        let errs = reg
+            .validate("Light", &serde_json::json!({ "intensity": null }))
+            .expect_err("null is not an intensity");
+
+        assert_eq!(errs[0].error, "field_type_mismatch");
+    }
+
+    /// Rejecting more must not start rejecting what was always legal.
+    #[test]
+    fn a_correct_component_still_validates() {
+        let reg = registry();
+        let value = serde_json::json!({ "intensity": 400.0, "color": [1.0, 0.5, 0.25] });
+
+        assert!(reg.validate("Light", &value).is_ok());
+        // Integers coerce to floats where a float is expected (§7).
+        assert!(
+            reg.validate("Light", &serde_json::json!({ "intensity": 400 }))
+                .is_ok(),
+            "§7: integers coerce to floats"
+        );
+        // A field simply being absent is not an error — defaults apply.
+        assert!(reg.validate("Light", &serde_json::json!({})).is_ok());
     }
 
     #[test]

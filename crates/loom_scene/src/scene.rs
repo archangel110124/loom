@@ -273,35 +273,112 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
 
     let mut errors = Vec::new();
     for (table, node) in entries.iter().zip(nodes) {
+        // `transform` is sugar for the Transform component (§1.1), but it used
+        // to be the one field that skipped this pass — it went straight through
+        // serde with `.ok().unwrap_or_default()`, so a guessed key name was
+        // ignored and a malformed element threw away the whole transform,
+        // rotation and scale included. Both produced a node at the origin and
+        // `ok: true`. Routing it through the registry like everything else is
+        // the fix; the choke point already knows how to say what is wrong.
+        if let Some(item) = table.get("transform") {
+            errors.extend(check(registry, "Transform", item, &node.path));
+        }
+
         let Some(components) = table.get("components").and_then(Item::as_table_like) else {
             continue;
         };
 
         for (type_name, item) in components.iter() {
-            let Some(fields) = item.as_table_like() else {
+            // Written as a component, a transform validates cleanly and is then
+            // invisible to the ECS, the renderer, physics and `measure` — the
+            // node just stays at the origin. It is the spelling an agent
+            // reaches for after seeing every other component written this way,
+            // so it has to be named rather than accepted. Supporting both would
+            // mean two sources of truth for one node's position.
+            if type_name == "Transform" {
+                let mut err = SceneError::new("unknown_component_type", &node.path);
+                err.field = "Transform".to_owned();
+                err.constraint = "a component type".to_owned();
+                err.hint = Some(
+                    "a transform is the node key, not a component: write \
+                     `transform = { pos = [...] }` on the node itself."
+                        .to_owned(),
+                );
+                errors.push(err);
                 continue;
-            };
-
-            let mut object = serde_json::Map::new();
-            for (field, value) in fields.iter() {
-                if let Some(v) = item_to_json(value) {
-                    object.insert(field.to_owned(), v);
-                }
             }
-
-            if let Err(field_errors) = registry.validate(type_name, &Value::Object(object)) {
-                errors.extend(field_errors.into_iter().map(|f| SceneError {
-                    error: f.error,
-                    node: node.path.clone(),
-                    field: f.field,
-                    value: f.value,
-                    constraint: f.constraint,
-                    hint: f.hint,
-                }));
-            }
+            errors.extend(check(registry, type_name, item, &node.path));
         }
     }
     errors
+}
+
+/// One component's worth of validation: finiteness, then the schema.
+fn check(registry: &TypeRegistry, type_name: &str, item: &Item, node: &str) -> Vec<SceneError> {
+    let Some(fields) = item.as_table_like() else {
+        return Vec::new();
+    };
+
+    // Finiteness first, because it cannot be checked any later. `serde_json`
+    // has no way to represent NaN or ±infinity, so `Value::from(f64)` maps them
+    // to null — by the time the registry sees the value the evidence is gone,
+    // and `mass = nan` was accepted where `mass = 0.0` is correctly rejected.
+    // §1 is explicit that these poison the determinism hashes M3 depends on.
+    let mut errors = Vec::new();
+    for (field, value) in fields.iter() {
+        non_finite(value, &format!("{type_name}.{field}"), &mut errors, node);
+    }
+    if !errors.is_empty() {
+        return errors;
+    }
+
+    let mut object = serde_json::Map::new();
+    for (field, value) in fields.iter() {
+        if let Some(v) = item_to_json(value) {
+            object.insert(field.to_owned(), v);
+        }
+    }
+
+    match registry.validate(type_name, &Value::Object(object)) {
+        Ok(()) => Vec::new(),
+        Err(field_errors) => field_errors
+            .into_iter()
+            .map(|f| SceneError {
+                error: f.error,
+                node: node.to_owned(),
+                field: f.field,
+                value: f.value,
+                constraint: f.constraint,
+                hint: f.hint,
+            })
+            .collect(),
+    }
+}
+
+/// Record every non-finite float reachable from `item`, named by its path.
+fn non_finite(item: &Item, field: &str, out: &mut Vec<SceneError>, node: &str) {
+    if let Some(v) = item.as_float() {
+        if !v.is_finite() {
+            out.push(SceneError {
+                error: "non_finite_float".to_owned(),
+                node: node.to_owned(),
+                field: field.to_owned(),
+                value: Value::String(v.to_string()),
+                constraint: "a finite number".to_owned(),
+                hint: Some(
+                    "NaN and infinity are rejected on every field: they poison the \
+                     determinism hashes the simulation depends on."
+                        .to_owned(),
+                ),
+            });
+        }
+        return;
+    }
+    if let Some(array) = item.as_array() {
+        for (i, v) in array.iter().enumerate() {
+            non_finite(&Item::Value(v.clone()), &format!("{field}[{i}]"), out, node);
+        }
+    }
 }
 
 /// Bridge a TOML item into `serde_json`, which is what the registry validates
