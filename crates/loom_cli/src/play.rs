@@ -23,6 +23,50 @@ pub struct Sim {
     physics: Physics,
     /// Entities with a body, and the body they got.
     dynamic: Vec<(loom_ecs::Entity, RigidBodyHandle)>,
+    /// Entities with a `CharacterController`, and their walking state.
+    characters: Vec<Walker>,
+}
+
+/// One character, its velocity, and its script's memory.
+///
+/// The velocity lives here rather than in the physics character because it is
+/// the *movement model's* state, not the collider's: the controller is handed
+/// one each tick and reports what survived, and whoever chose it decides what
+/// to do with that.
+struct Walker {
+    entity: loom_ecs::Entity,
+    character: loom_physics::Character,
+    velocity: [f32; 3],
+    grounded: bool,
+    memory: loom_script::ScriptMemory,
+}
+
+/// Read a `CharacterController` component into the shape physics wants.
+///
+/// The file says *total standing height* because that is what a level is
+/// measured in; the capsule wants the half-height of its straight section.
+/// A radius at or above half the height would give a negative straight
+/// section, so it degenerates to a sphere rather than to nonsense.
+fn character_shape(component: &serde_json::Value) -> loom_physics::CharacterShape {
+    // The component's own defaults, so an omitted field means the same thing
+    // here as it does in the schema the agent reads.
+    let default = loom_scene::components::CharacterController::default();
+    #[allow(clippy::cast_possible_truncation)]
+    let scalar = |name: &str, fallback: f32| {
+        component
+            .get(name)
+            .and_then(serde_json::Value::as_f64)
+            .map_or(fallback, |v| v as f32)
+    };
+
+    let radius = scalar("radius", default.radius).max(1e-3);
+    let height = scalar("height", default.height);
+    loom_physics::CharacterShape {
+        half_height: (height * 0.5 - radius).max(1e-3),
+        radius,
+        max_slope_degrees: scalar("max_slope_degrees", default.max_slope_degrees),
+        step_height: scalar("step_height", default.step_height).max(0.0),
+    }
 }
 
 impl Sim {
@@ -35,6 +79,7 @@ impl Sim {
     pub fn new(world: &World) -> Self {
         let mut physics = Physics::new(TICK_SECONDS);
         let mut dynamic = Vec::new();
+        let mut characters = Vec::new();
 
         for entity in world.entities() {
             let Some(global) = world.global_transform(*entity) else {
@@ -100,6 +145,22 @@ impl Sim {
             // wrong answers a collider that contains the drawn shape is the
             // one that does not let geometry poke through.
             let radius = half[0].max(half[1]).max(half[2]);
+
+            // A character is a capsule that walks, not scenery to collide
+            // with. Taken before every other branch: falling through to the
+            // static-box case would give it a box collider standing exactly
+            // where it is, so the first thing it collided with would be
+            // itself, and it would never move.
+            if let Some(component) = world.character(*entity) {
+                characters.push(Walker {
+                    entity: *entity,
+                    character: physics.add_character(pos, character_shape(component)),
+                    velocity: [0.0; 3],
+                    grounded: false,
+                    memory: loom_script::ScriptMemory::default(),
+                });
+                continue;
+            }
 
             // A voxel volume is terrain, not a box. Its recipe rides on the
             // world (never-do #11: the scene stores the op list, never the
@@ -168,7 +229,11 @@ impl Sim {
             }
         }
 
-        Self { physics, dynamic }
+        Self {
+            physics,
+            dynamic,
+            characters,
+        }
     }
 
     /// Advance whole ticks.
@@ -176,6 +241,74 @@ impl Sim {
         for _ in 0..ticks {
             self.physics.step();
         }
+    }
+
+    #[must_use]
+    pub fn character_count(&self) -> usize {
+        self.characters.len()
+    }
+
+    /// Advance every character by one tick and write where they ended up.
+    ///
+    /// `velocity_for` is the movement model — normally a script. It is given
+    /// the character's state and its own persistent memory, and answers with
+    /// the velocity it wants for this tick. Everything after that is
+    /// collision: the capsule is swept, slid along what it hits, stepped up
+    /// small ledges, and the velocity that *survived* is what the model sees
+    /// next tick.
+    ///
+    /// Call after [`Self::step`]. The broad-phase tree characters collide
+    /// against is built during the step, so a character moved before the
+    /// first one falls through the floor.
+    ///
+    /// # Errors
+    /// Whatever `velocity_for` returns. A failing script stops the tick
+    /// rather than being skipped: a movement model that threw is not a model
+    /// that meant "stand still", and silently freezing the character would
+    /// hide the error behind a plausible picture.
+    pub fn drive_characters<E>(
+        &mut self,
+        world: &mut World,
+        tick: u64,
+        mut velocity_for: impl FnMut(
+            loom_ecs::Entity,
+            &loom_script::Motion,
+            &mut loom_script::ScriptMemory,
+        ) -> Result<[f32; 3], E>,
+    ) -> Result<(), E> {
+        for walker in &mut self.characters {
+            let motion = loom_script::Motion {
+                tick,
+                dt: TICK_SECONDS,
+                position: walker.character.position(),
+                velocity: walker.velocity,
+                grounded: walker.grounded,
+            };
+            let velocity = velocity_for(walker.entity, &motion, &mut walker.memory)?;
+
+            let moved = self
+                .physics
+                .move_character(&mut walker.character, velocity, TICK_SECONDS);
+            walker.velocity = moved.velocity;
+            walker.grounded = moved.grounded;
+
+            // World space out of physics, local space into the node — the
+            // same conversion `write_back` does, and for the same reason: a
+            // character parented to anything would otherwise be re-composed
+            // at the parent's offset and drift by it every tick.
+            let parent_inverse = world
+                .parent(walker.entity)
+                .and_then(|parent| world.global_transform(parent))
+                .map_or(Mat4::IDENTITY, |g| {
+                    invertible_parent(Mat4::from_cols_array(&g.matrix))
+                });
+            let local = parent_inverse.transform_point3(Vec3::from_array(moved.position));
+            if let Some(transform) = world.transform_mut(walker.entity) {
+                transform.pos = local.to_array();
+            }
+        }
+        world.propagate_transforms();
+        Ok(())
     }
 
     /// Copy body positions back onto the world's transforms.

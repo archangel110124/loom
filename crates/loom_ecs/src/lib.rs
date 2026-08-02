@@ -132,6 +132,10 @@ pub struct World {
     /// The `ParticleEmitter` component, verbatim. Carried for the same reason
     /// as `material`: resolving it needs crates this one must not depend on.
     emitter: Storage<serde_json::Value>,
+    /// The `CharacterController` component, verbatim. Carried rather than
+    /// resolved for the same reason as `material`: turning it into a capsule
+    /// needs `loom_physics`, and this crate does not depend on it.
+    character: Storage<serde_json::Value>,
     /// The `Material` component, verbatim. Carried rather than resolved here
     /// for the same reason as `voxel_recipe`: resolving it needs the asset and
     /// render crates, and this one depends on neither.
@@ -348,6 +352,9 @@ impl World {
                     world.active_camera.get_or_insert(entity);
                 }
             }
+            if let Some(character) = node.components.get("CharacterController") {
+                world.character.insert(entity, character.clone());
+            }
             if let Some(emitter) = node.components.get("ParticleEmitter") {
                 world.emitter.insert(entity, emitter.clone());
             }
@@ -413,6 +420,12 @@ impl World {
             ],
             fov_y_degrees,
         })
+    }
+
+    /// The `CharacterController` a node declares, if any.
+    #[must_use]
+    pub fn character(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.character.get(entity)
     }
 
     /// The `ParticleEmitter` a node declares, if any.

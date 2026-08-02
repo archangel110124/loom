@@ -304,6 +304,51 @@ impl Default for ParticleEmitter {
     }
 }
 
+/// Makes a node a character: a capsule that walks, climbs and slides.
+///
+/// **This component says what the character *is*, not how it moves.** Shape,
+/// reach and what counts as a walkable floor live here because they are level
+/// geometry — a doorway either fits the capsule or does not. Speed,
+/// acceleration, gravity, jump height and whether there is a double jump are
+/// the *movement model*, and that is authored in the node's `Script`, which
+/// receives the character's state each tick and answers with a velocity.
+///
+/// The split is deliberate. Collision is what a script would get subtly wrong
+/// in ways that look like broken level geometry; the movement model is the
+/// part that is supposed to differ per game, and freezing it into the engine
+/// is what makes an engine feel like somebody else's engine.
+///
+/// A character with no script still falls, and does nothing else.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct CharacterController {
+    /// Total standing height in metres, cap to cap. 1.8–2.0 is human.
+    #[schemars(range(min = 0.1, max = 100.0))]
+    pub height: f32,
+    /// Capsule radius in metres. Half the width that has to fit a doorway.
+    #[schemars(range(min = 0.01, max = 50.0))]
+    pub radius: f32,
+    /// Steepest floor still walkable, in degrees. Steeper counts as a wall to
+    /// slide down rather than a ramp to climb.
+    #[schemars(range(min = 0.0, max = 89.0))]
+    pub max_slope_degrees: f32,
+    /// Tallest ledge stepped over without jumping — a stair riser. Zero turns
+    /// stepping off, which makes any staircase impassable.
+    #[schemars(range(min = 0.0, max = 10.0))]
+    pub step_height: f32,
+}
+
+impl Default for CharacterController {
+    fn default() -> Self {
+        Self {
+            height: 1.9,
+            radius: 0.35,
+            max_slope_degrees: 50.0,
+            step_height: 0.35,
+        }
+    }
+}
+
 /// The viewpoint a render is taken from.
 ///
 /// **The node's transform is the camera.** The eye is the node's world
@@ -365,6 +410,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<Material>("Material");
     reg.register::<ParticleEmitter>("ParticleEmitter");
     reg.register::<Camera>("Camera");
+    reg.register::<CharacterController>("CharacterController");
     reg.register::<Script>("Script");
     reg
 }

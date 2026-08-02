@@ -1,0 +1,119 @@
+# A character that walks, driven entirely by a script.
+#
+# Two things are being demonstrated, and they are separable on purpose.
+#
+# The `CharacterController` component says what the character *is*: a 1.9 m
+# capsule that can climb a 35 cm step and a 50 degree ramp. Those are level
+# measurements — whether it fits a doorway, whether it can take the stairs.
+#
+# The `Script` says how it *moves*: speed, acceleration, gravity, jump height,
+# air control, coyote time, and the decision to turn around at a wall. None of
+# that is in the engine. Point the component at a different file and the
+# character has a different feel with no Rust rebuilt.
+#
+# The corridor is closed at both ends so the script's turn-around has something
+# to turn around at, and there is a step in the middle so the capsule has to
+# climb something rather than only slide.
+#
+# Check it with:
+#   loom sim assets/test/walker.loom --ticks 240 \
+#     --assert "Level/Walker.y > 0.5"
+#   loom render assets/test/walker.loom --sim 200 --out walk.png
+
+[scene]
+format = 1
+id = "9c41e0b7-2d63-4f85-a71c-58e93f206ab4"
+
+[[node]]
+name = "Level"
+
+# ---------------------------------------------------------------------------
+# The character. Its transform is where it starts; after that the controller
+# owns its position and writes it back every tick.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Walker"
+parent = "Level"
+transform = { pos = [-6.0, 1.2, 0.0] }
+
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
+  step_height = 0.35
+  max_slope_degrees = 50.0
+
+  # The movement model. Everything about how this character feels lives here.
+  [node.components.Script]
+  path = "../scripts/patrol.rhai"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.75, 0.35, 0.10]
+  roughness = 0.6
+
+# ---------------------------------------------------------------------------
+# Somewhere to walk.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Floor"
+parent = "Level"
+transform = { pos = [0.0, -0.5, 0.0], scale = [12.0, 0.5, 4.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.32, 0.30, 0.28]
+  roughness = 0.9
+
+# A 30 cm step, under the character's 35 cm limit — it should climb this
+# without jumping. Raise `step_height` below it and the character stops dead,
+# which is the check that autostep is doing anything.
+[[node]]
+name = "Step"
+parent = "Level"
+transform = { pos = [0.0, 0.15, 0.0], scale = [1.5, 0.15, 4.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.45, 0.42, 0.36]
+  roughness = 0.85
+
+[[node]]
+name = "WallEast"
+parent = "Level"
+transform = { pos = [11.0, 1.5, 0.0], scale = [0.5, 1.5, 4.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.20, 0.34, 0.50]
+  roughness = 0.8
+
+[[node]]
+name = "WallWest"
+parent = "Level"
+transform = { pos = [-11.0, 1.5, 0.0], scale = [0.5, 1.5, 4.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.50, 0.22, 0.18]
+  roughness = 0.8
+
+[[node]]
+name = "Sun"
+parent = "Level"
+transform = { pos = [0.0, 6.0, 4.0] }
+
+  [node.components.Light]
+  intensity = 320.0
+  color = [1.0, 0.96, 0.88]

@@ -18,6 +18,7 @@ pub use sanity::{Severity, check_scene};
 // dependency on rapier. The engine choice stays behind this crate's door.
 pub use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
 
+use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
 use rapier3d::prelude::*;
 
 /// A physics world stepped at a fixed rate.
@@ -33,6 +34,71 @@ pub struct RayHit {
     /// The surface normal there — which is what an impact decal, a ricochet
     /// and a spray of debris all need to be oriented by.
     pub normal: [f32; 3],
+}
+
+/// The capsule a character occupies, and what it is able to climb.
+///
+/// Shape and mobility together because they are not separable: the step a
+/// character can walk up and the width that has to fit through a doorway are
+/// the same measurements from the level designer's side.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CharacterShape {
+    /// Half the capsule's straight section. Total standing height is
+    /// `2 * (half_height + radius)`.
+    pub half_height: f32,
+    pub radius: f32,
+    /// Steepest floor still counted as ground, in degrees. Anything steeper
+    /// is a wall to slide down rather than a ramp to walk up.
+    pub max_slope_degrees: f32,
+    /// Tallest ledge stepped over without jumping. Zero disables stepping.
+    pub step_height: f32,
+}
+
+impl Default for CharacterShape {
+    fn default() -> Self {
+        Self {
+            // 1.9 m standing, which puts an eye node at the 1.7 m that reads
+            // as human height in a rendered scene.
+            half_height: 0.6,
+            radius: 0.35,
+            max_slope_degrees: 50.0,
+            step_height: 0.35,
+        }
+    }
+}
+
+/// A character capsule in the world, and where it currently is.
+///
+/// Position is held here rather than read back from the body: the body is
+/// kinematic and only catches up during the next `step`, so reading it would
+/// lag a tick behind and make two moves in one tick sweep from the wrong place.
+pub struct Character {
+    body: RigidBodyHandle,
+    controller: KinematicCharacterController,
+    shape: CharacterShape,
+    position: [f32; 3],
+    grounded: bool,
+}
+
+impl Character {
+    #[must_use]
+    pub fn position(&self) -> [f32; 3] {
+        self.position
+    }
+
+    #[must_use]
+    pub fn is_grounded(&self) -> bool {
+        self.grounded
+    }
+}
+
+/// What one step of movement actually did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CharacterMove {
+    pub position: [f32; 3],
+    /// The velocity that survived collision — see [`Physics::move_character`].
+    pub velocity: [f32; 3],
+    pub grounded: bool,
 }
 
 pub struct Physics {
@@ -492,6 +558,148 @@ impl Physics {
         self.raycast(from, delta, distance - 1e-3).is_none()
     }
 
+    /// Put a character capsule in the world.
+    ///
+    /// The body is **kinematic**, not dynamic. A dynamic capsule is pushed
+    /// around by the solver: it slides down ramps, gets shoved by anything it
+    /// touches, and accelerates and decelerates on its own terms. That is
+    /// correct for a barrel and wrong for a character, where the movement
+    /// model is the thing being authored and the solver must not have opinions
+    /// about it. `add_capsule` above is the dynamic one, still there for
+    /// ragdolls and anything that should be thrown.
+    ///
+    /// It carries a real collider even so, so everything else in the world can
+    /// see it — a shot fired at the player has to hit something.
+    pub fn add_character(&mut self, position: [f32; 3], shape: CharacterShape) -> Character {
+        let body = RigidBodyBuilder::kinematic_position_based()
+            .translation(Vector::new(position[0], position[1], position[2]))
+            .build();
+        let body = self.bodies.insert(body);
+        let collider =
+            ColliderBuilder::capsule_y(shape.half_height.max(1e-3), shape.radius.max(1e-3)).build();
+        self.colliders
+            .insert_with_parent(collider, body, &mut self.bodies);
+
+        let mut controller = KinematicCharacterController {
+            up: Vector::Y,
+            slide: true,
+            max_slope_climb_angle: shape.max_slope_degrees.to_radians(),
+            // Slightly under the climb angle: a character that starts sliding
+            // at exactly the angle it can still walk up jitters between the
+            // two on any real floor.
+            min_slope_slide_angle: (shape.max_slope_degrees + 5.0).to_radians(),
+            ..KinematicCharacterController::default()
+        };
+        // Rapier leaves autostep off because it is expensive. It is not
+        // optional here: without it a 15 cm lip stops a character dead, and
+        // every staircase in a level becomes a wall.
+        controller.autostep = (shape.step_height > 0.0).then_some(CharacterAutostep {
+            max_height: CharacterLength::Absolute(shape.step_height),
+            min_width: CharacterLength::Absolute(shape.radius * 0.5),
+            include_dynamic_bodies: true,
+        });
+
+        Character {
+            body,
+            controller,
+            shape,
+            position,
+            grounded: false,
+        }
+    }
+
+    /// Move a character by `velocity` for one step, colliding and sliding.
+    ///
+    /// **The velocity is the caller's business and the collision is this
+    /// function's.** Nothing here applies gravity, friction, acceleration or a
+    /// speed limit — those are the movement model, and the movement model is
+    /// authored (in a script, usually) rather than baked into the engine. What
+    /// this owns is the part a script cannot get right: sweeping the capsule,
+    /// sliding it along what it hits, stepping it up small ledges, and saying
+    /// whether it ended up on the ground.
+    ///
+    /// The returned velocity is the one that **survived** the move, so a
+    /// caller that keeps integrating its own velocity finds out it hit
+    /// something. Walk into a wall and the component into the wall is gone;
+    /// stand on the floor and the accumulated fall is gone. Handing back the
+    /// requested velocity instead is the classic bug where three seconds of
+    /// standing still builds up −40 m/s that silently eats the next jump.
+    ///
+    /// # The world it collides against is the one the last `step` left
+    ///
+    /// Same caveat as [`Self::raycast`], for the same reason: the broad-phase
+    /// tree is built during [`Self::step`]. A character moved before anything
+    /// has stepped collides with nothing and falls through the floor.
+    pub fn move_character(
+        &mut self,
+        character: &mut Character,
+        velocity: [f32; 3],
+        dt: f32,
+    ) -> CharacterMove {
+        let requested = Vector::new(velocity[0], velocity[1], velocity[2]);
+        if !requested.is_finite() || !dt.is_finite() || dt <= 0.0 {
+            return CharacterMove {
+                position: character.position,
+                velocity: [0.0; 3],
+                grounded: character.grounded,
+            };
+        }
+
+        let pose = Pose::from_translation(Vector::new(
+            character.position[0],
+            character.position[1],
+            character.position[2],
+        ));
+        let capsule = Capsule::new_y(
+            character.shape.half_height.max(1e-3),
+            character.shape.radius.max(1e-3),
+        );
+
+        let movement = {
+            let query = self.broad_phase.as_query_pipeline(
+                self.narrow_phase.query_dispatcher(),
+                &self.bodies,
+                &self.colliders,
+                // Excluding itself. Rapier's sweeps currently ignore a shape
+                // they start already penetrating, so removing this changes
+                // nothing any test here can see — it is kept because that is
+                // an implementation detail rather than a promise, and the
+                // failure if it ever changes is a character that cannot move
+                // or is permanently grounded on itself. Neither reports an
+                // error; both look like broken input.
+                QueryFilter::default().exclude_rigid_body(character.body),
+            );
+            character
+                .controller
+                .move_shape(dt, &query, &capsule, &pose, requested * dt, |_| {})
+        };
+
+        let moved = pose.translation + movement.translation;
+        character.position = [moved.x, moved.y, moved.z];
+        character.grounded = movement.grounded;
+        // Keep the collider where the character is, so the rest of the world
+        // sees it there. Kinematic, so rapier derives its velocity from the
+        // move and pushes dynamic bodies out of the way properly.
+        if let Some(body) = self.bodies.get_mut(character.body) {
+            body.set_next_kinematic_translation(moved);
+        }
+
+        let mut survived = movement.translation / dt;
+        // Ground snapping is part of `translation` and can be much larger than
+        // the fall that earned it — stepping off a curb would report tens of
+        // metres per second downward. Standing on something means no vertical
+        // speed, whatever the sweep had to do to get there.
+        if movement.grounded && survived.y <= 0.0 {
+            survived.y = 0.0;
+        }
+
+        CharacterMove {
+            position: character.position,
+            velocity: [survived.x, survived.y, survived.z],
+            grounded: movement.grounded,
+        }
+    }
+
     pub fn body_count(&self) -> usize {
         self.bodies.len()
     }
@@ -824,5 +1032,312 @@ mod tests {
         };
 
         assert_eq!(run(), run(), "physics must replay identically");
+    }
+
+    // -- character controller -------------------------------------------
+    //
+    // A room to walk around in: a floor with its top surface at y = 0, and a
+    // wall standing on it. Every character test uses the same one so the
+    // numbers below mean the same thing in all of them.
+    fn room() -> Physics {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [20.0, 1.0, 20.0]);
+        // Wall at x = 4, facing back down -X.
+        physics.add_static_box([4.0, 1.5, 0.0], [0.0, 0.0, 0.0, 1.0], [0.5, 1.5, 20.0]);
+        physics.step();
+        physics
+    }
+
+    /// Where a resting capsule's centre sits: half the cylinder plus a cap.
+    fn rest_height(shape: CharacterShape) -> f32 {
+        shape.half_height + shape.radius
+    }
+
+    /// Gravity for one tick, the way a script would apply it.
+    fn fall(velocity: &mut [f32; 3], dt: f32) {
+        velocity[1] -= 9.81 * dt;
+    }
+
+    #[test]
+    fn a_character_falls_and_lands_on_the_floor() {
+        let mut physics = room();
+        let shape = CharacterShape::default();
+        let mut character = physics.add_character([0.0, 3.0, 0.0], shape);
+        let dt = 1.0 / 60.0;
+
+        let mut velocity = [0.0; 3];
+        let mut moved = physics.move_character(&mut character, velocity, dt);
+        for _ in 0..120 {
+            fall(&mut velocity, dt);
+            moved = physics.move_character(&mut character, velocity, dt);
+            velocity = moved.velocity;
+        }
+
+        assert!(moved.grounded, "it should be standing on the floor");
+        assert!(
+            (moved.position[1] - rest_height(shape)).abs() < 0.05,
+            "rested at {:?}, expected about {}",
+            moved.position,
+            rest_height(shape)
+        );
+    }
+
+    /// The bug this exists for: standing still, gravity accumulates every tick
+    /// into a downward velocity that the floor silently absorbs. Jump after a
+    /// few seconds and the built-up −40 m/s eats the jump. The controller has
+    /// to report the velocity that *survived* the move, not the one asked for.
+    #[test]
+    fn standing_still_does_not_accumulate_downward_velocity() {
+        let mut physics = room();
+        let mut character = physics.add_character([0.0, 1.2, 0.0], CharacterShape::default());
+        let dt = 1.0 / 60.0;
+
+        let mut velocity = [0.0; 3];
+        for _ in 0..180 {
+            fall(&mut velocity, dt);
+            velocity = physics.move_character(&mut character, velocity, dt).velocity;
+        }
+
+        assert!(
+            velocity[1].abs() < 0.2,
+            "three seconds of standing built up {} m/s",
+            velocity[1]
+        );
+    }
+
+    #[test]
+    fn a_character_walks_into_a_wall_and_stops_at_it() {
+        let mut physics = room();
+        let shape = CharacterShape::default();
+        let mut character = physics.add_character([0.0, 1.2, 0.0], shape);
+        let dt = 1.0 / 60.0;
+
+        let mut moved = physics.move_character(&mut character, [0.0; 3], dt);
+        for _ in 0..240 {
+            let mut velocity = [6.0, moved.velocity[1] - 9.81 * dt, 0.0];
+            if moved.grounded && velocity[1] < 0.0 {
+                velocity[1] = 0.0;
+            }
+            moved = physics.move_character(&mut character, velocity, dt);
+        }
+
+        // Wall's near face is at x = 3.5. Stopped before it, not through it.
+        assert!(
+            moved.position[0] < 3.5 && moved.position[0] > 3.5 - shape.radius - 0.2,
+            "ended at x = {}, wall face is at 3.5",
+            moved.position[0]
+        );
+    }
+
+    /// Walking into a wall at an angle must keep the along-wall component.
+    /// Without sliding a character sticks to every wall it brushes, which is
+    /// the single most obvious way a controller feels broken.
+    #[test]
+    fn a_character_slides_along_a_wall_it_hits_at_an_angle() {
+        let mut physics = room();
+        let mut character = physics.add_character([0.0, 1.2, 0.0], CharacterShape::default());
+        let dt = 1.0 / 60.0;
+
+        let mut moved = physics.move_character(&mut character, [0.0; 3], dt);
+        for _ in 0..240 {
+            moved = physics.move_character(&mut character, [6.0, -1.0, 3.0], dt);
+        }
+
+        assert!(moved.position[0] < 3.5, "should not be inside the wall");
+        assert!(
+            moved.position[2] > 4.0,
+            "pressed against the wall it should still travel along it; z = {}",
+            moved.position[2]
+        );
+    }
+
+    #[test]
+    fn a_grounded_character_can_jump_off_the_floor() {
+        let mut physics = room();
+        let shape = CharacterShape::default();
+        let mut character = physics.add_character([0.0, 1.2, 0.0], shape);
+        let dt = 1.0 / 60.0;
+
+        // Settle.
+        let mut moved = physics.move_character(&mut character, [0.0, -1.0, 0.0], dt);
+        for _ in 0..60 {
+            moved = physics.move_character(&mut character, [0.0, -1.0, 0.0], dt);
+        }
+        assert!(moved.grounded, "must be grounded before jumping");
+        let floor_height = moved.position[1];
+
+        // One jump, then coast under gravity.
+        let mut velocity = [0.0, 5.0, 0.0];
+        let mut peak = floor_height;
+        for _ in 0..40 {
+            let moved = physics.move_character(&mut character, velocity, dt);
+            velocity = moved.velocity;
+            fall(&mut velocity, dt);
+            peak = peak.max(moved.position[1]);
+        }
+
+        assert!(
+            peak > floor_height + 0.8,
+            "jumped to {peak}, floor is {floor_height}"
+        );
+    }
+
+    /// A curb. Without autostep a character stops dead at a 15 cm lip, which
+    /// makes every staircase in a level impassable.
+    #[test]
+    fn a_character_steps_up_a_low_obstacle() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [20.0, 1.0, 20.0]);
+        // A step whose top is 0.2 m above the floor.
+        physics.add_static_box([3.0, 0.1, 0.0], [0.0, 0.0, 0.0, 1.0], [2.0, 0.1, 20.0]);
+        physics.step();
+
+        let mut character = physics.add_character([0.0, 1.2, 0.0], CharacterShape::default());
+        let dt = 1.0 / 60.0;
+
+        let mut moved = physics.move_character(&mut character, [0.0; 3], dt);
+        for _ in 0..180 {
+            moved = physics.move_character(&mut character, [3.0, -2.0, 0.0], dt);
+        }
+
+        assert!(
+            moved.position[0] > 2.0,
+            "stopped at the lip: x = {}",
+            moved.position[0]
+        );
+        assert!(
+            moved.position[1] > 0.2,
+            "did not climb onto the step: y = {}",
+            moved.position[1]
+        );
+    }
+
+    /// The character must exist to everything else, not only to itself — a
+    /// shot fired at the player has to hit something.
+    #[test]
+    fn a_character_is_visible_to_a_raycast() {
+        let mut physics = room();
+        let mut character = physics.add_character([0.0, 1.2, 0.0], CharacterShape::default());
+        physics.move_character(&mut character, [0.0; 3], 1.0 / 60.0);
+        physics.step();
+
+        let hit = physics
+            .raycast([-6.0, 1.2, 0.0], [1.0, 0.0, 0.0], 20.0)
+            .expect("the character stands between the ray and the wall");
+
+        assert!(
+            hit.distance < 6.0,
+            "hit at {} — that is the wall, not the character",
+            hit.distance
+        );
+    }
+
+    /// Nothing under it, so nothing to stand on. A character that counts its
+    /// own capsule as ground is grounded in mid-air — which means infinite
+    /// jumps and no falling, from a bug with no visible cause.
+    #[test]
+    fn a_character_in_empty_space_is_never_grounded() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        // A floor far below, so the world is not empty and the broad phase
+        // has something in it — the character is simply nowhere near it.
+        physics.add_static_box([0.0, -200.0, 0.0], [0.0, 0.0, 0.0, 1.0], [20.0, 1.0, 20.0]);
+        physics.step();
+
+        let mut character = physics.add_character([0.0, 20.0, 0.0], CharacterShape::default());
+        let dt = 1.0 / 60.0;
+        let mut velocity = [0.0; 3];
+
+        for _ in 0..60 {
+            fall(&mut velocity, dt);
+            let moved = physics.move_character(&mut character, velocity, dt);
+            velocity = moved.velocity;
+            assert!(!moved.grounded, "grounded at y = {}", moved.position[1]);
+            physics.step();
+        }
+
+        assert!(velocity[1] < -8.0, "should be falling freely: {velocity:?}");
+    }
+
+    /// Jump under a low ceiling: the head stops, and so must the velocity.
+    /// Reporting the *requested* velocity instead pins the character against
+    /// the ceiling for as long as the jump would have lasted.
+    #[test]
+    fn hitting_a_ceiling_kills_the_upward_velocity() {
+        let mut physics = room();
+        // Ceiling with its underside at y = 2.6.
+        physics.add_static_box([0.0, 3.1, 0.0], [0.0, 0.0, 0.0, 1.0], [20.0, 0.5, 20.0]);
+        physics.step();
+
+        let mut character = physics.add_character([0.0, 0.95, 0.0], CharacterShape::default());
+        let dt = 1.0 / 60.0;
+
+        let mut velocity = [0.0, 9.0, 0.0];
+        let mut hit_ceiling = false;
+        for _ in 0..20 {
+            let moved = physics.move_character(&mut character, velocity, dt);
+            velocity = moved.velocity;
+            if velocity[1] < 1.0 {
+                hit_ceiling = true;
+                break;
+            }
+        }
+
+        assert!(hit_ceiling, "never stopped going up: {velocity:?}");
+    }
+
+    /// Walking off a low step, the sweep snaps the capsule down to the floor
+    /// in one tick. That snap is a much bigger drop than the fall that earned
+    /// it, and reported as velocity it reads as tens of metres per second —
+    /// a script integrating it would think it was in freefall while walking.
+    #[test]
+    fn a_ground_snap_is_not_reported_as_a_fall() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [20.0, 1.0, 20.0]);
+        // A platform 0.3 m up, ending at x = 1.0. Walking off it drops the
+        // character back to the floor.
+        physics.add_static_box([0.0, 0.15, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 0.15, 20.0]);
+        physics.step();
+
+        let mut character = physics.add_character([0.0, 1.3, 0.0], CharacterShape::default());
+        let dt = 1.0 / 60.0;
+
+        // Settle on the platform, then walk off the edge.
+        let mut moved = physics.move_character(&mut character, [0.0, -1.0, 0.0], dt);
+        for _ in 0..30 {
+            moved = physics.move_character(&mut character, [0.0, -1.0, 0.0], dt);
+        }
+        assert!(moved.grounded, "should start on the platform");
+
+        let mut worst: f32 = 0.0;
+        for _ in 0..90 {
+            moved = physics.move_character(&mut character, [2.0, -1.0, 0.0], dt);
+            if moved.grounded {
+                worst = worst.max(-moved.velocity[1]);
+            }
+        }
+
+        assert!(
+            worst < 2.0,
+            "reported {worst} m/s downward while walking on the ground"
+        );
+    }
+
+    /// Its own capsule must not block it. A controller that collides with
+    /// itself cannot move at all, and the symptom looks like broken input.
+    #[test]
+    fn a_character_does_not_collide_with_itself() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [20.0, 1.0, 20.0]);
+        physics.step();
+        let mut character = physics.add_character([0.0, 1.2, 0.0], CharacterShape::default());
+        let dt = 1.0 / 60.0;
+
+        let mut moved = physics.move_character(&mut character, [0.0; 3], dt);
+        for _ in 0..60 {
+            moved = physics.move_character(&mut character, [4.0, -1.0, 0.0], dt);
+            physics.step();
+        }
+
+        assert!(moved.position[0] > 3.0, "went nowhere: x = {}", moved.position[0]);
     }
 }

@@ -76,6 +76,47 @@ pub struct NodeState {
     pub scale: [f32; 3],
 }
 
+/// What a movement script is told about its character this tick.
+///
+/// Read-only: the script answers with a velocity and changes nothing else.
+/// Position in particular is *not* writable, and that is the point — a script
+/// that could assign a position would walk straight through walls, because the
+/// collide-and-slide sweep happens after this and works from the velocity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Motion {
+    pub tick: u64,
+    /// Seconds in one fixed step. Never a measured frame time (never-do #8).
+    pub dt: f32,
+    pub position: [f32; 3],
+    /// The velocity that survived last tick's move, so a script that
+    /// integrates its own finds out when it walked into a wall.
+    pub velocity: [f32; 3],
+    pub grounded: bool,
+}
+
+/// State a movement script keeps between ticks.
+///
+/// One per character, not one per script: two guards running the same file
+/// must not share a dash cooldown. The contents are the script's own business
+/// — the host neither reads nor validates them.
+///
+/// This exists because the interesting movement models all count something.
+/// Coyote time is "grounded within the last N ticks", a double jump is "jumps
+/// left", a dash is "ticks until ready" — none of which is derivable from a
+/// single instant, so a script without memory can only express the dullest
+/// possible walk.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptMemory(rhai::Map);
+
+impl ScriptMemory {
+    /// Whether the script has stored anything yet. For tests and for a log
+    /// line; the values themselves stay opaque.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// A sandboxed script host.
 pub struct ScriptHost {
     engine: Engine,
@@ -172,6 +213,63 @@ impl ScriptHost {
             rotation: from_scope(&scope, "rotation").unwrap_or(state.rotation),
             scale: from_scope(&scope, "scale").unwrap_or(state.scale),
         })
+    }
+
+    /// Run a movement script and return the velocity it chose.
+    ///
+    /// **This is the seam the character controller is built around.** The
+    /// engine owns collision — sweeping the capsule, sliding along walls,
+    /// stepping up ledges, deciding what counts as ground. The script owns
+    /// everything else: gravity, acceleration, friction, top speed, jump
+    /// height, air control, whether there is a double jump at all. Swapping
+    /// the file swaps the feel of the character without touching Rust.
+    ///
+    /// The division is not stylistic. Collision is the part a script would get
+    /// subtly wrong in ways that look like level-geometry bugs; the movement
+    /// model is the part that is *supposed* to be different per game, and
+    /// baking it into the engine is what makes an engine feel like somebody
+    /// else's engine.
+    ///
+    /// # Errors
+    /// [`ScriptError`] if the script is unknown, traps a limit, or throws.
+    pub fn motion(
+        &self,
+        name: &str,
+        motion: &Motion,
+        memory: &mut ScriptMemory,
+    ) -> Result<[f32; 3], ScriptError> {
+        let Some(ast) = self.compiled.get(name) else {
+            return Err(ScriptError {
+                error: "unknown_script".to_owned(),
+                script: name.to_owned(),
+                line: None,
+                message: format!("no compiled script named `{name}`"),
+                hint: Some("Compile it before running it.".to_owned()),
+            });
+        };
+
+        let mut scope = Scope::new();
+        scope.push("tick", i64::try_from(motion.tick).unwrap_or(i64::MAX));
+        scope.push("dt", f64::from(motion.dt));
+        scope.push("position", to_dynamic_vec(motion.position));
+        scope.push("velocity", to_dynamic_vec(motion.velocity));
+        scope.push("grounded", motion.grounded);
+        scope.push("memory", std::mem::take(&mut memory.0));
+
+        let result = self.engine.run_ast_with_scope(&mut scope, ast);
+
+        // Memory comes back even on failure. A script that throws on tick 900
+        // has already earned the state it built over the first 899, and
+        // dropping it would make the next tick behave differently again —
+        // two bugs where the author has one.
+        if let Some(map) = scope.get_value::<rhai::Map>("memory") {
+            memory.0 = map;
+        }
+        result.map_err(|e| self.to_error(name, &e))?;
+
+        // An untouched `velocity` means "keep going", not "stop". A script
+        // still being written should coast, not freeze the character.
+        Ok(from_scope(&scope, "velocity").unwrap_or(motion.velocity))
     }
 
     /// Turn a Rhai failure into the project's structured error shape.
@@ -319,6 +417,138 @@ mod tests {
 
     fn host() -> ScriptHost {
         ScriptHost::default()
+    }
+
+    // ---------------------------------------------------------------
+    // Movement scripts. The character controller owns collision; the
+    // script owns the model — see `ScriptHost::motion`.
+    // ---------------------------------------------------------------
+
+    fn walking() -> Motion {
+        Motion {
+            tick: 0,
+            dt: 1.0 / 60.0,
+            position: [0.0, 1.0, 0.0],
+            velocity: [0.0; 3],
+            grounded: true,
+        }
+    }
+
+    #[test]
+    fn a_movement_script_chooses_the_velocity() {
+        let mut host = host();
+        host.compile("walk", "velocity = [3.0, 0.0, -1.0];").expect("valid");
+
+        let out = host
+            .motion("walk", &walking(), &mut ScriptMemory::default())
+            .expect("runs");
+
+        assert!((out[0] - 3.0).abs() < 1e-6 && (out[2] + 1.0).abs() < 1e-6, "{out:?}");
+    }
+
+    /// The script has to be able to branch on the one thing only the
+    /// controller knows. Without it there is no jump and no air control.
+    #[test]
+    fn a_movement_script_can_branch_on_being_grounded() {
+        let mut host = host();
+        host.compile("jump", "if grounded { velocity[1] = 5.0; }").expect("valid");
+
+        let mut memory = ScriptMemory::default();
+        let on_ground = host.motion("jump", &walking(), &mut memory).expect("runs");
+        let airborne = Motion { grounded: false, ..walking() };
+        let in_air = host.motion("jump", &airborne, &mut memory).expect("runs");
+
+        assert!((on_ground[1] - 5.0).abs() < 1e-6, "{on_ground:?}");
+        assert!(in_air[1].abs() < 1e-6, "{in_air:?}");
+    }
+
+    /// Coyote time, dash cooldowns, double jumps — every movement model worth
+    /// authoring counts something across ticks. Without memory a script can
+    /// only express what is derivable from this instant.
+    #[test]
+    fn memory_survives_between_ticks() {
+        let mut host = host();
+        host.compile(
+            "count",
+            r#"
+            let n = if "n" in memory { memory.n } else { 0 };
+            memory.n = n + 1;
+            velocity = [memory.n.to_float(), 0.0, 0.0];
+            "#,
+        )
+        .expect("valid");
+
+        let mut memory = ScriptMemory::default();
+        let first = host.motion("count", &walking(), &mut memory).expect("runs");
+        let second = host.motion("count", &walking(), &mut memory).expect("runs");
+
+        assert!((first[0] - 1.0).abs() < 1e-6, "{first:?}");
+        assert!((second[0] - 2.0).abs() < 1e-6, "{second:?}");
+    }
+
+    /// Two characters running the same script must not share a mind.
+    #[test]
+    fn each_character_has_its_own_memory() {
+        let mut host = host();
+        host.compile(
+            "count",
+            r#"
+            let n = if "n" in memory { memory.n } else { 0 };
+            memory.n = n + 1;
+            velocity = [memory.n.to_float(), 0.0, 0.0];
+            "#,
+        )
+        .expect("valid");
+
+        let mut first = ScriptMemory::default();
+        let mut second = ScriptMemory::default();
+        host.motion("count", &walking(), &mut first).expect("runs");
+        host.motion("count", &walking(), &mut first).expect("runs");
+        let other = host.motion("count", &walking(), &mut second).expect("runs");
+
+        assert!((other[0] - 1.0).abs() < 1e-6, "second character saw {other:?}");
+    }
+
+    /// A script that ignores `velocity` must not stop the character dead —
+    /// it inherits what the controller gave it, so a half-written script
+    /// coasts rather than freezing.
+    #[test]
+    fn an_untouched_velocity_is_the_one_it_was_given() {
+        let mut host = host();
+        host.compile("noop", "let unused = tick;").expect("valid");
+
+        let motion = Motion { velocity: [2.0, 0.0, 4.0], ..walking() };
+        let out = host.motion("noop", &motion, &mut ScriptMemory::default()).expect("runs");
+
+        assert_eq!(out, [2.0, 0.0, 4.0]);
+    }
+
+    /// The sandbox applies here too — this is a new entry point into the
+    /// engine, and the limits are not per-entry-point by accident.
+    #[test]
+    fn a_movement_script_cannot_loop_forever() {
+        let mut host = host();
+        host.compile("hang", "while true { velocity[0] += 1.0; }").expect("compiles");
+
+        let err = host
+            .motion("hang", &walking(), &mut ScriptMemory::default())
+            .expect_err("must be stopped");
+
+        assert_eq!(err.error, "script_op_limit", "{err:?}");
+    }
+
+    #[test]
+    fn a_movement_script_cannot_read_the_clock() {
+        let mut host = host();
+        let compiled = host.compile("clock", "let t = timestamp(); velocity[0] = 1.0;");
+        let reachable = match compiled {
+            Err(_) => false,
+            Ok(()) => host
+                .motion("clock", &walking(), &mut ScriptMemory::default())
+                .is_ok(),
+        };
+
+        assert!(!reachable, "a movement script must not reach the wall clock");
     }
 
     /// **The M8 exit criterion.** A script rotates a cube.
