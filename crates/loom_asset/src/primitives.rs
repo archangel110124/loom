@@ -15,9 +15,23 @@ pub fn build(name: &str) -> Option<Mesh> {
     match name {
         "box" => Some(box_mesh()),
         "plane" => Some(plane()),
-        "sphere" => Some(sphere(24, 16)),
-        "cylinder" => Some(cylinder(24)),
-        "capsule" => Some(capsule(24, 8)),
+        // **Tessellation is a physics-visible number here, not a style
+        // choice.** These collide as analytic balls, cylinders and capsules,
+        // but are drawn as polyhedra inscribed in those shapes — every
+        // triangle sags inward between its vertices. At 24 segments the sag
+        // was 1.32% of the radius: 9.3mm on the tower scene's 0.7m wrecking
+        // ball, so a crate resting against it stopped 9mm short of the drawn
+        // surface and visibly sank into it. The simulation was right and the
+        // picture was wrong, which is the one failure this engine cannot have
+        // — the render is how the agent checks its own work.
+        //
+        // 64 segments puts the sag at 1.2mm, just under the solver's own
+        // resting penetration at that radius, so it stops being the artifact
+        // you notice. Costs 3185 vertices for a shape a scene uses a handful
+        // of times.
+        "sphere" => Some(sphere(64, 48)),
+        "cylinder" => Some(cylinder(64)),
+        "capsule" => Some(capsule(64, 16)),
         _ => None,
     }
 }
@@ -263,5 +277,67 @@ mod tests {
         assert!((min[1] - -2.0).abs() < 1e-3, "bottom at {}", min[1]);
         assert!((max[1] - 2.0).abs() < 1e-3, "top at {}", max[1]);
         assert!((max[0] - 1.0).abs() < 1e-3, "radius {}", max[0]);
+    }
+
+    /// The nearest point of `mesh`'s surface to the origin, as a fraction of
+    /// the radius it is meant to have.
+    ///
+    /// A tessellated round shape is a polyhedron *inscribed* in the shape it
+    /// stands for: its vertices sit on the surface, and every triangle sags
+    /// inward between them. This measures that sag.
+    fn inscribed_fraction(mesh: &Mesh) -> f32 {
+        let mut closest = f32::MAX;
+        for tri in mesh.indices.chunks_exact(3) {
+            let p = mesh.vertices[tri[0] as usize].position;
+            let q = mesh.vertices[tri[1] as usize].position;
+            let r = mesh.vertices[tri[2] as usize].position;
+            let u = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+            let w = [r[0] - p[0], r[1] - p[1], r[2] - p[2]];
+            let n = [
+                u[1] * w[2] - u[2] * w[1],
+                u[2] * w[0] - u[0] * w[2],
+                u[0] * w[1] - u[1] * w[0],
+            ];
+            let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if length < 1e-9 {
+                continue; // degenerate triangle at a pole
+            }
+            let distance = (n[0] * p[0] + n[1] * p[1] + n[2] * p[2]).abs() / length;
+            closest = closest.min(distance);
+        }
+        closest
+    }
+
+    /// **What we draw has to match what we collide.** A sphere collides as an
+    /// analytic ball of its radius, but is *drawn* as a polyhedron inscribed in
+    /// that ball. At 24x16 the drawn surface sagged 1.33% of the radius inside
+    /// the collider — 9.3mm on the tower scene's 0.7m wrecking ball — so
+    /// anything resting against it stopped 9mm short of the surface and visibly
+    /// sank into it. The simulation was right; the picture was wrong.
+    ///
+    /// 0.2% keeps the sag below the solver's own resting penetration (~1.3mm
+    /// at that radius), so it stops being the artifact you notice.
+    #[test]
+    fn a_drawn_sphere_matches_the_ball_it_collides_as() {
+        let sag = 1.0 - inscribed_fraction(&sphere(64, 48));
+
+        assert!(
+            sag < 0.002,
+            "drawn sphere sags {:.4}% inside its collider; \
+             anything resting on it will appear to sink in",
+            sag * 100.0
+        );
+    }
+
+    /// The same mismatch, and the same fix, for the other round primitives —
+    /// they collide as analytic cylinders and capsules too.
+    #[test]
+    fn the_other_round_primitives_match_their_colliders_too() {
+        for (name, sag) in [
+            ("cylinder", 1.0 - inscribed_fraction(&cylinder(64))),
+            ("capsule", 1.0 - inscribed_fraction(&capsule(64, 16))),
+        ] {
+            assert!(sag < 0.002, "drawn {name} sags {:.4}% inside", sag * 100.0);
+        }
     }
 }
