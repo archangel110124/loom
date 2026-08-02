@@ -99,6 +99,27 @@ const AXIS_COLORS: [egui::Color32; 3] = [
 ];
 const AXIS_NAMES: [&str; 3] = ["X", "Y", "Z"];
 
+/// How much of a value to show before it stops being readable.
+const VALUE_PREVIEW: usize = 160;
+
+/// A read-only value, short enough to belong in a row.
+///
+/// An array gets its length first, because "4 ops" is the thing you actually
+/// want from a voxel recipe and the JSON behind it is not reviewable in a
+/// side panel at any width.
+fn summarise(value: &serde_json::Value) -> String {
+    let text = value.to_string();
+    let prefix = match value {
+        serde_json::Value::Array(items) => format!("{} items  ", items.len()),
+        _ => String::new(),
+    };
+    if text.chars().count() <= VALUE_PREVIEW {
+        return format!("{prefix}{text}");
+    }
+    let clipped: String = text.chars().take(VALUE_PREVIEW).collect();
+    format!("{prefix}{clipped}…")
+}
+
 /// Draw every panel, returning whatever the human asked for.
 ///
 /// Panels attach to a root `Ui`, and **order matters**: the first added is
@@ -855,13 +876,21 @@ fn inspect_component(
                     }
                 }
                 serde_json::Value::String(s) => {
-                    ui.label(egui::RichText::new(s).monospace().weak());
+                    ui.add(egui::Label::new(egui::RichText::new(s).monospace().weak()).wrap());
                 }
                 // Nested objects (an AssetRef, say) are shown read-only rather
                 // than half-edited. Editing an asset reference is what the
                 // Assets panel is for.
+                //
+                // **Wrapped, and summarised when long.** A voxel volume's op
+                // list is a few hundred characters of JSON on one line, and an
+                // unwrapped label demands the width to draw it: the inspector
+                // sized itself to the widest thing in it, took most of the
+                // window, and squeezed the viewport into a strip. A label that
+                // wraps asks for no particular width, so no single field can
+                // dictate the layout again.
                 _ => {
-                    ui.weak(current.to_string());
+                    ui.add(egui::Label::new(egui::RichText::new(summarise(current)).weak()).wrap());
                 }
             }
         });
