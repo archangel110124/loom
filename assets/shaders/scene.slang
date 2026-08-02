@@ -103,13 +103,19 @@ struct Push {
 // and the direction things are lit from are the same fact.
 // ---------------------------------------------------------------------------
 
+// **These are linear, and were converted rather than re-eyeballed.** They used
+// to be the values that looked right on screen, which — with no sRGB encode on
+// the way out — meant they were sRGB numbers being used as if they were linear.
+// Fixing the encode made every one of them a gamma too bright. Each was passed
+// through the sRGB-to-linear transfer function once, so the sky looks exactly
+// as it did before while the arithmetic underneath it is now meaningful.
 static const float3 SUN_DIRECTION = normalize(float3(0.4, 0.9, 0.3));
-static const float3 SKY_ZENITH = float3(0.18, 0.34, 0.62);
-static const float3 SKY_HORIZON = float3(0.66, 0.74, 0.80);
+static const float3 SKY_ZENITH = float3(0.0272, 0.0946, 0.3424);
+static const float3 SKY_HORIZON = float3(0.3931, 0.5071, 0.6038);
 // Not near-black. Real ground bounces a great deal of light back up, and a
 // downward-facing surface lit by a black "ground" reads as a silhouette — which
 // defeats the point of a render the agent is supposed to be able to inspect.
-static const float3 GROUND_COLOR = float3(0.26, 0.23, 0.20);
+static const float3 GROUND_COLOR = float3(0.0550, 0.0432, 0.0331);
 /// How much of the sky's colour reaches a surface, and how much the sun adds.
 /// Tuned together so an unlit face stays readable without washing out.
 static const float AMBIENT_STRENGTH = 0.95;
@@ -300,6 +306,19 @@ float4 sampleMap(uint index, float2 uv) {
     return textures[NonUniformResourceIndex(index)].Sample(uv);
 }
 
+/// How much coarser the macro variation is than the detail tiling.
+///
+/// A tiled texture reads as a repeating stamp the moment you can see more than
+/// a few tiles at once, and terrain is nothing but that. Sampling the *same*
+/// texture at a small fraction of the frequency gives broad lush and dry
+/// patches that break the repeat without needing a second texture, a second
+/// UV set, or anything authored.
+static const float MACRO_SCALE = 1.0 / 26.0;
+/// Luminance the modulation is neutral at, so the macro term redistributes
+/// brightness instead of darkening everything.
+static const float MACRO_PIVOT = 0.36;
+static const float MACRO_STRENGTH = 1.15;
+
 /// Project a texture down the three world axes and blend by the normal.
 ///
 /// **This is what voxel terrain needs.** Surface Nets places a vertex anywhere
@@ -412,6 +431,16 @@ float4 fragmentMain(VSOutput in) : SV_Target {
             // Multiplied, not replaced: the albedo factor stays useful as a
             // tint, which is how one texture dresses several objects.
             albedo *= sampled.rgb;
+
+            if (projected) {
+                // One extra sample, top-down only. The vertical projection is
+                // enough because this varies over tens of metres and nobody
+                // reads large-scale colour off a cliff face; paying for three
+                // would triple the cost of the cheapest half of the effect.
+                float3 wide = sampleMap(m.maps.x, projectedUv.xz * MACRO_SCALE).rgb;
+                float luma = dot(wide, float3(0.2126, 0.7152, 0.0722));
+                albedo *= max((luma - MACRO_PIVOT) * MACRO_STRENGTH + 1.0, 0.0);
+            }
         }
 
         if (m.maps.y != NO_TEXTURE) {

@@ -23,7 +23,24 @@ use loom_render_graph::{Access, RenderGraph, Transition};
 use crate::debug_names::DebugNames;
 use crate::{Device, Instance};
 
-pub(crate) const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+/// **sRGB, not UNORM, and that is the whole colour pipeline in one word.**
+///
+/// Every lighting term in `scene.slang` is computed in linear light, which is
+/// the only space where adding two lights or multiplying an albedo by a
+/// cosine means anything. Those linear values then have to be *encoded* before
+/// they land in eight bits, because every viewer that opens the PNG will read
+/// them back as sRGB.
+///
+/// With `UNORM` nothing encoded them, so the whole image was displayed about a
+/// gamma too dark. It went unnoticed for a long time because every colour in
+/// the engine was a constant somebody had tuned until it looked right on
+/// screen — which quietly folded the missing encode into the constants. The
+/// first real sRGB texture, correctly linearised on read and then never
+/// re-encoded on write, is what made it obvious.
+///
+/// `_SRGB` makes the hardware do the encode on write, so the bytes read back
+/// for the PNG are already in the space the PNG says they are in.
+pub(crate) const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 pub(crate) const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 /// One object to draw.

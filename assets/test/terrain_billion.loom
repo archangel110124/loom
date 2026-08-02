@@ -34,6 +34,16 @@
 format = 1
 id = "a9f24e60-7c13-4b8d-95e2-3f6081c7ad54"
 
+[[asset]]
+key = "grass_albedo"
+id = "3b8e1f45-9c20-4d67-a8f1-5e0c2b7d9a36"
+path = "../textures/grass_albedo.png"
+
+[[asset]]
+key = "grass_normal"
+id = "6d21c908-4f73-4a5e-b39c-8071e5f24bc8"
+path = "../textures/grass_normal.png"
+
 [[node]]
 name = "World"
 
@@ -82,3 +92,23 @@ parent = "World"
   center = [420.0, 36.0, 430.0]
   radius = 34.0
   mode = "subtract"
+
+  # Grassland. **Triplanar is not optional here**: Surface Nets emits no UVs at
+  # all, so a UV-mapped material would sample a single texel of this texture
+  # across the entire world. Projecting from world space also keeps the blades
+  # the same physical size on a flat meadow and on the wall of a crater.
+  #
+  # uv_scale 0.5 puts one tile every 2 m, about the scale real grass reads at.
+  # Larger tiles look like carpet; smaller ones alias into noise as soon as the
+  # camera pulls back.
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  metallic = 0.0
+  # Grass is not glossy. Low roughness puts a sheen across the whole meadow
+  # that reads as wet plastic.
+  roughness = 0.92
+  albedo_map = { asset = "grass_albedo" }
+  normal_map = { asset = "grass_normal" }
+  uv_scale = [0.5, 0.5]
+  triplanar = true
+

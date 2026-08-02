@@ -715,13 +715,16 @@ fn scene_asset_path(scene: &Scene, key: &str) -> Option<String> {
 
 /// Distinct per-object colours until materials exist (M5).
 fn palette(index: usize) -> [f32; 3] {
+    // Linear, converted from the sRGB values these used to be. The renderer
+    // encodes on write now, so a colour written here is a physical quantity
+    // rather than a screen value — and the two differ by a gamma.
     const COLORS: [[f32; 3]; 6] = [
-        [0.85, 0.35, 0.35],
-        [0.35, 0.75, 0.85],
-        [0.90, 0.75, 0.35],
-        [0.55, 0.80, 0.45],
-        [0.70, 0.50, 0.85],
-        [0.80, 0.55, 0.40],
+        [0.6921, 0.1005, 0.1005],
+        [0.1005, 0.5225, 0.6921],
+        [0.7874, 0.5225, 0.1005],
+        [0.2633, 0.6038, 0.1706],
+        [0.4480, 0.2140, 0.6921],
+        [0.6038, 0.2633, 0.1329],
     ];
     COLORS[index % COLORS.len()]
 }
