@@ -1696,7 +1696,14 @@ pub(crate) fn create_particle_pipeline(
     let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
         .color_write_mask(vk::ColorComponentFlags::RGBA)
         .blend_enable(true)
-        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        // **Premultiplied alpha**, which is what lets one pipeline draw both
+        // smoke and fire. The shader multiplies colour by alpha itself, so
+        // `src = ONE`; a particle that then reports alpha 0 contributes its
+        // colour and occludes nothing, which is exactly additive blending.
+        // Fire needs to add light rather than cover what is behind it, and the
+        // alternative — a second pipeline and a second sorted draw — costs a
+        // pass to express something the blend equation already can.
+        .src_color_blend_factor(vk::BlendFactor::ONE)
         .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
         .color_blend_op(vk::BlendOp::ADD)
         .src_alpha_blend_factor(vk::BlendFactor::ONE)

@@ -1,0 +1,195 @@
+# An explosion, authored out of parts the engine already had.
+#
+# There is no `Explosion` component and there should not be one. A blast is a
+# flash of fire, a cloud of smoke a beat behind it, and a shove applied to
+# whatever is nearby — three things that exist independently and are worth
+# having independently. Fusing them into one component would buy a shorter
+# file and cost the ability to author anything that is not exactly this.
+#
+# What the emitters needed to express it was one-shot behaviour: `burst`
+# releases everything at an instant instead of trickling it, `delay` stages the
+# smoke behind the fire, and `duration` stops the tail rather than letting it
+# smoulder for the rest of the scene. Those are three fields, not a subsystem.
+#
+# The shove is `Physics::apply_blast`, which respects cover — a crate behind
+# the wall stays where it is, and that is visible in one render.
+#
+#   loom render assets/test/explosion.loom --sim 12  --out flash.png
+#   loom render assets/test/explosion.loom --sim 90  --out smoke.png
+#
+# The fire is gone by the second one and the smoke is still climbing, which is
+# the staging working.
+
+[scene]
+format = 1
+id = "5e2a9c74-1f38-4b06-9d52-8c73e1a4f0b9"
+
+# The force. Same node as nothing else — the fire and smoke hang off it as
+# children, so moving this one node moves the whole event.
+[[node]]
+name = "Blast"
+
+  [node.components.Blast]
+  radius = 7.0
+  # 8 kg crates, so this is about 15 m/s at the centre — thrown, not deleted.
+  impulse = 120.0
+  delay = 0.0
+
+# ---------------------------------------------------------------------------
+# The fireball. Additive, because overlapping alpha-blended flames darken each
+# other into a grey-brown cloud, while additive ones get brighter where they
+# pile up — which is what fire does.
+#
+# Short-lived and fast: a fireball is over in under half a second, and the
+# thing that lingers is smoke, not flame.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Fire"
+parent = "Blast"
+transform = { pos = [0.0, 0.6, 0.0] }
+
+  [node.components.ParticleEmitter]
+  burst = 160
+  rate = 220.0
+  duration = 0.12
+  lifetime = 0.42
+  lifetime_jitter = 0.45
+  speed = 11.0
+  spread_degrees = 180.0
+  radius = 0.35
+  gravity = 3.0
+  drag = 4.5
+  turbulence = 6.0
+  turbulence_scale = 0.9
+  size = [1.1, 3.4]
+  # Hot white core cooling to deep orange. Linear RGB, above 1.0 nowhere —
+  # these are physical intensities and the renderer encodes sRGB on write.
+  color_start = [1.0, 0.85, 0.45]
+  color_end = [0.65, 0.13, 0.02]
+  # Low, because additive light ACCUMULATES: a hundred sprites at 0.9 each
+  # saturate to a flat white dome that reads as a lamp, not a fireball. At 0.3
+  # only the core blows out and the edges stay orange, which is the shape of
+  # the thing.
+  alpha = [0.3, 0.0]
+  additive = true
+  seed = 21
+
+# ---------------------------------------------------------------------------
+# Smoke. Ordinary alpha, because smoke occludes. Delayed a tenth of a second
+# so the fire reads first, and given a short tail so the fireball appears to
+# feed it rather than the smoke simply existing.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Smoke"
+parent = "Blast"
+transform = { pos = [0.0, 0.5, 0.0] }
+
+  [node.components.ParticleEmitter]
+  burst = 200
+  rate = 260.0
+  delay = 0.1
+  duration = 1.1
+  lifetime = 5.0
+  lifetime_jitter = 0.4
+  speed = 5.5
+  spread_degrees = 120.0
+  radius = 0.5
+  gravity = 1.6
+  drag = 1.9
+  turbulence = 2.2
+  turbulence_scale = 0.45
+  size = [1.6, 8.0]
+  color_start = [0.12, 0.10, 0.09]
+  color_end = [0.42, 0.41, 0.40]
+  alpha = [0.5, 0.0]
+  seed = 7
+
+# ---------------------------------------------------------------------------
+# Things to throw. Two crates in the open and one behind a wall — the blast
+# reaches the first two and not the third, which is `apply_blast`'s cover
+# check doing its job somewhere you can see it.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "CrateNear"
+parent = "Blast"
+transform = { pos = [2.0, 0.5, 0.6], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 8.0
+
+  [node.components.Material]
+  albedo = [0.42, 0.28, 0.14]
+  roughness = 0.8
+
+[[node]]
+name = "CrateFar"
+parent = "Blast"
+transform = { pos = [-2.6, 0.5, -1.2], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 8.0
+
+  [node.components.Material]
+  albedo = [0.42, 0.28, 0.14]
+  roughness = 0.8
+
+# Behind the wall. Well inside the blast radius, and it should not move.
+[[node]]
+name = "CrateSheltered"
+parent = "Blast"
+transform = { pos = [5.2, 0.5, 0.0], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 8.0
+
+  [node.components.Material]
+  albedo = [0.16, 0.30, 0.44]
+  roughness = 0.8
+
+[[node]]
+name = "Wall"
+parent = "Blast"
+transform = { pos = [4.0, 1.2, 0.0], scale = [0.3, 1.2, 3.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.38, 0.36, 0.34]
+  roughness = 0.9
+
+[[node]]
+name = "Ground"
+parent = "Blast"
+transform = { pos = [0.0, -0.25, 0.0], scale = [16.0, 0.25, 16.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.26, 0.25, 0.23]
+  roughness = 0.95
+
+[[node]]
+name = "Sun"
+parent = "Blast"
+transform = { pos = [3.0, 7.0, 5.0] }
+
+  [node.components.Light]
+  intensity = 300.0
+  color = [1.0, 0.96, 0.9]

@@ -60,7 +60,11 @@ struct MaterialData {
 };
 
 struct ParticleInstance {
-    float4 position;   // xyz world, w radius
+    // xyz world, w radius. A NEGATIVE radius marks an additive particle —
+    // fire, a spark, anything that emits light rather than blocking it. A
+    // radius is never legitimately negative, so the sign is free to carry one
+    // bit and the instance stays 32 bytes.
+    float4 position;
     float4 color;      // rgb linear, a opacity
 };
 
@@ -665,6 +669,9 @@ struct ParticleOutput {
     // hanging in front of the haze at full strength.
     float3 worldPos : WORLDPOS;
     nointerpolation float seed : SEED;
+    /// 1.0 for a particle that adds light instead of covering what is behind
+    /// it. Carried from the sign of the radius — see `ParticleInstance`.
+    nointerpolation float additive : ADDITIVE;
 };
 
 [shader("vertex")]
@@ -694,7 +701,7 @@ ParticleOutput particleVertexMain(uint vertexID: SV_VertexID) {
     float sa = sin(angle), ca = cos(angle);
     float2 spun = float2(local.x * ca - local.y * sa, local.x * sa + local.y * ca);
 
-    float3 world = p.position.xyz + (right * spun.x + up * spun.y) * p.position.w;
+    float3 world = p.position.xyz + (right * spun.x + up * spun.y) * abs(p.position.w);
 
     ParticleOutput out;
     // `mvp` of the reserved object slot is the view-projection — see the note
@@ -704,6 +711,7 @@ ParticleOutput particleVertexMain(uint vertexID: SV_VertexID) {
     out.color = p.color;
     out.worldPos = world;
     out.seed = float(index);
+    out.additive = p.position.w < 0.0 ? 1.0 : 0.0;
     return out;
 }
 
@@ -737,8 +745,21 @@ float4 particleFragmentMain(ParticleOutput in) : SV_Target {
     }
     float3 toEye = push.eye.xyz - in.worldPos;
     float fog = fogAmount(push.eye.xyz, in.worldPos);
+    alpha = saturate(alpha);
+
+    if (in.additive > 0.5) {
+        // Fog ATTENUATES an emitter, it does not tint it. Blending toward the
+        // fog colour would ADD grey light to the scene, so a distant fireball
+        // would glow brighter through thicker haze.
+        float3 rgb = in.color.rgb * (1.0 - fog);
+        // Premultiplied by alpha for the brightness, then alpha zeroed: the
+        // blend adds this colour and occludes nothing behind it.
+        return float4(rgb * alpha, 0.0);
+    }
+
     float3 rgb = lerp(in.color.rgb, fogColor(-normalize(toEye)), fog);
-    return float4(rgb, saturate(alpha));
+    // Premultiplied: the pipeline's source factor is ONE.
+    return float4(rgb * alpha, alpha);
 }
 
 // ---------------------------------------------------------------------------

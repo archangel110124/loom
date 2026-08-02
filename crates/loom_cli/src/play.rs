@@ -369,6 +369,11 @@ impl Sim {
         world.propagate_transforms();
     }
 
+    /// Set off a blast in the simulated world.
+    pub fn apply_blast(&mut self, centre: [f32; 3], radius: f32, impulse: f32) -> usize {
+        self.physics.apply_blast(centre, radius, impulse)
+    }
+
     #[must_use]
     pub fn body_count(&self) -> usize {
         self.physics.body_count()
@@ -454,6 +459,13 @@ pub struct Runner {
     character_scripts: std::collections::BTreeMap<loom_ecs::Entity, String>,
     /// Scripts on ordinary nodes, which write a transform directly.
     node_scripts: Vec<(loom_ecs::Entity, String)>,
+    /// Blasts that have not gone off yet: the tick they fire on, and what
+    /// they do. Sorted by tick and drained from the front.
+    ///
+    /// Resolved once at load rather than scanned for every tick, and the
+    /// position is taken then too — a blast is an event at a place, and the
+    /// place is where the node was when the scene started.
+    pending_blasts: Vec<(u64, [f32; 3], f32, f32)>,
     /// This tick's player input, folded into every character's `Motion`.
     ///
     /// Headless it stays at its default of all-zero, which is right: nobody is
@@ -495,6 +507,37 @@ impl Runner {
             }
         }
 
+        // Blasts, in the order they go off.
+        let mut pending_blasts = Vec::new();
+        for entity in world.entities() {
+            let (Some(component), Some(global)) =
+                (world.blast(*entity), world.global_transform(*entity))
+            else {
+                continue;
+            };
+            #[allow(clippy::cast_possible_truncation)]
+            let scalar = |name: &str, fallback: f32| {
+                component
+                    .get(name)
+                    .and_then(serde_json::Value::as_f64)
+                    .map_or(fallback, |v| v as f32)
+            };
+            let defaults = loom_scene::components::Blast::default();
+            let delay = scalar("delay", defaults.delay).max(0.0);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            // Ticks, not seconds, because that is what the simulation counts.
+            // Rounded up so a blast never fires early, which would put the
+            // force ahead of the flash it is meant to share an instant with.
+            let at_tick = (delay / TICK_SECONDS).ceil() as u64 + 1;
+            pending_blasts.push((
+                at_tick,
+                [global.matrix[12], global.matrix[13], global.matrix[14]],
+                scalar("radius", defaults.radius),
+                scalar("impulse", defaults.impulse),
+            ));
+        }
+        pending_blasts.sort_by_key(|(tick, ..)| std::cmp::Reverse(*tick));
+
         Ok(Self {
             // Built from the world as authored. A script that moves a body
             // after this point is not fed back into the solver; scripted
@@ -504,6 +547,7 @@ impl Runner {
             host,
             character_scripts,
             node_scripts,
+            pending_blasts,
             input: loom_script::Motion::default(),
         })
     }
@@ -517,6 +561,7 @@ impl Runner {
             host: loom_script::ScriptHost::default(),
             character_scripts: std::collections::BTreeMap::new(),
             node_scripts: Vec::new(),
+            pending_blasts: Vec::new(),
             input: loom_script::Motion::default(),
         }
     }
@@ -531,6 +576,22 @@ impl Runner {
     /// [`loom_script::ScriptError`] from whichever script failed.
     pub fn tick(&mut self, world: &mut World, tick: u64) -> Result<(), loom_script::ScriptError> {
         self.physics.step(1);
+
+        // Blasts go off after the step, because the tree the cover check walks
+        // is built during it — before the first step every body is in the open
+        // and a wall shields nothing.
+        //
+        // Sorted descending, so the ones that are due are at the end and pop
+        // in order. A scheduled event is not scanned for.
+        while self
+            .pending_blasts
+            .last()
+            .is_some_and(|(at, ..)| *at <= tick)
+        {
+            let (_, centre, radius, impulse) = self.pending_blasts.pop().expect("just peeked");
+            self.physics.apply_blast(centre, radius, impulse);
+        }
+
         self.physics.write_back(world);
 
         if self.physics.character_count() > 0 {

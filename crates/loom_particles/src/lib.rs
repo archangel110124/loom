@@ -79,6 +79,25 @@ pub struct Emitter {
     pub turbulence: f32,
     /// Spatial scale of that swirl, in cycles per metre.
     pub turbulence_scale: f32,
+
+    /// Particles released all at once when the emitter starts.
+    ///
+    /// **This is what makes an explosion expressible.** A rate is a tap; a
+    /// blast is a single release of everything at the same instant, and no
+    /// number of particles per second is that.
+    pub burst: u32,
+    /// Seconds before this emitter does anything.
+    ///
+    /// Lets one scene stage an event out of several emitters: an explosion is
+    /// a fire flash now and smoke a beat later, and the delay is what puts
+    /// them in that order without any notion of a timeline.
+    pub delay: f32,
+    /// Seconds of continuous emission after `delay`. Zero means forever.
+    ///
+    /// Forever is right for a chimney and wrong for a blast, where the fire
+    /// feeds smoke for a moment and then stops. Without this an explosion
+    /// either puffs once or smoulders for the rest of the scene.
+    pub duration: f32,
     pub seed: u64,
 }
 
@@ -95,6 +114,9 @@ impl Default for Emitter {
             drag: 0.8,
             turbulence: 1.4,
             turbulence_scale: 0.35,
+            burst: 0,
+            delay: 0.0,
+            duration: 0.0,
             seed: 1,
         }
     }
@@ -114,6 +136,11 @@ pub struct System {
     /// Ticks stepped. Part of the state, so it is reproducible — never a clock
     /// reading (never-do #8).
     ticks: u64,
+    /// Whether the one-shot burst has been released.
+    ///
+    /// A flag rather than a time comparison: the burst has to fire exactly
+    /// once, and "is the age past the delay" is true on every step after it.
+    burst_done: bool,
 }
 
 impl System {
@@ -126,6 +153,7 @@ impl System {
             rng: noise::Rng::new(seed ^ 0x9E37_79B9_7F4A_7C15),
             owed: 0.0,
             ticks: 0,
+            burst_done: false,
         }
     }
 
@@ -194,10 +222,30 @@ impl System {
     }
 
     fn spawn(&mut self, dt: f32, emitter: &Emitter, origin: [f32; 3]) {
-        self.owed += emitter.rate.max(0.0) * dt;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let count = self.owed as u32;
-        self.owed -= f32::from(u16::try_from(count).unwrap_or(u16::MAX));
+        // Seconds simulated so far. From the tick count, never a clock.
+        #[allow(clippy::cast_precision_loss)]
+        let age = self.ticks as f32 * dt;
+        if age < emitter.delay {
+            return;
+        }
+
+        // The burst, exactly once, on the first step at or past the delay.
+        let mut count = 0;
+        if !self.burst_done {
+            self.burst_done = true;
+            count += emitter.burst;
+        }
+
+        // Continuous emission, if it has not run out. A `duration` of zero is
+        // "no limit" rather than "emit nothing" — most emitters are chimneys,
+        // and an unset field must not silently switch one off.
+        if emitter.duration <= 0.0 || age < emitter.delay + emitter.duration {
+            self.owed += emitter.rate.max(0.0) * dt;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let whole = self.owed as u32;
+            self.owed -= f32::from(u16::try_from(whole).unwrap_or(u16::MAX));
+            count += whole;
+        }
 
         for _ in 0..count {
             let mut unit = || self.rng.next_f32();
@@ -303,6 +351,88 @@ mod tests {
 
     /// Buoyancy is what makes smoke smoke. A positive gravity must carry the
     /// plume upward on average.
+    #[test]
+    fn a_burst_releases_everything_at_once() {
+        let emitter = Emitter { rate: 0.0, burst: 50, lifetime: 10.0, ..Emitter::default() };
+        let mut system = System::new(7);
+
+        system.step(1.0 / 60.0, &emitter, [0.0; 3]);
+
+        assert_eq!(system.particles().len(), 50, "the whole blast, on one tick");
+    }
+
+    /// A burst that repeats is a fountain. The flag has to latch.
+    #[test]
+    fn a_burst_fires_only_once() {
+        let emitter = Emitter { rate: 0.0, burst: 20, lifetime: 100.0, ..Emitter::default() };
+        let mut system = System::new(7);
+
+        for _ in 0..120 {
+            system.step(1.0 / 60.0, &emitter, [0.0; 3]);
+        }
+
+        assert_eq!(system.particles().len(), 20, "two seconds later, still one blast");
+    }
+
+    /// Staging an explosion out of several emitters depends on this: the smoke
+    /// must not already be there when the fire goes off.
+    #[test]
+    fn a_delayed_emitter_waits_its_turn() {
+        let emitter = Emitter { rate: 0.0, burst: 10, delay: 0.5, lifetime: 10.0, ..Emitter::default() };
+        let mut system = System::new(7);
+
+        for _ in 0..20 {
+            system.step(1.0 / 60.0, &emitter, [0.0; 3]);
+        }
+        assert!(system.particles().is_empty(), "a third of a second in, nothing yet");
+
+        for _ in 0..20 {
+            system.step(1.0 / 60.0, &emitter, [0.0; 3]);
+        }
+        assert_eq!(system.particles().len(), 10, "past the delay, the blast lands");
+    }
+
+    #[test]
+    fn emission_stops_at_the_end_of_its_duration() {
+        let emitter = Emitter {
+            rate: 60.0,
+            duration: 0.5,
+            lifetime: 100.0,
+            ..Emitter::default()
+        };
+        let mut system = System::new(7);
+
+        for _ in 0..30 {
+            system.step(1.0 / 60.0, &emitter, [0.0; 3]);
+        }
+        let at_the_limit = system.particles().len();
+
+        for _ in 0..120 {
+            system.step(1.0 / 60.0, &emitter, [0.0; 3]);
+        }
+
+        assert!(at_the_limit >= 25, "should have emitted for half a second: {at_the_limit}");
+        assert_eq!(
+            system.particles().len(),
+            at_the_limit,
+            "two more seconds must add nothing"
+        );
+    }
+
+    /// An unset `duration` must not switch an emitter off. Most emitters are
+    /// chimneys and never set it.
+    #[test]
+    fn a_duration_of_zero_emits_forever() {
+        let emitter = Emitter { rate: 60.0, lifetime: 100.0, ..Emitter::default() };
+        let mut system = System::new(7);
+
+        for _ in 0..120 {
+            system.step(1.0 / 60.0, &emitter, [0.0; 3]);
+        }
+
+        assert!(system.particles().len() > 100, "still going: {}", system.particles().len());
+    }
+
     #[test]
     fn a_buoyant_plume_rises() {
         let emitter = Emitter { gravity: 2.0, turbulence: 0.0, ..Emitter::default() };

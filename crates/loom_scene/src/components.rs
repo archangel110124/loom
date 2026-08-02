@@ -278,6 +278,33 @@ pub struct ParticleEmitter {
     /// where particles pop out of existence.
     #[schemars(inner(range(min = 0.0, max = 1.0)))]
     pub alpha: [f32; 2],
+    /// Particles released all at once when the emitter starts.
+    ///
+    /// **This is what makes an explosion expressible.** A rate is a tap; a
+    /// blast is everything released at the same instant, and no number of
+    /// particles per second is that. Set `rate = 0` for a pure one-shot.
+    #[schemars(range(min = 0, max = 100000))]
+    pub burst: u32,
+    /// Seconds before this emitter does anything.
+    ///
+    /// How an explosion is staged out of ordinary emitters: the fire flash
+    /// now, the smoke a beat later, both plain `ParticleEmitter` nodes under
+    /// one parent. No timeline concept required.
+    #[schemars(range(min = 0.0, max = 3600.0))]
+    pub delay: f32,
+    /// Seconds of continuous emission after `delay`. **Zero means forever.**
+    ///
+    /// Forever is right for a chimney and wrong for a blast, where the
+    /// fireball feeds smoke for a moment and then stops.
+    #[schemars(range(min = 0.0, max = 3600.0))]
+    pub duration: f32,
+    /// Add light instead of covering what is behind.
+    ///
+    /// **Fire needs this.** An alpha-blended flame is a grey-brown cloud tinted
+    /// orange, because overlapping sprites darken each other; an additive one
+    /// gets brighter where it piles up, which is what a fireball does. Wrong
+    /// for smoke, which occludes.
+    pub additive: bool,
     /// Reproducibility, authored rather than sampled from the clock.
     pub seed: u32,
 }
@@ -299,6 +326,10 @@ impl Default for ParticleEmitter {
             color_start: [0.32, 0.30, 0.29],
             color_end: [0.62, 0.62, 0.64],
             alpha: [0.55, 0.0],
+            burst: 0,
+            delay: 0.0,
+            duration: 0.0,
+            additive: false,
             seed: 1,
         }
     }
@@ -384,6 +415,51 @@ impl Default for Camera {
     }
 }
 
+/// A shove applied to everything dynamic near this node, once.
+///
+/// The *force* half of an explosion. The look of one is `ParticleEmitter`
+/// nodes — a `burst` of additive fire and a delayed cloud of smoke — and the
+/// two are deliberately separate components: a shockwave through a doorway has
+/// no flame, and a gas flare has no force. Authoring an explosion means
+/// putting both on one node, which is a scene decision rather than an engine
+/// one.
+///
+/// **Cover works.** A body with something solid between it and this node is
+/// not pushed at all. An explosion that ignores the level is both wrong and
+/// unteachable — nobody learns to duck behind a wall that does nothing.
+///
+/// Static geometry never moves, and neither does a `CharacterController`: a
+/// character's velocity belongs to its movement script, and knockback is that
+/// script's decision rather than something applied behind its back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Blast {
+    /// Metres. The push falls to nothing at this distance.
+    #[schemars(range(min = 0.0, max = 10000.0))]
+    pub radius: f32,
+    /// Newton-seconds delivered to a body at the centre, falling off linearly
+    /// to zero at `radius`. A 10 kg crate takes `impulse / 10` m/s.
+    #[schemars(range(min = 0.0, max = 1000000.0))]
+    pub impulse: f32,
+    /// Seconds into the simulation before it goes off. Fires exactly once.
+    ///
+    /// Matches `ParticleEmitter.delay`, so the force and the flash can be put
+    /// on the same instant — or deliberately not, for a charge that flashes
+    /// before it hits.
+    #[schemars(range(min = 0.0, max = 3600.0))]
+    pub delay: f32,
+}
+
+impl Default for Blast {
+    fn default() -> Self {
+        Self {
+            radius: 6.0,
+            impulse: 400.0,
+            delay: 0.0,
+        }
+    }
+}
+
 /// Attaches a sandboxed Rhai script to the node.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -411,6 +487,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<ParticleEmitter>("ParticleEmitter");
     reg.register::<Camera>("Camera");
     reg.register::<CharacterController>("CharacterController");
+    reg.register::<Blast>("Blast");
     reg.register::<Script>("Script");
     reg
 }

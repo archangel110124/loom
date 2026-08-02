@@ -56,6 +56,13 @@ fn parse(component: &serde_json::Value) -> (loom_particles::Emitter, Visual) {
             drag: f("drag", defaults.drag),
             turbulence: f("turbulence", defaults.turbulence),
             turbulence_scale: f("turbulence_scale", defaults.turbulence_scale),
+            #[allow(clippy::cast_possible_truncation)]
+            burst: component
+                .get("burst")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32,
+            delay: f("delay", defaults.delay),
+            duration: f("duration", defaults.duration),
             seed: component
                 .get("seed")
                 .and_then(serde_json::Value::as_u64)
@@ -66,6 +73,10 @@ fn parse(component: &serde_json::Value) -> (loom_particles::Emitter, Visual) {
             color_start: v("color_start", [0.32, 0.30, 0.29]),
             color_end: v("color_end", [0.62, 0.62, 0.64]),
             alpha: pair("alpha", [0.55, 0.0]),
+            additive: component
+                .get("additive")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
         },
     )
 }
@@ -76,6 +87,7 @@ struct Visual {
     color_start: [f32; 3],
     color_end: [f32; 3],
     alpha: [f32; 2],
+    additive: bool,
 }
 
 /// One emitter, kept alive across frames.
@@ -124,10 +136,19 @@ impl Plumes {
             let mut system = loom_particles::System::new(emitter.seed);
             // Warm up once, here, rather than every frame. An emitter opened
             // cold is a single dot at its origin, which reads as broken.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let warm = ((emitter.lifetime * 2.0) / DT).ceil() as u32;
-            for _ in 0..warm {
-                system.step(DT, &emitter, origin);
+            //
+            // **Not a one-shot, though.** Warming an explosion runs its burst
+            // and lets it die before the window ever draws a frame, so opening
+            // the scene would show the aftermath of a blast nobody saw. A
+            // steady plume wants to be caught mid-flow; an event wants to be
+            // caught at its beginning.
+            let one_shot = emitter.burst > 0 || emitter.duration > 0.0 || emitter.delay > 0.0;
+            if !one_shot {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let warm = ((emitter.lifetime * 2.0) / DT).ceil() as u32;
+                for _ in 0..warm {
+                    system.step(DT, &emitter, origin);
+                }
             }
             plumes.live.push(Live { system, emitter, visual, origin });
         }
@@ -172,8 +193,12 @@ fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
     // Fade in as well as out. Particles that appear at full opacity pop, and
     // the pop is at the emitter, where the eye already is.
     let fade = (t * 8.0).min(1.0);
+    // Negative radius marks an additive particle. See `ParticleInstance` in
+    // scene.slang: a radius is never legitimately negative, so its sign
+    // carries the flag and the instance stays 32 bytes.
+    let radius = if visual.additive { -size * 0.5 } else { size * 0.5 };
     ParticleInstance {
-        position: [p.position[0], p.position[1], p.position[2], size * 0.5],
+        position: [p.position[0], p.position[1], p.position[2], radius],
         color: [
             lerp(visual.color_start[0], visual.color_end[0]),
             lerp(visual.color_start[1], visual.color_end[1]),

@@ -516,6 +516,19 @@ impl Physics {
     /// collider and immediately casting against it, which returns `None` and
     /// looks like a miss rather than a mistake. Step first.
     pub fn raycast(&self, origin: [f32; 3], direction: [f32; 3], max_distance: f32) -> Option<RayHit> {
+        self.cast(origin, direction, max_distance, QueryFilter::default())
+    }
+
+    /// The shared cast. Everything that queries the world goes through here so
+    /// there is one description of what a ray does; callers differ only in
+    /// what they ask it to ignore.
+    fn cast(
+        &self,
+        origin: [f32; 3],
+        direction: [f32; 3],
+        max_distance: f32,
+        filter: QueryFilter,
+    ) -> Option<RayHit> {
         let dir = Vector::new(direction[0], direction[1], direction[2]);
         // A zero direction is a degenerate ray, not a hit at the origin. Rapier
         // would normalise it into a NaN and report nonsense.
@@ -529,7 +542,7 @@ impl Physics {
             self.narrow_phase.query_dispatcher(),
             &self.bodies,
             &self.colliders,
-            QueryFilter::default(),
+            filter,
         );
         // `solid: true` — a ray starting inside a shape hits immediately at
         // distance zero rather than passing through and striking the far wall
@@ -551,11 +564,72 @@ impl Physics {
     /// through a wall.
     #[must_use]
     pub fn line_of_sight(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        self.sees(from, to, QueryFilter::default())
+    }
+
+    /// Line of sight, ignoring whatever `filter` excludes.
+    ///
+    /// **A body occludes itself.** Checking cover for a crate means casting at
+    /// the crate's *centre*, and its own surface is in the way — half a metre
+    /// short for a one-metre crate. The pullback below only covers a target
+    /// resting exactly on a surface, so the body under test has to be excluded
+    /// outright or nothing is ever in the open.
+    fn sees(&self, from: [f32; 3], to: [f32; 3], filter: QueryFilter) -> bool {
+        /// A surface the origin is touching is not cover *from* the origin.
+        ///
+        /// A blast lying on the floor starts its sight rays inside that floor,
+        /// so every one of them hit at distance zero and reported the ground
+        /// as cover — the explosion shielded from itself by the thing it was
+        /// resting on, doing nothing at all. Authoring a blast at ground level
+        /// is the obvious thing to do, and it was the one thing that could not
+        /// work.
+        ///
+        /// The cost is a blind spot: something genuinely within a centimetre
+        /// of the origin does not shield. That is the better failure — a blast
+        /// buried inside a wall leaking through it is rarer, and far less
+        /// confusing, than one on the ground being inert.
+        const TOUCHING: f32 = 0.01;
+
         let delta = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
         let distance = delta.iter().map(|c| c * c).sum::<f32>().sqrt();
-        // Pulled back slightly so a target standing *on* the surface it is
-        // checked against does not occlude itself.
-        self.raycast(from, delta, distance - 1e-3).is_none()
+        if distance < 1e-4 {
+            return true;
+        }
+        let unit = [delta[0] / distance, delta[1] / distance, delta[2] / distance];
+
+        // Walk past whatever the origin is touching, then judge the first
+        // thing that is genuinely in the way.
+        //
+        // Testing only the nearest hit is not enough: a blast on the floor
+        // hits the floor at distance zero, and stopping there would declare
+        // everything beyond it — including an actual wall — out of the way.
+        // That is the opposite failure and just as wrong.
+        //
+        // Bounded rather than `loop`: geometry stacked at the origin must not
+        // hang the tick. Four surfaces is already a strange place to be.
+        let mut origin = from;
+        // The far end is pulled back so a target standing *on* the surface it
+        // is checked against does not occlude itself.
+        let mut remaining = distance - 1e-3;
+        for _ in 0..4 {
+            if remaining <= 0.0 {
+                return true;
+            }
+            let Some(hit) = self.cast(origin, unit, remaining, filter) else {
+                return true;
+            };
+            if hit.distance > TOUCHING {
+                return false;
+            }
+            let step = hit.distance + TOUCHING;
+            origin = [
+                origin[0] + unit[0] * step,
+                origin[1] + unit[1] * step,
+                origin[2] + unit[2] * step,
+            ];
+            remaining -= step;
+        }
+        false
     }
 
     /// Put a character capsule in the world.
@@ -698,6 +772,73 @@ impl Physics {
             velocity: [survived.x, survived.y, survived.z],
             grounded: movement.grounded,
         }
+    }
+
+    /// Shove everything dynamic away from a blast.
+    ///
+    /// `impulse` is what a body at the centre would take, in newton-seconds.
+    /// It falls off to nothing at `radius` — linearly, which is not the
+    /// inverse-square of a real shock front but is what a level designer can
+    /// reason about: half way out is half the push, and the edge is the edge.
+    ///
+    /// **Cover works.** A body with something solid between it and the centre
+    /// is skipped entirely, so a crate behind a wall stays put. Without that
+    /// check an explosion is a sphere of force that ignores the level, which
+    /// is both wrong and unteachable — a player cannot learn to take cover
+    /// from a blast that does not care.
+    ///
+    /// Returns how many bodies were moved, so a caller can say so rather than
+    /// guess.
+    ///
+    /// # The world it queries is the one the last `step` left
+    ///
+    /// Same caveat as [`Self::raycast`]: the occlusion check walks the tree
+    /// built during [`Self::step`]. Step first, or every body is in the open.
+    pub fn apply_blast(&mut self, centre: [f32; 3], radius: f32, impulse: f32) -> usize {
+        if !radius.is_finite() || radius <= 0.0 || !impulse.is_finite() {
+            return 0;
+        }
+
+        // Collected first: the line-of-sight check borrows the body set, and
+        // applying an impulse needs it mutably.
+        let mut pushes: Vec<(RigidBodyHandle, Vector)> = Vec::new();
+        for (handle, body) in self.bodies.iter() {
+            if !body.is_dynamic() {
+                continue;
+            }
+            let at = body.translation();
+            let offset = Vector::new(at.x - centre[0], at.y - centre[1], at.z - centre[2]);
+            let distance = offset.length();
+            if distance > radius {
+                continue;
+            }
+
+            // Straight up, for a body sitting exactly on the centre. Any
+            // direction would do; up is the one that looks like an explosion
+            // rather than a body shooting off along whichever axis the
+            // floating-point noise happened to favour.
+            let direction = if distance < 1e-4 {
+                Vector::Y
+            } else {
+                offset / distance
+            };
+
+            let at = [at.x, at.y, at.z];
+            if !self.sees(centre, at, QueryFilter::default().exclude_rigid_body(handle)) {
+                continue;
+            }
+
+            let falloff = 1.0 - distance / radius;
+            pushes.push((handle, direction * impulse * falloff));
+        }
+
+        let moved = pushes.len();
+        for (handle, push) in pushes {
+            if let Some(body) = self.bodies.get_mut(handle) {
+                body.apply_impulse(push, true);
+            }
+        }
+        moved
     }
 
     pub fn body_count(&self) -> usize {
@@ -1320,6 +1461,184 @@ mod tests {
             worst < 2.0,
             "reported {worst} m/s downward while walking on the ground"
         );
+    }
+
+    // -- blast ------------------------------------------------------------
+
+    /// A floor, and a crate resting on it at `x`.
+    fn with_crate(x: f32) -> (Physics, RigidBodyHandle) {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [40.0, 1.0, 40.0]);
+        let body = physics.add_box_body([x, 0.5, 0.0], [0.0, 0.0, 0.0, 1.0], [0.5; 3], 1.0);
+        physics.step();
+        (physics, body)
+    }
+
+    #[test]
+    fn a_blast_throws_a_crate_away_from_it() {
+        let (mut physics, body) = with_crate(3.0);
+
+        let moved = physics.apply_blast([0.0, 0.5, 0.0], 8.0, 40.0);
+        for _ in 0..30 {
+            physics.step();
+        }
+
+        assert_eq!(moved, 1);
+        let at = physics.position(body).expect("body");
+        assert!(at[0] > 4.0, "should have been thrown outward: {at:?}");
+    }
+
+    /// Falloff is the difference between a blast and a uniform shove. Without
+    /// it, standing back from a grenade gains you nothing.
+    #[test]
+    fn a_blast_pushes_harder_up_close() {
+        let (mut near, near_body) = with_crate(1.0);
+        let (mut far, far_body) = with_crate(7.0);
+
+        near.apply_blast([0.0, 0.5, 0.0], 8.0, 60.0);
+        far.apply_blast([0.0, 0.5, 0.0], 8.0, 60.0);
+        for _ in 0..20 {
+            near.step();
+            far.step();
+        }
+
+        let near_moved = near.position(near_body).expect("body")[0] - 1.0;
+        let far_moved = far.position(far_body).expect("body")[0] - 7.0;
+        assert!(
+            near_moved > far_moved * 2.0,
+            "close {near_moved} should far exceed distant {far_moved}"
+        );
+    }
+
+    #[test]
+    fn a_crate_outside_the_radius_is_untouched() {
+        let (mut physics, body) = with_crate(12.0);
+
+        let moved = physics.apply_blast([0.0, 0.5, 0.0], 8.0, 200.0);
+        for _ in 0..20 {
+            physics.step();
+        }
+
+        assert_eq!(moved, 0, "outside the radius");
+        let at = physics.position(body).expect("body");
+        assert!((at[0] - 12.0).abs() < 0.1, "it moved anyway: {at:?}");
+    }
+
+    /// **Cover has to work.** A blast that ignores the level is both wrong and
+    /// unteachable — nobody learns to duck behind a wall that does nothing.
+    #[test]
+    fn a_wall_shields_a_crate_from_a_blast() {
+        let (mut physics, body) = with_crate(4.0);
+        // A wall between the centre and the crate.
+        physics.add_static_box([2.0, 1.5, 0.0], [0.0, 0.0, 0.0, 1.0], [0.3, 1.5, 10.0]);
+        physics.step();
+
+        let moved = physics.apply_blast([0.0, 0.5, 0.0], 10.0, 200.0);
+        for _ in 0..30 {
+            physics.step();
+        }
+
+        assert_eq!(moved, 0, "the wall is in the way");
+        let at = physics.position(body).expect("body");
+        assert!((at[0] - 4.0).abs() < 0.2, "it was pushed through a wall: {at:?}");
+    }
+
+    /// Static geometry is the level. A blast that moved it would tear the
+    /// floor out from under everything standing on it.
+    #[test]
+    fn a_blast_does_not_move_the_level() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [40.0, 1.0, 40.0]);
+        physics.step();
+
+        assert_eq!(physics.apply_blast([0.0, 0.0, 0.0], 50.0, 500.0), 0);
+    }
+
+    /// **A blast does not fling the player.** A character is kinematic: its
+    /// velocity is the movement model's to choose, and an impulse written
+    /// straight into it would be overwritten next tick anyway. Knockback is a
+    /// real feature and it belongs in the movement script, which can see the
+    /// blast and decide what the character does about it — not here, silently
+    /// fighting the script for control of the same number.
+    #[test]
+    fn a_blast_does_not_shove_a_character() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [40.0, 1.0, 40.0]);
+        physics.step();
+        let mut character = physics.add_character([2.0, 1.0, 0.0], CharacterShape::default());
+        physics.move_character(&mut character, [0.0, -1.0, 0.0], 1.0 / 60.0);
+        physics.step();
+        let before = character.position();
+
+        let moved = physics.apply_blast([0.0, 0.5, 0.0], 10.0, 500.0);
+        physics.step();
+
+        assert_eq!(moved, 0, "a kinematic character is not blast debris");
+        assert!(
+            (character.position()[0] - before[0]).abs() < 1e-4,
+            "the controller lost control of its own position: {:?}",
+            character.position()
+        );
+    }
+
+    /// **A grenade resting on the floor still goes off.** The blast centre
+    /// sits on a surface, so the sight ray leaves from inside it and the floor
+    /// reported itself as cover — every body shielded, by the ground they are
+    /// all standing on. Authoring a blast at y = 0 is the obvious thing to do
+    /// and it did nothing at all.
+    #[test]
+    fn a_blast_on_the_ground_is_not_shielded_by_the_ground() {
+        let (mut physics, body) = with_crate(2.0);
+
+        // Exactly on the floor's top surface, which is at y = 0.
+        let moved = physics.apply_blast([0.0, 0.0, 0.0], 8.0, 200.0);
+        for _ in 0..20 {
+            physics.step();
+        }
+
+        assert_eq!(moved, 1, "the floor is not cover from a blast lying on it");
+        assert!(physics.position(body).expect("body")[0] > 2.5, "it did not move");
+    }
+
+    /// Both at once, which is the configuration every real scene has: a blast
+    /// resting on the ground, and a wall beyond it. Walking past the floor
+    /// must not mean walking past everything — the first version stopped at
+    /// the nearest hit, saw the floor at distance zero, and declared the wall
+    /// out of the way. Cover stopped working the moment the ground did.
+    #[test]
+    fn a_wall_still_shields_when_the_blast_is_lying_on_the_floor() {
+        let (mut physics, body) = with_crate(4.0);
+        physics.add_static_box([2.0, 1.5, 0.0], [0.0, 0.0, 0.0, 1.0], [0.3, 1.5, 10.0]);
+        physics.step();
+
+        // On the floor's top surface, so the sight ray starts inside it.
+        let moved = physics.apply_blast([0.0, 0.0, 0.0], 10.0, 200.0);
+        for _ in 0..30 {
+            physics.step();
+        }
+
+        assert_eq!(moved, 0, "the wall is still in the way");
+        assert!(
+            (physics.position(body).expect("body")[0] - 4.0).abs() < 0.2,
+            "pushed through a wall"
+        );
+    }
+
+    /// A body exactly at the centre has no direction to be pushed in. It must
+    /// not become NaN and vanish from the world.
+    #[test]
+    fn a_body_at_the_exact_centre_goes_up_rather_than_nowhere() {
+        let (mut physics, body) = with_crate(0.0);
+        // Exactly where the body is, so the offset really is zero rather than
+        // merely small — the settled position is not exactly the authored one.
+        let centre = physics.position(body).expect("body");
+
+        physics.apply_blast(centre, 8.0, 60.0);
+        physics.step();
+
+        let at = physics.position(body).expect("body");
+        assert!(at.iter().all(|c| c.is_finite()), "NaN position: {at:?}");
+        assert!(at[1] > 0.5, "should have been lifted: {at:?}");
     }
 
     /// Its own capsule must not block it. A controller that collides with
