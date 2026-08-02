@@ -785,7 +785,7 @@ fn scene_tx(path: &str, args: &[String]) -> (u8, String) {
             // --dry-run prints the diff and touches nothing. This is how the
             // human reviews a large change before it lands.
             if !transaction.dry_run
-                && let Err(e) = std::fs::write(path, &applied.scene)
+                && let Err(e) = loom_scene::write_atomically(std::path::Path::new(path), &applied.scene)
             {
                 return (1, json_line(&serde_json::json!({
                     "error": "io_error", "path": path, "constraint": e.to_string(),
@@ -1191,7 +1191,7 @@ fn place(path: &str, args: &[String]) -> (u8, String) {
     match loom_scene::apply(&src, &transaction) {
         Ok(applied) => {
             if !transaction.dry_run
-                && let Err(e) = std::fs::write(path, &applied.scene)
+                && let Err(e) = loom_scene::write_atomically(std::path::Path::new(path), &applied.scene)
             {
                 return (1, json_line(&serde_json::json!({
                     "error": "io_error", "constraint": e.to_string(),

@@ -16,6 +16,53 @@
 
 use crate::{Applied, Transaction, TransactionError, VersionToken, apply};
 
+/// Write a scene file so nobody can ever read a half-written one.
+///
+/// `std::fs::write` truncates and then writes, which leaves two windows where
+/// the file on disk is neither the old scene nor the new one: a reader in
+/// between sees a truncated file, and a crash in between leaves it that way
+/// permanently. This project's editor re-reads the scene four times a second
+/// and the agent writes it from another process, so that window is not
+/// theoretical — and the thing at stake is the human's authored work, which
+/// never-do #15 makes the highest-severity loss in the codebase.
+///
+/// Write beside it, flush, then rename. `rename` within a directory is atomic
+/// on POSIX: a reader sees the old file or the new one, never a partial. The
+/// temporary name carries the process id so two `loom` processes writing the
+/// same scene cannot clobber each other's intermediate file.
+///
+/// # Errors
+/// [`std::io::Error`] if the temporary cannot be written or the rename fails.
+/// The original is untouched in both cases.
+pub fn write_atomically(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let directory = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let name = path
+        .file_name()
+        .map_or_else(|| "scene.loom".into(), std::ffi::OsStr::to_string_lossy);
+    // Same directory, because `rename` is only atomic within one filesystem.
+    let temporary = directory.join(format!(".{name}.{}.tmp", std::process::id()));
+
+    let write = || -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        // Durability before visibility: without this the rename can land while
+        // the contents are still only in the page cache, so a crash leaves an
+        // empty file where a complete scene used to be.
+        file.sync_all()
+    };
+    if let Err(e) = write() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Why a save did not happen.
 #[derive(Debug)]
 pub enum SaveRejected {
@@ -224,7 +271,7 @@ impl Session {
                 return Err(SaveRejected::Stale { current: on_disk });
             }
         }
-        std::fs::write(&self.path, &self.text).map_err(SaveRejected::Io)?;
+        write_atomically(&self.path, &self.text).map_err(SaveRejected::Io)?;
         self.disk = self.version.clone();
         Ok(())
     }
@@ -456,6 +503,56 @@ name = \"Room\"
             "the kept version reached disk"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A reader must never see a half-written scene.** `fs::write` truncates
+    /// and then writes, so a reader in between sees a prefix of the new text
+    /// and a crash in between leaves the file that way. The editor re-reads the
+    /// scene four times a second while the agent writes it from another
+    /// process, so that window is real — and what is at stake is the human's
+    /// authored work.
+    ///
+    /// The assertion is byte equality with one of the two known texts, not
+    /// "it parses". A truncated scene very often still parses — my first
+    /// version of this test padded with comment lines, so every torn read was
+    /// a valid scene and the test passed against `fs::write` too.
+    #[test]
+    fn a_concurrent_reader_never_sees_a_partial_scene() {
+        let dir = std::env::temp_dir().join("loom_atomic_write");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("scene.loom");
+
+        // Big enough that a truncate-then-write is not instantaneous.
+        let long = format!("{SCENE}{}", "\n# padding so the write takes a while".repeat(20_000));
+        std::fs::write(&path, &long).expect("seed");
+
+        let reading = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let torn = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = {
+            let (path, reading, torn, long) =
+                (path.clone(), reading.clone(), torn.clone(), long.clone());
+            std::thread::spawn(move || {
+                while reading.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Ok(seen) = std::fs::read_to_string(&path)
+                        && seen != SCENE
+                        && seen != long
+                    {
+                        torn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            })
+        };
+
+        for _ in 0..20 {
+            super::write_atomically(&path, SCENE).expect("write");
+            super::write_atomically(&path, &long).expect("write");
+        }
+        reading.store(false, std::sync::atomic::Ordering::Relaxed);
+        reader.join().expect("reader");
+
+        let torn = torn.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(torn, 0, "a reader saw a scene that was neither version");
     }
 
     #[test]
