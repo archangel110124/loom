@@ -333,7 +333,8 @@ name = \"Root\"
     }
 
     /// M1 specified six; `RigidBody` joined them at M7 when physics needed a
-    /// way to say "this one falls".
+    /// way to say "this one falls", and `Material` when shading stopped being
+    /// a per-object debug colour.
     #[test]
     fn every_component_is_registered() {
         let reg = components::registry();
@@ -346,9 +347,41 @@ name = \"Root\"
             "Light",
             "Script",
             "RigidBody",
+            "Material",
         ] {
             assert!(reg.describe(name).is_some(), "{name} is not registered");
         }
+    }
+
+    /// Roughness outside 0..=1 is the mistake that makes a surface render
+    /// black with no other symptom, so the schema has to catch it rather than
+    /// the shader clamping it silently.
+    #[test]
+    fn a_material_outside_its_range_is_rejected() {
+        let reg = components::registry();
+
+        let errs = reg
+            .validate("Material", &serde_json::json!({ "roughness": 4.0 }))
+            .expect_err("roughness is a 0..=1 fraction");
+
+        assert_eq!(errs[0].error, "field_out_of_range");
+    }
+
+    /// Albedo is a linear factor, not 0-255. Same trap as `Light::color`,
+    /// which is why it carries the same range.
+    #[test]
+    fn an_albedo_in_bytes_is_rejected() {
+        let reg = components::registry();
+
+        assert!(
+            reg.validate("Material", &serde_json::json!({ "albedo": [255.0, 0.0, 0.0] }))
+                .is_err(),
+            "255 is the 0-255 spelling, not a linear factor"
+        );
+        assert!(
+            reg.validate("Material", &serde_json::json!({ "albedo": [0.8, 0.2, 0.2] }))
+                .is_ok()
+        );
     }
 
     /// `[[component.list]]` is an array of tables, which is neither an array

@@ -285,43 +285,73 @@ fn alias_report(
 ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
+    // Every field that names an asset, not just the mesh. A mistyped texture
+    // alias used to be invisible: the material simply rendered untextured,
+    // which looks exactly like a material that was never given a map.
+    const REFERENCES: [(&str, &str); 3] = [
+        ("MeshRenderer", "mesh"),
+        ("Material", "albedo_map"),
+        ("Material", "normal_map"),
+    ];
+
     for node in scene.nodes() {
-        let Some(alias) = node
-            .components
-            .get("MeshRenderer")
-            .and_then(|m| m.get("mesh"))
-            .and_then(|m| m.get("asset"))
-            .and_then(serde_json::Value::as_str)
-        else {
-            continue;
-        };
+        for (component, field) in REFERENCES {
+            let Some(alias) = node
+                .components
+                .get(component)
+                .and_then(|c| c.get(field))
+                .and_then(|m| m.get("asset"))
+                .and_then(serde_json::Value::as_str)
+                // An empty alias is how a material says "no texture here",
+                // which is the default and not a broken reference.
+                .filter(|a| !a.is_empty())
+            else {
+                continue;
+            };
 
-        // Primitives resolve procedurally and need no `[[asset]]` entry.
-        if loom_asset::primitives::build(alias).is_some() {
-            continue;
-        }
+            // Primitives resolve procedurally and need no `[[asset]]` entry.
+            // There is no equivalent library for textures, so this escape is
+            // for meshes only.
+            let mesh = component == "MeshRenderer";
+            if mesh && loom_asset::primitives::build(alias).is_some() {
+                continue;
+            }
 
-        match scene.asset_path(alias) {
-            None => errors.push(serde_json::json!({
-                "error": "unresolved_alias",
-                "node": node.path,
-                "field": "MeshRenderer.mesh.asset",
-                "value": alias,
-                "constraint": "an alias declared in [[asset]], or a primitive name",
-                "hint": format!(
-                    "no `[[asset]]` declares `{alias}`. Either add one, or use a \
-                     primitive: box, plane, sphere, cylinder, capsule."
-                ),
-            })),
-            Some(p) if !base.join(p).exists() => warnings.push(serde_json::json!({
-                "warning": "asset_file_missing",
-                "node": node.path,
-                "value": alias,
-                "path": p,
-                "hint": "the scene declares this asset but the file is not there; \
-                         a unit box is drawn in its place.",
-            })),
-            Some(_) => {}
+            match scene.asset_path(alias) {
+                None => errors.push(serde_json::json!({
+                    "error": "unresolved_alias",
+                    "node": node.path,
+                    "field": format!("{component}.{field}.asset"),
+                    "value": alias,
+                    "constraint": if mesh {
+                        "an alias declared in [[asset]], or a primitive name"
+                    } else {
+                        "an alias declared in [[asset]]"
+                    },
+                    "hint": if mesh {
+                        format!(
+                            "no `[[asset]]` declares `{alias}`. Either add one, or use a \
+                             primitive: box, plane, sphere, cylinder, capsule."
+                        )
+                    } else {
+                        format!("no `[[asset]]` declares `{alias}`. Add one pointing at the texture file.")
+                    },
+                })),
+                Some(p) if !base.join(p).exists() => warnings.push(serde_json::json!({
+                    "warning": "asset_file_missing",
+                    "node": node.path,
+                    "value": alias,
+                    "path": p,
+                    "hint": if mesh {
+                        "the scene declares this asset but the file is not there; \
+                         a unit box is drawn in its place."
+                    } else {
+                        "the scene declares this texture but the file is not there; \
+                         the material falls back to its untextured albedo."
+                    },
+                })),
+                Some(_) => {}
+            }
         }
     }
     (errors, warnings)

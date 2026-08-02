@@ -98,6 +98,68 @@ impl Default for Light {
     }
 }
 
+/// How a surface looks: base colour, how metal it is, how rough, and the
+/// textures that vary those across it.
+///
+/// **Absent means the node keeps its debug colour.** A blockout is authored
+/// long before it is textured, and a default material would make every untextured
+/// node turn the same flat grey — which loses exactly the "which box is which"
+/// readability the palette exists to give.
+///
+/// The two maps are `[[asset]]` aliases like any other asset reference, so a
+/// typo is caught by `loom validate` rather than showing up as an untextured
+/// surface with no explanation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Material {
+    /// Linear RGB, each channel normalized 0..=1. Not 0-255. Multiplied with
+    /// `albedo_map` when one is set.
+    #[schemars(inner(range(min = 0.0, max = 1.0)))]
+    pub albedo: [f32; 3],
+    /// `0.0` for anything non-metal, `1.0` for bare metal. Values in between
+    /// are physically meaningless for a single surface — use them only to
+    /// blend across one.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub metallic: f32,
+    /// `0.0` is a mirror, `1.0` is chalk. Fully smooth is rare in the real
+    /// world; most surfaces sit between 0.3 and 0.9.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub roughness: f32,
+    /// Colour texture. Leave the alias empty for none.
+    pub albedo_map: AssetRef,
+    /// Tangent-space normal map, in the usual convention where flat is
+    /// `(0.5, 0.5, 1.0)`. Leave the alias empty for none.
+    pub normal_map: AssetRef,
+    /// How many times the texture repeats across the mesh's `0..1` UV range.
+    #[schemars(inner(range(min = 0.0001, max = 10000.0)))]
+    pub uv_scale: [f32; 2],
+    /// Project textures down the three world axes instead of reading the
+    /// mesh's UVs.
+    ///
+    /// **This is what voxel terrain needs.** Surface Nets places vertices
+    /// anywhere in their cell and produces no UVs at all, so a voxel volume
+    /// textured by UV samples whatever happens to be at `(0, 0)`. Triplanar
+    /// costs three texture samples instead of one, which is why it is opt-in
+    /// rather than the default.
+    pub triplanar: bool,
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            albedo: [0.8; 3],
+            metallic: 0.0,
+            // Not 0.0: a default-smooth surface renders as a black mirror of a
+            // scene with no reflections in it, which reads as a bug.
+            roughness: 0.8,
+            albedo_map: AssetRef::default(),
+            normal_map: AssetRef::default(),
+            uv_scale: [1.0; 2],
+            triplanar: false,
+        }
+    }
+}
+
 /// Makes a node participate in physics.
 ///
 /// Static is the default because most of a blockout is scenery: if every box
@@ -179,6 +241,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<Light>("Light");
     reg.register::<RigidBody>("RigidBody");
     reg.register::<VoxelVolume>("VoxelVolume");
+    reg.register::<Material>("Material");
     reg.register::<Script>("Script");
     reg
 }
