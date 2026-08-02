@@ -16,11 +16,25 @@ pub mod sanity;
 pub use sanity::{Severity, check_scene};
 // Re-exported so callers can hold a body handle without taking a direct
 // dependency on rapier. The engine choice stays behind this crate's door.
-pub use rapier3d::prelude::RigidBodyHandle;
+pub use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
 
 use rapier3d::prelude::*;
 
 /// A physics world stepped at a fixed rate.
+/// What a ray struck.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RayHit {
+    /// The collider that was hit, for mapping back to whatever owns it.
+    pub collider: ColliderHandle,
+    /// Metres along the ray.
+    pub distance: f32,
+    /// Where it struck, in world space.
+    pub point: [f32; 3],
+    /// The surface normal there — which is what an impact decal, a ricochet
+    /// and a spray of debris all need to be oriented by.
+    pub normal: [f32; 3],
+}
+
 pub struct Physics {
     bodies: RigidBodySet,
     colliders: ColliderSet,
@@ -410,6 +424,74 @@ impl Physics {
 
     /// How many bodies exist, for the debris cap.
     #[must_use]
+    /// Cast a ray and return the nearest hit.
+    ///
+    /// **The foundation for most of what a shooter does.** A hitscan weapon is
+    /// this. So is deciding whether a character is standing on something, what
+    /// the crosshair is over, whether a grenade has line of sight, and where an
+    /// explosion's blast is blocked. Building any of those without it means
+    /// each one inventing its own intersection test against a different idea of
+    /// the world.
+    ///
+    /// Against the *physics* world, not the render world. They are separate on
+    /// purpose — a shot must hit what the simulation says is there, not what
+    /// happens to be drawn — but that only pays off if colliders and geometry
+    /// agree, which is what `check_scene` exists to police.
+    ///
+    /// `direction` need not be normalized; distances are reported in metres
+    /// along it either way.
+    ///
+    /// # The world it queries is the one the last `step` left
+    ///
+    /// The acceleration structure this walks is built during [`Self::step`],
+    /// so a collider added since then is **invisible to a ray**. In the normal
+    /// loop that is exactly right and costs nothing — gameplay queries run
+    /// after the tick that placed everything. It is a trap only when adding a
+    /// collider and immediately casting against it, which returns `None` and
+    /// looks like a miss rather than a mistake. Step first.
+    pub fn raycast(&self, origin: [f32; 3], direction: [f32; 3], max_distance: f32) -> Option<RayHit> {
+        let dir = Vector::new(direction[0], direction[1], direction[2]);
+        // A zero direction is a degenerate ray, not a hit at the origin. Rapier
+        // would normalise it into a NaN and report nonsense.
+        let length = dir.length();
+        if !length.is_finite() || length < 1e-6 || !max_distance.is_finite() {
+            return None;
+        }
+        let ray = Ray::new(Vector::new(origin[0], origin[1], origin[2]), dir / length);
+
+        let query = self.broad_phase.as_query_pipeline(
+            self.narrow_phase.query_dispatcher(),
+            &self.bodies,
+            &self.colliders,
+            QueryFilter::default(),
+        );
+        // `solid: true` — a ray starting inside a shape hits immediately at
+        // distance zero rather than passing through and striking the far wall
+        // from within. That is what a muzzle already clipping a wall should do.
+        let (collider, hit) = query.cast_ray_and_get_normal(&ray, max_distance, true)?;
+
+        let point = ray.point_at(hit.time_of_impact);
+        Some(RayHit {
+            collider,
+            distance: hit.time_of_impact,
+            point: [point.x, point.y, point.z],
+            normal: [hit.normal.x, hit.normal.y, hit.normal.z],
+        })
+    }
+
+    /// Whether anything blocks the segment between two points.
+    ///
+    /// Line of sight, and the test an explosion needs before it deals damage
+    /// through a wall.
+    #[must_use]
+    pub fn line_of_sight(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        let delta = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+        let distance = delta.iter().map(|c| c * c).sum::<f32>().sqrt();
+        // Pulled back slightly so a target standing *on* the surface it is
+        // checked against does not occlude itself.
+        self.raycast(from, delta, distance - 1e-3).is_none()
+    }
+
     pub fn body_count(&self) -> usize {
         self.bodies.len()
     }
@@ -499,6 +581,85 @@ impl Physics {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A shot straight down at a floor must land on the floor, at the distance
+    /// the geometry says — not somewhere near it.
+    #[test]
+    fn a_ray_hits_a_floor_at_the_right_distance() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        // Top surface at y = 1.0.
+        physics.add_static_box([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [10.0, 1.0, 10.0]);
+        physics.step();
+
+        let hit = physics
+            .raycast([0.0, 5.0, 0.0], [0.0, -1.0, 0.0], 100.0)
+            .expect("a floor directly below should be hit");
+
+        assert!((hit.distance - 4.0).abs() < 1e-3, "distance was {}", hit.distance);
+        assert!((hit.point[1] - 1.0).abs() < 1e-3, "point was {:?}", hit.point);
+        // The normal faces back up the ray, which is what a decal or a
+        // ricochet is oriented by.
+        assert!(hit.normal[1] > 0.9, "normal was {:?}", hit.normal);
+    }
+
+    #[test]
+    fn a_ray_pointing_away_hits_nothing() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [10.0, 1.0, 10.0]);
+        physics.step();
+
+        assert!(physics.raycast([0.0, 5.0, 0.0], [0.0, 1.0, 0.0], 100.0).is_none());
+    }
+
+    /// Range is what separates a rifle from a knife, so it has to actually
+    /// bound the query rather than being applied to the result afterwards.
+    #[test]
+    fn a_ray_stops_at_its_range() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [10.0, 1.0, 10.0]);
+        physics.step();
+
+        assert!(physics.raycast([0.0, 5.0, 0.0], [0.0, -1.0, 0.0], 3.0).is_none());
+        assert!(physics.raycast([0.0, 5.0, 0.0], [0.0, -1.0, 0.0], 4.5).is_some());
+    }
+
+    /// An unnormalised direction is the common case — a target position minus
+    /// a muzzle position — and must not scale the reported distance.
+    #[test]
+    fn direction_length_does_not_change_the_distance() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [10.0, 1.0, 10.0]);
+        physics.step();
+
+        let unit = physics.raycast([0.0, 5.0, 0.0], [0.0, -1.0, 0.0], 100.0).unwrap();
+        let long = physics.raycast([0.0, 5.0, 0.0], [0.0, -37.0, 0.0], 100.0).unwrap();
+
+        assert!((unit.distance - long.distance).abs() < 1e-3);
+    }
+
+    /// A zero direction is degenerate. Normalising it gives NaN, and a NaN ray
+    /// reports hits at meaningless places rather than failing.
+    #[test]
+    fn a_degenerate_ray_is_refused() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [10.0, 1.0, 10.0]);
+        physics.step();
+
+        assert!(physics.raycast([0.0, 5.0, 0.0], [0.0, 0.0, 0.0], 100.0).is_none());
+        assert!(physics.raycast([0.0, 5.0, 0.0], [f32::NAN, -1.0, 0.0], 100.0).is_none());
+    }
+
+    #[test]
+    fn line_of_sight_is_blocked_by_a_wall() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.5, 5.0, 5.0]);
+        physics.step();
+
+        assert!(!physics.line_of_sight([-4.0, 0.0, 0.0], [4.0, 0.0, 0.0]), "wall between");
+        assert!(physics.line_of_sight([-4.0, 8.0, 0.0], [4.0, 8.0, 0.0]), "clear above it");
+    }
+
     /// The hash has to notice everything the next tick depends on. It covered
     /// translation only, so a body resting in the same place with a different
     /// orientation — or moving through it at a different speed — hashed the
@@ -573,7 +734,6 @@ mod tests {
         }
     }
 
-    use super::*;
 
     /// **The M7 exit criterion.** A capsule falls onto a floor and stays on it.
     #[test]
