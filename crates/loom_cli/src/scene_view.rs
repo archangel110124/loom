@@ -53,6 +53,9 @@ pub struct SceneView {
     /// Kept rather than consumed, so play mode can turn a *simulated* world
     /// into draw calls with the same meshes the authored one uses.
     library: crate::MeshLibrary,
+    /// Kept for the same reason as `library`: play mode redraws a simulated
+    /// world and must dress it in the authored scene's materials.
+    materials: crate::materials::MaterialLibrary,
     /// World AABB per node, for picking and framing.
     pub picks: BTreeMap<String, loom_scene::place::Bounds>,
     /// Centre and radius of everything.
@@ -95,8 +98,9 @@ impl SceneView {
         })?;
         let world = World::from_scene(&scene);
         let library = crate::MeshLibrary::with_cache(&scene, base, cache);
+        let materials = crate::materials::MaterialLibrary::for_scene(&world, &scene, base);
 
-        let objects = crate::world_to_objects(&world, &library);
+        let objects = crate::world_to_objects(&world, &library, &materials);
         let picks = crate::node_bounds(&world, &library);
         let bounds = crate::scene_bounds(&picks);
         let paths = scene.nodes().iter().map(|n| n.path.clone()).collect();
@@ -107,6 +111,7 @@ impl SceneView {
             scene,
             objects,
             library,
+            materials,
             picks,
             bounds,
             paths,
@@ -114,6 +119,18 @@ impl SceneView {
             mesh_key,
             world,
         })
+    }
+
+    /// The textures this scene's materials name, for the renderer to upload.
+    #[must_use]
+    pub fn textures(&self) -> &[loom_asset::Texture] {
+        &self.materials.textures
+    }
+
+    /// The material table this scene's objects index into.
+    #[must_use]
+    pub fn material_table(&self) -> &[loom_render::MaterialData] {
+        &self.materials.materials
     }
 
     /// The geometry this scene needs, for the renderer to upload.
@@ -126,7 +143,7 @@ impl SceneView {
     /// simulated transforms, drawn with the authored scene's meshes.
     #[must_use]
     pub fn objects_of(&self, world: &World) -> Vec<Object> {
-        crate::world_to_objects(world, &self.library)
+        crate::world_to_objects(world, &self.library, &self.materials)
     }
 
     /// Which nodes differ between two versions of a scene, and how.

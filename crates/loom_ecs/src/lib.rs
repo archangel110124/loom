@@ -115,6 +115,10 @@ pub struct World {
     collider: Storage<[f32; 3]>,
     /// The asset alias a node's `MeshRenderer` names.
     mesh_asset: Storage<String>,
+    /// The `Material` component, verbatim. Carried rather than resolved here
+    /// for the same reason as `voxel_recipe`: resolving it needs the asset and
+    /// render crates, and this one depends on neither.
+    material: Storage<serde_json::Value>,
     /// Scene path, so callers can address an entity the way a `.loom` file does.
     paths: Storage<String>,
     /// The `.rhai` file a node's `Script` component names.
@@ -295,6 +299,9 @@ impl World {
                     world.collider.insert(entity, [x, y, z]);
                 }
             }
+            if let Some(material) = node.components.get("Material") {
+                world.material.insert(entity, material.clone());
+            }
             if let Some(volume) = node.components.get("VoxelVolume") {
                 world.mark_renderable(entity);
                 world.voxel_recipe.insert(entity, volume.clone());
@@ -313,6 +320,12 @@ impl World {
 
         world.propagate_transforms();
         world
+    }
+
+    /// The `Material` component a node declares, if any.
+    #[must_use]
+    pub fn material(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.material.get(entity)
     }
 
     /// Authored collider half-extents, if the node declares a `BoxCollider`.

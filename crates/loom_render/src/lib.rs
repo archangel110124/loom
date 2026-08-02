@@ -14,6 +14,7 @@
 mod debug_names;
 mod device;
 mod instance;
+mod material;
 mod raytrace;
 mod renderer;
 mod ui;
@@ -26,6 +27,7 @@ pub use glam;
 
 pub use debug_names::DebugNames;
 pub use device::{Device, DeviceError};
+pub use material::{FLAG_TRIPLANAR, MaterialData, NO_TEXTURE};
 pub use renderer::{Camera, Object, RenderError, Renderer};
 pub use ui::Ui;
 pub use viewer::Viewer;
@@ -173,18 +175,20 @@ mod tests {
             loom_asset::primitives::sphere(16, 12),
         ];
         let mut renderer =
-            Renderer::new(&instance, &device, 256, 192, &meshes).expect("renderer");
+            Renderer::new(&instance, &device, 256, 192, &meshes, &[], &[]).expect("renderer");
         let objects = [
             Object {
                 model: glam::Mat4::from_translation(glam::Vec3::new(-2.2, 0.0, 0.0))
                     * glam::Mat4::from_scale(glam::Vec3::splat(0.8)),
                 color: [0.9, 0.3, 0.3],
                 mesh: 0,
+                material: crate::NO_TEXTURE,
             },
             Object {
                 model: glam::Mat4::from_scale(glam::Vec3::splat(0.8)),
                 color: [0.3, 0.9, 0.4],
                 mesh: 1,
+                material: crate::NO_TEXTURE,
             },
         ];
         let camera = Camera {

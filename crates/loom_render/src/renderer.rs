@@ -35,6 +35,10 @@ pub struct Object {
     pub color: [f32; 3],
     /// Index into the mesh library the renderer was built with.
     pub mesh: u32,
+    /// Index into the material table, or `u32::MAX` for none — in which case
+    /// `color` is used directly, which is what keeps an untextured blockout
+    /// readable.
+    pub material: u32,
 }
 
 /// Where one mesh lives inside the combined index buffer.
@@ -82,8 +86,14 @@ pub(crate) struct Push {
     /// the Rust side is not writing it. Leading with it removes the padding
     /// and the mistake.
     pub(crate) inv_view_proj: [f32; 16],
+    /// Camera position, for the specular view vector. Straight after the
+    /// matrix so it is naturally aligned.
+    pub(crate) eye: [f32; 4],
     pub(crate) vertices: vk::DeviceAddress,
     pub(crate) objects: vk::DeviceAddress,
+    /// The material table. Another pointer rather than another descriptor:
+    /// materials are read by index from the fragment stage and never bound.
+    pub(crate) materials: vk::DeviceAddress,
     /// First object this draw should read. See the note in `scene.slang`.
     pub(crate) object_offset: u32,
 }
@@ -115,6 +125,9 @@ pub(crate) struct ObjectData {
     /// Rows of inverse-transpose(model)'s upper 3x3, padded to `vec4`.
     normal: [[f32; 4]; 3],
     color: [f32; 4],
+    /// Material index in `x`; the rest pads to the 16-byte alignment a
+    /// std430 block needs for the member that follows it.
+    material: [u32; 4],
 }
 
 /// Anything that can go wrong rendering.
@@ -177,6 +190,7 @@ pub struct Renderer {
 
     /// `None` when the device has no ray query; shadows are simply skipped.
     raytracer: Option<Raytracer>,
+    materials: crate::material::Materials,
     /// Unpacked positions the acceleration structures were built from.
     rt_positions: Option<(vk::Buffer, Allocation, vk::DeviceAddress)>,
     pipeline_layout: vk::PipelineLayout,
@@ -205,6 +219,8 @@ impl Renderer {
         width: u32,
         height: u32,
         meshes: &[loom_asset::Mesh],
+        textures: &[loom_asset::Texture],
+        materials: &[crate::material::MaterialData],
     ) -> Result<Self, RenderError> {
         let raw = device.handle().clone();
         let raytracing = device.supports_raytracing();
@@ -229,6 +245,7 @@ impl Renderer {
             height,
             COLOR_FORMAT,
             vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+            1,
             "loom.color_target",
         )?;
         let (depth, depth_alloc) = create_image(
@@ -238,6 +255,7 @@ impl Renderer {
             height,
             DEPTH_FORMAT,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            1,
             "loom.depth_target",
         )?;
 
@@ -319,6 +337,23 @@ impl Renderer {
             None
         };
 
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(device.queue_family())
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        // SAFETY: the family index came from this device.
+        let command_pool = unsafe { raw.create_command_pool(&pool_info, None) }?;
+
+        // Before the pipeline, because the pipeline layout needs its descriptor
+        // set layout — and after the command pool, because getting the textures
+        // into a sampleable layout is queue work.
+        let materials = crate::material::Materials::new(
+            &raw,
+            &mut allocator,
+            textures,
+            materials,
+            crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
+        )?;
+
         let cache_path = pipeline_cache_path(instance, device);
         let (pipeline_layout, pipeline, pipeline_cache) =
             create_pipeline(
@@ -326,6 +361,7 @@ impl Renderer {
                 cache_path.as_deref(),
                 COLOR_FORMAT,
                 raytracer.as_ref().map(Raytracer::descriptor_layout),
+                materials.descriptor_layout(),
             )?;
         let sky_pipeline = create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
 
@@ -340,12 +376,6 @@ impl Renderer {
         names.set(pipeline, "loom.scene_pipeline");
         names.set(pipeline_layout, "loom.scene_pipeline_layout");
         names.set(pipeline_cache, "loom.pipeline_cache");
-
-        let pool_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(device.queue_family())
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        // SAFETY: the family index came from this device.
-        let command_pool = unsafe { raw.create_command_pool(&pool_info, None) }?;
 
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -405,6 +435,7 @@ impl Renderer {
 
         Ok(Self {
             raytracer,
+            materials,
             rt_positions,
             device: raw,
             queue: device.queue(),
@@ -561,11 +592,14 @@ impl Renderer {
             .as_ref()
             .filter(|rt| rt.ready())
             .map(crate::raytrace::Raytracer::descriptor_set);
+        let material_set = self.materials.descriptor_set();
         let base_push = Push {
             vertices: self.vertex_address,
             objects: self.object_address,
+            materials: self.materials.address(),
             object_offset: 0,
             inv_view_proj: view_proj.inverse().to_cols_array(),
+            eye: camera.eye.extend(0.0).to_array(),
         };
         let sky = self.sky_pipeline;
         let (readback, image) = (self.readback, self.color);
@@ -601,6 +635,16 @@ impl Renderer {
                             &[],
                         );
                     }
+                    // Set 1: every texture in the scene, bound once for the
+                    // whole pass and never per draw (never-do #2).
+                    d.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        layout,
+                        1,
+                        &[material_set],
+                        &[],
+                    );
                     set_viewport(d, cmd, width, height);
                     d.cmd_bind_index_buffer(cmd, index_buffer, 0, vk::IndexType::UINT32);
                     for (range, first_instance, instances) in draws {
@@ -747,6 +791,11 @@ impl Drop for Renderer {
                 (self.raytracer.as_mut(), self.allocator.as_mut())
             {
                 rt.destroy(allocator);
+            }
+            // After the idle wait, for the same reason: these are images the
+            // fragment shader was sampling one frame ago.
+            if let Some(allocator) = self.allocator.as_mut() {
+                self.materials.destroy(allocator);
             }
             if let (Some((buffer, allocation, _)), Some(allocator)) =
                 (self.rt_positions.take(), self.allocator.as_mut())
@@ -1125,6 +1174,7 @@ pub(crate) fn pack_objects(
                     rows.z_axis.extend(0.0).to_array(),
                 ],
                 color: [object.color[0], object.color[1], object.color[2], 1.0],
+                material: [object.material, 0, 0, 0],
             }
         })
         .collect()
@@ -1240,6 +1290,7 @@ pub(crate) fn write_slice<T: Copy>(allocation: &Allocation, data: &[T]) -> Resul
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_image(
     device: &ash::Device,
     allocator: &mut Allocator,
@@ -1247,6 +1298,9 @@ pub(crate) fn create_image(
     height: u32,
     format: vk::Format,
     usage: vk::ImageUsageFlags,
+    // Render targets have one; a sampled texture has a full chain, built on
+    // the CPU and copied in level by level.
+    mip_levels: u32,
     name: &str,
 ) -> Result<(vk::Image, Allocation), RenderError> {
     let info = vk::ImageCreateInfo::default()
@@ -1257,7 +1311,7 @@ pub(crate) fn create_image(
             height,
             depth: 1,
         })
-        .mip_levels(1)
+        .mip_levels(mip_levels.max(1))
         .array_layers(1)
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
@@ -1311,6 +1365,7 @@ pub(crate) fn create_pipeline(
     cache_path: Option<&std::path::Path>,
     color_format: vk::Format,
     set_layout: Option<vk::DescriptorSetLayout>,
+    material_layout: vk::DescriptorSetLayout,
 ) -> Result<(vk::PipelineLayout, vk::Pipeline, vk::PipelineCache), RenderError> {
     let module = create_shader_module(device, crate::SCENE_SPV)?;
 
@@ -1319,10 +1374,22 @@ pub(crate) fn create_pipeline(
         .offset(0)
         .size(u32::try_from(size_of::<Push>()).unwrap_or(128));
     let ranges = [push_range];
-    // The scene's only descriptor set: the TLAS the fragment shader traces
-    // shadow rays against. Empty when the device has no ray query, which keeps
-    // one pipeline layout for both paths.
-    let sets: Vec<vk::DescriptorSetLayout> = set_layout.into_iter().collect();
+    // Set 0 is the TLAS the fragment shader traces shadow rays against; set 1
+    // is the bindless texture array. **Set 0 is present either way** — when the
+    // device has no ray query it is an empty layout rather than absent, because
+    // dropping it would renumber set 1 to set 0 and silently unbind every
+    // texture on exactly the machines that already have the least to spare.
+    let empty = if set_layout.is_none() {
+        let info = vk::DescriptorSetLayoutCreateInfo::default();
+        // SAFETY: an empty layout borrows nothing.
+        Some(unsafe { device.create_descriptor_set_layout(&info, None) }?)
+    } else {
+        None
+    };
+    let sets: Vec<vk::DescriptorSetLayout> = vec![
+        set_layout.or(empty).unwrap_or_default(),
+        material_layout,
+    ];
     let layout_info = vk::PipelineLayoutCreateInfo::default()
         .push_constant_ranges(&ranges)
         .set_layouts(&sets);

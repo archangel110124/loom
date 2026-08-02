@@ -56,6 +56,7 @@ pub struct Viewer {
     indices_alloc: Option<Allocation>,
     ranges: Vec<MeshRange>,
     unpack: crate::renderer::UnpackParams,
+    materials: crate::material::Materials,
     objects: vk::Buffer,
     objects_alloc: Option<Allocation>,
     object_address: vk::DeviceAddress,
@@ -95,6 +96,7 @@ impl Viewer {
     /// # Errors
     /// [`RenderError`] if any Vulkan object or allocation fails.
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         instance: &Instance,
         device: &Device,
@@ -102,6 +104,8 @@ impl Viewer {
         width: u32,
         height: u32,
         meshes: &[loom_asset::Mesh],
+        textures: &[loom_asset::Texture],
+        materials: &[crate::material::MaterialData],
     ) -> Result<Self, RenderError> {
         let raw = device.handle().clone();
         let raytracing = device.supports_raytracing();
@@ -182,6 +186,23 @@ impl Viewer {
             None
         };
 
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(device.queue_family())
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        // SAFETY: the family index came from this device.
+        let command_pool = unsafe { raw.create_command_pool(&pool_info, None) }?;
+
+        // Same ordering constraint as the offscreen path: after the command
+        // pool because uploading is queue work, before the pipeline because the
+        // layout needs its descriptor set layout.
+        let materials = crate::material::Materials::new(
+            &raw,
+            &mut allocator,
+            textures,
+            materials,
+            crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
+        )?;
+
         let cache_path = pipeline_cache_path(instance, device);
         // The pipeline is built for the *swapchain's* format, which is usually
         // BGRA rather than the offscreen path's RGBA. Dynamic rendering bakes
@@ -192,15 +213,11 @@ impl Viewer {
                 cache_path.as_deref(),
                 format,
                 raytracer.as_ref().map(crate::raytrace::Raytracer::descriptor_layout),
+                materials.descriptor_layout(),
             )?;
         let sky_pipeline =
             crate::renderer::create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, format)?;
 
-        let pool_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(device.queue_family())
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        // SAFETY: the family index came from this device.
-        let command_pool = unsafe { raw.create_command_pool(&pool_info, None) }?;
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -263,6 +280,7 @@ impl Viewer {
         Ok(Self {
             raytracing,
             raytracer,
+            materials,
             rt_positions,
             device: raw,
             queue: device.queue(),
@@ -552,11 +570,14 @@ impl Viewer {
             .as_ref()
             .filter(|rt| rt.ready())
             .map(crate::raytrace::Raytracer::descriptor_set);
+        let material_set = self.materials.descriptor_set();
         let base_push = crate::renderer::Push {
             vertices: self.vertex_address,
             objects: self.object_address,
+            materials: self.materials.address(),
             object_offset: 0,
             inv_view_proj: view_proj.inverse().to_cols_array(),
+            eye: camera.eye.extend(0.0).to_array(),
         };
         let sky = self.sky_pipeline;
         let index_buffer = self.indices;
@@ -590,6 +611,15 @@ impl Viewer {
                             &[],
                         );
                     }
+                    // Set 1: the scene's textures.
+                    d.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        layout,
+                        1,
+                        &[material_set],
+                        &[],
+                    );
                     set_viewport(d, cmd, extent.width, extent.height);
                     d.cmd_bind_index_buffer(cmd, index_buffer, 0, vk::IndexType::UINT32);
                     for (range, first_instance, instances) in draws {
@@ -826,6 +856,11 @@ impl Drop for Viewer {
             {
                 rt.destroy(allocator);
             }
+            // After the idle wait, for the same reason: these are images the
+            // fragment shader was sampling one frame ago.
+            if let Some(allocator) = self.allocator.as_mut() {
+                self.materials.destroy(allocator);
+            }
             if let (Some((buffer, allocation, _)), Some(allocator)) =
                 (self.rt_positions.take(), self.allocator.as_mut())
             {
@@ -985,6 +1020,7 @@ fn create_depth(
         height,
         DEPTH_FORMAT,
         vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+        1,
         "loom.viewer_depth",
     )?;
     let view = create_view(device, depth, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;

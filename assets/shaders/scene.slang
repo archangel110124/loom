@@ -43,6 +43,20 @@ struct ObjectData {
     float4 normalRow1;
     float4 normalRow2;
     float4 color;
+    // Material index in x. `NO_MATERIAL` means "use color directly", which is
+    // what keeps an untextured blockout readable.
+    uint4 material;
+};
+
+static const uint NO_TEXTURE = 0xFFFFFFFF;
+static const uint FLAG_TRIPLANAR = 1;
+
+// Mirrors `loom_render::MaterialData` exactly. One memory layout described
+// twice; a mismatch is silent and looks like a shading bug.
+struct MaterialData {
+    float4 albedo;   // rgb base colour
+    float4 params;   // metallic, roughness, uvScale.x, uvScale.y
+    uint4 maps;      // albedo index, normal index, flags, unused
 };
 
 struct Push {
@@ -57,8 +71,15 @@ struct Push {
     // NDC to world, for the sky's per-pixel ray. The scene entry points
     // ignore it; both pipelines share this block so they share one layout.
     float4x4 invViewProj;
+    // Camera position, for the specular view vector. Placed straight after the
+    // matrix so it lands on its natural 16-byte boundary with no padding — the
+    // exact trap the comment above describes.
+    float4 eye;
     Vertex* vertices;
     ObjectData* objects;
+    // The material table. A pointer rather than a descriptor: materials are
+    // read by index and never bound, so adding one costs no API calls.
+    MaterialData* materials;
     // Index of this draw's first object.
     //
     // NOT derived from SV_InstanceID + firstInstance: HLSL's SV_InstanceID is
@@ -142,6 +163,9 @@ struct VSOutput {
     // Where this pixel is in the world, which is where its shadow ray starts.
     float3 worldPos : WORLDPOS;
     float2 uv : TEXCOORD0;
+    // `nointerpolation`: an index is not a quantity, and interpolating it
+    // across a triangle would produce indices no material occupies.
+    nointerpolation uint material : MATERIAL;
 };
 
 // Mirrors `loom_asset::packed::unpack`. Kept in step by a Rust-side test that
@@ -189,6 +213,7 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
     out.position = mul(o.mvp, float4(unpackPosition(v.packedPosition, o.unpack), 1.0));
     out.normal = normalize(mul(normalMatrix, unpackNormal(v.packedNormal)));
     out.color = o.color.rgb;
+    out.material = o.material.x;
     out.worldPos = mul(o.model, float4(unpackPosition(v.packedPosition, o.unpack), 1.0)).xyz;
     out.uv = unpackUv(v.packedUv, o.uvUnpack);
     return out;
@@ -231,6 +256,109 @@ float sunVisibility(float3 position, float3 normal) {
     return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
 }
 
+// ---------------------------------------------------------------------------
+// Materials.
+//
+// Every texture in the scene lives in one array, bound once for the pass. A
+// material names its maps by index, so a scene with fifty materials still
+// draws in one instanced call — which is the whole point of never-do #2.
+// ---------------------------------------------------------------------------
+
+[[vk::binding(0, 1)]]
+uniform Sampler2D textures[];
+
+/// Sample a texture from the bindless array.
+///
+/// `NonUniformResourceIndex` is required, not decorative: instances inside one
+/// draw call can carry different materials, so the index varies across a wave.
+/// Without it the hardware is permitted to sample whichever index the first
+/// lane happened to hold, and the symptom is one object wearing another's
+/// texture — intermittently, depending on how draws pack into waves.
+float4 sampleMap(uint index, float2 uv) {
+    return textures[NonUniformResourceIndex(index)].Sample(uv);
+}
+
+/// Project a texture down the three world axes and blend by the normal.
+///
+/// **This is what voxel terrain needs.** Surface Nets places a vertex anywhere
+/// inside its cell and produces no UVs at all, so there is nothing to unwrap.
+/// Three samples instead of one is the honest cost, which is why it is a
+/// per-material opt-in rather than the default.
+float4 triplanar(uint index, float3 position, float3 normal) {
+    // Raised to a power so the blend is tight: a linear weight smears all
+    // three projections across most of a curved surface, which reads as a
+    // blurred texture rather than a projected one.
+    float3 weight = pow(abs(normal), 4.0);
+    weight /= max(weight.x + weight.y + weight.z, 1e-4);
+    return sampleMap(index, position.yz) * weight.x
+         + sampleMap(index, position.xz) * weight.y
+         + sampleMap(index, position.xy) * weight.z;
+}
+
+/// A tangent frame built from screen-space derivatives, with no stored tangents.
+///
+/// The mesh carries position, normal and UV — no tangent and no bitangent. The
+/// frame is recovered per pixel from how position and UV change across the
+/// quad, which is the Schüler/Mikkelsen construction.
+///
+/// Two reasons this is the right trade here rather than a compromise:
+///
+/// - It saves 8-12 bytes on every vertex in the scene and removes the entire
+///   tangent-generation stage from the import pipeline.
+/// - Triplanar geometry has no UVs and therefore no tangents to store, so a
+///   stored-tangent path would need this code anyway for half the scene.
+///
+/// The cost is a handful of ALU per pixel, paid only where a normal map is
+/// actually bound. On this hardware that is the cheaper side to spend.
+float3x3 cotangentFrame(float3 normal, float3 position, float2 uv) {
+    float3 dp1 = ddx(position);
+    float3 dp2 = ddy(position);
+    float2 duv1 = ddx(uv);
+    float2 duv2 = ddy(uv);
+
+    float3 dp2perp = cross(dp2, normal);
+    float3 dp1perp = cross(normal, dp1);
+    float3 tangent = dp2perp * duv1.x + dp1perp * duv2.x;
+    float3 bitangent = dp2perp * duv1.y + dp1perp * duv2.y;
+
+    // Scale by the largest component rather than normalising each axis: that
+    // keeps the frame orthogonal where the UVs are stretched, instead of
+    // silently correcting a stretch the artist put there on purpose.
+    float invmax = rsqrt(max(dot(tangent, tangent), dot(bitangent, bitangent)));
+    return float3x3(tangent * invmax, bitangent * invmax, normal);
+}
+
+/// GGX specular, the standard Trowbridge-Reitz distribution with a Smith
+/// height-correlated visibility term and a Schlick Fresnel.
+///
+/// One highlight term rather than a full IBL: there is no reflection probe in
+/// this engine yet, so anything more would be inventing detail the scene does
+/// not contain.
+float3 specular(float3 normal, float3 view, float3 light, float roughness, float3 f0) {
+    // Not named `half`: that is a built-in scalar type in this language, and
+    // shadowing it compiles today and stops compiling on a compiler update.
+    float3 halfway = normalize(view + light);
+    float nDotH = max(dot(normal, halfway), 0.0);
+    float nDotV = max(dot(normal, view), 1e-4);
+    float nDotL = max(dot(normal, light), 0.0);
+    float vDotH = max(dot(view, halfway), 0.0);
+
+    // Clamped away from zero: a perfectly smooth surface makes the
+    // distribution a delta function, which is a division by zero on the GPU
+    // and a NaN that spreads across the image.
+    float a = max(roughness * roughness, 1e-3);
+    float a2 = a * a;
+
+    float d = nDotH * nDotH * (a2 - 1.0) + 1.0;
+    float distribution = a2 / max(3.14159265 * d * d, 1e-6);
+
+    float k = a * 0.5;
+    float visibility = 0.5 / max(lerp(nDotV, 1.0, k) * lerp(nDotL, 1.0, k) * 4.0, 1e-4);
+
+    float3 fresnel = f0 + (1.0 - f0) * pow(1.0 - vDotH, 5.0);
+    return distribution * visibility * fresnel;
+}
+
 [shader("fragment")]
 float4 fragmentMain(VSOutput in) : SV_Target {
     // One directional sun plus ambient from the sky. The ambient used to be a
@@ -238,12 +366,84 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // whatever it faced; sampling the sky gradient instead means a face turned
     // upward picks up blue and one turned down picks up ground.
     float3 normal = normalize(in.normal);
+    float3 albedo = in.color;
+    float metallic = 0.0;
+    float roughness = 0.8;
+
+    if (in.material != NO_TEXTURE) {
+        MaterialData m = push.materials[in.material];
+        albedo = m.albedo.rgb;
+        metallic = m.params.x;
+        roughness = m.params.y;
+
+        bool projected = (m.maps.z & FLAG_TRIPLANAR) != 0;
+        // Scaling the *coordinate* rather than the sample: for triplanar this
+        // is world position, so a shared texture keeps a consistent real-world
+        // size across every object that uses it however each one is scaled.
+        float2 uv = in.uv * m.params.zw;
+        float3 projectedUv = in.worldPos * float3(m.params.z, m.params.w, m.params.z);
+
+        if (m.maps.x != NO_TEXTURE) {
+            float4 sampled = projected
+                ? triplanar(m.maps.x, projectedUv, normal)
+                : sampleMap(m.maps.x, uv);
+            // Multiplied, not replaced: the albedo factor stays useful as a
+            // tint, which is how one texture dresses several objects.
+            albedo *= sampled.rgb;
+        }
+
+        if (m.maps.y != NO_TEXTURE) {
+            float3 tangentNormal = projected
+                ? triplanar(m.maps.y, projectedUv, normal).xyz
+                : sampleMap(m.maps.y, uv).xyz;
+            tangentNormal = tangentNormal * 2.0 - 1.0;
+            // Built from derivatives of the position and UV actually used, so
+            // the triplanar path gets a correct frame without ever having had
+            // a tangent to store.
+            float3x3 frame = projected
+                ? cotangentFrame(normal, in.worldPos, projectedUv.xy)
+                : cotangentFrame(normal, in.worldPos, uv);
+            normal = normalize(mul(tangentNormal, frame));
+        }
+    }
+
     float diffuse = max(dot(normal, SUN_DIRECTION), 0.0);
     float3 ambient = hemisphereAmbient(normal) * AMBIENT_STRENGTH;
     // Only trace where the sun could reach anyway: a face turned away from the
     // sun is already dark, and tracing from it costs a ray to learn nothing.
-    float sun = diffuse > 0.0 ? sunVisibility(in.worldPos, normal) : 0.0;
-    float3 lit = in.color * (ambient + SUN_STRENGTH * diffuse * sun);
+    //
+    // Traced against the *geometric* normal, not the mapped one: a normal map
+    // can tilt a surface far enough to push the ray origin below the real
+    // surface, and the ray then starts inside its own geometry.
+    float3 geometric = normalize(in.normal);
+    float sun = diffuse > 0.0 ? sunVisibility(in.worldPos, geometric) : 0.0;
+
+    // Metals have no diffuse response — their albedo is the reflectance of the
+    // specular lobe instead, which is why it moves into f0 rather than being
+    // used twice.
+    float3 diffuseColor = albedo * (1.0 - metallic);
+    float3 f0 = lerp(float3(0.04), albedo, metallic);
+
+    float3 lit = diffuseColor * (ambient + SUN_STRENGTH * diffuse * sun);
+    float3 view = normalize(push.eye.xyz - in.worldPos);
+    lit += specular(normal, view, SUN_DIRECTION, roughness, f0) * SUN_STRENGTH * diffuse * sun;
+
+    // **Without this a metal renders black.** Metals have no diffuse response,
+    // so a fully metallic surface lit by one directional sun is unlit
+    // everywhere except the highlight — physically correct and useless to look
+    // at, because there is no environment for it to reflect.
+    //
+    // There is one: the sky this shader already draws. Reflecting it costs a
+    // gradient evaluation and no texture, no probe and no extra pass, and it
+    // is consistent with the background by construction rather than by tuning.
+    float3 reflection = reflect(-view, normal);
+    // A rough surface reflects a cone rather than a ray. Bending the direction
+    // toward the normal as roughness rises is the usual cheap stand-in for a
+    // prefiltered environment map, and the fade keeps a chalky surface from
+    // picking up a mirror's worth of sky.
+    float3 environment = skyGradient(normalize(lerp(reflection, normal, roughness)));
+    lit += environment * f0 * (1.0 - roughness * 0.7);
+
     return float4(lit, 1.0);
 }
 

@@ -22,14 +22,22 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// Scenes worth exercising: a blockout, a physics stack, every primitive, a
-/// voxel volume, and a scene that references a missing asset. The last one is
-/// deliberate — the degrade-don't-crash path has Vulkan work in it too.
-const SCENES: [&str; 5] = [
+/// voxel volume, a scene that references a missing asset, and a material
+/// matrix. The missing-asset one is deliberate — the degrade-don't-crash path
+/// has Vulkan work in it too.
+///
+/// `materials.loom` earns its place because it is the only scene that binds a
+/// descriptor set: the bindless texture array, sampled with a non-uniform
+/// index. Sampler creation, image layout transitions and array indexing are
+/// all things the validation layers have an opinion about and the compiler has
+/// none.
+const SCENES: [&str; 6] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
     "assets/test/cave.loom",
     "assets/test/office.loom",
+    "assets/test/materials.loom",
 ];
 
 /// How many frames a windowed run draws before shutting itself down. Enough to

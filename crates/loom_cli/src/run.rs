@@ -564,7 +564,12 @@ impl ApplicationHandler for App {
             }
         };
 
-        match build_viewer(&window, self.view.meshes()) {
+        match build_viewer(
+            &window,
+            self.view.meshes(),
+            self.view.textures(),
+            self.view.material_table(),
+        ) {
             Ok((instance, device, viewer)) => {
                 crate::log::info(format!("rendering on {}", device.name()));
                 match Ui::new(&instance, &device, &window, viewer.color_format()) {
@@ -1570,6 +1575,8 @@ fn ray_box(origin: Vec3, dir: Vec3, bounds: &loom_scene::place::Bounds) -> Optio
 fn build_viewer(
     window: &Arc<Window>,
     meshes: &[loom_asset::Mesh],
+    textures: &[loom_asset::Texture],
+    materials: &[loom_render::MaterialData],
 ) -> Result<(Instance, Device, Viewer), String> {
     use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
@@ -1606,8 +1613,17 @@ fn build_viewer(
         Device::for_surface(&instance, (&surface_loader, surface)).map_err(|e| e.to_string())?;
 
     let size = window.inner_size();
-    let viewer = Viewer::new(&instance, &device, surface, size.width, size.height, meshes)
-        .map_err(|e| e.to_string())?;
+    let viewer = Viewer::new(
+        &instance,
+        &device,
+        surface,
+        size.width,
+        size.height,
+        meshes,
+        textures,
+        materials,
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok((instance, device, viewer))
 }

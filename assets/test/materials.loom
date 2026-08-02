@@ -1,0 +1,227 @@
+# A scene that shows what a material actually does, by varying one thing at a
+# time against a fixed reference.
+#
+# The layout is deliberate. Every row shares a light, a camera and a shape, so
+# any difference between two objects in it is the property being varied and
+# nothing else. A scene where several things change at once looks impressive
+# and proves nothing.
+#
+# Row 1 — no material at all, then albedo only, then albedo + normal map. This
+# is the one that answers "is the normal map doing anything", because the two
+# spheres either side of it are identical apart from that.
+#
+# Row 2 — roughness from mirror to chalk at fixed metallic. A specular
+# highlight that does not tighten as roughness falls is a broken BRDF.
+#
+# Row 3 — metallic 0 to 1 at fixed roughness. Metal has no diffuse response,
+# so the albedo should migrate from the body of the sphere into its highlight.
+#
+# The floor is triplanar: it is a stretched box, so UV-mapped tiles would smear
+# along the long axis. Triplanar projects from world space instead, which is
+# the whole reason the flag exists.
+
+[scene]
+format = 1
+id = "b3d81c07-52af-4e69-9c14-7d2e6a0f4b85"
+
+[[asset]]
+key = "tiles_albedo"
+id = "e1a94c60-3f27-4d8b-a052-6c9f1b3e7d24"
+path = "../textures/tiles_albedo.png"
+
+[[asset]]
+key = "tiles_normal"
+id = "5c7b2e91-8d40-4a13-b6f8-2e05c9a17f3b"
+path = "../textures/tiles_normal.png"
+
+[[node]]
+name = "Stage"
+
+[[node]]
+name = "Floor"
+parent = "Stage"
+transform = { pos = [0.0, -1.0, 0.0], scale = [8.0, 0.5, 6.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  # Triplanar, because this box is scaled 32x wider than it is tall: its UVs
+  # stretch with it and the tiles would smear into stripes. Projecting from
+  # world space keeps them square whatever the box is scaled to.
+  [node.components.Material]
+  albedo = [0.9, 0.9, 0.9]
+  roughness = 0.75
+  albedo_map = { asset = "tiles_albedo" }
+  normal_map = { asset = "tiles_normal" }
+  uv_scale = [0.25, 0.25]
+  triplanar = true
+
+# ---------------------------------------------------------------------------
+# Row 1: nothing, then albedo, then albedo + normal.
+# ---------------------------------------------------------------------------
+
+# No Material component at all. Keeps its debug palette colour, which is what
+# makes an untextured blockout readable rather than uniformly grey.
+[[node]]
+name = "Bare"
+parent = "Stage"
+transform = { pos = [-5.0, 1.2, 3.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+[[node]]
+name = "AlbedoOnly"
+parent = "Stage"
+transform = { pos = [-2.0, 1.2, 3.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  roughness = 0.6
+  albedo_map = { asset = "tiles_albedo" }
+  uv_scale = [2.0, 1.0]
+
+# Identical to AlbedoOnly apart from the normal map, so the difference between
+# them is the tangent frame doing its job — and that frame is derived from
+# screen-space derivatives, with no tangent stored on any vertex.
+[[node]]
+name = "AlbedoAndNormal"
+parent = "Stage"
+transform = { pos = [1.0, 1.2, 3.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  roughness = 0.6
+  albedo_map = { asset = "tiles_albedo" }
+  normal_map = { asset = "tiles_normal" }
+  uv_scale = [2.0, 1.0]
+
+# Same maps, projected from world space instead of read from the sphere's UVs.
+[[node]]
+name = "Triplanar"
+parent = "Stage"
+transform = { pos = [4.0, 1.2, 3.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  roughness = 0.6
+  albedo_map = { asset = "tiles_albedo" }
+  normal_map = { asset = "tiles_normal" }
+  uv_scale = [0.5, 0.5]
+  triplanar = true
+
+# ---------------------------------------------------------------------------
+# Row 2: roughness, untextured so only the highlight changes.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Rough00"
+parent = "Stage"
+transform = { pos = [-5.0, 1.2, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.55, 0.15, 0.15]
+  roughness = 0.05
+
+[[node]]
+name = "Rough03"
+parent = "Stage"
+transform = { pos = [-2.0, 1.2, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.55, 0.15, 0.15]
+  roughness = 0.3
+
+[[node]]
+name = "Rough06"
+parent = "Stage"
+transform = { pos = [1.0, 1.2, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.55, 0.15, 0.15]
+  roughness = 0.6
+
+[[node]]
+name = "Rough10"
+parent = "Stage"
+transform = { pos = [4.0, 1.2, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.55, 0.15, 0.15]
+  roughness = 1.0
+
+# ---------------------------------------------------------------------------
+# Row 3: metallic, at a fixed roughness where the difference is visible.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Metal00"
+parent = "Stage"
+transform = { pos = [-5.0, 1.2, -3.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.72, 0.35]
+  metallic = 0.0
+  roughness = 0.25
+
+[[node]]
+name = "Metal05"
+parent = "Stage"
+transform = { pos = [-2.0, 1.2, -3.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.72, 0.35]
+  metallic = 0.5
+  roughness = 0.25
+
+[[node]]
+name = "Metal10"
+parent = "Stage"
+transform = { pos = [1.0, 1.2, -3.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.72, 0.35]
+  metallic = 1.0
+  roughness = 0.25
+
+# A rougher metal, so the row does not end on the one case where a mirror with
+# nothing to reflect looks like an unlit sphere.
+[[node]]
+name = "MetalRough"
+parent = "Stage"
+transform = { pos = [4.0, 1.2, -3.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.72, 0.35]
+  metallic = 1.0
+  roughness = 0.55

@@ -12,6 +12,7 @@
 
 mod gizmo;
 mod log;
+mod materials;
 mod panels;
 mod play;
 mod scene_view;
@@ -419,6 +420,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     let mut world = World::from_scene(&scene);
     let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
     let library = MeshLibrary::for_scene(&scene, base);
+    let material_library = materials::MaterialLibrary::for_scene(&world, &scene, base);
 
     // --sim steps physics before drawing, which is what makes a still image a
     // useful view of a simulation rather than only of its initial state.
@@ -426,7 +428,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         simulate_physics(&mut world, ticks);
     }
 
-    let objects = world_to_objects(&world, &library);
+    let objects = world_to_objects(&world, &library, &material_library);
     let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok()).unwrap_or(35.0);
     let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok()).unwrap_or(28.0);
     // Framed from REAL mesh bounds. Assuming a unit cube was fine while every
@@ -443,8 +445,16 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
             if device.supports_raytracing() { "" } else { " (no ray query)" }
         );
         let raytracing = device.supports_raytracing();
-        let mut renderer = Renderer::new(&instance, &device, width, height, &library.meshes)
-            .map_err(|e| e.to_string())?;
+        let mut renderer = Renderer::new(
+            &instance,
+            &device,
+            width,
+            height,
+            &library.meshes,
+            &material_library.textures,
+            &material_library.materials,
+        )
+        .map_err(|e| e.to_string())?;
         renderer
             .render_to_png(&objects, &camera, std::path::Path::new(&out))
             .map_err(|e| e.to_string())?;
@@ -478,7 +488,11 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
 /// Transform propagation lives in `loom_ecs` as of M3; this only reads the
 /// resolved `GlobalTransform`. The parent-chain walk that used to live here
 /// was a stand-in until the ECS existed, and is gone.
-pub(crate) fn world_to_objects(world: &World, library: &MeshLibrary) -> Vec<Object> {
+pub(crate) fn world_to_objects(
+    world: &World,
+    library: &MeshLibrary,
+    materials: &materials::MaterialLibrary,
+) -> Vec<Object> {
     world
         .entities()
         .iter()
@@ -490,6 +504,7 @@ pub(crate) fn world_to_objects(world: &World, library: &MeshLibrary) -> Vec<Obje
                 model: Mat4::from_cols_array(&global.matrix),
                 color: palette(index),
                 mesh: mesh_index_for(world, library, *entity),
+                material: materials.index_for(index),
             })
         })
         .collect()
@@ -1248,7 +1263,9 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
         Ok(d) => d,
         Err(e) => return (1, json_line(&serde_json::json!({ "error": "render_failed", "constraint": e.to_string() }))),
     };
-    let mut renderer = match Renderer::new(&instance, &device, width, height, &meshes) {
+    // `explode` synthesises its own debris rather than reading a scene, so it
+    // has no authored materials — the palette colour is the whole surface.
+    let mut renderer = match Renderer::new(&instance, &device, width, height, &meshes, &[], &[]) {
         Ok(r) => r,
         Err(e) => return (1, json_line(&serde_json::json!({ "error": "render_failed", "constraint": e.to_string() }))),
     };
@@ -1277,6 +1294,7 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
             model: Mat4::IDENTITY,
             color: [0.42, 0.46, 0.52],
             mesh: 0,
+            material: loom_render::NO_TEXTURE,
         }];
         for handle in &debris {
             let (Some(p), Some(r)) = (physics.position(*handle), physics.rotation_euler(*handle))
@@ -1296,6 +1314,7 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
                 ),
                 color: [0.78, 0.42, 0.24],
                 mesh: 1,
+                material: loom_render::NO_TEXTURE,
             });
         }
 

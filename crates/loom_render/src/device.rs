@@ -125,7 +125,12 @@ impl Device {
             .buffer_device_address(true)
             .descriptor_indexing(true)
             .runtime_descriptor_array(true)
-            .descriptor_binding_partially_bound(true);
+            .descriptor_binding_partially_bound(true)
+            // Instances inside one draw can carry different materials, so the
+            // texture index varies across a wave. Without this the hardware may
+            // sample whichever index the first lane held, and one object wears
+            // another's texture — intermittently, depending on wave packing.
+            .shader_sampled_image_array_non_uniform_indexing(true);
         // Slang emits the SPIR-V `DrawParameters` capability for shaders that
         // read SV_VertexID. Without this the module is rejected with
         // VUID-VkShaderModuleCreateInfo-pCode-08740 — found by validation, not
@@ -164,8 +169,15 @@ impl Device {
             vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
         let mut query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
 
+        // A Vulkan 1.0 core feature, so it lives in the base struct rather than
+        // in any of the versioned ones. Anisotropic filtering is not optional
+        // here: every scene in this project is a ground plane viewed at a
+        // grazing angle, which is exactly where trilinear filtering blurs out.
+        let base_features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
+
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
+            .enabled_features(&base_features)
             .enabled_extension_names(&device_extensions)
             .push_next(&mut features13)
             .push_next(&mut features12)
@@ -295,6 +307,10 @@ fn select_physical_device(
                 .get_physical_device_features2(physical, &mut features2);
         }
 
+        // Copied out before the chain is borrowed again: `features2` still
+        // holds mutable borrows of the pushed structs.
+        let core = features2.features;
+
         let mut missing = Vec::new();
         if features13.dynamic_rendering == vk::FALSE {
             missing.push("dynamicRendering");
@@ -313,6 +329,17 @@ fn select_physical_device(
         }
         if features11.shader_draw_parameters == vk::FALSE {
             missing.push("shaderDrawParameters");
+        }
+        // Both are needed by the bindless material path. Requesting either
+        // without checking makes `vkCreateDevice` fail with a bare
+        // `ERROR_FEATURE_NOT_PRESENT` that names nothing; checking here reports
+        // which one, which is the difference between a fixable message and a
+        // bisect.
+        if core.sampler_anisotropy == vk::FALSE {
+            missing.push("samplerAnisotropy");
+        }
+        if features12.shader_sampled_image_array_non_uniform_indexing == vk::FALSE {
+            missing.push("shaderSampledImageArrayNonUniformIndexing");
         }
         if !missing.is_empty() {
             rejections.push(format!("{name}: missing {}", missing.join(", ")));
