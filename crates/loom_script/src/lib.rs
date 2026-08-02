@@ -134,6 +134,31 @@ pub struct Motion {
     /// out of range. A weapon that detonates at max range in open air is a
     /// different weapon from one that needs a target.
     pub aim_hit: bool,
+
+    /// Whether this character can currently see the player.
+    ///
+    /// **Perception is the host's job for the same reason aiming is**: seeing
+    /// is a cast, and a script has no physics world. What a character *does*
+    /// about being seen — charge, flee, radio for help, ignore it — is the
+    /// script's, and that is where the interesting part of an enemy lives.
+    pub can_see_target: bool,
+    /// Where the player is, when visible. Stale otherwise, so a script that
+    /// wants a last-known position keeps one in its own memory rather than
+    /// being handed a lie.
+    pub target_at: [f32; 3],
+    /// Metres to the player, straight line.
+    pub target_distance: f32,
+    /// The next place to walk to along the route to `goal`, or the character's
+    /// own position when there is no route.
+    ///
+    /// One step, not the whole path: a script that received a list would have
+    /// to track its progress along it, and the host already knows where the
+    /// character is.
+    pub path_next: [f32; 3],
+    /// Whether a route to the last requested `goal` exists at all. A script
+    /// that cannot tell "arrived" from "unreachable" will walk into a wall
+    /// forever.
+    pub path_found: bool,
 }
 
 /// An explosion a script asked for this tick.
@@ -157,6 +182,9 @@ pub struct Motive {
     pub detonate: Option<Detonation>,
     /// Events it raised — a shot fired, a footstep, a shout.
     pub emitted: Vec<Event>,
+    /// Somewhere the script wants to walk to, if it named one. The host finds
+    /// the route; the script never sees a graph.
+    pub goal: Option<[f32; 3]>,
 }
 
 impl Default for Motion {
@@ -177,6 +205,11 @@ impl Default for Motion {
             aim_point: [0.0, 0.0, -1.0],
             aim_distance: 0.0,
             aim_hit: false,
+            can_see_target: false,
+            target_at: [0.0; 3],
+            target_distance: f32::INFINITY,
+            path_next: [0.0; 3],
+            path_found: false,
         }
     }
 }
@@ -541,6 +574,14 @@ impl ScriptHost {
         scope.push("aim_point", to_dynamic_vec(motion.aim_point));
         scope.push("aim_distance", f64::from(motion.aim_distance));
         scope.push("aim_hit", motion.aim_hit);
+        scope.push("can_see_target", motion.can_see_target);
+        scope.push("target_at", to_dynamic_vec(motion.target_at));
+        scope.push("target_distance", f64::from(motion.target_distance));
+        scope.push("path_next", to_dynamic_vec(motion.path_next));
+        scope.push("path_found", motion.path_found);
+        // Where the character wants to go. The host routes to it and reports
+        // the next step back next tick.
+        scope.push("goal", Dynamic::from_array(Vec::new()));
         // The request slot. Empty means "no explosion this tick", which is
         // almost every tick — so the default has to be the quiet one.
         scope.push("detonate", Dynamic::from_array(Vec::new()));
@@ -564,6 +605,7 @@ impl ScriptHost {
         // still being written should coast, not freeze the character.
         Ok(Motive {
             emitted: Self::drained_events(&scope, motion.tick, motion.position),
+            goal: from_scope(&scope, "goal"),
             velocity: from_scope(&scope, "velocity").unwrap_or(motion.velocity),
             detonate: from_scope(&scope, "detonate").map(|at| Detonation {
                 at,

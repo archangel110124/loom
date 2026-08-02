@@ -455,15 +455,38 @@ impl World {
     }
 
     /// The first node carrying a `CharacterController`.
-    ///
-    /// "The player" is not a concept the engine has. This is the nearest
-    /// honest thing: the character a human driving the scene would possess.
     #[must_use]
     pub fn first_character(&self) -> Option<Entity> {
         self.order
             .iter()
             .find(|e| self.character.get(**e).is_some())
             .copied()
+    }
+
+    /// The character a human drives: **the one carrying the active camera**.
+    ///
+    /// "The player" is not a concept the engine has, so it has to be inferred,
+    /// and the view is the honest signal — you are whatever you are looking
+    /// out of. Taking the *first* character instead made the answer depend on
+    /// the order nodes happen to appear in the file: adding an enemy above the
+    /// player in `range.loom` silently made the enemy the player, so the
+    /// player hunted the enemy and the enemy stood still.
+    ///
+    /// Falls back to the first character when nothing carries a camera, which
+    /// is the headless case and the case of a scene with no view authored.
+    #[must_use]
+    pub fn player_character(&self) -> Option<Entity> {
+        let mut current = self.active_camera_entity();
+        // Bounded, like every ancestor walk here: a malformed hierarchy with
+        // a cycle must not hang a tick.
+        for _ in 0..64 {
+            let Some(node) = current else { break };
+            if self.character.get(node).is_some() {
+                return Some(node);
+            }
+            current = self.parent(node);
+        }
+        self.first_character()
     }
 
     /// The `CharacterController` a node declares, if any.

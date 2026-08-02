@@ -18,6 +18,23 @@ use loom_render::glam::{Mat4, Quat, Vec3};
 /// wall clock.
 pub const TICK_SECONDS: f32 = 1.0 / 60.0;
 
+/// How far a goal must move before the route is worth recomputing, squared.
+const REPLAN_DISTANCE: f32 = 1.5 * 1.5;
+/// How close counts as having reached a waypoint, squared.
+const ARRIVED: f32 = 0.6 * 0.6;
+
+/// Distance ignoring height.
+///
+/// **Arriving at a waypoint is a horizontal question.** A route's points sit
+/// on the floor and a character's position is its capsule's centre, most of a
+/// metre above it — so a 3D comparison never reads as arrived, the route never
+/// advances, and the character grinds against its first waypoint forever at a
+/// fraction of its speed. It looks exactly like a movement bug and is not one.
+fn squared_distance_flat(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let (dx, dz) = (a[0] - b[0], a[2] - b[2]);
+    dx * dx + dz * dz
+}
+
 /// A node's scene path, or empty when it has none.
 fn path_of(world: &World, entity: loom_ecs::Entity) -> String {
     world.path(entity).unwrap_or_default().to_owned()
@@ -38,6 +55,12 @@ const AIM_RANGE: f32 = 250.0;
 /// A physics world built from a scene, ready to be stepped.
 pub struct Sim {
     physics: Physics,
+    /// Where anyone can walk. Baked once, after the first step, because the
+    /// tree the probes cast against does not exist before it.
+    nav: Option<loom_physics::NavGrid>,
+    /// Which character a human drives, as an index into `characters`.
+    /// Everyone else hunts it; it hunts nobody.
+    player: Option<usize>,
     /// Entities with a body, and the body they got.
     dynamic: Vec<(loom_ecs::Entity, RigidBodyHandle)>,
     /// Entities with a `CharacterController`, and their walking state.
@@ -56,6 +79,13 @@ struct Walker {
     velocity: [f32; 3],
     grounded: bool,
     memory: loom_script::ScriptMemory,
+    /// Where this character last said it wanted to go, and the route there.
+    ///
+    /// Kept rather than recomputed every tick: A* over a grid is not free, and
+    /// a goal that has not moved has not changed its answer. Re-planned when
+    /// the goal moves off the end of the route or the route runs out.
+    goal: Option<[f32; 3]>,
+    route: Vec<[f32; 3]>,
 }
 
 /// Read a `CharacterController` component into the shape physics wants.
@@ -175,6 +205,8 @@ impl Sim {
                     velocity: [0.0; 3],
                     grounded: false,
                     memory: loom_script::ScriptMemory::default(),
+                    goal: None,
+                    route: Vec::new(),
                 });
                 continue;
             }
@@ -246,8 +278,14 @@ impl Sim {
             }
         }
 
+        let player = world.player_character().and_then(|entity| {
+            characters.iter().position(|w| w.entity == entity)
+        });
+
         Self {
             physics,
+            nav: None,
+            player,
             dynamic,
             characters,
         }
@@ -257,6 +295,23 @@ impl Sim {
     pub fn step(&mut self, ticks: u32) {
         for _ in 0..ticks {
             self.physics.step();
+        }
+        // Baked after the first step, once, for the reason every query here
+        // has the same caveat: the broad-phase tree is built during the step,
+        // and probing before it finds no floor anywhere.
+        //
+        // `ponytail:` never rebuilt. A level whose walls move during play
+        // would route against the old one — a real limitation, and cheap to
+        // fix when something actually moves a wall, by re-baking on the
+        // transaction that did it.
+        if self.nav.is_none() && !self.characters.is_empty() {
+            self.nav = Some(loom_physics::NavGrid::bake(
+                &self.physics,
+                [-64.0, -64.0],
+                [64.0, 64.0],
+                0.5,
+                200.0,
+            ));
         }
     }
 
@@ -296,7 +351,20 @@ impl Sim {
     ) -> Result<(Vec<loom_script::Detonation>, Vec<loom_script::Event>), E> {
         let mut detonations = Vec::new();
         let mut raised = Vec::new();
-        for walker in &mut self.characters {
+
+        // **Whoever carries the camera is the one a human drives.** That is
+        // what "the target" means to everyone else: an enemy hunts the player,
+        // and the player hunts nobody. Taking the first character instead made
+        // it depend on file order, so adding an enemy above the player in the
+        // scene swapped the two.
+        let player_index = self.player;
+        let player = player_index
+            .and_then(|i| self.characters.get(i))
+            .map(|w| (w.character.position(), w.character.body()));
+        let nav = self.nav.as_ref();
+
+        for (index, walker) in self.characters.iter_mut().enumerate() {
+            let target = if Some(index) == player_index { None } else { player };
             // State from the controller, input from whoever is driving.
             // Every character gets the same input for now: "which character
             // the human is possessing" is a game-state question, and there is
@@ -330,7 +398,30 @@ impl Sim {
             // shot fired along it can never hit anything above or below eye
             // level, which is most of a level.
             let hit = self.physics.raycast(eye, input.aim, AIM_RANGE);
+            // What this character can perceive, and where its route goes.
+            // Both are casts, and a script has no physics world.
+            let can_see_target = target.is_some_and(|(at, body)| {
+                // Neither capsule is cover: not theirs from them, and not
+                // this character's own from itself.
+                self.physics
+                    .line_of_sight_between(eye, at, walker.character.body(), body)
+            });
+            let target_at = target.map_or(motion.position, |(at, _)| at);
+            let target_distance = target.map_or(f32::INFINITY, |(at, _)| {
+                let d = [
+                    at[0] - motion.position[0],
+                    at[1] - motion.position[1],
+                    at[2] - motion.position[2],
+                ];
+                d.iter().map(|c| c * c).sum::<f32>().sqrt()
+            });
+
             let motion = loom_script::Motion {
+                can_see_target,
+                target_at,
+                target_distance,
+                path_next: walker.route.first().copied().unwrap_or(motion.position),
+                path_found: !walker.route.is_empty(),
                 aim_point: hit.map_or(
                     [
                         eye[0] + input.aim[0] * AIM_RANGE,
@@ -346,6 +437,35 @@ impl Sim {
 
             let mut motive = velocity_for(walker.entity, &motion, &mut walker.memory)?;
             let velocity = motive.velocity;
+
+            // Route to wherever it asked to go. Re-planned only when the goal
+            // has actually moved or the route has run out — A* every tick for
+            // every character is the cost that makes navigation expensive,
+            // and a goal that has not moved has not changed its answer.
+            if let Some(goal) = motive.goal {
+                let moved = walker
+                    .goal
+                    .is_none_or(|old| squared_distance_flat(old, goal) > REPLAN_DISTANCE);
+                if moved || walker.route.is_empty() {
+                    walker.goal = Some(goal);
+                    walker.route = nav.map_or_else(Vec::new, |grid| {
+                        grid.path(walker.character.position(), goal, loom_physics::NavAgent::default())
+                    });
+                }
+            } else {
+                walker.goal = None;
+                walker.route.clear();
+            }
+            // Arrived at the next waypoint, so aim at the one after it.
+            if walker
+                .route
+                .first()
+                .is_some_and(|step| {
+                    squared_distance_flat(*step, walker.character.position()) < ARRIVED
+                })
+            {
+                walker.route.remove(0);
+            }
             if let Some(detonation) = motive.detonate {
                 detonations.push(detonation);
             }
@@ -775,6 +895,7 @@ impl Runner {
                                 velocity: fall_only(motion),
                                 detonate: None,
                                 emitted: Vec::new(),
+                                goal: None,
                             }),
                         }
                     })?;
@@ -944,7 +1065,7 @@ impl Play {
             });
 
         Self {
-            player: world.first_character(),
+            player: world.player_character(),
             eye,
             world,
             runner,
@@ -2021,6 +2142,79 @@ transform = { pos = [0.0, 6.0, 0.0] }
         let source = std::fs::read_to_string("../../assets/test/range.loom").expect("fixture");
         let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
         Play::start(world, std::path::Path::new("../../assets/test"))
+    }
+
+    // ---------------------------------------------------------------
+    // Enemies.
+    // ---------------------------------------------------------------
+
+    /// **An enemy closes the distance.** Perception and a route are the
+    /// engine's half — both are casts, and a script has no physics world.
+    /// Deciding that seeing the player means chasing is `enemy.rhai`'s.
+    #[test]
+    fn an_enemy_hunts_the_player() {
+        let mut play = firing_range();
+        let start = squared_distance_flat(
+            [axis(&play.world, "Range/Hunter", 0), 0.0, axis(&play.world, "Range/Hunter", 2)],
+            [axis(&play.world, "Range/Player", 0), 0.0, axis(&play.world, "Range/Player", 2)],
+        );
+
+        play.run(240);
+
+        let now = squared_distance_flat(
+            [axis(&play.world, "Range/Hunter", 0), 0.0, axis(&play.world, "Range/Hunter", 2)],
+            [axis(&play.world, "Range/Player", 0), 0.0, axis(&play.world, "Range/Player", 2)],
+        );
+        assert!(
+            now < start - 4.0,
+            "it did not close: {} -> {}",
+            start.sqrt(),
+            now.sqrt()
+        );
+    }
+
+    /// **Routing, isolated.** A knee-high wall is the one obstacle that
+    /// separates seeing from walking: an enemy can see straight over it and
+    /// cannot step over it. Without a route it walks into the wall and grinds
+    /// there — which is exactly what the straight-line fallback does, so this
+    /// is the case that proves the path is real and being followed.
+    #[test]
+    fn an_enemy_walks_around_what_it_can_see_over() {
+        let source = std::fs::read_to_string("../../assets/test/range.loom").expect("fixture");
+        // A metre-high wall across the enemy's straight line to the player,
+        // open at one end.
+        let walled = source.replace(
+            "[[node]]\nname = \"Ground\"",
+            "[[node]]\nname = \"LowWall\"\nparent = \"Range\"\n             transform = { pos = [-3.0, 0.5, 1.0], scale = [7.0, 0.5, 0.4] }\n\n               [node.components.MeshRenderer]\n  mesh = { asset = \"box\" }\n\n             [[node]]\nname = \"Ground\"",
+        );
+        let world = World::from_scene(&Scene::parse(&walled).expect("valid scene"));
+        let mut play = Play::start(world, std::path::Path::new("../../assets/test"));
+
+        play.run(420);
+
+        // Past the wall entirely: it had to go round the open end.
+        assert!(
+            axis(&play.world, "Range/Hunter", 2) > 2.0,
+            "stuck at the wall: z = {}",
+            axis(&play.world, "Range/Hunter", 2)
+        );
+    }
+
+    /// And having closed, it hurts you — through the event queue, so the
+    /// rules decide what a hit costs exactly as they do for a blast.
+    #[test]
+    fn an_enemy_that_reaches_you_hurts_you() {
+        let mut play = firing_range();
+
+        play.run(600);
+
+        assert!(
+            play.events().count_of("damage") >= 1,
+            "never landed a hit: {:?}",
+            play.events().counts()
+        );
+        let health = play.state().number("health").expect("rules keep health");
+        assert!(health < 100.0, "took no damage: {health} HP");
     }
 
     /// **The chain the event queue exists for.** A blast goes off, the engine

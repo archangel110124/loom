@@ -11,8 +11,10 @@
 //! So [`sanity`] runs first and reports in the same structured shape as every
 //! other rejection, because that is where the agent can act on it.
 
+pub mod nav;
 pub mod sanity;
 
+pub use nav::{NavAgent, NavGrid};
 pub use sanity::{Severity, check_scene};
 // Re-exported so callers can hold a body handle without taking a direct
 // dependency on rapier. The engine choice stays behind this crate's door.
@@ -606,6 +608,38 @@ impl Physics {
     #[must_use]
     pub fn line_of_sight(&self, from: [f32; 3], to: [f32; 3]) -> bool {
         self.sees(from, to, QueryFilter::default())
+    }
+
+    /// Whether one character can see another, ignoring both their bodies.
+    ///
+    /// **A character occludes itself, and this is the fourth place it has
+    /// bitten.** Both ends need excluding, for different reasons and to the
+    /// same effect. The target's own surface is half a metre nearer than its
+    /// centre, so an unfiltered cast reports everyone as hidden behind
+    /// themselves. The looker's capsule is around the point the ray starts
+    /// from, so the walk-past-what-you-are-touching rule spends its whole
+    /// budget crawling out of its own body and gives up still inside.
+    ///
+    /// Neither is subtle once seen, and both look identical from outside: an
+    /// enemy that never notices anyone.
+    #[must_use]
+    pub fn line_of_sight_between(
+        &self,
+        from: [f32; 3],
+        to: [f32; 3],
+        looker: RigidBodyHandle,
+        target: RigidBodyHandle,
+    ) -> bool {
+        // One exclusion is a field, the second has to be a predicate — rapier
+        // offers exactly one `exclude_rigid_body`.
+        let mine = |_: ColliderHandle, collider: &Collider| collider.parent() != Some(looker);
+        self.sees(
+            from,
+            to,
+            QueryFilter::default()
+                .exclude_rigid_body(target)
+                .predicate(&mine),
+        )
     }
 
     /// Line of sight, ignoring whatever `filter` excludes.

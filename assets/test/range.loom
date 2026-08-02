@@ -73,6 +73,29 @@ parent = "Range"
   color = [0.9, 0.35, 0.3]
   only_in_play = true
 
+# An enemy. Same `CharacterController` the player has and the same script
+# seam — the engine has no idea one of these is hostile. What makes it an
+# enemy is `enemy.rhai`, which chases what it can see, walks a route round
+# what it cannot walk through, and remembers where you went.
+[[node]]
+name = "Hunter"
+parent = "Range"
+transform = { pos = [-6.0, 1.0, -6.0] }
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+
+  [node.components.Script]
+  path = "../scripts/enemy.rhai"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.55, 0.12, 0.14]
+  roughness = 0.6
+
 # You cannot aim without one of these.
 [[node]]
 name = "Crosshair"
