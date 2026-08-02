@@ -270,6 +270,7 @@ impl Sim {
         &mut self,
         world: &mut World,
         tick: u64,
+        input: loom_script::Motion,
         mut velocity_for: impl FnMut(
             loom_ecs::Entity,
             &loom_script::Motion,
@@ -277,12 +278,18 @@ impl Sim {
         ) -> Result<[f32; 3], E>,
     ) -> Result<(), E> {
         for walker in &mut self.characters {
+            // State from the controller, input from whoever is driving.
+            // Every character gets the same input for now: "which character
+            // the human is possessing" is a game-state question, and there is
+            // exactly one character in a scene until there is a reason for
+            // more.
             let motion = loom_script::Motion {
                 tick,
                 dt: TICK_SECONDS,
                 position: walker.character.position(),
                 velocity: walker.velocity,
                 grounded: walker.grounded,
+                ..input
             };
             let velocity = velocity_for(walker.entity, &motion, &mut walker.memory)?;
 
@@ -447,6 +454,12 @@ pub struct Runner {
     character_scripts: std::collections::BTreeMap<loom_ecs::Entity, String>,
     /// Scripts on ordinary nodes, which write a transform directly.
     node_scripts: Vec<(loom_ecs::Entity, String)>,
+    /// This tick's player input, folded into every character's `Motion`.
+    ///
+    /// Headless it stays at its default of all-zero, which is right: nobody is
+    /// pressing keys for `loom sim`, and a scene must simulate the same way
+    /// whether or not a window is open.
+    pub input: loom_script::Motion,
 }
 
 impl Runner {
@@ -491,6 +504,7 @@ impl Runner {
             host,
             character_scripts,
             node_scripts,
+            input: loom_script::Motion::default(),
         })
     }
 
@@ -503,6 +517,7 @@ impl Runner {
             host: loom_script::ScriptHost::default(),
             character_scripts: std::collections::BTreeMap::new(),
             node_scripts: Vec::new(),
+            input: loom_script::Motion::default(),
         }
     }
 
@@ -521,8 +536,9 @@ impl Runner {
         if self.physics.character_count() > 0 {
             let host = &self.host;
             let scripts = &self.character_scripts;
+            let input = self.input;
             self.physics
-                .drive_characters(world, tick, |entity, motion, memory| {
+                .drive_characters(world, tick, input, |entity, motion, memory| {
                     match scripts.get(&entity) {
                         Some(script) => host.motion(script, motion, memory),
                         // No script, so no movement model — it falls and does
@@ -556,6 +572,20 @@ impl Runner {
     }
 }
 
+/// What the human is pressing this frame, sampled by the viewer.
+///
+/// Sampled per *frame* and applied per *tick*. Those differ, and the tick is
+/// what the simulation counts (never-do #8) — so a jump is latched here and
+/// consumed by the first tick that runs, rather than being missed because the
+/// key went up between two ticks.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlayerInput {
+    /// `[strafe, forward]`, each `-1..=1`.
+    pub move_axis: [f32; 2],
+    pub jump: bool,
+    pub sprint: bool,
+}
+
 /// Play mode as the editor holds it: a scene's world, its simulation, and how
 /// far it has been run.
 pub struct Play {
@@ -575,7 +605,26 @@ pub struct Play {
     /// an accumulator: the wall clock decides *how many* ticks to run, and
     /// never what a tick is worth.
     leftover: f32,
+
+    /// Where the player is looking, in radians. Yaw turns the character; pitch
+    /// only tilts the camera, because a capsule that leans back is a ragdoll.
+    yaw: f32,
+    pitch: f32,
+    /// Held keys, replaced every frame by the viewer.
+    input: PlayerInput,
+    /// A jump press waiting for a tick to consume it. Separate from `input`
+    /// because a press lasts one *frame* and might land between two ticks —
+    /// dropping it is the "sometimes jump does nothing" bug.
+    jump_pending: bool,
+    /// The character a human drives, and the node the view comes from.
+    /// Resolved once at Play: neither can appear mid-run.
+    player: Option<loom_ecs::Entity>,
+    eye: Option<loom_ecs::Entity>,
 }
+
+/// Just short of straight up or down. At exactly ±90° the forward vector is
+/// parallel to world up, `right` degenerates, and strafing snaps around.
+const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
 
 impl Play {
     /// Begin simulating. `base` is the directory scripts resolve against —
@@ -591,13 +640,96 @@ impl Play {
             crate::log::warn(format!("scripts did not load: {json}"));
             Runner::physics_only(&world)
         });
+        // The authored camera's rotation is where the view starts, so
+        // pressing Play does not snap the human somewhere else.
+        let eye = world.active_camera_entity();
+        let (yaw, pitch) = eye
+            .and_then(|e| world.transform(e))
+            .map_or((0.0, 0.0), |t| {
+                (t.rot_euler[1].to_radians(), t.rot_euler[0].to_radians())
+            });
+
         Self {
+            player: world.first_character(),
+            eye,
             world,
             runner,
             ticks: 0,
             paused: false,
             leftover: 0.0,
+            yaw,
+            pitch: pitch.clamp(-MAX_PITCH, MAX_PITCH),
+            input: PlayerInput::default(),
+            jump_pending: false,
         }
+    }
+
+    /// Replace this frame's held input.
+    pub fn set_input(&mut self, input: PlayerInput) {
+        // Latched, not overwritten: a press lasts one frame and the tick that
+        // consumes it may not have run yet.
+        self.jump_pending |= input.jump;
+        self.input = input;
+    }
+
+    /// Turn the view by a mouse delta, in radians.
+    pub fn look(&mut self, yaw_delta: f32, pitch_delta: f32) {
+        self.yaw -= yaw_delta;
+        self.pitch = (self.pitch - pitch_delta).clamp(-MAX_PITCH, MAX_PITCH);
+    }
+
+    /// The view this scene is played from, if it authored a camera.
+    #[must_use]
+    pub fn camera(&self) -> Option<loom_ecs::CameraView> {
+        self.world.active_camera()
+    }
+
+    /// Whether a human can drive anything here.
+    #[must_use]
+    pub fn has_player(&self) -> bool {
+        self.player.is_some()
+    }
+
+    /// Write the look angles onto the rig before the tick reads them.
+    ///
+    /// Yaw goes on the character and pitch on the camera, which is what makes
+    /// a camera parented to the character a first-person rig: turning the body
+    /// carries the view with it, and looking up does not tip the capsule over.
+    /// With no character the camera takes both, so a scene with only a camera
+    /// is still free to look around.
+    fn apply_look(&mut self) {
+        let (yaw, pitch) = (self.yaw.to_degrees(), self.pitch.to_degrees());
+        match self.player {
+            Some(player) => {
+                if let Some(t) = self.world.transform_mut(player) {
+                    t.rot_euler[1] = yaw;
+                }
+                if let Some(t) = self.eye.and_then(|e| self.world.transform_mut(e)) {
+                    t.rot_euler[0] = pitch;
+                }
+            }
+            None => {
+                if let Some(t) = self.eye.and_then(|e| self.world.transform_mut(e)) {
+                    t.rot_euler[0] = pitch;
+                    t.rot_euler[1] = yaw;
+                }
+            }
+        }
+        self.world.propagate_transforms();
+    }
+
+    /// The horizontal basis the player's input is expressed in.
+    fn basis(&self) -> ([f32; 3], [f32; 3]) {
+        // **The scene format's forward is −Z**, not +Z. These are exactly the
+        // camera node's own axes at this yaw — its local −Z and local +X — so
+        // "forward" for the script and "forward" for the view are the same
+        // direction by construction. Copying the fly camera's convention here
+        // instead (yaw 0 looking down +Z) made W walk backwards, and the
+        // symptom was a character that moonwalks away from where you look.
+        //
+        // Flat, because looking at the sky must not make W walk into it.
+        let (sin, cos) = self.yaw.sin_cos();
+        ([-sin, 0.0, -cos], [cos, 0.0, -sin])
     }
 
     /// Advance by real elapsed time, in whole ticks.
@@ -636,6 +768,18 @@ impl Play {
     pub fn run(&mut self, ticks: u32) {
         for _ in 0..ticks {
             self.ticks += 1;
+            self.apply_look();
+            let (forward, right) = self.basis();
+            self.runner.input = loom_script::Motion {
+                move_axis: self.input.move_axis,
+                forward,
+                right,
+                // Consumed here, so one press is one jump however the frames
+                // and ticks happen to line up.
+                jump: std::mem::take(&mut self.jump_pending),
+                sprint: self.input.sprint,
+                ..loom_script::Motion::default()
+            };
             if let Err(e) = self.runner.tick(&mut self.world, u64::from(self.ticks)) {
                 crate::log::warn(format!("{}: {} — paused", e.script, e.message));
                 self.paused = true;
@@ -1218,6 +1362,16 @@ transform = { pos = [0.0, 6.0, 0.0] }
         assert!(super::invertible_parent(flat).is_finite());
     }
 
+    fn axis_rot(world: &World, path: &str, index: usize) -> f32 {
+        world
+            .entities()
+            .iter()
+            .find(|e| world.path(**e) == Some(path))
+            .and_then(|e| world.transform(*e))
+            .map(|t| t.rot_euler[index])
+            .expect("node exists")
+    }
+
     fn axis(world: &World, path: &str, index: usize) -> f32 {
         world
             .entities()
@@ -1267,6 +1421,149 @@ transform = { pos = [0.0, 6.0, 0.0] }
 
         let y = axis(&play.world, "Root", 1);
         assert!((y - 1.0).abs() < 1e-4, "script did not run: y = {y}");
+    }
+
+    /// The player rig end to end: a scene with a character and a camera, a
+    /// key held, and the capsule walks where the camera is looking.
+    fn fps_scene() -> Play {
+        let source = std::fs::read_to_string("../../assets/test/camera.loom").expect("fixture");
+        let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+        Play::start(world, std::path::Path::new("../../assets/test"))
+    }
+
+    #[test]
+    fn holding_forward_walks_the_character_where_it_is_looking() {
+        let mut play = fps_scene();
+        assert!(play.has_player(), "the scene must have a character to drive");
+        let before = axis(&play.world, "Level/Player", 2);
+
+        play.set_input(PlayerInput {
+            move_axis: [0.0, 1.0],
+            ..PlayerInput::default()
+        });
+        play.run(60);
+
+        // Authored facing is -Z, so forward is -Z.
+        assert!(
+            axis(&play.world, "Level/Player", 2) < before - 2.0,
+            "did not walk: z went {before} -> {}",
+            axis(&play.world, "Level/Player", 2)
+        );
+    }
+
+    /// **The invariant that makes the rig coherent**: what the script is told
+    /// is forward and where the camera actually points are one direction. They
+    /// came from two different conventions at first — the fly camera's yaw and
+    /// the scene format's −Z — and the character walked backwards.
+    #[test]
+    fn forward_for_the_script_is_where_the_camera_looks() {
+        let mut play = fps_scene();
+
+        for turn in [0.0_f32, 0.7, -1.9, 3.0] {
+            play.look(turn, 0.0);
+            play.run(1);
+
+            let view = play.camera().expect("camera");
+            let looking = [
+                view.target[0] - view.eye[0],
+                view.target[2] - view.eye[2],
+            ];
+            let (forward, _) = play.basis();
+            assert!(
+                (forward[0] - looking[0]).abs() < 1e-3
+                    && (forward[2] - looking[1]).abs() < 1e-3,
+                "after turning {turn}: script forward {forward:?} vs view {looking:?}"
+            );
+        }
+    }
+
+    /// Turning has to change what "forward" means, or the character walks a
+    /// fixed compass direction whatever the human is looking at.
+    #[test]
+    fn looking_right_changes_which_way_forward_is() {
+        let mut play = fps_scene();
+        let start = (
+            axis(&play.world, "Level/Player", 0),
+            axis(&play.world, "Level/Player", 2),
+        );
+
+        // A quarter turn to the right, then walk. Facing −Z to start, so
+        // turning right faces +X.
+        play.look(std::f32::consts::FRAC_PI_2, 0.0);
+        play.set_input(PlayerInput {
+            move_axis: [0.0, 1.0],
+            ..PlayerInput::default()
+        });
+        play.run(60);
+
+        let moved_x = axis(&play.world, "Level/Player", 0) - start.0;
+        let moved_z = axis(&play.world, "Level/Player", 2) - start.1;
+        assert!(
+            moved_x > 2.0 && moved_z.abs() < 1.0,
+            "turned right should walk +X, not {moved_x} / {moved_z}"
+        );
+    }
+
+    /// The view has to ride the body, or the human walks and the picture does
+    /// not follow. This is the whole reason the camera is a child node.
+    #[test]
+    fn the_camera_follows_the_character_it_is_parented_to() {
+        let mut play = fps_scene();
+        let before = play.camera().expect("the scene authors a camera").eye;
+
+        play.set_input(PlayerInput {
+            move_axis: [0.0, 1.0],
+            ..PlayerInput::default()
+        });
+        play.run(60);
+
+        let after = play.camera().expect("still there").eye;
+        assert!(
+            (after[2] - before[2]) < -2.0,
+            "camera stayed put while the body walked: {before:?} -> {after:?}"
+        );
+    }
+
+    /// Looking up must tilt the view without tipping the capsule over — the
+    /// reason pitch goes on the camera node and yaw on the character.
+    #[test]
+    fn looking_up_tilts_the_view_and_not_the_body() {
+        let mut play = fps_scene();
+
+        play.look(0.0, -0.6);
+        play.run(1);
+
+        let view = play.camera().expect("camera");
+        assert!(
+            view.target[1] > view.eye[1] + 0.3,
+            "the view did not tilt up: {view:?}"
+        );
+        let body_pitch = axis_rot(&play.world, "Level/Player", 0);
+        assert!(body_pitch.abs() < 1e-3, "the capsule leaned: {body_pitch}");
+    }
+
+    /// A press lasts one frame; ticks run on their own schedule. Latching is
+    /// what stops "sometimes jump does nothing".
+    #[test]
+    fn a_jump_press_survives_until_a_tick_consumes_it() {
+        let mut play = fps_scene();
+        // Land first.
+        play.run(30);
+        let resting = axis(&play.world, "Level/Player", 1);
+
+        play.set_input(PlayerInput {
+            jump: true,
+            ..PlayerInput::default()
+        });
+        // The button is already released by the time the next tick runs.
+        play.set_input(PlayerInput::default());
+        play.run(12);
+
+        assert!(
+            axis(&play.world, "Level/Player", 1) > resting + 0.3,
+            "the jump was dropped: y {resting} -> {}",
+            axis(&play.world, "Level/Player", 1)
+        );
     }
 
     #[test]

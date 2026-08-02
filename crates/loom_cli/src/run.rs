@@ -118,6 +118,8 @@ impl FlyCamera {
 
 /// The context the viewer runs in. A menu would push another.
 const FLY: &str = "fly";
+/// Driving a character while Play runs. Live only then.
+const PLAY: &str = "play";
 /// Editing actions, live only when `--edit` was passed.
 const EDIT: &str = "edit";
 /// How far one nudge moves a node, in metres.
@@ -183,6 +185,10 @@ struct App {
     /// Draw calls for the simulated world, refreshed only on ticks that
     /// actually ran.
     play_objects: Vec<loom_render::Object>,
+    /// Whether the pointer is captured for first-person play. Tracked rather
+    /// than asked of the window because winit has no getter, and because
+    /// releasing it must not depend on the platform honouring the request.
+    captured: bool,
     /// Live particle state, kept across frames. `None` until the first frame
     /// after a scene load.
     plumes: Option<crate::particles::Plumes>,
@@ -295,6 +301,7 @@ impl App {
             mode: Mode::Move,
             handles: Vec::new(),
             play_objects: Vec::new(),
+            captured: false,
             plumes: None,
             ui: None,
             cursor: (0.0, 0.0),
@@ -758,8 +765,15 @@ impl ApplicationHandler for App {
                 // two redraws is still seen exactly once here rather than
                 // missed entirely.
                 if self.input.is_active(&self.bindings, FLY, "quit") {
-                    event_loop.exit();
-                    return;
+                    // While driving a character, Escape means "give me my
+                    // cursor back", not "close the window" — which is what it
+                    // means in every game that ever captured a pointer.
+                    if self.captured {
+                        self.capture_pointer(false);
+                    } else {
+                        event_loop.exit();
+                        return;
+                    }
                 }
                 if self.input.is_active(&self.bindings, FLY, "reframe") {
                     // Unity's F: frame the selection, or the scene when there
@@ -774,11 +788,28 @@ impl ApplicationHandler for App {
                 if self.play.is_none() {
                     self.poll_file(now);
                 }
+                self.feed_play_input();
                 if self.play.as_mut().is_some_and(|p| p.advance(dt)) {
                     self.refresh_play_objects();
                 }
 
-                let camera = self.camera.camera();
+                // While driving a character the view is the scene's camera,
+                // which the character carries. The fly camera is still there
+                // and still where it was — Escape hands the pointer back and
+                // Stop returns to it.
+                let camera = self
+                    .play
+                    .as_ref()
+                    .filter(|_| self.captured)
+                    .and_then(crate::play::Play::camera)
+                    .map_or_else(
+                        || self.camera.camera(),
+                        |view| Camera {
+                            eye: Vec3::from_array(view.eye),
+                            target: Vec3::from_array(view.target),
+                            fov_y_degrees: view.fov_y_degrees,
+                        },
+                    );
                 let extent = self.viewer.as_ref().map_or((1, 1), Viewer::extent);
                 #[allow(clippy::cast_precision_loss)]
                 let projection = gizmo::View::new(&camera, extent.0 as f32, extent.1 as f32);
@@ -878,11 +909,21 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
-        if let DeviceEvent::MouseMotion { delta } = event
-            && self.looking()
-        {
-            #[allow(clippy::cast_possible_truncation)]
-            let (dx, dy) = (delta.0 as f32, delta.1 as f32);
+        let DeviceEvent::MouseMotion { delta } = event else {
+            return;
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let (dx, dy) = (delta.0 as f32, delta.1 as f32);
+
+        // Captured means the human is inside the scene, not looking at it.
+        if self.captured {
+            if let Some(play) = self.play.as_mut() {
+                play.look(dx * LOOK_SENSITIVITY, dy * LOOK_SENSITIVITY);
+            }
+            return;
+        }
+
+        if self.looking() {
             self.camera.yaw -= dx * LOOK_SENSITIVITY;
             // Clamp just short of straight up/down: at exactly ±90° the
             // forward vector becomes parallel to world up and `right()`
@@ -976,13 +1017,71 @@ impl App {
             "play — {} bodies, {characters} characters, {scripts} scripts",
             play.bodies()
         ));
+        let drivable = play.has_player() && play.camera().is_some();
         self.play = Some(play);
+        // First person only when the scene actually has the rig for it: a
+        // character to move and a camera to see through. Without both, Play
+        // stays a spectator view and the fly camera keeps working.
+        if drivable {
+            self.capture_pointer(true);
+            crate::log::info("WASD to move, mouse to look, Space to jump, Esc to free the pointer");
+        } else {
+            crate::log::info(
+                "no player rig (needs a CharacterController and a Camera) — flying instead",
+            );
+        }
         self.refresh_play_objects();
         self.drag = None;
     }
 
+    /// Take or release the pointer for first-person play.
+    ///
+    /// Locked first, then Confined: Wayland and X11 disagree about which they
+    /// support, and a viewer that panics on an unsupported grab mode is worse
+    /// than one whose cursor leaves the window.
+    fn capture_pointer(&mut self, capture: bool) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        if capture {
+            let locked = window
+                .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                .or_else(|_| window.set_cursor_grab(winit::window::CursorGrabMode::Confined));
+            if let Err(e) = locked {
+                crate::log::warn(format!("could not capture the pointer: {e}"));
+                return;
+            }
+        } else if window.set_cursor_grab(winit::window::CursorGrabMode::None).is_err() {
+            return;
+        }
+        window.set_cursor_visible(!capture);
+        self.captured = capture;
+    }
+
+    /// Sample this frame's keys for the character being driven.
+    fn feed_play_input(&mut self) {
+        let Some(play) = self.play.as_mut() else {
+            return;
+        };
+        // Only while the pointer is captured. Otherwise typing in a panel
+        // would walk the character around behind the human's back.
+        if !self.captured {
+            play.set_input(crate::play::PlayerInput::default());
+            return;
+        }
+        play.set_input(crate::play::PlayerInput {
+            move_axis: [
+                self.input.axis(&self.bindings, PLAY, "move_right", "move_left"),
+                self.input.axis(&self.bindings, PLAY, "move_forward", "move_back"),
+            ],
+            jump: self.input.is_active(&self.bindings, PLAY, "jump"),
+            sprint: self.input.is_active(&self.bindings, PLAY, "sprint"),
+        });
+    }
+
     /// Stop, and go back to the authored scene exactly as it was.
     fn stop_play(&mut self) {
+        self.capture_pointer(false);
         if let Some(play) = self.play.take() {
             crate::log::info(format!(
                 "stopped after {} ticks ({:.2}s) — state {:016x}",

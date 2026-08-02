@@ -92,6 +92,40 @@ pub struct Motion {
     /// integrates its own finds out when it walked into a wall.
     pub velocity: [f32; 3],
     pub grounded: bool,
+
+    /// What the player is asking for: `[strafe, forward]`, each `-1..=1`.
+    /// All zero when nothing is driving this character, which is the headless
+    /// case and also a character nobody is possessing.
+    pub move_axis: [f32; 2],
+    /// Where the character is facing, horizontal and unit length.
+    ///
+    /// Handed in rather than derived from the transform because "forward" for
+    /// a first-person character is where the *camera* points, and the script
+    /// should not have to know how the camera is rigged to find that out.
+    pub forward: [f32; 3],
+    /// `forward` turned 90° right, for strafing.
+    pub right: [f32; 3],
+    /// True on the tick the jump button went down, not while it is held —
+    /// otherwise holding it jumps again the instant the character lands.
+    pub jump: bool,
+    pub sprint: bool,
+}
+
+impl Default for Motion {
+    fn default() -> Self {
+        Self {
+            tick: 0,
+            dt: 1.0 / 60.0,
+            position: [0.0; 3],
+            velocity: [0.0; 3],
+            grounded: false,
+            move_axis: [0.0; 2],
+            forward: [0.0, 0.0, -1.0],
+            right: [1.0, 0.0, 0.0],
+            jump: false,
+            sprint: false,
+        }
+    }
 }
 
 /// State a movement script keeps between ticks.
@@ -254,6 +288,14 @@ impl ScriptHost {
         scope.push("position", to_dynamic_vec(motion.position));
         scope.push("velocity", to_dynamic_vec(motion.velocity));
         scope.push("grounded", motion.grounded);
+        // Input. A script that ignores all of this is still valid — an NPC
+        // has no one pressing keys for it, and reads zeros.
+        scope.push("move_x", f64::from(motion.move_axis[0]));
+        scope.push("move_z", f64::from(motion.move_axis[1]));
+        scope.push("forward", to_dynamic_vec(motion.forward));
+        scope.push("right", to_dynamic_vec(motion.right));
+        scope.push("jump", motion.jump);
+        scope.push("sprint", motion.sprint);
         scope.push("memory", std::mem::take(&mut memory.0));
 
         let result = self.engine.run_ast_with_scope(&mut scope, ast);
@@ -426,11 +468,9 @@ mod tests {
 
     fn walking() -> Motion {
         Motion {
-            tick: 0,
-            dt: 1.0 / 60.0,
             position: [0.0, 1.0, 0.0],
-            velocity: [0.0; 3],
             grounded: true,
+            ..Motion::default()
         }
     }
 
@@ -521,6 +561,49 @@ mod tests {
         let out = host.motion("noop", &motion, &mut ScriptMemory::default()).expect("runs");
 
         assert_eq!(out, [2.0, 0.0, 4.0]);
+    }
+
+    /// A first-person character walks where it is looking, so the basis has
+    /// to reach the script. Turn the character and the same key press has to
+    /// send it somewhere else.
+    #[test]
+    fn a_movement_script_moves_relative_to_where_it_faces() {
+        let mut host = host();
+        host.compile(
+            "walk",
+            "velocity = [forward[0] * move_z + right[0] * move_x, 0.0,\
+                         forward[2] * move_z + right[2] * move_x];",
+        )
+        .expect("valid");
+
+        let north = Motion { move_axis: [0.0, 1.0], ..walking() };
+        let out = host.motion("walk", &north, &mut ScriptMemory::default()).expect("runs");
+        assert!((out[2] + 1.0).abs() < 1e-6, "facing -Z, W should go -Z: {out:?}");
+
+        // Same key, character turned to face +X.
+        let east = Motion {
+            move_axis: [0.0, 1.0],
+            forward: [1.0, 0.0, 0.0],
+            right: [0.0, 0.0, 1.0],
+            ..walking()
+        };
+        let out = host.motion("walk", &east, &mut ScriptMemory::default()).expect("runs");
+        assert!((out[0] - 1.0).abs() < 1e-6, "facing +X, W should go +X: {out:?}");
+    }
+
+    #[test]
+    fn a_movement_script_sees_the_jump_and_sprint_buttons() {
+        let mut host = host();
+        host.compile(
+            "keys",
+            "if jump { velocity[1] = 5.0; } if sprint { velocity[0] = 9.0; }",
+        )
+        .expect("valid");
+
+        let pressed = Motion { jump: true, sprint: true, ..walking() };
+        let out = host.motion("keys", &pressed, &mut ScriptMemory::default()).expect("runs");
+
+        assert!((out[1] - 5.0).abs() < 1e-6 && (out[0] - 9.0).abs() < 1e-6, "{out:?}");
     }
 
     /// The sandbox applies here too — this is a new entry point into the

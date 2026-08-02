@@ -422,6 +422,25 @@ impl World {
         })
     }
 
+    /// The node the view comes from, for whoever needs to *turn* it rather
+    /// than only read it — mouse look writes pitch onto this node.
+    #[must_use]
+    pub fn active_camera_entity(&self) -> Option<Entity> {
+        self.active_camera.filter(|e| self.is_alive(*e))
+    }
+
+    /// The first node carrying a `CharacterController`.
+    ///
+    /// "The player" is not a concept the engine has. This is the nearest
+    /// honest thing: the character a human driving the scene would possess.
+    #[must_use]
+    pub fn first_character(&self) -> Option<Entity> {
+        self.order
+            .iter()
+            .find(|e| self.character.get(**e).is_some())
+            .copied()
+    }
+
     /// The `CharacterController` a node declares, if any.
     #[must_use]
     pub fn character(&self, entity: Entity) -> Option<&serde_json::Value> {

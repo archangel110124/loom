@@ -7,13 +7,18 @@
 # camera standing *inside* the scene at eye height.
 #
 # So the check this scene exists for is: does `loom render` put the eye at
-# 1.7 m facing down the corridor, or does it back off and show the room from
-# outside? The two images are not subtly different.
+# head height facing down the corridor, or does it back off and show the room
+# from outside? The two images are not subtly different.
 #
 # The camera is a child of Player, and that is the whole trick. Nothing in the
 # engine knows what a player is. Move the Player node and the view moves with
 # it, because the camera's position is its node's position and its node hangs
-# off that one.
+# off that one — whether what moves it is the character controller, a script,
+# or an agent applying a transaction.
+#
+# Open it with `loom run assets/test/camera.loom --edit` and press Play: the
+# pointer is captured and WASD drives the capsule, because this scene has both
+# halves of the rig. Escape hands the pointer back without stopping the sim.
 
 [scene]
 format = 1
@@ -26,10 +31,25 @@ name = "Level"
 # The viewer. A body node at floor level, an eye node at head height.
 # ---------------------------------------------------------------------------
 
+# A capsule the human drives. `loom run --edit` captures the pointer at Play
+# when a scene has both this and a Camera, because that is the whole rig a
+# first-person view needs: something to move, and something to see through.
+#
+# The component is the *shape* — what fits a doorway, what stairs it can take.
+# How it moves is `fps.rhai`, and swapping that file changes the feel of the
+# character without rebuilding the engine.
 [[node]]
 name = "Player"
 parent = "Level"
-transform = { pos = [0.0, 0.0, 6.0] }
+transform = { pos = [0.0, 1.0, 6.0] }
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+  step_height = 0.35
+
+  [node.components.Script]
+  path = "../scripts/fps.rhai"
 
 # 1.7 m above the Player's feet, and the yaw comes from the parent — turning
 # the body turns the view, which is what makes this a first-person rig rather
@@ -41,7 +61,7 @@ transform = { pos = [0.0, 0.0, 6.0] }
 [[node]]
 name = "Eye"
 parent = "Level/Player"
-transform = { pos = [0.0, 1.7, 0.0] }
+transform = { pos = [0.0, 0.75, 0.0] }
 
   [node.components.Camera]
   fov_y_degrees = 90.0

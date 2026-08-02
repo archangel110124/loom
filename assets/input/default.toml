@@ -54,3 +54,19 @@ duplicate     = [{ button = "KeyD", modifiers = ["ControlLeft"], trigger = "pres
 delete        = [{ button = "Delete", trigger = "pressed" }]
 # Held while clicking to add to the selection rather than replace it.
 extend        = [{ button = "ControlLeft" }, { button = "ControlRight" }]
+
+# Playing, not editing. Live only while Play is running, which is also the only
+# time the pointer is captured — an editor that takes the mouse hostage while
+# you are trying to click a panel is unusable, and a shooter that makes you
+# hold a button to look is unplayable. The two contexts want opposite things,
+# so they are separate.
+[contexts.play.actions]
+move_forward = [{ button = "KeyW" }, { button = "ArrowUp" }]
+move_back    = [{ button = "KeyS" }, { button = "ArrowDown" }]
+move_left    = [{ button = "KeyA" }, { button = "ArrowLeft" }]
+move_right   = [{ button = "KeyD" }, { button = "ArrowRight" }]
+# Pressed, not held: holding jump must not re-fire the instant you land.
+jump         = [{ button = "Space", trigger = "pressed" }]
+sprint       = [{ button = "ShiftLeft" }, { button = "ShiftRight" }]
+# Hands the pointer back without stopping the simulation.
+release      = [{ button = "Escape", trigger = "pressed" }]
