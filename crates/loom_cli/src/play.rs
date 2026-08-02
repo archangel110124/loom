@@ -18,6 +18,16 @@ use loom_render::glam::{Mat4, Quat, Vec3};
 /// wall clock.
 pub const TICK_SECONDS: f32 = 1.0 / 60.0;
 
+/// A node's scene path, or empty when it has none.
+fn path_of(world: &World, entity: loom_ecs::Entity) -> String {
+    world.path(entity).unwrap_or_default().to_owned()
+}
+
+/// Event kinds the engine itself raises. Everything else is a game's own
+/// vocabulary and is never named in here.
+const BLAST: &str = "blast";
+const DAMAGE: &str = "damage";
+
 /// How far a character's aim ray reaches, in metres.
 ///
 /// Long enough to cross any blockout and short enough that a miss is a miss:
@@ -283,8 +293,9 @@ impl Sim {
             &loom_script::Motion,
             &mut loom_script::ScriptMemory,
         ) -> Result<loom_script::Motive, E>,
-    ) -> Result<Vec<loom_script::Detonation>, E> {
+    ) -> Result<(Vec<loom_script::Detonation>, Vec<loom_script::Event>), E> {
         let mut detonations = Vec::new();
+        let mut raised = Vec::new();
         for walker in &mut self.characters {
             // State from the controller, input from whoever is driving.
             // Every character gets the same input for now: "which character
@@ -333,11 +344,19 @@ impl Sim {
                 ..motion
             };
 
-            let motive = velocity_for(walker.entity, &motion, &mut walker.memory)?;
+            let mut motive = velocity_for(walker.entity, &motion, &mut walker.memory)?;
             let velocity = motive.velocity;
             if let Some(detonation) = motive.detonate {
                 detonations.push(detonation);
             }
+            // Whatever the character's own script raised. Stamped with the
+            // node it came from so a rule can tell which character shouted.
+            for event in &mut motive.emitted {
+                if event.node.is_empty() {
+                    event.node = path_of(world, walker.entity);
+                }
+            }
+            raised.append(&mut motive.emitted);
 
             let moved = self
                 .physics
@@ -361,7 +380,7 @@ impl Sim {
             }
         }
         world.propagate_transforms();
-        Ok(detonations)
+        Ok((detonations, raised))
     }
 
     /// Copy body positions back onto the world's transforms.
@@ -413,6 +432,32 @@ impl Sim {
             }
         }
         world.propagate_transforms();
+    }
+
+    /// Which characters an explosion at `centre` reaches, and how exposed
+    /// each was. Cover counts, the same way it does for the shove.
+    #[must_use]
+    pub fn characters_in_blast(
+        &self,
+        centre: [f32; 3],
+        radius: f32,
+    ) -> Vec<(loom_ecs::Entity, [f32; 3], f32)> {
+        let standing: Vec<(usize, [f32; 3], loom_physics::RigidBodyHandle)> = self
+            .characters
+            .iter()
+            .enumerate()
+            .map(|(index, walker)| {
+                (index, walker.character.position(), walker.character.body())
+            })
+            .collect();
+        self.physics
+            .blast_exposure(centre, radius, &standing)
+            .into_iter()
+            .filter_map(|(index, exposure)| {
+                let walker = self.characters.get(index)?;
+                Some((walker.entity, walker.character.position(), exposure))
+            })
+            .collect()
     }
 
     /// Set off a blast in the simulated world.
@@ -515,10 +560,13 @@ pub struct Runner {
     /// position is taken then too — a blast is an event at a place, and the
     /// place is where the node was when the scene started.
     pending_blasts: Vec<(u64, [f32; 3], f32, f32)>,
-    /// Every blast a script has set off, and when. Kept so the render path
-    /// can put a fireball where one went off — the simulation knows what
-    /// happened and the particles have to be told.
-    fired: Vec<(u64, loom_script::Detonation)>,
+    /// Everything that has happened, in order.
+    ///
+    /// One queue rather than a field per kind. Detonations used to have their
+    /// own — a `Vec<(tick, Detonation)>`, its own filter, its own slot in the
+    /// rules' view, its own replay path for the particles. Damage would have
+    /// needed the same again, and death after that. This is that shape, once.
+    events: loom_script::EventLog,
     /// This tick's player input, folded into every character's `Motion`.
     ///
     /// Headless it stays at its default of all-zero, which is right: nobody is
@@ -635,7 +683,7 @@ impl Runner {
             rules,
             state: loom_script::GameState::default(),
             pending_blasts,
-            fired: Vec::new(),
+            events: loom_script::EventLog::default(),
             input: loom_script::Motion::default(),
         })
     }
@@ -646,10 +694,22 @@ impl Runner {
         &self.state
     }
 
-    /// Blasts set off by scripts so far, with the tick each fired on.
+    /// Everything that has happened, in order.
     #[must_use]
-    pub fn fired(&self) -> &[(u64, loom_script::Detonation)] {
-        &self.fired
+    pub fn events(&self) -> &loom_script::EventLog {
+        &self.events
+    }
+
+    /// Where and when each explosion went off, derived from the log rather
+    /// than tracked alongside it — one record of what happened, not two.
+    #[must_use]
+    pub fn fired(&self) -> Vec<(u64, [f32; 3])> {
+        self.events
+            .all()
+            .iter()
+            .filter(|e| e.kind == BLAST)
+            .map(|e| (e.tick, e.at))
+            .collect()
     }
 
     /// A runner that steps physics and runs nothing, for when the scripts
@@ -664,7 +724,7 @@ impl Runner {
             rules: None,
             state: loom_script::GameState::default(),
             pending_blasts: Vec::new(),
-            fired: Vec::new(),
+            events: loom_script::EventLog::default(),
             input: loom_script::Motion::default(),
         }
     }
@@ -701,7 +761,7 @@ impl Runner {
             let host = &self.host;
             let scripts = &self.character_scripts;
             let input = self.input;
-            let detonations =
+            let (detonations, raised) =
                 self.physics
                     .drive_characters(world, tick, input, |entity, motion, memory| {
                         match scripts.get(&entity) {
@@ -714,16 +774,51 @@ impl Runner {
                             None => Ok(loom_script::Motive {
                                 velocity: fall_only(motion),
                                 detonate: None,
+                                emitted: Vec::new(),
                             }),
                         }
                     })?;
+
+            for event in raised {
+                self.events.push(event);
+            }
 
             // What a script asked for, done. After the move, so a blast set
             // off at the character's own feet acts on where it ended up.
             for blast in detonations {
                 self.physics
                     .apply_blast(blast.at, blast.radius, blast.impulse);
-                self.fired.push((tick, blast));
+                self.events.push(loom_script::Event {
+                    tick,
+                    kind: BLAST.to_owned(),
+                    at: blast.at,
+                    node: String::new(),
+                    values: [
+                        ("radius".to_owned(), f64::from(blast.radius)),
+                        ("impulse".to_owned(), f64::from(blast.impulse)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                });
+
+                // Who it caught. The engine reports this because it is the
+                // part a script cannot do — deciding who is in range needs the
+                // same cover cast the shove uses. What being caught *costs* is
+                // a rule, so this carries exposure and says nothing about
+                // health, armour or whether it hurts at all.
+                for (entity, at, exposure) in
+                    self.physics.characters_in_blast(blast.at, blast.radius)
+                {
+                    self.events.push(loom_script::Event {
+                        tick,
+                        kind: DAMAGE.to_owned(),
+                        at,
+                        node: world.path(entity).unwrap_or_default().to_owned(),
+                        values: [("exposure".to_owned(), f64::from(exposure))]
+                            .into_iter()
+                            .collect(),
+                    });
+                }
             }
         }
 
@@ -750,17 +845,19 @@ impl Runner {
         // reading last tick's world and would call the game a tick early.
         if let Some(rules) = &self.rules {
             let positions = world.positions();
-            let detonations: Vec<loom_script::Detonation> = self
-                .fired
-                .iter()
-                .filter(|(at, _)| *at == tick)
-                .map(|(_, blast)| *blast)
-                .collect();
+            let happened = self.events.on_tick(tick);
             let view = loom_script::WorldView {
                 positions: &positions,
-                detonations: &detonations,
+                events: &happened,
             };
-            self.host.rules(rules, tick, TICK_SECONDS, &view, &mut self.state)?;
+            let raised = self
+                .host
+                .rules(rules, tick, TICK_SECONDS, &view, &mut self.state)?;
+            // Raised after the rules read the tick, so a rule cannot see its
+            // own event this tick and loop on it. It lands on the next one.
+            for event in raised {
+                self.events.push(event);
+            }
         }
         Ok(())
     }
@@ -889,10 +986,16 @@ impl Play {
         self.runner.state()
     }
 
-    /// Blasts scripts have set off, with the tick each fired on.
+    /// Where and when each explosion went off.
     #[must_use]
-    pub fn fired(&self) -> &[(u64, loom_script::Detonation)] {
+    pub fn fired(&self) -> Vec<(u64, [f32; 3])> {
         self.runner.fired()
+    }
+
+    /// Everything that has happened, in order.
+    #[must_use]
+    pub fn events(&self) -> &loom_script::EventLog {
+        self.runner.events()
     }
 
     /// Whether a human can drive anything here.
@@ -1842,16 +1945,15 @@ transform = { pos = [0.0, 6.0, 0.0] }
         play.set_input(PlayerInput { fire: true, ..PlayerInput::default() });
         play.run(2);
 
-        let (_, blast) = *play.fired().first().expect("it fired");
+        let (_, blast_at) = *play.fired().first().expect("it fired");
         let at = axis(&play.world, "Level/Player", 1);
         assert!(
-            blast.at[1] < at,
-            "the shot landed at {:?}, above a player standing at y = {at}",
-            blast.at
+            blast_at[1] < at,
+            "the shot landed at {blast_at:?}, above a player standing at y = {at}"
         );
         // The floor is right there; a flat ray would have carried on to the
         // far end of the corridor instead.
-        let away = (blast.at[2] - axis(&play.world, "Level/Player", 2)).abs();
+        let away = (blast_at[2] - axis(&play.world, "Level/Player", 2)).abs();
         assert!(away < 4.0, "landed {away} m down the corridor, not underfoot");
     }
 
@@ -1913,6 +2015,109 @@ transform = { pos = [0.0, 6.0, 0.0] }
             "it never fired: {:?}",
             play.state().numbers()
         );
+    }
+
+    fn firing_range() -> Play {
+        let source = std::fs::read_to_string("../../assets/test/range.loom").expect("fixture");
+        let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+        Play::start(world, std::path::Path::new("../../assets/test"))
+    }
+
+    /// **The chain the event queue exists for.** A blast goes off, the engine
+    /// reports who it caught — the one part a script cannot work out, because
+    /// it needs the same cover cast the shove uses — and a rule turns that
+    /// into health and a death. None of health, damage or dying is a concept
+    /// the engine has.
+    #[test]
+    fn shooting_your_own_feet_kills_you() {
+        let mut play = firing_range();
+        play.run(20);
+        assert_eq!(play.state().number("health"), Some(100.0), "starts whole");
+
+        // Straight down, point blank.
+        play.look(0.0, 1.5);
+        play.set_input(PlayerInput { fire: true, ..PlayerInput::default() });
+        play.run(20);
+
+        assert!(
+            play.events().count_of("damage") >= 1,
+            "the blast caught nobody: {:?}",
+            play.events().counts()
+        );
+        assert_eq!(play.state().status(), loom_script::Status::Lost);
+        assert!(
+            play.state().message().contains("blew yourself up"),
+            "message was {:?}",
+            play.state().message()
+        );
+    }
+
+    /// And the other way: a shot at something far away hurts nobody. Damage
+    /// that ignored distance would make the weapon unusable, and the falloff
+    /// is the engine's half of the split.
+    #[test]
+    fn shooting_something_far_away_leaves_you_unharmed() {
+        let mut play = firing_range();
+        play.run(20);
+
+        // Level, down the range at the backstop nineteen metres away.
+        play.set_input(PlayerInput { fire: true, ..PlayerInput::default() });
+        play.run(30);
+
+        assert!(play.events().count_of("blast") >= 1, "it did not fire");
+        assert_eq!(play.events().count_of("damage"), 0, "hurt at nineteen metres");
+        assert_eq!(play.state().number("health"), Some(100.0));
+    }
+
+    /// Falloff, which is the engine's half of the split. Point blank kills;
+    /// a few metres off has to *wound* — otherwise the only two outcomes are
+    /// unharmed and dead, and a blast radius means nothing inside itself.
+    #[test]
+    fn a_blast_a_few_metres_away_wounds_without_killing() {
+        let mut play = firing_range();
+        play.run(20);
+
+        // A shallow angle down, so the shot lands a few metres ahead rather
+        // than underfoot.
+        play.look(0.0, 0.5);
+        play.set_input(PlayerInput { fire: true, ..PlayerInput::default() });
+        play.run(20);
+
+        let health = play.state().number("health").expect("rules keep health");
+        assert!(
+            play.events().count_of("damage") >= 1,
+            "no damage at all: {:?}",
+            play.events().counts()
+        );
+        assert!(
+            health > 0.0 && health < 100.0,
+            "expected a wound, got {health} HP"
+        );
+        assert_eq!(play.state().status(), loom_script::Status::Playing, "survivable");
+    }
+
+    /// **The log is a replay.** Two runs of the same scene must produce the
+    /// same events in the same order — a stronger claim than the same final
+    /// hash, and one that says *where* two runs diverged rather than only
+    /// that they did.
+    #[test]
+    fn the_event_log_replays_identically() {
+        let run = || {
+            let mut play = firing_range();
+            play.run(20);
+            play.look(0.0, 1.5);
+            play.set_input(PlayerInput { fire: true, ..PlayerInput::default() });
+            play.run(40);
+            play.events()
+                .all()
+                .iter()
+                .map(|e| (e.tick, e.kind.clone(), e.node.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        let first = run();
+        assert!(!first.is_empty(), "nothing happened, so nothing was compared");
+        assert_eq!(first, run());
     }
 
     /// **The whole loop.** A turret fires, a blast throws two targets off the

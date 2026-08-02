@@ -276,7 +276,7 @@ fn blast_template(world: &World) -> Vec<(loom_particles::Emitter, Visual)> {
 pub(crate) fn simulate(
     world: &World,
     ticks: Option<u32>,
-    fired: &[(u64, loom_script::Detonation)],
+    fired: &[(u64, [f32; 3])],
 ) -> Vec<ParticleInstance> {
     let mut out = Vec::new();
 
@@ -312,7 +312,7 @@ pub(crate) fn simulate(
     // the tick is data, not a clock reading, so `--sim N` means one thing.
     let template = blast_template(world);
     if !template.is_empty() {
-        for (at_tick, blast) in fired {
+        for (at_tick, at) in fired {
             #[allow(clippy::cast_possible_truncation)]
             let elapsed = ticks
                 .unwrap_or(0)
@@ -320,7 +320,7 @@ pub(crate) fn simulate(
             for (emitter, visual) in &template {
                 let mut system = loom_particles::System::new(emitter.seed ^ *at_tick);
                 for _ in 0..elapsed {
-                    system.step(DT, emitter, blast.at);
+                    system.step(DT, emitter, *at);
                 }
                 for p in system.particles() {
                     out.push(instance(p, visual));
@@ -362,14 +362,7 @@ mod tests {
     fn a_triggered_explosion_plays_where_it_was_set_off() {
         let world = range();
         let at = [2.0, 1.0, -7.0];
-        let fired = [(
-            10,
-            loom_script::Detonation {
-                at,
-                radius: 4.0,
-                impulse: 300.0,
-            },
-        )];
+        let fired = [(10, at)];
 
         let out = simulate(&world, Some(30), &fired);
 
@@ -445,14 +438,7 @@ mod tests {
         let one = simulate(
             &world,
             Some(30),
-            &[(
-                5,
-                loom_script::Detonation {
-                    at: [0.0, 1.0, 0.0],
-                    radius: 4.0,
-                    impulse: 300.0,
-                },
-            )],
+            &[(5, [0.0, 1.0, 0.0])],
         );
 
         assert!(none.len() < one.len(), "firing must add particles");

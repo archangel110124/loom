@@ -1179,6 +1179,12 @@ impl App {
         }
         self.reported_status = Some(status.as_str());
         let message = play.state().message().to_owned();
+        let happened: Vec<String> = play
+            .events()
+            .counts()
+            .into_iter()
+            .map(|(kind, count)| format!("{count} {kind}"))
+            .collect();
         let numbers: Vec<String> = play
             .state()
             .numbers()
@@ -1191,6 +1197,9 @@ impl App {
             if numbers.is_empty() { "" } else { " · " },
             numbers.join(", ")
         ));
+        if !happened.is_empty() {
+            crate::log::info(format!("events — {}", happened.join(", ")));
+        }
     }
 
     /// Give the particle systems any explosion a script has just set off.
@@ -1204,7 +1213,7 @@ impl App {
         }
         let fresh: Vec<(u64, [f32; 3])> = fired[self.detonations_seen..]
             .iter()
-            .map(|(tick, blast)| (*tick, blast.at))
+            .map(|(tick, at)| (*tick, *at))
             .collect();
         self.detonations_seen = fired.len();
 

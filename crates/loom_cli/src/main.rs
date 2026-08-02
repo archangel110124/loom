@@ -857,19 +857,21 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     // Assertions are checked after the run, against final world state. This is
     // what makes an agent's claim about behaviour checkable rather than
     // asserted (design doc §2.10).
+    let log = runner.events().clone();
     let state = runner.state();
     let mut failures = Vec::new();
     for spec in flags(args, "--assert") {
-        match check_assertion(&world, state, &spec) {
+        match check_assertion(&world, state, &log, &spec) {
             Ok(true) => {}
             Ok(false) | Err(_) => {
-                let actual = assertion_actual(&world, state, &spec);
+                let actual = assertion_actual(&world, state, &log, &spec);
                 failures.push(serde_json::json!({
                     "assert": spec,
                     "actual": actual,
                     "hint": "Format is `Node/Path.axis OP value`, axis one of x/y/z, \
-                             OP one of > >= < <= == ~=. `status == won|lost|playing` \
-                             and `state.<name> OP value` check the game's rules.",
+                             OP one of > >= < <= == ~=. `status == won|lost|playing`, \
+                             `state.<name> OP value` and `events.<kind> OP n` \
+                             check the game's rules and what happened.",
                 }));
             }
         }
@@ -884,6 +886,12 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     }
     for (name, value) in state.numbers() {
         game.insert(name, serde_json::json!(value));
+    }
+    // What happened, by kind. Reported whether or not anything asserted on it:
+    // an agent that ran a scene and sees `"damage": 0` learns why nobody died
+    // from the line it already had to read.
+    if !log.counts().is_empty() {
+        game.insert("events".into(), serde_json::json!(log.counts()));
     }
 
     if !failures.is_empty() {
@@ -926,7 +934,7 @@ fn simulate_physics(
     world: &mut World,
     base: &std::path::Path,
     ticks: u32,
-) -> Vec<(u64, loom_script::Detonation)> {
+) -> Vec<(u64, [f32; 3])> {
     let mut runner = match play::Runner::new(world, base) {
         Ok(r) => r,
         Err(json) => {
@@ -943,7 +951,7 @@ fn simulate_physics(
             break;
         }
     }
-    runner.fired().to_vec()
+    runner.fired()
 }
 
 /// Every value given for a repeated flag.
@@ -959,9 +967,18 @@ fn flags(args: &[String], name: &str) -> Vec<String> {
 fn assertion_value(
     world: &World,
     state: &loom_script::GameState,
+    log: &loom_script::EventLog,
     path: &str,
     axis: &str,
 ) -> Option<f32> {
+    // `events.damage >= 1` — what happened, rather than where things ended up.
+    // A game can be wrong in ways no position shows: nobody was ever hit, the
+    // explosion never fired, the pickup was never taken.
+    if path == "events" {
+        #[allow(clippy::cast_precision_loss)]
+        return Some(log.count_of(axis) as f32);
+    }
+
     // `state.score > 10` — the rules' own numbers, checkable the same way a
     // position is. Without this a game loop can only be asserted on through
     // whatever it happened to move.
@@ -998,6 +1015,7 @@ fn parse_assertion(spec: &str) -> Option<(String, String, String, f32)> {
 fn check_assertion(
     world: &World,
     state: &loom_script::GameState,
+    log: &loom_script::EventLog,
     spec: &str,
 ) -> Result<bool, ()> {
     // `status == won` is the assertion a game loop exists to make, and it is
@@ -1009,7 +1027,7 @@ fn check_assertion(
     }
 
     let (path, axis, op, expected) = parse_assertion(spec).ok_or(())?;
-    let actual = assertion_value(world, state, &path, &axis).ok_or(())?;
+    let actual = assertion_value(world, state, log, &path, &axis).ok_or(())?;
     Ok(match op.as_str() {
         ">" => actual > expected,
         ">=" => actual >= expected,
@@ -1025,13 +1043,14 @@ fn check_assertion(
 fn assertion_actual(
     world: &World,
     state: &loom_script::GameState,
+    log: &loom_script::EventLog,
     spec: &str,
 ) -> serde_json::Value {
     if spec.trim_start().starts_with("status") {
         return serde_json::json!(state.status().as_str());
     }
     parse_assertion(spec)
-        .and_then(|(path, axis, _, _)| assertion_value(world, state, &path, &axis))
+        .and_then(|(path, axis, _, _)| assertion_value(world, state, log, &path, &axis))
         .map_or(serde_json::Value::Null, |v| serde_json::json!(v))
 }
 

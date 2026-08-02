@@ -150,11 +150,13 @@ pub struct Detonation {
 }
 
 /// What a movement script produced this tick.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Motive {
     pub velocity: [f32; 3],
     /// An explosion the script asked for, if it asked for one.
     pub detonate: Option<Detonation>,
+    /// Events it raised — a shot fired, a footstep, a shout.
+    pub emitted: Vec<Event>,
 }
 
 impl Default for Motion {
@@ -282,6 +284,100 @@ impl GameState {
     }
 }
 
+/// Something that happened, at a tick, somewhere.
+///
+/// **Data in a queue, not a callback.** The usual engine event system is
+/// pub/sub: handlers subscribe and are invoked during dispatch. That breaks
+/// both properties this project rests on. Determinism goes because the result
+/// depends on registration order, and assertability goes because an event that
+/// vanishes into a handler is not inspectable when the tick ends — which is
+/// exactly when `loom sim --assert` looks.
+///
+/// So an event is appended, never dispatched. It is drained once, at a defined
+/// point, and handed to the rules as an array. Nothing subscribes, nothing
+/// re-enters, and the whole log is readable afterwards.
+///
+/// That last part is worth more than the feature: **an event log is a replay**.
+/// Two runs producing the same sequence is a stronger claim than two runs
+/// producing the same state hash, and unlike a hash it says where they
+/// diverged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Event {
+    /// The tick it happened on. Never a wall-clock time (never-do #8).
+    pub tick: u64,
+    /// What happened: `blast`, `damage`, or whatever a script invents.
+    ///
+    /// Not an enum. The engine emits a couple of kinds it is uniquely able to
+    /// know about; everything else is a game's own vocabulary, and a game's
+    /// vocabulary does not belong in the engine's type system.
+    pub kind: String,
+    /// Where. Defaults to the emitter's own position.
+    pub at: [f32; 3],
+    /// Who it happened to, as a node path. Empty when it happened to nobody
+    /// in particular — an explosion happens at a place, damage happens to
+    /// someone, and a rule needs to tell the player apart from the scenery.
+    pub node: String,
+    /// Named numbers. Ordered, so two runs serialise identically.
+    pub values: std::collections::BTreeMap<String, f64>,
+}
+
+impl Event {
+    #[must_use]
+    pub fn value(&self, name: &str) -> Option<f64> {
+        self.values.get(name).copied()
+    }
+}
+
+/// Every event so far, in the order they happened.
+///
+/// Append-only within a run. Kept whole rather than drained to nothing so the
+/// log can be reported and compared at the end — the replay property depends
+/// on it still being there.
+#[derive(Debug, Clone, Default)]
+pub struct EventLog {
+    events: Vec<Event>,
+}
+
+impl EventLog {
+    pub fn push(&mut self, event: Event) {
+        self.events.push(event);
+    }
+
+    #[must_use]
+    pub fn all(&self) -> &[Event] {
+        &self.events
+    }
+
+    /// Events from one tick. The slice the rules script sees.
+    ///
+    /// A scan rather than an index: events are appended in tick order, so this
+    /// is a contiguous run at the end, and a game producing enough events per
+    /// tick for the scan to matter has a louder problem than this.
+    #[must_use]
+    pub fn on_tick(&self, tick: u64) -> Vec<Event> {
+        self.events
+            .iter()
+            .filter(|e| e.tick == tick)
+            .cloned()
+            .collect()
+    }
+
+    /// How many of each kind happened, for reporting and for assertions.
+    #[must_use]
+    pub fn counts(&self) -> std::collections::BTreeMap<String, usize> {
+        let mut out = std::collections::BTreeMap::new();
+        for event in &self.events {
+            *out.entry(event.kind.clone()).or_insert(0) += 1;
+        }
+        out
+    }
+
+    #[must_use]
+    pub fn count_of(&self, kind: &str) -> usize {
+        self.events.iter().filter(|e| e.kind == kind).count()
+    }
+}
+
 /// What the rules script is allowed to see of the world this tick.
 ///
 /// Positions by node path, and what has just happened. Handed in rather than
@@ -291,8 +387,8 @@ impl GameState {
 pub struct WorldView<'a> {
     /// Every node's world position, by path.
     pub positions: &'a [(String, [f32; 3])],
-    /// Explosions that went off this tick.
-    pub detonations: &'a [Detonation],
+    /// Everything that happened this tick.
+    pub events: &'a [Event],
 }
 
 /// A sandboxed script host.
@@ -450,6 +546,7 @@ impl ScriptHost {
         scope.push("detonate", Dynamic::from_array(Vec::new()));
         scope.push("detonate_radius", 0.0_f64);
         scope.push("detonate_impulse", 0.0_f64);
+        scope.push("emit", Dynamic::from_array(Vec::new()));
         scope.push("memory", std::mem::take(&mut memory.0));
 
         let result = self.engine.run_ast_with_scope(&mut scope, ast);
@@ -466,6 +563,7 @@ impl ScriptHost {
         // An untouched `velocity` means "keep going", not "stop". A script
         // still being written should coast, not freeze the character.
         Ok(Motive {
+            emitted: Self::drained_events(&scope, motion.tick, motion.position),
             velocity: from_scope(&scope, "velocity").unwrap_or(motion.velocity),
             detonate: from_scope(&scope, "detonate").map(|at| Detonation {
                 at,
@@ -501,7 +599,7 @@ impl ScriptHost {
         dt: f32,
         view: &WorldView,
         state: &mut GameState,
-    ) -> Result<(), ScriptError> {
+    ) -> Result<Vec<Event>, ScriptError> {
         let Some(ast) = self.compiled.get(name) else {
             return Err(ScriptError {
                 error: "unknown_script".to_owned(),
@@ -532,17 +630,12 @@ impl ScriptHost {
         }
         scope.push("positions", positions);
 
-        let detonations: Vec<Dynamic> = view
-            .detonations
-            .iter()
-            .map(|d| {
-                let mut map = rhai::Map::new();
-                map.insert("at".into(), to_dynamic_vec(d.at));
-                map.insert("radius".into(), Dynamic::from_float(f64::from(d.radius)));
-                Dynamic::from_map(map)
-            })
-            .collect();
-        scope.push("detonations", Dynamic::from_array(detonations));
+        let events: Vec<Dynamic> = view.events.iter().map(to_dynamic_event).collect();
+        scope.push("events", Dynamic::from_array(events));
+        // Rules can raise events of their own — "wave cleared", "objective
+        // taken" — which is how one rule tells the next one something without
+        // either of them knowing about the other.
+        scope.push("emit", Dynamic::from_array(Vec::new()));
 
         let result = self.engine.run_ast_with_scope(&mut scope, ast);
 
@@ -563,7 +656,60 @@ impl ScriptHost {
         if let Some(text) = scope.get_value::<String>("message") {
             state.message = text;
         }
-        Ok(())
+        // The rules have no position of their own; an event they raise
+        // without one is at the origin unless it says otherwise.
+        Ok(Self::drained_events(&scope, tick, [0.0; 3]))
+    }
+
+    /// Events a script asked to raise, read back out of its scope.
+    ///
+    /// A script emits by pushing onto an array, the same shape everything else
+    /// here uses: it writes data, the host acts on it. Anything without a
+    /// `kind` is dropped rather than guessed at — an event with no name is not
+    /// an event, and inventing one would hide the typo.
+    fn drained_events(scope: &Scope, tick: u64, at: [f32; 3]) -> Vec<Event> {
+        let Some(raised) = scope.get_value::<rhai::Array>("emit") else {
+            return Vec::new();
+        };
+        raised
+            .into_iter()
+            .filter_map(|item| {
+                let map = item.try_cast::<rhai::Map>()?;
+                let kind = map.get("kind")?.clone().into_string().ok()?;
+                let at = map
+                    .get("at")
+                    .and_then(|v| v.clone().try_cast::<rhai::Array>())
+                    .and_then(|a| {
+                        let mut out = [0.0_f32; 3];
+                        for (slot, value) in out.iter_mut().zip(a) {
+                            #[allow(clippy::cast_possible_truncation)]
+                            {
+                                *slot = value.as_float().ok()? as f32;
+                            }
+                        }
+                        Some(out)
+                    })
+                    .unwrap_or(at);
+                let values = map
+                    .iter()
+                    .filter(|(name, _)| {
+                        !matches!(name.as_str(), "kind" | "at" | "node")
+                    })
+                    .filter_map(|(name, value)| {
+                        let number = value.as_float().ok().or_else(|| {
+                            #[allow(clippy::cast_precision_loss)]
+                            value.as_int().ok().map(|i| i as f64)
+                        })?;
+                        Some((name.to_string(), number))
+                    })
+                    .collect();
+                let node = map
+                    .get("node")
+                    .and_then(|v| v.clone().into_string().ok())
+                    .unwrap_or_default();
+                Some(Event { tick, kind, at, node, values })
+            })
+            .collect()
     }
 
     /// Turn a Rhai failure into the project's structured error shape.
@@ -610,6 +756,20 @@ impl ScriptHost {
             hint,
         }
     }
+}
+
+/// An event as a rhai map: `kind`, `at`, and its numbers at the top level, so
+/// a script writes `e.amount` rather than `e.values["amount"]`.
+fn to_dynamic_event(event: &Event) -> Dynamic {
+    let mut map = rhai::Map::new();
+    map.insert("kind".into(), Dynamic::from(event.kind.clone()));
+    map.insert("at".into(), to_dynamic_vec(event.at));
+    map.insert("node".into(), Dynamic::from(event.node.clone()));
+    map.insert("tick".into(), Dynamic::from_int(i64::try_from(event.tick).unwrap_or(i64::MAX)));
+    for (name, value) in &event.values {
+        map.insert(name.as_str().into(), Dynamic::from_float(*value));
+    }
+    Dynamic::from_map(map)
 }
 
 fn to_dynamic_vec(v: [f32; 3]) -> Dynamic {
@@ -920,7 +1080,7 @@ mod tests {
         host.compile("rules", r#"if tick > 10 { status = "won"; message = "cleared"; }"#)
             .expect("valid");
         let mut state = GameState::default();
-        let view = WorldView { positions: &nowhere(), detonations: &[] };
+        let view = WorldView { positions: &nowhere(), events: &[] };
 
         host.rules("rules", 5, 1.0 / 60.0, &view, &mut state).expect("runs");
         assert_eq!(state.status(), Status::Playing, "not yet");
@@ -944,7 +1104,7 @@ mod tests {
         )
         .expect("valid");
         let mut state = GameState::default();
-        let view = WorldView { positions: &nowhere(), detonations: &[] };
+        let view = WorldView { positions: &nowhere(), events: &[] };
 
         for tick in 0..4 {
             host.rules("score", tick, 1.0 / 60.0, &view, &mut state).expect("runs");
@@ -966,30 +1126,14 @@ mod tests {
         let mut state = GameState::default();
 
         let standing = vec![("Range/Target".to_owned(), [0.0, 1.0, 0.0])];
-        let view = WorldView { positions: &standing, detonations: &[] };
+        let view = WorldView { positions: &standing, events: &[] };
         host.rules("watch", 1, 1.0 / 60.0, &view, &mut state).expect("runs");
         assert_eq!(state.status(), Status::Playing, "still up");
 
         let fallen = vec![("Range/Target".to_owned(), [0.0, -3.0, 0.0])];
-        let view = WorldView { positions: &fallen, detonations: &[] };
+        let view = WorldView { positions: &fallen, events: &[] };
         host.rules("watch", 2, 1.0 / 60.0, &view, &mut state).expect("runs");
         assert_eq!(state.status(), Status::Won, "knocked into the pit");
-    }
-
-    #[test]
-    fn rules_see_what_exploded() {
-        let mut host = host();
-        host.compile("count", "state.blasts = detonations.len();").expect("valid");
-        let mut state = GameState::default();
-        let bangs = [
-            Detonation { at: [0.0; 3], radius: 3.0, impulse: 10.0 },
-            Detonation { at: [1.0; 3], radius: 3.0, impulse: 10.0 },
-        ];
-        let view = WorldView { positions: &nowhere(), detonations: &bangs };
-
-        host.rules("count", 1, 1.0 / 60.0, &view, &mut state).expect("runs");
-
-        assert_eq!(state.number("blasts"), Some(2.0));
     }
 
     /// A rules script is code an agent wrote, like any other. The limits are
@@ -998,7 +1142,7 @@ mod tests {
     fn a_rules_script_cannot_loop_forever() {
         let mut host = host();
         host.compile("hang", "let n = 0; while true { n += 1; }").expect("compiles");
-        let view = WorldView { positions: &nowhere(), detonations: &[] };
+        let view = WorldView { positions: &nowhere(), events: &[] };
 
         let err = host
             .rules("hang", 1, 1.0 / 60.0, &view, &mut GameState::default())

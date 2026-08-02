@@ -10,17 +10,25 @@
 //   - that taking too long loses
 //   - that there is a score, and what it counts
 //
-// What it is told:      tick, dt, positions, detonations
+// What it is told:      tick, dt, positions, events
 // What it answers with: status ("playing" | "won" | "lost"), message
 // What it may keep:     state, which outlives every character in the scene
 //
-// `positions` is every node by path. `detonations` is what exploded this tick.
+// `positions` is every node by path. `events` is everything that happened on
+// this tick — explosions, damage, and anything a script chose to raise. Each
+// carries a `kind`, a `node` it happened to, a place, and its own numbers.
 
 // ---------------------------------------------------------------------------
 // The rules, as numbers.
 // ---------------------------------------------------------------------------
 
 let TARGETS = ["Range/Target", "Range/TargetLeft"];
+let PLAYER = "Range/Player";
+let FULL_HEALTH = 100.0;
+let BLAST_DAMAGE = 150.0;  // at the centre; the engine reports the falloff.
+                           // Point blank is about 0.8 exposure, so a shot at
+                           // your own feet is lethal and one a few metres off
+                           // is survivable.
 let PIT = -1.5;         // below this, a target has left the platform
 let TIME_LIMIT = 600;   // ticks — ten seconds at sixty a tick
 let POINTS_EACH = 100;
@@ -33,8 +41,21 @@ let POINTS_EACH = 100;
 let destroyed = if "destroyed" in state { state.destroyed } else { 0 };
 let score = if "score" in state { state.score } else { 0 };
 let shots = if "shots" in state { state.shots } else { 0 };
+let health = if "health" in state { state.health } else { FULL_HEALTH };
 
-shots += detonations.len();
+// **Health is a rule, not an engine concept.** The engine reports that a
+// character was caught in a blast and how exposed it was; turning that into a
+// number, and deciding what happens when the number runs out, is this file's
+// business. A game with shields instead of health changes here and nowhere
+// else.
+for e in events {
+    if e.kind == "blast" {
+        shots += 1;
+    }
+    if e.kind == "damage" && e.node == PLAYER {
+        health -= e.exposure * BLAST_DAMAGE;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Count what is still standing.
@@ -67,7 +88,10 @@ if gone > destroyed {
 // as broken, whatever the stopwatch says.
 // ---------------------------------------------------------------------------
 
-if destroyed >= TARGETS.len() {
+if health <= 0.0 {
+    status = "lost";
+    message = "you blew yourself up";
+} else if destroyed >= TARGETS.len() {
     status = "won";
     message = "all targets cleared in " + shots + " shots";
 } else if tick >= TIME_LIMIT {
@@ -75,6 +99,7 @@ if destroyed >= TARGETS.len() {
     message = "out of time — " + destroyed + " of " + TARGETS.len() + " cleared";
 }
 
+state.health = if health < 0.0 { 0.0 } else { health };
 state.destroyed = destroyed;
 state.score = score;
 state.shots = shots;

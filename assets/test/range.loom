@@ -59,6 +59,20 @@ parent = "Range"
   size = 26.0
   color = [1.0, 0.85, 0.35]
 
+# Health, which is a number the rules keep — the engine has no idea what it
+# means. Shoot the floor at your feet and watch it go.
+[[node]]
+name = "Health"
+parent = "Range"
+
+  [node.components.Hud]
+  anchor = "bottom_right"
+  offset = [18.0, 14.0]
+  text = "{health} HP"
+  size = 24.0
+  color = [0.9, 0.35, 0.3]
+  only_in_play = true
+
 # You cannot aim without one of these.
 [[node]]
 name = "Crosshair"

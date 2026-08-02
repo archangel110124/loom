@@ -91,6 +91,12 @@ impl Character {
         self.grounded
     }
 
+    /// Its body, for excluding it from queries about itself.
+    #[must_use]
+    pub fn body(&self) -> RigidBodyHandle {
+        self.body
+    }
+
     /// The capsule this character occupies. The eye a shot leaves from is
     /// derived from it, so a shorter character shoots from lower down.
     #[must_use]
@@ -807,6 +813,45 @@ impl Physics {
             velocity: [survived.x, survived.y, survived.z],
             grounded: movement.grounded,
         }
+    }
+
+    /// Which characters a blast reaches, and how hard.
+    ///
+    /// The engine's job because it is the part a script cannot do: deciding
+    /// who is in range needs the same cover check the shove does, and a script
+    /// has no access to the physics world. What being hit *means* — health,
+    /// armour, whether it hurts at all — is a rule, and stays in the script.
+    ///
+    /// The fraction returned is the same linear falloff the impulse uses, so a
+    /// character at the centre takes `1.0` and one at the edge takes nothing.
+    #[must_use]
+    pub fn blast_exposure(
+        &self,
+        centre: [f32; 3],
+        radius: f32,
+        characters: &[(usize, [f32; 3], RigidBodyHandle)],
+    ) -> Vec<(usize, f32)> {
+        if !radius.is_finite() || radius <= 0.0 {
+            return Vec::new();
+        }
+        characters
+            .iter()
+            .filter_map(|(id, at, body)| {
+                let offset = [at[0] - centre[0], at[1] - centre[1], at[2] - centre[2]];
+                let distance = offset.iter().map(|c| c * c).sum::<f32>().sqrt();
+                if distance > radius {
+                    return None;
+                }
+                // Same cover rule as the shove, and the same exclusion:
+                // without it a character's own capsule is the first thing the
+                // ray meets, so everyone is behind cover from every blast
+                // including the one at their feet.
+                if !self.sees(centre, *at, QueryFilter::default().exclude_rigid_body(*body)) {
+                    return None;
+                }
+                Some((*id, 1.0 - distance / radius))
+            })
+            .collect()
     }
 
     /// Shove everything dynamic away from a blast.

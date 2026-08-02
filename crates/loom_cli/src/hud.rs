@@ -443,7 +443,7 @@ mod tests {
         let mut host = loom_script::ScriptHost::default();
         host.compile("r", "state.score = 250;").expect("valid");
         let mut state = GameState::default();
-        let view = loom_script::WorldView { positions: &[], detonations: &[] };
+        let view = loom_script::WorldView { positions: &[], events: &[] };
         host.rules("r", 1, 1.0 / 60.0, &view, &mut state).expect("runs");
 
         assert_eq!(interpolate("Score {score}", &state), "Score 250");
@@ -454,7 +454,7 @@ mod tests {
         let mut host = loom_script::ScriptHost::default();
         host.compile("r", r#"status = "won"; message = "nice";"#).expect("valid");
         let mut state = GameState::default();
-        let view = loom_script::WorldView { positions: &[], detonations: &[] };
+        let view = loom_script::WorldView { positions: &[], events: &[] };
         host.rules("r", 1, 1.0 / 60.0, &view, &mut state).expect("runs");
 
         assert_eq!(interpolate("{status}: {message}", &state), "won: nice");
