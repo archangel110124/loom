@@ -1,0 +1,250 @@
+# A scene that exercises the three things that are hard to get right, and that
+# fail in ways a single screenshot hides: ray-traced shadows, collision against
+# real shapes, and voxel density.
+#
+# WHAT EACH PART IS FOR
+#
+# Voxel density — three volumes, same shape, same world size, three
+# resolutions. Coarse is 32³ voxels, Medium 64³, Fine 128³. Because the shape
+# and the extent are identical, anything that differs between them is the
+# sampling rate and nothing else. That is the only way to see whether the
+# mesher degrades gracefully or falls apart.
+#
+# Collision — one of each collider the engine can build, dropped onto the
+# terrain: a ball, a box, a capsule and a cylinder. The collider follows the
+# mesh, so a sphere must roll and settle at its radius rather than resting on a
+# corner like a cube. A voxel volume collides as solid cells, not as a box.
+#
+# Ray tracing — the pillars stand clear of everything so their shadows land on
+# open ground where they can be checked. A shadow that is missing, doubled, or
+# somewhere other than opposite the sun is obvious here and invisible in a
+# scene where geometry already overlaps.
+
+[scene]
+format = 1
+id = "7f2a9d14-6c3b-4e85-a170-9b4e2c8d5f03"
+
+[[node]]
+name = "Ground"
+
+# ---------------------------------------------------------------------------
+# Voxel density: identical recipes, three sampling rates.
+#
+# World extent is chunks * 32 * voxel_size, so these are all 16 x 16 x 16
+# units. Op coordinates are in the volume's own space and are therefore
+# literally the same numbers in all three.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Coarse"
+parent = "Ground"
+transform = { pos = [-19.0, 0.0, 0.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.5
+  chunks = [1, 1, 1]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [8.0, 2.0, 8.0]
+  half_extents = [7.0, 2.0, 7.0]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [8.0, 4.0, 8.0]
+  radius = 5.0
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "capsule"
+  a = [1.0, 3.5, 8.0]
+  b = [15.0, 3.5, 8.0]
+  radius = 1.5
+  mode = "subtract"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [5.0, 6.5, 5.0]
+  radius = 2.5
+  mode = "subtract"
+
+[[node]]
+name = "Medium"
+parent = "Ground"
+transform = { pos = [0.0, 0.0, 0.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.25
+  chunks = [2, 2, 2]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [8.0, 2.0, 8.0]
+  half_extents = [7.0, 2.0, 7.0]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [8.0, 4.0, 8.0]
+  radius = 5.0
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "capsule"
+  a = [1.0, 3.5, 8.0]
+  b = [15.0, 3.5, 8.0]
+  radius = 1.5
+  mode = "subtract"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [5.0, 6.5, 5.0]
+  radius = 2.5
+  mode = "subtract"
+
+[[node]]
+name = "Fine"
+parent = "Ground"
+transform = { pos = [19.0, 0.0, 0.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.125
+  chunks = [4, 4, 4]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [8.0, 2.0, 8.0]
+  half_extents = [7.0, 2.0, 7.0]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [8.0, 4.0, 8.0]
+  radius = 5.0
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "capsule"
+  a = [1.0, 3.5, 8.0]
+  b = [15.0, 3.5, 8.0]
+  radius = 1.5
+  mode = "subtract"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [5.0, 6.5, 5.0]
+  radius = 2.5
+  mode = "subtract"
+
+# ---------------------------------------------------------------------------
+# Collision: one of every collider shape the engine builds, dropped from above.
+#
+# Each starts over the shoulder of a slab rather than the crown of a hill: a
+# body dropped on a dome rolls off and out of the world, which tests nothing
+# and makes the scene reframe around whatever is still falling. Landing on the
+# shoulder still resolves against real voxel cells.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "DropBall"
+parent = "Ground"
+transform = { pos = [-11.0, 9.5, 8.0], scale = [0.9, 0.9, 0.9] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 30.0
+
+[[node]]
+name = "DropBox"
+parent = "Ground"
+transform = { pos = [3.0, 7.0, 4.0], rot_euler = [20.0, 35.0, 10.0], scale = [0.8, 0.8, 0.8] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 20.0
+
+[[node]]
+name = "DropCapsule"
+parent = "Ground"
+transform = { pos = [12.5, 7.0, 12.0], rot_euler = [0.0, 0.0, 70.0], scale = [0.7, 1.2, 0.7] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 12.0
+
+[[node]]
+name = "DropCylinder"
+parent = "Ground"
+transform = { pos = [22.5, 7.0, 4.0], rot_euler = [0.0, 0.0, 25.0], scale = [0.8, 0.9, 0.8] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 15.0
+
+# ---------------------------------------------------------------------------
+# Ray tracing: shadow casters standing in the open.
+#
+# Set away from the hills on purpose. A shadow cast onto a curved, carved
+# surface tells you very little, because you cannot say what its outline should
+# have been. On flat open ground the answer is checkable by eye: a tall thin
+# box throws a long hard-edged bar, and a sphere throws an ellipse.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Apron"
+parent = "Ground"
+transform = { pos = [0.0, -0.4, 26.0], scale = [30.0, 0.4, 8.0] }
+
+  # No BoxCollider: an authored one is scaled by the node's world scale, so
+  # repeating the scale here would square it. The unit box mesh scaled by the
+  # transform already gives the right collider.
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+[[node]]
+name = "PillarTall"
+parent = "Ground"
+transform = { pos = [-8.0, 3.0, 24.0], scale = [0.5, 3.0, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+[[node]]
+name = "PillarWide"
+parent = "Ground"
+transform = { pos = [0.0, 1.6, 24.0], scale = [2.2, 1.6, 0.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+# A sphere on a stalk: its shadow is an ellipse detached from the stalk's,
+# which is the clearest way to see that shadows follow geometry and not
+# bounding boxes.
+[[node]]
+name = "Stalk"
+parent = "Ground"
+transform = { pos = [8.5, 1.2, 24.0], scale = [0.18, 1.2, 0.18] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+[[node]]
+name = "Orb"
+parent = "Ground"
+transform = { pos = [8.5, 3.4, 24.0], scale = [1.1, 1.1, 1.1] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
