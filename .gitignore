@@ -6,3 +6,6 @@
 # written, and an interrupted atomic write can leave its temporary behind.
 .*.lock
 .*.tmp
+
+# Stray renders from manual checks. Renders belong in a temp dir.
+render.png
