@@ -638,15 +638,11 @@ impl ApplicationHandler for App {
                     self.input
                         .set_button(&format!("{code:?}"), event.state == ElementState::Pressed);
                 }
-                if self.input.is_active(&self.bindings, FLY, "quit") {
-                    event_loop.exit();
-                }
-                if self.input.is_active(&self.bindings, FLY, "reframe") {
-                    // Unity's F: frame the selection, or the scene when there
-                    // is none. Framing the whole level when you meant one desk
-                    // is the more annoying of the two mistakes.
-                    self.camera = FlyCamera::framing(self.focus_bounds());
-                }
+                // Nothing acts on the key here. `Pressed` is latched for the
+                // whole frame, so evaluating it per event re-fires for every
+                // further keyboard event in that frame — the same bug already
+                // fixed for the editing actions. All of them are read once, in
+                // the redraw.
             }
 
             WindowEvent::CursorMoved { position, .. } => {
@@ -712,6 +708,16 @@ impl ApplicationHandler for App {
                 // `pressed_this_frame`), so a key tapped and released between
                 // two redraws is still seen exactly once here rather than
                 // missed entirely.
+                if self.input.is_active(&self.bindings, FLY, "quit") {
+                    event_loop.exit();
+                    return;
+                }
+                if self.input.is_active(&self.bindings, FLY, "reframe") {
+                    // Unity's F: frame the selection, or the scene when there
+                    // is none. Framing the whole level when you meant one desk
+                    // is the more annoying of the two mistakes.
+                    self.camera = FlyCamera::framing(self.focus_bounds());
+                }
                 self.handle_editing();
                 // Watching the file while a simulation runs would reload the
                 // authored scene out from under it; the sim owns the world

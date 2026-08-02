@@ -537,9 +537,20 @@ mod tests {
             [15.0, -40.0, 70.0],
             [-25.0, 160.0, -80.0],
             // Gimbal lock: the general extraction degenerates here.
+            //
+            // Roll must be non-zero and the south pole must carry yaw, or the
+            // cases prove nothing: with roll = 0 and yaw = 0 almost any
+            // formula returns the right answer, and a review demonstrated that
+            // by swapping the pole branch for one 180 degrees wrong at the
+            // south pole and watching the suite stay green.
             [90.0, 0.0, 0.0],
             [-90.0, 0.0, 0.0],
             [90.0, 30.0, 0.0],
+            [90.0, 0.0, 40.0],
+            [90.0, 25.0, -35.0],
+            [-90.0, 60.0, 0.0],
+            [-90.0, 0.0, -50.0],
+            [-90.0, -110.0, 20.0],
         ] {
             let mut physics = super::Physics::new(1.0 / 60.0);
             let handle = physics.add_box_body(

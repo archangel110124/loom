@@ -142,28 +142,45 @@ impl ActionMap {
         action: &str,
         held: &BTreeSet<String>,
         just_changed: &BTreeSet<String>,
-        pressed_this_frame: &BTreeSet<String>,
+        pressed_this_frame: &BTreeMap<String, BTreeSet<String>>,
     ) -> bool {
         let Some(bindings) = self.contexts.get(context).and_then(|c| c.actions.get(action)) else {
             return false;
         };
 
         bindings.iter().any(|binding| {
+            let down = held.contains(&binding.button);
+            let changed = just_changed.contains(&binding.button);
+
             // Modifiers are a requirement, never an exclusion: binding W with
             // no modifiers still fires while Shift is held, because sprinting
             // forward is still moving forward. A binding that needed exclusion
             // would say so, and none has yet.
-            if !binding.modifiers.iter().all(|m| held.contains(m)) {
-                return false;
-            }
-            let down = held.contains(&binding.button);
-            let changed = just_changed.contains(&binding.button);
             match binding.trigger {
-                Trigger::Held => down,
-                // Not `down && changed`: a key can go down and come back up
-                // inside one frame, and that is still a press.
-                Trigger::Pressed => pressed_this_frame.contains(&binding.button),
-                Trigger::Released => !down && changed,
+                Trigger::Held => {
+                    binding.modifiers.iter().all(|m| held.contains(m)) && down
+                }
+                // A chord counts when its modifiers were held **while the key
+                // was down** — which is either at the press itself, or added
+                // afterwards while the key is still held. Both are how people
+                // actually type a chord.
+                //
+                // What it must reject is a key that was tapped and released
+                // and *then* had a modifier arrive later in the same frame.
+                // Latching the press without also pinning when its modifiers
+                // applied let that fire the chord: Ctrl+S saving a scene
+                // because you reached for Ctrl just after tapping S.
+                Trigger::Pressed => pressed_this_frame
+                    .get(&binding.button)
+                    .is_some_and(|at_press| {
+                        binding
+                            .modifiers
+                            .iter()
+                            .all(|m| at_press.contains(m) || (down && held.contains(m)))
+                    }),
+                Trigger::Released => {
+                    binding.modifiers.iter().all(|m| held.contains(m)) && !down && changed
+                }
             }
         })
     }
@@ -174,9 +191,13 @@ impl ActionMap {
 pub struct InputState {
     held: BTreeSet<String>,
     just_changed: BTreeSet<String>,
-    /// Buttons that went down at any point this frame, whether or not they are
-    /// still down when the frame is read.
-    pressed_this_frame: BTreeSet<String>,
+    /// Buttons that went down at any point this frame, each with the set of
+    /// buttons that were already held **at that instant**.
+    ///
+    /// The snapshot is the point: a press is latched for the whole frame, so
+    /// reading its modifiers later would compare a press from early in the
+    /// frame against a keyboard state from the end of it.
+    pressed_this_frame: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl InputState {
@@ -196,12 +217,14 @@ impl InputState {
         }
         self.just_changed.insert(button.to_owned());
         if down {
+            // Snapshot BEFORE inserting, so a button is never its own
+            // modifier, and remembered for the whole frame rather than only
+            // until the release: `Pressed` used to mean "down AND changed", so
+            // a key tapped and released between two redraws was never seen at
+            // all — the faster you typed, the more input the editor dropped.
+            let at_press = self.held.clone();
             self.held.insert(button.to_owned());
-            // Remembered for the whole frame, not just until the release.
-            // `Pressed` used to mean "down AND changed", so a key tapped and
-            // released between two redraws was never seen at all — the faster
-            // you typed, the more input the editor dropped.
-            self.pressed_this_frame.insert(button.to_owned());
+            self.pressed_this_frame.insert(button.to_owned(), at_press);
         } else {
             self.held.remove(button);
         }
@@ -260,6 +283,45 @@ mod tests {
         assert!(!input.is_active(&map, "edit", "delete"), "and only once");
     }
 
+    /// A modified action must see the modifiers that were held **when the key
+    /// went down**, not whatever is held when the frame is read. Latching the
+    /// press without latching its context meant a key tapped early in a frame
+    /// could be claimed by a modifier pressed later in the same frame — Ctrl+S
+    /// saving because you happened to reach for Ctrl after tapping S.
+    #[test]
+    fn a_modifier_pressed_after_the_key_does_not_claim_it() {
+        let map = super::ActionMap::from_toml(super::DEFAULT_BINDINGS).expect("shipped bindings");
+        let mut input = super::InputState::new();
+
+        // S tapped on its own, then Ctrl goes down — all before the redraw.
+        input.set_button("KeyS", true);
+        input.set_button("KeyS", false);
+        input.set_button("ControlLeft", true);
+
+        assert!(
+            !input.is_active(&map, "edit", "save"),
+            "S was pressed unmodified; Ctrl arriving later must not make it a save"
+        );
+    }
+
+    /// And the chord that *is* held together must still fire, even when the
+    /// whole thing happens inside one frame.
+    #[test]
+    fn a_chord_tapped_inside_one_frame_fires() {
+        let map = super::ActionMap::from_toml(super::DEFAULT_BINDINGS).expect("shipped bindings");
+        let mut input = super::InputState::new();
+
+        input.set_button("ControlLeft", true);
+        input.set_button("KeyS", true);
+        input.set_button("KeyS", false);
+        input.set_button("ControlLeft", false);
+
+        assert!(
+            input.is_active(&map, "edit", "save"),
+            "Ctrl was held at the moment S went down, so this is a save"
+        );
+    }
+
     use super::*;
 
     fn set(items: &[&str]) -> BTreeSet<String> {
@@ -289,11 +351,11 @@ close = [{ button = "Escape", trigger = "pressed" }]
         let map = map();
 
         assert!(map.is_active("fly", "move_forward", &set(&["KeyW"]), &set(&[]),
-            &set(&[])));
+            &std::collections::BTreeMap::new()));
         assert!(map.is_active("fly", "move_forward", &set(&["ArrowUp"]), &set(&[]),
-            &set(&[])));
+            &std::collections::BTreeMap::new()));
         assert!(!map.is_active("fly", "move_forward", &set(&["KeyS"]), &set(&[]),
-            &set(&[])));
+            &std::collections::BTreeMap::new()));
     }
 
     /// The point of contexts: the same action name is inert outside its own.
@@ -302,7 +364,7 @@ close = [{ button = "Escape", trigger = "pressed" }]
         let map = map();
 
         assert!(!map.is_active("menu", "move_forward", &set(&["KeyW"]), &set(&[]),
-            &set(&[])));
+            &std::collections::BTreeMap::new()));
     }
 
     /// `Pressed` fires on the transition only. Auto-repeat must not retrigger.
@@ -382,7 +444,7 @@ close = [{ button = "Escape", trigger = "pressed" }]
             "move_forward",
             &set(&["KeyW", "ShiftLeft"]),
             &set(&[]),
-            &set(&[])
+            &std::collections::BTreeMap::new()
         ));
     }
 
