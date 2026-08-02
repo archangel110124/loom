@@ -27,10 +27,98 @@ use loom_scene::{Scene, components};
 const USAGE: &str = "\
 loom — AI-native engine CLI
 
+Every command prints one line of JSON. Exit 0 ok · 1 the thing was invalid ·
+2 the invocation was wrong.
+
 USAGE:
-    loom validate <scene.loom>    Validate a scene; exit 1 with JSON errors if invalid
-    loom describe <TypeName>      Print a component's JSON Schema
+    loom validate <scene.loom>
+        Validate a scene and report its version token. Exit 1 with JSON errors.
+
+    loom describe <TypeName>
+        Print a component's JSON Schema. No argument lists the known types.
+
+    loom render <scene.loom> [--out <f.png>] [--size <WxH>] [--sim <ticks>]
+                             [--yaw <deg>] [--pitch <deg>]
+        Render the scene headless to a PNG.
+
+    loom sim <scene.loom> [--ticks <n>] [--assert <expr>]
+        Step physics deterministically and print the state hash.
+
+    loom scene <scene.loom> --tx <tx.json> [--dry-run]
+        Apply a transaction. `expect_version` in the JSON makes the write
+        conditional; --dry-run prints the diff and writes nothing.
+
+    loom place <scene.loom> --op <op.json> [--dry-run] [--expect-version <tok>]
+        Geometry-aware placement: on top of, aligned to, facing, grid on.
+
+    loom measure <scene.loom> [--node <path>]
+        Bounds and overlaps, so a change can be checked without a render.
+
+    loom terrain <scene.loom> [--out <f.png>] [--from <x,y,z>] [--to <x,y,z>]
+                              [--max-slope <deg>]
+        Query walkable terrain between two points.
+
+    loom explode <scene.loom> --at <x,y,z> --radius <m> [--out <f.png>]
+                              [--frames <n>] [--size <WxH>] [--steps <n>]
+        Carve the voxel terrain and render the result.
+
+    loom run <scene.loom> [--edit] [--frames <n>]
+        Open the viewer. --edit gives the full editor; it reloads on change.
 ";
+
+/// The flags each subcommand accepts, and whether each takes a value.
+///
+/// **An unknown flag is a failed invocation, not a no-op.** Ignoring them
+/// meant `--frame 3` (singular) rendered the default frame and reported
+/// success, and a misspelled `--dry-run` wrote the file for real. The agent
+/// cannot tell from the output that it did something other than what it asked
+/// for, which is the failure mode this whole CLI exists to avoid.
+const FLAGS: &[(&str, &[(&str, bool)])] = &[
+    ("validate", &[]),
+    ("describe", &[]),
+    (
+        "render",
+        &[("--out", true), ("--size", true), ("--sim", true), ("--yaw", true), ("--pitch", true)],
+    ),
+    ("sim", &[("--ticks", true), ("--assert", true)]),
+    ("scene", &[("--tx", true), ("--dry-run", false)]),
+    ("place", &[("--op", true), ("--dry-run", false), ("--expect-version", true)]),
+    ("measure", &[("--node", true)]),
+    (
+        "terrain",
+        &[("--out", true), ("--from", true), ("--to", true), ("--max-slope", true)],
+    ),
+    (
+        "explode",
+        &[
+            ("--at", true), ("--radius", true), ("--out", true), ("--frames", true),
+            ("--size", true), ("--steps", true),
+        ],
+    ),
+    ("run", &[("--edit", false), ("--frames", true)]),
+];
+
+/// The first unrecognised flag in `args`, if any.
+///
+/// Values are skipped rather than inspected, so `--node --edit` reports
+/// nothing: `--edit` is that node's name, however odd, not a flag.
+fn unknown_flag(command: &str, args: &[String]) -> Option<(String, Vec<&'static str>)> {
+    let allowed = FLAGS.iter().find(|(name, _)| *name == command)?.1;
+
+    // args[0] is the path or type name; flags follow.
+    let mut i = 1;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if let Some((_, takes_value)) = allowed.iter().find(|(name, _)| *name == arg) {
+            i += if *takes_value { 2 } else { 1 };
+        } else if arg.starts_with("--") {
+            return Some((arg.to_owned(), allowed.iter().map(|(n, _)| *n).collect()));
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -46,6 +134,24 @@ fn main() -> ExitCode {
 /// Split out from `main` so it is testable without spawning a process.
 /// Codes: 0 ok · 1 the thing was invalid · 2 the invocation was wrong.
 fn run(args: &[String]) -> (u8, String) {
+    if let Some(command) = args.first()
+        && let Some((flag, allowed)) = unknown_flag(command, &args[1..])
+    {
+        return (
+            2,
+            json_line(&serde_json::json!({
+                "error": "unknown_flag",
+                "value": flag,
+                "constraint": format!("a flag of `loom {command}`"),
+                "hint": if allowed.is_empty() {
+                    format!("`loom {command}` takes no flags")
+                } else {
+                    format!("`loom {command}` takes: {}", allowed.join(", "))
+                },
+            })),
+        );
+    }
+
     match args.first().map(String::as_str) {
         Some("validate") => match args.get(1) {
             Some(path) => validate(path),
@@ -1534,6 +1640,63 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         assert_eq!(v["error"], "unknown_component_type");
         let hint = v["hint"].as_str().unwrap();
         assert!(hint.contains("Light"), "should suggest Light, got: {hint}");
+    }
+
+    /// **A mistyped flag must not look like a success.** Unknown flags were
+    /// ignored, so `--frame 3` (singular) rendered the default frame and
+    /// reported ok, and `--dry-run` misspelled wrote the file for real. An
+    /// agent has no way to notice: the output says it did what was asked.
+    #[test]
+    fn an_unknown_flag_is_refused() {
+        let (code, out) = run(&args(&[
+            "validate",
+            "../../assets/test/office.loom",
+            "--frame",
+            "3",
+        ]));
+
+        assert_eq!(code, 2, "wrong invocation is exit 2: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["error"], "unknown_flag");
+        assert_eq!(v["value"], "--frame");
+    }
+
+    /// A near-miss on a flag that *does* exist for another subcommand is the
+    /// likeliest mistake, so the rejection lists what this one takes.
+    #[test]
+    fn the_rejection_lists_the_flags_that_subcommand_accepts() {
+        let (code, out) = run(&args(&["sim", "../../assets/test/tower.loom", "--out", "x.png"]));
+
+        assert_eq!(code, 2);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let hint = v["hint"].as_str().unwrap();
+        assert!(hint.contains("--ticks"), "should list sim's flags: {hint}");
+    }
+
+    /// Every flag the code actually reads must be accepted, or the allowlist
+    /// has turned into a second bug.
+    #[test]
+    fn every_documented_flag_is_accepted() {
+        let (code, out) = run(&args(&[
+            "measure",
+            "../../assets/test/blockout.loom",
+            "--node",
+            "Room/Floor",
+        ]));
+
+        assert_eq!(code, 0, "--node is a real measure flag: {out}");
+    }
+
+    /// An agent restricted to the tool's own output has to be able to find the
+    /// subcommands. The usage text listed two of ten and no flags at all.
+    #[test]
+    fn usage_lists_every_subcommand() {
+        for command in [
+            "validate", "describe", "render", "sim", "scene", "place", "measure", "terrain",
+            "explode", "run",
+        ] {
+            assert!(USAGE.contains(command), "usage should mention `{command}`");
+        }
     }
 
     #[test]
