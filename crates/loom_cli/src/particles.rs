@@ -78,6 +78,111 @@ struct Visual {
     alpha: [f32; 2],
 }
 
+/// One emitter, kept alive across frames.
+struct Live {
+    system: loom_particles::System,
+    emitter: loom_particles::Emitter,
+    visual: Visual,
+    origin: [f32; 3],
+}
+
+/// Every emitter in a scene, simulated once and then advanced.
+///
+/// **This exists because the obvious thing is quadratic.** The offscreen
+/// renderer computes a plume by simulating from tick zero, which is right
+/// there: it runs once and the result is a pure function of the scene and the
+/// tick count, so `--sim 300` means exactly one thing.
+///
+/// Doing that *per frame* in the viewer costs the whole history again every
+/// frame. With a six-second lifetime that is 720 ticks of several hundred
+/// particles, sixty times a second — it measured 9.5 ms per frame on a scene
+/// with three props on a box, against 2.2 ms for a 67-million-voxel terrain.
+/// A scene with nothing in it was four times more expensive than one with
+/// 778,000 triangles.
+///
+/// So the viewer keeps the state and steps it forward by one tick per frame.
+/// The consequence is honest and worth stating: the plume in the window now
+/// depends on how many frames have been drawn, so it is a *live* view rather
+/// than a reproducible one. `loom render --sim N` is unchanged and remains
+/// exact, and that is the path assertions are made against.
+pub(crate) struct Plumes {
+    live: Vec<Live>,
+    instances: Vec<ParticleInstance>,
+}
+
+impl Plumes {
+    /// Build from a world and warm every plume to its settled population.
+    pub(crate) fn new(world: &World) -> Self {
+        let mut plumes = Self { live: Vec::new(), instances: Vec::new() };
+        for entity in world.entities() {
+            let (Some(component), Some(global)) = (world.emitter(*entity), world.global_transform(*entity))
+            else {
+                continue;
+            };
+            let (emitter, visual) = parse(component);
+            let origin = [global.matrix[12], global.matrix[13], global.matrix[14]];
+            let mut system = loom_particles::System::new(emitter.seed);
+            // Warm up once, here, rather than every frame. An emitter opened
+            // cold is a single dot at its origin, which reads as broken.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let warm = ((emitter.lifetime * 2.0) / DT).ceil() as u32;
+            for _ in 0..warm {
+                system.step(DT, &emitter, origin);
+            }
+            plumes.live.push(Live { system, emitter, visual, origin });
+        }
+        plumes.rebuild_instances();
+        plumes
+    }
+
+    /// Advance every plume by `ticks` steps.
+    pub(crate) fn advance(&mut self, ticks: u32) {
+        if self.live.is_empty() || ticks == 0 {
+            return;
+        }
+        for live in &mut self.live {
+            for _ in 0..ticks {
+                live.system.step(DT, &live.emitter, live.origin);
+            }
+        }
+        self.rebuild_instances();
+    }
+
+    pub(crate) fn instances(&self) -> &[ParticleInstance] {
+        &self.instances
+    }
+
+    fn rebuild_instances(&mut self) {
+        self.instances.clear();
+        for live in &self.live {
+            for p in live.system.particles() {
+                self.instances.push(instance(p, &live.visual));
+            }
+        }
+    }
+}
+
+/// One particle's drawable form: size and colour interpolated over its life.
+fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
+    let t = p.fraction();
+    // Smoke expands and pales as it cools and mixes with air; a plume whose
+    // particles keep their birth size and colour reads as a stream of blobs.
+    let size = visual.size[0] + (visual.size[1] - visual.size[0]) * t;
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    // Fade in as well as out. Particles that appear at full opacity pop, and
+    // the pop is at the emitter, where the eye already is.
+    let fade = (t * 8.0).min(1.0);
+    ParticleInstance {
+        position: [p.position[0], p.position[1], p.position[2], size * 0.5],
+        color: [
+            lerp(visual.color_start[0], visual.color_end[0]),
+            lerp(visual.color_start[1], visual.color_end[1]),
+            lerp(visual.color_start[2], visual.color_end[2]),
+            lerp(visual.alpha[0], visual.alpha[1]) * fade,
+        ],
+    }
+}
+
 /// Simulate every emitter in the world and return what to draw.
 ///
 /// `ticks` of `None` means "long enough to look settled": a plume reaches its
@@ -106,25 +211,7 @@ pub(crate) fn simulate(world: &World, ticks: Option<u32>) -> Vec<ParticleInstanc
         }
 
         for p in system.particles() {
-            let t = p.fraction();
-            // Size and colour interpolate over the particle's life. Smoke
-            // expands and pales as it cools and mixes with air; a plume whose
-            // particles keep their birth size and colour reads as a stream of
-            // identical blobs.
-            let size = visual.size[0] + (visual.size[1] - visual.size[0]) * t;
-            let lerp = |a: f32, b: f32| a + (b - a) * t;
-            // Fade in as well as out. Particles that appear at full opacity
-            // pop, and the pop is at the emitter where the eye already is.
-            let fade = (t * 8.0).min(1.0);
-            out.push(ParticleInstance {
-                position: [p.position[0], p.position[1], p.position[2], size * 0.5],
-                color: [
-                    lerp(visual.color_start[0], visual.color_end[0]),
-                    lerp(visual.color_start[1], visual.color_end[1]),
-                    lerp(visual.color_start[2], visual.color_end[2]),
-                    lerp(visual.alpha[0], visual.alpha[1]) * fade,
-                ],
-            });
+            out.push(instance(p, &visual));
         }
     }
 

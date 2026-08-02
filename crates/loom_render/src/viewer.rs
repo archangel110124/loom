@@ -57,6 +57,11 @@ pub struct Viewer {
     ranges: Vec<MeshRange>,
     unpack: crate::renderer::UnpackParams,
     materials: crate::material::Materials,
+    particle_buffer: vk::Buffer,
+    particle_alloc: Option<Allocation>,
+    particle_address: vk::DeviceAddress,
+    max_particles: usize,
+    particle_pipeline: vk::Pipeline,
     objects: vk::Buffer,
     objects_alloc: Option<Allocation>,
     object_address: vk::DeviceAddress,
@@ -217,6 +222,24 @@ impl Viewer {
             )?;
         let sky_pipeline =
             crate::renderer::create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, format)?;
+        let particle_pipeline = crate::renderer::create_particle_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            format,
+        )?;
+
+        // Mirrors the offscreen path's ceiling. Sized once so a frame never
+        // allocates, which in a live viewer would show up as a hitch.
+        const MAX_PARTICLES: usize = 65536;
+        let (particle_buffer, particle_alloc, particle_address) =
+            crate::renderer::create_address_buffer(
+                &raw,
+                &mut allocator,
+                (MAX_PARTICLES * size_of::<crate::renderer::ParticleInstance>()) as u64,
+                "loom.viewer_particles",
+                vk::BufferUsageFlags::empty(),
+            )?;
 
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -281,6 +304,11 @@ impl Viewer {
             raytracing,
             raytracer,
             materials,
+            particle_buffer,
+            particle_alloc: Some(particle_alloc),
+            particle_address,
+            max_particles: MAX_PARTICLES,
+            particle_pipeline,
             rt_positions,
             device: raw,
             queue: device.queue(),
@@ -468,7 +496,7 @@ impl Viewer {
     /// is not an error.
     #[allow(clippy::too_many_lines)]
     pub fn draw(&mut self, objects: &[Object], camera: &Camera) -> Result<(), RenderError> {
-        self.draw_with_ui(objects, camera, None, |_| {})
+        self.draw_with_ui(objects, &[], camera, None, |_| {})
     }
 
     /// Draw a frame with an optional UI layer over it.
@@ -484,6 +512,7 @@ impl Viewer {
     pub fn draw_with_ui(
         &mut self,
         objects: &[Object],
+        particles: &[crate::renderer::ParticleInstance],
         camera: &Camera,
         ui: Option<(&mut crate::Ui, &winit::window::Window)>,
         build: impl FnMut(&mut egui::Ui),
@@ -524,7 +553,45 @@ impl Viewer {
         self.reserve_objects(objects.len())?;
 
         let view_proj = view_projection(camera, aspect);
-        let object_data = pack_objects(&sorted, view_proj, &self.unpack);
+        let mut object_data = pack_objects(&sorted, view_proj, &self.unpack);
+        // The reserved slot the particle vertex shader reads its
+        // view-projection from. See the note on `Push::object_offset`.
+        let particle_slot = u32::try_from(object_data.len()).unwrap_or(0);
+        object_data.push(crate::renderer::view_projection_slot(view_proj));
+
+        // Sorted back to front, tiebroken by original index so the order is
+        // total. Identical to the offscreen path, and for the same reason:
+        // these blend, so what is drawn depends on the order it is drawn in.
+        let mut ordered: Vec<(usize, crate::renderer::ParticleInstance)> =
+            particles.iter().copied().enumerate().collect();
+        let eye = camera.eye;
+        ordered.sort_by(|(ai, a), (bi, b)| {
+            let d = |p: &crate::renderer::ParticleInstance| {
+                let (dx, dy, dz) = (
+                    p.position[0] - eye.x,
+                    p.position[1] - eye.y,
+                    p.position[2] - eye.z,
+                );
+                dz.mul_add(dz, dx.mul_add(dx, dy * dy))
+            };
+            d(b).partial_cmp(&d(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(ai.cmp(bi))
+        });
+        let drawn: Vec<crate::renderer::ParticleInstance> = ordered
+            .into_iter()
+            .take(self.max_particles)
+            .map(|(_, p)| p)
+            .collect();
+        let particle_count = u32::try_from(drawn.len()).unwrap_or(0);
+        if !drawn.is_empty() {
+            crate::renderer::write_slice(
+                self.particle_alloc
+                    .as_ref()
+                    .ok_or_else(|| RenderError::Allocator("particle buffer is gone".into()))?,
+                &drawn,
+            )?;
+        }
         // The TLAS follows the objects; the BLAS holding the triangles does not
         // move, which is what keeps this affordable per frame.
         if self.raytracer.is_some() {
@@ -575,16 +642,13 @@ impl Viewer {
             vertices: self.vertex_address,
             objects: self.object_address,
             materials: self.materials.address(),
-            // The windowed path does not draw particles yet: the offscreen
-            // renderer is the primary one (brief §7.1) and gets the feature
-            // first. Null rather than a dangling address, so the field is
-            // honest about there being nothing there.
-            particles: 0,
+            particles: self.particle_address,
             object_offset: 0,
             inv_view_proj: view_proj.inverse().to_cols_array(),
             eye: camera.eye.extend(0.0).to_array(),
         };
         let sky = self.sky_pipeline;
+        let particle_pipeline = self.particle_pipeline;
         let index_buffer = self.indices;
         let draws: Vec<(MeshRange, u32, u32)> = batches
             .iter()
@@ -651,6 +715,27 @@ impl Viewer {
                             0,
                             0,
                         );
+                    }
+
+                    // Particles last, over finished opaque geometry.
+                    if particle_count > 0 {
+                        d.cmd_bind_pipeline(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            particle_pipeline,
+                        );
+                        let push = crate::renderer::Push {
+                            object_offset: particle_slot,
+                            ..base_push
+                        };
+                        d.cmd_push_constants(
+                            cmd,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            push.bytes(),
+                        );
+                        d.cmd_draw(cmd, particle_count * 6, 1, 0, 0);
                     }
                     // The UI goes inside the same rendering pass, after the
                     // geometry, so panels draw over the scene without a second
@@ -865,6 +950,13 @@ impl Drop for Viewer {
             // fragment shader was sampling one frame ago.
             if let Some(allocator) = self.allocator.as_mut() {
                 self.materials.destroy(allocator);
+            }
+            self.device.destroy_pipeline(self.particle_pipeline, None);
+            self.device.destroy_buffer(self.particle_buffer, None);
+            if let (Some(allocation), Some(allocator)) =
+                (self.particle_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
             }
             if let (Some((buffer, allocation, _)), Some(allocator)) =
                 (self.rt_positions.take(), self.allocator.as_mut())

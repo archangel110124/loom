@@ -133,6 +133,13 @@ impl SceneView {
         &self.materials.materials
     }
 
+    /// The authored world, for anything that has to read components the draw
+    /// list does not carry — particle emitters, for one.
+    #[must_use]
+    pub fn world(&self) -> &World {
+        &self.world
+    }
+
     /// The geometry this scene needs, for the renderer to upload.
     #[must_use]
     pub fn meshes(&self) -> &[loom_asset::Mesh] {

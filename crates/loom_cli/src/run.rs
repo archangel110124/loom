@@ -151,6 +151,9 @@ struct App {
     /// Draw calls for the simulated world, refreshed only on ticks that
     /// actually ran.
     play_objects: Vec<loom_render::Object>,
+    /// Live particle state, kept across frames. `None` until the first frame
+    /// after a scene load.
+    plumes: Option<crate::particles::Plumes>,
     /// Handles as of the last frame, so a mouse press can hit-test them
     /// against exactly what was drawn.
     handles: Vec<gizmo::Handle>,
@@ -256,6 +259,7 @@ impl App {
             mode: Mode::Move,
             handles: Vec::new(),
             play_objects: Vec::new(),
+            plumes: None,
             ui: None,
             cursor: (0.0, 0.0),
             registry: loom_scene::components::registry(),
@@ -402,6 +406,10 @@ impl App {
             self.selected.extend(view.paths.first().cloned());
         }
         self.view = view;
+        // The scene changed, so the emitters may have. Dropped rather than
+        // patched: a reload is rare and rebuilding is a warm-up, not a frame
+        // cost.
+        self.plumes = None;
     }
 
     /// Re-derive from whatever the session currently holds.
@@ -764,6 +772,16 @@ impl ApplicationHandler for App {
                     None => &self.view.objects,
                 };
 
+                // Advanced by one tick, not rebuilt. Re-simulating every
+                // plume's whole history each frame cost 9.5 ms on this scene —
+                // four times a 67-million-voxel terrain, for three props on a
+                // box. The state is kept instead and stepped forward.
+                let plumes = self
+                    .plumes
+                    .get_or_insert_with(|| crate::particles::Plumes::new(self.view.world()));
+                plumes.advance(1);
+                let particles: &[loom_render::ParticleInstance] = plumes.instances();
+
                 let mut actions = Vec::new();
                 let state = PanelState {
                     agent_marks: &marks,
@@ -786,6 +804,7 @@ impl ApplicationHandler for App {
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
                     (Some(viewer), Some(ui), Some(window)) => viewer.draw_with_ui(
                         drawn,
+                        particles,
                         &camera,
                         Some((ui, window)),
                         |root| actions.extend(crate::panels::draw(root, &state)),

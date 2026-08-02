@@ -624,15 +624,7 @@ impl Renderer {
         // vertex shader reads `mvp` from here as the view-projection, because
         // the push block cannot hold a second matrix.
         let particle_slot = u32::try_from(object_data.len()).unwrap_or(0);
-        object_data.push(ObjectData {
-            mvp: view_proj.to_cols_array(),
-            model: Mat4::IDENTITY.to_cols_array(),
-            unpack: [0.0, 0.0, 0.0, 1.0],
-            uv_unpack: [0.0, 0.0, 1.0, 0.0],
-            normal: [[0.0; 4]; 3],
-            color: [1.0; 4],
-            material: [crate::material::NO_TEXTURE, 0, 0, 0],
-        });
+        object_data.push(view_projection_slot(view_proj));
 
         // **Sorted back to front, and that is not optional.** These blend, so
         // the result depends on the order they are drawn in: nearest-first
@@ -1632,6 +1624,25 @@ pub(crate) fn create_pipeline(
 /// no depth test or write (it is the backdrop, drawn first), no culling (the
 /// fullscreen triangle's winding is whatever `SV_VertexID` produces), and the
 /// sky entry points.
+/// The reserved `ObjectData` entry that carries a pass's view-projection.
+///
+/// The particle vertex shader needs the view-projection to place a billboard,
+/// and the push block has no room for a second `float4x4` — 64 more bytes
+/// would put it past the 128 Vulkan guarantees. The object buffer is already
+/// bound, so one spare slot carries the matrix instead. Shared between the two
+/// render paths so they cannot disagree about what is in it.
+pub(crate) fn view_projection_slot(view_proj: Mat4) -> ObjectData {
+    ObjectData {
+        mvp: view_proj.to_cols_array(),
+        model: Mat4::IDENTITY.to_cols_array(),
+        unpack: [0.0, 0.0, 0.0, 1.0],
+        uv_unpack: [0.0, 0.0, 1.0, 0.0],
+        normal: [[0.0; 4]; 3],
+        color: [1.0; 4],
+        material: [crate::material::NO_TEXTURE, 0, 0, 0],
+    }
+}
+
 /// The particle pipeline: alpha blended, depth tested, depth *not* written.
 ///
 /// Three settings carry the whole effect and each is a bug if wrong.
