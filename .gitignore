@@ -1,3 +1,8 @@
 /target
 *.spv
 /assets/test/**/*.actual.png
+
+# Scene write machinery: a lock sidecar sits beside any scene that gets
+# written, and an interrupted atomic write can leave its temporary behind.
+.*.lock
+.*.tmp
