@@ -21,7 +21,11 @@
 /// Declared here so the shape is reviewable before the transport exists, and
 /// so a missing implementation is visible rather than merely absent.
 pub const TOOLS: &[(&str, &str)] = &[
-    ("scene_query", "loom validate / loom measure"),
+    // Was "loom validate / loom measure". Only the first word after `loom` is
+    // ever run, so measure-shaped arguments were quietly handed to `validate`
+    // and the wrong result came back as a success. `scene_measure` below is
+    // the tool that wraps measure.
+    ("scene_query", "loom validate"),
     ("scene_edit", "loom scene --tx"),
     ("scene_place", "loom place --op"),
     ("scene_measure", "loom measure"),
