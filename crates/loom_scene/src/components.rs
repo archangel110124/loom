@@ -472,6 +472,76 @@ impl Default for Blast {
     }
 }
 
+/// Where a HUD element sits on the screen.
+///
+/// Anchors rather than coordinates because a window is resizable: ammo pinned
+/// to the bottom right has to stay there at any size, and a scene that says
+/// `[1900, 1040]` is a scene authored for one monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Anchor {
+    #[default]
+    TopLeft,
+    TopCenter,
+    TopRight,
+    CenterLeft,
+    Center,
+    CenterRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+/// A line of text drawn over the scene, in screen space.
+///
+/// **The overlay is authored, not coded.** Unity hangs UI off a Canvas in the
+/// scene, and the part worth keeping is that: a HUD is content, it belongs in
+/// the file, and changing where the score sits should not be a rebuild. What
+/// is not worth keeping is the Canvas itself — it maintains a retained mesh
+/// and invalidates it whenever anything changes, which is a lot of machinery
+/// for a dozen labels. This rebuilds the whole overlay every frame into one
+/// vertex buffer, which at HUD scale is cheaper *and* has no invalidation
+/// logic to get wrong.
+///
+/// `text` may name the game's state in braces: `{score}` takes a number the
+/// rules script is keeping, and `{status}` and `{message}` take the outcome.
+/// An unknown name is left standing in the text rather than blanked, so a typo
+/// shows up on screen instead of quietly rendering nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Hud {
+    /// Which corner or edge this is measured from.
+    pub anchor: Anchor,
+    /// Pixels inward from that anchor.
+    pub offset: [f32; 2],
+    /// The line to draw. `{name}` is replaced by the game state's `name`.
+    pub text: String,
+    /// Point size.
+    #[schemars(range(min = 1.0, max = 512.0))]
+    pub size: f32,
+    /// Linear RGB, each channel normalized 0..=1. Not 0-255.
+    #[schemars(inner(range(min = 0.0, max = 1.0)))]
+    pub color: [f32; 3],
+    /// Draw only while a game is running.
+    ///
+    /// A score is meaningless in the editor, and an overlay that cannot be
+    /// switched off obscures the thing being edited.
+    pub only_in_play: bool,
+}
+
+impl Default for Hud {
+    fn default() -> Self {
+        Self {
+            anchor: Anchor::TopLeft,
+            offset: [16.0, 16.0],
+            text: String::new(),
+            size: 22.0,
+            color: [1.0; 3],
+            only_in_play: false,
+        }
+    }
+}
+
 /// The game's rules: a script that runs once per tick for the whole scene.
 ///
 /// **This is the game loop, and none of it is in the engine.** The engine
@@ -524,6 +594,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<CharacterController>("CharacterController");
     reg.register::<Blast>("Blast");
     reg.register::<GameRules>("GameRules");
+    reg.register::<Hud>("Hud");
     reg.register::<Script>("Script");
     reg
 }

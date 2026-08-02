@@ -38,6 +38,44 @@ name = "Range"
   [node.components.GameRules]
   path = "../scripts/rules.rhai"
 
+# The overlay. Screen space, authored here rather than in code — moving the
+# score is an edit, and the agent can place one through the same transactions
+# it uses for anything else. `{name}` reads the rules script's own state.
+[[node]]
+name = "Score"
+parent = "Range"
+
+  [node.components.Hud]
+  anchor = "top_left"
+  offset = [18.0, 14.0]
+  text = "SCORE {score}"
+  size = 26.0
+  color = [1.0, 0.85, 0.35]
+
+[[node]]
+name = "Targets"
+parent = "Range"
+
+  [node.components.Hud]
+  anchor = "top_right"
+  offset = [18.0, 14.0]
+  text = "{destroyed} / 2 cleared  ·  {shots} shots"
+  size = 20.0
+
+# Only while a game is running: an outcome banner in the editor would sit over
+# the thing being edited saying "playing", which is noise.
+[[node]]
+name = "Outcome"
+parent = "Range"
+
+  [node.components.Hud]
+  anchor = "bottom_center"
+  offset = [0.0, 40.0]
+  text = "{message}"
+  size = 28.0
+  color = [1.0, 1.0, 1.0]
+  only_in_play = true
+
 # ---------------------------------------------------------------------------
 # The shooter. Faces -Z down the range at the targets.
 # ---------------------------------------------------------------------------

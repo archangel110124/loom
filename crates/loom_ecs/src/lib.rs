@@ -136,6 +136,9 @@ pub struct World {
     /// resolved for the same reason as `material`: turning it into a capsule
     /// needs `loom_physics`, and this crate does not depend on it.
     character: Storage<serde_json::Value>,
+    /// The `Hud` component, verbatim. Resolving it needs egui, which lives
+    /// several crates away.
+    hud: Storage<serde_json::Value>,
     /// The `Blast` component, verbatim. Carried for the same reason as the
     /// rest: setting it off needs `loom_physics`, which this crate must not
     /// depend on.
@@ -371,6 +374,9 @@ impl World {
             {
                 world.rules.insert(entity, path.to_owned());
             }
+            if let Some(hud) = node.components.get("Hud") {
+                world.hud.insert(entity, hud.clone());
+            }
             if let Some(blast) = node.components.get("Blast") {
                 world.blast.insert(entity, blast.clone());
             }
@@ -486,6 +492,13 @@ impl World {
                 Some((path.clone(), [m[12], m[13], m[14]]))
             })
             .collect()
+    }
+
+    /// Every `Hud` element in the scene, in file order — which is also the
+    /// order they draw, so an author can put one in front of another.
+    #[must_use]
+    pub fn hud_elements(&self) -> Vec<&serde_json::Value> {
+        self.order.iter().filter_map(|e| self.hud.get(*e)).collect()
     }
 
     /// The `Blast` a node declares, if any.

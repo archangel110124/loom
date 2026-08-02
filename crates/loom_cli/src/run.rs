@@ -882,6 +882,18 @@ impl ApplicationHandler for App {
                 plumes.advance(stepped);
                 let particles: &[loom_render::ParticleInstance] = plumes.instances();
 
+                // Resolved against the play world when one is running, so a
+                // HUD element parented to something that moved reads the same
+                // world the rules judged.
+                let overlay = match self.play.as_ref() {
+                    Some(play) => crate::hud::elements(&play.world, play.state(), true),
+                    None => crate::hud::elements(
+                        self.view.world(),
+                        &loom_script::GameState::default(),
+                        false,
+                    ),
+                };
+
                 let mut actions = Vec::new();
                 let state = PanelState {
                     agent_marks: &marks,
@@ -907,7 +919,12 @@ impl ApplicationHandler for App {
                         particles,
                         &camera,
                         Some((ui, window)),
-                        |root| actions.extend(crate::panels::draw(root, &state)),
+                        |root| {
+                            // The overlay first, so the editor's panels sit on
+                            // top of it rather than under a score.
+                            crate::hud::draw(root, &overlay);
+                            actions.extend(crate::panels::draw(root, &state));
+                        },
                     ),
                     (Some(viewer), _, _) => viewer.draw(drawn, &camera),
                     _ => Ok(()),

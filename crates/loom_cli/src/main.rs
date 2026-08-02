@@ -11,6 +11,7 @@
 //! and the count goes past four — `run` is the seam, so it is a local change.
 
 mod gizmo;
+mod hud;
 mod log;
 mod materials;
 mod panels;

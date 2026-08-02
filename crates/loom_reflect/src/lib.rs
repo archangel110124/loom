@@ -64,10 +64,10 @@ impl TypeRegistry {
     /// The caller supplies the node path; this layer only knows types and
     /// fields. `loom_scene` wraps these into the full error shape.
     ///
-    /// `ponytail:` range constraints only. Patterns, enums, nested objects, and
-    /// `required` are not checked yet — the six M1 components use none of them.
-    /// Upgrade path when they do: swap this body for the `jsonschema` crate and
-    /// map its output onto [`FieldError`], keeping the shape callers depend on.
+    /// `ponytail:` ranges and enums. Patterns, nested objects and `required`
+    /// are still unchecked — nothing declares them yet. Upgrade path when
+    /// something does: swap this body for the `jsonschema` crate and map its
+    /// output onto [`FieldError`], keeping the shape callers depend on.
     ///
     /// # Errors
     /// A [`FieldError`] per out-of-range field, or a single
@@ -118,11 +118,35 @@ impl TypeRegistry {
                 .and_then(Value::as_str)
                 .map(str::to_owned);
 
+            // **Follow the reference first.** schemars puts an enum in
+            // `$defs` and leaves a `$ref` where the field is, so everything
+            // below — the declared type, the allowed values — is in the other
+            // document. Walking the field schema as written meant an enum
+            // carried no constraints at all and accepted anything.
+            let field_schema = resolve(schema.as_value(), field_schema);
+
             // The declared type, checked before any range: a range check on a
             // value that is not a number silently passes, because `as_f64`
             // returns `None` and every comparison below is skipped.
             if let Some(mismatch) = type_mismatch(type_name, field, field_schema, actual) {
                 errors.push(FieldError { hint, ..mismatch });
+                continue;
+            }
+
+            // A closed set of names. The rejection lists them, because "not a
+            // valid corner" without saying which corners exist is a message an
+            // agent cannot act on (§6).
+            if let Some(allowed) = field_schema.get("enum").and_then(Value::as_array)
+                && !allowed.contains(actual)
+            {
+                let names: Vec<String> = allowed.iter().map(ToString::to_string).collect();
+                errors.push(FieldError {
+                    error: "field_not_in_enum".to_owned(),
+                    field: format!("{type_name}.{field}"),
+                    value: actual.clone(),
+                    constraint: names.join(", "),
+                    hint,
+                });
                 continue;
             }
 
@@ -169,6 +193,24 @@ impl TypeRegistry {
             Err(errors)
         }
     }
+}
+
+/// Follow a `$ref` into the schema's `$defs`, if the field is one.
+///
+/// Only local references, which is all schemars produces. Anything else is
+/// returned unchanged rather than chased: a validator that fetches documents
+/// is a different and much larger thing than this one.
+fn resolve<'a>(root: &'a Value, field_schema: &'a Value) -> &'a Value {
+    let Some(name) = field_schema
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.strip_prefix("#/$defs/"))
+    else {
+        return field_schema;
+    };
+    root.get("$defs")
+        .and_then(|defs| defs.get(name))
+        .unwrap_or(field_schema)
 }
 
 /// The declared type of `field`, and whether `actual` is one.
@@ -457,5 +499,66 @@ mod tests {
             "hint should carry the doc comment, got: {hint}"
         );
     }
-}
 
+    /// A component with an enum field, which is what `Hud.anchor` is.
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    enum Corner {
+        TopLeft,
+        BottomRight,
+    }
+
+    /// Something pinned to a corner of the screen.
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct Pinned {
+        /// Which corner it is measured from.
+        corner: Corner,
+    }
+
+    /// **A misspelled enum value validated clean.** schemars puts an enum
+    /// behind a `$ref` into `$defs`, and this walked the field schema without
+    /// following it — so `anchor = "top_lefft"` was accepted, dropped at load,
+    /// and the overlay silently drew in the wrong corner. Exactly the failure
+    /// `unknown_field` exists to prevent, one level deeper.
+    #[test]
+    fn a_value_outside_an_enum_is_rejected() {
+        let mut reg = TypeRegistry::new();
+        reg.register::<Pinned>("Pinned");
+
+        let errors = reg
+            .validate("Pinned", &serde_json::json!({ "corner": "top_lefft" }))
+            .expect_err("that is not a corner");
+
+        assert_eq!(errors[0].error, "field_not_in_enum");
+        assert_eq!(errors[0].field, "Pinned.corner");
+        assert!(
+            errors[0].constraint.contains("top_left"),
+            "the rejection must list what is allowed: {}",
+            errors[0].constraint
+        );
+    }
+
+    #[test]
+    fn a_valid_enum_value_still_passes() {
+        let mut reg = TypeRegistry::new();
+        reg.register::<Pinned>("Pinned");
+
+        assert!(reg
+            .validate("Pinned", &serde_json::json!({ "corner": "bottom_right" }))
+            .is_ok());
+    }
+
+    /// A number where a name belongs is a different mistake and gets its own
+    /// error, rather than being reported as "not one of these strings".
+    #[test]
+    fn a_number_where_an_enum_belongs_is_a_type_error() {
+        let mut reg = TypeRegistry::new();
+        reg.register::<Pinned>("Pinned");
+
+        let errors = reg
+            .validate("Pinned", &serde_json::json!({ "corner": 3 }))
+            .expect_err("a corner is not a number");
+
+        assert_eq!(errors[0].error, "field_type_mismatch", "{errors:?}");
+    }
+}
