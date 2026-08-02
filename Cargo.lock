@@ -1185,6 +1185,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom_audio"
+version = "0.0.0"
+dependencies = [
+ "loom_physics",
+]
+
+[[package]]
 name = "loom_cli"
 version = "0.0.0"
 dependencies = [

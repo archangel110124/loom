@@ -536,6 +536,34 @@ impl Physics {
         max_distance: f32,
         filter: QueryFilter,
     ) -> Option<RayHit> {
+        self.cast_solid(origin, direction, max_distance, filter, true)
+    }
+
+    /// Where a ray started inside a shape comes back *out*.
+    ///
+    /// [`Self::raycast`] treats a ray starting inside a solid as an immediate
+    /// hit at distance zero, which is what a shot leaving a muzzle already
+    /// clipping a wall should do. Sound is the other case: it passes through
+    /// walls, quietly, and how quietly depends on how much wall there is. That
+    /// needs the far side, not the near one.
+    #[must_use]
+    pub fn raycast_exit(
+        &self,
+        origin: [f32; 3],
+        direction: [f32; 3],
+        max_distance: f32,
+    ) -> Option<RayHit> {
+        self.cast_solid(origin, direction, max_distance, QueryFilter::default(), false)
+    }
+
+    fn cast_solid(
+        &self,
+        origin: [f32; 3],
+        direction: [f32; 3],
+        max_distance: f32,
+        filter: QueryFilter,
+        solid: bool,
+    ) -> Option<RayHit> {
         let dir = Vector::new(direction[0], direction[1], direction[2]);
         // A zero direction is a degenerate ray, not a hit at the origin. Rapier
         // would normalise it into a NaN and report nonsense.
@@ -554,7 +582,7 @@ impl Physics {
         // `solid: true` — a ray starting inside a shape hits immediately at
         // distance zero rather than passing through and striking the far wall
         // from within. That is what a muzzle already clipping a wall should do.
-        let (collider, hit) = query.cast_ray_and_get_normal(&ray, max_distance, true)?;
+        let (collider, hit) = query.cast_ray_and_get_normal(&ray, max_distance, solid)?;
 
         let point = ray.point_at(hit.time_of_impact);
         Some(RayHit {
@@ -1468,6 +1496,43 @@ mod tests {
             worst < 2.0,
             "reported {worst} m/s downward while walking on the ground"
         );
+    }
+
+    /// Sound passes through a wall; how much of it depends on the thickness,
+    /// and finding that needs the *far* face. A ray that reports the near one
+    /// measures zero thickness for every wall in the level.
+    #[test]
+    fn an_exit_ray_reports_the_far_side_of_a_wall() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        // A wall one metre thick: x from 1.0 to 2.0.
+        physics.add_static_box([1.5, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.5, 5.0, 5.0]);
+        physics.step();
+
+        // Started inside it, heading out.
+        let exit = physics
+            .raycast_exit([1.2, 0.0, 0.0], [1.0, 0.0, 0.0], 20.0)
+            .expect("it has a far side");
+
+        assert!(
+            (exit.distance - 0.8).abs() < 1e-2,
+            "exit was {} from x = 1.2, wall ends at 2.0",
+            exit.distance
+        );
+    }
+
+    /// And the shooting case must not change: a shot fired from inside a wall
+    /// hits it immediately rather than passing through to the far side.
+    #[test]
+    fn an_ordinary_ray_still_stops_where_it_starts_inside() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        physics.add_static_box([1.5, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.5, 5.0, 5.0]);
+        physics.step();
+
+        let hit = physics
+            .raycast([1.2, 0.0, 0.0], [1.0, 0.0, 0.0], 20.0)
+            .expect("inside counts as a hit");
+
+        assert!(hit.distance < 1e-3, "was {}", hit.distance);
     }
 
     // -- blast ------------------------------------------------------------
