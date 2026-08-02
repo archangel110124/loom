@@ -193,6 +193,71 @@ float valueNoise(float2 p) {
                 lerp(valueHash(i + float2(0, 1)), valueHash(i + float2(1, 1)), u.x), u.y);
 }
 
+// ---------------------------------------------------------------------------
+// Fog.
+//
+// **Height-based, and blended toward the sky rather than toward grey.** The
+// colour a surface fades into is `skyGradient` evaluated along the view ray,
+// which is the same function the background is drawn with — so a distant hill
+// dissolves into the exact horizon it stands in front of, at every camera
+// angle, with nothing to keep in step. A constant fog colour is the usual
+// shortcut and it shows: geometry fades to a grey the sky behind it is not.
+//
+// The density falls off exponentially with altitude, so fog pools in valleys
+// and craters while ridges stand clear. That is what separates fog from a
+// distance fade, and on this engine's terrain it is most of the effect.
+//
+// These are constants for the same reason the sun direction and sky colours
+// are: there is no scene-level environment block to author them in. When one
+// arrives, all four belong in it together.
+// ---------------------------------------------------------------------------
+
+/// Extinction per metre at y = 0.
+static const float FOG_DENSITY = 0.0026;
+/// How fast density decays with altitude, per metre. The scale height is its
+/// reciprocal — about 33 m here, so a hill twice that stands well clear.
+static const float FOG_FALLOFF = 0.03;
+
+/// Fraction of a surface's colour replaced by fog, for a ray between two
+/// points.
+///
+/// This is the closed-form integral of an exponentially decaying density along
+/// the ray, not a per-step march: for density `d * exp(-b*y)` the optical
+/// depth has an exact solution, so the whole effect is a handful of ALU with
+/// no loop and no samples.
+float fogAmount(float3 from, float3 to) {
+    float3 delta = to - from;
+    float distance = length(delta);
+    if (distance < 1e-4) {
+        return 0.0;
+    }
+    float riseRate = delta.y / distance;
+    float atOrigin = FOG_DENSITY * exp(-FOG_FALLOFF * from.y);
+
+    float depth;
+    // A near-horizontal ray stays at one altitude, and the general form
+    // divides by the climb rate — which for that ray is zero. The limit is
+    // just constant density times distance.
+    if (abs(riseRate) < 1e-4) {
+        depth = atOrigin * distance;
+    } else {
+        float climb = FOG_FALLOFF * riseRate;
+        depth = atOrigin * (1.0 - exp(-climb * distance)) / climb;
+    }
+    return 1.0 - exp(-depth);
+}
+
+/// What fog looks like along a view direction.
+///
+/// The sun term is why fog reads as weather rather than as a wash: looking
+/// into the sun through mist is bright, looking away from it is not, and that
+/// asymmetry is most of what makes it convincing.
+float3 fogColor(float3 direction) {
+    float3 base = skyGradient(direction);
+    float toSun = max(dot(direction, SUN_DIRECTION), 0.0);
+    return base + float3(1.0, 0.93, 0.80) * pow(toSun, 5.0) * 0.30;
+}
+
 struct VSOutput {
     float4 position : SV_Position;
     float3 normal : NORMAL;
@@ -526,6 +591,12 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     float3 environment = skyGradient(normalize(lerp(reflection, normal, roughness)));
     lit += environment * f0 * (1.0 - roughness * 0.7);
 
+    // Last, over the finished shading. Fog is what is between the eye and the
+    // surface, so it replaces the surface's colour rather than joining the
+    // lighting that produced it.
+    float fog = fogAmount(push.eye.xyz, in.worldPos);
+    lit = lerp(lit, fogColor(-view), fog);
+
     return float4(lit, 1.0);
 }
 
@@ -548,6 +619,9 @@ struct ParticleOutput {
     float4 position : SV_Position;
     float2 local : TEXCOORD0;   // -1..1 across the quad
     float4 color : COLOR;
+    // Fogged like everything else, so a distant plume recedes instead of
+    // hanging in front of the haze at full strength.
+    float3 worldPos : WORLDPOS;
     nointerpolation float seed : SEED;
 };
 
@@ -586,6 +660,7 @@ ParticleOutput particleVertexMain(uint vertexID: SV_VertexID) {
     out.position = mul(push.objects[push.objectOffset].mvp, float4(world, 1.0));
     out.local = local;
     out.color = p.color;
+    out.worldPos = world;
     out.seed = float(index);
     return out;
 }
@@ -618,7 +693,10 @@ float4 particleFragmentMain(ParticleOutput in) : SV_Target {
     if (alpha <= 0.002) {
         discard;
     }
-    return float4(in.color.rgb, saturate(alpha));
+    float3 toEye = push.eye.xyz - in.worldPos;
+    float fog = fogAmount(push.eye.xyz, in.worldPos);
+    float3 rgb = lerp(in.color.rgb, fogColor(-normalize(toEye)), fog);
+    return float4(rgb, saturate(alpha));
 }
 
 // ---------------------------------------------------------------------------
