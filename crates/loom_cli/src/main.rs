@@ -754,19 +754,6 @@ fn palette(index: usize) -> [f32; 3] {
     COLORS[index % COLORS.len()]
 }
 
-/// Gravity, and nothing else — what a character with no script does.
-///
-/// Deliberately not a walk. The movement model belongs in a script, and
-/// inventing a default one in Rust would mean every character in every scene
-/// silently inherits this file's opinion about acceleration and top speed.
-fn fall_only(motion: &loom_script::Motion) -> [f32; 3] {
-    [
-        motion.velocity[0],
-        motion.velocity[1] - 9.81 * motion.dt,
-        motion.velocity[2],
-    ]
-}
-
 /// Point the camera at the scene's bounds.
 ///
 /// Auto-framing rather than a fixed camera because the agent's first render of
@@ -838,7 +825,7 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     let base = std::path::Path::new(path)
         .parent()
         .unwrap_or(std::path::Path::new("."));
-    let mut runner = match Runner::new(&world, base) {
+    let mut runner = match play::Runner::new(&world, base) {
         Ok(r) => r,
         Err(json) => return (1, json),
     };
@@ -899,118 +886,6 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
 /// Play button — the headless path and the interactive one must agree about
 /// what a scene means physically, and the only way to guarantee that is for
 /// there to be one of them.
-/// One place that knows what "run this scene for a tick" means.
-///
-/// It used to be two. `loom sim` stepped physics and ran scripts in a loop;
-/// `loom render --sim` called a separate helper that stepped physics N times
-/// in one go and ran no scripts at all. So a character walked in the numbers
-/// and stood still in the picture — the two verification channels the agent
-/// has (brief §5) disagreed about the same scene, which makes both useless.
-struct Runner {
-    physics: play::Sim,
-    host: loom_script::ScriptHost,
-    /// Scripts on nodes that are characters. These are *movement models*: they
-    /// answer with a velocity and the controller does the moving.
-    character_scripts: std::collections::BTreeMap<loom_ecs::Entity, String>,
-    /// Scripts on ordinary nodes, which write a transform directly.
-    node_scripts: Vec<(loom_ecs::Entity, String)>,
-}
-
-impl Runner {
-    /// Compile every script the scene names and build its physics world.
-    ///
-    /// # Errors
-    /// A JSON line ready to print, for a script that will not read or compile.
-    fn new(world: &World, base: &std::path::Path) -> Result<Self, String> {
-        let mut host = loom_script::ScriptHost::default();
-        let mut character_scripts = std::collections::BTreeMap::new();
-        let mut node_scripts = Vec::new();
-
-        for entity in world.entities() {
-            let Some(script) = world.script_path(*entity) else {
-                continue;
-            };
-            let source = std::fs::read_to_string(base.join(script)).map_err(|e| {
-                json_line(&serde_json::json!({
-                    "error": "io_error", "script": script, "constraint": e.to_string(),
-                }))
-            })?;
-            host.compile(script, &source).map_err(|e| json_line(&e))?;
-
-            // Which entry point a script gets is decided by the node, not by
-            // the file: a character's script is its movement model, anything
-            // else's moves a transform. Running a character's script the
-            // second way as well would apply its position writes directly,
-            // which skips collision — it would walk through walls.
-            if world.character(*entity).is_some() {
-                character_scripts.insert(*entity, script.to_owned());
-            } else {
-                node_scripts.push((*entity, script.to_owned()));
-            }
-        }
-
-        Ok(Self {
-            // Built from the world as authored. A script that moves a body
-            // after this point is not fed back into the solver; scripted
-            // dynamic bodies are not wired yet, and that is a gap rather than
-            // a silent approximation.
-            physics: play::Sim::new(world),
-            host,
-            character_scripts,
-            node_scripts,
-        })
-    }
-
-    /// Advance one fixed tick: physics, then characters, then node scripts.
-    ///
-    /// Characters move after the step because the tree they collide against
-    /// is built during it, and before node scripts so a script reading a
-    /// character's position sees this tick's, not last tick's.
-    ///
-    /// # Errors
-    /// [`loom_script::ScriptError`] from whichever script failed.
-    fn tick(&mut self, world: &mut World, tick: u64) -> Result<(), loom_script::ScriptError> {
-        self.physics.step(1);
-        self.physics.write_back(world);
-
-        if self.physics.character_count() > 0 {
-            let host = &self.host;
-            let scripts = &self.character_scripts;
-            self.physics
-                .drive_characters(world, tick, |entity, motion, memory| {
-                    match scripts.get(&entity) {
-                        Some(script) => host.motion(script, motion, memory),
-                        // No script, so no movement model — it falls and does
-                        // nothing else. Not a default walk: inventing one in
-                        // Rust is what the script seam exists to avoid, and a
-                        // character that mysteriously strolls off is worse
-                        // than one that visibly stands still.
-                        None => Ok(fall_only(motion)),
-                    }
-                })?;
-        }
-
-        for (entity, script) in &self.node_scripts {
-            let Some(transform) = world.transform(*entity).cloned() else {
-                continue;
-            };
-            let state = loom_script::NodeState {
-                position: transform.pos,
-                rotation: transform.rot_euler,
-                scale: transform.scale,
-            };
-            let next = self.host.tick(script, tick, &state)?;
-            if let Some(t) = world.transform_mut(*entity) {
-                t.pos = next.position;
-                t.rot_euler = next.rotation;
-                t.scale = next.scale;
-            }
-        }
-        world.propagate_transforms();
-        Ok(())
-    }
-}
-
 /// Run a scene forward for `ticks`, for a render that wants a simulated view.
 ///
 /// A failing script is reported and the run stops there rather than aborting
@@ -1018,7 +893,7 @@ impl Runner {
 /// has to fix the script than no picture at all, which is the same reasoning
 /// that makes a missing texture a warning.
 fn simulate_physics(world: &mut World, base: &std::path::Path, ticks: u32) {
-    let mut runner = match Runner::new(world, base) {
+    let mut runner = match play::Runner::new(world, base) {
         Ok(r) => r,
         Err(json) => {
             log::warn(format!("scripts did not load, running physics only: {json}"));

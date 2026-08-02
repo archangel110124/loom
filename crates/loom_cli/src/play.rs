@@ -419,11 +419,155 @@ fn has_dynamic_ancestor(world: &World, entity: loom_ecs::Entity) -> bool {
     false
 }
 
+/// Gravity, and nothing else — what a character with no script does.
+///
+/// Deliberately not a walk. The movement model belongs in a script, and
+/// inventing a default one in Rust would mean every character in every scene
+/// silently inherits this file's opinion about acceleration and top speed.
+fn fall_only(motion: &loom_script::Motion) -> [f32; 3] {
+    [
+        motion.velocity[0],
+        motion.velocity[1] - 9.81 * motion.dt,
+        motion.velocity[2],
+    ]
+}
+
+/// One place that knows what "run this scene for a tick" means.
+///
+/// It used to be two. `loom sim` stepped physics and ran scripts in a loop;
+/// `loom render --sim` called a separate helper that stepped physics N times
+/// in one go and ran no scripts at all. So a character walked in the numbers
+/// and stood still in the picture — the two verification channels the agent
+/// has (brief §5) disagreed about the same scene, which makes both useless.
+pub struct Runner {
+    physics: Sim,
+    host: loom_script::ScriptHost,
+    /// Scripts on nodes that are characters. These are *movement models*: they
+    /// answer with a velocity and the controller does the moving.
+    character_scripts: std::collections::BTreeMap<loom_ecs::Entity, String>,
+    /// Scripts on ordinary nodes, which write a transform directly.
+    node_scripts: Vec<(loom_ecs::Entity, String)>,
+}
+
+impl Runner {
+    /// Compile every script the scene names and build its physics world.
+    ///
+    /// # Errors
+    /// A JSON line ready to print, for a script that will not read or compile.
+    pub fn new(world: &World, base: &std::path::Path) -> Result<Self, String> {
+        let mut host = loom_script::ScriptHost::default();
+        let mut character_scripts = std::collections::BTreeMap::new();
+        let mut node_scripts = Vec::new();
+
+        for entity in world.entities() {
+            let Some(script) = world.script_path(*entity) else {
+                continue;
+            };
+            let source = std::fs::read_to_string(base.join(script)).map_err(|e| {
+                crate::json_line(&serde_json::json!({
+                    "error": "io_error", "script": script, "constraint": e.to_string(),
+                }))
+            })?;
+            host.compile(script, &source).map_err(|e| crate::json_line(&e))?;
+
+            // Which entry point a script gets is decided by the node, not by
+            // the file: a character's script is its movement model, anything
+            // else's moves a transform. Running a character's script the
+            // second way as well would apply its position writes directly,
+            // which skips collision — it would walk through walls.
+            if world.character(*entity).is_some() {
+                character_scripts.insert(*entity, script.to_owned());
+            } else {
+                node_scripts.push((*entity, script.to_owned()));
+            }
+        }
+
+        Ok(Self {
+            // Built from the world as authored. A script that moves a body
+            // after this point is not fed back into the solver; scripted
+            // dynamic bodies are not wired yet, and that is a gap rather than
+            // a silent approximation.
+            physics: Sim::new(world),
+            host,
+            character_scripts,
+            node_scripts,
+        })
+    }
+
+    /// A runner that steps physics and runs nothing, for when the scripts
+    /// could not be loaded.
+    #[must_use]
+    pub fn physics_only(world: &World) -> Self {
+        Self {
+            physics: Sim::new(world),
+            host: loom_script::ScriptHost::default(),
+            character_scripts: std::collections::BTreeMap::new(),
+            node_scripts: Vec::new(),
+        }
+    }
+
+    /// Advance one fixed tick: physics, then characters, then node scripts.
+    ///
+    /// Characters move after the step because the tree they collide against
+    /// is built during it, and before node scripts so a script reading a
+    /// character's position sees this tick's, not last tick's.
+    ///
+    /// # Errors
+    /// [`loom_script::ScriptError`] from whichever script failed.
+    pub fn tick(&mut self, world: &mut World, tick: u64) -> Result<(), loom_script::ScriptError> {
+        self.physics.step(1);
+        self.physics.write_back(world);
+
+        if self.physics.character_count() > 0 {
+            let host = &self.host;
+            let scripts = &self.character_scripts;
+            self.physics
+                .drive_characters(world, tick, |entity, motion, memory| {
+                    match scripts.get(&entity) {
+                        Some(script) => host.motion(script, motion, memory),
+                        // No script, so no movement model — it falls and does
+                        // nothing else. Not a default walk: inventing one in
+                        // Rust is what the script seam exists to avoid, and a
+                        // character that mysteriously strolls off is worse
+                        // than one that visibly stands still.
+                        None => Ok(fall_only(motion)),
+                    }
+                })?;
+        }
+
+        for (entity, script) in &self.node_scripts {
+            let Some(transform) = world.transform(*entity).cloned() else {
+                continue;
+            };
+            let state = loom_script::NodeState {
+                position: transform.pos,
+                rotation: transform.rot_euler,
+                scale: transform.scale,
+            };
+            let next = self.host.tick(script, tick, &state)?;
+            if let Some(t) = world.transform_mut(*entity) {
+                t.pos = next.position;
+                t.rot_euler = next.rotation;
+                t.scale = next.scale;
+            }
+        }
+        world.propagate_transforms();
+        Ok(())
+    }
+}
+
 /// Play mode as the editor holds it: a scene's world, its simulation, and how
 /// far it has been run.
 pub struct Play {
     pub world: World,
-    sim: Sim,
+    /// The same per-tick runner `loom sim` and `loom render --sim` use.
+    ///
+    /// It used to be a bare `Sim`, stepped and written back — no scripts at
+    /// all. So the editor's Play button advanced the clock while every
+    /// scripted thing stood still, and the window disagreed with `loom sim`
+    /// about the same scene. Play mode's entire justification is that the two
+    /// are one run.
+    runner: Runner,
     /// Whole ticks run. Time is counted here, not in seconds.
     pub ticks: u32,
     pub paused: bool,
@@ -434,12 +578,22 @@ pub struct Play {
 }
 
 impl Play {
+    /// Begin simulating. `base` is the directory scripts resolve against —
+    /// the scene file's own directory.
+    ///
+    /// A script that will not load is reported and play continues without it,
+    /// rather than refusing to start. The editor is where a half-written
+    /// script is normal, and a Play button that does nothing at all teaches
+    /// less than a moving scene with one thing missing and a line in the log.
     #[must_use]
-    pub fn start(world: World) -> Self {
-        let sim = Sim::new(&world);
+    pub fn start(world: World, base: &std::path::Path) -> Self {
+        let runner = Runner::new(&world, base).unwrap_or_else(|json| {
+            crate::log::warn(format!("scripts did not load: {json}"));
+            Runner::physics_only(&world)
+        });
         Self {
             world,
-            sim,
+            runner,
             ticks: 0,
             paused: false,
             leftover: 0.0,
@@ -471,10 +625,23 @@ impl Play {
     }
 
     /// Advance exactly `ticks`, ignoring pause. The Step button.
+    ///
+    /// One tick at a time, not one batch: scripts run per tick, and a
+    /// character's collide-and-slide has to happen between two steps rather
+    /// than after all of them.
+    ///
+    /// A script that throws pauses play and says so. Carrying on would run the
+    /// same failure sixty times a second, and the log line that matters would
+    /// scroll away inside its own repeats.
     pub fn run(&mut self, ticks: u32) {
-        self.sim.step(ticks);
-        self.sim.write_back(&mut self.world);
-        self.ticks += ticks;
+        for _ in 0..ticks {
+            self.ticks += 1;
+            if let Err(e) = self.runner.tick(&mut self.world, u64::from(self.ticks)) {
+                crate::log::warn(format!("{}: {} — paused", e.script, e.message));
+                self.paused = true;
+                return;
+            }
+        }
     }
 
     #[must_use]
@@ -487,12 +654,26 @@ impl Play {
 
     #[must_use]
     pub fn bodies(&self) -> usize {
-        self.sim.body_count()
+        self.runner.physics.body_count()
+    }
+
+    /// How many characters and scripts this run will actually drive.
+    ///
+    /// Logged at Play, because "nothing is moving" has two very different
+    /// causes — a scene where nothing was ever going to move, and a scene
+    /// where something should have — and the human cannot tell them apart by
+    /// watching a clock advance.
+    #[must_use]
+    pub fn moving_parts(&self) -> (usize, usize) {
+        (
+            self.runner.character_scripts.len(),
+            self.runner.node_scripts.len(),
+        )
     }
 
     #[must_use]
     pub fn state_hash(&self) -> u64 {
-        self.sim.state_hash()
+        self.runner.physics.state_hash()
     }
 }
 
@@ -585,7 +766,7 @@ transform = { pos = [0.0, 4.0, 0.0], rot_euler = [0.0, 0.0, 45.0], scale = [0.7,
     #[test]
     fn a_sphere_rests_at_its_radius_however_it_is_turned() {
         let world = World::from_scene(&Scene::parse(TILTED_BALL).expect("valid scene"));
-        let mut play = Play::start(world);
+        let mut play = Play::start(world, std::path::Path::new("."));
 
         play.run(240);
         let y = height(&play.world, "Stage/Ball");
@@ -604,7 +785,7 @@ transform = { pos = [0.0, 4.0, 0.0], rot_euler = [0.0, 0.0, 45.0], scale = [0.7,
     fn a_tilted_box_still_rests_on_its_corner() {
         let source = TILTED_BALL.replace("asset = \"sphere\"", "asset = \"box\"");
         let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
-        let mut play = Play::start(world);
+        let mut play = Play::start(world, std::path::Path::new("."));
 
         play.run(240);
         let y = height(&play.world, "Stage/Ball");
@@ -633,7 +814,7 @@ transform = { pos = [0.0, 4.0, 0.0], rot_euler = [0.0, 0.0, 45.0], scale = [0.7,
                [node.components.RigidBody]\n  dynamic = true\n  mass = 5.0\n"
         );
         let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
-        let mut play = Play::start(world);
+        let mut play = Play::start(world, std::path::Path::new("."));
 
         play.run(400);
         let y = height(&play.world, "Terrain/Probe");
@@ -685,7 +866,7 @@ transform = {{ pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }}
 
         let rest = |source: &str| {
             let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
-            let mut play = Play::start(world);
+            let mut play = Play::start(world, std::path::Path::new("."));
             play.run(400);
             height(&play.world, "Stage/Crate")
         };
@@ -745,7 +926,7 @@ transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
   mass = 4.0
 "#;
         let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
-        let mut play = Play::start(world);
+        let mut play = Play::start(world, std::path::Path::new("."));
         play.run(240);
 
         let entity = *play
@@ -803,7 +984,7 @@ transform = {{ pos = [0.0, 3.0, 0.0], rot_euler = [0.0, 0.0, 80.0], scale = [0.5
         };
         let travel = |mesh: &str| {
             let world = World::from_scene(&Scene::parse(&scene(mesh)).expect("valid scene"));
-            let mut play = Play::start(world);
+            let mut play = Play::start(world, std::path::Path::new("."));
             play.run(300);
             let entity = *play
                 .world
@@ -877,7 +1058,7 @@ transform = { pos = [0.0, 20.0, 0.0], scale = [0.3, 0.3, 0.3] }
   mass = 2.0
 "#;
         let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
-        let mut play = Play::start(world);
+        let mut play = Play::start(world, std::path::Path::new("."));
         play.run(400);
 
         // The flag spawned at world y = 10 and rode its parent down. Nothing
@@ -934,7 +1115,7 @@ transform = {{ pos = [4.0, {drop_from}, 4.0], scale = [0.25, 0.25, 0.25] }}
         };
         let rest = |scale: f32, drop_from: f32| {
             let world = World::from_scene(&Scene::parse(&scene(scale, drop_from)).expect("valid"));
-            let mut play = Play::start(world);
+            let mut play = Play::start(world, std::path::Path::new("."));
             play.run(500);
             height(&play.world, "Stage/Probe")
         };
@@ -986,7 +1167,7 @@ transform = { pos = [0.0, 6.0, 0.0] }
   mass = 5.0
 "#;
         let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
-        let mut play = Play::start(world);
+        let mut play = Play::start(world, std::path::Path::new("."));
         play.run(400);
 
         // Unit capsule: straight half-height 1, radius 1, so it spans ±2 and
@@ -1037,9 +1218,60 @@ transform = { pos = [0.0, 6.0, 0.0] }
         assert!(super::invertible_parent(flat).is_finite());
     }
 
+    fn axis(world: &World, path: &str, index: usize) -> f32 {
+        world
+            .entities()
+            .iter()
+            .find(|e| world.path(**e) == Some(path))
+            .and_then(|e| world.transform(*e))
+            .map(|t| t.pos[index])
+            .expect("node exists")
+    }
+
+    /// **Play mode ran no scripts at all.** `Play::run` stepped physics and
+    /// wrote bodies back, and that was the whole tick — so pressing Play in
+    /// the editor advanced the clock while every scripted thing stood still.
+    /// `loom sim` ran scripts and the editor did not, which is the same class
+    /// of split that had `render --sim` disagreeing with `sim`.
+    #[test]
+    fn playing_runs_a_characters_movement_script() {
+        let source = std::fs::read_to_string("../../assets/test/walker.loom").expect("fixture");
+        let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+        let mut play = Play::start(world, std::path::Path::new("../../assets/test"));
+        let before = axis(&play.world, "Level/Walker", 0);
+
+        play.run(90);
+
+        assert!(
+            axis(&play.world, "Level/Walker", 0) > before + 3.0,
+            "the character did not walk: x went {before} -> {}",
+            axis(&play.world, "Level/Walker", 0)
+        );
+    }
+
+    /// The other half of the same gap: an ordinary node's script moves its
+    /// transform, and that never ran in the editor either.
+    #[test]
+    fn playing_runs_a_plain_node_script() {
+        let dir = std::env::temp_dir().join("loom_play_script_test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("rise.rhai"), "position[1] = tick.to_float() * 0.1;")
+            .expect("write script");
+        let scene = "[scene]\nformat = 1\nid = \"3a7c9e15-4b28-4d63-8f10-5e2b74c9a086\"\n\n\
+             [[node]]\nname = \"Root\"\ntransform = { pos = [0.0, 0.0, 0.0] }\n\n\
+               [node.components.Script]\n  path = \"rise.rhai\"\n";
+        let world = World::from_scene(&Scene::parse(scene).expect("valid scene"));
+        let mut play = Play::start(world, dir.as_path());
+
+        play.run(10);
+
+        let y = axis(&play.world, "Root", 1);
+        assert!((y - 1.0).abs() < 1e-4, "script did not run: y = {y}");
+    }
+
     #[test]
     fn playing_makes_a_crate_fall() {
-        let mut play = Play::start(world());
+        let mut play = Play::start(world(), std::path::Path::new("."));
         let before = height(&play.world, "Stage/Crate");
 
         play.run(60);
@@ -1060,7 +1292,7 @@ transform = { pos = [0.0, 6.0, 0.0] }
     /// the accumulator working, not a determinism failure.
     #[test]
     fn pacing_does_not_change_the_outcome_only_the_tick_count_does() {
-        let mut stuttering = Play::start(world());
+        let mut stuttering = Play::start(world(), std::path::Path::new("."));
         // Roughly a second, delivered in uneven lumps.
         for dt in [0.05_f32, 0.002, 0.13, 0.008, 0.24, 0.06, 0.21, 0.09, 0.21] {
             stuttering.advance(dt);
@@ -1068,7 +1300,7 @@ transform = { pos = [0.0, 6.0, 0.0] }
         assert!(stuttering.ticks > 50, "about a second ran: {}", stuttering.ticks);
 
         // The same number of ticks, delivered as a clean 60 fps.
-        let mut steady = Play::start(world());
+        let mut steady = Play::start(world(), std::path::Path::new("."));
         while steady.ticks < stuttering.ticks {
             steady.advance(TICK_SECONDS);
         }
@@ -1083,7 +1315,7 @@ transform = { pos = [0.0, 6.0, 0.0] }
 
     #[test]
     fn pausing_stops_time() {
-        let mut play = Play::start(world());
+        let mut play = Play::start(world(), std::path::Path::new("."));
         play.paused = true;
 
         play.advance(1.0);
@@ -1097,7 +1329,7 @@ transform = { pos = [0.0, 6.0, 0.0] }
     /// A stall must not turn into a thousand catch-up ticks.
     #[test]
     fn a_long_stall_is_clamped() {
-        let mut play = Play::start(world());
+        let mut play = Play::start(world(), std::path::Path::new("."));
 
         play.advance(30.0);
 

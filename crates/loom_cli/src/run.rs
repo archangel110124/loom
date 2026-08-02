@@ -970,8 +970,12 @@ impl App {
     /// is at risk because nothing was written.
     fn start_play(&mut self) {
         let world = loom_ecs::World::from_scene(&self.view.scene);
-        let play = crate::play::Play::start(world);
-        crate::log::info(format!("play — {} bodies", play.bodies()));
+        let play = crate::play::Play::start(world, &self.base);
+        let (characters, scripts) = play.moving_parts();
+        crate::log::info(format!(
+            "play — {} bodies, {characters} characters, {scripts} scripts",
+            play.bodies()
+        ));
         self.play = Some(play);
         self.refresh_play_objects();
         self.drag = None;
