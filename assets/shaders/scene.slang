@@ -166,6 +166,9 @@ struct VSOutput {
     // `nointerpolation`: an index is not a quantity, and interpolating it
     // across a triangle would produce indices no material occupies.
     nointerpolation uint material : MATERIAL;
+    // How far a shadow ray must start from this surface to clear it. Per
+    // object, because it is set by that mesh's quantisation step.
+    nointerpolation float shadowBias : SHADOWBIAS;
 };
 
 // Mirrors `loom_asset::packed::unpack`. Kept in step by a Rust-side test that
@@ -214,6 +217,25 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
     out.normal = normalize(mul(normalMatrix, unpackNormal(v.packedNormal)));
     out.color = o.color.rgb;
     out.material = o.material.x;
+    // **Why this is not a constant.** The raster path reconstructs worldPos
+    // from a 10-bit quantised position, but the acceleration structure was
+    // built from unpacked floats. The two disagree by up to half a
+    // quantisation step — on a 16-unit voxel volume that is ~0.008 units,
+    // eight times the fixed 1e-3 bias that used to be used here. The ray then
+    // starts *inside* the true surface and the volume self-shadows into acne.
+    //
+    // Scaling by the step this mesh was packed with makes the offset track the
+    // error that causes it: a small prop keeps a tight contact shadow, and a
+    // large terrain gets the clearance it actually needs.
+    //
+    // **Known gap, stated rather than hidden.** `unpack.w` is in the mesh's
+    // own space, and the offset is applied in world space, so an object scaled
+    // by N gets a bias N times smaller than its real error. It is right where
+    // the acne actually appears — voxel volumes, which are authored at world
+    // scale and drawn unscaled — and too small for a heavily scaled mesh.
+    // Correcting it needs the model matrix's scale, which is a change to how
+    // this shader indexes a matrix and wants its own commit.
+    out.shadowBias = max(SHADOW_BIAS, o.unpack.w);
     out.worldPos = mul(o.model, float4(unpackPosition(v.packedPosition, o.unpack), 1.0)).xyz;
     out.uv = unpackUv(v.packedUv, o.uvUnpack);
     return out;
@@ -239,14 +261,14 @@ uniform RaytracingAccelerationStructure sceneTLAS;
 /// The flags are template arguments rather than runtime values on purpose:
 /// static flags let the driver specialise the traversal, and passing them
 /// dynamically forfeits that.
-float sunVisibility(float3 position, float3 normal) {
+float sunVisibility(float3 position, float3 normal, float bias) {
     RayDesc ray;
     // Offset along the normal, not just by TMin: a ray starting exactly on the
     // surface hits the surface it came from, and the whole scene self-shadows
     // into acne.
-    ray.Origin = position + normal * SHADOW_BIAS;
+    ray.Origin = position + normal * bias;
     ray.Direction = SUN_DIRECTION;
-    ray.TMin = SHADOW_BIAS;
+    ray.TMin = bias;
     ray.TMax = 1e4;
 
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
@@ -416,7 +438,7 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // can tilt a surface far enough to push the ray origin below the real
     // surface, and the ray then starts inside its own geometry.
     float3 geometric = normalize(in.normal);
-    float sun = diffuse > 0.0 ? sunVisibility(in.worldPos, geometric) : 0.0;
+    float sun = diffuse > 0.0 ? sunVisibility(in.worldPos, geometric, in.shadowBias) : 0.0;
 
     // Metals have no diffuse response — their albedo is the reflectance of the
     // specular lobe instead, which is why it moves into f0 rather than being
