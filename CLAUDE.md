@@ -144,10 +144,18 @@ change, so your edits appear live. Two consequences:
 > undecided. `loom` has: validate, describe, render (--sim), sim (--assert),
 > run (--edit), scene (--tx), place (--op), measure, terrain, explode. `loom-mcp` wraps them.
 >
-> Post-M12 work, in the brief's own order of priority: shadows / SDFGI / the post stack (all
-> deliberately deferred past M12 by §7.16), Dual Contouring behind the existing `Mesher` trait for
-> sharp-cornered structures, LOD octree for the open world, and archetype ECS storage when
-> profiling demands it (ADR 0003 names the trigger).
+> **Landed since M12**, none of it on the brief's list — the game layer that proves the engine is
+> usable rather than merely complete: hardware ray tracing with ray-queried sun shadows, materials
+> (albedo, normal maps, triplanar, bindless textures), height-based fog, a deterministic particle
+> system, heightfield voxel terrain, raycasting and line of sight, a script-driven character
+> controller, first-person play from the editor, a deterministic event queue with damage on top,
+> ray-traced acoustics and audio playback, enemy navigation and perception, an authored
+> screen-space HUD, explosions, and the Proving Ground scene that ties them together.
+>
+> Post-M12 work still outstanding, in the brief's order of priority: **SDFGI and the post stack**
+> (deferred by §7.16 — shadows were on that list and are now done, by hardware ray tracing),
+> Dual Contouring behind the existing `Mesher` trait for sharp-cornered structures, LOD octree for
+> the open world, and archetype ECS storage when profiling demands it (ADR 0003 names the trigger).
 >
 > The knowledge graph is still deferred — ADR 0003, option 1, awaiting a decision.
 

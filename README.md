@@ -193,3 +193,13 @@ retroactively tidied away.
 - `docs/decisions/0003-knowledge-graph-deferred.md` — **proposed, awaiting a decision.**
 - `docs/decisions/0004-schemars-instead-of-a-reflect-derive.md` — why there is no
   `#[derive(Reflect)]`: `schemars` already emits all four things the design doc wanted from one.
+
+## License
+
+Dual-licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+at your option, matching the `license = "MIT OR Apache-2.0"` declaration in the
+workspace manifest. Contributions are accepted under the same dual license.
