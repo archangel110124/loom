@@ -13,7 +13,7 @@ jobs:
       # vulkan-validation-layers: loom_render's tests refuse to pass without
       # VK_LAYER_KHRONOS_validation rather than let 'validation clean' be
       # vacuously true. Mesa's software ICD on the runner handles the rest.
-      - run: sudo apt-get update && sudo apt-get install -y mold clang spirv-tools libasound2-dev pkg-config vulkan-validation-layers
+      - run: sudo apt-get update && sudo apt-get install -y mold clang spirv-tools libasound2-dev pkg-config vulkan-validationlayers
       # Slang is not in any distro repo. loom_render's build.rs fails loudly
       # without it (brief §7.7 / never-do #9), so CI must install it too.
       - name: Install Slang
