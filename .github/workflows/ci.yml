@@ -8,7 +8,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup show   # honours rust-toolchain.toml
-      - run: sudo apt-get update && sudo apt-get install -y mold clang spirv-tools
+      # libasound2-dev is required by alsa-sys, pulled in through cpal by
+      # loom_audio. Without it the build fails before clippy ever runs.
+      - run: sudo apt-get update && sudo apt-get install -y mold clang spirv-tools libasound2-dev pkg-config
       # Slang is not in any distro repo. loom_render's build.rs fails loudly
       # without it (brief §7.7 / never-do #9), so CI must install it too.
       - name: Install Slang
