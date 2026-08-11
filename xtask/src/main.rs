@@ -141,8 +141,16 @@ fn image(bless: bool) -> std::process::ExitCode {
     let mut checked = 0;
 
     for (name, scene, extra) in GOLDEN {
+        // **A missing scene fails the gate.** It used to skip, which meant
+        // renaming a scene file quietly dropped a whole rendering path out of
+        // coverage while the gate still printed success. That is the one
+        // failure mode a regression harness must not have, because every
+        // phase after this one trusts it to be watching.
         if !root.join(scene).exists() {
-            eprintln!("xtask: {scene} is missing; skipping");
+            failures.push(format!(
+                "{name}: {scene} is missing — the golden list names a scene that \
+                 does not exist, so this rendering path is unverified"
+            ));
             continue;
         }
         checked += 1;
@@ -276,7 +284,11 @@ fn flythrough() -> std::process::ExitCode {
 
     let mut failed = false;
     for (name, scene, _) in GOLDEN {
+        // Not a gate, but still not silent: a scene that vanished from the
+        // list is a hole in what anyone reviewing motion will actually see.
         if !root.join(scene).exists() {
+            failed = true;
+            eprintln!("  flythrough {name}: {scene} is missing");
             continue;
         }
         let prefix = out.join(format!("{name}.png"));
@@ -385,8 +397,11 @@ fn validate() -> std::process::ExitCode {
     let mut checked = 0;
 
     for scene in SCENES {
+        // Missing means unverified, not fine — see the same guard in `image`.
         if !root.join(scene).exists() {
-            eprintln!("xtask: {scene} is missing; skipping");
+            failures.push(format!(
+                "{scene}: missing — the scene list names a file that does not exist"
+            ));
             continue;
         }
         checked += 1;
