@@ -146,7 +146,7 @@ change, so your edits appear live. Two consequences:
 
 ## Current phase
 
-> **Phase 0 — Substrate. S1 and S2 done; S3 next.** See
+> **Phase 0 — Substrate. S1, S2 and S3 done; S4 (prefabs) is all that remains.** See
 > `docs/design/LOOM-IMPLEMENTATION-ORDER.md`, which is the sequencing document for everything
 > after M12 and **supersedes the build orders inside the companion docs wherever they conflict**.
 >
@@ -171,6 +171,14 @@ change, so your edits appear live. Two consequences:
 > **Authoring a new field means adding it to `loom_field::all()`.** Never hand-write a field in
 > Slang, and never edit the generated file — that changes the GPU alone, which is the divergence
 > the generator exists to make impossible.
+>
+> **S3 delivered** `loom_voxel::exposure` — one CPU march of the SDF answering "how open is this
+> direction" as a fraction, for rain, wind and gameplay alike. ADR 0007 records why it is an SDF
+> march rather than a ray query, and the two constants the tests chose rather than the design
+> (half-voxel steps, an asymmetric occupancy ramp — a one-voxel roof leaks without either).
+> **Rain and wind take sheltering from here; neither grows its own.** Audio's `openness` is
+> deliberately *not* unified with it: audio casts against the collision world, this marches only
+> the voxel volume, and swapping it would read every non-voxel scene as wide open.
 >
 > **Do not skip ahead.** The order after it is P1 wind → P2 grass → P3 water → P4 rain →
 > P5 scatter → P6 mesh vegetation + culling, with P7 editor slottable in parallel. Grass sits at
