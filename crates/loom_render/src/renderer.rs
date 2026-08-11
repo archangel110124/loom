@@ -1877,7 +1877,7 @@ pub(crate) fn create_sky_pipeline(
     Ok(pipeline)
 }
 
-fn create_shader_module(
+pub(crate) fn create_shader_module(
     device: &ash::Device,
     spv: &[u8],
 ) -> Result<vk::ShaderModule, RenderError> {

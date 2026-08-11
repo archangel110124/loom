@@ -47,6 +47,14 @@ pub const TRIANGLE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/triang
 /// The scene shader (one lit cube per object), embedded at build time.
 pub const SCENE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scene.spv"));
 
+/// The compute shader that evaluates the generated fields, for the S2
+/// agreement test. Nothing in the runtime dispatches it — see `field_agree`.
+#[cfg(test)]
+pub const FIELD_AGREE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/field_agree.spv"));
+
+#[cfg(test)]
+mod field_agree;
+
 #[cfg(test)]
 mod tests {
     /// **The validation collector is process-global**, and `cargo test` runs
@@ -58,7 +66,7 @@ mod tests {
     /// Every test that creates an `Instance` or drains the collector takes
     /// this first. Poisoning is ignored deliberately: if one test panics, the
     /// rest should still run and report honestly rather than cascade.
-    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
         static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }

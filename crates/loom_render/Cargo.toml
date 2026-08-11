@@ -24,3 +24,10 @@ winit = "=0.30.13"
 # field is.
 [build-dependencies]
 loom_field = { version = "0.0.0", path = "../loom_field" }
+
+# The same crate again, for the agreement test only: it evaluates the Rust side
+# of the field to compare against what the generated shader computed. A
+# dev-dependency rather than a dependency because nothing in the runtime
+# renderer evaluates a field on the CPU.
+[dev-dependencies]
+loom_field = { version = "0.0.0", path = "../loom_field" }

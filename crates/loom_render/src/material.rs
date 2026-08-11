@@ -385,7 +385,7 @@ fn upload(
 ///
 /// Same shape as `raytrace::Raytracer::submit_build` — initialisation work that
 /// must finish before the first frame, not per-frame work the graph schedules.
-fn record(
+pub(crate) fn record(
     device: &ash::Device,
     submit: Submit,
     record: impl FnOnce(vk::CommandBuffer),

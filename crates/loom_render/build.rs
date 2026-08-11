@@ -97,6 +97,14 @@ fn compile(shader: &Path, out_dir: &Path) {
         // default: getting this wrong transposes every matrix, which validation
         // cannot see and which looks like exploding geometry in the render.
         .arg("-matrix-layout-column-major")
+        // **Keep the source's entry-point names.** Slang renames a lone entry
+        // point to `main` and only preserves real names when a module has
+        // several — so `scene.slang` kept `vertexMain`/`fragmentMain` purely
+        // because it has two of them, and a single-entry-point module silently
+        // did not. The failure is a pipeline that will not compile, with the
+        // reason buried in a driver warning. Pinned so the name in the shader
+        // is the name the pipeline asks for, always.
+        .arg("-fvk-use-entrypoint-name")
         .arg("-g2")
         .args(["-o".as_ref(), spv.as_os_str()])
         .output()

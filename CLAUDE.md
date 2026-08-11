@@ -146,15 +146,31 @@ change, so your edits appear live. Two consequences:
 
 ## Current phase
 
-> **Phase 0 — Substrate. Not started.** See `docs/design/LOOM-IMPLEMENTATION-ORDER.md`, which is
-> the sequencing document for everything after M12 and **supersedes the build orders inside the
-> companion docs wherever they conflict**.
+> **Phase 0 — Substrate. S1 and S2 done; S3 next.** See
+> `docs/design/LOOM-IMPLEMENTATION-ORDER.md`, which is the sequencing document for everything
+> after M12 and **supersedes the build orders inside the companion docs wherever they conflict**.
 >
 > Phase 0 is S1 golden-image regression harness, S2 Rust→Slang codegen + CPU/GPU agreement test,
 > S3 voxel-SDF exposure/shelter query, S4 prefab system. None of it is visible and all of it is
 > load-bearing: it is 15–20% of the total and it prevents building water, rain, wind and grass on
 > a foundation with no pixel diff, three divergent field implementations, three occlusion queries
 > and scatter written twice.
+>
+> **S1 delivered** the fourth green check and `cargo xtask flythrough` — ADR 0005 records the
+> tolerance and the measurement behind it. Exit criterion run end to end: a one-line shader change
+> fails the gate, `--bless` accepts it, reverting restores the references.
+>
+> **S2 delivered** `loom_field` — a field is one expression tree, `Expr::eval` walks it on the CPU
+> and `build.rs` emits `assets/shaders/generated/fields.slang` from it, so the two cannot implement
+> different formulas. `cargo test` proves they agree numerically: worst absolute difference 4.5e-5
+> over 512 samples against a 1e-3 threshold. ADR 0006 records the mechanism, the three traps pinned
+> along the way, and the rule that **noise, when a field needs it, is implemented inside
+> `loom_field` rather than taken from a crate** — a crate bump must never be able to change the sim
+> hash. Nothing uses noise yet.
+>
+> **Authoring a new field means adding it to `loom_field::all()`.** Never hand-write a field in
+> Slang, and never edit the generated file — that changes the GPU alone, which is the divergence
+> the generator exists to make impossible.
 >
 > **Do not skip ahead.** The order after it is P1 wind → P2 grass → P3 water → P4 rain →
 > P5 scatter → P6 mesh vegetation + culling, with P7 editor slottable in parallel. Grass sits at
