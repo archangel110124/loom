@@ -1,6 +1,6 @@
 # Design docs — read this first
 
-Eleven documents. **You do not need to read them all.** Three contain superseded backend material
+Twelve documents. **You do not need to read them all.** Three contain superseded backend material
 that will make you build the wrong thing if you read it cold, and five are research passes for
 work that has not started.
 
@@ -37,6 +37,7 @@ Precedence and the full list of corrections: [ADR 0002](../decisions/0002-compan
 | **`loom-wind-system.md`** | The wind field: `wind_at(pos, t)`, Beaufort authoring, gusts, sheltering. Feeds water, rain, grass, vegetation, cloth. | Research. Phase 1. Its own build order is superseded. |
 | **`loom-water-system.md`** | Gerstner/FFT waves, buoyancy, shorelines, submersion, rivers. | Research. Phase 3. Its own build order is superseded. |
 | **`loom-rain-system.md`** | Streaks, wetness, splashes, puddles from flow accumulation, audio. | Research. Phase 4. Its own build order is superseded. |
+| **`loom-grass-system.md`** | Compute-generated Bézier blades in the Ghost of Tsushima mould, and the no-TAA anti-aliasing verdict. | Research. Phase 2. Its ordering list is superseded — see the note at the top of the file. |
 | **`loom-pcg-and-editor.md`** | Unreal PCG reimplemented without a node graph; the human+agent editor. | Research. Phases 5 and 7. Its own build order is superseded. |
 
 ## Routing by milestone

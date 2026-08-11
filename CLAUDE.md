@@ -143,6 +143,13 @@ change, so your edits appear live. Two consequences:
 > P2 rather than with the other vegetation because it is the forcing function on the no-TAA
 > decision, and that answer changes the plan for water and rain if it comes out badly.
 >
+> The grass research pass has landed and sharpens that: geometry blades plus MSAA gets *most* of
+> the way, and residual specular and edge shimmer in motion is **genuinely unsolved without
+> temporal accumulation**. Budget for the possibility that a single non-temporal full-screen AA
+> pass (CMAA2 / SMAA 1x) has to be added, and record it as an ADR if it is. It also confirms S1
+> from the outside: motion artifacts are the exact failure class grass is worst at and the exact
+> one a still PNG cannot see.
+>
 > The four post-M12 items previously listed here (shadows/SDFGI/post stack, Dual Contouring, LOD
 > octree, archetype ECS) are all in Phase 8 — deferred, each with a stated reason.
 
