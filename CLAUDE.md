@@ -5,8 +5,10 @@ sculpts destructible voxel terrain, and writes scripts — through a tool API, a
 with schema validation and visual + simulation verification.
 
 Full plan: `docs/design/LOOM-BUILD-BRIEF.md`. Traps: §7 of that document. Read it before Vulkan work.
-Five companion docs sit alongside it — **start at `docs/design/README.md`**, which routes by
-milestone and flags the superseded wgpu-era passages you must not build against.
+**Sequencing after M12: `docs/design/LOOM-IMPLEMENTATION-ORDER.md`** — it is the *when*, and it
+supersedes the build orders inside the companion docs wherever they conflict. Nine companion docs
+sit alongside them — **start at `docs/design/README.md`**, which routes by phase and flags the
+superseded wgpu-era passages you must not build against.
 
 Platform: Fedora 44, RTX 4090 (power-capped to 300W), Vulkan 1.3 target on a 1.4 loader.
 No web target. Single developer + agent.
@@ -124,7 +126,27 @@ change, so your edits appear live. Two consequences:
 - **Expect version-token rejections** and handle them by re-reading and re-applying, not by forcing
   the write.
 
-## Current milestone
+## Current phase
+
+> **Phase 0 — Substrate. Not started.** See `docs/design/LOOM-IMPLEMENTATION-ORDER.md`, which is
+> the sequencing document for everything after M12 and **supersedes the build orders inside the
+> companion docs wherever they conflict**.
+>
+> Phase 0 is S1 golden-image regression harness, S2 Rust→Slang codegen + CPU/GPU agreement test,
+> S3 voxel-SDF exposure/shelter query, S4 prefab system. None of it is visible and all of it is
+> load-bearing: it is 15–20% of the total and it prevents building water, rain, wind and grass on
+> a foundation with no pixel diff, three divergent field implementations, three occlusion queries
+> and scatter written twice.
+>
+> **Do not skip ahead.** The order after it is P1 wind → P2 grass → P3 water → P4 rain →
+> P5 scatter → P6 mesh vegetation + culling, with P7 editor slottable in parallel. Grass sits at
+> P2 rather than with the other vegetation because it is the forcing function on the no-TAA
+> decision, and that answer changes the plan for water and rain if it comes out badly.
+>
+> The four post-M12 items previously listed here (shadows/SDFGI/post stack, Dual Contouring, LOD
+> octree, archetype ECS) are all in Phase 8 — deferred, each with a stated reason.
+
+### What M0–M12 already delivered
 
 > **M0–M12 complete, editor included.** See §6 of the build brief.
 >
@@ -144,12 +166,16 @@ change, so your edits appear live. Two consequences:
 > undecided. `loom` has: validate, describe, render (--sim), sim (--assert),
 > run (--edit), scene (--tx), place (--op), measure, terrain, explode. `loom-mcp` wraps them.
 >
-> Post-M12 work, in the brief's own order of priority: shadows / SDFGI / the post stack (all
-> deliberately deferred past M12 by §7.16), Dual Contouring behind the existing `Mesher` trait for
-> sharp-cornered structures, LOD octree for the open world, and archetype ECS storage when
-> profiling demands it (ADR 0003 names the trigger).
+> Built after M12 and not in the brief: raycasting and blast force with cover, a character
+> controller whose movement model is a script, explosions (one-shot emitters, additive fire),
+> a scene-authored `Camera`, first-person play with pointer capture, a deterministic event log
+> with damage on it, `GameRules` with win/lose and assertions, a `Hud`, navigation probed from the
+> collision world with A*, enemies, ray-traced acoustics with playback, and `Environment` so a
+> scene can set its own sun, sky and fog. `assets/games/proving_ground.loom` is a whole game.
 >
-> The knowledge graph is still deferred — ADR 0003, option 1, awaiting a decision.
+> The knowledge graph is still deferred — ADR 0003, option 1, awaiting a decision. The
+> implementation order asks for it to be accepted or rejected rather than left open; nothing in
+> Phases 0–8 depends on it.
 
 ---
 
