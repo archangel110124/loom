@@ -1289,6 +1289,7 @@ dependencies = [
  "loom_script",
  "loom_terrain",
  "loom_voxel",
+ "png",
  "serde",
  "serde_json",
  "winit",

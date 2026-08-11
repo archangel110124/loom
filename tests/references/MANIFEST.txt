@@ -1,0 +1,10 @@
+# Content hashes of the golden reference images.
+# Written by `cargo xtask image --bless`. A change here is a deliberate
+# re-blessing; a change to a PNG without a change here is a mistake.
+
+3e9b0d32ff3e1041236e977bef1168d813db907a954b0b3c21e893dc42969fb4  cave.png
+e9371b8ad969fd1cdf7e47e63466805f9cb879dc85bd56496dec427208d54c9d  explosion.png
+1b1e91422d853d3e08ea0067bf3493c1364fe45994d8a80a212acb649c0253ac  materials.png
+3b728fdac91b10419b993414f2e25b7745a4084f4c8cf58de95aa81fde78e4b1  primitives.png
+871ac82b1eaa17114ad993bb0c59fa9fe15bffc985d7f514ed9a3216a7121bb2  proving_ground.png
+1c18248b1acd77720c825e96a4eda70fe386d615132566e449a834b516f5996c  smoke.png

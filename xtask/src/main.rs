@@ -64,11 +64,302 @@ fn main() -> std::process::ExitCode {
     let task = std::env::args().nth(1).unwrap_or_default();
     match task.as_str() {
         "validate" => validate(),
+        "image" => image(std::env::args().any(|a| a == "--bless")),
+        "flythrough" => flythrough(),
         other => {
-            eprintln!("unknown task {other:?}\n\nUSAGE:\n    cargo xtask validate");
+            eprintln!(
+                "unknown task {other:?}\n\nUSAGE:\n    cargo xtask validate\n    \
+                 cargo xtask image [--bless]\n    cargo xtask flythrough"
+            );
             std::process::ExitCode::from(2)
         }
     }
+}
+
+/// Scenes with a committed reference image, and how to render each.
+///
+/// Chosen for coverage of *rendering paths*, not for looking nice: mesh
+/// geometry, the bindless texture array, voxel terrain, alpha-blended
+/// particles, additive particles over a physics run, and a scene whose
+/// environment is authored dark with heavy fog. A regression in any one of
+/// those shows up in exactly one of these and nowhere else.
+///
+/// Small on purpose. 320x200 is enough to catch a shader change and keeps
+/// each reference a few kilobytes, which is the difference between committing
+/// them and bloating history with them.
+const GOLDEN: [(&str, &str, &[&str]); 6] = [
+    ("primitives", "assets/test/primitives.loom", &[]),
+    ("materials", "assets/test/materials.loom", &[]),
+    ("cave", "assets/test/cave.loom", &[]),
+    ("smoke", "assets/test/smoke.loom", &[]),
+    ("explosion", "assets/test/explosion.loom", &["--sim", "22"]),
+    (
+        "proving_ground",
+        "assets/games/proving_ground.loom",
+        &["--sim", "150"],
+    ),
+];
+
+/// Every reference renders at this size.
+const GOLDEN_SIZE: &str = "320x200";
+
+/// **The pixel diff `CLAUDE.md`'s definition of green has never had.**
+///
+/// Clippy catches what the compiler does not, the validation layers catch what
+/// clippy does not, and determinism hashes catch a simulation that drifted.
+/// None of them catches a shader that now renders everything slightly wrong,
+/// and until now that was found by a human opening the PNG.
+///
+/// That does not scale to what is queued: water, rain, wind and vegetation are
+/// the four most visually regression-prone systems in the backlog, and every
+/// numeric change to a shader in any of them is otherwise unverifiable.
+fn image(bless: bool) -> std::process::ExitCode {
+    let root = repo_root();
+
+    let loom = match build_debug(&root) {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("xtask: {message}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    if !has_vulkan_device(&loom, &root) {
+        println!("skip: cargo xtask image — no usable Vulkan device on this machine");
+        return std::process::ExitCode::SUCCESS;
+    }
+
+    let references = root.join("tests/references");
+    if let Err(e) = std::fs::create_dir_all(&references) {
+        eprintln!("xtask: cannot create {}: {e}", references.display());
+        return std::process::ExitCode::from(2);
+    }
+    let scratch = root.join("target/xtask-image");
+    let _ = std::fs::create_dir_all(&scratch);
+
+    let mut failures = Vec::new();
+    let mut blessed = Vec::new();
+    let mut checked = 0;
+
+    for (name, scene, extra) in GOLDEN {
+        if !root.join(scene).exists() {
+            eprintln!("xtask: {scene} is missing; skipping");
+            continue;
+        }
+        checked += 1;
+
+        let rendered = scratch.join(format!("{name}.png"));
+        let reference = references.join(format!("{name}.png"));
+        let rendered_path = rendered.to_string_lossy().into_owned();
+
+        let mut argv: Vec<&str> = vec!["render", scene, "--out", &rendered_path, "--size", GOLDEN_SIZE];
+        argv.extend_from_slice(extra);
+        let render = match run(&loom, &root, &argv) {
+            Ok(output) => output,
+            Err(e) => {
+                failures.push(format!("render {name}: {e}"));
+                continue;
+            }
+        };
+        if !render.status.success() {
+            failures.push(format!(
+                "render {name}: {}",
+                String::from_utf8_lossy(&render.stderr).trim()
+            ));
+            continue;
+        }
+
+        // A reference that does not exist yet is not a failure the first time
+        // a scene is added — but it is not a pass either. Blessing is the only
+        // way to create one, so the intent is always explicit.
+        if !reference.exists() {
+            if bless {
+                if let Err(e) = std::fs::copy(&rendered, &reference) {
+                    failures.push(format!("{name}: cannot write reference: {e}"));
+                } else {
+                    blessed.push(format!("{name} (new)"));
+                }
+            } else {
+                failures.push(format!(
+                    "{name}: no reference image; run `cargo xtask image --bless` to create one"
+                ));
+            }
+            continue;
+        }
+
+        if bless {
+            match std::fs::copy(&rendered, &reference) {
+                Ok(_) => blessed.push(name.to_owned()),
+                Err(e) => failures.push(format!("{name}: cannot write reference: {e}")),
+            }
+            continue;
+        }
+
+        let compared = match run(
+            &loom,
+            &root,
+            &["compare", &rendered_path, &reference.to_string_lossy()],
+        ) {
+            Ok(output) => output,
+            Err(e) => {
+                failures.push(format!("{name}: {e}"));
+                continue;
+            }
+        };
+        if !compared.status.success() {
+            // The JSON carries the numbers; printing it whole means the reader
+            // sees how far off it was, not merely that it was.
+            failures.push(format!(
+                "{name}: {}",
+                String::from_utf8_lossy(&compared.stdout).replace('\n', " ")
+            ));
+        }
+    }
+
+    if bless {
+        write_manifest(&references);
+        println!(
+            "cargo xtask image --bless: {} reference(s) accepted{}",
+            blessed.len(),
+            if blessed.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", blessed.join(", "))
+            }
+        );
+        return std::process::ExitCode::SUCCESS;
+    }
+
+    if failures.is_empty() {
+        println!("cargo xtask image: {checked} scene(s) match their reference");
+        return std::process::ExitCode::SUCCESS;
+    }
+    for failure in &failures {
+        eprintln!("  image diff: {failure}");
+    }
+    eprintln!(
+        "\n{} scene(s) differ from their reference. If the change was intended, \
+         look at target/xtask-image/*.png against tests/references/*.png and then \
+         run `cargo xtask image --bless`.",
+        failures.len()
+    );
+    std::process::ExitCode::from(1)
+}
+
+/// Dump a reviewable frame sequence for every golden scene.
+///
+/// **Not a gate, and that is deliberate.** There is no reference sequence to
+/// diff against, because the artifacts this exists to catch — shimmer,
+/// popping, unison sway, swimming vegetation, a wind direction that snaps
+/// instead of turning — are things a person recognises in motion and a
+/// threshold cannot describe. What it does is make looking cheap: one command,
+/// numbered frames, flick through them.
+///
+/// The implementation order calls this "the part that matters most and the
+/// part most likely to be skipped", which is exactly why it is a task rather
+/// than a set of flags to remember.
+fn flythrough() -> std::process::ExitCode {
+    let root = repo_root();
+    let loom = match build_debug(&root) {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("xtask: {message}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    if !has_vulkan_device(&loom, &root) {
+        println!("skip: cargo xtask flythrough — no usable Vulkan device on this machine");
+        return std::process::ExitCode::SUCCESS;
+    }
+
+    let out = root.join("target/xtask-flythrough");
+    let _ = std::fs::create_dir_all(&out);
+
+    let mut failed = false;
+    for (name, scene, _) in GOLDEN {
+        if !root.join(scene).exists() {
+            continue;
+        }
+        let prefix = out.join(format!("{name}.png"));
+        let result = run(
+            &loom,
+            &root,
+            &[
+                "render",
+                scene,
+                "--out",
+                &prefix.to_string_lossy(),
+                "--size",
+                "480x300",
+                "--frames",
+                "16",
+                "--spin",
+                "7",
+                "--step",
+                "10",
+            ],
+        );
+        match result {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                failed = true;
+                eprintln!(
+                    "  flythrough {name}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            Err(e) => {
+                failed = true;
+                eprintln!("  flythrough {name}: {e}");
+            }
+        }
+    }
+
+    if failed {
+        return std::process::ExitCode::from(1);
+    }
+    println!(
+        "cargo xtask flythrough: 16 frames per scene in {}",
+        out.display()
+    );
+    std::process::ExitCode::SUCCESS
+}
+
+/// Record each reference's content hash next to it.
+///
+/// The references are committed — six small PNGs are tens of kilobytes, not
+/// history bloat — but a binary diff tells a reviewer nothing. The manifest
+/// makes a blessed change show up as a readable one-line hash change, so
+/// "which references moved, and did anyone mean to move them" is answerable
+/// from the diff alone.
+fn write_manifest(references: &Path) {
+    let Ok(entries) = std::fs::read_dir(references) else {
+        return;
+    };
+    let mut names: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "png"))
+        .collect();
+    names.sort();
+
+    let mut lines = vec![
+        "# Content hashes of the golden reference images.".to_owned(),
+        "# Written by `cargo xtask image --bless`. A change here is a deliberate".to_owned(),
+        "# re-blessing; a change to a PNG without a change here is a mistake.".to_owned(),
+        String::new(),
+    ];
+    for path in names {
+        let Ok(sum) = Command::new("sha256sum").arg(&path).output() else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&sum.stdout);
+        let Some(hash) = text.split_whitespace().next() else {
+            continue;
+        };
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        lines.push(format!("{hash}  {name}"));
+    }
+    let _ = std::fs::write(references.join("MANIFEST.txt"), lines.join("\n") + "\n");
 }
 
 fn validate() -> std::process::ExitCode {

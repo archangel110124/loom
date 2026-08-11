@@ -12,6 +12,7 @@
 
 mod gizmo;
 mod hud;
+mod imagediff;
 mod log;
 mod materials;
 mod panels;
@@ -45,6 +46,14 @@ USAGE:
                              [--yaw <deg>] [--pitch <deg>]
         Render the scene headless to a PNG. Uses the scene's `Camera` node if
         it has one; --yaw/--pitch overrides it and orbits the bounds instead.
+
+    loom render <scene.loom> --frames <n> [--spin <deg>] [--step <ticks>]
+        Dump a numbered frame sequence along a deterministic orbit, advancing
+        the simulation between frames. Motion artifacts — shimmer, popping,
+        unison sway — are invisible in a still.
+
+    loom compare <a.png> <b.png> [--channel <0-255>] [--fraction <0-1>] [--worst <0-255>]
+        Pixel-compare two renders. Exit 1 if they differ beyond tolerance.
 
     loom sim <scene.loom> [--ticks <n>] [--assert <expr>]
         Step physics deterministically and print the state hash.
@@ -83,7 +92,14 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
     ("describe", &[]),
     (
         "render",
-        &[("--out", true), ("--size", true), ("--sim", true), ("--yaw", true), ("--pitch", true)],
+        &[
+            ("--out", true), ("--size", true), ("--sim", true), ("--yaw", true),
+            ("--pitch", true), ("--frames", true), ("--spin", true), ("--step", true),
+        ],
+    ),
+    (
+        "compare",
+        &[("--channel", true), ("--fraction", true), ("--worst", true)],
     ),
     ("sim", &[("--ticks", true), ("--assert", true)]),
     ("scene", &[("--tx", true), ("--dry-run", false)]),
@@ -169,6 +185,10 @@ fn run(args: &[String]) -> (u8, String) {
         Some("render") => match args.get(1) {
             Some(path) => render(path, args),
             None => (2, USAGE.to_owned()),
+        },
+        Some("compare") => match (args.get(1), args.get(2)) {
+            (Some(a), Some(b)) => compare(a, b, args),
+            _ => (2, USAGE.to_owned()),
         },
         Some("sim") => match args.get(1) {
             Some(path) => sim(path, args),
@@ -445,6 +465,12 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     );
     let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok());
     let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok());
+    let frames = flag(args, "--frames").and_then(|v| v.parse::<u32>().ok()).filter(|n| *n > 0);
+    // Degrees of orbit per frame, and simulation ticks between them. Defaults
+    // chosen so a dozen frames sweep a visible arc and advance a fifth of a
+    // second each — enough for a shimmer or a pop to show up between two.
+    let spin = flag(args, "--spin").and_then(|v| v.parse::<f32>().ok()).unwrap_or(6.0);
+    let step = flag(args, "--step").and_then(|v| v.parse::<u32>().ok()).unwrap_or(12);
     // An authored `Camera` is the view, unless the caller asked for an angle.
     //
     // Both halves matter. A scene that places a camera means it, and rendering
@@ -490,9 +516,67 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         )
         .map_err(|e| e.to_string())?;
         renderer.environment = environment;
-        renderer
-            .render_to_png(&objects, &particles, &camera, std::path::Path::new(&out))
-            .map_err(|e| e.to_string())?;
+
+        match frames {
+            // The still. One image, the scene as `--sim` left it.
+            None => renderer
+                .render_to_png(&objects, &particles, &camera, std::path::Path::new(&out))
+                .map_err(|e| e.to_string())?,
+
+            // **The fly-through, which is the part that matters.** A still
+            // cannot show unison sway, swimming vegetation, an instant
+            // wind-direction snap, impostor popping, wave-direction snapping
+            // or grass shimmer — every one of those is a *motion* artifact,
+            // and motion artifacts are the dominant failure mode of every
+            // system in the backlog.
+            //
+            // Both the camera and the simulation move between frames. Moving
+            // only the camera misses anything that animates in place; moving
+            // only the world misses anything that depends on view angle, which
+            // is most aliasing.
+            Some(count) => {
+                let mut runner = play::Runner::new(&world, base)?;
+                let mut elapsed = 0_u64;
+
+                for index in 0..count {
+                    if index > 0 {
+                        for _ in 0..step {
+                            elapsed += 1;
+                            if let Err(e) = runner.tick(&mut world, elapsed) {
+                                return Err(format!("{}: {}", e.script, e.message));
+                            }
+                        }
+                    }
+                    let objects = world_to_objects(&world, &library, &material_library);
+                    #[allow(clippy::cast_possible_truncation)]
+                    let particles = particles::simulate(
+                        &world,
+                        Some(elapsed as u32),
+                        &runner.fired(),
+                    );
+
+                    // Orbit from wherever the still would have looked, so a
+                    // fly-through and a still of the same scene are the same
+                    // shot at frame zero.
+                    #[allow(clippy::cast_precision_loss)]
+                    let turn = spin * index as f32;
+                    let camera = frame_scene(
+                        &node_bounds(&world, &library),
+                        yaw.unwrap_or(35.0) + turn,
+                        pitch.unwrap_or(28.0),
+                    );
+
+                    renderer
+                        .render_to_png(
+                            &objects,
+                            &particles,
+                            &camera,
+                            std::path::Path::new(&frame_path(&out, index)),
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
         // Zero validation messages is half the definition of green (brief §7.3).
         instance
             .check_validation()
@@ -504,7 +588,8 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         Ok((gpu, raytracing)) => (
             0,
             json_line(&serde_json::json!({
-                "ok": true, "out": out, "objects": objects.len(), "particles": particles.len(),
+                "ok": true, "out": out, "frames": frames.unwrap_or(1),
+                "objects": objects.len(), "particles": particles.len(),
                 "size": [width, height], "gpu": gpu,
                 // Reported so the agent can tell a scene rendered without
                 // shadows from a scene that has none.
@@ -746,6 +831,76 @@ fn bake_voxel(component: &serde_json::Value) -> Option<loom_asset::Mesh> {
 /// The advisory `path` an `[[asset]]` entry carries, for importing.
 fn scene_asset_path(scene: &Scene, key: &str) -> Option<String> {
     scene.asset_path(key).map(str::to_owned)
+}
+
+/// `shot.png` and frame 7 becomes `shot_0007.png`.
+///
+/// Zero-padded so the shell orders them the way they were rendered — a
+/// sequence that sorts `frame_10` before `frame_2` is a sequence nobody can
+/// flick through, which defeats the point of dumping one.
+fn frame_path(out: &str, index: u32) -> String {
+    let path = std::path::Path::new(out);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("png");
+    let numbered = format!("{stem}_{index:04}.{extension}");
+    match path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(dir) => dir.join(numbered).to_string_lossy().into_owned(),
+        None => numbered,
+    }
+}
+
+/// Pixel-compare two renders.
+fn compare(a: &str, b: &str, args: &[String]) -> (u8, String) {
+    let mut tolerance = imagediff::Tolerance::default();
+    if let Some(v) = flag(args, "--channel").and_then(|v| v.parse::<u8>().ok()) {
+        tolerance.channel = v;
+    }
+    if let Some(v) = flag(args, "--fraction").and_then(|v| v.parse::<f64>().ok()) {
+        tolerance.fraction = v;
+    }
+    if let Some(v) = flag(args, "--worst").and_then(|v| v.parse::<u8>().ok()) {
+        tolerance.worst = v;
+    }
+
+    let (left, right) = match (
+        imagediff::load(std::path::Path::new(a)),
+        imagediff::load(std::path::Path::new(b)),
+    ) {
+        (Ok(left), Ok(right)) => (left, right),
+        (Err(e), _) | (_, Err(e)) => {
+            return (2, json_line(&serde_json::json!({ "error": "io_error", "constraint": e })));
+        }
+    };
+
+    match imagediff::compare(&left, &right, tolerance) {
+        Err(e) => (
+            1,
+            json_line(&serde_json::json!({
+                "ok": false, "error": "size_mismatch", "constraint": e, "a": a, "b": b,
+            })),
+        ),
+        Ok(diff) => {
+            let passed = diff.passes(tolerance);
+            (
+                u8::from(!passed),
+                json_line(&serde_json::json!({
+                    "ok": passed,
+                    "a": a,
+                    "b": b,
+                    "pixels": diff.pixels,
+                    "differing": diff.differing,
+                    "fraction": diff.fraction(),
+                    "worst": diff.worst,
+                    "mean": diff.mean,
+                    "tolerance": {
+                        "channel": tolerance.channel,
+                        "fraction": tolerance.fraction,
+                        "worst": tolerance.worst,
+                    },
+                })),
+            )
+        }
+    }
 }
 
 /// Read the scene's `Environment` into what the renderer wants.

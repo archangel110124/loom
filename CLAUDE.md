@@ -46,13 +46,31 @@ Changing one of these requires an ADR in `docs/decisions/` and human approval.
 
 ---
 
-## Definition of green — all three, every time
+## Definition of green — all four, every time
 
 ```bash
 cargo clippy --workspace -- -D warnings   # 1. clean
-cargo xtask validate                      # 2. ZERO Vulkan validation messages — REAL as of today
-cargo test --workspace                    # 3. golden images + determinism hashes match
+cargo xtask validate                      # 2. ZERO Vulkan validation messages
+cargo test --workspace                    # 3. unit tests + determinism hashes match
+cargo xtask image                         # 4. renders match their reference PNGs
 ```
+
+`scripts/green.sh` runs all four. Check 4 is S1 of the implementation order and
+is new: until it existed, "golden images" was aspirational and every render in
+this project was verified by a human opening the PNG. It renders six scenes
+chosen for coverage of *rendering paths* — mesh, bindless textures, voxels,
+alpha particles, additive particles, an authored-dark environment — and
+compares them to `tests/references/` with a calibrated tolerance.
+
+**`cargo xtask image --bless` accepts new references.** Do it deliberately and
+read the diff: `tests/references/MANIFEST.txt` records each reference's hash,
+so a re-blessing is a readable line in a commit rather than an opaque binary.
+
+**`cargo xtask flythrough` is not a gate and is the more important half.** It
+dumps sixteen orbiting frames per scene, advancing the simulation between them.
+Shimmer, popping, unison sway and a wind direction that snaps instead of
+turning are all invisible in a still, and they are the dominant failure mode of
+every system queued in Phases 1–6.
 
 **`cargo check` passing is not done.** Rust's compiler catches nothing that matters in Vulkan —
 missing barriers, wrong image layouts, use-after-free of in-flight resources, out-of-bounds bindless

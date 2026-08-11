@@ -10,6 +10,7 @@ name = "loom"
 path = "src/main.rs"
 
 [dependencies]
+png = "=0.18.1"
 loom_asset = { version = "0.0.0", path = "../loom_asset" }
 loom_audio = { version = "0.0.0", path = "../loom_audio" }
 loom_ecs = { version = "0.0.0", path = "../loom_ecs" }
