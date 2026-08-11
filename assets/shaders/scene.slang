@@ -122,6 +122,11 @@ struct Push {
     EnvironmentData* environment;
     uint objectOffset;
 };
+// The analytic fields, generated from `loom_field` by build.rs. Included
+// rather than written here: the CPU evaluates the same tree, and a hand-
+// written copy is the divergence S2 exists to prevent.
+#include "generated/fields.slang"
+
 [[vk::push_constant]] Push push;
 
 // The sky, the sun and the haze. Read from the buffer rather than baked in as

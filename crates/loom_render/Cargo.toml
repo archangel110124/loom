@@ -18,3 +18,9 @@ loom_render_graph = { version = "0.0.0", path = "../loom_render_graph" }
 png = "=0.18.1"
 raw-window-handle = "=0.6.2"
 winit = "=0.30.13"
+
+# The single source of truth for analytic fields. `build.rs` generates the
+# Slang half from it, so the CPU and the GPU cannot disagree about what a
+# field is.
+[build-dependencies]
+loom_field = { version = "0.0.0", path = "../loom_field" }

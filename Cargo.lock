@@ -1304,6 +1304,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom_field"
+version = "0.0.0"
+
+[[package]]
 name = "loom_input"
 version = "0.0.0"
 dependencies = [
@@ -1348,6 +1352,7 @@ dependencies = [
  "glam 0.31.1",
  "gpu-allocator",
  "loom_asset",
+ "loom_field",
  "loom_render_graph",
  "png",
  "raw-window-handle",
