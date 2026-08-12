@@ -278,8 +278,41 @@ change, so your edits appear live. Two consequences:
 > two slices and `grass_slope` for one, and in both cases the gate reported a full pass without ever
 > rendering the thing under test. Now 19 scene runs and 9 references.
 >
-> **Slice 7: the AA investigation is finished, and density falloff won it.** Every number is
-> `cargo xtask shimmer`'s flicker on `meadow` at 4x MSAA, each row one change from its neighbour:
+> ## ⚠ THE AA NUMBERS BELOW ARE INVALID. READ THIS FIRST.
+>
+> **`cargo xtask shimmer` and `cargo xtask flythrough` ignore the scene's authored camera.** They
+> frame whole-scene bounds — for `meadow`, about 38 m back — and render at 480x300. At that distance
+> the 55 m density falloff has deleted the entire field, and a surviving blade is ~0.3 px wide. Open
+> `target/xtask-shimmer/meadow_0000.png`: **it is a bare green slab with a stone on it. There is no
+> grass in the frame at all.**
+>
+> So every row of the table below measures *how thoroughly the falloff removes grass from the shot*,
+> not how stable grass is. **The winning variant won by deleting the subject.** 0.137 is the flicker
+> of an empty plane.
+>
+> **Measured at `meadow`'s own camera, with the camera completely static and one tick of wind between
+> frames:**
+>
+>     meadow        0.539        cave (no animated geometry)  0.000
+>     grass_slope   0.324
+>
+> `cave` at exactly 0.000 is the control that proves the instrument and the static camera are sound.
+> **Grass twinkles at rest.** Cutting wind speed 10x only brings `meadow` to 0.361, so this is not
+> coherent motion cancelling imperfectly — it is twinkle.
+>
+> **The AA question this phase exists to answer — can thin geometry be stable without temporal
+> accumulation — is still open.** MSAA's sample-count curve was taken before the falloff existed, so
+> those rows saw real (sub-pixel) grass and are probably sound; every row involving the cull is not.
+> Re-measure at an authored camera before trusting anything here.
+>
+> **The general lesson, which cost a night:** a metric that frames a scene automatically will
+> silently stop containing the subject, and then it rewards whatever removes the subject fastest.
+> The human found this by running `loom run` and seeing no grass; no gate in this project can detect
+> an absent feature.
+>
+> **Slice 7 (numbers invalid, see above): density falloff appeared to win the AA investigation.**
+> Every number is `cargo xtask shimmer`'s flicker on `meadow` at 4x MSAA, each row one change from
+> its neighbour:
 >
 >     no cull (every blade)              0.354
 >     hard cull, 12% surviving at range  0.234
