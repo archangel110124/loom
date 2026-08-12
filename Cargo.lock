@@ -1280,6 +1280,7 @@ dependencies = [
  "loom_asset",
  "loom_audio",
  "loom_ecs",
+ "loom_field",
  "loom_input",
  "loom_particles",
  "loom_physics",

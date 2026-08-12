@@ -9,12 +9,17 @@
 // driver may contract a multiply-add. This shader is how that residual gets
 // measured instead of assumed.
 //
+// Since P1 it also carries the noise primitive, which is the one thing written
+// twice on purpose — an integer lattice hash cannot be expressed in the float
+// expression tree. That half is compared for **exact** equality, because a
+// hash that differs by a bit is not a rounding difference, it is a different
+// number.
+//
 // Nothing in the runtime dispatches it. It is built by the same `build.rs`
-// loop as every other shader so that it cannot rot: a change to the field that
-// breaks the generated Slang fails the build here, not six weeks later in
-// Phase 1.
+// loop as every other shader so that it cannot rot: a change to a field that
+// breaks the generated Slang fails the build here, not six weeks later.
 
-// First, because the entry point below calls into it.
+// First, because the entry points below call into it.
 #include "generated/fields.slang"
 
 struct AgreePush {
@@ -25,8 +30,13 @@ struct AgreePush {
     // results are float4: the trap is real and `scene.slang`'s Push block
     // carries a long comment about the version of it that already bit.
     float4* samples;
-    // xyz = the field at that sample, w unused.
+    // xyz = the field at that sample, w unused. For the noise entry point,
+    // x = the noise value and the rest is zero.
     float4* results;
+    // The field's authored parameters, flat, in the order the generated
+    // `wind_at_params` reader expects. Generated from one list, so the index
+    // here and the struct field there cannot drift apart.
+    float* params;
     uint count;
 };
 
@@ -42,5 +52,19 @@ void agreeMain(uint3 id: SV_DispatchThreadID) {
     }
 
     float4 sample = push.samples[id.x];
-    push.results[id.x] = float4(wind_at(sample.xyz, sample.w), 0.0);
+    WindParams params = wind_at_params(push.params);
+    push.results[id.x] = float4(wind_at(sample.xyz, sample.w, params), 0.0);
+}
+
+// The noise primitive alone, so a disagreement in it is reported as a
+// disagreement in it rather than as a slightly-off wind field.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void noiseMain(uint3 id: SV_DispatchThreadID) {
+    if (id.x >= push.count) {
+        return;
+    }
+
+    float4 sample = push.samples[id.x];
+    push.results[id.x] = float4(loom_value_noise(sample.xyz), 0.0, 0.0, 0.0);
 }

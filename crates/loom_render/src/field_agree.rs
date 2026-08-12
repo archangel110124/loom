@@ -56,6 +56,7 @@ pub(crate) type Sample = [f32; 4];
 struct Push {
     samples: vk::DeviceAddress,
     results: vk::DeviceAddress,
+    params: vk::DeviceAddress,
     count: u32,
 }
 
@@ -67,7 +68,9 @@ pub(crate) fn evaluate_on_gpu(
     device: &crate::Device,
     allocator: &mut Allocator,
     pool: vk::CommandPool,
+    entry: &std::ffi::CStr,
     samples: &[Sample],
+    field_params: &[f32],
 ) -> Result<Vec<[f32; 4]>, RenderError> {
     let raw = device.handle();
     let bytes = std::mem::size_of_val(samples) as vk::DeviceSize;
@@ -86,6 +89,15 @@ pub(crate) fn evaluate_on_gpu(
         "loom.field_agree.results",
         vk::BufferUsageFlags::empty(),
     )?;
+    // Never zero-sized: a buffer of no bytes is an invalid create info, and a
+    // field with no parameters is a perfectly ordinary thing to test.
+    let (param_buffer, param_alloc, param_address) = create_address_buffer(
+        raw,
+        allocator,
+        (field_params.len().max(1) * size_of::<f32>()) as vk::DeviceSize,
+        "loom.field_agree.params",
+        vk::BufferUsageFlags::empty(),
+    )?;
 
     // Everything from here must clean up both buffers on the way out, so the
     // work is wrapped and the teardown runs unconditionally afterwards. A
@@ -93,6 +105,9 @@ pub(crate) fn evaluate_on_gpu(
     // failure, hiding whatever actually went wrong.
     let outcome = (|| {
         write_slice(&sample_alloc, samples)?;
+        if !field_params.is_empty() {
+            write_slice(&param_alloc, field_params)?;
+        }
 
         let module = create_shader_module(raw, crate::FIELD_AGREE_SPV)?;
         let range = vk::PushConstantRange::default()
@@ -107,7 +122,7 @@ pub(crate) fn evaluate_on_gpu(
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(module)
-            .name(c"agreeMain");
+            .name(entry);
         let info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
             .layout(layout);
@@ -134,6 +149,7 @@ pub(crate) fn evaluate_on_gpu(
         let push = Push {
             samples: sample_address,
             results: result_address,
+            params: param_address,
             count: u32::try_from(samples.len()).unwrap_or(u32::MAX),
         };
         // The shader's workgroup is 64 wide, so round up and let the entry
@@ -191,9 +207,11 @@ pub(crate) fn evaluate_on_gpu(
     unsafe {
         raw.destroy_buffer(sample_buffer, None);
         raw.destroy_buffer(result_buffer, None);
+        raw.destroy_buffer(param_buffer, None);
     }
     let _ = allocator.free(sample_alloc);
     let _ = allocator.free(result_alloc);
+    let _ = allocator.free(param_alloc);
 
     outcome
 }
@@ -274,8 +292,28 @@ mod tests {
         // SAFETY: the family index came from this device.
         let pool = unsafe { raw.create_command_pool(&pool_info, None) }.expect("command pool");
 
+        let field = loom_field::wind();
+        let params = loom_field::wind_defaults();
+        assert!(
+            params.missing(&field).is_empty(),
+            "the defaults must cover every parameter the field reads: {:?}",
+            params.missing(&field)
+        );
+        let flat = field.params_array(&params);
+
         let samples = samples(512);
-        let gpu = evaluate_on_gpu(&device, &mut allocator, pool, &samples).expect("dispatch");
+        let gpu = evaluate_on_gpu(&device, &mut allocator, pool, c"agreeMain", &samples, &flat)
+            .expect("dispatch");
+
+        // **The noise primitive, compared exactly.** It is the one thing
+        // written twice on purpose — an integer lattice hash has no
+        // representation in the float expression tree — so it gets the
+        // assertion the fields cannot have. A hash that differs by a bit is
+        // not a rounding difference; it is a different number, and `frac`
+        // would turn it into a visibly different field.
+        let noise_gpu =
+            evaluate_on_gpu(&device, &mut allocator, pool, c"noiseMain", &samples, &flat)
+                .expect("noise dispatch");
 
         // SAFETY: the dispatch was waited on before this returned.
         unsafe { raw.destroy_command_pool(pool, None) };
@@ -285,7 +323,17 @@ mod tests {
             panic!("validation was not silent:\n  {}", messages.join("\n  "));
         }
 
-        let field = loom_field::wind();
+        for (i, sample) in samples.iter().enumerate() {
+            let cpu = loom_field::noise::value([sample[0], sample[1], sample[2]]);
+            assert_eq!(
+                cpu.to_bits(),
+                noise_gpu[i][0].to_bits(),
+                "the noise primitive disagrees at sample {i} {sample:?}: \
+                 cpu {cpu}, gpu {} — the two halves in `loom_field::noise` \
+                 have diverged, and every determinism hash is now suspect",
+                noise_gpu[i][0]
+            );
+        }
 
         // **Otherwise this test agrees for free.** If the dispatch never ran,
         // or the shader wrote nothing, or the field happened to evaluate to
@@ -311,7 +359,7 @@ mod tests {
         for (i, (sample, got)) in samples.iter().zip(&gpu).enumerate() {
             let position = [sample[0], sample[1], sample[2]];
             for (axis, expression) in field.body.iter().enumerate() {
-                let cpu = expression.eval(position, sample[3]);
+                let cpu = expression.eval_with(position, sample[3], &params);
                 let delta = (cpu - got[axis]).abs();
                 assert!(
                     delta.is_finite(),

@@ -603,6 +603,66 @@ impl Default for Environment {
     }
 }
 
+/// The weather the whole scene stands in.
+///
+/// **Authored as scalars, evaluated as a field.** The numbers here fill
+/// `loom_field`'s wind parameters, so the same values drive the CPU side
+/// (physics, gameplay, the determinism hash) and the GPU side (every vertex
+/// that leans). Changing one changes both, which is the whole reason the field
+/// is generated rather than written twice.
+///
+/// At most one per scene; the first is used. Absent, the default is a
+/// moderate breeze from the west — Beaufort 4, the lowest wind that visibly
+/// moves foliage, so a scene that says nothing still looks like weather.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Wind {
+    /// Compass direction the wind blows *toward*, in degrees clockwise from
+    /// +X. Normalised into a unit vector on load, so any value works.
+    ///
+    /// Degrees rather than a vector because that is how weather is quoted and
+    /// how a human thinks about it; the field takes the vector, and the
+    /// conversion happens once at the boundary.
+    pub direction_degrees: f32,
+    /// Mean speed in metres per second.
+    ///
+    /// The Beaufort scale, for authoring: 2 is a light breeze that stirs
+    /// leaves, 5.5 a moderate breeze that moves small branches, 11 a strong
+    /// breeze, 20 a gale. Above about 25 the vegetation shaders stop looking
+    /// like plants and start looking like errors.
+    #[schemars(range(min = 0.0, max = 40.0))]
+    pub speed: f32,
+    /// How much the speed swells and drops. `0` is a steady flow, `1` the
+    /// authored default, `2` a squally day.
+    #[schemars(range(min = 0.0, max = 3.0))]
+    pub gustiness: f32,
+    /// Small-scale swirl on top, in metres per second.
+    ///
+    /// This is the term that stops everything moving in unison — the single
+    /// most recognisable tell that a vegetation shot is fake.
+    #[schemars(range(min = 0.0, max = 10.0))]
+    pub turbulence: f32,
+    /// Fraction of the wind still blowing at ground level.
+    ///
+    /// Ground drag: `0.45` matches a 1/7 power law over the first few metres,
+    /// which is where grass and undergrowth live. Lower makes a sheltered
+    /// hollow, `1.0` removes the profile entirely.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub ground_drag: f32,
+}
+
+impl Default for Wind {
+    fn default() -> Self {
+        Self {
+            direction_degrees: 0.0,
+            speed: 5.5,
+            gustiness: 1.0,
+            turbulence: 0.8,
+            ground_drag: 0.45,
+        }
+    }
+}
+
 /// A sound that plays from this node's position.
 ///
 /// **What it sounds like from where you stand is measured, not authored.**
@@ -700,6 +760,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<Hud>("Hud");
     reg.register::<AudioSource>("AudioSource");
     reg.register::<Environment>("Environment");
+    reg.register::<Wind>("Wind");
     reg.register::<Script>("Script");
     reg
 }

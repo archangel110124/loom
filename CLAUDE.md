@@ -146,7 +146,7 @@ change, so your edits appear live. Two consequences:
 
 ## Current phase
 
-> **Phase 0 — Substrate. Complete. P1 (wind) is next.** See
+> **Phase 0 complete; P1 (wind) done. P2 (grass) is next.** See
 > `docs/design/LOOM-IMPLEMENTATION-ORDER.md`, which is the sequencing document for everything
 > after M12 and **supersedes the build orders inside the companion docs wherever they conflict**.
 >
@@ -194,6 +194,16 @@ change, so your edits appear live. Two consequences:
 > regress S4.** The parser used to refuse `prefab` precisely because a key it does not understand
 > is a key it *ignores* — the instance arrived with no components, drew nothing, and validated
 > clean. Any new command that reads a scene must go through `prefab_load::for_reading`.
+>
+> **P1 delivered** the wind field — ADR 0009. A `Wind` component authors it, `loom_field::wind`
+> is the tree, the Slang is generated, and `loom_field::wind::Wind` samples it with S3 sheltering.
+> `loom sim --assert "wind@x,y,z.speed >= v"` checks it from the CLI.
+>
+> **Two rules that outlive P1.** `loom_field::noise` is **frozen ABI** — an integer lattice hash,
+> written in Rust and Slang side by side and compared *exactly* by the agreement test, because a
+> `frac`-based hash amplifies a last-bit difference into a different number. And the 10k-tick wind
+> hash is pinned in a test that `cargo xtask validate` also runs in **release**; changing a field
+> means re-pinning it in the same commit, deliberately.
 >
 > **Do not skip ahead.** The order after it is P1 wind → P2 grass → P3 water → P4 rain →
 > P5 scatter → P6 mesh vegetation + culling, with P7 editor slottable in parallel. Grass sits at

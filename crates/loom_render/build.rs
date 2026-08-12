@@ -65,7 +65,14 @@ fn generate_fields(shader_dir: &Path) {
          // editing this file changes the GPU alone, which is precisely the\n\
          // divergence the generator exists to make impossible.\n\n",
     );
+    // The noise primitive first: the fields call it, and Slang needs it
+    // declared before use.
+    text.push_str(loom_field::noise::slang());
+    text.push('\n');
+
     for field in loom_field::all() {
+        text.push_str(&field.params_to_slang());
+        text.push('\n');
         text.push_str(&field.to_slang());
         text.push('\n');
     }

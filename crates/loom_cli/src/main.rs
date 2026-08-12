@@ -21,6 +21,7 @@ mod play;
 mod prefab_cmd;
 mod prefab_load;
 mod scene_view;
+mod weather;
 mod sound;
 mod run;
 
@@ -1115,12 +1116,17 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     // asserted (design doc §2.10).
     let log = runner.events().clone();
     let state = runner.state();
+    // The scene's wind, sampled at the tick the run ended on — so a wind
+    // assertion is checked against the same clock the simulation used rather
+    // than against a wall clock (never-do #8).
+    #[allow(clippy::cast_precision_loss)]
+    let weather = (weather::wind_of(&scene), ticks as f32 / 60.0);
     let mut failures = Vec::new();
     for spec in flags(args, "--assert") {
-        match check_assertion(&world, state, &log, &spec) {
+        match check_assertion(&world, state, &log, &weather, &spec) {
             Ok(true) => {}
             Ok(false) | Err(_) => {
-                let actual = assertion_actual(&world, state, &log, &spec);
+                let actual = assertion_actual(&world, state, &log, &weather, &spec);
                 failures.push(serde_json::json!({
                     "assert": spec,
                     "actual": actual,
@@ -1224,9 +1230,28 @@ fn assertion_value(
     world: &World,
     state: &loom_script::GameState,
     log: &loom_script::EventLog,
+    weather: &(loom_field::wind::Wind, f32),
     path: &str,
     axis: &str,
 ) -> Option<f32> {
+    // `wind@12,2,-4.speed >= 3` — the field itself, at a fixed position and
+    // the tick the run ended on. P1'''s exit criterion asks for exactly this:
+    // an assertion on `wind_at()` that runs identically in debug and release,
+    // because a wind field is the kind of thing that can drift without any
+    // visible symptom until vegetation four phases later leans wrong.
+    if let Some(rest) = path.strip_prefix("wind") {
+        let at = rest.strip_prefix('@').map_or(Some([0.0, 0.0, 0.0]), parse_vec3)?;
+        let (wind, t) = weather;
+        let v = wind.at(at, *t);
+        return match axis {
+            "x" => Some(v[0]),
+            "y" => Some(v[1]),
+            "z" => Some(v[2]),
+            "speed" => Some(v[0].mul_add(v[0], v[2] * v[2]).sqrt()),
+            _ => None,
+        };
+    }
+
     // `events.damage >= 1` — what happened, rather than where things ended up.
     // A game can be wrong in ways no position shows: nobody was ever hit, the
     // explosion never fired, the pickup was never taken.
@@ -1272,6 +1297,7 @@ fn check_assertion(
     world: &World,
     state: &loom_script::GameState,
     log: &loom_script::EventLog,
+    weather: &(loom_field::wind::Wind, f32),
     spec: &str,
 ) -> Result<bool, ()> {
     // `status == won` is the assertion a game loop exists to make, and it is
@@ -1283,7 +1309,7 @@ fn check_assertion(
     }
 
     let (path, axis, op, expected) = parse_assertion(spec).ok_or(())?;
-    let actual = assertion_value(world, state, log, &path, &axis).ok_or(())?;
+    let actual = assertion_value(world, state, log, weather, &path, &axis).ok_or(())?;
     Ok(match op.as_str() {
         ">" => actual > expected,
         ">=" => actual >= expected,
@@ -1300,13 +1326,14 @@ fn assertion_actual(
     world: &World,
     state: &loom_script::GameState,
     log: &loom_script::EventLog,
+    weather: &(loom_field::wind::Wind, f32),
     spec: &str,
 ) -> serde_json::Value {
     if spec.trim_start().starts_with("status") {
         return serde_json::json!(state.status().as_str());
     }
     parse_assertion(spec)
-        .and_then(|(path, axis, _, _)| assertion_value(world, state, log, &path, &axis))
+        .and_then(|(path, axis, _, _)| assertion_value(world, state, log, weather, &path, &axis))
         .map_or(serde_json::Value::Null, |v| serde_json::json!(v))
 }
 

@@ -457,6 +457,24 @@ fn validate() -> std::process::ExitCode {
     // This is also the standing answer to "would a custom physics engine be
     // better": on the axis this project cares about most, the current one is
     // measurably correct, and now stays measured.
+    // **P1's exit criterion, and it needs the release profile to mean
+    // anything.** The wind field's 10,000-tick hash is pinned in a unit test,
+    // and `cargo test` builds debug — so on its own it proves the field has
+    // not changed, not that the two profiles agree about it. A field is
+    // arithmetic, which is exactly where inlining and vectorisation differ.
+    match run_cargo(&root, &["test", "--release", "-p", "loom_field", "--quiet"]) {
+        Ok(output) if output.status.success() => {
+            println!("wind field: the 10k-tick hash holds in release too");
+        }
+        Ok(output) => {
+            failures.push(format!(
+                "wind field release tests\n  {}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            ));
+        }
+        Err(e) => failures.push(format!("wind field release tests\n  could not run: {e}")),
+    }
+
     match determinism_holds(&root) {
         Ok(hash) => println!("determinism: debug and release agree ({hash})"),
         Err(problem) => failures.push(problem),
@@ -591,6 +609,15 @@ fn has_vulkan_device(loom: &Path, root: &Path) -> bool {
 
 /// Build the debug binary — the profile in which the layers are enabled — and
 /// return its path.
+/// Run a cargo subcommand from the workspace root.
+fn run_cargo(root: &Path, args: &[&str]) -> Result<Output, String> {
+    Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("could not run cargo: {e}"))
+}
+
 fn build_debug(root: &Path) -> Result<PathBuf, String> {
     let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .args(["build", "-p", "loom_cli"])

@@ -3,10 +3,70 @@
 // editing this file changes the GPU alone, which is precisely the
 // divergence the generator exists to make impossible.
 
-float3 wind_at(float3 p, float t) {
+
+// The noise primitive. Frozen: its output is in every determinism hash.
+// The Rust half is `loom_field::noise`; they are one implementation written
+// twice, and `field_agree` asserts they are exactly equal.
+uint loom_hash(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+// Integer lattice, so every corner is bit-identical to the CPU's. Only the
+// interpolation below is floating point.
+float loom_lattice(int x, int y, int z) {
+    uint h = loom_hash(loom_hash(loom_hash(uint(x)) + uint(y)) + uint(z));
+    return float(h >> 8) * (1.0 / 16777216.0);
+}
+
+float loom_value_noise(float3 p) {
+    float3 base = floor(p);
+    float3 frac = p - base;
+    int3 cell = int3(base);
+
+    float3 w = frac * frac * (3.0 - 2.0 * frac);
+
+    float x00 = lerp(loom_lattice(cell.x, cell.y, cell.z),
+                     loom_lattice(cell.x + 1, cell.y, cell.z), w.x);
+    float x10 = lerp(loom_lattice(cell.x, cell.y + 1, cell.z),
+                     loom_lattice(cell.x + 1, cell.y + 1, cell.z), w.x);
+    float x01 = lerp(loom_lattice(cell.x, cell.y, cell.z + 1),
+                     loom_lattice(cell.x + 1, cell.y, cell.z + 1), w.x);
+    float x11 = lerp(loom_lattice(cell.x, cell.y + 1, cell.z + 1),
+                     loom_lattice(cell.x + 1, cell.y + 1, cell.z + 1), w.x);
+    float y0 = lerp(x00, x10, w.y);
+    float y1 = lerp(x01, x11, w.y);
+    return lerp(y0, y1, w.z);
+}
+
+struct WindParams {
+    float speed;
+    float gustiness;
+    float dir_x;
+    float dir_z;
+    float ground_drag;
+    float turbulence;
+};
+
+WindParams wind_at_params(float *v) {
+    WindParams params;
+    params.speed = v[0];
+    params.gustiness = v[1];
+    params.dir_x = v[2];
+    params.dir_z = v[3];
+    params.ground_drag = v[4];
+    params.turbulence = v[5];
+    return params;
+}
+
+float3 wind_at(float3 p, float t, WindParams params) {
     return float3(
-        ((6.0 * ((1.0 + (0.35 * sin((((p.x * 0.18) + (p.z * 0.126)) - (t * 1.1))))) + (0.22 * sin((((p.x * 0.07) + (p.z * 0.049)) - (t * 0.6)))))) * min(1.0, max(0.25, (0.25 + (p.y * 0.06))))),
-        ((0.6 * sin(((p.x * 0.11) + (t * 0.8)))) * min(1.0, max(0.25, (0.25 + (p.y * 0.06))))),
-        ((2.5 * ((1.0 + (0.35 * sin((((p.x * 0.18) + (p.z * 0.126)) - (t * 1.1))))) + (0.22 * sin((((p.x * 0.07) + (p.z * 0.049)) - (t * 0.6)))))) * min(1.0, max(0.25, (0.25 + (p.y * 0.06))))));
+        ((((params.speed * (((1.0 + ((params.gustiness * 0.18) * sin(((((p.x * 0.05) * params.dir_x) + ((p.z * 0.05) * params.dir_z)) - (t * 0.45))))) + ((params.gustiness * 0.1) * sin(((((p.x * 0.13) * params.dir_x) + ((p.z * 0.13) * params.dir_z)) - (t * 0.9))))) + ((params.gustiness * 0.05) * sin(((((p.x * 0.31) * params.dir_x) + ((p.z * 0.31) * params.dir_z)) - (t * 1.7)))))) * (params.ground_drag + ((1.0 - params.ground_drag) * (max(0.0, p.y) / (max(0.0, p.y) + 2.0))))) * params.dir_x) + (params.turbulence * ((((0.0 + (1.0 * loom_value_noise(float3(((((p.x * 0.06) - (((t * 0.08) * params.speed) * params.dir_x)) + 0.0) * 1.0), ((p.y * 0.06) * 1.0), ((((p.z * 0.06) - (((t * 0.08) * params.speed) * params.dir_z)) + 0.0) * 1.0))))) * 1.0) * 2.0) - 1.0))),
+        (((params.turbulence * ((((0.0 + (1.0 * loom_value_noise(float3(((((p.x * 0.06) - (((t * 0.08) * params.speed) * params.dir_x)) + 11.7) * 1.0), ((p.y * 0.06) * 1.0), ((((p.z * 0.06) - (((t * 0.08) * params.speed) * params.dir_z)) + 11.7) * 1.0))))) * 1.0) * 2.0) - 1.0)) * 0.35) * (params.ground_drag + ((1.0 - params.ground_drag) * (max(0.0, p.y) / (max(0.0, p.y) + 2.0))))),
+        ((((params.speed * (((1.0 + ((params.gustiness * 0.18) * sin(((((p.x * 0.05) * params.dir_x) + ((p.z * 0.05) * params.dir_z)) - (t * 0.45))))) + ((params.gustiness * 0.1) * sin(((((p.x * 0.13) * params.dir_x) + ((p.z * 0.13) * params.dir_z)) - (t * 0.9))))) + ((params.gustiness * 0.05) * sin(((((p.x * 0.31) * params.dir_x) + ((p.z * 0.31) * params.dir_z)) - (t * 1.7)))))) * (params.ground_drag + ((1.0 - params.ground_drag) * (max(0.0, p.y) / (max(0.0, p.y) + 2.0))))) * params.dir_z) + (params.turbulence * ((((0.0 + (1.0 * loom_value_noise(float3(((((p.x * 0.06) - (((t * 0.08) * params.speed) * params.dir_x)) + 23.4) * 1.0), ((p.y * 0.06) * 1.0), ((((p.z * 0.06) - (((t * 0.08) * params.speed) * params.dir_z)) + 23.4) * 1.0))))) * 1.0) * 2.0) - 1.0))));
 }
 

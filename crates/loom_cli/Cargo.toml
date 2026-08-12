@@ -19,6 +19,7 @@ loom_particles = { version = "0.0.0", path = "../loom_particles" }
 loom_physics = { version = "0.0.0", path = "../loom_physics" }
 loom_reflect = { version = "0.0.0", path = "../loom_reflect" }
 loom_render = { version = "0.0.0", path = "../loom_render" }
+loom_field = { version = "0.0.0", path = "../loom_field" }
 loom_scene = { version = "0.0.0", path = "../loom_scene" }
 loom_script = { version = "0.0.0", path = "../loom_script" }
 loom_terrain = { version = "0.0.0", path = "../loom_terrain" }
