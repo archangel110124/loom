@@ -119,7 +119,24 @@ colour change is invalid.** Current baselines are `meadow` **3.059** and `grass_
 Every number in the table above was taken on the darker field and they remain valid *relative to each
 other*, which is what the argument rests on.
 
-Normalising flicker by local mean would remove this whole class of error and is recommended as the
-next change to the instrument. It is not done. Given this metric has now been wrong in three separate
-ways in one night — framing, animation, and now scale — that recommendation should be treated as
-load-bearing rather than tidy-up.
+I recommended normalising flicker by mean brightness as the fix, and called it load-bearing. **Then I
+built it and measured it, and it does not work.** Dividing by the frame's mean channel value and
+re-rendering `meadow` with the grass albedo darkened and brightened:
+
+    dark   [0.15, 0.22, 0.07]    11.627
+    normal [0.29, 0.44, 0.14]    17.331
+    bright [0.55, 0.80, 0.28]    26.723
+
+Still scaling with brightness, and more steeply than the raw metric did. The reason is obvious in
+hindsight: the numerator comes almost entirely from grass, while the denominator is the whole frame
+— sky and soil included — and those do not scale when only the grass albedo moves. It is reverted.
+
+**And the premise deserves more doubt than I gave it.** A brighter blade against the same dark soil
+is genuinely *higher contrast*, and contrast is what makes flicker visible. So a metric in absolute
+units reporting more flicker for brighter grass may be perceptually right, and normalising it away
+would remove a real effect rather than an artifact. Per-pixel local normalisation would be invariant
+in the way I wanted, but it would also divide out exactly that contrast.
+
+What stands is the narrower, certain claim: **do not compare two AA numbers across a change in
+colour or lighting.** Whether the right long-term answer is a contrast-aware perceptual metric or
+simply a discipline of holding colour fixed is unresolved, and I no longer think it is obvious.

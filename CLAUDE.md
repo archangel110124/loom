@@ -287,7 +287,9 @@ change, so your edits appear live. Two consequences:
 > took its colour from the authored `Material` — the field is painted brighter and the metric
 > measures absolute pixel differences, so **flicker is not invariant to brightness**. The table
 > below was taken on the darker field and its rows remain valid against each other. Normalising
-> flicker by local mean is the recommended next fix to the instrument; see ADR 0010.)
+> flicker by mean brightness was tried and **does not work** — it still scales, more steeply, because
+> the numerator is grass and the denominator is the whole frame. Reverted; see ADR 0010. What stands
+> is the narrow rule: **never compare two AA numbers across a change in colour or lighting.**)
 >
 >     MSAA          1x 3.888   2x 3.000   4x 2.712   8x 2.502
 >     density falloff at 4x:   on 2.712   off 2.715      <- no effect at all
