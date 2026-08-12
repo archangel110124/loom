@@ -83,3 +83,50 @@ shader. Now eight scenes.
 Gates: clippy clean, 35 test binaries, 18 scene runs / zero validation messages,
 determinism `b478ea4ac2622d32` (unchanged — grass is outside the sim hash,
 verified rather than assumed), 8/8 images match.
+
+### 23:48 — piece A dispatched: grass on real terrain (builder running)
+
+The gap: `loom_cli::grass_blades` passes `&|_, _| Ground::default()` — a flat,
+constant ground — so grass has never responded to terrain at all. Two of Phase
+2's five exit criteria depend on it ("thins on steep slopes and thickens in
+gullies without any authored mask", "destroying terrain under a patch leaves no
+floating blades"). `loom_grass::coverage` already implements the rules and has
+tests; only the feed is missing.
+
+### 23:52 — performance: the existing harness cannot measure grass, and there is no evidence of a problem
+
+Marginal per-frame cost at 1920x1080, taken as (time for 33 frames − time for 1
+frame) / 32 so device init, the grass bake and PNG encode fall out:
+
+                     run 1              run 2
+    meadow       28.14 ms/frame     30.39 ms/frame
+    primitives   33.52 ms/frame     30.60 ms/frame
+
+Run 1 was taken while a sub-agent was using the GPU and its ordering was noise.
+Run 2 is the result: **~30 ms per frame regardless of what is in the scene.**
+`primitives` has no grass, `meadow` has ~45,000 blades at 42 vertices each, and
+they cost the same. So this number is entirely the offscreen path's per-frame
+readback and stall, and it cannot answer "does a grass field render at target
+framerate" in either direction. Reported here as two runs rather than one
+because the first, alone, would have supported a confident wrong conclusion.
+
+**Decision made without the human, and the reasoning.** The obvious next Phase 2
+item is the placement compute pass plus `vkCmdDrawIndirect`, which the design
+doc specifies. I am *not* building it next, for two reasons:
+
+1. **There is no measurement showing it is needed.** Building a GPU culling and
+   compaction path to fix an unmeasured cost is the premature optimisation this
+   project's style rules exist to prevent. Measure first.
+2. **It would create a second placement implementation.** Placement lives in
+   `loom_grass` as tested Rust. Hand-porting Voronoi clumping and the position
+   hash into Slang is exactly the CPU/GPU divergence that S2 and ADR 0006 were
+   built to make impossible, and the `Expr` tree S2 generates from is a scalar
+   field language that does not express loops, neighbourhood search or struct
+   output. Doing it properly is an architectural piece that deserves an ADR and
+   the human's judgement, not an overnight decision.
+
+So piece B is instead **GPU timestamp queries around the render graph's passes**
+— the instrument that makes any performance claim honest, that the "renders at
+target framerate" exit criterion actually requires, and that UE5 has as its GPU
+Visualizer. With real numbers, the culling decision can be made on evidence in
+the morning. Written up for the human to overrule.
