@@ -230,6 +230,17 @@ struct App {
     /// viewer's resources would be a use-after-free.
     gpu: Option<(Instance, Device)>,
     last_frame: std::time::Instant,
+    /// Seconds of weather the window has shown, which is what bends the grass.
+    ///
+    /// **Free-running, and not the simulation clock.** Grass is rendering-only
+    /// and outside the determinism hash, so its sway does not have to agree
+    /// tick-for-tick with a headless render, and foliage that stands frozen
+    /// until you press Play is wrong in an editor — every engine animates it in
+    /// the viewport. Advanced from the same frame `dt` the camera uses.
+    ///
+    /// It is the *simulation's* wind that must stay tick-derived: particles get
+    /// theirs from `Plumes`, which advances on steps, not on seconds.
+    wind_seconds: f32,
     /// Smoothed, because a number that changes sixty times a second is not a
     /// number anyone can read.
     fps: f32,
@@ -355,6 +366,7 @@ impl App {
             gpu: None,
             #[allow(clippy::disallowed_methods)]
             last_frame: std::time::Instant::now(),
+            wind_seconds: 0.0,
             fps: 0.0,
             frames_left: None,
             agent_changes: Vec::new(),
@@ -821,6 +833,9 @@ impl ApplicationHandler for App {
                     // Exponential smoothing: readable, and one line.
                     self.fps = self.fps.mul_add(0.9, (1.0 / dt) * 0.1);
                 }
+                // Clamped for the same reason the camera step is: a stall must
+                // not jump the wind forward and snap every blade.
+                self.wind_seconds += dt.min(0.1);
                 // Clamp: a stall must not teleport the camera across the map.
                 self.step_camera(dt.min(0.1));
                 // Once per frame, not once per keyboard event: `end_frame`
@@ -982,10 +997,19 @@ impl ApplicationHandler for App {
                 // The scene's sky, from whichever world is current: play mode
                 // holds its own, and an environment edited during play should
                 // show up like any other edit.
-                let environment = crate::environment_of(match self.play.as_ref() {
-                    Some(play) => &play.world,
-                    None => self.view.world(),
-                });
+                // **The scene's own wind, at a clock that advances.** This was
+                // `environment_of`, which passes `Wind::default()` and a time of
+                // zero — so the window bent its grass with the wrong wind and
+                // then froze it there. The authored `Wind` reached the particles
+                // and never reached the blades.
+                let environment = crate::environment_with_wind(
+                    match self.play.as_ref() {
+                        Some(play) => &play.world,
+                        None => self.view.world(),
+                    },
+                    &crate::weather::wind_of(&self.view.scene),
+                    self.wind_seconds,
+                );
                 if let Some(viewer) = self.viewer.as_mut() {
                     viewer.environment = environment;
                 }

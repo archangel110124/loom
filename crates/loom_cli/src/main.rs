@@ -1492,13 +1492,16 @@ fn compare(a: &str, b: &str, args: &[String]) -> (u8, String) {
     }
 }
 
-/// Read the scene's `Environment` into what the renderer wants.
-///
-/// Absent, the defaults are the constants the shader used to carry, so a
-/// scene that says nothing about its sky looks exactly as it did.
-pub(crate) fn environment_of(world: &World) -> loom_render::EnvironmentData {
-    environment_with_wind(world, &loom_field::wind::Wind::default(), 0.0)
-}
+// `environment_of(world)` used to live here: `environment_with_wind` with
+// `Wind::default()` and a clock of zero. It was deleted rather than fixed,
+// because its whole shape was a trap. It looked like the convenient overload
+// and it silently substituted the wrong weather at a frozen instant, which is
+// exactly what it did to the viewer — the authored `Wind` reached the particles
+// and never reached the grass, and the blades stood still in the window while
+// swaying correctly in every headless render.
+//
+// There is now one way to build an environment and it takes the wind and the
+// time, so neither can be forgotten.
 
 /// The scene's environment, with its weather and the simulation's clock.
 ///
