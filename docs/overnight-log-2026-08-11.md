@@ -167,6 +167,67 @@ buffer, own pipeline, vertex-shader-only draw). **`TYPE_1` sample count** — th
 viewer draws into a single-sample swapchain image while the offscreen path is at
 4x, and that mismatch is four validation errors rather than a visual bug.
 
+### 01:05 — viewer grass landed (`4bfc0e8`), and the gate could not have caught it
+
+Mirrors the particle path; `TYPE_1` samples because the viewer draws into a
+single-sample swapchain image. Reload re-uploads, guarded by a `grass_key`
+because the editor calls the reload funnel on *every frame of a gizmo drag* and
+the SDF bake is 2.98 s on `grass_slope` — regenerating unconditionally would
+have made the editor unusable on any grass-over-terrain scene. Verified by
+rewriting a scene file on disk with the window open, not by reading code.
+
+**The viewer screenshot reads 145 fps**, which is the first time exit criterion
+1 ("renders at target framerate") has been *observed* in a real-time loop rather
+than inferred from one offscreen frame.
+
+**Second instance of the same disease:** `cargo xtask validate` does not run the
+windowed path over `SCENES`. It renders all 17 offscreen and then opens a window
+for exactly two hardcoded scenes, `blockout` and `cave` — neither of which has
+grass or particles. A wrong `rasterizationSamples` only errors when the pipeline
+is bound for a draw, so the check described as catching that class of bug could
+never have caught it on any scene with grass. `meadow` is in that list now.
+
+### 01:16 — the instrument had three defects, not one (`0938053`)
+
+Chasing the shimmer failure to the bottom turned up two more:
+
+  1. **The camera ignored the scene** (the one found at 00:52).
+  2. **The wind clock never advanced.** The environment was built once from
+     `--sim` and never touched again, so every frame of a fly-through sampled
+     the wind at the same instant. `cargo xtask flythrough` exists to catch
+     motion artifacts in vegetation and **had never once shown vegetation
+     moving**; with a static camera all sixteen frames were byte-identical.
+  3. **It was pointed at the wrong artifact.** It panned the camera and held the
+     scene still. That theory does not survive sub-pixel geometry: flicker
+     cancels motion linear in pixel *value*, true of smooth gradients and never
+     of blades translating two pixels a frame. Fixing the camera to pan properly
+     from the authored eye measured **5.65 with 52% of pixels changing** — the
+     mirror image of the original error.
+
+Camera bolted down, simulation advancing. Controls at exactly 0.000.
+
+### 01:26 — the AA table, re-run (`82faec6`). Two conclusions reverse
+
+    MSAA          1x 3.888   2x 3.000   4x 2.712   8x 2.502
+    falloff @4x   on 2.712   off 2.715
+    width @4x     0.020 2.712  0.035 2.635  0.060 2.338  0.100 1.973
+
+**MSAA survives.** Monotonic, 4x still right.
+
+**The density falloff did nothing.** Its 61% "win" was the deletion artifact
+entirely. Keep it as LOD and cost; it is not an AA tool.
+
+**Widening genuinely works**, monotonically. So "minimum screen-space width
+clamping is measured worse, twice, decisively" was *also* an artifact, and the
+trick the research pass called the most important for distant grass **was
+deleted on bad evidence**. Rebuilding it is dispatched.
+
+Recorded cautions: the number is strongly resolution-dependent (2.712 at
+640x400, 0.539 at 1080p) because the artifact *is* sub-pixel geometry; and
+flicker on animated geometry conflates twinkle with legitimate motion, so the
+0.000 controls prove the camera is static, not that 2.712 is bad in absolute
+terms.
+
 ### 23:51 — Stage 3 (P3 water) is fully specified; no spec-writing needed
 
 Checked, because the brief said to write the spec if Stage 3 was underspecified.
