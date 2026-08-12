@@ -217,6 +217,35 @@ This is the outcome that justifies having built the instrument before the
 optimisation, and it is worth noticing that the intuition it overturned was the
 design document's own sequencing.
 
+### 00:40 — piece B: critic returns **PASS**. Committed `519eff8`
+
+The critic's calibration was better than the builder's and corrected it on a
+fact. The builder assumed PCIe 4.0 x16; the critic checked `nvidia-smi` under
+load and found the link is **gen 4 x8**, a 15.75 GB/s ceiling. Measured readback
+throughput is 13.5–14.0 GB/s across a 16x range of image sizes — **86–89% of a
+hard physical limit, never crossing it**, with a near-zero intercept. A
+mishandled `timestampPeriod` would have implied 543 GB/s; a ns/µs slip would
+have implied 13.6 MB/s. Both excluded. It also re-derived the wrap case by hand
+and checked every `ash` signature against the vendored source.
+
+Both Vulkan gates were run with the instrument **on** as well as off, which is
+the real test for timestamp code: 18 scene runs / zero validation messages and
+8/8 images, either way.
+
+**The gap it named, which I am fixing rather than only recording:** the printed
+line says `total`, and that total is the sum of graph passes only — about **2% of
+what a frame actually costs**. The per-frame TLAS rebuild is a separate submit
+outside the graph and is untimed, and the host-side read of the readback buffer
+(~410 MB/s) is invisible to it. Nothing reported is wrong, but a field labelled
+`total` sitting next to 2% of the frame is precisely the kind of number that
+gets quoted later as if it meant the frame. Renaming it is a few characters.
+
+Secondary gaps, recorded not fixed: granularity is coarse — the graph has two
+passes, so `forward` is sky + meshes + grass + particles + the MSAA resolve in
+one number, and isolating grass required an A/B between two scenes rather than a
+third timestamp pair. And the `Viewer` is uninstrumented, so the instrument
+exists only on the path whose cost profile the real game never has.
+
 ### 00:30 — piece A built: grass reads the terrain. Critic dispatched; my own read first
 
 Builder returned. The mechanism works: `GroundGrid` bakes a height grid per

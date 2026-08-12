@@ -859,6 +859,252 @@ fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
     h
 }
 
+/// A node's world translation, by summing the parent chain.
+///
+/// `ponytail:` translation only — a rotated or scaled parent is ignored. Scene
+/// nodes carry a *local* transform on purpose (`loom_scene` has no matrix
+/// math), and nothing that carries terrain or a grass field is authored
+/// rotated. Compose the full matrices here when one is.
+fn world_translation(scene: &Scene, node: &loom_scene::Node) -> [f32; 3] {
+    let mut sum = node.transform.pos;
+    let mut parent = node.parent.as_deref();
+    while let Some(path) = parent {
+        let Some(above) = scene.nodes().iter().find(|n| n.path == path) else {
+            break;
+        };
+        for (axis, value) in sum.iter_mut().enumerate() {
+            *value += above.transform.pos[axis];
+        }
+        parent = above.parent.as_deref();
+    }
+    sum
+}
+
+/// The scene's terrain volume and where it sits, or `None` if it has none.
+///
+/// **The first one wins.** A scene with two voxel volumes under one grass field
+/// is not a thing anything authors yet; when it is, this becomes a lookup per
+/// sample and gets slower.
+fn scene_volume(scene: &Scene) -> Option<(loom_voxel::Volume, [f32; 3])> {
+    scene.nodes().iter().find_map(|node| {
+        let (volume, ()) = build_volume(node.components.get("VoxelVolume")?)?;
+        Some((volume, world_translation(scene, node)))
+    })
+}
+
+/// Most samples a ground grid takes along one axis.
+///
+/// The grid is sampled at the voxel size until a field is big enough that that
+/// would be more than this, and then it coarsens. 117² marches down a 96-voxel
+/// column measured 0.11 s, so 256² is under a second; a 500 m field at 0.25 m
+/// would be four thousand squared and would not finish in a load.
+const GROUND_GRID_MAX: usize = 256;
+
+/// Radius, in metres, of the stencil that stands in for flow accumulation.
+///
+/// A metre, because a gully is a metre-scale feature and a voxel-scale stencil
+/// measures quantization noise instead. This is a calibration knob: widen it
+/// and only broad valleys read as lush, narrow it and every dimple does.
+const FLOW_RADIUS: f32 = 1.0;
+
+/// Rise, in metres over [`FLOW_RADIUS`], that reads as a fully lush gully.
+const FLOW_FULL: f32 = 0.08;
+
+/// Where the ground is under a grass field, sampled from the voxel SDF.
+///
+/// **A grid, not a query per blade, and the ratio was measured.** Height needs
+/// a march down the SDF and the flow proxy needs four more around each point:
+/// on `grass_slope.loom` that is 352k marches and **2.98 s**. The same field
+/// sampled once onto a 117² grid is 13.7k marches and **0.11 s**, with every
+/// blade a bilinear lookup and the neighbourhood terms array reads. Twenty-seven
+/// times, for an answer that is smoother rather than worse — a blade cannot
+/// resolve terrain finer than the voxel the grid is sampled at anyway.
+///
+/// The grid is in world space and stores heights *relative to the grass node*,
+/// because that is what [`loom_grass::Ground::height`] means to the caller
+/// below — which adds the node's own translation back on.
+struct GroundGrid {
+    /// World X and Z of sample `(0, 0)`.
+    origin: [f32; 2],
+    /// Metres between samples.
+    spacing: f32,
+    /// Samples per axis.
+    side: usize,
+    /// Surface height relative to the grass node, or `NaN` where the column has
+    /// no surface at all.
+    height: Vec<f32>,
+    /// Flow stencil radius, in samples.
+    stencil: usize,
+}
+
+/// World Y of the topmost surface in a column, or `NaN` where there is none.
+///
+/// **Marched, then bisected.** The field is an `i8` quantized to ±1 voxel
+/// (`SDF_SCALE`), so it saturates and the value carries no usable distance
+/// beyond that — a sphere trace would step through the ground. Half-voxel steps
+/// for the same reason [`loom_voxel::exposure`] uses them: the thinnest feature
+/// the field can hold is one voxel, and a whole-voxel step can miss a lip.
+fn surface_height(volume: &loom_voxel::Volume, offset: [f32; 3], x: f32, z: f32) -> f32 {
+    let (lx, lz) = (x - offset[0], z - offset[2]);
+    #[allow(clippy::cast_precision_loss)]
+    let top = volume.resolution()[1] as f32 * volume.voxel_size;
+    let step = volume.voxel_size * 0.5;
+    // Positive is air, zero and below is solid — the sign convention `exposure`
+    // documents from the other side.
+    let solid = |y: f32| loom_voxel::exposure::sample(volume, [lx, y, lz]) <= 0.0;
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let steps = (top / step).ceil() as usize;
+    let mut air = top;
+    for i in 1..=steps {
+        #[allow(clippy::cast_precision_loss)]
+        let y = step.mul_add(-(i as f32), top);
+        if solid(y) {
+            // Eight halvings of a half-voxel bracket puts the crossing well
+            // inside a millimetre at any voxel size the engine uses. A blade
+            // that sits a millimetre proud of the ground is invisible; one that
+            // sits a centimetre under it is decapitated.
+            let (mut lo, mut hi) = (y, air);
+            for _ in 0..8 {
+                let mid = 0.5 * (lo + hi);
+                if solid(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            return 0.5f32.mul_add(lo + hi, offset[1]);
+        }
+        air = y;
+    }
+    f32::NAN
+}
+
+impl GroundGrid {
+    /// Sample the ground under a field of half-extent `half` centred on `base`.
+    fn bake(
+        volume: &loom_voxel::Volume,
+        offset: [f32; 3],
+        base: [f32; 3],
+        half: [f32; 2],
+    ) -> Self {
+        // Margin so the flow stencil and the slope differences never read off
+        // the edge of the grid, which would make the field's border a cliff.
+        let reach = half[0].max(half[1]) + FLOW_RADIUS + volume.voxel_size * 2.0;
+        #[allow(clippy::cast_precision_loss)]
+        let spacing = (reach * 2.0 / GROUND_GRID_MAX as f32).max(volume.voxel_size);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let side = (reach * 2.0 / spacing).ceil() as usize + 1;
+        let origin = [base[0] - reach, base[2] - reach];
+
+        let mut height = Vec::with_capacity(side * side);
+        for j in 0..side {
+            for i in 0..side {
+                #[allow(clippy::cast_precision_loss)]
+                let (x, z) = (
+                    spacing.mul_add(i as f32, origin[0]),
+                    spacing.mul_add(j as f32, origin[1]),
+                );
+                height.push(surface_height(volume, offset, x, z) - base[1]);
+            }
+        }
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let stencil = ((FLOW_RADIUS / spacing).round() as usize).max(1);
+        Self { origin, spacing, side, height, stencil }
+    }
+
+    /// Height at a sample, or `NaN` outside the grid.
+    fn node(&self, i: usize, j: usize) -> f32 {
+        if i >= self.side || j >= self.side {
+            return f32::NAN;
+        }
+        self.height[j * self.side + i]
+    }
+
+    /// What the ground is doing at a world position.
+    ///
+    /// **`rock = 1` is also how "there is no ground here" is said.** It is the
+    /// one term in [`loom_grass::coverage`] that zeroes the answer whatever the
+    /// normal says, so a column with no surface — outside the volume, or a hole
+    /// blown clean through it — grows nothing. That is the no-floating-blades
+    /// half of P2's exit criteria, and it costs no new channel.
+    fn at(&self, x: f32, z: f32) -> loom_grass::Ground {
+        let bare = loom_grass::Ground { rock: 1.0, ..loom_grass::Ground::default() };
+        let (gx, gz) = ((x - self.origin[0]) / self.spacing, (z - self.origin[1]) / self.spacing);
+        // The stencil reaches `stencil` samples out, so anything nearer the
+        // edge than that has no neighbourhood to measure.
+        #[allow(clippy::cast_precision_loss)]
+        let limit = (self.side - self.stencil - 1) as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let low = self.stencil as f32;
+        if !(gx >= low && gz >= low && gx < limit && gz < limit) {
+            return bare;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (i, j) = (gx as usize, gz as usize);
+        let (fx, fz) = (gx - gx.floor(), gz - gz.floor());
+
+        // Bilinear height. One absent corner makes the whole cell absent — an
+        // interpolation against NaN is NaN, and a blade at NaN is a triangle at
+        // infinity.
+        let lerp = |a: f32, b: f32, t: f32| (b - a).mul_add(t, a);
+        let h = lerp(
+            lerp(self.node(i, j), self.node(i + 1, j), fx),
+            lerp(self.node(i, j + 1), self.node(i + 1, j + 1), fx),
+            fz,
+        );
+        if !h.is_finite() {
+            return bare;
+        }
+
+        // Slope from central differences of the height field rather than the
+        // SDF gradient: the field is quantized to 127 steps across a voxel, so
+        // its gradient is noisy at exactly the scale a blade cares about, and
+        // the surface is what grass grows on anyway.
+        let (dx, dz) = (
+            (self.node(i + 1, j) - self.node(i - 1, j)) / (2.0 * self.spacing),
+            (self.node(i, j + 1) - self.node(i, j - 1)) / (2.0 * self.spacing),
+        );
+        let length = dx.mul_add(dx, dz.mul_add(dz, 1.0)).sqrt();
+        let normal = if length.is_finite() && length > 0.0 {
+            [-dx / length, 1.0 / length, -dz / length]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+
+        // **A concavity proxy, not flow accumulation.** Real flow means routing
+        // water downhill across the whole field and counting what drains
+        // through each cell (D8 or D-infinity over the heightfield); there is
+        // no such data for a voxel volume, and `loom_terrain` is a separate
+        // heightmap system these scenes do not use. Concave ground is where
+        // water would collect, which is the part grass responds to, so: the
+        // centre against the mean of four neighbours a metre out. Positive is a
+        // hollow, negative — a ridge — reads as zero. Replace this with real
+        // accumulation when erosion lands and there is a drainage field worth
+        // reading.
+        let s = self.stencil;
+        let ring = [
+            self.node(i + s, j),
+            self.node(i - s, j),
+            self.node(i, j + s),
+            self.node(i, j - s),
+        ];
+        let flow = if ring.iter().all(|v| v.is_finite()) {
+            ((ring.iter().sum::<f32>() / 4.0 - h) / FLOW_FULL).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // `rock` stays 0 for real ground. Nothing in the scene schema says
+        // which parts of a volume are stone rather than soil — deriving it from
+        // slope would only double-count the slope term coverage already has.
+        // A per-op material on `VoxelVolume`, or the erosion field Phase 8
+        // wants, is what would drive it.
+        loom_grass::Ground { height: h, normal, rock: 0.0, flow }
+    }
+}
+
 /// Bake a `VoxelVolume` component into a mesh.
 /// Every blade in every grass field in the scene, ready to upload.
 ///
@@ -868,6 +1114,12 @@ fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
 /// wind bend, in the vertex shader, which is what a baked mesh could not do.
 pub(crate) fn grass_blades(scene: &Scene) -> Vec<loom_render::GrassBlade> {
     let mut out = Vec::new();
+    // Baking the volume is not free — `terrain_stress` is 67 million voxels —
+    // so a scene with no grass in it must not pay for one.
+    if !scene.nodes().iter().any(|n| n.components.contains_key("Grass")) {
+        return out;
+    }
+    let terrain = scene_volume(scene);
     for node in scene.nodes() {
         let Some(component) = node.components.get("Grass") else {
             continue;
@@ -886,16 +1138,26 @@ pub(crate) fn grass_blades(scene: &Scene) -> Vec<loom_render::GrassBlade> {
             clump_colour: field.clump_colour,
         };
         // The field is centred on its node.
-        let origin = node.transform.pos;
+        let origin = world_translation(scene, node);
         let (hx, hz) = (field.half_extent[0], field.half_extent[1]);
+        // **The seam.** `loom_grass` knows nothing about voxels — it asks a
+        // closure what the ground is doing, and this is where the scene's
+        // actual terrain answers. A scene with no voxel volume keeps the flat
+        // plane, so `meadow` renders exactly as it did.
+        let grid = terrain
+            .as_ref()
+            .map(|(volume, offset)| GroundGrid::bake(volume, *offset, origin, [hx, hz]));
+        let ground = |x: f32, z: f32| {
+            grid.as_ref().map_or_else(loom_grass::Ground::default, |g| {
+                g.at(x + origin[0], z + origin[2])
+            })
+        };
         let low = loom_grass::Tile::at(-hx, -hz);
         let high = loom_grass::Tile::at(hx, hz);
         for z in low.z..=high.z {
             for x in low.x..=high.x {
                 let tile = loom_grass::Tile { x, z };
-                for blade in
-                    loom_grass::tile(tile, &rules, &|_, _| loom_grass::Ground::default())
-                {
+                for blade in loom_grass::tile(tile, &rules, &ground) {
                     if blade.position[0].abs() > hx || blade.position[2].abs() > hz {
                         continue;
                     }
@@ -2490,5 +2752,157 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
 
         assert_eq!(code, 2);
         assert!(out.contains("loom validate"));
+    }
+
+    /// A slab with a dome on it and a bowl scooped out of it — the shape
+    /// `assets/test/grass_slope.loom` authors, in four ops.
+    fn hillside() -> loom_voxel::Volume {
+        let mut volume = loom_voxel::Volume::new([4, 3, 4], 0.25);
+        volume.bake(&[
+            loom_voxel::VoxelOp::Box {
+                center: [16.0, 3.0, 16.0],
+                half_extents: [14.0, 3.0, 14.0],
+                mode: loom_voxel::CsgMode::Union,
+            },
+            loom_voxel::VoxelOp::Sphere {
+                center: [9.0, 3.5, 16.0],
+                radius: 6.5,
+                mode: loom_voxel::CsgMode::Union,
+            },
+            loom_voxel::VoxelOp::Sphere {
+                center: [19.5, 11.0, 22.0],
+                radius: 6.5,
+                mode: loom_voxel::CsgMode::Subtract,
+            },
+        ]);
+        volume
+    }
+
+    /// **The ground closure actually reads the terrain.** P2's exit criterion
+    /// is that grass thins on steep ground and thickens in gullies *without an
+    /// authored mask*, and `loom_grass` has implemented that rule from the
+    /// start — against a flat constant `Ground`, so none of it ever fired. Every
+    /// number here collapses to the flat case (coverage 0.625 everywhere) if
+    /// the closure goes back to `Ground::default()`.
+    #[test]
+    fn coverage_follows_the_voxel_terrain() {
+        let volume = hillside();
+        let grid = GroundGrid::bake(&volume, [0.0; 3], [16.0, 0.0, 16.0], [13.0, 13.0]);
+        let rules = loom_grass::Rules::default();
+        let cover = |x: f32, z: f32| loom_grass::coverage(&rules, &grid.at(x, z));
+
+        // The slab top, well away from both features.
+        let flat = cover(26.0, 10.0);
+        // Half way up the dome's flank, past 35° — inside the fade band.
+        let flank = cover(13.0, 16.0);
+        // The floor of the hollow: level, and concave for a metre around.
+        let hollow = cover(19.5, 22.0);
+
+        assert!(flat > 0.5, "the flat slab grows nothing: {flat}");
+        assert!(
+            flank < flat * 0.75,
+            "the dome's flank ({flank}) is as lush as level ground ({flat}) — \
+             the ground closure is not reading the slope"
+        );
+        assert!(
+            hollow > flat * 1.25,
+            "the hollow ({hollow}) is no lusher than level ground ({flat}) — \
+             the ground closure is not reading the concavity"
+        );
+    }
+
+    /// Blades sit **on** the surface, at three heights that are all different.
+    /// A blade whose Y comes from its node's transform is a blade floating over
+    /// a hill or buried in it.
+    #[test]
+    fn blade_height_comes_from_the_surface_under_it() {
+        let volume = hillside();
+        let grid = GroundGrid::bake(&volume, [0.0; 3], [16.0, 0.0, 16.0], [13.0, 13.0]);
+
+        // The slab top is y = 6, the dome peaks near y = 10, the hollow bottoms
+        // out around y = 4.5 — measured from the ops, not from the code.
+        assert!((grid.at(26.0, 10.0).height - 6.0).abs() < 0.05);
+        assert!((grid.at(9.0, 16.0).height - 10.0).abs() < 0.1);
+        assert!((grid.at(19.5, 22.0).height - 4.5).abs() < 0.1);
+    }
+
+    /// **No floating blades where the ground was destroyed.** A shaft punched
+    /// clean through the slab leaves a column with no surface at all, and that
+    /// has to grow nothing rather than growing grass at the old height. The
+    /// bake reads the volume as it is now, so a carve is reflected by
+    /// re-baking — the same property `loom_voxel::exposure` has.
+    #[test]
+    fn a_hole_through_the_terrain_grows_no_grass() {
+        let mut volume = hillside();
+        let grid = GroundGrid::bake(&volume, [0.0; 3], [16.0, 0.0, 16.0], [13.0, 13.0]);
+        let rules = loom_grass::Rules::default();
+        let before = loom_grass::coverage(&rules, &grid.at(26.0, 10.0));
+        assert!(before > 0.5, "nothing grew there to begin with: {before}");
+
+        volume.edit(&loom_voxel::VoxelOp::Box {
+            center: [26.0, 3.0, 10.0],
+            half_extents: [2.0, 5.0, 2.0],
+            mode: loom_voxel::CsgMode::Subtract,
+        });
+        let grid = GroundGrid::bake(&volume, [0.0; 3], [16.0, 0.0, 16.0], [13.0, 13.0]);
+        let after = loom_grass::coverage(&rules, &grid.at(26.0, 10.0));
+
+        assert_eq!(after, 0.0, "grass is floating over the hole");
+    }
+
+    /// **The wiring, end to end**, on the scene authored for it. The tests
+    /// above check the grid; this one checks that `grass_blades` actually hands
+    /// it to `loom_grass`. Every assertion here fails if the ground closure goes
+    /// back to a flat constant: the heights collapse to one value and the
+    /// dome's flank grows as much grass as the level slab.
+    #[test]
+    fn grass_on_a_voxel_scene_follows_the_terrain() {
+        let src = std::fs::read_to_string("../../assets/test/grass_slope.loom").expect("scene");
+        let scene = Scene::parse(&src).expect("grass_slope parses");
+
+        let blades = grass_blades(&scene);
+        assert!(!blades.is_empty(), "no blades, so this proves nothing");
+
+        // The slab top is y = 6 and the dome peaks near y = 10: blades reach
+        // both, because their Y comes from the surface and not from the node.
+        let high = blades.iter().map(|b| b.position[1]).fold(f32::MIN, f32::max);
+        let low = blades.iter().map(|b| b.position[1]).fold(f32::MAX, f32::min);
+        assert!(high > 9.0, "nothing grew on the dome: highest blade is {high}");
+        assert!(low < 5.5, "nothing grew in the hollow: lowest blade is {low}");
+
+        // Blades per square metre in a 2 m box, on the level slab and on the
+        // dome's flank at roughly 38°.
+        let density = |cx: f32, cz: f32| {
+            blades
+                .iter()
+                .filter(|b| {
+                    (b.position[0] - cx).abs() < 1.0 && (b.position[2] - cz).abs() < 1.0
+                })
+                .count()
+        };
+        let flat = density(26.0, 10.0);
+        let flank = density(13.0, 16.0);
+
+        assert!(flat > 100, "the level slab is bare: {flat} blades in 4 m²");
+        assert!(
+            flank * 4 < flat * 3,
+            "the dome's flank ({flank}) is as lush as the level slab ({flat})"
+        );
+    }
+
+    /// Grass over a scene with no voxel volume is unchanged — `meadow.loom`
+    /// keeps its reference image, and a flat field stays flat.
+    #[test]
+    fn a_scene_without_terrain_keeps_the_flat_ground() {
+        let src = std::fs::read_to_string("../../assets/test/meadow.loom").expect("meadow");
+        let scene = Scene::parse(&src).expect("meadow parses");
+
+        let blades = grass_blades(&scene);
+
+        assert!(!blades.is_empty(), "no blades, so this proves nothing");
+        assert!(
+            blades.iter().all(|b| b.position[1] == 0.0),
+            "a scene with no terrain moved its blades off the plane"
+        );
     }
 }
