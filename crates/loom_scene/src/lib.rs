@@ -12,7 +12,7 @@ mod scene;
 pub use edit::{FileApplyError, SaveRejected, Session, apply_to_file, write_atomically};
 pub use ops::{Applied, SceneOp, Transaction, TransactionError, VersionToken, apply};
 pub use place::{Anchor, Axis, PlaceOp};
-pub use scene::{Node, Scene, SceneError};
+pub use scene::{Node, PrefabDecl, Scene, SceneError};
 
 #[cfg(test)]
 mod tests {

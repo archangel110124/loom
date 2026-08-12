@@ -18,6 +18,7 @@ mod materials;
 mod panels;
 mod particles;
 mod play;
+mod prefab_cmd;
 mod prefab_load;
 mod scene_view;
 mod sound;
@@ -62,6 +63,13 @@ USAGE:
     loom scene <scene.loom> --tx <tx.json> [--dry-run]
         Apply a transaction. `expect_version` in the JSON makes the write
         conditional; --dry-run prints the diff and writes nothing.
+
+    loom prefab <verb> <scene.loom> --node <path> [--key <Type.field> ...]
+        The three prefab operations. `revert-overrides` puts an instance back
+        to the prefab; `apply-overrides` promotes its deviations into the
+        prefab so every instance gains them (two files, two undo steps);
+        `unpack` replaces the instance with concrete nodes and stops it
+        tracking the prefab. Naming no --key means all of them.
 
     loom place <scene.loom> --op <op.json> [--dry-run] [--expect-version <tok>]
         Geometry-aware placement: on top of, aligned to, facing, grid on.
@@ -199,6 +207,7 @@ fn run(args: &[String]) -> (u8, String) {
             Some(path) => scene_tx(path, args),
             None => (2, USAGE.to_owned()),
         },
+        Some("prefab") => prefab_cmd::run(args),
         Some("terrain") => match args.get(1) {
             Some(path) => terrain(path, args),
             None => (2, USAGE.to_owned()),

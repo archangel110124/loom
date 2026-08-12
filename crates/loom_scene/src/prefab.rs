@@ -88,6 +88,194 @@ pub fn resolve(scene: &Scene, library: &Library) -> Result<Resolved, Vec<SceneEr
     Ok(Resolved { scene: flattened, warnings })
 }
 
+/// Load every prefab a scene declares, and every prefab *those* declare.
+///
+/// `scene_path` locates the consuming file; `path` hints resolve relative to
+/// the directory holding it, and a nested prefab relative to its own file — so
+/// a prefab that instances another keeps working wherever it is placed from.
+///
+/// **`Scene::parse` stays pure and this does the I/O**, which is the split that
+/// lets the parser be tested without a filesystem while `apply_to_file` and
+/// the CLI still get prefabs resolved from disk.
+///
+/// # Errors
+/// A declared prefab whose file cannot be read, or that does not parse.
+pub fn library_for(
+    scene: &Scene,
+    scene_path: &std::path::Path,
+) -> Result<Library, Vec<SceneError>> {
+    let base = scene_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let mut library = Library::new();
+    let mut seen = BTreeSet::new();
+    collect(scene, base, &mut library, &mut seen)?;
+    Ok(library)
+}
+
+/// Depth-first, guarded by `seen` on the prefab id. The guard is for repeated
+/// work, not for cycles: a cycle is a *scene* error with a path to report, and
+/// swallowing it here would turn a nameable mistake into a missing prefab.
+fn collect(
+    scene: &Scene,
+    base: &std::path::Path,
+    library: &mut Library,
+    seen: &mut BTreeSet<String>,
+) -> Result<(), Vec<SceneError>> {
+    for decl in scene.prefabs() {
+        if !seen.insert(decl.id.clone()) {
+            continue;
+        }
+
+        // The path is a hint for *finding* the file, once. Identity stays the
+        // id, which is what the library is keyed by — so moving a prefab
+        // breaks one hint rather than every reference to it.
+        let candidate = std::path::Path::new(&decl.path);
+        let file = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            base.join(candidate)
+        };
+
+        let text = std::fs::read_to_string(&file).map_err(|e| {
+            let mut err = SceneError::new("io_error", "");
+            err.constraint = format!("{}: {e}", file.display());
+            err.field = "prefab".to_owned();
+            err.value = Value::from(decl.key.clone());
+            err.hint = Some(format!(
+                "the prefab `{}` (id {}) declares `path = \"{}\"`, which does \
+                 not read from {}.",
+                decl.key,
+                decl.id,
+                decl.path,
+                base.display()
+            ));
+            vec![err]
+        })?;
+        let parsed = Scene::parse(&text)?;
+
+        let nested = file.parent().unwrap_or(base).to_path_buf();
+        collect(&parsed, &nested, library, seen)?;
+        library.insert(decl.id, parsed);
+    }
+    Ok(())
+}
+
+/// A node's transform as TOML, or `None` when it is identity.
+///
+/// **Not `serde_json::to_value` plus the generic converter**, for two reasons
+/// that both show up in a written file.
+///
+/// A `Transform` holds `f32`; JSON holds `f64`. Widening `1.4_f32` gives
+/// `1.399999976158142`, and writing that back replaces the author's number
+/// with noise — the format spec is explicit that the authored value is the
+/// source of truth. Going through `f32::to_string` emits the shortest decimal
+/// that round-trips, which is `1.4`.
+///
+/// And defaults are omitted (§4), so an unpacked node does not sprout
+/// `rot_euler = [0.0, 0.0, 0.0]` and `scale = [1.0, 1.0, 1.0]` it never had.
+pub(crate) fn transform_toml(
+    transform: &crate::components::Transform,
+) -> Option<toml_edit::InlineTable> {
+    let default = crate::components::Transform::default();
+    let mut table = toml_edit::InlineTable::new();
+
+    let mut put = |key: &str, value: [f32; 3]| {
+        let mut array = toml_edit::Array::new();
+        for component in value {
+            // `to_string` on the f32, re-read as f64: the decimal is the
+            // shortest that identifies the f32, and it parses exactly.
+            let shortest = component.to_string().parse::<f64>().unwrap_or(f64::from(component));
+            array.push(shortest);
+        }
+        table.insert(key, array.into());
+    };
+
+    if transform.pos != default.pos {
+        put("pos", transform.pos);
+    }
+    if transform.rot_euler != default.rot_euler {
+        put("rot_euler", transform.rot_euler);
+    }
+    if transform.scale != default.scale {
+        put("scale", transform.scale);
+    }
+
+    if table.is_empty() { None } else { Some(table) }
+}
+
+/// One instance's contents, ready to be written into the consuming file.
+#[derive(Debug)]
+pub struct Unpacked {
+    /// The concrete nodes, the first being the instance itself.
+    pub nodes: Vec<Node>,
+    /// Asset declarations the consuming file does not have yet.
+    ///
+    /// A prefab's aliases are file-local, so unpacking has to bring the
+    /// declarations along or the nodes reference names nothing declares.
+    pub assets: Vec<crate::PrefabDecl>,
+    /// Overrides that pointed at nothing — reported, never silently dropped.
+    pub warnings: Vec<SceneError>,
+}
+
+/// Expand a single instance, for `unpack`.
+///
+/// Separate from [`resolve`] because unpacking is surgery on one node: the
+/// rest of the file keeps its instances, its comments and its formatting, and
+/// only this one becomes concrete.
+///
+/// # Errors
+/// The node is not an instance, its prefab is missing, or it is in a cycle.
+pub fn expand_instance(
+    scene: &Scene,
+    instance_path: &str,
+    library: &Library,
+) -> Result<Unpacked, Vec<SceneError>> {
+    let Some(node) = scene.nodes().iter().find(|n| n.path == instance_path) else {
+        let mut err = SceneError::new("unknown_node", instance_path);
+        err.constraint = "a node in this scene".to_owned();
+        return Err(vec![err]);
+    };
+    let Some(alias) = node.prefab.as_deref() else {
+        let mut err = SceneError::new("not_a_prefab_instance", instance_path);
+        err.constraint = "a node with `prefab = \"...\"`".to_owned();
+        err.hint = Some("only an instance has anything to unpack".to_owned());
+        return Err(vec![err]);
+    };
+
+    let mut assets = AssetMerge::new(scene);
+    let before = assets.order.len();
+    let mut warnings = Vec::new();
+    let mut stack = Vec::new();
+
+    let id = scene.prefab_id(alias).unwrap_or_default();
+    let Some(source) = library.get(&id) else {
+        let mut err = SceneError::new("prefab_not_loaded", instance_path);
+        err.field = "prefab".to_owned();
+        err.value = Value::from(alias);
+        err.constraint = id;
+        return Err(vec![err]);
+    };
+
+    stack.push(id);
+    let mut nodes =
+        expand(source, library, Some(instance_path), &mut stack, &mut assets, &mut warnings)?;
+
+    if let Some(root) = nodes.first_mut() {
+        root.transform.clone_from(&node.transform);
+        (root.name, root.parent) = split_path(instance_path);
+    }
+    apply_overrides(&node.overrides, instance_path, &mut nodes, &mut warnings);
+
+    let gained = assets.order[before..]
+        .iter()
+        .map(|(key, id, path)| crate::PrefabDecl {
+            key: key.clone(),
+            id: id.clone(),
+            path: path.clone(),
+        })
+        .collect();
+    Ok(Unpacked { nodes, assets: gained, warnings })
+}
+
 /// Expand one scene's nodes, recursing into instances.
 ///
 /// `prefix` is the path the scene's root takes in the output. `None` means
@@ -378,11 +566,8 @@ fn emit(source: &Scene, nodes: &[Node], assets: &AssetMerge) -> String {
         if let Some(parent) = &node.parent {
             out.push_str(&format!("parent = {}\n", toml_edit::Value::from(parent.clone())));
         }
-        if node.transform != crate::components::Transform::default()
-            && let Ok(value) = serde_json::to_value(&node.transform)
-            && let Some(item) = json_to_toml(&value)
-        {
-            out.push_str(&format!("transform = {item}\n"));
+        if let Some(transform) = transform_toml(&node.transform) {
+            out.push_str(&format!("transform = {transform}\n"));
         }
         for (type_name, data) in &node.components {
             let Some(toml_edit::Value::InlineTable(table)) = json_to_toml(data) else {

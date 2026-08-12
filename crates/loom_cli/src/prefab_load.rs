@@ -1,58 +1,33 @@
-//! Loading a scene with its prefabs resolved.
+//! Expanding a scene's prefab instances before a command reads it.
 //!
-//! **`loom_scene` deliberately cannot read files.** It depends on nothing else
-//! in the workspace and `Scene::parse` takes a string, which is what makes it
-//! testable without a filesystem and keeps `cargo check` fast. Resolution
-//! therefore takes a [`Library`] someone else filled — and filling it from
-//! disk is this module's whole job.
+//! The loading itself lives in `loom_scene::prefab` — `library_for` reads the
+//! declared files, `resolve` expands against them. This is the thin layer that
+//! says *when*: which commands need it, and what they do with the warnings.
 //!
-//! **Every production load goes through here**, and that is a correctness
-//! requirement rather than tidiness. Before S4 the parser refused `prefab`
-//! outright, because a key it does not understand is a key it *ignores*: the
-//! instance node arrived with no components at all, drew nothing, lit nothing,
-//! and the scene validated clean. Now that the parser accepts the key, a load
-//! path that skips resolution reintroduces exactly that bug.
+//! **Going through here is a correctness requirement, not tidiness.** Before
+//! S4 the parser refused `prefab` outright, because a key it does not
+//! understand is a key it *ignores*: the instance node arrived with no
+//! components at all, drew nothing, lit nothing, and the scene validated
+//! clean. Now that the parser accepts the key, a command that reads a scene
+//! and skips resolution reintroduces exactly that bug.
 
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use loom_scene::prefab::{self, Library};
+use loom_scene::prefab;
 use loom_scene::{Scene, SceneError};
-
-/// Expand an already-parsed scene, reading its prefabs from disk.
-///
-/// Takes a parsed scene rather than a path because every caller already has
-/// the text — commands read it to report a version token, and the editor polls
-/// it — so a read-it-again entry point would be a second way to do the same
-/// thing with its own chance of drifting.
-///
-/// `path` locates the scene; prefab `path` hints resolve relative to the
-/// directory holding it.
-///
-/// # Errors
-/// Parse or validation failures of any prefab it pulls in, a prefab file that
-/// cannot be read, or an instancing cycle.
-pub(crate) fn resolve_from(scene: &Scene, path: &Path) -> Result<prefab::Resolved, Vec<SceneError>> {
-    let base = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut library = Library::new();
-    let mut seen = BTreeSet::new();
-    collect(scene, base, &mut library, &mut seen)?;
-    prefab::resolve(scene, &library)
-}
 
 /// Expand a parsed scene for *consumption*, discarding the warnings.
 ///
 /// For the read-only commands — render, sim, measure — which want a scene to
 /// look at and have no channel for a warning. `validate` uses
-/// [`resolve_from`] directly and reports them, which is where an author is
-/// actually looking for them.
+/// [`for_reading_with_warnings`] and reports them, which is where an author is
+/// actually looking.
 ///
 /// **A scene with no prefabs is returned unchanged**, so routing a command
-/// through here costs nothing and closes the hole where an unexpanded
-/// instance reaches a consumer as a node with no components.
+/// through here costs nothing.
 ///
 /// # Errors
-/// Whatever resolution rejected.
+/// Whatever loading or resolution rejected.
 pub(crate) fn for_reading(scene: &Scene, path: &Path) -> Result<Scene, Vec<SceneError>> {
     for_reading_with_warnings(scene, path).map(|(scene, _)| scene)
 }
@@ -60,7 +35,7 @@ pub(crate) fn for_reading(scene: &Scene, path: &Path) -> Result<Scene, Vec<Scene
 /// As [`for_reading`], keeping the orphaned-override warnings.
 ///
 /// # Errors
-/// Whatever resolution rejected.
+/// Whatever loading or resolution rejected.
 pub(crate) fn for_reading_with_warnings(
     scene: &Scene,
     path: &Path,
@@ -68,69 +43,17 @@ pub(crate) fn for_reading_with_warnings(
     if scene.prefabs().is_empty() {
         return Ok((scene.clone(), Vec::new()));
     }
-    resolve_from(scene, path).map(|resolved| (resolved.scene, resolved.warnings))
-}
-
-/// Load every prefab a scene declares, and every prefab *those* declare.
-///
-/// Depth-first, guarded by `seen` on the prefab id. The guard is for repeated
-/// work, not for cycles: a cycle is a *scene* error with a path to report, and
-/// swallowing it here would turn a nameable mistake into a missing prefab.
-fn collect(
-    scene: &Scene,
-    base: &Path,
-    library: &mut Library,
-    seen: &mut BTreeSet<String>,
-) -> Result<(), Vec<SceneError>> {
-    for decl in scene.prefabs() {
-        if !seen.insert(decl.id.clone()) {
-            continue;
-        }
-
-        // The path is a hint for *finding* the file, once. Identity stays the
-        // id, which is what the library is keyed by (§3, the Unity lesson) —
-        // so moving a prefab breaks one hint rather than every reference.
-        let file = resolve_path(base, &decl.path);
-        let text = std::fs::read_to_string(&file).map_err(|e| {
-            let mut err = io_error(&file, &e.to_string());
-            err.field = "prefab".to_owned();
-            err.value = serde_json::Value::from(decl.key.clone());
-            err.hint = Some(format!(
-                "the prefab `{}` (id {}) declares `path = \"{}\"`, which does \
-                 not read from {}.",
-                decl.key,
-                decl.id,
-                decl.path,
-                base.display()
-            ));
-            vec![err]
-        })?;
-        let parsed = Scene::parse(&text)?;
-
-        // Nested prefabs are loaded relative to *their own* file, so a prefab
-        // that instances another keeps working wherever it is placed from.
-        let nested_base = file.parent().unwrap_or(base).to_path_buf();
-        collect(&parsed, &nested_base, library, seen)?;
-        library.insert(decl.id, parsed);
-    }
-    Ok(())
-}
-
-fn resolve_path(base: &Path, hint: &str) -> PathBuf {
-    let candidate = Path::new(hint);
-    if candidate.is_absolute() { candidate.to_path_buf() } else { base.join(candidate) }
-}
-
-fn io_error(path: &Path, message: &str) -> SceneError {
-    SceneError::external("io_error", &format!("{}: {message}", path.display()))
+    let library = prefab::library_for(scene, path)?;
+    prefab::resolve(scene, &library).map(|resolved| (resolved.scene, resolved.warnings))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     /// Write a prefab and a scene that places it twice, and load the pair off
-    /// disk exactly as the CLI does.
+    /// disk exactly as a command does.
     fn fixture(dir: &Path) -> PathBuf {
         std::fs::write(
             dir.join("lamp.loom"),
@@ -154,10 +77,10 @@ mod tests {
     }
 
     /// Read and expand, the way a command does.
-    fn load(path: &Path) -> Result<prefab::Resolved, Vec<SceneError>> {
+    fn load(path: &Path) -> Result<(Scene, Vec<SceneError>), Vec<SceneError>> {
         let src = std::fs::read_to_string(path).expect("read scene");
         let scene = Scene::parse(&src)?;
-        resolve_from(&scene, path)
+        for_reading_with_warnings(&scene, path)
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -174,13 +97,13 @@ mod tests {
         let dir = scratch("expand");
         let scene = fixture(&dir);
 
-        let resolved = load(&scene).expect("loads");
+        let (resolved, warnings) = load(&scene).expect("loads");
 
-        let paths: Vec<&str> = resolved.scene.nodes().iter().map(|n| n.path.as_str()).collect();
+        let paths: Vec<&str> = resolved.nodes().iter().map(|n| n.path.as_str()).collect();
         assert_eq!(paths, ["Room", "Room/A", "Room/B"]);
-        assert_eq!(resolved.scene.nodes()[1].components["Light"]["intensity"], 100.0);
-        assert_eq!(resolved.scene.nodes()[2].components["Light"]["intensity"], 7.0);
-        assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
+        assert_eq!(resolved.nodes()[1].components["Light"]["intensity"], 100.0);
+        assert_eq!(resolved.nodes()[2].components["Light"]["intensity"], 7.0);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     /// **Editing the prefab file moves every instance**, which is the whole
@@ -196,15 +119,15 @@ mod tests {
              [node.components.Light]\n  intensity = 400.0\n",
         )
         .expect("edit prefab");
-        let resolved = load(&scene).expect("still loads");
+        let (resolved, _) = load(&scene).expect("still loads");
 
         assert_eq!(
-            resolved.scene.nodes()[1].components["Light"]["intensity"],
+            resolved.nodes()[1].components["Light"]["intensity"],
             400.0,
             "the un-overridden instance followed the edit"
         );
         assert_eq!(
-            resolved.scene.nodes()[2].components["Light"]["intensity"],
+            resolved.nodes()[2].components["Light"]["intensity"],
             7.0,
             "and the overridden one kept its own value"
         );

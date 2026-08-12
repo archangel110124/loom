@@ -78,6 +78,23 @@ pub enum SceneOp {
     /// Take a component off a node. Adding one is [`SceneOp::SetField`],
     /// which creates the component table it writes into.
     RemoveComponent { node: String, component: String },
+    /// Drop a prefab instance's deviations, putting it back to the prefab.
+    ///
+    /// `keys` empty means all of them. Named keys revert one deviation and
+    /// leave the rest, which is what "revert this field" in an inspector does.
+    RevertOverrides {
+        node: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keys: Vec<String>,
+    },
+    /// Replace a prefab instance with the concrete nodes it stood for.
+    ///
+    /// The instance stops tracking the prefab: later edits to the prefab no
+    /// longer reach it. That is the point — it is the escape hatch for "this
+    /// one needs to be different in a way overrides cannot express" — and it
+    /// is why this is a deliberate operation rather than something that
+    /// happens when you edit an instance.
+    UnpackPrefab { node: String },
 }
 
 /// A batch of ops applied together, undone together.
@@ -146,6 +163,23 @@ impl std::error::Error for TransactionError {}
 /// [`TransactionError`] if the version is stale, the scene is invalid, an op
 /// targets a missing node, or the result would not parse.
 pub fn apply(source: &str, transaction: &Transaction) -> Result<Applied, Box<TransactionError>> {
+    apply_with(source, transaction, &crate::prefab::Library::new())
+}
+
+/// As [`apply`], with prefabs available.
+///
+/// Only [`SceneOp::UnpackPrefab`] needs them — it writes out what an instance
+/// stood for, and cannot know that without the prefab. Every other op is
+/// unaffected, which is why `apply` stays the plain entry point rather than
+/// forcing a library on callers that have none.
+///
+/// # Errors
+/// As [`apply`], plus a missing prefab when unpacking.
+pub fn apply_with(
+    source: &str,
+    transaction: &Transaction,
+    library: &crate::prefab::Library,
+) -> Result<Applied, Box<TransactionError>> {
     // Boxed: on a stale write the error carries the entire current scene, so
     // the unboxed variant would make every Ok return pay for the rare failure.
     let fail = |error: &str, constraint: String, node: Option<String>, hint: Option<String>| {
@@ -185,6 +219,13 @@ pub fn apply(source: &str, transaction: &Transaction) -> Result<Applied, Box<Tra
         .map_err(|e: toml_edit::TomlError| fail("parse_error", e.to_string(), None, None))?;
 
     for op in &transaction.ops {
+        // Unpack is the one op that needs to know what a prefab contains, so
+        // it is applied here where the library is in scope rather than in
+        // `apply_one`, which deliberately sees only the document.
+        if let SceneOp::UnpackPrefab { node } = op {
+            unpack(&mut doc, node, library).map_err(|e| fail(&e.0, e.1, Some(e.2), e.3))?;
+            continue;
+        }
         apply_one(&mut doc, op).map_err(|e| fail(&e.0, e.1, Some(e.2), e.3))?;
     }
 
@@ -216,6 +257,177 @@ pub fn apply(source: &str, transaction: &Transaction) -> Result<Applied, Box<Tra
         undo: source.to_owned(),
         scene: after,
     })
+}
+
+/// Replace a prefab instance with the concrete nodes it stood for.
+///
+/// Surgery on one node: everything else in the file — its other instances, its
+/// comments, its formatting — is untouched, because the document is edited
+/// rather than re-emitted.
+fn unpack(
+    doc: &mut DocumentMut,
+    node: &str,
+    library: &crate::prefab::Library,
+) -> Result<(), OpFailure> {
+    // **Distinguish "wrong entry point" from "prefab missing".** Both end up
+    // unable to find the prefab, and only one is fixed by loading a file — so
+    // an empty library is reported as what it is.
+    if library.is_empty() {
+        return Err((
+            "prefab_library_required".to_owned(),
+            format!("unpacking `{node}` needs the prefab it instances"),
+            node.to_owned(),
+            Some(
+                "`unpack` is applied through `apply_with`, which takes the \
+                 loaded prefabs. The CLI does this for you."
+                    .to_owned(),
+            ),
+        ));
+    }
+
+    // Parsing the document back gives node paths and the prefab declarations,
+    // which the raw DOM does not carry. It is the same text `apply` will
+    // re-validate at the end, so this cannot see a scene that is not real.
+    let scene = Scene::parse(&doc.to_string()).map_err(|errors| {
+        (
+            "would_produce_invalid_scene".to_owned(),
+            errors.first().map_or_else(String::new, |e| e.constraint.clone()),
+            node.to_owned(),
+            None,
+        )
+    })?;
+    let unpacked = crate::prefab::expand_instance(&scene, node, library).map_err(|errors| {
+        let first = errors.first();
+        (
+            first.map_or_else(|| "unpack_failed".to_owned(), |e| e.error.clone()),
+            first.map_or_else(String::new, |e| e.constraint.clone()),
+            node.to_owned(),
+            first.and_then(|e| e.hint.clone()),
+        )
+    })?;
+
+    let index = require_node(doc, node)?;
+
+    // The declarations first: a node referencing an alias nothing declares
+    // would fail the re-validation at the end of `apply` with a confusing
+    // message about the alias rather than about the unpack.
+    if !unpacked.assets.is_empty() {
+        if doc.get("asset").and_then(Item::as_array_of_tables).is_none() {
+            doc["asset"] = Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+        }
+        let assets = doc["asset"].as_array_of_tables_mut().expect("just ensured");
+        for decl in &unpacked.assets {
+            let mut table = Table::new();
+            table["key"] = value(decl.key.as_str());
+            table["id"] = value(decl.id.as_str());
+            table["path"] = value(decl.path.as_str());
+            assets.push(table);
+        }
+    }
+
+    let array = nodes_mut(doc, node)?;
+    let mut nodes = unpacked.nodes.into_iter();
+    let Some(root) = nodes.next() else {
+        return Err((
+            "unpack_failed".to_owned(),
+            format!("`{node}`'s prefab has no nodes"),
+            node.to_owned(),
+            None,
+        ));
+    };
+
+    // The instance becomes its own contents: same name, same parent, same
+    // placement, with the prefab reference and its deltas gone.
+    let existing = array.get_mut(index).expect("index came from this array");
+    existing.remove("prefab");
+    existing.remove("overrides");
+    write_components(existing, &root)?;
+
+    // Children go straight after, keeping parents-before-children and leaving
+    // the rest of the file where the author put it.
+    for (offset, child) in nodes.enumerate() {
+        let mut table = Table::new();
+        table["name"] = value(child.name.as_str());
+        if let Some(parent) = &child.parent {
+            table["parent"] = value(parent.as_str());
+        }
+        write_components(&mut table, &child)?;
+        array.insert(index + 1 + offset, table);
+    }
+    Ok(())
+}
+
+/// Write a node's transform and components into a table.
+fn write_components(table: &mut Table, node: &crate::Node) -> Result<(), OpFailure> {
+    if let Some(transform) = crate::prefab::transform_toml(&node.transform) {
+        table["transform"] = Item::Value(transform.into());
+    }
+
+    if node.components.is_empty() {
+        return Ok(());
+    }
+    let mut components = Table::new();
+    components.set_implicit(true);
+    for (type_name, data) in &node.components {
+        let toml_edit::Value::InlineTable(fields) = json_to_toml(data, type_name)? else {
+            continue;
+        };
+        let mut component = Table::new();
+        for (key, field) in fields.iter() {
+            component[key] = Item::Value(field.clone());
+        }
+        components[type_name.as_str()] = Item::Table(component);
+    }
+    table["components"] = Item::Table(components);
+    Ok(())
+}
+
+/// Whether the node at `index` instances a prefab.
+fn is_prefab_instance(doc: &DocumentMut, index: usize) -> bool {
+    doc.get("node")
+        .and_then(Item::as_array_of_tables)
+        .and_then(|array| array.get(index))
+        .is_some_and(|table| table.get("prefab").is_some())
+}
+
+/// Write one deviation into a prefab instance's `[node.overrides]`.
+///
+/// The key is used verbatim, so the `Child/Path::Type.field` spelling reaches
+/// into the instanced sub-tree the same way it does in a hand-written file.
+/// `Scene::parse` validates the grammar on the way back in, and `apply`
+/// re-parses before returning — so a malformed key is rejected with the
+/// scene unchanged rather than written and discovered later.
+fn set_override(
+    doc: &mut DocumentMut,
+    index: usize,
+    node: &str,
+    key: &str,
+    new: &Value,
+) -> Result<(), OpFailure> {
+    let value = json_to_toml(new, key)?;
+    let array = nodes_mut(doc, node)?;
+    let table = array.get_mut(index).expect("index came from this array");
+
+    if table.get("overrides").is_none() {
+        table["overrides"] = Item::Table(Table::new());
+    }
+    let overrides = table["overrides"].as_table_like_mut().ok_or_else(|| {
+        (
+            "malformed_node".to_owned(),
+            format!("`{node}` has an `overrides` that is not a table"),
+            node.to_owned(),
+            Some("Overrides must be a table of dotted keys.".to_owned()),
+        )
+    })?;
+
+    // Assign through the existing entry when there is one, so a human's
+    // comment on the line survives — the same reason `SetField` does.
+    if let Some(slot) = overrides.get_mut(key) {
+        *slot = Item::Value(value);
+    } else {
+        overrides.insert(key, Item::Value(value));
+    }
+    Ok(())
 }
 
 /// A node name must be usable as one path segment.
@@ -484,6 +696,16 @@ fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
                 )
             })?;
             let index = require_node(doc, node)?;
+
+            // **On a prefab instance this becomes an override.** An instance
+            // owns no components — writing one would give the node two sources
+            // for the same data with no rule about which wins, and the parser
+            // rejects exactly that. Routing here means the editor's inspector
+            // and `loom scene --tx` need no idea whether a node is an
+            // instance: setting a field does the right thing either way.
+            if is_prefab_instance(doc, index) {
+                return set_override(doc, index, node, field, new);
+            }
             let array = doc["node"].as_array_of_tables_mut().unwrap();
             let table = array.get_mut(index).unwrap();
 
@@ -576,6 +798,76 @@ fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
                 ));
             }
             Ok(())
+        }
+
+        SceneOp::RevertOverrides { node, keys } => {
+            let index = require_node(doc, node)?;
+            if !is_prefab_instance(doc, index) {
+                return Err((
+                    "not_a_prefab_instance".to_owned(),
+                    format!("`{node}` does not instance a prefab"),
+                    node.clone(),
+                    Some(
+                        "Only a node with `prefab = \"...\"` has overrides to \
+                         revert."
+                            .to_owned(),
+                    ),
+                ));
+            }
+
+            let array = nodes_mut(doc, node)?;
+            let table = array.get_mut(index).expect("index came from this array");
+            if keys.is_empty() {
+                table.remove("overrides");
+                return Ok(());
+            }
+
+            let Some(overrides) =
+                table.get_mut("overrides").and_then(Item::as_table_like_mut)
+            else {
+                return Err((
+                    "unknown_override".to_owned(),
+                    format!("`{node}` has no overrides"),
+                    node.clone(),
+                    None,
+                ));
+            };
+            for key in keys {
+                if overrides.remove(key).is_none() {
+                    return Err((
+                        "unknown_override".to_owned(),
+                        format!("`{node}` has no override `{key}`"),
+                        node.clone(),
+                        Some(
+                            "Reverting is per-key; name one the instance \
+                             actually carries, or pass none to revert all."
+                                .to_owned(),
+                        ),
+                    ));
+                }
+            }
+            // An empty table left behind is noise in the file and reads as "an
+            // instance with overrides" to anyone skimming it.
+            if overrides.is_empty() {
+                table.remove("overrides");
+            }
+            Ok(())
+        }
+
+        SceneOp::UnpackPrefab { node } => {
+            // Needs the prefab's contents, which `apply` cannot read — see
+            // `apply_with`. Reaching here means the caller used the plain
+            // `apply`, and saying so beats a confusing "prefab not found".
+            Err((
+                "prefab_library_required".to_owned(),
+                format!("unpacking `{node}` needs the prefab it instances"),
+                node.clone(),
+                Some(
+                    "`unpack` is applied through `apply_with`, which takes the \
+                     loaded prefabs. The CLI does this for you."
+                        .to_owned(),
+                ),
+            ))
         }
 
         SceneOp::RenameNode { node, name } => {
@@ -1616,5 +1908,356 @@ parent = \"Room\"
 
         assert_eq!(applied.diff.len(), 2, "one line out, one in: {:?}", applied.diff);
         assert!(applied.diff[1].contains("1.0"));
+    }
+}
+
+#[cfg(test)]
+mod prefab_ops {
+    use super::*;
+    use crate::prefab::Library;
+
+    const LAMP_ID: &str = "7d3e1b90-4c25-4a68-9f01-2b6ce8a4d517";
+
+    const ROOM: &str = "\
+[scene]
+format = 1
+id = \"5a2f6c81-9e34-4d07-b1a8-3f7d02c9e461\"
+
+[[prefab]]
+key = \"lamp\"
+id = \"7d3e1b90-4c25-4a68-9f01-2b6ce8a4d517\"
+path = \"lamp.loom\"
+
+[[node]]
+name = \"Room\"
+
+[[node]]
+name = \"Lamp\"
+parent = \"Room\"
+prefab = \"lamp\"
+transform = { pos = [2.0, 0.0, 0.0] }
+
+  [node.overrides]
+  \"Light.intensity\" = 30.0
+";
+
+    fn library() -> Library {
+        let mut library = Library::new();
+        library.insert(
+            LAMP_ID,
+            Scene::parse(
+                "[scene]\nformat = 1\n\n[[node]]\nname = \"Lamp\"\n\n  \
+                 [node.components.Light]\n  intensity = 120.0\n\n\
+                 [[node]]\nname = \"Shade\"\nparent = \"Lamp\"\n\
+                 transform = { pos = [0.0, 0.42, 0.0] }\n\n  \
+                 [node.components.Material]\n  roughness = 0.7\n",
+            )
+            .expect("prefab is valid"),
+        );
+        library
+    }
+
+    fn tx(label: &str, ops: Vec<SceneOp>) -> Transaction {
+        Transaction { label: label.into(), ops, dry_run: false, expect_version: None }
+    }
+
+    /// **Setting a field on an instance writes an override, not a component.**
+    /// An instance owns no components — the parser rejects a node with both —
+    /// so the inspector and the agent need no idea which kind of node it is.
+    #[test]
+    fn setting_a_field_on_an_instance_becomes_an_override() {
+        let applied = apply(
+            ROOM,
+            &tx(
+                "Dim it further",
+                vec![SceneOp::SetField {
+                    node: "Room/Lamp".into(),
+                    field: "Light.intensity".into(),
+                    value: serde_json::json!(12.0),
+                }],
+            ),
+        )
+        .expect("applies");
+
+        assert!(applied.scene.contains("\"Light.intensity\" = 12.0"));
+        assert!(
+            !applied.scene.contains("[node.components.Light]"),
+            "must not write a component onto an instance:\n{}",
+            applied.scene
+        );
+        let parsed = Scene::parse(&applied.scene).expect("still valid");
+        let lamp = parsed.nodes().iter().find(|n| n.path == "Room/Lamp").expect("node");
+        assert_eq!(lamp.overrides["Light.intensity"], 12.0);
+    }
+
+    /// The child-path spelling survives the round trip through an op.
+    #[test]
+    fn an_override_can_be_set_on_a_child_of_the_instance() {
+        let applied = apply(
+            ROOM,
+            &tx(
+                "Roughen the shade",
+                vec![SceneOp::SetField {
+                    node: "Room/Lamp".into(),
+                    field: "Shade::Material.roughness".into(),
+                    value: serde_json::json!(0.2),
+                }],
+            ),
+        )
+        .expect("applies");
+
+        let parsed = Scene::parse(&applied.scene).expect("still valid");
+        let lamp = parsed.nodes().iter().find(|n| n.path == "Room/Lamp").expect("node");
+        assert_eq!(lamp.overrides["Shade::Material.roughness"], 0.2);
+    }
+
+    /// Reverting everything puts the instance back to the prefab.
+    #[test]
+    fn reverting_all_overrides_removes_the_table() {
+        let applied = apply(
+            ROOM,
+            &tx("Back to stock", vec![SceneOp::RevertOverrides {
+                node: "Room/Lamp".into(),
+                keys: Vec::new(),
+            }]),
+        )
+        .expect("applies");
+
+        assert!(!applied.scene.contains("node.overrides"), "{}", applied.scene);
+        let parsed = Scene::parse(&applied.scene).expect("still valid");
+        let lamp = parsed.nodes().iter().find(|n| n.path == "Room/Lamp").expect("node");
+        assert!(lamp.overrides.is_empty());
+        assert_eq!(lamp.prefab.as_deref(), Some("lamp"), "still an instance");
+    }
+
+    /// Reverting one key leaves the others — "revert this field" in an
+    /// inspector, rather than "revert everything".
+    #[test]
+    fn reverting_one_key_leaves_the_rest() {
+        let two = apply(
+            ROOM,
+            &tx("Add a second", vec![SceneOp::SetField {
+                node: "Room/Lamp".into(),
+                field: "Shade::Material.roughness".into(),
+                value: serde_json::json!(0.2),
+            }]),
+        )
+        .expect("applies")
+        .scene;
+
+        let applied = apply(
+            &two,
+            &tx("Revert the shade", vec![SceneOp::RevertOverrides {
+                node: "Room/Lamp".into(),
+                keys: vec!["Shade::Material.roughness".into()],
+            }]),
+        )
+        .expect("applies");
+
+        let parsed = Scene::parse(&applied.scene).expect("still valid");
+        let lamp = parsed.nodes().iter().find(|n| n.path == "Room/Lamp").expect("node");
+        assert_eq!(lamp.overrides.len(), 1);
+        assert_eq!(lamp.overrides["Light.intensity"], 30.0);
+    }
+
+    /// Naming a key the instance does not carry is an error, not a no-op — a
+    /// silently ignored revert reads as "this field is back to the prefab"
+    /// when it is not.
+    #[test]
+    fn reverting_an_override_that_is_not_there_is_refused() {
+        let err = apply(
+            ROOM,
+            &tx("Revert nothing", vec![SceneOp::RevertOverrides {
+                node: "Room/Lamp".into(),
+                keys: vec!["Light.color".into()],
+            }]),
+        )
+        .expect_err("no such override");
+
+        assert_eq!(err.error, "unknown_override");
+    }
+
+    /// Overrides only exist on instances.
+    #[test]
+    fn reverting_on_a_plain_node_is_refused() {
+        let err = apply(
+            ROOM,
+            &tx("Nonsense", vec![SceneOp::RevertOverrides {
+                node: "Room".into(),
+                keys: Vec::new(),
+            }]),
+        )
+        .expect_err("not an instance");
+
+        assert_eq!(err.error, "not_a_prefab_instance");
+    }
+
+    /// **Unpack makes an instance concrete**: the prefab's nodes are written
+    /// out, the reference and its deltas go, and the override is baked in.
+    #[test]
+    fn unpacking_writes_the_prefabs_nodes_into_the_file() {
+        let applied = apply_with(
+            ROOM,
+            &tx("Unpack the lamp", vec![SceneOp::UnpackPrefab { node: "Room/Lamp".into() }]),
+            &library(),
+        )
+        .expect("applies");
+
+        let parsed = Scene::parse(&applied.scene).expect("still valid");
+        let paths: Vec<&str> = parsed.nodes().iter().map(|n| n.path.as_str()).collect();
+        assert_eq!(paths, ["Room", "Room/Lamp", "Room/Lamp/Shade"]);
+
+        let lamp = parsed.nodes().iter().find(|n| n.path == "Room/Lamp").expect("node");
+        assert!(lamp.prefab.is_none(), "no longer an instance");
+        assert!(lamp.overrides.is_empty(), "the deltas are baked in, not kept");
+        assert_eq!(
+            lamp.components["Light"]["intensity"], 30.0,
+            "the override became the value"
+        );
+        assert_eq!(lamp.transform.pos, [2.0, 0.0, 0.0], "placement survives");
+
+        let shade = parsed.nodes().iter().find(|n| n.path == "Room/Lamp/Shade").expect("child");
+        assert_eq!(shade.transform.pos, [0.0, 0.42, 0.0]);
+    }
+
+    /// After unpacking, an edit to the prefab no longer reaches the node.
+    /// That is the whole meaning of the operation.
+    #[test]
+    fn an_unpacked_instance_stops_tracking_the_prefab() {
+        let applied = apply_with(
+            ROOM,
+            &tx("Unpack", vec![SceneOp::UnpackPrefab { node: "Room/Lamp".into() }]),
+            &library(),
+        )
+        .expect("applies");
+
+        let scene = Scene::parse(&applied.scene).expect("valid");
+        let resolved = crate::prefab::resolve(&scene, &library()).expect("nothing to resolve");
+
+        let lamp = resolved.scene.nodes().iter().find(|n| n.path == "Room/Lamp").expect("node");
+        assert_eq!(lamp.components["Light"]["intensity"], 30.0, "its own value now");
+    }
+
+    /// Unpacking through the plain `apply` says what is missing rather than
+    /// claiming the prefab does not exist.
+    #[test]
+    fn unpacking_without_a_library_says_so() {
+        let err = apply(
+            ROOM,
+            &tx("Unpack", vec![SceneOp::UnpackPrefab { node: "Room/Lamp".into() }]),
+        )
+        .expect_err("no prefabs supplied");
+
+        assert_eq!(err.error, "prefab_library_required");
+    }
+
+    /// **The S4 exit criterion's last clause.** Overrides set across many ops
+    /// and an unpack undo together, in one step, because the undo payload is
+    /// the whole previous text.
+    #[test]
+    fn a_prefab_transaction_undoes_in_one_step() {
+        let ops = vec![
+            SceneOp::SetField {
+                node: "Room/Lamp".into(),
+                field: "Light.intensity".into(),
+                value: serde_json::json!(7.0),
+            },
+            SceneOp::SetField {
+                node: "Room/Lamp".into(),
+                field: "Shade::Material.roughness".into(),
+                value: serde_json::json!(0.1),
+            },
+            SceneOp::UnpackPrefab { node: "Room/Lamp".into() },
+        ];
+
+        let applied =
+            apply_with(ROOM, &tx("Override twice and unpack", ops), &library()).expect("applies");
+
+        assert!(applied.scene.contains("[node.components.Light]"), "it really unpacked");
+        assert_eq!(applied.undo, ROOM, "one undo restores everything");
+    }
+
+    /// Unpacking brings the prefab's asset declarations with it — otherwise
+    /// the written nodes reference aliases the file does not declare, and the
+    /// scene stops loading.
+    #[test]
+    fn unpacking_brings_the_prefabs_asset_declarations() {
+        let mut library = Library::new();
+        library.insert(
+            LAMP_ID,
+            Scene::parse(
+                "[scene]\nformat = 1\n\n[[asset]]\nkey = \"brass\"\n\
+                 id = \"cccccccc-0000-4000-8000-000000000003\"\npath = \"brass.png\"\n\n\
+                 [[node]]\nname = \"Lamp\"\n\n  [node.components.Material]\n  \
+                 albedo_map = { asset = \"brass\" }\n",
+            )
+            .expect("prefab is valid"),
+        );
+
+        let applied = apply_with(
+            ROOM,
+            &tx("Unpack", vec![SceneOp::UnpackPrefab { node: "Room/Lamp".into() }]),
+            &library,
+        )
+        .expect("applies");
+
+        let parsed = Scene::parse(&applied.scene).expect("still valid");
+        assert_eq!(parsed.asset_path("brass"), Some("brass.png"));
+    }
+
+    /// **The author's number survives, and defaults stay omitted.**
+    ///
+    /// A `Transform` holds f32 and JSON holds f64, so the obvious
+    /// serialize-then-convert wrote `1.4` back as `1.399999976158142` — noise
+    /// in place of what the author typed, in a format whose whole premise is
+    /// that the text is the source of truth. It also emitted
+    /// `rot_euler = [0.0, 0.0, 0.0]` and `scale = [1.0, 1.0, 1.0]` onto nodes
+    /// that never had them, against §4.
+    #[test]
+    fn unpacking_writes_the_authored_numbers_not_widened_ones() {
+        let applied = apply_with(
+            ROOM,
+            &tx("Unpack", vec![SceneOp::UnpackPrefab { node: "Room/Lamp".into() }]),
+            &library(),
+        )
+        .expect("applies");
+
+        assert!(
+            applied.scene.contains("pos = [2.0, 0.0, 0.0]"),
+            "the placement was rewritten:\n{}",
+            applied.scene
+        );
+        assert!(
+            applied.scene.contains("pos = [0.0, 0.42, 0.0]"),
+            "the child's transform was rewritten:\n{}",
+            applied.scene
+        );
+        assert!(
+            !applied.scene.contains("999999"),
+            "an f32 was widened into noise:\n{}",
+            applied.scene
+        );
+        assert!(
+            !applied.scene.contains("rot_euler"),
+            "a default was written out, against §4:\n{}",
+            applied.scene
+        );
+        assert!(!applied.scene.contains("scale ="), "same for scale:\n{}", applied.scene);
+    }
+
+    /// Everything else in the file is left exactly as the author wrote it,
+    /// comments included — the reason this layer edits a DOM.
+    #[test]
+    fn unpacking_leaves_the_rest_of_the_file_alone() {
+        let commented = ROOM.replace("[[node]]\nname = \"Room\"", "# The room itself.\n[[node]]\nname = \"Room\"");
+
+        let applied = apply_with(
+            &commented,
+            &tx("Unpack", vec![SceneOp::UnpackPrefab { node: "Room/Lamp".into() }]),
+            &library(),
+        )
+        .expect("applies");
+
+        assert!(applied.scene.contains("# The room itself."), "{}", applied.scene);
     }
 }
