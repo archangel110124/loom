@@ -283,7 +283,11 @@ change, so your edits appear live. Two consequences:
 > `cargo xtask shimmer` now holds the camera still at the scene's authored eye and advances the
 > simulation, so it measures twinkle at rest. Three scenes with no animated geometry score **exactly
 > 0.000**, which is the control it never had. Baseline at 4x MSAA, 640x400:
-> **`meadow` 2.712, `grass_slope` 1.545.**
+> **`meadow` 3.059, `grass_slope` 1.755** (these moved from 2.712/1.545 at `1062550`, when grass
+> took its colour from the authored `Material` — the field is painted brighter and the metric
+> measures absolute pixel differences, so **flicker is not invariant to brightness**. The table
+> below was taken on the darker field and its rows remain valid against each other. Normalising
+> flicker by local mean is the recommended next fix to the instrument; see ADR 0010.)
 >
 >     MSAA          1x 3.888   2x 3.000   4x 2.712   8x 2.502
 >     density falloff at 4x:   on 2.712   off 2.715      <- no effect at all

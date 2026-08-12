@@ -102,3 +102,24 @@ first step onto one, which is why it is here rather than in a commit.
 Every number above is reproducible with `cargo xtask shimmer` at `8c2bcb6`. The gated-off clamp
 implementation and its full table are in `assets/shaders/scene.slang` so the experiment is not run a
 fourth time.
+
+### The baseline moved after this ADR was written, and the reason is a flaw in the metric
+
+At `1062550` grass takes its colour from the authored `Material` instead of a hardcoded green, and
+`meadow`'s baseline moved **2.712 → 3.059** with no change to geometry or to any AA setting. It was
+attributed rather than assumed: with the new hue variation disabled it is 3.026, and with hue
+variation on but the old darker albedo restored it is 2.753.
+
+So roughly 1% is the hue variation and **the rest is simply that the field is now painted brighter.**
+`cargo xtask shimmer` measures absolute pixel differences, so the same geometry in a lighter colour
+scores higher without being one bit less stable.
+
+**The metric is therefore not invariant to brightness, and comparing any two AA numbers across a
+colour change is invalid.** Current baselines are `meadow` **3.059** and `grass_slope` **1.755**.
+Every number in the table above was taken on the darker field and they remain valid *relative to each
+other*, which is what the argument rests on.
+
+Normalising flicker by local mean would remove this whole class of error and is recommended as the
+next change to the instrument. It is not done. Given this metric has now been wrong in three separate
+ways in one night — framing, animation, and now scale — that recommendation should be treated as
+load-bearing rather than tidy-up.
