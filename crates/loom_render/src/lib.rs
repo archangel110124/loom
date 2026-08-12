@@ -13,9 +13,10 @@
 //! [loom gpu] 1920x1080  forward 0.105 ms  readback 0.610 ms  total 0.715 ms  (45460 blades, 2 objects)
 //! ```
 //!
-//! **`LOOM_CMAA2=1` turns on the anti-aliasing pass** (ADR 0010). Off by
-//! default: it moves every golden reference, and what it buys is measured
-//! rather than assumed — see `cmaa2.rs` and the ADR's results table.
+//! **`LOOM_CMAA2=0` turns off the anti-aliasing pass** (ADR 0010), which is on
+//! by default. What it buys is measured rather than assumed — see `cmaa2.rs`
+//! and the ADR's results table — and that variable is how the reference numbers
+//! are taken.
 //!
 //! Off by default, because the queries are commands in the buffer and the
 //! ALL_COMMANDS timestamps between passes cost some overlap. The same numbers
@@ -69,10 +70,14 @@ pub const TRIANGLE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/triang
 /// The scene shader (one lit cube per object), embedded at build time.
 pub const SCENE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scene.spv"));
 
-/// The anti-aliasing pass (ADR 0010), embedded at build time.
+/// The anti-aliasing pass's shape filter (ADR 0010), embedded at build time.
 ///
-/// Only ever used when `LOOM_CMAA2` is set — see `cmaa2::requested`.
+/// Only ever used when `LOOM_CMAA2` is not `0` — see `cmaa2::requested`.
 pub const CMAA2_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cmaa2.spv"));
+
+/// The anti-aliasing pass's edge detection, which runs first and writes the
+/// mask the shape filter walks.
+pub const CMAA2_EDGES_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cmaa2_edges.spv"));
 
 /// The compute shader that evaluates the generated fields, for the S2
 /// agreement test. Nothing in the runtime dispatches it — see `field_agree`.
@@ -271,11 +276,18 @@ mod tests {
                 // barrier ownership stays visible rather than assumed.
                 ("forward", "loom.msaa_color"),
                 ("forward", "loom.msaa_depth"),
-                // The anti-aliasing pass reads the colour target and writes a
-                // second image, so the readback moves onto *that* one. Three
-                // more transitions, all the graph's, and this list is why
-                // turning the pass on by default could not quietly skip one.
-                ("cmaa2", "loom.color_target"),
+                // The anti-aliasing pass is **two** passes: edge detection
+                // writes a mask image, and the shape filter reads the mask and
+                // the colour target and writes a third image. The readback
+                // therefore moves onto *that* one.
+                //
+                // Note what is missing: the shape filter reads the colour
+                // target too, and there is no `("cmaa2", "loom.color_target")`
+                // here, because read-after-read in the same layout needs no
+                // barrier and the graph knows it.
+                ("cmaa2_edges", "loom.color_target"),
+                ("cmaa2_edges", "loom.aa_edges"),
+                ("cmaa2", "loom.aa_edges"),
                 ("cmaa2", "loom.aa_target"),
                 ("readback", "loom.aa_target"),
             ],
@@ -357,9 +369,11 @@ mod tests {
             .map(|t| (t.pass, t.image))
             .collect();
         assert!(
-            transitions.contains(&("cmaa2", "loom.color_target"))
+            transitions.contains(&("cmaa2_edges", "loom.color_target"))
+                && transitions.contains(&("cmaa2_edges", "loom.aa_edges"))
+                && transitions.contains(&("cmaa2", "loom.aa_edges"))
                 && transitions.contains(&("cmaa2", "loom.aa_target")),
-            "the graph did not transition both AA images: {transitions:?}"
+            "the graph did not transition all three AA images: {transitions:?}"
         );
         assert!(
             transitions.contains(&("readback", "loom.aa_target")),

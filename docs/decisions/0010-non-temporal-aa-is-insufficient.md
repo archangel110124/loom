@@ -146,6 +146,55 @@ conservatism working.
 reduction is a judgement call about whether that is worth a permanent post-process pass and a
 re-blessing — which is a human's call, not the implementation's.
 
+### The Z-shape half, added 2026-08-12, and what it was worth
+
+The omission above is now filled: `DetectZsHorizontal`, `FindZLineLengths` and `BlendZs` are
+implemented, with Intel's `c_maxLineLength` = 86, `c_symmetryCorrectionOffset` = 0.22 and
+`c_dampeningEffect` = 0.15, and with `DeferredColorApply2x2CS`'s 0.8 / 1.8 contribution weighting.
+Doing so required splitting the pass in two — `cmaa2_edges.slang` writes a per-pixel edge bitmask
+to an `R8_UINT` image and `cmaa2.slang` walks it — because tracing a line needs the mask stored.
+One structural difference remains and is documented in the shader: **Intel's Z blend scatters and
+this one gathers**, because scattering needs a storage image and no sRGB format supports `STORAGE`.
+
+`cargo xtask shimmer`, same conditions as the table above:
+
+| | `meadow` | `grass_slope` |
+| --- | --- | --- |
+| 4x MSAA | 3.059 | 1.755 |
+| 4x + simple shapes | 2.791 | 1.605 |
+| **4x + Z-shapes** | **2.788** | **1.605** |
+| 8x MSAA | 2.824 | 1.310 |
+| 8x + simple shapes | 2.601 | 1.244 |
+| **8x + Z-shapes** | **2.598** | **1.244** |
+
+**On grass it is worth nothing.** 0.003 on `meadow`, 0.000 on `grass_slope`, at both sample counts.
+That was the prediction and it is now the measurement: Z-shape handling smooths long, shallow-angled
+edges, and a field of thin near-vertical blades has none. The residual is sub-pixel *coverage*
+flicker — information absent from the frame, not information in the wrong shape — and this ADR's
+conclusion is unchanged and if anything firmer.
+
+It is not inert, and the distinction matters. At 1920x1080 it changes 0.037% of `primitives` and
+0.044% of `materials`, and on the ground plane's long shallow silhouette in `primitives` the
+staircase the simple-shape blend leaves — steps still individually countable, merely softened at
+their corners — becomes a continuous ramp. Texture is untouched: the tile grid in `materials` is
+pixel-identical with the path on and off.
+
+The refactor is verifiable rather than asserted: with the Z loop disabled, the two-pass build
+reproduces the one-pass build's numbers **exactly** on all nine scenes (`meadow` 2.791,
+`grass_slope` 1.605), so the whole delta above is the new path and none of it is the restructuring.
+
+Cost at 1920x1080, `LOOM_GPU_TIMING=1`, against 0.042 ms for the one-pass version:
+
+| scene | edge pass | shape pass | total |
+| --- | --- | --- | --- |
+| `meadow` | 0.022 | 0.099 | **0.121** |
+| `primitives` | 0.023 | 0.045 | 0.068 |
+| `materials` | 0.022 | 0.035 | 0.057 |
+
+Roughly 3x, and still under 15% of a `meadow` render graph. A cap of 32 instead of 86 saves 0.009 ms
+on `meadow` and is bit-identical on every gate scene at this resolution; 86 is kept because it is
+Intel's and because a flatter horizon at a higher resolution would reach it.
+
 ## Status of the evidence
 
 Every number above is reproducible with `cargo xtask shimmer` at `8c2bcb6`. The gated-off clamp

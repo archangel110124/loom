@@ -670,9 +670,16 @@ impl Renderer {
                 "loom.aa_target",
             )?;
             let view = create_view(&raw, image, COLOR_FORMAT, vk::ImageAspectFlags::COLOR)?;
-            let pass = crate::cmaa2::Cmaa2::new(&raw, &names, pipeline_cache, COLOR_FORMAT)?;
-            // SAFETY: nothing has been submitted yet.
-            unsafe { pass.set_source(&raw, color_view) };
+            let pass = crate::cmaa2::Cmaa2::new(
+                &raw,
+                &mut allocator,
+                &names,
+                pipeline_cache,
+                COLOR_FORMAT,
+                color_view,
+                width,
+                height,
+            )?;
             names.set(image, "loom.aa_target");
             names.set(view, "loom.aa_target.view");
             Some((pass, image, view, allocation))
@@ -1250,21 +1257,35 @@ impl Renderer {
             },
         );
 
-        // The anti-aliasing pass, between the forward pass and the readback.
-        // Both images are the graph's (never-do #4): it moves the colour target
-        // from COLOR_ATTACHMENT_OPTIMAL to SHADER_READ_ONLY_OPTIMAL and the AA
-        // target out of UNDEFINED, and nothing here writes a barrier.
+        // The anti-aliasing passes, between the forward pass and the readback.
+        // Every image is the graph's (never-do #4): it moves the colour target
+        // from COLOR_ATTACHMENT_OPTIMAL to SHADER_READ_ONLY_OPTIMAL, the edge
+        // mask out of UNDEFINED and then to SHADER_READ_ONLY_OPTIMAL, and the
+        // AA target out of UNDEFINED. Nothing here writes a barrier.
         let readback_source = match self.aa.as_ref() {
             Some((pass, aa_image, aa_view, _)) => {
+                let edges_id = graph.import("loom.aa_edges", pass.edges_image());
                 let aa_id = graph.import("loom.aa_target", *aa_image);
                 let (aa_view, width, height) = (*aa_view, self.width, self.height);
                 graph.pass(
-                    "cmaa2",
-                    &[(color, Access::ShaderRead), (aa_id, Access::ColorWrite)],
+                    "cmaa2_edges",
+                    &[(color, Access::ShaderRead), (edges_id, Access::ColorWrite)],
                     move |d, cmd| {
                         // SAFETY: the graph has put both images in the layouts
                         // this recording requires, and `cmd` is recording
                         // outside any rendering block.
+                        unsafe { pass.record_edges(d, cmd, width, height) };
+                    },
+                );
+                graph.pass(
+                    "cmaa2",
+                    &[
+                        (color, Access::ShaderRead),
+                        (edges_id, Access::ShaderRead),
+                        (aa_id, Access::ColorWrite),
+                    ],
+                    move |d, cmd| {
+                        // SAFETY: as above.
                         unsafe { pass.record(d, cmd, aa_view, width, height) };
                     },
                 );
@@ -1451,7 +1472,7 @@ impl Drop for Renderer {
             if let (Some((mut pass, image, view, allocation)), Some(allocator)) =
                 (self.aa.take(), self.allocator.as_mut())
             {
-                pass.destroy(&self.device);
+                pass.destroy(&self.device, allocator);
                 self.device.destroy_image_view(view, None);
                 self.device.destroy_image(image, None);
                 let _ = allocator.free(allocation);

@@ -1,15 +1,27 @@
 //! The CMAA2-class full-screen anti-aliasing pass authorised by ADR 0010.
 //!
-//! `assets/shaders/cmaa2.slang` documents exactly which half of Intel's
-//! algorithm is implemented and which half is not; read that before trusting
-//! the name. This file is only the plumbing: one descriptor holding the frame
-//! that was just rendered, one full-screen triangle, one pipeline.
+//! `assets/shaders/cmaa2.slang` and `assets/shaders/cmaa2_edges.slang` document
+//! exactly which parts of Intel's algorithm are implemented and which are not;
+//! read those before trusting the name. This file is only the plumbing.
 //!
-//! # Why a fragment pass and not compute
+//! # Two passes, because the edge mask has to be stored
 //!
-//! The obvious shape for a post-process is a compute dispatch writing a
-//! storage image. It is the wrong shape *here*, for a reason that is a
-//! property of this renderer rather than a preference:
+//! It began as one fragment pass that recomputed a pixel's edges — and its four
+//! neighbours' — from the colour image, five overlapping evaluations per pixel.
+//! That is workable for the simple-shape blend, which never looks further than
+//! one pixel away, and impossible for the Z-shape path, which walks along an
+//! edge for dozens of pixels. Sixteen texture fetches per step of that walk is
+//! not a cost worth paying when one will do.
+//!
+//! So pass 1 writes the four edge bits per pixel into an `R8_UINT` image, and
+//! pass 2 reads it. The split also made the *first* pass cheaper: a 4x4 luma
+//! window instead of 6x6, and each edge computed once.
+//!
+//! # Why fragment passes and not compute
+//!
+//! The obvious shape for a post-process is a compute dispatch writing a storage
+//! image. It is the wrong shape *here*, for a reason that is a property of this
+//! renderer rather than a preference:
 //!
 //! `COLOR_FORMAT` is `R8G8B8A8_SRGB` and the swapchain is `B8G8R8A8_SRGB`.
 //! **No sRGB format supports `STORAGE`**, so a compute pass could not write
@@ -20,26 +32,38 @@
 //! every other pass, and the viewer's swapchain image is written in place
 //! rather than copied into.
 //!
+//! The edge image *could* be a storage image — `R8_UINT` supports it — but
+//! there is nothing to gain: it is written once per pixel from a full-screen
+//! triangle either way, and a second dispatch shape would mean a second set of
+//! barriers to reason about for no measured difference.
+//!
 //! It also needs no new [`Access`](loom_render_graph::Access) variant: the
 //! graph already models `ShaderRead` and `ColorWrite`, which is exactly what
-//! this pass does to two images.
+//! these passes do to three images.
 //!
-//! The cost of the choice is that the pass has no cheap way to keep an edge
-//! bitmask between two halves, which is what CMAA2's Z-shape tracing needs.
-//! That is the omission the shader documents.
+//! The cost of the choice is that **Intel's Z blend scatters and this one
+//! gathers** — see the shader header. That is the one algorithmic difference,
+//! and it is forced by exactly the constraint above.
 //!
-//! # Two images, never one
+//! # Three images, and never fewer
 //!
-//! The pass reads a neighbourhood and writes the centre, so reading and
+//! The blend pass reads a neighbourhood and writes the centre, so reading and
 //! writing the same image would have every pixel racing its neighbours — the
 //! output of one texel depending on whether another had been rewritten yet.
-//! The destination is always a different image, and both go through the render
-//! graph (never-do #4).
+//! The destination is always a different image, and all three go through the
+//! render graph (never-do #4).
 
 use ash::vk;
+use gpu_allocator::vulkan::{Allocation, Allocator};
 
 use crate::debug_names::DebugNames;
-use crate::renderer::{RenderError, create_shader_module};
+use crate::renderer::{RenderError, create_image, create_shader_module, create_view};
+
+/// The packed edge mask. Four bits used of eight; there is no smaller colour
+/// format, and packing two pixels per byte the way Intel's
+/// `CMAA_PACK_SINGLE_SAMPLE_EDGE_TO_HALF_WIDTH` does would buy bandwidth this
+/// pass is nowhere near limited by.
+const EDGE_FORMAT: vk::Format = vk::Format::R8_UINT;
 
 /// Whether the pass runs. **On by default**; `LOOM_CMAA2=0` turns it off.
 ///
@@ -49,22 +73,32 @@ use crate::renderer::{RenderError, create_shader_module};
 /// — modestly, and with a shape worth understanding:
 ///
 /// ```text
-///                meadow    +CMAA2
-///     1x MSAA     4.375  ->  3.652   (-16.5%)
-///     4x MSAA     3.059  ->  2.791   ( -8.8%)
-///     8x MSAA     2.824  ->  2.601   ( -7.9%)
+///                          meadow   grass_slope
+///     4x MSAA, no pass      3.059      1.755
+///     4x + simple shapes    2.791      1.605
+///     4x + Z-shapes too     2.788      1.605
+///     8x MSAA, no pass      2.824      1.310
+///     8x + simple shapes    2.601      1.244
+///     8x + Z-shapes too     2.598      1.244
 /// ```
 ///
-/// **The filter's share shrinks the more MSAA has already done**, which is what
-/// you would expect from what the two things actually are: MSAA recovers
-/// information by taking more samples, and this only reshapes what is already
-/// in the frame. It is not a substitute for samples and the numbers say so.
+/// **The Z-shape path is worth nothing on grass, and that is the measurement,
+/// not a shrug.** 0.003 on `meadow` and exactly zero on `grass_slope` — both
+/// inside the metric's noise. It was predicted: Z-shape handling targets long,
+/// shallow-angled edges, and a field of thin near-vertical blades has none.
+/// What that field has is sub-pixel *coverage* flicker, where the information
+/// is missing from the frame rather than merely mis-shaped, and no spatial
+/// filter can invent it. The path is not inert — it changes 0.037% of
+/// `primitives` and 0.044% of `materials` at 1080p, and on a long shallow
+/// silhouette it visibly replaces a staircase with a ramp — it simply has
+/// nothing to work on in grass.
 ///
-/// The reason it is on: **4x + this (2.791) beats 8x MSAA alone (2.824)** for
-/// 0.042 ms rather than for double the MSAA bandwidth. It is the better buy at
-/// the margin, which is a different and much smaller claim than "it fixes the
-/// aliasing" — it does not. `meadow` sits at 2.791 against a 0.000 control and
-/// Phase 2's exit criterion 2 remains **not met**.
+/// The reason the pass is on at all: **4x + this (2.788) beats 8x MSAA alone
+/// (2.824)** for a fraction of a millisecond rather than for double the MSAA
+/// bandwidth. It is the better buy at the margin, which is a different and much
+/// smaller claim than "it fixes the aliasing" — it does not. `meadow` sits at
+/// 2.788 against a 0.000 control and Phase 2's exit criterion 2 remains **not
+/// met**.
 ///
 /// An environment variable rather than a `const bool` for the same reason
 /// `LOOM_GPU_TIMING` is one: it makes "the same scene, with and without" a pair
@@ -75,62 +109,105 @@ pub(crate) fn requested() -> bool {
     std::env::var_os("LOOM_CMAA2").is_none_or(|v| v != "0")
 }
 
-/// The pass: a sampler, a set holding the source image, and a pipeline.
+/// Both passes: two pipelines, two descriptor sets, and the edge image between
+/// them.
 pub(crate) struct Cmaa2 {
-    layout: vk::DescriptorSetLayout,
+    edge_layout: vk::DescriptorSetLayout,
+    blend_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
-    set: vk::DescriptorSet,
+    edge_set: vk::DescriptorSet,
+    blend_set: vk::DescriptorSet,
     sampler: vk::Sampler,
-    pipeline_layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+    edge_pipeline_layout: vk::PipelineLayout,
+    blend_pipeline_layout: vk::PipelineLayout,
+    edge_pipeline: vk::Pipeline,
+    blend_pipeline: vk::Pipeline,
+    edges: vk::Image,
+    edges_view: vk::ImageView,
+    edges_alloc: Option<Allocation>,
 }
 
 impl Cmaa2 {
-    /// Build the pass for a destination of `color_format`.
+    /// Build both passes for a destination of `color_format`, reading `source`.
     ///
     /// The format is a parameter because the offscreen path resolves into
     /// `R8G8B8A8_SRGB` and the window presents `B8G8R8A8_SRGB`; dynamic
     /// rendering bakes the attachment format into the pipeline, so the two
-    /// cannot share one.
+    /// cannot share one. The edge pass's format never varies, so it does not
+    /// take one.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         device: &ash::Device,
+        allocator: &mut Allocator,
         names: &DebugNames,
         cache: vk::PipelineCache,
         color_format: vk::Format,
+        source: vk::ImageView,
+        width: u32,
+        height: u32,
     ) -> Result<Self, RenderError> {
-        let binding = vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
-        let bindings = [binding];
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        // SAFETY: `bindings` outlives the call.
-        let layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }?;
+        // **Two layouts, not one with an unused binding.** The edge pass has no
+        // edge image to read, and giving it a descriptor pointing at one would
+        // mean a set claiming `SHADER_READ_ONLY_OPTIMAL` for an image that is a
+        // colour attachment at that moment. Whether validation objects depends
+        // on whether it counts the binding as statically used, which is not a
+        // thing to be clever about.
+        let sampled = |ty, stage| {
+            vk::DescriptorSetLayoutBinding::default()
+                .descriptor_type(ty)
+                .descriptor_count(1)
+                .stage_flags(stage)
+        };
+        let edge_bindings =
+            [sampled(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, vk::ShaderStageFlags::FRAGMENT)
+                .binding(0)];
+        let blend_bindings = [
+            sampled(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, vk::ShaderStageFlags::FRAGMENT)
+                .binding(0),
+            sampled(vk::DescriptorType::SAMPLED_IMAGE, vk::ShaderStageFlags::FRAGMENT).binding(1),
+        ];
+        // SAFETY: the binding slices outlive the calls.
+        let (edge_layout, blend_layout) = unsafe {
+            (
+                device.create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&edge_bindings),
+                    None,
+                )?,
+                device.create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&blend_bindings),
+                    None,
+                )?,
+            )
+        };
 
-        let size = vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1);
-        let sizes = [size];
+        let sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(2),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1),
+        ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&sizes)
-            .max_sets(1);
+            .max_sets(2);
         // SAFETY: `sizes` outlives the call.
         let pool = unsafe { device.create_descriptor_pool(&pool_info, None) }?;
 
-        let layouts = [layout];
+        let layouts = [edge_layout, blend_layout];
         let allocate = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(pool)
             .set_layouts(&layouts);
-        // SAFETY: `layouts` outlives the call and the pool has room for one set.
-        let set = unsafe { device.allocate_descriptor_sets(&allocate) }?[0];
+        // SAFETY: `layouts` outlives the call and the pool has room for both.
+        let sets = unsafe { device.allocate_descriptor_sets(&allocate) }?;
+        let (edge_set, blend_set) = (sets[0], sets[1]);
 
-        // **NEAREST and CLAMP_TO_EDGE, both load-bearing.** The shader reads
+        // **NEAREST and CLAMP_TO_EDGE, both load-bearing.** The shaders read
         // texels, not a filtered image: a linear filter would silently average
-        // the neighbours it is trying to compare, and the edge detection would
+        // the neighbours the edge detection is trying to compare, and it would
         // find a softened version of its own input. Clamping makes a read past
-        // the border return the border pixel, so the 6x6 window needs no bounds
-        // test in the inner loop.
+        // the border return the border pixel, so the luma window needs no
+        // bounds test in the inner loop.
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::NEAREST)
             .min_filter(vk::Filter::NEAREST)
@@ -141,72 +218,198 @@ impl Cmaa2 {
         // SAFETY: no borrowed data in the info.
         let sampler = unsafe { device.create_sampler(&sampler_info, None) }?;
 
-        let set_layouts = [layout];
-        let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
-        // SAFETY: `set_layouts` outlives the call.
-        let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None) }?;
-
-        let pipeline = match create_aa_pipeline(device, pipeline_layout, cache, color_format) {
-            Ok(pipeline) => pipeline,
-            Err(e) => {
-                // The failure path cleans up too — `field_agree.rs` documents
-                // what happens when it does not: the object-tracking check at
-                // teardown reports the leak instead of the real error.
-                // SAFETY: everything below was created here.
-                unsafe {
-                    device.destroy_pipeline_layout(pipeline_layout, None);
-                    device.destroy_sampler(sampler, None);
-                    device.destroy_descriptor_pool(pool, None);
-                    device.destroy_descriptor_set_layout(layout, None);
-                }
-                return Err(e);
-            }
+        let edge_set_layouts = [edge_layout];
+        let blend_set_layouts = [blend_layout];
+        // SAFETY: both slices outlive their calls.
+        let (edge_pipeline_layout, blend_pipeline_layout) = unsafe {
+            (
+                device.create_pipeline_layout(
+                    &vk::PipelineLayoutCreateInfo::default().set_layouts(&edge_set_layouts),
+                    None,
+                )?,
+                device.create_pipeline_layout(
+                    &vk::PipelineLayoutCreateInfo::default().set_layouts(&blend_set_layouts),
+                    None,
+                )?,
+            )
         };
 
-        names.set(pipeline, "loom.cmaa2_pipeline");
-        names.set(sampler, "loom.cmaa2_sampler");
-
-        Ok(Self {
-            layout,
+        let mut this = Self {
+            edge_layout,
+            blend_layout,
             pool,
-            set,
+            edge_set,
+            blend_set,
             sampler,
-            pipeline_layout,
-            pipeline,
-        })
+            edge_pipeline_layout,
+            blend_pipeline_layout,
+            edge_pipeline: vk::Pipeline::null(),
+            blend_pipeline: vk::Pipeline::null(),
+            edges: vk::Image::null(),
+            edges_view: vk::ImageView::null(),
+            edges_alloc: None,
+        };
+
+        // From here on, every failure path has to tear down what came before —
+        // `field_agree.rs` documents what happens when one does not: the
+        // object-tracking check at teardown reports the leak instead of the
+        // real error.
+        let pipelines = create_pipeline(
+            device,
+            edge_pipeline_layout,
+            cache,
+            EDGE_FORMAT,
+            crate::CMAA2_EDGES_SPV,
+            c"edgeVertexMain",
+            c"edgeFragmentMain",
+        )
+        .and_then(|edge| {
+            create_pipeline(
+                device,
+                blend_pipeline_layout,
+                cache,
+                color_format,
+                crate::CMAA2_SPV,
+                c"aaVertexMain",
+                c"aaFragmentMain",
+            )
+            .map(|blend| (edge, blend))
+        });
+        match pipelines {
+            Ok((edge, blend)) => {
+                this.edge_pipeline = edge;
+                this.blend_pipeline = blend;
+            }
+            Err(e) => {
+                // SAFETY: nothing recorded against any of this yet.
+                unsafe { this.destroy(device, allocator) };
+                return Err(e);
+            }
+        }
+
+        // SAFETY: the device is idle — nothing has been submitted against a set
+        // that does not exist yet.
+        if let Err(e) = unsafe { this.rebind(device, allocator, names, source, width, height) } {
+            // SAFETY: as above.
+            unsafe { this.destroy(device, allocator) };
+            return Err(e);
+        }
+
+        names.set(this.edge_pipeline, "loom.cmaa2_edge_pipeline");
+        names.set(this.blend_pipeline, "loom.cmaa2_pipeline");
+        names.set(sampler, "loom.cmaa2_sampler");
+        Ok(this)
     }
 
-    /// Point the pass at the image it should anti-alias.
+    /// The edge mask image, for the caller to import into the render graph.
+    pub(crate) fn edges_image(&self) -> vk::Image {
+        self.edges
+    }
+
+    /// Point the passes at the image they should anti-alias, sizing the edge
+    /// mask to match.
     ///
     /// Called once at creation and again after a resize. **Never per frame**:
-    /// the set is the same set every frame and rewriting it would be the
+    /// the sets are the same sets every frame and rewriting them would be the
     /// per-draw descriptor allocation never-do #2 forbids, one step removed.
     ///
     /// # Safety
-    /// No command buffer referencing this set may be in flight.
-    pub(crate) unsafe fn set_source(&self, device: &ash::Device, view: vk::ImageView) {
-        let info = vk::DescriptorImageInfo::default()
+    /// No command buffer referencing these sets or the edge image may be in
+    /// flight.
+    pub(crate) unsafe fn rebind(
+        &mut self,
+        device: &ash::Device,
+        allocator: &mut Allocator,
+        names: &DebugNames,
+        source: vk::ImageView,
+        width: u32,
+        height: u32,
+    ) -> Result<(), RenderError> {
+        // SAFETY: the caller guarantees nothing is in flight.
+        unsafe { self.destroy_edges(device, allocator) };
+
+        let (edges, allocation) = create_image(
+            device,
+            allocator,
+            width,
+            height,
+            EDGE_FORMAT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            1,
+            vk::SampleCountFlags::TYPE_1,
+            "loom.aa_edges",
+        )?;
+        let edges_view = create_view(device, edges, EDGE_FORMAT, vk::ImageAspectFlags::COLOR)?;
+        names.set(edges, "loom.aa_edges");
+        names.set(edges_view, "loom.aa_edges.view");
+        self.edges = edges;
+        self.edges_view = edges_view;
+        self.edges_alloc = Some(allocation);
+
+        let source_info = [vk::DescriptorImageInfo::default()
             .sampler(self.sampler)
-            .image_view(view)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-        let infos = [info];
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(self.set)
-            .dst_binding(0)
-            .dst_array_element(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&infos);
-        // SAFETY: `infos` outlives the call and the caller guarantees the set
-        // is not in use.
-        unsafe { device.update_descriptor_sets(&[write], &[]) };
+            .image_view(source)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let edge_info = [vk::DescriptorImageInfo::default()
+            .image_view(edges_view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.edge_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&source_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.blend_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&source_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.blend_set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&edge_info),
+        ];
+        // SAFETY: the infos outlive the call and the caller guarantees the sets
+        // are not in use.
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
+        Ok(())
     }
 
-    /// Record the pass into `cmd`.
+    /// Record pass 1 — edge detection into the mask image — into `cmd`.
     ///
     /// # Safety
     /// `cmd` must be recording outside any rendering block, the source image
-    /// must already be in `SHADER_READ_ONLY_OPTIMAL` and the destination in
+    /// must already be in `SHADER_READ_ONLY_OPTIMAL` and the edge image in
     /// `COLOR_ATTACHMENT_OPTIMAL` — which is the graph's job, not this one's.
+    pub(crate) unsafe fn record_edges(
+        &self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        width: u32,
+        height: u32,
+    ) {
+        // SAFETY: the caller guarantees the layouts and that `cmd` is recording.
+        unsafe {
+            self.draw(
+                device,
+                cmd,
+                self.edges_view,
+                self.edge_pipeline,
+                self.edge_pipeline_layout,
+                self.edge_set,
+                width,
+                height,
+            );
+        }
+    }
+
+    /// Record pass 2 — the shape filter — into `cmd`.
+    ///
+    /// # Safety
+    /// `cmd` must be recording outside any rendering block, the source and edge
+    /// images must already be in `SHADER_READ_ONLY_OPTIMAL` and the destination
+    /// in `COLOR_ATTACHMENT_OPTIMAL`.
     pub(crate) unsafe fn record(
         &self,
         device: &ash::Device,
@@ -215,9 +418,39 @@ impl Cmaa2 {
         width: u32,
         height: u32,
     ) {
-        // No depth attachment: this pass has no geometry to test. The pipeline
-        // declares `UNDEFINED` for depth to match, because a pipeline that
-        // disagrees with its rendering info is a validation error on every draw.
+        // SAFETY: the caller guarantees the layouts and that `cmd` is recording.
+        unsafe {
+            self.draw(
+                device,
+                cmd,
+                destination,
+                self.blend_pipeline,
+                self.blend_pipeline_layout,
+                self.blend_set,
+                width,
+                height,
+            );
+        }
+    }
+
+    /// One full-screen triangle into one colour attachment. Both passes are
+    /// this, and writing it twice is how the two drift apart.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw(
+        &self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        destination: vk::ImageView,
+        pipeline: vk::Pipeline,
+        layout: vk::PipelineLayout,
+        set: vk::DescriptorSet,
+        width: u32,
+        height: u32,
+    ) {
+        // No depth attachment: these passes have no geometry to test. The
+        // pipeline declares `UNDEFINED` for depth to match, because a pipeline
+        // that disagrees with its rendering info is a validation error on every
+        // draw.
         let attachment = vk::RenderingAttachmentInfo::default()
             .image_view(destination)
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -238,13 +471,13 @@ impl Cmaa2 {
         unsafe {
             device.cmd_begin_rendering(cmd, &rendering);
             crate::renderer::set_viewport(device, cmd, width, height);
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
             device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
+                layout,
                 0,
-                &[self.set],
+                &[set],
                 &[],
             );
             device.cmd_draw(cmd, 3, 1, 0, 0);
@@ -253,40 +486,73 @@ impl Cmaa2 {
     }
 
     /// # Safety
+    /// No command buffer referencing the edge image may be in flight.
+    unsafe fn destroy_edges(&mut self, device: &ash::Device, allocator: &mut Allocator) {
+        // SAFETY: the caller guarantees nothing is in flight.
+        unsafe {
+            if self.edges_view != vk::ImageView::null() {
+                device.destroy_image_view(self.edges_view, None);
+            }
+            if self.edges != vk::Image::null() {
+                device.destroy_image(self.edges, None);
+            }
+        }
+        self.edges_view = vk::ImageView::null();
+        self.edges = vk::Image::null();
+        if let Some(allocation) = self.edges_alloc.take() {
+            let _ = allocator.free(allocation);
+        }
+    }
+
+    /// # Safety
     /// The device must be idle.
-    pub(crate) unsafe fn destroy(&mut self, device: &ash::Device) {
+    pub(crate) unsafe fn destroy(&mut self, device: &ash::Device, allocator: &mut Allocator) {
         // SAFETY: the caller has idled the device and these handles are ours.
         unsafe {
-            device.destroy_pipeline(self.pipeline, None);
-            device.destroy_pipeline_layout(self.pipeline_layout, None);
+            self.destroy_edges(device, allocator);
+            if self.blend_pipeline != vk::Pipeline::null() {
+                device.destroy_pipeline(self.blend_pipeline, None);
+            }
+            if self.edge_pipeline != vk::Pipeline::null() {
+                device.destroy_pipeline(self.edge_pipeline, None);
+            }
+            device.destroy_pipeline_layout(self.blend_pipeline_layout, None);
+            device.destroy_pipeline_layout(self.edge_pipeline_layout, None);
             device.destroy_sampler(self.sampler, None);
             device.destroy_descriptor_pool(self.pool, None);
-            device.destroy_descriptor_set_layout(self.layout, None);
+            device.destroy_descriptor_set_layout(self.blend_layout, None);
+            device.destroy_descriptor_set_layout(self.edge_layout, None);
         }
+        self.blend_pipeline = vk::Pipeline::null();
+        self.edge_pipeline = vk::Pipeline::null();
     }
 }
 
-/// The pipeline: a full-screen triangle, no vertex input, no depth, one sample.
+/// A full-screen triangle pipeline: no vertex input, no depth, one sample.
 ///
-/// One sample even when the scene rasterised at four — this runs on the
+/// One sample even when the scene rasterised at four — these run on the
 /// *resolved* image, which is single-sampled by definition.
-fn create_aa_pipeline(
+#[allow(clippy::too_many_arguments)]
+fn create_pipeline(
     device: &ash::Device,
     layout: vk::PipelineLayout,
     cache: vk::PipelineCache,
     color_format: vk::Format,
+    spv: &[u8],
+    vertex_entry: &std::ffi::CStr,
+    fragment_entry: &std::ffi::CStr,
 ) -> Result<vk::Pipeline, RenderError> {
-    let module = create_shader_module(device, crate::CMAA2_SPV)?;
+    let module = create_shader_module(device, spv)?;
 
     let stages = [
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
             .module(module)
-            .name(c"aaVertexMain"),
+            .name(vertex_entry),
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::FRAGMENT)
             .module(module)
-            .name(c"aaFragmentMain"),
+            .name(fragment_entry),
     ];
 
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();

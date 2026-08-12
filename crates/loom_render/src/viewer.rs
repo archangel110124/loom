@@ -29,6 +29,9 @@ const INITIAL_OBJECTS: usize = 4096;
 /// A window's swapchain and everything needed to draw into it.
 pub struct Viewer {
     device: ash::Device,
+    /// Kept rather than dropped after construction, because resizing rebuilds
+    /// images and an unnamed one is a hex handle in the next validation message.
+    names: DebugNames,
     /// Whether this device can trace rays; see `Device::supports_raytracing`.
     raytracing: bool,
     raytracer: Option<crate::raytrace::Raytracer>,
@@ -373,6 +376,7 @@ impl Viewer {
         }
 
         Ok(Self {
+            names,
             raytracing,
             raytracer,
             materials,
@@ -929,15 +933,30 @@ impl Viewer {
             },
         );
 
-        // The anti-aliasing pass, reading the finished scene and writing the
-        // swapchain image. Both transitions are the graph's (never-do #4).
+        // The anti-aliasing passes: edge detection into the mask image, then
+        // the shape filter reading the finished scene and the mask and writing
+        // the swapchain image. Every transition is the graph's (never-do #4).
         if let Some((pass, _, _, _)) = self.aa.as_ref() {
+            let edges_id = graph.import("loom.aa_edges", pass.edges_image());
             graph.pass(
-                "cmaa2",
-                &[(scene_id, Access::ShaderRead), (target, Access::ColorWrite)],
+                "cmaa2_edges",
+                &[(scene_id, Access::ShaderRead), (edges_id, Access::ColorWrite)],
                 move |d, cmd| {
                     // SAFETY: the graph has put the scene image in
-                    // SHADER_READ_ONLY_OPTIMAL and the swapchain image in
+                    // SHADER_READ_ONLY_OPTIMAL and the mask in
+                    // COLOR_ATTACHMENT_OPTIMAL.
+                    unsafe { pass.record_edges(d, cmd, extent.width, extent.height) };
+                },
+            );
+            graph.pass(
+                "cmaa2",
+                &[
+                    (scene_id, Access::ShaderRead),
+                    (edges_id, Access::ShaderRead),
+                    (target, Access::ColorWrite),
+                ],
+                move |d, cmd| {
+                    // SAFETY: as above, and the swapchain image is in
                     // COLOR_ATTACHMENT_OPTIMAL.
                     unsafe { pass.record(d, cmd, view, extent.width, extent.height) };
                 },
@@ -1112,7 +1131,7 @@ impl Viewer {
             // so it resizes with the window. The pass itself — pipeline,
             // sampler, descriptor set — survives; only the image it points at
             // is rebuilt, and the descriptor is repointed at the new view.
-            if let Some((pass, image, view, allocation)) = self.aa.take() {
+            if let Some((mut pass, image, view, allocation)) = self.aa.take() {
                 // SAFETY: the device was idled at the top of this function.
                 unsafe {
                     self.device.destroy_image_view(view, None);
@@ -1137,8 +1156,17 @@ impl Viewer {
                     vk::ImageAspectFlags::COLOR,
                 )?;
                 // SAFETY: the device is idle, so no command buffer references
-                // the set being rewritten.
-                unsafe { pass.set_source(&self.device, view) };
+                // the sets being rewritten or the edge image being rebuilt.
+                unsafe {
+                    pass.rebind(
+                        &self.device,
+                        allocator,
+                        &self.names,
+                        view,
+                        extent.width,
+                        extent.height,
+                    )?;
+                }
                 self.aa = Some((pass, image, view, allocation));
             }
         }
@@ -1184,7 +1212,7 @@ impl Drop for Viewer {
             if let (Some((mut pass, image, view, allocation)), Some(allocator)) =
                 (self.aa.take(), self.allocator.as_mut())
             {
-                pass.destroy(&self.device);
+                pass.destroy(&self.device, allocator);
                 self.device.destroy_image_view(view, None);
                 self.device.destroy_image(image, None);
                 let _ = allocator.free(allocation);
@@ -1385,9 +1413,16 @@ fn create_aa_target(
     let view = create_view(device, image, format, vk::ImageAspectFlags::COLOR)?;
     // The swapchain's format, not the offscreen path's: dynamic rendering bakes
     // the attachment format into the pipeline, and this one writes the window.
-    let pass = crate::cmaa2::Cmaa2::new(device, names, cache, format)?;
-    // SAFETY: nothing has been submitted against this set.
-    unsafe { pass.set_source(device, view) };
+    let pass = crate::cmaa2::Cmaa2::new(
+        device,
+        allocator,
+        names,
+        cache,
+        format,
+        view,
+        extent.width,
+        extent.height,
+    )?;
     names.set(image, "loom.viewer_scene");
     names.set(view, "loom.viewer_scene.view");
     Ok((pass, image, view, allocation))
