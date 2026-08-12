@@ -309,12 +309,10 @@ fn shimmer() -> std::process::ExitCode {
     let out = root.join("target/xtask-shimmer");
     let _ = std::fs::create_dir_all(&out);
 
-    // A slow pan: twelve frames over three degrees is a quarter of a degree
-    // each, which is roughly what a hand on a mouse does in one frame. Fast
-    // enough that a stable image still changes a little, slow enough that any
-    // large change is instability rather than motion.
+    // Twelve frames, camera bolted down, a fifth of a second of wind between
+    // each. See the note on `--step` below for why the camera stopped moving.
     const FRAMES: u32 = 12;
-    const SPIN: &str = "3";
+    const SPIN: &str = "0";
     const SIZE: &str = "640x400";
 
     // **Only comparable within a scene.** The measurement counts every pixel
@@ -322,16 +320,14 @@ fn shimmer() -> std::process::ExitCode {
     // scene scores higher than a bare one without being less stable. What it
     // is for is the ratio between two settings of the thing under
     // investigation, on the same scene, with everything else held still.
-    println!("pan of {SPIN} degrees over {FRAMES} frames at {SIZE}.");
+    println!("{FRAMES} frames at {SIZE}, camera static (spin {SPIN}), sim advancing.");
     println!("Compare a scene against ITSELF under another setting; across scenes it means nothing.");
     println!();
     println!("scene                     flicker   changed%   (flicker is the AA number)");
     let mut failed = false;
-    for (name, scene, _) in GOLDEN.iter().chain(std::iter::once(&(
-        "meadow",
-        "assets/test/meadow.loom",
-        &[] as &[&str],
-    ))) {
+    // `meadow` used to be chained on here because it was not in `GOLDEN`. It is
+    // now, and leaving the chain in printed it twice.
+    for (name, scene, _) in &GOLDEN {
         if !root.join(scene).exists() {
             continue;
         }
@@ -350,11 +346,32 @@ fn shimmer() -> std::process::ExitCode {
                 &FRAMES.to_string(),
                 "--spin",
                 SPIN,
-                // No simulation between frames: this measures what the camera
-                // does to the image, not what the scene does. Mixing the two
-                // would make a smoke plume read as shimmer.
+                // **The simulation advances and the camera does not.** This is
+                // the reverse of how it started, and the reversal is the whole
+                // point.
+                //
+                // It began as a camera-motion metric: pan slowly, hold the
+                // scene still, on the theory that a stable image reprojects
+                // smoothly and only unstable pixels change. That theory is
+                // wrong for sub-pixel geometry. `|b - (a+c)/2|` cancels motion
+                // that is linear *in pixel value*, which holds for smooth
+                // gradients and never for a field of blades translating a
+                // couple of pixels a frame — a pure pan at the authored camera
+                // measured 5.65 with 52% of pixels changing, entirely swamped.
+                //
+                // Holding the camera still and letting the wind blow measures
+                // the artifact that actually afflicts grass: twinkle at rest.
+                // It has a perfect control — `cave` has no animated geometry and
+                // scores exactly 0.000 — and it is discriminating: `meadow`
+                // scores ~0.54 against that zero.
+                //
+                // The cost is that anything else that animates now scores, so
+                // `smoke` reads as unstable when it is merely a smoke plume.
+                // That is acceptable because this number was never comparable
+                // across scenes anyway; it is a scene against itself under two
+                // settings.
                 "--step",
-                "0",
+                "12",
             ],
         );
         match rendered {

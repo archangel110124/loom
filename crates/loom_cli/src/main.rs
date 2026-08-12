@@ -613,13 +613,77 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     // Orbit from wherever the still would have looked, so a
                     // fly-through and a still of the same scene are the same
                     // shot at frame zero.
+                    //
+                    // **An authored camera is honoured here, and it was not,
+                    // which invalidated the entire anti-aliasing investigation
+                    // this tool exists to run.** This path used to frame whole
+                    // scene bounds unconditionally. For `meadow` that is about
+                    // 38 m back — past the 55 m density falloff's reach, at a
+                    // resolution where a blade is a third of a pixel — so every
+                    // fly-through and shimmer frame of the project's flagship
+                    // grass scene was *a bare green slab with no grass in it*.
+                    // The flicker metric then dutifully reported that removing
+                    // grass reduced flicker, and the AA table was tuned against
+                    // it. A metric that frames its own shot will eventually
+                    // stop containing the subject, and then it rewards whatever
+                    // deletes the subject fastest.
+                    //
+                    // So: an authored camera **pans**. The eye stays exactly
+                    // where the scene put it and the view direction rotates
+                    // about it.
+                    //
+                    // Rotating the *eye* about the target instead was the first
+                    // attempt and it is wrong for the same underlying reason the
+                    // old code was: at an authored first-person camera the
+                    // target is metres away, so orbiting the eye around it
+                    // translates the camera a third of a metre per frame, and
+                    // translation through a dense near field is the largest
+                    // parallax signal available. It measured 5.589 with 52% of
+                    // pixels changing — swamped. A pure rotation about a fixed
+                    // eye produces no parallax at all: a stable image simply
+                    // reprojects, which `|b - (a+c)/2|` cancels, and only pixels
+                    // that genuinely twinkle survive. That is also what a hand
+                    // on a mouse actually does.
+                    //
+                    // Scenes with no camera keep the whole-scene framing, which
+                    // is right for them.
+                    // **The wind clock has to advance, and it did not.** The
+                    // environment was built once from `--sim` and never touched
+                    // again, so every frame of a fly-through sampled the wind at
+                    // the same instant: the blades were frozen while the camera
+                    // moved around them. `cargo xtask flythrough` exists
+                    // specifically to catch motion artifacts in vegetation, and
+                    // it had never once shown the vegetation moving. With a
+                    // static camera the whole sixteen-frame sequence was
+                    // byte-identical.
+                    #[allow(clippy::cast_precision_loss)]
+                    let moment = wind_seconds + elapsed as f32 / 60.0;
+                    renderer.environment = environment_with_wind(&world, &weather, moment);
+
                     #[allow(clippy::cast_precision_loss)]
                     let turn = spin * index as f32;
-                    let camera = frame_scene(
-                        &node_bounds(&world, &library),
-                        yaw.unwrap_or(35.0) + turn,
-                        pitch.unwrap_or(28.0),
-                    );
+                    let camera = match world.active_camera().filter(|_| !orbiting) {
+                        Some(view) => {
+                            let eye = Vec3::from_array(view.eye);
+                            let ahead = Vec3::from_array(view.target) - eye;
+                            let (sin, cos) = turn.to_radians().sin_cos();
+                            Camera {
+                                eye,
+                                target: eye
+                                    + Vec3::new(
+                                        ahead.x.mul_add(cos, ahead.z * sin),
+                                        ahead.y,
+                                        ahead.z.mul_add(cos, -(ahead.x * sin)),
+                                    ),
+                                fov_y_degrees: view.fov_y_degrees,
+                            }
+                        }
+                        None => frame_scene(
+                            &node_bounds(&world, &library),
+                            yaw.unwrap_or(35.0) + turn,
+                            pitch.unwrap_or(28.0),
+                        ),
+                    };
 
                     renderer
                         .render_to_png(
