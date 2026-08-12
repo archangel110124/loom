@@ -217,6 +217,36 @@ This is the outcome that justifies having built the instrument before the
 optimisation, and it is worth noticing that the intuition it overturned was the
 design document's own sequencing.
 
+### 00:30 — piece A built: grass reads the terrain. Critic dispatched; my own read first
+
+Builder returned. The mechanism works: `GroundGrid` bakes a height grid per
+field from the scene's voxel SDF (bilinear height, central-difference normal,
+concavity-proxy flow), and `grass_blades` feeds it through the existing
+`&dyn Fn` seam, so `loom_grass` still has no `loom_voxel` dependency. Coverage
+measures 0.625 flat / 0.365 on a 38° flank / 0.982 in the basin. Bake for the
+new scene is 0.14 s against 2.98 s for the naive per-candidate march — the
+builder measured the alternative rather than asserting the grid was necessary,
+which is the right instinct.
+
+**My own judgement of the render, recorded before the critic reports**, so the
+two are independent:
+
+The terrain response is real and visible — bare dome flank, grass on the cap, a
+lush ring around the basin. As a proof that the plumbing works, it passes.
+
+**Against the stated bar — UE5 landscape grass — it does not hold up yet**, and
+the reason is a single authored constant rather than the new code. `slope_cutoff`
+is 0.7 (45°) and `loom_grass::coverage` fades it out over 0.15, so grass goes
+from full to nothing across a narrow band of slope. On a dome that renders as a
+**hard shaved ring** — a clean, obviously synthetic boundary. Real hillsides
+carry grass well past 38°, thinning gradually and breaking up irregularly rather
+than stopping along a contour line. The shot reads as grass stuck to a shape
+rather than a meadow on a hill.
+
+That is a *tuning and shaping* gap, not a plumbing gap, and it is exactly the
+kind of thing the piece should be sent back for rather than accepted. Waiting for
+the critic before acting, so I am not grading against my own preconception.
+
 **W2 will follow `loom_field::noise`'s precedent, not S2's `Expr` tree.** The
 water doc's recommended Option A is "write it once in Rust, emit the Slang from
 `build.rs` as text", which is exactly what `noise::slang()` already does. S2's
