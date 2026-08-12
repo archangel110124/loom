@@ -889,6 +889,54 @@ float grassCullDraw(GrassBlade blade) {
     return float(loom_hash(loom_hash(q.x) + loom_hash(q.z) + q.y) >> 8) * (1.0 / 16777216.0);
 }
 
+/// The pixel floor below which a blade is widened. **Zero disables it, and it
+/// is zero — this is the third time this trick has been measured and the third
+/// time it has failed to earn its place.** Do not run the experiment a fourth
+/// time without reading this.
+///
+/// The first two rounds were measured on a broken instrument: `shimmer` framed
+/// whole-scene bounds and photographed a bare slab of soil with every blade
+/// already culled. Those numbers are void. This table is `cargo xtask shimmer`
+/// on the fixed instrument — camera at the scene's authored eye, simulation
+/// advancing, 4x MSAA, 640x400 — and the run is deterministic, so a repeat of
+/// the same row reproduces to the last digit and every difference below is
+/// signal rather than noise:
+///
+///     floor    meadow   grass_slope
+///     off       2.712     1.545      <- shipped
+///     0.8 px    2.700     1.569
+///     1.0 px    2.688     1.563
+///     1.4 px    2.665     1.562
+///     2.0 px    2.631     1.554
+///     3.0 px    2.583     1.548
+///     4.0 px    2.518     1.554
+///
+/// **It helps `meadow` monotonically and hurts `grass_slope` at every floor.**
+/// A tool that improves one grass scene by 0.9% and makes the other worse is
+/// not a tool. And the two are not symmetric by accident: `meadow`'s camera
+/// sits in the field, so a 0.02 m blade spans 8.98/d pixels here and the floor
+/// only bites past 9 m at 1 px; `grass_slope` looks down a 15–40 m slope where
+/// almost every blade is sub-pixel, so the floor widens the whole field — and
+/// that is the case it loses.
+///
+/// **The wins that are large enough to see are uniform widening in disguise.**
+/// Widening every blade in the scene file gives 0.035 m -> 2.635 and
+/// 0.060 m -> 2.338 on `meadow`; a 2 px floor gives 2.631, matching the
+/// gentlest of those while making the far half of the field up to 3x too wide.
+/// At 4 px the mid-distance visibly mats into tufts and stops reading as
+/// individual blades. The selectivity the trick is sold on does not buy a
+/// better trade than simply authoring a slightly wider blade.
+///
+/// One interaction was tested and ruled out rather than assumed: weighting
+/// `widen` by `fade`, so the clamp cannot re-inflate a blade the density
+/// falloff is walking to zero, changes the table by at most 0.001. Most of
+/// `grass_slope` is at full fade, so there is nothing to fight — the
+/// regression is the clamp on its own merits.
+///
+/// The code stays because it is correct, cheap when off (the branch folds on a
+/// literal) and the measurement above is only reproducible if it exists.
+static const float GRASS_MIN_PIXELS = 0.0;
+
 [shader("vertex")]
 GrassOutput grassVertexMain(uint vertexID: SV_VertexID) {
     uint bladeIndex = vertexID / GRASS_VERTS;
@@ -975,27 +1023,26 @@ GrassOutput grassVertexMain(uint vertexID: SV_VertexID) {
     //     soft fade + alpha-to-coverage      0.212
     //     soft fade + minimum-width clamp    0.419
     //
-    // **The previous round blamed the wrong tool.** It measured a minimum
-    // screen-space width clamp and a hard cull together, got 0.431, and
-    // concluded the cull's pop was the suspect. Separated, the cull is the
-    // single largest win available — 0.354 to 0.234 on its own — and the
-    // widening is what nearly doubles the flicker. The research pass calls
-    // that clamp the most important trick for distant grass; on true geometry
-    // blades at 4x MSAA it is measured worse, twice, and it is gone.
+    // **Those absolute values are void and the ranking is unconfirmed.** They
+    // were taken before `shimmer` was fixed to use each scene's authored
+    // camera, so they photographed a bare slab of soil from 38 m with the
+    // falloff having already deleted every blade. `meadow` measures 2.712 on
+    // the working instrument, not 0.137. The falloff has not been re-measured
+    // against no-falloff since; the table is kept only because it records what
+    // was tried and in what order, and re-running it is a cheap loose end.
     //
-    // Two things that did not earn their place and are recorded here so the
-    // experiment is not run a third time:
+    // What HAS been re-measured is the last row. See `GRASS_MIN_PIXELS` above:
+    // on the working instrument the clamp helps `meadow` monotonically and
+    // hurts `grass_slope` at every floor, which is a third negative result
+    // rather than the reversal the old numbers made it look like.
     //
-    //   **Minimum screen-space width + density compensation.** Widening a
-    //   sub-pixel blade recruits more pixels into the flicker rather than
-    //   steadying any of them; MSAA underneath does not rescue it. It also
-    //   turns out to be answering a question nobody asked — the field does not
-    //   visibly thin when 88% of distant blades are dropped, because at that
-    //   range the survivors already overlap.
+    // One thing that did not earn its place and is recorded here so the
+    // experiment is not run again:
     //
     //   **Alpha-to-coverage on the fading blade.** 0.002, which is under this
     //   metric's resolution, because the geometric shrink has already taken
-    //   the blade's area to zero by the time its opacity would matter.
+    //   the blade's area to zero by the time its opacity would matter. Also
+    //   pre-fix, and so worth exactly what the rest of the table is worth.
     // -----------------------------------------------------------------------
     float viewDistance = length(push.environment[0].eye.xyz - base);
 
@@ -1041,7 +1088,38 @@ GrassOutput grassVertexMain(uint vertexID: SV_VertexID) {
     point *= fade;
 
     float3 side = float3(-facing.y, 0.0, facing.x);
-    float halfWidth = width * 0.5 * (1.0 - t * t) * fade;
+
+    // -----------------------------------------------------------------------
+    // **Minimum screen-space width**, re-measured on an instrument that can
+    // see the grass. See `GRASS_MIN_PIXELS` below for the table and verdict.
+    //
+    // The measurement is a projection of two world points, never a term of
+    // the matrix. An early version took the vertical scale from `mvp[1][1]`,
+    // which is the *view*-projection: the blade then carried the camera's
+    // rotation and grew into a sheet whenever the camera turned. Projecting
+    // `base` and `base + side * width` and measuring the gap between them is
+    // exact and does not care how the matrix is laid out.
+    //
+    // **Measured before the fade, applied as a factor.** A blade mid-fade is
+    // sub-pixel by design — the falloff is walking it to zero, which is worth
+    // 0.214 -> 0.137 on its own — so clamping its *faded* width would floor
+    // exactly the blades the shipped tool is removing. The floor is computed
+    // from the blade's intrinsic width and the fade still multiplies to zero.
+    // -----------------------------------------------------------------------
+    float widen = 1.0;
+    if (GRASS_MIN_PIXELS > 0.0) {
+        float4x4 viewProj = push.objects[push.objectOffset].mvp;
+        float4 clipA = mul(viewProj, float4(base, 1.0));
+        float4 clipB = mul(viewProj, float4(base + side * width, 1.0));
+        float2 ndcA = clipA.xy / max(clipA.w, 1e-4);
+        float2 ndcB = clipB.xy / max(clipB.w, 1e-4);
+        float pixelsWide = length((ndcB - ndcA) * env.viewport.xy * 0.5);
+        if (pixelsWide > 1e-4) {
+            widen = max(1.0, GRASS_MIN_PIXELS / pixelsWide);
+        }
+    }
+
+    float halfWidth = width * 0.5 * (1.0 - t * t) * fade * widen;
 
     // A fully faded blade has zero extent in every direction, so all six of its
     // corners land on `base` and the triangles are degenerate. A vertex shader

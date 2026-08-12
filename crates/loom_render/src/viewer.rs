@@ -692,6 +692,18 @@ impl Viewer {
             result?;
         }
         let batches = batch_by_mesh(&sorted);
+        // **Before the upload, not after**, the same as the offscreen path. The
+        // camera moved into this buffer when the push block ran out of room, and
+        // it was being written a line *below* the upload — so the window drew
+        // every frame with the previous frame's eye. The viewport was never
+        // written at all: it sat at its 1x1 default, which the grass shader
+        // reads as "every blade is a hundred pixels wide".
+        self.environment.eye = camera.eye.extend(0.0).to_array();
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.environment.viewport =
+                [self.extent.width as f32, self.extent.height as f32, 0.0, 0.0];
+        }
         write_slice(
             self.environment_alloc
                 .as_ref()
@@ -736,9 +748,6 @@ impl Viewer {
             object_offset: 0,
             inv_view_proj: view_proj.inverse().to_cols_array(),
         };
-        // The camera moved into the environment buffer when the push block ran
-        // out of room; the viewer has to fill it there now.
-        self.environment.eye = camera.eye.extend(0.0).to_array();
         let sky = self.sky_pipeline;
         let particle_pipeline = self.particle_pipeline;
         let grass_pipeline = self.grass_pipeline;
