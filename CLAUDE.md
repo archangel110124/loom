@@ -57,10 +57,13 @@ cargo xtask image                         # 4. renders match their reference PNG
 
 `scripts/green.sh` runs all four. Check 4 is S1 of the implementation order and
 is new: until it existed, "golden images" was aspirational and every render in
-this project was verified by a human opening the PNG. It renders six scenes
+this project was verified by a human opening the PNG. It renders eight scenes
 chosen for coverage of *rendering paths* — mesh, bindless textures, voxels,
-alpha particles, additive particles, an authored-dark environment — and
-compares them to `tests/references/` with a calibrated tolerance.
+alpha particles, additive particles, an authored-dark environment, a whole
+game, and vertex-shader-generated grass — and compares them to
+`tests/references/` with a calibrated tolerance. **Adding a rendering path
+means adding a scene to `GOLDEN`**, or the gate reports a full pass without
+ever having looked at it; grass shipped two slices before anyone noticed.
 
 **`cargo xtask image --bless` accepts new references.** Do it deliberately and
 read the diff: `tests/references/MANIFEST.txt` records each reference's hash,
@@ -237,18 +240,57 @@ change, so your edits appear live. Two consequences:
 > barrier-list test in `lib.rs` now names all four transitions, which is how that ownership stays
 > visible rather than assumed.
 >
-> **Slice 5: the AA investigation has its first real result, and it is a negative one.**
-> Minimum screen-space width clamping — which the research pass calls the single most important
-> trick for distant grass — **makes flicker worse on its own**: 0.424 with nothing, 0.479 with the
-> pixel floor. That is structural, not a tuning failure. Rasterisation without multisampling is
-> binary at the pixel centre, so widening a sub-pixel blade recruits *more* pixels into the
-> flicker rather than steadying it. The trick is "widen **and** reduce alpha"; the alpha half needs
-> alpha-to-coverage, which needs MSAA. That was the hypothesis; it was then tested on top of 4x
-> MSAA and is **also wrong** — 0.431 against 0.354 for MSAA alone. The remaining suspect is the
-> density falloff rather than the widening: its cull is a hard threshold on view distance, so
-> blades pop as the camera moves, and a pop is flicker by definition. **Next to try: a smooth fade
-> to zero height instead of a hard cull, plus actual alpha-to-coverage.** The code stays gated off
-> behind `GRASS_AA` in `scene.slang`, because measured-worse is measured-worse.
+> **Slice 7: the AA investigation is finished, and density falloff won it.** Every number is
+> `cargo xtask shimmer`'s flicker on `meadow` at 4x MSAA, each row one change from its neighbour:
+>
+>     no cull (every blade)              0.354
+>     hard cull, 12% surviving at range  0.234
+>     + soft fade                        0.214
+>     + fading all the way to none       0.137   <- shipped
+>     soft fade + alpha-to-coverage      0.212
+>     soft fade + minimum-width clamp    0.419
+>
+> **0.354 → 0.137 on top of MSAA**, and the mechanism is one screenful of shader. Blades thin with
+> distance, chosen by a stable hash of the blade's own position so the survivors never change as
+> the camera moves, and each one leaves by shrinking uniformly to a point across a band 8% of the
+> population wide.
+>
+> **The previous round blamed the wrong tool, and the lesson is the general one.** It measured a
+> minimum-width clamp and a hard cull *together*, got 0.431, and concluded the cull's pop was the
+> suspect. Separated, the cull is the single largest win available and the widening is what nearly
+> doubles the flicker. Two tools measured as one is not a measurement. The clamp is now **deleted,
+> not gated** — the research pass calls it the most important trick for distant grass, and on true
+> geometry blades it is measured worse twice, decisively, with the confound removed.
+>
+> **Fading to *none* rather than to a floor is most of the win** (0.214 → 0.137). A floor leaves a
+> fixed fraction of blades scattered across the far field, and a sparse scatter of sub-pixel blades
+> is noisier than either a full field or an empty one — each is a lone twinkling pixel with nothing
+> around it to average against.
+>
+> **That only works because the ground under a grass field is authored the colour of grass**, and
+> that is a scene rule rather than an engine one. `meadow`'s soil was brown; from the flythrough's
+> orbit the thinned field read as ploughed earth. Dark green fixes it and still reads as shadowed
+> ground between blades close up. **Any scene with a `Grass` field owes its ground the same.**
+>
+> **Alpha-to-coverage bought 0.002 and was removed with it.** The geometric shrink has already
+> taken a blade's area to zero by the time its opacity would matter, so there was nothing left for
+> coverage to do. The pipeline state, the extra varying and the RGB-only write mask it needed all
+> came back out.
+>
+> **A pan cannot measure a pop; only a dolly can**, and the dolly is swamped by near-field parallax
+> — six variants landed within 2% of each other on it. So the fade's *smoothness* is still unmeasured;
+> what is measured is that thinning the field helps enormously and that a soft edge is worth a
+> further 9% over a hard one.
+>
+> **`meadow` is in `GOLDEN` now.** It was not, and the image gate had been reporting seven matches
+> without looking at a single blade — grass is the only rendering path whose geometry exists solely
+> in the vertex shader, so nothing else covers it.
+>
+> **Slice 5 (superseded, kept for the reasoning):** minimum screen-space width clamping makes
+> flicker worse on its own — 0.424 with nothing, 0.479 with the pixel floor. Rasterisation without
+> multisampling is binary at the pixel centre, so widening a sub-pixel blade recruits *more* pixels
+> into the flicker rather than steadying it. The hypothesis that it needed MSAA underneath was
+> tested and also wrong.
 >
 > **`cargo xtask shimmer` now reports flicker, not changed pixels**, because changed pixels was
 > fooled by exactly this experiment: widening blades covers more screen, changes more pixels, and
@@ -269,14 +311,15 @@ change, so your edits appear live. Two consequences:
 > geometry-over-cards is already decided. So the GPU path is not *after* the AA work — it is a
 > **prerequisite** for most of it.
 >
-> **Next, in this order:** vertex-shader blade generation (which also brings the wind bend — same
-> piece of work), then MSAA, then width clamping and density falloff with `shimmer` judging each,
-> then the placement compute pass and indirect draw for scale, then LOD and culling. If the
-> non-temporal toolkit still proves insufficient, adding a full-screen AA pass is a scope decision
-> needing an ADR, not drift.
+> **Next, in this order:** the placement compute pass and indirect draw for scale, then LOD and
+> culling. Vertex-shader blade generation, MSAA and the AA toolkit are done. **The non-temporal
+> toolkit proved sufficient** — 0.354 → 0.137 with density falloff on top of 4x MSAA — so the
+> full-screen AA pass that was budgeted for is not needed, and adding one is now a scope decision
+> needing an ADR rather than a contingency already agreed.
 >
 > **Grass is rendering-only and outside the sim hash**, the same exemption rain gets. Blades are
-> never ECS entities and the scene shows one node for the field, never the blades.
+> never ECS entities and the scene shows one node for the field, never the blades. **Verified, not
+> assumed**: the determinism hash is `b478ea4ac2622d32` across every change in P2 slices 5–7.
 >
 > **The only thing wind visibly drives is particles**, via `wind_response` on `ParticleEmitter` —
 > a coupling toward the air's velocity, **zero by default** so every scene authored before wind

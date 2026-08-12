@@ -958,97 +958,97 @@ GrassOutput grassVertexMain(uint vertexID: SV_VertexID) {
     tangent = length(tangent) > 1e-6 ? normalize(tangent) : float3(0, 1, 0);
 
     // -----------------------------------------------------------------------
-    // The two tools that make thin geometry survive without temporal AA.
-    // They are one mechanism, not two, and either alone is wrong.
+    // **Density falloff with a soft edge**, which is the whole of the
+    // non-temporal AA toolkit that survived measurement.
     //
-    // **Density falloff.** Far away most blades are dropped, chosen by a hash
-    // of the blade's own position so the survivors never change as the camera
-    // moves. Dropping them alone would visibly thin the field; hence the
-    // second half.
+    // Far away most blades are dropped, chosen by a hash of the blade's own
+    // position so the survivors never change as the camera moves, and each one
+    // leaves by shrinking rather than by vanishing at a threshold.
     //
-    // **Minimum screen-space width.** A blade narrower than about a pixel does
-    // not shrink smoothly, it twinkles — covering a pixel centre one frame and
-    // missing it the next. A pixel floor trades a slightly too-fat blade for
-    // one that stops flickering, and survivors widen by exactly the factor the
-    // falloff removed, so apparent coverage is preserved rather than guessed.
+    // Every number below is `cargo xtask shimmer`'s flicker on `meadow`, at 4x
+    // MSAA, each variant differing from its neighbour by one thing:
+    //
+    //     no cull (every blade)              0.354
+    //     hard cull, 12% surviving at range  0.234
+    //     + soft fade                        0.214
+    //     + fading all the way to none       0.137   <- shipped
+    //     soft fade + alpha-to-coverage      0.212
+    //     soft fade + minimum-width clamp    0.419
+    //
+    // **The previous round blamed the wrong tool.** It measured a minimum
+    // screen-space width clamp and a hard cull together, got 0.431, and
+    // concluded the cull's pop was the suspect. Separated, the cull is the
+    // single largest win available — 0.354 to 0.234 on its own — and the
+    // widening is what nearly doubles the flicker. The research pass calls
+    // that clamp the most important trick for distant grass; on true geometry
+    // blades at 4x MSAA it is measured worse, twice, and it is gone.
+    //
+    // Two things that did not earn their place and are recorded here so the
+    // experiment is not run a third time:
+    //
+    //   **Minimum screen-space width + density compensation.** Widening a
+    //   sub-pixel blade recruits more pixels into the flicker rather than
+    //   steadying any of them; MSAA underneath does not rescue it. It also
+    //   turns out to be answering a question nobody asked — the field does not
+    //   visibly thin when 88% of distant blades are dropped, because at that
+    //   range the survivors already overlap.
+    //
+    //   **Alpha-to-coverage on the fading blade.** 0.002, which is under this
+    //   metric's resolution, because the geometric shrink has already taken
+    //   the blade's area to zero by the time its opacity would matter.
     // -----------------------------------------------------------------------
     float viewDistance = length(push.environment[0].eye.xyz - base);
 
-    // **Both tools are off, and the numbers are why.** Measured with
-    // `cargo xtask shimmer`, which reports temporal flicker rather than
-    // changed pixels:
-    //
-    //     neither                     0.424
-    //     minimum width only          0.479
-    //     minimum width + falloff     0.481
-    //
-    // Widening a sub-pixel blade makes things WORSE without MSAA, and the
-    // reason is structural rather than a tuning failure. Rasterisation without
-    // multisampling is binary at the pixel centre: a blade thinner than a
-    // pixel covers some centres and misses others, and widening it to a pixel
-    // floor does not reduce that — it recruits MORE pixels into the flicker.
-    //
-    // That was the first reading, and the obvious conclusion — "it needs MSAA
-    // underneath it" — was then tested and is ALSO wrong:
-    //
-    //     4x MSAA alone              0.354
-    //     4x MSAA + these tools      0.431
-    //
-    // Worse than 4x alone, and worse than no MSAA at all. The remaining
-    // suspect is the density falloff rather than the widening: the cull is a
-    // HARD threshold on view distance, so blades pop in and out as the camera
-    // moves, and a pop is flicker by definition. The next thing to try is a
-    // smooth fade — shrink a blade toward zero height as it approaches the
-    // threshold — together with alpha-to-coverage for the opacity half the
-    // research pass actually specifies. Until then these stay off, because
-    // measured-worse is measured-worse.
-    static const bool GRASS_AA = false;
-
+    // Blades begin thinning at NEAR and the last of them is gone by FAR. These
+    // are metres, not screen space, and that is a simplification with a known
+    // ceiling: the right quantity is a blade's *apparent* size, so a narrow FOV
+    // or a much taller species will want these retuned rather than inherited.
     const float GRASS_NEAR = 8.0;
     const float GRASS_FAR = 55.0;
     float falloff = saturate((viewDistance - GRASS_NEAR) / (GRASS_FAR - GRASS_NEAR));
-    float keep = GRASS_AA ? lerp(1.0, 0.12, falloff) : 1.0;
-    bool culled = grassCullDraw(blade) > keep;
+
+    // **Ending at zero rather than at a floor was worth 0.214 -> 0.137.** A
+    // floor leaves a fixed fraction of blades scattered across the far field,
+    // and a sparse scatter of sub-pixel blades is *noisier* than either a full
+    // field or none — every one of them is a lone twinkling pixel with nothing
+    // around it to average against. Taking the fraction to zero costs nothing
+    // in the authored shot, where the farthest blade is 16m away and barely
+    // into the falloff at all, and it is what makes the distant field resolve
+    // to flat ground instead of to static.
+    //
+    // Which only works because the ground under a grass field is authored the
+    // colour of grass. That is the other half of density falloff and it is a
+    // scene-authoring rule, not an engine one: see the note on `Soil` in
+    // `assets/test/meadow.loom`.
+    //
+    // **The band is in draw space, not metres**, so the same 8% of the
+    // population is mid-fade at every range and the transition never becomes a
+    // visible ring of short grass. `grassCullDraw` is a stable hash of the
+    // blade's own position, so which blades go, and in what order, never
+    // changes as the camera moves — only how far each has got through its own
+    // exit. Starting the ramp above 1.0 is what keeps near grass untouched: a
+    // draw is in [0,1), so a threshold of 1.0 + BAND leaves every near blade
+    // above the top of its own band and at full height.
+    const float FADE_BAND = 0.08;
+    float keep = (1.0 + FADE_BAND) * (1.0 - falloff);
+    float fade = saturate((keep - grassCullDraw(blade)) / FADE_BAND);
+
+    // A uniform scale about the base, not a height scale. Scaling height alone
+    // would leave a full-width blade lying on the ground at the end of its
+    // fade — a little green mat, which is more visible than the pop it
+    // replaced. Scaling everything means the blade approaches a point, and a
+    // point covers no pixels.
+    point *= fade;
 
     float3 side = float3(-facing.y, 0.0, facing.x);
-    float halfWidth = width * 0.5 * (1.0 - t * t);
+    float halfWidth = width * 0.5 * (1.0 - t * t) * fade;
 
-    // Widen the survivors by what the falloff removed: apparent density is
-    // blades-per-area times width, so this holds it constant. Capped, because
-    // the far end of the falloff would otherwise widen a blade eightfold and
-    // turn a distant field into overlapping sheets.
-    const float MAX_WIDEN = 3.0;
-    halfWidth *= min(1.0 / max(keep, 0.05), MAX_WIDEN);
-
-    // **The pixel floor, measured rather than derived.** The first attempt
-    // took the vertical scale from `mvp[1][1]`, which is wrong: that is the
-    // *view*-projection, so the element carries the camera's rotation as well
-    // as the FOV, and a blade grew to a sheet whenever the camera turned.
-    // Projecting two points and measuring the gap between them is exact and
-    // does not care how the matrix is laid out.
-    float4x4 viewProj = push.objects[push.objectOffset].mvp;
-    float4 clipA = mul(viewProj, float4(base, 1.0));
-    float4 clipB = mul(viewProj, float4(base + side * width, 1.0));
-    float2 ndcA = clipA.xy / max(clipA.w, 1e-4);
-    float2 ndcB = clipB.xy / max(clipB.w, 1e-4);
-    float pixelsWide = length((ndcB - ndcA) * push.environment[0].viewport.xy * 0.5);
-
-    // A blade thinner than this twinkles instead of shrinking. Widen it to the
-    // floor and no further — the point is to stop the flicker, not to make
-    // distant grass fat.
-    const float MIN_PIXELS = 1.4;
-    if (GRASS_AA && pixelsWide > 1e-4 && pixelsWide < MIN_PIXELS) {
-        halfWidth *= MIN_PIXELS / pixelsWide;
-    }
-
+    // A fully faded blade has zero extent in every direction, so all six of its
+    // corners land on `base` and the triangles are degenerate. A vertex shader
+    // cannot decline to emit; degenerate triangles are discarded before
+    // rasterisation and cost nothing downstream, which is the same trick the
+    // hard cull used and the reason no branch is needed here.
     float3 world = base + point + side * halfWidth * edge;
-
-    // A culled blade collapses to a point rather than being skipped — a vertex
-    // shader cannot decline to emit. Degenerate triangles are discarded before
-    // rasterisation and cost nothing downstream.
-    if (culled) {
-        world = base;
-    }
 
     // **Not the geometric normal**, deliberately — a flat blade lit honestly
     // reads as paper. Tilted outward from the spine and blended toward the

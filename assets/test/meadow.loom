@@ -47,8 +47,14 @@ transform = { pos = [0.0, -0.06, 0.0], scale = [22.0, 0.12, 22.0] }
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
 
+  # **Dark green, not brown, and that is the other half of the density
+  # falloff.** Blades thin out with distance until the field is mostly ground,
+  # so the ground has to already be the colour of a meadow or the thinning
+  # reads as bare dirt appearing. It was brown, and from the flythrough's
+  # orbit the field looked ploughed. Still dark enough to read as the shadowed
+  # earth between blades close up, which is what it is.
   [node.components.Material]
-  albedo = [0.13, 0.15, 0.08]
+  albedo = [0.16, 0.21, 0.10]
   roughness = 1.0
 
 [[node]]

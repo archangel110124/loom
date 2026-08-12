@@ -91,7 +91,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 7] = [
+const GOLDEN: [(&str, &str, &[&str]); 8] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -106,6 +106,13 @@ const GOLDEN: [(&str, &str, &[&str]); 7] = [
         "assets/games/proving_ground.loom",
         &["--sim", "150"],
     ),
+    // **Grass is its own rendering path** and was missing from this list until
+    // the density falloff landed and the gate reported seven matches without
+    // having looked at a single blade. Nothing else here draws geometry that
+    // exists only in the vertex shader — no vertex buffer, no index buffer, the
+    // triangles derived from `SV_VertexID` — so nothing else would catch a
+    // regression in it.
+    ("meadow", "assets/test/meadow.loom", &[]),
 ];
 
 /// Every reference renders at this size.
