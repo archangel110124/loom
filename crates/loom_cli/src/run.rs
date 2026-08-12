@@ -502,6 +502,19 @@ impl App {
         let Some(viewer) = self.viewer.as_mut() else {
             return;
         };
+        // The same silent-truncation trap the offscreen path has, except here
+        // it lands in the human's console rather than on stderr, which is where
+        // they are actually looking.
+        let capacity = viewer.grass_capacity();
+        if blades.len() > capacity && capacity > 0 {
+            crate::log::error(format!(
+                "the grass field needs {} blades and the buffer holds {capacity}; {} were \
+                 dropped in generation order, so expect a hard edge across the field. \
+                 Reduce density or half_extent.",
+                blades.len(),
+                blades.len() - capacity
+            ));
+        }
         match viewer.set_grass(&blades) {
             Ok(()) => self.grass_uploaded = key,
             Err(e) => crate::log::error(format!("could not upload the grass: {e}")),

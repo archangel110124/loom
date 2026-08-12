@@ -568,6 +568,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         // and the vertex shader re-expands and re-bends them every frame.
         let blades = grass_blades(&scene);
         if !blades.is_empty() {
+            warn_if_grass_truncated(blades.len(), renderer.grass_capacity());
             renderer.set_grass(&blades).map_err(|e| e.to_string())?;
         }
 
@@ -1201,6 +1202,34 @@ pub(crate) fn grass_key(scene: &Scene) -> String {
 /// pure function of its coordinates, so this is not per-frame work — it is
 /// uploaded once. What happens every frame is the Bezier expansion and the
 /// wind bend, in the vertex shader, which is what a baked mesh could not do.
+/// Say so when the blade buffer could not hold the field.
+///
+/// **The failure this prevents is the most visible one a scene author can hit,
+/// and it used to be silent.** Past capacity the renderer drops the tail, and
+/// tiles are generated in z-major order, so what gets dropped is a contiguous
+/// spatial slab rather than a thin scatter — with a camera in the field that is
+/// the *near* half, and the render comes back with a straight horizontal edge
+/// across the middle of the image, `"ok": true`, and exit code 0.
+///
+/// `Grass::half_extent` is schema-legal to 500 m and `density` to 2000 blades
+/// per square metre, so a field well inside what the schema invites overruns a
+/// quarter-million blades easily: 60x60 m at the default density does it.
+///
+/// This does not raise the ceiling — growing a quarter-million-element buffer
+/// mid-frame is worse than a limit somebody can see — it just stops the ceiling
+/// being invisible.
+fn warn_if_grass_truncated(wanted: usize, capacity: usize) {
+    if wanted > capacity && capacity > 0 {
+        eprintln!(
+            "warning: grass field needs {wanted} blades and the buffer holds {capacity}; \
+             {} were dropped. They are dropped in generation order, not by distance, so \
+             expect a hard edge across the field rather than a thinner one. Reduce \
+             `density` or `half_extent`.",
+            wanted - capacity
+        );
+    }
+}
+
 pub(crate) fn grass_blades(scene: &Scene) -> Vec<loom_render::GrassBlade> {
     let mut out = Vec::new();
     // Baking the volume is not free — `terrain_stress` is 67 million voxels —

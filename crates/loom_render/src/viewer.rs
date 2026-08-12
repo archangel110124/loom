@@ -412,12 +412,20 @@ impl Viewer {
     /// function of its coordinates, and what moves is the Bézier expansion and
     /// the wind bend, both of which happen in the vertex shader.
     ///
+    /// How many blades the buffer holds. Past this the tail is dropped, so a
+    /// caller that cares — and it should, the drop is a contiguous spatial slab
+    /// rather than a scatter — can say so before uploading.
+    #[must_use]
+    pub fn grass_capacity(&self) -> usize {
+        self.grass_alloc.as_ref().map_or(0, |a| {
+            a.size() as usize / size_of::<crate::renderer::GrassBlade>()
+        })
+    }
+
     /// # Errors
     /// If the buffer is gone, which means the viewer is being torn down.
     pub fn set_grass(&mut self, blades: &[crate::renderer::GrassBlade]) -> Result<(), RenderError> {
-        let capacity = self.grass_alloc.as_ref().map_or(0, |a| {
-            a.size() as usize / size_of::<crate::renderer::GrassBlade>()
-        });
+        let capacity = self.grass_capacity();
         let drawn = &blades[..blades.len().min(capacity)];
         self.grass_count = u32::try_from(drawn.len()).unwrap_or(0);
         if drawn.is_empty() {
