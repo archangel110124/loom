@@ -130,3 +130,31 @@ So piece B is instead **GPU timestamp queries around the render graph's passes**
 target framerate" exit criterion actually requires, and that UE5 has as its GPU
 Visualizer. With real numbers, the culling decision can be made on evidence in
 the morning. Written up for the human to overrule.
+
+### 23:51 — Stage 3 (P3 water) is fully specified; no spec-writing needed
+
+Checked, because the brief said to write the spec if Stage 3 was underspecified.
+It is not: `LOOM-IMPLEMENTATION-ORDER.md` gives steps W0–W9 and
+`docs/design/loom-water-system.md` gives the component schemas, the `sample_water`
+signature, the Gerstner formulation and nine named traps. There is **no existing
+water code** — one unrelated comment about smoke buoyancy in `loom_particles` is
+the only hit in the workspace. Greenfield.
+
+The first three steps are the ones worth doing tonight, because they are pure,
+deterministic and independently testable:
+
+  - **W0** `WaterBody` / `WaveSet` / `GerstnerWave` in `loom_scene::components`,
+    plus the steepness validator. The doc specifies the exact error JSON shape
+    (§5.3) including the computed limit, and caps waves at 16.
+  - **W1** `sample_water` in a new `loom_water` crate, with **analytic** normals.
+    §5.4 is explicit that finite-differencing is wrong here — Gerstner displaces
+    horizontally, so three nearby samples are not at the positions you think.
+  - **W2** the Slang twin plus an agreement test.
+
+**W2 will follow `loom_field::noise`'s precedent, not S2's `Expr` tree.** The
+water doc's recommended Option A is "write it once in Rust, emit the Slang from
+`build.rs` as text", which is exactly what `noise::slang()` already does. S2's
+`Expr` is a *scalar field* language; Gerstner needs vector output and a loop over
+a wave set, which it does not express. Same reasoning that ruled out generating
+grass placement, and the same conclusion reached from the design doc's own
+recommendation rather than from convenience.
