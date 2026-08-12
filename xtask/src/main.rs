@@ -311,7 +311,7 @@ fn shimmer() -> std::process::ExitCode {
     println!("pan of {SPIN} degrees over {FRAMES} frames at {SIZE}.");
     println!("Compare a scene against ITSELF under another setting; across scenes it means nothing.");
     println!();
-    println!("scene                     mean%   worst%   (pixels changed between frames)");
+    println!("scene                     flicker   changed%   (flicker is the AA number)");
     let mut failed = false;
     for (name, scene, _) in GOLDEN.iter().chain(std::iter::once(&(
         "meadow",
@@ -357,8 +357,7 @@ fn shimmer() -> std::process::ExitCode {
             }
         }
 
-        let mut total = 0.0_f64;
-        let mut worst = 0.0_f64;
+        let mut changed = 0.0_f64;
         let mut pairs = 0_u32;
         for frame in 1..FRAMES {
             let a = out.join(format!("{name}_{:04}.png", frame - 1));
@@ -371,19 +370,49 @@ fn shimmer() -> std::process::ExitCode {
                 continue;
             };
             let text = String::from_utf8_lossy(&output.stdout);
-            let Some(fraction) = read_fraction(&text) else { continue };
-            total += fraction;
-            worst = worst.max(fraction);
+            let Some(fraction) = read_field(&text, "\"fraction\"") else { continue };
+            changed += fraction;
             pairs += 1;
         }
 
-        if pairs == 0 {
+        // **The number that actually means something.** Three consecutive
+        // frames: coherent motion is near-linear and cancels, a pixel that
+        // twinkles does not. The changed-pixel count beside it is kept only
+        // because it is cheap and occasionally explains a surprise.
+        let mut noise = 0.0_f64;
+        let mut triples = 0_u32;
+        for frame in 1..FRAMES - 1 {
+            let a = out.join(format!("{name}_{:04}.png", frame - 1));
+            let b = out.join(format!("{name}_{frame:04}.png"));
+            let c = out.join(format!("{name}_{:04}.png", frame + 1));
+            let Ok(output) = run(
+                &loom,
+                &root,
+                &[
+                    "flicker",
+                    &a.to_string_lossy(),
+                    &b.to_string_lossy(),
+                    &c.to_string_lossy(),
+                ],
+            ) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&output.stdout);
+            let Some(value) = read_field(&text, "\"flicker\"") else { continue };
+            noise += value;
+            triples += 1;
+        }
+
+        if pairs == 0 || triples == 0 {
             eprintln!("  shimmer {name}: no comparable frames");
             failed = true;
             continue;
         }
-        let mean = total / f64::from(pairs);
-        println!("{name:<24} {:>6.2}  {:>6.2}", mean * 100.0, worst * 100.0);
+        println!(
+            "{name:<24} {:>7.3}   {:>7.2}",
+            noise / f64::from(triples),
+            changed / f64::from(pairs) * 100.0
+        );
     }
 
     if failed {
@@ -392,13 +421,13 @@ fn shimmer() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-/// Pull `"fraction": <number>` out of a `loom compare` line.
+/// Pull a named number out of a one-line JSON result.
 ///
 /// Hand-scanned rather than parsed: `xtask` has no dependencies on purpose, so
 /// that a gate cannot be broken by the same bad crate version as the thing it
 /// checks.
-fn read_fraction(json: &str) -> Option<f64> {
-    let start = json.find("\"fraction\"")? + "\"fraction\"".len();
+fn read_field(json: &str, key: &str) -> Option<f64> {
+    let start = json.find(key)? + key.len();
     let rest = json.get(start..)?.trim_start().strip_prefix(':')?.trim_start();
     let end = rest.find(|c: char| !c.is_ascii_digit() && c != '.' && c != 'e' && c != '-')?;
     rest.get(..end)?.parse().ok()

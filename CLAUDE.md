@@ -220,6 +220,22 @@ change, so your edits appear live. Two consequences:
 > lockstep. Wind and the camera position both live in the environment buffer because the push block
 > is at its 128-byte guarantee.
 >
+> **Slice 5: the AA investigation has its first real result, and it is a negative one.**
+> Minimum screen-space width clamping — which the research pass calls the single most important
+> trick for distant grass — **makes flicker worse on its own**: 0.424 with nothing, 0.479 with the
+> pixel floor. That is structural, not a tuning failure. Rasterisation without multisampling is
+> binary at the pixel centre, so widening a sub-pixel blade recruits *more* pixels into the
+> flicker rather than steadying it. The trick is "widen **and** reduce alpha"; the alpha half needs
+> alpha-to-coverage, which needs MSAA. **It is not a standalone tool.** The code is written,
+> measured and gated off behind `GRASS_AA` in `scene.slang` — turn it on in the same commit that
+> lands MSAA, and re-measure.
+>
+> **`cargo xtask shimmer` now reports flicker, not changed pixels**, because changed pixels was
+> fooled by exactly this experiment: widening blades covers more screen, changes more pixels, and
+> read as a regression when the question was stability. Flicker is `|b - (a+c)/2|` over three
+> frames — coherent motion is near-linear and cancels, a pixel that twinkles does not. `loom
+> flicker a b c` exposes it. **Use the flicker column; the changed% column is context only.**
+>
 > **Slice 3: `cargo xtask shimmer` measures the phase risk as a number** — mean fraction of
 > pixels changing between consecutive frames of a slow pan, using the same calibrated comparison
 > the image gate uses. **Only ever compare a scene against itself under a different setting**; it

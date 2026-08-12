@@ -124,6 +124,44 @@ pub(crate) fn load(path: &std::path::Path) -> Result<Image, String> {
     })
 }
 
+/// How much of a frame is *temporal noise* rather than motion.
+///
+/// **The measurement `compare` cannot make.** Counting pixels that changed
+/// between two frames conflates flicker with parallax: widening distant grass
+/// so it stops twinkling covers more of the screen, so more pixels change, and
+/// a pixel-count metric reports the fix as a regression. That happened, which
+/// is why this exists.
+///
+/// Coherent motion is smooth in time — a pixel sweeping across an edge moves
+/// roughly linearly over three frames, so the middle frame is close to the
+/// average of its neighbours. A pixel that flickers is not: it is bright,
+/// dark, bright. The second difference `|b - (a + c) / 2|` is near zero for
+/// the first and large for the second.
+///
+/// Returned as a mean over every channel of every pixel, in 0-255 units.
+///
+/// # Errors
+/// When the three frames are not the same size.
+pub(crate) fn flicker(a: &Image, b: &Image, c: &Image) -> Result<f64, String> {
+    if a.pixels.len() != b.pixels.len() || b.pixels.len() != c.pixels.len() {
+        return Err(format!(
+            "sizes differ: {}x{}, {}x{}, {}x{}",
+            a.width, a.height, b.width, b.height, c.width, c.height
+        ));
+    }
+
+    let mut total = 0.0_f64;
+    for ((x, y), z) in a.pixels.iter().zip(&b.pixels).zip(&c.pixels) {
+        let predicted = (f64::from(*x) + f64::from(*z)) * 0.5;
+        total += (f64::from(*y) - predicted).abs();
+    }
+    if b.pixels.is_empty() {
+        return Ok(0.0);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    Ok(total / b.pixels.len() as f64)
+}
+
 /// Compare two images of the same size.
 ///
 /// # Errors
@@ -277,6 +315,43 @@ mod tests {
         assert!(!diff.passes(Tolerance::default()), "but nearly all of them moved");
     }
 
+
+    /// **Smooth motion is not flicker.** A pixel ramping evenly across three
+    /// frames is exactly the average of its neighbours, so the second
+    /// difference is zero — which is the whole point, because a pixel-count
+    /// metric would call this a large change.
+    #[test]
+    fn a_smoothly_moving_pixel_reads_as_no_flicker() {
+        let a = flat(8, 8, [10, 10, 10, 255]);
+        let b = flat(8, 8, [60, 60, 60, 255]);
+        let c = flat(8, 8, [110, 110, 110, 255]);
+
+        let measured = flicker(&a, &b, &c).expect("same size");
+
+        assert!(measured < 0.01, "smooth motion measured as {measured}");
+    }
+
+    /// A pixel that goes bright, dark, bright is flicker, and reads as it —
+    /// even though its start and end are identical, which a two-frame
+    /// comparison of the ends would call no change at all.
+    #[test]
+    fn a_pixel_that_flickers_is_caught() {
+        let a = flat(8, 8, [200, 200, 200, 255]);
+        let b = flat(8, 8, [40, 40, 40, 255]);
+        let c = flat(8, 8, [200, 200, 200, 255]);
+
+        let measured = flicker(&a, &b, &c).expect("same size");
+
+        assert!(measured > 100.0, "obvious flicker measured as only {measured}");
+    }
+
+    /// A still image has neither.
+    #[test]
+    fn a_still_image_has_no_flicker() {
+        let a = flat(8, 8, [77, 88, 99, 255]);
+
+        assert_eq!(flicker(&a, &a, &a).expect("same size"), 0.0);
+    }
     /// A resize is not a difference to be measured against a tolerance — it is
     /// a different picture, and saying "100% of pixels changed" would bury the
     /// actual cause.

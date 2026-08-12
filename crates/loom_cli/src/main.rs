@@ -65,6 +65,11 @@ USAGE:
         Apply a transaction. `expect_version` in the JSON makes the write
         conditional; --dry-run prints the diff and writes nothing.
 
+    loom flicker <a.png> <b.png> <c.png>
+        Temporal noise in the middle frame: |b - (a+c)/2|, averaged. Motion is
+        smooth over three frames and cancels; a pixel that twinkles does not.
+        This is the anti-aliasing measurement — `compare` cannot make it.
+
     loom prefab <verb> <scene.loom> --node <path> [--key <Type.field> ...]
         The three prefab operations. `revert-overrides` puts an instance back
         to the prefab; `apply-overrides` promotes its deviations into the
@@ -207,6 +212,10 @@ fn run(args: &[String]) -> (u8, String) {
         Some("scene") => match args.get(1) {
             Some(path) => scene_tx(path, args),
             None => (2, USAGE.to_owned()),
+        },
+        Some("flicker") => match (args.get(1), args.get(2), args.get(3)) {
+            (Some(a), Some(b), Some(c)) => flicker(a, b, c),
+            _ => (2, USAGE.to_owned()),
         },
         Some("prefab") => prefab_cmd::run(args),
         Some("terrain") => match args.get(1) {
@@ -963,6 +972,34 @@ fn frame_path(out: &str, index: u32) -> String {
 }
 
 /// Pixel-compare two renders.
+/// How much of the middle frame is temporal noise rather than motion.
+///
+/// **The measurement `compare` cannot make.** Counting changed pixels
+/// conflates flicker with parallax, and the anti-aliasing work needs to tell
+/// them apart: widening distant grass so it stops twinkling covers more
+/// screen, changes more pixels, and reads as a regression to a pixel-count
+/// metric. See `imagediff::flicker`.
+fn flicker(a: &str, b: &str, c: &str) -> (u8, String) {
+    let images: Result<Vec<imagediff::Image>, String> =
+        [a, b, c].iter().map(|p| imagediff::load(std::path::Path::new(p))).collect();
+    let images = match images {
+        Ok(images) => images,
+        Err(e) => {
+            return (2, json_line(&serde_json::json!({ "error": "io_error", "constraint": e })));
+        }
+    };
+    match imagediff::flicker(&images[0], &images[1], &images[2]) {
+        Err(e) => (
+            2,
+            json_line(&serde_json::json!({ "error": "size_mismatch", "constraint": e })),
+        ),
+        Ok(measured) => (
+            0,
+            json_line(&serde_json::json!({ "ok": true, "flicker": measured, "b": b })),
+        ),
+    }
+}
+
 fn compare(a: &str, b: &str, args: &[String]) -> (u8, String) {
     let mut tolerance = imagediff::Tolerance::default();
     if let Some(v) = flag(args, "--channel").and_then(|v| v.parse::<u8>().ok()) {

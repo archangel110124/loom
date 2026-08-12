@@ -115,6 +115,12 @@ pub struct EnvironmentData {
     /// Camera position. **Here rather than in the push block**, which was at
     /// exactly its 128-byte guarantee before grass needed a pointer.
     pub eye: [f32; 4],
+    /// x viewport width in pixels, y height, zw unused.
+    ///
+    /// **The grass vertex shader reasons in pixels**, because the whole
+    /// minimum-width trick is "no blade may be thinner than about one pixel"
+    /// and a shader cannot know what a pixel is without this.
+    pub viewport: [f32; 4],
     /// xy wind direction, z speed, w gustiness.
     ///
     /// **Wind lives here rather than in the push block**, which is already at
@@ -140,6 +146,7 @@ impl Default for EnvironmentData {
             horizon: [0.3931, 0.5071, 0.6038, 0.03],
             // Beaufort 4 from the west, matching `loom_field::wind_defaults`.
             eye: [0.0; 4],
+            viewport: [1.0, 1.0, 0.0, 0.0],
             wind: [1.0, 0.0, 5.5, 1.0],
             weather: [0.8, 0.45, 0.0, 0.0],
         }
@@ -821,6 +828,11 @@ impl Renderer {
         // would send last frame's eye — a specular highlight one frame stale,
         // which is invisible in a still and wrong in motion.
         self.environment.eye = camera.eye.extend(0.0).to_array();
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.environment.viewport =
+                [self.width as f32, self.height as f32, 0.0, 0.0];
+        }
         write_slice(
             self.environment_alloc
                 .as_ref()
