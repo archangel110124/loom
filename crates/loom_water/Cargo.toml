@@ -1,0 +1,13 @@
+[package]
+name = "loom_water"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The scene layer, for the authored `WaterBody`. Nothing else: this crate is
+# the one place the wave surface is defined, and the Slang half is emitted from
+# the same file — anything pulled in here becomes a build-time dependency of
+# whatever generates the shader.
+[dependencies]
+loom_scene = { version = "0.0.0", path = "../loom_scene" }

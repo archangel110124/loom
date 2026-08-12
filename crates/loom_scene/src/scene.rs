@@ -563,8 +563,99 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
                 errors.push(err);
                 continue;
             }
-            errors.extend(check(registry, type_name, item, &node.path));
+            let schema_errors = check(registry, type_name, item, &node.path);
+            // Cross-field rules run only on a component that already validates,
+            // because they read typed values: a `WaterBody` with a string where
+            // a number goes has nothing for the steepness limit to compute
+            // against, and reporting both would be reporting one fault twice.
+            if schema_errors.is_empty() && type_name == "WaterBody" {
+                errors.extend(check_water(item, &node.path));
+            }
+            errors.extend(schema_errors);
         }
+    }
+    errors
+}
+
+/// The water rules a schema range cannot express, because each one relates
+/// several fields to each other.
+///
+/// **The steepness limit is the one that matters.** A Gerstner wave whose `Q`
+/// is too large for its amplitude and wavelength loops through itself: the
+/// horizontal displacement stops being monotonic, the surface folds, and the
+/// mesh is visibly broken. An agent asked to make the sea choppier will push
+/// steepness until exactly that happens, and the symptom reads as a rendering
+/// bug rather than as a parameter it chose — so the rejection carries the
+/// computed limit and the reason.
+fn check_water(item: &Item, node: &str) -> Vec<SceneError> {
+    // Through serde rather than off the raw TOML, so an omitted field is its
+    // documented default here exactly as it will be at load. Reading the tables
+    // directly would compute the limit against zeros the runtime never sees.
+    let Some(body) = item_to_json(item)
+        .and_then(|v| serde_json::from_value::<components::WaterBody>(v).ok())
+    else {
+        return Vec::new();
+    };
+
+    let mut errors = Vec::new();
+    let count = body.waves.waves.len();
+    if count > components::MAX_WAVES {
+        let mut err = SceneError::new("too_many_waves", node);
+        err.field = "WaterBody.waves.waves".to_owned();
+        err.value = Value::from(count);
+        err.constraint = format!("at most {} waves", components::MAX_WAVES);
+        err.hint = Some(
+            "per-vertex cost is linear in the wave count and the pattern stops \
+             visibly repeating well before the cap. Merge or drop the smallest \
+             waves."
+                .to_owned(),
+        );
+        errors.push(err);
+    }
+
+    // The limit is shared out among the waves, so it depends on how many there
+    // are: N waves each at the single-wave limit fold N times as hard.
+    let n = count as f64;
+    for (index, wave) in body.waves.waves.iter().enumerate() {
+        let field = |name: &str| format!("WaterBody.waves.waves[{index}].{name}");
+        let wavelength = f64::from(wave.wavelength);
+        if wavelength <= 0.0 {
+            let mut err = SceneError::new("wave_wavelength_not_positive", node);
+            err.field = field("wavelength");
+            err.value = Value::from(wave.wavelength);
+            err.constraint = "greater than zero".to_owned();
+            err.hint = Some(
+                "wavelength sets the wave number k = 2π/λ, so zero or negative \
+                 makes every derived quantity infinite or backwards."
+                    .to_owned(),
+            );
+            errors.push(err);
+            continue;
+        }
+
+        let k = std::f64::consts::TAU / wavelength;
+        let amplitude = f64::from(wave.amplitude).abs();
+        let steepness = f64::from(wave.steepness).abs();
+        // Amplitude zero is a wave that does nothing, and its steepness is
+        // unbounded rather than infinite — nothing to reject.
+        if amplitude == 0.0 || steepness * n * k * amplitude <= 1.0 {
+            continue;
+        }
+
+        let limit = 1.0 / (n * k * amplitude);
+        let mut err = SceneError::new("wave_steepness_exceeds_limit", node);
+        err.field = field("steepness");
+        err.value = Value::from(wave.steepness);
+        err.constraint = format!(
+            "at most {limit:.3} for {count} wave(s) at wavelength {wavelength} \
+             and amplitude {amplitude}"
+        );
+        err.hint = Some(
+            "Q*k*A must stay under 1/N for N waves or the surface \
+             self-intersects. Reduce steepness or amplitude."
+                .to_owned(),
+        );
+        errors.push(err);
     }
     errors
 }

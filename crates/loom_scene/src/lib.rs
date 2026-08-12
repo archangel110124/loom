@@ -536,6 +536,100 @@ name = \"Hill\"
         assert_eq!(errs[0].constraint, "0.0..=10000.0");
     }
 
+    /// A scene with one water body, whose wave table the test supplies.
+    fn water_scene(waves: &str) -> String {
+        format!(
+            "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f\"\n\n\
+             [[node]]\nname = \"Ocean\"\n\n\
+             [node.components.WaterBody]\nsurface_height = 0.0\n{waves}"
+        )
+    }
+
+    /// A sea an agent could plausibly author is accepted. The steepness limit
+    /// has to leave room for real water or it is just a ban on waves.
+    #[test]
+    fn an_ordinary_sea_validates() {
+        let src = water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 18.0\namplitude = 0.55\nsteepness = 0.7\ndirection = [1.0, 0.2]\n\n\
+             [[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 7.0\namplitude = 0.18\nsteepness = 0.6\ndirection = [0.8, -0.6]\n",
+        );
+
+        Scene::parse(&src).expect("an ordinary two-wave sea must validate");
+    }
+
+    /// **§5.3, the trap that reads as a rendering bug.** Too much steepness and
+    /// the wave loops through itself; the rejection has to carry the computed
+    /// limit, because "too steep" without a number is not something an agent
+    /// tuning choppiness can act on.
+    #[test]
+    fn an_over_steep_wave_is_rejected_with_its_computed_limit() {
+        // A metre of amplitude on a four-metre wave: k = 2π/4 = 1.571, so
+        // Q·k·A = 1.571 > 1 and the surface folds.
+        let src = water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 4.0\namplitude = 1.0\nsteepness = 1.0\ndirection = [1.0, 0.0]\n",
+        );
+
+        let errors = Scene::parse(&src).expect_err("Q*k*A = 1.57 > 1 is a folded surface");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "wave_steepness_exceeds_limit");
+        assert_eq!(errors[0].node, "Ocean");
+        assert_eq!(errors[0].field, "WaterBody.waves.waves[0].steepness");
+        assert_eq!(errors[0].value, serde_json::json!(1.0));
+        // The limit is 1/(N·k·A) = 0.637, and the message has to say so.
+        assert!(errors[0].constraint.starts_with("at most 0.637"), "{errors:?}");
+        assert!(
+            errors[0].hint.as_deref().is_some_and(|h| h.contains("1/N")),
+            "{errors:?}"
+        );
+    }
+
+    /// **The limit is shared out, so adding waves tightens it.** Four copies of
+    /// a wave that is fine alone fold four times as hard, which is the multi-
+    /// wave half of §5.3 and the half an agent will hit by adding detail.
+    #[test]
+    fn the_steepness_limit_tightens_as_waves_are_added() {
+        // Q·k·A = 0.9 · (2π/12) · 0.5 = 0.236: comfortable alone, over the
+        // 1/N budget once there are five of them.
+        let wave = "\n[[node.components.WaterBody.waves.waves]]\n\
+                    wavelength = 12.0\namplitude = 0.5\nsteepness = 0.9\ndirection = [1.0, 0.0]\n";
+
+        Scene::parse(&water_scene(wave)).expect("one such wave is fine");
+        let errors = Scene::parse(&water_scene(&wave.repeat(5)))
+            .expect_err("five of them exceed the shared budget");
+        assert_eq!(errors.len(), 5, "every offending wave is named: {errors:?}");
+        assert_eq!(errors[4].field, "WaterBody.waves.waves[4].steepness");
+    }
+
+    /// The cap is 16 (§5.3): per-vertex cost is linear in the count and an
+    /// agent has no intuition for that.
+    #[test]
+    fn more_than_sixteen_waves_is_rejected() {
+        let wave = "\n[[node.components.WaterBody.waves.waves]]\n\
+                    wavelength = 30.0\namplitude = 0.05\nsteepness = 0.2\ndirection = [1.0, 0.0]\n";
+
+        Scene::parse(&water_scene(&wave.repeat(components::MAX_WAVES))).expect("16 is the cap");
+        let errors = Scene::parse(&water_scene(&wave.repeat(components::MAX_WAVES + 1)))
+            .expect_err("17 is over it");
+        assert_eq!(errors[0].error, "too_many_waves");
+        assert_eq!(errors[0].constraint, "at most 16 waves");
+    }
+
+    /// A zero wavelength divides by zero on the way to the wave number, and a
+    /// non-finite anything poisons the determinism hashes (§1).
+    #[test]
+    fn a_zero_wavelength_is_rejected_before_it_becomes_infinity() {
+        let src = water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 0.0\namplitude = 0.5\nsteepness = 0.5\ndirection = [1.0, 0.0]\n",
+        );
+
+        let errors = Scene::parse(&src).expect_err("k = 2π/0 is infinite");
+        assert_eq!(errors[0].error, "wave_wavelength_not_positive");
+    }
+
     /// Colour channels are normalized 0..=1. An agent writing 255 is a real
     /// and very likely mistake, so it must be caught rather than clamped.
     #[test]

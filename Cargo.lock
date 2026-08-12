@@ -1419,6 +1419,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom_water"
+version = "0.0.0"
+dependencies = [
+ "loom_scene",
+]
+
+[[package]]
 name = "mach2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

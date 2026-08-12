@@ -726,6 +726,186 @@ impl Default for Wind {
     }
 }
 
+/// The most waves one body may sum.
+///
+/// **Per-vertex cost is linear in this**, and an agent tuning "make the sea
+/// rougher" has no intuition for that — it will add waves until the frame time
+/// goes. Unreal defaults to 16 and documents fewer as more performant, so 16 is
+/// the ceiling here too: enough that the pattern does not visibly repeat, few
+/// enough that a water mesh stays affordable.
+pub const MAX_WAVES: usize = 16;
+
+/// What shape of water this is.
+///
+/// Three bodies, one component, following Unreal — the factoring is right and
+/// the difference between them is *how the surface is bounded and driven*, not
+/// what a wave is.
+///
+/// **Only the wave surface exists so far.** Every kind currently samples the
+/// same Gerstner sum at the same still-water level; a lake is not yet clipped
+/// to a polygon and a river has no flow field (that arrives with the terrain
+/// flow accumulation it is derived from). Authoring the kind now means the
+/// scene says what it means before the renderer can tell the difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WaterKind {
+    /// Unbounded, and the only one whose surface is correct today.
+    #[default]
+    Ocean,
+    /// Enclosed still water. Waves should be smaller and shorter than an
+    /// ocean's — fetch is what builds a big wave, and a lake has none.
+    Lake,
+    /// Flowing water. Real rivers are carried by flow, not waves; leave the
+    /// wave set nearly flat and expect the flow field to do the work.
+    River,
+}
+
+/// One trochoidal (Gerstner) wave.
+///
+/// **The surface is a function, not a simulation.** Everything a wave does is
+/// determined by these five numbers plus the time, which is what lets the CPU
+/// and the GPU each evaluate it and agree, and what makes `loom sim --assert`
+/// trustworthy over water.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct GerstnerWave {
+    /// Crest-to-crest distance in metres.
+    ///
+    /// Also sets the speed: deep-water waves travel at `sqrt(g·k)`, so a long
+    /// wave is inherently a slow, rolling swell and a short one is chop. There
+    /// is no separate speed control for that reason — see `speed_scale`.
+    #[schemars(range(min = 0.05, max = 2000.0))]
+    pub wavelength: f32,
+    /// Crest height above the still-water line, in metres.
+    ///
+    /// Roughly a twentieth of the wavelength is an ordinary sea. Much more than
+    /// that is a wave physics does not produce and the steepness limit will
+    /// reject.
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub amplitude: f32,
+    /// `Q` — how peaked the crests are and how flat the troughs, `0` to `1`.
+    ///
+    /// Zero is a plain sine. Raising it pinches the crests, which is what makes
+    /// a sea look like water rather than like corrugated iron. Too high and the
+    /// wave loops through itself and the surface self-intersects, so this is
+    /// bounded by amplitude and wavelength together — the validator computes the
+    /// limit and reports it.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub steepness: f32,
+    /// Travel direction on the XZ plane. Normalised on use, so any length works.
+    ///
+    /// **Spread these out.** Waves all facing one way read as a rippling sheet;
+    /// what breaks the repetition is a few directions fanned around the wind,
+    /// with the longest wave most closely aligned to it.
+    pub direction: [f32; 2],
+    /// Multiplier on the physically correct phase speed. `1.0` is correct.
+    ///
+    /// A knob for taste, not for physics: a scene that wants a livelier sea
+    /// without changing its scale reaches for this. Far from `1.0` and the
+    /// waves stop looking like water, because speed and wavelength no longer
+    /// agree.
+    #[schemars(range(min = 0.05, max = 4.0))]
+    pub speed_scale: f32,
+}
+
+impl Default for GerstnerWave {
+    fn default() -> Self {
+        Self {
+            wavelength: 12.0,
+            amplitude: 0.35,
+            steepness: 0.5,
+            direction: [1.0, 0.0],
+            speed_scale: 1.0,
+        }
+    }
+}
+
+/// The waves on one body.
+///
+/// **Empty by default, and that is deliberate.** Hand-authored amplitudes are
+/// about to be replaced by a spectrum derived from the scene's `Wind` — fetch
+/// and wind speed give a sea state, and authoring numbers now would mean
+/// authoring them twice. Until then a wave set says what it says, and an empty
+/// one is a mirror-flat surface rather than an invented sea.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct WaveSet {
+    /// The summed waves, at most [`MAX_WAVES`] of them.
+    ///
+    /// Summing several wavelengths and directions is the entire trick: one wave
+    /// is a corrugation, and four or five with no common factor between their
+    /// wavelengths is a sea.
+    #[schemars(length(max = 16))]
+    pub waves: Vec<GerstnerWave>,
+    /// Depth in metres below which waves start to flatten.
+    ///
+    /// Real waves feel the bottom and shorten as they approach a beach; this is
+    /// the depth at which that begins. Nothing reads it until the terrain depth
+    /// query exists, and it is authored now so a shoreline does not need the
+    /// file rewritten.
+    #[schemars(range(min = 0.0, max = 1000.0))]
+    pub attenuation_depth: f32,
+    /// Hard clamp on displacement above the still-water line, in metres.
+    ///
+    /// This is what the water mesh's bounds are built from, so it must be at
+    /// least the summed amplitudes — a clamp that is too low crops the crests,
+    /// and one that is far too high wastes the bounds it exists to define.
+    #[schemars(range(min = 0.0, max = 200.0))]
+    pub max_height: f32,
+}
+
+/// A body of water: an analytic, stateless, deterministic surface.
+///
+/// **No fluid simulation and no GPU readback.** The surface is a sum of
+/// travelling waves evaluated from position and time, so physics and rendering
+/// each compute it independently and get the same answer — which is the only
+/// arrangement in which a buoyancy assertion means anything. A boat floating
+/// visibly above the water it is drawn on is what the alternative looks like.
+///
+/// **Water is a plane that terrain does not drain.** Blowing a crater in a lake
+/// bed below the waterline does not empty the lake; the surface ignores it. A
+/// known and deliberate v1 limitation, written down here rather than discovered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct WaterBody {
+    /// Ocean, lake or river. See [`WaterKind`] for what is implemented.
+    pub kind: WaterKind,
+    /// Still-water level in world Y, before any wave displacement.
+    pub surface_height: f32,
+    /// The waves summed over that level.
+    pub waves: WaveSet,
+    /// Density in kg/m³. `1000` fresh, `1025` salt.
+    ///
+    /// Read by buoyancy: it is what makes a floating object sit where it does,
+    /// so the difference between fresh and salt is a real difference in
+    /// waterline.
+    #[schemars(range(min = 1.0, max = 20000.0))]
+    pub density: f32,
+    /// Linear drag coefficient on a submerged body.
+    ///
+    /// Also what a river pushes with, once flow exists — drag against the
+    /// relative velocity of the water is how a current carries anything.
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub drag: f32,
+    /// The surface material.
+    pub material: AssetRef,
+}
+
+impl Default for WaterBody {
+    fn default() -> Self {
+        Self {
+            kind: WaterKind::Ocean,
+            surface_height: 0.0,
+            waves: WaveSet::default(),
+            // Salt water, because the default kind is an ocean and the two
+            // defaults should describe one thing rather than half of each.
+            density: 1025.0,
+            drag: 1.0,
+            material: AssetRef::default(),
+        }
+    }
+}
+
 /// A sound that plays from this node's position.
 ///
 /// **What it sounds like from where you stand is measured, not authored.**
@@ -825,6 +1005,11 @@ pub fn registry() -> TypeRegistry {
     reg.register::<Environment>("Environment");
     reg.register::<Wind>("Wind");
     reg.register::<Grass>("Grass");
+    // `WaveSet` and `GerstnerWave` are deliberately absent: they are fields of
+    // a `WaterBody`, not things a node can carry. Registering them would make
+    // `components.WaveSet = { ... }` validate cleanly and then be read by
+    // nothing, which is the silent-no-op failure the registry exists to stop.
+    reg.register::<WaterBody>("WaterBody");
     reg.register::<Script>("Script");
     reg
 }
