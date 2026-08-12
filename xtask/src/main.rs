@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 16] = [
+const SCENES: [&str; 17] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -49,6 +49,7 @@ const SCENES: [&str; 16] = [
     "assets/test/smoke.loom",
     "assets/test/windy.loom",
     "assets/test/meadow.loom",
+    "assets/test/grass_slope.loom",
     "assets/test/camera.loom",
     "assets/test/walker.loom",
     "assets/test/explosion.loom",
@@ -91,7 +92,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 8] = [
+const GOLDEN: [(&str, &str, &[&str]); 9] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -113,6 +114,12 @@ const GOLDEN: [(&str, &str, &[&str]); 8] = [
     // triangles derived from `SV_VertexID` — so nothing else would catch a
     // regression in it.
     ("meadow", "assets/test/meadow.loom", &[]),
+    // **Grass reading the terrain it stands on**, which `meadow` cannot cover
+    // because its ground is a flat box. This is the only scene that exercises
+    // the voxel-SDF height march, the per-field ground grid, and the
+    // slope/flow response — and it went in with none of the four gates
+    // touching it, which is the same miss `meadow` made one commit earlier.
+    ("grass_slope", "assets/test/grass_slope.loom", &[]),
 ];
 
 /// Every reference renders at this size.

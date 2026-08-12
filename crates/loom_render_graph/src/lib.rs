@@ -447,10 +447,17 @@ impl<'a> RenderGraph<'a> {
             // The opening timestamp goes *before* the barriers, so a pass owns
             // the cost of the transitions it required. ALL_COMMANDS on both
             // ends means "when everything before this point has completed",
-            // which is the only reading that does not smear neighbouring
-            // passes into each other — at the price of some lost overlap
-            // between them, so a timed frame is slightly slower than an
-            // untimed one and each pass reads slightly pessimistically.
+            // which is the reading that does not smear neighbouring passes
+            // into each other.
+            //
+            // **It does not cost overlap, and an earlier version of this
+            // comment claimed it did.** A timestamp write is not an execution
+            // dependency: it imposes no ordering the pipeline would not
+            // otherwise have. Passes here happen to be ordered anyway, by the
+            // graph's own barriers. Where two passes genuinely overlap, both
+            // timestamps resolve against the same timeline and their intervals
+            // will overlap too — which is a real limitation of reading these
+            // numbers as a sum, but it is not a slowdown.
             if let Some(t) = timers.as_deref_mut().filter(|t| index < t.pending.len()) {
                 // SAFETY: query index is inside the reset range.
                 unsafe {

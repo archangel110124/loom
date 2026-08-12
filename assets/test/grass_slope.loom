@@ -87,8 +87,12 @@ transform = { pos = [16.0, 0.0, 16.0] }
   # field drapes over the hill instead of cutting through it.
   [node.components.Grass]
   half_extent = [13.0, 13.0]
-  density = 70.0
+  density = 140.0
   height = 0.40
+  # The 0.7 default, deliberately: about 45°, which puts the bare band across
+  # the widest part of the dome's flank where it is easiest to see and to
+  # regression-test. What keeps that band from reading as a shaved ring is the
+  # break-up in `loom_grass::coverage`, not a gentler threshold here.
   width = 0.020
   clump_facing = 0.75
   clump_colour = 0.4

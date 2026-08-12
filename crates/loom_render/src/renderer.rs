@@ -1272,11 +1272,20 @@ impl Renderer {
                     .collect::<Vec<_>>()
                     .join("  ");
                 let total: f64 = timers.times().iter().map(|(_, ms)| ms).sum();
+                // **`graph` and not `total`, deliberately.** This is the sum of
+                // the render graph's passes and nothing else. It is roughly 2%
+                // of what a frame costs: the per-frame TLAS rebuild is a
+                // separate submit outside the graph, the host-side read of the
+                // readback buffer is CPU work, and the offscreen path then
+                // encodes a PNG. Labelling this `total` would be the one number
+                // here capable of misleading its reader, because it would get
+                // quoted later as if it were the frame.
+                //
                 // Blades on the line because P2's exit criterion is a frame
                 // time *at a plausible blade count*, and a millisecond with no
                 // count beside it answers half the question.
                 eprintln!(
-                    "[loom gpu] {}x{}  {table}  total {total:.3} ms  ({} blades, {} objects)",
+                    "[loom gpu] {}x{}  {table}  graph {total:.3} ms  ({} blades, {} objects)",
                     self.width, self.height, self.grass_count, objects.len(),
                 );
             }

@@ -251,10 +251,40 @@ const LUSH: f32 = 1.6;
 /// density field draws a visible line across a hillside, and the line moves
 /// when the terrain is edited — which reads as the grass having a border.
 #[must_use]
-pub fn coverage(rules: &Rules, ground: &Ground) -> f32 {
+pub fn coverage(rules: &Rules, ground: &Ground, at: [f32; 2]) -> f32 {
+    // **The slope boundary wanders, and that is what stops it reading as a
+    // shaved ring.** A smooth hill has smooth contours, so a cutoff on slope —
+    // at *any* threshold, softened by any amount — draws grass to a clean curve
+    // across the flank. A clean curve is the synthetic tell: real vegetation
+    // boundaries are ragged, because soil depth and shelter vary faster than
+    // the landform does.
+    //
+    // So the threshold itself is perturbed by low-frequency noise on world
+    // position. This is not the same as widening the fade band, which only
+    // makes the clean curve blurrier. Softening the edge was the first attempt
+    // and it looked exactly as artificial from a distance.
+    //
+    // **The wander only ever subtracts**, which is what keeps `slope_cutoff`'s
+    // documented meaning exact: grass stops *entirely* at the cutoff, and the
+    // noise moves the boundary down-slope from there rather than straddling it.
+    // A symmetric perturbation was the first version and it let grass survive
+    // past the cutoff — `grass_thins_on_a_slope_and_stops_on_rock` caught it
+    // immediately, asserting the hard guarantee the parameter promises. That
+    // guarantee is worth more than the extra realism of grass creeping onto
+    // steeper ground, because an agent authoring a scene can check it.
+    //
+    // Flat ground is untouched by construction: with a normal Y of 1.0 the
+    // margin over the cutoff is far larger than `BREAKUP`, so the term clamps
+    // to full coverage and a flat field places byte-identical blades.
+    const BREAKUP: f32 = 0.14;
+    const BREAKUP_SCALE: f32 = 0.32;
+    let wander = loom_field::noise::value([at[0] * BREAKUP_SCALE, 0.0, at[1] * BREAKUP_SCALE])
+        * BREAKUP;
+
     // Slope, from the normal's Y. Fades out over the last 15% rather than
     // stopping dead at the cutoff.
-    let steepness = ((ground.normal[1] - rules.slope_cutoff) / 0.15).clamp(0.0, 1.0);
+    let steepness =
+        ((ground.normal[1] - rules.slope_cutoff - wander) / 0.15).clamp(0.0, 1.0);
     // Rock, inverted: bare stone carries nothing.
     let soil = (1.0 - ground.rock).clamp(0.0, 1.0);
     // Gullies collect water, so they are lusher — but only up to a point,
@@ -299,7 +329,7 @@ pub fn tile(tile: Tile, rules: &Rules, ground: &dyn Fn(f32, f32) -> Ground) -> V
                 .mul_add(step, origin[1] + jz * step);
 
             let under = ground(x, z);
-            let cover = coverage(rules, &under);
+            let cover = coverage(rules, &under, [x, z]);
             // Rejection sampling against the coverage, from the blade's own
             // hash. A blade's survival depends on nothing but its position.
             if unit(seed.rotate_left(19)) >= cover {

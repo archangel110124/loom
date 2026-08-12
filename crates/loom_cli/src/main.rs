@@ -2781,15 +2781,24 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
     /// **The ground closure actually reads the terrain.** P2's exit criterion
     /// is that grass thins on steep ground and thickens in gullies *without an
     /// authored mask*, and `loom_grass` has implemented that rule from the
-    /// start — against a flat constant `Ground`, so none of it ever fired. Every
-    /// number here collapses to the flat case (coverage 0.625 everywhere) if
-    /// the closure goes back to `Ground::default()`.
+    /// start — against a flat constant `Ground`, so none of it ever fired.
+    ///
+    /// **What this test does and does not cover.** It builds a `GroundGrid`
+    /// directly, so it proves the grid reads the terrain; it does *not* prove
+    /// the grid is wired into `grass_blades`. An earlier version of this
+    /// comment claimed these numbers collapse to the flat case if the closure
+    /// regresses to `Ground::default()`, and that was simply untrue — the
+    /// mutation was run and this test passed. `grass_on_a_voxel_scene_follows_
+    /// the_terrain` is the one that fails, and it is the only test guarding the
+    /// seam. Said plainly here because a test that documents a guarantee it
+    /// does not provide is worse than no comment: it stops the next person
+    /// looking for the missing one.
     #[test]
     fn coverage_follows_the_voxel_terrain() {
         let volume = hillside();
         let grid = GroundGrid::bake(&volume, [0.0; 3], [16.0, 0.0, 16.0], [13.0, 13.0]);
         let rules = loom_grass::Rules::default();
-        let cover = |x: f32, z: f32| loom_grass::coverage(&rules, &grid.at(x, z));
+        let cover = |x: f32, z: f32| loom_grass::coverage(&rules, &grid.at(x, z), [x, z]);
 
         // The slab top, well away from both features.
         let flat = cover(26.0, 10.0);
@@ -2836,7 +2845,7 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         let mut volume = hillside();
         let grid = GroundGrid::bake(&volume, [0.0; 3], [16.0, 0.0, 16.0], [13.0, 13.0]);
         let rules = loom_grass::Rules::default();
-        let before = loom_grass::coverage(&rules, &grid.at(26.0, 10.0));
+        let before = loom_grass::coverage(&rules, &grid.at(26.0, 10.0), [26.0, 10.0]);
         assert!(before > 0.5, "nothing grew there to begin with: {before}");
 
         volume.edit(&loom_voxel::VoxelOp::Box {
@@ -2845,7 +2854,7 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
             mode: loom_voxel::CsgMode::Subtract,
         });
         let grid = GroundGrid::bake(&volume, [0.0; 3], [16.0, 0.0, 16.0], [13.0, 13.0]);
-        let after = loom_grass::coverage(&rules, &grid.at(26.0, 10.0));
+        let after = loom_grass::coverage(&rules, &grid.at(26.0, 10.0), [26.0, 10.0]);
 
         assert_eq!(after, 0.0, "grass is floating over the hole");
     }
@@ -2870,23 +2879,51 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         assert!(high > 9.0, "nothing grew on the dome: highest blade is {high}");
         assert!(low < 5.5, "nothing grew in the hollow: lowest blade is {low}");
 
-        // Blades per square metre in a 2 m box, on the level slab and on the
-        // dome's flank at roughly 38°.
+        // **A ladder up the dome, not one point on it.** The dome is a sphere
+        // of radius 6.5 centred at (9, 16) with its equator buried, so at a
+        // horizontal distance `r` from its axis the surface normal's Y is
+        // `sqrt(6.5² - r²) / 6.5` — every slope from flat to vertical, indexed
+        // by a number the test can compute. That makes the assertion the real
+        // invariant, "steeper grows less", rather than a claim about one
+        // sample's absolute value.
+        //
+        // The single-point version this replaces compared r = 4 (n.y = 0.79,
+        // about 38°) against level ground and demanded it be a quarter barer.
+        // That is not a property of the mechanism, it is a property of where
+        // `slope_cutoff` happens to sit — and it broke the moment the scene
+        // authored a cutoff that keeps a 38° hillside grassy, which is what a
+        // real hillside does. A ladder holds for any cutoff.
         let density = |cx: f32, cz: f32| {
             blades
                 .iter()
-                .filter(|b| {
-                    (b.position[0] - cx).abs() < 1.0 && (b.position[2] - cz).abs() < 1.0
-                })
+                .filter(|b| (b.position[0] - cx).abs() < 0.6 && (b.position[2] - cz).abs() < 0.6)
                 .count()
         };
+        // Along +X from the dome's axis, so the offset from x = 9 is `r`. The
+        // samples stay inside r < 6, which is where the dome meets the slab —
+        // a box straddling that rim would mix bare flank with lush level
+        // ground and read as *more* grass on the steeper sample, which is
+        // exactly the false negative an earlier version of this test produced.
+        //
+        //   r = 2.0   n.y 0.97   18°   well inside
+        //   r = 4.0   n.y 0.79   38°   inside the fade band
+        //   r = 5.2   n.y 0.60   53°   past the cutoff
+        let gentle = density(11.0, 16.0);
+        let mid = density(13.0, 16.0);
+        let steep = density(14.2, 16.0);
         let flat = density(26.0, 10.0);
-        let flank = density(13.0, 16.0);
 
-        assert!(flat > 100, "the level slab is bare: {flat} blades in 4 m²");
+        assert!(flat > 60, "the level slab is bare: {flat} blades in 1.44 m²");
+        assert!(gentle > flat / 2, "nothing grew on the dome's gentle cap: {gentle}");
         assert!(
-            flank * 4 < flat * 3,
-            "the dome's flank ({flank}) is as lush as the level slab ({flat})"
+            gentle >= mid && mid >= steep,
+            "grass did not thin monotonically up the dome's flank: \
+             {gentle} (18°), {mid} (38°), {steep} (53°)"
+        );
+        assert!(
+            steep * 4 < gentle,
+            "past the slope cutoff the dome is still lush: {steep} at 53° \
+             against {gentle} at 18° — the slope term is not firing"
         );
     }
 
