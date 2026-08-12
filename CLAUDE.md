@@ -146,7 +146,7 @@ change, so your edits appear live. Two consequences:
 
 ## Current phase
 
-> **Phase 0 complete; P1 (wind) done. P2 (grass) is next.** See
+> **Phase 0 complete; P1 done. P2 (grass) started — placement only.** See
 > `docs/design/LOOM-IMPLEMENTATION-ORDER.md`, which is the sequencing document for everything
 > after M12 and **supersedes the build orders inside the companion docs wherever they conflict**.
 >
@@ -198,6 +198,21 @@ change, so your edits appear live. Two consequences:
 > **P1 delivered** the wind field — ADR 0009. A `Wind` component authors it, `loom_field::wind`
 > is the tree, the Slang is generated, and `loom_field::wind::Wind` samples it with S3 sheltering.
 > `loom sim --assert "wind@x,y,z.speed >= v"` checks it from the CLI.
+>
+> **P2 slice 1 landed: `loom_grass` placement.** A blade is a pure function of its coordinates —
+> position-hashed off the frozen `loom_field::noise::hash`, Voronoi clumping, coverage computed
+> from slope/rock/flow rather than a painted mask. That purity is what makes dirty-region
+> regeneration byte-identical, and there is a test asserting a crater leaves its neighbours
+> untouched. **Nothing draws yet.**
+>
+> **Still ahead in P2, in order:** the placement compute shader (the Slang half of `loom_grass`,
+> generated not retyped), Bézier expansion + `vkCmdDrawIndexedIndirect`, LOD and culling, and then
+> **the phase's actual risk — anti-aliasing without TAA.** Budget real time for that one; if
+> MSAA + alpha-to-coverage + minimum-width clamping is insufficient, adding a non-temporal
+> full-screen AA pass is a scope decision that needs an ADR, not drift.
+>
+> **Grass is rendering-only and outside the sim hash**, the same exemption rain gets. Blades are
+> never ECS entities and the scene shows one node for the field, never the blades.
 >
 > **The only thing wind visibly drives is particles**, via `wind_response` on `ParticleEmitter` —
 > a coupling toward the air's velocity, **zero by default** so every scene authored before wind

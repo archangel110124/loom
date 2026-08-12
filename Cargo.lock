@@ -1309,6 +1309,13 @@ name = "loom_field"
 version = "0.0.0"
 
 [[package]]
+name = "loom_grass"
+version = "0.0.0"
+dependencies = [
+ "loom_field",
+]
+
+[[package]]
 name = "loom_input"
 version = "0.0.0"
 dependencies = [
