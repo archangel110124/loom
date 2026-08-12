@@ -49,6 +49,15 @@ pub struct Viewer {
     depth_view: vk::ImageView,
     depth_alloc: Option<Allocation>,
 
+    /// The anti-aliasing pass and the image the scene is drawn into first, or
+    /// `None` when `LOOM_CMAA2` is unset — the default, and then the scene is
+    /// drawn straight into the swapchain image exactly as before.
+    ///
+    /// **The window needs this as much as the offscreen path does**, and more:
+    /// it is where the human looks. Grass rendered offscreen and not in the
+    /// window for two slices, which is the defect this mirrors deliberately.
+    aa: Option<(crate::cmaa2::Cmaa2, vk::Image, vk::ImageView, Allocation)>,
+
     vertices: vk::Buffer,
     vertices_alloc: Option<Allocation>,
     vertex_address: vk::DeviceAddress,
@@ -309,6 +318,23 @@ impl Viewer {
             rendered.push(unsafe { raw.create_semaphore(&semaphore_info, None) }?);
         }
 
+        // The AA pass reads the scene and writes the swapchain image, so what
+        // it needs here is a *source* to render the scene into. The swapchain
+        // image cannot be that source: its usage is COLOR_ATTACHMENT only, and
+        // asking a presentable image for SAMPLED is not portable.
+        let aa = if crate::cmaa2::requested() {
+            Some(create_aa_target(
+                &raw,
+                &mut allocator,
+                &names,
+                pipeline_cache,
+                format,
+                extent,
+            )?)
+        } else {
+            None
+        };
+
         names.set(pipeline, "loom.viewer_pipeline");
         names.set(grass_pipeline, "loom.viewer_grass_pipeline");
         names.set(grass_buffer, "loom.viewer_grass");
@@ -375,6 +401,7 @@ impl Viewer {
             depth,
             depth_view,
             depth_alloc: Some(depth_alloc),
+            aa,
             vertices,
             vertices_alloc: Some(vertices_alloc),
             vertex_address,
@@ -770,14 +797,31 @@ impl Viewer {
         let depth_image = self.depth;
         let depth_id = graph.import("loom.viewer_depth", depth_image);
 
+        // With the AA pass on, the scene is drawn into its own image and the
+        // pass writes the swapchain; without it, straight into the swapchain as
+        // before. Everything downstream — the UI, the present transition — is
+        // unchanged either way.
+        //
+        // **The UI is inside the forward pass**, so with AA on it is filtered
+        // along with the scene. CMAA2 is conservative enough that egui's own
+        // anti-aliased text is left almost entirely alone, and moving the UI
+        // into a third pass to avoid it would buy a second rendering block for
+        // a difference nobody can see.
+        let (scene_view, scene_id) = match self.aa.as_ref() {
+            Some((_, image, aa_view, _)) => {
+                (*aa_view, graph.import("loom.viewer_scene", *image))
+            }
+            None => (view, target),
+        };
+
         graph.pass(
             "forward",
-            &[(target, Access::ColorWrite), (depth_id, Access::DepthWrite)],
+            &[(scene_id, Access::ColorWrite), (depth_id, Access::DepthWrite)],
             move |d, cmd| {
                 // SAFETY: the graph transitioned both attachments already.
                 unsafe {
                     // The viewer renders at one sample; MSAA is the offscreen path for now.
-                    begin_rendering(d, cmd, view, depth_view, None, extent.width, extent.height);
+                    begin_rendering(d, cmd, scene_view, depth_view, None, extent.width, extent.height);
                     set_viewport(d, cmd, extent.width, extent.height);
                     crate::renderer::draw_sky(d, cmd, sky, layout, &base_push);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
@@ -884,6 +928,21 @@ impl Viewer {
                 }
             },
         );
+
+        // The anti-aliasing pass, reading the finished scene and writing the
+        // swapchain image. Both transitions are the graph's (never-do #4).
+        if let Some((pass, _, _, _)) = self.aa.as_ref() {
+            graph.pass(
+                "cmaa2",
+                &[(scene_id, Access::ShaderRead), (target, Access::ColorWrite)],
+                move |d, cmd| {
+                    // SAFETY: the graph has put the scene image in
+                    // SHADER_READ_ONLY_OPTIMAL and the swapchain image in
+                    // COLOR_ATTACHMENT_OPTIMAL.
+                    unsafe { pass.record(d, cmd, view, extent.width, extent.height) };
+                },
+            );
+        }
 
         // Presentable layout. Declared as a pass with no work, because the
         // transition IS the work — and forgetting it is the classic first
@@ -1048,6 +1107,40 @@ impl Viewer {
             self.depth = depth;
             self.depth_alloc = Some(depth_alloc);
             self.depth_view = depth_view;
+
+            // The AA source is a full-resolution image like the depth buffer,
+            // so it resizes with the window. The pass itself — pipeline,
+            // sampler, descriptor set — survives; only the image it points at
+            // is rebuilt, and the descriptor is repointed at the new view.
+            if let Some((pass, image, view, allocation)) = self.aa.take() {
+                // SAFETY: the device was idled at the top of this function.
+                unsafe {
+                    self.device.destroy_image_view(view, None);
+                    self.device.destroy_image(image, None);
+                }
+                let _ = allocator.free(allocation);
+                let (image, allocation) = create_image(
+                    &self.device,
+                    allocator,
+                    extent.width,
+                    extent.height,
+                    self.format,
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+                    1,
+                    vk::SampleCountFlags::TYPE_1,
+                    "loom.viewer_scene",
+                )?;
+                let view = create_view(
+                    &self.device,
+                    image,
+                    self.format,
+                    vk::ImageAspectFlags::COLOR,
+                )?;
+                // SAFETY: the device is idle, so no command buffer references
+                // the set being rewritten.
+                unsafe { pass.set_source(&self.device, view) };
+                self.aa = Some((pass, image, view, allocation));
+            }
         }
         Ok(())
     }
@@ -1087,6 +1180,14 @@ impl Drop for Viewer {
             // fragment shader was sampling one frame ago.
             if let Some(allocator) = self.allocator.as_mut() {
                 self.materials.destroy(allocator);
+            }
+            if let (Some((mut pass, image, view, allocation)), Some(allocator)) =
+                (self.aa.take(), self.allocator.as_mut())
+            {
+                pass.destroy(&self.device);
+                self.device.destroy_image_view(view, None);
+                self.device.destroy_image(image, None);
+                let _ = allocator.free(allocation);
             }
             self.device.destroy_pipeline(self.particle_pipeline, None);
             self.device.destroy_buffer(self.particle_buffer, None);
@@ -1258,6 +1359,38 @@ fn create_swapchain(
     }
 
     Ok((surface_format.format, extent, swapchain, images, views))
+}
+
+/// The image the scene is drawn into when the AA pass is on, and the pass
+/// itself, already pointed at it.
+fn create_aa_target(
+    device: &ash::Device,
+    allocator: &mut Allocator,
+    names: &DebugNames,
+    cache: vk::PipelineCache,
+    format: vk::Format,
+    extent: vk::Extent2D,
+) -> Result<(crate::cmaa2::Cmaa2, vk::Image, vk::ImageView, Allocation), RenderError> {
+    let (image, allocation) = create_image(
+        device,
+        allocator,
+        extent.width,
+        extent.height,
+        format,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+        1,
+        vk::SampleCountFlags::TYPE_1,
+        "loom.viewer_scene",
+    )?;
+    let view = create_view(device, image, format, vk::ImageAspectFlags::COLOR)?;
+    // The swapchain's format, not the offscreen path's: dynamic rendering bakes
+    // the attachment format into the pipeline, and this one writes the window.
+    let pass = crate::cmaa2::Cmaa2::new(device, names, cache, format)?;
+    // SAFETY: nothing has been submitted against this set.
+    unsafe { pass.set_source(device, view) };
+    names.set(image, "loom.viewer_scene");
+    names.set(view, "loom.viewer_scene.view");
+    Ok((pass, image, view, allocation))
 }
 
 fn create_depth(

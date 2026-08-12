@@ -106,6 +106,46 @@ first step onto one, which is why it is here rather than in a commit.
 - `MSAA_SAMPLES` should probably go to 8x (2.502 for double the bandwidth) since it is then the only
   tool available and the frame has room.
 
+## What the pass actually delivered
+
+Built 2026-08-12: `assets/shaders/cmaa2.slang` plus `crates/loom_render/src/cmaa2.rs`, wired into
+both the offscreen renderer and the windowed viewer, behind **`LOOM_CMAA2=1`** — off by default.
+It implements CMAA2's local-contrast-adaptive **edge detection** and its **simple-shape (L-corner)
+blend**, with Intel's own constants read from the published source. It does **not** implement the
+Z-shape / long-edge path, which is the half that puts a gradient along a long near-horizontal edge,
+because that needs the edge bitmask kept in a texture so it can be walked. The shader's header says
+so at length; the name is only honest with that sentence attached.
+
+`cargo xtask shimmer`, 640x400, camera at the authored eye, sim advancing:
+
+| | `meadow` | `grass_slope` |
+| --- | --- | --- |
+| 4x MSAA (the shipped setting) | 3.059 | 1.755 |
+| 4x MSAA + CMAA2 | **2.791** (−8.8%) | **1.605** (−8.5%) |
+| 1x MSAA | 4.375 | 2.630 |
+| 1x MSAA + CMAA2 | 3.652 (−16.5%) | 2.288 (−13.0%) |
+
+The three static control scenes stay at exactly 0.000 with the pass on, so it invents no flicker of
+its own.
+
+**Read the table in this order.** The reduction is real, reproducible and in the right direction on
+both scenes — but it is 9%, against MSAA's 36%, and it is *smaller* the more MSAA is already doing.
+CMAA2 alone at one sample (3.652) is well behind 4x MSAA alone (3.059), so **it does not make MSAA
+redundant** and the two are complementary with sharply diminishing returns. The prediction this ADR
+was accepted on — that a spatial filter would steady a temporal artifact — is confirmed in sign and
+disappointing in size: it does not get `meadow` near its 0.000 control, and on that basis the phase's
+exit criterion 2 is still not met.
+
+It costs **0.042 ms at 1920x1080** on the 4090 (`LOOM_GPU_TIMING=1`), stable across scenes because it
+is a fixed per-pixel cost — about 20% on top of a `meadow` forward pass and 5% of the render graph.
+It does not cost visible sharpness: at 1080p it changes 0.18% of `materials`, a scene that is nothing
+but texture detail, against 4.7% of `meadow`, which is nothing but silhouettes. That ratio is the
+conservatism working.
+
+**Left gated off, deliberately.** Turning it on moves seven of the nine golden references, and a 9%
+reduction is a judgement call about whether that is worth a permanent post-process pass and a
+re-blessing — which is a human's call, not the implementation's.
+
 ## Status of the evidence
 
 Every number above is reproducible with `cargo xtask shimmer` at `8c2bcb6`. The gated-off clamp

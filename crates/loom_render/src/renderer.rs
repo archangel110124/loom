@@ -354,6 +354,10 @@ pub struct Renderer {
     particle_address: vk::DeviceAddress,
     /// `None` when rendering at one sample.
     msaa: Option<Msaa>,
+    /// The anti-aliasing pass and the image it writes into, or `None` when
+    /// `LOOM_CMAA2` is unset — which is the default. When it is present the
+    /// readback reads *this* image rather than the colour target.
+    aa: Option<(crate::cmaa2::Cmaa2, vk::Image, vk::ImageView, Allocation)>,
     grass_buffer: vk::Buffer,
     grass_alloc: Option<Allocation>,
     grass_address: vk::DeviceAddress,
@@ -436,7 +440,13 @@ impl Renderer {
             width,
             height,
             COLOR_FORMAT,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+            // `SAMPLED` because the anti-aliasing pass reads this image as a
+            // texture (ADR 0010). Declared unconditionally: a usage flag
+            // changes no pixel, and making it conditional on an environment
+            // variable would mean the gate silently changed image creation.
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::SAMPLED,
             1,
             vk::SampleCountFlags::TYPE_1,
             "loom.color_target",
@@ -643,6 +653,33 @@ impl Renderer {
         let grass_pipeline =
             create_grass_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT, MSAA_SAMPLES)?;
 
+        // The anti-aliasing pass (ADR 0010), when asked for. A second colour
+        // image, never the same one: the filter reads a 6x6 neighbourhood and
+        // writes the centre, so reading and writing one image would make every
+        // pixel's result depend on whether its neighbours had been rewritten.
+        let aa = if crate::cmaa2::requested() {
+            let (image, allocation) = create_image(
+                &raw,
+                &mut allocator,
+                width,
+                height,
+                COLOR_FORMAT,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+                1,
+                vk::SampleCountFlags::TYPE_1,
+                "loom.aa_target",
+            )?;
+            let view = create_view(&raw, image, COLOR_FORMAT, vk::ImageAspectFlags::COLOR)?;
+            let pass = crate::cmaa2::Cmaa2::new(&raw, &names, pipeline_cache, COLOR_FORMAT)?;
+            // SAFETY: nothing has been submitted yet.
+            unsafe { pass.set_source(&raw, color_view) };
+            names.set(image, "loom.aa_target");
+            names.set(view, "loom.aa_target.view");
+            Some((pass, image, view, allocation))
+        } else {
+            None
+        };
+
         names.set(color, "loom.color_target");
         names.set(depth, "loom.depth_target");
         names.set(color_view, "loom.color_target.view");
@@ -757,6 +794,7 @@ impl Renderer {
             particle_alloc: Some(particle_alloc),
             particle_address,
             msaa,
+            aa,
             grass_buffer,
             grass_alloc: Some(grass_alloc),
             grass_address,
@@ -1050,7 +1088,14 @@ impl Renderer {
         let particle_pipeline = self.particle_pipeline;
         let grass_pipeline = self.grass_pipeline;
         let grass_count = self.grass_count;
-        let (readback, image) = (self.readback, self.color);
+        // **The readback follows the last pass that wrote a pixel.** With the
+        // AA pass on, the finished frame is in its target and copying the
+        // colour target instead would silently read the un-anti-aliased image
+        // — a bug that looks exactly like "the pass does nothing".
+        let (readback, image) = (
+            self.readback,
+            self.aa.as_ref().map_or(self.color, |(_, image, _, _)| *image),
+        );
         let index_buffer = self.indices;
         let draws: Vec<(MeshRange, u32, u32)> = batches
             .iter()
@@ -1205,7 +1250,30 @@ impl Renderer {
             },
         );
 
-        graph.pass("readback", &[(color, Access::TransferSrc)], move |d, cmd| {
+        // The anti-aliasing pass, between the forward pass and the readback.
+        // Both images are the graph's (never-do #4): it moves the colour target
+        // from COLOR_ATTACHMENT_OPTIMAL to SHADER_READ_ONLY_OPTIMAL and the AA
+        // target out of UNDEFINED, and nothing here writes a barrier.
+        let readback_source = match self.aa.as_ref() {
+            Some((pass, aa_image, aa_view, _)) => {
+                let aa_id = graph.import("loom.aa_target", *aa_image);
+                let (aa_view, width, height) = (*aa_view, self.width, self.height);
+                graph.pass(
+                    "cmaa2",
+                    &[(color, Access::ShaderRead), (aa_id, Access::ColorWrite)],
+                    move |d, cmd| {
+                        // SAFETY: the graph has put both images in the layouts
+                        // this recording requires, and `cmd` is recording
+                        // outside any rendering block.
+                        unsafe { pass.record(d, cmd, aa_view, width, height) };
+                    },
+                );
+                aa_id
+            }
+            None => color,
+        };
+
+        graph.pass("readback", &[(readback_source, Access::TransferSrc)], move |d, cmd| {
             let region = vk::BufferImageCopy::default()
                 .buffer_offset(0)
                 .buffer_row_length(0)
@@ -1380,6 +1448,14 @@ impl Drop for Renderer {
                 self.device.destroy_buffer(buffer, None);
             }
             self.device.destroy_pipeline(self.particle_pipeline, None);
+            if let (Some((mut pass, image, view, allocation)), Some(allocator)) =
+                (self.aa.take(), self.allocator.as_mut())
+            {
+                pass.destroy(&self.device);
+                self.device.destroy_image_view(view, None);
+                self.device.destroy_image(image, None);
+                let _ = allocator.free(allocation);
+            }
             if let (Some(msaa), Some(allocator)) = (self.msaa.take(), self.allocator.as_mut()) {
                 self.device.destroy_image_view(msaa.view, None);
                 self.device.destroy_image_view(msaa.depth_view, None);

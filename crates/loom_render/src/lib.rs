@@ -13,6 +13,10 @@
 //! [loom gpu] 1920x1080  forward 0.105 ms  readback 0.610 ms  total 0.715 ms  (45460 blades, 2 objects)
 //! ```
 //!
+//! **`LOOM_CMAA2=1` turns on the anti-aliasing pass** (ADR 0010). Off by
+//! default: it moves every golden reference, and what it buys is measured
+//! rather than assumed — see `cmaa2.rs` and the ADR's results table.
+//!
 //! Off by default, because the queries are commands in the buffer and the
 //! ALL_COMMANDS timestamps between passes cost some overlap. The same numbers
 //! are available to a caller as [`Renderer::last_pass_times`]. The windowed
@@ -26,6 +30,7 @@
 //! and Slang. If a feature here grows much beyond that, it is the obsolete
 //! pre-1.3 style and should be reconsidered.
 
+mod cmaa2;
 mod debug_names;
 mod device;
 mod instance;
@@ -63,6 +68,11 @@ pub const TRIANGLE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/triang
 
 /// The scene shader (one lit cube per object), embedded at build time.
 pub const SCENE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scene.spv"));
+
+/// The anti-aliasing pass (ADR 0010), embedded at build time.
+///
+/// Only ever used when `LOOM_CMAA2` is set — see `cmaa2::requested`.
+pub const CMAA2_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cmaa2.spv"));
 
 /// The compute shader that evaluates the generated fields, for the S2
 /// agreement test. Nothing in the runtime dispatches it — see `field_agree`.
@@ -261,9 +271,117 @@ mod tests {
                 // barrier ownership stays visible rather than assumed.
                 ("forward", "loom.msaa_color"),
                 ("forward", "loom.msaa_depth"),
-                ("readback", "loom.color_target"),
+                // The anti-aliasing pass reads the colour target and writes a
+                // second image, so the readback moves onto *that* one. Three
+                // more transitions, all the graph's, and this list is why
+                // turning the pass on by default could not quietly skip one.
+                ("cmaa2", "loom.color_target"),
+                ("cmaa2", "loom.aa_target"),
+                ("readback", "loom.aa_target"),
             ],
             "graph did not place the expected barriers"
+        );
+    }
+
+    /// **The anti-aliasing pass, which nothing else in the suite covers.**
+    ///
+    /// It is **on** by default now (ADR 0010 and `cmaa2::requested`), so this
+    /// test runs the comparison the other way round: it renders once with
+    /// `LOOM_CMAA2=0` and once with the default, and asserts they differ. The
+    /// direction matters because a filter that silently does nothing passes
+    /// every other check in the suite — the frame is still validation-clean,
+    /// the graph still places its transitions, and the image still looks right.
+    ///
+    /// Three things are asserted, in the order they can fail: the pipeline
+    /// builds and the frame is validation-clean; the render graph placed the
+    /// transitions for both images and moved the readback onto the AA target;
+    /// and the output actually differs from the same scene without the pass —
+    /// because a filter that silently does nothing passes the first two.
+    #[test]
+    fn the_anti_aliasing_pass_runs_and_changes_the_image() {
+        let _serialised = exclusive();
+        let Ok(instance) = Instance::new(c"loom-aa-test") else {
+            eprintln!("skipping: no Vulkan loader");
+            return;
+        };
+        let device = match Device::new(&instance) {
+            Ok(d) => d,
+            Err(DeviceError::NoDevices) => {
+                eprintln!("skipping: no Vulkan device");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let _ = instance.check_validation();
+
+        let meshes = [loom_asset::primitives::sphere(16, 12)];
+        let objects = [Object {
+            model: glam::Mat4::from_scale(glam::Vec3::splat(1.4)),
+            color: [0.9, 0.3, 0.3],
+            mesh: 0,
+            material: crate::NO_TEXTURE,
+        }];
+        let camera = Camera {
+            eye: glam::Vec3::new(3.0, 3.0, 6.0),
+            target: glam::Vec3::ZERO,
+            fov_y_degrees: 45.0,
+        };
+
+        // **The gate is an environment variable, so the test sets one.** This
+        // is sound only because every test in this crate that touches Vulkan —
+        // and therefore every other reader of the environment in this process
+        // — takes `exclusive()` first, and this one holds it across the whole
+        // pair.
+        //
+        // SAFETY: as above; no other thread in this process reads or writes
+        // the environment while the guard is held.
+        unsafe { std::env::set_var("LOOM_CMAA2", "0") };
+        let mut plain =
+            Renderer::new(&instance, &device, 128, 96, &meshes, &[], &[]).expect("renderer");
+        let without = plain.render(&objects, &[], &camera).expect("render");
+        drop(plain);
+        // SAFETY: as above, and before anything else can observe it.
+        unsafe { std::env::remove_var("LOOM_CMAA2") };
+
+        let mut antialiased =
+            Renderer::new(&instance, &device, 128, 96, &meshes, &[], &[]).expect("renderer");
+        let with = antialiased.render(&objects, &[], &camera).expect("render");
+
+        if let Err(messages) = instance.check_validation() {
+            panic!("validation was not silent:\n  {}", messages.join("\n  "));
+        }
+
+        let transitions: Vec<(&str, &str)> = antialiased
+            .last_transitions()
+            .iter()
+            .map(|t| (t.pass, t.image))
+            .collect();
+        assert!(
+            transitions.contains(&("cmaa2", "loom.color_target"))
+                && transitions.contains(&("cmaa2", "loom.aa_target")),
+            "the graph did not transition both AA images: {transitions:?}"
+        );
+        assert!(
+            transitions.contains(&("readback", "loom.aa_target")),
+            "the readback still reads the colour target, so the pass is being \
+             computed and thrown away: {transitions:?}"
+        );
+
+        let changed = without
+            .iter()
+            .zip(&with)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            changed > 100,
+            "the pass changed only {changed} bytes — a filter that does nothing"
+        );
+        // ...but not *everything*: this is a conservative filter, and one that
+        // touched every pixel would be a blur wearing its name.
+        assert!(
+            changed < without.len() / 2,
+            "the pass changed {changed} of {} bytes, which is not conservative",
+            without.len()
         );
     }
 
