@@ -278,6 +278,37 @@ change, so your edits appear live. Two consequences:
 > two slices and `grass_slope` for one, and in both cases the gate reported a full pass without ever
 > rendering the thing under test. Now 19 scene runs and 9 references.
 >
+> ## The AA investigation, re-run on an instrument that can see the grass
+>
+> `cargo xtask shimmer` now holds the camera still at the scene's authored eye and advances the
+> simulation, so it measures twinkle at rest. Three scenes with no animated geometry score **exactly
+> 0.000**, which is the control it never had. Baseline at 4x MSAA, 640x400:
+> **`meadow` 2.712, `grass_slope` 1.545.**
+>
+>     MSAA          1x 3.888   2x 3.000   4x 2.712   8x 2.502
+>     density falloff at 4x:   on 2.712   off 2.715      <- no effect at all
+>     blade width at 4x:  0.020 2.712   0.035 2.635   0.060 2.338   0.100 1.973
+>
+> **MSAA survives re-measurement.** Monotonic, ~36% from 1x to 8x, and 4x is still the right pick.
+>
+> **The density falloff's win was entirely the deletion artifact.** 2.712 against 2.715 — zero. It
+> remains worth keeping as an LOD and cost measure, and it helps `grass_slope` by ~6%, but **it is
+> not an anti-aliasing tool** and the table that said it was, was photographing an empty field.
+>
+> **Widening blades genuinely reduces twinkle**, monotonically, 27% for 5x width — so "minimum
+> screen-space width clamping is measured worse, twice, decisively" was *also* an artifact of the
+> broken instrument, and the research pass that called it the most important trick for distant grass
+> was probably right. It was deleted on bad evidence. 0.1 m blades are a leaf rather than grass, so
+> the usable form is the screen-space clamp that widens only sub-pixel blades — **that is the next
+> thing to build, and it should be judged on this instrument.**
+>
+> **Two cautions on reading the number.** It is strongly resolution-dependent — `meadow` is 2.712 at
+> 640x400 and 0.539 at 1920x1080 — because the artifact *is* sub-pixel geometry, so the low
+> resolution is a deliberate stress test rather than a representative frame. And flicker on animated
+> geometry conflates twinkle with legitimate motion: a blade really does change pixels when it bends.
+> The 0.000 controls prove the camera is static; they do **not** establish that 2.712 is bad in
+> absolute terms. Resolution scaling is the discriminator, and it says sub-pixel twinkle dominates.
+>
 > ## ⚠ THE AA NUMBERS BELOW ARE INVALID. READ THIS FIRST.
 >
 > **`cargo xtask shimmer` and `cargo xtask flythrough` ignore the scene's authored camera.** They
