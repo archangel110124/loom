@@ -240,6 +240,44 @@ change, so your edits appear live. Two consequences:
 > barrier-list test in `lib.rs` now names all four transitions, which is how that ownership stays
 > visible rather than assumed.
 >
+> **Slice 9: grass reads the terrain it stands on, and the engine can finally measure itself.**
+>
+> `grass_blades` passed `loom_grass` a flat constant `Ground`, so grass never responded to terrain at
+> all — the slope and flow rules had been implemented and tested since slice 1 with nothing feeding
+> them. A `GroundGrid` per field now marches the voxel SDF down to the surface (half-voxel steps,
+> then eight bisections — the `i8` field saturates at one voxel and carries no usable distance
+> further out) and answers with bilinear height, a central-difference normal, and a concavity proxy
+> for flow. **`loom_grass` still has no `loom_voxel` dependency**; the `&dyn Fn` closure is the seam.
+> A column with no surface returns `rock = 1.0`, which zeroes coverage — that is the
+> no-floating-blades path, and it falls out of the same query rather than being a special case.
+> The grid is not faith-based: the naive per-candidate march measures **2.98 s against 0.14 s**.
+>
+> **The slope boundary wanders, and that is the difference between a hillside and a shaved ring.** A
+> cutoff on slope — at any threshold, softened by any amount — draws grass to a clean curve across a
+> smooth hill, and a clean curve is the synthetic tell. `coverage` now perturbs the *threshold* with
+> low-frequency noise on world position. Widening the fade band instead only blurs the curve; that
+> was tried first. **The wander only ever subtracts**, so `slope_cutoff` keeps its documented meaning
+> exactly — grass stops *entirely* there. A symmetric version let grass survive past the cutoff and
+> the existing test caught it within a minute. Flat ground is untouched by construction, and the
+> manifest proves it: only `grass_slope`'s reference hash moved.
+>
+> **GPU timestamps exist** (`LOOM_GPU_TIMING=1`, per render-graph pass, `Renderer::last_pass_times`).
+> They say **grass costs 0.054 ms** for 45,460 blades at 1080p/4x MSAA — 0.3% of a 16.7 ms frame. The
+> whole forward pass of every scene in this project is 0.05–0.11 ms. **So the placement compute pass
+> and `vkCmdDrawIndirect` are not justified by GPU cost**; density could rise ~10x first. The
+> milliseconds are calibrated against the readback pass, whose duration is bounded by the bus:
+> 13.5–14.0 GB/s measured against a PCIe 4.0 x8 ceiling of 15.75 GB/s, linear over a 16x range.
+> The printed field is labelled `graph`, not `total`, because it is the sum of graph passes and
+> about **2% of a frame** — the TLAS rebuild is a separate submit and the PNG encode is CPU.
+>
+> **The offscreen harness's ~30 ms/frame is the PNG encoder**, not the engine: ~10 ms fixed plus
+> ~11 ms per megapixel, with GPU readback only 0.61 ms of it. It never measured the engine in either
+> direction.
+>
+> **Adding a rendering path means adding a scene to `SCENES` and `GOLDEN`.** `meadow` was missing for
+> two slices and `grass_slope` for one, and in both cases the gate reported a full pass without ever
+> rendering the thing under test. Now 19 scene runs and 9 references.
+>
 > **Slice 7: the AA investigation is finished, and density falloff won it.** Every number is
 > `cargo xtask shimmer`'s flicker on `meadow` at 4x MSAA, each row one change from its neighbour:
 >
@@ -311,11 +349,19 @@ change, so your edits appear live. Two consequences:
 > geometry-over-cards is already decided. So the GPU path is not *after* the AA work — it is a
 > **prerequisite** for most of it.
 >
-> **Next, in this order:** the placement compute pass and indirect draw for scale, then LOD and
-> culling. Vertex-shader blade generation, MSAA and the AA toolkit are done. **The non-temporal
-> toolkit proved sufficient** — 0.354 → 0.137 with density falloff on top of 4x MSAA — so the
-> full-screen AA pass that was budgeted for is not needed, and adding one is now a scope decision
-> needing an ADR rather than a contingency already agreed.
+> **Next:** P3 water. Vertex-shader blade generation, MSAA, the AA toolkit and the terrain response
+> are done. **The non-temporal toolkit proved sufficient** — 0.354 → 0.137 with density falloff on
+> top of 4x MSAA — so the full-screen AA pass that was budgeted for is not needed, and adding one is
+> now a scope decision needing an ADR rather than a contingency already agreed.
+>
+> **The placement compute pass and indirect draw are deferred, on evidence.** They are the design
+> doc's next item, and the GPU timestamps say grass is 0.3% of a frame, so they would optimise the
+> part that is already free. They will be wanted when placement has to be *dynamic* — a field larger
+> than one CPU bake, streaming as the camera moves — which is a scale argument, not a cost one.
+> Doing it also needs an answer to where the placement rules live: hand-porting Voronoi clumping and
+> the position hash into Slang is the CPU/GPU divergence S2 and ADR 0006 exist to prevent, and S2's
+> `Expr` tree is a scalar-field language that cannot express neighbourhood search or struct output.
+> **That deserves an ADR.**
 >
 > **Grass is rendering-only and outside the sim hash**, the same exemption rain gets. Blades are
 > never ECS entities and the scene shows one node for the field, never the blades. **Verified, not
