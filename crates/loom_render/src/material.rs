@@ -273,6 +273,7 @@ fn upload(
         format,
         vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
         levels,
+        vk::SampleCountFlags::TYPE_1,
         &format!("loom.texture.{}", texture.name),
     )?;
 

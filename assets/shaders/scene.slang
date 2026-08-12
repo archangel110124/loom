@@ -988,12 +988,20 @@ GrassOutput grassVertexMain(uint vertexID: SV_VertexID) {
     // pixel covers some centres and misses others, and widening it to a pixel
     // floor does not reduce that — it recruits MORE pixels into the flicker.
     //
-    // The trick the research pass describes is "widen AND reduce alpha to
-    // preserve apparent coverage". The second half is the part that pays, it
-    // needs alpha-to-coverage, and alpha-to-coverage needs MSAA. So this is
-    // not a standalone tool; it is the tool you add ON TOP of MSAA. The code
-    // stays, disabled, because it is correct and measured — turn `GRASS_AA` on
-    // in the same commit that lands MSAA and re-measure.
+    // That was the first reading, and the obvious conclusion — "it needs MSAA
+    // underneath it" — was then tested and is ALSO wrong:
+    //
+    //     4x MSAA alone              0.354
+    //     4x MSAA + these tools      0.431
+    //
+    // Worse than 4x alone, and worse than no MSAA at all. The remaining
+    // suspect is the density falloff rather than the widening: the cull is a
+    // HARD threshold on view distance, so blades pop in and out as the camera
+    // moves, and a pop is flicker by definition. The next thing to try is a
+    // smooth fade — shrink a blade toward zero height as it approaches the
+    // threshold — together with alpha-to-coverage for the opacity half the
+    // research pass actually specifies. Until then these stay off, because
+    // measured-worse is measured-worse.
     static const bool GRASS_AA = false;
 
     const float GRASS_NEAR = 8.0;

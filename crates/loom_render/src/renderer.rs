@@ -153,6 +153,30 @@ impl Default for EnvironmentData {
     }
 }
 
+/// How many samples the offscreen renderer rasterises with.
+///
+/// **Four, and the number is measured rather than assumed.** P2's central
+/// question is whether grass can be made stable without temporal
+/// accumulation, and MSAA is the only tool in the non-temporal kit that works
+/// on geometry silhouettes directly. `cargo xtask shimmer` is what says
+/// whether a given count earns its bandwidth; the phase notes carry the
+/// readings.
+pub(crate) const MSAA_SAMPLES: vk::SampleCountFlags = vk::SampleCountFlags::TYPE_4;
+
+/// The multisampled render targets, when there are any.
+///
+/// Held together because they live and die together: both are transient, both
+/// are recreated on resize, and a half-recreated pair is a validation error
+/// rather than a visible bug.
+struct Msaa {
+    image: vk::Image,
+    alloc: Allocation,
+    view: vk::ImageView,
+    depth_image: vk::Image,
+    depth_allocation: Allocation,
+    depth_view: vk::ImageView,
+}
+
 /// One grass blade, as the vertex shader reads it.
 ///
 /// **Packed into `float4`s rather than mirroring `loom_grass::Blade` field for
@@ -327,6 +351,8 @@ pub struct Renderer {
     particle_buffer: vk::Buffer,
     particle_alloc: Option<Allocation>,
     particle_address: vk::DeviceAddress,
+    /// `None` when rendering at one sample.
+    msaa: Option<Msaa>,
     grass_buffer: vk::Buffer,
     grass_alloc: Option<Allocation>,
     grass_address: vk::DeviceAddress,
@@ -391,6 +417,7 @@ impl Renderer {
             COLOR_FORMAT,
             vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
             1,
+            vk::SampleCountFlags::TYPE_1,
             "loom.color_target",
         )?;
         let (depth, depth_alloc) = create_image(
@@ -401,8 +428,52 @@ impl Renderer {
             DEPTH_FORMAT,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             1,
+            vk::SampleCountFlags::TYPE_1,
             "loom.depth_target",
         )?;
+
+        // **The multisampled pair.** Geometry is rasterised into these and
+        // resolved into `color` at the end of the pass, so everything
+        // downstream — the readback, the golden images — still sees one
+        // sample per pixel and needs no changes at all.
+        //
+        // `TRANSIENT_ATTACHMENT` is the honest usage: nothing ever reads these
+        // images, they exist only between the first draw and the resolve, and
+        // saying so lets a tiled GPU keep them entirely on-chip.
+        let samples = MSAA_SAMPLES;
+        let multisampled = samples != vk::SampleCountFlags::TYPE_1;
+        let msaa = if multisampled {
+            let (image, alloc) = create_image(
+                &raw,
+                &mut allocator,
+                width,
+                height,
+                COLOR_FORMAT,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+                1,
+                samples,
+                "loom.msaa_color",
+            )?;
+            let (depth_image, depth_allocation) = create_image(
+                &raw,
+                &mut allocator,
+                width,
+                height,
+                DEPTH_FORMAT,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                    | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+                1,
+                samples,
+                "loom.msaa_depth",
+            )?;
+            let view = create_view(&raw, image, COLOR_FORMAT, vk::ImageAspectFlags::COLOR)?;
+            let depth_view =
+                create_view(&raw, depth_image, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;
+            Some(Msaa { image, alloc, view, depth_image, depth_allocation, depth_view })
+        } else {
+            None
+        };
 
         let color_view = create_view(&raw, color, COLOR_FORMAT, vk::ImageAspectFlags::COLOR)?;
         let depth_view = create_view(&raw, depth, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;
@@ -536,12 +607,20 @@ impl Renderer {
                 COLOR_FORMAT,
                 raytracer.as_ref().map(Raytracer::descriptor_layout),
                 materials.descriptor_layout(),
+                MSAA_SAMPLES,
             )?;
-        let sky_pipeline = create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
+        let sky_pipeline =
+            create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT, MSAA_SAMPLES)?;
         let particle_pipeline =
-            create_particle_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
+            create_particle_pipeline(
+                &raw,
+                pipeline_layout,
+                pipeline_cache,
+                COLOR_FORMAT,
+                MSAA_SAMPLES,
+            )?;
         let grass_pipeline =
-            create_grass_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
+            create_grass_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT, MSAA_SAMPLES)?;
 
         names.set(color, "loom.color_target");
         names.set(depth, "loom.depth_target");
@@ -617,6 +696,7 @@ impl Renderer {
             particle_buffer,
             particle_alloc: Some(particle_alloc),
             particle_address,
+            msaa,
             grass_buffer,
             grass_alloc: Some(grass_alloc),
             grass_address,
@@ -872,9 +952,21 @@ impl Renderer {
         let mut graph = RenderGraph::new();
         let color = graph.import("loom.color_target", self.color);
         let depth = graph.import("loom.depth_target", self.depth);
+        // **The multisampled pair goes through the graph like anything else.**
+        // never-do #4: barriers are the graph's, and these images start
+        // UNDEFINED every frame and must reach ATTACHMENT_OPTIMAL before the
+        // pass reads them. Skipping this is exactly the class of mistake the
+        // validation layers exist to catch, and they caught it.
+        let msaa_ids = self.msaa.as_ref().map(|m| {
+            (
+                graph.import("loom.msaa_color", m.image),
+                graph.import("loom.msaa_depth", m.depth_image),
+            )
+        });
 
         let (width, height) = (self.width, self.height);
         let (color_view, depth_view) = (self.color_view, self.depth_view);
+        let msaa_views = self.msaa.as_ref().map(|m| (m.view, m.depth_view));
         let (pipeline, layout) = (self.pipeline, self.pipeline_layout);
         // `ready` is false until a TLAS exists — an empty scene traces nothing.
         let shadow_set = self
@@ -907,14 +999,30 @@ impl Renderer {
             })
             .collect();
 
+        // The colour target is written by the *resolve* when multisampling, so
+        // it is a colour write either way — what changes is which image the
+        // fragment shader rasterises into.
+        let mut forward_uses = vec![(color, Access::ColorWrite), (depth, Access::DepthWrite)];
+        if let Some((ms_color, ms_depth)) = msaa_ids {
+            forward_uses.push((ms_color, Access::ColorWrite));
+            forward_uses.push((ms_depth, Access::DepthWrite));
+        }
         graph.pass(
             "forward",
-            &[(color, Access::ColorWrite), (depth, Access::DepthWrite)],
+            &forward_uses,
             move |d, cmd| {
                 // SAFETY: the graph has already transitioned both attachments
                 // into the layouts this recording requires.
                 unsafe {
-                    begin_rendering(d, cmd, color_view, depth_view, width, height);
+                    // Multisampled: rasterise into the MSAA pair and resolve into
+                    // the colour target, so the readback and the golden images
+                    // still see one sample per pixel.
+                    match msaa_views {
+                        Some((ms_color, ms_depth)) => begin_rendering(
+                            d, cmd, ms_color, ms_depth, Some(color_view), width, height,
+                        ),
+                        None => begin_rendering(d, cmd, color_view, depth_view, None, width, height),
+                    }
                     set_viewport(d, cmd, width, height);
                     draw_sky(d, cmd, sky, layout, &base_push);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
@@ -1163,6 +1271,14 @@ impl Drop for Renderer {
                 self.device.destroy_buffer(buffer, None);
             }
             self.device.destroy_pipeline(self.particle_pipeline, None);
+            if let (Some(msaa), Some(allocator)) = (self.msaa.take(), self.allocator.as_mut()) {
+                self.device.destroy_image_view(msaa.view, None);
+                self.device.destroy_image_view(msaa.depth_view, None);
+                self.device.destroy_image(msaa.image, None);
+                self.device.destroy_image(msaa.depth_image, None);
+                let _ = allocator.free(msaa.alloc);
+                let _ = allocator.free(msaa.depth_allocation);
+            }
             self.device.destroy_pipeline(self.grass_pipeline, None);
             self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.particle_buffer, None);
@@ -1305,14 +1421,24 @@ pub(crate) unsafe fn begin_rendering(
     cmd: vk::CommandBuffer,
     color_view: vk::ImageView,
     depth_view: vk::ImageView,
+    // When multisampling, the single-sample image the pass resolves into.
+    // `color_view` is then the multisampled target rather than the result.
+    resolve_view: Option<vk::ImageView>,
     width: u32,
     height: u32,
 ) {
-    let color_attachment = vk::RenderingAttachmentInfo::default()
+    let mut color_attachment = vk::RenderingAttachmentInfo::default()
         .image_view(color_view)
         .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
         .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE)
+        // **DONT_CARE on the multisampled image.** Its samples are consumed by
+        // the resolve and never read again, so storing them would be pure
+        // bandwidth — and bandwidth is the whole cost of MSAA.
+        .store_op(if resolve_view.is_some() {
+            vk::AttachmentStoreOp::DONT_CARE
+        } else {
+            vk::AttachmentStoreOp::STORE
+        })
         .clear_value(vk::ClearValue {
             color: vk::ClearColorValue {
                 float32: [0.05, 0.06, 0.08, 1.0],
@@ -1329,6 +1455,14 @@ pub(crate) unsafe fn begin_rendering(
                 stencil: 0,
             },
         });
+    if let Some(resolve) = resolve_view {
+        color_attachment = color_attachment
+            // AVERAGE is the only mode guaranteed for colour, and it is what
+            // "anti-aliased" means here: the pixel is the mean of its samples.
+            .resolve_mode(vk::ResolveModeFlags::AVERAGE)
+            .resolve_image_view(resolve)
+            .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+    }
     let color_attachments = [color_attachment];
     let rendering = vk::RenderingInfo::default()
         .render_area(vk::Rect2D {
@@ -1676,6 +1810,9 @@ pub(crate) fn create_image(
     // Render targets have one; a sampled texture has a full chain, built on
     // the CPU and copied in level by level.
     mip_levels: u32,
+    // Multisampling. TYPE_1 for everything but a multisampled render target,
+    // which cannot be sampled or copied — only resolved.
+    samples: vk::SampleCountFlags,
     name: &str,
 ) -> Result<(vk::Image, Allocation), RenderError> {
     let info = vk::ImageCreateInfo::default()
@@ -1688,7 +1825,7 @@ pub(crate) fn create_image(
         })
         .mip_levels(mip_levels.max(1))
         .array_layers(1)
-        .samples(vk::SampleCountFlags::TYPE_1)
+        .samples(samples)
         .tiling(vk::ImageTiling::OPTIMAL)
         .usage(usage)
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -1741,6 +1878,7 @@ pub(crate) fn create_pipeline(
     color_format: vk::Format,
     set_layout: Option<vk::DescriptorSetLayout>,
     material_layout: vk::DescriptorSetLayout,
+    samples: vk::SampleCountFlags,
 ) -> Result<(vk::PipelineLayout, vk::Pipeline, vk::PipelineCache), RenderError> {
     let module = create_shader_module(device, crate::SCENE_SPV)?;
 
@@ -1803,8 +1941,8 @@ pub(crate) fn create_pipeline(
         .cull_mode(vk::CullModeFlags::BACK)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
-    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples);
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
         .depth_write_enable(true)
@@ -1898,6 +2036,11 @@ pub(crate) fn create_grass_pipeline(
     layout: vk::PipelineLayout,
     cache: vk::PipelineCache,
     color_format: vk::Format,
+    // **The viewer and the offscreen renderer disagree about this**, which is
+    // why it is a parameter. A pipeline's rasterisation sample count must
+    // match the attachment it draws into, and the windowed path draws straight
+    // into a single-sample swapchain image.
+    samples: vk::SampleCountFlags,
 ) -> Result<vk::Pipeline, RenderError> {
     let module = create_shader_module(device, crate::SCENE_SPV)?;
 
@@ -1925,8 +2068,8 @@ pub(crate) fn create_grass_pipeline(
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
-    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples);
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
         .depth_write_enable(true)
@@ -1970,6 +2113,11 @@ pub(crate) fn create_particle_pipeline(
     layout: vk::PipelineLayout,
     cache: vk::PipelineCache,
     color_format: vk::Format,
+    // **The viewer and the offscreen renderer disagree about this**, which is
+    // why it is a parameter. A pipeline's rasterisation sample count must
+    // match the attachment it draws into, and the windowed path draws straight
+    // into a single-sample swapchain image.
+    samples: vk::SampleCountFlags,
 ) -> Result<vk::Pipeline, RenderError> {
     let module = create_shader_module(device, crate::SCENE_SPV)?;
 
@@ -1995,8 +2143,8 @@ pub(crate) fn create_particle_pipeline(
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
-    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples);
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
         .depth_write_enable(false)
@@ -2054,6 +2202,7 @@ pub(crate) fn create_sky_pipeline(
     layout: vk::PipelineLayout,
     cache: vk::PipelineCache,
     color_format: vk::Format,
+    samples: vk::SampleCountFlags,
 ) -> Result<vk::Pipeline, RenderError> {
     let module = create_shader_module(device, crate::SCENE_SPV)?;
 
@@ -2079,8 +2228,8 @@ pub(crate) fn create_sky_pipeline(
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
-    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples);
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(false)
         .depth_write_enable(false);

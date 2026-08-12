@@ -220,15 +220,35 @@ change, so your edits appear live. Two consequences:
 > lockstep. Wind and the camera position both live in the environment buffer because the push block
 > is at its 128-byte guarantee.
 >
+> **Slice 6: MSAA, and it is the tool that works.** Measured flicker on `meadow`:
+>
+>     1x  0.424      2x  0.387      4x  0.354      8x  0.318
+>
+> Steady, diminishing, no cliff. **4x is the setting** (`MSAA_SAMPLES` in `renderer.rs`) — 8x buys
+> another 10% for double the bandwidth and can be revisited when there is a frame budget to argue
+> against. The offscreen path rasterises into a transient multisampled pair and resolves into the
+> colour target, so the readback and the golden images still see one sample per pixel. **The
+> viewer draws at one sample**, which is why every pipeline builder takes its count as a parameter:
+> a pipeline's rasterisation samples must match the attachment, and getting that wrong is four
+> validation errors, not a visual bug.
+>
+> **The multisampled images go through the render graph** like everything else (never-do #4). They
+> start UNDEFINED every frame; skipping the transition is a validation error, and it was one. The
+> barrier-list test in `lib.rs` now names all four transitions, which is how that ownership stays
+> visible rather than assumed.
+>
 > **Slice 5: the AA investigation has its first real result, and it is a negative one.**
 > Minimum screen-space width clamping — which the research pass calls the single most important
 > trick for distant grass — **makes flicker worse on its own**: 0.424 with nothing, 0.479 with the
 > pixel floor. That is structural, not a tuning failure. Rasterisation without multisampling is
 > binary at the pixel centre, so widening a sub-pixel blade recruits *more* pixels into the
 > flicker rather than steadying it. The trick is "widen **and** reduce alpha"; the alpha half needs
-> alpha-to-coverage, which needs MSAA. **It is not a standalone tool.** The code is written,
-> measured and gated off behind `GRASS_AA` in `scene.slang` — turn it on in the same commit that
-> lands MSAA, and re-measure.
+> alpha-to-coverage, which needs MSAA. That was the hypothesis; it was then tested on top of 4x
+> MSAA and is **also wrong** — 0.431 against 0.354 for MSAA alone. The remaining suspect is the
+> density falloff rather than the widening: its cull is a hard threshold on view distance, so
+> blades pop as the camera moves, and a pop is flicker by definition. **Next to try: a smooth fade
+> to zero height instead of a hard cull, plus actual alpha-to-coverage.** The code stays gated off
+> behind `GRASS_AA` in `scene.slang`, because measured-worse is measured-worse.
 >
 > **`cargo xtask shimmer` now reports flicker, not changed pixels**, because changed pixels was
 > fooled by exactly this experiment: widening blades covers more screen, changes more pixels, and

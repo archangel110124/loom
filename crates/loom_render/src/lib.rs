@@ -240,6 +240,12 @@ mod tests {
             [
                 ("forward", "loom.color_target"),
                 ("forward", "loom.depth_target"),
+                // The multisampled pair, which the graph must move out of
+                // UNDEFINED every frame. Rendering without these transitions
+                // is a validation error, and it was — this list is how the
+                // barrier ownership stays visible rather than assumed.
+                ("forward", "loom.msaa_color"),
+                ("forward", "loom.msaa_depth"),
                 ("readback", "loom.color_target"),
             ],
             "graph did not place the expected barriers"

@@ -231,14 +231,19 @@ impl Viewer {
                 format,
                 raytracer.as_ref().map(crate::raytrace::Raytracer::descriptor_layout),
                 materials.descriptor_layout(),
+                ash::vk::SampleCountFlags::TYPE_1,
             )?;
         let sky_pipeline =
-            crate::renderer::create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, format)?;
+            crate::renderer::create_sky_pipeline(
+                &raw, pipeline_layout, pipeline_cache, format,
+                ash::vk::SampleCountFlags::TYPE_1,
+            )?;
         let particle_pipeline = crate::renderer::create_particle_pipeline(
             &raw,
             pipeline_layout,
             pipeline_cache,
             format,
+            ash::vk::SampleCountFlags::TYPE_1,
         )?;
 
         // Mirrors the offscreen path's ceiling. Sized once so a frame never
@@ -692,7 +697,8 @@ impl Viewer {
             move |d, cmd| {
                 // SAFETY: the graph transitioned both attachments already.
                 unsafe {
-                    begin_rendering(d, cmd, view, depth_view, extent.width, extent.height);
+                    // The viewer renders at one sample; MSAA is the offscreen path for now.
+                    begin_rendering(d, cmd, view, depth_view, None, extent.width, extent.height);
                     set_viewport(d, cmd, extent.width, extent.height);
                     crate::renderer::draw_sky(d, cmd, sky, layout, &base_push);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
@@ -1157,6 +1163,7 @@ fn create_depth(
         DEPTH_FORMAT,
         vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
         1,
+        vk::SampleCountFlags::TYPE_1,
         "loom.viewer_depth",
     )?;
     let view = create_view(device, depth, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;
