@@ -151,6 +151,45 @@ deterministic and independently testable:
     horizontally, so three nearby samples are not at the positions you think.
   - **W2** the Slang twin plus an agreement test.
 
+### 00:12 — piece B built: GPU timestamps. **Grass is cheap, and the plan changes.**
+
+Builder returned; critic dispatched with fresh context and no sight of the
+builder's reasoning. Verdict pending. The measurements, subject to that:
+
+    scene         forward pass   readback   blades
+    meadow           0.105 ms    0.610 ms   45,460
+    primitives       0.050 ms    0.610 ms        0
+    meadow minus its Grass component, same camera:
+                     0.051 ms    0.610 ms        0
+
+**Grass costs ~0.054 ms** for 45,460 blades at 1920x1080 with 4x MSAA — about
+0.3% of a 16.7 ms frame. The entire forward pass of every scene in this project
+is 0.05–0.11 ms. 4x MSAA costs ~0.024 ms and almost all of that is sky and
+ground fill; the blades cost the same at 1x and 4x, which is what thin
+coverage-limited geometry should do.
+
+The builder calibrated the instrument against a quantity predictable from first
+principles rather than asserting it: the readback pass is a pure image→host copy,
+and 8.29 MB / 0.610 ms = 13.6 GB/s, which is realistic PCIe 4.0 x16. It holds at
+13.5 GB/s at 4K and 14.0 GB/s at 960x540, and readback scales 1.00 / 4.12 / 16.5x
+against a 1 / 4 / 16x pixel count. A mishandled `timestampPeriod` would have
+thrown that off by the same factor and landed somewhere absurd. Good method —
+but the critic is verifying it independently, because a confidently-wrong timing
+instrument is worse than none.
+
+**What this settles.** The ~30 ms/frame measured earlier is **0.7 ms of GPU work
+and ~29.3 ms of CPU and stall.** So:
+
+  - The placement compute pass and `vkCmdDrawIndirect` queued next in the design
+    doc are **not justified by GPU cost at this scale**. Density could rise ~10x
+    before the grass draw reaches 0.5 ms. Building them tonight would have been
+    optimising the one part of the frame that is already free.
+  - The thing actually worth instrumenting next is the **CPU** side.
+
+This is the outcome that justifies having built the instrument before the
+optimisation, and it is worth noticing that the intuition it overturned was the
+design document's own sequencing.
+
 **W2 will follow `loom_field::noise`'s precedent, not S2's `Expr` tree.** The
 water doc's recommended Option A is "write it once in Rust, emit the Slang from
 `build.rs` as text", which is exactly what `noise::slang()` already does. S2's
