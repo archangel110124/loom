@@ -88,7 +88,7 @@ struct EnvironmentData {
 struct GrassBlade {
     float4 position;  // xyz base, w height
     float4 facing;    // xy facing, z width, w rest tilt
-    float4 shape;     // x bend, y shade, z clump hash, w unused
+    float4 shape;     // x bend, y shade, z clump hash, w clump albedo, 8:8:8
 };
 
 struct Push {
@@ -862,8 +862,23 @@ struct GrassOutput {
     float3 normal : TEXCOORD1;
     // x is across the blade, y runs base to tip.
     float2 uv : TEXCOORD2;
-    float shade : TEXCOORD3;
+    // The blade's albedo: its clump's colour times its own shade, unpacked
+    // here rather than in the fragment stage — see `unpackRGB`.
+    float3 albedo : TEXCOORD3;
 };
+
+/// The clump albedo `loom_cli::pack_rgb` wrote into `shape.w`.
+///
+/// **Called from the vertex shader only.** The packed value is up to 2^24,
+/// which an `f32` holds exactly — but an *interpolated* one is only exact if
+/// the barycentrics sum to exactly one, and one ULP at that magnitude is a
+/// channel that wrapped. Unpack once, interpolate the colour.
+float3 unpackRGB(float packed) {
+    float r = floor(packed / 65536.0);
+    float g = floor(fmod(packed, 65536.0) / 256.0);
+    float b = fmod(packed, 256.0);
+    return float3(r, g, b) * (1.0 / 255.0);
+}
 
 /// The wind at a point, from the environment block.
 float3 grassWind(float3 p) {
@@ -1141,7 +1156,7 @@ GrassOutput grassVertexMain(uint vertexID: SV_VertexID) {
     out.worldPos = world;
     out.normal = normal;
     out.uv = float2(edge * 0.5 + 0.5, t);
-    out.shade = blade.shape.y;
+    out.albedo = unpackRGB(blade.shape.w) * blade.shape.y;
     return out;
 }
 
@@ -1157,7 +1172,12 @@ float4 grassFragmentMain(GrassOutput in) : SV_Target {
     // soft rather than as a million little planes.
     float wrapped = saturate((dot(normal, sunDirection()) + 0.4) / 1.4);
 
-    float3 albedo = float3(0.24, 0.40, 0.13) * in.shade;
+    // **Authored, not hardcoded.** The colour is the `Material` beside the
+    // field's `Grass`, shifted per clump toward straw or blue-green and scaled
+    // by the blade's own shade — all of it decided on the CPU and delivered in
+    // `shape.w`. It was a literal here, and two shipped scenes authored an
+    // albedo that nothing read.
+    float3 albedo = in.albedo;
     // **Darken toward the base.** The cheapest high-value trick available and
     // the stand-in for the ambient occlusion this renderer does not have: the
     // bottom of a blade is buried in its neighbours and receives almost no

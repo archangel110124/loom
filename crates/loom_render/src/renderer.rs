@@ -191,7 +191,8 @@ pub struct GrassBlade {
     pub position: [f32; 4],
     /// xy facing, z width, w rest tilt.
     pub facing: [f32; 4],
-    /// x bend, y shade, z clump hash as a float, w unused.
+    /// x bend, y shade, z clump hash as a float, w the clump's albedo packed
+    /// 8:8:8 (`loom_cli::pack_rgb`, unpacked in `grassVertexMain`).
     pub shape: [f32; 4],
 }
 

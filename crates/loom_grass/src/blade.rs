@@ -216,6 +216,7 @@ mod tests {
             tilt: 0.3,
             bend: 0.7,
             shade: 1.0,
+            hue: 0.0,
             clump: 0,
         }
     }

@@ -1191,6 +1191,14 @@ pub(crate) fn grass_key(scene: &Scene) -> String {
                 parts.push(format!("{}|{name}|{at:?}|{component}", node.path));
             }
         }
+        // The field's colour comes from the `Material` beside its `Grass`, so
+        // editing that albedo has to regenerate — only for a grass node, or
+        // every material edit in the scene would pay the voxel march.
+        if node.components.contains_key("Grass")
+            && let Some(material) = node.components.get("Material")
+        {
+            parts.push(format!("{}|Material|{material}", node.path));
+        }
     }
     parts.join("\n")
 }
@@ -1230,6 +1238,40 @@ fn warn_if_grass_truncated(wanted: usize, capacity: usize) {
     }
 }
 
+/// What a grass field with no `Material` beside it is coloured.
+///
+/// The hue `scene.slang` used to hardcode, so a field that authors nothing
+/// renders exactly as it did.
+const GRASS_ALBEDO: [f32; 3] = [0.24, 0.40, 0.13];
+
+/// One clump's albedo: the field's authored colour, pushed along the single
+/// axis grass actually varies on.
+///
+/// **Dry is yellow-green and lush is blue-green** — more red and less blue, or
+/// the reverse — so the whole of hue variation here is two multiplies against
+/// `hue` from [`loom_grass`]. A free hue rotation would need an HSV round trip
+/// and could reach colours no field contains; this cannot leave the range
+/// between straw and blue-green whatever it is handed.
+fn hue_shift(albedo: [f32; 3], hue: f32) -> [f32; 3] {
+    // Deliberately small. Doubling these reads as patches of different plants
+    // rather than as one field, which is the failure mode of the whole idea.
+    const RED: f32 = 0.45;
+    const BLUE: f32 = 0.60;
+    [albedo[0] * (1.0 - hue * RED), albedo[1], albedo[2] * (1.0 + hue * BLUE)]
+}
+
+/// Three colour channels into the one `float4` slot `GrassBlade` has left.
+///
+/// Eight bits each: 1/255 is finer than the variation being carried, and the
+/// packed integer stays under 2^24 where an `f32` is exact, so the shader
+/// unpacks precisely what was packed. **It unpacks in the *vertex* stage** —
+/// an interpolated 16-million-magnitude float is not guaranteed bit-identical
+/// across a triangle, and one ULP there is a blue channel that wrapped.
+fn pack_rgb(colour: [f32; 3]) -> f32 {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round();
+    q(colour[0]).mul_add(65536.0, q(colour[1]).mul_add(256.0, q(colour[2])))
+}
+
 pub(crate) fn grass_blades(scene: &Scene) -> Vec<loom_render::GrassBlade> {
     let mut out = Vec::new();
     // Baking the volume is not free — `terrain_stress` is 67 million voxels —
@@ -1255,6 +1297,18 @@ pub(crate) fn grass_blades(scene: &Scene) -> Vec<loom_render::GrassBlade> {
             clump_facing: field.clump_facing,
             clump_colour: field.clump_colour,
         };
+        // **The authored colour, read from the `Material` beside the `Grass`.**
+        // Both shipped grass scenes have always carried one and nothing read
+        // it — the shader hardcoded a green — which is precisely the failure an
+        // engine whose premise is "the agent can verify its own work" cannot
+        // have: the scene said one thing and the render showed another, and
+        // every gate passed.
+        let albedo = node
+            .components
+            .get("Material")
+            .and_then(|m| serde_json::from_value::<loom_scene::components::Material>(m.clone()).ok())
+            .map_or(GRASS_ALBEDO, |m| m.albedo);
+
         // The field is centred on its node.
         let origin = world_translation(scene, node);
         let (hx, hz) = (field.half_extent[0], field.half_extent[1]);
@@ -1291,7 +1345,12 @@ pub(crate) fn grass_blades(scene: &Scene) -> Vec<loom_render::GrassBlade> {
                         // phase-shift the sway. Its fractional part is what is
                         // used, so precision past 24 bits does not matter.
                         #[allow(clippy::cast_precision_loss)]
-                        shape: [blade.bend, blade.shade, (blade.clump % 65536) as f32 / 65536.0, 0.0],
+                        shape: [
+                            blade.bend,
+                            blade.shade,
+                            (blade.clump % 65536) as f32 / 65536.0,
+                            pack_rgb(hue_shift(albedo, blade.hue)),
+                        ],
                     });
                 }
             }
@@ -2534,6 +2593,71 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// The packed colour survives the trip, unpacked exactly as `unpackRGB`
+    /// does it in `scene.slang`.
+    ///
+    /// This is the layout-described-twice hazard in miniature: the pack is
+    /// Rust and the unpack is Slang, and nothing but this test says they are
+    /// the same arithmetic. Quantisation to 1/255 is the only error allowed.
+    #[test]
+    fn a_packed_grass_colour_unpacks_to_itself() {
+        // Both shipped fields, both endpoints of the hue shift, and the
+        // extremes that would overflow the 24 bits if the clamp went missing.
+        for colour in [[0.29, 0.44, 0.14], [0.24, 0.40, 0.13], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]] {
+            for hue in [-1.0, -0.4, 0.0, 0.4, 1.0] {
+                let want = hue_shift(colour, hue);
+                let packed = pack_rgb(want);
+                assert!(packed <= 16_777_215.0, "{packed} is past what an f32 holds exactly");
+                let unpacked = [
+                    (packed / 65536.0).floor() / 255.0,
+                    ((packed % 65536.0) / 256.0).floor() / 255.0,
+                    (packed % 256.0) / 255.0,
+                ];
+                for i in 0..3 {
+                    let expected = want[i].clamp(0.0, 1.0);
+                    assert!(
+                        (unpacked[i] - expected).abs() <= 1.0 / 255.0,
+                        "channel {i} of {want:?} came back as {:?}",
+                        unpacked
+                    );
+                }
+            }
+        }
+    }
+
+    /// Neighbouring clumps differ in hue, and not by much. Both halves matter:
+    /// no variation is the carpet this exists to break up, and too much reads
+    /// as patches of different plants.
+    #[test]
+    fn clumps_vary_in_hue_without_becoming_a_patchwork() {
+        let rules = loom_grass::Rules::default();
+        let ground = |_: f32, _: f32| loom_grass::Ground::default();
+        let blades = loom_grass::tile(loom_grass::Tile { x: 0, z: 0 }, &rules, &ground);
+
+        let hues: Vec<f32> = blades.iter().map(|b| b.hue).collect();
+        let spread = hues.iter().fold(f32::MIN, |a, b| a.max(*b))
+            - hues.iter().fold(f32::MAX, |a, b| a.min(*b));
+        assert!(spread > 0.2, "every clump is the same hue: spread {spread}");
+
+        // What the eye judges is the resulting colour, not the parameter, and
+        // it judges it *relative* to how dark the field already is. The band
+        // is deliberately wide: it is a guard against a later retune landing
+        // an order of magnitude out, not a fit to today's constants. What
+        // settles the strength is looking at `meadow` at 1920x1080.
+        let base = [0.29, 0.44, 0.14];
+        let colours: Vec<[f32; 3]> = hues.iter().map(|h| hue_shift(base, *h)).collect();
+        for channel in [0, 2] {
+            let values: Vec<f32> = colours.iter().map(|c| c[channel]).collect();
+            let range = (values.iter().fold(f32::MIN, |a, b| a.max(*b))
+                - values.iter().fold(f32::MAX, |a, b| a.min(*b)))
+                / base[channel];
+            assert!(
+                (0.1..0.6).contains(&range),
+                "channel {channel} varies by {range} of itself across one tile"
+            );
+        }
     }
 
     /// Semantic placement reasons in world space — "on top of" means nothing

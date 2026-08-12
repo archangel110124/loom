@@ -75,6 +75,15 @@ pub struct Blade {
     pub bend: f32,
     /// Multiplier on the clump's colour, per blade.
     pub shade: f32,
+    /// How far this clump's hue is pushed off the field's authored one, `-1`
+    /// dry yellow-green through `+1` lush blue-green, scaled by
+    /// [`Rules::clump_colour`] like `shade` is.
+    ///
+    /// **Hue, not only value, because a field that varies in brightness alone
+    /// still reads as one dyed carpet.** Real grass runs from straw to
+    /// blue-green within a few metres. What the shift means in RGB is the
+    /// caller's business — this crate knows the clump, not the material.
+    pub hue: f32,
     /// Which clump this blade belongs to, as a hash. Blades sharing one agree
     /// about facing, height and colour.
     pub clump: u32,
@@ -350,6 +359,11 @@ fn blade(x: f32, z: f32, ground: &Ground, rules: &Rules, seed: u32) -> Blade {
     let clump_angle = unit(clump) * std::f32::consts::TAU;
     let clump_height = unit(clump.rotate_left(7));
     let clump_shade = unit(clump.rotate_left(13));
+    // Re-hashed rather than rotated: a rotation of the same word shares bits
+    // with the window `clump_shade` reads, so hue and brightness would drift
+    // together and every pale clump would also be the dry one. `hash` is the
+    // frozen lattice hash, which is also what the compute half will call.
+    let clump_hue = unit(hash(clump ^ 0x68bc_21eb));
 
     // The blade's own, so they are not identical either.
     let own_angle = unit(seed.rotate_left(3)) * std::f32::consts::TAU;
@@ -379,6 +393,7 @@ fn blade(x: f32, z: f32, ground: &Ground, rules: &Rules, seed: u32) -> Blade {
         tilt: 0.08 + spread * 0.35,
         bend: 0.5 + unit(seed.rotate_left(29)) * 0.5,
         shade: 1.0 + (clump_shade - 0.5) * rules.clump_colour,
+        hue: (clump_hue - 0.5) * 2.0 * rules.clump_colour,
         clump,
     }
 }
