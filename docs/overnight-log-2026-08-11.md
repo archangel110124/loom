@@ -131,6 +131,42 @@ target framerate" exit criterion actually requires, and that UE5 has as its GPU
 Visualizer. With real numbers, the culling decision can be made on evidence in
 the morning. Written up for the human to overrule.
 
+### 00:52 — **the human looked at the viewer and there was no grass**
+
+Woke up, ran `loom run` on `meadow`, and sent a screenshot: a bare green plane
+with the sphere on it. No blades.
+
+`crates/loom_render/src/viewer.rs:674` says why, in a comment nobody had
+surfaced:
+
+    // The viewer has no grass path yet; the headless renderer does.
+    grass: 0,
+
+**Grass has never rendered in the windowed viewer**, since slice 2. The viewer
+has a sky pipeline and a particle pipeline and no grass pipeline; its push block
+passes a null grass buffer address. Only the offscreen `loom render` path draws
+it.
+
+**Why five gates and three critics missed it, which is the part worth keeping.**
+Every image judged tonight — mine, both builders', all three critics' — came out
+of the *offscreen* renderer, because that is what `cargo xtask image`,
+`flythrough`, `shimmer` and `render` all use. `cargo xtask validate` does drive
+the windowed path across all 19 scenes, but validation layers verify that what
+you *did* is legal; they cannot object to a draw call you never made. **No gate
+in this project can detect an absent feature**, and every reviewer was looking
+down the one pipe where the feature was present.
+
+That is not a gap in the reviews, it is a gap in what was reviewable. The
+correct reading of exit criterion 1 — "a grass field renders" — was never met on
+the path `CLAUDE.md` designates as the human's live view, and the phase notes I
+wrote at 00:49 claiming the terrain response was done are, on the viewer,
+untrue.
+
+Fix dispatched: mirror the particle path, which is the same shape (device-address
+buffer, own pipeline, vertex-shader-only draw). **`TYPE_1` sample count** — the
+viewer draws into a single-sample swapchain image while the offscreen path is at
+4x, and that mismatch is four validation errors rather than a visual bug.
+
 ### 23:51 — Stage 3 (P3 water) is fully specified; no spec-writing needed
 
 Checked, because the brief said to write the spec if Stage 3 was underspecified.
