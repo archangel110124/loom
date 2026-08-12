@@ -265,6 +265,14 @@ pub struct ParticleEmitter {
     /// broad slow curls; large ones make fine noise.
     #[schemars(range(min = 0.001, max = 10.0))]
     pub turbulence_scale: f32,
+    /// How readily these particles are carried by the scene's `Wind`.
+    ///
+    /// Per second, so `4.0` matches the air in about a quarter of a second —
+    /// smoke, steam, dust. `0.5` lags it noticeably, which is what embers and
+    /// light debris do. **`0.0` ignores wind entirely and is the default**, so
+    /// every scene authored before wind existed renders exactly as it did.
+    #[schemars(range(min = 0.0, max = 20.0))]
+    pub wind_response: f32,
     /// Diameter in metres at birth and at death. Smoke expands as it cools.
     #[schemars(inner(range(min = 0.0, max = 1000.0)))]
     pub size: [f32; 2],
@@ -322,6 +330,7 @@ impl Default for ParticleEmitter {
             drag: 0.8,
             turbulence: 1.4,
             turbulence_scale: 0.35,
+            wind_response: 0.0,
             size: [0.6, 3.2],
             color_start: [0.32, 0.30, 0.29],
             color_end: [0.62, 0.62, 0.64],

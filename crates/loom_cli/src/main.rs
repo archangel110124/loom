@@ -489,8 +489,10 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     }
 
     let objects = world_to_objects(&world, &library, &material_library);
+    let weather = weather::wind_of(&scene);
     let particles = particles::simulate(
         &world,
+        &weather,
         flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()),
         &fired,
     );
@@ -582,6 +584,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     #[allow(clippy::cast_possible_truncation)]
                     let particles = particles::simulate(
                         &world,
+                        &weather,
                         Some(elapsed as u32),
                         &runner.fired(),
                     );

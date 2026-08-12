@@ -56,6 +56,7 @@ fn parse(component: &serde_json::Value) -> (loom_particles::Emitter, Visual) {
             drag: f("drag", defaults.drag),
             turbulence: f("turbulence", defaults.turbulence),
             turbulence_scale: f("turbulence_scale", defaults.turbulence_scale),
+            wind_response: f("wind_response", defaults.wind_response),
             #[allow(clippy::cast_possible_truncation)]
             burst: component
                 .get("burst")
@@ -120,12 +121,17 @@ struct Live {
 pub(crate) struct Plumes {
     live: Vec<Live>,
     instances: Vec<ParticleInstance>,
+    /// The air these plumes sit in. Sampled per particle, per step.
+    wind: loom_field::wind::Wind,
+    /// Seconds simulated, from the tick count — never a clock (never-do #8).
+    elapsed: f32,
 }
 
 impl Plumes {
     /// Build from a world and warm every plume to its settled population.
-    pub(crate) fn new(world: &World) -> Self {
-        let mut plumes = Self { live: Vec::new(), instances: Vec::new() };
+    pub(crate) fn new(world: &World, wind: loom_field::wind::Wind) -> Self {
+        let mut plumes =
+            Self { live: Vec::new(), instances: Vec::new(), wind, elapsed: 0.0 };
         for entity in world.entities() {
             let (Some(component), Some(global)) = (world.emitter(*entity), world.global_transform(*entity))
             else {
@@ -151,8 +157,14 @@ impl Plumes {
             if !one_shot {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let warm = ((emitter.lifetime * 2.0) / DT).ceil() as u32;
-                for _ in 0..warm {
-                    system.step(DT, &emitter, origin);
+                // Warmed *in the wind*, so a plume opens already bent
+                // downwind rather than standing straight up and then
+                // toppling over in the first second anyone watches.
+                for tick in 0..warm {
+                    #[allow(clippy::cast_precision_loss)]
+                    let t = tick as f32 * DT;
+                    let wind = &plumes.wind;
+                    system.step_in_wind(DT, &emitter, origin, &|at| wind.at(at, t));
                 }
             }
             plumes.live.push(Live { system, emitter, visual, origin });
@@ -182,10 +194,17 @@ impl Plumes {
         if self.live.is_empty() || ticks == 0 {
             return;
         }
+        let wind = &self.wind;
         for live in &mut self.live {
+            let mut t = self.elapsed;
             for _ in 0..ticks {
-                live.system.step(DT, &live.emitter, live.origin);
+                live.system.step_in_wind(DT, &live.emitter, live.origin, &|at| wind.at(at, t));
+                t += DT;
             }
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.elapsed += ticks as f32 * DT;
         }
         self.rebuild_instances();
     }
@@ -275,6 +294,7 @@ fn blast_template(world: &World) -> Vec<(loom_particles::Emitter, Visual)> {
 
 pub(crate) fn simulate(
     world: &World,
+    wind: &loom_field::wind::Wind,
     ticks: Option<u32>,
     fired: &[(u64, [f32; 3])],
 ) -> Vec<ParticleInstance> {
@@ -298,8 +318,10 @@ pub(crate) fn simulate(
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let steps = ticks.unwrap_or_else(|| ((emitter.lifetime * 2.0) / DT).ceil() as u32);
         let mut system = loom_particles::System::new(emitter.seed);
-        for _ in 0..steps {
-            system.step(DT, &emitter, origin);
+        for tick in 0..steps {
+            #[allow(clippy::cast_precision_loss)]
+            let t = tick as f32 * DT;
+            system.step_in_wind(DT, &emitter, origin, &|at| wind.at(at, t));
         }
 
         for p in system.particles() {
@@ -320,7 +342,7 @@ pub(crate) fn simulate(
             for (emitter, visual) in &template {
                 let mut system = loom_particles::System::new(emitter.seed ^ *at_tick);
                 for _ in 0..elapsed {
-                    system.step(DT, emitter, *at);
+                    system.step_in_wind(DT, emitter, *at, &|p| wind.at(p, 0.0));
                 }
                 for p in system.particles() {
                     out.push(instance(p, visual));
@@ -334,6 +356,11 @@ pub(crate) fn simulate(
 
 #[cfg(test)]
 mod tests {
+    /// Still air, so a test measures the emitter rather than the weather.
+    fn calm() -> loom_field::wind::Wind {
+        loom_field::wind::Wind::new(0.0, 0.0, 0.0, 0.0, 1.0)
+    }
+
     use super::*;
 
     fn range() -> World {
@@ -347,7 +374,7 @@ mod tests {
     /// permanent fireball parked somewhere in it.
     #[test]
     fn a_dormant_explosion_does_not_play_where_it_sits() {
-        let quiet = simulate(&range(), Some(60), &[]);
+        let quiet = simulate(&range(), &calm(), Some(60), &[]);
 
         assert!(
             quiet.is_empty(),
@@ -364,7 +391,7 @@ mod tests {
         let at = [2.0, 1.0, -7.0];
         let fired = [(10, at)];
 
-        let out = simulate(&world, Some(30), &fired);
+        let out = simulate(&world, &calm(), Some(30), &fired);
 
         assert!(!out.is_empty(), "the explosion produced nothing");
         // The prefab is parked at x = -14; every particle should be near the
@@ -389,7 +416,7 @@ mod tests {
     /// had been pressed.
     #[test]
     fn building_a_plume_does_not_fire_a_one_shot() {
-        let plumes = Plumes::new(&explosion());
+        let plumes = Plumes::new(&explosion(), calm());
 
         assert!(
             plumes.instances().is_empty(),
@@ -406,8 +433,8 @@ mod tests {
     fn rebuilding_a_plume_from_the_same_scene_gives_the_same_thing() {
         let world = explosion();
 
-        let first = Plumes::new(&world);
-        let second = Plumes::new(&world);
+        let first = Plumes::new(&world, calm());
+        let second = Plumes::new(&world, calm());
 
         assert_eq!(
             first.instances().len(),
@@ -424,7 +451,7 @@ mod tests {
         let source = std::fs::read_to_string("../../assets/test/smoke.loom").expect("fixture");
         let world = World::from_scene(&loom_scene::Scene::parse(&source).expect("valid scene"));
 
-        let plumes = Plumes::new(&world);
+        let plumes = Plumes::new(&world, calm());
 
         assert!(!plumes.instances().is_empty(), "a chimney should preview");
     }
@@ -434,9 +461,10 @@ mod tests {
     fn no_shot_means_no_fireball() {
         let world = range();
 
-        let none = simulate(&world, Some(30), &[]);
+        let none = simulate(&world, &calm(), Some(30), &[]);
         let one = simulate(
             &world,
+            &calm(),
             Some(30),
             &[(5, [0.0, 1.0, 0.0])],
         );

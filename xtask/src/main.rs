@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 14] = [
+const SCENES: [&str; 15] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -47,6 +47,7 @@ const SCENES: [&str; 14] = [
     "assets/test/materials.loom",
     "assets/test/terrain_stress.loom",
     "assets/test/smoke.loom",
+    "assets/test/windy.loom",
     "assets/test/camera.loom",
     "assets/test/walker.loom",
     "assets/test/explosion.loom",
@@ -87,12 +88,16 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 6] = [
+const GOLDEN: [(&str, &str, &[&str]); 7] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
     ("smoke", "assets/test/smoke.loom", &[]),
     ("explosion", "assets/test/explosion.loom", &["--sim", "22"]),
+    // Wind-advected particles: the one scene where the field does something
+    // visible, so a wind regression shows up as a picture rather than only as
+    // a changed hash.
+    ("windy", "assets/test/windy.loom", &["--sim", "360"]),
     (
         "proving_ground",
         "assets/games/proving_ground.loom",

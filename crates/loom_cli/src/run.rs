@@ -893,9 +893,12 @@ impl ApplicationHandler for App {
                     Some(play) => &play.world,
                     None => self.view.world(),
                 };
+                // The scene'''s own weather, so a plume in the viewer bends the
+                // same way it does in a headless render.
+                let wind = crate::weather::wind_of(&self.view.scene);
                 let plumes = self
                     .plumes
-                    .get_or_insert_with(|| crate::particles::Plumes::new(world));
+                    .get_or_insert_with(|| crate::particles::Plumes::new(world, wind));
                 plumes.advance(stepped);
                 let particles: &[loom_render::ParticleInstance] = plumes.instances();
 

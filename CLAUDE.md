@@ -199,6 +199,11 @@ change, so your edits appear live. Two consequences:
 > is the tree, the Slang is generated, and `loom_field::wind::Wind` samples it with S3 sheltering.
 > `loom sim --assert "wind@x,y,z.speed >= v"` checks it from the CLI.
 >
+> **The only thing wind visibly drives is particles**, via `wind_response` on `ParticleEmitter` —
+> a coupling toward the air's velocity, **zero by default** so every scene authored before wind
+> renders byte-identically. `assets/test/windy.loom` is the demo and is in both gates. Grass (P2)
+> is what makes the field carry a landscape.
+>
 > **Two rules that outlive P1.** `loom_field::noise` is **frozen ABI** — an integer lattice hash,
 > written in Rust and Slang side by side and compared *exactly* by the agreement test, because a
 > `frac`-based hash amplifies a last-bit difference into a different number. And the 10k-tick wind
