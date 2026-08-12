@@ -18,7 +18,7 @@ use gpu_allocator::vulkan::{
     Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc,
 };
 
-use loom_render_graph::{Access, RenderGraph, Transition};
+use loom_render_graph::{Access, GpuTimers, RenderGraph, Transition};
 
 use crate::debug_names::DebugNames;
 use crate::{Device, Instance};
@@ -376,6 +376,26 @@ pub struct Renderer {
     /// What the graph decided last frame. Exposed so a test can assert the
     /// barriers actually happened rather than trusting that they did.
     last_transitions: Vec<Transition>,
+    /// `Some` only when `LOOM_GPU_TIMING` is set and the queue can write
+    /// timestamps. Off by default: it costs two commands per pass and it
+    /// serialises passes slightly, so it must not be paid for by every render.
+    timers: Option<GpuTimers>,
+    /// Set when `LOOM_GPU_TIMING` asked for a table.
+    print_timing: bool,
+}
+
+/// Timestamps this renderer's query pool has room for. The offscreen path
+/// declares two passes; the slack is so adding one does not silently go
+/// unmeasured.
+const TIMED_PASSES: u32 = 8;
+
+/// Whether `LOOM_GPU_TIMING` asks for a per-frame table on stderr.
+///
+/// An environment variable rather than a flag so every command that renders —
+/// `loom render`, `loom sim`, `cargo xtask image` — gains the instrument
+/// without any of them knowing it exists.
+fn timing_requested() -> bool {
+    std::env::var_os("LOOM_GPU_TIMING").is_some_and(|v| v != "0")
 }
 
 impl Renderer {
@@ -690,7 +710,46 @@ impl Renderer {
             )?;
         }
 
+        // GPU timing, if it was asked for. Queried and branched on rather than
+        // assumed (Vulkan doc §14): `timestampValidBits` is per queue family
+        // and may be zero, and `timestampPeriod` is nanoseconds per tick — 1.0
+        // on this box's driver, ~40 on other hardware.
+        let print_timing = timing_requested();
+        let timers = if print_timing {
+            // SAFETY: `physical` came from this instance.
+            let limits = unsafe {
+                instance
+                    .handle()
+                    .get_physical_device_properties(device.physical())
+            }
+            .limits;
+            // SAFETY: same.
+            let families = unsafe {
+                instance
+                    .handle()
+                    .get_physical_device_queue_family_properties(device.physical())
+            };
+            let valid_bits = families
+                .get(device.queue_family() as usize)
+                .map_or(0, |f| f.timestamp_valid_bits);
+            let timers = GpuTimers::new(&raw, limits.timestamp_period, valid_bits, TIMED_PASSES)?;
+            match &timers {
+                Some(t) => names.set(t.pool(), "loom.timestamps"),
+                None => eprintln!(
+                    "[loom gpu] timestamps unavailable: timestampValidBits={valid_bits}, \
+                     timestampPeriod={}, timestampComputeAndGraphics={}",
+                    limits.timestamp_period,
+                    limits.timestamp_compute_and_graphics != 0,
+                ),
+            }
+            timers
+        } else {
+            None
+        };
+
         Ok(Self {
+            timers,
+            print_timing,
             raytracer,
             materials,
             particle_buffer,
@@ -1174,6 +1233,10 @@ impl Renderer {
             }
         });
 
+        if let Some(timers) = self.timers.as_mut() {
+            graph.time(timers);
+        }
+
         let d = &self.device;
         // SAFETY: the buffer is not in flight — the previous submit was waited on.
         unsafe {
@@ -1197,6 +1260,28 @@ impl Renderer {
             d.wait_for_fences(&[self.fence], true, u64::MAX)?;
         }
 
+        // After the fence, never before: the queries are only guaranteed
+        // available once the work that wrote them has completed.
+        if let Some(timers) = self.timers.as_mut() {
+            timers.resolve(&self.device);
+            if self.print_timing {
+                let table = timers
+                    .times()
+                    .iter()
+                    .map(|(name, ms)| format!("{name} {ms:.3} ms"))
+                    .collect::<Vec<_>>()
+                    .join("  ");
+                let total: f64 = timers.times().iter().map(|(_, ms)| ms).sum();
+                // Blades on the line because P2's exit criterion is a frame
+                // time *at a plausible blade count*, and a millisecond with no
+                // count beside it answers half the question.
+                eprintln!(
+                    "[loom gpu] {}x{}  {table}  total {total:.3} ms  ({} blades, {} objects)",
+                    self.width, self.height, self.grass_count, objects.len(),
+                );
+            }
+        }
+
         let allocation = self
             .readback_alloc
             .as_ref()
@@ -1216,6 +1301,17 @@ impl Renderer {
     #[must_use]
     pub fn last_transitions(&self) -> &[Transition] {
         &self.last_transitions
+    }
+
+    /// GPU milliseconds per pass on the last [`Self::render`], in pass order.
+    ///
+    /// Empty unless `LOOM_GPU_TIMING` was set when this renderer was built —
+    /// the query pool has to exist before the first frame records into it.
+    /// This is the API a caller consumes; the stderr table is a convenience
+    /// for commands that have no idea timing exists.
+    #[must_use]
+    pub fn last_pass_times(&self) -> &[(String, f64)] {
+        self.timers.as_ref().map_or(&[], GpuTimers::times)
     }
 
     /// Render and write a PNG.
@@ -1252,6 +1348,9 @@ impl Drop for Renderer {
         unsafe {
             let _ = self.device.device_wait_idle();
             self.save_pipeline_cache();
+            if let Some(timers) = self.timers.as_mut() {
+                timers.destroy(&self.device);
+            }
             // Before the allocator goes away: acceleration structures own both
             // Vulkan handles and allocations from it.
             if let (Some(rt), Some(allocator)) =

@@ -132,6 +132,135 @@ struct Registered {
     name: &'static str,
 }
 
+/// GPU timestamps around every pass, resolved after the frame's fence.
+///
+/// The graph already knows where a pass begins and ends, so this lives here
+/// rather than being sprinkled through call sites — the same argument that puts
+/// barriers here (never-do #4).
+///
+/// **Nothing is recorded unless a caller hands one to [`RenderGraph::time`].**
+/// Two timestamp writes per pass are commands in the buffer like any other, and
+/// an instrument that is always on is an instrument that changes what it
+/// measures.
+pub struct GpuTimers {
+    pool: vk::QueryPool,
+    /// Nanoseconds per tick, from `VkPhysicalDeviceLimits::timestampPeriod`.
+    /// Never hardcoded: `vulkaninfo` reports 1.0 on this box's NVIDIA driver,
+    /// and other vendors report tens of nanoseconds, so a constant would be
+    /// silently wrong by an order of magnitude on somebody else's GPU.
+    period_ns: f32,
+    /// Only the low `timestampValidBits` of a written value are meaningful.
+    mask: u64,
+    /// Passes the pool can hold timestamps for.
+    capacity: u32,
+    /// Filled by [`RenderGraph::execute`], read by [`Self::resolve`].
+    pending: Vec<&'static str>,
+    times: Vec<(String, f64)>,
+}
+
+/// Milliseconds between two raw timestamp values.
+///
+/// Split out because it is the only arithmetic here that can be wrong in a way
+/// no GPU is needed to see: the mask, and the counter wrapping past it.
+fn elapsed_ms(start: u64, end: u64, mask: u64, period_ns: f32) -> f64 {
+    let (start, end) = (start & mask, end & mask);
+    // The counter is `timestampValidBits` wide and wraps. Wrapping is rare
+    // (2^64 ticks is centuries at 1ns) but wrong-by-a-universe when ignored.
+    let ticks = end.wrapping_sub(start) & mask;
+    #[allow(clippy::cast_precision_loss)]
+    let ticks = ticks as f64;
+    ticks * f64::from(period_ns) / 1_000_000.0
+}
+
+impl GpuTimers {
+    /// Build a pool sized for `passes` passes, or `None` when this queue family
+    /// cannot write timestamps at all.
+    ///
+    /// `valid_bits` is the queue family's `timestampValidBits`. Zero means the
+    /// family reports no usable timestamps — the honest answer there is "no
+    /// numbers", not numbers made of whatever the driver left in the buffer.
+    ///
+    /// # Errors
+    /// The driver's error if `vkCreateQueryPool` fails.
+    pub fn new(
+        device: &ash::Device,
+        period_ns: f32,
+        valid_bits: u32,
+        passes: u32,
+    ) -> Result<Option<Self>, vk::Result> {
+        if valid_bits == 0 || period_ns <= 0.0 {
+            return Ok(None);
+        }
+        let info = vk::QueryPoolCreateInfo::default()
+            .query_type(vk::QueryType::TIMESTAMP)
+            .query_count(passes * 2);
+        // SAFETY: `info` is fully initialised and outlives the call.
+        let pool = unsafe { device.create_query_pool(&info, None) }?;
+        Ok(Some(Self {
+            pool,
+            period_ns,
+            mask: if valid_bits >= 64 {
+                u64::MAX
+            } else {
+                (1_u64 << valid_bits) - 1
+            },
+            capacity: passes,
+            pending: Vec::new(),
+            times: Vec::new(),
+        }))
+    }
+
+    /// The pool handle, so the owner can name it via `VK_EXT_debug_utils`.
+    #[must_use]
+    pub fn pool(&self) -> vk::QueryPool {
+        self.pool
+    }
+
+    /// Read back the last executed frame's timings. Call **after** waiting on
+    /// that frame's fence; the results are guaranteed available by then.
+    pub fn resolve(&mut self, device: &ash::Device) {
+        self.times.clear();
+        if self.pending.is_empty() {
+            return;
+        }
+        let mut raw = vec![0_u64; self.pending.len() * 2];
+        // SAFETY: every query in the range was reset and written by the
+        // command buffer whose fence the caller has waited on.
+        let read = unsafe {
+            device.get_query_pool_results(
+                self.pool,
+                0,
+                &mut raw,
+                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+            )
+        };
+        if read.is_err() {
+            return;
+        }
+        for (index, name) in self.pending.iter().enumerate() {
+            let ms = elapsed_ms(raw[index * 2], raw[index * 2 + 1], self.mask, self.period_ns);
+            self.times.push(((*name).to_string(), ms));
+        }
+    }
+
+    /// Per-pass milliseconds from the last [`Self::resolve`], in pass order.
+    #[must_use]
+    pub fn times(&self) -> &[(String, f64)] {
+        &self.times
+    }
+
+    /// Destroy the pool.
+    ///
+    /// # Safety
+    /// No command buffer referencing this pool may still be in flight.
+    pub unsafe fn destroy(&mut self, device: &ash::Device) {
+        // SAFETY: the caller guarantees nothing is in flight.
+        unsafe { device.destroy_query_pool(self.pool, None) };
+        self.pool = vk::QueryPool::null();
+        self.pending.clear();
+    }
+}
+
 /// What a pass does once its resources are in the right layouts.
 type Record<'a> = Box<dyn FnOnce(&ash::Device, vk::CommandBuffer) + 'a>;
 
@@ -147,6 +276,7 @@ pub struct Pass<'a> {
 pub struct RenderGraph<'a> {
     images: Vec<Registered>,
     passes: Vec<Pass<'a>>,
+    timers: Option<&'a mut GpuTimers>,
 }
 
 impl<'a> RenderGraph<'a> {
@@ -155,7 +285,14 @@ impl<'a> RenderGraph<'a> {
         Self {
             images: Vec::new(),
             passes: Vec::new(),
+            timers: None,
         }
+    }
+
+    /// Time every pass on the GPU. The timings land in `timers` when
+    /// [`GpuTimers::resolve`] is called after this frame's fence.
+    pub fn time(&mut self, timers: &'a mut GpuTimers) {
+        self.timers = Some(timers);
     }
 
     /// Register an image whose current state is unknown.
@@ -285,7 +422,46 @@ impl<'a> RenderGraph<'a> {
         let mut emitted = Vec::new();
         let passes = std::mem::take(&mut self.passes);
 
-        for pass in passes {
+        // **Reset before anything is written, every frame.** A query that was
+        // not reset since its last write returns stale data or none at all,
+        // and it is the single most common way this feature is built wrong.
+        // Recorded here, at the top of the command buffer, so it is outside
+        // any dynamic-rendering block — a reset inside one is invalid.
+        let mut timers = self.timers.take();
+        if let Some(t) = timers.as_deref_mut() {
+            let timed = passes.len().min(t.capacity as usize);
+            t.pending = passes.iter().take(timed).map(|p| p.name).collect();
+            // SAFETY: the range is within the pool's query count, and the
+            // caller has waited on the fence of the frame that last used it.
+            unsafe {
+                device.cmd_reset_query_pool(
+                    cmd,
+                    t.pool,
+                    0,
+                    u32::try_from(timed).unwrap_or(0) * 2,
+                );
+            }
+        }
+
+        for (index, pass) in passes.into_iter().enumerate() {
+            // The opening timestamp goes *before* the barriers, so a pass owns
+            // the cost of the transitions it required. ALL_COMMANDS on both
+            // ends means "when everything before this point has completed",
+            // which is the only reading that does not smear neighbouring
+            // passes into each other — at the price of some lost overlap
+            // between them, so a timed frame is slightly slower than an
+            // untimed one and each pass reads slightly pessimistically.
+            if let Some(t) = timers.as_deref_mut().filter(|t| index < t.pending.len()) {
+                // SAFETY: query index is inside the reset range.
+                unsafe {
+                    device.cmd_write_timestamp2(
+                        cmd,
+                        vk::PipelineStageFlags2::ALL_COMMANDS,
+                        t.pool,
+                        u32::try_from(index).unwrap_or(0) * 2,
+                    );
+                }
+            }
             let mut barriers = Vec::new();
             for (id, access) in &pass.accesses {
                 if let Some((transition, barrier)) = self.decide(pass.name, *id, *access) {
@@ -302,6 +478,18 @@ impl<'a> RenderGraph<'a> {
             }
 
             (pass.record)(device, cmd);
+
+            if let Some(t) = timers.as_deref_mut().filter(|t| index < t.pending.len()) {
+                // SAFETY: query index is inside the reset range.
+                unsafe {
+                    device.cmd_write_timestamp2(
+                        cmd,
+                        vk::PipelineStageFlags2::ALL_COMMANDS,
+                        t.pool,
+                        u32::try_from(index).unwrap_or(0) * 2 + 1,
+                    );
+                }
+            }
         }
 
         emitted
@@ -420,6 +608,22 @@ mod tests {
         assert_eq!(transitions.len(), 2, "same layout, but still a hazard");
         assert_eq!(transitions[1].pass, "second");
         assert_eq!(transitions[1].from, transitions[1].to);
+    }
+
+    /// The one part of GPU timing that can be wrong without a GPU present.
+    /// A 1ns period is this box's driver; 40ns is a plausible other one, and
+    /// hardcoding either is how a timing report ends up wrong by 40x.
+    #[test]
+    fn timestamp_ticks_convert_with_the_device_period_and_mask() {
+        let mask = (1_u64 << 36) - 1;
+        // A million ticks at 1ns each is a millisecond.
+        assert!((elapsed_ms(0, 1_000_000, mask, 1.0) - 1.0).abs() < 1e-9);
+        assert!((elapsed_ms(0, 1_000_000, mask, 40.0) - 40.0).abs() < 1e-9);
+        // High bits beyond timestampValidBits are garbage and must be dropped,
+        // not read as an enormous elapsed time.
+        assert!((elapsed_ms(1 << 40, (1 << 40) + 1_000_000, mask, 1.0) - 1.0).abs() < 1e-9);
+        // And the counter wraps at that width rather than going negative.
+        assert!((elapsed_ms(mask - 999, mask + 1, mask, 1.0) - 0.001).abs() < 1e-9);
     }
 
     #[test]

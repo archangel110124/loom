@@ -5,6 +5,21 @@
 //! §0). A future backend would be a rewrite of this crate rather than a
 //! diffusion through the codebase.
 //!
+//! **`LOOM_GPU_TIMING=1` turns on per-pass GPU timestamps.** Every command
+//! that renders offscreen — `loom render`, `loom sim`, `cargo xtask image` —
+//! then prints one line per frame to stderr:
+//!
+//! ```text
+//! [loom gpu] 1920x1080  forward 0.105 ms  readback 0.610 ms  total 0.715 ms  (45460 blades, 2 objects)
+//! ```
+//!
+//! Off by default, because the queries are commands in the buffer and the
+//! ALL_COMMANDS timestamps between passes cost some overlap. The same numbers
+//! are available to a caller as [`Renderer::last_pass_times`]. The windowed
+//! [`Viewer`] is **not** instrumented: it has frames in flight, which needs a
+//! pool per frame and a one-frame-late resolve, and the measurement this was
+//! built for is the offscreen path.
+//!
 //! Style note: modern Vulkan is short. The reference is Sascha Willems'
 //! `HowToVulkan2026` — a lit, textured, multi-object scene in a few hundred
 //! lines using dynamic rendering, descriptor indexing, buffer device address,
