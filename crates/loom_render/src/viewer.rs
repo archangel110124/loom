@@ -62,6 +62,13 @@ pub struct Viewer {
     particle_address: vk::DeviceAddress,
     max_particles: usize,
     particle_pipeline: vk::Pipeline,
+    grass_buffer: vk::Buffer,
+    grass_alloc: Option<Allocation>,
+    grass_address: vk::DeviceAddress,
+    grass_pipeline: vk::Pipeline,
+    /// Blades currently in the buffer. Uploaded on scene load, expanded every
+    /// frame in the vertex shader — see [`Viewer::set_grass`].
+    grass_count: u32,
     objects: vk::Buffer,
     environment_buffer: vk::Buffer,
     environment_alloc: Option<gpu_allocator::vulkan::Allocation>,
@@ -245,6 +252,16 @@ impl Viewer {
             format,
             ash::vk::SampleCountFlags::TYPE_1,
         )?;
+        // **One sample, unlike the offscreen path's four.** A pipeline's
+        // rasterisation sample count must match the attachment it draws into,
+        // and this one draws straight into the swapchain image.
+        let grass_pipeline = crate::renderer::create_grass_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            format,
+            ash::vk::SampleCountFlags::TYPE_1,
+        )?;
 
         // Mirrors the offscreen path's ceiling. Sized once so a frame never
         // allocates, which in a live viewer would show up as a hitch.
@@ -257,6 +274,16 @@ impl Viewer {
                 "loom.viewer_particles",
                 vk::BufferUsageFlags::empty(),
             )?;
+        // Same ceiling as `renderer.rs`, and the same reason: past it the tail
+        // is dropped rather than the buffer growing mid-frame.
+        const MAX_BLADES: usize = 262_144;
+        let (grass_buffer, grass_alloc, grass_address) = crate::renderer::create_address_buffer(
+            &raw,
+            &mut allocator,
+            (MAX_BLADES * size_of::<crate::renderer::GrassBlade>()) as u64,
+            "loom.viewer_grass",
+            vk::BufferUsageFlags::empty(),
+        )?;
 
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -283,6 +310,8 @@ impl Viewer {
         }
 
         names.set(pipeline, "loom.viewer_pipeline");
+        names.set(grass_pipeline, "loom.viewer_grass_pipeline");
+        names.set(grass_buffer, "loom.viewer_grass");
         names.set(depth, "loom.viewer_depth");
         names.set(acquired, "loom.sem_image_acquired");
         for semaphore in &rendered {
@@ -326,6 +355,11 @@ impl Viewer {
             particle_address,
             max_particles: MAX_PARTICLES,
             particle_pipeline,
+            grass_buffer,
+            grass_alloc: Some(grass_alloc),
+            grass_address,
+            grass_pipeline,
+            grass_count: 0,
             rt_positions,
             device: raw,
             queue: device.queue(),
@@ -368,6 +402,33 @@ impl Viewer {
             in_flight,
             physical: device.physical(),
         })
+    }
+
+    /// Hand the viewer this frame's grass.
+    ///
+    /// Mirrors [`crate::Renderer::set_grass`] exactly, including the ceiling:
+    /// past capacity the tail is dropped rather than the buffer growing. Called
+    /// on scene load and on every reload, not per frame — a blade is a pure
+    /// function of its coordinates, and what moves is the Bézier expansion and
+    /// the wind bend, both of which happen in the vertex shader.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the viewer is being torn down.
+    pub fn set_grass(&mut self, blades: &[crate::renderer::GrassBlade]) -> Result<(), RenderError> {
+        let capacity = self.grass_alloc.as_ref().map_or(0, |a| {
+            a.size() as usize / size_of::<crate::renderer::GrassBlade>()
+        });
+        let drawn = &blades[..blades.len().min(capacity)];
+        self.grass_count = u32::try_from(drawn.len()).unwrap_or(0);
+        if drawn.is_empty() {
+            return Ok(());
+        }
+        write_slice(
+            self.grass_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("grass buffer is gone".into()))?,
+            drawn,
+        )
     }
 
     /// Make sure the object buffer can hold `wanted` objects.
@@ -671,8 +732,7 @@ impl Viewer {
             environment: self.environment_address,
             materials: self.materials.address(),
             particles: self.particle_address,
-            // The viewer has no grass path yet; the headless renderer does.
-            grass: 0,
+            grass: self.grass_address,
             object_offset: 0,
             inv_view_proj: view_proj.inverse().to_cols_array(),
         };
@@ -681,6 +741,8 @@ impl Viewer {
         self.environment.eye = camera.eye.extend(0.0).to_array();
         let sky = self.sky_pipeline;
         let particle_pipeline = self.particle_pipeline;
+        let grass_pipeline = self.grass_pipeline;
+        let grass_count = self.grass_count;
         let index_buffer = self.indices;
         let draws: Vec<(MeshRange, u32, u32)> = batches
             .iter()
@@ -748,6 +810,31 @@ impl Viewer {
                             0,
                             0,
                         );
+                    }
+
+                    // Grass after the meshes and before the particles, exactly
+                    // as the offscreen path orders it: it is opaque and
+                    // depth-written, so smoke has to blend over finished
+                    // blades. 42 vertices per blade (`GRASS_VERTS` in
+                    // `scene.slang`), no vertex buffer.
+                    if grass_count > 0 {
+                        d.cmd_bind_pipeline(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            grass_pipeline,
+                        );
+                        let push = crate::renderer::Push {
+                            object_offset: particle_slot,
+                            ..base_push
+                        };
+                        d.cmd_push_constants(
+                            cmd,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            push.bytes(),
+                        );
+                        d.cmd_draw(cmd, grass_count * 42, 1, 0, 0);
                     }
 
                     // Particles last, over finished opaque geometry.
@@ -988,6 +1075,13 @@ impl Drop for Viewer {
             self.device.destroy_buffer(self.particle_buffer, None);
             if let (Some(allocation), Some(allocator)) =
                 (self.particle_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            self.device.destroy_pipeline(self.grass_pipeline, None);
+            self.device.destroy_buffer(self.grass_buffer, None);
+            if let (Some(allocation), Some(allocator)) =
+                (self.grass_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
             }

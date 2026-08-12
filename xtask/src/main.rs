@@ -630,7 +630,16 @@ fn validate() -> std::process::ExitCode {
     // render touches none of it.
     if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
         let frames = WINDOWED_FRAMES.to_string();
-        for scene in ["assets/test/blockout.loom", "assets/test/cave.loom"] {
+        // **`meadow` is here for the pipelines the other two never bind.** A
+        // pipeline's rasterisation sample count must match its attachment, and
+        // the windowed path is single-sampled where the offscreen one is 4x —
+        // so the grass pipeline is only wrong in the window, and only while a
+        // blade is actually being drawn. Neither a blockout nor a cave has one.
+        for scene in [
+            "assets/test/blockout.loom",
+            "assets/test/cave.loom",
+            "assets/test/meadow.loom",
+        ] {
             if !root.join(scene).exists() {
                 continue;
             }

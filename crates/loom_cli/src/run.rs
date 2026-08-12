@@ -178,6 +178,9 @@ struct App {
     disk_seen: loom_scene::VersionToken,
     /// Mesh set currently on the GPU, so a moved node costs no re-upload.
     uploaded: u64,
+    /// What the grass on the GPU was placed from — see [`crate::grass_key`].
+    /// Empty means "no blades uploaded", which is also a scene with no grass.
+    grass_uploaded: String,
     /// The handle being dragged, if one is.
     drag: Option<Drag>,
     /// Bumped whenever a mouse button comes up. Part of every gesture key, so
@@ -308,6 +311,9 @@ impl App {
                 .camera()
                 .map_or_else(|| FlyCamera::framing(view.bounds), FlyCamera::at),
             uploaded: view.mesh_key,
+            // Not `grass_key(&view.scene)`: the viewer does not exist yet, so
+            // nothing has been uploaded. `resumed` does the first upload.
+            grass_uploaded: String::new(),
             selected: view.paths.first().cloned().into_iter().collect(),
             view,
             base,
@@ -472,10 +478,34 @@ impl App {
             self.selected.extend(view.paths.first().cloned());
         }
         self.view = view;
+        // Grass is placed from the scene the same way the meshes are, so a
+        // reload has to re-place it or the window keeps showing the old field.
+        self.upload_grass();
         // The scene changed, so the emitters may have. Dropped rather than
         // patched: a reload is rare and rebuilding is a warm-up, not a frame
         // cost.
         self.plumes = None;
+    }
+
+    /// Place this scene's grass and hand it to the GPU, if it changed.
+    ///
+    /// Placement is a pure function of position, so this is not per-frame work
+    /// — the blades are uploaded once and the vertex shader expands and bends
+    /// them every frame. [`crate::grass_key`] is what keeps it that way while
+    /// `show` runs on every frame of a gizmo drag.
+    fn upload_grass(&mut self) {
+        let key = crate::grass_key(&self.view.scene);
+        if key == self.grass_uploaded {
+            return;
+        }
+        let blades = crate::grass_blades(&self.view.scene);
+        let Some(viewer) = self.viewer.as_mut() else {
+            return;
+        };
+        match viewer.set_grass(&blades) {
+            Ok(()) => self.grass_uploaded = key,
+            Err(e) => crate::log::error(format!("could not upload the grass: {e}")),
+        }
     }
 
     /// Re-derive from whatever the session currently holds.
@@ -653,6 +683,9 @@ impl ApplicationHandler for App {
                 self.gpu = Some((instance, device));
                 self.viewer = Some(viewer);
                 self.window = Some(window);
+                // The meshes went in through `Viewer::new`; grass has no such
+                // constructor argument, so the first field is placed here.
+                self.upload_grass();
             }
             Err(e) => {
                 eprintln!("loom: {e}");

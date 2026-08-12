@@ -1105,6 +1105,31 @@ impl GroundGrid {
     }
 }
 
+/// Everything [`grass_blades`] reads out of the scene, as a comparable key.
+///
+/// Placing grass marches the voxel SDF — seconds on `grass_slope` — and the
+/// editor re-derives its view on **every frame of a gizmo drag**. This is the
+/// same guard `SceneView::mesh_key` is for geometry: regenerate only when a
+/// grass field, the terrain under it, or where either sits actually moved.
+pub(crate) fn grass_key(scene: &Scene) -> String {
+    // Same early-out as `grass_blades`, and for the same reason: a scene with
+    // no grass must not pay to describe a 67-million-voxel volume it will
+    // never grow anything on. The empty string then means "no blades".
+    if !scene.nodes().iter().any(|n| n.components.contains_key("Grass")) {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    for node in scene.nodes() {
+        for name in ["Grass", "VoxelVolume"] {
+            if let Some(component) = node.components.get(name) {
+                let at = world_translation(scene, node);
+                parts.push(format!("{}|{name}|{at:?}|{component}", node.path));
+            }
+        }
+    }
+    parts.join("\n")
+}
+
 /// Bake a `VoxelVolume` component into a mesh.
 /// Every blade in every grass field in the scene, ready to upload.
 ///
@@ -2940,6 +2965,42 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         assert!(
             blades.iter().all(|b| b.position[1] == 0.0),
             "a scene with no terrain moved its blades off the plane"
+        );
+    }
+
+    /// The guard that keeps the viewer from re-marching the voxel SDF on every
+    /// frame of a gizmo drag. Both halves matter: too eager and the editor
+    /// stalls for seconds, too lazy and edits to a grass field never show up.
+    #[test]
+    fn the_grass_key_tracks_grass_and_nothing_else() {
+        let src = std::fs::read_to_string("../../assets/test/meadow.loom").expect("meadow");
+        let scene = Scene::parse(&src).expect("meadow parses");
+        let key = grass_key(&scene);
+        assert!(!key.is_empty(), "meadow has a grass field");
+
+        // A scene with no grass never places any, so it needs no key.
+        let bare = Scene::parse("[scene]\nformat = 1\n\n[[node]]\nname = \"Root\"\n")
+            .expect("bare scene parses");
+        assert_eq!(grass_key(&bare), "");
+
+        // Dragging the stone — which is what a gizmo drag looks like — must not
+        // re-place the field.
+        let dragged = src.replace("pos = [2.4, 0.22, -1.6]", "pos = [3.9, 0.22, -1.6]");
+        assert_ne!(dragged, src, "the stone's transform moved in the file");
+        let dragged = Scene::parse(&dragged).expect("the dragged scene parses");
+        assert_eq!(
+            grass_key(&dragged),
+            key,
+            "moving an unrelated node re-places the grass, so a drag stalls"
+        );
+
+        // Editing the field itself must.
+        let denser = src.replace("density = 140.0", "density = 260.0");
+        let denser = Scene::parse(&denser).expect("the denser scene parses");
+        assert_ne!(
+            grass_key(&denser),
+            key,
+            "an edited grass field kept its key, so the edit never shows"
         );
     }
 }
