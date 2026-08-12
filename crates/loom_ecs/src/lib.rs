@@ -401,13 +401,12 @@ impl World {
                 world.mark_renderable(entity);
                 world.voxel_recipe.insert(entity, volume.clone());
             }
-            // A grass field draws the mesh baked from its rules, the same way
-            // a voxel volume draws the mesh baked from its op list. Neither
-            // carries a , because neither references an asset —
-            // the recipe *is* the geometry.
-            if node.components.contains_key("Grass") {
-                world.mark_renderable(entity);
-            }
+            // **A grass field is deliberately not renderable.** It draws
+            // through the blade buffer rather than as an object with a mesh.
+            // Marking it renderable made it fall through to the default unit
+            // box, which put a large green cube in the middle of the meadow —
+            // the node has no mesh to resolve, and "no mesh" resolves to the
+            // placeholder.
             if let Some(renderer) = node.components.get("MeshRenderer") {
                 world.mark_renderable(entity);
                 if let Some(asset) = renderer

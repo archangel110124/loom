@@ -112,6 +112,21 @@ pub struct EnvironmentData {
     pub zenith: [f32; 4],
     /// rgb sky at the horizon, a fog falloff with height.
     pub horizon: [f32; 4],
+    /// Camera position. **Here rather than in the push block**, which was at
+    /// exactly its 128-byte guarantee before grass needed a pointer.
+    pub eye: [f32; 4],
+    /// xy wind direction, z speed, w gustiness.
+    ///
+    /// **Wind lives here rather than in the push block**, which is already at
+    /// 116 of its 128 bytes. It is per-scene data read by whatever wants it,
+    /// which is what this buffer is for.
+    pub wind: [f32; 4],
+    /// x turbulence, y ground drag, z seconds simulated, w unused.
+    ///
+    /// Time is here because the vertex shader needs it to bend a blade, and
+    /// it is the simulation's clock — the tick count times the fixed timestep,
+    /// never a wall clock (never-do #8).
+    pub weather: [f32; 4],
 }
 
 impl Default for EnvironmentData {
@@ -123,8 +138,30 @@ impl Default for EnvironmentData {
             sun_color: [1.0, 0.98, 0.94, 0.95],
             zenith: [0.0272, 0.0946, 0.3424, 0.0026],
             horizon: [0.3931, 0.5071, 0.6038, 0.03],
+            // Beaufort 4 from the west, matching `loom_field::wind_defaults`.
+            eye: [0.0; 4],
+            wind: [1.0, 0.0, 5.5, 1.0],
+            weather: [0.8, 0.45, 0.0, 0.0],
         }
     }
+}
+
+/// One grass blade, as the vertex shader reads it.
+///
+/// **Packed into `float4`s rather than mirroring `loom_grass::Blade` field for
+/// field.** A `float3` in a buffer still aligns to 16 bytes, so the natural
+/// layout would leave holes the Rust side does not have and every blade after
+/// the first would read shifted — the trap `scene.slang`'s push block already
+/// documents. Three `float4`s have no holes to get wrong.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GrassBlade {
+    /// xyz base position, w height.
+    pub position: [f32; 4],
+    /// xy facing, z width, w rest tilt.
+    pub facing: [f32; 4],
+    /// x bend, y shade, z clump hash as a float, w unused.
+    pub shape: [f32; 4],
 }
 
 /// What the camera looks at.
@@ -152,9 +189,6 @@ pub(crate) struct Push {
     /// the Rust side is not writing it. Leading with it removes the padding
     /// and the mistake.
     pub(crate) inv_view_proj: [f32; 16],
-    /// Camera position, for the specular view vector. Straight after the
-    /// matrix so it is naturally aligned.
-    pub(crate) eye: [f32; 4],
     pub(crate) vertices: vk::DeviceAddress,
     pub(crate) objects: vk::DeviceAddress,
     /// The material table. Another pointer rather than another descriptor:
@@ -162,6 +196,12 @@ pub(crate) struct Push {
     pub(crate) materials: vk::DeviceAddress,
     /// The particle instances for this frame. Null when there are none.
     pub(crate) particles: vk::DeviceAddress,
+    /// This frame's grass blades. Null when the scene has none.
+    ///
+    /// **The block is at 124 of its 128 bytes with this**, which is why the
+    /// wind parameters the vertex shader also needs live in the environment
+    /// buffer instead. There is room for nothing else here.
+    pub(crate) grass: vk::DeviceAddress,
     /// The sky and sun. Placed before `object_offset`, not after: a device
     /// address needs eight-byte alignment, and putting it last would pad the
     /// block to exactly the 128 bytes Vulkan guarantees, with nothing spare.
@@ -280,6 +320,12 @@ pub struct Renderer {
     particle_buffer: vk::Buffer,
     particle_alloc: Option<Allocation>,
     particle_address: vk::DeviceAddress,
+    grass_buffer: vk::Buffer,
+    grass_alloc: Option<Allocation>,
+    grass_address: vk::DeviceAddress,
+    grass_pipeline: vk::Pipeline,
+    /// Blades uploaded this frame. Zero draws nothing at all.
+    grass_count: u32,
     max_particles: usize,
     /// Alpha-blended, depth-tested but not depth-writing.
     particle_pipeline: vk::Pipeline,
@@ -414,6 +460,11 @@ impl Renderer {
         // A plume is a few thousand; a scene with several is a few tens of
         // thousands. Sized once rather than grown, so a frame never allocates.
         const MAX_PARTICLES: usize = 65536;
+        // **A ceiling, not a target.** Ghost of Tsushima drew ~83,000 blades
+        // from ~1,000,000 candidates; this is the buffer a CPU-side placement
+        // pass can fill before the compute path takes over, and it is what
+        // caps the frame cost while there is no culling.
+        const MAX_BLADES: usize = 262_144;
         const MAX_OBJECTS: usize = 4096;
         let (objects, objects_alloc, object_address) = create_address_buffer(
             &raw,
@@ -434,6 +485,13 @@ impl Renderer {
             &mut allocator,
             (MAX_PARTICLES * size_of::<ParticleInstance>()) as u64,
             "loom.particles",
+            vk::BufferUsageFlags::empty(),
+        )?;
+        let (grass_buffer, grass_alloc, grass_address) = create_address_buffer(
+            &raw,
+            &mut allocator,
+            (MAX_BLADES * size_of::<GrassBlade>()) as u64,
+            "loom.grass",
             vk::BufferUsageFlags::empty(),
         )?;
 
@@ -475,6 +533,8 @@ impl Renderer {
         let sky_pipeline = create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
         let particle_pipeline =
             create_particle_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
+        let grass_pipeline =
+            create_grass_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
 
         names.set(color, "loom.color_target");
         names.set(depth, "loom.depth_target");
@@ -550,6 +610,11 @@ impl Renderer {
             particle_buffer,
             particle_alloc: Some(particle_alloc),
             particle_address,
+            grass_buffer,
+            grass_alloc: Some(grass_alloc),
+            grass_address,
+            grass_pipeline,
+            grass_count: 0,
             max_particles: MAX_PARTICLES,
             particle_pipeline,
             rt_positions,
@@ -645,6 +710,44 @@ impl Renderer {
         Ok(())
     }
 
+    /// Hand the renderer this frame's grass.
+    ///
+    /// **Uploaded once, expanded every frame.** Placement is a pure function
+    /// of position, so the blades themselves do not change; what is per-frame
+    /// is the Bézier expansion and the wind bend, and both happen in the
+    /// vertex shader. That is the whole reason this is a buffer of blades
+    /// rather than a mesh of triangles.
+    ///
+    /// Past capacity the tail is dropped rather than the buffer growing: this
+    /// is the ceiling before the compute placement path exists, and silently
+    /// reallocating a quarter-million-element buffer mid-frame is worse than a
+    /// limit somebody can see.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the renderer is being torn down.
+    pub fn set_grass(&mut self, blades: &[GrassBlade]) -> Result<(), RenderError> {
+        let capacity = self.grass_capacity();
+        let drawn = &blades[..blades.len().min(capacity)];
+        self.grass_count = u32::try_from(drawn.len()).unwrap_or(0);
+        if drawn.is_empty() {
+            return Ok(());
+        }
+        write_slice(
+            self.grass_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("grass buffer is gone".into()))?,
+            drawn,
+        )
+    }
+
+    /// How many blades the buffer holds.
+    #[must_use]
+    pub fn grass_capacity(&self) -> usize {
+        self.grass_alloc
+            .as_ref()
+            .map_or(0, |a| a.size() as usize / size_of::<GrassBlade>())
+    }
+
     pub fn render(
         &mut self,
         objects: &[Object],
@@ -713,6 +816,11 @@ impl Renderer {
                 &drawn,
             )?;
         }
+        // **Before the upload, not after.** The camera moved into this buffer
+        // when the push block ran out of room, so setting it below the write
+        // would send last frame's eye — a specular highlight one frame stale,
+        // which is invisible in a still and wrong in motion.
+        self.environment.eye = camera.eye.extend(0.0).to_array();
         write_slice(
             self.environment_alloc
                 .as_ref()
@@ -769,12 +877,15 @@ impl Renderer {
             environment: self.environment_address,
             materials: self.materials.address(),
             particles: self.particle_address,
+            grass: self.grass_address,
             object_offset: 0,
             inv_view_proj: view_proj.inverse().to_cols_array(),
-            eye: camera.eye.extend(0.0).to_array(),
+
         };
         let sky = self.sky_pipeline;
         let particle_pipeline = self.particle_pipeline;
+        let grass_pipeline = self.grass_pipeline;
+        let grass_count = self.grass_count;
         let (readback, image) = (self.readback, self.color);
         let index_buffer = self.indices;
         let draws: Vec<(MeshRange, u32, u32)> = batches
@@ -846,6 +957,39 @@ impl Renderer {
                             0,
                             0,
                         );
+                    }
+
+                    // **Grass before particles and after the meshes.** It is
+                    // opaque and depth-written, so it belongs with the solid
+                    // geometry rather than with the blended pass — drawing it
+                    // after the particles would put smoke behind the blades it
+                    // should be drifting in front of.
+                    //
+                    // 42 vertices per blade, no vertex buffer: the Bezier is
+                    // expanded from SV_VertexID, which is what lets the wind
+                    // bend it per frame.
+                    if grass_count > 0 {
+                        d.cmd_bind_pipeline(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            grass_pipeline,
+                        );
+                        let push = Push {
+                            object_offset: particle_slot,
+                            ..base_push
+                        };
+                        let bytes = std::slice::from_raw_parts(
+                            std::ptr::from_ref(&push).cast::<u8>(),
+                            size_of::<Push>(),
+                        );
+                        d.cmd_push_constants(
+                            cmd,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            bytes,
+                        );
+                        d.cmd_draw(cmd, grass_count * 42, 1, 0, 0);
                     }
 
                     // Particles last, over finished opaque geometry, so the
@@ -1007,7 +1151,14 @@ impl Drop for Renderer {
                 self.device.destroy_buffer(buffer, None);
             }
             self.device.destroy_pipeline(self.particle_pipeline, None);
+            self.device.destroy_pipeline(self.grass_pipeline, None);
+            self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.particle_buffer, None);
+            if let (Some(allocation), Some(allocator)) =
+                (self.grass_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
             if let (Some(allocation), Some(allocator)) =
                 (self.particle_alloc.take(), self.allocator.as_mut())
             {
@@ -1721,6 +1872,87 @@ pub(crate) fn view_projection_slot(view_proj: Mat4) -> ObjectData {
 ///
 /// Culling is off because a billboard faces the camera by construction and a
 /// back-facing one is a rounding error away, not an error.
+/// The grass pipeline: opaque geometry, depth-written, both faces drawn.
+///
+/// **Opaque, not blended** — the research pass is explicit that alpha blending
+/// forces sorting and kills early-Z, and that overdraw is the real enemy for
+/// grass rather than blade maths. True geometry blades also have no alpha-test
+/// edge to alias, which is the trade this phase chose deliberately.
+///
+/// **No back-face culling.** A blade has no back: it is a surface one triangle
+/// thick, and culling half of it makes a field flicker as blades turn.
+pub(crate) fn create_grass_pipeline(
+    device: &ash::Device,
+    layout: vk::PipelineLayout,
+    cache: vk::PipelineCache,
+    color_format: vk::Format,
+) -> Result<vk::Pipeline, RenderError> {
+    let module = create_shader_module(device, crate::SCENE_SPV)?;
+
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(module)
+            .name(c"grassVertexMain"),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(module)
+            .name(c"grassFragmentMain"),
+    ];
+
+    // No vertex input at all: a blade's geometry comes from SV_VertexID and
+    // the buffer the push block points at.
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(true)
+        .depth_write_enable(true)
+        .depth_compare_op(vk::CompareOp::LESS);
+    let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(false);
+    let attachments = [blend_attachment];
+    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let color_formats = [color_format];
+    let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&color_formats)
+        .depth_attachment_format(DEPTH_FORMAT);
+
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterizer)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth_stencil)
+        .color_blend_state(&blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering_info);
+
+    // SAFETY: every borrowed slice outlives the call.
+    let pipeline = unsafe { device.create_graphics_pipelines(cache, &[info], None) }
+        .map_err(|(_, e)| RenderError::Vulkan(e))?[0];
+    // SAFETY: the pipeline holds what it needs from the module.
+    unsafe { device.destroy_shader_module(module, None) };
+    Ok(pipeline)
+}
+
 pub(crate) fn create_particle_pipeline(
     device: &ash::Device,
     layout: vk::PipelineLayout,

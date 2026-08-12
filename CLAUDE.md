@@ -146,7 +146,7 @@ change, so your edits appear live. Two consequences:
 
 ## Current phase
 
-> **Phase 0 complete; P1 done. P2 (grass) started — placement only.** See
+> **Phase 0 complete; P1 done. P2 (grass) in progress — blades render and bend in the wind.** See
 > `docs/design/LOOM-IMPLEMENTATION-ORDER.md`, which is the sequencing document for everything
 > after M12 and **supersedes the build orders inside the companion docs wherever they conflict**.
 >
@@ -211,6 +211,14 @@ change, so your edits appear live. Two consequences:
 > mesh answers that with no compute pass or indirect draw. The machinery cannot change the answer;
 > the answer may change the machinery. Blade normals are deliberately *not* geometric — tilted
 > outward and blended toward the ground, because an honestly-lit flat blade reads as paper.
+>
+> **Slice 4: blades are generated in the vertex shader and bent by P1's wind.** 42 verts per blade
+> from `SV_VertexID`, no vertex or index buffer; the CPU uploads *what a blade is* and the GPU
+> decides where its triangles are, which is the whole reason wind can move it. **The bend is on the
+> control points, never the base** — a blade whose base moves is grass sliding across the ground,
+> the "swimming" artifact. The clump hash phase-shifts the sway so neighbours do not move in
+> lockstep. Wind and the camera position both live in the environment buffer because the push block
+> is at its 128-byte guarantee.
 >
 > **Slice 3: `cargo xtask shimmer` measures the phase risk as a number** — mean fraction of
 > pixels changing between consecutive frames of a slow pan, using the same calibrated comparison

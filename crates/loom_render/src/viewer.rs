@@ -666,10 +666,14 @@ impl Viewer {
             environment: self.environment_address,
             materials: self.materials.address(),
             particles: self.particle_address,
+            // The viewer has no grass path yet; the headless renderer does.
+            grass: 0,
             object_offset: 0,
             inv_view_proj: view_proj.inverse().to_cols_array(),
-            eye: camera.eye.extend(0.0).to_array(),
         };
+        // The camera moved into the environment buffer when the push block ran
+        // out of room; the viewer has to fill it there now.
+        self.environment.eye = camera.eye.extend(0.0).to_array();
         let sky = self.sky_pipeline;
         let particle_pipeline = self.particle_pipeline;
         let index_buffer = self.indices;

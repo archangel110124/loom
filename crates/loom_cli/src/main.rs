@@ -464,6 +464,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         Ok(s) => s,
         Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
     };
+    let weather = weather::wind_of(&scene);
     // Prefab instances become the nodes they stand for before anything looks
     // at the tree. Without this a `prefab = "..."` node reaches the renderer
     // with no components and draws nothing, silently.
@@ -489,7 +490,6 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     }
 
     let objects = world_to_objects(&world, &library, &material_library);
-    let weather = weather::wind_of(&scene);
     let particles = particles::simulate(
         &world,
         &weather,
@@ -528,7 +528,13 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         ),
     };
 
-    let environment = environment_of(&world);
+    // The clock the wind is sampled at. `--sim` advances it, so a still of a
+    // simulated scene shows the grass bent the way that moment's wind bends it.
+    #[allow(clippy::cast_precision_loss)]
+    let wind_seconds = flag(args, "--sim")
+        .and_then(|v| v.parse::<u32>().ok())
+        .map_or(0.0, |t| t as f32 / 60.0);
+    let environment = environment_with_wind(&world, &weather, wind_seconds);
     let result = (|| -> Result<(String, bool), String> {
         let instance = Instance::new(c"loom").map_err(|e| e.to_string())?;
         let device = Device::new(&instance).map_err(|e| e.to_string())?;
@@ -549,6 +555,12 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         )
         .map_err(|e| e.to_string())?;
         renderer.environment = environment;
+        // Placement is a pure function of position, so the blades go up once
+        // and the vertex shader re-expands and re-bends them every frame.
+        let blades = grass_blades(&scene);
+        if !blades.is_empty() {
+            renderer.set_grass(&blades).map_err(|e| e.to_string())?;
+        }
 
         match frames {
             // The still. One image, the scene as `--sim` left it.
@@ -725,8 +737,6 @@ impl MeshLibrary {
             let (kind, recipe_source, bake): (&str, _, fn(&serde_json::Value) -> Option<loom_asset::Mesh>) =
                 if let Some(volume) = node.components.get("VoxelVolume") {
                     ("voxel", volume, bake_voxel)
-                } else if let Some(field) = node.components.get("Grass") {
-                    ("grass", field, bake_grass)
                 } else {
                     continue;
                 };
@@ -841,68 +851,64 @@ fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
 }
 
 /// Bake a `VoxelVolume` component into a mesh.
-/// Generate a grass field's geometry from its rules.
+/// Every blade in every grass field in the scene, ready to upload.
 ///
-/// **CPU-generated geometry through the ordinary mesh path, on purpose.** The
-/// shipping architecture is a placement compute pass feeding
-/// `vkCmdDrawIndexedIndirect`, and that is where this is going. It is here
-/// first because P2's stated risk is anti-aliasing without temporal
-/// accumulation — shimmer is a property of sub-pixel geometry under a moving
-/// camera, and a generated mesh answers that with no new pipeline at all.
-/// Getting the visual answer before building the machinery is the cheaper
-/// order; the machinery cannot change the answer, and the answer may well
-/// change the machinery.
-///
-/// The ground is flat here. Slope- and flow-driven density are already in
-/// `loom_grass` and tested; wiring them to the real terrain query is the next
-/// slice, alongside the compute path.
-fn bake_grass(component: &serde_json::Value) -> Option<loom_asset::Mesh> {
-    let rules: loom_scene::components::Grass =
-        serde_json::from_value(component.clone()).ok()?;
-
-    let placement = loom_grass::Rules {
-        density: rules.density,
-        height: rules.height,
-        height_jitter: 0.35,
-        width: rules.width,
-        slope_cutoff: rules.slope_cutoff,
-        clump_facing: rules.clump_facing,
-        clump_colour: rules.clump_colour,
-    };
-
-    // Tiles covering the authored extent. The field is centred on its node, so
-    // the mesh is built around the origin and the node's transform places it.
-    let (hx, hz) = (rules.half_extent[0], rules.half_extent[1]);
-    let low = loom_grass::Tile::at(-hx, -hz);
-    let high = loom_grass::Tile::at(hx, hz);
-
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-    for z in low.z..=high.z {
-        for x in low.x..=high.x {
-            let tile = loom_grass::Tile { x, z };
-            for blade in loom_grass::tile(tile, &placement, &|_, _| loom_grass::Ground::default())
-            {
-                // Clip to the authored rectangle rather than to whole tiles, so
-                // the field's edge is where the author put it.
-                if blade.position[0].abs() > hx || blade.position[2].abs() > hz {
-                    continue;
+/// **Placement stays on the CPU; expansion moved to the GPU.** A blade is a
+/// pure function of its coordinates, so this is not per-frame work — it is
+/// uploaded once. What happens every frame is the Bezier expansion and the
+/// wind bend, in the vertex shader, which is what a baked mesh could not do.
+pub(crate) fn grass_blades(scene: &Scene) -> Vec<loom_render::GrassBlade> {
+    let mut out = Vec::new();
+    for node in scene.nodes() {
+        let Some(component) = node.components.get("Grass") else {
+            continue;
+        };
+        let Ok(field) = serde_json::from_value::<loom_scene::components::Grass>(component.clone())
+        else {
+            continue;
+        };
+        let rules = loom_grass::Rules {
+            density: field.density,
+            height: field.height,
+            height_jitter: 0.35,
+            width: field.width,
+            slope_cutoff: field.slope_cutoff,
+            clump_facing: field.clump_facing,
+            clump_colour: field.clump_colour,
+        };
+        // The field is centred on its node.
+        let origin = node.transform.pos;
+        let (hx, hz) = (field.half_extent[0], field.half_extent[1]);
+        let low = loom_grass::Tile::at(-hx, -hz);
+        let high = loom_grass::Tile::at(hx, hz);
+        for z in low.z..=high.z {
+            for x in low.x..=high.x {
+                let tile = loom_grass::Tile { x, z };
+                for blade in
+                    loom_grass::tile(tile, &rules, &|_, _| loom_grass::Ground::default())
+                {
+                    if blade.position[0].abs() > hx || blade.position[2].abs() > hz {
+                        continue;
+                    }
+                    out.push(loom_render::GrassBlade {
+                        position: [
+                            blade.position[0] + origin[0],
+                            blade.position[1] + origin[1],
+                            blade.position[2] + origin[2],
+                            blade.height,
+                        ],
+                        facing: [blade.facing[0], blade.facing[1], blade.width, blade.tilt],
+                        // The clump hash reaches the shader as a float only to
+                        // phase-shift the sway. Its fractional part is what is
+                        // used, so precision past 24 bits does not matter.
+                        #[allow(clippy::cast_precision_loss)]
+                        shape: [blade.bend, blade.shade, (blade.clump % 65536) as f32 / 65536.0, 0.0],
+                    });
                 }
-                loom_grass::blade::emit(
-                    &blade,
-                    [0.0, 1.0, 0.0],
-                    loom_grass::blade::SEGMENTS_NEAR,
-                    &mut vertices,
-                    &mut indices,
-                );
             }
         }
     }
-
-    if vertices.is_empty() {
-        return None;
-    }
-    Some(loom_asset::Mesh { name: "grass".to_owned(), vertices, indices })
+    out
 }
 
 fn bake_voxel(component: &serde_json::Value) -> Option<loom_asset::Mesh> {
@@ -1015,6 +1021,33 @@ fn compare(a: &str, b: &str, args: &[String]) -> (u8, String) {
 /// Absent, the defaults are the constants the shader used to carry, so a
 /// scene that says nothing about its sky looks exactly as it did.
 pub(crate) fn environment_of(world: &World) -> loom_render::EnvironmentData {
+    environment_with_wind(world, &loom_field::wind::Wind::default(), 0.0)
+}
+
+/// The scene's environment, with its weather and the simulation's clock.
+///
+/// **The wind parameters travel in the environment buffer**, not the push
+/// block, which is at 124 of its 128 bytes. The vertex shader reads them to
+/// bend a blade, so they have to reach the GPU somehow and this is the buffer
+/// for per-scene data.
+pub(crate) fn environment_with_wind(
+    world: &World,
+    wind: &loom_field::wind::Wind,
+    seconds: f32,
+) -> loom_render::EnvironmentData {
+    let mut env = environment_of_inner(world);
+    let params = wind.params();
+    env.wind = [
+        params.get("dir_x"),
+        params.get("dir_z"),
+        params.get("speed"),
+        params.get("gustiness"),
+    ];
+    env.weather = [params.get("turbulence"), params.get("ground_drag"), seconds, 0.0];
+    env
+}
+
+fn environment_of_inner(world: &World) -> loom_render::EnvironmentData {
     let defaults = loom_scene::components::Environment::default();
     let Some(component) = world.environment() else {
         return loom_render::EnvironmentData::default();
@@ -1070,6 +1103,10 @@ pub(crate) fn environment_of(world: &World) -> loom_render::EnvironmentData {
             horizon[2],
             scalar("fog_falloff", defaults.fog_falloff),
         ],
+        // The sky is this function's business; the weather is filled in by
+        // `environment_with_wind`, which is the only caller that knows the
+        // scene's `Wind` and the simulation's clock.
+        ..loom_render::EnvironmentData::default()
     }
 }
 
@@ -1976,11 +2013,9 @@ fn measure(path: &str, args: &[String]) -> (u8, String) {
 /// answers.
 fn mesh_index_for(world: &World, library: &MeshLibrary, entity: loom_ecs::Entity) -> u32 {
     if let Some(path) = world.path(entity) {
-        for kind in ["voxel", "grass"] {
-            let key = format!("{kind}:{path}");
-            if library.by_name.contains_key(&key) {
-                return library.index_for(Some(&key));
-            }
+        let voxel = format!("voxel:{path}");
+        if library.by_name.contains_key(&voxel) {
+            return library.index_for(Some(&voxel));
         }
     }
     library.index_for(world.mesh_asset(entity))

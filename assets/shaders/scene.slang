@@ -76,6 +76,18 @@ struct EnvironmentData {
     float4 sunColor;   // rgb, a ambient strength
     float4 zenith;     // rgb sky overhead, a fog density
     float4 horizon;    // rgb sky at the horizon, a fog falloff
+    // Camera position. **Here rather than in the push block**, which was at
+    // exactly its 128-byte guarantee before grass needed a pointer. This is
+    // per-frame data read by whatever wants it, which is what this buffer is.
+    float4 eye;
+    float4 wind;       // xy direction, z speed, w gustiness
+    float4 weather;    // x turbulence, y ground drag, z seconds, w unused
+};
+
+struct GrassBlade {
+    float4 position;  // xyz base, w height
+    float4 facing;    // xy facing, z width, w rest tilt
+    float4 shape;     // x bend, y shade, z clump hash, w unused
 };
 
 struct Push {
@@ -90,10 +102,6 @@ struct Push {
     // NDC to world, for the sky's per-pixel ray. The scene entry points
     // ignore it; both pipelines share this block so they share one layout.
     float4x4 invViewProj;
-    // Camera position, for the specular view vector. Placed straight after the
-    // matrix so it lands on its natural 16-byte boundary with no padding — the
-    // exact trap the comment above describes.
-    float4 eye;
     Vertex* vertices;
     ObjectData* objects;
     // The material table. A pointer rather than a descriptor: materials are
@@ -109,6 +117,9 @@ struct Push {
     // ground turns black and a stray quad covers a third of the screen, with
     // no validation message anywhere.
     ParticleInstance* particles;
+    // This frame's grass blades. The block is at 124 of its 128 bytes with
+    // this, which is why the wind parameters live in the environment buffer.
+    GrassBlade* grass;
     // Index of this draw's first object.
     //
     // NOT derived from SV_InstanceID + firstInstance: HLSL's SV_InstanceID is
@@ -644,7 +655,7 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     float3 f0 = lerp(float3(0.04), albedo, metallic);
 
     float3 lit = diffuseColor * (ambient + sunStrength() * diffuse * sun);
-    float3 view = normalize(push.eye.xyz - in.worldPos);
+    float3 view = normalize(push.environment[0].eye.xyz - in.worldPos);
     lit += specular(normal, view, sunDirection(), roughness, f0) * sunStrength() * diffuse * sun;
 
     // **Without this a metal renders black.** Metals have no diffuse response,
@@ -666,7 +677,7 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // Last, over the finished shading. Fog is what is between the eye and the
     // surface, so it replaces the surface's colour rather than joining the
     // lighting that produced it.
-    float fog = fogAmount(push.eye.xyz, in.worldPos);
+    float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     lit = lerp(lit, fogColor(-view), fog);
 
     return float4(lit, 1.0);
@@ -713,7 +724,7 @@ ParticleOutput particleVertexMain(uint vertexID: SV_VertexID) {
     };
     float2 local = CORNERS[corner];
 
-    float3 forward = normalize(push.eye.xyz - p.position.xyz);
+    float3 forward = normalize(push.environment[0].eye.xyz - p.position.xyz);
     // Guard the degenerate case: a particle directly above the eye makes the
     // cross product with world up vanish, and the quad collapses to a line.
     float3 reference = abs(forward.y) > 0.99 ? float3(0, 0, 1) : float3(0, 1, 0);
@@ -769,8 +780,8 @@ float4 particleFragmentMain(ParticleOutput in) : SV_Target {
     if (alpha <= 0.002) {
         discard;
     }
-    float3 toEye = push.eye.xyz - in.worldPos;
-    float fog = fogAmount(push.eye.xyz, in.worldPos);
+    float3 toEye = push.environment[0].eye.xyz - in.worldPos;
+    float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     alpha = saturate(alpha);
 
     if (in.additive > 0.5) {
@@ -822,4 +833,165 @@ float4 skyFragmentMain(SkyOutput in) : SV_Target {
     float4 far = mul(push.invViewProj, float4(in.ndc, 1.0, 1.0));
     float3 dir = normalize(far.xyz / far.w - near.xyz / near.w);
     return float4(skyColor(dir), 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// Grass
+//
+// A blade is a cubic Bézier expanded here from `SV_VertexID` alone — no vertex
+// buffer, no index buffer, 42 vertices per blade. The CPU uploads what a blade
+// *is*; where its triangles are is decided per frame, which is what lets the
+// wind bend it.
+//
+// **The wind bends the control points, it does not translate the blade.** A
+// blade whose base moves is grass sliding across the ground — the "swimming"
+// artifact — and it is one of the motion-only traps that a still frame cannot
+// show. The base is pinned; the tip travels.
+// ---------------------------------------------------------------------------
+
+// Segments along a blade. Seven is fifteen vertices plus the tip, the
+// published Ghost of Tsushima number, and six vertices per segment because
+// this is a triangle list rather than a strip.
+static const uint GRASS_SEGMENTS = 7;
+static const uint GRASS_VERTS = GRASS_SEGMENTS * 6;
+
+struct GrassOutput {
+    float4 clip : SV_Position;
+    float3 worldPos : TEXCOORD0;
+    float3 normal : TEXCOORD1;
+    // x is across the blade, y runs base to tip.
+    float2 uv : TEXCOORD2;
+    float shade : TEXCOORD3;
+};
+
+/// The wind at a point, from the environment block.
+float3 grassWind(float3 p) {
+    EnvironmentData env = *push.environment;
+    WindParams params;
+    params.dir_x = env.wind.x;
+    params.dir_z = env.wind.y;
+    params.speed = env.wind.z;
+    params.gustiness = env.wind.w;
+    params.turbulence = env.weather.x;
+    params.ground_drag = env.weather.y;
+    return wind_at(p, env.weather.z, params);
+}
+
+[shader("vertex")]
+GrassOutput grassVertexMain(uint vertexID: SV_VertexID) {
+    uint bladeIndex = vertexID / GRASS_VERTS;
+    uint local = vertexID % GRASS_VERTS;
+    uint segment = local / 6;
+    uint corner = local % 6;
+
+    GrassBlade blade = push.grass[bladeIndex];
+
+    // Which ring and which edge this corner is. Two triangles per segment.
+    const uint2 CORNERS[6] = {
+        uint2(0, 0), uint2(0, 1), uint2(1, 0),
+        uint2(1, 0), uint2(0, 1), uint2(1, 1),
+    };
+    uint ring = segment + CORNERS[corner].x;
+    float edge = CORNERS[corner].y == 0 ? -1.0 : 1.0;
+    float t = float(ring) / float(GRASS_SEGMENTS);
+
+    float3 base = blade.position.xyz;
+    float height = blade.position.w;
+    float2 facing = blade.facing.xy;
+    float width = blade.facing.z;
+    float tilt = blade.facing.w;
+    float bend = blade.shape.x;
+
+    // Rest control points, matching `loom_grass::blade::controls` — the same
+    // curve the CPU builds, so the two agree about what a blade looks like.
+    float lean = sin(tilt) * height;
+    float rise = cos(tilt) * height;
+    float3 p1 = float3(facing.x * lean * 0.33 * bend, rise * 0.55, facing.y * lean * 0.33 * bend);
+    float3 p3 = float3(facing.x * lean, rise, facing.y * lean);
+    float3 p2 = float3((p1.x + p3.x) * 0.5, (p1.y + p3.y) * 0.5 + rise * 0.06, (p1.z + p3.z) * 0.5);
+
+    // **The bend.** Wind is sampled once at the base, not per control point:
+    // a blade is a few centimetres tall and sampling along it would cost three
+    // field evaluations to produce a difference smaller than the blade. The
+    // clump hash phase-shifts it so neighbours do not move in lockstep — the
+    // unison artifact, which is the single most recognisable tell in a
+    // vegetation shot.
+    EnvironmentData env = *push.environment;
+    float3 air = grassWind(base);
+    float phase = frac(blade.shape.z) * 6.2831853;
+    float sway = 1.0 + 0.25 * sin(env.weather.z * 1.7 + phase);
+    float3 push3 = air * sway;
+
+    // Displacement grows along the blade — the base is rooted, the tip is
+    // free. Quadratic, because a linear ramp bends a blade from the root and
+    // grass bends from partway up.
+    float stiffness = 0.055 / max(height, 0.02);
+    float3 p1b = p1 + push3 * (0.33 * 0.33) * stiffness;
+    float3 p2b = p2 + push3 * (0.66 * 0.66) * stiffness;
+    float3 p3b = p3 + push3 * stiffness;
+
+    // Keep the blade its own length. Without this a strong gust stretches it,
+    // which reads as grass growing when the wind picks up.
+    float reach = length(p3b);
+    if (reach > height) {
+        p3b *= height / reach;
+    }
+
+    float u = 1.0 - t;
+    float3 point = u * u * u * float3(0, 0, 0)
+                 + 3.0 * u * u * t * p1b
+                 + 3.0 * u * t * t * p2b
+                 + t * t * t * p3b;
+    float3 tangent = 3.0 * u * u * p1b + 6.0 * u * t * (p2b - p1b) + 3.0 * t * t * (p3b - p2b);
+    tangent = length(tangent) > 1e-6 ? normalize(tangent) : float3(0, 1, 0);
+
+    float3 side = float3(-facing.y, 0.0, facing.x);
+    float halfWidth = width * 0.5 * (1.0 - t * t);
+    float3 world = base + point + side * halfWidth * edge;
+
+    // **Not the geometric normal**, deliberately — a flat blade lit honestly
+    // reads as paper. Tilted outward from the spine and blended toward the
+    // ground, more strongly at the base where a blade is most surrounded by
+    // its neighbours. Same treatment as the CPU mesh path.
+    float3 face = cross(side, tangent);
+    float towardGround = (1.0 - t * 0.65) * 0.55;
+    float3 normal = normalize(lerp(face, float3(0, 1, 0), towardGround));
+
+    GrassOutput out;
+    out.clip = mul(push.objects[push.objectOffset].mvp, float4(world, 1.0));
+    out.worldPos = world;
+    out.normal = normal;
+    out.uv = float2(edge * 0.5 + 0.5, t);
+    out.shade = blade.shape.y;
+    return out;
+}
+
+[shader("fragment")]
+float4 grassFragmentMain(GrassOutput in) : SV_Target {
+    // Both faces are lit as if facing the viewer. Grass has no back, and a
+    // blade that turns edge-on and goes black is the harshest artifact in the
+    // whole field.
+    float3 normal = normalize(in.normal);
+
+    // Wrapped, not clamped: light bleeds around a thin blade rather than
+    // stopping dead at the terminator, which is what makes a field read as
+    // soft rather than as a million little planes.
+    float wrapped = saturate((dot(normal, sunDirection()) + 0.4) / 1.4);
+
+    float3 albedo = float3(0.24, 0.40, 0.13) * in.shade;
+    // **Darken toward the base.** The cheapest high-value trick available and
+    // the stand-in for the ambient occlusion this renderer does not have: the
+    // bottom of a blade is buried in its neighbours and receives almost no
+    // sky.
+    float occlusion = lerp(0.35, 1.0, in.uv.y * in.uv.y);
+
+    float3 lit = albedo * (ambientStrength() * occlusion + sunStrength() * wrapped * occlusion);
+    // A touch of translucency at the tip, where a blade is thin enough to
+    // transmit — grass is not opaque and looks wrong when treated as if it is.
+    lit += albedo * sunColor() * pow(saturate(dot(-sunDirection(), normalize(in.worldPos - push.environment[0].eye.xyz))), 4.0) * in.uv.y * 0.25;
+
+    // Same haze every other surface gets, so grass sits in the scene rather
+    // than floating in front of it.
+    float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+    return float4(lerp(lit, fogColor(normalize(in.worldPos - push.environment[0].eye.xyz)), fog), 1.0);
 }
