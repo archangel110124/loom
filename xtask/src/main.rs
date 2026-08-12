@@ -68,10 +68,12 @@ fn main() -> std::process::ExitCode {
         "validate" => validate(),
         "image" => image(std::env::args().any(|a| a == "--bless")),
         "flythrough" => flythrough(),
+        "shimmer" => shimmer(),
         other => {
             eprintln!(
                 "unknown task {other:?}\n\nUSAGE:\n    cargo xtask validate\n    \
-                 cargo xtask image [--bless]\n    cargo xtask flythrough"
+                 cargo xtask image [--bless]\n    cargo xtask flythrough
+    cargo xtask shimmer"
             );
             std::process::ExitCode::from(2)
         }
@@ -257,6 +259,149 @@ fn image(bless: bool) -> std::process::ExitCode {
         failures.len()
     );
     std::process::ExitCode::from(1)
+}
+
+
+/// Measure temporal instability — the phase-2 risk, as a number.
+///
+/// **Shimmer is not visible in a still and is not an opinion.** It is pixels
+/// changing between two frames that should look almost the same: nudge the
+/// camera a quarter of a degree and a stable image barely moves, while
+/// sub-pixel geometry crawls, twinkles and pops. So the measurement is the
+/// mean fraction of pixels that differ between *consecutive* frames of a very
+/// slow pan.
+///
+/// This is deliberately the same comparison the golden-image gate uses, at the
+/// same calibrated per-channel threshold, so a number here means the same
+/// thing a number there does.
+///
+/// Not a gate. There is no correct value — a scene with more geometry in it
+/// shimmers more, and the useful reading is the *ratio* between two settings
+/// of the thing being investigated. It prints a table and returns success.
+fn shimmer() -> std::process::ExitCode {
+    let root = repo_root();
+    let loom = match build_debug(&root) {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("xtask: {message}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    if !has_vulkan_device(&loom, &root) {
+        println!("skip: cargo xtask shimmer — no usable Vulkan device on this machine");
+        return std::process::ExitCode::SUCCESS;
+    }
+
+    let out = root.join("target/xtask-shimmer");
+    let _ = std::fs::create_dir_all(&out);
+
+    // A slow pan: twelve frames over three degrees is a quarter of a degree
+    // each, which is roughly what a hand on a mouse does in one frame. Fast
+    // enough that a stable image still changes a little, slow enough that any
+    // large change is instability rather than motion.
+    const FRAMES: u32 = 12;
+    const SPIN: &str = "3";
+    const SIZE: &str = "640x400";
+
+    // **Only comparable within a scene.** The measurement counts every pixel
+    // that changed, which includes legitimate parallax — a richly textured
+    // scene scores higher than a bare one without being less stable. What it
+    // is for is the ratio between two settings of the thing under
+    // investigation, on the same scene, with everything else held still.
+    println!("pan of {SPIN} degrees over {FRAMES} frames at {SIZE}.");
+    println!("Compare a scene against ITSELF under another setting; across scenes it means nothing.");
+    println!();
+    println!("scene                     mean%   worst%   (pixels changed between frames)");
+    let mut failed = false;
+    for (name, scene, _) in GOLDEN.iter().chain(std::iter::once(&(
+        "meadow",
+        "assets/test/meadow.loom",
+        &[] as &[&str],
+    ))) {
+        if !root.join(scene).exists() {
+            continue;
+        }
+        let prefix = out.join(format!("{name}.png"));
+        let rendered = run(
+            &loom,
+            &root,
+            &[
+                "render",
+                scene,
+                "--out",
+                &prefix.to_string_lossy(),
+                "--size",
+                SIZE,
+                "--frames",
+                &FRAMES.to_string(),
+                "--spin",
+                SPIN,
+                // No simulation between frames: this measures what the camera
+                // does to the image, not what the scene does. Mixing the two
+                // would make a smoke plume read as shimmer.
+                "--step",
+                "0",
+            ],
+        );
+        match rendered {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                failed = true;
+                eprintln!("  shimmer {name}: {}", String::from_utf8_lossy(&output.stderr).trim());
+                continue;
+            }
+            Err(e) => {
+                failed = true;
+                eprintln!("  shimmer {name}: {e}");
+                continue;
+            }
+        }
+
+        let mut total = 0.0_f64;
+        let mut worst = 0.0_f64;
+        let mut pairs = 0_u32;
+        for frame in 1..FRAMES {
+            let a = out.join(format!("{name}_{:04}.png", frame - 1));
+            let b = out.join(format!("{name}_{frame:04}.png"));
+            let Ok(output) = run(
+                &loom,
+                &root,
+                &["compare", &a.to_string_lossy(), &b.to_string_lossy()],
+            ) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&output.stdout);
+            let Some(fraction) = read_fraction(&text) else { continue };
+            total += fraction;
+            worst = worst.max(fraction);
+            pairs += 1;
+        }
+
+        if pairs == 0 {
+            eprintln!("  shimmer {name}: no comparable frames");
+            failed = true;
+            continue;
+        }
+        let mean = total / f64::from(pairs);
+        println!("{name:<24} {:>6.2}  {:>6.2}", mean * 100.0, worst * 100.0);
+    }
+
+    if failed {
+        return std::process::ExitCode::from(1);
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+/// Pull `"fraction": <number>` out of a `loom compare` line.
+///
+/// Hand-scanned rather than parsed: `xtask` has no dependencies on purpose, so
+/// that a gate cannot be broken by the same bad crate version as the thing it
+/// checks.
+fn read_fraction(json: &str) -> Option<f64> {
+    let start = json.find("\"fraction\"")? + "\"fraction\"".len();
+    let rest = json.get(start..)?.trim_start().strip_prefix(':')?.trim_start();
+    let end = rest.find(|c: char| !c.is_ascii_digit() && c != '.' && c != 'e' && c != '-')?;
+    rest.get(..end)?.parse().ok()
 }
 
 /// Dump a reviewable frame sequence for every golden scene.

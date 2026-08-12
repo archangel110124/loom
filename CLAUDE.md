@@ -212,12 +212,24 @@ change, so your edits appear live. Two consequences:
 > the answer may change the machinery. Blade normals are deliberately *not* geometric — tilted
 > outward and blended toward the ground, because an honestly-lit flat blade reads as paper.
 >
-> **Still ahead in P2, in order:** the AA investigation (MSAA sample counts, alpha-to-coverage,
-> minimum screen-space width clamping — the first render is visibly harsh, which is the phase
-> risk showing up on schedule), then wind bend on the control points, then the placement compute
-> shader and `vkCmdDrawIndexedIndirect` for scale, then LOD and culling. If the non-temporal
-> toolkit proves insufficient, adding a full-screen AA pass is a scope decision needing an ADR,
-> not drift.
+> **Slice 3: `cargo xtask shimmer` measures the phase risk as a number** — mean fraction of
+> pixels changing between consecutive frames of a slow pan, using the same calibrated comparison
+> the image gate uses. **Only ever compare a scene against itself under a different setting**; it
+> counts legitimate parallax too, so across scenes it means nothing. Baseline at 1× MSAA:
+> `meadow` 3.26% mean.
+>
+> **The order changed, and the investigation is what changed it.** Of the five non-temporal AA
+> tools, only MSAA is testable against a baked mesh: minimum screen-space width clamping and
+> density falloff are both **camera-dependent**, so they cannot exist until blades are generated
+> in a vertex shader. Alpha-to-coverage is largely moot for true geometry blades, and
+> geometry-over-cards is already decided. So the GPU path is not *after* the AA work — it is a
+> **prerequisite** for most of it.
+>
+> **Next, in this order:** vertex-shader blade generation (which also brings the wind bend — same
+> piece of work), then MSAA, then width clamping and density falloff with `shimmer` judging each,
+> then the placement compute pass and indirect draw for scale, then LOD and culling. If the
+> non-temporal toolkit still proves insufficient, adding a full-screen AA pass is a scope decision
+> needing an ADR, not drift.
 >
 > **Grass is rendering-only and outside the sim hash**, the same exemption rain gets. Blades are
 > never ECS entities and the scene shows one node for the field, never the blades.
