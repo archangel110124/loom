@@ -186,6 +186,33 @@ and ~29.3 ms of CPU and stall.** So:
     optimising the one part of the frame that is already free.
   - The thing actually worth instrumenting next is the **CPU** side.
 
+### 00:20 — correction: the ~29 ms is the PNG encoder, not the engine
+
+The builder attributed the non-GPU remainder partly to "per-frame blade
+regeneration on the CPU". **That is wrong and I checked it rather than repeating
+it.** `loom_cli`'s render loop calls `set_grass` once *before* the frame loop;
+blades are baked exactly once per invocation.
+
+Marginal per-frame cost of `meadow` against resolution:
+
+    960x540      4x pixels    11.97 ms/frame
+    1920x1080   16x pixels    32.26 ms/frame
+    3840x2160   64x pixels    98.29 ms/frame
+
+(A 480x270 point read 119 ms and is discarded as contaminated — sub-agents were
+compiling on the same box. Reported rather than silently dropped.)
+
+That fits **~10 ms fixed + ~11 ms per megapixel**. GPU readback is 0.61 ms at
+1080p, so the per-megapixel term is not transfer — it is **PNG compression**, in
+a loop that writes one image per frame.
+
+So the honest picture is: the offscreen path's frame time is dominated by the
+harness being a *testing* tool that encodes a PNG every frame. It never measured
+the engine at all, in either direction. Engine cost at 1080p is **0.7 ms of GPU
+and a small CPU remainder**. Nothing here indicates a CPU bottleneck in the
+engine, and the earlier entry's "the CPU side is the thing worth instrumenting"
+should be read as unproven rather than established.
+
 This is the outcome that justifies having built the instrument before the
 optimisation, and it is worth noticing that the intuition it overturned was the
 design document's own sequencing.
