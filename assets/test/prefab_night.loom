@@ -1,0 +1,33 @@
+# The same room after dark — `extends` rather than a copy.
+#
+# Everything here is a *change* to prefab_room.loom: the floor, the lamps and
+# their placements all come from it, and editing that file changes this scene
+# too. Merging is field by field, so restating `intensity` leaves the lamp's
+# authored colour alone (docs/format/README.md §5).
+[scene]
+format = 1
+id = "b47e0d23-58a1-4c6f-9021-7ae3c85fb914"
+
+[[prefab]]
+key = "day"
+id = "5a2f6c81-9e34-4d07-b1a8-3f7d02c9e461"
+path = "prefab_room.loom"
+
+[[node]]
+name = "NightRoom"
+extends = "day"
+
+[[node]]
+name = "Floor"
+parent = "NightRoom"
+
+  [node.components.Material]
+  albedo = [0.10, 0.09, 0.11]
+
+[[node]]
+name = "LampCentre"
+parent = "NightRoom"
+
+  # The centre lamp is the only one still burning.
+  [node.overrides]
+  "Light.intensity" = 260.0

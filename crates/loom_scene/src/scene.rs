@@ -51,6 +51,12 @@ pub struct Node {
     /// attached to it. An instance carries no components of its own — they
     /// come from the prefab, and deviations go in `overrides`.
     pub prefab: Option<String>,
+    /// Alias of the scene this one extends, on the root node only (§5).
+    ///
+    /// Godot's scene inheritance: the whole file starts from another and
+    /// changes it. Unlike `prefab`, a node with `extends` **does** carry
+    /// components — they are the changes, merged field by field over the base.
+    pub extends: Option<String>,
     /// Per-instance deviations from the prefab, as a flat dotted map.
     ///
     /// `Light.intensity`, or `Child/Path::Light.intensity` to reach inside the
@@ -270,6 +276,15 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
     let mut children: BTreeSet<(String, String)> = BTreeSet::new();
     let mut root: Option<String> = None;
 
+    // Whether this file inherits. A derived scene's nodes may be prefab
+    // instances *in the base* without restating `prefab` here — the alias is
+    // file-local and the derived file need not even declare it — so the
+    // "overrides require prefab" rule is relaxed when the scene extends.
+    let inherits = doc
+        .get("node")
+        .and_then(Item::as_array_of_tables)
+        .is_some_and(|entries| entries.iter().any(|t| t.get("extends").is_some()));
+
     // Declared prefab aliases, for the resolution check below. Read straight
     // from the document rather than through `Scene::prefabs`, which needs a
     // `Scene` that does not exist until this function returns.
@@ -297,18 +312,20 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
             continue;
         }
 
-        // `prefab` and `[node.overrides]` are built (§5). `extends` — whole
-        // scene inheritance — is not, and stays refused for the reason the
-        // other two were: the parser not knowing a word means it ignores it,
-        // and a node that silently loses its contents still validates clean.
-        if table.get("extends").is_some() {
-            let mut err = SceneError::new("not_implemented", name);
+        let extends = table.get("extends").and_then(Item::as_str).map(str::to_owned);
+
+        // **Only the root extends.** Inheritance is a property of the scene,
+        // not of a node inside it — a mid-tree `extends` would be a prefab
+        // instance spelled differently, and having two spellings for one thing
+        // is how a format grows a dialect.
+        if extends.is_some() && table.get("parent").is_some() {
+            let mut err = SceneError::new("extends_on_a_child", name);
             err.field = "extends".to_owned();
-            err.constraint = "a key this build understands".to_owned();
+            err.constraint = "the root node".to_owned();
             err.hint = Some(
-                "`extends` (whole-scene inheritance, docs/format/README.md §5) \
-                 is not implemented. Prefab instances are: declare `[[prefab]]` \
-                 and set `prefab = \"<alias>\"` on a node."
+                "`extends` makes the whole scene an extension of another. To \
+                 bring one scene *into* another as a node, use \
+                 `prefab = \"<alias>\"`."
                     .to_owned(),
             );
             errors.push(err);
@@ -368,7 +385,7 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
         // An unresolved alias names itself and lists what *is* declared — the
         // §3 rule for assets, and the difference between a fixable message and
         // a scavenger hunt.
-        if let Some(alias) = &prefab
+        if let Some(alias) = prefab.as_ref().or(extends.as_ref())
             && !declared.contains(alias)
         {
             {
@@ -407,7 +424,7 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
 
         let mut override_map = BTreeMap::new();
         if let Some(table_like) = table.get("overrides").and_then(Item::as_table_like) {
-            if prefab.is_none() {
+            if prefab.is_none() && !inherits {
                 let mut err = SceneError::new("overrides_without_prefab", &path);
                 err.constraint = "`overrides` requires `prefab`".to_owned();
                 err.hint = Some(
@@ -446,6 +463,7 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
             transform,
             components: component_map,
             prefab,
+            extends,
             overrides: override_map,
         });
     }

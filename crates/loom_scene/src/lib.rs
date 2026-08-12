@@ -151,21 +151,34 @@ name = \"Root\"
         assert!(hint.contains("transform ="), "point at the real key: {hint}");
     }
 
-    /// `extends` — whole-scene inheritance — is still unbuilt, and the reason
-    /// it stays refused is the one that applied to `prefab` before S4: the
-    /// parser not knowing a word means it *ignores* it, so a node silently
-    /// loses its contents and the scene validates clean.
+    /// Inheritance is a property of the *scene*, so only the root extends. A
+    /// mid-tree `extends` would be a prefab instance spelled differently, and
+    /// two spellings for one thing is how a format grows a dialect.
     #[test]
-    fn extends_is_still_refused_rather_than_ignored() {
-        let scene = format!("{TRANSFORM_SCENE}extends = \"base\"\n");
+    fn extends_on_a_child_node_is_refused() {
+        let scene = format!(
+            "[[prefab]]\nkey = \"base\"\nid = \"p-1\"\npath = \"base.loom\"\n\n\
+             {TRANSFORM_SCENE}\n[[node]]\nname = \"Child\"\nparent = \"Root\"\n\
+             extends = \"base\"\n"
+        );
 
         let Err(errs) = Scene::parse(&scene) else {
-            panic!("`extends` does nothing today, so it must not be accepted")
+            panic!("`extends` below the root must not parse")
         };
 
-        assert_eq!(errs[0].error, "not_implemented", "{errs:?}");
+        assert_eq!(errs[0].error, "extends_on_a_child", "{errs:?}");
         let hint = errs[0].hint.as_deref().unwrap_or_default();
-        assert!(hint.contains("§5"), "point at the spec section: {hint}");
+        assert!(hint.contains("prefab"), "point at the alternative: {hint}");
+    }
+
+    /// An undeclared alias is named the same way a prefab's is.
+    #[test]
+    fn an_undeclared_extends_alias_is_refused() {
+        let scene = format!("{TRANSFORM_SCENE}extends = \"nowhere\"\n");
+
+        let Err(errs) = Scene::parse(&scene) else { panic!("nothing declares it") };
+
+        assert_eq!(errs[0].error, "unresolved_prefab", "{errs:?}");
     }
 
     /// A prefab alias has to be declared, and the message lists what is —

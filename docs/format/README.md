@@ -250,16 +250,17 @@ Two consequences worth stating plainly:
 
 ## 5. Prefab instances and overrides
 
-> **Implemented, except `extends`.** `prefab` and `[node.overrides]` are read
-> by `loom_scene::prefab`, resolved from disk by the CLI, and expanded before
-> any command looks at the tree. `extends` — whole-scene inheritance — is still
-> refused with `not_implemented`, on the same reasoning that applied to the
-> other two: a key the parser does not know is a key it *ignores*, so a node
-> silently loses its contents and the scene still validates.
+> **Implemented.** `prefab`, `[node.overrides]` and `extends` are read by
+> `loom_scene::prefab` and expanded before any command looks at the tree. The
+> three operations are `loom prefab <unpack|revert-overrides|apply-overrides>`,
+> and setting a field on an instance writes an override rather than a
+> component.
 >
-> Also not yet built: `apply_overrides`, `revert_overrides` and `unpack` as
-> first-class operations. The resolution they would be built on exists; what is
-> missing is the write-back half.
+> Two behaviours worth knowing, both recorded in ADR 0008: `apply-overrides`
+> writes **two** files and is therefore two undo steps, not one; and `extends`
+> merges field by field, which means resetting an inherited transform to
+> exactly identity is the one edit it cannot express (omitted *is* identity, so
+> the two are indistinguishable in the file).
 
 Unity's `PrefabInstance` delta model. The consuming file stores a **source reference plus explicit
 modifications** — never a copy of the prefab's contents.

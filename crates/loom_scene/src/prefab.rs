@@ -276,6 +276,130 @@ pub fn expand_instance(
     Ok(Unpacked { nodes, assets: gained, warnings })
 }
 
+/// A scene's nodes after inheritance, before any instance is expanded.
+///
+/// `extends` on the root makes the whole file a change to another file
+/// (Godot's scene inheritance): the base's tree comes through, and this
+/// scene's nodes are merged over it. Editing the base updates every scene that
+/// extends it, which is the same bargain as a prefab and the reason both live
+/// here.
+///
+/// **Merged field by field, not component by component.** Declaring
+/// `[node.components.Light] intensity = 5.0` in a derived scene means "change
+/// the intensity" — dropping the base's colour because it was not restated
+/// would make every override a full re-declaration, and defaults are omitted
+/// (§4) so a full re-declaration is not even writable.
+///
+/// A node the base does not have is added. Paths are rebased onto this
+/// scene's root name, so a derived scene may rename the root freely.
+fn inherited(
+    scene: &Scene,
+    library: &Library,
+    stack: &mut Vec<String>,
+) -> Result<Vec<Node>, Vec<SceneError>> {
+    let Some(root) = scene.nodes().first() else {
+        return Ok(Vec::new());
+    };
+    let Some(alias) = root.extends.as_deref() else {
+        return Ok(scene.nodes().to_vec());
+    };
+
+    let id = scene.prefab_id(alias).unwrap_or_default();
+    if let Some(at) = stack.iter().position(|seen| *seen == id) {
+        let mut err = SceneError::new("prefab_cycle", &root.path);
+        err.value = Value::from(alias);
+        let mut cycle: Vec<String> = stack[at..].to_vec();
+        cycle.push(id);
+        err.constraint = cycle.join(" -> ");
+        err.hint = Some("a scene cannot extend itself, at any depth".to_owned());
+        return Err(vec![err]);
+    }
+    let Some(base) = library.get(&id) else {
+        let mut err = SceneError::new("prefab_not_loaded", &root.path);
+        err.field = "extends".to_owned();
+        err.value = Value::from(alias);
+        err.constraint = id;
+        err.hint = Some(format!(
+            "the scene `{alias}` this one extends is declared but was not loaded."
+        ));
+        return Err(vec![err]);
+    };
+
+    stack.push(id);
+    let base_nodes = inherited(base, library, stack)?;
+    stack.pop();
+
+    let base_root = base_nodes.first().map(|n| n.path.clone()).unwrap_or_default();
+    let mut merged: Vec<Node> = base_nodes
+        .into_iter()
+        .map(|mut node| {
+            node.path = reparent_path(&node.path, &base_root, &root.path);
+            (node.name, node.parent) = split_path(&node.path);
+            // The base's own `extends` is already resolved; carrying it
+            // forward would make the merged scene look unresolved.
+            node.extends = None;
+            // **Aliases are file-local, so an inherited one is meaningless
+            // here.** The base may instance `"lamp"` while the derived file
+            // declares no such key — and need not, since it never wrote the
+            // reference. Resolving to the id at the merge keeps the reference
+            // pointing at the same prefab whatever either file calls it.
+            if let Some(alias) = node.prefab.as_deref()
+                && let Some(id) = base.prefab_id(alias)
+            {
+                node.prefab = Some(id);
+            }
+            node
+        })
+        .collect();
+
+    for node in scene.nodes() {
+        if let Some(existing) = merged.iter_mut().find(|n| n.path == node.path) {
+            for (type_name, data) in &node.components {
+                match existing.components.get_mut(type_name) {
+                    Some(Value::Object(base_fields)) => {
+                        if let Value::Object(fields) = data {
+                            for (key, value) in fields {
+                                base_fields.insert(key.clone(), value.clone());
+                            }
+                            continue;
+                        }
+                        existing.components.insert(type_name.clone(), data.clone());
+                    }
+                    _ => {
+                        existing.components.insert(type_name.clone(), data.clone());
+                    }
+                }
+            }
+            // **A non-default transform wins; an identity one defers.** The
+            // node struct cannot tell "wrote identity" from "wrote nothing",
+            // because omitted *is* identity (§4) — so resetting an inherited
+            // transform back to exactly identity is the one thing extends
+            // cannot express. Overriding a single axis works, and so does
+            // anything non-identity.
+            if node.transform != crate::components::Transform::default() {
+                existing.transform.clone_from(&node.transform);
+            }
+            if node.prefab.is_some() {
+                existing.prefab.clone_from(&node.prefab);
+            }
+            // **Overrides merge per key, and do not need `prefab` restated.**
+            // An inherited node may be an instance in the base; the derived
+            // file cannot always name its prefab, because the alias is
+            // file-local. Deviating from an inherited instance is the ordinary
+            // reason to extend a scene at all.
+            for (key, value) in &node.overrides {
+                existing.overrides.insert(key.clone(), value.clone());
+            }
+        } else {
+            let mut added = node.clone();
+            added.extends = None;
+            merged.push(added);
+        }
+    }
+
+    Ok(merged)
+}
+
 /// Expand one scene's nodes, recursing into instances.
 ///
 /// `prefix` is the path the scene's root takes in the output. `None` means
@@ -289,9 +413,13 @@ fn expand(
     warnings: &mut Vec<SceneError>,
 ) -> Result<Vec<Node>, Vec<SceneError>> {
     let mut out: Vec<Node> = Vec::new();
-    let scene_root = scene.nodes().first().map(|n| n.path.clone()).unwrap_or_default();
+    // Inheritance first: a scene that extends another is that other scene plus
+    // changes, and everything below — instances, overrides, asset merging —
+    // applies to the result rather than to the half of it this file holds.
+    let source_nodes = inherited(scene, library, stack)?;
+    let scene_root = source_nodes.first().map(|n| n.path.clone()).unwrap_or_default();
 
-    for node in scene.nodes() {
+    for node in &source_nodes {
         // Where this node lands in the output tree.
         let path = match prefix {
             None => node.path.clone(),
@@ -312,15 +440,11 @@ fn expand(
             continue;
         };
 
-        let Some(id) = scene.prefab_id(alias) else {
-            // Unreachable through `Scene::parse`, which rejects an alias with
-            // no declaration — but `resolve` is public and a caller could hand
-            // us a scene built another way.
-            let mut err = SceneError::new("unresolved_prefab", &path);
-            err.field = "prefab".to_owned();
-            err.value = Value::from(alias);
-            return Err(vec![err]);
-        };
+        // An alias this scene declares resolves to its id; anything else is
+        // already an id, put there by `inherited` when it merged a base whose
+        // aliases mean nothing here. `Scene::parse` rejects an alias with no
+        // declaration, so those are the only two cases.
+        let id = scene.prefab_id(alias).unwrap_or_else(|| alias.to_owned());
 
         if let Some(at) = stack.iter().position(|seen| *seen == id) {
             let mut err = SceneError::new("prefab_cycle", &path);
@@ -900,5 +1024,196 @@ mod tests {
             .find(|n| n.path == "Room/Box")
             .expect("the instance");
         assert_eq!(placed.components["Material"]["albedo_map"]["asset"], "wood");
+    }
+}
+
+#[cfg(test)]
+mod extends_tests {
+    use super::*;
+
+    const BASE_ID: &str = "8c4a1f70-6b23-4e59-a017-9d2f5c8e3b46";
+
+    /// The base: a room with a floor and a lamp.
+    fn base() -> Scene {
+        Scene::parse(
+            "[scene]\nformat = 1\n\n[[node]]\nname = \"Room\"\n\n\
+             [[node]]\nname = \"Floor\"\nparent = \"Room\"\n\
+             transform = { scale = [8.0, 0.2, 8.0] }\n\n  \
+             [node.components.Material]\n  albedo = [0.3, 0.3, 0.3]\n  roughness = 0.8\n\n\
+             [[node]]\nname = \"Lamp\"\nparent = \"Room\"\n\n  \
+             [node.components.Light]\n  intensity = 100.0\n  color = [1.0, 0.9, 0.8]\n",
+        )
+        .expect("base is valid")
+    }
+
+    fn library() -> Library {
+        let mut library = Library::new();
+        library.insert(BASE_ID, base());
+        library
+    }
+
+    /// A derived scene: same room, renamed, with one field changed and one
+    /// node added.
+    fn derived() -> Scene {
+        Scene::parse(&format!(
+            "[scene]\nformat = 1\n\n[[prefab]]\nkey = \"room\"\nid = \"{BASE_ID}\"\n\
+             path = \"room.loom\"\n\n\
+             [[node]]\nname = \"NightRoom\"\nextends = \"room\"\n\n\
+             [[node]]\nname = \"Lamp\"\nparent = \"NightRoom\"\n\n  \
+             [node.components.Light]\n  intensity = 8.0\n\n\
+             [[node]]\nname = \"Candle\"\nparent = \"NightRoom\"\n\n  \
+             [node.components.Light]\n  intensity = 3.0\n"
+        ))
+        .expect("derived is valid")
+    }
+
+    /// The base's tree comes through, rebased onto the derived root's name.
+    #[test]
+    fn the_base_scene_comes_through() {
+        let resolved = resolve(&derived(), &library()).expect("resolves");
+
+        let paths: Vec<&str> = resolved.scene.nodes().iter().map(|n| n.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["NightRoom", "NightRoom/Floor", "NightRoom/Lamp", "NightRoom/Candle"]
+        );
+    }
+
+    /// **Merged field by field, not component by component.** The derived
+    /// scene restates only `intensity`; the base's `color` must survive.
+    /// Replacing whole components would make every change a full
+    /// re-declaration — which §4 makes unwritable, since defaults are omitted.
+    #[test]
+    fn a_changed_field_does_not_drop_its_neighbours() {
+        let resolved = resolve(&derived(), &library()).expect("resolves");
+
+        let lamp = resolved
+            .scene
+            .nodes()
+            .iter()
+            .find(|n| n.path == "NightRoom/Lamp")
+            .expect("the lamp");
+        assert_eq!(lamp.components["Light"]["intensity"], 8.0, "the change landed");
+        assert_eq!(
+            lamp.components["Light"]["color"],
+            serde_json::json!([1.0, 0.9, 0.8]),
+            "and the base's colour survived it"
+        );
+    }
+
+    /// Untouched nodes come through whole.
+    #[test]
+    fn an_untouched_node_keeps_everything() {
+        let resolved = resolve(&derived(), &library()).expect("resolves");
+
+        let floor = resolved
+            .scene
+            .nodes()
+            .iter()
+            .find(|n| n.path == "NightRoom/Floor")
+            .expect("the floor");
+        assert_eq!(floor.components["Material"]["roughness"], 0.8);
+        assert_eq!(floor.transform.scale, [8.0, 0.2, 8.0]);
+    }
+
+    /// A node the base does not have is added.
+    #[test]
+    fn a_new_node_is_added() {
+        let resolved = resolve(&derived(), &library()).expect("resolves");
+
+        let candle = resolved
+            .scene
+            .nodes()
+            .iter()
+            .find(|n| n.path == "NightRoom/Candle")
+            .expect("the candle");
+        assert_eq!(candle.components["Light"]["intensity"], 3.0);
+    }
+
+    /// **Editing the base updates the extension** — the same bargain a prefab
+    /// makes, and the reason inheritance is worth having at all.
+    #[test]
+    fn editing_the_base_updates_the_extension() {
+        let mut brighter = Library::new();
+        brighter.insert(
+            BASE_ID,
+            Scene::parse(&base().to_loom_string().replace("roughness = 0.8", "roughness = 0.1"))
+                .expect("still valid"),
+        );
+
+        let resolved = resolve(&derived(), &brighter).expect("resolves");
+
+        let floor = resolved
+            .scene
+            .nodes()
+            .iter()
+            .find(|n| n.path == "NightRoom/Floor")
+            .expect("the floor");
+        assert_eq!(floor.components["Material"]["roughness"], 0.1);
+    }
+
+    /// Inheritance and instancing compose: a scene may extend another *and*
+    /// place prefabs, and an inherited node may itself be an instance.
+    #[test]
+    fn an_extended_scene_can_still_place_prefabs() {
+        let mut library = library();
+        library.insert(
+            "22222222-2222-4222-8222-222222222222",
+            Scene::parse(
+                "[scene]\nformat = 1\n\n[[node]]\nname = \"Torch\"\n\n  \
+                 [node.components.Light]\n  intensity = 44.0\n",
+            )
+            .expect("prefab is valid"),
+        );
+
+        let scene = Scene::parse(&format!(
+            "[scene]\nformat = 1\n\n[[prefab]]\nkey = \"room\"\nid = \"{BASE_ID}\"\n\
+             path = \"room.loom\"\n\n[[prefab]]\nkey = \"torch\"\n\
+             id = \"22222222-2222-4222-8222-222222222222\"\npath = \"torch.loom\"\n\n\
+             [[node]]\nname = \"Hall\"\nextends = \"room\"\n\n\
+             [[node]]\nname = \"Sconce\"\nparent = \"Hall\"\nprefab = \"torch\"\n"
+        ))
+        .expect("valid");
+
+        let resolved = resolve(&scene, &library).expect("resolves");
+
+        let sconce = resolved
+            .scene
+            .nodes()
+            .iter()
+            .find(|n| n.path == "Hall/Sconce")
+            .expect("the instance");
+        assert_eq!(sconce.components["Light"]["intensity"], 44.0);
+        assert!(
+            resolved.scene.nodes().iter().any(|n| n.path == "Hall/Floor"),
+            "and the inherited nodes are still there"
+        );
+    }
+
+    /// A scene that extends itself, at any depth, is refused with the cycle
+    /// named rather than recursing until the stack runs out.
+    #[test]
+    fn an_inheritance_cycle_is_refused() {
+        let self_extending = Scene::parse(&format!(
+            "[scene]\nformat = 1\n\n[[prefab]]\nkey = \"me\"\nid = \"{BASE_ID}\"\n\
+             path = \"me.loom\"\n\n[[node]]\nname = \"Room\"\nextends = \"me\"\n"
+        ))
+        .expect("the file itself is well-formed");
+        let mut library = Library::new();
+        library.insert(BASE_ID, self_extending);
+
+        let errors = resolve(&derived(), &library).expect_err("a cycle must not resolve");
+
+        assert_eq!(errors[0].error, "prefab_cycle");
+        assert!(errors[0].constraint.contains("->"), "{:?}", errors[0]);
+    }
+
+    /// Extending a scene that was never loaded says so, naming the alias.
+    #[test]
+    fn extending_a_scene_that_is_not_loaded_is_named() {
+        let errors = resolve(&derived(), &Library::new()).expect_err("nothing to extend");
+
+        assert_eq!(errors[0].error, "prefab_not_loaded");
+        assert_eq!(errors[0].field, "extends");
     }
 }

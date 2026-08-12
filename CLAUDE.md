@@ -146,7 +146,7 @@ change, so your edits appear live. Two consequences:
 
 ## Current phase
 
-> **Phase 0 — Substrate. S1–S3 done; S4 (prefabs) is part-built.** See
+> **Phase 0 — Substrate. Complete. P1 (wind) is next.** See
 > `docs/design/LOOM-IMPLEMENTATION-ORDER.md`, which is the sequencing document for everything
 > after M12 and **supersedes the build orders inside the companion docs wherever they conflict**.
 >
@@ -180,20 +180,20 @@ change, so your edits appear live. Two consequences:
 > deliberately *not* unified with it: audio casts against the collision world, this marches only
 > the voxel volume, and swapping it would read every non-voxel scene as wide open.
 >
-> **S4 is part-built — read this before touching prefabs.** `[[prefab]]`, `prefab = "<alias>"` and
-> `[node.overrides]` parse, validate and resolve (`loom_scene::prefab`), and the CLI expands them
-> from disk before `validate`, `render`, `sim` and `measure` look at the tree. A prefab library is
-> keyed by **`id`, never the alias** — aliases are file-local, and two files may use one word for
-> different prefabs. `assets/test/prefab_room.loom` is a worked example.
+> **S4 delivered** prefabs in full — ADR 0008. `[[prefab]]`, `prefab = "<alias>"`,
+> `[node.overrides]` and `extends` all resolve through `loom_scene::prefab`, and
+> `loom prefab <unpack|revert-overrides|apply-overrides>` are the three §5 operations.
+> `assets/test/prefab_room.loom` is a worked example. A library is keyed by **`id`, never the
+> alias** — aliases are file-local, and two files may use one word for different prefabs.
 >
-> **The load path is a correctness requirement, not tidiness.** The parser used to refuse `prefab`
-> precisely because a key it does not understand is a key it *ignores* — the instance arrived with
-> no components, drew nothing, and validated clean. Any new command that reads a scene must go
-> through `prefab_load::for_reading`, or that bug is back.
+> **Setting a field on a prefab instance writes an override, not a component**, so the inspector
+> and `loom scene --tx` need no idea which kind of node they hold. `apply-overrides` writes two
+> files and is therefore **two undo steps**; everything else is one.
 >
-> Still missing from S4: `apply_overrides`, `revert_overrides` and `unpack` as first-class ops
-> (so "undoes as one transaction" is unproven), `extends` scene inheritance, and editor
-> integration. Resolution is the half they all build on and it is done.
+> **The load path is a correctness requirement, not tidiness, and it is the likeliest way to
+> regress S4.** The parser used to refuse `prefab` precisely because a key it does not understand
+> is a key it *ignores* — the instance arrived with no components, drew nothing, and validated
+> clean. Any new command that reads a scene must go through `prefab_load::for_reading`.
 >
 > **Do not skip ahead.** The order after it is P1 wind → P2 grass → P3 water → P4 rain →
 > P5 scatter → P6 mesh vegetation + culling, with P7 editor slottable in parallel. Grass sits at
