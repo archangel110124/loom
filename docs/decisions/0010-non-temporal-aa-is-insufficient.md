@@ -1,7 +1,16 @@
 # ADR 0010 — The non-temporal AA toolkit is insufficient for grass
 
 - **Date:** 2026-08-12
-- **Status:** **proposed — awaiting human decision.** Nothing is built against this yet.
+- **Status:** **accepted** (2026-08-12, human). A CMAA2-class full-screen pass is authorised.
+  The build brief's "no post-process stack before Phase 8" boundary is hereby **moved, not
+  eroded** — this pass is its first and, until Phase 8, only inhabitant.
+
+  **The risk this decision carries, stated at the point of acceptance:** CMAA2 is a *spatial*
+  filter and the artifact it is being bought to fix is *temporal*. The expectation is that
+  smoothing a sub-pixel edge reduces how violently it varies frame to frame, which is an
+  inference and not a measurement. `cargo xtask shimmer` is now trustworthy enough to settle
+  it, and the acceptance test is a measured reduction against the baselines below — not the
+  pass merely existing and looking smoother in a still.
 - **Decision touched:** potentially adds a post-process pass, which the build brief's locked
   decisions do not currently include. Implements the escape hatch named in
   `LOOM-IMPLEMENTATION-ORDER.md` Phase 2: *"If that combination proves insufficient, the escape hatch
