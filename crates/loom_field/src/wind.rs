@@ -70,6 +70,31 @@ impl Wind {
         [open[0] * shelter, open[1] * shelter, open[2] * shelter]
     }
 
+    /// The mean wind speed at a height above the ground, in m/s.
+    ///
+    /// **The authored `speed` is not a wind speed at any height.** The height
+    /// profile is `ground_drag + (1 − ground_drag)·h/(h+2)`, which reaches 1
+    /// only as `h` goes to infinity — so `speed` is the free-stream value the
+    /// profile saturates toward, and at the meteorological standard 10 m the
+    /// field is `0.908` of it with the default drag.
+    ///
+    /// Anything quoting a wind speed against a reference height must come
+    /// through here: a Beaufort number, a forecast, and in particular the
+    /// Pierson–Moskowitz sea state in `loom_water::spectrum`, which takes U10
+    /// and would silently size the whole ocean 10% large if handed `speed`.
+    ///
+    /// **Mean**, not a sample: the gust term and the turbulence are zeroed, so
+    /// this is the speed the field swings around rather than whatever it
+    /// happens to be doing at some point and time.
+    #[must_use]
+    pub fn mean_speed_at(&self, height: f32) -> f32 {
+        let mut params = self.params.clone();
+        params.set("gustiness", 0.0);
+        params.set("turbulence", 0.0);
+        let v = self.field.eval_with([0.0, height, 0.0], 0.0, &params);
+        (v[0] * v[0] + v[2] * v[2]).sqrt()
+    }
+
     /// The parameters, for the GPU side to upload.
     #[must_use]
     pub fn params(&self) -> &Params {
@@ -135,6 +160,35 @@ mod tests {
 
         assert_eq!(over, open);
         assert_eq!(under, [0.0, 0.0, 0.0]);
+    }
+
+    /// **The reference-height conversion, pinned.** `speed` is the free-stream
+    /// value, and the number every published wind-driven formula wants is U10.
+    /// The profile at 10 m with the default drag is
+    /// `0.45 + 0.55·10/12 = 0.9083`, so U10 is 91% of the authored speed and a
+    /// caller that skips this is 10% high — which in a wave spectrum, where
+    /// height goes as the square, is a sea a fifth too big.
+    #[test]
+    fn the_authored_speed_is_not_the_wind_at_ten_metres() {
+        let wind = Wind::new(0.0, 10.0, 1.0, 0.8, 0.45);
+
+        let u10 = wind.mean_speed_at(10.0);
+
+        assert!((u10 - 9.0833).abs() < 1e-3, "U10 is {u10}, not 9.0833");
+        // And it really is the profile, not a constant: the same wind at ankle
+        // height is a good deal slower, and far above it approaches `speed`.
+        assert!(wind.mean_speed_at(0.2) < 0.6 * u10);
+        assert!(wind.mean_speed_at(2000.0) > 0.99 * 10.0);
+    }
+
+    /// The mean is the mean: gusting and turbulence do not change it, which is
+    /// what makes it safe to feed a spectrum that assumes a steady wind.
+    #[test]
+    fn the_mean_speed_ignores_the_gusts() {
+        let steady = Wind::new(30.0, 7.0, 0.0, 0.0, 0.45);
+        let squally = Wind::new(30.0, 7.0, 2.0, 3.0, 0.45);
+
+        assert!((steady.mean_speed_at(10.0) - squally.mean_speed_at(10.0)).abs() < 1e-6);
     }
 
     /// The flattened array is what the shader reads, so it has to match the
