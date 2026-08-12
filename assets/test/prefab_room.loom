@@ -1,0 +1,50 @@
+# Three lamps from one prefab, each placed differently and one of them dimmed.
+#
+# Edit `prefabs/lamp.loom` and all three follow — none of them contains a copy
+# of it, only a reference plus its own deltas (docs/format/README.md §5).
+[scene]
+format = 1
+id = "5a2f6c81-9e34-4d07-b1a8-3f7d02c9e461"
+
+[[prefab]]
+key = "lamp"
+id = "7d3e1b90-4c25-4a68-9f01-2b6ce8a4d517"
+path = "prefabs/lamp.loom"
+
+[[node]]
+name = "Room"
+
+[[node]]
+name = "Floor"
+parent = "Room"
+transform = { pos = [0.0, -0.1, 0.0], scale = [8.0, 0.2, 8.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.32, 0.30, 0.28]
+
+[[node]]
+name = "LampLeft"
+parent = "Room"
+prefab = "lamp"
+transform = { pos = [-2.0, 1.4, 0.0] }
+
+[[node]]
+name = "LampCentre"
+parent = "Room"
+prefab = "lamp"
+transform = { pos = [0.0, 1.4, 0.0] }
+
+[[node]]
+name = "LampRight"
+parent = "Room"
+prefab = "lamp"
+transform = { pos = [2.0, 1.4, 0.0] }
+
+  # Two deviations: this one is dimmer, and its shade is darker. Everything
+  # else still comes from the prefab.
+  [node.overrides]
+  "Light.intensity" = 30.0
+  "Shade::Material.albedo" = [0.20, 0.18, 0.16]

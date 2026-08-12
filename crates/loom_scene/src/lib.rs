@@ -6,6 +6,7 @@ pub mod components;
 pub mod edit;
 pub mod ops;
 pub mod place;
+pub mod prefab;
 mod scene;
 
 pub use edit::{FileApplyError, SaveRejected, Session, apply_to_file, write_atomically};
@@ -150,38 +151,109 @@ name = \"Root\"
         assert!(hint.contains("transform ="), "point at the real key: {hint}");
     }
 
-    /// §5 of the format spec describes prefab instances, `[node.overrides]`
-    /// and `extends`. **None of it is implemented**, and the parser did not
-    /// know the words — it ignored them. So a prefab instance node became a
-    /// node with no components at all: it drew nothing and lit nothing, and
-    /// the scene validated clean. The spec's own flagship fixture depended on
-    /// it, which is how it went unnoticed.
-    ///
-    /// Refusing them is not a decision to never build prefabs; it is a refusal
-    /// to accept text that means nothing today.
+    /// `extends` — whole-scene inheritance — is still unbuilt, and the reason
+    /// it stays refused is the one that applied to `prefab` before S4: the
+    /// parser not knowing a word means it *ignores* it, so a node silently
+    /// loses its contents and the scene validates clean.
     #[test]
-    fn an_unimplemented_prefab_key_is_refused_rather_than_ignored() {
-        for line in ["prefab = \"lamp\"", "extends = \"base\""] {
-            let scene = format!("{TRANSFORM_SCENE}{line}\n");
+    fn extends_is_still_refused_rather_than_ignored() {
+        let scene = format!("{TRANSFORM_SCENE}extends = \"base\"\n");
 
-            let Err(errs) = Scene::parse(&scene) else {
-                panic!("`{line}` does nothing today, so it must not be accepted")
-            };
-            assert_eq!(errs[0].error, "not_implemented", "for {line}: {errs:?}");
-            let hint = errs[0].hint.as_deref().unwrap_or_default();
-            assert!(hint.contains("§5"), "point at the spec section: {hint}");
-        }
+        let Err(errs) = Scene::parse(&scene) else {
+            panic!("`extends` does nothing today, so it must not be accepted")
+        };
+
+        assert_eq!(errs[0].error, "not_implemented", "{errs:?}");
+        let hint = errs[0].hint.as_deref().unwrap_or_default();
+        assert!(hint.contains("§5"), "point at the spec section: {hint}");
     }
 
+    /// A prefab alias has to be declared, and the message lists what is —
+    /// the §3 rule for asset aliases, applied to prefabs.
     #[test]
-    fn an_overrides_table_is_refused() {
+    fn an_undeclared_prefab_alias_names_the_declared_ones() {
+        let scene = format!(
+            "[[prefab]]\nkey = \"lamp\"\nid = \"p-1\"\npath = \"lamp.loom\"\n\n\
+             {TRANSFORM_SCENE}prefab = \"lampp\"\n"
+        );
+
+        let Err(errs) = Scene::parse(&scene) else { panic!("a typo'd alias must not parse") };
+
+        assert_eq!(errs[0].error, "unresolved_prefab", "{errs:?}");
+        let hint = errs[0].hint.as_deref().unwrap_or_default();
+        assert!(hint.contains("lamp"), "list what is declared: {hint}");
+    }
+
+    /// **Two sources for one component, with no rule about which wins.** An
+    /// instance takes its components from the prefab; deviations go in
+    /// `overrides` and nowhere else.
+    #[test]
+    fn a_prefab_instance_may_not_also_declare_components() {
+        let scene = format!(
+            "[[prefab]]\nkey = \"lamp\"\nid = \"p-1\"\npath = \"lamp.loom\"\n\n\
+             {TRANSFORM_SCENE}prefab = \"lamp\"\n\n  \
+             [node.components.Light]\n  intensity = 5.0\n"
+        );
+
+        let Err(errs) = Scene::parse(&scene) else {
+            panic!("components on an instance must not parse")
+        };
+
+        assert_eq!(errs[0].error, "prefab_instance_has_components", "{errs:?}");
+    }
+
+    /// Overrides deviate from a prefab. Without one there is nothing to
+    /// deviate from, and the fields belong on the node directly.
+    #[test]
+    fn overrides_without_a_prefab_are_refused() {
         let scene =
             format!("{TRANSFORM_SCENE}\n  [node.overrides]\n  \"Light.intensity\" = 420.0\n");
 
         let Err(errs) = Scene::parse(&scene) else {
-            panic!("overrides do nothing today, so they must not be accepted")
+            panic!("overrides with no prefab must not parse")
         };
-        assert_eq!(errs[0].error, "not_implemented");
+
+        assert_eq!(errs[0].error, "overrides_without_prefab", "{errs:?}");
+    }
+
+    /// The key grammar is `[Child/Path::]TypeName.field`. A malformed key is
+    /// wrong in the file whatever prefab it points at, so it is caught at
+    /// parse rather than left to resolution.
+    #[test]
+    fn a_malformed_override_key_is_named() {
+        for key in ["Light", "Light.", ".intensity", "::Light.intensity", "a//b::L.f"] {
+            let scene = format!(
+                "[[prefab]]\nkey = \"lamp\"\nid = \"p-1\"\npath = \"lamp.loom\"\n\n\
+                 {TRANSFORM_SCENE}prefab = \"lamp\"\n\n  \
+                 [node.overrides]\n  \"{key}\" = 1.0\n"
+            );
+
+            let Err(errs) = Scene::parse(&scene) else { panic!("`{key}` must not parse") };
+
+            assert_eq!(errs[0].error, "malformed_override_key", "for `{key}`: {errs:?}");
+            assert_eq!(errs[0].field, key);
+        }
+    }
+
+    /// The shape the spec's own §5 example uses, end to end through the
+    /// parser: a declaration, an instance, a transform, and two overrides.
+    #[test]
+    fn the_spec_section_five_example_parses() {
+        let scene = format!(
+            "[[prefab]]\nkey = \"lamp\"\nid = \"p-1\"\npath = \"lamp.loom\"\n\n\
+             {TRANSFORM_SCENE}prefab = \"lamp\"\n\n  \
+             [node.overrides]\n  \"Light.intensity\" = 420.0\n  \
+             \"Bulb/Glass::Material.color\" = [1.0, 0.92, 0.78]\n"
+        );
+
+        let parsed = Scene::parse(&scene).expect("the §5 shape must parse");
+
+        let node = parsed.nodes().last().expect("a node");
+        assert_eq!(node.prefab.as_deref(), Some("lamp"));
+        assert_eq!(node.overrides.len(), 2);
+        assert_eq!(parsed.prefab_id("lamp").as_deref(), Some("p-1"));
+        // Round-trip is byte-identical, prefab keys included.
+        assert_eq!(parsed.to_loom_string(), scene);
     }
 
     /// §7: the three Vec3 spellings are "accepted interchangeably", and the

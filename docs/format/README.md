@@ -250,12 +250,16 @@ Two consequences worth stating plainly:
 
 ## 5. Prefab instances and overrides
 
-> **NOT IMPLEMENTED.** Nothing in `crates/` reads `prefab`, `extends` or
-> `[node.overrides]`. Until it does, the parser **rejects** all three with
-> `not_implemented` rather than ignoring them — a node whose components come
-> from a prefab silently had no components at all, so it drew nothing, lit
-> nothing, and the scene still validated. This section is the design to build
-> against, not a description of the code.
+> **Implemented, except `extends`.** `prefab` and `[node.overrides]` are read
+> by `loom_scene::prefab`, resolved from disk by the CLI, and expanded before
+> any command looks at the tree. `extends` — whole-scene inheritance — is still
+> refused with `not_implemented`, on the same reasoning that applied to the
+> other two: a key the parser does not know is a key it *ignores*, so a node
+> silently loses its contents and the scene still validates.
+>
+> Also not yet built: `apply_overrides`, `revert_overrides` and `unpack` as
+> first-class operations. The resolution they would be built on exists; what is
+> missing is the write-back half.
 
 Unity's `PrefabInstance` delta model. The consuming file stores a **source reference plus explicit
 modifications** — never a copy of the prefab's contents.

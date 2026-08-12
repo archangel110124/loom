@@ -18,6 +18,7 @@ mod materials;
 mod panels;
 mod particles;
 mod play;
+mod prefab_load;
 mod scene_view;
 mod sound;
 mod run;
@@ -248,6 +249,18 @@ fn validate(path: &str) -> (u8, String) {
 
     match Scene::parse(&src) {
         Ok(scene) => {
+            // **The one place override warnings surface.** A prefab that
+            // renamed a child leaves an override pointing at nothing; §5 says
+            // that is a loud warning with the value preserved, never a silent
+            // drop, and `validate` is where an author goes looking.
+            let (scene, prefab_warnings) =
+                match prefab_load::for_reading_with_warnings(&scene, std::path::Path::new(path)) {
+                    Ok(pair) => pair,
+                    Err(errors) => {
+                        return (1, json_line(&serde_json::json!({ "errors": errors })));
+                    }
+                };
+
             // An alias that resolves to nothing is a `docs/format/README.md` §6
             // error code, but the renderer deliberately substitutes a box and
             // carries on (design doc §2.6: degrade, do not crash). Both are
@@ -283,6 +296,7 @@ fn validate(path: &str) -> (u8, String) {
                     "version": loom_scene::VersionToken::of(&src),
                     "physics": findings,
                     "assets": missing,
+                    "overrides": prefab_warnings,
                 })),
             )
         }
@@ -437,6 +451,13 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         }
     };
     let scene = match Scene::parse(&src) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+    // Prefab instances become the nodes they stand for before anything looks
+    // at the tree. Without this a `prefab = "..."` node reaches the renderer
+    // with no components and draws nothing, silently.
+    let scene = match prefab_load::for_reading(&scene, std::path::Path::new(path)) {
         Ok(s) => s,
         Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
     };
@@ -1043,6 +1064,11 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
         }
     };
     let scene = match Scene::parse(&src) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+    // Expanded before the simulation sees it — see `render`.
+    let scene = match prefab_load::for_reading(&scene, std::path::Path::new(path)) {
         Ok(s) => s,
         Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
     };
@@ -1775,6 +1801,13 @@ fn measure(path: &str, args: &[String]) -> (u8, String) {
         }))),
     };
     let scene = match Scene::parse(&src) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+
+    // Measuring an unexpanded instance would report a node with no geometry —
+    // true of the file, false of the scene.
+    let scene = match prefab_load::for_reading(&scene, std::path::Path::new(path)) {
         Ok(s) => s,
         Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
     };

@@ -45,6 +45,31 @@ pub struct Node {
     /// component without this struct growing one accessor per type — the same
     /// reason the registry is schema-driven.
     pub components: BTreeMap<String, Value>,
+    /// File-local alias of the prefab this node instances (§5).
+    ///
+    /// Structural, like `parent`: it describes what the node *is*, not data
+    /// attached to it. An instance carries no components of its own — they
+    /// come from the prefab, and deviations go in `overrides`.
+    pub prefab: Option<String>,
+    /// Per-instance deviations from the prefab, as a flat dotted map.
+    ///
+    /// `Light.intensity`, or `Child/Path::Light.intensity` to reach inside the
+    /// instanced sub-tree. **Flat on purpose** — setting one override is a
+    /// single map insert with no tree surgery, which is what makes it a
+    /// one-line `SceneOp` rather than a structural edit.
+    pub overrides: BTreeMap<String, Value>,
+}
+
+/// One `[[prefab]]` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefabDecl {
+    /// File-local alias. What nodes in *this* file write.
+    pub key: String,
+    /// The real identity, stable across files and renames.
+    pub id: String,
+    /// A hint for humans (§3). Nothing resolves a reference through it — a
+    /// loader uses it to *find* the file once, and identity stays the `id`.
+    pub path: String,
 }
 
 /// A rejection, shaped per `docs/format/README.md` §6.
@@ -66,7 +91,20 @@ pub struct SceneError {
 }
 
 impl SceneError {
-    fn new(error: &str, node: &str) -> Self {
+    /// Build one from outside the crate.
+    ///
+    /// A loader that cannot read a prefab file has a real §6-shaped error to
+    /// report and no way to construct it otherwise — and inventing a second
+    /// error type for "problems near a scene" would mean every caller
+    /// matching on two.
+    #[must_use]
+    pub fn external(error: &str, constraint: &str) -> Self {
+        let mut err = Self::new(error, "");
+        err.constraint = constraint.to_owned();
+        err
+    }
+
+    pub(crate) fn new(error: &str, node: &str) -> Self {
         Self {
             error: error.to_owned(),
             node: node.to_owned(),
@@ -130,6 +168,36 @@ impl Scene {
             .as_str()
     }
 
+    /// The `[[asset]]` declarations, in file order.
+    #[must_use]
+    pub fn assets(&self) -> Vec<PrefabDecl> {
+        declarations(&self.doc, "asset")
+    }
+
+    /// The `[scene] id`, if the file carries one.
+    #[must_use]
+    pub fn scene_id(&self) -> Option<String> {
+        self.doc.get("scene")?.get("id")?.as_str().map(str::to_owned)
+    }
+
+    /// The `[[prefab]]` declarations, in file order.
+    ///
+    /// **Identity is `id`, never the alias and never the path.** The alias is
+    /// file-local — two scenes may call the same prefab different things, and
+    /// the same word may mean different prefabs in different files — so a
+    /// library of prefabs is keyed by `id` and each file's aliases are
+    /// resolved through its own declarations (§3, the Unity lesson).
+    #[must_use]
+    pub fn prefabs(&self) -> Vec<PrefabDecl> {
+        declarations(&self.doc, "prefab")
+    }
+
+    /// The `id` a file-local prefab alias refers to.
+    #[must_use]
+    pub fn prefab_id(&self, key: &str) -> Option<String> {
+        self.prefabs().into_iter().find(|p| p.key == key).map(|p| p.id)
+    }
+
     /// Serialize back to `.loom`.
     ///
     /// For an unmodified scene this is byte-identical to the input, comments
@@ -170,6 +238,26 @@ fn check_format_version(doc: &DocumentMut) -> Result<(), Vec<SceneError>> {
     }
 }
 
+/// The `key`/`id`/`path` triples of an `[[asset]]` or `[[prefab]]` array.
+///
+/// One reader for both because they are the same shape by design (§3): a
+/// file-local alias, the UUID that is the real identity, and an advisory path.
+fn declarations(doc: &DocumentMut, table: &str) -> Vec<PrefabDecl> {
+    let Some(entries) = doc.get(table).and_then(Item::as_array_of_tables) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            Some(PrefabDecl {
+                key: entry.get("key")?.as_str()?.to_owned(),
+                id: entry.get("id").and_then(Item::as_str).unwrap_or_default().to_owned(),
+                path: entry.get("path").and_then(Item::as_str).unwrap_or_default().to_owned(),
+            })
+        })
+        .collect()
+}
+
 /// Resolve every node's path, enforcing the structural rules from §3.
 fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
     let Some(entries) = doc.get("node").and_then(Item::as_array_of_tables) else {
@@ -181,6 +269,20 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
     let mut known: BTreeSet<String> = BTreeSet::new();
     let mut children: BTreeSet<(String, String)> = BTreeSet::new();
     let mut root: Option<String> = None;
+
+    // Declared prefab aliases, for the resolution check below. Read straight
+    // from the document rather than through `Scene::prefabs`, which needs a
+    // `Scene` that does not exist until this function returns.
+    let declared: BTreeSet<String> = doc
+        .get("prefab")
+        .and_then(Item::as_array_of_tables)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|t| t.get("key").and_then(Item::as_str).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
 
     for table in entries {
         let Some(name) = table.get("name").and_then(Item::as_str) else {
@@ -195,24 +297,21 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
             continue;
         }
 
-        // §5 of the format spec — prefab instances, `[node.overrides]`,
-        // `extends` — is documented but not built. The parser did not know
-        // these words, so it ignored them: a prefab instance node ended up
-        // with no components at all, drew nothing, lit nothing, and validated
-        // clean. Silence is the one answer that is definitely wrong; refusing
-        // says so and costs nothing when prefabs do get built.
-        for key in ["prefab", "extends", "overrides"] {
-            if table.get(key).is_some() {
-                let mut err = SceneError::new("not_implemented", name);
-                err.field = key.to_owned();
-                err.constraint = "a key this build understands".to_owned();
-                err.hint = Some(format!(
-                    "`{key}` is described in docs/format/README.md §5 (prefab \
-                     instances and overrides), which is not implemented yet. \
-                     Write the components on the node directly."
-                ));
-                errors.push(err);
-            }
+        // `prefab` and `[node.overrides]` are built (§5). `extends` — whole
+        // scene inheritance — is not, and stays refused for the reason the
+        // other two were: the parser not knowing a word means it ignores it,
+        // and a node that silently loses its contents still validates clean.
+        if table.get("extends").is_some() {
+            let mut err = SceneError::new("not_implemented", name);
+            err.field = "extends".to_owned();
+            err.constraint = "a key this build understands".to_owned();
+            err.hint = Some(
+                "`extends` (whole-scene inheritance, docs/format/README.md §5) \
+                 is not implemented. Prefab instances are: declare `[[prefab]]` \
+                 and set `prefab = \"<alias>\"` on a node."
+                    .to_owned(),
+            );
+            errors.push(err);
         }
 
         let parent = table.get("parent").and_then(Item::as_str);
@@ -264,6 +363,81 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
             }
         }
 
+        let prefab = table.get("prefab").and_then(Item::as_str).map(str::to_owned);
+
+        // An unresolved alias names itself and lists what *is* declared — the
+        // §3 rule for assets, and the difference between a fixable message and
+        // a scavenger hunt.
+        if let Some(alias) = &prefab
+            && !declared.contains(alias)
+        {
+            {
+                let mut err = SceneError::new("unresolved_prefab", &path);
+                err.field = "prefab".to_owned();
+                err.value = Value::from(alias.clone());
+                err.constraint = "a declared `[[prefab]]` key".to_owned();
+                err.hint = Some(if declared.is_empty() {
+                    "this file declares no prefabs. Add `[[prefab]]` with \
+                     `key`, `id` and `path`."
+                        .to_owned()
+                } else {
+                    format!(
+                        "declared prefab keys: {}",
+                        declared.iter().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                });
+                errors.push(err);
+            }
+        }
+
+        // **An instance declares no components of its own.** Allowing both
+        // would give a node two sources for the same component and no rule
+        // about which wins — the override map is the one way to deviate.
+        if prefab.is_some() && !component_map.is_empty() {
+            let mut err = SceneError::new("prefab_instance_has_components", &path);
+            err.constraint = "a prefab instance takes its components from the prefab".to_owned();
+            err.hint = Some(
+                "put the deviation in `[node.overrides]` as \
+                 \"TypeName.field\" = value, or drop `prefab` to write the \
+                 components directly."
+                    .to_owned(),
+            );
+            errors.push(err);
+        }
+
+        let mut override_map = BTreeMap::new();
+        if let Some(table_like) = table.get("overrides").and_then(Item::as_table_like) {
+            if prefab.is_none() {
+                let mut err = SceneError::new("overrides_without_prefab", &path);
+                err.constraint = "`overrides` requires `prefab`".to_owned();
+                err.hint = Some(
+                    "overrides are deviations from a prefab. A node with no \
+                     prefab has nothing to deviate from — set the fields \
+                     directly instead."
+                        .to_owned(),
+                );
+                errors.push(err);
+            }
+            for (key, item) in table_like.iter() {
+                if let Some(reason) = override_key_problem(key) {
+                    let mut err = SceneError::new("malformed_override_key", &path);
+                    err.field = key.to_owned();
+                    err.constraint = reason;
+                    err.hint = Some(
+                        "an override key is `TypeName.field`, or \
+                         `Child/Path::TypeName.field` to reach inside the \
+                         instanced sub-tree."
+                            .to_owned(),
+                    );
+                    errors.push(err);
+                    continue;
+                }
+                if let Some(value) = item_to_json(item) {
+                    override_map.insert(key.to_owned(), value);
+                }
+            }
+        }
+
         known.insert(path.clone());
         nodes.push(Node {
             name: name.to_owned(),
@@ -271,6 +445,8 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
             path,
             transform,
             components: component_map,
+            prefab,
+            overrides: override_map,
         });
     }
 
@@ -283,6 +459,48 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
     } else {
         Err(errors)
     }
+}
+
+/// Why an override key is not well-formed, or `None` if it is.
+///
+/// The grammar is `[<child path>::]<TypeName>.<field>`. Checked here rather
+/// than at resolution because a malformed key is wrong in the file regardless
+/// of which prefab it points at — and because a key that cannot be parsed
+/// cannot be reported against a target later.
+///
+/// **Not checked here: whether the target exists.** That needs the prefab, and
+/// a missing target is a warning with the value preserved (§5), never an
+/// error — see `resolve`.
+fn override_key_problem(key: &str) -> Option<String> {
+    let (child, field_path) = match key.split_once("::") {
+        Some((child, rest)) => (Some(child), rest),
+        None => (None, key),
+    };
+
+    if let Some(child) = child {
+        if child.is_empty() || child.starts_with('/') || child.ends_with('/') {
+            return Some("the child path before `::` is empty or has a stray `/`".to_owned());
+        }
+        if child.split('/').any(|segment| segment.is_empty() || segment.trim() != segment) {
+            return Some("every segment of the child path must be a non-empty name".to_owned());
+        }
+    }
+
+    let Some((type_name, field)) = field_path.split_once('.') else {
+        return Some("expected `TypeName.field`, with a `.` between them".to_owned());
+    };
+    if type_name.is_empty() {
+        return Some("the component type before `.` is empty".to_owned());
+    }
+    if field.is_empty() {
+        return Some("the field after `.` is empty".to_owned());
+    }
+    // Nested fields are addressed with further dots, so only the first split
+    // matters — but an empty segment anywhere is still a typo.
+    if field.split('.').any(str::is_empty) {
+        return Some("a field segment between dots is empty".to_owned());
+    }
+    None
 }
 
 /// Check every component on every node against its registered schema.

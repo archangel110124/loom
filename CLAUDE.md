@@ -146,7 +146,7 @@ change, so your edits appear live. Two consequences:
 
 ## Current phase
 
-> **Phase 0 — Substrate. S1, S2 and S3 done; S4 (prefabs) is all that remains.** See
+> **Phase 0 — Substrate. S1–S3 done; S4 (prefabs) is part-built.** See
 > `docs/design/LOOM-IMPLEMENTATION-ORDER.md`, which is the sequencing document for everything
 > after M12 and **supersedes the build orders inside the companion docs wherever they conflict**.
 >
@@ -179,6 +179,21 @@ change, so your edits appear live. Two consequences:
 > **Rain and wind take sheltering from here; neither grows its own.** Audio's `openness` is
 > deliberately *not* unified with it: audio casts against the collision world, this marches only
 > the voxel volume, and swapping it would read every non-voxel scene as wide open.
+>
+> **S4 is part-built — read this before touching prefabs.** `[[prefab]]`, `prefab = "<alias>"` and
+> `[node.overrides]` parse, validate and resolve (`loom_scene::prefab`), and the CLI expands them
+> from disk before `validate`, `render`, `sim` and `measure` look at the tree. A prefab library is
+> keyed by **`id`, never the alias** — aliases are file-local, and two files may use one word for
+> different prefabs. `assets/test/prefab_room.loom` is a worked example.
+>
+> **The load path is a correctness requirement, not tidiness.** The parser used to refuse `prefab`
+> precisely because a key it does not understand is a key it *ignores* — the instance arrived with
+> no components, drew nothing, and validated clean. Any new command that reads a scene must go
+> through `prefab_load::for_reading`, or that bug is back.
+>
+> Still missing from S4: `apply_overrides`, `revert_overrides` and `unpack` as first-class ops
+> (so "undoes as one transaction" is unproven), `extends` scene inheritance, and editor
+> integration. Resolution is the half they all build on and it is done.
 >
 > **Do not skip ahead.** The order after it is P1 wind → P2 grass → P3 water → P4 rain →
 > P5 scatter → P6 mesh vegetation + culling, with P7 editor slottable in parallel. Grass sits at
