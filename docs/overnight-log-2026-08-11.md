@@ -228,6 +228,44 @@ flicker on animated geometry conflates twinkle with legitimate motion, so the
 0.000 controls prove the camera is static, not that 2.712 is bad in absolute
 terms.
 
+### 02:10 — grass colour (`1062550`), and the metric's third failure mode
+
+Two shipped scenes authored a `Material` albedo on their grass field and nothing
+read it. Live now, packed into the one free slot of the blade payload, with
+per-clump **hue** variation rather than brightness-only.
+
+**The important part is what it revealed.** Flicker moved 2.712 → 3.059 with no
+change to geometry or to any AA setting. The builder attributed it instead of
+assuming: hue variation costs ~1%, and the rest is that the field is simply
+painted **brighter**. `shimmer` measures absolute pixel differences, so the same
+geometry in a lighter colour scores higher without being less stable.
+
+Framing, animation, and now scale. **Normalising flicker by local mean is
+recorded as load-bearing.** New baselines: `meadow` 3.059, `grass_slope` 1.755.
+
+### 02:21 — P3 W0–W2 landed (`3c7062c`), critic dispatched
+
+Schema + steepness validator, `sample_water` with analytic normals, and the
+Slang twin.
+
+**The agreement test is bit-identical — worst difference 0.0 across 5,632
+values** against a 1e-4 threshold, and it is a real comparison rather than a
+tautology: `ash` is confined to `loom_render`, so the twin is compiled with
+`slangc -target cpp`, linked to a harness and run. Same IEEE f32 ops in the same
+order, hence exact rather than merely close. Mutation-checked — changing 9.81 to
+9.83 in the Slang alone fails by 0.769.
+
+**The steepness limit was validated by watching the surface fold**, not by
+asserting a formula: one test walks a wavelength and finds where the displaced X
+coordinate stops being monotonic (safe at 0.9 and 0.99, folding at 1.05 and
+1.5), and another shows four waves fold at 0.30 each and not at 0.24, which is
+what makes the `1/N` division right.
+
+Found on the way and worth the human's attention: **`loom_reflect`'s validator
+does not descend into nested components**, so `schemars` ranges on nested types
+are documentation only and `maxItems` appears in `loom describe` without being
+enforced. That affects every nested component in the project.
+
 ### 23:51 — Stage 3 (P3 water) is fully specified; no spec-writing needed
 
 Checked, because the brief said to write the spec if Stage 3 was underspecified.
