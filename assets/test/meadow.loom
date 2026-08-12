@@ -28,6 +28,11 @@ name = "Meadow"
   fog_density = 0.008
   fog_falloff = 0.06
 
+  # **Authored, and currently inert here.** Wind drives particles, and this
+  # scene has none; the grass is a mesh baked once at load, so it cannot sway
+  # whatever the field says. Bending the Bézier control points needs the
+  # vertex shader, which arrives with the compute path — the two are the same
+  # piece of work. The values are set now so the scene is ready for it.
   [node.components.Wind]
   direction_degrees = 20.0
   speed = 5.0
