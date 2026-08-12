@@ -1281,6 +1281,7 @@ dependencies = [
  "loom_audio",
  "loom_ecs",
  "loom_field",
+ "loom_grass",
  "loom_input",
  "loom_particles",
  "loom_physics",
@@ -1312,6 +1313,7 @@ version = "0.0.0"
 name = "loom_grass"
 version = "0.0.0"
 dependencies = [
+ "loom_asset",
  "loom_field",
 ]
 

@@ -612,6 +612,60 @@ impl Default for Environment {
     }
 }
 
+/// A field of grass, stored as the rules that generate it.
+///
+/// **Never the blades.** A tile is a few thousand of them and a field is
+/// millions; the same represent-the-generator principle as a voxel op list
+/// (never-do #11). The scene tree shows one node for the field, and blades are
+/// never ECS entities — `loom_ecs` is `Vec<Option<T>>`, and a million blade
+/// entities would be pathological.
+///
+/// **Rendering only.** Grass is outside the deterministic simulation, the same
+/// exemption rain gets: sim hashes must be identical with it on or off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Grass {
+    /// Half the field's size on X and Z, in metres, centred on the node.
+    #[schemars(inner(range(min = 0.5, max = 500.0)))]
+    pub half_extent: [f32; 2],
+    /// Blades per square metre on flat, ideal ground.
+    #[schemars(range(min = 0.1, max = 2000.0))]
+    pub density: f32,
+    /// Blade height in metres, before per-blade variation.
+    #[schemars(range(min = 0.01, max = 5.0))]
+    pub height: f32,
+    /// Blade width at the base, in metres.
+    #[schemars(range(min = 0.0005, max = 0.5))]
+    pub width: f32,
+    /// Surface normal Y at which grass stops. `0.7` is roughly 45°.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub slope_cutoff: f32,
+    /// How strongly blades in a clump agree about facing, `0` to `1`.
+    ///
+    /// The single highest-value realism control here: uniformly random blades
+    /// read as carpet, and blades that agree with their neighbours read as a
+    /// field.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub clump_facing: f32,
+    /// How much a clump's colour varies from its neighbours'.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub clump_colour: f32,
+}
+
+impl Default for Grass {
+    fn default() -> Self {
+        Self {
+            half_extent: [6.0, 6.0],
+            density: 100.0,
+            height: 0.42,
+            width: 0.018,
+            slope_cutoff: 0.7,
+            clump_facing: 0.7,
+            clump_colour: 0.35,
+        }
+    }
+}
+
 /// The weather the whole scene stands in.
 ///
 /// **Authored as scalars, evaluated as a field.** The numbers here fill
@@ -770,6 +824,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<AudioSource>("AudioSource");
     reg.register::<Environment>("Environment");
     reg.register::<Wind>("Wind");
+    reg.register::<Grass>("Grass");
     reg.register::<Script>("Script");
     reg
 }

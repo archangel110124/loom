@@ -29,6 +29,8 @@
 //! identical with grass on or off. The exemption is not laziness — a million
 //! blades in the hash would make every hash a function of the camera.
 
+pub mod blade;
+
 use loom_field::noise::hash;
 
 /// World size of one placement tile, in metres.

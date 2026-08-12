@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 15] = [
+const SCENES: [&str; 16] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -48,6 +48,7 @@ const SCENES: [&str; 15] = [
     "assets/test/terrain_stress.loom",
     "assets/test/smoke.loom",
     "assets/test/windy.loom",
+    "assets/test/meadow.loom",
     "assets/test/camera.loom",
     "assets/test/walker.loom",
     "assets/test/explosion.loom",

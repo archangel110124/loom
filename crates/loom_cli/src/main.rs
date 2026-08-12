@@ -719,10 +719,19 @@ impl MeshLibrary {
         // Voxel volumes bake into a mesh at load, from the op list the scene
         // stores. never-do #11: the scene holds the recipe, never the voxels.
         for node in scene.nodes() {
-            let Some(volume) = node.components.get("VoxelVolume") else {
-                continue;
-            };
-            let key = format!("voxel:{}", node.path);
+            // Grass and voxel volumes both bake a mesh from a recipe, and the
+            // caching, keying and warning are identical — only the generator
+            // differs.
+            let (kind, recipe_source, bake): (&str, _, fn(&serde_json::Value) -> Option<loom_asset::Mesh>) =
+                if let Some(volume) = node.components.get("VoxelVolume") {
+                    ("voxel", volume, bake_voxel)
+                } else if let Some(field) = node.components.get("Grass") {
+                    ("grass", field, bake_grass)
+                } else {
+                    continue;
+                };
+            let volume = recipe_source;
+            let key = format!("{kind}:{}", node.path);
             if by_name.contains_key(&key) {
                 continue;
             }
@@ -732,7 +741,7 @@ impl MeshLibrary {
             let baked = match cache.get(&recipe) {
                 Some(mesh) => Some(mesh.clone()),
                 None => {
-                    let mesh = bake_voxel(volume);
+                    let mesh = bake(volume);
                     if let Some(mesh) = mesh.clone() {
                         // `ponytail:` unbounded until it isn't. Each entry is
                         // one volume's geometry and an edit session touches a
@@ -750,7 +759,7 @@ impl MeshLibrary {
                     by_name.insert(key, u32::try_from(meshes.len()).unwrap_or(0));
                     meshes.push(mesh);
                 }
-                None => crate::log::warn(format!("{}: voxel volume produced no surface", node.path)),
+                None => crate::log::warn(format!("{}: {kind} produced no surface", node.path)),
             }
         }
 
@@ -832,6 +841,70 @@ fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
 }
 
 /// Bake a `VoxelVolume` component into a mesh.
+/// Generate a grass field's geometry from its rules.
+///
+/// **CPU-generated geometry through the ordinary mesh path, on purpose.** The
+/// shipping architecture is a placement compute pass feeding
+/// `vkCmdDrawIndexedIndirect`, and that is where this is going. It is here
+/// first because P2's stated risk is anti-aliasing without temporal
+/// accumulation — shimmer is a property of sub-pixel geometry under a moving
+/// camera, and a generated mesh answers that with no new pipeline at all.
+/// Getting the visual answer before building the machinery is the cheaper
+/// order; the machinery cannot change the answer, and the answer may well
+/// change the machinery.
+///
+/// The ground is flat here. Slope- and flow-driven density are already in
+/// `loom_grass` and tested; wiring them to the real terrain query is the next
+/// slice, alongside the compute path.
+fn bake_grass(component: &serde_json::Value) -> Option<loom_asset::Mesh> {
+    let rules: loom_scene::components::Grass =
+        serde_json::from_value(component.clone()).ok()?;
+
+    let placement = loom_grass::Rules {
+        density: rules.density,
+        height: rules.height,
+        height_jitter: 0.35,
+        width: rules.width,
+        slope_cutoff: rules.slope_cutoff,
+        clump_facing: rules.clump_facing,
+        clump_colour: rules.clump_colour,
+    };
+
+    // Tiles covering the authored extent. The field is centred on its node, so
+    // the mesh is built around the origin and the node's transform places it.
+    let (hx, hz) = (rules.half_extent[0], rules.half_extent[1]);
+    let low = loom_grass::Tile::at(-hx, -hz);
+    let high = loom_grass::Tile::at(hx, hz);
+
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for z in low.z..=high.z {
+        for x in low.x..=high.x {
+            let tile = loom_grass::Tile { x, z };
+            for blade in loom_grass::tile(tile, &placement, &|_, _| loom_grass::Ground::default())
+            {
+                // Clip to the authored rectangle rather than to whole tiles, so
+                // the field's edge is where the author put it.
+                if blade.position[0].abs() > hx || blade.position[2].abs() > hz {
+                    continue;
+                }
+                loom_grass::blade::emit(
+                    &blade,
+                    [0.0, 1.0, 0.0],
+                    loom_grass::blade::SEGMENTS_NEAR,
+                    &mut vertices,
+                    &mut indices,
+                );
+            }
+        }
+    }
+
+    if vertices.is_empty() {
+        return None;
+    }
+    Some(loom_asset::Mesh { name: "grass".to_owned(), vertices, indices })
+}
+
 fn bake_voxel(component: &serde_json::Value) -> Option<loom_asset::Mesh> {
     #[allow(clippy::cast_possible_truncation)]
     let voxel_size = component.get("voxel_size").and_then(serde_json::Value::as_f64)? as f32;
@@ -1903,9 +1976,11 @@ fn measure(path: &str, args: &[String]) -> (u8, String) {
 /// answers.
 fn mesh_index_for(world: &World, library: &MeshLibrary, entity: loom_ecs::Entity) -> u32 {
     if let Some(path) = world.path(entity) {
-        let voxel = format!("voxel:{path}");
-        if library.by_name.contains_key(&voxel) {
-            return library.index_for(Some(&voxel));
+        for kind in ["voxel", "grass"] {
+            let key = format!("{kind}:{path}");
+            if library.by_name.contains_key(&key) {
+                return library.index_for(Some(&key));
+            }
         }
     }
     library.index_for(world.mesh_asset(entity))

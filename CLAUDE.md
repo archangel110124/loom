@@ -205,11 +205,19 @@ change, so your edits appear live. Two consequences:
 > regeneration byte-identical, and there is a test asserting a crater leaves its neighbours
 > untouched. **Nothing draws yet.**
 >
-> **Still ahead in P2, in order:** the placement compute shader (the Slang half of `loom_grass`,
-> generated not retyped), Bézier expansion + `vkCmdDrawIndexedIndirect`, LOD and culling, and then
-> **the phase's actual risk — anti-aliasing without TAA.** Budget real time for that one; if
-> MSAA + alpha-to-coverage + minimum-width clamping is insufficient, adding a non-temporal
-> full-screen AA pass is a scope decision that needs an ADR, not drift.
+> **Slice 2: grass renders.** Cubic-Bézier blades, 15 verts near / 7 far, generated on the CPU
+> into an ordinary mesh — `assets/test/meadow.loom`. **That order is deliberate and worth keeping
+> in mind:** the phase's risk is AA, shimmer is sub-pixel geometry under a moving camera, and a
+> mesh answers that with no compute pass or indirect draw. The machinery cannot change the answer;
+> the answer may change the machinery. Blade normals are deliberately *not* geometric — tilted
+> outward and blended toward the ground, because an honestly-lit flat blade reads as paper.
+>
+> **Still ahead in P2, in order:** the AA investigation (MSAA sample counts, alpha-to-coverage,
+> minimum screen-space width clamping — the first render is visibly harsh, which is the phase
+> risk showing up on schedule), then wind bend on the control points, then the placement compute
+> shader and `vkCmdDrawIndexedIndirect` for scale, then LOD and culling. If the non-temporal
+> toolkit proves insufficient, adding a full-screen AA pass is a scope decision needing an ADR,
+> not drift.
 >
 > **Grass is rendering-only and outside the sim hash**, the same exemption rain gets. Blades are
 > never ECS entities and the scene shows one node for the field, never the blades.
