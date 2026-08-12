@@ -39,7 +39,13 @@ use loom_scene::components::{GerstnerWave, WaterBody, WaveSet};
 /// operations in the same order, so what is left is `sinf`/`cosf`/`sqrtf`
 /// rounding — the run prints the worst difference it saw, and a threshold loose
 /// enough to hide a real formula change would make this test decorative.
-const EPSILON: f32 = 1e-4;
+///
+/// The worst difference measured is **exactly 0.0**: same operations, same
+/// order, same libm. `1e-4` was a thousand times looser than that, and a 0.1%
+/// mutation of one Slang term cleared it by only 1.6× — so a 0.05% divergence
+/// would have passed. This is still four orders of magnitude of headroom over
+/// the observed value; raise it only against a printed number.
+const EPSILON: f32 = 1e-6;
 
 /// How many `(x, z, t)` points both sides evaluate.
 const SAMPLES: usize = 512;

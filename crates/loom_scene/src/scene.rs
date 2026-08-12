@@ -591,10 +591,32 @@ fn check_water(item: &Item, node: &str) -> Vec<SceneError> {
     // Through serde rather than off the raw TOML, so an omitted field is its
     // documented default here exactly as it will be at load. Reading the tables
     // directly would compute the limit against zeros the runtime never sees.
-    let Some(body) = item_to_json(item)
-        .and_then(|v| serde_json::from_value::<components::WaterBody>(v).ok())
-    else {
-        return Vec::new();
+    //
+    // **A failure here is an error, never "nothing to check".** `.ok()` and an
+    // empty vector meant one unreadable field switched the whole of the water
+    // validation off — the steepness limit, the wave cap, all of it — while
+    // the file still reported `ok: true`. `kind = "lava"` and a three-element
+    // `direction` both got there, and both are spellings an agent will try.
+    // Same silent no-op the `unknown_field` comment in `loom_reflect` exists
+    // to prevent: a value this layer does not understand is a value it must
+    // refuse, not one it may ignore.
+    let body = match item_to_json(item)
+        .ok_or_else(|| "the component is not a table of values".to_owned())
+        .and_then(|v| {
+            serde_json::from_value::<components::WaterBody>(v).map_err(|e| e.to_string())
+        }) {
+        Ok(body) => body,
+        Err(why) => {
+            let mut err = SceneError::new("component_unreadable", node);
+            err.field = "WaterBody".to_owned();
+            err.constraint = "a readable WaterBody".to_owned();
+            err.hint = Some(format!(
+                "{why}. The schema check passed, so this is a field the schema \
+                 does not reach — a nested value or an enum name. None of the \
+                 water rules could run until it is fixed."
+            ));
+            return vec![err];
+        }
     };
 
     let mut errors = Vec::new();
@@ -633,9 +655,39 @@ fn check_water(item: &Item, node: &str) -> Vec<SceneError> {
             continue;
         }
 
+        // **Not `.abs()`.** Amplitude and steepness are magnitudes, and
+        // folding a negative one through `abs` made the steepness limit report
+        // someone else's mistake: `amplitude = -5.0` blamed steepness and
+        // printed "amplitude 5", and `steepness = -9.0` produced the
+        // self-contradictory "value -9.0, constraint at most 3.183". A sign
+        // typo is its own fault and reads as one.
+        let before = errors.len();
+        for (name, value) in [("amplitude", wave.amplitude), ("steepness", wave.steepness)]
+            .into_iter()
+            .filter(|&(_, value)| value < 0.0)
+        {
+            let mut err = SceneError::new(&format!("wave_{name}_negative"), node);
+            err.field = field(name);
+            err.value = Value::from(value);
+            err.constraint = "at least zero".to_owned();
+            err.hint = Some(
+                "amplitude and steepness are magnitudes, not signed offsets — \
+                 a negative one is a sign typo. Flip the wave with `direction` \
+                 instead."
+                    .to_owned(),
+            );
+            errors.push(err);
+        }
+        // A wave with a sign typo has nothing left for the steepness limit to
+        // say — reporting both would be reporting one fault twice, which is
+        // the same rule the caller applies to schema errors.
+        if errors.len() != before {
+            continue;
+        }
+
         let k = std::f64::consts::TAU / wavelength;
-        let amplitude = f64::from(wave.amplitude).abs();
-        let steepness = f64::from(wave.steepness).abs();
+        let amplitude = f64::from(wave.amplitude);
+        let steepness = f64::from(wave.steepness);
         // Amplitude zero is a wave that does nothing, and its steepness is
         // unbounded rather than infinite — nothing to reject.
         if amplitude == 0.0 || steepness * n * k * amplitude <= 1.0 {

@@ -630,6 +630,79 @@ name = \"Hill\"
         assert_eq!(errors[0].error, "wave_wavelength_not_positive");
     }
 
+    /// **A `WaterBody` serde cannot read must not be a `WaterBody` nobody
+    /// checks.** The steepness limit is the whole reason this validation
+    /// exists, and it used to be switched off by any single field the schema
+    /// check does not reach — a nested array of the wrong length being the
+    /// cheapest example, because `direction` lives two tables down and the
+    /// registry only walks a component's top level. The wave here is over the
+    /// limit on purpose: without the rejection the file reports `ok: true`.
+    #[test]
+    fn a_water_body_that_cannot_be_read_is_rejected_rather_than_skipped() {
+        let src = water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 4.0\namplitude = 1.0\nsteepness = 1.0\n\
+             direction = [1.0, 0.0, 0.0]\n",
+        );
+
+        let errors = Scene::parse(&src).expect_err("a direction has two components");
+        assert_eq!(errors[0].error, "component_unreadable", "{errors:?}");
+        assert_eq!(errors[0].node, "Ocean");
+        assert_eq!(errors[0].field, "WaterBody");
+        // Serde's own message is the actionable half — it names what it could
+        // not read, which is the one thing this layer cannot work out.
+        assert!(
+            errors[0]
+                .hint
+                .as_deref()
+                .is_some_and(|h| h.contains("length 3")),
+            "{errors:?}"
+        );
+    }
+
+    /// The enum spelling of the same hole: `kind` is a name the schema does
+    /// reach, and it stayed unchecked because schemars emits documented
+    /// variants as `oneOf` rather than a flat `enum` array. Both layers hold
+    /// it now — the schema check gets there first, which is why the error is
+    /// the more specific one.
+    #[test]
+    fn an_invalid_water_kind_is_rejected() {
+        let src = water_scene("kind = \"lava\"\n");
+
+        let errors = Scene::parse(&src).expect_err("lava is not a kind of water");
+        assert_eq!(errors[0].error, "field_not_in_enum", "{errors:?}");
+        assert_eq!(errors[0].field, "WaterBody.kind");
+        assert!(errors[0].constraint.contains("ocean"), "{errors:?}");
+    }
+
+    /// **A sign typo is its own mistake.** Folding it through `.abs()` blamed
+    /// steepness for a negative amplitude and printed the value with the sign
+    /// flipped, and reported `steepness = -9.0` as "value -9.0, constraint at
+    /// most 3.183" — a rejection that contradicts itself is worse than none,
+    /// because an agent acting on it lowers a number that is already low.
+    #[test]
+    fn a_negative_amplitude_or_steepness_is_rejected_as_itself() {
+        let src = water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 4.0\namplitude = -5.0\nsteepness = 0.5\ndirection = [1.0, 0.0]\n",
+        );
+        let errors = Scene::parse(&src).expect_err("amplitude is a magnitude");
+        assert_eq!(errors.len(), 1, "one fault, reported once: {errors:?}");
+        assert_eq!(errors[0].error, "wave_amplitude_negative");
+        assert_eq!(errors[0].field, "WaterBody.waves.waves[0].amplitude");
+        assert_eq!(errors[0].value, serde_json::json!(-5.0));
+
+        let src = water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 4.0\namplitude = 1.0\nsteepness = -9.0\ndirection = [1.0, 0.0]\n",
+        );
+        let errors = Scene::parse(&src).expect_err("steepness is a magnitude");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "wave_steepness_negative");
+        assert_eq!(errors[0].field, "WaterBody.waves.waves[0].steepness");
+        assert_eq!(errors[0].value, serde_json::json!(-9.0));
+    }
+
     /// Colour channels are normalized 0..=1. An agent writing 255 is a real
     /// and very likely mistake, so it must be caught rather than clamped.
     #[test]
