@@ -138,6 +138,10 @@ pub struct World {
     character: Storage<serde_json::Value>,
     /// The scene's `Environment`, verbatim. At most one is used.
     environment: Storage<serde_json::Value>,
+    /// The `WaterBody` component, verbatim. Carried for the same reason as
+    /// `material`: turning it into waves needs `loom_water`, and this crate
+    /// does not depend on it.
+    water: Storage<serde_json::Value>,
     /// The `AudioSource` component, verbatim. Resolving it needs a decoder
     /// and a device, neither of which belongs in here.
     audio: Storage<serde_json::Value>,
@@ -382,6 +386,9 @@ impl World {
             if let Some(env) = node.components.get("Environment") {
                 world.environment.insert(entity, env.clone());
             }
+            if let Some(water) = node.components.get("WaterBody") {
+                world.water.insert(entity, water.clone());
+            }
             if let Some(audio) = node.components.get("AudioSource") {
                 world.audio.insert(entity, audio.clone());
             }
@@ -538,6 +545,19 @@ impl World {
     #[must_use]
     pub fn environment(&self) -> Option<&serde_json::Value> {
         self.order.iter().find_map(|e| self.environment.get(*e))
+    }
+
+    /// The scene's water, if it authors any.
+    ///
+    /// **The first one, and there is deliberately no way to ask for a second.**
+    /// A `WaterBody` has no extent in the schema — a lake is a plane, not a
+    /// region — so two of them would be two infinite surfaces at different
+    /// heights with nothing to say where one stops. When bodies gain a
+    /// boundary this becomes a list; until then one is the honest number, and
+    /// it is the same rule `environment` follows.
+    #[must_use]
+    pub fn water(&self) -> Option<&serde_json::Value> {
+        self.order.iter().find_map(|e| self.water.get(*e))
     }
 
     /// The `AudioSource` a node declares, if any.

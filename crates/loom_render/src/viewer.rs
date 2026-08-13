@@ -78,6 +78,9 @@ pub struct Viewer {
     grass_alloc: Option<Allocation>,
     grass_address: vk::DeviceAddress,
     grass_pipeline: vk::Pipeline,
+    /// The water surface. Whether it draws at all is read from
+    /// [`Viewer::environment`], which the caller sets every frame.
+    water_pipeline: vk::Pipeline,
     /// Blades currently in the buffer. Uploaded on scene load, expanded every
     /// frame in the vertex shader — see [`Viewer::set_grass`].
     grass_count: u32,
@@ -267,12 +270,28 @@ impl Viewer {
         // **One sample, unlike the offscreen path's four.** A pipeline's
         // rasterisation sample count must match the attachment it draws into,
         // and this one draws straight into the swapchain image.
-        let grass_pipeline = crate::renderer::create_grass_pipeline(
+        let grass_pipeline = crate::renderer::create_geometry_pipeline(
             &raw,
             pipeline_layout,
             pipeline_cache,
             format,
             ash::vk::SampleCountFlags::TYPE_1,
+            c"grassVertexMain",
+            c"grassFragmentMain",
+        )?;
+        // **And the water, in the window as well as offscreen.** Three defects
+        // this phase were the viewer being handed a simplified version of what
+        // the offscreen path does, with no gate able to see the difference —
+        // grass did not render here at all for two slices. Same pipeline, same
+        // shader, same draw.
+        let water_pipeline = crate::renderer::create_geometry_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            format,
+            ash::vk::SampleCountFlags::TYPE_1,
+            c"waterVertexMain",
+            c"waterFragmentMain",
         )?;
 
         // Mirrors the offscreen path's ceiling. Sized once so a frame never
@@ -389,6 +408,7 @@ impl Viewer {
             grass_alloc: Some(grass_alloc),
             grass_address,
             grass_pipeline,
+            water_pipeline,
             grass_count: 0,
             rt_positions,
             device: raw,
@@ -791,6 +811,12 @@ impl Viewer {
         let particle_pipeline = self.particle_pipeline;
         let grass_pipeline = self.grass_pipeline;
         let grass_count = self.grass_count;
+        let water_pipeline = self.water_pipeline;
+        let water_verts = if self.environment.water[2] > 0.0 {
+            crate::renderer::WATER_VERTS
+        } else {
+            0
+        };
         let index_buffer = self.indices;
         let draws: Vec<(MeshRange, u32, u32)> = batches
             .iter()
@@ -900,6 +926,28 @@ impl Viewer {
                             push.bytes(),
                         );
                         d.cmd_draw(cmd, grass_count * 42, 1, 0, 0);
+                    }
+
+                    // Water, in the same place in the order as offscreen:
+                    // opaque and depth-written, so before the blended pass.
+                    if water_verts > 0 {
+                        d.cmd_bind_pipeline(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            water_pipeline,
+                        );
+                        let push = crate::renderer::Push {
+                            object_offset: particle_slot,
+                            ..base_push
+                        };
+                        d.cmd_push_constants(
+                            cmd,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            push.bytes(),
+                        );
+                        d.cmd_draw(cmd, water_verts, 1, 0, 0);
                     }
 
                     // Particles last, over finished opaque geometry.
@@ -1225,6 +1273,7 @@ impl Drop for Viewer {
                 let _ = allocator.free(allocation);
             }
             self.device.destroy_pipeline(self.grass_pipeline, None);
+            self.device.destroy_pipeline(self.water_pipeline, None);
             self.device.destroy_buffer(self.grass_buffer, None);
             if let (Some(allocation), Some(allocator)) =
                 (self.grass_alloc.take(), self.allocator.as_mut())

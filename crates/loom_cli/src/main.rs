@@ -1523,7 +1523,71 @@ pub(crate) fn environment_with_wind(
         params.get("gustiness"),
     ];
     env.weather = [params.get("turbulence"), params.get("ground_drag"), seconds, 0.0];
+    add_water(&mut env, world, wind);
     env
+}
+
+/// Still-water depth handed to the water shader, in metres.
+///
+/// **A constant, and W6 is what makes it real.** The honest quantity is
+/// `surface_height - terrain_height(x, z)` against a voxel SDF that changes at
+/// runtime (§5.2 of the water doc), and nothing samples that yet. Only the
+/// colour tint reads it, so the visible effect of the placeholder is that a
+/// shore is the same colour as open sea — which is exactly what W6 fixes and
+/// is not hidden by anything.
+const WATER_DEPTH_UNTIL_W6: f32 = 6.0;
+
+/// Put the scene's sea into the environment the shader reads.
+///
+/// **The waves are derived from the wind unless the file lists its own.** A sea
+/// has one honest input — how hard it is blowing — and `loom_water::spectrum`
+/// turns that into sixteen waves whose significant height matches the published
+/// relation. A scene that authors waves anyway keeps them, because a stylised
+/// or scripted sea is a legitimate thing to want; a scene that does not gets a
+/// sea that matches the grass bending beside it, for free.
+///
+/// The wave set is the equilibrium one, not `SeaState`'s slewed version: a
+/// still and a fly-through both want the sea the wind has already built, and
+/// the inertia only matters once something turns the wind mid-run.
+fn add_water(
+    env: &mut loom_render::EnvironmentData,
+    world: &World,
+    wind: &loom_field::wind::Wind,
+) {
+    let Some(body) = world
+        .water()
+        .and_then(|v| serde_json::from_value::<loom_scene::components::WaterBody>(v.clone()).ok())
+    else {
+        return;
+    };
+    let params = wind.params();
+    let authored = &body.waves.waves;
+    let derived;
+    let waves = if authored.is_empty() {
+        derived = loom_water::spectrum::wave_set(
+            // U10, which is what the spectrum is written against — never
+            // `Wind::speed`, which is a free-stream value about 10% above it.
+            wind.mean_speed_at(10.0),
+            [params.get("dir_x"), params.get("dir_z")],
+        );
+        &derived.waves
+    } else {
+        authored
+    };
+
+    env.water = [body.surface_height, WATER_DEPTH_UNTIL_W6, 1.0, 0.0];
+    // Truncated at the cap the shader's loop is bounded by, which is also the
+    // schema's `maxItems`, so this only bites on a hand-built body.
+    env.wave_count = u32::try_from(waves.len().min(loom_render::MAX_WAVES)).unwrap_or(0);
+    for (slot, wave) in env.waves.iter_mut().zip(waves) {
+        *slot = loom_render::WaterWave {
+            direction: wave.direction,
+            wavelength: wave.wavelength,
+            amplitude: wave.amplitude,
+            steepness: wave.steepness,
+            speed_scale: wave.speed_scale,
+        };
+    }
 }
 
 fn environment_of_inner(world: &World) -> loom_render::EnvironmentData {
@@ -2596,6 +2660,86 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// The environment a scene's text produces, wind and water and all.
+    fn environment_of_text(text: &str) -> loom_render::EnvironmentData {
+        let scene = loom_scene::Scene::parse(text).expect("valid scene");
+        let world = World::from_scene(&scene);
+        environment_with_wind(&world, &crate::weather::wind_of(&scene), 0.0)
+    }
+
+    /// **A scene with no `WaterBody` draws no water at all**, and the flag the
+    /// draw is skipped on is the only thing that says so — there is no vertex
+    /// buffer to be empty. Every scene that shipped before W4 depends on this.
+    #[test]
+    fn a_scene_without_water_leaves_the_water_flag_off() {
+        let env = environment_of_text("[scene]\nformat = 1\n\n[[node]]\nname = \"Dry\"\n");
+
+        assert_eq!(env.water[2], 0.0);
+        assert_eq!(env.wave_count, 0);
+    }
+
+    /// **The sea is derived from the wind, and it is the right size.** The
+    /// published fully-developed relation is `Hs = 0.22·U10²/g`, and the whole
+    /// point of deriving rather than authoring is that a scene which says
+    /// "blowing 8 m/s" gets the sea that goes with it. Checked here rather than
+    /// only in `loom_water` because this is the seam: the wind component, the
+    /// reference-height conversion and the buffer the GPU reads all meet in
+    /// `add_water`, and each of them is a place to lose a factor.
+    #[test]
+    fn the_waves_are_derived_from_the_scene_s_wind() {
+        let env = environment_of_text(
+            "[scene]\nformat = 1\n\n[[node]]\nname = \"Sea\"\n\n\
+             [node.components.Wind]\nspeed = 8.0\ndirection_degrees = 0.0\n\n\
+             [node.components.WaterBody]\nsurface_height = -1.5\n",
+        );
+
+        assert_eq!(env.water[0], -1.5, "the still-water level did not reach the shader");
+        assert_eq!(env.water[2], 1.0, "the water flag is off on a scene with water");
+        assert_eq!(env.wave_count, u32::try_from(loom_render::MAX_WAVES).unwrap());
+
+        // Hs = 4√m0 with m0 = ΣA²/2, summed in index order like everything
+        // else. U10 is the mean at 10 m, which is not the authored `speed`.
+        let u10 = crate::weather::wind_of(
+            &loom_scene::Scene::parse(
+                "[scene]\nformat = 1\n\n[[node]]\nname = \"Sea\"\n\n\
+                 [node.components.Wind]\nspeed = 8.0\ndirection_degrees = 0.0\n",
+            )
+            .expect("valid scene"),
+        )
+        .mean_speed_at(10.0);
+        let m0: f32 = env.waves.iter().map(|w| w.amplitude * w.amplitude / 2.0).sum();
+        let derived = 4.0 * m0.sqrt();
+        let published = 0.22 * u10 * u10 / 9.81;
+        assert!(
+            (derived - published).abs() / published < 0.01,
+            "the sea reaching the GPU is Hs = {derived} m, the published value at \
+             U10 = {u10} m/s is {published} m"
+        );
+        // And the waves travel: a zero speed_scale is a frozen sea, and a zero
+        // wavelength is a wave the shader skips.
+        for wave in &env.waves {
+            assert!(wave.wavelength > 0.0 && wave.speed_scale > 0.0, "{wave:?}");
+        }
+    }
+
+    /// An authored wave list wins, because a stylised or scripted sea is a
+    /// legitimate thing to want and the derivation would silently overwrite it.
+    #[test]
+    fn an_authored_wave_list_is_not_replaced_by_the_derivation() {
+        let env = environment_of_text(
+            "[scene]\nformat = 1\n\n[[node]]\nname = \"Sea\"\n\n\
+             [node.components.Wind]\nspeed = 8.0\n\n\
+             [node.components.WaterBody]\nsurface_height = 0.0\n\n\
+             [[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 7.0\namplitude = 0.35\nsteepness = 0.7\n\
+             direction = [1.0, 0.0]\nspeed_scale = 1.0\n",
+        );
+
+        assert_eq!(env.wave_count, 1);
+        assert_eq!(env.waves[0].wavelength, 7.0);
+        assert_eq!(env.waves[0].amplitude, 0.35);
     }
 
     /// The packed colour survives the trip, unpacked exactly as `unpackRGB`

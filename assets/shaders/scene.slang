@@ -20,6 +20,11 @@
 // Both members are 4-byte, and the struct is 8, which still satisfies std430
 // for a PhysicalStorageBuffer block: the requirement is that each member is
 // aligned to its own size, not to 16.
+// The water surface, generated from `loom_water` by build.rs. Included up here
+// rather than beside the fields because `EnvironmentData` below embeds a
+// `LoomWaveSet`, and a struct cannot contain a type declared after it.
+#include "generated/water.slang"
+
 struct Vertex {
     uint packedPosition;   // 10 bits per axis, 2 spare
     uint packedNormal;     // octahedral, 16 bits per component
@@ -83,6 +88,15 @@ struct EnvironmentData {
     float4 viewport;   // xy size in pixels
     float4 wind;       // xy direction, z speed, w gustiness
     float4 weather;    // x turbulence, y ground drag, z seconds, w unused
+    // x still-water level, y still-water depth, z 1 when the scene has water,
+    // w unused. **The depth is a constant until W6** — the terrain query that
+    // makes it real is a voxel-SDF lookup this shader cannot do.
+    float4 water;
+    // **The sea itself, in the environment buffer rather than behind another
+    // pointer.** The push block is at 116 of the 128 bytes Vulkan guarantees;
+    // this is per-scene data read once per vertex, which is exactly what this
+    // buffer is for. Last in the struct, so every offset above it is unmoved.
+    LoomWaveSet waves;
 };
 
 struct GrassBlade {
@@ -881,16 +895,21 @@ float3 unpackRGB(float packed) {
 }
 
 /// The wind at a point, from the environment block.
+/// **Fields, not a struct copy.** `EnvironmentData env = *push.environment`
+/// was a whole-struct load, and the struct now ends with sixteen waves — 400
+/// bytes nobody here reads, per vertex, if the compiler declines to prove it
+/// dead. Reading the four vectors this actually wants costs what it costs.
 float3 grassWind(float3 p) {
-    EnvironmentData env = *push.environment;
+    float4 wind = push.environment[0].wind;
+    float4 weather = push.environment[0].weather;
     WindParams params;
-    params.dir_x = env.wind.x;
-    params.dir_z = env.wind.y;
-    params.speed = env.wind.z;
-    params.gustiness = env.wind.w;
-    params.turbulence = env.weather.x;
-    params.ground_drag = env.weather.y;
-    return wind_at(p, env.weather.z, params);
+    params.dir_x = wind.x;
+    params.dir_z = wind.y;
+    params.speed = wind.z;
+    params.gustiness = wind.w;
+    params.turbulence = weather.x;
+    params.ground_drag = weather.y;
+    return wind_at(p, weather.z, params);
 }
 
 /// A stable per-blade draw for the distance cull.
@@ -991,10 +1010,10 @@ GrassOutput grassVertexMain(uint vertexID: SV_VertexID) {
     // clump hash phase-shifts it so neighbours do not move in lockstep — the
     // unison artifact, which is the single most recognisable tell in a
     // vegetation shot.
-    EnvironmentData env = *push.environment;
+    float seconds = push.environment[0].weather.z;
     float3 air = grassWind(base);
     float phase = frac(blade.shape.z) * 6.2831853;
-    float sway = 1.0 + 0.25 * sin(env.weather.z * 1.7 + phase);
+    float sway = 1.0 + 0.25 * sin(seconds * 1.7 + phase);
     float3 push3 = air * sway;
 
     // Displacement grows along the blade — the base is rooted, the tip is
@@ -1128,7 +1147,8 @@ GrassOutput grassVertexMain(uint vertexID: SV_VertexID) {
         float4 clipB = mul(viewProj, float4(base + side * width, 1.0));
         float2 ndcA = clipA.xy / max(clipA.w, 1e-4);
         float2 ndcB = clipB.xy / max(clipB.w, 1e-4);
-        float pixelsWide = length((ndcB - ndcA) * env.viewport.xy * 0.5);
+        float pixelsWide =
+            length((ndcB - ndcA) * push.environment[0].viewport.xy * 0.5);
         if (pixelsWide > 1e-4) {
             widen = max(1.0, GRASS_MIN_PIXELS / pixelsWide);
         }
@@ -1193,4 +1213,171 @@ float4 grassFragmentMain(GrassOutput in) : SV_Target {
     // than floating in front of it.
     float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     return float4(lerp(lit, fogColor(normalize(in.worldPos - push.environment[0].eye.xyz)), fog), 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// Water
+//
+// **The surface itself is `loom_sample_water`, generated from the Rust.** This
+// file never writes a Gerstner term: `loom_water::slang()` is emitted into
+// `generated/water.slang` by `build.rs`, and `loom_water`'s agreement test
+// compiles that same string and compares it numerically against the Rust that
+// buoyancy will read. Hand-writing the wave sum here is the one mistake that
+// puts a boat above the water it is drawn on with no error anywhere.
+//
+// **The mesh is concentric LOD rings, camera-centred, one draw.** Level 0 is a
+// WATER_RES x WATER_RES grid of WATER_CELL cells; each level after it doubles
+// the cell size and drops its central quarter, which the level inside covers
+// exactly. Rings rather than a real quadtree because a quadtree buys per-tile
+// culling that nothing here can spend — there is no indirect draw and no
+// visible set — and costs a per-frame traversal on the CPU to decide what a
+// vertex shader is already deciding for free. Seven levels reach 512 m.
+//
+// **The grid is snapped to the COARSEST cell, so no vertex ever slides.** A
+// camera-centred mesh that follows the eye continuously moves every vertex
+// every frame, which changes every vertex's displacement every frame, which is
+// a shimmer generator. Snapped, the vertices sit on a fixed world lattice and
+// the mesh is a window onto it: the eye can move and nothing in the geometry
+// moves at all. All levels share one snap because they must share a centre for
+// the holes to line up, and the coarsest cell is the only increment every
+// level's lattice divides. The cost is that the window jumps 32 m at a time —
+// which moves no vertex, only the LOD boundaries, and those are far away by
+// construction.
+//
+// **No cracks, by construction rather than by skirt.** Each level's outermost
+// vertex ring is snapped to the next level's lattice, so the two share exactly
+// the same vertices along their shared edge and evaluate the same function at
+// them. The fine side's spare vertices collapse onto their neighbours and the
+// triangles between them are degenerate, which costs nothing. A skirt would
+// hide a gap; this removes it.
+// ---------------------------------------------------------------------------
+
+/// Cells per side, per level. Also the vertex count's only real lever: seven
+/// levels of 32x32 quads is 43,008 vertices, which is nothing.
+static const uint WATER_RES = 32;
+/// How many rings. Level L has cells of `WATER_CELL * 2^L`, so the outermost
+/// reaches `WATER_RES * WATER_CELL * 2^(L-1)` metres — 512 m at these numbers.
+static const uint WATER_LEVELS = 7;
+/// The finest cell, in metres, right under the camera.
+static const float WATER_CELL = 0.5;
+
+struct WaterOutput {
+    float4 clip : SV_Position;
+    float3 worldPos : TEXCOORD0;
+    float3 normal : TEXCOORD1;
+    /// Still-water depth under this point, in metres. Constant until W6 — see
+    /// the note on `EnvironmentData::water`.
+    nointerpolation float depth : TEXCOORD2;
+};
+
+[shader("vertex")]
+WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
+    uint quad = vertexID / 6;
+    uint corner = vertexID % 6;
+    uint level = quad / (WATER_RES * WATER_RES);
+    uint cell = quad % (WATER_RES * WATER_RES);
+    uint cx = cell % WATER_RES;
+    uint cz = cell / WATER_RES;
+
+    const uint2 CORNERS[6] = {
+        uint2(0, 0), uint2(0, 1), uint2(1, 0),
+        uint2(1, 0), uint2(0, 1), uint2(1, 1),
+    };
+    int ix = int(cx + CORNERS[corner].x);
+    int iz = int(cz + CORNERS[corner].y);
+
+    // The stitch. On this level's outer boundary, round the coordinate that
+    // runs ALONG the boundary down to an even index — which is a vertex of the
+    // next level out, whose cells are twice as wide. WATER_RES/2 is even, so
+    // index parity and world-lattice parity agree.
+    if (ix == 0 || ix == int(WATER_RES)) { iz -= iz & 1; }
+    if (iz == 0 || iz == int(WATER_RES)) { ix -= ix & 1; }
+
+    // The central quarter of every level but the first is covered by the level
+    // inside it. Collapsed to a point rather than skipped: a vertex shader
+    // cannot decline to emit, and a degenerate triangle is discarded before
+    // rasterisation for free — the same trick the grass fade uses.
+    bool covered = level > 0
+        && cx >= WATER_RES / 4 && cx < 3 * WATER_RES / 4
+        && cz >= WATER_RES / 4 && cz < 3 * WATER_RES / 4;
+
+    float cellSize = WATER_CELL * exp2(float(level));
+    float coarsest = WATER_CELL * exp2(float(WATER_LEVELS - 1));
+    float2 centre = round(push.environment[0].eye.xz / coarsest) * coarsest;
+    float2 xz = centre
+        + (float2(float(ix), float(iz)) - float(WATER_RES) * 0.5) * cellSize;
+
+    float surface = push.environment[0].water.x;
+    float depth = push.environment[0].water.y;
+    LoomWaterSample surfaceAt = loom_sample_water(
+        push.environment[0].waves,
+        surface,
+        surface - depth,
+        xz,
+        push.environment[0].weather.z);
+
+    // The horizontal displacement is half of what makes a Gerstner wave read
+    // as water rather than as a sine: crests pinch toward each other. It is
+    // also why the seam stays watertight — both sides of a shared edge
+    // evaluate the same function at the same xz and land on the same point.
+    float3 world = float3(
+        xz.x + surfaceAt.displacement.x,
+        surfaceAt.height,
+        xz.y + surfaceAt.displacement.z);
+    if (covered) {
+        world = float3(centre.x, surface, centre.y);
+    }
+
+    WaterOutput out;
+    out.clip = mul(push.objects[push.objectOffset].mvp, float4(world, 1.0));
+    out.worldPos = world;
+    out.normal = surfaceAt.normal;
+    out.depth = surfaceAt.depth;
+    return out;
+}
+
+/// What deep water looks like when you see into it rather than off it.
+/// Linear, and dark on purpose — most of what a viewer reads as "the colour of
+/// the sea" is the sky bouncing off it, which the Fresnel term below supplies.
+static const float3 WATER_DEEP = float3(0.004, 0.018, 0.030);
+static const float3 WATER_SHALLOW = float3(0.020, 0.070, 0.075);
+/// Depth over which the tint reaches its deep value, in metres.
+static const float WATER_TINT_DEPTH = 5.0;
+/// **Not zero.** A mirror-smooth sea gives a specular lobe the size of a
+/// pixel, which is the classic water shimmer; this is the smallest roughness
+/// that still reads as sun glitter rather than as a hard white dot.
+static const float WATER_ROUGHNESS = 0.08;
+
+[shader("fragment")]
+float4 waterFragmentMain(WaterOutput in) : SV_Target {
+    float3 toEye = push.environment[0].eye.xyz - in.worldPos;
+    float3 view = normalize(toEye);
+    float3 normal = normalize(in.normal);
+    // Seen from underneath — the far wall of a trough, and eventually W7's
+    // underwater camera — the analytic normal points away. Flipping it keeps
+    // the shading continuous instead of letting the surface go black.
+    if (dot(normal, view) < 0.0) {
+        normal = -normal;
+    }
+
+    // Schlick against water's f0. This is the whole trick: face-on you see
+    // into the water, at a grazing angle you see the sky, and the crossover is
+    // most of what makes a surface read as liquid.
+    float fresnel = 0.02 + 0.98 * pow(saturate(1.0 - dot(normal, view)), 5.0);
+
+    float3 body = lerp(WATER_SHALLOW, WATER_DEEP, saturate(in.depth / WATER_TINT_DEPTH));
+    float toSun = max(dot(normal, sunDirection()), 0.0);
+    float3 through = body
+        * (hemisphereAmbient(normal) * ambientStrength() + sunColor() * sunStrength() * toSun)
+        // Light scattered up through a crest, which is what makes a wave read
+        // as translucent rather than as painted metal. Strongest looking into
+        // the sun, which is where a real one glows.
+        + body * 6.0 * sunStrength() * pow(saturate(dot(-view, sunDirection())), 3.0);
+
+    float3 lit = lerp(through, skyColor(reflect(-view, normal)), fresnel);
+    lit += specular(normal, view, sunDirection(), WATER_ROUGHNESS, float3(0.02))
+         * sunColor() * sunStrength() * toSun;
+
+    float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+    return float4(lerp(lit, fogColor(-view), fog), 1.0);
 }

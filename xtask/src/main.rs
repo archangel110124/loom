@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 17] = [
+const SCENES: [&str; 18] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -50,6 +50,7 @@ const SCENES: [&str; 17] = [
     "assets/test/windy.loom",
     "assets/test/meadow.loom",
     "assets/test/grass_slope.loom",
+    "assets/test/ocean.loom",
     "assets/test/camera.loom",
     "assets/test/walker.loom",
     "assets/test/explosion.loom",
@@ -92,7 +93,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 9] = [
+const GOLDEN: [(&str, &str, &[&str]); 10] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -120,6 +121,17 @@ const GOLDEN: [(&str, &str, &[&str]); 9] = [
     // slope/flow response — and it went in with none of the four gates
     // touching it, which is the same miss `meadow` made one commit earlier.
     ("grass_slope", "assets/test/grass_slope.loom", &[]),
+    // **Water is its own rendering path**, and the most regression-prone one
+    // in the project: it is a displaced mesh generated entirely in the vertex
+    // shader from a wave sum, shaded by a Fresnel term against the sky. Small
+    // numeric changes there produce large visible ones, and none of the nine
+    // above draw a single water vertex.
+    //
+    // `--sim 90` because the sea at t=0 is a different surface from the sea a
+    // second and a half in, and a reference taken at the one instant where
+    // every wave's phase is zero would be the least representative frame there
+    // is.
+    ("ocean", "assets/test/ocean.loom", &["--sim", "90"]),
 ];
 
 /// Every reference renders at this size.
@@ -652,10 +664,16 @@ fn validate() -> std::process::ExitCode {
         // the windowed path is single-sampled where the offscreen one is 4x —
         // so the grass pipeline is only wrong in the window, and only while a
         // blade is actually being drawn. Neither a blockout nor a cave has one.
+        // `ocean.loom` is here for the same reason `meadow` is, and it is the
+        // same trap one system later: the water pipeline is built at one
+        // sample in the window and four offscreen, so a mismatch is invisible
+        // to every headless gate and fires on the first frame that draws a
+        // wave.
         for scene in [
             "assets/test/blockout.loom",
             "assets/test/cave.loom",
             "assets/test/meadow.loom",
+            "assets/test/ocean.loom",
         ] {
             if !root.join(scene).exists() {
                 continue;

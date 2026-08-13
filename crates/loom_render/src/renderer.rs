@@ -131,8 +131,54 @@ pub struct EnvironmentData {
     ///
     /// Time is here because the vertex shader needs it to bend a blade, and
     /// it is the simulation's clock — the tick count times the fixed timestep,
-    /// never a wall clock (never-do #8).
+    /// never a wall clock (never-do #8). The water surface reads the same
+    /// clock, so grass and waves cannot drift apart.
     pub weather: [f32; 4],
+    /// x still-water level, y still-water depth, z 1 when the scene has water,
+    /// w unused.
+    ///
+    /// **The depth is a constant until W6.** The real quantity is
+    /// `surface_height - terrain_height(x, z)` against a voxel SDF that
+    /// changes at runtime, which is a query this shader cannot make. Nothing
+    /// but the colour tint reads it yet, so a constant is honest rather than
+    /// wrong — but wave attenuation in the shallows will need the real one.
+    pub water: [f32; 4],
+    /// The sea, as [`WaterWave`]s — the same sixteen `loom_water` derives from
+    /// the wind, in the same order.
+    ///
+    /// **Here rather than behind another pointer.** The push block is at 116
+    /// of the 128 bytes Vulkan guarantees, and this is per-scene data read once
+    /// per vertex, which is what this buffer is for. It is last in the struct
+    /// so every offset above it is unmoved.
+    pub waves: [WaterWave; MAX_WAVES],
+    /// How many of `waves` to sum. Zero is a mirror.
+    pub wave_count: u32,
+    /// Pads the struct to a 16-byte multiple, matching what Slang lays out.
+    pub padding: [u32; 3],
+}
+
+/// The cap on summed waves, mirroring `loom_scene::components::MAX_WAVES` and
+/// the generated shader's `LOOM_MAX_WAVES`.
+///
+/// Spelled again here rather than imported: `loom_render` does not depend on
+/// `loom_scene`, and `loom_water`'s own test asserts the shader's bound equals
+/// the scene layer's. A test below asserts this one matches the shader too.
+pub const MAX_WAVES: usize = 16;
+
+/// One Gerstner wave, as the vertex shader reads it.
+///
+/// Mirrors `LoomWave` in the generated shader field for field, **including the
+/// order**: `direction` leads because it is the only member needing 8-byte
+/// alignment, and a scalar in front of it would pad the two layouts
+/// differently. 24 bytes, no holes on either side.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WaterWave {
+    pub direction: [f32; 2],
+    pub wavelength: f32,
+    pub amplitude: f32,
+    pub steepness: f32,
+    pub speed_scale: f32,
 }
 
 impl Default for EnvironmentData {
@@ -149,6 +195,18 @@ impl Default for EnvironmentData {
             viewport: [1.0, 1.0, 0.0, 0.0],
             wind: [1.0, 0.0, 5.5, 1.0],
             weather: [0.8, 0.45, 0.0, 0.0],
+            // No water: `z` is the flag the draw is skipped on, so a scene
+            // that authors no `WaterBody` renders exactly as it did.
+            water: [0.0, 0.0, 0.0, 0.0],
+            waves: [WaterWave {
+                direction: [1.0, 0.0],
+                wavelength: 0.0,
+                amplitude: 0.0,
+                steepness: 0.0,
+                speed_scale: 1.0,
+            }; MAX_WAVES],
+            wave_count: 0,
+            padding: [0; 3],
         }
     }
 }
@@ -162,6 +220,15 @@ impl Default for EnvironmentData {
 /// whether a given count earns its bandwidth; the phase notes carry the
 /// readings.
 pub(crate) const MSAA_SAMPLES: vk::SampleCountFlags = vk::SampleCountFlags::TYPE_4;
+
+/// Vertices in one water draw: `WATER_RES² × WATER_LEVELS × 6`.
+///
+/// **One memory layout described twice again** — the three constants live in
+/// `scene.slang` and the draw count lives here, and a mismatch shows up as a
+/// missing outer ring or as a wasted level drawn on top of itself. Spelled out
+/// rather than computed from named constants on this side, because the numbers
+/// that matter are the shader's; a test asserts they still agree.
+pub(crate) const WATER_VERTS: u32 = 32 * 32 * 7 * 6;
 
 /// The multisampled render targets, when there are any.
 ///
@@ -362,6 +429,10 @@ pub struct Renderer {
     grass_alloc: Option<Allocation>,
     grass_address: vk::DeviceAddress,
     grass_pipeline: vk::Pipeline,
+    /// The water surface. Drawn only when the environment says the scene has
+    /// water; the mesh itself is entirely in the vertex shader, so there is no
+    /// buffer beside this.
+    water_pipeline: vk::Pipeline,
     /// Blades uploaded this frame. Zero draws nothing at all.
     grass_count: u32,
     max_particles: usize,
@@ -650,8 +721,24 @@ impl Renderer {
                 COLOR_FORMAT,
                 MSAA_SAMPLES,
             )?;
-        let grass_pipeline =
-            create_grass_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT, MSAA_SAMPLES)?;
+        let grass_pipeline = create_geometry_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            COLOR_FORMAT,
+            MSAA_SAMPLES,
+            c"grassVertexMain",
+            c"grassFragmentMain",
+        )?;
+        let water_pipeline = create_geometry_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            COLOR_FORMAT,
+            MSAA_SAMPLES,
+            c"waterVertexMain",
+            c"waterFragmentMain",
+        )?;
 
         // The anti-aliasing pass (ADR 0010), when asked for. A second colour
         // image, never the same one: the filter reads a 6x6 neighbourhood and
@@ -806,6 +893,7 @@ impl Renderer {
             grass_alloc: Some(grass_alloc),
             grass_address,
             grass_pipeline,
+            water_pipeline,
             grass_count: 0,
             max_particles: MAX_PARTICLES,
             particle_pipeline,
@@ -1095,6 +1183,11 @@ impl Renderer {
         let particle_pipeline = self.particle_pipeline;
         let grass_pipeline = self.grass_pipeline;
         let grass_count = self.grass_count;
+        let water_pipeline = self.water_pipeline;
+        // The whole water mesh is in the vertex shader, so "is there water"
+        // is the only thing the CPU decides — and the environment already
+        // carries the answer, which is why there is no `set_water`.
+        let water_verts = if self.environment.water[2] > 0.0 { WATER_VERTS } else { 0 };
         // **The readback follows the last pass that wrote a pixel.** With the
         // AA pass on, the finished frame is in its target and copying the
         // colour target instead would silently read the un-anti-aliased image
@@ -1222,6 +1315,39 @@ impl Renderer {
                             bytes,
                         );
                         d.cmd_draw(cmd, grass_count * 42, 1, 0, 0);
+                    }
+
+                    // **Water, with the grass and the meshes rather than with
+                    // the particles.** It is opaque and depth-written — there
+                    // is no refraction in W4 — so it belongs in the solid pass,
+                    // and drawing it after the blended one would put smoke
+                    // behind the sea it drifts over.
+                    //
+                    // One draw for the whole surface, no vertex buffer and no
+                    // instancing: the concentric LOD rings are derived from
+                    // SV_VertexID and the wave sum is evaluated per vertex.
+                    if water_verts > 0 {
+                        d.cmd_bind_pipeline(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            water_pipeline,
+                        );
+                        let push = Push {
+                            object_offset: particle_slot,
+                            ..base_push
+                        };
+                        let bytes = std::slice::from_raw_parts(
+                            std::ptr::from_ref(&push).cast::<u8>(),
+                            size_of::<Push>(),
+                        );
+                        d.cmd_push_constants(
+                            cmd,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            bytes,
+                        );
+                        d.cmd_draw(cmd, water_verts, 1, 0, 0);
                     }
 
                     // Particles last, over finished opaque geometry, so the
@@ -1486,6 +1612,7 @@ impl Drop for Renderer {
                 let _ = allocator.free(msaa.depth_allocation);
             }
             self.device.destroy_pipeline(self.grass_pipeline, None);
+            self.device.destroy_pipeline(self.water_pipeline, None);
             self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.particle_buffer, None);
             if let (Some(allocation), Some(allocator)) =
@@ -2228,16 +2355,22 @@ pub(crate) fn view_projection_slot(view_proj: Mat4) -> ObjectData {
 ///
 /// Culling is off because a billboard faces the camera by construction and a
 /// back-facing one is a rounding error away, not an error.
-/// The grass pipeline: opaque geometry, depth-written, both faces drawn.
+/// A pipeline for geometry that exists only in the vertex shader: opaque,
+/// depth-written, both faces drawn, no vertex input at all.
 ///
-/// **Opaque, not blended** — the research pass is explicit that alpha blending
-/// forces sorting and kills early-Z, and that overdraw is the real enemy for
-/// grass rather than blade maths. True geometry blades also have no alpha-test
-/// edge to alias, which is the trade this phase chose deliberately.
+/// **Grass and water share this**, because they want exactly the same state
+/// and differ only in which entry points they name. Each reason below is a bug
+/// if it is wrong for either of them:
 ///
-/// **No back-face culling.** A blade has no back: it is a surface one triangle
-/// thick, and culling half of it makes a field flicker as blades turn.
-pub(crate) fn create_grass_pipeline(
+/// - **Opaque, not blended.** Alpha blending forces a sort and kills early-Z,
+///   and neither a geometry blade nor a wave surface has an alpha edge to
+///   antialias. Water without refraction has nothing to see through it either.
+/// - **No back-face culling.** A blade has no back — it is a surface one
+///   triangle thick, and culling half of it makes a field flicker as blades
+///   turn. A Gerstner crest can likewise present its underside to the camera.
+/// - **Depth written**, so both sit with the solid geometry rather than in a
+///   blended pass.
+pub(crate) fn create_geometry_pipeline(
     device: &ash::Device,
     layout: vk::PipelineLayout,
     cache: vk::PipelineCache,
@@ -2247,6 +2380,8 @@ pub(crate) fn create_grass_pipeline(
     // match the attachment it draws into, and the windowed path draws straight
     // into a single-sample swapchain image.
     samples: vk::SampleCountFlags,
+    vertex_entry: &std::ffi::CStr,
+    fragment_entry: &std::ffi::CStr,
 ) -> Result<vk::Pipeline, RenderError> {
     let module = create_shader_module(device, crate::SCENE_SPV)?;
 
@@ -2254,15 +2389,15 @@ pub(crate) fn create_grass_pipeline(
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
             .module(module)
-            .name(c"grassVertexMain"),
+            .name(vertex_entry),
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::FRAGMENT)
             .module(module)
-            .name(c"grassFragmentMain"),
+            .name(fragment_entry),
     ];
 
-    // No vertex input at all: a blade's geometry comes from SV_VertexID and
-    // the buffer the push block points at.
+    // No vertex input at all: the geometry comes from SV_VertexID and the
+    // buffers the push block points at.
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
     let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST);

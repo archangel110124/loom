@@ -24,6 +24,9 @@ winit = "=0.30.13"
 # field is.
 [build-dependencies]
 loom_field = { version = "0.0.0", path = "../loom_field" }
+# The water surface, for the same reason: `loom_water::slang` is the GPU half
+# of `loom_water::sample_water`, emitted here so the two cannot be edited apart.
+loom_water = { version = "0.0.0", path = "../loom_water" }
 
 # The same crate again, for the agreement test only: it evaluates the Rust side
 # of the field to compare against what the generated shader computed. A

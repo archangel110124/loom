@@ -50,7 +50,8 @@ pub use debug_names::DebugNames;
 pub use device::{Device, DeviceError};
 pub use material::{FLAG_TRIPLANAR, MaterialData, NO_TEXTURE};
 pub use renderer::{
-    Camera, EnvironmentData, GrassBlade, Object, ParticleInstance, RenderError, Renderer,
+    Camera, EnvironmentData, GrassBlade, MAX_WAVES, Object, ParticleInstance, RenderError,
+    Renderer, WaterWave,
 };
 pub use ui::Ui;
 pub use viewer::Viewer;
@@ -104,6 +105,41 @@ mod tests {
     }
 
     use super::*;
+
+    /// **The water draw count is the shader's, and nothing but this says so.**
+    /// `WATER_VERTS` on the Rust side and `WATER_RES`/`WATER_LEVELS` in
+    /// `scene.slang` are one number described twice: too few and the outermost
+    /// ring is never drawn, too many and a level is drawn on top of itself.
+    /// Neither is a validation error and neither fails to compile — the
+    /// symptom is a missing horizon or a doubled surface.
+    ///
+    /// Read out of the shader source rather than out of the compiled module
+    /// because the constants fold away in SPIR-V, and reading the source is
+    /// what a human would do to check.
+    #[test]
+    fn the_water_draw_matches_the_shader_s_grid() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/scene.slang"
+        ))
+        .expect("scene.slang is beside the crate that compiles it");
+
+        let constant = |name: &str| -> u32 {
+            let needle = format!("static const uint {name} = ");
+            let start = source.find(&needle).unwrap_or_else(|| panic!("no {name}")) + needle.len();
+            let rest = &source[start..];
+            let end = rest.find(|c: char| !c.is_ascii_digit()).expect("a number");
+            rest[..end].parse().expect("a number")
+        };
+
+        let res = constant("WATER_RES");
+        let levels = constant("WATER_LEVELS");
+        assert_eq!(res * res * levels * 6, renderer::WATER_VERTS);
+        // Six vertices per quad is a triangle list, and the ring's hole is the
+        // central quarter — which is only a whole number of cells if the
+        // resolution divides by four.
+        assert_eq!(res % 4, 0, "WATER_RES = {res} cannot have a quarter-sized hole");
+    }
 
     /// SPIR-V starts with the magic number `0x0723_0203` and is a whole number
     /// of 32-bit words. Cheap proof that `build.rs` produced a real module
