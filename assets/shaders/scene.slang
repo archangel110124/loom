@@ -1377,14 +1377,29 @@ static const float WATER_CELL = 0.5;
 /// *incoherently*, which is the flicker.
 ///
 /// The two constants are estimated samples per wavelength (`λ / cell`):
-/// - `WHOLE` 8 — a sine reconstructed piecewise-linearly at eight samples per
-///   period misses its crest by 7.6% of amplitude, which reads as a smooth
-///   surface. Below that the facets start to be visible as facets.
-/// - `GONE` 3 — Nyquist is 2, and *at* 2 the sampled height depends entirely on
-///   where the lattice happens to fall relative to the crest. Three retires the
-///   wave before it enters that region rather than inside it.
-static const float WATER_FADE_WHOLE = 8.0;
-static const float WATER_FADE_GONE = 3.0;
+/// - `WHOLE` 4 — a sine reconstructed piecewise-linearly at four samples per
+///   period misses its crest by 29% of amplitude. That is a visible
+///   approximation and it is the right trade, because the alternative below is
+///   worse than an approximation.
+/// - `GONE` 2 — Nyquist exactly. Below it the sampled height depends entirely
+///   on where the lattice falls relative to the crest, which is not a wave any
+///   more, it is noise keyed to the grid.
+///
+/// **These were 8 and 3, and that was wrong in the near field.** The finest
+/// cell is `WATER_CELL` = 0.5 m, so `WHOLE = 8` meant *no wave shorter than
+/// 4 m was ever drawn whole, at any distance, including directly in front of
+/// the camera*. `river.loom` authors 3.4 m and 1.9 m ripples; the 1.9 m wave
+/// came out at **6.9% of its amplitude at point-blank range** and the river
+/// rendered as a mirror. The human saw it and asked.
+///
+/// The error was treating "eight samples per period looks smooth" as a floor
+/// rather than as the point above which no fade is needed. Deleting a wave the
+/// mesh can represent imperfectly is worse than drawing it imperfectly: a 1.9 m
+/// ripple at 3.8 samples per period is visibly a ripple, and absent it is
+/// visibly a mirror. The fade exists to retire waves the mesh genuinely cannot
+/// sample, and Nyquist is where that line actually is.
+static const float WATER_FADE_WHOLE = 4.0;
+static const float WATER_FADE_GONE = 2.0;
 
 /// The size of the cell sampling this point, as a function of **position only**.
 ///

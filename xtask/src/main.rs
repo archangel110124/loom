@@ -118,7 +118,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 12] = [
+const GOLDEN: [(&str, &str, &[&str]); 13] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -178,6 +178,12 @@ const GOLDEN: [(&str, &str, &[&str]); 12] = [
     //
     // `--sim 90` for the same reason as the two above.
     ("underwater", "assets/test/underwater.loom", &["--sim", "90"]),
+    // **Short waves are a rendering path of their own.** `river` authors 3.4 m
+    // and 1.9 m ripples, far shorter than anything `ocean` or `shore` carries,
+    // and it was in SCENES but not here — so when the Nyquist fade landed and
+    // silently deleted every wave under 4 m, no gate saw the river turn into a
+    // mirror. A human did. This is that gate.
+    ("river", "assets/test/river.loom", &["--sim", "300"]),
 ];
 
 /// Every reference renders at this size.
