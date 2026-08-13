@@ -257,11 +257,37 @@ impl FlowGrid {
         if self.side < 2 {
             return [0.0; 3];
         }
-        let gx = (x - self.origin[0]) / self.spacing;
-        let gz = (z - self.origin[1]) / self.spacing;
+        let raw_gx = (x - self.origin[0]) / self.spacing;
+        let raw_gz = (z - self.origin[1]) / self.spacing;
         #[allow(clippy::cast_precision_loss)]
         let limit = (self.side - 1) as f32;
-        if !(gx >= 0.0 && gz >= 0.0 && gx < limit && gz < limit) {
+
+        // **The plume: a river does not stop at its mouth, it disperses past
+        // it.** Outside the grid there is no terrain and so no drainage, and
+        // the first version of this returned zero there. That put a wall of
+        // still water across the channel mouth and a crate parked against it.
+        //
+        // The second version tapered the current down over the grid's last few
+        // metres, which was backwards — it made the river slow *before* its
+        // mouth. Rivers run at speed to the mouth and lose it afterwards.
+        //
+        // So the sample point is clamped to the grid and the current it finds
+        // there is carried outward, decaying over `PLUME_METRES`. On the side
+        // edges that reads as zero anyway, because the banks have no current to
+        // extrude. The decay length is a calibration knob like
+        // `SMOOTHING_RADIUS` is, not an authorable field, until something needs
+        // it to be.
+        const PLUME_METRES: f32 = 24.0;
+        let gx = raw_gx.clamp(0.0, limit - 1e-4);
+        let gz = raw_gz.clamp(0.0, limit - 1e-4);
+        let outside = ((raw_gx - gx).abs().max((raw_gz - gz).abs())) * self.spacing;
+        let plume = if outside <= 0.0 {
+            1.0
+        } else {
+            let t = (1.0 - outside / PLUME_METRES).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        if plume <= 0.0 {
             return [0.0; 3];
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -279,49 +305,12 @@ impl FlowGrid {
         let high = lerp(node(i, j + 1), node(i + 1, j + 1), fx);
         let v = lerp(low, high, fz);
 
-        // **The current fades out over the grid's last few cells**, and without
-        // this it does not fade at all — it stops.
-        //
-        // Outside the grid there is no terrain, so there is no drainage and no
-        // current, and returning zero out there is right. What was wrong was
-        // the step: measured on `river.loom`, `flow.x` read 3.000 m/s at
-        // x = 47.5 and 0.000 at x = 48. A crate carried downstream did not
-        // reach a river mouth and disperse, it hit a wall of still water at the
-        // volume's edge and stopped dead — 48.37 m at tick 2400 and 48.36 at
-        // tick 3600.
-        //
-        // This is a discontinuity in a field the *simulation* reads, which is
-        // worse than the rendering discontinuities elsewhere in this phase: a
-        // body's velocity is integrated, so a step in the force is a visible
-        // kink in a trajectory rather than a seam in a picture. Tapering over
-        // `EDGE_FADE` cells turns the stop into a deceleration, which is what a
-        // river discharging into open sea actually does.
-        let edge = self.edge_weight(gx, gz, limit);
-        [v[0] * edge, 0.0, v[1] * edge]
-    }
-
-    /// How much of the current survives this close to the grid's edge.
-    ///
-    /// Smoothstep rather than a linear ramp so the *derivative* is continuous
-    /// too — a body crossing the taper feels no step in acceleration either.
-    fn edge_weight(&self, gx: f32, gz: f32, limit: f32) -> f32 {
-        /// Metres over which the current dies at the grid's edge.
-        ///
-        /// **In metres, not cells, and that distinction was measured.** Four
-        /// *cells* at the shipped 0.25 m voxel is one metre, which a crate
-        /// moving at 3 m/s crosses in a third of a second — still a stop, just
-        /// a shorter one. The taper has to be long enough that a body
-        /// decelerates over a time a viewer can see, and that is a distance in
-        /// the world rather than a count of samples.
-        ///
-        /// Four metres is a second and a bit at this scene's current. It is
-        /// also comfortably clear of `river.loom`'s drop point at x = 6, so the
-        /// crate starts in full flow rather than in the ramp.
-        const EDGE_FADE_METRES: f32 = 4.0;
-        let fade_cells = (EDGE_FADE_METRES / self.spacing).max(1.0);
-        let inset = gx.min(gz).min(limit - gx).min(limit - gz);
-        let t = (inset / fade_cells).clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
+        // Smoothstep, so the derivative is continuous too and a body crossing
+        // the mouth feels no step in acceleration either. A discontinuity here
+        // is worse than the rendering seams elsewhere in this phase: a body's
+        // velocity is integrated, so a step in the force is a kink in a
+        // trajectory rather than a seam in a picture.
+        [v[0] * plume, 0.0, v[1] * plume]
     }
 
     /// The fastest current anywhere on the grid, m/s. For tests and reporting.
@@ -584,19 +573,51 @@ mod tests {
         assert!(flow.at(7.5, 9.5)[0] > 0.1, "the ground beside it stopped flowing");
     }
 
-    /// Off the grid is still water, not the nearest edge — the same answer the
-    /// height field gives, and for the same reason: a river 200 m away is not
-    /// this river.
+    /// **Off the grid a river keeps going, and then it stops.**
+    ///
+    /// This replaces `off_the_grid_is_still`, which asserted the current was
+    /// exactly zero the moment it left the grid. That contract was wrong and it
+    /// showed: a crate carried downstream hit a wall of still water at the
+    /// volume's edge and parked against it. A river discharging into open sea
+    /// runs at full speed to its mouth and disperses *past* it.
+    ///
+    /// Three things are pinned, and the third is the one that stops the plume
+    /// from being an infinite river: it is continuous at the mouth, it decays
+    /// outward, and it is exactly zero beyond `PLUME_METRES`. A river 200 m
+    /// away is still not this river.
     #[test]
-    fn off_the_grid_is_still() {
+    fn a_river_plumes_past_its_mouth_and_then_stops() {
         let side = 16;
         #[allow(clippy::cast_precision_loss)]
         let heights = grid(side, |i, _| 10.0 - i as f32 * 0.1);
         let flow = FlowGrid::bake([0.0, 0.0], 1.0, side, &heights, 2.0);
 
-        for (x, z) in [(-1.0, 8.0), (8.0, 900.0), (15.5, 8.0)] {
-            assert_eq!(flow.at(x, z), [0.0; 3], "({x}, {z}) is not off the grid");
+        let mouth = flow.at(14.9, 8.0)[0];
+        assert!(mouth > 0.1, "nothing was flowing at the mouth to begin with");
+
+        // Continuous across the boundary: no step a body would feel as a kick.
+        let just_out = flow.at(15.1, 8.0)[0];
+        assert!(
+            (just_out - mouth).abs() < mouth * 0.05,
+            "the current steps at the mouth: {mouth} inside against {just_out} outside"
+        );
+
+        // Decaying, monotonically, out into open water.
+        let mut previous = just_out;
+        for out in [18.0_f32, 22.0, 26.0, 30.0] {
+            let here = flow.at(out, 8.0)[0];
+            assert!(
+                here <= previous,
+                "the plume sped up at {out}: {here} against {previous}"
+            );
+            previous = here;
         }
+
+        // And gone. Beyond the plume it is open sea, with no memory of a river.
+        for far in [40.0_f32, 200.0] {
+            assert_eq!(flow.at(far, 8.0), [0.0; 3], "still flowing {far} m out");
+        }
+        assert_eq!(flow.at(8.0, 900.0), [0.0; 3], "flowing off the side");
     }
 
     /// **The hash depends on this.** Accumulation adds floats in visiting
