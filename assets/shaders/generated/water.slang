@@ -108,10 +108,16 @@ LoomWaterSample loom_sample_water(
     float surface_height,
     float ground_height,
     float2 xz,
-    float t)
+    float t,
+    // The river's current here, m/s, sampled from the flow grid by the caller —
+    // `float3(0, 0, 0)` for an ocean or a lake. Pre-sampled for the same reason
+    // `ground_height` is: this function knows nothing about the terrain.
+    float3 flow)
 {
     float3 displacement = float3(0.0, 0.0, 0.0);
-    float3 velocity = float3(0.0, 0.0, 0.0);
+    // The current is what the orbital motion is summed onto, so the two are one
+    // velocity rather than two forces.
+    float3 velocity = flow;
     float slope_x = 0.0;
     float slope_z = 0.0;
     float flatten = 0.0;

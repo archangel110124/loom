@@ -59,6 +59,14 @@ use loom_voxel::heightfield::HeightField;
 /// the observed value; raise it only against a printed number.
 const EPSILON: f32 = 1e-6;
 
+/// The river current handed to both halves at every sample.
+///
+/// **Non-zero on purpose.** A flow of zero would let a side that dropped the
+/// argument entirely agree with one that kept it, which is exactly the
+/// divergence the new parameter could introduce. The two horizontal components
+/// differ so a swap shows as a failure rather than as luck.
+const FLOW: [f32; 3] = [0.7, 0.0, -0.4];
+
 /// How many `(x, z, t)` points both sides evaluate.
 const SAMPLES: usize = 512;
 
@@ -230,7 +238,8 @@ fn the_rust_and_the_slang_compute_the_same_surface() {
         if HeightField::has_ground(ground) {
             inside += 1;
         }
-        let cpu = loom_water::sample_water(&body, [sample[0], sample[1]], sample[2], ground);
+        let cpu =
+            loom_water::sample_water(&body, [sample[0], sample[1]], sample[2], ground, FLOW);
         let expected = [
             cpu.height,
             cpu.normal[0],
@@ -307,7 +316,7 @@ fn the_slang_half_compiles_for_the_gpu_too() {
          \x20   set.waves[0].amplitude = 0.5;\n\
          \x20   set.waves[0].steepness = 0.5;\n\
          \x20   set.waves[0].speed_scale = 1.0;\n\
-         \x20   LoomWaterSample s = loom_sample_water(set, 0.0, -4.0, float2(1.0, 2.0), 3.0);\n\
+         \x20   LoomWaterSample s = loom_sample_water(set, 0.0, -4.0, float2(1.0, 2.0), 3.0, float3(0.4, 0.0, -0.2));\n\
          \x20   loom_water_probe[0] = s.height + s.normal.y + s.displacement.x\n\
          \x20       + s.velocity.z + s.depth;\n}}\n",
         loom_water::slang()
@@ -382,17 +391,17 @@ fn kernel(body: &WaterBody, bed: &HeightField, samples: &[[f32; 3]]) -> String {
 
     for [x, z, t] in samples {
         out.push_str(&format!(
-            "    emit(set, bed, {:?}, float2({x:?}, {z:?}), {t:?});\n",
-            body.surface_height,
+            "    emit(set, bed, {:?}, float2({x:?}, {z:?}), {t:?}, float3({:?}, {:?}, {:?}));\n",
+            body.surface_height, FLOW[0], FLOW[1], FLOW[2],
         ));
     }
     out.push_str("}\n");
 
     // Declared above `computeMain` in the emitted text, since Slang wants it
     // before use.
-    let emit = "\nvoid emit(LoomWaveSet set, LoomHeightField bed, float surface_height, float2 xz, float t)\n\
+    let emit = "\nvoid emit(LoomWaveSet set, LoomHeightField bed, float surface_height, float2 xz, float t, float3 flow)\n\
                 {\n    float ground_height = loom_ground_height(bed, xz);\n\
-                \x20   LoomWaterSample s = loom_sample_water(set, surface_height, ground_height, xz, t);\n\
+                \x20   LoomWaterSample s = loom_sample_water(set, surface_height, ground_height, xz, t, flow);\n\
                 \x20   printf(\"%.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\\n\",\n\
                 \x20       s.height, s.normal.x, s.normal.y, s.normal.z,\n\
                 \x20       s.displacement.x, s.displacement.y, s.displacement.z,\n\

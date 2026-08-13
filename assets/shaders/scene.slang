@@ -1431,7 +1431,15 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
         surface,
         ground,
         xz,
-        push.environment[0].weather.z);
+        push.environment[0].weather.z,
+        // **No current on the GPU, and it costs nothing here.** The flow field
+        // only ever reaches `velocity`, which this shader does not read: the
+        // surface a river is drawn at is the surface a still lake is drawn at,
+        // and what the current does is move what floats on it. Uploading the
+        // flow grid would be a second buffer feeding a value nothing samples.
+        // A flow-map material — a river whose *texture* scrolls downstream —
+        // is what would need it, and that is river mesh shaping, not W8.
+        float3(0.0, 0.0, 0.0));
 
     // The horizontal displacement is half of what makes a Gerstner wave read
     // as water rather than as a sine: crests pinch toward each other. It is

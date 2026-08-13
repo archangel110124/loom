@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 22] = [
+const SCENES: [&str; 23] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -64,6 +64,12 @@ const SCENES: [&str; 22] = [
     // in the frame, and a sky pass that paints the medium instead of the
     // horizon. Nothing else in this list submerges the camera.
     "assets/test/underwater.loom",
+    // The only scene with a current: the flow field is baked from the voxel
+    // bed's drainage at load, and `render --sim` is where a river both draws
+    // and carries something at once. It is deliberately *not* in `GOLDEN` —
+    // the surface it draws is the surface `shore` already covers, because flow
+    // reaches `velocity` and nothing the shader reads.
+    "assets/test/river.loom",
     // The only scene where particles are spawned *by* the simulation rather
     // than by an emitter standing somewhere: the crate goes under at tick 105
     // and the splash is replayed from the event log, so a `--sim 120` render

@@ -46,6 +46,16 @@ pub struct PontoonState {
     /// [`loom_voxel::heightfield::NO_GROUND`]'s meaning by passing a very
     /// negative number; a scene with no terrain does exactly that.
     pub ground: f32,
+    /// The river's current at this pontoon, m/s, in world space.
+    ///
+    /// **Filled by the caller from [`crate::flow::FlowGrid`]**, for the same
+    /// reason `ground` is: it is derived from the voxel terrain, and this crate
+    /// must not know what a voxel is. `[0.0; 3]` is an ocean or a lake.
+    ///
+    /// Per pontoon rather than per body, because that is what makes a crate
+    /// entering an eddy turn: the pontoons are metres apart, the current
+    /// differs between them, and the difference is a torque.
+    pub flow: [f32; 3],
 }
 
 /// One force and one torque, in world space, about the centre of mass — and
@@ -109,8 +119,10 @@ pub fn submerged_volume(radius: f32, centre_y: f32, surface_y: f32) -> f32 {
 /// simulation seconds, the same clock the shader is handed, so the surface a
 /// crate floats on is the surface it is drawn on.
 ///
-/// The flow term is zero until rivers exist (W8): `v_water` is the wave's
-/// orbital velocity alone, which is the part [`sample_water`] already knows.
+/// `v_water` is the wave's orbital velocity plus the pontoon's own `flow`,
+/// summed inside [`sample_water`] — **there is one water velocity and one drag
+/// term**, and a river carries a crate through the same arithmetic that makes
+/// it bob under a crest.
 #[must_use]
 pub fn solve(
     water: &WaterBody,
@@ -132,8 +144,13 @@ pub fn solve(
         // crater under a lake does not empty it — but how big a wave is at this
         // spot is a function of how deep it is here, and a solver that passed
         // zero would float a crate on the open sea's swell in a foot of water.
-        let surface: WaterSample =
-            sample_water(water, [pontoon.at[0], pontoon.at[2]], t, pontoon.ground);
+        let surface: WaterSample = sample_water(
+            water,
+            [pontoon.at[0], pontoon.at[2]],
+            t,
+            pontoon.ground,
+            pontoon.flow,
+        );
 
         let volume = submerged_volume(pontoon.radius, pontoon.at[1], surface.height);
         let whole = 4.0 / 3.0 * std::f32::consts::PI * pontoon.radius.powi(3);
@@ -156,8 +173,30 @@ pub fn solve(
         // Archimedes: the weight of the water pushed aside, straight up.
         let mut force = [0.0, displaced * GRAVITY * buoyancy.coefficient, 0.0];
 
+        // **The damping is measured in the water's frame, not the world's.**
+        // Damping models the water resisting a body being dragged *through* it,
+        // so the velocity that matters is the one relative to the water — and
+        // in a river the water is moving. Measured in the world frame instead,
+        // a crate that had reached the current's own speed would still be
+        // damped as if it were being hauled upstream at 2 m/s, and the river
+        // could never carry anything: on the first `river.loom` the crate
+        // settled at 0.08 m/s against a 2.24 m/s current, because the damping
+        // outweighed the drag by a factor of twenty-five.
+        //
+        // **Only the current is subtracted, deliberately, and not the waves'
+        // orbital motion.** A crate riding a swell really is moving through the
+        // water — that is what makes it bob rather than sit still while the
+        // wave passes under it — and §5.5's whole subject is damping that
+        // motion. Every scene that predates rivers has a zero current here, so
+        // this is bit-for-bit what it was.
         let v = pontoon.velocity;
-        let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        let carried = [
+            v[0] - pontoon.flow[0],
+            v[1] - pontoon.flow[1],
+            v[2] - pontoon.flow[2],
+        ];
+        let speed =
+            (carried[0] * carried[0] + carried[1] * carried[1] + carried[2] * carried[2]).sqrt();
         for (axis, component) in force.iter_mut().enumerate() {
             // §5.5, and **the damping is scaled by the displaced mass on
             // purpose**. A coefficient in plain newtons per m/s is a number
@@ -173,11 +212,13 @@ pub fn solve(
             let damping = displaced
                 * buoyancy
                     .damp_quadratic
-                    .mul_add(v[axis] * speed, buoyancy.damp_linear * v[axis]);
+                    .mul_add(carried[axis] * speed, buoyancy.damp_linear * carried[axis]);
             // Drag against the *relative* flow — the water's velocity minus the
-            // body's. This is what will carry a crate down a river, and with no
-            // flow field yet it is the wave's orbital motion pushing things
-            // along under the crests.
+            // body's. **This is the one path by which a river moves anything**:
+            // the current is inside `surface.velocity`, so carrying a crate
+            // downstream and nudging it along under a crest are the same term
+            // with the same coefficient. A separate "river push" force would be
+            // a second opinion about what the water is doing to this body.
             let drag = water.drag * (surface.velocity[axis] - v[axis]) * wetness;
             *component += drag - damping;
         }
@@ -228,7 +269,10 @@ pub fn submersion_at(
     t: f32,
     ground: f32,
 ) -> f32 {
-    let surface = sample_water(water, [at[0], at[2]], t, ground);
+    // No flow: this asks *where the surface is*, and a current is horizontal —
+    // it moves the water without raising or lowering it. Passing one in would
+    // be sampling a number this function then discards.
+    let surface = sample_water(water, [at[0], at[2]], t, ground, [0.0; 3]);
     if radius <= 0.0 {
         return f32::from(u8::from(surface.height > at[1]));
     }
@@ -359,7 +403,7 @@ mod tests {
             at: [0.0, 0.0, 0.0],
             radius: 1.0,
             velocity: [0.0; 3],
-            ground: DEEP,
+            ground: DEEP, flow: [0.0; 3],
         }];
 
         let w = solve(&water, &buoyancy, &pontoons, [0.0; 3], 0.0);
@@ -389,7 +433,7 @@ mod tests {
                 at: [p.offset[0], p.offset[0] * -0.6, p.offset[2]],
                 radius: p.radius,
                 velocity: [0.0; 3],
-                ground: DEEP,
+                ground: DEEP, flow: [0.0; 3],
             })
             .collect();
 
@@ -410,7 +454,7 @@ mod tests {
                 at: [0.0, 0.0, 0.0],
                 radius: 0.5,
                 velocity: [0.0; 3],
-                ground: DEEP,
+                ground: DEEP, flow: [0.0; 3],
             }],
             [0.0; 3],
             0.0,
@@ -437,7 +481,7 @@ mod tests {
                     at: [0.0, -1.0, 0.0],
                     radius: 1.0,
                     velocity: [0.0, -speed, 0.0],
-                    ground: DEEP,
+                    ground: DEEP, flow: [0.0; 3],
                 }],
                 [0.0; 3],
                 0.0,
@@ -469,7 +513,7 @@ mod tests {
                 at: [0.0, 9.0, 0.0],
                 radius: 0.5,
                 velocity: [0.0, -20.0, 3.0],
-                ground: DEEP,
+                ground: DEEP, flow: [0.0; 3],
             }],
             [0.0; 3],
             0.0,
@@ -503,12 +547,12 @@ mod tests {
         // Away from the origin: at phase zero the orbital motion is purely
         // vertical, so a test placed there would be checking nothing.
         let at = [3.0, -0.4, 0.0];
-        let flow = sample_water(&water, [at[0], at[2]], 0.0, 0.0).velocity;
+        let flow = sample_water(&water, [at[0], at[2]], 0.0, 0.0, [0.0; 3]).velocity;
 
         let w = solve(
             &water,
             &buoyancy,
-            &[PontoonState { at, radius: 0.5, velocity: [0.0; 3], ground: DEEP }],
+            &[PontoonState { at, radius: 0.5, velocity: [0.0; 3], ground: DEEP, flow: [0.0; 3] }],
             [0.0; 3],
             0.0,
         );
@@ -518,6 +562,49 @@ mod tests {
             w.force[0].signum() == flow[0].signum() && w.force[0].abs() > 1e-3,
             "drag {:?} does not follow the water's {flow:?}",
             w.force
+        );
+    }
+
+    /// **A river pushes through the drag term and nothing else.** The current
+    /// is summed into the water's velocity inside `sample_water`, so the force
+    /// it produces has to be the same force the swell produces — one term, one
+    /// coefficient. This is the unit-level half of the `river.loom` assertion:
+    /// the scene proves a crate arrives downstream, and this proves which
+    /// arithmetic carried it.
+    #[test]
+    fn a_current_carries_a_still_body_downstream() {
+        // Flat water, so the only thing moving is the river. On a wavy fixture
+        // the orbital motion would be indistinguishable from the current.
+        let water = WaterBody { drag: 50.0, ..WaterBody::default() };
+        let buoyancy = Buoyancy {
+            coefficient: 0.0,
+            damp_linear: 0.0,
+            damp_quadratic: 0.0,
+            ..Buoyancy::default()
+        };
+        let pontoon = |flow: [f32; 3]| PontoonState {
+            at: [3.0, -0.4, 0.0],
+            radius: 0.5,
+            velocity: [0.0; 3],
+            ground: DEEP,
+            flow,
+        };
+
+        let still = solve(&water, &buoyancy, &[pontoon([0.0; 3])], [0.0; 3], 0.0);
+        assert_eq!(still.force, [0.0; 3], "flat water with no current is not still");
+
+        let carried = solve(&water, &buoyancy, &[pontoon([2.0, 0.0, 0.0])], [0.0; 3], 0.0);
+        assert!(carried.force[0] > 1e-3, "the current does not push: {:?}", carried.force);
+        assert_eq!(carried.force[2], 0.0, "a current along X pushes along Z");
+
+        // And it pushes *harder* when it runs faster, which is what makes
+        // `FlowField::speed` a knob rather than a switch.
+        let faster = solve(&water, &buoyancy, &[pontoon([4.0, 0.0, 0.0])], [0.0; 3], 0.0);
+        assert!(
+            (faster.force[0] - 2.0 * carried.force[0]).abs() < 1e-3,
+            "drag against the current is not linear: {} then {}",
+            carried.force[0],
+            faster.force[0]
         );
     }
 
@@ -542,7 +629,7 @@ mod tests {
                 at: [p.offset[0], p.offset[1] - 0.2, p.offset[2]],
                 radius: p.radius,
                 velocity: [0.3, -0.7, 0.1],
-                ground: DEEP,
+                ground: DEEP, flow: [0.0; 3],
             })
             .collect();
 
@@ -567,7 +654,7 @@ mod tests {
                     at: [p.offset[0], y, p.offset[2]],
                     radius: p.radius,
                     velocity: [0.0; 3],
-                    ground: DEEP,
+                    ground: DEEP, flow: [0.0; 3],
                 })
                 .collect::<Vec<PontoonState>>()
         };

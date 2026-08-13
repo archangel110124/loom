@@ -1006,6 +1006,44 @@ pub(crate) fn terrain_field(
     loom_voxel::heightfield::HeightField::bake(volume, offset, centre, wx.max(wz) * 0.5)
 }
 
+/// The river's current over a baked bed, or `None` when the water is not one.
+///
+/// **The bridge, and the only place the two systems meet.** `loom_water` must
+/// not know what a voxel is — the Slang half of the surface is generated from
+/// it — and `loom_voxel` has no business knowing what a `WaterBody` is. So the
+/// height grid crosses over as a plain array of metres, exactly as the wind
+/// parameters cross into `loom_field` in `weather.rs`, and for the same reason.
+///
+/// **The sentinel becomes a `NaN` on the way through.** A column with no ground
+/// is `heightfield::NO_GROUND` — a large finite negative, so the *shader's*
+/// bilinear can stay branchless — and routing rain into it would make one
+/// imaginary cell a billion metres down the outlet for the entire map. The
+/// grass path already converts it the same way, for the same reason.
+pub(crate) fn river_flow(
+    field: &loom_voxel::heightfield::HeightField,
+    water: &loom_scene::components::WaterBody,
+) -> Option<loom_water::flow::FlowGrid> {
+    let flow = water.flow?;
+    let heights: Vec<f32> = field
+        .height
+        .iter()
+        .map(|h| {
+            if loom_voxel::heightfield::HeightField::has_ground(*h) {
+                *h
+            } else {
+                f32::NAN
+            }
+        })
+        .collect();
+    Some(loom_water::flow::FlowGrid::bake(
+        field.origin,
+        field.spacing,
+        field.side,
+        &heights,
+        flow.speed,
+    ))
+}
+
 /// The scene's terrain height grid, or `None` when nothing would read it.
 ///
 /// **Only baked for a scene that has water**, and that early-out is not

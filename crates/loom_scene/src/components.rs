@@ -741,11 +741,11 @@ pub const MAX_WAVES: usize = 16;
 /// the difference between them is *how the surface is bounded and driven*, not
 /// what a wave is.
 ///
-/// **Only the wave surface exists so far.** Every kind currently samples the
-/// same Gerstner sum at the same still-water level; a lake is not yet clipped
-/// to a polygon and a river has no flow field (that arrives with the terrain
-/// flow accumulation it is derived from). Authoring the kind now means the
-/// scene says what it means before the renderer can tell the difference.
+/// **The surface is still one Gerstner sum for all three**, at one still-water
+/// level, and a lake is not yet clipped to a polygon. What a river now has that
+/// the others do not is [`WaterBody::flow`] — a current, derived from the
+/// terrain's drainage, that carries what floats on it. Authoring the kind means
+/// the scene says what it means before the renderer can tell the difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WaterKind {
@@ -905,10 +905,18 @@ pub struct WaterBody {
     pub density: f32,
     /// Linear drag coefficient on a submerged body.
     ///
-    /// Also what a river pushes with, once flow exists — drag against the
-    /// relative velocity of the water is how a current carries anything.
+    /// **Also what a river pushes with.** Drag against the *relative* velocity
+    /// of the water is how a current carries anything, and it is the only path
+    /// by which [`Self::flow`] reaches a rigid body — a river with `drag = 0`
+    /// is a current that flows past everything without touching it.
     #[schemars(range(min = 0.0, max = 100.0))]
     pub drag: f32,
+    /// Makes this water a river: how fast it runs, and nothing about where.
+    ///
+    /// **Rivers only, and `None` for everything else.** Absent — the default —
+    /// is water that goes nowhere, which is every scene authored before this
+    /// existed and every ocean and lake authored after it.
+    pub flow: Option<FlowField>,
     /// The surface material.
     pub material: AssetRef,
 }
@@ -923,8 +931,47 @@ impl Default for WaterBody {
             // defaults should describe one thing rather than half of each.
             density: 1025.0,
             drag: 1.0,
+            flow: None,
             material: AssetRef::default(),
         }
+    }
+}
+
+/// A river's current: one number, because the terrain supplies the rest.
+///
+/// **There is deliberately no direction and no path in here.** Where the water
+/// runs is a property of the ground, not of the author: `loom_water::flow`
+/// routes water downhill across the same height grid the depth comes from,
+/// accumulates what drains through each cell, and takes the direction from the
+/// bed's own gradient. An author who could type a direction here could type one
+/// that runs up a hill, and the agent — which cannot place spline control
+/// points well anyway — would have to guess the terrain's shape to fill it in.
+/// See the water doc §5.8: this is the one place Loom's architecture is
+/// straightforwardly better than Unreal's, and it is better precisely by having
+/// fewer fields.
+///
+/// So the only thing left to author is the scale, which the terrain genuinely
+/// cannot supply: a drainage map says where the water is and how much of it
+/// there is, not whether this is a mountain torrent or an estuary.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct FlowField {
+    /// Speed in m/s where the drainage is heaviest — the river's own middle.
+    ///
+    /// Everywhere else is a fraction of it, falling off with the log of the
+    /// catchment draining through that point, so a headwater trickles and the
+    /// main channel runs. Zero is a river that does not move, which is what a
+    /// mutation test sets it to.
+    #[schemars(range(min = 0.0, max = 30.0))]
+    pub speed: f32,
+}
+
+impl Default for FlowField {
+    fn default() -> Self {
+        // A brisk walking pace. Fast enough to visibly carry a crate within a
+        // few seconds of simulated time, slow enough to be a river rather than
+        // a flume.
+        Self { speed: 2.0 }
     }
 }
 

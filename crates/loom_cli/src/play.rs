@@ -89,6 +89,14 @@ pub struct Sim {
     /// viewer does on every file change, and what `loom explode` produces — is
     /// what picks it up. See `scene_terrain_field` for the cost.
     terrain: Option<loom_voxel::heightfield::HeightField>,
+    /// The river's current over that bed, or `None` for water that goes
+    /// nowhere — which is every ocean, every lake, and every scene authored
+    /// before rivers existed.
+    ///
+    /// **Baked from `terrain` at load and never rebaked**, exactly as the bed
+    /// is and with the same consequence: blow the bank out mid-run and the
+    /// current is the one the old bank made. Reloading picks it up.
+    flow: Option<loom_water::flow::FlowGrid>,
     /// Bodies that float, in scene order, with their pontoons already in body
     /// space. **Order is fixed at load and never sorted**: the forces are
     /// summed as floats, and a different visiting order is a different number
@@ -409,6 +417,7 @@ impl Sim {
                                 radius: 0.0,
                                 velocity: [0.0; 3],
                                 ground: loom_voxel::heightfield::NO_GROUND,
+                                flow: [0.0; 3],
                             };
                             buoyancy.pontoons.len()
                         ],
@@ -431,6 +440,20 @@ impl Sim {
         });
 
         let water = crate::weather::water_of(world, &crate::weather::wind_of_world(world));
+        // The current, off the bed that was just baked. Both halves have to be
+        // in hand: a river with no terrain has nothing to run down, and terrain
+        // with no river has nothing to say.
+        let flow = terrain
+            .as_ref()
+            .zip(water.as_ref())
+            .and_then(|(bed, water)| crate::river_flow(bed, water));
+        if water.as_ref().is_some_and(|w| w.flow.is_some()) && flow.is_none() {
+            crate::log::warn(
+                "the WaterBody authors flow but the scene has no voxel terrain; \
+                 a river's course comes from the ground and there is none"
+                    .to_owned(),
+            );
+        }
         if water.is_none() && !floating.is_empty() {
             crate::log::warn(
                 "the scene has Buoyancy but no WaterBody; nothing will float".to_owned(),
@@ -458,6 +481,7 @@ impl Sim {
             characters,
             water,
             terrain,
+            flow,
             floating,
             water_events: Vec::new(),
             tick: 0,
@@ -512,6 +536,14 @@ impl Sim {
                     .map_or(loom_voxel::heightfield::NO_GROUND, |t| {
                         t.at(state.at[0], state.at[2])
                     });
+                // The current here, off the grid derived from that same bed.
+                // Per pontoon rather than per body: they are metres apart, so
+                // a crate half in the channel and half in the slack water on
+                // the inside of a bend is turned by the difference.
+                state.flow = self
+                    .flow
+                    .as_ref()
+                    .map_or([0.0; 3], |f| f.at(state.at[0], state.at[2]));
             }
 
             let wrench = loom_water::buoyancy::solve(
@@ -544,8 +576,16 @@ impl Sim {
                     .map_or(loom_voxel::heightfield::NO_GROUND, |t| {
                         t.at(position[0], position[2])
                     });
-                let surface =
-                    loom_water::sample_water(water, [position[0], position[2]], t, ground);
+                // No current: this asks only where the surface is, so the splash
+                // lands on the water rather than inside the body. A horizontal
+                // current does not move it up or down.
+                let surface = loom_water::sample_water(
+                    water,
+                    [position[0], position[2]],
+                    t,
+                    ground,
+                    [0.0; 3],
+                );
                 let velocity = self
                     .physics
                     .velocity_at_point(floating.body, position)
@@ -1727,7 +1767,7 @@ transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
         #[allow(clippy::cast_precision_loss)]
         let heights: Vec<f32> = ticks
             .map(|tick| {
-                loom_water::sample_water(&water, [at[0], at[2]], tick as f32 * TICK_SECONDS, 0.0)
+                loom_water::sample_water(&water, [at[0], at[2]], tick as f32 * TICK_SECONDS, 0.0, [0.0; 3])
                     .height
             })
             .collect();
@@ -1849,6 +1889,66 @@ transform = { pos = [0.0, 4.0, 0.0], rot_euler = [0.0, 0.0, 45.0], scale = [0.7,
         // Anything above zero means it landed on the terrain rather than
         // through it.
         assert!(y > 1.0, "the probe fell through the voxel terrain: y = {y}");
+    }
+
+    /// **W8's exit criterion, as a test rather than a command line.** A crate
+    /// dropped upstream arrives downstream, on a river whose course nobody
+    /// drew: the channel is carved into a voxel volume, the drainage is
+    /// computed off the bed that carving produced, and the current reaches the
+    /// crate through the drag term the solver already had.
+    ///
+    /// Measured over 600 ticks — ten seconds — from x = 6.0:
+    ///
+    /// - with the flow: **x = 17.7**, and the crate stays in the channel
+    /// - with `speed = 0.0`: **x = 6.00**, which is where it was dropped
+    ///
+    /// The second half is the mutation check, and it is in here rather than in
+    /// a comment because an assertion that cannot fail is decoration. The
+    /// threshold sits at 14 — well clear of both numbers — so a real slowdown
+    /// fails it and float noise does not.
+    #[test]
+    fn a_crate_dropped_in_a_river_ends_up_downstream() {
+        let source = std::fs::read_to_string("../../assets/test/river.loom").expect("fixture");
+        let travel = |source: &str| {
+            let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
+            let mut play = Play::start(world, std::path::Path::new("."));
+            play.run(600);
+            let entity = play
+                .world
+                .entities()
+                .iter()
+                .copied()
+                .find(|e| play.world.path(*e) == Some("River/Crate"))
+                .expect("the crate is in the scene");
+            play.world.transform(entity).expect("it has a transform").pos
+        };
+
+        let carried = travel(&source);
+        assert!(
+            carried[0] > 14.0,
+            "the river did not carry the crate downstream: x = {}",
+            carried[0]
+        );
+        // And it stayed in the river rather than being pushed at the bank,
+        // which is the failure the flow field's direction smoothing exists to
+        // prevent — the channel runs down z = 24.
+        assert!(
+            (carried[2] - 24.0).abs() < 1.5,
+            "the crate was pushed out of the channel: z = {}",
+            carried[2]
+        );
+
+        // Zero the one authored number and the claim has to stop holding.
+        let still = travel(&source.replace(
+            "[node.components.WaterBody.flow]\n  speed = 3.0",
+            "[node.components.WaterBody.flow]\n  speed = 0.0",
+        ));
+        assert!(
+            still[0] < 7.0,
+            "a river with no speed still moved the crate: x = {} — \
+             the mutation did not take, so the assertion above proves nothing",
+            still[0]
+        );
     }
 
     /// `BoxCollider` is documented and schema-validated, and the simulation
