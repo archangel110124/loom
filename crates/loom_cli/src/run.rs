@@ -212,6 +212,9 @@ struct App {
     /// particle systems. The runner's list only grows, so the tail past this
     /// is what is new — no event queue, and nothing to miss if a frame is slow.
     detonations_seen: usize,
+    /// The same, for splashes. A separate count because the two lists grow
+    /// independently and a shared one would replay whichever moved last.
+    splashes_seen: usize,
     /// Whether the pointer is captured for first-person play. Tracked rather
     /// than asked of the window because winit has no getter, and because
     /// releasing it must not depend on the platform honouring the request.
@@ -346,6 +349,7 @@ impl App {
             sound: None,
             reported_status: None,
             detonations_seen: 0,
+            splashes_seen: 0,
             captured: false,
             plumes: None,
             ui: None,
@@ -1283,6 +1287,7 @@ impl App {
         // too. Leaving the counter high would make the first shot of the next
         // run look like one already seen, and it would never be drawn.
         self.detonations_seen = 0;
+        self.splashes_seen = 0;
         self.reported_status = None;
         self.plumes = None;
         // Dropping the device closes the stream, so Stop is silent rather
@@ -1325,7 +1330,10 @@ impl App {
         ]);
         // Right-handed, world up: forward cross up.
         let right = normalize([forward[2], 0.0, -forward[0]]);
-        sound.update(&play.world, play.physics(), view.eye, right, forward);
+        // The ears' own state, from the simulation that owns the surface —
+        // the same water body, clock and bed a crate floats on.
+        let submerged = play.submerged_at(view.eye);
+        sound.update(&play.world, play.physics(), view.eye, right, forward, submerged);
     }
 
     /// Say how the game ended, once.
@@ -1366,20 +1374,27 @@ impl App {
         }
     }
 
-    /// Give the particle systems any explosion a script has just set off.
+    /// Give the particle systems any explosion a script has just set off, and
+    /// any splash the water has just raised.
     fn spawn_new_detonations(&mut self) {
         let Some(play) = self.play.as_ref() else {
             return;
         };
         let fired = play.fired();
-        if fired.len() <= self.detonations_seen {
+        let splashed = play.splashed();
+        if fired.len() <= self.detonations_seen && splashed.len() <= self.splashes_seen {
             return;
         }
-        let fresh: Vec<(u64, [f32; 3])> = fired[self.detonations_seen..]
+        let fresh: Vec<(u64, [f32; 3])> = fired[self.detonations_seen.min(fired.len())..]
+            .iter()
+            .map(|(tick, at)| (*tick, *at))
+            .collect();
+        let wet: Vec<(u64, [f32; 3])> = splashed[self.splashes_seen.min(splashed.len())..]
             .iter()
             .map(|(tick, at)| (*tick, *at))
             .collect();
         self.detonations_seen = fired.len();
+        self.splashes_seen = splashed.len();
 
         // Against the play world, because that is where the dormant prefab is
         // — the same scene, but the one the simulation is holding.
@@ -1387,6 +1402,9 @@ impl App {
         if let Some(plumes) = self.plumes.as_mut() {
             for (tick, at) in fresh {
                 plumes.detonate(world, at, tick);
+            }
+            for (tick, at) in wet {
+                plumes.splash(world, at, tick);
             }
         }
     }

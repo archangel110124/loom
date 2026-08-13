@@ -44,6 +44,14 @@ fn path_of(world: &World, entity: loom_ecs::Entity) -> String {
 /// vocabulary and is never named in here.
 const BLAST: &str = "blast";
 const DAMAGE: &str = "damage";
+/// A body went into the water, and came back out of it.
+///
+/// **Two edges of one state, not two facts.** Both come out of the same
+/// hysteretic flag, so neither can fire without the other having been true, and
+/// the splash is the reaction to the first — which is why there is no separate
+/// `splash` event to keep in step with this one.
+const SUBMERGED: &str = "submerged";
+const SURFACED: &str = "surfaced";
 
 /// How far a character's aim ray reaches, in metres.
 ///
@@ -86,15 +94,34 @@ pub struct Sim {
     /// summed as floats, and a different visiting order is a different number
     /// in the determinism hash.
     floating: Vec<Floating>,
+    /// Water events raised this step and not yet collected: entries and exits.
+    ///
+    /// Held rather than pushed straight into the log because the log belongs to
+    /// [`Runner`], and a `Sim` stepped on its own — `loom render --sim` with no
+    /// scripts — still has to be steppable. Drained by whoever owns a log, and
+    /// stamped with the tick then, so every event in it counts ticks the one
+    /// way (see [`Sim::drain_water_events`]).
+    water_events: Vec<loom_script::Event>,
     /// Ticks stepped so far. Water is a function of position and this, times
     /// the fixed timestep — never of a wall clock (never-do #8).
     tick: u64,
 }
 
-/// One buoyant body: what floats, and where its spheres are.
+/// One buoyant body: what floats, where its spheres are, and how wet it is.
 struct Floating {
     body: RigidBodyHandle,
+    /// Scene path, resolved at load. The event log names nodes, and `float`
+    /// runs without a `World` in hand.
+    path: String,
     buoyancy: loom_scene::components::Buoyancy,
+    /// The two thresholds the state flips at. See `loom_scene::Submersion`.
+    submersion: loom_scene::components::Submersion,
+    /// Fraction of this body under the surface, as of the last step. **Not a
+    /// second opinion** — it is what `buoyancy::solve` divided the displaced
+    /// volume by while computing the force it applied.
+    fraction: f32,
+    /// The debounced answer, which is what everything else reads.
+    submerged: bool,
     /// Scratch, reused every tick so the solver's input does not allocate
     /// inside the fixed step.
     states: Vec<loom_water::buoyancy::PontoonState>,
@@ -359,6 +386,23 @@ impl Sim {
                 if let Some(buoyancy) = buoyancy_of(world, *entity, half, ball) {
                     floating.push(Floating {
                         body: handle,
+                        path: path_of(world, *entity),
+                        // Absent means the defaults, like every other
+                        // component: a body that floats has a submersion state
+                        // whether or not anyone authored the thresholds, or
+                        // half the systems that read it would have to handle
+                        // "this body has no answer".
+                        submersion: world
+                            .submersion(*entity)
+                            .and_then(|v| {
+                                serde_json::from_value::<
+                                    loom_scene::components::Submersion,
+                                >(v.clone())
+                                .ok()
+                            })
+                            .unwrap_or_default(),
+                        fraction: 0.0,
+                        submerged: false,
                         states: vec![
                             loom_water::buoyancy::PontoonState {
                                 at: [0.0; 3],
@@ -392,6 +436,19 @@ impl Sim {
                 "the scene has Buoyancy but no WaterBody; nothing will float".to_owned(),
             );
         }
+        // Submersion thresholds on a node that does not float would validate
+        // cleanly and be read by nothing — the silent no-op the type registry
+        // exists to stop, one level up. The fraction they threshold comes out
+        // of the buoyancy solver, so no `Buoyancy` is no fraction.
+        for entity in world.entities() {
+            if world.submersion(*entity).is_some() && world.buoyancy(*entity).is_none() {
+                crate::log::warn(format!(
+                    "{}: Submersion needs Buoyancy on the same node; \
+                     the submerged fraction comes from its pontoons",
+                    world.path(*entity).unwrap_or("?")
+                ));
+            }
+        }
 
         Self {
             physics,
@@ -402,6 +459,7 @@ impl Sim {
             water,
             terrain,
             floating,
+            water_events: Vec::new(),
             tick: 0,
         }
     }
@@ -465,7 +523,96 @@ impl Sim {
             );
             self.physics
                 .apply_force_torque(floating.body, wrench.force, wrench.torque);
+
+            // **The same number that scaled the force is the gameplay state.**
+            // Not a second query: a body cannot be pushed up by water it is not
+            // in, and this is what "one answer" means in practice.
+            floating.fraction = wrench.submerged;
+            let was = floating.submerged;
+            floating.submerged = loom_water::buoyancy::is_submerged(
+                was,
+                wrench.submerged,
+                floating.submersion.enter,
+                floating.submersion.exit,
+            );
+            if floating.submerged != was {
+                // Where the splash goes: on the surface above the body, not at
+                // its centre, which by then is under the water.
+                let ground = self
+                    .terrain
+                    .as_ref()
+                    .map_or(loom_voxel::heightfield::NO_GROUND, |t| {
+                        t.at(position[0], position[2])
+                    });
+                let surface =
+                    loom_water::sample_water(water, [position[0], position[2]], t, ground);
+                let velocity = self
+                    .physics
+                    .velocity_at_point(floating.body, position)
+                    .unwrap_or([0.0; 3]);
+                self.water_events.push(loom_script::Event {
+                    // Stamped on the way out; see `drain_water_events`.
+                    tick: 0,
+                    kind: if floating.submerged { SUBMERGED } else { SURFACED }.to_owned(),
+                    at: [position[0], surface.height, position[2]],
+                    node: floating.path.clone(),
+                    values: [
+                        ("fraction".to_owned(), f64::from(wrench.submerged)),
+                        // Positive going down, so a splash can be scaled by how
+                        // hard the thing hit rather than by which way it was
+                        // travelling.
+                        ("speed".to_owned(), f64::from(-velocity[1])),
+                    ]
+                    .into_iter()
+                    .collect(),
+                });
+            }
         }
+    }
+
+    /// Water entries and exits since the last call, stamped with `tick`.
+    ///
+    /// The stamp happens here rather than in `float` because `Sim` counts its
+    /// own ticks from zero while a [`Runner`] counts from one, and an event log
+    /// whose ticks come from two clocks is a replay that cannot be compared
+    /// against another run.
+    fn drain_water_events(&mut self, tick: u64) -> Vec<loom_script::Event> {
+        self.water_events
+            .drain(..)
+            .map(|mut event| {
+                event.tick = tick;
+                event
+            })
+            .collect()
+    }
+
+    /// Every floating body, how much of it is under, and whether that counts.
+    ///
+    /// In load order, like everything else the simulation iterates.
+    #[must_use]
+    pub fn submersion(&self) -> Vec<(String, f32, bool)> {
+        self.floating
+            .iter()
+            .map(|f| (f.path.clone(), f.fraction, f.submerged))
+            .collect()
+    }
+
+    /// Whether a point is under the water — the listener's question.
+    ///
+    /// Same water body, same clock and same bed as the buoyancy solver, so the
+    /// tick a crate's deck goes under is the tick the sound goes muffled.
+    #[must_use]
+    pub fn submerged_at(&self, at: [f32; 3]) -> bool {
+        let Some(water) = &self.water else {
+            return false;
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let t = self.tick as f32 * TICK_SECONDS;
+        let ground = self
+            .terrain
+            .as_ref()
+            .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(at[0], at[2]));
+        loom_water::buoyancy::submersion_at(water, at, 0.0, t, ground) > 0.5
     }
 
     /// Advance whole ticks.
@@ -1023,6 +1170,22 @@ impl Runner {
             .collect()
     }
 
+    /// Where and when something went into the water, for the splash.
+    ///
+    /// Derived from the log for the same reason `fired` is: one record of what
+    /// happened. A splash tracked alongside the event that caused it is two
+    /// records that can disagree, and the one the human sees would be the one
+    /// no assertion checks.
+    #[must_use]
+    pub fn splashed(&self) -> Vec<(u64, [f32; 3])> {
+        self.events
+            .all()
+            .iter()
+            .filter(|e| e.kind == SUBMERGED)
+            .map(|e| (e.tick, e.at))
+            .collect()
+    }
+
     /// A runner that steps physics and runs nothing, for when the scripts
     /// could not be loaded.
     #[must_use]
@@ -1050,6 +1213,13 @@ impl Runner {
     /// [`loom_script::ScriptError`] from whichever script failed.
     pub fn tick(&mut self, world: &mut World, tick: u64) -> Result<(), loom_script::ScriptError> {
         self.physics.step(1);
+
+        // What the water did during the step, into the one log. Before the
+        // rules run, so a rule sees a body go under on the tick it went under
+        // rather than the tick after.
+        for event in self.physics.drain_water_events(tick) {
+            self.events.push(event);
+        }
 
         // Blasts go off after the step, because the tree the cover check walks
         // is built during it — before the first step every body is in the open
@@ -1158,9 +1328,11 @@ impl Runner {
         if let Some(rules) = &self.rules {
             let positions = world.positions();
             let happened = self.events.on_tick(tick);
+            let submersion = self.physics.submersion();
             let view = loom_script::WorldView {
                 positions: &positions,
                 events: &happened,
+                submersion: &submersion,
             };
             let raised = self
                 .host
@@ -1304,6 +1476,12 @@ impl Play {
         self.runner.fired()
     }
 
+    /// Where and when something went into the water.
+    #[must_use]
+    pub fn splashed(&self) -> Vec<(u64, [f32; 3])> {
+        self.runner.splashed()
+    }
+
     /// Everything that has happened, in order.
     #[must_use]
     pub fn events(&self) -> &loom_script::EventLog {
@@ -1315,6 +1493,13 @@ impl Play {
     #[must_use]
     pub fn physics(&self) -> &loom_physics::Physics {
         self.runner.physics.world()
+    }
+
+    /// Whether the listener is under the water. What the ears hear, not what
+    /// any body is doing — see `Sim::submerged_at`.
+    #[must_use]
+    pub fn submerged_at(&self, at: [f32; 3]) -> bool {
+        self.runner.physics.submerged_at(at)
     }
 
     /// Whether a human can drive anything here.

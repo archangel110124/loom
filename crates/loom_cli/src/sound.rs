@@ -143,6 +143,9 @@ impl Sound {
     }
 
     /// Re-measure and hand every voice its position for this tick.
+    ///
+    /// `submerged` is whether the listener's head is under the water — asked of
+    /// the simulation, which owns the surface, rather than worked out here.
     pub(crate) fn update(
         &mut self,
         world: &World,
@@ -150,6 +153,7 @@ impl Sound {
         listener: [f32; 3],
         right: [f32; 3],
         forward: [f32; 3],
+        submerged: bool,
     ) {
         if self.sources.is_empty() {
             return;
@@ -177,6 +181,13 @@ impl Sound {
             source.acoustics.reverb_delay = room.reverb_delay;
             source.acoustics.reverb_gain = room.reverb_gain;
             source.acoustics.openness = room.openness;
+            // **A property of the listener, applied per source, here.** It goes
+            // on last so it can only ever muffle further, and it goes on every
+            // source at once because it is the ears that are under the water,
+            // not any one sound.
+            if submerged {
+                source.acoustics = source.acoustics.underwater();
+            }
         }
 
         let sources = &self.sources;

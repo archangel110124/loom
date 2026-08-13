@@ -1030,6 +1030,53 @@ impl Default for Buoyancy {
     }
 }
 
+/// Tunes when a floating body counts as being *in* the water.
+///
+/// **Underwater is a gameplay state, not a shader effect** (water doc §5.7).
+/// Scripts branch on it, entering the water is what makes a splash, and the
+/// event log records both edges — so the question "is this body under" gets one
+/// answer, computed once per step, rather than one per system that wanted to
+/// know.
+///
+/// The answer itself is not authored here and cannot be: it is the submerged
+/// fraction the buoyancy solver already computes, because it is what Archimedes
+/// multiplies. Every node with [`Buoyancy`] has it whether or not it carries
+/// this component; what this authors is where the two thresholds sit.
+///
+/// **Two thresholds, not one, and that is the entire component.** A body
+/// floating at its waterline sits at some fixed fraction, and a wave passing
+/// under it moves that fraction up and down through whatever single number you
+/// compare against — so the state flips several times a second, every script
+/// watching it fires on every flip, and the splash re-fires with each one. The
+/// gap between `enter` and `exit` is what makes the state hold still. Set them
+/// equal and it chatters; that is a choice, not an error.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Submersion {
+    /// Fraction of the body that must be under before it counts as submerged.
+    ///
+    /// Above the fraction it floats at when settled, or it is submerged while
+    /// bobbing on the surface. Default `0.6` — comfortably more than half under
+    /// is a thing that has gone *in*, rather than a thing sitting on top.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub enter: f32,
+    /// Fraction it must fall back below before it stops counting.
+    ///
+    /// Below the settled waterline of anything that is meant to surface again.
+    /// Default `0.3`.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub exit: f32,
+}
+
+impl Default for Submersion {
+    fn default() -> Self {
+        Self {
+            enter: 0.6,
+            exit: 0.3,
+        }
+    }
+}
+
 /// A sound that plays from this node's position.
 ///
 /// **What it sounds like from where you stand is measured, not authored.**
@@ -1136,6 +1183,7 @@ pub fn registry() -> TypeRegistry {
     // the registry exists to stop.
     reg.register::<WaterBody>("WaterBody");
     reg.register::<Buoyancy>("Buoyancy");
+    reg.register::<Submersion>("Submersion");
     reg.register::<Script>("Script");
     reg
 }

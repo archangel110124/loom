@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 20] = [
+const SCENES: [&str; 21] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -59,6 +59,12 @@ const SCENES: [&str; 20] = [
     // device address, a shoreline discard, and waves attenuating in the
     // shallows — none of which `ocean` draws a pixel of.
     "assets/test/shore.loom",
+    // The only scene where particles are spawned *by* the simulation rather
+    // than by an emitter standing somewhere: the crate goes under at tick 105
+    // and the splash is replayed from the event log, so a `--sim 120` render
+    // here binds the particle pipeline off the back of a physics run. Nothing
+    // else in this list does that.
+    "assets/test/splash.loom",
     "assets/test/camera.loom",
     "assets/test/walker.loom",
     "assets/test/explosion.loom",

@@ -429,6 +429,15 @@ pub struct WorldView<'a> {
     pub positions: &'a [(String, [f32; 3])],
     /// Everything that happened this tick.
     pub events: &'a [Event],
+    /// Every floating body: its path, how much of it is under the water, and
+    /// whether the engine calls that submerged.
+    ///
+    /// **Both, and the second is not derivable from the first.** The fraction
+    /// is the raw signal and a script that thresholded it itself would get the
+    /// chatter the engine's two thresholds exist to remove — a wave washing
+    /// over a body crosses any single number twice per wave. So the debounced
+    /// answer is handed over as well, and it is the one to branch on.
+    pub submersion: &'a [(String, f32, bool)],
 }
 
 /// A sandboxed script host.
@@ -679,6 +688,18 @@ impl ScriptHost {
             positions.insert(path.as_str().into(), to_dynamic_vec(*at));
         }
         scope.push("positions", positions);
+
+        // Water, as two maps keyed the same way `positions` is: `submerged` is
+        // the state to branch on and `submersion` is how far under, for anything
+        // that wants a continuous response rather than a switch.
+        let mut wet = rhai::Map::new();
+        let mut under = rhai::Map::new();
+        for (path, fraction, submerged) in view.submersion {
+            wet.insert(path.as_str().into(), Dynamic::from_float(f64::from(*fraction)));
+            under.insert(path.as_str().into(), Dynamic::from_bool(*submerged));
+        }
+        scope.push("submersion", wet);
+        scope.push("submerged", under);
 
         let events: Vec<Dynamic> = view.events.iter().map(to_dynamic_event).collect();
         scope.push("events", Dynamic::from_array(events));
@@ -1130,7 +1151,7 @@ mod tests {
         host.compile("rules", r#"if tick > 10 { status = "won"; message = "cleared"; }"#)
             .expect("valid");
         let mut state = GameState::default();
-        let view = WorldView { positions: &nowhere(), events: &[] };
+        let view = WorldView { positions: &nowhere(), events: &[], submersion: &[] };
 
         host.rules("rules", 5, 1.0 / 60.0, &view, &mut state).expect("runs");
         assert_eq!(state.status(), Status::Playing, "not yet");
@@ -1154,7 +1175,7 @@ mod tests {
         )
         .expect("valid");
         let mut state = GameState::default();
-        let view = WorldView { positions: &nowhere(), events: &[] };
+        let view = WorldView { positions: &nowhere(), events: &[], submersion: &[] };
 
         for tick in 0..4 {
             host.rules("score", tick, 1.0 / 60.0, &view, &mut state).expect("runs");
@@ -1176,14 +1197,44 @@ mod tests {
         let mut state = GameState::default();
 
         let standing = vec![("Range/Target".to_owned(), [0.0, 1.0, 0.0])];
-        let view = WorldView { positions: &standing, events: &[] };
+        let view = WorldView { positions: &standing, events: &[], submersion: &[] };
         host.rules("watch", 1, 1.0 / 60.0, &view, &mut state).expect("runs");
         assert_eq!(state.status(), Status::Playing, "still up");
 
         let fallen = vec![("Range/Target".to_owned(), [0.0, -3.0, 0.0])];
-        let view = WorldView { positions: &fallen, events: &[] };
+        let view = WorldView { positions: &fallen, events: &[], submersion: &[] };
         host.rules("watch", 2, 1.0 / 60.0, &view, &mut state).expect("runs");
         assert_eq!(state.status(), Status::Won, "knocked into the pit");
+    }
+
+    /// **Water reaches the rules the same way positions do**: handed in, keyed
+    /// by node path, never queried. A script has no water body and no clock, so
+    /// "is this thing under" has to arrive as data.
+    #[test]
+    fn rules_can_read_what_is_under_the_water() {
+        let mut host = host();
+        host.compile(
+            "drown",
+            r#"
+            state.wet = submersion["Sea/Crate"];
+            if submerged["Sea/Crate"] { status = "lost"; message = "it sank"; }
+            "#,
+        )
+        .expect("valid");
+        let mut state = GameState::default();
+
+        // Riding the surface: wet, and not submerged. The two differ, and that
+        // is the point of handing over both.
+        let afloat = vec![("Sea/Crate".to_owned(), 0.4_f32, false)];
+        let view = WorldView { positions: &nowhere(), events: &[], submersion: &afloat };
+        host.rules("drown", 1, 1.0 / 60.0, &view, &mut state).expect("runs");
+        assert_eq!(state.status(), Status::Playing, "floating is not sinking");
+        assert!((state.number("wet").expect("reported") - 0.4).abs() < 1e-6);
+
+        let under = vec![("Sea/Crate".to_owned(), 0.95_f32, true)];
+        let view = WorldView { positions: &nowhere(), events: &[], submersion: &under };
+        host.rules("drown", 2, 1.0 / 60.0, &view, &mut state).expect("runs");
+        assert_eq!(state.status(), Status::Lost);
     }
 
     /// A rules script is code an agent wrote, like any other. The limits are
@@ -1192,7 +1243,7 @@ mod tests {
     fn a_rules_script_cannot_loop_forever() {
         let mut host = host();
         host.compile("hang", "let n = 0; while true { n += 1; }").expect("compiles");
-        let view = WorldView { positions: &nowhere(), events: &[] };
+        let view = WorldView { positions: &nowhere(), events: &[], submersion: &[] };
 
         let err = host
             .rules("hang", 1, 1.0 / 60.0, &view, &mut GameState::default())

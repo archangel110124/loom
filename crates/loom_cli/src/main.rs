@@ -494,8 +494,9 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // fireball is drawn where the blast happened rather than only its effect
     // on the crates being visible.
     let mut fired = Vec::new();
+    let mut splashed = Vec::new();
     if let Some(ticks) = flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()) {
-        fired = simulate_physics(&mut world, base, ticks);
+        (fired, splashed) = simulate_physics(&mut world, base, ticks);
     }
 
     let objects = world_to_objects(&world, &library, &material_library);
@@ -504,6 +505,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         &weather,
         flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()),
         &fired,
+        &splashed,
     );
     let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok());
     let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok());
@@ -616,6 +618,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                         &weather,
                         Some(elapsed as u32),
                         &runner.fired(),
+                        &runner.splashed(),
                     );
 
                     // Orbit from wherever the still would have looked, so a
@@ -1866,11 +1869,14 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
 /// the render: a picture of the scene up to the failure is more use to whoever
 /// has to fix the script than no picture at all, which is the same reasoning
 /// that makes a missing texture a warning.
+/// When and where something the particles have to replay happened.
+type Happenings = Vec<(u64, [f32; 3])>;
+
 fn simulate_physics(
     world: &mut World,
     base: &std::path::Path,
     ticks: u32,
-) -> Vec<(u64, [f32; 3])> {
+) -> (Happenings, Happenings) {
     let mut runner = match play::Runner::new(world, base) {
         Ok(r) => r,
         Err(json) => {
@@ -1878,7 +1884,7 @@ fn simulate_physics(
             let mut sim = play::Sim::new(world);
             sim.step(ticks);
             sim.write_back(world);
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
     };
     for tick in 1..=u64::from(ticks) {
@@ -1887,7 +1893,7 @@ fn simulate_physics(
             break;
         }
     }
-    runner.fired()
+    (runner.fired(), runner.splashed())
 }
 
 /// Every value given for a repeated flag.
@@ -3000,6 +3006,42 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         ]));
 
         assert_eq!(code, 0, "the crate should float and settle: {out}");
+    }
+
+    /// **The W7 exit criterion, end to end.** A crate falls in, the engine
+    /// says so once, the crate floats back out, the engine says that once too,
+    /// and a script reading the state ends the game on it.
+    ///
+    /// `== 1` rather than `>= 1` is the whole test. A state that chattered as
+    /// the swell went past would satisfy `>= 1` on its first tick and go on
+    /// firing for the next twenty-five seconds — a splash per flip, a script
+    /// callback per flip, and nothing in a still image or a final position to
+    /// show for it.
+    #[test]
+    fn a_crate_enters_the_water_once_and_leaves_it_once() {
+        let scene = "../../assets/test/splash.loom";
+        let (code, out) = run(&args(&[
+            "sim",
+            scene,
+            "--ticks",
+            "1800",
+            "--assert",
+            "events.submerged == 1",
+            "--assert",
+            "events.surfaced == 1",
+            "--assert",
+            "status == won",
+            // The settled band never reaches `enter`, so the single entry is a
+            // property of this sea and this crate rather than a lucky run.
+            "--assert",
+            "state.wet_max < 0.6",
+            "--assert",
+            "Sea/Crate.y < 1.5",
+            "--assert",
+            "Sea/Crate.y > -1.5",
+        ]));
+
+        assert_eq!(code, 0, "the crate should go in once and come back out: {out}");
     }
 
     /// And the same run must still be reproducible.

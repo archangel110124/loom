@@ -149,6 +149,10 @@ pub struct World {
     /// The `Buoyancy` component, verbatim. Floating a body needs `loom_water`
     /// and `loom_physics`, and this crate depends on neither.
     buoyancy: Storage<serde_json::Value>,
+    /// The `Submersion` component, verbatim — the two thresholds at which a
+    /// floating body counts as being in the water. Carried for the same reason
+    /// as `buoyancy`: the fraction it thresholds comes out of the water solver.
+    submersion: Storage<serde_json::Value>,
     /// The `AudioSource` component, verbatim. Resolving it needs a decoder
     /// and a device, neither of which belongs in here.
     audio: Storage<serde_json::Value>,
@@ -402,6 +406,9 @@ impl World {
             if let Some(buoyancy) = node.components.get("Buoyancy") {
                 world.buoyancy.insert(entity, buoyancy.clone());
             }
+            if let Some(submersion) = node.components.get("Submersion") {
+                world.submersion.insert(entity, submersion.clone());
+            }
             if let Some(audio) = node.components.get("AudioSource") {
                 world.audio.insert(entity, audio.clone());
             }
@@ -584,6 +591,21 @@ impl World {
     #[must_use]
     pub fn buoyancy(&self, entity: Entity) -> Option<&serde_json::Value> {
         self.buoyancy.get(entity)
+    }
+
+    /// The `Submersion` thresholds a node declares, if any.
+    #[must_use]
+    pub fn submersion(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.submersion.get(entity)
+    }
+
+    /// Whether this node itself carries the `WaterBody`.
+    ///
+    /// For walking a node's ancestors: a `ParticleEmitter` under the water is
+    /// the scene's splash, not a plume that should play where it sits.
+    #[must_use]
+    pub fn is_water(&self, entity: Entity) -> bool {
+        self.water.get(entity).is_some()
     }
 
     /// The `AudioSource` a node declares, if any.

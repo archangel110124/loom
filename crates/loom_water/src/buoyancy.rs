@@ -48,13 +48,31 @@ pub struct PontoonState {
     pub ground: f32,
 }
 
-/// One force and one torque, in world space, about the centre of mass.
+/// One force and one torque, in world space, about the centre of mass — and
+/// how much of the body the water had hold of while producing them.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Wrench {
     /// Newtons.
     pub force: [f32; 3],
     /// Newton-metres.
     pub torque: [f32; 3],
+    /// Fraction of the body's pontoon volume under the surface, `0.0` to `1.0`.
+    ///
+    /// **This rides out of the solver rather than being asked for separately,
+    /// and that is the whole point.** Buoyancy already computes a submerged
+    /// volume per pontoon — it is what Archimedes multiplies — so a second
+    /// query answering "is it in the water" would be a second opinion about a
+    /// number this function already knows, free to disagree with the forces
+    /// actually applied. Gameplay, scripts, splashes and the event log all read
+    /// this one.
+    ///
+    /// It is a fraction rather than a flag or a depth for three reasons. It is
+    /// what is already in hand. A flag cannot scale a continuous response, and
+    /// the flag is derivable from it ([`is_submerged`]) while the reverse is
+    /// not. And "the depth of a reference point" needs a point: a body rotates,
+    /// so any single point is right in one orientation and wrong in the others,
+    /// whereas the pontoons turn with the body and the fraction turns with them.
+    pub submerged: f32,
 }
 
 /// Volume of the part of a sphere below `surface_y`, in cubic metres.
@@ -102,6 +120,11 @@ pub fn solve(
     t: f32,
 ) -> Wrench {
     let mut wrench = Wrench::default();
+    // The two halves of the submerged fraction, summed in the same pass and the
+    // same order as the forces. `dry` is counted too — a body one of whose four
+    // pontoons is under is a quarter submerged, not wholly.
+    let mut wet_volume = 0.0_f32;
+    let mut total_volume = 0.0_f32;
 
     for pontoon in pontoons {
         // **The bed, because the shallows flatten the waves.** Water is still a
@@ -113,13 +136,15 @@ pub fn solve(
             sample_water(water, [pontoon.at[0], pontoon.at[2]], t, pontoon.ground);
 
         let volume = submerged_volume(pontoon.radius, pontoon.at[1], surface.height);
+        let whole = 4.0 / 3.0 * std::f32::consts::PI * pontoon.radius.powi(3);
+        total_volume += whole;
+        wet_volume += volume;
         if volume <= 0.0 {
             // Out of the water entirely: no buoyancy, and no damping or drag
             // either. Damping a pontoon in mid-air is water acting at a
             // distance, and it reads as an object falling through treacle.
             continue;
         }
-        let whole = 4.0 / 3.0 * std::f32::consts::PI * pontoon.radius.powi(3);
         // How much of this sphere is wet, which is what scales what the water
         // is allowed to do to it. Without this a pontoon grazing the surface
         // gets a fully-submerged pontoon's drag.
@@ -173,7 +198,69 @@ pub fn solve(
         }
     }
 
+    // A body with no pontoons at all is not in the water; it has no volume for
+    // the water to be in. Guarded rather than divided, because the alternative
+    // is a NaN in a number the event log and every script read.
+    wrench.submerged = if total_volume > 0.0 {
+        (wet_volume / total_volume).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     wrench
+}
+
+/// How much of a sphere at `at` is under the water, `0.0` to `1.0`.
+///
+/// The same question [`solve`] answers for a whole body, for callers that have
+/// one point rather than a pontoon set — the audio listener is the one that
+/// exists, and it is a point because an ear has no volume. `radius <= 0.0` is
+/// therefore not degenerate but the normal case, and it answers the way a point
+/// does: under the surface or not, with nothing in between.
+///
+/// **Same surface, same clock, same height field as the solver.** It reads
+/// [`sample_water`] like everything else does, so a listener cannot be told it
+/// is underwater by a surface a crate floating beside it disagrees with.
+#[must_use]
+pub fn submersion_at(
+    water: &WaterBody,
+    at: [f32; 3],
+    radius: f32,
+    t: f32,
+    ground: f32,
+) -> f32 {
+    let surface = sample_water(water, [at[0], at[2]], t, ground);
+    if radius <= 0.0 {
+        return f32::from(u8::from(surface.height > at[1]));
+    }
+    let whole = 4.0 / 3.0 * std::f32::consts::PI * radius * radius * radius;
+    (submerged_volume(radius, at[1], surface.height) / whole).clamp(0.0, 1.0)
+}
+
+/// Whether a body counts as submerged, given what it counted as last tick.
+///
+/// **A Schmitt trigger, and the two thresholds are the whole reason this is a
+/// function rather than a comparison.** A body floating at the waterline sits
+/// where the fraction is *near* whatever single threshold you pick, and a wave
+/// passing under it then crosses that threshold twice per wave — so "is it
+/// submerged" chatters every few ticks, every script watching it fires on every
+/// edge, and every splash re-fires. It is invisible in a still and obvious in a
+/// tick-by-tick event log, which is why the test for it counts events over
+/// thirty seconds rather than looking at a picture.
+///
+/// Going under takes `enter`; coming back out takes falling below `exit`. In
+/// between, whatever it already was. `exit >= enter` is authoring nonsense and
+/// is treated as no hysteresis at all rather than as an error — the state is
+/// then simply `fraction >= enter`, which chatters, which is the author's
+/// choice and is exactly what the mutation check for this flips.
+#[must_use]
+pub fn is_submerged(was: bool, fraction: f32, enter: f32, exit: f32) -> bool {
+    if fraction >= enter {
+        return true;
+    }
+    if fraction <= exit.min(enter) {
+        return false;
+    }
+    was
 }
 
 /// Four pontoons sized to a box, for a `Buoyancy` that lists none.
@@ -463,6 +550,133 @@ mod tests {
         let b = solve(&water, &Buoyancy::default(), &pontoons, [0.0; 3], 3.5);
         assert_eq!(a.force[1].to_bits(), b.force[1].to_bits());
         assert_eq!(a.torque[0].to_bits(), b.torque[0].to_bits());
+    }
+
+    /// **Submersion is the solver's own arithmetic, not a second opinion.**
+    /// Four pontoons, two of them under: the fraction is what the displaced
+    /// volumes say, and it moves with the surface rather than with a separate
+    /// height test that could disagree with the forces being applied.
+    #[test]
+    fn the_solver_reports_how_much_of_the_body_is_under() {
+        let water = still();
+        let buoyancy = Buoyancy::default();
+        let at = |y: f32| {
+            default_pontoons([0.5, 0.5, 0.5])
+                .iter()
+                .map(|p| PontoonState {
+                    at: [p.offset[0], y, p.offset[2]],
+                    radius: p.radius,
+                    velocity: [0.0; 3],
+                    ground: DEEP,
+                })
+                .collect::<Vec<PontoonState>>()
+        };
+
+        // Well clear of the water, on it, and well under it.
+        assert_eq!(solve(&water, &buoyancy, &at(6.0), [0.0; 3], 0.0).submerged, 0.0);
+        let half = solve(&water, &buoyancy, &at(0.0), [0.0; 3], 0.0).submerged;
+        assert!((half - 0.5).abs() < 1e-5, "spheres centred on the surface: {half}");
+        assert_eq!(solve(&water, &buoyancy, &at(-6.0), [0.0; 3], 0.0).submerged, 1.0);
+
+        // And it is the *fraction of the body*, not of the wet pontoons: two
+        // corners under and two out is half a body, not a whole one.
+        let mut tilted = at(0.0);
+        for (index, state) in tilted.iter_mut().enumerate() {
+            state.at[1] = if index < 2 { -6.0 } else { 6.0 };
+        }
+        let split = solve(&water, &buoyancy, &tilted, [0.0; 3], 0.0).submerged;
+        assert!((split - 0.5).abs() < 1e-5, "two of four under is half: {split}");
+    }
+
+    /// A body with no pontoons is not in the water, and is not a NaN either —
+    /// which is what a bare division would put into the event log and into
+    /// every script that reads it.
+    #[test]
+    fn a_body_with_no_pontoons_is_dry_rather_than_nan() {
+        let w = solve(&still(), &Buoyancy::default(), &[], [0.0; 3], 0.0);
+
+        assert_eq!(w.submerged, 0.0);
+        assert!(w.submerged.is_finite());
+    }
+
+    /// The listener's version: a point is under the surface or it is not.
+    #[test]
+    fn a_point_is_submerged_below_the_surface_and_not_above_it() {
+        let mut sea = still();
+        sea.surface_height = 2.0;
+
+        assert_eq!(submersion_at(&sea, [3.0, 1.0, -4.0], 0.0, 0.0, DEEP), 1.0);
+        assert_eq!(submersion_at(&sea, [3.0, 3.0, -4.0], 0.0, 0.0, DEEP), 0.0);
+        // A sphere straddling it is neither, which is what makes the same
+        // function usable for a head as for a hull.
+        let straddling = submersion_at(&sea, [3.0, 2.0, -4.0], 0.5, 0.0, DEEP);
+        assert!((straddling - 0.5).abs() < 1e-5, "{straddling}");
+    }
+
+    /// **The chatter test, which is the failure this whole mechanism exists to
+    /// prevent.** A body under the surface with a swell washing over it crosses
+    /// any single threshold twice per wave. With two thresholds the state
+    /// changes twice in the whole run; with one it changes on every crossing,
+    /// and every one of those is a script callback and a splash.
+    ///
+    /// Written as a trace rather than a count, because a count alone is not
+    /// discriminating: several plausible ways of getting this wrong — dropping
+    /// the carried state, latching on the wrong threshold — also produce two
+    /// changes. What has to hold is *when* they happen.
+    #[test]
+    fn hysteresis_is_what_stops_a_passing_wave_from_chattering_the_state() {
+        const ENTER: f32 = 0.75;
+        const EXIT: f32 = 0.25;
+        // A body that sinks over a second, sits under the surface for eight
+        // seconds while a swell washes over it — dipping to 0.5, which is below
+        // `enter` and well above `exit` — and then floats out.
+        let fraction = |tick: u32| -> f32 {
+            let t = f32::from(u16::try_from(tick).unwrap_or(u16::MAX)) / 60.0;
+            if t < 1.0 {
+                t
+            } else if t < 9.0 {
+                0.7 + 0.2 * (t * std::f32::consts::TAU).sin()
+            } else {
+                0.0
+            }
+        };
+        let trace = |enter: f32, exit: f32| {
+            let mut was = false;
+            let mut changes = Vec::new();
+            for tick in 0..600 {
+                let now = is_submerged(was, fraction(tick), enter, exit);
+                if now != was {
+                    changes.push((tick, now));
+                }
+                was = now;
+            }
+            changes
+        };
+
+        let changes = trace(ENTER, EXIT);
+        assert_eq!(changes.len(), 2, "in once and out once: {changes:?}");
+        // On the way in, at `enter` and not before — a state that latched on
+        // the lower threshold would go under while the body was still mostly
+        // out of the water.
+        let (went_in, under) = changes[0];
+        assert!(under);
+        assert!(fraction(went_in) >= ENTER, "latched early at {}", fraction(went_in));
+        assert!(fraction(went_in - 1) < ENTER, "latched late");
+        // And out only when the body actually leaves, not on the first dip.
+        let (came_out, under) = changes[1];
+        assert!(!under);
+        assert!(came_out > 9 * 60 - 2, "surfaced at tick {came_out}, on a dip");
+
+        // **The mutation: one threshold instead of two.** Same signal, same code
+        // path, and the state falls apart — so the gap between the two is load
+        // bearing rather than decoration.
+        let single = trace(ENTER, ENTER);
+        assert!(
+            single.len() > 10,
+            "a single threshold should chatter, and this test proves nothing if \
+             it does not: {} changes",
+            single.len()
+        );
     }
 
     /// The derived default displaces what the box does, rather than what four
