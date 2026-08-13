@@ -40,6 +40,7 @@
 //! a different number — the same class of bug `clippy.toml` guards against by
 //! banning `HashMap` iteration in simulation code.
 
+pub mod buoyancy;
 pub mod spectrum;
 
 use loom_scene::components::{MAX_WAVES, WaterBody};

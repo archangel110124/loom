@@ -65,6 +65,26 @@ pub struct Sim {
     dynamic: Vec<(loom_ecs::Entity, RigidBodyHandle)>,
     /// Entities with a `CharacterController`, and their walking state.
     characters: Vec<Walker>,
+    /// The scene's water, with its waves resolved once — the same resolution
+    /// the renderer does, so a crate floats on the sea it is drawn on.
+    water: Option<loom_scene::components::WaterBody>,
+    /// Bodies that float, in scene order, with their pontoons already in body
+    /// space. **Order is fixed at load and never sorted**: the forces are
+    /// summed as floats, and a different visiting order is a different number
+    /// in the determinism hash.
+    floating: Vec<Floating>,
+    /// Ticks stepped so far. Water is a function of position and this, times
+    /// the fixed timestep — never of a wall clock (never-do #8).
+    tick: u64,
+}
+
+/// One buoyant body: what floats, and where its spheres are.
+struct Floating {
+    body: RigidBodyHandle,
+    buoyancy: loom_scene::components::Buoyancy,
+    /// Scratch, reused every tick so the solver's input does not allocate
+    /// inside the fixed step.
+    states: Vec<loom_water::buoyancy::PontoonState>,
 }
 
 /// One character, its velocity, and its script's memory.
@@ -116,6 +136,46 @@ fn character_shape(component: &serde_json::Value) -> loom_physics::CharacterShap
     }
 }
 
+/// Read a node's `Buoyancy`, with its pontoons resolved.
+///
+/// **An empty pontoon list is the documented default, made real.** Four
+/// spheres at the body's horizontal corners displacing exactly its own volume
+/// — which is both halves of the water doc's §5.6 trap answered by
+/// construction: one pontoon would give no righting torque, and hand-placed
+/// corner spheres large enough to look right displace several times what the
+/// object does and make it float like a cork.
+///
+/// A sphere is the exception and gets one pontoon of its own radius, because a
+/// sphere *is* a pontoon: four corner spheres would be a worse approximation of
+/// it, and a body with no orientation has nothing to right.
+fn buoyancy_of(
+    world: &World,
+    entity: loom_ecs::Entity,
+    half: [f32; 3],
+    ball: bool,
+) -> Option<loom_scene::components::Buoyancy> {
+    let mut component = serde_json::from_value::<loom_scene::components::Buoyancy>(
+        world.buoyancy(entity)?.clone(),
+    )
+    .ok()?;
+    if component.pontoons.is_empty() {
+        component.pontoons = if ball {
+            vec![loom_scene::components::Pontoon {
+                offset: [0.0; 3],
+                radius: half[0].max(half[1]).max(half[2]),
+            }]
+        } else {
+            loom_water::buoyancy::default_pontoons(half)
+        };
+    }
+    // The schema caps this and the validator enforces it; truncating here as
+    // well means a hand-built component cannot make the cost unbounded.
+    component
+        .pontoons
+        .truncate(loom_scene::components::MAX_PONTOONS);
+    Some(component)
+}
+
 impl Sim {
     /// Build colliders and bodies for everything in `world`.
     ///
@@ -127,6 +187,7 @@ impl Sim {
         let mut physics = Physics::new(TICK_SECONDS);
         let mut dynamic = Vec::new();
         let mut characters = Vec::new();
+        let mut floating: Vec<Floating> = Vec::new();
 
         for entity in world.entities() {
             let Some(global) = world.global_transform(*entity) else {
@@ -267,6 +328,20 @@ impl Sim {
                     physics.add_box_body(pos, quat, half, mass)
                 };
                 dynamic.push((*entity, handle));
+                if let Some(buoyancy) = buoyancy_of(world, *entity, half, ball) {
+                    floating.push(Floating {
+                        body: handle,
+                        states: vec![
+                            loom_water::buoyancy::PontoonState {
+                                at: [0.0; 3],
+                                radius: 0.0,
+                                velocity: [0.0; 3],
+                            };
+                            buoyancy.pontoons.len()
+                        ],
+                        buoyancy,
+                    });
+                }
             } else if world.is_renderable(*entity) && !has_dynamic_ancestor(world, *entity) {
                 if ball {
                     physics.add_static_ball(pos, radius);
@@ -282,19 +357,86 @@ impl Sim {
             characters.iter().position(|w| w.entity == entity)
         });
 
+        let water = crate::weather::water_of(world, &crate::weather::wind_of_world(world));
+        if water.is_none() && !floating.is_empty() {
+            crate::log::warn(
+                "the scene has Buoyancy but no WaterBody; nothing will float".to_owned(),
+            );
+        }
+
         Self {
             physics,
             nav: None,
             player,
             dynamic,
             characters,
+            water,
+            floating,
+            tick: 0,
+        }
+    }
+
+    /// Apply this tick's buoyancy, before the solver runs.
+    ///
+    /// **Every rule that protects the determinism hash applies in here**, which
+    /// is what makes buoyancy different from the water mesh and the grass:
+    /// bodies in load order, pontoons in component order, one force and one
+    /// torque per body applied once, and the surface read from
+    /// `loom_water::sample_water` on the CPU — never from the GPU (§5.1).
+    fn float(&mut self) {
+        let Some(water) = &self.water else {
+            return;
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let t = self.tick as f32 * TICK_SECONDS;
+
+        for floating in &mut self.floating {
+            let (Some(position), Some(rotation), Some(centre)) = (
+                self.physics.position(floating.body),
+                self.physics.rotation_quat(floating.body),
+                self.physics.centre_of_mass(floating.body),
+            ) else {
+                continue;
+            };
+            let rotation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
+
+            for (state, pontoon) in floating.states.iter_mut().zip(&floating.buoyancy.pontoons) {
+                // The offset is in the body's own space and turns with it —
+                // which is the whole mechanism by which a tilted crate is
+                // righted. Applied at the node's origin rather than the centre
+                // of mass, because that is the space the offsets were authored
+                // in.
+                let at = Vec3::from_array(position)
+                    + rotation * Vec3::from_array(pontoon.offset);
+                state.at = at.to_array();
+                state.radius = pontoon.radius;
+                state.velocity = self
+                    .physics
+                    .velocity_at_point(floating.body, state.at)
+                    .unwrap_or([0.0; 3]);
+            }
+
+            let wrench = loom_water::buoyancy::solve(
+                water,
+                &floating.buoyancy,
+                &floating.states,
+                centre,
+                t,
+            );
+            self.physics
+                .apply_force_torque(floating.body, wrench.force, wrench.torque);
         }
     }
 
     /// Advance whole ticks.
     pub fn step(&mut self, ticks: u32) {
         for _ in 0..ticks {
+            // Forces first, inside the same fixed step, before the solver runs
+            // — a force applied after `step` would take effect a tick late and
+            // the buoyancy would visibly lag the surface.
+            self.float();
             self.physics.step();
+            self.tick += 1;
         }
         // Baked after the first step, once, for the reason every query here
         // has the same caveat: the broad-phase tree is built during the step,
@@ -1329,6 +1471,49 @@ transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
 
     fn world() -> World {
         World::from_scene(&Scene::parse(FALLING).expect("valid scene"))
+    }
+
+    /// Run the crate scene and report where `Sea/Crate` is every tick.
+    fn crate_trajectory(source: &str, ticks: u32) -> Vec<[f32; 3]> {
+        let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
+        let mut play = Play::start(world, std::path::Path::new("."));
+        (0..ticks)
+            .map(|_| {
+                play.run(1);
+                let entity = play
+                    .world
+                    .entities()
+                    .iter()
+                    .copied()
+                    .find(|e| play.world.path(*e) == Some("Sea/Crate"))
+                    .expect("the crate");
+                play.world.transform(entity).expect("a transform").pos
+            })
+            .collect()
+    }
+
+    /// How far the sea itself rises and falls at one spot over a tick range —
+    /// the thing a floating crate's motion has to be compared against, because
+    /// a crate on a real sea is supposed to move.
+    fn sea_travel(source: &str, at: [f32; 3], ticks: std::ops::Range<u32>) -> f32 {
+        let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
+        let water = crate::weather::water_of(&world, &crate::weather::wind_of_world(&world))
+            .expect("the scene has water");
+        #[allow(clippy::cast_precision_loss)]
+        let heights: Vec<f32> = ticks
+            .map(|tick| {
+                loom_water::sample_water(&water, [at[0], at[2]], tick as f32 * TICK_SECONDS, 0.0)
+                    .height
+            })
+            .collect();
+        peak_to_peak(&heights)
+    }
+
+    /// Peak-to-peak vertical travel over a slice of a run, in metres.
+    fn peak_to_peak(window: &[f32]) -> f32 {
+        let high = window.iter().copied().fold(f32::MIN, f32::max);
+        let low = window.iter().copied().fold(f32::MAX, f32::min);
+        high - low
     }
 
     fn height(world: &World, path: &str) -> f32 {
@@ -2470,6 +2655,156 @@ transform = { pos = [0.0, 6.0, 0.0] }
         // Step works anyway — that is what a step button is.
         play.run(1);
         assert_eq!(play.ticks, 1);
+    }
+
+    /// The scene the exit criterion runs on, read from disk so the test and
+    /// `loom sim assets/test/water_crate.loom` are measuring the same crate.
+    fn water_crate() -> String {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/test/water_crate.loom"),
+        )
+        .expect("the W5 test scene should exist")
+    }
+
+    /// **W5's exit criterion, as a number.** A crate dropped four metres into
+    /// the sea and left alone for 1800 ticks — thirty seconds, because
+    /// resonance is not visible in five.
+    ///
+    /// *Does not resonate* is defined here as: over the last five seconds the
+    /// crate's peak-to-peak vertical travel is **no more than the sea's own
+    /// travel at that spot**, and no larger than it was on entry. A crate on a
+    /// real sea is supposed to move, so the reference is the surface it is on
+    /// rather than a number — riding the waves is the pass, out-travelling them
+    /// is the fail. An undamped pontoon takes energy out of the wave field
+    /// every cycle with nothing to give it back to, and ends up moving several
+    /// times as far as the water under it.
+    #[test]
+    fn a_floating_crate_settles_rather_than_resonating() {
+        let scene = water_crate();
+        let track = crate_trajectory(&scene, 1800);
+        let y: Vec<f32> = track.iter().map(|p| p[1]).collect();
+
+        // Once it is in the water: the drop takes about half a second and the
+        // entry transient a couple more.
+        let entry = peak_to_peak(&y[300..600]);
+        let settled = peak_to_peak(&y[1500..1800]);
+        let sea = sea_travel(&scene, track[1799], 1500..1800);
+        // **Archimedes, measured rather than assumed.** At the waterline it
+        // settles on, the crate's four pontoons displace the crate's own mass
+        // of water — 518 kg. Any factor slip in the volume, the density or the
+        // force would leave it floating high or swamped, and every other
+        // assertion here would still pass.
+        let mean = y[1500..1800].iter().sum::<f32>() / 300.0;
+        let displaced: f32 = loom_water::buoyancy::default_pontoons([0.6, 0.6, 0.6])
+            .iter()
+            .map(|p| loom_water::buoyancy::submerged_volume(p.radius, mean + p.offset[1], 0.0))
+            .sum::<f32>()
+            * 1000.0;
+        assert!(
+            (displaced - 518.0).abs() < 30.0,
+            "resting at y = {mean:.3} it displaces {displaced:.0} kg of water, \
+             and it weighs 518 kg"
+        );
+
+        assert!(
+            settled <= entry,
+            "the bob is growing, not decaying: {entry:.3} m early, {settled:.3} m late"
+        );
+        // A quarter of slack, because the crate drifts across the surface
+        // while the reference is a fixed point — so it samples a slightly
+        // different run of crests than the spot it ends on. An undamped crate
+        // is nearly three times the sea's travel, so this costs nothing.
+        assert!(
+            settled <= sea * 1.25,
+            "the crate out-travels the sea it is floating on: {settled:.3} m \
+             against the surface's {sea:.3} m"
+        );
+        // And it is riding the waves rather than resting on an invisible floor
+        // — a crate that stopped moving entirely would pass both tests above
+        // and would mean the buoyancy had died.
+        assert!(
+            settled > sea * 0.25,
+            "the crate is barely moving on a sea that travels {sea:.3} m: {settled:.3} m"
+        );
+    }
+
+    /// The other half of the same claim: **remove the damping and the
+    /// assertion above has to fail.** Without this the test only asserts that
+    /// a crate exists.
+    #[test]
+    fn without_damping_the_same_crate_resonates() {
+        let undamped = water_crate().replace(
+            "[node.components.Buoyancy]",
+            "[node.components.Buoyancy]\n  damp_linear = 0.0\n  damp_quadratic = 0.0",
+        );
+        let track = crate_trajectory(&undamped, 1800);
+        let y: Vec<f32> = track.iter().map(|p| p[1]).collect();
+
+        let settled = peak_to_peak(&y[1500..1800]);
+        let sea = sea_travel(&undamped, track[1799], 1500..1800);
+        assert!(
+            settled > sea,
+            "damping was removed and the crate still rides the sea ({settled:.3} m \
+             against the surface's {sea:.3} m) — then the test above proves nothing"
+        );
+    }
+
+    /// **Why there are four pontoons and not one.** Force applied at an offset
+    /// is a torque; force applied through the centre of mass is not. The crate
+    /// is dropped in on its side, 60° over: four pontoons right it, because the
+    /// deeper ones push harder than the shallower ones and the difference acts
+    /// at an offset. One pontoon at the centre of mass has no offset to act
+    /// through, so the water cannot turn it at all and it stays over.
+    ///
+    /// "Cannot turn it" rather than "spins it" is the honest version of the
+    /// doc's warning: a single central pontoon does not tumble a crate, it
+    /// leaves its attitude to whatever else happens to touch it — which in open
+    /// water is nothing.
+    #[test]
+    fn four_pontoons_right_a_capsized_crate_and_one_does_not() {
+        let capsized = water_crate().replace(
+            "rot_euler = [0.0, 12.0, 0.0]",
+            "rot_euler = [0.0, 12.0, 60.0]",
+        );
+        let tilt_after = |source: &str, ticks: u32| {
+            let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
+            let mut play = Play::start(world, std::path::Path::new("."));
+            play.run(ticks);
+            let entity = play
+                .world
+                .entities()
+                .iter()
+                .copied()
+                .find(|e| play.world.path(*e) == Some("Sea/Crate"))
+                .expect("the crate");
+            let rot = play.world.transform(entity).expect("a transform").rot_euler;
+            // Pitch and roll only: yaw is free for a floating box and says
+            // nothing about whether it is the right way up.
+            rot[0].abs().max(rot[2].abs())
+        };
+
+        // The wave sum's steepest slope is about 20°, and a crate that follows
+        // the surface reaches it — so level is the wrong bar and upright is the
+        // right one.
+        let four = tilt_after(&capsized, 900);
+        assert!(four < 30.0, "four pontoons should right it: {four} degrees");
+
+        // Radius chosen so the single sphere displaces the same volume the four
+        // do: this is a test of *where* the force lands, not of how much.
+        let one = tilt_after(
+            &capsized.replace(
+                "[node.components.Buoyancy]",
+                "[node.components.Buoyancy]\n  \
+                 pontoons = [{ offset = [0.0, 0.0, 0.0], radius = 0.7444 }]",
+            ),
+            900,
+        );
+        assert!(
+            one > 45.0,
+            "one central pontoon can exert no righting torque, so the crate \
+             should still be over: {one} degrees against {four} for four"
+        );
     }
 
     /// A stall must not turn into a thousand catch-up ticks.

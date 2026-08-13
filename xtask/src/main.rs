@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 18] = [
+const SCENES: [&str; 19] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -51,6 +51,10 @@ const SCENES: [&str; 18] = [
     "assets/test/meadow.loom",
     "assets/test/grass_slope.loom",
     "assets/test/ocean.loom",
+    // The only scene where a rigid body is driven by the water rather than
+    // only drawn against it, so it is the only one whose `render --sim` runs
+    // the buoyancy solver at all.
+    "assets/test/water_crate.loom",
     "assets/test/camera.loom",
     "assets/test/walker.loom",
     "assets/test/explosion.loom",

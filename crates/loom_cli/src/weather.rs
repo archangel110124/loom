@@ -7,22 +7,14 @@
 //! two-sources-of-truth problem the field itself exists to prevent, one level
 //! up.
 
+use loom_ecs::World;
 use loom_field::wind::Wind;
 use loom_scene::Scene;
+use loom_scene::components::WaterBody;
 
-/// The scene's wind, or a default breeze when it authors none.
-///
-/// **At most one per scene; the first is used** — the same rule `Environment`
-/// follows, and for the same reason: two of them is a scene with two weathers
-/// and no way to say which is meant. A second is not an error, because
-/// rejecting a whole scene over a duplicate that has an obvious reading would
-/// be worse than picking one.
-#[must_use]
-pub(crate) fn wind_of(scene: &Scene) -> Wind {
-    let Some(authored) = scene
-        .nodes()
-        .iter()
-        .find_map(|node| node.components.get("Wind"))
+/// The one mapping from the authored scalars to the field.
+fn wind_from(authored: Option<&serde_json::Value>) -> Wind {
+    let Some(authored) = authored
         .and_then(|value| serde_json::from_value::<loom_scene::components::Wind>(value.clone()).ok())
     else {
         return Wind::default();
@@ -35,6 +27,56 @@ pub(crate) fn wind_of(scene: &Scene) -> Wind {
         authored.turbulence,
         authored.ground_drag,
     )
+}
+
+/// The scene's wind, or a default breeze when it authors none.
+///
+/// **At most one per scene; the first is used** — the same rule `Environment`
+/// follows, and for the same reason: two of them is a scene with two weathers
+/// and no way to say which is meant. A second is not an error, because
+/// rejecting a whole scene over a duplicate that has an obvious reading would
+/// be worse than picking one.
+#[must_use]
+pub(crate) fn wind_of(scene: &Scene) -> Wind {
+    wind_from(
+        scene
+            .nodes()
+            .iter()
+            .find_map(|node| node.components.get("Wind")),
+    )
+}
+
+/// The same wind, read from a loaded world.
+///
+/// The simulation has a `World` and no `Scene` — and the sea a crate floats on
+/// has to be the sea that is drawn, so both paths resolve the weather through
+/// the same function rather than through two readings of the same fields.
+#[must_use]
+pub(crate) fn wind_of_world(world: &World) -> Wind {
+    wind_from(world.wind())
+}
+
+/// The scene's water with its wave set resolved, or `None` if it has no water.
+///
+/// **The resolution is the point.** A `WaterBody` that lists no waves gets
+/// sixteen derived from the wind, and the surface a body floats on must be the
+/// surface that is drawn — so rendering and buoyancy both come through here.
+/// Two readings of "authored waves, else the spectrum" is exactly the divergence
+/// that puts a boat above its own water.
+#[must_use]
+pub(crate) fn water_of(world: &World, wind: &Wind) -> Option<WaterBody> {
+    let mut body =
+        serde_json::from_value::<WaterBody>(world.water()?.clone()).ok()?;
+    if body.waves.waves.is_empty() {
+        let params = wind.params();
+        body.waves = loom_water::spectrum::wave_set(
+            // U10, which is what the spectrum is written against — never
+            // `Wind::speed`, which is a free-stream value about 10% above it.
+            wind.mean_speed_at(10.0),
+            [params.get("dir_x"), params.get("dir_z")],
+        );
+    }
+    Some(body)
 }
 
 #[cfg(test)]

@@ -1554,26 +1554,10 @@ fn add_water(
     world: &World,
     wind: &loom_field::wind::Wind,
 ) {
-    let Some(body) = world
-        .water()
-        .and_then(|v| serde_json::from_value::<loom_scene::components::WaterBody>(v.clone()).ok())
-    else {
+    let Some(body) = weather::water_of(world, wind) else {
         return;
     };
-    let params = wind.params();
-    let authored = &body.waves.waves;
-    let derived;
-    let waves = if authored.is_empty() {
-        derived = loom_water::spectrum::wave_set(
-            // U10, which is what the spectrum is written against — never
-            // `Wind::speed`, which is a free-stream value about 10% above it.
-            wind.mean_speed_at(10.0),
-            [params.get("dir_x"), params.get("dir_z")],
-        );
-        &derived.waves
-    } else {
-        authored
-    };
+    let waves = &body.waves.waves;
 
     env.water = [body.surface_height, WATER_DEPTH_UNTIL_W6, 1.0, 0.0];
     // Truncated at the cap the shader's loop is bounded by, which is also the
@@ -1750,6 +1734,13 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
         Err(json) => return (1, json),
     };
 
+    // How far each node moved vertically over the closing stretch of the run,
+    // for the `.bob` assertion. Recorded rather than derived afterwards
+    // because a final position cannot tell a settled body from one passing
+    // through the middle of a swing.
+    let mut travel: Vec<(String, f32, f32)> = Vec::new();
+    let window_opens = ticks.saturating_sub(RESONANCE_WINDOW);
+
     // Elapsed time is fed in as an exact constant, never read from the wall
     // clock (never-do #8). That is what makes this reproducible, and it is why
     // `advance` takes the delta as an argument.
@@ -1757,6 +1748,9 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
         clock.advance(clock.step_seconds());
         if let Err(e) = runner.tick(&mut world, clock.tick) {
             return (1, json_line(&e));
+        }
+        if clock.tick > window_opens {
+            record_travel(&world, &mut travel);
         }
         // A finished game stops. Running past the end would let the world
         // drift on after the result was decided, so a `--ticks` that happened
@@ -1779,15 +1773,17 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     let weather = (weather::wind_of(&scene), ticks as f32 / 60.0);
     let mut failures = Vec::new();
     for spec in flags(args, "--assert") {
-        match check_assertion(&world, state, &log, &weather, &spec) {
+        match check_assertion(&world, state, &log, &weather, &travel, &spec) {
             Ok(true) => {}
             Ok(false) | Err(_) => {
-                let actual = assertion_actual(&world, state, &log, &weather, &spec);
+                let actual = assertion_actual(&world, state, &log, &weather, &travel, &spec);
                 failures.push(serde_json::json!({
                     "assert": spec,
                     "actual": actual,
-                    "hint": "Format is `Node/Path.axis OP value`, axis one of x/y/z, \
-                             OP one of > >= < <= == ~=. `status == won|lost|playing`, \
+                    "hint": "Format is `Node/Path.axis OP value`, axis one of x/y/z \
+                             or `bob` (peak-to-peak vertical travel over the last \
+                             300 ticks), OP one of > >= < <= == ~=. \
+                             `status == won|lost|playing`, \
                              `state.<name> OP value` and `events.<kind> OP n` \
                              check the game's rules and what happened.",
                 }));
@@ -1881,12 +1877,38 @@ fn flags(args: &[String], name: &str) -> Vec<String> {
         .collect()
 }
 
+/// How many closing ticks `.bob` measures over — five seconds.
+///
+/// **Long enough to contain several cycles of anything a body floats on.** A
+/// shorter window would catch a body at the top of one swing and call it
+/// settled; a longer one would blur the entry transient back into the answer,
+/// which is the thing the measurement is trying to see the far side of.
+const RESONANCE_WINDOW: u64 = 300;
+
+/// Fold this tick's positions into the per-node vertical travel.
+///
+/// A linear scan per node, which is O(n²) over a tick and irrelevant at the
+/// scale of a scene — `ponytail:` sort or index it if a scene with thousands of
+/// nodes ever makes `loom sim` slow.
+fn record_travel(world: &World, travel: &mut Vec<(String, f32, f32)>) {
+    for (path, at) in world.positions() {
+        match travel.iter_mut().find(|(name, ..)| *name == path) {
+            Some((_, low, high)) => {
+                *low = low.min(at[1]);
+                *high = high.max(at[1]);
+            }
+            None => travel.push((path, at[1], at[1])),
+        }
+    }
+}
+
 /// The world-space value an assertion refers to.
 fn assertion_value(
     world: &World,
     state: &loom_script::GameState,
     log: &loom_script::EventLog,
     weather: &(loom_field::wind::Wind, f32),
+    travel: &[(String, f32, f32)],
     path: &str,
     axis: &str,
 ) -> Option<f32> {
@@ -1924,6 +1946,18 @@ fn assertion_value(
         return state.number(axis).map(|v| v as f32);
     }
 
+    // `Crate.bob < 1.3` — **how far a body moved up and down over the last five
+    // seconds, not where it ended up.** A final position cannot tell a settled
+    // body from one caught in the middle of a swing, which is exactly the
+    // question a buoyancy assertion has to answer: an undamped float passes
+    // through its resting height twice a cycle forever (water doc §5.5).
+    if axis == "bob" {
+        return travel
+            .iter()
+            .find(|(name, ..)| name == path)
+            .map(|(_, low, high)| high - low);
+    }
+
     let entity = world
         .entities()
         .iter()
@@ -1954,6 +1988,7 @@ fn check_assertion(
     state: &loom_script::GameState,
     log: &loom_script::EventLog,
     weather: &(loom_field::wind::Wind, f32),
+    travel: &[(String, f32, f32)],
     spec: &str,
 ) -> Result<bool, ()> {
     // `status == won` is the assertion a game loop exists to make, and it is
@@ -1965,7 +2000,8 @@ fn check_assertion(
     }
 
     let (path, axis, op, expected) = parse_assertion(spec).ok_or(())?;
-    let actual = assertion_value(world, state, log, weather, &path, &axis).ok_or(())?;
+    let actual =
+        assertion_value(world, state, log, weather, travel, &path, &axis).ok_or(())?;
     Ok(match op.as_str() {
         ">" => actual > expected,
         ">=" => actual >= expected,
@@ -1983,13 +2019,16 @@ fn assertion_actual(
     state: &loom_script::GameState,
     log: &loom_script::EventLog,
     weather: &(loom_field::wind::Wind, f32),
+    travel: &[(String, f32, f32)],
     spec: &str,
 ) -> serde_json::Value {
     if spec.trim_start().starts_with("status") {
         return serde_json::json!(state.status().as_str());
     }
     parse_assertion(spec)
-        .and_then(|(path, axis, _, _)| assertion_value(world, state, log, weather, &path, &axis))
+        .and_then(|(path, axis, _, _)| {
+            assertion_value(world, state, log, weather, travel, &path, &axis)
+        })
         .map_or(serde_json::Value::Null, |v| serde_json::json!(v))
 }
 
@@ -2908,6 +2947,37 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         ]));
 
         assert_eq!(code, 0, "the ball should have fallen: {out}");
+    }
+
+    /// **W5's exit criterion, run as the implementation order writes it.**
+    ///
+    ///     loom sim water_crate.loom --ticks 1800
+    ///
+    /// Thirty seconds, because resonance is not visible in five. The crate has
+    /// to still be in the sea *and* to be moving no more than the sea is: the
+    /// bounds alone are the assertion the water doc suggests and they are too
+    /// weak on their own, because an undamped float passes through its resting
+    /// height twice a cycle and a check at one instant catches it there half
+    /// the time. `.bob` is what makes it discriminating — measured 1.01 m
+    /// damped against 2.73 m with the damping removed, on a sea whose own
+    /// travel there is 0.97 m.
+    #[test]
+    fn a_crate_floats_for_thirty_seconds_without_resonating() {
+        let scene = "../../assets/test/water_crate.loom";
+        let (code, out) = run(&args(&[
+            "sim",
+            scene,
+            "--ticks",
+            "1800",
+            "--assert",
+            "Sea/Crate.bob < 1.3",
+            "--assert",
+            "Sea/Crate.y < 1.5",
+            "--assert",
+            "Sea/Crate.y > -1.5",
+        ]));
+
+        assert_eq!(code, 0, "the crate should float and settle: {out}");
     }
 
     /// And the same run must still be reproducible.

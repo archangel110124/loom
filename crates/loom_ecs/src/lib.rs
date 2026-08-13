@@ -142,6 +142,13 @@ pub struct World {
     /// `material`: turning it into waves needs `loom_water`, and this crate
     /// does not depend on it.
     water: Storage<serde_json::Value>,
+    /// The scene's `Wind`, verbatim. At most one is used, like `Environment`.
+    /// Carried rather than resolved for the same reason as `water`: turning it
+    /// into a field needs `loom_field`, which this crate does not depend on.
+    wind: Storage<serde_json::Value>,
+    /// The `Buoyancy` component, verbatim. Floating a body needs `loom_water`
+    /// and `loom_physics`, and this crate depends on neither.
+    buoyancy: Storage<serde_json::Value>,
     /// The `AudioSource` component, verbatim. Resolving it needs a decoder
     /// and a device, neither of which belongs in here.
     audio: Storage<serde_json::Value>,
@@ -389,6 +396,12 @@ impl World {
             if let Some(water) = node.components.get("WaterBody") {
                 world.water.insert(entity, water.clone());
             }
+            if let Some(wind) = node.components.get("Wind") {
+                world.wind.insert(entity, wind.clone());
+            }
+            if let Some(buoyancy) = node.components.get("Buoyancy") {
+                world.buoyancy.insert(entity, buoyancy.clone());
+            }
             if let Some(audio) = node.components.get("AudioSource") {
                 world.audio.insert(entity, audio.clone());
             }
@@ -558,6 +571,19 @@ impl World {
     #[must_use]
     pub fn water(&self) -> Option<&serde_json::Value> {
         self.order.iter().find_map(|e| self.water.get(*e))
+    }
+
+    /// The scene's wind, if it authors any. The first, for the same reason
+    /// `water` takes the first: one scene, one weather.
+    #[must_use]
+    pub fn wind(&self) -> Option<&serde_json::Value> {
+        self.order.iter().find_map(|e| self.wind.get(*e))
+    }
+
+    /// The `Buoyancy` a node declares, if any.
+    #[must_use]
+    pub fn buoyancy(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.buoyancy.get(entity)
     }
 
     /// The `AudioSource` a node declares, if any.

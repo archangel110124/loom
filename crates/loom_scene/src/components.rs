@@ -906,6 +906,108 @@ impl Default for WaterBody {
     }
 }
 
+/// The most pontoons one floating body may carry.
+///
+/// Every pontoon is a full water sample plus a force accumulation, per body,
+/// per fixed step — so this is a cost multiplier and an agent has no intuition
+/// for it. Four is what a crate needs; sixteen is past the point where more
+/// spheres describe the shape any better than a bigger radius would.
+pub const MAX_PONTOONS: usize = 16;
+
+/// One sphere standing in for part of a floating object.
+///
+/// Unreal's word, and Unreal's approximation: a floating body is a handful of
+/// spheres rather than a real volume integral against its collider. It is
+/// cheap, it is stable, and — the part that matters — the force from each one
+/// lands at a *different place*, which is where the righting torque comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Pontoon {
+    /// Centre in the node's local space, metres.
+    ///
+    /// Spread them: pontoons stacked at the origin sum to one force at the
+    /// centre of mass and the object spins freely, which is [`Buoyancy`]'s
+    /// documented trap.
+    pub offset: [f32; 3],
+    /// Sphere radius, metres.
+    #[schemars(range(min = 0.001, max = 100.0))]
+    pub radius: f32,
+}
+
+impl Default for Pontoon {
+    fn default() -> Self {
+        Self {
+            offset: [0.0; 3],
+            radius: 0.5,
+        }
+    }
+}
+
+/// Makes a rigid body float on the scene's water.
+///
+/// **This is simulation, not rendering.** Unlike the water surface and the
+/// grass, buoyancy applies forces to rigid bodies, so it is inside the
+/// determinism hash and every rule that protects it applies: the pontoons are
+/// summed in index order into one force and one torque, applied once, from the
+/// CPU wave function alone. Nothing here reads GPU memory, ever.
+///
+/// **Damping is not optional and is on by default.** An analytic wave field is
+/// an infinite energy source with nothing to dissipate it, so an undamped
+/// pontoon gains amplitude every wave until the object launches. It takes tens
+/// of seconds to become obvious, which is why the check for it is a 1800-tick
+/// `loom sim` assertion rather than a screenshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Buoyancy {
+    /// The spheres, at most [`MAX_PONTOONS`] of them.
+    ///
+    /// **Empty means four, derived from the node's own size** — at the four
+    /// horizontal corners, with radii summing to the body's volume. That is
+    /// the documented default made real rather than written down: one pontoon
+    /// gives no torque and the object spins, and hand-placed corner spheres
+    /// with a radius each big enough to look right total several times the
+    /// object's actual volume, so it floats like a cork.
+    #[schemars(length(max = 16))]
+    pub pontoons: Vec<Pontoon>,
+    /// Multiplier on the buoyant force. `1.0` is Archimedes.
+    ///
+    /// Below one for something waterlogged, above one for a float that has to
+    /// hold more than its own volume up. Taste, not physics.
+    #[schemars(range(min = 0.0, max = 10.0))]
+    pub coefficient: f32,
+    /// First-order damping on a submerged pontoon's velocity, per second.
+    ///
+    /// **This is the one that stops the bobbing, and zero resonates.** It is a
+    /// rate rather than a force: the damping is applied to the mass of water
+    /// the pontoon has displaced, so the same number means the same thing on a
+    /// buoy and on a barge. Read it as how fast the bob dies — `4` takes most
+    /// of the speed out of it in a second.
+    #[schemars(range(min = 0.0, max = 1000.0))]
+    pub damp_linear: f32,
+    /// Second-order damping, per metre. Only ever applied underwater.
+    ///
+    /// Scaled the same way, and it is what keeps a fast entry from punching
+    /// through the surface — at entry speeds the linear term alone is far too
+    /// weak, and at rest this one contributes nothing.
+    #[schemars(range(min = 0.0, max = 1000.0))]
+    pub damp_quadratic: f32,
+}
+
+impl Default for Buoyancy {
+    fn default() -> Self {
+        Self {
+            pontoons: Vec::new(),
+            coefficient: 1.0,
+            // A pontoon float's natural frequency is a few radians per second
+            // for anything crate-sized, so this is roughly a third of critical
+            // damping: enough to kill an entry's bob within a few seconds,
+            // little enough that the object still rides the waves it is on.
+            damp_linear: 4.0,
+            damp_quadratic: 1.0,
+        }
+    }
+}
+
 /// A sound that plays from this node's position.
 ///
 /// **What it sounds like from where you stand is measured, not authored.**
@@ -1005,11 +1107,13 @@ pub fn registry() -> TypeRegistry {
     reg.register::<Environment>("Environment");
     reg.register::<Wind>("Wind");
     reg.register::<Grass>("Grass");
-    // `WaveSet` and `GerstnerWave` are deliberately absent: they are fields of
-    // a `WaterBody`, not things a node can carry. Registering them would make
-    // `components.WaveSet = { ... }` validate cleanly and then be read by
-    // nothing, which is the silent-no-op failure the registry exists to stop.
+    // `WaveSet`, `GerstnerWave` and `Pontoon` are deliberately absent: they are
+    // fields of a `WaterBody` or a `Buoyancy`, not things a node can carry.
+    // Registering them would make `components.WaveSet = { ... }` validate
+    // cleanly and then be read by nothing, which is the silent-no-op failure
+    // the registry exists to stop.
     reg.register::<WaterBody>("WaterBody");
+    reg.register::<Buoyancy>("Buoyancy");
     reg.register::<Script>("Script");
     reg
 }

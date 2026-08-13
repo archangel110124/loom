@@ -92,6 +92,81 @@ pub fn check_scene(scene: &Scene) -> Vec<Finding> {
             }
         }
 
+        // **The pontoon-count trap (water doc §5.6), both halves of it.** A
+        // `Buoyancy` that lists its own pontoons can get either wrong, and
+        // both failures look like the engine misbehaving rather than like the
+        // scene being wrong. An empty list is not checked: it means "four,
+        // sized to this body", which is correct by construction.
+        if let Some(pontoons) = node
+            .components
+            .get("Buoyancy")
+            .and_then(|b| b.get("pontoons"))
+            .and_then(|v| v.as_array())
+            .filter(|list| !list.is_empty())
+        {
+            // A sphere is the one shape one pontoon describes exactly, and a
+            // body with no orientation has nothing to right — so warning about
+            // it would be noise.
+            let spherical = node
+                .components
+                .get("MeshRenderer")
+                .and_then(|m| m.get("mesh"))
+                .and_then(|m| m.get("asset"))
+                .and_then(|a| a.as_str())
+                == Some("sphere");
+            if pontoons.len() == 1 && !spherical {
+                findings.push(Finding {
+                    severity: Severity::Warning,
+                    error: "single_pontoon".to_owned(),
+                    node: node.path.clone(),
+                    constraint: "1 pontoon gives no righting torque".to_owned(),
+                    hint: "One sphere puts the whole buoyant force through one \
+                           point, so the body spins freely instead of sitting \
+                           upright. Use four, or omit `pontoons` to get four \
+                           sized to this node."
+                        .to_owned(),
+                });
+            }
+
+            // Radii that *look* right around a bounding box total several times
+            // the object's volume, and then it floats like a cork with its deck
+            // in the air. Compared against the box the node actually is.
+            let displaced: f32 = pontoons
+                .iter()
+                .filter_map(|p| p.get("radius").and_then(|v| v.as_f64()))
+                .map(|r| 4.0 / 3.0 * std::f32::consts::PI * (r as f32).powi(3))
+                .sum();
+            let half = collider.and_then(|c| c.get("half_extents")).map_or_else(
+                || [scale[0].abs(), scale[1].abs(), scale[2].abs()],
+                |v| {
+                    let read = |i: usize| {
+                        v.get(i).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32
+                    };
+                    [
+                        read(0).abs() * scale[0].abs(),
+                        read(1).abs() * scale[1].abs(),
+                        read(2).abs() * scale[2].abs(),
+                    ]
+                },
+            );
+            let body_volume = 8.0 * half[0] * half[1] * half[2];
+            if body_volume > 0.0 && displaced > body_volume * 2.5 {
+                findings.push(Finding {
+                    severity: Severity::Warning,
+                    error: "pontoon_volume_mismatch".to_owned(),
+                    node: node.path.clone(),
+                    constraint: format!(
+                        "pontoons displace {displaced:.2} m³ against a body of {body_volume:.2} m³"
+                    ),
+                    hint: "Pontoon radii should sum to roughly the object's own \
+                           volume, not its bounding sphere's. Too much and it \
+                           floats like a cork with its deck in the air. Omitting \
+                           `pontoons` derives four that displace exactly this body."
+                        .to_owned(),
+                });
+            }
+        }
+
         // A node scaled to nothing has geometry that cannot be collided with
         // or seen, which is nearly always a mistake rather than intent.
         if scale.iter().any(|s| s.abs() < 1e-4) {
@@ -190,6 +265,62 @@ mod tests {
 
         let findings = check_scene(&scene);
         assert!(findings.iter().any(|f| f.error == "mirrored_scale"));
+    }
+
+    /// §5.6, first half. One pontoon is legal and always wrong: the object
+    /// spins because nothing gives it a righting torque.
+    #[test]
+    fn a_single_pontoon_is_warned_about() {
+        let scene = scene(
+            "[[node]]\nname = \"Raft\"\nparent = \"Root\"\n\
+             transform = { scale = [1.0, 0.3, 1.0] }\n\n\
+               [node.components.Buoyancy]\n  \
+               pontoons = [{ offset = [0.0, 0.0, 0.0], radius = 0.6 }]\n",
+        );
+
+        let findings = check_scene(&scene);
+        assert!(
+            findings.iter().any(|f| f.error == "single_pontoon"),
+            "{findings:#?}"
+        );
+    }
+
+    /// §5.6, second half. Four spheres drawn around the corners of a bounding
+    /// box displace far more than the box does, and the object then floats far
+    /// too high — which reads as a physics bug rather than an authoring one.
+    #[test]
+    fn pontoons_that_displace_far_more_than_the_body_are_warned_about() {
+        let scene = scene(
+            "[[node]]\nname = \"Cork\"\nparent = \"Root\"\n\
+             transform = { scale = [0.5, 0.5, 0.5] }\n\n\
+               [node.components.Buoyancy]\n  pontoons = [\
+               { offset = [-0.5, 0.0, -0.5], radius = 0.7 }, \
+               { offset = [0.5, 0.0, -0.5], radius = 0.7 }, \
+               { offset = [-0.5, 0.0, 0.5], radius = 0.7 }, \
+               { offset = [0.5, 0.0, 0.5], radius = 0.7 }]\n",
+        );
+
+        let findings = check_scene(&scene);
+        assert!(
+            findings.iter().any(|f| f.error == "pontoon_volume_mismatch"),
+            "{findings:#?}"
+        );
+    }
+
+    /// And four sensible ones on a crate say nothing, or the check is noise.
+    #[test]
+    fn four_well_sized_pontoons_report_nothing() {
+        let scene = scene(
+            "[[node]]\nname = \"Crate\"\nparent = \"Root\"\n\
+             transform = { scale = [0.5, 0.5, 0.5] }\n\n\
+               [node.components.Buoyancy]\n  pontoons = [\
+               { offset = [-0.25, 0.0, -0.25], radius = 0.39 }, \
+               { offset = [0.25, 0.0, -0.25], radius = 0.39 }, \
+               { offset = [-0.25, 0.0, 0.25], radius = 0.39 }, \
+               { offset = [0.25, 0.0, 0.25], radius = 0.39 }]\n",
+        );
+
+        assert!(check_scene(&scene).is_empty());
     }
 
     #[test]
