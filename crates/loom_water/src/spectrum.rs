@@ -298,6 +298,22 @@ impl SeaState {
     }
 }
 
+/// Significant wave height of a wave set: `4√m0`, with `m0` the summed
+/// variance `ΣA²/2`. Summed in index order, like everything else.
+///
+/// **The one number that says how big a sea is.** It is what the published
+/// fully-developed relation is stated in, so it is what
+/// `significant_wave_height_matches_the_published_relation` checks [`wave_set`]
+/// against — and it is the number an agent that just authored a `WaterBody`
+/// wants back, because "sixteen waves" is not an answer to "how rough is it".
+/// `loom water` reports it for authored wave sets too: the formula is a
+/// property of a sum of sinusoids, not of this spectrum.
+#[must_use]
+pub fn significant_height(waves: &WaveSet) -> f32 {
+    let m0: f32 = waves.waves.iter().map(|w| w.amplitude * w.amplitude / 2.0).sum();
+    4.0 * m0.sqrt()
+}
+
 /// A unit vector, or `None` for anything that has no direction.
 fn normalise(v: [f32; 2]) -> Option<[f32; 2]> {
     let length = (v[0] * v[0] + v[1] * v[1]).sqrt();
@@ -311,13 +327,6 @@ fn normalise(v: [f32; 2]) -> Option<[f32; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Significant wave height of a wave set: `4√m0`, with `m0` the summed
-    /// variance `ΣA²/2`. Summed in index order, like everything else.
-    fn significant_height(waves: &WaveSet) -> f32 {
-        let m0: f32 = waves.waves.iter().map(|w| w.amplitude * w.amplitude / 2.0).sum();
-        4.0 * m0.sqrt()
-    }
 
     /// One water body's worth of TOML, so the real validator judges the real
     /// derived set rather than a re-implementation of its rules.

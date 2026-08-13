@@ -83,6 +83,13 @@ USAGE:
     loom measure <scene.loom> [--node <path>]
         Bounds and overlaps, so a change can be checked without a render.
 
+    loom water <scene.loom> --at <x,z|x,y,z> [--sim <ticks>]
+        What the water is doing at one point: surface height, normal, depth to
+        the bed, and velocity. --sim picks the instant, exactly as it does for
+        render; without it the answer is t = 0, which is the one moment every
+        wave is at the same phase. A third component in --at asks whether that
+        height is under the surface.
+
     loom terrain <scene.loom> [--out <f.png>] [--from <x,y,z>] [--to <x,y,z>]
                               [--max-slope <deg>]
         Query walkable terrain between two points.
@@ -120,6 +127,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
     ("scene", &[("--tx", true), ("--dry-run", false)]),
     ("place", &[("--op", true), ("--dry-run", false), ("--expect-version", true)]),
     ("measure", &[("--node", true)]),
+    ("water", &[("--at", true), ("--sim", true)]),
     (
         "terrain",
         &[("--out", true), ("--from", true), ("--to", true), ("--max-slope", true)],
@@ -232,6 +240,10 @@ fn run(args: &[String]) -> (u8, String) {
         },
         Some("measure") => match args.get(1) {
             Some(path) => measure(path, args),
+            None => (2, USAGE.to_owned()),
+        },
+        Some("water") => match args.get(1) {
+            Some(path) => water(path, args),
             None => (2, USAGE.to_owned()),
         },
         Some("run") => match args.get(1) {
@@ -2322,6 +2334,181 @@ fn parse_vec2(spec: &str) -> Option<[usize; 2]> {
     (parts.len() == 2).then(|| [parts[0], parts[1]])
 }
 
+/// `x,z`, or `x,y,z` when the caller also wants the submersion test.
+///
+/// Strict, unlike [`parse_vec2`]: every component must parse. Dropping an
+/// unparseable one would turn `--at 4,oops,9` into the point `(4, 9)` and
+/// answer confidently about somewhere else, which is the failure this whole
+/// CLI is arranged to prevent.
+fn parse_at(spec: &str) -> Option<([f32; 2], Option<f32>)> {
+    let parts: Vec<f32> = spec
+        .split(',')
+        .map(|p| p.trim().parse())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    match parts[..] {
+        [x, z] => Some(([x, z], None)),
+        [x, y, z] => Some(([x, z], Some(y))),
+        _ => None,
+    }
+}
+
+/// What the water is doing at one point, at one instant.
+///
+/// **This computes nothing.** Every number below comes out of the function the
+/// engine itself calls for it: the wave set from [`weather::water_of`], which
+/// is what the renderer and the buoyancy solver both read; the surface from
+/// [`loom_water::sample_water`]; the bed from [`scene_terrain_field`], the same
+/// grid uploaded to the shader; the current from [`river_flow`]; the
+/// submersion test from [`loom_water::buoyancy::submersion_at`], which is what
+/// decides a swimmer's muffled ears and the underwater tint. A query that
+/// recomputed any of them would agree with the engine right up until the day
+/// it mattered.
+///
+/// **Time is `--sim <ticks>` at the fixed 60 Hz step, and it defaults to 0.**
+/// Waves move, so an instant is part of the question rather than a detail of
+/// it — and t = 0 is the worst possible default to leave implicit, because it
+/// is the one moment every wave in the set is at the same phase. Both the tick
+/// count and the seconds it means are in the output, so an answer can never be
+/// read without the instant it belongs to.
+fn water(path: &str, args: &[String]) -> (u8, String) {
+    let Some((at, y)) = flag(args, "--at").and_then(|s| parse_at(&s)) else {
+        return (2, json_line(&serde_json::json!({
+            "error": "missing_argument",
+            "constraint": "--at X,Z or --at X,Y,Z, all finite numbers",
+            "hint": "--at X,Z is the point to sample. A third component asks \
+                     whether that height is under the surface.",
+        })));
+    };
+    // Rejected rather than defaulted, because a `--sim` this could not read
+    // would silently report t = 0 while the caller believed it asked for t = 15.
+    let ticks = match flag(args, "--sim") {
+        None => 0_u32,
+        Some(spec) => match spec.parse::<u32>() {
+            Ok(t) => t,
+            Err(_) => return (2, json_line(&serde_json::json!({
+                "error": "invalid_argument", "value": spec,
+                "constraint": "--sim takes a whole number of ticks",
+                "hint": "Ticks are the fixed 60 Hz simulation step; `--sim 90` is 1.5 s.",
+            }))),
+        },
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let seconds = ticks as f32 / 60.0;
+
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => return (2, json_line(&serde_json::json!({
+            "error": "io_error", "path": path, "constraint": e.to_string(),
+        }))),
+    };
+    let scene = match Scene::parse(&src) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+    // A `WaterBody` on a prefab instance is a component like any other, and an
+    // unexpanded instance carries none — the scene would read as dry.
+    let scene = match prefab_load::for_reading(&scene, std::path::Path::new(path)) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+
+    let world = World::from_scene(&scene);
+    let wind = weather::wind_of_world(&world);
+    // **Provenance has to be read before the resolution, not after.** `water_of`
+    // fills an empty wave set from the spectrum, and once it has, a derived sea
+    // and an authored one are the same sixteen numbers. This is the last moment
+    // the difference exists.
+    let authored = world
+        .water()
+        .and_then(|v| serde_json::from_value::<components::WaterBody>(v.clone()).ok())
+        .is_some_and(|b| !b.waves.waves.is_empty());
+    let Some(body) = weather::water_of(&world, &wind) else {
+        return (1, json_line(&serde_json::json!({
+            "error": "no_water", "path": path,
+            "constraint": "the scene has no WaterBody",
+            "hint": "Add a WaterBody component to a node. `loom describe WaterBody` \
+                     is its schema.",
+        })));
+    };
+
+    // The bed, and the current that is routed off it — the same two bakes the
+    // renderer and the simulation do, through the same two functions.
+    let bed = scene_terrain_field(&scene);
+    let ground = bed
+        .as_ref()
+        .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(at[0], at[1]));
+    // **Off the grid is not an error.** There is no terrain there, so the water
+    // is bottomless — which is the right answer for an open sea and exactly what
+    // the shader draws. Reported as nulls rather than as the sentinel, because
+    // a depth of a billion metres is a number a caller would act on.
+    let grounded = loom_voxel::heightfield::HeightField::has_ground(ground);
+    let flow = bed
+        .as_ref()
+        .and_then(|g| river_flow(g, &body))
+        .map_or([0.0; 3], |grid| grid.at(at[0], at[1]));
+
+    let sample = loom_water::sample_water(&body, at, seconds, ground, flow);
+    // `sample_water` sums the orbital motion onto the current, so the wave half
+    // is the difference. Subtracted rather than sampled a second time with no
+    // flow: two samples is two chances to disagree.
+    let orbital = [
+        sample.velocity[0] - flow[0],
+        sample.velocity[1] - flow[1],
+        sample.velocity[2] - flow[2],
+    ];
+
+    (
+        0,
+        json_line(&serde_json::json!({
+            "ok": true,
+            "path": path,
+            "at": at,
+            "y": y,
+            // Both, always: seconds is what the waves were evaluated at, ticks
+            // is what a caller passes to `render --sim` or `sim --ticks` to see
+            // this same instant.
+            "ticks": ticks,
+            "seconds": seconds,
+            "kind": body.kind,
+            "surface": {
+                "height": sample.height,
+                "still_height": body.surface_height,
+                "normal": sample.normal,
+                "displacement": sample.displacement,
+            },
+            "bed": {
+                "height": grounded.then_some(ground),
+                "depth": grounded.then_some(sample.depth),
+            },
+            "velocity": {
+                "total": sample.velocity,
+                "orbital": orbital,
+                "flow": flow,
+            },
+            // **What an agent that just authored this body needs to see.** Not
+            // the raw sample: "did I get the sea I asked for" is answered by
+            // where the waves came from and how big they are.
+            "waves": {
+                "source": if authored { "authored" } else { "wind" },
+                "count": body.waves.waves.len(),
+                "significant_height": loom_water::spectrum::significant_height(&body.waves),
+                "attenuation_depth": body.waves.attenuation_depth,
+                "max_height": body.waves.max_height,
+                // Only when it is what the sea was built from. Reporting the
+                // wind of a scene whose waves are authored would read as a
+                // cause when it is a bystander.
+                "wind_speed_10m": (!authored).then(|| wind.mean_speed_at(10.0)),
+            },
+            // Null when `--at` named no height: not "no", but "not asked".
+            "submerged": y.map(|y| {
+                loom_water::buoyancy::submersion_at(&body, [at[0], y, at[1]], 0.0, seconds, ground)
+                    > 0.5
+            }),
+        })),
+    )
+}
+
 /// Blast a voxel surface and render the aftermath.
 ///
 /// The destructible loop end to end: a CSG subtract carves the crater, the
@@ -3251,13 +3438,170 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         assert_eq!(code, 0, "--node is a real measure flag: {out}");
     }
 
+    /// The water query at one instant, as JSON.
+    fn water_at(scene: &str, spec: &[&str]) -> (u8, serde_json::Value) {
+        let mut argv = vec!["water", scene];
+        argv.extend_from_slice(spec);
+        let (code, out) = run(&args(&argv));
+        (code, serde_json::from_str(&out).unwrap_or_else(|_| serde_json::json!({ "raw": out })))
+    }
+
+    /// **The query has to agree with the engine, or it is worth nothing as a
+    /// check on it.** Not "the numbers look plausible" — the same call, made
+    /// the same way, has to give the same float. This is the test that fails
+    /// the day someone gives `loom water` its own sampling path.
+    #[test]
+    fn the_reported_surface_is_the_surface_the_engine_samples() {
+        let path = "../../assets/test/ocean.loom";
+        let (code, v) = water_at(path, &["--at", "3.5,-9.0", "--sim", "90"]);
+        assert_eq!(code, 0, "ocean has water: {v}");
+
+        // The same route `add_water` and `submerge_eye` take.
+        let scene = Scene::parse(&std::fs::read_to_string(path).unwrap()).expect("valid scene");
+        let world = World::from_scene(&scene);
+        let wind = crate::weather::wind_of_world(&world);
+        let body = crate::weather::water_of(&world, &wind).expect("ocean has water");
+        let expected = loom_water::sample_water(&body, [3.5, -9.0], 90.0 / 60.0, -1.0e9, [0.0; 3]);
+
+        assert_eq!(v["surface"]["height"].as_f64().unwrap() as f32, expected.height);
+        assert_eq!(v["surface"]["normal"][1].as_f64().unwrap() as f32, expected.normal[1]);
+        assert_eq!(v["seconds"].as_f64().unwrap() as f32, 1.5);
+    }
+
+    /// **Waves move, so an instant is part of the question.** A query that
+    /// reported one number whatever the clock said would be a trap rather than
+    /// a measurement — and t = 0 is the one instant where every wave in the set
+    /// shares a phase, which is why it is never implicit in the output.
+    #[test]
+    fn the_instant_is_part_of_the_question() {
+        let ocean = "../../assets/test/ocean.loom";
+        let (_, still) = water_at(ocean, &["--at", "3.5,-9.0"]);
+        let (_, later) = water_at(ocean, &["--at", "3.5,-9.0", "--sim", "90"]);
+
+        assert_eq!(still["ticks"], 0, "t = 0 is stated, not implied: {still}");
+        assert!(
+            (still["surface"]["height"].as_f64().unwrap()
+                - later["surface"]["height"].as_f64().unwrap())
+            .abs()
+                > 1e-3,
+            "the sea did not move between t = 0 and t = 1.5 s: {still} / {later}"
+        );
+
+        // And a `--sim` that could not be read is refused rather than silently
+        // answering for t = 0, which is the trap itself wearing a disguise.
+        let (code, v) = water_at(ocean, &["--at", "0,0", "--sim", "later"]);
+        assert_eq!(code, 2, "an unreadable --sim is a failed invocation: {v}");
+    }
+
+    /// **Provenance is the question an author actually has.** `ocean` writes
+    /// its five waves down; a scene with a `WaterBody` and no wave list gets
+    /// sixteen from the wind spectrum, and the difference is invisible in every
+    /// other output the engine produces.
+    #[test]
+    fn the_wave_set_says_where_it_came_from() {
+        let (_, authored) = water_at("../../assets/test/ocean.loom", &["--at", "0,0"]);
+        assert_eq!(authored["waves"]["source"], "authored");
+        assert_eq!(authored["waves"]["count"], 5);
+        assert!(authored["waves"]["wind_speed_10m"].is_null(), "{authored}");
+
+        let dir = std::env::temp_dir().join("loom_water_derived");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let scene = dir.join("sea.loom");
+        std::fs::write(
+            &scene,
+            "[scene]\nformat = 1\nid = \"7d1e4c0a-2b6f-4a58-9c31-5e8b0f2a7d64\"\n\n\
+             [[node]]\nname = \"Sea\"\n\n  [node.components.Wind]\n  speed = 11.0\n\n  \
+             [node.components.WaterBody]\n  surface_height = 0.0\n",
+        )
+        .expect("write scene");
+        let (code, derived) = water_at(scene.to_str().unwrap(), &["--at", "0,0"]);
+
+        assert_eq!(code, 0, "{derived}");
+        assert_eq!(derived["waves"]["source"], "wind");
+        assert_eq!(derived["waves"]["count"], 16);
+        assert!(
+            derived["waves"]["wind_speed_10m"].as_f64().unwrap() > 1.0,
+            "a derived sea has to name the wind it came from: {derived}"
+        );
+        assert!(
+            derived["waves"]["significant_height"].as_f64().unwrap() > 0.5,
+            "an 11 m/s sea is not flat: {derived}"
+        );
+    }
+
+    /// The river is the only scene with a bed under the water and a current
+    /// over it, and both come from the ground rather than from the `WaterBody`.
+    #[test]
+    fn the_river_reports_its_bed_and_its_current() {
+        let (code, v) = water_at("../../assets/test/river.loom", &["--at", "24.0,24.0"]);
+
+        assert_eq!(code, 0, "{v}");
+        assert_eq!(v["kind"], "river");
+        // The channel bed is well below the 6.5 m surface, and in it.
+        let depth = v["bed"]["depth"].as_f64().expect("in the channel, over ground");
+        assert!(depth > 1.0, "the middle of the channel is not a puddle: {v}");
+        // Downstream is +X, and the current is what carries the crate.
+        let flow_x = v["velocity"]["flow"][0].as_f64().unwrap();
+        assert!(flow_x > 0.1, "the river does not run downstream: {v}");
+        // Total = current + orbital, which is one velocity and not two.
+        let total_x = v["velocity"]["total"][0].as_f64().unwrap();
+        let orbital_x = v["velocity"]["orbital"][0].as_f64().unwrap();
+        assert!((total_x - (flow_x + orbital_x)).abs() < 1e-6, "{v}");
+
+        // Off the terrain grid the water is bottomless, which is information
+        // rather than an error — and reported as null rather than as −10⁹.
+        let (code, far) = water_at("../../assets/test/river.loom", &["--at", "9000,9000"]);
+        assert_eq!(code, 0, "outside the grid is a legitimate answer: {far}");
+        assert!(far["bed"]["depth"].is_null(), "{far}");
+        assert!(far["velocity"]["flow"][0].as_f64().unwrap().abs() < 1e-9, "{far}");
+    }
+
+    /// **A dry scene is a failed query, not a measurement.** It exits 1 with a
+    /// named error for the same reason `measure --node` does on a node with no
+    /// geometry: an agent that asks what the water is doing and gets exit 0 has
+    /// been told there is an answer.
+    #[test]
+    fn a_scene_with_no_water_is_an_error_that_names_itself() {
+        let (code, v) = water_at("../../assets/test/tower.loom", &["--at", "0,0"]);
+
+        assert_eq!(code, 1, "{v}");
+        assert_eq!(v["error"], "no_water");
+        assert!(v["hint"].as_str().unwrap().contains("WaterBody"), "{v}");
+    }
+
+    /// The submersion answer is `submersion_at`'s — the same call that decides
+    /// a swimmer's muffled ears and the underwater tint — and it is null rather
+    /// than false when `--at` named no height, because it was not asked.
+    #[test]
+    fn a_height_turns_the_query_into_a_submersion_test() {
+        let ocean = "../../assets/test/ocean.loom";
+        let (_, flat) = water_at(ocean, &["--at", "0,0"]);
+        assert!(flat["submerged"].is_null(), "not asked is not `false`: {flat}");
+
+        let (_, under) = water_at(ocean, &["--at", "0,-4,0"]);
+        let (_, over) = water_at(ocean, &["--at", "0,4,0"]);
+        assert_eq!(under["submerged"], true, "{under}");
+        assert_eq!(over["submerged"], false, "{over}");
+        assert_eq!(under["y"], -4.0, "the height is echoed back: {under}");
+    }
+
+    /// A component that cannot be read is a point somewhere else answered
+    /// confidently, so `--at` is strict where `parse_vec2` is not.
+    #[test]
+    fn a_malformed_point_is_refused_rather_than_repaired() {
+        let (code, v) = water_at("../../assets/test/ocean.loom", &["--at", "4,oops,9"]);
+
+        assert_eq!(code, 2, "should not read as the point (4, 9): {v}");
+        assert_eq!(v["error"], "missing_argument");
+    }
+
     /// An agent restricted to the tool's own output has to be able to find the
     /// subcommands. The usage text listed two of ten and no flags at all.
     #[test]
     fn usage_lists_every_subcommand() {
         for command in [
             "validate", "describe", "render", "sim", "scene", "place", "measure", "terrain",
-            "explode", "run",
+            "explode", "run", "water",
         ] {
             assert!(USAGE.contains(command), "usage should mention `{command}`");
         }
