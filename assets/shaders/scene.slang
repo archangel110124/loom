@@ -178,6 +178,16 @@ float3 skyHorizon() { return push.environment[0].horizon.rgb; }
 float fogDensity() { return push.environment[0].zenith.a; }
 float fogFalloff() { return push.environment[0].horizon.a; }
 
+/// Whether the eye is under the water. **Decided once, on the CPU.**
+///
+/// It is `loom_water::buoyancy::submersion_at` at the camera position — the
+/// same query the buoyancy solver, the audio listener and `is_submerged(node)`
+/// all ask, so a swimmer's ears and a swimmer's eyes cannot disagree about
+/// which side of the surface they are on. Recomputing a wave height per pixel
+/// to answer a question that is one bool per frame would also be a second
+/// implementation of the thing this project keeps paying to keep single.
+bool eyeUnderwater() { return push.environment[0].water.y > 0.5; }
+
 
 // ---------------------------------------------------------------------------
 // The sky.
@@ -246,6 +256,54 @@ float3 hemisphereAmbient(float3 normal) {
     return lerp(skyGradient(float3(0.0, -1.0, 0.0)), skyGradient(float3(0.0, 1.0, 0.0)), up);
 }
 
+// ---------------------------------------------------------------------------
+// Underwater.
+//
+// **Not a pass.** ADR 0010 moved the "no post-process before Phase 8" boundary
+// once, deliberately, to admit exactly one full-screen filter; a second one
+// arriving as a detail of a water step is the drift that ADR exists to prevent.
+// So being submerged is expressed entirely in things this file already does:
+// the fog term every surface applies, the background the sky pass paints, and
+// which side of the water surface is being shaded.
+//
+// That is not a compromise — it is what underwater physically is. Water is a
+// participating medium with a short extinction distance and a strong colour,
+// which is precisely what `fogAmount`/`fogColor` model. The only thing a
+// screen-space pass would add here is distortion and caustics, and both are
+// out of scope.
+// ---------------------------------------------------------------------------
+
+/// Extinction per metre under the surface.
+///
+/// **The whole effect is the ratio to the fog above.** A scene authors
+/// `fog_density` in the thousandths — hundreds of metres of visibility — and
+/// this is 0.07: an e-fold in fourteen metres, three quarters gone by twenty.
+/// Clear sea rather than soup, and a calibration knob rather than a constant of
+/// nature — it is the number to turn if a lake should read as murkier than an
+/// ocean, and the number a per-body `clarity` would replace when one exists.
+static const float UNDERWATER_EXTINCTION = 0.07;
+
+/// The water's own colour, before the light coming down through it.
+///
+/// Blue-green rather than blue: red goes first in real water, and a tint that
+/// is merely a darker sky reads as night rather than as being underneath
+/// something.
+static const float3 UNDERWATER_TINT = float3(0.08, 0.30, 0.28);
+
+/// What the water looks like in a direction with nothing in that direction.
+///
+/// Scaled by how much light is actually up there, so a night dive is dark and
+/// an authored-dark environment stays dark. Brightness rather than colour is
+/// taken from the sky — multiplying tint by sky *colour* would drag the
+/// blue-green back toward whatever hue the sky is, which is the one thing this
+/// is meant not to do.
+float3 underwaterColor() {
+    float above = ambientStrength()
+                * dot(skyGradient(float3(0.0, 1.0, 0.0)), float3(0.2126, 0.7152, 0.0722))
+                + sunStrength() * 0.25;
+    return UNDERWATER_TINT * above;
+}
+
 /// Cheap 2D value noise, for shaping things that are meant to look irregular.
 ///
 /// Hash-based rather than sampled from a texture: it needs no descriptor, and
@@ -298,6 +356,16 @@ float fogAmount(float3 from, float3 to) {
     if (distance < 1e-4) {
         return 0.0;
     }
+    // **Submerged, the same term with different constants.** Water's density
+    // does not fall off with altitude — the height falloff below is an
+    // atmosphere model and would make the sea thinner near the surface — so
+    // this is plain Beer-Lambert over the distance. One branch, taken by every
+    // surface in the frame at once, which is what makes it an atmosphere
+    // rather than a tint on the water shader.
+    if (eyeUnderwater()) {
+        return 1.0 - exp(-distance * UNDERWATER_EXTINCTION);
+    }
+
     float riseRate = delta.y / distance;
     float atOrigin = fogDensity() * exp(-fogFalloff() * from.y);
 
@@ -320,6 +388,13 @@ float fogAmount(float3 from, float3 to) {
 /// into the sun through mist is bright, looking away from it is not, and that
 /// asymmetry is most of what makes it convincing.
 float3 fogColor(float3 direction) {
+    // Underwater there is no sun shaft and no gradient: the medium is the same
+    // colour in every direction, and it is the same colour the sky pass paints
+    // — so distant geometry dissolves into exactly the background behind it,
+    // which is the property the height fog above was written for too.
+    if (eyeUnderwater()) {
+        return underwaterColor();
+    }
     float3 base = skyGradient(direction);
     float toSun = max(dot(direction, sunDirection()), 0.0);
     return base + float3(1.0, 0.93, 0.80) * pow(toSun, 5.0) * 0.30;
@@ -852,6 +927,15 @@ SkyOutput skyVertexMain(uint vertexID: SV_VertexID) {
 
 [shader("fragment")]
 float4 skyFragmentMain(SkyOutput in) : SV_Target {
+    // **Submerged, the background is water, not sky.** Looking sideways with
+    // no geometry in view, this pass used to paint a horizon and a sun glow
+    // from the bottom of a lake. There is no direction to compute: the medium
+    // is uniform, and the surface overhead is drawn by the water pass in front
+    // of this one.
+    if (eyeUnderwater()) {
+        return float4(underwaterColor(), 1.0);
+    }
+
     // Unproject both ends of the pixel's ray and take the direction between
     // them. Using only the far plane would be wrong under a perspective
     // divide that is not centred on the eye.
@@ -1388,6 +1472,11 @@ static const float WATER_TINT_DEPTH = 5.0;
 /// pixel, which is the classic water shimmer; this is the smallest roughness
 /// that still reads as sun glitter rather than as a hard white dot.
 static const float WATER_ROUGHNESS = 0.08;
+/// Water's refractive index against air's 1.0.
+///
+/// It is here for one number: `asin(1/1.333)` is 48.6°, the critical angle, and
+/// that cone is Snell's window.
+static const float WATER_IOR = 1.333;
 
 [shader("fragment")]
 float4 waterFragmentMain(WaterOutput in) : SV_Target {
@@ -1413,6 +1502,51 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // the shading continuous instead of letting the surface go black.
     if (dot(normal, view) < 0.0) {
         normal = -normal;
+    }
+
+    // **Seen from below, which is a different surface.** Everything above this
+    // line is shared; everything after it assumes the sky is on the far side,
+    // and applying it from underneath draws the underside of a lake as a
+    // bright sky-lit sheet — which is what being submerged looked like until
+    // this branch existed. This is a bug fix, not an effect.
+    //
+    // The flag is the camera's, not this pixel's: the normal flip above
+    // already handles the far wall of a trough seen from *above*, and that
+    // pixel must keep being shaded as the top of the water it is.
+    if (eyeUnderwater()) {
+        // **Schlick against the angle on the air side.** Going water → air the
+        // reflectance climbs to 1 at the critical angle and stays there — total
+        // internal reflection — so the ordinary form, which is 0.02 face-on and
+        // 1.0 only at exactly 90°, is not merely inaccurate here but misses the
+        // effect entirely. Feeding the *transmitted* angle to the same Schlick
+        // polynomial reaches 1.0 exactly where `sinT2` does, so the rim is
+        // continuous rather than a drawn ring — though only just: measured, it
+        // goes from a tenth reflected to all of it over the last two degrees,
+        // which is why the window has a hard edge in the reference and in every
+        // photograph of one.
+        float cosI = saturate(dot(normal, view));
+        float sinT2 = WATER_IOR * WATER_IOR * (1.0 - cosI * cosI);
+        float3 through = float3(0.0, 0.0, 0.0);
+        float fresnel = 1.0;
+        if (sinT2 < 1.0) {
+            float cosT = sqrt(1.0 - sinT2);
+            fresnel = 0.02 + 0.98 * pow(saturate(1.0 - cosT), 5.0);
+            // **Snell's window**, and it costs one `refract`: the entire sky
+            // above, squeezed into a 97°-wide disc overhead, everything outside
+            // it mirror. `skyColor` is the same function the background pass
+            // draws, so the sun rides along in the window where a real one is.
+            through = skyColor(refract(-view, normal, WATER_IOR));
+        }
+        // What the underside reflects is the water itself — and since the
+        // medium is one colour in every direction, the mirror comes out
+        // *identical to the background*. **That is a real limitation, not an
+        // oversight**: a real mirrored surface carries a reflection of the
+        // seabed, and this one is featureless everywhere outside the window.
+        // Fixing it needs the geometry behind the surface, which is the
+        // refraction/reflection pass this step is explicitly not building.
+        float3 lit = lerp(through, underwaterColor(), fresnel);
+        float fogUnder = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+        return float4(lerp(lit, fogColor(-view), fogUnder), 1.0);
     }
 
     // Schlick against water's f0. This is the whole trick: face-on you see

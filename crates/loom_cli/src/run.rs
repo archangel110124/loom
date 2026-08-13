@@ -185,6 +185,14 @@ struct App {
     /// [`crate::terrain_key`]. Empty means none, which is also a scene with no
     /// water to read it.
     terrain_uploaded: String,
+    /// The same grid, kept rather than dropped after the upload.
+    ///
+    /// The GPU reads it for the water's depth; the CPU reads it to decide
+    /// whether the eye is under the surface, and both have to be the same bed
+    /// or the shoreline and the underwater view disagree about where the water
+    /// stops. Re-baking it per frame is a march down the SDF per sample, which
+    /// is not frame work.
+    terrain: Option<loom_voxel::heightfield::HeightField>,
     /// The handle being dragged, if one is.
     drag: Option<Drag>,
     /// Bumped whenever a mouse button comes up. Part of every gesture key, so
@@ -333,6 +341,7 @@ impl App {
             // nothing has been uploaded. `resumed` does the first upload.
             grass_uploaded: String::new(),
             terrain_uploaded: String::new(),
+            terrain: None,
             selected: view.paths.first().cloned().into_iter().collect(),
             view,
             base,
@@ -565,7 +574,10 @@ impl App {
             None => viewer.set_terrain(&[], [0.0; 2], 1.0, 0),
         };
         match result {
-            Ok(()) => self.terrain_uploaded = key,
+            Ok(()) => {
+                self.terrain_uploaded = key;
+                self.terrain = field;
+            }
             Err(e) => crate::log::error(format!("could not upload the terrain heights: {e}")),
         }
     }
@@ -1039,12 +1051,23 @@ impl ApplicationHandler for App {
                 // zero — so the window bent its grass with the wrong wind and
                 // then froze it there. The authored `Wind` reached the particles
                 // and never reached the blades.
-                let environment = crate::environment_with_wind(
-                    match self.play.as_ref() {
-                        Some(play) => &play.world,
-                        None => self.view.world(),
-                    },
-                    &crate::weather::wind_of(&self.view.scene),
+                let world = match self.play.as_ref() {
+                    Some(play) => &play.world,
+                    None => self.view.world(),
+                };
+                let wind = crate::weather::wind_of(&self.view.scene);
+                let mut environment =
+                    crate::environment_with_wind(world, &wind, self.wind_seconds);
+                // Whether the eye is under the water, from the same query that
+                // muffles the sound (W7). The fly camera and a swimming
+                // character both go through here, so the window's view and the
+                // scripts' `is_submerged` cannot disagree.
+                crate::submerge_eye(
+                    &mut environment,
+                    world,
+                    &wind,
+                    self.terrain.as_ref(),
+                    camera.eye,
                     self.wind_seconds,
                 );
                 if let Some(viewer) = self.viewer.as_mut() {

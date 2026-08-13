@@ -1,0 +1,221 @@
+# Under the surface, looking up.
+#
+# **What this scene exists to catch is a bug, not an effect.** Until the branch
+# it covers landed, the sea seen from below drew as a bright sky-lit sheet:
+# `waterFragmentMain` shaded every pixel as if the sky were on the far side of
+# it, which from underneath it is not. Nothing broke — no z-fighting, no holes,
+# no validation message — being submerged simply looked identical to standing on
+# the beach. That is the failure class a golden image exists for and the reason
+# this file is in `GOLDEN` rather than only in `SCENES`.
+#
+# Three things are in frame at once, and each is a different change:
+#
+# 1. **The underside of the water**, across the top. Water is a mirror seen
+#    from below except within 48.6° of straight up, and inside that cone the
+#    entire sky is squeezed into one bright disc — Snell's window, which is
+#    about a third of the upward hemisphere and costs one `refract`. The waves
+#    tilt the surface by up to thirty degrees, so the window is neither round
+#    nor centred, which is what it looks like from a real sea.
+# 2. **The atmosphere is water.** The same `fogAmount`/`fogColor` every surface
+#    in the engine already applies, with an e-fold in fourteen metres instead
+#    of hundreds and a blue-green colour instead of the sky's. The two boulders
+#    are what makes that readable — same albedo, same roughness, six metres and
+#    ten metres out — because an exponential is only legible against a repeat.
+# 3. **The background is water too.** Past the volume there is no geometry, and
+#    the sky pass used to paint a horizon and a sun glow down there.
+#
+# **The camera is 3.4 m under, and the sea's four waves sum to 1.23 m**, so the
+# worst crest still leaves two metres of clearance. That is deliberate: a camera
+# hovering at the waterline flips between submerged and not as a crest passes,
+# and a *reference image* that flips is a gate that fails at random. The test is
+# `loom_water::buoyancy::submersion_at` at the eye — W7's, the same one that
+# muffles the audio — and it is honest at the waterline; this scene simply does
+# not stand there.
+#
+# The terrain is `shore.loom`'s, unchanged, and the camera is 5.8 m below
+# `shore`'s and a metre behind it. **The two references are one stretch of water
+# from opposite sides of it**, so a change that moves one and not the other is
+# worth looking at before it is blessed.
+
+[scene]
+format = 1
+id = "b3d17f0a-9c46-4e58-a2b1-70f5c8e34d29"
+
+[[node]]
+name = "Deep"
+
+  [node.components.Environment]
+  # The same afternoon `shore` has. It reaches the frame twice — through the
+  # window as the actual sky, and as the brightness the water's colour is
+  # scaled by — so turning the sun down darkens both together rather than
+  # leaving a lit sea under a night sky.
+  sun_direction = [0.16, 0.34, -0.93]
+  sun_strength = 1.3
+  sun_color = [1.0, 0.93, 0.80]
+  ambient = 0.48
+  sky_zenith = [0.16, 0.30, 0.54]
+  sky_horizon = [0.60, 0.67, 0.72]
+  # Both are ignored while the eye is under: air fog pools by altitude, water
+  # does not. Authored anyway so surfacing does not change the weather.
+  fog_density = 0.004
+  fog_falloff = 0.05
+
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 6.0
+  gustiness = 1.2
+  turbulence = 0.9
+
+# The sea floor and the island, one volume — `shore.loom`'s, unchanged.
+[[node]]
+name = "Ground"
+parent = "Deep"
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.25
+  chunks = [6, 2, 6]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [24.0, 1.0, 24.0]
+  half_extents = [26.0, 1.0, 26.0]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [24.0, -21.0, 24.0]
+  radius = 30.0
+  mode = "union"
+
+  [node.components.Material]
+  albedo = [0.52, 0.45, 0.34]
+  roughness = 0.9
+
+[[node]]
+name = "Water"
+parent = "Deep"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 8.0
+  density = 1025.0
+
+  [node.components.WaterBody.waves]
+  attenuation_depth = 4.0
+  max_height = 1.2
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 22.0
+  amplitude = 0.62
+  steepness = 0.35
+  direction = [0.1, -1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 13.0
+  amplitude = 0.34
+  steepness = 0.45
+  direction = [-0.3, -1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 8.0
+  amplitude = 0.19
+  steepness = 0.5
+  direction = [0.5, -1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 4.5
+  amplitude = 0.08
+  steepness = 0.55
+  direction = [-0.2, -1.0]
+  speed_scale = 1.0
+
+# Three posts at 4, 8 and 15 metres, driven into the slope and up through the
+# surface. **Each one is cut off at the waterline**, because the sea is opaque
+# and writes depth: from below, the part of a post that is in the air is behind
+# the water. That is a second thing this reference covers and a still from above
+# cannot.
+#
+# They are also the near half of the extinction measurement: the first should
+# read as wet timber, the second as tinted, the third as barely there.
+[[node]]
+name = "PostNear"
+parent = "Deep"
+transform = { pos = [23.6, 5.5, 39.0], scale = [0.20, 3.6, 0.20] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.24, 0.19, 0.14]
+  roughness = 0.85
+
+[[node]]
+name = "PostMid"
+parent = "Deep"
+transform = { pos = [27.2, 5.5, 35.4], scale = [0.20, 3.6, 0.20] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.24, 0.19, 0.14]
+  roughness = 0.85
+
+[[node]]
+name = "PostFar"
+parent = "Deep"
+transform = { pos = [21.6, 5.5, 28.6], scale = [0.20, 3.6, 0.20] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.24, 0.19, 0.14]
+  roughness = 0.85
+
+# Two boulders on the slope, at six and ten metres. **Same albedo, same
+# roughness, same sun**: every difference between them in the reference is the
+# water in between, which is the only way to read an exponential off a still.
+[[node]]
+name = "BoulderNear"
+parent = "Deep"
+transform = { pos = [22.4, 6.3, 37.6], rot_euler = [0.0, 25.0, 0.0], scale = [2.2, 1.5, 2.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.28, 0.27, 0.24]
+  roughness = 0.95
+
+[[node]]
+name = "BoulderFar"
+parent = "Deep"
+transform = { pos = [28.8, 7.4, 33.2], rot_euler = [0.0, -40.0, 0.0], scale = [2.6, 1.7, 2.3] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.28, 0.27, 0.24]
+  roughness = 0.95
+
+# Nearly three and a half metres under, looking 28° up the slope toward the
+# island: the bed and the boulders along the bottom, the posts cut off where
+# the surface passes in front of them, and the underside of the sea across the
+# top with Snell's window in it.
+#
+# **85° vertical, which is wide.** It is not a style choice: the window starts
+# 41° above the horizon and the bed is below the eye, so no ordinary lens holds
+# both. Wide is also what an underwater camera actually is, for exactly this
+# reason.
+[[node]]
+name = "Camera"
+parent = "Deep"
+transform = { pos = [25.0, 4.6, 43.0], rot_euler = [28.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 85.0

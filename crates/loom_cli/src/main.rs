@@ -545,7 +545,11 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     let wind_seconds = flag(args, "--sim")
         .and_then(|v| v.parse::<u32>().ok())
         .map_or(0.0, |t| t as f32 / 60.0);
-    let environment = environment_with_wind(&world, &weather, wind_seconds);
+    // The bed, baked once: the water reads its depth from it on the GPU and
+    // the submersion test reads it on the CPU, and they must be the same grid.
+    let terrain = scene_terrain_field(&scene);
+    let mut environment = environment_with_wind(&world, &weather, wind_seconds);
+    submerge_eye(&mut environment, &world, &weather, terrain.as_ref(), camera.eye, wind_seconds);
     let result = (|| -> Result<(String, bool), String> {
         let instance = Instance::new(c"loom").map_err(|e| e.to_string())?;
         let device = Device::new(&instance).map_err(|e| e.to_string())?;
@@ -575,7 +579,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         }
         // The bed the water reads its depth from — uploaded once, because a
         // bake of the voxel SDF changes only when the terrain does.
-        if let Some(field) = scene_terrain_field(&scene) {
+        if let Some(field) = terrain.as_ref() {
             renderer
                 .set_terrain(&field.height, field.origin, field.spacing, field.side)
                 .map_err(|e| e.to_string())?;
@@ -695,6 +699,18 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                             pitch.unwrap_or(28.0),
                         ),
                     };
+
+                    // After the camera, because it is a fact about the camera:
+                    // a fly-through that starts under a wave crest and ends
+                    // above it must change its answer between frames.
+                    submerge_eye(
+                        &mut renderer.environment,
+                        &world,
+                        &weather,
+                        terrain.as_ref(),
+                        camera.eye,
+                        moment,
+                    );
 
                     renderer
                         .render_to_png(
@@ -1582,7 +1598,9 @@ fn add_water(
 
     // Depth is no longer in here: it is a per-vertex query against the terrain
     // height grid `set_terrain` uploads, which is the same grid the buoyancy
-    // solver reads (W6). `y` is spare.
+    // solver reads (W6). `y` is the underwater flag, and it is left off here
+    // because this function does not know where the camera is —
+    // `submerge_eye` stamps it once the shot is framed.
     env.water = [body.surface_height, 0.0, 1.0, 0.0];
     env.attenuation_depth = body.waves.attenuation_depth;
     // Truncated at the cap the shader's loop is bounded by, which is also the
@@ -1597,6 +1615,40 @@ fn add_water(
             speed_scale: wave.speed_scale,
         };
     }
+}
+
+/// Tell the shader whether the camera is under the water.
+///
+/// **One bool per frame, and it is W7's bool.**
+/// [`loom_water::buoyancy::submersion_at`] is the same function the buoyancy
+/// solver calls per pontoon and `Physics::submerged_at` calls for the audio
+/// listener — same surface, same clock, same bed. A swimmer whose ears go
+/// muffled one tick and whose view goes green on another would be the exact
+/// divergence this project keeps paying to avoid, so there is no second
+/// height test here and none in the shader either: `scene.slang` reads this
+/// flag out of the environment buffer and never asks again.
+///
+/// A radius of zero because an eye has no volume — the answer is "above" or
+/// "below" with nothing in between, which is also why there is no hysteresis:
+/// a camera bobbing exactly at the waterline flips, and that is what water at
+/// your eyeline actually does.
+pub(crate) fn submerge_eye(
+    env: &mut loom_render::EnvironmentData,
+    world: &World,
+    wind: &loom_field::wind::Wind,
+    terrain: Option<&loom_voxel::heightfield::HeightField>,
+    eye: Vec3,
+    seconds: f32,
+) {
+    let Some(body) = weather::water_of(world, wind) else {
+        return;
+    };
+    // The same bed the water shader reads its depth from, because the shoaling
+    // taper flattens the waves over it — off the grid it is bottomless, which
+    // is what an open ocean wants.
+    let ground = terrain.map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(eye.x, eye.z));
+    let under = loom_water::buoyancy::submersion_at(&body, eye.to_array(), 0.0, seconds, ground);
+    env.water[1] = f32::from(under > 0.5);
 }
 
 fn environment_of_inner(world: &World) -> loom_render::EnvironmentData {
@@ -2734,6 +2786,40 @@ mod tests {
         let scene = loom_scene::Scene::parse(text).expect("valid scene");
         let world = World::from_scene(&scene);
         environment_with_wind(&world, &crate::weather::wind_of(&scene), 0.0)
+    }
+
+    /// **The underwater flag is a fact about the camera, and it is W7's fact.**
+    ///
+    /// A flat sea at y = 0 and three eyes: well under, well over, and exactly
+    /// at the surface. The middle one is the one that matters — every scene
+    /// that shipped before this existed renders from above, and a flag that
+    /// came on for them would turn eleven references green-black at once.
+    ///
+    /// No terrain here, which is a scene with no volume: the bed is
+    /// bottomless, the waves are unattenuated, and the answer comes from
+    /// `sample_water` alone — the same call `Physics::submerged_at` makes for
+    /// the audio listener.
+    #[test]
+    fn the_underwater_flag_follows_the_eye() {
+        let text = "[scene]\nformat = 1\n\n[[node]]\nname = \"Sea\"\n\n\
+                    [node.components.Wind]\nspeed = 8.0\ndirection_degrees = 0.0\n\n\
+                    [node.components.WaterBody]\nsurface_height = 0.0\n";
+        let scene = loom_scene::Scene::parse(text).expect("valid scene");
+        let world = World::from_scene(&scene);
+        let wind = crate::weather::wind_of(&scene);
+
+        let flag = |y: f32| {
+            let mut env = environment_with_wind(&world, &wind, 0.0);
+            assert_eq!(env.water[1], 0.0, "the flag must start off");
+            submerge_eye(&mut env, &world, &wind, None, Vec3::new(3.0, y, -4.0), 0.0);
+            env.water[1]
+        };
+
+        assert_eq!(flag(-6.0), 1.0, "an eye six metres down is not submerged");
+        assert_eq!(flag(6.0), 0.0, "an eye six metres up is submerged");
+        // Well above the swell this wind builds, which is what every scene
+        // authored before the underwater path renders from.
+        assert_eq!(flag(40.0), 0.0);
     }
 
     /// **A scene with no `WaterBody` draws no water at all**, and the flag the

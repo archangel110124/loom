@@ -134,11 +134,21 @@ pub struct EnvironmentData {
     /// never a wall clock (never-do #8). The water surface reads the same
     /// clock, so grass and waves cannot drift apart.
     pub weather: [f32; 4],
-    /// x still-water level, y unused, z 1 when the scene has water, w unused.
+    /// x still-water level, y 1 when the eye is submerged, z 1 when the scene
+    /// has water, w unused.
     ///
     /// **Depth used to live in `y` as a constant.** It is a real per-vertex
     /// query now: `surface_height - terrain_height(x, z)`, read out of
     /// [`Self::terrain`] and the height buffer beside it.
+    ///
+    /// **`y` is the underwater flag, and it is a CPU answer on purpose.**
+    /// "Is the camera under the water" is one bool per frame, out of
+    /// `loom_water::buoyancy::submersion_at` — the same query the buoyancy
+    /// solver and the audio listener ask. The shader reading it via
+    /// `eyeUnderwater()` is what turns the fog into water, the sky into the
+    /// water's colour, and the surface into its own underside; recomputing a
+    /// wave height per pixel to decide that would be a second answer to a
+    /// question W7 already answers.
     pub water: [f32; 4],
     /// The terrain height grid: xy world origin, z metres between samples,
     /// w samples per axis. **`w == 0` means the scene has no terrain**, which

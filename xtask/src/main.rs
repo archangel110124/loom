@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 21] = [
+const SCENES: [&str; 22] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -59,6 +59,11 @@ const SCENES: [&str; 21] = [
     // device address, a shoreline discard, and waves attenuating in the
     // shallows — none of which `ocean` draws a pixel of.
     "assets/test/shore.loom",
+    // The only scene rendered from *under* the water: a different branch of
+    // the water fragment shader, a different fog term in every other shader
+    // in the frame, and a sky pass that paints the medium instead of the
+    // horizon. Nothing else in this list submerges the camera.
+    "assets/test/underwater.loom",
     // The only scene where particles are spawned *by* the simulation rather
     // than by an emitter standing somewhere: the crate goes under at tick 105
     // and the splash is replayed from the event log, so a `--sim 120` render
@@ -107,7 +112,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 11] = [
+const GOLDEN: [(&str, &str, &[&str]); 12] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -157,6 +162,16 @@ const GOLDEN: [(&str, &str, &[&str]); 11] = [
     // where every wave's phase is zero, which is the least representative
     // frame there is.
     ("shore", "assets/test/shore.loom", &["--sim", "90"]),
+    // **The water seen from below**, which neither of the two above can cover:
+    // they both render from a camera in the air, so the surface's
+    // below-surface branch, the underwater fog constants and the submerged
+    // sky pass are all dead code as far as they are concerned. It went in with
+    // the branch it covers, rather than a commit later — the bug it exists to
+    // catch broke nothing, produced no validation message and looked like a
+    // sunlit sea, so a human reading a diff would not have found it either.
+    //
+    // `--sim 90` for the same reason as the two above.
+    ("underwater", "assets/test/underwater.loom", &["--sim", "90"]),
 ];
 
 /// Every reference renders at this size.
