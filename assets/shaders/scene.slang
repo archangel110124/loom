@@ -1356,6 +1356,60 @@ static const uint WATER_LEVELS = 7;
 /// The finest cell, in metres, right under the camera.
 static const float WATER_CELL = 0.5;
 
+/// **The Nyquist fade, and the one place the drawn surface leaves the sampled
+/// one.** See ADR 0012.
+///
+/// A wave shorter than about twice the cell sampling it cannot be represented
+/// by that cell — the vertices land wherever the lattice happens to cut it, and
+/// what rasterises is a flat quad or a stepped shelf whose height is an
+/// artifact of the sampling phase rather than of the sea. W4 measured this at
+/// roughly 43% of `ocean`'s flicker. So each wave's amplitude is taken to zero
+/// as the samples per wavelength fall toward the limit.
+///
+/// **This lives here and not in `loom_water`**, because it is a property of
+/// THIS MESH's sampling rate and of nothing else. `sample_water` — the function
+/// buoyancy reads, the function `loom water --at` prints, the function the
+/// agreement test pins — is untouched and still answers with the whole sea. A
+/// boat floats on the surface the CPU knows about; past the fade's onset the
+/// far field is drawn smoother than that surface is. The alternative is not a
+/// truer picture: at three samples per wavelength the drawn surface already
+/// differs from `sample_water` by most of the wave's amplitude, and differs
+/// *incoherently*, which is the flicker.
+///
+/// The two constants are estimated samples per wavelength (`λ / cell`):
+/// - `WHOLE` 8 — a sine reconstructed piecewise-linearly at eight samples per
+///   period misses its crest by 7.6% of amplitude, which reads as a smooth
+///   surface. Below that the facets start to be visible as facets.
+/// - `GONE` 3 — Nyquist is 2, and *at* 2 the sampled height depends entirely on
+///   where the lattice happens to fall relative to the crest. Three retires the
+///   wave before it enters that region rather than inside it.
+static const float WATER_FADE_WHOLE = 8.0;
+static const float WATER_FADE_GONE = 3.0;
+
+/// The size of the cell sampling this point, as a function of **position only**.
+///
+/// It must be position-only for two reasons. The seam: a vertex on a ring
+/// boundary is emitted by both levels, at the same `xz` by construction, and if
+/// the two disagreed about the fade the watertight edge W4 built would open
+/// again. And continuity: a weight that stepped per level would trade facets
+/// for a visible ring where the amplitude jumps.
+///
+/// Level `L` covers Chebyshev radius `8·cell_L` to `16·cell_L` from the centre,
+/// so `r / 16` is the exact cell size at each ring's outer edge and
+/// under-reads by at most 2× inside it. Under- rather than over-reading is the
+/// deliberate half: clamped at `WATER_CELL` it is **exact everywhere level 0
+/// draws** (`r ≤ 8 m`), so the near field is bit-identical to the unfaded
+/// surface for any wave longer than `WATER_FADE_WHOLE · WATER_CELL` = 4 m.
+///
+/// Measured from the SNAPPED centre, not the eye. The eye moves continuously
+/// and every vertex's amplitude would move with it — the same shimmer generator
+/// the 32 m snap exists to avoid. Against the centre a vertex's weight is
+/// constant until the window jumps, which is when its LOD level changes anyway.
+float waterSamplingCell(float2 xz, float2 centre) {
+    float2 offset = abs(xz - centre);
+    return max(WATER_CELL, max(offset.x, offset.y) / (float(WATER_RES) * 0.5));
+}
+
 struct WaterOutput {
     float4 clip : SV_Position;
     float3 worldPos : TEXCOORD0;
@@ -1426,8 +1480,27 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     // Rust half answers the buoyancy solver — one bake, two lookups, and the
     // agreement test compares them numerically rather than trusting this.
     float ground = loom_ground_height(terrainField(), xz);
+
+    // **The Nyquist fade, applied as an amplitude and nothing else.** Every
+    // term in `loom_sample_water` reads `amplitude` — the vertical offset, the
+    // horizontal Gerstner pinch, `ka` in the normal, the orbital velocity — so
+    // scaling it here means the normal describes the surface that is actually
+    // drawn rather than the one that would have been. Shading that disagreed
+    // with the geometry is the way a fade like this usually goes wrong.
+    //
+    // It also cannot break the fold limit the validator proves: `Σ Q·k·A ≤ 1`
+    // is linear in `A` and every weight is in `[0, 1]`, the same argument
+    // `shoal` already rests on.
+    LoomWaveSet faded = push.environment[0].waves;
+    float sampleCell = waterSamplingCell(xz, centre);
+    for (int w = 0; w < LOOM_MAX_WAVES; ++w) {
+        if (w >= faded.count) { break; }
+        faded.waves[w].amplitude *= smoothstep(
+            WATER_FADE_GONE, WATER_FADE_WHOLE, faded.waves[w].wavelength / sampleCell);
+    }
+
     LoomWaterSample surfaceAt = loom_sample_water(
-        push.environment[0].waves,
+        faded,
         surface,
         ground,
         xz,

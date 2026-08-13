@@ -73,8 +73,11 @@ parent = "Sea"
   # Nothing shorter than 4.7 m, and that is a property of the mesh rather than
   # taste. The LOD rings are 0.5 m cells out to 8 m, 1 m to 16 m, 2 m to 32 m
   # and so on, so a 3 m wave is sampled twice per wavelength by the time it is
-  # 20 m away and turns into noise. Fading a wave's amplitude with the cell
-  # size that samples it is the standard fix and nothing here does it yet.
+  # 20 m away and turns into noise. `waterVertexMain` now fades a wave's
+  # amplitude as its wavelength approaches the cell sampling it (ADR 0012), so
+  # a shorter wave would not alias — it would simply be gone sooner. 4.7 m is
+  # the shortest wave that survives to 25 m, and 4 m is the shortest wave that
+  # is whole even under the camera.
   [[node.components.WaterBody.waves.waves]]
   wavelength = 26.0
   amplitude = 0.55
