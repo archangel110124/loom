@@ -278,7 +278,50 @@ impl FlowGrid {
         let low = lerp(node(i, j), node(i + 1, j), fx);
         let high = lerp(node(i, j + 1), node(i + 1, j + 1), fx);
         let v = lerp(low, high, fz);
-        [v[0], 0.0, v[1]]
+
+        // **The current fades out over the grid's last few cells**, and without
+        // this it does not fade at all — it stops.
+        //
+        // Outside the grid there is no terrain, so there is no drainage and no
+        // current, and returning zero out there is right. What was wrong was
+        // the step: measured on `river.loom`, `flow.x` read 3.000 m/s at
+        // x = 47.5 and 0.000 at x = 48. A crate carried downstream did not
+        // reach a river mouth and disperse, it hit a wall of still water at the
+        // volume's edge and stopped dead — 48.37 m at tick 2400 and 48.36 at
+        // tick 3600.
+        //
+        // This is a discontinuity in a field the *simulation* reads, which is
+        // worse than the rendering discontinuities elsewhere in this phase: a
+        // body's velocity is integrated, so a step in the force is a visible
+        // kink in a trajectory rather than a seam in a picture. Tapering over
+        // `EDGE_FADE` cells turns the stop into a deceleration, which is what a
+        // river discharging into open sea actually does.
+        let edge = self.edge_weight(gx, gz, limit);
+        [v[0] * edge, 0.0, v[1] * edge]
+    }
+
+    /// How much of the current survives this close to the grid's edge.
+    ///
+    /// Smoothstep rather than a linear ramp so the *derivative* is continuous
+    /// too — a body crossing the taper feels no step in acceleration either.
+    fn edge_weight(&self, gx: f32, gz: f32, limit: f32) -> f32 {
+        /// Metres over which the current dies at the grid's edge.
+        ///
+        /// **In metres, not cells, and that distinction was measured.** Four
+        /// *cells* at the shipped 0.25 m voxel is one metre, which a crate
+        /// moving at 3 m/s crosses in a third of a second — still a stop, just
+        /// a shorter one. The taper has to be long enough that a body
+        /// decelerates over a time a viewer can see, and that is a distance in
+        /// the world rather than a count of samples.
+        ///
+        /// Four metres is a second and a bit at this scene's current. It is
+        /// also comfortably clear of `river.loom`'s drop point at x = 6, so the
+        /// crate starts in full flow rather than in the ramp.
+        const EDGE_FADE_METRES: f32 = 4.0;
+        let fade_cells = (EDGE_FADE_METRES / self.spacing).max(1.0);
+        let inset = gx.min(gz).min(limit - gx).min(limit - gz);
+        let t = (inset / fade_cells).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
     }
 
     /// The fastest current anywhere on the grid, m/s. For tests and reporting.
