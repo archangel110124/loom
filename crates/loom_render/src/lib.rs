@@ -174,6 +174,31 @@ mod tests {
         // central quarter — which is only a whole number of cells if the
         // resolution divides by four.
         assert_eq!(res % 4, 0, "WATER_RES = {res} cannot have a quarter-sized hole");
+
+        // **The snap quantum must fit inside the finest ring**, and nothing
+        // else in the build says so.
+        //
+        // The whole mesh is snapped to the coarsest cell, `CELL·2^(LEVELS-1)`,
+        // so the eye sits up to half of that from the centre. Level 0 only
+        // reaches `(RES/2)·CELL`. When the first number exceeds the second the
+        // camera stands *outside the finest ring* for most of its travel and
+        // the water directly under it is drawn by level 1 or level 2 — the
+        // sharpest possible version of "the LOD is too aggressive", and
+        // invisible in a still from a camera that happens to be near a snap
+        // point.
+        //
+        // The shipped `RES = 32, LEVELS = 7` failed this: 16 m of possible
+        // offset against 8 m of level 0. It was found by measuring `river`,
+        // where it turned the near surface into a mirror. `CELL` cancels, so
+        // the condition is just `2^(LEVELS-1) <= RES`.
+        assert!(
+            1u32 << (levels - 1) <= res,
+            "the {}-cell snap quantum is wider than level 0's {}-cell reach \
+             (WATER_RES = {res}, WATER_LEVELS = {levels}): the camera would \
+             stand outside the finest ring",
+            1u32 << (levels - 1),
+            res / 2,
+        );
     }
 
     /// SPIR-V starts with the magic number `0x0723_0203` and is a whole number

@@ -1326,7 +1326,20 @@ float4 grassFragmentMain(GrassOutput in) : SV_Target {
 // exactly. Rings rather than a real quadtree because a quadtree buys per-tile
 // culling that nothing here can spend — there is no indirect draw and no
 // visible set — and costs a per-frame traversal on the CPU to decide what a
-// vertex shader is already deciding for free. Seven levels reach 512 m.
+// vertex shader is already deciding for free.
+//
+// **A ring mesh IS a screen-space-uniform tessellation, and WATER_RES is the
+// only thing that sets how uniform.** A vertex at Chebyshev radius `r` sits in
+// a cell of `r / (WATER_RES/2)` metres — proportional to distance, so its
+// *angular* size is the constant `2 / WATER_RES` radians no matter how far away
+// it is. That is the property a projected grid is usually reached for. See
+// ADR 0013: at WATER_RES = 32 the constant was 3.6°, which is 58 pixels of quad
+// at 900p, and 58-pixel quads are what "the LOD is way too aggressive" means.
+// At 128 it is 0.9°, or about 14 pixels.
+//
+// **And it ends at the horizon, not at a disc edge.** The outermost level's
+// outer vertex ring is pushed to WATER_HORIZON and every clip position is held
+// inside the far plane, so there is no radius at which water stops.
 //
 // **The grid is snapped to the COARSEST cell, so no vertex ever slides.** A
 // camera-centred mesh that follows the eye continuously moves every vertex
@@ -1335,9 +1348,18 @@ float4 grassFragmentMain(GrassOutput in) : SV_Target {
 // the mesh is a window onto it: the eye can move and nothing in the geometry
 // moves at all. All levels share one snap because they must share a centre for
 // the holes to line up, and the coarsest cell is the only increment every
-// level's lattice divides. The cost is that the window jumps 32 m at a time —
+// level's lattice divides. The cost is that the window jumps 16 m at a time —
 // which moves no vertex, only the LOD boundaries, and those are far away by
 // construction.
+//
+// **The quantum has to fit inside level 0, and it did not used to.** The eye
+// stands up to half a coarsest-cell from the snapped centre; level 0 reaches
+// `WATER_RES/2` cells. At 32 and seven levels that was 16 m of offset against
+// 8 m of reach, so the camera spent most of its travel *outside the finest
+// ring* and the water under it was drawn by level 1 or 2. ADR 0013 found it in
+// `river`, where it read as a mirror. `the_water_draw_matches_the_shader_s_grid`
+// now asserts `2^(WATER_LEVELS-1) <= WATER_RES`; at 128 and six it is 32
+// against 128.
 //
 // **No cracks, by construction rather than by skirt.** Each level's outermost
 // vertex ring is snapped to the next level's lattice, so the two share exactly
@@ -1347,14 +1369,41 @@ float4 grassFragmentMain(GrassOutput in) : SV_Target {
 // hide a gap; this removes it.
 // ---------------------------------------------------------------------------
 
-/// Cells per side, per level. Also the vertex count's only real lever: seven
-/// levels of 32x32 quads is 43,008 vertices, which is nothing.
-static const uint WATER_RES = 32;
-/// How many rings. Level L has cells of `WATER_CELL * 2^L`, so the outermost
-/// reaches `WATER_RES * WATER_CELL * 2^(L-1)` metres — 512 m at these numbers.
-static const uint WATER_LEVELS = 7;
+/// Cells per side, per level — **and the screen-space density knob**. A cell at
+/// Chebyshev radius `r` is `r / (WATER_RES/2)` metres across, which subtends
+/// `2 / WATER_RES` radians at any distance. 128 is 0.9°, about 14 pixels of
+/// quad at 900p through a 55° lens. It was 32, which is 58 pixels.
+///
+/// The cost is quadratic and the benefit is linear, because a ring covers a
+/// whole disc while a camera sees a wedge of it: six levels of 128² quads is
+/// 589,824 vertices against 43,008. ADR 0013 measures what that costs and the
+/// answer is that it is still nothing.
+static const uint WATER_RES = 128;
+/// How many rings of real geometry. Level L has cells of `WATER_CELL * 2^L`, so
+/// the outermost reaches `WATER_RES/2 * WATER_CELL * 2^(L-1)` metres — 1024 m
+/// here, past the 1000 m far plane, and past the ~830 m where the Nyquist fade
+/// below has retired the last wave `ocean` authors. Rings beyond the point
+/// where the sea is drawn flat buy nothing the skirt does not.
+static const uint WATER_LEVELS = 6;
 /// The finest cell, in metres, right under the camera.
 static const float WATER_CELL = 0.5;
+/// Where the outermost ring's outer edge goes, in metres.
+///
+/// **This is the horizon, and it is why the water has no edge.** The mesh used
+/// to be a 512 m disc, so there was a radius where the sea simply stopped: a
+/// hard horizontal line, measured at 8/255 per channel against the sky in
+/// `ocean` at its authored camera even with fog at 85%. Any finite radius has
+/// that line somewhere; what makes it invisible is putting it far enough out
+/// that it falls under the horizon by less than a pixel *for any camera height
+/// a scene might use*. 50 km subtends 0.11° from 100 m up — a fifth of a pixel
+/// — and the atmosphere has long since saturated by then.
+///
+/// It is not infinity because infinity does not survive the projection: a point
+/// at infinite distance lands at `z/w = far/(far-near)`, just outside the far
+/// plane, and is clipped. A finite skirt plus the clamp in `waterVertexMain` is
+/// the same picture without an infinite-projection matrix the rest of the
+/// renderer would have to agree to.
+static const float WATER_HORIZON = 50000.0;
 
 /// **The Nyquist fade, and the one place the drawn surface leaves the sampled
 /// one.** See ADR 0012.
@@ -1398,6 +1447,14 @@ static const float WATER_CELL = 0.5;
 /// ripple at 3.8 samples per period is visibly a ripple, and absent it is
 /// visibly a mirror. The fade exists to retire waves the mesh genuinely cannot
 /// sample, and Nyquist is where that line actually is.
+///
+/// **Both constants survived ADR 0013 unchanged, and that is the test of them.**
+/// They are stated in samples per wavelength, which is a fact about
+/// reconstruction and not about this mesh; the mesh enters only through
+/// `waterSamplingCell`, which is written against `WATER_RES`. Quadrupling the
+/// density therefore moved the whole curve outward without touching a number
+/// here: on `ocean` the fade first touches a wave at 37 m instead of 9.4 m, and
+/// the sea is drawn flat past ~830 m instead of past ~140 m.
 static const float WATER_FADE_WHOLE = 4.0;
 static const float WATER_FADE_GONE = 2.0;
 
@@ -1409,12 +1466,19 @@ static const float WATER_FADE_GONE = 2.0;
 /// again. And continuity: a weight that stepped per level would trade facets
 /// for a visible ring where the amplitude jumps.
 ///
-/// Level `L` covers Chebyshev radius `8·cell_L` to `16·cell_L` from the centre,
-/// so `r / 16` is the exact cell size at each ring's outer edge and
-/// under-reads by at most 2× inside it. Under- rather than over-reading is the
-/// deliberate half: clamped at `WATER_CELL` it is **exact everywhere level 0
-/// draws** (`r ≤ 8 m`), so the near field is bit-identical to the unfaded
-/// surface for any wave longer than `WATER_FADE_WHOLE · WATER_CELL` = 4 m.
+/// Level `L` covers Chebyshev radius `(WATER_RES/4)·cell_L` to
+/// `(WATER_RES/2)·cell_L` from the centre, so `r / (WATER_RES/2)` is the exact
+/// cell size at each ring's outer edge and under-reads by at most 2× inside it.
+/// Under- rather than over-reading is the deliberate half: clamped at
+/// `WATER_CELL` it is **exact everywhere level 0 draws** (`r ≤ 32 m`), so the
+/// near field is bit-identical to the unfaded surface for any wave longer than
+/// `WATER_FADE_WHOLE · WATER_CELL` = 4 m.
+///
+/// **Written against `WATER_RES` rather than against 16, and that is load
+/// bearing.** ADR 0013 changed the density by changing `WATER_RES` alone; a
+/// hand-inlined 16 here would have left the fade describing a mesh that no
+/// longer exists, which is the failure this expression is shaped to make
+/// impossible.
 ///
 /// Measured from the SNAPPED centre, not the eye. The eye moves continuously
 /// and every vertex's amplitude would move with it — the same shimmer generator
@@ -1486,8 +1550,31 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     float cellSize = WATER_CELL * exp2(float(level));
     float coarsest = WATER_CELL * exp2(float(WATER_LEVELS - 1));
     float2 centre = round(push.environment[0].eye.xz / coarsest) * coarsest;
-    float2 xz = centre
-        + (float2(float(ix), float(iz)) - float(WATER_RES) * 0.5) * cellSize;
+    float2 offset = (float2(float(ix), float(iz)) - float(WATER_RES) * 0.5) * cellSize;
+
+    // **The horizon skirt: the outermost vertex ring, moved out to
+    // WATER_HORIZON.** Every vertex on that ring has Chebyshev radius exactly
+    // `WATER_RES/2 * cellSize`, so one scale factor lands the whole ring on the
+    // horizon and keeps it a square — no per-vertex direction maths, and the
+    // two triangles of a boundary quad still share both of their outer
+    // vertices, which is what keeps it watertight.
+    //
+    // The quads it stretches are drawn dead flat and that is not luck: at this
+    // radius `waterSamplingCell` reads hundreds of metres, so every weight
+    // below is *exactly* zero and `loom_sample_water` returns the plane. The
+    // ring inside it is at 1024 m, where the same is already true — so there is
+    // no step in height across the join, only a step in triangle size, out
+    // past the far plane where nothing is drawn anyway.
+    //
+    // Computed after the stitch, because the stitch can move an index onto the
+    // boundary (`iz == 1` next to `ix == 0` rounds down to 0) and a vertex the
+    // stitch put on the edge is on the edge.
+    if (level == WATER_LEVELS - 1
+        && (ix == 0 || ix == int(WATER_RES) || iz == 0 || iz == int(WATER_RES))) {
+        offset *= WATER_HORIZON / (float(WATER_RES) * 0.5 * cellSize);
+    }
+
+    float2 xz = centre + offset;
 
     float surface = push.environment[0].water.x;
     // **The depth query, per vertex, out of the same grid the CPU reads.**
@@ -1543,6 +1630,21 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
 
     WaterOutput out;
     out.clip = mul(push.objects[push.objectOffset].mvp, float4(world, 1.0));
+    // **Held inside the far plane, which is what lets the skirt reach 50 km
+    // through a projection that ends at 1000 m.** Without this the clipper cuts
+    // the water at the far plane and the disc edge comes back, one kilometre
+    // further out; with it the horizon ring rasterises at the far depth, behind
+    // every other surface in the scene, which is where the horizon belongs.
+    //
+    // Guarded on `w > 0` and only ever clamping *down*. A vertex behind the eye
+    // has `w < 0`, and there `w * 0.999999` is the larger number — an
+    // unconditional `min` would drag such a vertex's `z` toward it and corrupt
+    // the near-plane clip, which is the one this must not touch. Strictly
+    // inside rather than equal to `w` because the depth test is LESS against a
+    // buffer cleared to 1.0, and a horizon at exactly 1.0 draws nothing.
+    if (out.clip.w > 0.0) {
+        out.clip.z = min(out.clip.z, out.clip.w * 0.999999);
+    }
     out.worldPos = world;
     out.normal = surfaceAt.normal;
     // **Clamped, and not for tidiness.** Off the height grid the depth is the

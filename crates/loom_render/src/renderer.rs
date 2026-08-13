@@ -264,7 +264,7 @@ pub const MAX_TERRAIN_SAMPLES: usize = 256 * 256;
 /// missing outer ring or as a wasted level drawn on top of itself. Spelled out
 /// rather than computed from named constants on this side, because the numbers
 /// that matter are the shader's; a test asserts they still agree.
-pub(crate) const WATER_VERTS: u32 = 32 * 32 * 7 * 6;
+pub(crate) const WATER_VERTS: u32 = 128 * 128 * 6 * 6;
 
 /// The multisampled render targets, when there are any.
 ///
