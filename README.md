@@ -1,6 +1,6 @@
 # Loom
 
-A 3D game engine in Rust where an LLM agent is a first-class author, not a code-completion
+A 3D game engine in Rust (written by ai) where an LLM agent is a first-class author, not a code-completion
 bolt-on. The agent composes scenes, sculpts destructible voxel terrain, and writes gameplay
 scripts through a CLI tool API — against diffable text files, schema-validated on load, and
 verified by two channels it can read on its own: a headless render to PNG and a deterministic
