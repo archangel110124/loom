@@ -88,10 +88,21 @@ struct EnvironmentData {
     float4 viewport;   // xy size in pixels
     float4 wind;       // xy direction, z speed, w gustiness
     float4 weather;    // x turbulence, y ground drag, z seconds, w unused
-    // x still-water level, y still-water depth, z 1 when the scene has water,
-    // w unused. **The depth is a constant until W6** — the terrain query that
-    // makes it real is a voxel-SDF lookup this shader cannot do.
+    // x still-water level, y unused, z 1 when the scene has water, w unused.
+    // Depth used to sit in `y` as a constant; it is a real per-vertex query
+    // now, out of the height field below.
     float4 water;
+    // The terrain height grid: xy world origin, z metres between samples,
+    // w samples per axis. **Zero samples means no terrain**, and every depth
+    // query is then bottomless — which is what an open ocean wants.
+    //
+    // Split from the pointer that follows only because `LoomHeightField` puts
+    // its pointer last and a float4 must stay 16-byte aligned; the two are
+    // assembled back into one in `waterVertexMain`.
+    float4 terrain;
+    // The heights, `terrain.w²` of them, row-major. **A pointer in this buffer
+    // rather than in the push block**, which is at 124 of its 128 bytes.
+    float* terrainHeights;
     // **The sea itself, in the environment buffer rather than behind another
     // pointer.** The push block is at 116 of the 128 bytes Vulkan guarantees;
     // this is per-scene data read once per vertex, which is exactly what this
@@ -1265,10 +1276,28 @@ struct WaterOutput {
     float4 clip : SV_Position;
     float3 worldPos : TEXCOORD0;
     float3 normal : TEXCOORD1;
-    /// Still-water depth under this point, in metres. Constant until W6 — see
-    /// the note on `EnvironmentData::water`.
-    nointerpolation float depth : TEXCOORD2;
+    /// Still-water depth under this point, in metres. Negative is dry land.
+    ///
+    /// **Interpolated, and that is the shoreline.** It used to be
+    /// `nointerpolation` because it was a constant; now it varies across a
+    /// quad, and the fragment shader discarding where it goes negative is what
+    /// cuts the water off at the water's edge rather than at the nearest
+    /// vertex. The cut then has cell-size-independent resolution, which
+    /// matters because the cell out at the far LOD ring is 32 m across.
+    float depth : TEXCOORD2;
 };
+
+/// The scene's terrain height grid, assembled from the two environment fields
+/// that carry it. `side == 0` is a scene with no terrain: every lookup then
+/// returns `LOOM_NO_GROUND` and the water is bottomless.
+LoomHeightField terrainField() {
+    LoomHeightField field;
+    field.origin = push.environment[0].terrain.xy;
+    field.spacing = push.environment[0].terrain.z;
+    field.side = int(push.environment[0].terrain.w);
+    field.height = push.environment[0].terrainHeights;
+    return field;
+}
 
 [shader("vertex")]
 WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
@@ -1308,11 +1337,15 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
         + (float2(float(ix), float(iz)) - float(WATER_RES) * 0.5) * cellSize;
 
     float surface = push.environment[0].water.x;
-    float depth = push.environment[0].water.y;
+    // **The depth query, per vertex, out of the same grid the CPU reads.**
+    // `loom_ground_height` is generated from `loom_voxel::heightfield`, whose
+    // Rust half answers the buoyancy solver — one bake, two lookups, and the
+    // agreement test compares them numerically rather than trusting this.
+    float ground = loom_ground_height(terrainField(), xz);
     LoomWaterSample surfaceAt = loom_sample_water(
         push.environment[0].waves,
         surface,
-        surface - depth,
+        ground,
         xz,
         push.environment[0].weather.z);
 
@@ -1332,7 +1365,15 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     out.clip = mul(push.objects[push.objectOffset].mvp, float4(world, 1.0));
     out.worldPos = world;
     out.normal = surfaceAt.normal;
-    out.depth = surfaceAt.depth;
+    // **Clamped, and not for tidiness.** Off the height grid the depth is the
+    // sentinel's — a billion metres — and this attribute is interpolated. A
+    // triangle with one vertex inside the grid and one outside then perspective-
+    // divides a 6 and a 1e9 together, which loses enough of the small end to
+    // come out *negative* on scattered pixels; the shoreline test below
+    // discarded them, and the grid's boundary drew itself in the sea as a
+    // dotted line. Everything downstream saturates by 5 m, so a hundred is far
+    // past any use of the value and interpolates exactly.
+    out.depth = min(surfaceAt.depth, 100.0);
     return out;
 }
 
@@ -1350,6 +1391,20 @@ static const float WATER_ROUGHNESS = 0.08;
 
 [shader("fragment")]
 float4 waterFragmentMain(WaterOutput in) : SV_Target {
+    // **The shoreline.** Where the bed is above the still-water line there is
+    // no water, and drawing it anyway is a sheet of sea lying over a hill —
+    // the single most obvious thing wrong with water that ignores terrain.
+    //
+    // A discard rather than a fade because the surface is opaque: it writes
+    // depth, and a fade would need blending, a sort against the terrain behind
+    // it, and a decision about what a half-transparent sea reflects. The edge
+    // is not left raw, though — the shoaling taper flattens the waves to
+    // nothing as they reach it, so the cut runs along still water rather than
+    // through a moving crest, which is what would make it crawl.
+    if (in.depth <= 0.0) {
+        discard;
+    }
+
     float3 toEye = push.environment[0].eye.xyz - in.worldPos;
     float3 view = normalize(toEye);
     float3 normal = normalize(in.normal);

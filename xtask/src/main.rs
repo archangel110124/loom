@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 19] = [
+const SCENES: [&str; 20] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -55,6 +55,10 @@ const SCENES: [&str; 19] = [
     // only drawn against it, so it is the only one whose `render --sim` runs
     // the buoyancy solver at all.
     "assets/test/water_crate.loom",
+    // The only scene where water meets land: a depth grid uploaded over buffer
+    // device address, a shoreline discard, and waves attenuating in the
+    // shallows — none of which `ocean` draws a pixel of.
+    "assets/test/shore.loom",
     "assets/test/camera.loom",
     "assets/test/walker.loom",
     "assets/test/explosion.loom",
@@ -97,7 +101,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 10] = [
+const GOLDEN: [(&str, &str, &[&str]); 11] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -136,6 +140,17 @@ const GOLDEN: [(&str, &str, &[&str]); 10] = [
     // every wave's phase is zero would be the least representative frame there
     // is.
     ("ocean", "assets/test/ocean.loom", &["--sim", "90"]),
+    // **Water against terrain**, which `ocean` cannot cover: it has no voxel
+    // volume at all, so its depth is the sentinel everywhere and its waves are
+    // never attenuated. Everything W6 added is visible here and nowhere else —
+    // the shoreline the fragment shader cuts, the flattening of the swell as
+    // it comes onto the shelf, and the shallow tint that used to be a
+    // hardcoded six metres.
+    //
+    // `--sim 90` for the same reason as `ocean`: t = 0 is the one instant
+    // where every wave's phase is zero, which is the least representative
+    // frame there is.
+    ("shore", "assets/test/shore.loom", &["--sim", "90"]),
 ];
 
 /// Every reference renders at this size.
@@ -678,6 +693,14 @@ fn validate() -> std::process::ExitCode {
             "assets/test/cave.loom",
             "assets/test/meadow.loom",
             "assets/test/ocean.loom",
+            // **And `shore`, for the pointer.** It is the only scene where the
+            // water shader dereferences the terrain height buffer at all —
+            // every other one has no terrain and returns the sentinel before
+            // touching it — and the viewer allocates and uploads that buffer
+            // through its own path, not the offscreen renderer's. A null or
+            // stale address there is a device fault on the first wave, and no
+            // headless gate would see it.
+            "assets/test/shore.loom",
         ] {
             if !root.join(scene).exists() {
                 continue;

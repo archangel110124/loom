@@ -25,6 +25,17 @@
 //! shader plumbing first; this is the half that can be had today, cheaply, and
 //! it is the half that catches a typo.
 //!
+//! # W6 rides on the same harness
+//!
+//! Depth has the identical hazard one layer down: the buoyancy solver subtracts
+//! a terrain height the CPU looked up, and the shader draws a shoreline from a
+//! terrain height the GPU looked up. Those are two lookups into **one baked
+//! grid**, and this test now runs the second one — `loom_voxel::heightfield`'s
+//! Slang half — beside the water and compares both the ground height and the
+//! depth that comes out of it. The measured difference is again exactly zero;
+//! it was 4.8e-7 until the Rust lerp stopped using `mul_add`, which is the kind
+//! of thing only a numeric comparison finds.
+//!
 //! Skips honestly, like every other tool-dependent check here, when `slangc` or
 //! a C++ compiler is missing.
 
@@ -32,6 +43,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use loom_scene::components::{GerstnerWave, WaterBody, WaveSet};
+use loom_voxel::heightfield::HeightField;
 
 /// Absolute agreement threshold, on a surface whose values reach a few metres.
 ///
@@ -81,6 +93,36 @@ fn sea() -> WaterBody {
     }
 }
 
+/// The bed both sides are asked about.
+///
+/// **Built by hand rather than marched out of a voxel volume**, for the same
+/// reason the sample set is written into the shader as literals: what is under
+/// test is that the two *lookups* agree, and a bake would only add a step both
+/// sides share. It carries the three things that could be got differently wrong
+/// — a slope, a hole with no ground in it at all
+/// (`loom_voxel::heightfield::NO_GROUND`), and a fractional grid position that
+/// lands between four different corners.
+fn bed() -> HeightField {
+    let side = 24;
+    let mut height = Vec::with_capacity(side * side);
+    for j in 0..side {
+        for i in 0..side {
+            let (x, z) = (i as f32, j as f32);
+            // A beach running up the +X axis, with a bump in it so the
+            // interpolation has something to interpolate.
+            let h = 0.35f32.mul_add(x, -6.0) + (0.4 * z).sin() * 0.5;
+            // A hole punched through the middle: no ground at all, which must
+            // survive being blended with the real heights around it.
+            height.push(if (10..13).contains(&i) && (6..9).contains(&j) {
+                loom_voxel::heightfield::NO_GROUND
+            } else {
+                h
+            });
+        }
+    }
+    HeightField { origin: [-6.0, -9.0], spacing: 0.75, side, height }
+}
+
 /// The sample set, generated once in Rust and written into the shader as
 /// literals.
 ///
@@ -89,7 +131,7 @@ fn sea() -> WaterBody {
 /// meant to catch it. Scattered by an integer hash rather than walked on a grid,
 /// because a regular grid can land every sample on the same phase of a sinusoid
 /// and agree for the wrong reason.
-fn samples() -> Vec<[f32; 4]> {
+fn samples() -> Vec<[f32; 3]> {
     (0..SAMPLES)
         .map(|i| {
             let h = |k: u32| {
@@ -99,11 +141,16 @@ fn samples() -> Vec<[f32; 4]> {
                 x ^= x >> 15;
                 f32::from(x as u16) / f32::from(u16::MAX)
             };
+            // **Spread wider than the bed on purpose.** The grid covers x in
+            // [−6, 12) and z in [−9, 9), so roughly half of these land inside
+            // it and the rest fall off the edge — where both sides have to
+            // return the sentinel rather than the nearest corner, which is a
+            // branch and therefore the easiest thing here to get differently
+            // wrong.
             [
-                h(1).mul_add(400.0, -200.0), // x
-                h(2).mul_add(400.0, -200.0), // z
-                h(3) * 120.0,                // t, seconds
-                h(4).mul_add(30.0, -25.0),   // ground height, for depth
+                h(1).mul_add(40.0, -14.0), // x
+                h(2).mul_add(40.0, -20.0), // z
+                h(3) * 120.0,              // t, seconds
             ]
         })
         .collect()
@@ -121,12 +168,13 @@ fn the_rust_and_the_slang_compute_the_same_surface() {
     };
 
     let body = sea();
+    let bed = bed();
     let samples = samples();
     let dir = std::env::temp_dir().join(format!("loom_water_agree_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
 
     let shader = dir.join("water.slang");
-    std::fs::write(&shader, kernel(&body, &samples)).expect("write shader");
+    std::fs::write(&shader, kernel(&body, &bed, &samples)).expect("write shader");
     std::fs::write(dir.join("harness.cpp"), HARNESS).expect("write harness");
 
     let kernel_cpp = dir.join("kernel.cpp");
@@ -171,8 +219,18 @@ fn the_rust_and_the_slang_compute_the_same_surface() {
 
     let mut worst = 0.0_f32;
     let mut worst_at = (0, 0);
+    // **The depth the physics uses is the depth the shader draws.** The ground
+    // height is looked up on each side by its own implementation — Rust's
+    // `HeightField::at` here, the generated `loom_ground_height` there — and
+    // then fed to the surface, so a divergence in the lookup shows up in every
+    // field below rather than only in the last column.
+    let mut inside = 0_usize;
     for (i, (sample, row)) in samples.iter().zip(&rows).enumerate() {
-        let cpu = loom_water::sample_water(&body, [sample[0], sample[1]], sample[2], sample[3]);
+        let ground = bed.at(sample[0], sample[1]);
+        if HeightField::has_ground(ground) {
+            inside += 1;
+        }
+        let cpu = loom_water::sample_water(&body, [sample[0], sample[1]], sample[2], ground);
         let expected = [
             cpu.height,
             cpu.normal[0],
@@ -185,6 +243,7 @@ fn the_rust_and_the_slang_compute_the_same_surface() {
             cpu.velocity[1],
             cpu.velocity[2],
             cpu.depth,
+            ground,
         ];
         assert_eq!(row.len(), expected.len(), "row {i} has {} values", row.len());
         for (field, (rust, slang)) in expected.iter().zip(row).enumerate() {
@@ -200,9 +259,16 @@ fn the_rust_and_the_slang_compute_the_same_surface() {
     let _ = std::fs::remove_dir_all(&dir);
     eprintln!(
         "water agreement: worst absolute difference {worst:e} over {} samples \
-         ({} values each)",
+         ({} values each), {inside} of them over real ground",
         samples.len(),
-        11
+        12
+    );
+    // Otherwise the depth half of this test proves nothing: a sample set that
+    // missed the bed entirely would compare two sentinels and agree.
+    assert!(
+        inside > samples.len() / 8,
+        "only {inside} of {} samples landed on the bed",
+        samples.len()
     );
     assert!(
         worst < EPSILON,
@@ -265,9 +331,12 @@ fn the_slang_half_compiles_for_the_gpu_too() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The Slang source: the twin, plus a kernel that prints the sample set.
-fn kernel(body: &WaterBody, samples: &[[f32; 4]]) -> String {
-    let mut out = String::from(loom_water::slang());
+/// The Slang source: both twins, plus a kernel that prints the sample set.
+fn kernel(body: &WaterBody, bed: &HeightField, samples: &[[f32; 3]]) -> String {
+    // The height field first: the water half does not use it, but the kernel
+    // below does, and Slang wants a function declared before it is called.
+    let mut out = String::from(loom_voxel::heightfield::slang());
+    out.push_str(loom_water::slang());
     out.push_str(
         "\n[shader(\"compute\")]\n[numthreads(1,1,1)]\nvoid computeMain(uint3 tid : SV_DispatchThreadID)\n{\n    LoomWaveSet set;\n",
     );
@@ -275,6 +344,10 @@ fn kernel(body: &WaterBody, samples: &[[f32; 4]]) -> String {
     // shortest decimal that parses back to the same f32 — so the wave table and
     // the sample set cross into Slang without a rounding step of their own.
     out.push_str(&format!("    set.count = {};\n", body.waves.waves.len()));
+    out.push_str(&format!(
+        "    set.attenuation_depth = {:?};\n",
+        body.waves.attenuation_depth
+    ));
     for (i, wave) in body.waves.waves.iter().enumerate() {
         out.push_str(&format!(
             "    set.waves[{i}].direction = float2({:?}, {:?});\n\
@@ -290,22 +363,40 @@ fn kernel(body: &WaterBody, samples: &[[f32; 4]]) -> String {
             wave.speed_scale,
         ));
     }
-    for [x, z, t, ground] in samples {
+    // The bed, as a local array the field points at. **This is the part that
+    // makes the test cover W6's real question** — the shader reads its heights
+    // through a pointer over buffer device address, and the only thing that
+    // differs here is where the pointer comes from.
+    out.push_str(&format!(
+        "    float heights[{}];\n",
+        bed.height.len()
+    ));
+    for (i, h) in bed.height.iter().enumerate() {
+        out.push_str(&format!("    heights[{i}] = {h:?};\n"));
+    }
+    out.push_str(&format!(
+        "    LoomHeightField bed;\n    bed.origin = float2({:?}, {:?});\n\
+         \x20   bed.spacing = {:?};\n    bed.side = {};\n    bed.height = &heights[0];\n",
+        bed.origin[0], bed.origin[1], bed.spacing, bed.side,
+    ));
+
+    for [x, z, t] in samples {
         out.push_str(&format!(
-            "    emit(set, {:?}, {:?}, float2({x:?}, {z:?}), {t:?});\n",
-            body.surface_height, ground,
+            "    emit(set, bed, {:?}, float2({x:?}, {z:?}), {t:?});\n",
+            body.surface_height,
         ));
     }
     out.push_str("}\n");
 
     // Declared above `computeMain` in the emitted text, since Slang wants it
     // before use.
-    let emit = "\nvoid emit(LoomWaveSet set, float surface_height, float ground_height, float2 xz, float t)\n\
-                {\n    LoomWaterSample s = loom_sample_water(set, surface_height, ground_height, xz, t);\n\
-                \x20   printf(\"%.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\\n\",\n\
+    let emit = "\nvoid emit(LoomWaveSet set, LoomHeightField bed, float surface_height, float2 xz, float t)\n\
+                {\n    float ground_height = loom_ground_height(bed, xz);\n\
+                \x20   LoomWaterSample s = loom_sample_water(set, surface_height, ground_height, xz, t);\n\
+                \x20   printf(\"%.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\\n\",\n\
                 \x20       s.height, s.normal.x, s.normal.y, s.normal.z,\n\
                 \x20       s.displacement.x, s.displacement.y, s.displacement.z,\n\
-                \x20       s.velocity.x, s.velocity.y, s.velocity.z, s.depth);\n}\n";
+                \x20       s.velocity.x, s.velocity.y, s.velocity.z, s.depth, ground_height);\n}\n";
     let split = out.find("\n[shader(\"compute\")]").expect("the kernel was just written");
     out.insert_str(split, emit);
     out

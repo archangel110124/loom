@@ -571,6 +571,13 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
             warn_if_grass_truncated(blades.len(), renderer.grass_capacity());
             renderer.set_grass(&blades).map_err(|e| e.to_string())?;
         }
+        // The bed the water reads its depth from — uploaded once, because a
+        // bake of the voxel SDF changes only when the terrain does.
+        if let Some(field) = scene_terrain_field(&scene) {
+            renderer
+                .set_terrain(&field.height, field.origin, field.spacing, field.side)
+                .map_err(|e| e.to_string())?;
+        }
 
         match frames {
             // The still. One image, the scene as `--sim` left it.
@@ -957,13 +964,50 @@ fn scene_volume(scene: &Scene) -> Option<(loom_voxel::Volume, [f32; 3])> {
     })
 }
 
-/// Most samples a ground grid takes along one axis.
+/// The ground under a whole voxel volume, for water to take its depth from.
 ///
-/// The grid is sampled at the voxel size until a field is big enough that that
-/// would be more than this, and then it coarsens. 117² marches down a 96-voxel
-/// column measured 0.11 s, so 256² is under a second; a 500 m field at 0.25 m
-/// would be four thousand squared and would not finish in a load.
-const GROUND_GRID_MAX: usize = 256;
+/// **The window is the volume's own footprint**, which is the honest answer to
+/// "where might there be terrain": outside it there is none, and the height
+/// field says so with its sentinel rather than by extrapolating the edge. The
+/// water mesh reaches 512 m and the grid does not; a sea 200 m from a small
+/// island is bottomless, which is correct.
+///
+/// **Rotation and scale on the volume's node are ignored**, exactly as the
+/// grass path ignores them — only the translation is applied. A rotated terrain
+/// volume would need the whole query in the volume's local frame, and nothing
+/// authors one.
+pub(crate) fn terrain_field(
+    volume: &loom_voxel::Volume,
+    offset: [f32; 3],
+) -> loom_voxel::heightfield::HeightField {
+    let [rx, _, rz] = volume.resolution();
+    #[allow(clippy::cast_precision_loss)]
+    let (wx, wz) = (rx as f32 * volume.voxel_size, rz as f32 * volume.voxel_size);
+    let centre = [offset[0] + wx * 0.5, offset[2] + wz * 0.5];
+    loom_voxel::heightfield::HeightField::bake(volume, offset, centre, wx.max(wz) * 0.5)
+}
+
+/// The scene's terrain height grid, or `None` when nothing would read it.
+///
+/// **Only baked for a scene that has water**, and that early-out is not
+/// politeness: the bake is a march down the SDF per sample, and
+/// `terrain_stress.loom` is 67 million voxels. Grass bakes its own window
+/// through the same code, which is one march each rather than one shared —
+/// the two want different extents, and sharing them would mean baking the
+/// coarser of the two for both.
+pub(crate) fn scene_terrain_field(
+    scene: &Scene,
+) -> Option<loom_voxel::heightfield::HeightField> {
+    if !scene
+        .nodes()
+        .iter()
+        .any(|n| n.components.contains_key("WaterBody"))
+    {
+        return None;
+    }
+    let (volume, offset) = scene_volume(scene)?;
+    Some(terrain_field(&volume, offset))
+}
 
 /// Radius, in metres, of the stencil that stands in for flow accumulation.
 ///
@@ -985,64 +1029,18 @@ const FLOW_FULL: f32 = 0.08;
 /// times, for an answer that is smoother rather than worse — a blade cannot
 /// resolve terrain finer than the voxel the grid is sampled at anyway.
 ///
-/// The grid is in world space and stores heights *relative to the grass node*,
-/// because that is what [`loom_grass::Ground::height`] means to the caller
-/// below — which adds the node's own translation back on.
+/// **The grid itself is [`loom_voxel::heightfield::HeightField`]**, shared with
+/// water — which needs exactly the same "where is the ground at (x, z)" and
+/// must get exactly the same answer, because the shoreline it draws and the
+/// depth the buoyancy solver reads are the same number. What lives here is only
+/// what grass adds on top: the slope, the flow proxy, and the node-relative
+/// height [`loom_grass::Ground`] is written in terms of.
 struct GroundGrid {
-    /// World X and Z of sample `(0, 0)`.
-    origin: [f32; 2],
-    /// Metres between samples.
-    spacing: f32,
-    /// Samples per axis.
-    side: usize,
-    /// Surface height relative to the grass node, or `NaN` where the column has
-    /// no surface at all.
-    height: Vec<f32>,
+    field: loom_voxel::heightfield::HeightField,
+    /// World Y of the grass node, subtracted from every height handed out.
+    base_y: f32,
     /// Flow stencil radius, in samples.
     stencil: usize,
-}
-
-/// World Y of the topmost surface in a column, or `NaN` where there is none.
-///
-/// **Marched, then bisected.** The field is an `i8` quantized to ±1 voxel
-/// (`SDF_SCALE`), so it saturates and the value carries no usable distance
-/// beyond that — a sphere trace would step through the ground. Half-voxel steps
-/// for the same reason [`loom_voxel::exposure`] uses them: the thinnest feature
-/// the field can hold is one voxel, and a whole-voxel step can miss a lip.
-fn surface_height(volume: &loom_voxel::Volume, offset: [f32; 3], x: f32, z: f32) -> f32 {
-    let (lx, lz) = (x - offset[0], z - offset[2]);
-    #[allow(clippy::cast_precision_loss)]
-    let top = volume.resolution()[1] as f32 * volume.voxel_size;
-    let step = volume.voxel_size * 0.5;
-    // Positive is air, zero and below is solid — the sign convention `exposure`
-    // documents from the other side.
-    let solid = |y: f32| loom_voxel::exposure::sample(volume, [lx, y, lz]) <= 0.0;
-
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let steps = (top / step).ceil() as usize;
-    let mut air = top;
-    for i in 1..=steps {
-        #[allow(clippy::cast_precision_loss)]
-        let y = step.mul_add(-(i as f32), top);
-        if solid(y) {
-            // Eight halvings of a half-voxel bracket puts the crossing well
-            // inside a millimetre at any voxel size the engine uses. A blade
-            // that sits a millimetre proud of the ground is invisible; one that
-            // sits a centimetre under it is decapitated.
-            let (mut lo, mut hi) = (y, air);
-            for _ in 0..8 {
-                let mid = 0.5 * (lo + hi);
-                if solid(mid) {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            return 0.5f32.mul_add(lo + hi, offset[1]);
-        }
-        air = y;
-    }
-    f32::NAN
 }
 
 impl GroundGrid {
@@ -1056,35 +1054,32 @@ impl GroundGrid {
         // Margin so the flow stencil and the slope differences never read off
         // the edge of the grid, which would make the field's border a cliff.
         let reach = half[0].max(half[1]) + FLOW_RADIUS + volume.voxel_size * 2.0;
-        #[allow(clippy::cast_precision_loss)]
-        let spacing = (reach * 2.0 / GROUND_GRID_MAX as f32).max(volume.voxel_size);
+        let field = loom_voxel::heightfield::HeightField::bake(
+            volume,
+            offset,
+            [base[0], base[2]],
+            reach,
+        );
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let side = (reach * 2.0 / spacing).ceil() as usize + 1;
-        let origin = [base[0] - reach, base[2] - reach];
-
-        let mut height = Vec::with_capacity(side * side);
-        for j in 0..side {
-            for i in 0..side {
-                #[allow(clippy::cast_precision_loss)]
-                let (x, z) = (
-                    spacing.mul_add(i as f32, origin[0]),
-                    spacing.mul_add(j as f32, origin[1]),
-                );
-                height.push(surface_height(volume, offset, x, z) - base[1]);
-            }
-        }
-
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let stencil = ((FLOW_RADIUS / spacing).round() as usize).max(1);
-        Self { origin, spacing, side, height, stencil }
+        let stencil = ((FLOW_RADIUS / field.spacing).round() as usize).max(1);
+        Self { field, base_y: base[1], stencil }
     }
 
-    /// Height at a sample, or `NaN` outside the grid.
+    /// Height at a sample relative to the grass node, or `NaN` where there is
+    /// no ground.
+    ///
+    /// **`NaN` here rather than the height field's sentinel**, because every
+    /// caller below is a Rust arithmetic path that already treats "not finite"
+    /// as "no ground", and a −10⁹ blended into a slope would read as a cliff
+    /// instead. The sentinel exists for the shader's sake, which has no branch
+    /// to spare.
     fn node(&self, i: usize, j: usize) -> f32 {
-        if i >= self.side || j >= self.side {
-            return f32::NAN;
+        let h = self.field.node(i, j);
+        if loom_voxel::heightfield::HeightField::has_ground(h) {
+            h - self.base_y
+        } else {
+            f32::NAN
         }
-        self.height[j * self.side + i]
     }
 
     /// What the ground is doing at a world position.
@@ -1096,11 +1091,15 @@ impl GroundGrid {
     /// half of P2's exit criteria, and it costs no new channel.
     fn at(&self, x: f32, z: f32) -> loom_grass::Ground {
         let bare = loom_grass::Ground { rock: 1.0, ..loom_grass::Ground::default() };
-        let (gx, gz) = ((x - self.origin[0]) / self.spacing, (z - self.origin[1]) / self.spacing);
+        let spacing = self.field.spacing;
+        let (gx, gz) = (
+            (x - self.field.origin[0]) / spacing,
+            (z - self.field.origin[1]) / spacing,
+        );
         // The stencil reaches `stencil` samples out, so anything nearer the
         // edge than that has no neighbourhood to measure.
         #[allow(clippy::cast_precision_loss)]
-        let limit = (self.side - self.stencil - 1) as f32;
+        let limit = (self.field.side - self.stencil - 1) as f32;
         #[allow(clippy::cast_precision_loss)]
         let low = self.stencil as f32;
         if !(gx >= low && gz >= low && gx < limit && gz < limit) {
@@ -1128,8 +1127,8 @@ impl GroundGrid {
         // its gradient is noisy at exactly the scale a blade cares about, and
         // the surface is what grass grows on anyway.
         let (dx, dz) = (
-            (self.node(i + 1, j) - self.node(i - 1, j)) / (2.0 * self.spacing),
-            (self.node(i, j + 1) - self.node(i, j - 1)) / (2.0 * self.spacing),
+            (self.node(i + 1, j) - self.node(i - 1, j)) / (2.0 * spacing),
+            (self.node(i, j + 1) - self.node(i, j - 1)) / (2.0 * spacing),
         );
         let length = dx.mul_add(dx, dz.mul_add(dz, 1.0)).sqrt();
         let normal = if length.is_finite() && length > 0.0 {
@@ -1176,6 +1175,35 @@ impl GroundGrid {
 /// editor re-derives its view on **every frame of a gizmo drag**. This is the
 /// same guard `SceneView::mesh_key` is for geometry: regenerate only when a
 /// grass field, the terrain under it, or where either sits actually moved.
+/// Everything [`scene_terrain_field`] reads out of the scene, as a comparable
+/// key.
+///
+/// **This is the answer to §5.2 in the viewer.** Carve the lake bed with a
+/// transaction and the ops under `VoxelVolume` change, so this string changes,
+/// so the height field is rebaked and re-uploaded and the shoreline moves. It
+/// costs the bake — a march per grid sample, tenths of a second on the scenes
+/// here — paid on the edit rather than on the frame, which is the same bargain
+/// grass makes. What it does *not* do is rebake inside a running simulation:
+/// `Sim` bakes once at load, and a crater blown mid-run is seen by the water
+/// only after a reload.
+pub(crate) fn terrain_key(scene: &Scene) -> String {
+    if !scene
+        .nodes()
+        .iter()
+        .any(|n| n.components.contains_key("WaterBody"))
+    {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    for node in scene.nodes() {
+        if let Some(component) = node.components.get("VoxelVolume") {
+            let at = world_translation(scene, node);
+            parts.push(format!("{}|{at:?}|{component}", node.path));
+        }
+    }
+    parts.join("\n")
+}
+
 pub(crate) fn grass_key(scene: &Scene) -> String {
     // Same early-out as `grass_blades`, and for the same reason: a scene with
     // no grass must not pay to describe a 67-million-voxel volume it will
@@ -1527,16 +1555,6 @@ pub(crate) fn environment_with_wind(
     env
 }
 
-/// Still-water depth handed to the water shader, in metres.
-///
-/// **A constant, and W6 is what makes it real.** The honest quantity is
-/// `surface_height - terrain_height(x, z)` against a voxel SDF that changes at
-/// runtime (§5.2 of the water doc), and nothing samples that yet. Only the
-/// colour tint reads it, so the visible effect of the placeholder is that a
-/// shore is the same colour as open sea — which is exactly what W6 fixes and
-/// is not hidden by anything.
-const WATER_DEPTH_UNTIL_W6: f32 = 6.0;
-
 /// Put the scene's sea into the environment the shader reads.
 ///
 /// **The waves are derived from the wind unless the file lists its own.** A sea
@@ -1559,7 +1577,11 @@ fn add_water(
     };
     let waves = &body.waves.waves;
 
-    env.water = [body.surface_height, WATER_DEPTH_UNTIL_W6, 1.0, 0.0];
+    // Depth is no longer in here: it is a per-vertex query against the terrain
+    // height grid `set_terrain` uploads, which is the same grid the buoyancy
+    // solver reads (W6). `y` is spare.
+    env.water = [body.surface_height, 0.0, 1.0, 0.0];
+    env.attenuation_depth = body.waves.attenuation_depth;
     // Truncated at the cap the shader's loop is bounded by, which is also the
     // schema's `maxItems`, so this only bites on a hand-built body.
     env.wave_count = u32::try_from(waves.len().min(loom_render::MAX_WAVES)).unwrap_or(0);

@@ -11,3 +11,12 @@ publish.workspace = true
 # whatever generates the shader.
 [dependencies]
 loom_scene = { version = "0.0.0", path = "../loom_scene" }
+
+# **Tests only.** W6's depth comes from `loom_voxel::heightfield`, and the
+# agreement test compiles that crate's Slang half beside this one's so the two
+# lookups can be compared against their Rust originals in the same run. A
+# dev-dependency rather than a dependency because nothing in this crate marches
+# a voxel: `sample_water` is handed a ground height and never asks where it came
+# from, which is what keeps the generated shader free of the terrain system.
+[dev-dependencies]
+loom_voxel = { version = "0.0.0", path = "../loom_voxel" }

@@ -95,6 +95,10 @@ fn generate_water(shader_dir: &Path) {
          // Do not edit. Edit `loom_water::slang` and the Rust beside it, which is\n\
          // the half physics reads; editing this file changes the GPU alone.\n",
     );
+    // The terrain height lookup first: the water surface takes a ground height
+    // as an argument and does not call this itself, but `scene.slang` needs
+    // both and Slang wants a function declared before it is used.
+    text.push_str(loom_voxel::heightfield::slang());
     text.push_str(loom_water::slang());
     write_generated(shader_dir, "water.slang", &text);
 }

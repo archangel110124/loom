@@ -68,6 +68,19 @@ pub struct Sim {
     /// The scene's water, with its waves resolved once — the same resolution
     /// the renderer does, so a crate floats on the sea it is drawn on.
     water: Option<loom_scene::components::WaterBody>,
+    /// The ground under the scene's voxel terrain, baked once at load.
+    ///
+    /// **The same grid the water shader reads**, through the same
+    /// `loom_voxel::heightfield` lookup — which is what makes the depth a crate
+    /// floats in the depth the shoreline is drawn from. `None` when the scene
+    /// has no voxel terrain, and every depth is then bottomless.
+    ///
+    /// **Baked at load and never rebaked**, which is the honest W6 answer to
+    /// §5.2: carve the lake bed mid-run and the water this `Sim` sees is the
+    /// water the bed used to make. Reloading the scene — which is what the
+    /// viewer does on every file change, and what `loom explode` produces — is
+    /// what picks it up. See `scene_terrain_field` for the cost.
+    terrain: Option<loom_voxel::heightfield::HeightField>,
     /// Bodies that float, in scene order, with their pontoons already in body
     /// space. **Order is fixed at load and never sorted**: the forces are
     /// summed as floats, and a different visiting order is a different number
@@ -188,6 +201,10 @@ impl Sim {
         let mut dynamic = Vec::new();
         let mut characters = Vec::new();
         let mut floating: Vec<Floating> = Vec::new();
+        // Whether anything will ask about the bed. Read before the loop so the
+        // voxel branch can decide to bake without a second pass over the world.
+        let floats = world.water().is_some();
+        let mut terrain = None;
 
         for entity in world.entities() {
             let Some(global) = world.global_transform(*entity) else {
@@ -291,6 +308,17 @@ impl Sim {
                             volume.voxel_size * world_scale.y.abs(),
                             volume.voxel_size * world_scale.z.abs(),
                         ];
+                        // **The water's bed, off the same rebuilt volume.**
+                        // Baked here rather than in a second pass because the
+                        // volume is expensive to build and already in hand —
+                        // and only when the scene has water, because the march
+                        // is not free and nothing else in the sim reads it.
+                        if floats {
+                            terrain = Some(crate::terrain_field(
+                                &volume,
+                                [pos[0], pos[1], pos[2]],
+                            ));
+                        }
                         if physics
                             .add_static_voxels(pos, quat, sized, &cells)
                             .is_none()
@@ -336,6 +364,7 @@ impl Sim {
                                 at: [0.0; 3],
                                 radius: 0.0,
                                 velocity: [0.0; 3],
+                                ground: loom_voxel::heightfield::NO_GROUND,
                             };
                             buoyancy.pontoons.len()
                         ],
@@ -371,6 +400,7 @@ impl Sim {
             dynamic,
             characters,
             water,
+            terrain,
             floating,
             tick: 0,
         }
@@ -414,6 +444,16 @@ impl Sim {
                     .physics
                     .velocity_at_point(floating.body, state.at)
                     .unwrap_or([0.0; 3]);
+                // The bed under this pontoon, from the shared height field.
+                // Without it a crate in a foot of water rides the open sea's
+                // swell, and the surface it is drawn on is not the one it is
+                // floating on.
+                state.ground = self
+                    .terrain
+                    .as_ref()
+                    .map_or(loom_voxel::heightfield::NO_GROUND, |t| {
+                        t.at(state.at[0], state.at[2])
+                    });
             }
 
             let wrench = loom_water::buoyancy::solve(
@@ -2665,6 +2705,56 @@ transform = { pos = [0.0, 6.0, 0.0] }
                 .join("../../assets/test/water_crate.loom"),
         )
         .expect("the W5 test scene should exist")
+    }
+
+    /// **W6 on the physics side: the crate feels the bottom.** The same scene
+    /// with a voxel shelf a metre and a half under the surface, and an
+    /// authored `attenuation_depth`, so the waves the buoyancy solver samples
+    /// are the shallow ones.
+    ///
+    /// This is the whole CPU path in one assertion — `Sim` bakes the height
+    /// field off the volume it is already building a collider from, fills each
+    /// pontoon's `ground` from it, and `sample_water` tapers every amplitude by
+    /// `tanh(k·d)/tanh(k·D)`. Any link missing and the crate rides the open
+    /// sea's swell in five feet of water, which is what it did before W6.
+    #[test]
+    fn a_crate_in_the_shallows_rides_a_smaller_sea() {
+        let deep = water_crate();
+        let shallow = deep
+            .replace(
+                "  drag = 2.0\n",
+                "  drag = 2.0\n\n  [node.components.WaterBody.waves]\n  \
+                 attenuation_depth = 4.0\n  max_height = 1.5\n",
+            )
+            // A shelf under the whole area the crate drifts over: 16 m square,
+            // its top at y = −1.5, which is 1.5 m of water. Low enough that the
+            // crate never touches it — it floats with its underside at about
+            // −0.65 — and shallow enough that the taper is about a half.
+            + "\n[[node]]\nname = \"Shelf\"\nparent = \"Sea\"\n\
+               transform = { pos = [-8.0, -7.5, -14.0] }\n\n  \
+               [node.components.VoxelVolume]\n  voxel_size = 0.25\n  chunks = [2, 1, 2]\n\n  \
+               [[node.components.VoxelVolume.ops]]\n  kind = \"box\"\n  \
+               center = [8.0, 3.0, 8.0]\n  half_extents = [10.0, 3.0, 10.0]\n  \
+               mode = \"union\"\n";
+
+        let deep_y: Vec<f32> = crate_trajectory(&deep, 1800).iter().map(|p| p[1]).collect();
+        let shallow_y: Vec<f32> =
+            crate_trajectory(&shallow, 1800).iter().map(|p| p[1]).collect();
+
+        let open = peak_to_peak(&deep_y[1500..1800]);
+        let inshore = peak_to_peak(&shallow_y[1500..1800]);
+        assert!(
+            inshore < open * 0.75,
+            "the crate rides the same sea in 1.5 m of water as in the open: \
+             {inshore:.3} m against {open:.3} m"
+        );
+        // And it is still floating rather than sunk or beached — a taper that
+        // zeroed the surface entirely would also pass the line above.
+        let mean = shallow_y[1500..1800].iter().sum::<f32>() / 300.0;
+        assert!(
+            (-0.5..0.5).contains(&mean),
+            "the crate is not at the waterline any more: y = {mean:.3}"
+        );
     }
 
     /// **W5's exit criterion, as a number.** A crate dropped four metres into

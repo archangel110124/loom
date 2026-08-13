@@ -839,10 +839,26 @@ pub struct WaveSet {
     pub waves: Vec<GerstnerWave>,
     /// Depth in metres below which waves start to flatten.
     ///
-    /// Real waves feel the bottom and shorten as they approach a beach; this is
-    /// the depth at which that begins. Nothing reads it until the terrain depth
-    /// query exists, and it is authored now so a shoreline does not need the
-    /// file rewritten.
+    /// Real waves feel the bottom as they approach a beach, and this is the
+    /// depth at and beyond which they are still their whole selves: below it
+    /// each wave's amplitude is scaled by `tanh(k·d) / tanh(k·D)`, reaching zero
+    /// at the shoreline. The longest waves flatten first, which is what `k`
+    /// being in there buys.
+    ///
+    /// **Zero — the default — turns attenuation off entirely**, so an ocean
+    /// authored before the shallows existed is unchanged. Both halves of the
+    /// engine read it: the shader attenuates per vertex, and buoyancy samples
+    /// the same flattened surface, so a crate in a foot of water does not ride
+    /// the open sea's swell. See ADR 0011 for what the model leaves out —
+    /// no shoaling amplification, no refraction, no wavelength shortening.
+    ///
+    /// **Author the sea floor deeper than this at the edge of the terrain
+    /// volume** — and deeper than the shader's shallow-water tint ramp too.
+    /// Outside the volume there is no terrain and the water is bottomless, so
+    /// anything reading depth that has not saturated by the volume's edge draws
+    /// the edge: a step in the wave height, or a rectangle of differently
+    /// tinted water around the terrain. `assets/test/shore.loom` is the worked
+    /// example.
     #[schemars(range(min = 0.0, max = 1000.0))]
     pub attenuation_depth: f32,
     /// Hard clamp on displacement above the still-water line, in metres.
@@ -865,6 +881,12 @@ pub struct WaveSet {
 /// **Water is a plane that terrain does not drain.** Blowing a crater in a lake
 /// bed below the waterline does not empty the lake; the surface ignores it. A
 /// known and deliberate v1 limitation, written down here rather than discovered.
+///
+/// What the terrain *does* decide is depth, and depth decides three things: how
+/// big the waves are here ([`WaveSet::attenuation_depth`]), how the shallows are
+/// tinted, and where the surface stops being drawn at all. The bed is read from
+/// the voxel SDF on the CPU, baked to a grid, and read by the shader from that
+/// same grid — one number, two lookups (ADR 0011).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct WaterBody {

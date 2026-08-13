@@ -181,6 +181,10 @@ struct App {
     /// What the grass on the GPU was placed from — see [`crate::grass_key`].
     /// Empty means "no blades uploaded", which is also a scene with no grass.
     grass_uploaded: String,
+    /// What the terrain height grid on the GPU was baked from — see
+    /// [`crate::terrain_key`]. Empty means none, which is also a scene with no
+    /// water to read it.
+    terrain_uploaded: String,
     /// The handle being dragged, if one is.
     drag: Option<Drag>,
     /// Bumped whenever a mouse button comes up. Part of every gesture key, so
@@ -325,6 +329,7 @@ impl App {
             // Not `grass_key(&view.scene)`: the viewer does not exist yet, so
             // nothing has been uploaded. `resumed` does the first upload.
             grass_uploaded: String::new(),
+            terrain_uploaded: String::new(),
             selected: view.paths.first().cloned().into_iter().collect(),
             view,
             base,
@@ -493,6 +498,7 @@ impl App {
         // Grass is placed from the scene the same way the meshes are, so a
         // reload has to re-place it or the window keeps showing the old field.
         self.upload_grass();
+        self.upload_terrain();
         // The scene changed, so the emitters may have. Dropped rather than
         // patched: a reload is rare and rebuilding is a warm-up, not a frame
         // cost.
@@ -530,6 +536,33 @@ impl App {
         match viewer.set_grass(&blades) {
             Ok(()) => self.grass_uploaded = key,
             Err(e) => crate::log::error(format!("could not upload the grass: {e}")),
+        }
+    }
+
+    /// Bake this scene's terrain height grid and hand it to the GPU, if it
+    /// changed.
+    ///
+    /// **This is where a carved lake bed reaches the water.** The key is the
+    /// volume's op list, so the transaction that blows a crater rebakes and the
+    /// shoreline moves with it; a gizmo drag that touches nothing else does
+    /// not, because the bake is a march down the SDF per sample and that is not
+    /// frame work.
+    fn upload_terrain(&mut self) {
+        let key = crate::terrain_key(&self.view.scene);
+        if key == self.terrain_uploaded {
+            return;
+        }
+        let field = crate::scene_terrain_field(&self.view.scene);
+        let Some(viewer) = self.viewer.as_mut() else {
+            return;
+        };
+        let result = match field.as_ref() {
+            Some(f) => viewer.set_terrain(&f.height, f.origin, f.spacing, f.side),
+            None => viewer.set_terrain(&[], [0.0; 2], 1.0, 0),
+        };
+        match result {
+            Ok(()) => self.terrain_uploaded = key,
+            Err(e) => crate::log::error(format!("could not upload the terrain heights: {e}")),
         }
     }
 

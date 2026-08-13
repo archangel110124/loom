@@ -2,6 +2,59 @@
 // Do not edit. Edit `loom_water::slang` and the Rust beside it, which is
 // the half physics reads; editing this file changes the GPU alone.
 
+// The terrain height field. The Rust half is `loom_voxel::heightfield`; they
+// are one implementation written twice, and `loom_water`'s agreement test
+// compiles this and compares the two numerically.
+//
+// Never edit this by hand: it is emitted from the Rust, and editing it changes
+// the GPU alone — which is a shoreline drawn somewhere the physics does not
+// think it is.
+
+// Where a column has no surface. Large, negative and finite, never a NaN: the
+// bilinear below is plain arithmetic with no branch, so "no ground" has to
+// survive being interpolated with a real height.
+static const float LOOM_NO_GROUND = -1.0e9;
+
+struct LoomHeightField {
+    // World XZ of sample (0, 0).
+    float2 origin;
+    // Metres between samples.
+    float spacing;
+    // Samples per axis. Zero means the scene has no terrain at all.
+    int side;
+    // Row-major, `side * side` of them.
+    float* height;
+};
+
+float loom_height_node(LoomHeightField field, int i, int j) {
+    if (i >= field.side || j >= field.side) { return LOOM_NO_GROUND; }
+    return field.height[j * field.side + i];
+}
+
+float loom_ground_height(LoomHeightField field, float2 xz) {
+    if (field.side <= 0) { return LOOM_NO_GROUND; }
+    float gx = (xz.x - field.origin.x) / field.spacing;
+    float gz = (xz.y - field.origin.y) / field.spacing;
+    float limit = float(field.side - 1);
+    if (!(gx >= 0.0 && gz >= 0.0 && gx < limit && gz < limit)) {
+        return LOOM_NO_GROUND;
+    }
+    int i = int(gx);
+    int j = int(gz);
+    float fx = gx - float(i);
+    float fz = gz - float(j);
+
+    float h00 = loom_height_node(field, i, j);
+    float h10 = loom_height_node(field, i + 1, j);
+    float h01 = loom_height_node(field, i, j + 1);
+    float h11 = loom_height_node(field, i + 1, j + 1);
+    // Written as `(b - a) * t + a` rather than `lerp`, because that is what the
+    // Rust does and a library `lerp` is free to round the other way.
+    float a = (h10 - h00) * fx + h00;
+    float b = (h11 - h01) * fx + h01;
+    return (b - a) * fz + a;
+}
+
 // The water surface. The Rust half is `loom_water::sample_water`; they are one
 // implementation written twice, and `slang_agreement` compiles this and
 // compares the two numerically.
@@ -25,7 +78,22 @@ struct LoomWave {
 struct LoomWaveSet {
     LoomWave waves[LOOM_MAX_WAVES];
     int count;
+    // Depth in metres below which waves start to flatten. Zero disables it,
+    // which is the schema default and what keeps an open ocean unchanged.
+    float attenuation_depth;
 };
+
+// How much of its deep-water amplitude a wave keeps in water `depth` deep.
+// The Rust half is `loom_water::shoal`, which carries the reasoning: linear
+// theory's tanh(k*d), normalised so the authored depth is where the wave is
+// whole again. Never above 1, which is what keeps the steepness limit the
+// validator enforces from being broken by the shallows.
+float loom_shoal(float k, float depth, float attenuation_depth) {
+    if (attenuation_depth <= 0.0) { return 1.0; }
+    float full = tanh(k * attenuation_depth);
+    if (full <= 0.0) { return 1.0; }
+    return clamp(tanh(k * depth) / full, 0.0, 1.0);
+}
 
 struct LoomWaterSample {
     float height;
@@ -48,6 +116,10 @@ LoomWaterSample loom_sample_water(
     float slope_z = 0.0;
     float flatten = 0.0;
 
+    // Still-water depth, once: a depth that oscillated with the waves would
+    // make the attenuation modulate itself.
+    float depth = surface_height - ground_height;
+
     for (int i = 0; i < LOOM_MAX_WAVES; ++i) {
         if (i >= set.count) { break; }
         LoomWave wave = set.waves[i];
@@ -65,11 +137,14 @@ LoomWaterSample loom_sample_water(
         float sin_phase = sin(phase);
         float cos_phase = cos(phase);
 
-        float qa = wave.steepness * wave.amplitude;
-        float ka = k * wave.amplitude;
+        // The shallows, entering as an amplitude and nothing else.
+        float amplitude = wave.amplitude * loom_shoal(k, depth, set.attenuation_depth);
+
+        float qa = wave.steepness * amplitude;
+        float ka = k * amplitude;
 
         displacement.x += qa * d.x * cos_phase;
-        displacement.y += wave.amplitude * sin_phase;
+        displacement.y += amplitude * sin_phase;
         displacement.z += qa * d.y * cos_phase;
 
         slope_x += d.x * ka * cos_phase;
@@ -77,7 +152,7 @@ LoomWaterSample loom_sample_water(
         flatten += wave.steepness * ka * sin_phase;
 
         velocity.x += qa * d.x * omega * sin_phase;
-        velocity.y -= wave.amplitude * omega * cos_phase;
+        velocity.y -= amplitude * omega * cos_phase;
         velocity.z += qa * d.y * omega * sin_phase;
     }
 
@@ -98,6 +173,6 @@ LoomWaterSample loom_sample_water(
     result.normal = normal;
     result.displacement = displacement;
     result.velocity = velocity;
-    result.depth = surface_height - ground_height;
+    result.depth = depth;
     return result;
 }

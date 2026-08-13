@@ -77,6 +77,13 @@ pub struct Viewer {
     grass_buffer: vk::Buffer,
     grass_alloc: Option<Allocation>,
     grass_address: vk::DeviceAddress,
+    /// The terrain height grid the water takes its depth from — see
+    /// [`Viewer::set_terrain`]. Uploaded on load and on reload, never per frame.
+    terrain_buffer: vk::Buffer,
+    terrain_alloc: Option<Allocation>,
+    terrain_address: vk::DeviceAddress,
+    terrain_params: [f32; 4],
+    terrain_heights: vk::DeviceAddress,
     grass_pipeline: vk::Pipeline,
     /// The water surface. Whether it draws at all is read from
     /// [`Viewer::environment`], which the caller sets every frame.
@@ -315,6 +322,14 @@ impl Viewer {
             "loom.viewer_grass",
             vk::BufferUsageFlags::empty(),
         )?;
+        let (terrain_buffer, terrain_alloc, terrain_address) =
+            crate::renderer::create_address_buffer(
+                &raw,
+                &mut allocator,
+                (crate::renderer::MAX_TERRAIN_SAMPLES * size_of::<f32>()) as u64,
+                "loom.viewer_terrain",
+                vk::BufferUsageFlags::empty(),
+            )?;
 
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -360,6 +375,7 @@ impl Viewer {
         names.set(pipeline, "loom.viewer_pipeline");
         names.set(grass_pipeline, "loom.viewer_grass_pipeline");
         names.set(grass_buffer, "loom.viewer_grass");
+        names.set(terrain_buffer, "loom.viewer_terrain");
         names.set(depth, "loom.viewer_depth");
         names.set(acquired, "loom.sem_image_acquired");
         for semaphore in &rendered {
@@ -407,6 +423,11 @@ impl Viewer {
             grass_buffer,
             grass_alloc: Some(grass_alloc),
             grass_address,
+            terrain_buffer,
+            terrain_alloc: Some(terrain_alloc),
+            terrain_address,
+            terrain_params: [0.0, 0.0, 1.0, 0.0],
+            terrain_heights: 0,
             grass_pipeline,
             water_pipeline,
             grass_count: 0,
@@ -487,6 +508,41 @@ impl Viewer {
                 .as_ref()
                 .ok_or_else(|| RenderError::Allocator("grass buffer is gone".into()))?,
             drawn,
+        )
+    }
+
+    /// Hand the viewer the terrain height grid the water reads.
+    ///
+    /// Mirrors [`crate::Renderer::set_terrain`], including what an empty slice
+    /// means: no terrain, and every depth query bottomless.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the viewer is being torn down.
+    pub fn set_terrain(
+        &mut self,
+        heights: &[f32],
+        origin: [f32; 2],
+        spacing: f32,
+        side: usize,
+    ) -> Result<(), RenderError> {
+        if heights.is_empty()
+            || side * side > crate::renderer::MAX_TERRAIN_SAMPLES
+            || heights.len() < side * side
+        {
+            self.terrain_params = [0.0, 0.0, 1.0, 0.0];
+            self.terrain_heights = 0;
+            return Ok(());
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.terrain_params = [origin[0], origin[1], spacing, side as f32];
+        }
+        self.terrain_heights = self.terrain_address;
+        write_slice(
+            self.terrain_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("terrain buffer is gone".into()))?,
+            &heights[..side * side],
         )
     }
 
@@ -763,6 +819,12 @@ impl Viewer {
             self.environment.viewport =
                 [self.extent.width as f32, self.extent.height as f32, 0.0, 0.0];
         }
+        // Stamped rather than assigned by the caller, exactly as in
+        // `renderer.rs`: the window replaces `environment` every frame from the
+        // scene, and the terrain grid is not part of what a scene reload
+        // rebuilds cheaply.
+        self.environment.terrain = self.terrain_params;
+        self.environment.terrain_heights = self.terrain_heights;
         write_slice(
             self.environment_alloc
                 .as_ref()
@@ -1275,8 +1337,14 @@ impl Drop for Viewer {
             self.device.destroy_pipeline(self.grass_pipeline, None);
             self.device.destroy_pipeline(self.water_pipeline, None);
             self.device.destroy_buffer(self.grass_buffer, None);
+            self.device.destroy_buffer(self.terrain_buffer, None);
             if let (Some(allocation), Some(allocator)) =
                 (self.grass_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            if let (Some(allocation), Some(allocator)) =
+                (self.terrain_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
             }

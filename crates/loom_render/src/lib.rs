@@ -106,6 +106,41 @@ mod tests {
 
     use super::*;
 
+    /// **`EnvironmentData` is one memory layout described twice**, and the
+    /// second description is in a shader the compiler never sees. A wrong
+    /// offset here is not a build error and not a validation message — it is
+    /// the water reading the wave table as a pointer, which is a hang or a
+    /// blank screen with nothing to blame.
+    ///
+    /// The numbers are Slang's, read out of the compiled module with
+    /// `spirv-dis | grep 'OpMemberDecorate %EnvironmentData_natural'`. The
+    /// pointer is the one worth pinning: it sits between two `float4`-aligned
+    /// blocks and is the only 8-byte member in the struct.
+    #[test]
+    fn the_environment_buffer_is_laid_out_as_the_shader_reads_it() {
+        use renderer::EnvironmentData;
+        let base = EnvironmentData::default();
+        let at = |field: *const u8| {
+            field as usize - std::ptr::from_ref(&base).cast::<u8>() as usize
+        };
+
+        assert_eq!(at(std::ptr::from_ref(&base.water).cast()), 128, "water");
+        assert_eq!(at(std::ptr::from_ref(&base.terrain).cast()), 144, "terrain");
+        assert_eq!(
+            at(std::ptr::from_ref(&base.terrain_heights).cast()),
+            160,
+            "terrainHeights — the pointer the height field is read through"
+        );
+        assert_eq!(at(std::ptr::from_ref(&base.waves).cast()), 168, "waves");
+        assert_eq!(at(std::ptr::from_ref(&base.wave_count).cast()), 552, "count");
+        assert_eq!(
+            at(std::ptr::from_ref(&base.attenuation_depth).cast()),
+            556,
+            "attenuation_depth"
+        );
+        assert_eq!(size_of::<EnvironmentData>(), 560, "the whole struct");
+    }
+
     /// **The water draw count is the shader's, and nothing but this says so.**
     /// `WATER_VERTS` on the Rust side and `WATER_RES`/`WATER_LEVELS` in
     /// `scene.slang` are one number described twice: too few and the outermost

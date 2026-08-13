@@ -134,15 +134,26 @@ pub struct EnvironmentData {
     /// never a wall clock (never-do #8). The water surface reads the same
     /// clock, so grass and waves cannot drift apart.
     pub weather: [f32; 4],
-    /// x still-water level, y still-water depth, z 1 when the scene has water,
-    /// w unused.
+    /// x still-water level, y unused, z 1 when the scene has water, w unused.
     ///
-    /// **The depth is a constant until W6.** The real quantity is
-    /// `surface_height - terrain_height(x, z)` against a voxel SDF that
-    /// changes at runtime, which is a query this shader cannot make. Nothing
-    /// but the colour tint reads it yet, so a constant is honest rather than
-    /// wrong — but wave attenuation in the shallows will need the real one.
+    /// **Depth used to live in `y` as a constant.** It is a real per-vertex
+    /// query now: `surface_height - terrain_height(x, z)`, read out of
+    /// [`Self::terrain`] and the height buffer beside it.
     pub water: [f32; 4],
+    /// The terrain height grid: xy world origin, z metres between samples,
+    /// w samples per axis. **`w == 0` means the scene has no terrain**, which
+    /// is how an open ocean says "bottomless" without a second flag.
+    ///
+    /// Mirrors `LoomHeightField` in the generated shader minus its pointer,
+    /// which follows immediately below for alignment's sake.
+    pub terrain: [f32; 4],
+    /// The heights themselves, `w²` of them, row-major.
+    ///
+    /// **A pointer in the environment buffer rather than in the push block**,
+    /// which is at 124 of the 128 bytes Vulkan guarantees. It is per-scene data
+    /// re-uploaded only when the terrain changes, which is exactly what this
+    /// buffer is for.
+    pub terrain_heights: vk::DeviceAddress,
     /// The sea, as [`WaterWave`]s — the same sixteen `loom_water` derives from
     /// the wind, in the same order.
     ///
@@ -153,8 +164,12 @@ pub struct EnvironmentData {
     pub waves: [WaterWave; MAX_WAVES],
     /// How many of `waves` to sum. Zero is a mirror.
     pub wave_count: u32,
-    /// Pads the struct to a 16-byte multiple, matching what Slang lays out.
-    pub padding: [u32; 3],
+    /// Depth in metres below which waves flatten. Zero disables it.
+    ///
+    /// Inside the wave set rather than beside it because that is where
+    /// `LoomWaveSet` keeps it, and the two are one memory layout described
+    /// twice.
+    pub attenuation_depth: f32,
 }
 
 /// The cap on summed waves, mirroring `loom_scene::components::MAX_WAVES` and
@@ -198,6 +213,9 @@ impl Default for EnvironmentData {
             // No water: `z` is the flag the draw is skipped on, so a scene
             // that authors no `WaterBody` renders exactly as it did.
             water: [0.0, 0.0, 0.0, 0.0],
+            // No terrain: side 0, so every depth query is bottomless.
+            terrain: [0.0, 0.0, 1.0, 0.0],
+            terrain_heights: 0,
             waves: [WaterWave {
                 direction: [1.0, 0.0],
                 wavelength: 0.0,
@@ -206,7 +224,7 @@ impl Default for EnvironmentData {
                 speed_scale: 1.0,
             }; MAX_WAVES],
             wave_count: 0,
-            padding: [0; 3],
+            attenuation_depth: 0.0,
         }
     }
 }
@@ -220,6 +238,14 @@ impl Default for EnvironmentData {
 /// whether a given count earns its bandwidth; the phase notes carry the
 /// readings.
 pub(crate) const MSAA_SAMPLES: vk::SampleCountFlags = vk::SampleCountFlags::TYPE_4;
+
+/// Heights the terrain buffer holds: `loom_voxel::heightfield::MAX_SIDE²`.
+///
+/// Spelled here rather than imported, because `loom_render` does not depend on
+/// `loom_voxel` — nothing in the renderer knows what a voxel is, and the bake
+/// that fills this lives at the CLI layer. The number is a ceiling: the CPU
+/// coarsens its grid rather than exceeding it.
+pub const MAX_TERRAIN_SAMPLES: usize = 256 * 256;
 
 /// Vertices in one water draw: `WATER_RES² × WATER_LEVELS × 6`.
 ///
@@ -429,6 +455,17 @@ pub struct Renderer {
     grass_alloc: Option<Allocation>,
     grass_address: vk::DeviceAddress,
     grass_pipeline: vk::Pipeline,
+    /// The terrain height grid the water reads its depth out of. Written once
+    /// per scene, not per frame — see [`Renderer::set_terrain`].
+    terrain_buffer: vk::Buffer,
+    terrain_alloc: Option<Allocation>,
+    terrain_address: vk::DeviceAddress,
+    /// xy origin, z spacing, w samples per axis — stamped into the environment
+    /// buffer at render time so a caller's per-frame assignment cannot lose it.
+    terrain_params: [f32; 4],
+    /// The address handed to the shader: `terrain_address`, or null when the
+    /// scene has no terrain.
+    terrain_heights: vk::DeviceAddress,
     /// The water surface. Drawn only when the environment says the scene has
     /// water; the mesh itself is entirely in the vertex shader, so there is no
     /// buffer beside this.
@@ -674,6 +711,16 @@ impl Renderer {
             "loom.grass",
             vk::BufferUsageFlags::empty(),
         )?;
+        // 256² floats, which is `loom_voxel::heightfield::MAX_SIDE` squared —
+        // the cap the CPU bake coarsens to rather than exceeding. 256 KB, once,
+        // for the whole scene.
+        let (terrain_buffer, terrain_alloc, terrain_address) = create_address_buffer(
+            &raw,
+            &mut allocator,
+            (MAX_TERRAIN_SAMPLES * size_of::<f32>()) as u64,
+            "loom.terrain",
+            vk::BufferUsageFlags::empty(),
+        )?;
 
         // Built before the pipeline, because the pipeline layout needs its
         // descriptor set layout. `None` on a device without ray query, which
@@ -893,6 +940,11 @@ impl Renderer {
             grass_alloc: Some(grass_alloc),
             grass_address,
             grass_pipeline,
+            terrain_buffer,
+            terrain_alloc: Some(terrain_alloc),
+            terrain_address,
+            terrain_params: [0.0, 0.0, 1.0, 0.0],
+            terrain_heights: 0,
             water_pipeline,
             grass_count: 0,
             max_particles: MAX_PARTICLES,
@@ -1020,6 +1072,49 @@ impl Renderer {
         )
     }
 
+    /// Hand the renderer the terrain height grid the water reads.
+    ///
+    /// **Not per frame.** The grid is a bake of the voxel SDF, so it changes
+    /// when the terrain does and at no other time; the caller uploads it on
+    /// load and on the transaction that carved something. `origin`, `spacing`
+    /// and the sample count are held here and stamped into
+    /// [`EnvironmentData::terrain`] at render time, so the two halves cannot be
+    /// set apart and a caller replacing the environment cannot lose them.
+    ///
+    /// An empty slice means the scene has no terrain, and every depth query
+    /// then answers "bottomless" — which is what an open ocean wants.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the renderer is being torn down.
+    pub fn set_terrain(
+        &mut self,
+        heights: &[f32],
+        origin: [f32; 2],
+        spacing: f32,
+        side: usize,
+    ) -> Result<(), RenderError> {
+        // A grid too big for the buffer is dropped whole rather than in part: a
+        // partly-uploaded height field would draw a shoreline through the
+        // middle of the scene, which is a much worse failure than no shoreline.
+        // The CPU bake coarsens at `MAX_SIDE`, so this is a guard, not a path.
+        if heights.is_empty() || side * side > MAX_TERRAIN_SAMPLES || heights.len() < side * side {
+            self.terrain_params = [0.0, 0.0, 1.0, 0.0];
+            self.terrain_heights = 0;
+            return Ok(());
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.terrain_params = [origin[0], origin[1], spacing, side as f32];
+        }
+        self.terrain_heights = self.terrain_address;
+        write_slice(
+            self.terrain_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("terrain buffer is gone".into()))?,
+            &heights[..side * side],
+        )
+    }
+
     /// How many blades the buffer holds.
     #[must_use]
     pub fn grass_capacity(&self) -> usize {
@@ -1106,6 +1201,13 @@ impl Renderer {
             self.environment.viewport =
                 [self.width as f32, self.height as f32, 0.0, 0.0];
         }
+        // **Stamped here for the same reason the eye is.** `environment` is a
+        // public field callers assign wholesale every frame, and the terrain
+        // grid is not theirs to know about — it is uploaded once by
+        // `set_terrain` and would otherwise be cleared by the next assignment,
+        // which is a shoreline that vanishes on frame two.
+        self.environment.terrain = self.terrain_params;
+        self.environment.terrain_heights = self.terrain_heights;
         write_slice(
             self.environment_alloc
                 .as_ref()
@@ -1614,9 +1716,15 @@ impl Drop for Renderer {
             self.device.destroy_pipeline(self.grass_pipeline, None);
             self.device.destroy_pipeline(self.water_pipeline, None);
             self.device.destroy_buffer(self.grass_buffer, None);
+            self.device.destroy_buffer(self.terrain_buffer, None);
             self.device.destroy_buffer(self.particle_buffer, None);
             if let (Some(allocation), Some(allocator)) =
                 (self.grass_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            if let (Some(allocation), Some(allocator)) =
+                (self.terrain_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
             }

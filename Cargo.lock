@@ -1365,6 +1365,7 @@ dependencies = [
  "loom_asset",
  "loom_field",
  "loom_render_graph",
+ "loom_voxel",
  "loom_water",
  "png",
  "raw-window-handle",
@@ -1425,6 +1426,7 @@ name = "loom_water"
 version = "0.0.0"
 dependencies = [
  "loom_scene",
+ "loom_voxel",
 ]
 
 [[package]]

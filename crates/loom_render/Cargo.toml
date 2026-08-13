@@ -27,6 +27,10 @@ loom_field = { version = "0.0.0", path = "../loom_field" }
 # The water surface, for the same reason: `loom_water::slang` is the GPU half
 # of `loom_water::sample_water`, emitted here so the two cannot be edited apart.
 loom_water = { version = "0.0.0", path = "../loom_water" }
+# And the terrain height lookup, which is where the water gets its depth. Build
+# only, and only for `heightfield::slang` — the renderer itself never learns
+# what a voxel is, and the bake that fills the buffer lives at the CLI layer.
+loom_voxel = { version = "0.0.0", path = "../loom_voxel" }
 
 # The same crate again, for the agreement test only: it evaluates the Rust side
 # of the field to compare against what the generated shader computed. A

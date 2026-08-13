@@ -33,6 +33,19 @@ pub struct PontoonState {
     /// in opposite directions, and damping that ignored the rotation would
     /// damp none of it.
     pub velocity: [f32; 3],
+    /// Terrain height under this pontoon, in world Y.
+    ///
+    /// **Filled by the caller, from the same height field the water shader
+    /// reads** (`loom_voxel::heightfield`). It is here rather than looked up
+    /// inside [`solve`] for the reason the whole crate is arranged this way:
+    /// `loom_water` must not know what a voxel is, or the shader generated from
+    /// it acquires a dependency on the terrain system.
+    ///
+    /// It matters because waves flatten in the shallows — a crate in half a
+    /// metre of water must not ride a swell that is not there. Default it to
+    /// [`loom_voxel::heightfield::NO_GROUND`]'s meaning by passing a very
+    /// negative number; a scene with no terrain does exactly that.
+    pub ground: f32,
 }
 
 /// One force and one torque, in world space, about the centre of mass.
@@ -91,10 +104,13 @@ pub fn solve(
     let mut wrench = Wrench::default();
 
     for pontoon in pontoons {
-        // Ground height is irrelevant here: only `WaterSample::depth` reads it
-        // and buoyancy does not, because water is a plane the terrain does not
-        // drain (§5.2, a stated v1 limitation).
-        let surface: WaterSample = sample_water(water, [pontoon.at[0], pontoon.at[2]], t, 0.0);
+        // **The bed, because the shallows flatten the waves.** Water is still a
+        // plane the terrain does not drain (§5.2, a stated v1 limitation) — a
+        // crater under a lake does not empty it — but how big a wave is at this
+        // spot is a function of how deep it is here, and a solver that passed
+        // zero would float a crate on the open sea's swell in a foot of water.
+        let surface: WaterSample =
+            sample_water(water, [pontoon.at[0], pontoon.at[2]], t, pontoon.ground);
 
         let volume = submerged_volume(pontoon.radius, pontoon.at[1], surface.height);
         if volume <= 0.0 {
@@ -198,6 +214,10 @@ mod tests {
     use super::*;
     use loom_scene::components::{GerstnerWave, Pontoon, WaveSet};
 
+    /// A bed far enough down that nothing here is in the shallows — what a
+    /// scene with no terrain under its water reports.
+    const DEEP: f32 = -1000.0;
+
     fn still() -> WaterBody {
         WaterBody {
             drag: 0.0,
@@ -252,6 +272,7 @@ mod tests {
             at: [0.0, 0.0, 0.0],
             radius: 1.0,
             velocity: [0.0; 3],
+            ground: DEEP,
         }];
 
         let w = solve(&water, &buoyancy, &pontoons, [0.0; 3], 0.0);
@@ -281,6 +302,7 @@ mod tests {
                 at: [p.offset[0], p.offset[0] * -0.6, p.offset[2]],
                 radius: p.radius,
                 velocity: [0.0; 3],
+                ground: DEEP,
             })
             .collect();
 
@@ -301,6 +323,7 @@ mod tests {
                 at: [0.0, 0.0, 0.0],
                 radius: 0.5,
                 velocity: [0.0; 3],
+                ground: DEEP,
             }],
             [0.0; 3],
             0.0,
@@ -327,6 +350,7 @@ mod tests {
                     at: [0.0, -1.0, 0.0],
                     radius: 1.0,
                     velocity: [0.0, -speed, 0.0],
+                    ground: DEEP,
                 }],
                 [0.0; 3],
                 0.0,
@@ -358,6 +382,7 @@ mod tests {
                 at: [0.0, 9.0, 0.0],
                 radius: 0.5,
                 velocity: [0.0, -20.0, 3.0],
+                ground: DEEP,
             }],
             [0.0; 3],
             0.0,
@@ -396,7 +421,7 @@ mod tests {
         let w = solve(
             &water,
             &buoyancy,
-            &[PontoonState { at, radius: 0.5, velocity: [0.0; 3] }],
+            &[PontoonState { at, radius: 0.5, velocity: [0.0; 3], ground: DEEP }],
             [0.0; 3],
             0.0,
         );
@@ -430,6 +455,7 @@ mod tests {
                 at: [p.offset[0], p.offset[1] - 0.2, p.offset[2]],
                 radius: p.radius,
                 velocity: [0.3, -0.7, 0.1],
+                ground: DEEP,
             })
             .collect();
 

@@ -33,6 +33,14 @@
 //! down in [`loom_scene::components::WaterBody`] rather than left to be
 //! discovered).
 //!
+//! # Shallow water
+//!
+//! A wave that can feel the bottom flattens. The factor is
+//! `tanh(k·d) / tanh(k·D)`, clamped to `[0, 1]`, where `d` is the still-water
+//! depth and `D` is the authored [`WaveSet::attenuation_depth`] — see
+//! [`shoal`], which explains what that buys and what it deliberately leaves
+//! out.
+//!
 //! # Order of accumulation
 //!
 //! Waves are summed in index order and only in index order. Float addition is
@@ -84,12 +92,62 @@ pub struct WaterSample {
     pub depth: f32,
 }
 
+/// How much of its deep-water amplitude a wave keeps in water `depth` deep.
+///
+/// **The model, and what it leaves out.** Linear wave theory puts the depth
+/// dependence of a wave's surface amplitude in `tanh(k·d)` — the same factor
+/// that appears in the dispersion relation `ω² = g·k·tanh(k·d)`, which is why
+/// deep water (`tanh → 1`) is the form the rest of this file already uses.
+/// Normalising by `tanh(k·D)` makes the authored depth `D` mean what the schema
+/// says it means: at `D` and deeper the wave is at full height, and below it the
+/// wave flattens, reaching zero exactly at the shoreline. Long swell feels the
+/// bottom in deeper water than short chop does, which is the visible half of
+/// shoaling and comes free from `k` being in there.
+///
+/// Three things are deliberately **not** modelled, and each is a visible thing a
+/// real shore does:
+///
+/// - **No amplification.** Real waves grow before they break — Green's law says
+///   amplitude rises as the water shallows, and only then collapses. This taper
+///   is monotone into the shore and never exceeds 1. The reason is the fold
+///   limit (§5.3): the validator proves `Σ Q·k·A ≤ 1` for the authored wave set,
+///   and scaling every amplitude by a factor in `[0, 1]` cannot break a bound
+///   that already holds, whereas amplification would need its own clamp and its
+///   own proof. Surf that peaks belongs with breaking and foam, in W7.
+/// - **No refraction.** Crests do not turn to run parallel to the beach. That
+///   needs a per-wave direction that varies with position, which makes the phase
+///   a path integral rather than a dot product, and the surface stops being an
+///   analytic function of `(x, z, t)` — the property everything here rests on.
+/// - **No wavelength shortening.** `ω` stays the deep-water `sqrt(g·k)`, so
+///   crests do not bunch up as they slow down. Making `ω` depend on depth would
+///   make the *phase* depend on the path a wave took to get here, with the same
+///   consequence as refraction: no closed form, no agreement between CPU and GPU
+///   without state.
+///
+/// `D ≤ 0` disables attenuation entirely, which is the schema default and what
+/// keeps an open ocean identical to the day before this existed.
+#[must_use]
+pub fn shoal(k: f32, depth: f32, attenuation_depth: f32) -> f32 {
+    if attenuation_depth <= 0.0 {
+        return 1.0;
+    }
+    // `tanh` saturates rather than overflowing, so the sentinel depth a scene
+    // with no terrain reports (a billion metres) is 1.0 and not an infinity.
+    let full = (k * attenuation_depth).tanh();
+    if full <= 0.0 {
+        return 1.0;
+    }
+    ((k * depth).tanh() / full).clamp(0.0, 1.0)
+}
+
 /// Sample the water surface at a world XZ position and simulation time.
 ///
-/// `ground_height` is the terrain surface under the sample, which only
-/// [`WaterSample::depth`] uses; the caller owns that query because it is a
-/// voxel-SDF lookup against terrain that changes at runtime, and water must not
-/// cache it.
+/// `ground_height` is the terrain surface under the sample. It sets
+/// [`WaterSample::depth`], and through [`shoal`] it flattens the waves in the
+/// shallows — so the same query has to answer for the shader as for the
+/// buoyancy solver, which is what `loom_voxel::heightfield` is. The caller owns
+/// it because it is a voxel-SDF lookup against terrain that changes at runtime,
+/// and water must not cache it.
 ///
 /// `t` is seconds since the simulation started — tick count times the fixed
 /// timestep, **never a wall clock** (never-do #8). It is `f32` rather than
@@ -124,6 +182,11 @@ pub fn sample_water(
     let mut slope_z = 0.0_f32;
     let mut flatten = 0.0_f32;
 
+    // Still-water depth, computed once: every wave's taper reads it, and a
+    // depth that oscillated with the waves would make the attenuation modulate
+    // itself.
+    let depth = body.surface_height - ground_height;
+
     // `take` rather than trusting the caller: the validator rejects a longer
     // list at load, and the shader's loop is bounded at the same number, so a
     // hand-built body with more waves must not make the two disagree.
@@ -151,11 +214,17 @@ pub fn sample_water(
         let phase = k * (d[0] * world_xz[0] + d[1] * world_xz[1]) - omega * t;
         let (sin_phase, cos_phase) = (phase.sin(), phase.cos());
 
-        let qa = wave.steepness * wave.amplitude;
-        let ka = k * wave.amplitude;
+        // **The shallows, entering as an amplitude and nothing else.** Every
+        // term below reads `amplitude` rather than `wave.amplitude`, so the
+        // normal and the orbital velocity flatten with the surface instead of
+        // describing a wave that is no longer there.
+        let amplitude = wave.amplitude * shoal(k, depth, body.waves.attenuation_depth);
+
+        let qa = wave.steepness * amplitude;
+        let ka = k * amplitude;
 
         displacement[0] += qa * d[0] * cos_phase;
-        displacement[1] += wave.amplitude * sin_phase;
+        displacement[1] += amplitude * sin_phase;
         displacement[2] += qa * d[1] * cos_phase;
 
         slope_x += d[0] * ka * cos_phase;
@@ -165,7 +234,7 @@ pub fn sample_water(
         // d/dt of the displacement above. dφ/dt = −ω, which is where each
         // sign comes from — the vertical term is the one that trips people up.
         velocity[0] += qa * d[0] * omega * sin_phase;
-        velocity[1] -= wave.amplitude * omega * cos_phase;
+        velocity[1] -= amplitude * omega * cos_phase;
         velocity[2] += qa * d[1] * omega * sin_phase;
     }
 
@@ -188,7 +257,7 @@ pub fn sample_water(
         normal,
         displacement,
         velocity,
-        depth: body.surface_height - ground_height,
+        depth,
     }
 }
 
@@ -232,7 +301,22 @@ struct LoomWave {
 struct LoomWaveSet {
     LoomWave waves[LOOM_MAX_WAVES];
     int count;
+    // Depth in metres below which waves start to flatten. Zero disables it,
+    // which is the schema default and what keeps an open ocean unchanged.
+    float attenuation_depth;
 };
+
+// How much of its deep-water amplitude a wave keeps in water `depth` deep.
+// The Rust half is `loom_water::shoal`, which carries the reasoning: linear
+// theory's tanh(k*d), normalised so the authored depth is where the wave is
+// whole again. Never above 1, which is what keeps the steepness limit the
+// validator enforces from being broken by the shallows.
+float loom_shoal(float k, float depth, float attenuation_depth) {
+    if (attenuation_depth <= 0.0) { return 1.0; }
+    float full = tanh(k * attenuation_depth);
+    if (full <= 0.0) { return 1.0; }
+    return clamp(tanh(k * depth) / full, 0.0, 1.0);
+}
 
 struct LoomWaterSample {
     float height;
@@ -255,6 +339,10 @@ LoomWaterSample loom_sample_water(
     float slope_z = 0.0;
     float flatten = 0.0;
 
+    // Still-water depth, once: a depth that oscillated with the waves would
+    // make the attenuation modulate itself.
+    float depth = surface_height - ground_height;
+
     for (int i = 0; i < LOOM_MAX_WAVES; ++i) {
         if (i >= set.count) { break; }
         LoomWave wave = set.waves[i];
@@ -272,11 +360,14 @@ LoomWaterSample loom_sample_water(
         float sin_phase = sin(phase);
         float cos_phase = cos(phase);
 
-        float qa = wave.steepness * wave.amplitude;
-        float ka = k * wave.amplitude;
+        // The shallows, entering as an amplitude and nothing else.
+        float amplitude = wave.amplitude * loom_shoal(k, depth, set.attenuation_depth);
+
+        float qa = wave.steepness * amplitude;
+        float ka = k * amplitude;
 
         displacement.x += qa * d.x * cos_phase;
-        displacement.y += wave.amplitude * sin_phase;
+        displacement.y += amplitude * sin_phase;
         displacement.z += qa * d.y * cos_phase;
 
         slope_x += d.x * ka * cos_phase;
@@ -284,7 +375,7 @@ LoomWaterSample loom_sample_water(
         flatten += wave.steepness * ka * sin_phase;
 
         velocity.x += qa * d.x * omega * sin_phase;
-        velocity.y -= wave.amplitude * omega * cos_phase;
+        velocity.y -= amplitude * omega * cos_phase;
         velocity.z += qa * d.y * omega * sin_phase;
     }
 
@@ -305,7 +396,7 @@ LoomWaterSample loom_sample_water(
     result.normal = normal;
     result.displacement = displacement;
     result.velocity = velocity;
-    result.depth = surface_height - ground_height;
+    result.depth = depth;
     return result;
 }
 "#
@@ -540,6 +631,147 @@ mod tests {
         let period = std::f32::consts::TAU / (GRAVITY * k).sqrt();
         let one_period = sample_water(&sea, at, period, 0.0).height;
         assert!((now - one_period).abs() < 1e-3, "{now} vs {one_period} after one period");
+    }
+
+    /// A body with waves and an authored shoaling depth.
+    fn shoaling(waves: Vec<GerstnerWave>, attenuation_depth: f32) -> WaterBody {
+        WaterBody {
+            waves: WaveSet { waves, attenuation_depth, ..WaveSet::default() },
+            ..WaterBody::default()
+        }
+    }
+
+    /// **Waves flatten as the bottom rises, and stop at the shoreline.** The
+    /// exit criterion of the step, as a number rather than as a screenshot.
+    #[test]
+    fn the_waves_flatten_toward_the_shore() {
+        let sea = shoaling(vec![wave(20.0, 0.8, 0.4, [1.0, 0.0])], 10.0);
+
+        // The peak-to-trough range over one period, which is the honest measure
+        // of "how big are the waves here" — a single instant could be sampled
+        // at a zero crossing whatever the amplitude.
+        let range = |ground: f32| {
+            let (mut low, mut high) = (f32::INFINITY, f32::NEG_INFINITY);
+            for i in 0..200 {
+                let t = i as f32 * 0.05;
+                let h = sample_water(&sea, [0.0, 0.0], t, ground).height;
+                low = low.min(h);
+                high = high.max(h);
+            }
+            high - low
+        };
+
+        let deep = range(-40.0);
+        let shelf = range(-10.0);
+        let shallow = range(-2.0);
+        let ankle = range(-0.2);
+        let dry = range(0.5);
+
+        assert!((deep - shelf).abs() < 1e-3, "at the authored depth the wave is whole: {deep} vs {shelf}");
+        assert!(shallow < shelf * 0.75, "2 m of water barely flattened it: {shallow} of {shelf}");
+        assert!(ankle < shelf * 0.2, "ankle-deep water still has a swell in it: {ankle}");
+        assert!(dry == 0.0, "the surface is still moving over dry land: {dry}");
+    }
+
+    /// Long waves feel the bottom before short ones do — the one piece of real
+    /// shoaling physics the taper keeps, and the reason it is `tanh(k·d)`
+    /// rather than a depth ramp shared by every wave.
+    #[test]
+    fn long_waves_feel_the_bottom_first() {
+        let depth = 3.0;
+        let attenuation = 12.0;
+        let swell = shoal(std::f32::consts::TAU / 60.0, depth, attenuation);
+        let chop = shoal(std::f32::consts::TAU / 4.0, depth, attenuation);
+
+        assert!(swell < 0.8, "a 60 m swell in 3 m of water is barely touched: {swell}");
+        assert!(chop > 0.99, "a 4 m chop in 3 m of water should not care: {chop}");
+    }
+
+    /// **An unauthored `attenuation_depth` changes nothing at all.** Zero is the
+    /// schema default, and every scene written before the shallows existed has
+    /// it — so this is the test that they still render and hash as they did.
+    #[test]
+    fn no_authored_depth_is_no_attenuation() {
+        let waves = vec![wave(20.0, 0.8, 0.4, [1.0, 0.0]), wave(7.0, 0.3, 0.5, [0.2, 1.0])];
+        let open = body(waves.clone());
+
+        // Including a bed a metre under the surface: with no authored depth,
+        // even that must not change a single bit of the answer.
+        for ground in [-1000.0, -6.0, -1.0, 0.5] {
+            let a = sample_water(&open, [3.0, -4.0], 1.25, ground);
+            let b = sample_water(&open, [3.0, -4.0], 1.25, -1000.0);
+            assert_eq!(a.height, b.height, "ground {ground} moved the surface");
+            assert_eq!(a.displacement, b.displacement);
+            assert_eq!(a.velocity, b.velocity);
+            assert_eq!(a.normal, b.normal);
+        }
+    }
+
+    /// **The fold limit holds at every depth, over a flat bed.** Attenuation
+    /// scales every amplitude by a factor in `[0, 1]`, and the fold condition
+    /// `Σ Q·k·A ≤ 1` is linear in `A` — so a wave set the validator accepted in
+    /// deep water cannot fold in shallow water. Measured rather than argued,
+    /// with the set sitting right at the limit where the argument is tightest.
+    #[test]
+    fn shoaling_never_folds_the_surface_over_a_flat_bed() {
+        // Q·k·A = 1 exactly at full amplitude: λ = 2π gives k = 1, A = 1, Q = 1.
+        let sea = shoaling(vec![wave(std::f32::consts::TAU, 1.0, 1.0, [1.0, 0.0])], 6.0);
+
+        for step in 0..=60 {
+            let ground = -(step as f32) * 0.2;
+            let mut previous = f32::NEG_INFINITY;
+            for i in 0..2000 {
+                let x = i as f32 * (std::f32::consts::TAU / 2000.0);
+                let moved = x + sample_water(&sea, [x, 0.0], 0.0, ground).displacement[0];
+                assert!(
+                    moved >= previous,
+                    "the surface folds at depth {}: x = {x} moved to {moved} behind {previous}",
+                    -ground
+                );
+                previous = moved;
+            }
+        }
+    }
+
+    /// **The one way shoaling can fold a surface, measured and bounded.** A bed
+    /// that rises steeply makes the taper itself vary with x, and the horizontal
+    /// map `x → x + Σ Q·A(x)·cos φ` picks up a `dA/dx` term the flat-bed
+    /// argument above does not cover. So: how steep does the bed have to be?
+    ///
+    /// The answer, measured, is **between 1:1 and 1.1:1** — a 45° underwater
+    /// slope, and only for a wave set sitting exactly on the fold limit; the
+    /// budget is shared, so a gentler sea folds on a steeper bed or not at all.
+    /// Real beaches are 1:20 to 1:100 and the scene in the gate is about 1:4 at
+    /// its waterline, so this
+    /// is a documented bound rather than a bug. The test exists so the number is
+    /// known and so a future taper that makes it worse is caught here.
+    #[test]
+    fn a_steep_enough_bed_is_where_shoaling_could_fold() {
+        // The same wave set as above, right at the limit.
+        let sea = shoaling(vec![wave(std::f32::consts::TAU, 1.0, 1.0, [1.0, 0.0])], 6.0);
+        // A bed climbing toward the shore: deep at x = 0, breaking the surface
+        // at x = SHORE. The dangerous half is where the taper is *falling*,
+        // which is why the bed has to rise with x rather than away from it.
+        const SHORE: f32 = 8.0 * std::f32::consts::TAU;
+        let folds = |rise: f32| {
+            let mut previous = f32::NEG_INFINITY;
+            let mut folded = false;
+            for i in 0..8000 {
+                let x = i as f32 * (SHORE / 8000.0);
+                let ground = rise * (x - SHORE);
+                let moved = x + sample_water(&sea, [x, 0.0], 0.0, ground).displacement[0];
+                if moved < previous {
+                    folded = true;
+                }
+                previous = moved;
+            }
+            folded
+        };
+
+        assert!(!folds(0.125), "a 1:8 beach must not fold");
+        assert!(!folds(0.25), "nor a 1:4 one — which is the gate scene's shore");
+        assert!(!folds(1.0), "nor, measured, a 45° one");
+        assert!(folds(1.1), "steeper than 45° is where it goes, at Q·k·A = 1");
     }
 
     /// The Slang half has to carry the same constants. A numeric comparison
