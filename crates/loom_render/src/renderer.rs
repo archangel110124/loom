@@ -127,12 +127,19 @@ pub struct EnvironmentData {
     /// 116 of its 128 bytes. It is per-scene data read by whatever wants it,
     /// which is what this buffer is for.
     pub wind: [f32; 4],
-    /// x turbulence, y ground drag, z seconds simulated, w unused.
+    /// x turbulence, y ground drag, z seconds simulated, w the water film.
     ///
     /// Time is here because the vertex shader needs it to bend a blade, and
     /// it is the simulation's clock — the tick count times the fixed timestep,
     /// never a wall clock (never-do #8). The water surface reads the same
     /// clock, so grass and waves cannot drift apart.
+    ///
+    /// **`w` is `loom_rain::Wetness::film` at full exposure**, the half of
+    /// wetness that lowers roughness. Its partner is [`Self::water`]`[3]` — the
+    /// two free trailing scalars in this buffer, which is what its packing is
+    /// for. Both are zero in a scene that authors no `Rain`, and the shader
+    /// skips the whole wetness path on that, so a dry scene shades bit for bit
+    /// as it did before Phase 4.
     pub weather: [f32; 4],
     /// What the rain is doing at the camera: xyz the sheltered P1 wind a
     /// streak leans along, w the rate in mm/h reaching the eye.
@@ -144,7 +151,8 @@ pub struct EnvironmentData {
     /// out of the determinism hash.
     pub rain: [f32; 4],
     /// x still-water level, y 1 when the eye is submerged, z 1 when the scene
-    /// has water, w unused.
+    /// has water, w `loom_rain::Wetness::soak` — the half of wetness that
+    /// darkens albedo. See [`Self::weather`]`[3]` for why it lodges here.
     ///
     /// **Depth used to live in `y` as a constant.** It is a real per-vertex
     /// query now: `surface_height - terrain_height(x, z)`, read out of

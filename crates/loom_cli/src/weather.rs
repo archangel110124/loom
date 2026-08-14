@@ -54,6 +54,15 @@ impl Weather {
     pub fn rain_at(&self, at: [f32; 3]) -> loom_rain::RainSample {
         rain_at(self.rain.as_ref(), &self.wind, self.sky.as_ref(), at, self.seconds)
     }
+
+    /// How wet a surface at a world point is by now.
+    ///
+    /// The exposure is [`Self::rain_at`]'s — S3's march of the scene's own
+    /// voxels, the same number that scaled the rate. Wetness grows no occlusion
+    /// of its own, which is the rule the whole phase is arranged around.
+    pub fn wetness_at(&self, at: [f32; 3]) -> loom_rain::Wetness {
+        loom_rain::wetness(self.rain.as_ref(), self.rain_at(at).exposure, self.seconds)
+    }
 }
 
 /// The same query, for a caller that holds the pieces rather than a [`Weather`].

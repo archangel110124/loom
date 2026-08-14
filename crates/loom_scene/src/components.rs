@@ -142,6 +142,22 @@ pub struct Material {
     /// costs three texture samples instead of one, which is why it is opt-in
     /// rather than the default.
     pub triplanar: bool,
+    /// How much water this surface can hold in its pores — how much it darkens
+    /// when it is wet.
+    ///
+    /// `0.0` is glass or polished stone: a wet one is glossier and no darker.
+    /// `1.0` is dry sand, raw concrete, unsealed timber — the surfaces that go
+    /// visibly black in the rain. Most built things sit near the default.
+    ///
+    /// **Darkening is a property of the material, not of the weather.** Water
+    /// fills the pores, light that would have scattered back out of them is
+    /// internally reflected instead, and how much of that happens is decided by
+    /// the surface. A single global "wetness makes things darker" number is the
+    /// version of this that makes a wet window and a wet pavement behave alike.
+    ///
+    /// Ignored to the extent a surface is metallic: metal has no pores.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub porosity: f32,
 }
 
 impl Default for Material {
@@ -156,6 +172,11 @@ impl Default for Material {
             normal_map: AssetRef::default(),
             uv_scale: [1.0; 2],
             triplanar: false,
+            // Most of a scene is stone, concrete, timber and dirt, all of which
+            // darken noticeably in the rain. A default of zero would make the
+            // whole effect opt-in per material, which is how a feature ends up
+            // authored into one test scene and nowhere else.
+            porosity: 0.4,
         }
     }
 }
@@ -755,13 +776,29 @@ pub struct Rain {
     /// which is why that is the ceiling.
     #[schemars(range(min = 0.0, max = 100.0))]
     pub intensity: f32,
+    /// Seconds the shower lasts, from the start of the run. Omit for rain that
+    /// never stops.
+    ///
+    /// **The only reason this exists is that drying is not otherwise
+    /// expressible.** Wetness accumulates while it rains and recovers after,
+    /// and "after" needs a moment the rain ends at — without one, the second
+    /// half of the effect is unreachable from a scene file and unassertable
+    /// from `loom sim`. It is one number rather than a schedule because a
+    /// schedule is a thing to author for a game that wants weather, and nothing
+    /// wants that yet.
+    ///
+    /// Past it the rate is zero everywhere: the streaks stop and the audio
+    /// stops. The surfaces stay wet for as long as `loom_rain::wetness` says
+    /// they do, which is minutes, and that gap is the point.
+    #[schemars(range(min = 0.0, max = 86400.0))]
+    pub duration: Option<f32>,
 }
 
 impl Default for Rain {
     /// Steady moderate rain — the rate a scene means when it says "raining"
     /// and nothing more.
     fn default() -> Self {
-        Self { intensity: 4.0 }
+        Self { intensity: 4.0, duration: None }
     }
 }
 

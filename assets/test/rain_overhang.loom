@@ -51,8 +51,28 @@ name = "Weather"
 
   # Steady rain, at twice the "moderate" default so the sheltered and open
   # readings are far apart in mm/h rather than separated by a rounding error.
+  #
+  # It stops after a minute, and that is what makes the THIRD exit criterion
+  # checkable: wetness accumulates while it rains and dries afterwards, and
+  # "afterwards" needs a moment the rain ended at. Nothing before this could
+  # turn rain off, so drying was unreachable from a scene file.
+  #
+  #     loom sim assets/test/rain_overhang.loom --ticks 3600 \
+  #       --assert "wetness@-13,3,-13.film > 0.99"
+  #     loom sim assets/test/rain_overhang.loom --ticks 9000 \
+  #       --assert "wetness@-13,3,-13.film < 0.05" \
+  #       --assert "wetness@-13,3,-13.soak > 0.4"
+  #
+  # 3600 ticks is 60 s — the last instant of the shower, and the surface is as
+  # wet as it is going to get. 9000 is 150 s, ninety seconds after it stopped:
+  # the sheen is gone and most of the darkening is still there. That gap IS the
+  # two-rate dry-down, and one number could not express it.
+  #
+  # The golden image is at `--sim 90`, a second and a half in, so it sees a
+  # freshly-wet scene and this line does not move it.
   [node.components.Rain]
   intensity = 8.0
+  duration = 60.0
 
   # The rain leans along this. It changes no rate — a streak's angle is not how
   # much water arrives — but it is the vector `loom_rain` hands the renderer,

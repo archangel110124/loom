@@ -196,10 +196,20 @@ const GOLDEN: [(&str, &str, &[&str]); 14] = [
     // everywhere except under the shelter, and a column of them coming through
     // the skylight one CSG subtract punched in the roof.
     //
-    // `--sim 90` because rain at t = 0 is the one frame where every drop sits
-    // exactly on its hashed lattice point, which is the least representative
-    // instant there is — the same reason `ocean` and `shore` are simulated.
-    ("rain_overhang", "assets/test/rain_overhang.loom", &["--sim", "90"]),
+    // `--sim` at all because rain at t = 0 is the one frame where every drop
+    // sits exactly on its hashed lattice point, which is the least
+    // representative instant there is — the same reason `ocean` and `shore`
+    // are simulated.
+    //
+    // **1800 ticks, and it used to be 90, because wetness is slow.** Step 3's
+    // whole content is in the forward material and a second and a half of rain
+    // moves it by well under the tolerance — the reference matched
+    // byte-for-byte with the wetness code in and with it stubbed out, which is
+    // a gate protecting nothing. Thirty seconds in, the film is at its ceiling
+    // and the soak is about half way, the exposed ground and the top of the
+    // slab are visibly darker and glossier, and the sheltered floor and the
+    // undersides are not: 18.5% of pixels move against a stub, measured.
+    ("rain_overhang", "assets/test/rain_overhang.loom", &["--sim", "1800"]),
 ];
 
 /// Every reference renders at this size.

@@ -59,7 +59,7 @@ static const uint FLAG_TRIPLANAR = 1;
 // Mirrors `loom_render::MaterialData` exactly. One memory layout described
 // twice; a mismatch is silent and looks like a shading bug.
 struct MaterialData {
-    float4 albedo;   // rgb base colour
+    float4 albedo;   // rgb base colour, w porosity (how much it darkens wet)
     float4 params;   // metallic, roughness, uvScale.x, uvScale.y
     uint4 maps;      // albedo index, normal index, flags, unused
 };
@@ -87,13 +87,16 @@ struct EnvironmentData {
     float4 eye;
     float4 viewport;   // xy size in pixels
     float4 wind;       // xy direction, z speed, w gustiness
-    float4 weather;    // x turbulence, y ground drag, z seconds, w unused
+    // x turbulence, y ground drag, z seconds, w the wetness FILM — see the
+    // wetness section further down, and `water.w` for its other half.
+    float4 weather;
     // **`loom_rain::sample_rain` at the eye, and nothing else.** xyz is the
     // sheltered P1 wind a streak leans along, w the rate in mm/h that reaches
     // the camera. Both come out of the one authoritative call; the GPU layer
     // derives everything else and writes nothing back.
     float4 rain;
-    // x still-water level, y unused, z 1 when the scene has water, w unused.
+    // x still-water level, y 1 when the eye is submerged, z 1 when the scene
+    // has water, w the wetness SOAK.
     // Depth used to sit in `y` as a constant; it is a real per-vertex query
     // now, out of the height field below.
     float4 water;
@@ -686,6 +689,97 @@ float3 specular(float3 normal, float3 view, float3 light, float roughness, float
     return distribution * visibility * fresnel;
 }
 
+/// The scene's terrain height grid, assembled from the two environment fields
+/// that carry it. `side == 0` is a scene with no terrain: every lookup then
+/// returns `LOOM_NO_GROUND` and the water is bottomless.
+///
+/// **Up here rather than beside the water**, which is where it started and
+/// where its only caller used to be. The wetness gate below reads the same grid
+/// — one bake, three readers, and the third one must not grow a fourth.
+LoomHeightField terrainField() {
+    LoomHeightField field;
+    field.origin = push.environment[0].terrain.xy;
+    field.spacing = push.environment[0].terrain.z;
+    field.side = int(push.environment[0].terrain.w);
+    field.height = push.environment[0].terrainHeights;
+    return field;
+}
+
+// ---------------------------------------------------------------------------
+// Wetness.
+//
+// **Phase 4 step 3, and it is entirely a shading effect on top of two numbers
+// the CPU decided.** `loom_rain::wetness` is the model: a water FILM that
+// builds in seconds and drains in half a minute, and a SOAK that takes a minute
+// to get into the material and five to leave it. The shader never integrates
+// anything, never writes anything, and — like the streaks — is not in the
+// determinism hash.
+//
+// The two numbers are for a surface in the OPEN. What varies across the scene
+// is decided here, and it is decided out of the terrain height field the rain
+// drops already read (never a second occlusion representation, ADR 0014):
+//
+//   * a point below the topmost solid surface in its column is under cover;
+//   * a surface facing down does not collect rain, one facing up collects all
+//     of it, and a vertical wall collects the fraction wind drives onto it.
+//
+// **What this cannot express**, stated rather than discovered later: the height
+// field flattens an overhang away, so a wall under an eave is dry over its whole
+// height rather than dry at the top and wet at the bottom, and mesh geometry
+// shelters nothing at all. Neither can it express history — a floor uncovered
+// after ten dry minutes is instantly as wet as the field outside, because there
+// is one pair of scalars for the scene rather than a wetness grid with an update
+// path. That grid is the upgrade, and it costs storage and a write path.
+// `ponytail:` one global pair + a per-pixel gate; a wetness texture if a scene
+// ever needs a surface to remember.
+// ---------------------------------------------------------------------------
+
+/// The water film, and the soak. `loom_rain::wetness` at full exposure, packed
+/// into the two free trailing scalars of the environment buffer.
+float wetFilm() { return push.environment[0].weather.w; }
+float wetSoak() { return push.environment[0].water.w; }
+
+/// Porosity for geometry with no `Material` — a blockout, drawn in its debug
+/// colour. The same value as `loom_scene::components::Material::porosity`'s
+/// default, so texturing a box does not change how wet it looks.
+static const float WET_BLOCKOUT_POROSITY = 0.4;
+/// How dark a fully porous, fully soaked surface goes: down to a third.
+///
+/// Calibrated by eye against wet concrete, which is what the literature does
+/// too — Lagarde's own note is that the per-channel physical curves are not
+/// worth their cost over one monochrome factor.
+static const float WET_DARKEN = 0.7;
+/// Roughness a water film converges on. Not zero: even standing water has a
+/// little texture, and a true mirror in a scene with no reflections reads as a
+/// hole.
+static const float WET_SMOOTH = 0.08;
+/// Fraction of the rain a vertical wall collects. Rain arrives from above, so
+/// a wall only gets what the wind drives onto it — but zero would leave a
+/// soaked courtyard ringed by bone-dry walls, which reads as a bug.
+static const float WET_WALL = 0.35;
+/// Metres of slack in the "is this under cover" test.
+///
+/// The height field is a bilinear read of a grid coarser than a fragment, so a
+/// surface lying exactly ON the terrain sits within a few centimetres of its own
+/// column height either way. Without slack the ground flickers between wet and
+/// dry across a triangle. Half a metre is far below any roof worth sheltering
+/// under.
+static const float WET_COVER_SLACK = 0.5;
+
+/// How much of the scene's wetness reaches this surface point.
+///
+/// The geometric normal, deliberately — a normal map should change how a wet
+/// surface catches the light, not whether it is wet.
+float wetGate(float3 worldPos, float3 geometric) {
+    // Off the grid, and in a scene with no terrain, this is a large negative
+    // sentinel and nothing is ever under cover.
+    float ground = loom_ground_height(terrainField(), worldPos.xz);
+    float open = worldPos.y > ground - WET_COVER_SLACK ? 1.0 : 0.0;
+    float facing = smoothstep(-0.3, 0.0, geometric.y)
+        * lerp(WET_WALL, 1.0, saturate(geometric.y));
+    return open * facing;
+}
+
 [shader("fragment")]
 float4 fragmentMain(VSOutput in) : SV_Target {
     // One directional sun plus ambient from the sky. The ambient used to be a
@@ -696,12 +790,14 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     float3 albedo = in.color;
     float metallic = 0.0;
     float roughness = 0.8;
+    float porosity = WET_BLOCKOUT_POROSITY;
 
     if (in.material != NO_TEXTURE) {
         MaterialData m = push.materials[in.material];
         albedo = m.albedo.rgb;
         metallic = m.params.x;
         roughness = m.params.y;
+        porosity = m.albedo.w;
 
         bool projected = (m.maps.z & FLAG_TRIPLANAR) != 0;
         // Scaling the *coordinate* rather than the sample: for triplanar this
@@ -753,6 +849,29 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // surface, and the ray then starts inside its own geometry.
     float3 geometric = normalize(in.normal);
     float sun = diffuse > 0.0 ? sunVisibility(in.worldPos, geometric, in.shadowBias) : 0.0;
+
+    // -----------------------------------------------------------------------
+    // **Wet.** Two properties, driven by the two halves of the model, and they
+    // are separate so that drying is not a crossfade: the film goes first and
+    // takes the sheen with it, the darkening stays.
+    //
+    // Porosity is what makes darkening a property of the material rather than
+    // of the weather — a polished stone barely darkens, a raw one goes almost
+    // black — and metal is excluded because metal has no pores to fill.
+    //
+    // **Branched, and the branch is uniform over the whole draw**: both scalars
+    // are per-frame constants, so a dry scene pays nothing for this and — more
+    // to the point — reaches the lighting below with `albedo` and `roughness`
+    // bit for bit what they were. Multiplying by an identity would very nearly
+    // do that, and "very nearly" is what a golden image is there to catch.
+    // -----------------------------------------------------------------------
+    if (wetFilm() + wetSoak() > 0.0) {
+        float wet = wetGate(in.worldPos, geometric);
+        albedo *= 1.0 - WET_DARKEN * porosity * (1.0 - metallic) * wet * wetSoak();
+        // Toward a water film, never rougher than the surface already is: a
+        // material authored smoother than standing water stays that way.
+        roughness = lerp(roughness, min(roughness, WET_SMOOTH), wet * wetFilm());
+    }
 
     // Metals have no diffuse response — their albedo is the reflectance of the
     // specular lobe instead, which is why it moves into f0 rather than being
@@ -1508,18 +1627,6 @@ struct WaterOutput {
     /// matters because the cell out at the far LOD ring is 32 m across.
     float depth : TEXCOORD2;
 };
-
-/// The scene's terrain height grid, assembled from the two environment fields
-/// that carry it. `side == 0` is a scene with no terrain: every lookup then
-/// returns `LOOM_NO_GROUND` and the water is bottomless.
-LoomHeightField terrainField() {
-    LoomHeightField field;
-    field.origin = push.environment[0].terrain.xy;
-    field.spacing = push.environment[0].terrain.z;
-    field.side = int(push.environment[0].terrain.w);
-    field.height = push.environment[0].terrainHeights;
-    return field;
-}
 
 [shader("vertex")]
 WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {

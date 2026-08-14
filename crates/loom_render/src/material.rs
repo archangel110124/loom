@@ -46,7 +46,8 @@ pub const NO_TEXTURE: u32 = u32::MAX;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct MaterialData {
-    /// Linear RGB base colour; `w` unused.
+    /// Linear RGB base colour; `w` is porosity — how much the surface darkens
+    /// when it is wet (`loom_scene::components::Material::porosity`).
     pub albedo: [f32; 4],
     /// metallic, roughness, uv_scale.x, uv_scale.y.
     pub params: [f32; 4],
@@ -61,7 +62,7 @@ pub const FLAG_TRIPLANAR: u32 = 1;
 impl Default for MaterialData {
     fn default() -> Self {
         Self {
-            albedo: [0.8, 0.8, 0.8, 1.0],
+            albedo: [0.8, 0.8, 0.8, 0.4],
             params: [0.0, 0.8, 1.0, 1.0],
             maps: [NO_TEXTURE, NO_TEXTURE, 0, 0],
         }

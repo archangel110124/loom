@@ -100,12 +100,122 @@ pub fn sample_rain(
     // A negative rate is not a thing weather does. The schema range already
     // rejects one, but this value is multiplied into wetness and particle
     // counts downstream and a sign flip there has no visible symptom.
-    let intensity = rain.map_or(0.0, |rain| rain.intensity.max(0.0));
+    //
+    // A shower that has ended is not raining either. `duration` is `None` for
+    // rain that never stops, which is every scene authored before it existed.
+    let intensity = rain.map_or(0.0, |rain| {
+        if t > rain.duration.unwrap_or(f32::INFINITY) {
+            0.0
+        } else {
+            rain.intensity.max(0.0)
+        }
+    });
 
     RainSample {
         rate: intensity * exposure,
         exposure,
         wind: wind.sheltered(at, t, exposure),
+    }
+}
+
+/// How wet a surface is, as the two numbers a wet surface actually has.
+///
+/// **Two, and that is the whole point.** Water on a surface is a film sitting
+/// on top of it and water in a surface is soaked into its pores, and they
+/// behave differently: the film is what makes a road shine, and it is gone
+/// minutes after the rain stops; the soak is what makes it dark, and it is
+/// still there a quarter of an hour later. Collapse them into one number and
+/// drying becomes a crossfade back to dry — every property recovering together,
+/// which is exactly what real drying does not look like.
+///
+/// Both are fractions from 0 (bone dry) to 1 (as wet as this rain gets it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Wetness {
+    /// The water film. Drives **roughness** — a wet surface is smoother, so its
+    /// highlight tightens and brightens.
+    pub film: f32,
+    /// Water absorbed into the material. Drives **albedo darkening**, scaled by
+    /// the material's own porosity.
+    pub soak: f32,
+}
+
+/// Rain, in mm/h, at which a surface ends up as wet as it is going to get.
+///
+/// **Low, and deliberately not the streak layer's `RAIN_FULL_RATE`.** Those are
+/// different questions that happen to be measured in the same unit: how many
+/// drops to draw scales with the rate all the way up to a downpour, but a
+/// surface is a surface — light rain wets it completely given time, and heavy
+/// rain does not make it wetter than wet, only faster. Sharing one constant
+/// would mean a drizzle could never darken anything.
+pub const SOAKING_RATE: f32 = 2.0;
+
+/// Seconds for the water film to build to 1 - 1/e of its level. A surface
+/// glosses over almost as soon as it starts raining.
+const FILM_WET: f32 = 4.0;
+/// Seconds for the film to drain and evaporate away. Minutes, not hours.
+const FILM_DRY: f32 = 30.0;
+/// Seconds for water to soak into the material. Slower than the film by an
+/// order of magnitude — it has to get past the surface first.
+const SOAK_WET: f32 = 45.0;
+/// Seconds for the soak to dry out.
+///
+/// **Ten times [`FILM_DRY`], and that ratio is the effect.** Specular vanishes
+/// faster than the darkening recovers (Lagarde; fxguide's write-up of the same
+/// model), and it is what makes a drying surface read as drying rather than as
+/// a dissolve back to its dry self: for the first minute after the rain the
+/// sheen is going while the stain is not.
+const SOAK_DRY: f32 = 300.0;
+
+/// `1 - e^{-t/tau}`, the approach to equilibrium.
+fn approach(t: f32, tau: f32) -> f32 {
+    1.0 - (-t / tau).exp()
+}
+
+/// How wet a surface at this exposure is, after `t` seconds of the scene's rain.
+///
+/// **Closed form, and there is no accumulator anywhere.** A scene's rain is one
+/// authored intensity that runs for one authored stretch, so the differential
+/// equation this would otherwise be integrated from has an exact solution — and
+/// evaluating it is both cheaper than stepping a per-surface accumulator and
+/// impossible to desynchronise from the value the renderer is handed. A stored
+/// accumulator would be a second representation of a number the formula already
+/// gives, free to drift from it, and it would put wetness in the world's state
+/// hash for nothing.
+///
+/// It is nonetheless **CPU state in the sense that matters**: it is
+/// deterministic, it is a function of the simulated clock and never a wall
+/// clock, `loom sim --assert "wetness@x,y,z.film"` reads it, and a script asking
+/// "is this wet" would read the same call. Nothing on the GPU computes it and
+/// nothing on the GPU writes it back — the shader is handed two floats.
+///
+/// `exposure` is [`RainSample::exposure`], S3's march. Passing 1 asks what a
+/// surface in the open would be.
+///
+/// **What it cannot express is history.** Wetness here is a function of the
+/// *current* exposure, so a floor that spent five minutes under a roof and was
+/// then carved open reads as though it had been out in the rain the whole time,
+/// instead of starting dry and wetting up. Fixing that needs stored per-surface
+/// state — a grid or a texture with an update path — and ADR 0014's trigger list
+/// is where to record it if a scene ever needs it.
+#[must_use]
+pub fn wetness(rain: Option<&Rain>, exposure: f32, t: f32) -> Wetness {
+    let Some(rain) = rain else {
+        // The same rule `sample_rain` follows: a scene that authors no rain is
+        // dry, so every scene written before this phase renders unchanged.
+        return Wetness { film: 0.0, soak: 0.0 };
+    };
+    let rate = rain.intensity.max(0.0) * exposure.clamp(0.0, 1.0);
+    let equilibrium = (rate / SOAKING_RATE).min(1.0);
+
+    // `None` is rain that never stops, so the wet phase is the whole run and
+    // the dry phase is empty — `t - inf` clamps to zero and both decays are 1.
+    let falling = rain.duration.unwrap_or(f32::INFINITY).max(0.0);
+    let wet = t.max(0.0).min(falling);
+    let dry = (t - falling).max(0.0);
+
+    Wetness {
+        film: equilibrium * approach(wet, FILM_WET) * (-dry / FILM_DRY).exp(),
+        soak: equilibrium * approach(wet, SOAK_WET) * (-dry / SOAK_DRY).exp(),
     }
 }
 
@@ -128,7 +238,7 @@ mod tests {
     }
 
     fn heavy() -> Rain {
-        Rain { intensity: 16.0 }
+        Rain { intensity: 16.0, duration: None }
     }
 
     #[test]
@@ -256,8 +366,8 @@ mod tests {
     /// everywhere rather than differently in different places.
     #[test]
     fn the_authored_intensity_reaches_the_rate() {
-        let drizzle = Rain { intensity: 0.5 };
-        let downpour = Rain { intensity: 50.0 };
+        let drizzle = Rain { intensity: 0.5, duration: None };
+        let downpour = Rain { intensity: 50.0, duration: None };
         let at = [5.0, 10.0, 5.0];
 
         let light = sample_rain(Some(&drizzle), &Wind::default(), None, at, 0.0);
@@ -265,5 +375,100 @@ mod tests {
 
         assert!((light.rate - 0.5).abs() < 1e-4, "{light:?}");
         assert!((heavy.rate - 50.0).abs() < 1e-4, "{heavy:?}");
+    }
+
+    /// A shower with a `duration` stops. Nothing else in the engine can turn
+    /// rain off, so without this the second half of "wetness accumulates and
+    /// dries" is not reachable from a scene file at all.
+    #[test]
+    fn a_shower_with_a_duration_ends() {
+        let shower = Rain { intensity: 8.0, duration: Some(60.0) };
+
+        let during = sample_rain(Some(&shower), &Wind::default(), None, [0.0; 3], 59.0);
+        let after = sample_rain(Some(&shower), &Wind::default(), None, [0.0; 3], 61.0);
+
+        assert!(during.rate > 7.9, "{during:?}");
+        assert_eq!(after.rate, 0.0, "the shower did not end: {after:?}");
+    }
+
+    /// **The exit criterion, at the state level: wetness accumulates and
+    /// dries.** Every number below is `wetness` evaluated at a simulated
+    /// second; nothing here is a screenshot.
+    #[test]
+    fn wetness_accumulates_and_dries() {
+        let shower = Rain { intensity: 8.0, duration: Some(60.0) };
+        let at = |t| wetness(Some(&shower), 1.0, t);
+
+        assert_eq!(at(0.0), Wetness { film: 0.0, soak: 0.0 }, "wet before it rained");
+
+        // Rising, both of them, all the way to the moment it stops.
+        let (a, b, c) = (at(5.0), at(20.0), at(60.0));
+        assert!(a.film < b.film && b.film < c.film, "film did not rise: {a:?} {b:?} {c:?}");
+        assert!(a.soak < b.soak && b.soak < c.soak, "soak did not rise: {a:?} {b:?} {c:?}");
+        assert!(c.film > 0.99, "an hour of rain and no film: {c:?}");
+
+        // Falling, both of them, once it has.
+        let (d, e) = (at(90.0), at(150.0));
+        assert!(e.film < d.film && d.film < c.film, "film did not dry: {c:?} {d:?} {e:?}");
+        assert!(e.soak < d.soak && d.soak < c.soak, "soak did not dry: {c:?} {d:?} {e:?}");
+        assert!(e.film < 0.05, "the sheen outlasted 90 seconds: {e:?}");
+    }
+
+    /// **The two-rate dry-down, as an inequality rather than as a vibe.** The
+    /// asymmetry is the whole effect: if both decayed together, drying would be
+    /// a crossfade back to the dry material and would read as one. Ninety
+    /// seconds after the rain the film is nearly gone and most of the stain is
+    /// still there.
+    #[test]
+    fn the_specular_dries_faster_than_the_darkening() {
+        let shower = Rain { intensity: 8.0, duration: Some(60.0) };
+        let stopped = wetness(Some(&shower), 1.0, 60.0);
+        let later = wetness(Some(&shower), 1.0, 150.0);
+
+        let film_left = later.film / stopped.film;
+        let soak_left = later.soak / stopped.soak;
+        assert!(
+            film_left < soak_left * 0.25,
+            "the film is not outpacing the soak: {film_left} against {soak_left}"
+        );
+        assert!(soak_left > 0.6, "the darkening vanished with the sheen: {soak_left}");
+    }
+
+    /// **Accumulation is gated by exposure**, and by the same number the rate
+    /// is — S3's march, not a second occlusion answer. A sheltered surface does
+    /// not wet however long it rains.
+    #[test]
+    fn a_sheltered_surface_does_not_wet() {
+        let rain = heavy();
+
+        let open = wetness(Some(&rain), 1.0, 600.0);
+        let sheltered = wetness(Some(&rain), 0.0, 600.0);
+
+        assert!(open.film > 0.99 && open.soak > 0.99, "{open:?}");
+        assert_eq!(sheltered, Wetness { film: 0.0, soak: 0.0 });
+    }
+
+    /// **A scene that authors no rain is bone dry, forever.** This is what
+    /// keeps every reference image written before this phase byte-identical:
+    /// the shader multiplies by these, and zero is exactly zero.
+    #[test]
+    fn a_scene_without_rain_never_wets() {
+        let out = wetness(None, 1.0, 10_000.0);
+
+        assert_eq!(out, Wetness { film: 0.0, soak: 0.0 });
+    }
+
+    /// Drizzle wets a surface completely, given time — it only takes longer to
+    /// look like anything. A downpour does not make it wetter than wet.
+    #[test]
+    fn heavier_rain_does_not_wet_past_wet() {
+        let drizzle = Rain { intensity: SOAKING_RATE, duration: None };
+        let downpour = Rain { intensity: 50.0, duration: None };
+
+        let a = wetness(Some(&drizzle), 1.0, 600.0);
+        let b = wetness(Some(&downpour), 1.0, 600.0);
+
+        assert!((a.film - b.film).abs() < 1e-5, "{a:?} against {b:?}");
+        assert!(a.soak > 0.99, "drizzle never soaked it: {a:?}");
     }
 }

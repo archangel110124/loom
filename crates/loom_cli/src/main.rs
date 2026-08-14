@@ -63,7 +63,9 @@ USAGE:
         reads the weather where it is asked about: `wind@x,y,z.speed >= 3`, and
         `rain@x,y,z.rate < 0.05` for the rain reaching a point in mm/h after the
         scene's own voxels have sheltered it (`.exposure` is that shelter alone,
-        0 sealed to 1 open sky).
+        0 sealed to 1 open sky). `wetness@x,y,z.film` is how wet a surface there
+        has become by that tick — `.film` the sheen, `.soak` the darkening, and
+        the two dry at different rates.
 
     loom scene <scene.loom> --tx <tx.json> [--dry-run]
         Apply a transaction. `expect_version` in the JSON makes the write
@@ -1793,6 +1795,22 @@ pub(crate) fn rain_at_eye(
     }
     let sample = weather::rain_at(rain, wind, sky, eye.to_array(), seconds);
     env.rain = [sample.wind[0], sample.wind[1], sample.wind[2], sample.rate];
+
+    // **Wetness, at full exposure, for the whole scene.** Two scalars and no
+    // per-surface state: the shader decides how much of them reaches a given
+    // pixel, out of the terrain height field it already reads. Asking for the
+    // exposure at the *eye* here would be wrong in a way the streaks can get
+    // away with and this cannot — walking under a roof would dry the field
+    // outside it.
+    //
+    // `weather.w` and `water.w` were the two free trailing scalars in the
+    // environment buffer, which is exactly what that buffer's packing is for.
+    // Growing it by a `float4` would move `terrainHeights` and every offset
+    // pinned in `loom_render`'s layout test, for two floats.
+    let wet = loom_rain::wetness(rain, 1.0, seconds);
+    env.weather[3] = wet.film;
+    env.water[3] = wet.soak;
+
     // Every cell, or none. A fully sheltered eye still skips the draw entirely.
     if sample.rate > 0.0 { MAX_RAIN_DROPS } else { 0 }
 }
@@ -2012,7 +2030,10 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
         // million of them; a run that never mentions rain must not pay for it.
         sky: specs
             .iter()
-            .any(|spec| spec.trim_start().starts_with("rain"))
+            .any(|spec| {
+                let spec = spec.trim_start();
+                spec.starts_with("rain") || spec.starts_with("wetness")
+            })
             .then(|| scene_volume(&scene))
             .flatten(),
         #[allow(clippy::cast_precision_loss)]
@@ -2033,8 +2054,9 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
                              `status == won|lost|playing`, \
                              `state.<name> OP value` and `events.<kind> OP n` \
                              check the game's rules and what happened. \
-                             `wind@x,y,z.<x|y|z|speed>` and \
-                             `rain@x,y,z.<rate|exposure>` read the weather where \
+                             `wind@x,y,z.<x|y|z|speed>`, \
+                             `rain@x,y,z.<rate|exposure>` and \
+                             `wetness@x,y,z.<film|soak>` read the weather where \
                              it is asked about.",
                 }));
             }
@@ -2178,6 +2200,25 @@ fn assertion_value(
             "y" => Some(v[1]),
             "z" => Some(v[2]),
             "speed" => Some(v[0].mul_add(v[0], v[2] * v[2]).sqrt()),
+            _ => None,
+        };
+    }
+
+    // `wetness@2,1,-4.film` — **the third exit criterion, and it is temporal,
+    // which is why it is here and not in a screenshot.** "Wetness accumulates
+    // and dries" is a claim about how a surface changes over a run: a still
+    // cannot distinguish a scene that dried from one that was never wet. The
+    // two axes are the two rates — `film` is the sheen, `soak` is the
+    // darkening, and the whole point of the model is that they do not decay
+    // together. Checked before `rain`, because "wetness" would otherwise never
+    // be reached: `strip_prefix("rain")` does not match it, but the reader who
+    // adds the next axis should not have to know that.
+    if let Some(rest) = path.strip_prefix("wetness") {
+        let at = rest.strip_prefix('@').map_or(Some([0.0, 0.0, 0.0]), parse_vec3)?;
+        let wet = weather.wetness_at(at);
+        return match axis {
+            "film" => Some(wet.film),
+            "soak" => Some(wet.soak),
             _ => None,
         };
     }
@@ -3533,6 +3574,44 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         ]));
 
         assert_eq!(code, 0, "{out}");
+    }
+
+    /// **Phase 4's third exit criterion: wetness accumulates and dries.**
+    ///
+    /// Temporal, so it is a simulation assertion and not a screenshot — a still
+    /// of a dried surface and a still of one that was never wet are the same
+    /// picture. `rain_overhang` rains for sixty seconds and then stops, which is
+    /// what makes "afterwards" a moment there is a tick number for.
+    ///
+    /// The three readings at 150 s are the whole model in one line: **the sheen
+    /// is gone, the darkening is still more than half there, and the sheltered
+    /// floor never got either.** If the two dried at one rate the second of
+    /// those would fail, and drying would be a crossfade back to the dry
+    /// material rather than something that looks like drying.
+    #[test]
+    fn wetness_accumulates_and_dries() {
+        let scene = "../../assets/test/rain_overhang.loom";
+
+        // 3600 ticks — sixty seconds, the last instant of the shower.
+        let (code, out) = run(&args(&[
+            "sim", scene, "--ticks", "3600",
+            "--assert", "wetness@-13,3,-13.film > 0.99",
+            "--assert", "wetness@-13,3,-13.soak > 0.7",
+            // **Gated by exposure, and by S3's exposure alone.** Under the
+            // slab nothing wets; under the hole cut through it, everything does.
+            "--assert", "wetness@0,3,0.film < 0.01",
+            "--assert", "wetness@0,3,-6.film > 0.99",
+        ]));
+        assert_eq!(code, 0, "it should be soaked after a minute of rain: {out}");
+
+        // 9000 ticks — a hundred and fifty seconds, ninety of them dry.
+        let (code, out) = run(&args(&[
+            "sim", scene, "--ticks", "9000",
+            "--assert", "rain@-13,3,-13.rate == 0",
+            "--assert", "wetness@-13,3,-13.film < 0.05",
+            "--assert", "wetness@-13,3,-13.soak > 0.4",
+        ]));
+        assert_eq!(code, 0, "the sheen should go long before the stain: {out}");
     }
 
     /// **The draw count and the shader's grid are one number, and this is the

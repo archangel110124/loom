@@ -116,7 +116,11 @@ impl MaterialLibrary {
 
             let slot = u32::try_from(library.materials.len()).unwrap_or(0);
             library.materials.push(MaterialData {
-                albedo: [albedo[0], albedo[1], albedo[2], 1.0],
+                // `w` is porosity — how much this surface darkens when wet.
+                // It rides in the albedo's spare lane rather than growing the
+                // struct: `MaterialData` is one memory layout described twice
+                // and the trailing scalar was already there for the taking.
+                albedo: [albedo[0], albedo[1], albedo[2], scalar("porosity", 0.4)],
                 params: [
                     scalar("metallic", 0.0),
                     scalar("roughness", 0.8),
