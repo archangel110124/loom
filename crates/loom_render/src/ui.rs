@@ -69,12 +69,14 @@ impl Ui {
             device.handle().clone(),
             egui_ash_renderer::RenderMode::DynamicRendering(DynamicRendering {
                 color_attachment_format: color_format,
-                // The UI draws inside the *scene's* rendering pass, which has a
-                // depth attachment — so egui's pipeline has to declare the same
-                // format or every UI draw is VUID-...-08914. It still neither
-                // tests nor writes depth (see `Options` below); declaring the
-                // format is about matching the pass, not about using it.
-                depth_attachment_format: Some(crate::renderer::DEPTH_FORMAT),
+                // **No depth attachment, because the UI has its own pass now.**
+                // It used to draw inside the scene's rendering pass and had to
+                // declare that pass's depth format or every UI draw was
+                // VUID-...-08914. Rain moved it out: rain is a pass of its own
+                // (the depth buffer changes from attachment to texture between
+                // the two) and the UI has to come *after* it, or streaks fall
+                // across the panels. It never tested or wrote depth anyway.
+                depth_attachment_format: None,
                 stencil_attachment_format: None,
             }),
             Options {

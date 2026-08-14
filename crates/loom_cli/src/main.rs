@@ -564,8 +564,20 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // The bed, baked once: the water reads its depth from it on the GPU and
     // the submersion test reads it on the CPU, and they must be the same grid.
     let terrain = scene_terrain_field(&scene);
+    // The scene's rain, and the volume it shelters under — both resolved once.
+    // `None` for a scene that authors none, which is dry rather than drizzly.
+    let rain = weather::rain_of(&scene);
+    let rain_sky = rain_sky(&scene);
     let mut environment = environment_with_wind(&world, &weather, wind_seconds);
     submerge_eye(&mut environment, &world, &weather, terrain.as_ref(), camera.eye, wind_seconds);
+    let rain_drops = rain_at_eye(
+        &mut environment,
+        rain.as_ref(),
+        &weather,
+        rain_sky.as_ref(),
+        camera.eye,
+        wind_seconds,
+    );
     let result = (|| -> Result<(String, bool), String> {
         let instance = Instance::new(c"loom").map_err(|e| e.to_string())?;
         let device = Device::new(&instance).map_err(|e| e.to_string())?;
@@ -593,13 +605,15 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
             warn_if_grass_truncated(blades.len(), renderer.grass_capacity());
             renderer.set_grass(&blades).map_err(|e| e.to_string())?;
         }
-        // The bed the water reads its depth from — uploaded once, because a
-        // bake of the voxel SDF changes only when the terrain does.
+        // The bed the water reads its depth from, and the surface rain stops
+        // at — uploaded once, because a bake of the voxel SDF changes only when
+        // the terrain does.
         if let Some(field) = terrain.as_ref() {
             renderer
                 .set_terrain(&field.height, field.origin, field.spacing, field.side)
                 .map_err(|e| e.to_string())?;
         }
+        renderer.set_rain(rain_drops);
 
         match frames {
             // The still. One image, the scene as `--sim` left it.
@@ -727,6 +741,19 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                         camera.eye,
                         moment,
                     );
+                    // For the same reason, and it is the stronger case: the
+                    // shot that walks under the overhang has to stop raining
+                    // partway through, which is the phase's exit criterion in
+                    // motion rather than in a still.
+                    let drops = rain_at_eye(
+                        &mut renderer.environment,
+                        rain.as_ref(),
+                        &weather,
+                        rain_sky.as_ref(),
+                        camera.eye,
+                        moment,
+                    );
+                    renderer.set_rain(drops);
 
                     renderer
                         .render_to_png(
@@ -1062,20 +1089,27 @@ pub(crate) fn river_flow(
 
 /// The scene's terrain height grid, or `None` when nothing would read it.
 ///
-/// **Only baked for a scene that has water**, and that early-out is not
+/// **Only baked for a scene with water or rain**, and that early-out is not
 /// politeness: the bake is a march down the SDF per sample, and
 /// `terrain_stress.loom` is 67 million voxels. Grass bakes its own window
 /// through the same code, which is one march each rather than one shared —
 /// the two want different extents, and sharing them would mean baking the
 /// coarser of the two for both.
+///
+/// **Rain is the second reader, and it uses the grid differently.** Water asks
+/// how deep it is over the bed; rain asks what the first thing above a falling
+/// drop is, which for a top-down height field is the same query and the right
+/// answer — the topmost surface in a column is exactly what a drop hits. It is
+/// the same grid either way, so a scene that has both bakes once.
 pub(crate) fn scene_terrain_field(
     scene: &Scene,
 ) -> Option<loom_voxel::heightfield::HeightField> {
-    if !scene
+    let wanted = scene
         .nodes()
         .iter()
         .any(|n| n.components.contains_key("WaterBody"))
-    {
+        || weather::rain_of(scene).is_some();
+    if !wanted {
         return None;
     }
     let (volume, offset) = scene_volume(scene)?;
@@ -1260,11 +1294,16 @@ impl GroundGrid {
 /// `Sim` bakes once at load, and a crater blown mid-run is seen by the water
 /// only after a reload.
 pub(crate) fn terrain_key(scene: &Scene) -> String {
-    if !scene
+    // The same two readers `scene_terrain_field` bakes for. Rain is here for
+    // the sharper version of the same criterion: carve the overhang open with
+    // a transaction and the streaks come through on the next re-derive,
+    // because the ops changed, so this key changed, so the grid was rebaked.
+    let wanted = scene
         .nodes()
         .iter()
         .any(|n| n.components.contains_key("WaterBody"))
-    {
+        || weather::rain_of(scene).is_some();
+    if !wanted {
         return String::new();
     }
     let mut parts = Vec::new();
@@ -1703,6 +1742,66 @@ pub(crate) fn submerge_eye(
     let ground = terrain.map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(eye.x, eye.z));
     let under = loom_water::buoyancy::submersion_at(&body, eye.to_array(), 0.0, seconds, ground);
     env.water[1] = f32::from(under > 0.5);
+}
+
+/// Drops the layer draws at [`RAIN_FULL_RATE`] and above.
+///
+/// A calibration knob, not physics — real rain at 8 mm/h has millions of drops
+/// per box and no renderer draws them. What this number buys is the *look* of
+/// weather at the cost of its overdraw, and it is the one dial to turn when
+/// that trade needs revisiting.
+const MAX_RAIN_DROPS: u32 = 160_000;
+
+/// Rate, in mm/h, at which the layer is at its full drop count.
+///
+/// **The same number `scene.slang` fades opacity in by**, and it is one number
+/// spelled twice — see `RAIN_FULL_RATE` there for why both the count and the
+/// opacity scale rather than only the count. Past this point rain gets no
+/// denser and no brighter, so a scene authoring 200 mm/h reads as a downpour
+/// rather than as a wall.
+const RAIN_FULL_RATE: f32 = 20.0;
+
+/// Tell the shader what the rain is doing at the camera, and how many streaks
+/// that is worth.
+///
+/// **One `sample_rain` call, at the eye, and it is the authoritative one.** The
+/// rate it returns is what `loom sim --assert "rain@x,y,z.rate"` reads, so the
+/// streaks cannot claim weather the simulation disagrees with. What the GPU
+/// gets is four floats and a draw count; it writes nothing back, which is what
+/// keeps this whole layer out of the determinism hash.
+///
+/// **A camera under cover therefore thins the whole layer**, because the
+/// exposure S3 marches is the exposure at the eye. That is per-camera, not
+/// per-drop, and it is honest about being so. The per-drop half of the answer
+/// is in the shader, against the terrain height field.
+pub(crate) fn rain_at_eye(
+    env: &mut loom_render::EnvironmentData,
+    rain: Option<&loom_scene::components::Rain>,
+    wind: &loom_field::wind::Wind,
+    sky: Option<&(loom_voxel::Volume, [f32; 3])>,
+    eye: Vec3,
+    seconds: f32,
+) -> u32 {
+    if rain.is_none() {
+        return 0;
+    }
+    let sample = weather::rain_at(rain, wind, sky, eye.to_array(), seconds);
+    env.rain = [sample.wind[0], sample.wind[1], sample.wind[2], sample.rate];
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        ((sample.rate / RAIN_FULL_RATE).clamp(0.0, 1.0) * MAX_RAIN_DROPS as f32) as u32
+    }
+}
+
+/// The voxel volume rain shelters under, or `None` when a scene authors no
+/// `Rain` at all.
+///
+/// **Built once per render, never per frame.** It is the scene's op list re-run
+/// into an SDF, which `terrain_stress.loom` would pay 67 million voxels for —
+/// and a scene with no rain must pay nothing.
+pub(crate) fn rain_sky(scene: &Scene) -> Option<(loom_voxel::Volume, [f32; 3])> {
+    weather::rain_of(scene)?;
+    scene_volume(scene)
 }
 
 fn environment_of_inner(world: &World) -> loom_render::EnvironmentData {

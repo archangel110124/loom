@@ -91,6 +91,14 @@ pub struct Viewer {
     /// Blades currently in the buffer. Uploaded on scene load, expanded every
     /// frame in the vertex shader — see [`Viewer::set_grass`].
     grass_count: u32,
+    /// The rain streaks. Additive, order-independent, in a pass of their own
+    /// after the depth buffer is finished with.
+    rain_pipeline: vk::Pipeline,
+    /// Drops this frame — see [`Viewer::set_rain`]. There is no buffer beside
+    /// it: a drop is a pure function of its index and the clock.
+    rain_drops: u32,
+    /// The scene's depth, as a descriptor the rain fragment shader samples.
+    scene_depth: crate::scene_depth::SceneDepth,
     objects: vk::Buffer,
     environment_buffer: vk::Buffer,
     environment_alloc: Option<gpu_allocator::vulkan::Allocation>,
@@ -249,6 +257,8 @@ impl Viewer {
             crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
         )?;
 
+        let scene_depth = crate::scene_depth::SceneDepth::new(&raw)?;
+        scene_depth.bind(depth_view);
         let cache_path = pipeline_cache_path(instance, device);
         // The pipeline is built for the *swapchain's* format, which is usually
         // BGRA rather than the offscreen path's RGBA. Dynamic rendering bakes
@@ -260,6 +270,7 @@ impl Viewer {
                 format,
                 raytracer.as_ref().map(crate::raytrace::Raytracer::descriptor_layout),
                 materials.descriptor_layout(),
+                scene_depth.descriptor_layout(),
                 ash::vk::SampleCountFlags::TYPE_1,
             )?;
         let sky_pipeline =
@@ -300,6 +311,12 @@ impl Viewer {
             c"waterVertexMain",
             c"waterFragmentMain",
         )?;
+        // **And the rain, in the window as well as offscreen**, for the reason
+        // spelled out above the water pipeline. This one is not even
+        // parameterised: rain draws into a single-sample target in both paths,
+        // so the windowed and headless versions are the same pipeline state.
+        let rain_pipeline =
+            crate::renderer::create_rain_pipeline(&raw, pipeline_layout, pipeline_cache, format)?;
 
         // Mirrors the offscreen path's ceiling. Sized once so a frame never
         // allocates, which in a live viewer would show up as a hitch.
@@ -431,6 +448,9 @@ impl Viewer {
             grass_pipeline,
             water_pipeline,
             grass_count: 0,
+            rain_pipeline,
+            rain_drops: 0,
+            scene_depth,
             rt_positions,
             device: raw,
             queue: device.queue(),
@@ -509,6 +529,12 @@ impl Viewer {
                 .ok_or_else(|| RenderError::Allocator("grass buffer is gone".into()))?,
             drawn,
         )
+    }
+
+    /// How many rain drops to draw. Mirrors [`crate::Renderer::set_rain`] —
+    /// same count, same shader, same pass.
+    pub fn set_rain(&mut self, drops: u32) {
+        self.rain_drops = drops;
     }
 
     /// Hand the viewer the terrain height grid the water reads.
@@ -913,7 +939,17 @@ impl Viewer {
                 // SAFETY: the graph transitioned both attachments already.
                 unsafe {
                     // The viewer renders at one sample; MSAA is the offscreen path for now.
-                    begin_rendering(d, cmd, scene_view, depth_view, None, extent.width, extent.height);
+                    // No multisampling here, so no resolve of either kind: the
+                    // depth the rain pass samples is the one written directly.
+                    begin_rendering(
+                        d,
+                        cmd,
+                        scene_view,
+                        depth_view,
+                        None,
+                        extent.width,
+                        extent.height,
+                    );
                     set_viewport(d, cmd, extent.width, extent.height);
                     crate::renderer::draw_sky(d, cmd, sky, layout, &base_push);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
@@ -1032,16 +1068,91 @@ impl Viewer {
                         );
                         d.cmd_draw(cmd, particle_count * 6, 1, 0, 0);
                     }
-                    // The UI goes inside the same rendering pass, after the
-                    // geometry, so panels draw over the scene without a second
-                    // pass or a render-pass object.
-                    if let Some((ui, window)) = ui {
-                        let _ = ui.draw(window, cmd, extent, queue, pool, build);
-                    }
                     d.cmd_end_rendering(cmd);
                 }
             },
         );
+
+        // **Rain, then the UI, each in a pass of its own.** Rain has to be
+        // separate — the depth buffer stops being an attachment and becomes a
+        // texture between the forward pass and this one, and only the graph
+        // may move it (never-do #4). The UI then has to follow rain rather
+        // than precede it, or streaks fall across the panels; it used to be
+        // inside the forward pass, and moving it is what that costs.
+        //
+        // Both are before the AA passes, so both are filtered as before.
+        let rain_pipeline = self.rain_pipeline;
+        let rain_drops = self.rain_drops;
+        let rain_depth_set = self.scene_depth.descriptor_set();
+        if rain_drops > 0 {
+            graph.pass(
+                "rain",
+                &[(scene_id, Access::ColorWrite), (depth_id, Access::DepthSample)],
+                move |d, cmd| {
+                    // SAFETY: the graph has put the scene target back in
+                    // COLOR_ATTACHMENT_OPTIMAL and the depth image in
+                    // SHADER_READ_ONLY_OPTIMAL.
+                    unsafe {
+                        crate::renderer::begin_overlay_rendering(
+                            d,
+                            cmd,
+                            scene_view,
+                            extent.width,
+                            extent.height,
+                        );
+                        set_viewport(d, cmd, extent.width, extent.height);
+                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, rain_pipeline);
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            2,
+                            &[rain_depth_set],
+                            &[],
+                        );
+                        let push = crate::renderer::Push {
+                            object_offset: particle_slot,
+                            ..base_push
+                        };
+                        d.cmd_push_constants(
+                            cmd,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            push.bytes(),
+                        );
+                        d.cmd_draw(cmd, rain_drops * 6, 1, 0, 0);
+                        d.cmd_end_rendering(cmd);
+                    }
+                },
+            );
+        }
+
+        if ui.is_some() {
+            graph.pass(
+                "ui",
+                &[(scene_id, Access::ColorWrite)],
+                move |d, cmd| {
+                    // SAFETY: the graph has the scene target in
+                    // COLOR_ATTACHMENT_OPTIMAL, and egui's pipeline declares no
+                    // depth attachment to match this block.
+                    unsafe {
+                        crate::renderer::begin_overlay_rendering(
+                            d,
+                            cmd,
+                            scene_view,
+                            extent.width,
+                            extent.height,
+                        );
+                    }
+                    if let Some((ui, window)) = ui {
+                        let _ = ui.draw(window, cmd, extent, queue, pool, build);
+                    }
+                    // SAFETY: the block opened immediately above.
+                    unsafe { d.cmd_end_rendering(cmd) };
+                },
+            );
+        }
 
         // The anti-aliasing passes: edge detection into the mask image, then
         // the shape filter reading the finished scene and the mask and writing
@@ -1236,6 +1347,10 @@ impl Viewer {
             self.depth = depth;
             self.depth_alloc = Some(depth_alloc);
             self.depth_view = depth_view;
+            // The rain pass's descriptor points at the view that was just
+            // destroyed. Repointing it is not optional and has no symptom the
+            // validation layers can see once the handle is reused.
+            self.scene_depth.bind(depth_view);
 
             // The AA source is a full-resolution image like the depth buffer,
             // so it resizes with the window. The pass itself — pipeline,
@@ -1336,6 +1451,7 @@ impl Drop for Viewer {
             }
             self.device.destroy_pipeline(self.grass_pipeline, None);
             self.device.destroy_pipeline(self.water_pipeline, None);
+            self.device.destroy_pipeline(self.rain_pipeline, None);
             self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.terrain_buffer, None);
             if let (Some(allocation), Some(allocator)) =
@@ -1557,7 +1673,9 @@ fn create_depth(
         width,
         height,
         DEPTH_FORMAT,
-        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+        // `SAMPLED` because the rain pass reads this as a texture — see the
+        // offscreen path's depth target, which says the same thing.
+        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
         1,
         vk::SampleCountFlags::TYPE_1,
         "loom.viewer_depth",

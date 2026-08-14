@@ -88,6 +88,11 @@ struct EnvironmentData {
     float4 viewport;   // xy size in pixels
     float4 wind;       // xy direction, z speed, w gustiness
     float4 weather;    // x turbulence, y ground drag, z seconds, w unused
+    // **`loom_rain::sample_rain` at the eye, and nothing else.** xyz is the
+    // sheltered P1 wind a streak leans along, w the rate in mm/h that reaches
+    // the camera. Both come out of the one authoritative call; the GPU layer
+    // derives everything else and writes nothing back.
+    float4 rain;
     // x still-water level, y unused, z 1 when the scene has water, w unused.
     // Depth used to sit in `y` as a constant; it is a real per-vertex query
     // now, out of the height field below.
@@ -1767,4 +1772,235 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
 
     float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     return float4(lerp(lit, fogColor(-view), fog), 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// Rain.
+//
+// **Stateless.** A drop's world position is a pure function of its integer
+// index and the simulated clock. There is no drop buffer, no per-frame update
+// and no simulation — which is also what keeps this layer out of the
+// determinism hash: it writes nothing, and nothing reads it back.
+//
+// Six vertices per drop from `SV_VertexID` alone, like the particles, and no
+// vertex input at all — the same model the rest of this renderer uses.
+//
+// **What the CPU decides, and it is only two things**: how many drops to draw,
+// and `environment.rain` — `loom_rain::sample_rain` at the eye, which is the
+// authoritative Phase 4 state. Everything else below is derived here.
+// ---------------------------------------------------------------------------
+
+/// The wrapping volume, in metres, centred on the eye.
+///
+/// Wide enough that its faces sit past the fog on a normal shot and shallow
+/// enough that a fixed drop count still reads as weather rather than as
+/// drizzle. These are calibration knobs, not physics.
+static const float3 RAIN_BOX = float3(72.0, 32.0, 72.0);
+/// Terminal velocity, m/s. Moderate rain is 6–9; the streak length the eye
+/// actually reads is derived from this rather than authored beside it.
+static const float RAIN_FALL = 8.0;
+/// Seconds of motion one streak stands for — a shutter time, not a length.
+/// 0.1 s at 8 m/s is a 0.8 m streak, which is what a photograph of rain shows.
+static const float RAIN_SHUTTER = 0.1;
+static const float RAIN_WIDTH = 0.02;
+/// Metres of geometry between "behind the wall" and "fully visible". The soft
+/// depth fade, and the reason a streak does not end in a hard line where it
+/// crosses the ground.
+static const float RAIN_DEPTH_FADE = 0.7;
+/// Rate, in mm/h, at which the layer is at full strength. Spelled again as
+/// `RAIN_FULL_RATE` on the Rust side, which scales the *drop count* by the same
+/// ratio — so light rain is both sparser and fainter, and nothing past this
+/// rate gets denser or brighter.
+///
+/// **Both, rather than only the count, on purpose.** Exposure at the eye moves
+/// continuously as a camera walks under a ledge; a count alone would step the
+/// layer out one drop at a time, and a fade is what makes that a transition
+/// rather than a stutter.
+static const float RAIN_FULL_RATE = 20.0;
+
+/// The scene's depth, after the forward pass. Set 2, binding 0.
+///
+/// **Sampled, not tested.** Rain draws in a pass of its own, into the resolved
+/// colour target, with no depth attachment at all — so the depth buffer is an
+/// ordinary sampled image here. The multisampled path resolves its depth into
+/// this same single-sample image, so both paths read one texel per pixel. The
+/// comparison being arithmetic rather than a hardware test is what buys the
+/// soft fade: a depth test can only accept or reject.
+[[vk::binding(0, 2)]]
+uniform Sampler2D sceneDepth;
+
+/// Three uncorrelated values in `[0, 1)` from one drop index.
+///
+/// **`loom_hash` is `loom_field::noise`'s, and it is frozen ABI** — the project
+/// has exactly one integer hash and this is it. A `frac(sin(...))` one-liner is
+/// the usual choice for something outside the sim hash, and there is no reason
+/// to carry a second family of magic constants for it.
+float3 rainHash(uint index) {
+    uint h1 = loom_hash(index * 0x9e3779b9u + 0x517cc1b7u);
+    uint h2 = loom_hash(h1);
+    uint h3 = loom_hash(h2);
+    const float SCALE = 1.0 / 16777216.0;
+    return float3(float(h1 >> 8), float(h2 >> 8), float(h3 >> 8)) * SCALE;
+}
+
+struct RainOutput {
+    float4 position : SV_Position;
+    /// x across the streak in -1..1, y along it.
+    float2 local : TEXCOORD0;
+    float3 worldPos : TEXCOORD1;
+    /// Rate, boundary fade and occlusion multiplied together. Constant over a
+    /// drop, so it is decided once in the vertex stage.
+    nointerpolation float strength : TEXCOORD2;
+};
+
+[shader("vertex")]
+RainOutput rainVertexMain(uint vertexID: SV_VertexID) {
+    uint drop = vertexID / 6;
+    uint corner = vertexID % 6;
+    const float2 CORNERS[6] = {
+        float2(-1, -1), float2(1, -1), float2(1, 1),
+        float2(-1, -1), float2(1, 1), float2(-1, 1),
+    };
+    float2 local = CORNERS[corner];
+
+    float3 eye = push.environment[0].eye.xyz;
+    float seconds = push.environment[0].weather.z;
+    float4 rain = push.environment[0].rain;
+
+    // **One wind vector for the whole layer, sampled by the CPU at the eye.**
+    // It is `loom_rain::sample_rain(...).wind` — P1's field, already sheltered
+    // by the same S3 exposure that scaled the rate, so the lean and the rate
+    // cannot disagree about the weather. It has to be uniform in any case: a
+    // velocity that varied with position would need integrating, and a drop's
+    // position would stop being a closed form of its index and the time.
+    float3 velocity = float3(rain.x, -RAIN_FALL, rain.z);
+
+    // -----------------------------------------------------------------------
+    // **The wrap, and why a drop never teleports.**
+    //
+    // In the frame that falls with the rain — `world - velocity * t` — the
+    // pattern is a fixed, infinitely repeating lattice of period `RAIN_BOX`.
+    // The modulo below picks the copy of drop `i` nearest the eye. Time alone
+    // therefore never moves a drop discontinuously: it slides smoothly, and
+    // only the *choice of copy* changes, at the box face.
+    //
+    // Which leaves exactly one discontinuity, at that face, whichever caused
+    // it — the fall carrying a drop out of the bottom, or the camera walking
+    // the box over it. `edge` below takes a drop's opacity to zero over the
+    // outer quarter of the box on every axis, so the swap always happens at
+    // zero brightness. That is the whole answer: continuous in time by
+    // construction, and nothing is drawn on the seam.
+    // -----------------------------------------------------------------------
+    //
+    // `ponytail:` `velocity * seconds` is absolute, so its precision decays
+    // with the clock — at 8 m/s an `f32` resolves a millimetre out to about
+    // three hours of simulated time and a centimetre for a day. Subtract a
+    // periodic offset before the multiply if a run ever needs to be longer
+    // than that; nothing does, and doing it now would only be arithmetic
+    // nobody can check.
+    float3 pattern = rainHash(drop) * RAIN_BOX + velocity * seconds;
+    float3 rel = pattern - (eye - RAIN_BOX * 0.5);
+    rel -= RAIN_BOX * floor(rel / RAIN_BOX);
+    float3 pos = eye - RAIN_BOX * 0.5 + rel;
+
+    // Zero at the centre of the box, one at a face.
+    float3 toEdge = abs(rel / RAIN_BOX - 0.5) * 2.0;
+    float edge = 1.0 - smoothstep(0.75, 1.0, max(max(toEdge.x, toEdge.y), toEdge.z));
+
+    // -----------------------------------------------------------------------
+    // **The overhang, and exactly what this can and cannot say.**
+    //
+    // W6's baked terrain height field is the topmost solid surface in a
+    // column. A height field cannot represent an overhang *in general* — it
+    // flattens away the space underneath one. For rain it is nearly the right
+    // shape anyway, because rain arrives from directly above: the first thing
+    // a falling drop meets IS the topmost surface, so killing every drop below
+    // it stops rain under a roof, a bridge or a ledge, and lets it through a
+    // hole punched in one as soon as the bake changes.
+    //
+    // What it does NOT do: rain blown far enough sideways to reach under a
+    // ledge still stops at that column, and geometry which is not in the voxel
+    // volume — every mesh in the scene — does not stop rain at all. Neither is
+    // claimed anywhere else. The CPU's `sample_rain` at the eye, which marches
+    // S3 properly, is what scales the layer as a whole.
+    //
+    // Off the grid, and in a scene with no terrain, `loom_ground_height`
+    // returns its large negative sentinel and nothing here is culled.
+    // -----------------------------------------------------------------------
+    float ground = loom_ground_height(terrainField(), pos.xz);
+    float aboveGround = pos.y > ground ? 1.0 : 0.0;
+
+    float strength = saturate(rain.w / RAIN_FULL_RATE) * edge * aboveGround;
+
+    // The streak: a ribbon along the direction of travel, turned to face the
+    // eye. A drop with no strength collapses to a point and its triangles are
+    // discarded before rasterisation — the same trick the grass fade and the
+    // water LOD both use, and the reason there is no branch here.
+    float speed = max(length(velocity), 1e-3);
+    float3 along = velocity / speed;
+    float3 side = cross(along, eye - pos);
+    float sideLength = length(side);
+    // Looking straight down a streak the cross product vanishes and the ribbon
+    // would collapse to a line. Any perpendicular will do there — the quad is
+    // end-on and covers almost nothing.
+    side = sideLength > 1e-4 ? side / sideLength : float3(1, 0, 0);
+
+    float alive = strength > 0.0 ? 1.0 : 0.0;
+    float halfLength = speed * RAIN_SHUTTER * 0.5 * alive;
+    float halfWidth = RAIN_WIDTH * 0.5 * alive;
+    float3 world = pos + along * (local.y * halfLength) + side * (local.x * halfWidth);
+
+    RainOutput out;
+    // `mvp` of the reserved object slot is the view-projection — the same slot
+    // the particles, the grass and the water read.
+    out.position = mul(push.objects[push.objectOffset].mvp, float4(world, 1.0));
+    out.local = local;
+    out.worldPos = world;
+    out.strength = strength;
+    return out;
+}
+
+[shader("fragment")]
+float4 rainFragmentMain(RainOutput in) : SV_Target {
+    // Soft across the width and tapered at both ends, so a streak reads as a
+    // smear rather than a lozenge. Additive blending has no sort and no order
+    // to get wrong, which is the whole reason it was chosen: overdraw is the
+    // cost of rain, and this is the version of it that needs no sorting.
+    float across = 1.0 - abs(in.local.x);
+    float along = 1.0 - in.local.y * in.local.y;
+    float alpha = in.strength * smoothstep(0.0, 1.0, across) * along;
+
+    // -----------------------------------------------------------------------
+    // **The soft depth fade.** The scene's depth is sampled rather than
+    // tested, so the comparison is a ramp instead of a cliff. Both distances
+    // are in metres from the eye: reconstructing the scene point through
+    // `invViewProj` puts them on the same scale, where a difference of
+    // nonlinear depths would mean something different at every range.
+    //
+    // A pixel of sky reads depth 1.0 and reconstructs at the far plane, so
+    // nothing fades against the background.
+    // -----------------------------------------------------------------------
+    float2 uv = in.position.xy / push.environment[0].viewport.xy;
+    float depth = sceneDepth.SampleLevel(uv, 0.0).r;
+    float4 unprojected = mul(push.invViewProj, float4(uv * 2.0 - 1.0, depth, 1.0));
+    float3 eye = push.environment[0].eye.xyz;
+    float behind = distance(eye, unprojected.xyz / unprojected.w) - distance(eye, in.worldPos);
+    alpha *= saturate(behind / RAIN_DEPTH_FADE);
+
+    if (alpha <= 0.002) {
+        discard;
+    }
+
+    // Rain is lit by the sky and by nothing else, so its colour is the sky's.
+    // A scene authored dark gets dark rain rather than white scratches, which
+    // is the rule `Environment` already imposes on everything else.
+    float3 sky = lerp(skyHorizon(), skyZenith(), 0.5);
+    float fog = fogAmount(eye, in.worldPos);
+    // Fog attenuates an emitter rather than tinting it — the same reasoning as
+    // the additive particles: blending toward the fog colour would ADD grey
+    // light, and distant rain would glow through the haze.
+    float3 rgb = sky * (1.0 - fog);
+    // Premultiplied with alpha zeroed: the blend adds this and occludes
+    // nothing behind it.
+    return float4(rgb * alpha, 0.0);
 }

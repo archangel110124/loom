@@ -41,6 +41,22 @@ pub enum Access {
     DepthRead,
     /// Sampled in a shader.
     ShaderRead,
+    /// Written as the single-sample destination of a **depth resolve**.
+    ///
+    /// The layout is the depth attachment's, but the stage and access are the
+    /// *colour* ones — which looks wrong and is not. A resolve is modelled as
+    /// happening at `COLOR_ATTACHMENT_OUTPUT` with `COLOR_ATTACHMENT_WRITE`
+    /// whatever it resolves, and declaring this as an ordinary `DepthWrite`
+    /// makes sync validation report a WRITE_AFTER_WRITE against the graph's own
+    /// layout transition. It said so plainly the first time; this is the fix.
+    DepthResolve,
+    /// A *depth* image sampled in a shader.
+    ///
+    /// Separate from [`Self::ShaderRead`] for one reason and it is not
+    /// cosmetic: the barrier's aspect mask has to be `DEPTH`, and a colour
+    /// aspect on a depth image is a validation error rather than a wrong
+    /// picture. The layout is the same `SHADER_READ_ONLY_OPTIMAL`.
+    DepthSample,
     /// Source of a transfer.
     TransferSrc,
     /// Destination of a transfer.
@@ -55,9 +71,9 @@ impl Access {
     pub fn layout(self) -> vk::ImageLayout {
         match self {
             Self::ColorWrite => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            Self::DepthWrite => vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+            Self::DepthWrite | Self::DepthResolve => vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
             Self::DepthRead => vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
-            Self::ShaderRead => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            Self::ShaderRead | Self::DepthSample => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             Self::TransferSrc => vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             Self::TransferDst => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             Self::Present => vk::ImageLayout::PRESENT_SRC_KHR,
@@ -66,10 +82,10 @@ impl Access {
 
     fn stage(self) -> vk::PipelineStageFlags2 {
         match self {
-            Self::ColorWrite => vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            Self::ColorWrite | Self::DepthResolve => vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
             Self::DepthWrite | Self::DepthRead => vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
                 | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-            Self::ShaderRead => vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            Self::ShaderRead | Self::DepthSample => vk::PipelineStageFlags2::FRAGMENT_SHADER,
             Self::TransferSrc | Self::TransferDst => vk::PipelineStageFlags2::ALL_TRANSFER,
             // Nothing in the pipeline reads it; the presentation engine does.
             Self::Present => vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
@@ -78,11 +94,11 @@ impl Access {
 
     fn access(self) -> vk::AccessFlags2 {
         match self {
-            Self::ColorWrite => vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            Self::ColorWrite | Self::DepthResolve => vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
             Self::DepthWrite => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
                 | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
             Self::DepthRead => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
-            Self::ShaderRead => vk::AccessFlags2::SHADER_SAMPLED_READ,
+            Self::ShaderRead | Self::DepthSample => vk::AccessFlags2::SHADER_SAMPLED_READ,
             Self::TransferSrc => vk::AccessFlags2::TRANSFER_READ,
             Self::TransferDst => vk::AccessFlags2::TRANSFER_WRITE,
             Self::Present => vk::AccessFlags2::empty(),
@@ -91,7 +107,9 @@ impl Access {
 
     fn aspect(self) -> vk::ImageAspectFlags {
         match self {
-            Self::DepthWrite | Self::DepthRead => vk::ImageAspectFlags::DEPTH,
+            Self::DepthWrite | Self::DepthRead | Self::DepthSample | Self::DepthResolve => {
+                vk::ImageAspectFlags::DEPTH
+            }
             _ => vk::ImageAspectFlags::COLOR,
         }
     }
@@ -101,7 +119,7 @@ impl Access {
     fn writes(self) -> bool {
         matches!(
             self,
-            Self::ColorWrite | Self::DepthWrite | Self::TransferDst
+            Self::ColorWrite | Self::DepthWrite | Self::DepthResolve | Self::TransferDst
         )
     }
 }

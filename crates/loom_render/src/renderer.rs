@@ -134,6 +134,15 @@ pub struct EnvironmentData {
     /// never a wall clock (never-do #8). The water surface reads the same
     /// clock, so grass and waves cannot drift apart.
     pub weather: [f32; 4],
+    /// What the rain is doing at the camera: xyz the sheltered P1 wind a
+    /// streak leans along, w the rate in mm/h reaching the eye.
+    ///
+    /// **This is `loom_rain::sample_rain` at the eye and nothing else** — one
+    /// call, the authoritative Phase 4 state, so the streaks cannot say
+    /// something different from `loom sim --assert`. The GPU layer derives
+    /// every drop from it and writes nothing back, which is what keeps rain
+    /// out of the determinism hash.
+    pub rain: [f32; 4],
     /// x still-water level, y 1 when the eye is submerged, z 1 when the scene
     /// has water, w unused.
     ///
@@ -220,6 +229,11 @@ impl Default for EnvironmentData {
             viewport: [1.0, 1.0, 0.0, 0.0],
             wind: [1.0, 0.0, 5.5, 1.0],
             weather: [0.8, 0.45, 0.0, 0.0],
+            // **Dry, and that is not a default drizzle.** `w` is the rate the
+            // draw count is derived from, so a scene authoring no `Rain`
+            // renders exactly as it did — the same rule `loom_rain` follows on
+            // the CPU, spelled the same way.
+            rain: [0.0; 4],
             // No water: `z` is the flag the draw is skipped on, so a scene
             // that authors no `WaterBody` renders exactly as it did.
             water: [0.0, 0.0, 0.0, 0.0],
@@ -482,6 +496,15 @@ pub struct Renderer {
     water_pipeline: vk::Pipeline,
     /// Blades uploaded this frame. Zero draws nothing at all.
     grass_count: u32,
+    /// The rain streaks. Additive, order-independent, in a pass of their own
+    /// after the depth buffer is finished with.
+    rain_pipeline: vk::Pipeline,
+    /// Drops this frame — the *only* per-frame rain state, and there is no
+    /// buffer beside it: a drop's position is a pure function of its index and
+    /// the clock. Zero draws nothing.
+    rain_drops: u32,
+    /// The scene's depth, as a descriptor the rain fragment shader samples.
+    scene_depth: crate::scene_depth::SceneDepth,
     max_particles: usize,
     /// Alpha-blended, depth-tested but not depth-writing.
     particle_pipeline: vk::Pipeline,
@@ -575,7 +598,12 @@ impl Renderer {
             width,
             height,
             DEPTH_FORMAT,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            // `SAMPLED` because the rain pass reads this as a texture to fade
+            // a streak against the geometry it crosses. Unconditional, like
+            // the colour target's, for the same reason: a usage flag changes
+            // no pixel, and making it depend on whether a scene has rain would
+            // put a different image in front of the gate.
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             1,
             vk::SampleCountFlags::TYPE_1,
             "loom.depth_target",
@@ -758,6 +786,10 @@ impl Renderer {
             crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
         )?;
 
+        let scene_depth = crate::scene_depth::SceneDepth::new(&raw)?;
+        // The offscreen renderer's targets are fixed at construction, so this
+        // is the only time the set has to be pointed anywhere.
+        scene_depth.bind(depth_view);
         let cache_path = pipeline_cache_path(instance, device);
         let (pipeline_layout, pipeline, pipeline_cache) =
             create_pipeline(
@@ -766,6 +798,7 @@ impl Renderer {
                 COLOR_FORMAT,
                 raytracer.as_ref().map(Raytracer::descriptor_layout),
                 materials.descriptor_layout(),
+                scene_depth.descriptor_layout(),
                 MSAA_SAMPLES,
             )?;
         let sky_pipeline =
@@ -796,6 +829,9 @@ impl Renderer {
             c"waterVertexMain",
             c"waterFragmentMain",
         )?;
+        // No sample count: rain draws into the resolved target, which is one
+        // sample in both render paths.
+        let rain_pipeline = create_rain_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
 
         // The anti-aliasing pass (ADR 0010), when asked for. A second colour
         // image, never the same one: the filter reads a 6x6 neighbourhood and
@@ -957,6 +993,9 @@ impl Renderer {
             terrain_heights: 0,
             water_pipeline,
             grass_count: 0,
+            rain_pipeline,
+            rain_drops: 0,
+            scene_depth,
             max_particles: MAX_PARTICLES,
             particle_pipeline,
             rt_positions,
@@ -1131,6 +1170,16 @@ impl Renderer {
         self.grass_alloc
             .as_ref()
             .map_or(0, |a| a.size() as usize / size_of::<GrassBlade>())
+    }
+
+    /// How many rain drops to draw. Zero — the default — draws none.
+    ///
+    /// **The whole of the rain layer's CPU state**, beside the four floats in
+    /// [`EnvironmentData::rain`]. There is nothing to upload: a drop is derived
+    /// from its own index and the simulated clock, so the count is a draw
+    /// argument and not a buffer.
+    pub fn set_rain(&mut self, drops: u32) {
+        self.rain_drops = drops;
     }
 
     pub fn render(
@@ -1319,10 +1368,18 @@ impl Renderer {
         // The colour target is written by the *resolve* when multisampling, so
         // it is a colour write either way — what changes is which image the
         // fragment shader rasterises into.
-        let mut forward_uses = vec![(color, Access::ColorWrite), (depth, Access::DepthWrite)];
+        //
+        // The *depth* target likewise: multisampled it is the resolve
+        // destination rather than the attachment, and a resolve writes at the
+        // colour stage whatever it resolves — which is what `DepthResolve`
+        // exists to say, and what sync validation caught when it did not.
+        let mut forward_uses = vec![(color, Access::ColorWrite)];
         if let Some((ms_color, ms_depth)) = msaa_ids {
             forward_uses.push((ms_color, Access::ColorWrite));
             forward_uses.push((ms_depth, Access::DepthWrite));
+            forward_uses.push((depth, Access::DepthResolve));
+        } else {
+            forward_uses.push((depth, Access::DepthWrite));
         }
         graph.pass(
             "forward",
@@ -1335,10 +1392,20 @@ impl Renderer {
                     // the colour target, so the readback and the golden images
                     // still see one sample per pixel.
                     match msaa_views {
+                        // Depth resolves alongside the colour — the rain pass
+                        // samples it.
                         Some((ms_color, ms_depth)) => begin_rendering(
-                            d, cmd, ms_color, ms_depth, Some(color_view), width, height,
+                            d,
+                            cmd,
+                            ms_color,
+                            ms_depth,
+                            Some((color_view, depth_view)),
+                            width,
+                            height,
                         ),
-                        None => begin_rendering(d, cmd, color_view, depth_view, None, width, height),
+                        None => {
+                            begin_rendering(d, cmd, color_view, depth_view, None, width, height)
+                        }
                     }
                     set_viewport(d, cmd, width, height);
                     draw_sky(d, cmd, sky, layout, &base_push);
@@ -1494,6 +1561,55 @@ impl Renderer {
                 }
             },
         );
+
+        // **Rain, in a pass of its own, after the forward pass.** It has to be
+        // separate: the depth buffer goes from being written as an attachment
+        // to being sampled as a texture between the two, and only the graph
+        // may move it (never-do #4). Drawing into the *resolved* colour target
+        // is also what makes this one pipeline serve both render paths — it is
+        // single-sample either way.
+        //
+        // Before the AA passes, so a streak is filtered like everything else.
+        let rain_pipeline = self.rain_pipeline;
+        let rain_drops = self.rain_drops;
+        let rain_depth_set = self.scene_depth.descriptor_set();
+        if rain_drops > 0 {
+            graph.pass(
+                "rain",
+                &[(color, Access::ColorWrite), (depth, Access::DepthSample)],
+                move |d, cmd| {
+                    // SAFETY: the graph has put the colour target back into
+                    // COLOR_ATTACHMENT_OPTIMAL and the depth image into
+                    // SHADER_READ_ONLY_OPTIMAL before this records.
+                    unsafe {
+                        begin_overlay_rendering(d, cmd, color_view, width, height);
+                        set_viewport(d, cmd, width, height);
+                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, rain_pipeline);
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            2,
+                            &[rain_depth_set],
+                            &[],
+                        );
+                        let push = Push {
+                            object_offset: particle_slot,
+                            ..base_push
+                        };
+                        d.cmd_push_constants(
+                            cmd,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            push.bytes(),
+                        );
+                        d.cmd_draw(cmd, rain_drops * 6, 1, 0, 0);
+                        d.cmd_end_rendering(cmd);
+                    }
+                },
+            );
+        }
 
         // The anti-aliasing passes, between the forward pass and the readback.
         // Every image is the graph's (never-do #4): it moves the colour target
@@ -1725,6 +1841,7 @@ impl Drop for Renderer {
             }
             self.device.destroy_pipeline(self.grass_pipeline, None);
             self.device.destroy_pipeline(self.water_pipeline, None);
+            self.device.destroy_pipeline(self.rain_pipeline, None);
             self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.terrain_buffer, None);
             self.device.destroy_buffer(self.particle_buffer, None);
@@ -1872,9 +1989,12 @@ pub(crate) unsafe fn begin_rendering(
     cmd: vk::CommandBuffer,
     color_view: vk::ImageView,
     depth_view: vk::ImageView,
-    // When multisampling, the single-sample image the pass resolves into.
-    // `color_view` is then the multisampled target rather than the result.
-    resolve_view: Option<vk::ImageView>,
+    // When multisampling, the single-sample colour and depth images the pass
+    // resolves into — `color_view` and `depth_view` are then the multisampled
+    // targets rather than the results. One argument for the pair because they
+    // are always both present or both absent, and resolving colour without
+    // depth is what left the rain pass sampling a cleared image.
+    resolve: Option<(vk::ImageView, vk::ImageView)>,
     width: u32,
     height: u32,
 ) {
@@ -1885,7 +2005,7 @@ pub(crate) unsafe fn begin_rendering(
         // **DONT_CARE on the multisampled image.** Its samples are consumed by
         // the resolve and never read again, so storing them would be pure
         // bandwidth — and bandwidth is the whole cost of MSAA.
-        .store_op(if resolve_view.is_some() {
+        .store_op(if resolve.is_some() {
             vk::AttachmentStoreOp::DONT_CARE
         } else {
             vk::AttachmentStoreOp::STORE
@@ -1895,23 +2015,38 @@ pub(crate) unsafe fn begin_rendering(
                 float32: [0.05, 0.06, 0.08, 1.0],
             },
         });
-    let depth_attachment = vk::RenderingAttachmentInfo::default()
+    let mut depth_attachment = vk::RenderingAttachmentInfo::default()
         .image_view(depth_view)
         .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
         .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::DONT_CARE)
+        // **STORE, not DONT_CARE, and that is the rain pass.** The depth this
+        // frame produced is sampled after the forward pass to fade a streak
+        // against the geometry it crosses; discarding it here is a black or
+        // garbage read there, with no validation message to say so.
+        .store_op(vk::AttachmentStoreOp::STORE)
         .clear_value(vk::ClearValue {
             depth_stencil: vk::ClearDepthStencilValue {
                 depth: 1.0,
                 stencil: 0,
             },
         });
-    if let Some(resolve) = resolve_view {
+    if let Some((color_resolve, depth_resolve)) = resolve {
+        // **Depth resolves too, into the single-sample image.** Multisampling
+        // rasterises into `msaa_depth` and the single-sample `depth` is then
+        // untouched — so without this the rain pass would sample a cleared
+        // image and fade against nothing. `SAMPLE_ZERO` is the one mode the
+        // spec guarantees every implementation supports, and for a fade
+        // tolerance measured in tens of centimetres the difference between one
+        // sample and the minimum of four is not visible.
+        depth_attachment = depth_attachment
+            .resolve_mode(vk::ResolveModeFlags::SAMPLE_ZERO)
+            .resolve_image_view(depth_resolve)
+            .resolve_image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
         color_attachment = color_attachment
             // AVERAGE is the only mode guaranteed for colour, and it is what
             // "anti-aliased" means here: the pixel is the mean of its samples.
             .resolve_mode(vk::ResolveModeFlags::AVERAGE)
-            .resolve_image_view(resolve)
+            .resolve_image_view(color_resolve)
             .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
     }
     let color_attachments = [color_attachment];
@@ -2329,6 +2464,7 @@ pub(crate) fn create_pipeline(
     color_format: vk::Format,
     set_layout: Option<vk::DescriptorSetLayout>,
     material_layout: vk::DescriptorSetLayout,
+    depth_layout: vk::DescriptorSetLayout,
     samples: vk::SampleCountFlags,
 ) -> Result<(vk::PipelineLayout, vk::Pipeline, vk::PipelineCache), RenderError> {
     let module = create_shader_module(device, crate::SCENE_SPV)?;
@@ -2350,9 +2486,14 @@ pub(crate) fn create_pipeline(
     } else {
         None
     };
+    // Set 2 is the scene's depth, sampled by the rain pass alone. Declared on
+    // the shared layout rather than on one of its own, because every pipeline
+    // here already shares this layout and a second one would mean a second
+    // push-constant range to keep in step.
     let sets: Vec<vk::DescriptorSetLayout> = vec![
         set_layout.or(empty).unwrap_or_default(),
         material_layout,
+        depth_layout,
     ];
     let layout_info = vk::PipelineLayoutCreateInfo::default()
         .push_constant_ranges(&ranges)
@@ -2654,6 +2795,132 @@ pub(crate) fn create_particle_pipeline(
     // reference to it after creation.
     unsafe { device.destroy_shader_module(module, None) };
     Ok(pipeline)
+}
+
+/// The rain streaks: additive, no depth attachment, one sample.
+///
+/// Every difference from the particle pipeline is load-bearing:
+///
+/// - **No depth attachment and no depth test.** The pass draws after the
+///   forward pass has finished with the depth buffer, and reads it as a texture
+///   instead — which is what makes the fade a ramp rather than a clip. Declaring
+///   `UNDEFINED` here is what says so, and a pipeline that disagreed with its
+///   pass would fail on every draw.
+/// - **One sample, in both render paths.** Rain draws into the *resolved*
+///   colour target, which is single-sample whether or not the forward pass
+///   multisampled — so unlike the grass and water pipelines this one does not
+///   take a sample count, and the windowed and headless paths cannot drift.
+/// - **Additive by way of premultiplied alpha**, exactly as the particles do
+///   it: the shader multiplies colour by alpha and reports alpha zero, so a
+///   streak adds light and occludes nothing. Order-independent by construction,
+///   which is why nothing sorts drops.
+pub(crate) fn create_rain_pipeline(
+    device: &ash::Device,
+    layout: vk::PipelineLayout,
+    cache: vk::PipelineCache,
+    color_format: vk::Format,
+) -> Result<vk::Pipeline, RenderError> {
+    let module = create_shader_module(device, crate::SCENE_SPV)?;
+
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(module)
+            .name(c"rainVertexMain"),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(module)
+            .name(c"rainFragmentMain"),
+    ];
+
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(false)
+        .depth_write_enable(false);
+    let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::ONE)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .alpha_blend_op(vk::BlendOp::ADD);
+    let attachments = [blend_attachment];
+    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let color_formats = [color_format];
+    let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&color_formats)
+        .depth_attachment_format(vk::Format::UNDEFINED);
+
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterizer)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth_stencil)
+        .color_blend_state(&blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering_info);
+
+    // SAFETY: every borrowed slice outlives the call.
+    let pipeline = unsafe { device.create_graphics_pipelines(cache, &[info], None) }
+        .map_err(|(_, e)| RenderError::Vulkan(e))?[0];
+    // SAFETY: the pipeline holds what it needs from the module.
+    unsafe { device.destroy_shader_module(module, None) };
+    Ok(pipeline)
+}
+
+/// Begin a pass over the finished colour target: loaded, added to, no depth.
+///
+/// Used by the rain pass and — in the viewer — by the UI that has to come after
+/// it. A pass of its own rather than a draw at the end of the forward pass,
+/// because the depth buffer has to change layout between being written and
+/// being sampled, and only the graph may do that (never-do #4).
+///
+/// # Safety
+/// `cmd` must be recording outside any rendering block, with `color_view` in
+/// `COLOR_ATTACHMENT_OPTIMAL`.
+pub(crate) unsafe fn begin_overlay_rendering(
+    d: &ash::Device,
+    cmd: vk::CommandBuffer,
+    color_view: vk::ImageView,
+    width: u32,
+    height: u32,
+) {
+    let color_attachment = vk::RenderingAttachmentInfo::default()
+        .image_view(color_view)
+        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::LOAD)
+        .store_op(vk::AttachmentStoreOp::STORE);
+    let color_attachments = [color_attachment];
+    let rendering = vk::RenderingInfo::default()
+        .render_area(vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: vk::Extent2D { width, height },
+        })
+        .layer_count(1)
+        .color_attachments(&color_attachments);
+    // SAFETY: the caller guarantees the layout and that no pass is active.
+    unsafe { d.cmd_begin_rendering(cmd, &rendering) };
 }
 
 pub(crate) fn create_sky_pipeline(

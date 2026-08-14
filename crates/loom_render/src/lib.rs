@@ -38,6 +38,7 @@ mod instance;
 mod material;
 mod raytrace;
 mod renderer;
+mod scene_depth;
 mod ui;
 mod viewer;
 
@@ -124,21 +125,22 @@ mod tests {
             field as usize - std::ptr::from_ref(&base).cast::<u8>() as usize
         };
 
-        assert_eq!(at(std::ptr::from_ref(&base.water).cast()), 128, "water");
-        assert_eq!(at(std::ptr::from_ref(&base.terrain).cast()), 144, "terrain");
+        assert_eq!(at(std::ptr::from_ref(&base.rain).cast()), 128, "rain");
+        assert_eq!(at(std::ptr::from_ref(&base.water).cast()), 144, "water");
+        assert_eq!(at(std::ptr::from_ref(&base.terrain).cast()), 160, "terrain");
         assert_eq!(
             at(std::ptr::from_ref(&base.terrain_heights).cast()),
-            160,
+            176,
             "terrainHeights — the pointer the height field is read through"
         );
-        assert_eq!(at(std::ptr::from_ref(&base.waves).cast()), 168, "waves");
-        assert_eq!(at(std::ptr::from_ref(&base.wave_count).cast()), 552, "count");
+        assert_eq!(at(std::ptr::from_ref(&base.waves).cast()), 184, "waves");
+        assert_eq!(at(std::ptr::from_ref(&base.wave_count).cast()), 568, "count");
         assert_eq!(
             at(std::ptr::from_ref(&base.attenuation_depth).cast()),
-            556,
+            572,
             "attenuation_depth"
         );
-        assert_eq!(size_of::<EnvironmentData>(), 560, "the whole struct");
+        assert_eq!(size_of::<EnvironmentData>(), 576, "the whole struct");
     }
 
     /// **The water draw count is the shader's, and nothing but this says so.**
@@ -365,13 +367,19 @@ mod tests {
             transitions,
             [
                 ("forward", "loom.color_target"),
-                ("forward", "loom.depth_target"),
                 // The multisampled pair, which the graph must move out of
                 // UNDEFINED every frame. Rendering without these transitions
                 // is a validation error, and it was — this list is how the
                 // barrier ownership stays visible rather than assumed.
                 ("forward", "loom.msaa_color"),
                 ("forward", "loom.msaa_depth"),
+                // **The depth target comes after them, not before**, because
+                // multisampling makes it the *resolve destination* rather than
+                // the attachment — `Access::DepthResolve`, declared in the
+                // multisampled branch alongside the pair. The scene here draws
+                // no rain, so nothing samples it; it is resolved anyway, for
+                // the same reason the usage flags are unconditional.
+                ("forward", "loom.depth_target"),
                 // The anti-aliasing pass is **two** passes: edge detection
                 // writes a mask image, and the shape filter reads the mask and
                 // the colour target and writes a third image. The readback

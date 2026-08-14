@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 23] = [
+const SCENES: [&str; 24] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -76,6 +76,11 @@ const SCENES: [&str; 23] = [
     // here binds the particle pipeline off the back of a physics run. Nothing
     // else in this list does that.
     "assets/test/splash.loom",
+    // The only scene with rain: a third pass in the frame, a pipeline with no
+    // depth attachment at all, and the depth buffer sampled as a texture
+    // rather than tested against. None of the twenty-three above records a
+    // single one of those transitions.
+    "assets/test/rain_overhang.loom",
     "assets/test/camera.loom",
     "assets/test/walker.loom",
     "assets/test/explosion.loom",
@@ -118,7 +123,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 13] = [
+const GOLDEN: [(&str, &str, &[&str]); 14] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -184,6 +189,17 @@ const GOLDEN: [(&str, &str, &[&str]); 13] = [
     // silently deleted every wave under 4 m, no gate saw the river turn into a
     // mirror. A human did. This is that gate.
     ("river", "assets/test/river.loom", &["--sim", "300"]),
+    // **Rain is its own rendering path**, and it carries what nothing else
+    // here does: a pass drawn after the forward pass, into the resolved colour
+    // target, with the depth buffer sampled as a texture instead of tested
+    // against. Its content is the phase exit criterion made visible — streaks
+    // everywhere except under the shelter, and a column of them coming through
+    // the skylight one CSG subtract punched in the roof.
+    //
+    // `--sim 90` because rain at t = 0 is the one frame where every drop sits
+    // exactly on its hashed lattice point, which is the least representative
+    // instant there is — the same reason `ocean` and `shore` are simulated.
+    ("rain_overhang", "assets/test/rain_overhang.loom", &["--sim", "90"]),
 ];
 
 /// Every reference renders at this size.
@@ -734,6 +750,15 @@ fn validate() -> std::process::ExitCode {
             // stale address there is a device fault on the first wave, and no
             // headless gate would see it.
             "assets/test/shore.loom",
+            // **And `rain_overhang`, for the pass and the descriptor.** Rain
+            // is the first thing here that draws in a pass of its own, and the
+            // first that binds a descriptor set the viewer builds and repoints
+            // itself — the depth image is recreated on every resize, and the
+            // rain pass samples it. Nothing headless resizes, so nothing
+            // headless can catch a descriptor left pointing at a destroyed
+            // view. It is also the third slice in a row where the window could
+            // have quietly got a simplified version of the offscreen path.
+            "assets/test/rain_overhang.loom",
         ] {
             if !root.join(scene).exists() {
                 continue;

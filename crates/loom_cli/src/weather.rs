@@ -52,16 +52,32 @@ impl Weather {
     /// each call site so that the sky's frame conversion and the "absent means
     /// dry" rule are applied once.
     pub fn rain_at(&self, at: [f32; 3]) -> loom_rain::RainSample {
-        loom_rain::sample_rain(
-            self.rain.as_ref(),
-            &self.wind,
-            self.sky
-                .as_ref()
-                .map(|(volume, offset)| loom_rain::Sky { volume, offset: *offset }),
-            at,
-            self.seconds,
-        )
+        rain_at(self.rain.as_ref(), &self.wind, self.sky.as_ref(), at, self.seconds)
     }
+}
+
+/// The same query, for a caller that holds the pieces rather than a [`Weather`].
+///
+/// **The renderer is that caller.** It has a borrowed `Wind` (which is not
+/// `Clone` — it holds a built expression tree) and the sky volume it baked once
+/// at load, so it cannot assemble a `Weather` per frame. It must still get the
+/// identical answer: the streaks a scene draws and the rate `loom sim --assert`
+/// reads are the same number, and two spellings of the frame conversion is
+/// exactly how they would stop being.
+pub(crate) fn rain_at(
+    rain: Option<&Rain>,
+    wind: &Wind,
+    sky: Option<&(loom_voxel::Volume, [f32; 3])>,
+    at: [f32; 3],
+    seconds: f32,
+) -> loom_rain::RainSample {
+    loom_rain::sample_rain(
+        rain,
+        wind,
+        sky.map(|(volume, offset)| loom_rain::Sky { volume, offset: *offset }),
+        at,
+        seconds,
+    )
 }
 
 /// The scene's rain, or `None` when it authors none.

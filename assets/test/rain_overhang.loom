@@ -1,9 +1,15 @@
 # Rain, and the roof that stops it.
 #
 # Phase 4's first two exit criteria live in this file, and both are checked
-# without rendering anything — which is the point. The streaks a later slice
-# draws are stateless GPU noise outside the simulation entirely; what has to be
-# right, and what gameplay reads, is the rate the CPU says is reaching a point.
+# without rendering anything — which is the point. The streaks step 2 draws are
+# stateless GPU noise outside the simulation entirely; what has to be right, and
+# what gameplay reads, is the rate the CPU says is reaching a point.
+#
+# **It is a golden image as well now**, at `--sim 90`, and it is the only scene
+# in that list which draws rain — a pass after the forward pass, into the
+# resolved colour target, with the depth buffer sampled rather than tested. The
+# picture carries the first exit criterion too: streaks everywhere except under
+# the shelter, and a faint column of them through the skylight below.
 #
 #     loom sim assets/test/rain_overhang.loom --ticks 1 \
 #       --assert "rain@-13,3,-13.rate > 7.9" \
