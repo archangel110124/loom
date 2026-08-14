@@ -135,6 +135,10 @@ struct EnvironmentData {
     // against this struct's Slang layout, and a `float4` inserted higher up
     // would move `waves` and pad besides.
     float4 eyeStep;
+    // x cloud cover 0..1, y metres across a cloud mass, z drift multiplier on
+    // the wind, w unused. Feeds the generated `clouds_at`; the cover here is
+    // already the effective one, with rain's floor applied on the CPU.
+    float4 cloud;
 };
 
 struct GrassBlade {
@@ -200,9 +204,43 @@ struct Push {
 // constants, so a scene can be at night. Accessors rather than globals because
 // `push` is not in scope until here.
 float3 sunDirection() { return normalize(push.environment[0].sun.xyz); }
-float sunStrength() { return push.environment[0].sun.w; }
-float3 sunColor() { return push.environment[0].sunColor.rgb; }
-float ambientStrength() { return push.environment[0].sunColor.a; }
+
+/// How much of the sky is deck, for the light rather than for the picture.
+///
+/// The authored-and-floored scalar, not the per-ray sample: scene lighting
+/// wants one number for the whole sky, and this is the one the deck was drawn
+/// from, so the two cannot disagree about how overcast it is.
+float cloudCover() { return saturate(push.environment[0].cloud.x); }
+
+// **Cloud cover drives the light, and this is the half that makes a deck real.**
+// Drawing clouds and leaving the sun at full strength gives a scene lit like a
+// clear afternoon with a picture of clouds pasted above it — sun glinting off
+// the water under a solid overcast. That is not a hypothetical: it is what the
+// first version of this did, and it was spotted on sight.
+//
+// Overcast light is *dimmer, cooler and flatter*. The disc stops being a
+// direction and the whole sky becomes the source, so direct light falls hard,
+// its warm cast goes, and ambient rises to take over. Getting that wrong is
+// more noticeable than the clouds themselves (ADR 0015).
+//
+// **Every lighting path in this file goes through these three**, which is why
+// the coupling lives here and not at each site: specular highlights, wrapped
+// foliage lighting, the sky gradient and the particle terms all follow without
+// knowing clouds exist.
+//
+// Purely visual: ADR 0015 verified that nothing in `loom_script`, `loom_ecs` or
+// `play.rs` reads sun strength or direction, so this cannot reach the
+// determinism hash. If that ever changes, this coupling has to be revisited.
+float sunStrength() {
+    return push.environment[0].sun.w * lerp(1.0, 0.12, cloudCover());
+}
+float3 sunColor() {
+    return lerp(push.environment[0].sunColor.rgb, float3(0.70, 0.75, 0.82),
+                cloudCover() * 0.85);
+}
+float ambientStrength() {
+    return push.environment[0].sunColor.a * lerp(1.0, 1.8, cloudCover());
+}
 float3 skyZenith() { return push.environment[0].zenith.rgb; }
 float3 skyHorizon() { return push.environment[0].horizon.rgb; }
 float fogDensity() { return push.environment[0].zenith.a; }
@@ -265,6 +303,57 @@ float3 skyGradient(float3 dir) {
 }
 
 /// What the background shows: the gradient, plus the sun.
+/// Where a view ray meets the cloud deck, as a horizontal position.
+///
+/// The classic sky-plane projection: `dir.xz / dir.y` scaled by a deck height.
+/// It compresses toward the horizon exactly the way a real deck does, and it is
+/// why clouds have no parallax — see ADR 0015's list of what this cannot do.
+///
+/// **`dir.y` is floored rather than branched on.** At the horizon the quotient
+/// runs to infinity, and an unbounded coordinate into a noise lattice is a
+/// smeared band of garbage rather than a distant sky. The floor alone does not
+/// fix that — it converts the infinity into a *stretch* — so `horizonFade`
+/// below takes the deck out before the stretch becomes visible.
+float3 cloudPlane(float3 dir) {
+    const float DECK_HEIGHT = 900.0;
+    float2 plane = dir.xz / max(dir.y, 0.10) * DECK_HEIGHT;
+    return float3(plane.x, 0.0, plane.y) + push.environment[0].eye.xyz * float3(1, 0, 1);
+}
+
+/// How much of the deck survives at this elevation.
+///
+/// **Not a fudge.** A cloud deck really does disappear into haze toward the
+/// horizon — you are looking through tens of kilometres of atmosphere at a
+/// layer only a kilometre up — and the projection above is degenerate in the
+/// same place. One term covers both, and without it the sky ends in a band of
+/// vertical smears.
+float horizonFade(float3 dir) {
+    return smoothstep(0.02, 0.30, dir.y);
+}
+
+/// The deck along a view ray: x coverage 0..1, y raw density for shading.
+///
+/// **Two numbers because they answer different questions.** Coverage is opacity
+/// and saturates by design; shading needs something that still varies when the
+/// sky is solid, or an overcast day renders as a flat white ceiling.
+float2 cloudSample(float3 dir) {
+    float4 cloud = push.environment[0].cloud;
+    if (cloud.x <= 0.0) {
+        return float2(0.0, 0.0);
+    }
+    float4 wind = push.environment[0].wind;
+    CloudsParams params;
+    params.cloud_cover = cloud.x;
+    params.cloud_scale = cloud.y;
+    params.cloud_drift = cloud.z;
+    params.dir_x = wind.x;
+    params.dir_z = wind.y;
+    params.speed = wind.z;
+    // The same clock the grass bends on and the waves travel on.
+    float3 got = clouds_at(cloudPlane(dir), push.environment[0].weather.z, params);
+    return float2(got.x * horizonFade(dir), got.y);
+}
+
 float3 skyColor(float3 dir) {
     float3 base = skyGradient(dir);
     float toSun = max(dot(dir, sunDirection()), 0.0);
@@ -273,7 +362,45 @@ float3 skyColor(float3 dir) {
     // the opposite of what this render path is for.
     float glow = pow(toSun, 8.0) * 0.18;
     float disc = pow(toSun, 512.0) * 0.9;
-    return base + float3(1.0, 0.94, 0.82) * (glow + disc);
+
+    float2 deck = cloudSample(dir);
+    float cover = deck.x;
+    if (cover <= 0.0) {
+        return base + float3(1.0, 0.94, 0.82) * (glow + disc);
+    }
+
+    // **One extra tap toward the sun, and it is what makes clouds read as
+    // clouds.** Sample the deck again a little way along the sun direction: if
+    // it is *denser* that way, this patch is behind its own mass and goes grey;
+    // if thinner, it is lit and goes white. Cheap fake self-shadowing, and the
+    // highest realism-per-instruction trick available without raymarching a
+    // volume (ADR 0015).
+    //
+    // **Density, not coverage.** Coverage saturates, so under an overcast sky
+    // both taps read 1.0, every difference is zero and the deck shades to one
+    // flat tone. That is not a hypothetical: it is what the first version of
+    // this did.
+    float3 sunward = normalize(dir + sunDirection() * 0.25);
+    float shadow = cloudSample(sunward).y;
+    float lit = saturate(0.5 - (shadow - deck.y) * 5.0);
+
+    // Overcast grey through to a sunlit top. Deliberately not pure white: a
+    // white that clips reads as a blown highlight rather than as cloud, and the
+    // range is narrow because a real deck is a small spread of greys.
+    const float3 CLOUD_DARK = float3(0.29, 0.30, 0.34);
+    const float3 CLOUD_LIT = float3(0.78, 0.78, 0.79);
+    float3 body = lerp(CLOUD_DARK, CLOUD_LIT, lit);
+
+    // **The sun goes behind the cloud, rather than through it.** This is the
+    // whole point of the coupling: rain falling out of a clear sky with a
+    // blazing disc in it was the single biggest tell in any weather scene here.
+    // The glow survives a little longer than the disc, because an overcast sky
+    // really is brightest where the sun is behind it.
+    float3 sun = float3(1.0, 0.94, 0.82) * (glow * (1.0 - cover * 0.75) + disc * (1.0 - cover));
+
+    // Clouds sit in front of the gradient and behind the horizon haze, which
+    // the existing fog term applies to everything.
+    return lerp(base, body, cover) + sun;
 }
 
 /// Ambient light arriving at a surface facing `normal`.

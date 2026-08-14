@@ -1921,6 +1921,24 @@ pub(crate) fn rain_at_eye(
     let sample = weather::rain_at(rain, wind, None, eye.to_array(), seconds);
     env.rain = [sample.wind[0], sample.wind[1], sample.wind[2], sample.rate];
 
+    // **Rain puts a floor under the cloud cover, and this is the only place
+    // that knows both.** A blazing sun in a downpour was the single biggest
+    // tell in every weather scene here; ADR 0015 calls it a bigger one than
+    // having no clouds at all.
+    //
+    // Applied here rather than in `environment_of_inner` because that function
+    // reads the `Environment` component and has no business reaching for
+    // `Rain`, and rather than in the shader because "how cloudy does this much
+    // rain imply" is a fact about weather, not about drawing.
+    //
+    // Light drizzle does not need an unbroken deck, so the floor climbs with
+    // the rate and stops short of solid: 2 mm/h is a grey-but-broken sky, and
+    // anything past a downpour is already fully covered.
+    if let Some(rain) = rain {
+        let implied = (rain.intensity / 12.0).clamp(0.0, 1.0).mul_add(0.35, 0.6);
+        env.cloud[0] = env.cloud[0].max(implied.min(0.95));
+    }
+
     // **Wetness, at full exposure, for the whole scene.** Two scalars and no
     // per-surface state: the shader decides how much of them reaches a given
     // pixel, out of the terrain height field it already reads. Asking for the
@@ -1996,6 +2014,16 @@ fn environment_of_inner(world: &World) -> loom_render::EnvironmentData {
             horizon[1],
             horizon[2],
             scalar("fog_falloff", defaults.fog_falloff),
+        ],
+        // Cover is the authored value only. **The rain floor is applied in
+        // `environment_with_wind`**, which is the caller that knows whether the
+        // scene rains; putting it here would need this function to reach for a
+        // component it otherwise has no business reading.
+        cloud: [
+            scalar("cloud_cover", defaults.cloud_cover),
+            scalar("cloud_scale", defaults.cloud_scale),
+            2.5,
+            0.0,
         ],
         // The sky is this function's business; the weather is filled in by
         // `environment_with_wind`, which is the only caller that knows the

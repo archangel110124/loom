@@ -476,9 +476,14 @@ pub fn clouds() -> Field {
     // is wide enough that a cloud has a soft edge rather than a cut-out one.
     const BAND: f32 = 0.18;
     let threshold = c(1.0) - cover;
-    let coverage = smoothstep(threshold.clone(), threshold + c(BAND), n);
+    let coverage = smoothstep(threshold.clone(), threshold + c(BAND), n.clone());
 
-    Field { name: "clouds_at", body: [coverage, c(0.0), c(0.0)] }
+    // **`y` is the raw density, and it is not a spare channel being filled.**
+    // The coverage curve saturates: at heavy cover most of the sky is pinned at
+    // 1.0, and shading from a saturated value gives a flat white ceiling with no
+    // cloud in it — which is exactly what the first render of this looked like.
+    // Opacity and shading want different quantities, so the field returns both.
+    Field { name: "clouds_at", body: [coverage, n, c(0.0)] }
 }
 
 /// The parameters [`clouds`] reads, at their defaults.

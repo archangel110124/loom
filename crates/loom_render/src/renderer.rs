@@ -234,6 +234,14 @@ pub struct EnvironmentData {
     /// pinned by a test against Slang's own layout; adding a `float4` in the
     /// middle would move `waves` and pad besides.
     pub eye_step: [f32; 4],
+    /// x cloud cover 0..1, y metres across a cloud mass, z drift multiplier on
+    /// the wind, w unused.
+    ///
+    /// Feeds the generated `clouds_at`. Cover is the *effective* value — the
+    /// authored one already raised to the floor rain puts under it — because
+    /// that rule belongs with the scene, not in a shader that would have to
+    /// know what rain is.
+    pub cloud: [f32; 4],
 }
 
 /// The cap on summed waves, mirroring `loom_scene::components::MAX_WAVES` and
@@ -301,6 +309,8 @@ impl Default for EnvironmentData {
             // this value, which is what makes the streak smear unable to move a
             // reference.
             eye_step: [0.0; 4],
+            // Clear sky, and the same scale `loom_field::cloud_defaults` uses.
+            cloud: [0.0, 1200.0, 2.5, 0.0],
         }
     }
 }

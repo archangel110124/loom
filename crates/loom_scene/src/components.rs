@@ -613,6 +613,22 @@ pub struct Environment {
     /// How fast the haze thins with height. Larger keeps it near the ground.
     #[schemars(range(min = 0.0, max = 10.0))]
     pub fog_falloff: f32,
+    /// How much of the sky is cloud: `0.0` clear, `1.0` a solid deck.
+    ///
+    /// **Rain raises a floor under this**, so a raining scene that authors
+    /// nothing still gets an overcast sky. A sun blazing through a downpour is
+    /// a bigger tell than having no clouds at all, and it is what every scene
+    /// in this project did before the deck existed.
+    ///
+    /// Author it above that floor for cloud without rain. Below it does
+    /// nothing: there is no way to ask for a clear sky over heavy rain, which
+    /// is a real weather state and an unusual one — say so in an ADR if a scene
+    /// ever needs it rather than adding a flag on spec.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub cloud_cover: f32,
+    /// Metres across one cloud mass. Larger is a broader, slower deck.
+    #[schemars(range(min = 50.0, max = 20000.0))]
+    pub cloud_scale: f32,
 }
 
 impl Default for Environment {
@@ -629,6 +645,11 @@ impl Default for Environment {
             sky_horizon: [0.3931, 0.5071, 0.6038],
             fog_density: 0.0026,
             fog_falloff: 0.03,
+            // Clear. Every scene authored before the deck existed looks exactly
+            // as it did — unless it rains, and then the floor applies, which is
+            // the one deliberate change to existing scenes.
+            cloud_cover: 0.0,
+            cloud_scale: 1200.0,
         }
     }
 }

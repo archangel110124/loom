@@ -158,7 +158,8 @@ mod tests {
         // unchanged.** A `float4` needs 16-byte alignment and 592 is a multiple
         // of 16, so it lands flush with no padding.
         assert_eq!(at(std::ptr::from_ref(&base.eye_step).cast()), 592, "eyeStep");
-        assert_eq!(size_of::<EnvironmentData>(), 608, "the whole struct");
+        assert_eq!(at(std::ptr::from_ref(&base.cloud).cast()), 608, "cloud");
+        assert_eq!(size_of::<EnvironmentData>(), 624, "the whole struct");
     }
 
     /// **The water draw count is the shader's, and nothing but this says so.**
