@@ -410,7 +410,96 @@ impl Field {
 /// GPU that the CPU does not also have.
 #[must_use]
 pub fn all() -> Vec<Field> {
-    vec![wind()]
+    vec![wind(), clouds()]
+}
+
+/// `min(max(e, 0), 1)`, because the tree has no saturate of its own.
+fn saturate(e: Expr) -> Expr {
+    Expr::Min(Box::new(Expr::Max(Box::new(e), Box::new(c(0.0)))), Box::new(c(1.0)))
+}
+
+/// `smoothstep(edge0, edge1, x)`, assembled from the primitives.
+///
+/// **The caller must guarantee `edge1 != edge0`.** There is no branch in an
+/// expression tree, so a zero-width band divides by zero and produces a NaN
+/// that propagates silently to every pixel. Every use below spaces the edges
+/// with a constant.
+fn smoothstep(edge0: Expr, edge1: Expr, x: Expr) -> Expr {
+    let t = saturate((x - edge0.clone()) / (edge1 - edge0));
+    t.clone() * t.clone() * (c(3.0) - c(2.0) * t)
+}
+
+/// Cloud cover overhead: 0 clear sky, 1 solid deck.
+///
+/// **ADR 0016's step 1, and the reason that ADR argues this shape fits.** Cloud
+/// coverage is a scalar function of position and time, which is exactly what
+/// `Expr` expresses — unlike grass placement (neighbourhood search) and
+/// Gerstner waves (a loop with vector output), both of which needed hand-written
+/// Slang twins. So the clouds the eye sees and the rain the simulation feels are
+/// the same function *by construction*, not by discipline.
+///
+/// **Scalar in `body[0]`; the other two axes are zero.** A `Field` is a float3
+/// because the wind is, and inventing a second field type to save eight bytes of
+/// a register would be the abstraction this codebase keeps refusing. The sky
+/// shader reads `.x`.
+///
+/// It advects along the P1 wind, so a squall crosses the sky the same way the
+/// grass leans and the rain falls — coherence that costs nothing here and is
+/// most of what sells weather.
+#[must_use]
+pub fn clouds() -> Field {
+    let cover = Expr::Param("cloud_cover");
+    let scale = Expr::Param("cloud_scale");
+    let drift = Expr::Param("cloud_drift");
+    // The same three names the wind field reads, on purpose: a scene authors
+    // one wind and the deck moves with it.
+    let dir_x = Expr::Param("dir_x");
+    let dir_z = Expr::Param("dir_z");
+    let speed = Expr::Param("speed");
+
+    // Metres the deck has travelled. Subtracted from the sample position, so
+    // the pattern moves *downwind* rather than the sampler moving upwind.
+    let travel = speed * drift * Expr::T;
+    let u = (Expr::X - dir_x * travel.clone()) / scale.clone();
+    let v = (Expr::Z - dir_z * travel) / scale;
+
+    // Three octaves. The fourth is below the resolution of a sky gradient and
+    // costs a full noise evaluation per pixel to prove it.
+    let n = fbm(u, c(0.0), v, 3);
+
+    // **The coverage curve.** `cover` slides the threshold rather than scaling
+    // the result, which is what makes partial cover look like separate clouds
+    // instead of a uniform grey veil: at cover 0.3 only the top 30% of the noise
+    // survives, and those are islands.
+    //
+    // The band is a constant so the divide above can never be by zero, and it
+    // is wide enough that a cloud has a soft edge rather than a cut-out one.
+    const BAND: f32 = 0.18;
+    let threshold = c(1.0) - cover;
+    let coverage = smoothstep(threshold.clone(), threshold + c(BAND), n);
+
+    Field { name: "clouds_at", body: [coverage, c(0.0), c(0.0)] }
+}
+
+/// The parameters [`clouds`] reads, at their defaults.
+///
+/// **Half cover, because a scene that authors nothing should look like weather
+/// rather than like a decision.** The same reasoning as [`wind_defaults`].
+///
+/// `cloud_scale` is metres per unit of noise: 1200 m puts a few cloud masses
+/// across a horizon, which is what a cumulus field looks like from the ground.
+/// `cloud_drift` is a multiplier on the wind because cloud-level wind is faster
+/// than the wind at head height that `speed` describes.
+#[must_use]
+pub fn cloud_defaults() -> Params {
+    Params::new(&[
+        ("cloud_cover", 0.5),
+        ("cloud_scale", 1200.0),
+        ("cloud_drift", 2.5),
+        ("dir_x", 1.0),
+        ("dir_z", 0.0),
+        ("speed", 5.5),
+    ])
 }
 
 /// The wind field: a steady direction plus a few travelling gusts, thinning

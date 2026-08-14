@@ -315,6 +315,24 @@ mod tests {
             evaluate_on_gpu(&device, &mut allocator, pool, c"noiseMain", &samples, &flat)
                 .expect("noise dispatch");
 
+        // **The cloud field, on the same device and the same samples.** A field
+        // added to `loom_field::all()` gets its Slang generated automatically
+        // and its agreement test *not at all* — the entry point is named here,
+        // by hand. Adding a field without adding it below produces a shader
+        // that compiles, runs, and is never once compared to the Rust it came
+        // from, which is precisely the state S2 exists to prevent.
+        let cloud_field = loom_field::clouds();
+        let cloud_params = loom_field::cloud_defaults();
+        assert!(
+            cloud_params.missing(&cloud_field).is_empty(),
+            "the cloud defaults must cover every parameter the field reads: {:?}",
+            cloud_params.missing(&cloud_field)
+        );
+        let cloud_flat = cloud_field.params_array(&cloud_params);
+        let clouds_gpu =
+            evaluate_on_gpu(&device, &mut allocator, pool, c"cloudsMain", &samples, &cloud_flat)
+                .expect("clouds dispatch");
+
         // SAFETY: the dispatch was waited on before this returned.
         unsafe { raw.destroy_command_pool(pool, None) };
         drop(allocator);
@@ -387,7 +405,38 @@ mod tests {
             "cpu and gpu disagree by {worst} at sample {worst_at} — \
              the generated Slang and the Rust tree have diverged"
         );
+        // **The cloud field gets the same treatment, including the same refusal
+        // to agree for free.** Coverage is bounded in [0, 1], so the wind
+        // field's "magnitude > 1" check would be wrong here; what proves this
+        // one is not flat is that it reaches *both* ends. A curve stuck at 0
+        // (or at 1) would agree perfectly with a CPU that is equally stuck.
+        let cloud_low = clouds_gpu.iter().map(|v| v[0]).fold(f32::INFINITY, f32::min);
+        let cloud_high = clouds_gpu.iter().map(|v| v[0]).fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            cloud_low < 0.2 && cloud_high > 0.8,
+            "cloud coverage does not span its range over the samples: {cloud_low} to \
+             {cloud_high} — a field pinned at one end agrees for the wrong reason"
+        );
+        assert!(
+            (0.0..=1.0).contains(&cloud_low) && (0.0..=1.0).contains(&cloud_high),
+            "cloud coverage escaped [0, 1]: {cloud_low} to {cloud_high}"
+        );
+
+        let mut cloud_worst = 0.0_f32;
+        for (sample, got) in samples.iter().zip(&clouds_gpu) {
+            let position = [sample[0], sample[1], sample[2]];
+            let cpu = cloud_field.body[0].eval_with(position, sample[3], &cloud_params);
+            assert!(cpu.is_finite() && got[0].is_finite(), "cloud NaN at {position:?}");
+            cloud_worst = cloud_worst.max((cpu - got[0]).abs());
+        }
+        assert!(
+            cloud_worst < EPSILON,
+            "cpu and gpu disagree about cloud cover by {cloud_worst} — \
+             the generated Slang and the Rust tree have diverged"
+        );
+
         eprintln!("field agreement: worst absolute difference {worst:e} over {} samples", samples.len());
+        eprintln!("cloud agreement: worst absolute difference {cloud_worst:e}, coverage spans {cloud_low:.3}..{cloud_high:.3}");
     }
 
     /// The sample set must actually exercise the field. Every point landing in

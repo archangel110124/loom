@@ -70,3 +70,30 @@ float3 wind_at(float3 p, float t, WindParams params) {
         ((((params.speed * (((1.0 + ((params.gustiness * 0.18) * sin(((((p.x * 0.05) * params.dir_x) + ((p.z * 0.05) * params.dir_z)) - (t * 0.45))))) + ((params.gustiness * 0.1) * sin(((((p.x * 0.13) * params.dir_x) + ((p.z * 0.13) * params.dir_z)) - (t * 0.9))))) + ((params.gustiness * 0.05) * sin(((((p.x * 0.31) * params.dir_x) + ((p.z * 0.31) * params.dir_z)) - (t * 1.7)))))) * (params.ground_drag + ((1.0 - params.ground_drag) * (max(0.0, p.y) / (max(0.0, p.y) + 2.0))))) * params.dir_z) + (params.turbulence * ((((0.0 + (1.0 * loom_value_noise(float3(((((p.x * 0.06) - (((t * 0.08) * params.speed) * params.dir_x)) + 23.4) * 1.0), ((p.y * 0.06) * 1.0), ((((p.z * 0.06) - (((t * 0.08) * params.speed) * params.dir_z)) + 23.4) * 1.0))))) * 1.0) * 2.0) - 1.0))));
 }
 
+struct CloudsParams {
+    float dir_x;
+    float speed;
+    float cloud_drift;
+    float cloud_scale;
+    float dir_z;
+    float cloud_cover;
+};
+
+CloudsParams clouds_at_params(float *v) {
+    CloudsParams params;
+    params.dir_x = v[0];
+    params.speed = v[1];
+    params.cloud_drift = v[2];
+    params.cloud_scale = v[3];
+    params.dir_z = v[4];
+    params.cloud_cover = v[5];
+    return params;
+}
+
+float3 clouds_at(float3 p, float t, CloudsParams params) {
+    return float3(
+        ((min(max(((((((0.0 + (1.0 * loom_value_noise(float3((((p.x - (params.dir_x * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 1.0), (0.0 * 1.0), (((p.z - (params.dir_z * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 1.0))))) + (0.5 * loom_value_noise(float3((((p.x - (params.dir_x * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 2.0), (0.0 * 2.0), (((p.z - (params.dir_z * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 2.0))))) + (0.25 * loom_value_noise(float3((((p.x - (params.dir_x * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 4.0), (0.0 * 4.0), (((p.z - (params.dir_z * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 4.0))))) * 0.5714286) - (1.0 - params.cloud_cover)) / (((1.0 - params.cloud_cover) + 0.18) - (1.0 - params.cloud_cover))), 0.0), 1.0) * min(max(((((((0.0 + (1.0 * loom_value_noise(float3((((p.x - (params.dir_x * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 1.0), (0.0 * 1.0), (((p.z - (params.dir_z * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 1.0))))) + (0.5 * loom_value_noise(float3((((p.x - (params.dir_x * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 2.0), (0.0 * 2.0), (((p.z - (params.dir_z * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 2.0))))) + (0.25 * loom_value_noise(float3((((p.x - (params.dir_x * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 4.0), (0.0 * 4.0), (((p.z - (params.dir_z * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 4.0))))) * 0.5714286) - (1.0 - params.cloud_cover)) / (((1.0 - params.cloud_cover) + 0.18) - (1.0 - params.cloud_cover))), 0.0), 1.0)) * (3.0 - (2.0 * min(max(((((((0.0 + (1.0 * loom_value_noise(float3((((p.x - (params.dir_x * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 1.0), (0.0 * 1.0), (((p.z - (params.dir_z * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 1.0))))) + (0.5 * loom_value_noise(float3((((p.x - (params.dir_x * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 2.0), (0.0 * 2.0), (((p.z - (params.dir_z * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 2.0))))) + (0.25 * loom_value_noise(float3((((p.x - (params.dir_x * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 4.0), (0.0 * 4.0), (((p.z - (params.dir_z * ((params.speed * params.cloud_drift) * t))) / params.cloud_scale) * 4.0))))) * 0.5714286) - (1.0 - params.cloud_cover)) / (((1.0 - params.cloud_cover) + 0.18) - (1.0 - params.cloud_cover))), 0.0), 1.0)))),
+        0.0,
+        0.0);
+}
+

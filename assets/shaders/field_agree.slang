@@ -56,6 +56,24 @@ void agreeMain(uint3 id: SV_DispatchThreadID) {
     push.results[id.x] = float4(wind_at(sample.xyz, sample.w, params), 0.0);
 }
 
+// Cloud coverage, which is a *scalar* field — `clouds_at` returns a float3
+// whose y and z are zero, and `.x` is the answer. Its own entry point rather
+// than a second field evaluated in `agreeMain`, because the parameter block is
+// flat and positional: two fields sharing one dispatch would have to share one
+// parameter array, and the first field to gain a parameter would silently shift
+// the second field's reads.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cloudsMain(uint3 id: SV_DispatchThreadID) {
+    if (id.x >= push.count) {
+        return;
+    }
+
+    float4 sample = push.samples[id.x];
+    CloudsParams params = clouds_at_params(push.params);
+    push.results[id.x] = float4(clouds_at(sample.xyz, sample.w, params), 0.0);
+}
+
 // The noise primitive alone, so a disagreement in it is reported as a
 // disagreement in it rather than as a slightly-off wind field.
 [shader("compute")]
