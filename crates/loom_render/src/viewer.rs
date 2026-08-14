@@ -342,15 +342,16 @@ impl Viewer {
             c"waterFragmentMain",
         )?;
         // **And the rain, in the window as well as offscreen**, for the reason
-        // spelled out above the water pipeline. This one is not even
-        // parameterised: rain draws into a single-sample target in both paths,
-        // so the windowed and headless versions are the same pipeline state.
+        // spelled out above the water pipeline — and at the scene's sample
+        // count, because rain draws into the multisampled image before the
+        // resolve in both paths now.
         let rain_pipeline =
             crate::renderer::create_rain_pipeline(
                 &raw,
                 pipeline_layout,
                 pipeline_cache,
                 format,
+                samples,
                 c"rainVertexMain",
                 c"rainFragmentMain",
             )?;
@@ -359,6 +360,7 @@ impl Viewer {
             pipeline_layout,
             pipeline_cache,
             format,
+            samples,
             c"rainSplashVertexMain",
             c"rainSplashFragmentMain",
         )?;
@@ -1133,7 +1135,14 @@ impl Viewer {
             )
         });
         let msaa_views = self.msaa.as_ref().map(|m| (m.view, m.depth_view));
-        let mut forward_uses = vec![(scene_id, Access::ColorWrite)];
+        // **When rain defers the colour resolve, the forward pass does not
+        // write the scene target at all** — the rain pass is what produces it.
+        // See the same construction in `renderer.rs`.
+        let rain_resolves = msaa_ids.is_some() && rain_buffers.is_some();
+        let mut forward_uses = Vec::new();
+        if !rain_resolves {
+            forward_uses.push((scene_id, Access::ColorWrite));
+        }
         if let Some((ms_color, ms_depth)) = msaa_ids {
             forward_uses.push((ms_color, Access::ColorWrite));
             forward_uses.push((ms_depth, Access::DepthWrite));
@@ -1157,7 +1166,10 @@ impl Viewer {
                             cmd,
                             ms_color,
                             ms_depth,
-                            Some((scene_view, depth_view)),
+                            crate::renderer::Resolve {
+                                color: (!rain_resolves).then_some(scene_view),
+                                depth: Some(depth_view),
+                            },
                             extent.width,
                             extent.height,
                         ),
@@ -1166,7 +1178,7 @@ impl Viewer {
                             cmd,
                             scene_view,
                             depth_view,
-                            None,
+                            crate::renderer::Resolve::default(),
                             extent.width,
                             extent.height,
                         ),
@@ -1308,9 +1320,14 @@ impl Viewer {
         let rain_depth_set = self.scene_depth.descriptor_set();
         if let Some((drops_id, args_id)) = rain_buffers {
             let drop_count = crate::rain::DROPS;
+            let mut rain_uses =
+                vec![(scene_id, Access::ColorWrite), (depth_id, Access::DepthSample)];
+            if let Some((ms_color, _)) = msaa_ids {
+                rain_uses.push((ms_color, Access::ColorWrite));
+            }
             graph.pass_with(
                 "rain",
-                &[(scene_id, Access::ColorWrite), (depth_id, Access::DepthSample)],
+                &rain_uses,
                 &[
                     (drops_id, loom_render_graph::BufferAccess::VertexRead),
                     (args_id, loom_render_graph::BufferAccess::IndirectRead),
@@ -1321,13 +1338,26 @@ impl Viewer {
                     // SHADER_READ_ONLY_OPTIMAL, and both buffers behind a
                     // barrier against the compute pass that wrote them.
                     unsafe {
-                        crate::renderer::begin_overlay_rendering(
-                            d,
-                            cmd,
-                            scene_view,
-                            extent.width,
-                            extent.height,
-                        );
+                        // Multisampled: load the samples the forward pass left,
+                        // add streaks at the same rate, and resolve here.
+                        match msaa_views {
+                            Some((ms_color, _)) => crate::renderer::begin_overlay_rendering(
+                                d,
+                                cmd,
+                                ms_color,
+                                Some(scene_view),
+                                extent.width,
+                                extent.height,
+                            ),
+                            None => crate::renderer::begin_overlay_rendering(
+                                d,
+                                cmd,
+                                scene_view,
+                                None,
+                                extent.width,
+                                extent.height,
+                            ),
+                        }
                         set_viewport(d, cmd, extent.width, extent.height);
                         d.cmd_bind_descriptor_sets(
                             cmd,
@@ -1371,10 +1401,15 @@ impl Viewer {
                     // COLOR_ATTACHMENT_OPTIMAL, and egui's pipeline declares no
                     // depth attachment to match this block.
                     unsafe {
+                        // `None`: the UI draws into the resolved scene target
+                        // at one sample, after rain has already resolved into
+                        // it. Multisampling a text overlay would cost fill rate
+                        // for a difference nobody can see.
                         crate::renderer::begin_overlay_rendering(
                             d,
                             cmd,
                             scene_view,
+                            None,
                             extent.width,
                             extent.height,
                         );

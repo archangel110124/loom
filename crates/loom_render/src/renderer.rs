@@ -329,8 +329,12 @@ impl Msaa {
     /// offscreen, the swapchain's in the window. A resolve requires both images
     /// to have the same format, so this cannot be a constant.
     ///
-    /// `TRANSIENT_ATTACHMENT` is the honest usage — nothing ever reads these
-    /// images, they exist only between the first draw and the resolve.
+    /// **Not `TRANSIENT_ATTACHMENT`, and that changed when rain moved.** The
+    /// colour image used to live entirely inside the forward pass, but the rain
+    /// pass now loads it in a second rendering block so that streaks rasterise
+    /// at the same sample count as everything else. An image whose samples
+    /// survive a block boundary has to be stored, and a transient image backed
+    /// by lazily-allocated memory cannot be.
     pub(crate) fn new(
         device: &ash::Device,
         allocator: &mut Allocator,
@@ -348,7 +352,7 @@ impl Msaa {
             width,
             height,
             format,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
             1,
             samples,
             "loom.msaa_color",
@@ -895,24 +899,29 @@ impl Renderer {
             c"waterVertexMain",
             c"waterFragmentMain",
         )?;
-        // No sample count: rain draws into the resolved target, which is one
-        // sample in both render paths.
+        // **Rain rasterises at the scene's sample count**, because it now draws
+        // into the multisampled colour image before the resolve rather than
+        // onto the finished frame after it. A streak is the thinnest geometry
+        // in the engine and it was the last thing in the frame with no
+        // anti-aliasing at all.
         let rain_pipeline = create_rain_pipeline(
             &raw,
             pipeline_layout,
             pipeline_cache,
             COLOR_FORMAT,
+            samples,
             c"rainVertexMain",
             c"rainFragmentMain",
         )?;
         // The splashes share every piece of state with the streaks — additive,
-        // no depth attachment, one sample — and differ only in which vertex and
-        // fragment functions run. Same builder, two entry points.
+        // no depth attachment, same samples — and differ only in which vertex
+        // and fragment functions run. Same builder, two entry points.
         let rain_splash_pipeline = create_rain_pipeline(
             &raw,
             pipeline_layout,
             pipeline_cache,
             COLOR_FORMAT,
+            samples,
             c"rainSplashVertexMain",
             c"rainSplashFragmentMain",
         )?;
@@ -1544,7 +1553,18 @@ impl Renderer {
         // destination rather than the attachment, and a resolve writes at the
         // colour stage whatever it resolves — which is what `DepthResolve`
         // exists to say, and what sync validation caught when it did not.
-        let mut forward_uses = vec![(color, Access::ColorWrite)];
+        //
+        // **When rain defers the colour resolve, the forward pass no longer
+        // writes the colour target at all** — it writes only the multisampled
+        // image, and the rain pass is what produces `color`. Declaring a write
+        // that does not happen would make the graph order a barrier against
+        // nothing; worse, it would hide that rain is now load-bearing for every
+        // pixel rather than an overlay on a finished frame.
+        let rain_resolves = msaa_ids.is_some() && rain_buffers.is_some();
+        let mut forward_uses = Vec::new();
+        if !rain_resolves {
+            forward_uses.push((color, Access::ColorWrite));
+        }
         if let Some((ms_color, ms_depth)) = msaa_ids {
             forward_uses.push((ms_color, Access::ColorWrite));
             forward_uses.push((ms_depth, Access::DepthWrite));
@@ -1563,20 +1583,32 @@ impl Renderer {
                     // the colour target, so the readback and the golden images
                     // still see one sample per pixel.
                     match msaa_views {
-                        // Depth resolves alongside the colour — the rain pass
-                        // samples it.
+                        // Depth resolves here always — the rain pass samples
+                        // it. **The colour resolve is deferred to the rain pass
+                        // whenever rain is going to draw**, so that streaks
+                        // rasterise into the same multisampled image the scene
+                        // did rather than onto the finished single-sample one.
                         Some((ms_color, ms_depth)) => begin_rendering(
                             d,
                             cmd,
                             ms_color,
                             ms_depth,
-                            Some((color_view, depth_view)),
+                            Resolve {
+                                color: (!rain_resolves).then_some(color_view),
+                                depth: Some(depth_view),
+                            },
                             width,
                             height,
                         ),
-                        None => {
-                            begin_rendering(d, cmd, color_view, depth_view, None, width, height)
-                        }
+                        None => begin_rendering(
+                            d,
+                            cmd,
+                            color_view,
+                            depth_view,
+                            Resolve::default(),
+                            width,
+                            height,
+                        ),
                     }
                     set_viewport(d, cmd, width, height);
                     draw_sky(d, cmd, sky, layout, &base_push);
@@ -1753,9 +1785,13 @@ impl Renderer {
         let rain_depth_set = self.scene_depth.descriptor_set();
         if let Some((drops_id, args_id)) = rain_buffers {
             let drop_count = crate::rain::DROPS;
+            let mut rain_uses = vec![(color, Access::ColorWrite), (depth, Access::DepthSample)];
+            if let Some((ms_color, _)) = msaa_ids {
+                rain_uses.push((ms_color, Access::ColorWrite));
+            }
             graph.pass_with(
                 "rain",
-                &[(color, Access::ColorWrite), (depth, Access::DepthSample)],
+                &rain_uses,
                 &[
                     (drops_id, loom_render_graph::BufferAccess::VertexRead),
                     (args_id, loom_render_graph::BufferAccess::IndirectRead),
@@ -1766,7 +1802,21 @@ impl Renderer {
                     // SHADER_READ_ONLY_OPTIMAL, and both buffers behind a
                     // barrier against the compute writes.
                     unsafe {
-                        begin_overlay_rendering(d, cmd, color_view, width, height);
+                        // Multisampled: load the samples the forward pass left,
+                        // add streaks to them at the same rate, and resolve.
+                        match msaa_views {
+                            Some((ms_color, _)) => begin_overlay_rendering(
+                                d,
+                                cmd,
+                                ms_color,
+                                Some(color_view),
+                                width,
+                                height,
+                            ),
+                            None => {
+                                begin_overlay_rendering(d, cmd, color_view, None, width, height)
+                            }
+                        }
                         set_viewport(d, cmd, width, height);
                         d.cmd_bind_descriptor_sets(
                             cmd,
@@ -2183,28 +2233,43 @@ pub(crate) unsafe fn draw_sky(
     }
 }
 
+/// The single-sample images a multisampled pass resolves into.
+///
+/// **Colour and depth are separate because the rain pass split them.** Rain
+/// rasterises into the multisampled colour *after* the forward pass and carries
+/// the colour resolve itself, so a multisampled forward pass resolves depth
+/// only whenever rain is going to draw. Depth is never deferred that way: rain
+/// samples it, and resolving colour without depth is what once left the rain
+/// pass fading against a cleared image.
+///
+/// `Resolve::default()` — neither — is the single-sample path.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Resolve {
+    pub(crate) color: Option<vk::ImageView>,
+    pub(crate) depth: Option<vk::ImageView>,
+}
+
 pub(crate) unsafe fn begin_rendering(
     d: &ash::Device,
     cmd: vk::CommandBuffer,
+    // The multisampled targets when `resolve` has anything in it, the results
+    // themselves when it does not.
     color_view: vk::ImageView,
     depth_view: vk::ImageView,
-    // When multisampling, the single-sample colour and depth images the pass
-    // resolves into — `color_view` and `depth_view` are then the multisampled
-    // targets rather than the results. One argument for the pair because they
-    // are always both present or both absent, and resolving colour without
-    // depth is what left the rain pass sampling a cleared image.
-    resolve: Option<(vk::ImageView, vk::ImageView)>,
+    resolve: Resolve,
     width: u32,
     height: u32,
 ) {
+    let Resolve { color: color_resolve, depth: depth_resolve } = resolve;
     let mut color_attachment = vk::RenderingAttachmentInfo::default()
         .image_view(color_view)
         .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
         .load_op(vk::AttachmentLoadOp::CLEAR)
-        // **DONT_CARE on the multisampled image.** Its samples are consumed by
-        // the resolve and never read again, so storing them would be pure
-        // bandwidth — and bandwidth is the whole cost of MSAA.
-        .store_op(if resolve.is_some() {
+        // **DONT_CARE once the samples are consumed by a resolve here.** They
+        // are never read again, so storing them would be pure bandwidth — and
+        // bandwidth is the whole cost of MSAA. When the resolve is deferred to
+        // the rain pass they *are* read again, so they have to be stored.
+        .store_op(if color_resolve.is_some() {
             vk::AttachmentStoreOp::DONT_CARE
         } else {
             vk::AttachmentStoreOp::STORE
@@ -2229,7 +2294,7 @@ pub(crate) unsafe fn begin_rendering(
                 stencil: 0,
             },
         });
-    if let Some((color_resolve, depth_resolve)) = resolve {
+    if let Some(depth_resolve) = depth_resolve {
         // **Depth resolves too, into the single-sample image.** Multisampling
         // rasterises into `msaa_depth` and the single-sample `depth` is then
         // untouched — so without this the rain pass would sample a cleared
@@ -2241,6 +2306,8 @@ pub(crate) unsafe fn begin_rendering(
             .resolve_mode(vk::ResolveModeFlags::SAMPLE_ZERO)
             .resolve_image_view(depth_resolve)
             .resolve_image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
+    }
+    if let Some(color_resolve) = color_resolve {
         color_attachment = color_attachment
             // AVERAGE is the only mode guaranteed for colour, and it is what
             // "anti-aliased" means here: the pixel is the mean of its samples.
@@ -3087,6 +3154,7 @@ pub(crate) fn create_rain_pipeline(
     layout: vk::PipelineLayout,
     cache: vk::PipelineCache,
     color_format: vk::Format,
+    samples: vk::SampleCountFlags,
     vertex: &std::ffi::CStr,
     fragment: &std::ffi::CStr,
 ) -> Result<vk::Pipeline, RenderError> {
@@ -3114,8 +3182,8 @@ pub(crate) fn create_rain_pipeline(
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
-    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples);
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(false)
         .depth_write_enable(false);
@@ -3173,14 +3241,30 @@ pub(crate) unsafe fn begin_overlay_rendering(
     d: &ash::Device,
     cmd: vk::CommandBuffer,
     color_view: vk::ImageView,
+    // When the overlay is itself multisampled, the single-sample image it
+    // resolves into. **This is how rain gets anti-aliased**: the forward pass
+    // leaves its samples stored, rain adds streaks to them at the same sample
+    // count, and the resolve happens here instead. The UI passes `None` — it
+    // draws after the resolve, at one sample, on purpose.
+    resolve: Option<vk::ImageView>,
     width: u32,
     height: u32,
 ) {
-    let color_attachment = vk::RenderingAttachmentInfo::default()
+    let mut color_attachment = vk::RenderingAttachmentInfo::default()
         .image_view(color_view)
         .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
         .load_op(vk::AttachmentLoadOp::LOAD)
-        .store_op(vk::AttachmentStoreOp::STORE);
+        .store_op(if resolve.is_some() {
+            vk::AttachmentStoreOp::DONT_CARE
+        } else {
+            vk::AttachmentStoreOp::STORE
+        });
+    if let Some(resolve) = resolve {
+        color_attachment = color_attachment
+            .resolve_mode(vk::ResolveModeFlags::AVERAGE)
+            .resolve_image_view(resolve)
+            .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+    }
     let color_attachments = [color_attachment];
     let rendering = vk::RenderingInfo::default()
         .render_area(vk::Rect2D {
