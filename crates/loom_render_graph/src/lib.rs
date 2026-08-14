@@ -22,10 +22,69 @@
 
 use ash::vk;
 
-/// A resource the graph tracks. Images only for now — buffers reached by
-/// device address need no layout transitions, which is most of what this does.
+/// A resource the graph tracks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ImageId(pub u32);
+
+/// A buffer the graph tracks.
+///
+/// **A buffer has no layout, and that was the reason this used to be images
+/// only** — "buffers reached by device address need no layout transitions,
+/// which is most of what this does". True, and it left the other part
+/// unhandled: a compute pass that writes a buffer and a draw that reads it
+/// still need an *execution and memory* dependency, or the draw reads whatever
+/// was there last frame. That is invisible on this driver about nine frames in
+/// ten, which is the worst possible failure profile and exactly the class
+/// never-do #4 exists to keep out of call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BufferId(pub u32);
+
+/// How a pass touches a buffer.
+///
+/// Deliberately fewer variants than [`Access`]: without layouts, all a buffer
+/// barrier carries is a stage and an access mask, and every one of these is a
+/// pair the rain path actually uses. Add a variant when a pass needs one, not
+/// before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferAccess {
+    /// Read and written by a compute shader — the drop simulation's own state.
+    ComputeReadWrite,
+    /// Read by a compute shader and not written.
+    ComputeRead,
+    /// Read by a vertex shader — a drop buffer feeding the streak draw.
+    VertexRead,
+    /// Read by the command processor as `VkDrawIndirectCommand`.
+    IndirectRead,
+    /// Destination of a transfer — a staging copy or a `vkCmdFillBuffer`.
+    TransferDst,
+}
+
+impl BufferAccess {
+    fn stage(self) -> vk::PipelineStageFlags2 {
+        match self {
+            Self::ComputeReadWrite | Self::ComputeRead => vk::PipelineStageFlags2::COMPUTE_SHADER,
+            Self::VertexRead => vk::PipelineStageFlags2::VERTEX_SHADER,
+            Self::IndirectRead => vk::PipelineStageFlags2::DRAW_INDIRECT,
+            Self::TransferDst => vk::PipelineStageFlags2::ALL_TRANSFER,
+        }
+    }
+
+    fn access(self) -> vk::AccessFlags2 {
+        match self {
+            Self::ComputeReadWrite => {
+                vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE
+            }
+            Self::ComputeRead | Self::VertexRead => vk::AccessFlags2::SHADER_STORAGE_READ,
+            Self::IndirectRead => vk::AccessFlags2::INDIRECT_COMMAND_READ,
+            Self::TransferDst => vk::AccessFlags2::TRANSFER_WRITE,
+        }
+    }
+
+    /// Whether this access writes. Read-after-read needs no barrier.
+    fn writes(self) -> bool {
+        matches!(self, Self::ComputeReadWrite | Self::TransferDst)
+    }
+}
 
 /// How a pass touches a resource.
 ///
@@ -286,13 +345,38 @@ type Record<'a> = Box<dyn FnOnce(&ash::Device, vk::CommandBuffer) + 'a>;
 pub struct Pass<'a> {
     name: &'static str,
     accesses: Vec<(ImageId, Access)>,
+    buffers: Vec<(BufferId, BufferAccess)>,
     record: Record<'a>,
+}
+
+/// A buffer's last known state. No layout — only who touched it and how.
+#[derive(Debug, Clone, Copy)]
+struct BufferState {
+    stage: vk::PipelineStageFlags2,
+    access: vk::AccessFlags2,
+}
+
+impl BufferState {
+    /// A buffer nothing in this command buffer has touched.
+    const fn untouched() -> Self {
+        Self {
+            stage: vk::PipelineStageFlags2::TOP_OF_PIPE,
+            access: vk::AccessFlags2::empty(),
+        }
+    }
+}
+
+struct RegisteredBuffer {
+    buffer: vk::Buffer,
+    state: BufferState,
+    name: &'static str,
 }
 
 /// Declares passes, then executes them with barriers inserted automatically.
 #[derive(Default)]
 pub struct RenderGraph<'a> {
     images: Vec<Registered>,
+    buffers: Vec<RegisteredBuffer>,
     passes: Vec<Pass<'a>>,
     timers: Option<&'a mut GpuTimers>,
 }
@@ -302,6 +386,7 @@ impl<'a> RenderGraph<'a> {
     pub fn new() -> Self {
         Self {
             images: Vec::new(),
+            buffers: Vec::new(),
             passes: Vec::new(),
             timers: None,
         }
@@ -350,11 +435,100 @@ impl<'a> RenderGraph<'a> {
         accesses: &[(ImageId, Access)],
         record: impl FnOnce(&ash::Device, vk::CommandBuffer) + 'a,
     ) {
+        self.pass_with(name, accesses, &[], record);
+    }
+
+    /// Register a buffer whose current state is unknown.
+    ///
+    /// "Unknown" is honest at the top of a frame: whatever touched it last was
+    /// in a submission this one has already waited on, so the only dependency
+    /// left is within this command buffer. The first access therefore needs no
+    /// barrier, which is what [`BufferState::untouched`] encodes.
+    pub fn import_buffer(&mut self, name: &'static str, buffer: vk::Buffer) -> BufferId {
+        let id = BufferId(u32::try_from(self.buffers.len()).unwrap_or(u32::MAX));
+        self.buffers.push(RegisteredBuffer {
+            buffer,
+            state: BufferState::untouched(),
+            name,
+        });
+        id
+    }
+
+    /// Add a pass that touches buffers as well as images.
+    ///
+    /// Both lists must be complete. An omitted buffer is the same defect an
+    /// omitted image is, with one difference that makes it nastier: there is no
+    /// layout to be wrong, so the picture is usually right and occasionally
+    /// one frame stale.
+    pub fn pass_with(
+        &mut self,
+        name: &'static str,
+        accesses: &[(ImageId, Access)],
+        buffers: &[(BufferId, BufferAccess)],
+        record: impl FnOnce(&ash::Device, vk::CommandBuffer) + 'a,
+    ) {
         self.passes.push(Pass {
             name,
             accesses: accesses.to_vec(),
+            buffers: buffers.to_vec(),
             record: Box::new(record),
         });
+    }
+
+    /// Decide what a single buffer access needs, and advance its state.
+    ///
+    /// The buffer twin of [`Self::decide`], and split for the same reason:
+    /// `plan` and `execute` must not contain two copies of this judgement.
+    fn decide_buffer(
+        &mut self,
+        pass: &'static str,
+        id: BufferId,
+        access: BufferAccess,
+    ) -> Option<BufferDecision> {
+        let resource = self.buffers.get_mut(id.0 as usize)?;
+        let target = BufferState {
+            stage: access.stage(),
+            access: access.access(),
+        };
+
+        // Nothing in *this* command buffer has touched it yet, so there is no
+        // dependency to express. Cross-submission ordering is the fence's job,
+        // and emitting a barrier against `TOP_OF_PIPE` with no source access
+        // would be a barrier that says nothing.
+        if resource.state.access.is_empty() {
+            resource.state = target;
+            return None;
+        }
+
+        // A hazard exists when either side writes. Read-after-read on a buffer
+        // is already ordered, exactly as it is for an image in one layout.
+        let wrote_before = resource.state.access.intersects(
+            vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
+        );
+        if !access.writes() && !wrote_before {
+            // Still record the reader, so a later write knows to wait for it.
+            resource.state.stage |= target.stage;
+            resource.state.access |= target.access;
+            return None;
+        }
+
+        let barrier = vk::BufferMemoryBarrier2::default()
+            .src_stage_mask(resource.state.stage)
+            .src_access_mask(resource.state.access)
+            .dst_stage_mask(target.stage)
+            .dst_access_mask(target.access)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(resource.buffer)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+
+        let transition = BufferTransition {
+            pass,
+            buffer: resource.name,
+        };
+        resource.state = target;
+        Some((transition, barrier))
     }
 
     /// Decide what a single access needs, and advance the resource's state.
@@ -418,8 +592,15 @@ impl<'a> RenderGraph<'a> {
     /// Consumes the passes, exactly as `execute` does, so the two cannot
     /// disagree about what a graph decides.
     #[must_use]
-    pub fn plan(mut self) -> Vec<Transition> {
+    pub fn plan(self) -> Vec<Transition> {
+        self.plan_full().0
+    }
+
+    /// Image transitions and buffer barriers, without touching a device.
+    #[must_use]
+    pub fn plan_full(mut self) -> (Vec<Transition>, Vec<BufferTransition>) {
         let mut emitted = Vec::new();
+        let mut buffers = Vec::new();
         let passes = std::mem::take(&mut self.passes);
         for pass in &passes {
             for (id, access) in &pass.accesses {
@@ -427,8 +608,13 @@ impl<'a> RenderGraph<'a> {
                     emitted.push(transition);
                 }
             }
+            for (id, access) in &pass.buffers {
+                if let Some((transition, _)) = self.decide_buffer(pass.name, *id, *access) {
+                    buffers.push(transition);
+                }
+            }
         }
-        emitted
+        (emitted, buffers)
     }
 
     /// Record every pass into `cmd`, emitting transitions between them.
@@ -494,11 +680,19 @@ impl<'a> RenderGraph<'a> {
                     barriers.push(barrier);
                 }
             }
+            let mut buffer_barriers = Vec::new();
+            for (id, access) in &pass.buffers {
+                if let Some((_, barrier)) = self.decide_buffer(pass.name, *id, *access) {
+                    buffer_barriers.push(barrier);
+                }
+            }
 
-            if !barriers.is_empty() {
-                let dependency = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-                // SAFETY: `barriers` outlives the call and every image is live
-                // for the caller-provided command buffer's lifetime.
+            if !barriers.is_empty() || !buffer_barriers.is_empty() {
+                let dependency = vk::DependencyInfo::default()
+                    .image_memory_barriers(&barriers)
+                    .buffer_memory_barriers(&buffer_barriers);
+                // SAFETY: both slices outlive the call and every resource is
+                // live for the caller-provided command buffer's lifetime.
                 unsafe { device.cmd_pipeline_barrier2(cmd, &dependency) };
             }
 
@@ -524,6 +718,20 @@ impl<'a> RenderGraph<'a> {
 /// What [`RenderGraph::decide`] concluded: the transition to report, and the
 /// barrier that realises it.
 type Decision = (Transition, vk::ImageMemoryBarrier2<'static>);
+
+/// The buffer twin of [`Decision`].
+type BufferDecision = (BufferTransition, vk::BufferMemoryBarrier2<'static>);
+
+/// A buffer barrier the graph decided to emit.
+///
+/// No layout to report, so this is only "who waited on whom, and where" — which
+/// is still the thing a test needs to see, because the failure it guards
+/// against is a barrier that was never emitted at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BufferTransition {
+    pub pass: &'static str,
+    pub buffer: &'static str,
+}
 
 /// A layout transition the graph decided to emit. Returned for tests and for
 /// debugging; a graph is much easier to trust when it can say what it did.
@@ -649,6 +857,87 @@ mod tests {
         assert!((elapsed_ms(1 << 40, (1 << 40) + 1_000_000, mask, 1.0) - 1.0).abs() < 1e-9);
         // And the counter wraps at that width rather than going negative.
         assert!((elapsed_ms(mask - 999, mask + 1, mask, 1.0) - 0.001).abs() < 1e-9);
+    }
+
+    fn plan_buffers(build: impl FnOnce(&mut RenderGraph<'_>)) -> Vec<BufferTransition> {
+        let mut graph = RenderGraph::new();
+        build(&mut graph);
+        graph.plan_full().1
+    }
+
+    /// **The rain frame's shape**: simulate into a buffer, then draw from it.
+    /// Without a barrier between the two the draw reads last frame's drops,
+    /// which looks almost right and is the reason buffers had to join the
+    /// graph at all.
+    #[test]
+    fn a_compute_write_then_a_vertex_read_emits_one_buffer_barrier() {
+        let barriers = plan_buffers(|g| {
+            let drops = g.import_buffer("drops", vk::Buffer::null());
+            g.pass_with("rain_simulate", &[], &[(drops, BufferAccess::ComputeReadWrite)], |_, _| {});
+            g.pass_with("rain", &[], &[(drops, BufferAccess::VertexRead)], |_, _| {});
+        });
+
+        assert_eq!(barriers, [BufferTransition { pass: "rain", buffer: "drops" }]);
+    }
+
+    /// The first touch in a command buffer waits on nothing: whatever ran last
+    /// frame was in a submission this one already fenced against.
+    #[test]
+    fn the_first_access_to_a_buffer_needs_no_barrier() {
+        let barriers = plan_buffers(|g| {
+            let drops = g.import_buffer("drops", vk::Buffer::null());
+            g.pass_with("rain_simulate", &[], &[(drops, BufferAccess::ComputeReadWrite)], |_, _| {});
+        });
+
+        assert!(barriers.is_empty(), "{barriers:?}");
+    }
+
+    /// Two compute passes writing the same buffer in a row must not race —
+    /// the write-after-write case, which has no layout change to give it away.
+    #[test]
+    fn compute_after_compute_on_one_buffer_still_emits_a_barrier() {
+        let barriers = plan_buffers(|g| {
+            let drops = g.import_buffer("drops", vk::Buffer::null());
+            for _ in 0..3 {
+                g.pass_with("tick", &[], &[(drops, BufferAccess::ComputeReadWrite)], |_, _| {});
+            }
+        });
+
+        assert_eq!(barriers.len(), 2, "one between each consecutive pair");
+    }
+
+    /// Two readers in a row need nothing between them, and the writer after
+    /// them gets exactly one barrier — which must wait on *both*, hence a read
+    /// accumulating into the state rather than replacing it.
+    #[test]
+    fn a_write_after_two_reads_gets_one_barrier_that_waits_for_both() {
+        let mut graph = RenderGraph::new();
+        let drops = graph.import_buffer("drops", vk::Buffer::null());
+        graph.pass_with("seed", &[], &[(drops, BufferAccess::TransferDst)], |_, _| {});
+        graph.pass_with("draw", &[], &[(drops, BufferAccess::VertexRead)], |_, _| {});
+        graph.pass_with("indirect", &[], &[(drops, BufferAccess::IndirectRead)], |_, _| {});
+        graph.pass_with("simulate", &[], &[(drops, BufferAccess::ComputeReadWrite)], |_, _| {});
+
+        // The barrier's source mask is built from the accumulated state, so
+        // reach into it after planning rather than restating the rule here.
+        let (_, barriers) = graph.plan_full();
+        let passes: Vec<&str> = barriers.iter().map(|b| b.pass).collect();
+        assert_eq!(passes, ["draw", "simulate"], "{barriers:?}");
+    }
+
+    /// And the accumulation itself, which is what makes the barrier above
+    /// correct rather than merely present.
+    #[test]
+    fn a_read_accumulates_into_the_state_instead_of_replacing_it() {
+        let mut graph = RenderGraph::new();
+        let drops = graph.import_buffer("drops", vk::Buffer::null());
+        graph.decide_buffer("seed", drops, BufferAccess::TransferDst);
+        graph.decide_buffer("draw", drops, BufferAccess::VertexRead);
+        graph.decide_buffer("indirect", drops, BufferAccess::IndirectRead);
+
+        let state = graph.buffers[0].state;
+        assert!(state.stage.contains(vk::PipelineStageFlags2::VERTEX_SHADER));
+        assert!(state.stage.contains(vk::PipelineStageFlags2::DRAW_INDIRECT));
     }
 
     #[test]

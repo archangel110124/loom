@@ -1,0 +1,593 @@
+# A homestead on an island, in the rain. The standing shot.
+#
+# **This scene is a changelog, not a unit test, and that is the whole reason it
+# exists.** Every other file in this directory isolates one system so that a
+# regression in it shows up in exactly one reference and nowhere else. This one
+# runs most of them at once — terrain, water, current, ocean, grass, rain,
+# wetness, shelter, both particle blend modes, wind, an authored environment —
+# from a camera that is never going to move again. So it will move its golden
+# image whenever *anything* changes, and it is supposed to.
+#
+# **Do not "fix" that churn by taking it out of `GOLDEN`.** The value is not
+# that the reference stays still; it is that every time it moves, the move is a
+# readable line in `tests/references/MANIFEST.txt` and a visible diff of a whole
+# frame. Nothing else in this repo shows what a change did to a *picture* rather
+# than to one system. Re-bless it deliberately, look at the diff, and if you
+# cannot explain what moved, that is the bug.
+#
+# Its own gate value is real but different from the others': it is the only
+# scene where two systems can interfere. A wetness term that reads the grass
+# blade's normal, a water depth grid that the rain shelter march also wants, a
+# particle sort that the sky pass invalidates — none of those are visible in a
+# scene that exercises one path at a time.
+#
+#     loom render assets/test/homestead.loom --sim 1800 --out shot.png \
+#       --size 1280x800
+#
+# ---------------------------------------------------------------------------
+# What each element is for, and what breaking it looks like *here*
+# ---------------------------------------------------------------------------
+#
+# **The island — voxel CSG** (`Ground`). One volume, eleven ops, in the order
+# they are written: sea floor, dome, channel, a rock scoop, then the house.
+# ORDER MATTERS everywhere in this file; the channel is subtracted before the
+# house is added, which is what lets the terrace sit on the bank rather than be
+# cut away by it. *Broken:* the shoreline stops matching the water's edge, or
+# the channel becomes a tunnel — a straight capsule chord under a convex dome
+# dips below the surface in the middle even when it clears at both ends, and
+# then the creek is a cave with a lake at each end. As authored, the chord's
+# worst clearance is at z = 17.4 and any radius over 1.61 m breaks the surface
+# there; 4.2 m is chosen for the channel's *width*, not for that margin. Move
+# either shape and check the middle, not the ends.
+#
+# **48 m across at 0.375 m voxels — deliberately coarser than `shore.loom`'s
+# 0.25.** Bake cost is per *chunk*, not per metre: [4,2,4] is 32 chunks against
+# `shore`'s 72 at the same footprint, and dropping to it cut a render by about
+# 45%. Measured on the debug build the gates use: this scene 4.8 s, `shore`
+# 3.6 s, `grass_slope` 2.7 s, `terrain_stress` 15.4 s — so a scene carrying
+# several systems at once costs a third more than one carrying a slice of it,
+# and a quarter of what the stress scene costs. **Trim the resolution before
+# the content** if it ever needs to come down again; the content is the point.
+#
+# The house's walls and roof are 0.8 m — a hair over two voxels — for the reason
+# `rain_overhang.loom` gives: S3 seals a one-voxel roof and that is already
+# tested, so nothing here should be sitting on the limit. The shelter
+# assertions below are what would go quietly soft if it were.
+#
+# **The sea and the river are ONE `WaterBody`, and that is the interesting
+# part.** `World::water()` takes the first and there is deliberately no way to
+# ask for a second: a `WaterBody` has no extent in the schema, so two would be
+# two infinite planes with nothing to say where one stops. Since ADR 0013 the
+# water mesh reaches the true horizon, so one sea-level body plus a `flow`
+# field gives *both* — a current where the island's drainage channels it,
+# open ocean everywhere the terrain grid does not reach. Nothing here says
+# where the river runs; `loom_water::flow` routes water downhill across the
+# same height grid the depth comes from and takes the direction from the
+# neighbourhood's discharge.
+#
+#     loom water assets/test/homestead.loom --at 24,25   # -0.93 m/s down -Z
+#     loom water assets/test/homestead.loom --at 24,14   # -1.28 m/s, faster
+#     loom water assets/test/homestead.loom --at 24,-30  # 0, and bed: null
+#
+# The third is the proof that one body is doing two jobs: no bed, no current,
+# open sea. *Broken:* the current reverses, or wanders off the channel onto the
+# banks, or the ocean acquires a drift — all three are `flow` reading the wrong
+# gradient, and the middle one is the bug the smoothing radius exists to stop.
+#
+# **Grass — three fields, not one, and the reason is water.** `loom_grass` has
+# no idea where the sea is: coverage is slope, rock and gully-flow, and a
+# gully is *lusher*, so a single rectangle over this island would grow a lawn
+# down the middle of the river bed and out across the sea floor. Three
+# rectangles that each stay above the water line is the honest fix, and they
+# carry `slope_cutoff = 0.45` so the blades run down the banks instead of
+# stopping in a shaved line at the rim. *Broken:* blades underwater, a hard
+# straight edge across a bank, or the field floating above / sunk into the
+# terrain — the last is the SDF height march, which is the expensive part of
+# loading this scene.
+#
+# **The house — voxel CSG, because shelter is not a mesh property.** Rain
+# exposure is `loom_voxel::exposure` marching the SDF; a `MeshRenderer` box
+# would keep no rain off at all. The roof is what makes these hold:
+#
+#     loom sim assets/test/homestead.loom --ticks 1 \
+#       --assert "rain@31.7,10.5,15.7.rate < 0.05" \
+#       --assert "rain@17,10.5,24.rate > 11.9" \
+#       --assert "rain@24,12,30.rate > 11.9"
+#
+# Inside the shack: nothing. On the grass and over the creek: the full 12 mm/h.
+# *Broken:* the interior reading climbs — a thinned roof, an exposure march
+# that stopped honouring the node's translation, or a shelter query that reads
+# the camera's exposure instead of the sample point's.
+#
+# **Rain, wetness, and why the banks shine.** At `--sim 1800` the film is at its
+# ceiling and the soak is about half way — measured, and asserted:
+#
+#     loom sim assets/test/homestead.loom --ticks 1800 \
+#       --assert "wetness@17,10.5,24.film > 0.99" \
+#       --assert "wetness@17,10.5,24.soak > 0.4" \
+#       --assert "wetness@17,10.5,24.soak < 0.7" \
+#       --assert "wetness@31.7,10.5,15.7.film < 0.01"
+#
+# The last line is the one that matters: the floor inside the door is bone dry
+# thirty seconds into a downpour, because the same voxel roof that stops the
+# rain stops the wetness. Everything exposed is glossy and darkened; every
+# sheltered surface is matt. The wet inner face of the east bank is the
+# brightest non-sky thing in the frame: a smooth SDF surface with a water film
+# reflecting a bright horizon at a grazing angle. It is physically what the
+# model says and it is on the edge of blowing out; if wetness gains a
+# roughness floor, this is the pixel that will move first. *Broken:* the whole
+# island goes matt (wetness detached from the rain rate), or the sheltered
+# surfaces shine too (exposure not reaching the material).
+#
+# **Fire and smoke — the two blend modes, side by side.** The fire is
+# `additive`, because overlapping alpha flames darken each other into grey mud
+# while additive ones brighten where they pile up; its alpha is low for the
+# same reason `explosion.loom` gives, so only the core blows out. The smoke
+# above it is ordinary sorted alpha, because smoke occludes. They share a spot
+# in the doorway, which is the frame's only warm light and the thing that tells
+# you the dark box is a house. *Broken:* the smoke stops sorting and flickers
+# against the roof, or the fire turns into a flat white dome (additive alpha
+# too high), or the plume stops leaning (see wind).
+#
+# **Wind drives three things here and they must agree.** The grass bends, the
+# smoke leans (`wind_response = 4.0`, matching the air in a quarter second) and
+# the rain streaks tilt — all from one `loom_field::wind` sample. *Broken:* they
+# disagree. Blades leaning one way and smoke the other is the CPU and GPU
+# evaluating different formulas, which is exactly what S2's generator exists to
+# make impossible; if you ever see it, the generated Slang was hand-edited.
+#
+# **Environment.** Low sun over the sea, off to the left of the frame so the
+# glitter path lands inside it and the rain is lit from three-quarters behind.
+# Fog separates the island from the horizon rather than hiding anything. The
+# camera sits seven metres above the water and looks down the channel: Fresnel
+# on water needs a grazing angle, and this is where the surface goes from
+# "seeing into it" in the creek to "seeing the sky in it" at the horizon, in one
+# shot.
+# *Broken:* the sea flattens to one colour (Fresnel or the depth tint), or the
+# horizon hardens into an edge (the water mesh stopped reaching it).
+#
+# **`--yaw`/`--pitch` is not useful on this scene, and that is worth knowing
+# before you try it.** Overriding the camera drops back to auto-framing from
+# *mesh* bounds, and the only meshes here are a fire pit and a post — so the
+# orbit frames those two and puts the eye under water. `cargo xtask flythrough`
+# is the second angle that works: it keeps the authored camera and spins it,
+# which is what the sixteen frames of grass, waves and rain in motion need
+# anyway.
+#
+# **What is deliberately NOT here.** Nothing floats. `river.loom` proves a
+# current by carrying a crate downstream, but this scene's golden frame is at
+# tick 1800 — thirty seconds — and anything the creek picked up would be out at
+# sea and out of frame, proving the current only by its absence. So the current
+# is asserted with `loom water` instead. The post in the creek is there to give
+# the surface a fixed silhouette to move against, which is what
+# `cargo xtask flythrough` needs and a still cannot show.
+
+[scene]
+format = 1
+id = "e3d7b1a5-84c2-4f60-9b13-5a2e7c064d98"
+
+[[node]]
+name = "Homestead"
+
+  # Low sun out over the sea, 14 degrees to the left of the camera's axis and
+  # 13 degrees above the horizon. Both numbers were chosen against renders
+  # rather than from taste: further left and the glitter path leaves the frame,
+  # much higher and the water goes matt because Fresnel needs the grazing
+  # angle. Everything camera-facing is therefore three-quarter backlit and the
+  # house reads as a silhouette with a fire in the door — that is the intent,
+  # not an unlit material.
+  [node.components.Environment]
+  sun_direction = [-0.14, 0.23, -0.96]
+  sun_strength = 1.3
+  sun_color = [1.0, 0.80, 0.56]
+  ambient = 0.50
+  sky_zenith = [0.07, 0.09, 0.15]
+  sky_horizon = [0.27, 0.24, 0.23]
+  fog_density = 0.006
+  fog_falloff = 0.05
+
+  # Blowing across the frame, toward -X and slightly toward the camera.
+  # **The one field three systems read**: grass bend, smoke advection
+  # (`wind_response` below) and the tilt of the rain streaks. If they ever
+  # disagree, the CPU and GPU are evaluating different formulas — see the
+  # header.
+  [node.components.Wind]
+  direction_degrees = 165.0
+  speed = 8.0
+  gustiness = 1.5
+  turbulence = 1.2
+  ground_drag = 0.45
+
+  # Heavy, and it never stops — there is no `duration`, because this scene is
+  # a standing shot rather than a dry-down test (`rain_overhang.loom` owns
+  # that). 12 mm/h is well past `loom_rain::SOAKING_RATE` (2.0), so the
+  # wetness equilibrium is 1.0 and every exposed surface is as wet as it can
+  # get; the rate is chosen for how many streaks are drawn, which is the other
+  # question the same unit answers.
+  [node.components.Rain]
+  intensity = 12.0
+
+[[node]]
+name = "Ground"
+parent = "Homestead"
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.375
+  chunks = [4, 2, 4]
+
+  # The sea floor, top at y = 2 — six metres under the still-water line, which
+  # is deeper than anything that reads depth. `shore.loom` states that rule and
+  # the reason: the shoaling taper saturates at `attenuation_depth` (4 m) and
+  # the shallow tint at `WATER_TINT_DEPTH` (5 m), so a shallower floor draws the
+  # grid's own boundary as a hard rectangle in the sea. It runs past the
+  # volume's edge on purpose — beyond it there is no terrain, depth is the
+  # sentinel, and the water draws itself as bottomless open ocean.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [24.0, 1.0, 24.0]
+  half_extents = [26.0, 1.0, 26.0]
+  mode = "union"
+
+  # The island. A sphere, because its flank passes through every angle, so the
+  # water line and the grass's slope cutoff both land where the terrain puts
+  # them rather than on a seam somebody authored. Centred 18.7 m down with
+  # radius 29.7: summit y = 11, water line at r = 13 (a 26 m island), base at
+  # r = 21.3 — which is what has to fit inside a 48 m volume with a margin, and
+  # is the constraint that fixes every other number in this file.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [24.0, -18.7, 24.0]
+  radius = 29.7
+  mode = "union"
+
+  # The channel, cut from the summit out to sea along -Z. Its bed descends from
+  # y = 6.4 to y = 1.4, and THAT descent is the entire reason there is a
+  # current: flow direction is the bed's gradient and a flat bed has none.
+  #
+  # **A straight chord under a convex dome is the trap.** The dome falls away
+  # faster than the axis does, so a radius that clears the surface at both ends
+  # can still pass *below* it in the middle — and then the cut is a tunnel, not
+  # a channel. Here the worst clearance is at z = 17.4, where the ground is
+  # 1.61 m above the axis, so anything over that radius surfaces along the whole
+  # run. 4.2 m is far past it and is chosen for width: a narrower cut gave a
+  # six-metre slot with vertical walls that filled the frame, and widening it
+  # is what let the grass reach down the banks.
+  [[node.components.VoxelVolume.ops]]
+  kind = "capsule"
+  a = [24.0, 10.6, 26.0]
+  b = [24.0, 5.6, 4.0]
+  radius = 4.2
+  mode = "subtract"
+
+  # One scoop out of the west bank, so the rim is not a smooth machined arc for
+  # its whole length. Bigger rocks were tried as `union` spheres and read as
+  # wet black domes: a sphere under a water film reflects the sky, and at this
+  # albedo that is the shiniest thing in the frame. Subtracting is safe;
+  # adding is not.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [19.6, 10.6, 24.5]
+  radius = 2.6
+  mode = "subtract"
+
+  # --- the house, on the +X bank -------------------------------------------
+
+  # The terrace, top at y = 9.9. **Deep (bottom y = 3.5) and only just proud of
+  # the ground**: the depth is so it stays grounded where it overhangs the
+  # channel, and the 9.9 is because at 10.5 its retaining face stood a metre
+  # clear of the hill and read as a sheet of wet white card in the middle of
+  # the shot. Lower it and it buries; raise it and the face comes back.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [32.0, 6.7, 16.5]
+  half_extents = [3.0, 3.2, 3.5]
+  mode = "union"
+
+  # Walls and roof, 0.8 m — a hair over two voxels at 0.375 m. **Two, not one,
+  # for the reason `rain_overhang.loom` gives**: S3 seals a one-voxel roof and
+  # that is already tested, so nothing here should sit on the limit. The shelter
+  # assertion at the top of this file is what would go quietly soft if it did.
+  # Wall height 2.8 m, floor 9.9 to eaves 12.7.
+  #
+  # Back wall (-Z).
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [31.75, 11.3, 13.9]
+  half_extents = [2.75, 1.4, 0.4]
+  mode = "union"
+
+  # Left wall (-X).
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [29.4, 11.3, 15.75]
+  half_extents = [0.4, 1.4, 2.0]
+  mode = "union"
+
+  # Right wall (+X).
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [34.1, 11.3, 15.75]
+  half_extents = [0.4, 1.4, 2.0]
+  mode = "union"
+
+  # Front wall (+Z), facing the camera.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [31.75, 11.3, 17.35]
+  half_extents = [2.75, 1.4, 0.4]
+  mode = "union"
+
+  # Roof.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [31.75, 13.05, 16.0]
+  half_extents = [3.4, 0.4, 2.9]
+  mode = "union"
+
+  # The doorway, punched through the front wall — 1.4 m wide, 1.8 m tall, and
+  # the only opening. It faces the camera so the fire outside it is the frame's
+  # one warm light. The interior behind it is where the `rain@...rate < 0.05`
+  # assertion is taken.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [31.2, 10.8, 17.35]
+  half_extents = [0.7, 0.9, 0.7]
+  mode = "subtract"
+
+  [node.components.Material]
+  albedo = [0.15, 0.145, 0.105]
+  roughness = 0.95
+
+[[node]]
+name = "Water"
+parent = "Homestead"
+
+  # **The scene's only water body, and it is both the river and the ocean.**
+  # See the header. `kind` is a label — nothing in the renderer or the physics
+  # branches on it; the only code that reads it is `loom water`, which echoes
+  # it back. This one is a river that happens to reach the sea.
+  [node.components.WaterBody]
+  kind = "river"
+  surface_height = 8.0
+  density = 1025.0
+  drag = 60.0
+
+  # The only thing authored about the current. Where it goes is the ground's
+  # business. Set this to 0.0 and the two `loom water --at` readings in the
+  # header collapse to zero while the ocean is unchanged, which is the cheapest
+  # falsification of the claim that one body is doing two jobs.
+  [node.components.WaterBody.flow]
+  speed = 2.5
+
+  # Swell running onshore, toward +Z. Four waves with no common factor, longest
+  # first, so the sum does not repeat on a visible grid; nothing shorter than
+  # 4.7 m because the LOD rings stop resolving it (ADR 0012, and `ocean.loom`
+  # explains the number). `attenuation_depth = 4` is shallower than the 6 m sea
+  # floor, so the swell arrives at the beach flattened and the creek — 2 to 5 m
+  # deep — is nearly still while the open sea is not.
+  [node.components.WaterBody.waves]
+  attenuation_depth = 4.0
+  max_height = 1.3
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 22.0
+  amplitude = 0.62
+  steepness = 0.35
+  direction = [0.15, 1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 13.0
+  amplitude = 0.34
+  steepness = 0.45
+  direction = [-0.25, 1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 8.0
+  amplitude = 0.19
+  steepness = 0.5
+  direction = [0.45, 1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 4.7
+  amplitude = 0.09
+  steepness = 0.55
+  direction = [-0.15, 1.0]
+  speed_scale = 1.0
+
+# Three fields, each a rectangle that stays above the water line and off the
+# river. `loom_grass` does not know where the sea is — see the header — so this
+# is the only thing keeping blades out of it. **Check the corners** if you move
+# one: the island's water line is a circle of radius 13 about [24, ., 24], and
+# a rectangle's corner is the bit that escapes it.
+#
+# `slope_cutoff = 0.45` rather than the 0.7 default so the blades run down the
+# banks. At 0.7 they stopped in a shaved line at the rim and the wet bank below
+# read as poured concrete.
+
+[[node]]
+name = "GrassWest"
+parent = "Homestead"
+transform = { pos = [16.75, 0.0, 23.0] }
+
+  [node.components.Grass]
+  half_extent = [3.4, 6.0]
+  slope_cutoff = 0.45
+  density = 150.0
+  height = 0.42
+  width = 0.020
+  clump_facing = 0.75
+  clump_colour = 0.4
+
+  [node.components.Material]
+  albedo = [0.27, 0.40, 0.13]
+  roughness = 0.75
+
+[[node]]
+name = "GrassEast"
+parent = "Homestead"
+transform = { pos = [30.75, 0.0, 25.5] }
+
+  [node.components.Grass]
+  half_extent = [4.25, 4.5]
+  slope_cutoff = 0.45
+  density = 150.0
+  height = 0.42
+  width = 0.020
+  clump_facing = 0.75
+  clump_colour = 0.4
+
+  [node.components.Material]
+  albedo = [0.27, 0.40, 0.13]
+  roughness = 0.75
+
+[[node]]
+name = "GrassNear"
+parent = "Homestead"
+transform = { pos = [26.0, 0.0, 32.15] }
+
+  [node.components.Grass]
+  half_extent = [4.5, 2.35]
+  slope_cutoff = 0.45
+  density = 150.0
+  height = 0.42
+  width = 0.020
+  clump_facing = 0.75
+  clump_colour = 0.4
+
+  [node.components.Material]
+  albedo = [0.27, 0.40, 0.13]
+  roughness = 0.75
+
+# The fire pit, on the terrace a metre outside the door. **Outside on purpose**:
+# under the eaves the plume would climb straight into the roof, and particles do
+# not collide with terrain.
+
+[[node]]
+name = "FirePit"
+parent = "Homestead"
+transform = { pos = [31.2, 9.95, 18.8], scale = [0.55, 0.14, 0.55] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.10, 0.08, 0.07]
+  roughness = 0.9
+
+# ---------------------------------------------------------------------------
+# ADDITIVE. Overlapping alpha-blended flames darken each other into grey-brown
+# mud; additive ones brighten where they pile up, which is what fire does. The
+# alpha is low for the reason `explosion.loom` gives — additive light
+# accumulates, and at 0.9 a hundred sprites saturate into a flat white dome
+# that reads as a lamp.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Fire"
+parent = "Homestead"
+transform = { pos = [31.2, 10.1, 18.8] }
+
+  [node.components.ParticleEmitter]
+  rate = 170.0
+  lifetime = 0.6
+  lifetime_jitter = 0.4
+  speed = 2.4
+  spread_degrees = 22.0
+  radius = 0.18
+  gravity = 3.2
+  drag = 2.2
+  turbulence = 2.6
+  turbulence_scale = 0.8
+  wind_response = 1.2
+  size = [0.40, 1.05]
+  color_start = [1.0, 0.80, 0.36]
+  color_end = [0.72, 0.16, 0.03]
+  alpha = [0.3, 0.0]
+  additive = true
+  seed = 5501
+
+# ---------------------------------------------------------------------------
+# ALPHA, sorted, because smoke occludes. `wind_response = 4.0` matches the air
+# in about a quarter of a second, which is what smoke does; the fire above is
+# 1.2 because a flame is anchored to its fuel and only leans. Short-lived on
+# purpose: at `lifetime = 3.4` the plume crossed the whole frame as a pale band
+# and washed out the sea behind it.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Smoke"
+parent = "Homestead"
+transform = { pos = [31.2, 10.8, 18.8] }
+
+  [node.components.ParticleEmitter]
+  rate = 40.0
+  lifetime = 2.0
+  lifetime_jitter = 0.4
+  speed = 1.5
+  spread_degrees = 24.0
+  radius = 0.28
+  gravity = 1.5
+  drag = 0.9
+  turbulence = 1.6
+  turbulence_scale = 0.3
+  wind_response = 4.0
+  size = [0.45, 2.4]
+  color_start = [0.16, 0.14, 0.13]
+  color_end = [0.42, 0.42, 0.45]
+  alpha = [0.38, 0.0]
+  seed = 8837
+
+# The fire's light. Additive particles are not a light source — they brighten
+# their own pixels and nothing else — so without this the doorway and the wall
+# beside it stay as dark as the rest of the backlit house. 90 rather than the
+# 300 `explosion.loom` uses: this one is two metres from a wall, not seven.
+
+[[node]]
+name = "Hearth"
+parent = "Homestead"
+transform = { pos = [31.2, 10.6, 18.8] }
+
+  [node.components.Light]
+  intensity = 90.0
+  color = [1.0, 0.55, 0.20]
+
+# A post standing in the creek. Its whole job is to have a known silhouette for
+# the water to move against: a still frame cannot tell a current from a pond,
+# and `cargo xtask flythrough` is where that shows. Its base is 2.2 m under the
+# surface, so it looks like it starts at the water line — that is water, not a
+# floating box. It is driven 0.4 m into the bed rather than resting on it,
+# because the bed here is a voxel surface and a change of resolution moves it.
+
+[[node]]
+name = "MooringPost"
+parent = "Homestead"
+transform = { pos = [23.0, 7.7, 25.0], scale = [0.16, 1.9, 0.16] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.16, 0.13, 0.10]
+  roughness = 0.85
+
+# **The shot. Do not move it** — the whole point of this file is that the same
+# frame is re-rendered as the engine changes, so a camera tweak throws away
+# every comparison against every earlier reference.
+#
+# Seven metres above the back of the island, looking down the channel: the
+# creek runs away from the eye into the sea, the house sits on the right bank
+# with its fire, the grass is foreground and mid-ground, and the horizon is the
+# open ocean the same water body draws. Earlier cameras sat lower and closer to
+# the rim and the two banks filled the frame as black and white wedges; this
+# one is far enough back that they are the lower third.
+
+[[node]]
+name = "Camera"
+parent = "Homestead"
+transform = { pos = [23.5, 15.0, 37.5], rot_euler = [-11.0, -6.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 50.0

@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 24] = [
+const SCENES: [&str; 26] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -81,12 +81,23 @@ const SCENES: [&str; 24] = [
     // rather than tested against. None of the twenty-three above records a
     // single one of those transitions.
     "assets/test/rain_overhang.loom",
+    // The only scene whose rain is stopped by geometry that is not in a voxel
+    // volume — a mesh deck with a box collider. It is the only exercise of the
+    // collision-field bake and upload path, and of the indirect splash draw
+    // over a surface that is not the ground.
+    "assets/test/rain_gantry.loom",
     "assets/test/camera.loom",
     "assets/test/walker.loom",
     "assets/test/explosion.loom",
     "assets/test/range.loom",
     "assets/test/turret_range.loom",
     "assets/games/proving_ground.loom",
+    // The only scene that runs several systems *at once*: voxel terrain, one
+    // water body serving both a current and open ocean, three grass fields,
+    // rain with wetness and shelter, additive and alpha particles, wind and an
+    // authored environment, in one frame. Everything above it isolates one
+    // path; this is the one that catches two paths interfering.
+    "assets/test/homestead.loom",
 ];
 
 /// How many frames a windowed run draws before shutting itself down. Enough to
@@ -123,7 +134,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 15] = [
+const GOLDEN: [(&str, &str, &[&str]); 17] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -223,6 +234,37 @@ const GOLDEN: [(&str, &str, &[&str]); 15] = [
     // left so the impacts stop where the wetness does. Stubbing either half
     // moves 0.47% and 1.01% of pixels here.
     ("rain_impact", "assets/test/rain_impact.loom", &["--sim", "1800"]),
+    // **Rain under a MESH roof, which no other scene here can see.** Both rain
+    // scenes above shelter with a voxel slab, and a voxel slab is what the
+    // baked terrain height field could already express — they passed for two
+    // slices with no collision in the engine at all. The gantry is a box mesh
+    // with a `BoxCollider` and nothing else, so the only thing that stops a
+    // drop under it is `loom_rain::collide`'s bake of the collision world and
+    // `rain_sim.slang`'s march through it (ADR 0015, and ADR 0014's trigger 2).
+    //
+    // It carries the splashes' *collision* half too: every ring on this apron
+    // is an impact the simulation resolved, and there are none under the deck
+    // for the same reason there are no streaks.
+    //
+    // `--sim 600` is ten seconds — well past the drop field's four-second
+    // settling time, with the apron wet and the strip under the deck dry.
+    ("rain_gantry", "assets/test/rain_gantry.loom", &["--sim", "600"]),
+    // **The changelog shot, and it is deliberately not a normal gate.** Every
+    // reference above protects one rendering path and moves only when that
+    // path changes. This one touches terrain, water, current, grass, rain,
+    // wetness, shelter, both particle blend modes, wind and the environment at
+    // once, so it moves whenever *anything* does — and that churn is the
+    // point, not a defect. Its value is that each re-bless is a readable line
+    // in `MANIFEST.txt` next to a visible diff, which is the only artefact in
+    // this repo that shows what a change did to a whole frame rather than to
+    // one system. **Do not remove it to quiet the re-blessing.** The header of
+    // the scene file says the same thing at more length.
+    //
+    // `--sim 1800` for the reason `rain_overhang` uses it: wetness is slow,
+    // and thirty seconds in is the first frame where the film has reached its
+    // ceiling and the soak is half way. It also puts the waves and both
+    // plumes well past their opening transient.
+    ("homestead", "assets/test/homestead.loom", &["--sim", "1800"]),
 ];
 
 /// Every reference renders at this size.
@@ -782,6 +824,11 @@ fn validate() -> std::process::ExitCode {
             // view. It is also the third slice in a row where the window could
             // have quietly got a simplified version of the offscreen path.
             "assets/test/rain_overhang.loom",
+    // The only scene whose rain is stopped by geometry that is not in a voxel
+    // volume — a mesh deck with a box collider. It is the only exercise of the
+    // collision-field bake and upload path, and of the indirect splash draw
+    // over a surface that is not the ground.
+    "assets/test/rain_gantry.loom",
         ] {
             if !root.join(scene).exists() {
                 continue;

@@ -51,9 +51,12 @@ USAGE:
         it has one; --yaw/--pitch overrides it and orbits the bounds instead.
 
     loom render <scene.loom> --frames <n> [--spin <deg>] [--step <ticks>]
-        Dump a numbered frame sequence along a deterministic orbit, advancing
+                             [--dolly <m>]
+        Dump a numbered frame sequence along a deterministic path, advancing
         the simulation between frames. Motion artifacts — shimmer, popping,
-        unison sway — are invisible in a still.
+        unison sway — are invisible in a still. --spin turns the camera in
+        place; --dolly walks it forward, which is the only one of the two that
+        produces parallax.
 
     loom compare <a.png> <b.png> [--channel <0-255>] [--fraction <0-1>] [--worst <0-255>]
         Pixel-compare two renders. Exit 1 if they differ beyond tolerance.
@@ -123,6 +126,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
         &[
             ("--out", true), ("--size", true), ("--sim", true), ("--yaw", true),
             ("--pitch", true), ("--frames", true), ("--spin", true), ("--step", true),
+            ("--dolly", true),
         ],
     ),
     (
@@ -518,13 +522,15 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     }
 
     let objects = world_to_objects(&world, &library, &material_library);
-    let mut particles = particles::simulate(
+    let particles = particles::simulate(
         &world,
         &weather,
         flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()),
         &fired,
         &splashed,
     );
+    // `--sim` as a tick count, which is what the rain simulation's clock is.
+    let sim_ticks = flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
     let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok());
     let pitch = flag(args, "--pitch").and_then(|v| v.parse::<f32>().ok());
     let frames = flag(args, "--frames").and_then(|v| v.parse::<u32>().ok()).filter(|n| *n > 0);
@@ -533,6 +539,21 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // second each — enough for a shimmer or a pop to show up between two.
     let spin = flag(args, "--spin").and_then(|v| v.parse::<f32>().ok()).unwrap_or(6.0);
     let step = flag(args, "--step").and_then(|v| v.parse::<u32>().ok()).unwrap_or(12);
+    // Metres the camera WALKS forward between frames, along its own heading and
+    // level with the ground.
+    //
+    // **Translation, which `--spin` deliberately is not.** A pan is a pure
+    // rotation about a fixed eye, chosen because it produces no parallax and so
+    // lets `loom flicker` see twinkle rather than motion. That makes it the
+    // wrong instrument for anything whose artifact IS parallax — a
+    // camera-locked volume, a density front travelling with the eye, a field
+    // that reads as a flat sheet sliding. Rain is all three, and the human's
+    // report was specifically "when you move".
+    //
+    // Level rather than along the view vector, because that is what walking is:
+    // a camera tilted down at the ground must not burrow into it over sixteen
+    // frames.
+    let dolly = flag(args, "--dolly").and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
     // An authored `Camera` is the view, unless the caller asked for an angle.
     //
     // Both halves matter. A scene that places a camera means it, and rendering
@@ -576,15 +597,9 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     submerge_eye(&mut environment, &world, &weather, terrain.as_ref(), camera.eye, wind_seconds);
     let rain_drops =
         rain_at_eye(&mut environment, rain.as_ref(), &weather, camera.eye, wind_seconds);
-    // Where that rain is landing. **After the camera**, because impacts are
-    // only drawn near the eye — and after `rain_at_eye`, because the rate they
-    // are gated by is the one it stamped into the environment.
-    particles.extend(particles::rain_splashes(
-        &environment,
-        terrain.as_ref(),
-        camera.eye.to_array(),
-        wind_seconds,
-    ));
+    // Where the rain is landing is no longer decided here. Splashes are
+    // collisions the drop simulation resolved on the GPU, appended to a ring
+    // and drawn indirectly — ADR 0015, and ADR 0014's trigger 3.
     let result = (|| -> Result<(String, bool), String> {
         let instance = Instance::new(c"loom").map_err(|e| e.to_string())?;
         let device = Device::new(&instance).map_err(|e| e.to_string())?;
@@ -621,6 +636,19 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                 .map_err(|e| e.to_string())?;
         }
         renderer.set_rain(rain_drops);
+        // **The drop simulation's clock.** A fresh renderer seeds at tick zero
+        // and advances to here in one dispatch, so a still at `--sim N` is
+        // always seed-then-advance-N and reproduces run to run (ADR 0015).
+        renderer.set_rain_tick(u64::from(sim_ticks));
+        // And the world those drops collide with, baked once. This is what
+        // fires ADR 0014's trigger 2: the field is the collision world — voxel
+        // volumes unioned with static box colliders — so a mesh roof stops rain
+        // where the baked height field never could.
+        if let Some(field) = rain_collision_field(&scene, &world) {
+            renderer
+                .set_rain_field(&field.sdf, field.dims, field.origin, field.spacing)
+                .map_err(|e| e.to_string())?;
+        }
 
         match frames {
             // The still. One image, the scene as `--sim` left it.
@@ -654,7 +682,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     }
                     let objects = world_to_objects(&world, &library, &material_library);
                     #[allow(clippy::cast_possible_truncation)]
-                    let mut particles = particles::simulate(
+                    let particles = particles::simulate(
                         &world,
                         &weather,
                         Some(elapsed as u32),
@@ -716,17 +744,27 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     let turn = spin * index as f32;
                     let camera = match world.active_camera().filter(|_| !orbiting) {
                         Some(view) => {
-                            let eye = Vec3::from_array(view.eye);
-                            let ahead = Vec3::from_array(view.target) - eye;
+                            let start = Vec3::from_array(view.eye);
+                            let ahead = Vec3::from_array(view.target) - start;
                             let (sin, cos) = turn.to_radians().sin_cos();
+                            let facing = Vec3::new(
+                                ahead.x.mul_add(cos, ahead.z * sin),
+                                ahead.y,
+                                ahead.z.mul_add(cos, -(ahead.x * sin)),
+                            );
+                            // The walk, along the heading and level with the
+                            // ground. Zero by default, so every existing
+                            // fly-through is the pure pan it was.
+                            let level = Vec3::new(facing.x, 0.0, facing.z);
+                            let step = if level.length_squared() > 1e-6 {
+                                level.normalize() * (dolly * index as f32)
+                            } else {
+                                Vec3::ZERO
+                            };
+                            let eye = start + step;
                             Camera {
                                 eye,
-                                target: eye
-                                    + Vec3::new(
-                                        ahead.x.mul_add(cos, ahead.z * sin),
-                                        ahead.y,
-                                        ahead.z.mul_add(cos, -(ahead.x * sin)),
-                                    ),
+                                target: eye + facing,
                                 fov_y_degrees: view.fov_y_degrees,
                             }
                         }
@@ -762,14 +800,16 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                         moment,
                     );
                     renderer.set_rain(drops);
-                    // And the impacts, which move with both: the camera has
-                    // turned and the rain has advanced.
-                    particles.extend(particles::rain_splashes(
-                        &renderer.environment,
-                        terrain.as_ref(),
-                        camera.eye.to_array(),
-                        moment,
-                    ));
+                    // **And the drop simulation's clock, which is what makes a
+                    // fly-through show rain that is falling rather than rain
+                    // that has been re-hashed.** It advances by the difference
+                    // since the last frame, so the sixteen frames of a
+                    // fly-through are sixteen consecutive states of one
+                    // simulation.
+                    // `--sim` first, then the frames: the same clock
+                    // `moment` above is built from, so the rain and the wind
+                    // cannot be looking at different instants.
+                    renderer.set_rain_tick(u64::from(sim_ticks) + elapsed);
 
                     renderer
                         .render_to_png(
@@ -1040,6 +1080,65 @@ pub(crate) fn scene_volume(scene: &Scene) -> Option<(loom_voxel::Volume, [f32; 3
         let (volume, ()) = build_volume(node.components.get("VoxelVolume")?)?;
         Some((volume, world_translation(scene, node)))
     })
+}
+
+/// The world raindrops collide with, or `None` for a scene with no rain and
+/// nothing to hit.
+///
+/// **The bridge for ADR 0015, and the same shape as `scene_terrain_field`.**
+/// The renderer never learns what a voxel or a collider is; it is handed a
+/// block of `i8` and a frame. What crosses over is the *collision world* —
+/// every voxel volume unioned with every static box collider — because ADR
+/// 0014's trigger 2 is geometry that is not in the voxel volume, and a bake of
+/// the voxels alone would carry drops onto a better representation of exactly
+/// the same world.
+///
+/// The rule is one sentence: **rain stops where a body would stop.** It is the
+/// same rule audio's `openness` follows when it casts against the collision
+/// world rather than the voxels, and it means a mesh roof shelters rain exactly
+/// when it also blocks a bullet.
+pub(crate) fn rain_collision_field(
+    scene: &Scene,
+    world: &World,
+) -> Option<loom_rain::collide::Field> {
+    weather::rain_of(scene)?;
+    let volume = scene_volume(scene);
+    let volumes: Vec<(&loom_voxel::Volume, [f32; 3])> = volume
+        .as_ref()
+        .map(|(v, offset)| (v, *offset))
+        .into_iter()
+        .collect();
+
+    let boxes: Vec<loom_rain::collide::Solid> = world
+        .entities()
+        .iter()
+        .filter_map(|entity| {
+            let half = world.collider_half_extents(*entity)?;
+            let global = world.global_transform(*entity)?;
+            let matrix = Mat4::from_cols_array(&global.matrix);
+            let (scale, _, translation) = matrix.to_scale_rotation_translation();
+            // **Rotation is dropped, and the box is grown to cover it.**
+            // `loom_rain::collide` rasterises axis-aligned boxes; a rotated one
+            // would need its own shape. A rotated collider is rare and the
+            // conservative cover errs toward *more* shelter, which is the safe
+            // direction — a drop stopped a little early is invisible, a drop
+            // falling through a roof is the bug this exists to fix.
+            //
+            // `ponytail:` exact when the collider is axis-aligned, which every
+            // one in the repository is. Add an oriented box to
+            // `loom_rain::collide::Shape` if a scene ever needs one.
+            Some(loom_rain::collide::Solid {
+                center: translation.to_array(),
+                half_extents: [
+                    half[0] * scale.x.abs(),
+                    half[1] * scale.y.abs(),
+                    half[2] * scale.z.abs(),
+                ],
+            })
+        })
+        .collect();
+
+    loom_rain::collide::bake(&volumes, &boxes)
 }
 
 /// The ground under a whole voxel volume, for water to take its depth from.
@@ -1762,12 +1861,12 @@ pub(crate) fn submerge_eye(
 
 /// Drops the layer draws, which is one per cell of `scene.slang`'s rain grid.
 ///
-/// **`RAIN_CELLS` there, multiplied out — and unlike the count this replaced it
-/// is not free to be any number.** A drop's slot index decomposes into a cell
-/// of a 64 x 32 x 64 block by shifting and masking, so a short draw would leave
-/// out a *slab* of the block rather than thinning the field. The rate scales
-/// the layer inside the shader instead, where it can drop a cell here and a
-/// cell there.
+/// **`RAIN_DROPS` in `include/rain.slang`, and it is not free to be any
+/// number**: it is the length of the buffer `rain_sim.slang` simulates and the
+/// vertex shader indexes with no bounds test. A short draw would leave a slab
+/// of the buffer undrawn rather than thin the field; a long one reads past the
+/// end through a device address, which is a hang. The rate thins the layer
+/// inside the shader instead, where a drop keeps or drops *itself*.
 ///
 /// The extent it covers is a calibration knob — real rain at 8 mm/h has
 /// millions of drops per block and no renderer draws them. What this buys is
@@ -3630,40 +3729,33 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         assert_eq!(code, 0, "the sheen should go long before the stain: {out}");
     }
 
-    /// **The draw count and the shader's grid are one number, and this is the
-    /// only place they can be compared.** A drop's slot index is shifted and
-    /// masked into a cell of `RAIN_CELLS`, so `MAX_RAIN_DROPS` must be exactly
-    /// that product: too few and a whole slab of the block never gets a drop,
-    /// too many and cells are drawn twice with the streaks exactly coincident.
-    /// Neither errors, neither fails validation, and both look like a tuning
-    /// problem rather than a bug — which is the same argument
-    /// `loom_field::noise` makes for grepping its own Slang half.
+    /// **The draw count and the simulation's drop count are one number, and
+    /// this is the only place they can be compared.** The vertex shader indexes
+    /// `environment.rainDrops[vertexID / 6]` with no bounds test — a device
+    /// address read past the end is a hang, not a validation message — and the
+    /// compute shader sizes its own bounds check from its own copy. Neither
+    /// side sees the other, and the failure of a mismatch looks like a driver
+    /// fault rather than an off-by-one.
+    ///
+    /// The same argument `loom_field::noise` makes for grepping its own Slang
+    /// half, and the shape this test had before ADR 0015 for the closed-form
+    /// grid it replaced.
     #[test]
-    fn the_draw_count_matches_the_shaders_rain_grid() {
-        let slang = std::fs::read_to_string("../../assets/shaders/scene.slang")
-            .expect("scene.slang is readable");
+    fn the_draw_count_matches_the_shaders_drop_count() {
+        let slang = std::fs::read_to_string("../../assets/shaders/include/rain.slang")
+            .expect("the shared rain header is readable");
         let decl = slang
-            .split("static const int3 RAIN_CELLS = int3(")
+            .split("static const uint RAIN_DROPS = ")
             .nth(1)
-            .and_then(|rest| rest.split(')').next())
-            .expect("scene.slang declares RAIN_CELLS");
+            .and_then(|rest| rest.split('u').next())
+            .expect("include/rain.slang declares RAIN_DROPS");
+        let drops: u32 = decl.trim().parse().expect("RAIN_DROPS is an integer");
 
-        let cells: Vec<u32> = decl
-            .split(',')
-            .map(|n| n.trim().parse().expect("RAIN_CELLS is three integers"))
-            .collect();
-
-        assert_eq!(cells.len(), 3, "RAIN_CELLS is `{decl}`");
-        // Powers of two, because the wrap is `& (n - 1)` — see the constant's
-        // own comment for the bug that rule exists to have already happened.
-        for n in &cells {
-            assert!(n.is_power_of_two(), "RAIN_CELLS `{decl}` is not powers of two");
-        }
-        assert_eq!(
-            MAX_RAIN_DROPS,
-            cells.iter().product::<u32>(),
-            "MAX_RAIN_DROPS does not cover RAIN_CELLS `{decl}`"
-        );
+        assert_eq!(MAX_RAIN_DROPS, drops, "MAX_RAIN_DROPS does not match RAIN_DROPS `{decl}`");
+        // The dispatch is 64 wide, and a count that is not a multiple of it is
+        // not wrong — the shader discards the tail — but it is a smell worth
+        // pinning, because the tail is the one part no scene exercises.
+        assert_eq!(drops % 64, 0, "RAIN_DROPS `{decl}` is not a whole number of workgroups");
     }
 
     /// **The streak layer is told what the SKY is doing, not what the camera

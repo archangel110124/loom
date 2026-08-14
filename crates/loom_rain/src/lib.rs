@@ -17,6 +17,8 @@
 //! collision world; this marches the voxel volume, and a scene with no voxels
 //! would read as wide open to one and correctly enclosed to the other.
 
+pub mod collide;
+
 use loom_field::noise;
 use loom_field::wind::Wind;
 use loom_scene::components::Rain;

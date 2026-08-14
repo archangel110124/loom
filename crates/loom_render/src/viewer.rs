@@ -17,7 +17,7 @@ use crate::renderer::{
     create_pipeline, create_view, pack_objects, pipeline_cache_path, set_viewport,
     view_projection, write_slice,
 };
-use loom_render_graph::{Access, RenderGraph};
+use loom_render_graph::{Access, GpuTimers, RenderGraph};
 use crate::{Device, Instance};
 use gpu_allocator::vulkan::{Allocation, Allocator, AllocatorCreateDesc};
 
@@ -93,7 +93,25 @@ pub struct Viewer {
     grass_count: u32,
     /// The rain streaks. Additive, order-independent, in a pass of their own
     /// after the depth buffer is finished with.
+    /// Per-pass GPU timestamps, when `LOOM_GPU_TIMING` asks for them.
+    ///
+    /// **The window had none, and that was a real gap rather than an
+    /// oversight nobody noticed.** Every timing number this project has quoted
+    /// came from the offscreen path, which pays for a readback and a PNG
+    /// encode the window does not and skips the swapchain and the UI the window
+    /// does — so "rain costs 0.03 ms" was, strictly, a claim about headless
+    /// rendering. Resolved after the same fence the offscreen one uses.
+    timers: Option<GpuTimers>,
+    print_timing: bool,
     rain_pipeline: vk::Pipeline,
+    /// The splashes, drawn indirectly from a count only the GPU knows.
+    rain_splash_pipeline: vk::Pipeline,
+    /// The drop buffer, the collision field and the compute pipelines that
+    /// advance them — the same [`crate::rain::RainSim`] the offscreen path
+    /// owns, so the two render the same simulation rather than two of them.
+    rain_sim: crate::rain::RainSim,
+    /// The tick the drop simulation should stand at this frame.
+    rain_tick: u64,
     /// Drops this frame — see [`Viewer::set_rain`]. There is no buffer beside
     /// it: a drop is a pure function of its index and the clock.
     rain_drops: u32,
@@ -316,7 +334,62 @@ impl Viewer {
         // parameterised: rain draws into a single-sample target in both paths,
         // so the windowed and headless versions are the same pipeline state.
         let rain_pipeline =
-            crate::renderer::create_rain_pipeline(&raw, pipeline_layout, pipeline_cache, format)?;
+            crate::renderer::create_rain_pipeline(
+                &raw,
+                pipeline_layout,
+                pipeline_cache,
+                format,
+                c"rainVertexMain",
+                c"rainFragmentMain",
+            )?;
+        let rain_splash_pipeline = crate::renderer::create_rain_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            format,
+            c"rainSplashVertexMain",
+            c"rainSplashFragmentMain",
+        )?;
+        let rain_sim = crate::rain::RainSim::new(
+            instance.handle(),
+            device,
+            &mut allocator,
+            pipeline_cache,
+            crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
+        )?;
+
+        // GPU timing, on the same environment variable and with the same
+        // queried-not-assumed care as the offscreen path — `timestampValidBits`
+        // is per queue family and may be zero.
+        let print_timing = crate::renderer::timing_requested();
+        let timers = if print_timing {
+            // SAFETY: `physical` came from this instance.
+            let limits = unsafe {
+                instance.handle().get_physical_device_properties(device.physical())
+            }
+            .limits;
+            // SAFETY: same.
+            let families = unsafe {
+                instance
+                    .handle()
+                    .get_physical_device_queue_family_properties(device.physical())
+            };
+            let valid_bits = families
+                .get(device.queue_family() as usize)
+                .map_or(0, |f| f.timestamp_valid_bits);
+            let timers = GpuTimers::new(
+                &raw,
+                limits.timestamp_period,
+                valid_bits,
+                crate::renderer::TIMED_PASSES,
+            )?;
+            if let Some(t) = &timers {
+                names.set(t.pool(), "loom.viewer_timestamps");
+            }
+            timers
+        } else {
+            None
+        };
 
         // Mirrors the offscreen path's ceiling. Sized once so a frame never
         // allocates, which in a live viewer would show up as a hitch.
@@ -448,7 +521,12 @@ impl Viewer {
             grass_pipeline,
             water_pipeline,
             grass_count: 0,
+            timers,
+            print_timing,
             rain_pipeline,
+            rain_splash_pipeline,
+            rain_sim,
+            rain_tick: 0,
             rain_drops: 0,
             scene_depth,
             rt_positions,
@@ -534,7 +612,51 @@ impl Viewer {
     /// How many rain drops to draw. Mirrors [`crate::Renderer::set_rain`] —
     /// same count, same shader, same pass.
     pub fn set_rain(&mut self, drops: u32) {
-        self.rain_drops = drops;
+        self.rain_drops = drops.min(crate::rain::DROPS);
+    }
+
+    /// The simulation tick this frame stands for. Mirrors
+    /// [`crate::Renderer::set_rain_tick`], including that going backwards
+    /// re-seeds — which is what a scene reload has to do.
+    pub fn set_rain_tick(&mut self, tick: u64) {
+        if tick < self.rain_tick {
+            self.rain_sim.reset();
+        }
+        self.rain_tick = tick;
+    }
+
+    /// Hand the viewer the world raindrops collide with. Mirrors
+    /// [`crate::Renderer::set_rain_field`].
+    ///
+    /// # Errors
+    /// The driver's, if the image cannot be created or the copy fails.
+    pub fn set_rain_field(
+        &mut self,
+        sdf: &[i8],
+        dims: [usize; 3],
+        origin: [f32; 3],
+        spacing: f32,
+    ) -> Result<(), RenderError> {
+        // SAFETY: called outside a frame, on load and on reload.
+        unsafe { self.device.device_wait_idle() }?;
+        let allocator = self
+            .allocator
+            .as_mut()
+            .ok_or_else(|| RenderError::Allocator("allocator is gone".into()))?;
+        self.rain_sim.set_field(
+            allocator,
+            crate::raytrace::Submit { pool: self.command_pool, queue: self.queue },
+            sdf,
+            dims,
+            origin,
+            spacing,
+        )
+    }
+
+    /// Whether a scene-sized collision field has been uploaded.
+    #[must_use]
+    pub fn has_rain_field(&self) -> bool {
+        self.rain_sim.has_field()
     }
 
     /// Hand the viewer the terrain height grid the water reads.
@@ -748,6 +870,29 @@ impl Viewer {
             d.wait_for_fences(&[self.in_flight], true, u64::MAX)?;
         }
 
+        // After that fence and before this frame resets the pool: the queries
+        // are only guaranteed available once the work that wrote them has
+        // completed, which is exactly what the wait above establishes.
+        if let Some(timers) = self.timers.as_mut() {
+            timers.resolve(&d);
+            if self.print_timing && !timers.times().is_empty() {
+                let table = timers
+                    .times()
+                    .iter()
+                    .map(|(name, ms)| format!("{name} {ms:.3} ms"))
+                    .collect::<Vec<_>>()
+                    .join("  ");
+                let total: f64 = timers.times().iter().map(|(_, ms)| ms).sum();
+                // `graph` rather than `total`, for the reason spelled out in
+                // `renderer.rs`: this is the sum of the graph's passes and not
+                // what a frame costs.
+                eprintln!(
+                    "[loom gpu window] {}x{}  {table}  graph {total:.3} ms",
+                    self.extent.width, self.extent.height,
+                );
+            }
+        }
+
         // SAFETY: the swapchain is live.
         let acquired = unsafe {
             self.swapchain_loader.acquire_next_image(
@@ -851,6 +996,8 @@ impl Viewer {
         // rebuilds cheaply.
         self.environment.terrain = self.terrain_params;
         self.environment.terrain_heights = self.terrain_heights;
+        self.environment.rain_drops = self.rain_sim.drops_address;
+        self.environment.rain_splashes = self.rain_sim.splashes_address;
         write_slice(
             self.environment_alloc
                 .as_ref()
@@ -874,6 +1021,20 @@ impl Viewer {
         // driver keep them for nothing.
         let mut graph = RenderGraph::new();
         let target = graph.import("loom.swapchain_image", image);
+
+        // **The drop simulation, first in the frame**, exactly as offscreen:
+        // it writes buffers the two rain draws read, and the graph is what
+        // orders them.
+        let rain_buffers = (self.rain_drops > 0).then(|| {
+            self.rain_sim.record(
+                &mut graph,
+                self.rain_tick,
+                [self.environment.eye[0], self.environment.eye[1], self.environment.eye[2]],
+                self.environment.rain,
+                self.terrain_params,
+                self.terrain_heights,
+            )
+        });
 
         let extent = self.extent;
         let depth_view = self.depth_view;
@@ -1082,16 +1243,23 @@ impl Viewer {
         //
         // Both are before the AA passes, so both are filtered as before.
         let rain_pipeline = self.rain_pipeline;
-        let rain_drops = self.rain_drops;
+        let rain_splash_pipeline = self.rain_splash_pipeline;
+        let rain_args_buffer = self.rain_sim.args_buffer();
         let rain_depth_set = self.scene_depth.descriptor_set();
-        if rain_drops > 0 {
-            graph.pass(
+        if let Some((drops_id, args_id)) = rain_buffers {
+            let drop_count = crate::rain::DROPS;
+            graph.pass_with(
                 "rain",
                 &[(scene_id, Access::ColorWrite), (depth_id, Access::DepthSample)],
+                &[
+                    (drops_id, loom_render_graph::BufferAccess::VertexRead),
+                    (args_id, loom_render_graph::BufferAccess::IndirectRead),
+                ],
                 move |d, cmd| {
                     // SAFETY: the graph has put the scene target back in
-                    // COLOR_ATTACHMENT_OPTIMAL and the depth image in
-                    // SHADER_READ_ONLY_OPTIMAL.
+                    // COLOR_ATTACHMENT_OPTIMAL, the depth image in
+                    // SHADER_READ_ONLY_OPTIMAL, and both buffers behind a
+                    // barrier against the compute pass that wrote them.
                     unsafe {
                         crate::renderer::begin_overlay_rendering(
                             d,
@@ -1101,7 +1269,6 @@ impl Viewer {
                             extent.height,
                         );
                         set_viewport(d, cmd, extent.width, extent.height);
-                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, rain_pipeline);
                         d.cmd_bind_descriptor_sets(
                             cmd,
                             vk::PipelineBindPoint::GRAPHICS,
@@ -1121,7 +1288,14 @@ impl Viewer {
                             0,
                             push.bytes(),
                         );
-                        d.cmd_draw(cmd, rain_drops * 6, 1, 0, 0);
+                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, rain_pipeline);
+                        d.cmd_draw(cmd, drop_count * 6, 1, 0, 0);
+                        d.cmd_bind_pipeline(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            rain_splash_pipeline,
+                        );
+                        d.cmd_draw_indirect(cmd, rain_args_buffer, 0, 1, 0);
                         d.cmd_end_rendering(cmd);
                     }
                 },
@@ -1198,6 +1372,9 @@ impl Viewer {
             d.begin_command_buffer(cmd, &begin)?;
         }
 
+        if let Some(timers) = self.timers.as_mut() {
+            graph.time(timers);
+        }
         graph.execute(&d, cmd);
 
         // SAFETY: recording is complete.
@@ -1451,7 +1628,14 @@ impl Drop for Viewer {
             }
             self.device.destroy_pipeline(self.grass_pipeline, None);
             self.device.destroy_pipeline(self.water_pipeline, None);
+            if let Some(timers) = self.timers.as_mut() {
+                timers.destroy(&self.device);
+            }
             self.device.destroy_pipeline(self.rain_pipeline, None);
+            self.device.destroy_pipeline(self.rain_splash_pipeline, None);
+            if let Some(allocator) = self.allocator.as_mut() {
+                self.rain_sim.destroy(allocator);
+            }
             self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.terrain_buffer, None);
             if let (Some(allocation), Some(allocator)) =

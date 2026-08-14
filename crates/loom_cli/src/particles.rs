@@ -262,73 +262,20 @@ fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
     }
 }
 
-/// Radius of a crown at the instant of impact, and as it dies, in metres.
-///
-/// Small: a splash is a burst of spray a hand's width across, and a crown the
-/// size of a smoke puff reads as steam rather than as rain landing.
-const CROWN: [f32; 2] = [0.03, 0.09];
-/// Peak brightness of one crown against the sky colour it is lit by.
-const CROWN_ALPHA: f32 = 0.5;
-
-/// Rain impacts, as the crowns the particle pass draws.
-///
-/// **Phase 4 step 4, and it is not a particle *system*.** There is no emitter,
-/// no `System`, no state and nothing to step: `loom_rain::splashes` is a closed
-/// form over the rate and the surface, the same shape of thing `loom_rain::wetness`
-/// is, and this only dresses what it returns. So it costs nothing to skip, it
-/// cannot drift out of step with the rain, and — like the streaks — it is
-/// outside the determinism hash because nothing reads it back.
-///
-/// Lit by the sky and by nothing else, which is the rule the streaks already
-/// follow: a scene authored dark gets dark spray rather than white specks.
-/// Additive for the same reason they are — spray scatters light rather than
-/// blocking it, and additive blending needs no sort.
-pub(crate) fn rain_splashes(
-    env: &loom_render::EnvironmentData,
-    ground: Option<&loom_voxel::heightfield::HeightField>,
-    eye: [f32; 3],
-    seconds: f32,
-) -> Vec<ParticleInstance> {
-    // `env.rain[3]` is the scene's UNSHELTERED rain rate, stamped by
-    // `rain_at_eye`. Reading the `Rain` component again here would be a second
-    // answer to how hard it is raining.
-    //
-    // **Unsheltered is the right input, and where a crown is allowed to land is
-    // decided by where it lands.** `loom_rain::splashes` puts every impact on
-    // the topmost surface of its column, out of the same height field the drops
-    // are culled against — so under a roof the crowns are on the *roof*, never
-    // on the floor beneath it. Gating them by the exposure at the eye instead,
-    // which is what this used to get, thinned the impacts out in the open the
-    // moment the camera stepped under cover.
-    let sky = [
-        f32::midpoint(env.horizon[0], env.zenith[0]),
-        f32::midpoint(env.horizon[1], env.zenith[1]),
-        f32::midpoint(env.horizon[2], env.zenith[2]),
-    ];
-    loom_rain::splashes(env.rain[3], ground, eye, seconds)
-        .iter()
-        .map(|splash| {
-            let t = splash.fraction;
-            let size = CROWN[0] + (CROWN[1] - CROWN[0]) * t;
-            // Brightest the instant it lands and gone by the end, with the
-            // first frame of it faded in — a crown that appears at full
-            // strength pops, and there are hundreds of them.
-            let alpha = CROWN_ALPHA * (1.0 - t) * (1.0 - t) * (t * 8.0).min(1.0);
-            ParticleInstance {
-                // Lifted by its own radius so the quad sits on the surface
-                // rather than half inside it.
-                position: [
-                    splash.position[0],
-                    splash.position[1] + size,
-                    splash.position[2],
-                    // Negative marks additive — see `ParticleInstance`.
-                    -size,
-                ],
-                color: [sky[0], sky[1], sky[2], alpha],
-            }
-        })
-        .collect()
-}
+// **The CPU splash crowns are gone — ADR 0015, trigger 3.**
+//
+// They were a closed form over the rate and the baked height field: a position
+// exposure said a drop *should* have reached, at a rate derived from how open
+// the column was. That is a good approximation of where rain lands on terrain
+// and a wrong one everywhere else — under a mesh, on a sloped face, in the lee
+// of anything, and anywhere the height field flattens an overhang away.
+//
+// A splash is now a collision the drop simulation actually resolved, appended
+// to a GPU ring by `rain_sim.slang` and drawn indirectly. It carries the impact
+// point and the surface normal, neither of which the CPU could know without
+// re-deriving the whole field. `loom_rain::splashes` survives as the CPU
+// answer for anything that needs to *reason* about impacts without a GPU —
+// which nothing currently does, and which is why it has no caller here.
 
 /// Simulate every emitter in the world and return what to draw.
 ///

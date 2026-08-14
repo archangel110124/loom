@@ -573,14 +573,26 @@ impl App {
             Some(f) => viewer.set_terrain(&f.height, f.origin, f.spacing, f.side),
             None => viewer.set_terrain(&[], [0.0; 2], 1.0, 0),
         };
+        // **And the world raindrops collide with, on exactly the same trigger.**
+        // Carving the roof open in the editor lets rain through on the next
+        // frame because the field was re-baked, not because anything told the
+        // rain about it — which is Phase 4's sharpest exit criterion and now
+        // applies to a mesh gantry as well as to a voxel roof.
+        let rain_field = crate::rain_collision_field(&self.view.scene, self.view.world());
+        if let Some(f) = rain_field.as_ref()
+            && let Err(e) = viewer.set_rain_field(&f.sdf, f.dims, f.origin, f.spacing)
+        {
+            crate::log::error(format!("could not upload the rain collision field: {e}"));
+        }
         match result {
             Ok(()) => {
                 self.terrain_uploaded = key;
                 self.terrain = field;
                 // Carving the roof open in the editor lets rain in on the next
-                // frame with no reload, and `terrain` above is the whole reason:
-                // the drops are culled against this grid, per drop, in the
-                // vertex shader. Nothing here marches the SDF.
+                // frame with no reload, and the two bakes above are the whole
+                // reason: the height grid is where a drop falls to outside the
+                // collision field, and the collision field is what a drop
+                // actually tests against. Nothing per-frame marches the SDF.
             }
             Err(e) => crate::log::error(format!("could not upload the terrain heights: {e}")),
         }
@@ -1087,16 +1099,10 @@ impl ApplicationHandler for App {
                     camera.eye,
                     self.wind_seconds,
                 );
-                // Where that rain lands, added to whatever the plumes drew.
-                // Built fresh each frame rather than kept, because it has no
-                // state to keep — see `particles::rain_splashes`. The `Vec` is
-                // only paid for by a scene that is actually raining.
-                let crowns = crate::particles::rain_splashes(
-                    &environment,
-                    self.terrain.as_ref(),
-                    camera.eye.to_array(),
-                    self.wind_seconds,
-                );
+                // Where the rain lands is the GPU's answer now: a splash is a
+                // collision `rain_sim.slang` resolved against the baked world,
+                // appended to a ring and drawn indirectly (ADR 0015).
+                let crowns: Vec<loom_render::ParticleInstance> = Vec::new();
                 let combined;
                 let particles: &[loom_render::ParticleInstance] = if crowns.is_empty() {
                     particles
@@ -1107,6 +1113,12 @@ impl ApplicationHandler for App {
                 if let Some(viewer) = self.viewer.as_mut() {
                     viewer.environment = environment;
                     viewer.set_rain(drops);
+                    // **The drop simulation's clock, in ticks.** The same
+                    // mapping the headless path uses — `--sim N` is N/60
+                    // seconds — so a window and a `loom render --sim N` of the
+                    // same scene ask the simulation for the same instant.
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    viewer.set_rain_tick((self.wind_seconds * 60.0).round().max(0.0) as u64);
                 }
 
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {

@@ -462,6 +462,43 @@ change, so your edits appear live. Two consequences:
 >
 > The four post-M12 items previously listed here (shadows/SDFGI/post stack, Dual Contouring, LOD
 > octree, archetype ECS) are all in Phase 8 — deferred, each with a stated reason.
+>
+> **P4 rain drops are stateful — ADR 0017, and it supersedes ADR 0014's deferral.** A drop has a
+> position and a velocity in a GPU buffer, `rain_sim.slang` advances it a fixed tick at a time and
+> **collides it against the collision world** — every voxel volume unioned with every static
+> `BoxCollider`, baked by `loom_rain::collide` into an `R8_SNORM` 3D image. So a **mesh** roof now
+> stops rain, which the baked height field could never do (ADR 0014's trigger 2), and a splash is a
+> collision the simulation resolved rather than a place exposure said a drop should have reached
+> (trigger 3). `assets/test/rain_gantry.loom` is the scene that can only pass with this, and it is
+> in both gates. Splashes feed an **indirect draw** from a count that never leaves the device; the
+> CPU crowns in `loom_cli::particles` are gone. Cost is 0.022 ms to simulate and 0.033 ms to draw at
+> 1920x1080, against 0.036 ms for the whole stateless layer.
+>
+> **The render graph owns buffer barriers now**, because it had to: a compute pass writing the drop
+> buffer and a vertex shader reading it in the same command buffer need a dependency, and a missing
+> one draws last frame's rain, which looks almost right. `BufferId`/`BufferAccess`/`pass_with` —
+> never-do #4 covers buffers as well as images, and `plan_full` makes the buffer barriers as
+> testable as the layout transitions.
+>
+> **What state costs is that a frame is no longer a pure function of its tick**, which is the same
+> objection ADR 0010 used to reject TAA. The golden gate survives it because a headless still seeds
+> deterministically and advances to `--sim N` in **one** dispatch — verified byte-identical across
+> three processes — but the viewer and the offscreen path now agree only while the camera is still.
+> `Renderer::set_rain_tick` going backwards re-seeds.
+>
+> **It did not fix the reported motion artifact, and that was characterised first.** Rain is 97% of
+> the frame-to-frame temporal noise in `rain_impact` under a walking camera; the cause is that the
+> rain pass draws into the **resolved single-sample target after the MSAA resolve**, so distant
+> sub-pixel streaks are the one thing in the frame with no anti-aliasing at all, and that the near
+> field is drawn at a constant *world* width that makes a drop half a metre away a 19-px bar.
+> **The near field is fixed** — `RAIN_NEAR_MIN`/`RAIN_NEAR_FULL` fade the nearest 0.6–2.5 m out,
+> which drops the layer's frame-to-frame brightness swing from 13.4% to 7.4% and costs 65 drops of
+> 131,072; the boundary fade could never have covered it, because a drop 30 cm from the eye is in
+> the *middle* of the block. **The sub-pixel half is not**: a screen-space width floor with matching
+> alpha needs alpha-to-coverage, which needs the rain pass to have samples, and it has none by
+> design. None of it needs state. **`cargo xtask shimmer` cannot measure any of this** — at its 0.2 s step a drop
+> falls 1.6 m and consecutive frames share no streaks. Use `loom render --dolly <m>`, added for it:
+> the fly-through could only *pan*, and a pan is chosen precisely because it makes no parallax.
 
 ### What M0–M12 already delivered
 

@@ -1,8 +1,11 @@
 # ADR 0014 — Rain drops stay stateless, and what would change that
 
 - **Date:** 2026-08-14
-- **Status:** **accepted** — as a *deferral with a trigger*, not as a closed door. The trigger is
-  written down in "When to revisit" and it is specific.
+- **Status:** **superseded by ADR 0017.** It was accepted as a *deferral with a trigger*, not as a
+  closed door; triggers 2 and 3 fired and the stateful version was built. Read 0017 for what
+  replaced this, what it cost the golden gate, and — the part this document got right and the
+  build confirmed — that **statelessness was never the reason the layer reads badly in motion**.
+  Trigger 1 has still not fired.
 - **Decision touched:** Phase 4 step 2's stateless streak renderer. Does not move a locked decision.
 
 ## The question

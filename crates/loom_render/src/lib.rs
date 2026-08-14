@@ -36,6 +36,7 @@ mod debug_names;
 mod device;
 mod instance;
 mod material;
+mod rain;
 mod raytrace;
 mod renderer;
 mod scene_depth;
@@ -80,6 +81,13 @@ pub const CMAA2_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cmaa2.spv
 /// The anti-aliasing pass's edge detection, which runs first and writes the
 /// mask the shape filter walks.
 pub const CMAA2_EDGES_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cmaa2_edges.spv"));
+
+/// The raindrop simulation (ADR 0015), embedded at build time.
+///
+/// Two compute entry points: `rainSimulateMain` advances every drop and
+/// collides it against the baked world, `rainSplashArgsMain` writes the splash
+/// draw's indirect arguments.
+pub const RAIN_SIM_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rain_sim.spv"));
 
 /// The compute shader that evaluates the generated fields, for the S2
 /// agreement test. Nothing in the runtime dispatches it — see `field_agree`.
@@ -133,14 +141,20 @@ mod tests {
             176,
             "terrainHeights — the pointer the height field is read through"
         );
-        assert_eq!(at(std::ptr::from_ref(&base.waves).cast()), 184, "waves");
-        assert_eq!(at(std::ptr::from_ref(&base.wave_count).cast()), 568, "count");
+        assert_eq!(
+            at(std::ptr::from_ref(&base.rain_drops).cast()),
+            184,
+            "rainDrops — the drop buffer the streak draw reads"
+        );
+        assert_eq!(at(std::ptr::from_ref(&base.rain_splashes).cast()), 192, "rainSplashes");
+        assert_eq!(at(std::ptr::from_ref(&base.waves).cast()), 200, "waves");
+        assert_eq!(at(std::ptr::from_ref(&base.wave_count).cast()), 584, "count");
         assert_eq!(
             at(std::ptr::from_ref(&base.attenuation_depth).cast()),
-            572,
+            588,
             "attenuation_depth"
         );
-        assert_eq!(size_of::<EnvironmentData>(), 576, "the whole struct");
+        assert_eq!(size_of::<EnvironmentData>(), 592, "the whole struct");
     }
 
     /// **The water draw count is the shader's, and nothing but this says so.**

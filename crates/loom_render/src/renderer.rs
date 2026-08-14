@@ -187,6 +187,16 @@ pub struct EnvironmentData {
     /// re-uploaded only when the terrain changes, which is exactly what this
     /// buffer is for.
     pub terrain_heights: vk::DeviceAddress,
+    /// This frame's raindrops, as `rain_sim.slang` left them. Zero in a scene
+    /// with no rain, and the streak draw is skipped then.
+    ///
+    /// **The renderer owns this buffer**, unlike every other pointer here: a
+    /// drop's state is the renderer's, produced by a compute pass and consumed
+    /// by a vertex shader, and it is never seen by the CPU at all. Set by
+    /// [`Renderer::advance_rain`].
+    pub rain_drops: vk::DeviceAddress,
+    /// This frame's splash ring — impacts the simulation actually resolved.
+    pub rain_splashes: vk::DeviceAddress,
     /// The sea, as [`WaterWave`]s — the same sixteen `loom_water` derives from
     /// the wind, in the same order.
     ///
@@ -254,6 +264,9 @@ impl Default for EnvironmentData {
             // No terrain: side 0, so every depth query is bottomless.
             terrain: [0.0, 0.0, 1.0, 0.0],
             terrain_heights: 0,
+            // Stamped by `advance_rain` every frame the layer runs.
+            rain_drops: 0,
+            rain_splashes: 0,
             waves: [WaterWave {
                 direction: [1.0, 0.0],
                 wavelength: 0.0,
@@ -513,10 +526,17 @@ pub struct Renderer {
     /// The rain streaks. Additive, order-independent, in a pass of their own
     /// after the depth buffer is finished with.
     rain_pipeline: vk::Pipeline,
-    /// Drops this frame — the *only* per-frame rain state, and there is no
-    /// buffer beside it: a drop's position is a pure function of its index and
-    /// the clock. Zero draws nothing.
+    /// The splashes, drawn indirectly from a count only the GPU knows.
+    rain_splash_pipeline: vk::Pipeline,
+    /// The drop buffer, the collision field, and the two compute pipelines that
+    /// advance them. ADR 0015.
+    rain_sim: crate::rain::RainSim,
+    /// Whether the scene is raining at all. Zero skips the simulation and both
+    /// draws, so a scene with no `Rain` costs exactly what it did.
     rain_drops: u32,
+    /// The simulation tick this frame stands for, handed to the drop sim so it
+    /// can advance by the difference since it last ran.
+    rain_tick: u64,
     /// The scene's depth, as a descriptor the rain fragment shader samples.
     scene_depth: crate::scene_depth::SceneDepth,
     max_particles: usize,
@@ -547,14 +567,14 @@ pub struct Renderer {
 /// Timestamps this renderer's query pool has room for. The offscreen path
 /// declares two passes; the slack is so adding one does not silently go
 /// unmeasured.
-const TIMED_PASSES: u32 = 8;
+pub(crate) const TIMED_PASSES: u32 = 12;
 
 /// Whether `LOOM_GPU_TIMING` asks for a per-frame table on stderr.
 ///
 /// An environment variable rather than a flag so every command that renders —
 /// `loom render`, `loom sim`, `cargo xtask image` — gains the instrument
 /// without any of them knowing it exists.
-fn timing_requested() -> bool {
+pub(crate) fn timing_requested() -> bool {
     std::env::var_os("LOOM_GPU_TIMING").is_some_and(|v| v != "0")
 }
 
@@ -845,7 +865,32 @@ impl Renderer {
         )?;
         // No sample count: rain draws into the resolved target, which is one
         // sample in both render paths.
-        let rain_pipeline = create_rain_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT)?;
+        let rain_pipeline = create_rain_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            COLOR_FORMAT,
+            c"rainVertexMain",
+            c"rainFragmentMain",
+        )?;
+        // The splashes share every piece of state with the streaks — additive,
+        // no depth attachment, one sample — and differ only in which vertex and
+        // fragment functions run. Same builder, two entry points.
+        let rain_splash_pipeline = create_rain_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            COLOR_FORMAT,
+            c"rainSplashVertexMain",
+            c"rainSplashFragmentMain",
+        )?;
+        let rain_sim = crate::rain::RainSim::new(
+            instance.handle(),
+            device,
+            &mut allocator,
+            pipeline_cache,
+            crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
+        )?;
 
         // The anti-aliasing pass (ADR 0010), when asked for. A second colour
         // image, never the same one: the filter reads a 6x6 neighbourhood and
@@ -1008,7 +1053,10 @@ impl Renderer {
             water_pipeline,
             grass_count: 0,
             rain_pipeline,
+            rain_splash_pipeline,
+            rain_sim,
             rain_drops: 0,
+            rain_tick: 0,
             scene_depth,
             max_particles: MAX_PARTICLES,
             particle_pipeline,
@@ -1188,12 +1236,68 @@ impl Renderer {
 
     /// How many rain drops to draw. Zero — the default — draws none.
     ///
-    /// **The whole of the rain layer's CPU state**, beside the four floats in
-    /// [`EnvironmentData::rain`]. There is nothing to upload: a drop is derived
-    /// from its own index and the simulated clock, so the count is a draw
-    /// argument and not a buffer.
+    /// **A switch rather than a count, since ADR 0015.** The simulation carries
+    /// a fixed [`crate::rain::DROPS`] of them and thins the field by having a
+    /// drop keep or drop *itself* against the rate, because a grid cannot be
+    /// thinned by shortening a draw — a shorter draw deletes a contiguous slab
+    /// of the buffer rather than thinning the field. Anything non-zero runs the
+    /// layer; zero skips the dispatch and both draws entirely, so a scene with
+    /// no `Rain` costs exactly what it did before rain existed.
     pub fn set_rain(&mut self, drops: u32) {
-        self.rain_drops = drops;
+        self.rain_drops = drops.min(crate::rain::DROPS);
+    }
+
+    /// The simulation tick this frame stands for.
+    ///
+    /// **The drop buffer's whole notion of time.** It advances by the
+    /// difference since the last frame, which is one tick in a live viewer and
+    /// the whole of `--sim N` in a fresh headless render. Going backwards
+    /// re-seeds, so a caller that restarts a simulation gets rain that restarts
+    /// with it.
+    pub fn set_rain_tick(&mut self, tick: u64) {
+        if tick < self.rain_tick {
+            self.rain_sim.reset();
+        }
+        self.rain_tick = tick;
+    }
+
+    /// Hand the renderer the world raindrops collide with.
+    ///
+    /// The baked collision field from `loom_rain::collide` — voxels unioned
+    /// with static box colliders, as signed distance in `i8`. **Uploaded when
+    /// the world changes and at no other time**; 2.4 MB is a real copy and it
+    /// has no business being in a frame.
+    ///
+    /// # Errors
+    /// The driver's, if the image cannot be created or the copy fails.
+    pub fn set_rain_field(
+        &mut self,
+        sdf: &[i8],
+        dims: [usize; 3],
+        origin: [f32; 3],
+        spacing: f32,
+    ) -> Result<(), RenderError> {
+        // SAFETY: no frame is in flight — `render` waits on its fence before
+        // returning, and the windowed path calls this outside a frame.
+        unsafe { self.device.device_wait_idle() }?;
+        let allocator = self
+            .allocator
+            .as_mut()
+            .ok_or_else(|| RenderError::Allocator("allocator is gone".into()))?;
+        self.rain_sim.set_field(
+            allocator,
+            crate::raytrace::Submit { pool: self.command_pool, queue: self.queue },
+            sdf,
+            dims,
+            origin,
+            spacing,
+        )
+    }
+
+    /// Whether a scene-sized collision field has been uploaded.
+    #[must_use]
+    pub fn has_rain_field(&self) -> bool {
+        self.rain_sim.has_field()
     }
 
     pub fn render(
@@ -1281,6 +1385,10 @@ impl Renderer {
         // which is a shoreline that vanishes on frame two.
         self.environment.terrain = self.terrain_params;
         self.environment.terrain_heights = self.terrain_heights;
+        // Same argument again: the drop and splash buffers are the renderer's
+        // and no caller has any business knowing their addresses.
+        self.environment.rain_drops = self.rain_sim.drops_address;
+        self.environment.rain_splashes = self.rain_sim.splashes_address;
         write_slice(
             self.environment_alloc
                 .as_ref()
@@ -1329,6 +1437,23 @@ impl Renderer {
             (
                 graph.import("loom.msaa_color", m.image),
                 graph.import("loom.msaa_depth", m.depth_image),
+            )
+        });
+
+        // **The drop simulation, first in the frame.** It writes buffers the
+        // rain and splash draws read, and the graph puts the barrier between
+        // them — which is why buffers had to join it at all.
+        //
+        // Ahead of the forward pass rather than beside the draws, so the
+        // dispatch overlaps the geometry work rather than stalling behind it.
+        let rain_buffers = (self.rain_drops > 0).then(|| {
+            self.rain_sim.record(
+                &mut graph,
+                self.rain_tick,
+                [self.environment.eye[0], self.environment.eye[1], self.environment.eye[2]],
+                self.environment.rain,
+                self.terrain_params,
+                self.terrain_heights,
             )
         });
 
@@ -1584,21 +1709,33 @@ impl Renderer {
         // single-sample either way.
         //
         // Before the AA passes, so a streak is filtered like everything else.
+        //
+        // **The buffer accesses are declared here and they are the point.** The
+        // vertex shader reads the drops the compute pass wrote a few passes
+        // ago, and the indirect draw reads a vertex count the same dispatch
+        // produced. Both are dependencies the graph has to know about; leaving
+        // either out draws last frame's rain, which looks almost right.
         let rain_pipeline = self.rain_pipeline;
-        let rain_drops = self.rain_drops;
+        let rain_splash_pipeline = self.rain_splash_pipeline;
+        let rain_args_buffer = self.rain_sim.args_buffer();
         let rain_depth_set = self.scene_depth.descriptor_set();
-        if rain_drops > 0 {
-            graph.pass(
+        if let Some((drops_id, args_id)) = rain_buffers {
+            let drop_count = crate::rain::DROPS;
+            graph.pass_with(
                 "rain",
                 &[(color, Access::ColorWrite), (depth, Access::DepthSample)],
+                &[
+                    (drops_id, loom_render_graph::BufferAccess::VertexRead),
+                    (args_id, loom_render_graph::BufferAccess::IndirectRead),
+                ],
                 move |d, cmd| {
                     // SAFETY: the graph has put the colour target back into
-                    // COLOR_ATTACHMENT_OPTIMAL and the depth image into
-                    // SHADER_READ_ONLY_OPTIMAL before this records.
+                    // COLOR_ATTACHMENT_OPTIMAL, the depth image into
+                    // SHADER_READ_ONLY_OPTIMAL, and both buffers behind a
+                    // barrier against the compute writes.
                     unsafe {
                         begin_overlay_rendering(d, cmd, color_view, width, height);
                         set_viewport(d, cmd, width, height);
-                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, rain_pipeline);
                         d.cmd_bind_descriptor_sets(
                             cmd,
                             vk::PipelineBindPoint::GRAPHICS,
@@ -1618,7 +1755,23 @@ impl Renderer {
                             0,
                             push.bytes(),
                         );
-                        d.cmd_draw(cmd, rain_drops * 6, 1, 0, 0);
+
+                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, rain_pipeline);
+                        d.cmd_draw(cmd, drop_count * 6, 1, 0, 0);
+
+                        // **The splashes, drawn indirectly.** How many there
+                        // are is a fact only the GPU has: the compute pass
+                        // counted the collisions it resolved. Reading that back
+                        // to decide a draw count would be the readback ADR 0014
+                        // forbids, so the count stays on the device and the
+                        // command processor fetches it.
+                        d.cmd_bind_pipeline(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            rain_splash_pipeline,
+                        );
+                        d.cmd_draw_indirect(cmd, rain_args_buffer, 0, 1, 0);
+
                         d.cmd_end_rendering(cmd);
                     }
                 },
@@ -1856,6 +2009,10 @@ impl Drop for Renderer {
             self.device.destroy_pipeline(self.grass_pipeline, None);
             self.device.destroy_pipeline(self.water_pipeline, None);
             self.device.destroy_pipeline(self.rain_pipeline, None);
+            self.device.destroy_pipeline(self.rain_splash_pipeline, None);
+            if let Some(allocator) = self.allocator.as_mut() {
+                self.rain_sim.destroy(allocator);
+            }
             self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.terrain_buffer, None);
             self.device.destroy_buffer(self.particle_buffer, None);
@@ -2307,6 +2464,24 @@ pub(crate) fn create_address_buffer(
     name: &str,
     extra: vk::BufferUsageFlags,
 ) -> Result<(vk::Buffer, Allocation, vk::DeviceAddress), RenderError> {
+    create_address_buffer_in(device, allocator, size, name, extra, MemoryLocation::CpuToGpu)
+}
+
+/// As [`create_address_buffer`], with the heap named.
+///
+/// **`GpuOnly` for anything the CPU never writes.** The default above is
+/// host-visible because almost everything here is uploaded per frame from the
+/// CPU; the drop buffer is the opposite — it is seeded and advanced entirely by
+/// a compute shader and read by a vertex shader, and putting four megabytes of
+/// it in a host-visible heap would put a PCIe round trip in the frame.
+pub(crate) fn create_address_buffer_in(
+    device: &ash::Device,
+    allocator: &mut Allocator,
+    size: u64,
+    name: &str,
+    extra: vk::BufferUsageFlags,
+    location: MemoryLocation,
+) -> Result<(vk::Buffer, Allocation, vk::DeviceAddress), RenderError> {
     let info = vk::BufferCreateInfo::default()
         .size(size)
         // SHADER_DEVICE_ADDRESS is what makes `vkGetBufferDeviceAddress` legal
@@ -2341,7 +2516,7 @@ pub(crate) fn create_address_buffer(
         .allocate(&AllocationCreateDesc {
             name,
             requirements,
-            location: MemoryLocation::CpuToGpu,
+            location,
             linear: true,
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         })
@@ -2444,6 +2619,57 @@ pub(crate) fn create_image(
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         })
         .map_err(|e| RenderError::Allocator(e.to_string()))?;
+    // SAFETY: the allocation matches the image's requirements.
+    unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset()) }?;
+    Ok((image, allocation))
+}
+
+/// Create a 3D image. One mip, one sample, device-local.
+///
+/// Separate from [`create_image`] rather than a flag on it: `TYPE_3D` changes
+/// the extent's meaning, forbids array layers, and needs `TYPE_3D` on the view
+/// as well — four things that must agree, which is more than a boolean's worth
+/// of difference.
+pub(crate) fn create_image_3d(
+    device: &ash::Device,
+    allocator: &mut Allocator,
+    extent: vk::Extent3D,
+    format: vk::Format,
+    usage: vk::ImageUsageFlags,
+    name: &str,
+) -> Result<(vk::Image, Allocation), RenderError> {
+    let info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_3D)
+        .format(format)
+        .extent(extent)
+        .mip_levels(1)
+        // **Exactly one, and it is not optional**: a 3D image with more than
+        // one array layer is invalid, and `arrayLayers` defaults to zero, which
+        // is also invalid.
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(usage)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .initial_layout(vk::ImageLayout::UNDEFINED);
+
+    // SAFETY: `info` is fully initialised and outlives the call.
+    let image = unsafe { device.create_image(&info, None) }?;
+    // SAFETY: `image` was just created on this device.
+    let requirements = unsafe { device.get_image_memory_requirements(image) };
+    let allocation = allocator
+        .allocate(&AllocationCreateDesc {
+            name,
+            requirements,
+            location: MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })
+        .map_err(|e| {
+            // SAFETY: the image was just created here and nothing holds it.
+            unsafe { device.destroy_image(image, None) };
+            RenderError::Allocator(e.to_string())
+        })?;
     // SAFETY: the allocation matches the image's requirements.
     unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset()) }?;
     Ok((image, allocation))
@@ -2833,6 +3059,8 @@ pub(crate) fn create_rain_pipeline(
     layout: vk::PipelineLayout,
     cache: vk::PipelineCache,
     color_format: vk::Format,
+    vertex: &std::ffi::CStr,
+    fragment: &std::ffi::CStr,
 ) -> Result<vk::Pipeline, RenderError> {
     let module = create_shader_module(device, crate::SCENE_SPV)?;
 
@@ -2840,11 +3068,11 @@ pub(crate) fn create_rain_pipeline(
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
             .module(module)
-            .name(c"rainVertexMain"),
+            .name(vertex),
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::FRAGMENT)
             .module(module)
-            .name(c"rainFragmentMain"),
+            .name(fragment),
     ];
 
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
