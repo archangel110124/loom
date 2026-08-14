@@ -133,6 +133,9 @@ pub struct Viewer {
     environment_address: vk::DeviceAddress,
     /// What the next frame draws with. Set from the scene each frame.
     pub environment: crate::renderer::EnvironmentData,
+    /// The previous frame's camera, for the streak smear. Shared implementation
+    /// with the offscreen path — see `renderer::EyeTracker`.
+    eye_tracker: crate::renderer::EyeTracker,
     objects_alloc: Option<Allocation>,
     object_address: vk::DeviceAddress,
     /// How many objects the buffer can currently hold; grown on demand.
@@ -586,6 +589,7 @@ impl Viewer {
             environment_alloc: Some(environment_alloc),
             environment_address,
             environment: crate::renderer::EnvironmentData::default(),
+            eye_tracker: crate::renderer::EyeTracker::default(),
             object_capacity: INITIAL_OBJECTS,
             requested: vk::Extent2D { width, height },
             pipeline_layout,
@@ -1012,6 +1016,10 @@ impl Viewer {
         // written at all: it sat at its 1x1 default, which the grass shader
         // reads as "every blade is a hundred pixels wide".
         self.environment.eye = camera.eye.extend(0.0).to_array();
+        // Same camera, same line, same tracker as the offscreen path — the
+        // streak smear is where a window that quietly renders something simpler
+        // would be least visible and hardest to catch.
+        self.environment.eye_step = self.eye_tracker.step(camera.eye, self.rain_tick);
         #[allow(clippy::cast_precision_loss)]
         {
             self.environment.viewport =

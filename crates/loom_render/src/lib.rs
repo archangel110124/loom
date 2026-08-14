@@ -154,7 +154,11 @@ mod tests {
             588,
             "attenuation_depth"
         );
-        assert_eq!(size_of::<EnvironmentData>(), 592, "the whole struct");
+        // **Appended after the wave table, which is why every offset above is
+        // unchanged.** A `float4` needs 16-byte alignment and 592 is a multiple
+        // of 16, so it lands flush with no padding.
+        assert_eq!(at(std::ptr::from_ref(&base.eye_step).cast()), 592, "eyeStep");
+        assert_eq!(size_of::<EnvironmentData>(), 608, "the whole struct");
     }
 
     /// **The water draw count is the shader's, and nothing but this says so.**

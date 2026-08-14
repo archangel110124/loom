@@ -213,6 +213,27 @@ pub struct EnvironmentData {
     /// `LoomWaveSet` keeps it, and the two are one memory layout described
     /// twice.
     pub attenuation_depth: f32,
+    /// How far the camera moved in the last rain tick, in metres. xyz; w unused.
+    ///
+    /// **Metres per tick rather than metres per second, deliberately.** The
+    /// shader divides by its own `RAIN_TICK` to get a velocity, so the fixed
+    /// timestep exists in exactly one place. A copy of `1.0 / 60.0` on this side
+    /// would be a second definition of the simulation's clock, and this project
+    /// has paid for that class of duplication twice already.
+    ///
+    /// **Stamped by the renderer, never by a caller**, like the terrain grid and
+    /// the drop pointers: it is the difference between two frames' cameras, and
+    /// no caller is holding both.
+    ///
+    /// Why it exists: a rain streak is a shutter smear, and a smear records
+    /// motion *relative to the camera*. Without it the whole field slides
+    /// rigidly when you walk instead of stretching — the third of the three
+    /// motion causes ADR 0017 named, and the one it left alone.
+    ///
+    /// **Appended after the wave table on purpose.** Every offset above is
+    /// pinned by a test against Slang's own layout; adding a `float4` in the
+    /// middle would move `waves` and pad besides.
+    pub eye_step: [f32; 4],
 }
 
 /// The cap on summed waves, mirroring `loom_scene::components::MAX_WAVES` and
@@ -276,6 +297,10 @@ impl Default for EnvironmentData {
             }; MAX_WAVES],
             wave_count: 0,
             attenuation_depth: 0.0,
+            // A still camera. Every golden image renders one frame and so keeps
+            // this value, which is what makes the streak smear unable to move a
+            // reference.
+            eye_step: [0.0; 4],
         }
     }
 }
@@ -631,6 +656,8 @@ pub struct Renderer {
     /// timestamps. Off by default: it costs two commands per pass and it
     /// serialises passes slightly, so it must not be paid for by every render.
     timers: Option<GpuTimers>,
+    /// The previous frame's camera, for the streak smear. See [`EyeTracker`].
+    eye_tracker: EyeTracker,
     /// Set when `LOOM_GPU_TIMING` asked for a table.
     print_timing: bool,
 }
@@ -1129,6 +1156,7 @@ impl Renderer {
             environment_alloc: Some(environment_alloc),
             environment_address,
             environment: EnvironmentData::default(),
+            eye_tracker: EyeTracker::default(),
             max_objects: MAX_OBJECTS,
             pipeline_layout,
             pipeline,
@@ -1414,6 +1442,9 @@ impl Renderer {
         // would send last frame's eye — a specular highlight one frame stale,
         // which is invisible in a still and wrong in motion.
         self.environment.eye = camera.eye.extend(0.0).to_array();
+        // Stamped here for the same reason and from the same camera, so the two
+        // can never describe different frames.
+        self.environment.eye_step = self.eye_tracker.step(camera.eye, self.rain_tick);
         #[allow(clippy::cast_precision_loss)]
         {
             self.environment.viewport =
@@ -3237,6 +3268,52 @@ pub(crate) fn create_rain_pipeline(
 /// # Safety
 /// `cmd` must be recording outside any rendering block, with `color_view` in
 /// `COLOR_ATTACHMENT_OPTIMAL`.
+/// The camera's displacement over the last rain tick, for
+/// [`EnvironmentData::eye_step`] — and the running state it needs.
+///
+/// One implementation because there are two render paths and they have already
+/// diverged three times this phase: grass did not draw in the window for two
+/// slices, and the viewer went without MSAA for two phases.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct EyeTracker {
+    previous: Option<(glam::Vec3, u64)>,
+}
+
+impl EyeTracker {
+    /// **Zero on the first frame, and that is what keeps the golden images
+    /// still.** Every reference render is a single frame, so there is no
+    /// previous eye and no smear — this feature cannot move a reference.
+    ///
+    /// Zero again when the tick goes backwards, which is the headless path
+    /// re-seeding.
+    pub(crate) fn step(&mut self, eye: glam::Vec3, tick: u64) -> [f32; 4] {
+        let step = match self.previous {
+            Some((previous, then)) if tick >= then => {
+                // Ticks, never a wall clock. A frame that advanced the sim by
+                // three ticks moved the camera three ticks' worth.
+                let ticks = (tick - then).max(1);
+                #[allow(clippy::cast_precision_loss)]
+                let per_tick = (eye - previous) / ticks as f32;
+                // **A cut is not motion.** Teleporting, loading a scene or
+                // scrubbing a timeline moves the eye arbitrarily far in one
+                // frame, and at a shutter time that draws streaks metres long
+                // across the whole frame. Half a metre per tick is 30 m/s,
+                // faster than anything that walks.
+                const MAX_STEP: f32 = 0.5;
+                let distance = per_tick.length();
+                if distance > MAX_STEP {
+                    per_tick * (MAX_STEP / distance)
+                } else {
+                    per_tick
+                }
+            }
+            _ => glam::Vec3::ZERO,
+        };
+        self.previous = Some((eye, tick));
+        step.extend(0.0).to_array()
+    }
+}
+
 pub(crate) unsafe fn begin_overlay_rendering(
     d: &ash::Device,
     cmd: vk::CommandBuffer,

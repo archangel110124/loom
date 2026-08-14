@@ -125,8 +125,16 @@ struct EnvironmentData {
     // **The sea itself, in the environment buffer rather than behind another
     // pointer.** The push block is at 116 of the 128 bytes Vulkan guarantees;
     // this is per-scene data read once per vertex, which is exactly what this
-    // buffer is for. Last in the struct, so every offset above it is unmoved.
+    // buffer is for.
     LoomWaveSet waves;
+    // How far the camera moved in the last `RAIN_TICK`, in metres — xyz, w
+    // unused. **Metres per tick, not per second**, so the timestep lives only
+    // in this file; `rainVertexMain` divides by `RAIN_TICK` itself.
+    //
+    // After the wave table because every offset above it is pinned by a test
+    // against this struct's Slang layout, and a `float4` inserted higher up
+    // would move `waves` and pad besides.
+    float4 eyeStep;
 };
 
 struct GrassBlade {
@@ -2152,8 +2160,20 @@ RainOutput rainVertexMain(uint vertexID: SV_VertexID) {
     // A drop with no strength collapses to a point and its triangles are
     // discarded before rasterisation — the same trick the grass fade and the
     // water LOD both use, and the reason there is no branch here.
-    float speed = max(length(velocity), 1e-3);
-    float3 along = velocity / speed;
+    // **Relative to the camera, because a streak is a shutter smear.** A
+    // photograph records where a drop moved across the frame, and walking
+    // forward moves the frame. With only the drop's own velocity here the whole
+    // field slid rigidly under a moving camera instead of stretching, which is
+    // the third motion cause ADR 0017 named and the one it left untouched.
+    //
+    // `eyeStep` is metres per `RAIN_TICK`, so the timestep is defined once, in
+    // this file. A camera falling alongside the rain sees no relative motion and
+    // the streaks collapse to points, which is correct and is why the length
+    // below reads the relative speed rather than the drop's.
+    float3 eyeVelocity = push.environment[0].eyeStep.xyz / RAIN_TICK;
+    float3 relative = velocity - eyeVelocity;
+    float speed = max(length(relative), 1e-3);
+    float3 along = relative / speed;
     float3 side = cross(along, eye - pos);
     float sideLength = length(side);
     // Looking straight down a streak the cross product vanishes and the ribbon
