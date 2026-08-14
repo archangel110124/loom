@@ -2103,8 +2103,21 @@ static const float RAIN_FADE = 0.125;
 /// actually reads is derived from this rather than authored beside it.
 static const float RAIN_FALL = 8.0;
 /// Seconds of motion one streak stands for — a shutter time, not a length.
-/// 0.1 s at 8 m/s is a 0.8 m streak, which is what a photograph of rain shows.
-static const float RAIN_SHUTTER = 0.1;
+///
+/// **This was 0.1 s and that is a still-photograph number, not a frame's.** A
+/// long-exposure photograph of rain does show 0.8 m streaks, and that is why
+/// the value looked defensible; but a *frame* stands for a frame, and a camera
+/// at 60 fps with a 180-degree shutter integrates 1/120 s. Even a generous
+/// 1/60 s is 0.017 s. At 0.1 the streaks were about six times too long, and
+/// six-times-too-long streaks stop reading as rain and start reading as
+/// scratches on the lens — which is what a human said when he first saw it.
+///
+/// 0.03 s is 0.27 m at this fall speed: still a deliberate exaggeration, about
+/// double a real frame, because a physically exact streak is thin enough that
+/// the rate has to rise to compensate and the fill cost rises with it. Rendered
+/// side by side at 0.1 / 0.05 / 0.03 / 0.017, the step from 0.1 to 0.05 is the
+/// one that changes the character; below 0.03 the difference is marginal.
+static const float RAIN_SHUTTER = 0.03;
 static const float RAIN_WIDTH = 0.02;
 /// Metres of geometry between "behind the wall" and "fully visible". The soft
 /// depth fade, and the reason a streak does not end in a hard line where it
