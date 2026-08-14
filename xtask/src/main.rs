@@ -123,7 +123,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 14] = [
+const GOLDEN: [(&str, &str, &[&str]); 15] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -210,6 +210,19 @@ const GOLDEN: [(&str, &str, &[&str]); 14] = [
     // slab are visibly darker and glossier, and the sheltered floor and the
     // undersides are not: 18.5% of pixels move against a stub, measured.
     ("rain_overhang", "assets/test/rain_overhang.loom", &["--sim", "1800"]),
+    // **And the near field, because `rain_overhang` cannot see step 4.** Its
+    // ground starts ten metres away, where a splash crown is a third of a pixel
+    // and a ripple ring is under one: both effects measured *below tolerance*
+    // there — 0.016% of pixels for a stubbed ripple against a 0.1% threshold —
+    // so a reference of that shot would have been protecting nothing. Exactly
+    // the trap step 3 found in this same scene one slice earlier, and the
+    // reason a second rain scene is worth its render.
+    //
+    // A metre above wet concrete with the sun low and ahead, which is the
+    // geometry that makes wet ground read as wet, plus a canopy over the near
+    // left so the impacts stop where the wetness does. Stubbing either half
+    // moves 0.47% and 1.01% of pixels here.
+    ("rain_impact", "assets/test/rain_impact.loom", &["--sim", "1800"]),
 ];
 
 /// Every reference renders at this size.

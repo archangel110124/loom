@@ -5,11 +5,17 @@
 # stateless GPU noise outside the simulation entirely; what has to be right, and
 # what gameplay reads, is the rate the CPU says is reaching a point.
 #
-# **It is a golden image as well now**, at `--sim 90`, and it is the only scene
-# in that list which draws rain — a pass after the forward pass, into the
-# resolved colour target, with the depth buffer sampled rather than tested. The
-# picture carries the first exit criterion too: streaks everywhere except under
-# the shelter, and a faint column of them through the skylight below.
+# **It is a golden image as well now**, at `--sim 1800`, and it is the scene in
+# that list which draws rain as an ESTABLISHING SHOT — a pass after the forward
+# pass, into the resolved colour target, with the depth buffer sampled rather
+# than tested. The picture carries the first exit criterion too: streaks
+# everywhere except under the shelter, and a faint column of them through the
+# skylight below.
+#
+# **What it cannot see is the near field**, and that is why `rain_impact.loom`
+# exists beside it: its ground starts ten metres from the camera, where a splash
+# crown is a third of a pixel and a ripple ring is under one. Step 4's two
+# effects both measure below the image gate's tolerance here.
 #
 #     loom sim assets/test/rain_overhang.loom --ticks 1 \
 #       --assert "rain@-13,3,-13.rate > 7.9" \
@@ -68,8 +74,9 @@ name = "Weather"
   # the sheen is gone and most of the darkening is still there. That gap IS the
   # two-rate dry-down, and one number could not express it.
   #
-  # The golden image is at `--sim 90`, a second and a half in, so it sees a
-  # freshly-wet scene and this line does not move it.
+  # The golden image is at `--sim 1800`, thirty seconds in: the film is at its
+  # ceiling and the soak is about half way, which is a visibly wet scene rather
+  # than a nominally wet one.
   [node.components.Rain]
   intensity = 8.0
   duration = 60.0

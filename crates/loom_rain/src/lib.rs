@@ -17,6 +17,7 @@
 //! collision world; this marches the voxel volume, and a scene with no voxels
 //! would read as wide open to one and correctly enclosed to the other.
 
+use loom_field::noise;
 use loom_field::wind::Wind;
 use loom_scene::components::Rain;
 use loom_voxel::Volume;
@@ -217,6 +218,173 @@ pub fn wetness(rain: Option<&Rain>, exposure: f32, t: f32) -> Wetness {
         film: equilibrium * approach(wet, FILM_WET) * (-dry / FILM_DRY).exp(),
         soak: equilibrium * approach(wet, SOAK_WET) * (-dry / SOAK_DRY).exp(),
     }
+}
+
+/// One rain impact on a surface.
+///
+/// **Not a particle, and not a collision.** The drops are stateless (ADR 0014)
+/// and never report hitting anything, so an impact is not an event that
+/// happened — it is a point the rain *is* landing on, computed from the same
+/// rate everything else in this crate reads.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Splash {
+    /// Where it landed, on the topmost surface of its column.
+    pub position: [f32; 3],
+    /// How far through its crown's life it is, 0 at the instant of impact to 1
+    /// as it vanishes. The renderer grows and fades a sprite along it.
+    pub fraction: f32,
+}
+
+/// Metres per splash cell. One impact slot per square metre per [`SPLASH_PERIOD`].
+const SPLASH_CELL: f32 = 1.0;
+/// Impacts one square metre can carry at once.
+///
+/// Real rain at 8 mm/h delivers on the order of five hundred drops per square
+/// metre per second. Nothing draws that, and nothing needs to: like the streak
+/// layer's cell count, this is a calibration knob that buys the *look* of rain
+/// landing at the cost of the overdraw, not a physical count.
+const SPLASH_SLOTS: u32 = 3;
+/// Seconds between one slot's impacts.
+const SPLASH_PERIOD: f32 = 0.7;
+/// Seconds a crown lasts. A real one is nearer 0.1 s; this is long enough that
+/// a still frame catches some of them mid-life rather than as points.
+const SPLASH_LIFETIME: f32 = 0.32;
+/// Metres around the eye impacts are drawn within.
+///
+/// Splashes are "only generated close to the screen" in every published rain
+/// system, for the reason the streaks fade at their block faces: past this a
+/// crown is well under a pixel and all it can do is shimmer.
+const SPLASH_REACH: f32 = 24.0;
+/// Rate, in mm/h, at which every slot is used.
+///
+/// **The same question `scene.slang`'s `RAIN_FULL_RATE` answers, and the same
+/// 20 mm/h** — how hard it has to rain before the visual layer is at full
+/// strength. Deliberately *not* [`SOAKING_RATE`], which is the different
+/// question of how hard it has to rain to wet a surface through.
+const SPLASH_FULL_RATE: f32 = 20.0;
+
+/// Where the rain is landing, near the eye, right now.
+///
+/// **Spawned from the rain rate and the surface, never from a drop.** That is
+/// ADR 0014's clause and it is what makes this independent of whether drops
+/// ever become stateful: `rate` is [`sample_rain`]'s — the authored intensity
+/// scaled by S3's sky-exposure march — and `ground` is W6's baked height field,
+/// which is the same grid the streak layer culls its drops against. Neither is
+/// a new answer to "does rain reach here".
+///
+/// **Closed form, and there is no splash state anywhere**, exactly as
+/// [`wetness`] is. A cell's slot fires every [`SPLASH_PERIOD`] seconds at a
+/// phase, a position and a presence hashed from the cell, the slot and *which*
+/// cycle it is on — so nothing repeats, nothing accumulates and nothing has to
+/// be stepped. Calling this at the same simulated second twice gives the same
+/// splashes, and calling it a tick later gives the ones alive a tick later.
+///
+/// It is outside the determinism hash for the same reason the streaks are:
+/// nothing writes it back and no simulation reads it. `t` is the simulated
+/// clock all the same, never a wall clock (never-do #8).
+///
+/// **What it cannot say**, in the same terms the rest of the phase states its
+/// limits: `rate` is the exposure at the *eye*, so a camera under a roof thins
+/// the impacts everywhere, and a height field cannot express an overhang — a
+/// splash lands on the top of a roof and never on the floor beneath it, which
+/// is right, but rain blown sideways under a ledge still stops at that column.
+/// Both are the streak layer's limitations, deliberately, and not a third set.
+#[must_use]
+pub fn splashes(
+    rate: f32,
+    ground: Option<&loom_voxel::heightfield::HeightField>,
+    eye: [f32; 3],
+    t: f32,
+) -> Vec<Splash> {
+    // No terrain is no surface to land on. Mesh geometry is not in the height
+    // field, so a scene whose floor is a box mesh gets no splashes — the same
+    // blind spot the drops' occlusion has, named rather than worked around.
+    let Some(ground) = ground else { return Vec::new() };
+    let presence = (rate / SPLASH_FULL_RATE).clamp(0.0, 1.0);
+    if presence <= 0.0 {
+        return Vec::new();
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let reach = (SPLASH_REACH / SPLASH_CELL).ceil() as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let centre = [
+        (eye[0] / SPLASH_CELL).floor() as i32,
+        (eye[2] / SPLASH_CELL).floor() as i32,
+    ];
+
+    let mut out = Vec::new();
+    for dz in -reach..=reach {
+        for dx in -reach..=reach {
+            // A disc, not a square: the corners of the square are half again
+            // as far away as the edges, which is where a crown is smallest and
+            // shimmers most.
+            if dx * dx + dz * dz > reach * reach {
+                continue;
+            }
+            let cell = [centre[0] + dx, centre[1] + dz];
+            for slot in 0..SPLASH_SLOTS {
+                if let Some(splash) = splash_in(cell, slot, presence, ground, t) {
+                    out.push(splash);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One cell's slot, at a time — or `None` when it is between impacts.
+fn splash_in(
+    cell: [i32; 2],
+    slot: u32,
+    presence: f32,
+    ground: &loom_voxel::heightfield::HeightField,
+    t: f32,
+) -> Option<Splash> {
+    // `loom_field::noise::hash` and nothing else. The project has one integer
+    // hash, it is frozen ABI, and the streak layer already folds coordinates
+    // into it exactly this way.
+    #[allow(clippy::cast_sign_loss)]
+    let seed = noise::hash(noise::hash(noise::hash(cell[0] as u32).wrapping_add(cell[1] as u32)).wrapping_add(slot));
+    let unit = |h: u32| {
+        #[allow(clippy::cast_precision_loss)]
+        {
+            (h >> 8) as f32 * (1.0 / 16_777_216.0)
+        }
+    };
+
+    // Which impact this slot is on, and how long ago it landed. The phase is
+    // per slot, so neighbouring cells do not splash in unison — the same
+    // artifact the grass clump hash exists to break.
+    let s = t / SPLASH_PERIOD + unit(seed);
+    let cycle = s.floor();
+    let age = (s - cycle) * SPLASH_PERIOD;
+    if age >= SPLASH_LIFETIME {
+        return None;
+    }
+
+    // **Rehashed per cycle**, so the next impact in this cell lands somewhere
+    // else. Hashing position from the cell alone would make every slot a tap
+    // dripping on one spot forever, which reads as a grid the moment two
+    // cycles pass.
+    #[allow(clippy::cast_possible_truncation)]
+    let h = noise::hash(seed.wrapping_add(cycle as i32 as u32));
+    let (u, v, keep) = (unit(h), unit(noise::hash(h)), unit(noise::hash(noise::hash(h))));
+    // Light rain lands in fewer places as well as more faintly — the same
+    // per-cell thinning the streak layer does against the same ratio.
+    if keep >= presence {
+        return None;
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    let x = (cell[0] as f32 + u) * SPLASH_CELL;
+    #[allow(clippy::cast_precision_loss)]
+    let z = (cell[1] as f32 + v) * SPLASH_CELL;
+    let y = ground.at(x, z);
+    if !loom_voxel::heightfield::HeightField::has_ground(y) {
+        return None;
+    }
+    Some(Splash { position: [x, y, z], fraction: age / SPLASH_LIFETIME })
 }
 
 #[cfg(test)]
@@ -456,6 +624,160 @@ mod tests {
         let out = wetness(None, 1.0, 10_000.0);
 
         assert_eq!(out, Wetness { film: 0.0, soak: 0.0 });
+    }
+
+    /// The roofed volume with a floor under it, baked into the height field the
+    /// streaks already cull against — so the splashes and the drops are reading
+    /// one grid. [`roofed`] alone is a slab floating over nothing, which is
+    /// right for an exposure march and has no surface to land on.
+    fn field() -> loom_voxel::heightfield::HeightField {
+        let mut volume = roofed();
+        volume.edit(&VoxelOp::Box {
+            center: [32.0, 1.0, 32.0],
+            half_extents: [31.0, 1.0, 31.0],
+            mode: CsgMode::Union,
+        });
+        loom_voxel::heightfield::HeightField::bake(&volume, [0.0; 3], [32.0, 32.0], 32.0)
+    }
+
+    /// **Same clock, same splashes** — the property everything else here rests
+    /// on. There is no RNG, no accumulator and no wall clock, so two calls at
+    /// one simulated second are the same list in the same order.
+    #[test]
+    fn the_same_second_gives_the_same_splashes() {
+        let field = field();
+        let at = [10.0, 12.0, 10.0];
+
+        let a = splashes(16.0, Some(&field), at, 4.25);
+        let b = splashes(16.0, Some(&field), at, 4.25);
+
+        assert!(!a.is_empty(), "heavy rain on open ground produced nothing");
+        assert_eq!(a, b);
+    }
+
+    /// And it is a *function of the time*: a second later is a different set of
+    /// impacts. A splash layer frozen in place is the artifact a still frame
+    /// cannot see.
+    #[test]
+    fn a_later_second_lands_somewhere_else() {
+        let field = field();
+        let at = [10.0, 12.0, 10.0];
+
+        let now = splashes(16.0, Some(&field), at, 4.25);
+        let later = splashes(16.0, Some(&field), at, 5.25);
+
+        assert_ne!(now, later, "the impacts did not move on");
+    }
+
+    /// **The rate gates them, and it is `sample_rain`'s rate** — the authored
+    /// intensity already scaled by S3's exposure. Dry is empty, not sparse.
+    #[test]
+    fn the_rate_decides_how_many_land() {
+        let field = field();
+        let at = [10.0, 12.0, 10.0];
+        let count = |rate| splashes(rate, Some(&field), at, 3.0).len();
+
+        assert_eq!(count(0.0), 0, "a dry scene splashed");
+        let light = count(2.0);
+        let heavy = count(20.0);
+        assert!(light > 0, "2 mm/h landed nothing at all");
+        assert!(heavy > light * 3, "{light} at 2 mm/h against {heavy} at 20");
+    }
+
+    /// **Impacts land on the surface, not at the eye's height.** Under the roof
+    /// they land on the *roof*, which is what a height field can say and is
+    /// also what is true: a splash on the sheltered floor would be the bug.
+    #[test]
+    fn they_land_on_the_topmost_surface() {
+        let field = field();
+        // The slab spans local x,z 22..42 at y = 19..21; the ground below is
+        // whatever the volume has there.
+        let out = splashes(20.0, Some(&field), [32.0, 25.0, 32.0], 2.0);
+
+        assert!(!out.is_empty(), "nothing landed on the roof");
+        for splash in &out {
+            let ground = field.at(splash.position[0], splash.position[2]);
+            assert!(
+                (splash.position[1] - ground).abs() < 1e-3,
+                "{splash:?} is not on the surface at {ground}"
+            );
+        }
+        // And every one of them is on top of the slab rather than under it.
+        let over_the_slab = out
+            .iter()
+            .filter(|s| (s.position[0] - 32.0).abs() < 8.0 && (s.position[2] - 32.0).abs() < 8.0)
+            .collect::<Vec<&Splash>>();
+        assert!(!over_the_slab.is_empty(), "the roof caught nothing");
+        for splash in over_the_slab {
+            assert!(splash.position[1] > 20.0, "rain landed under the roof: {splash:?}");
+        }
+    }
+
+    /// A scene with no voxels has no surface for rain to land on. Splashes
+    /// hanging in the air where the floor is a mesh would be worse than none.
+    #[test]
+    fn a_scene_without_terrain_gets_no_splashes() {
+        assert!(splashes(20.0, None, [0.0; 3], 1.0).is_empty());
+    }
+
+    /// They follow the camera, because they are only drawn near it. Moving a
+    /// hundred metres away must not leave the crowns behind.
+    #[test]
+    fn they_are_drawn_around_the_eye() {
+        let field = field();
+
+        let near = splashes(20.0, Some(&field), [10.0, 12.0, 10.0], 2.0);
+        assert!(!near.is_empty());
+        for splash in &near {
+            let d = (splash.position[0] - 10.0).hypot(splash.position[2] - 10.0);
+            // The reach, plus the diagonal of the cell it landed in.
+            assert!(
+                d < SPLASH_REACH + 1.5,
+                "{splash:?} is {d} m from an eye at [10, ., 10]"
+            );
+        }
+
+        // Far enough off the baked grid that nothing is in reach of a surface.
+        assert!(splashes(20.0, Some(&field), [400.0, 12.0, 400.0], 2.0).is_empty());
+    }
+
+    /// **A cell does not drip on one spot forever.** The position is rehashed
+    /// per impact, so consecutive splashes in one square metre land apart —
+    /// without which the layer reads as a grid of taps after two seconds.
+    #[test]
+    fn consecutive_impacts_in_a_cell_land_apart() {
+        let field = field();
+        let at = [10.0, 12.0, 10.0];
+        let near_cell = |t: f32| {
+            splashes(20.0, Some(&field), at, t)
+                .into_iter()
+                .filter(|s| s.position[0].floor() == 10.0 && s.position[2].floor() == 10.0)
+                .map(|s| [s.position[0], s.position[2]])
+                .collect::<Vec<[f32; 2]>>()
+        };
+
+        // Two whole periods apart, so the same slots have fired again.
+        let first = near_cell(1.0);
+        let second = near_cell(1.0 + SPLASH_PERIOD * 2.0);
+        assert!(!first.is_empty() && !second.is_empty(), "the cell never splashed");
+        assert_ne!(first, second, "the same cell dripped on the same spot");
+    }
+
+    /// A crown ages from 0 to 1 and is gone. Nothing outside that range reaches
+    /// the renderer, which scales a sprite by it.
+    #[test]
+    fn a_crown_ages_through_its_life_and_stops() {
+        let field = field();
+        for step in 0..40 {
+            #[allow(clippy::cast_precision_loss)]
+            let t = 1.0 + step as f32 * 0.05;
+            for splash in splashes(20.0, Some(&field), [10.0, 12.0, 10.0], t) {
+                assert!(
+                    (0.0..1.0).contains(&splash.fraction),
+                    "{splash:?} is outside its own life"
+                );
+            }
+        }
     }
 
     /// Drizzle wets a surface completely, given time — it only takes longer to

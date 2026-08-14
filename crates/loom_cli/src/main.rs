@@ -518,7 +518,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     }
 
     let objects = world_to_objects(&world, &library, &material_library);
-    let particles = particles::simulate(
+    let mut particles = particles::simulate(
         &world,
         &weather,
         flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()),
@@ -580,6 +580,15 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         camera.eye,
         wind_seconds,
     );
+    // Where that rain is landing. **After the camera**, because impacts are
+    // only drawn near the eye — and after `rain_at_eye`, because the rate they
+    // are gated by is the one it stamped into the environment.
+    particles.extend(particles::rain_splashes(
+        &environment,
+        terrain.as_ref(),
+        camera.eye.to_array(),
+        wind_seconds,
+    ));
     let result = (|| -> Result<(String, bool), String> {
         let instance = Instance::new(c"loom").map_err(|e| e.to_string())?;
         let device = Device::new(&instance).map_err(|e| e.to_string())?;
@@ -649,7 +658,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     }
                     let objects = world_to_objects(&world, &library, &material_library);
                     #[allow(clippy::cast_possible_truncation)]
-                    let particles = particles::simulate(
+                    let mut particles = particles::simulate(
                         &world,
                         &weather,
                         Some(elapsed as u32),
@@ -756,6 +765,14 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                         moment,
                     );
                     renderer.set_rain(drops);
+                    // And the impacts, which move with both: the camera has
+                    // turned and the rain has advanced.
+                    particles.extend(particles::rain_splashes(
+                        &renderer.environment,
+                        terrain.as_ref(),
+                        camera.eye.to_array(),
+                        moment,
+                    ));
 
                     renderer
                         .render_to_png(

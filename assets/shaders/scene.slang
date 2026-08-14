@@ -780,6 +780,130 @@ float wetGate(float3 worldPos, float3 geometric) {
     return open * facing;
 }
 
+/// Rate, in mm/h, at which the visual layer is at full strength. Light rain is
+/// both sparser and fainter, and nothing past this rate gets denser or
+/// brighter.
+///
+/// **Both, rather than only the density, on purpose.** Exposure at the eye
+/// moves continuously as a camera walks under a ledge; dropping cells alone
+/// would step the layer out one drop at a time, and a fade is what makes that a
+/// transition rather than a stutter.
+///
+/// **It is spelled once.** The Rust side used to hold the same 20.0 and scale
+/// the draw count by it; a grid cannot be thinned by shortening the draw, so
+/// both halves moved into this file. It sits up here rather than beside the
+/// streaks — where it was, and where its only reader used to be — because the
+/// ripples below thin themselves against exactly the same number, and rain that
+/// was falling harder than it was rippling would be two answers to one
+/// question. `loom_rain`'s `SPLASH_FULL_RATE` is the third reader, and the one
+/// that cannot be shared: it is on the far side of the CPU boundary.
+static const float RAIN_FULL_RATE = 20.0;
+
+// ---------------------------------------------------------------------------
+// Ripples — Phase 4 step 4's shading half.
+//
+// **Expanding rings on a wet surface, and they are what reads as rain landing.**
+// Streaks over a wet-but-glassy floor look like rain in front of a photograph
+// of rain; the rings are what put the two in the same world.
+//
+// Procedural rather than a scrolling normal atlas, which is what the research
+// pass proposes ("ripple normal atlas first"). Same cost class and one fewer
+// asset: no texture to author, no descriptor, no upload path, no tiling period,
+// and the scale is in metres rather than in whatever the atlas was drawn at.
+// Cyanilux's rain breakdown does the same thing for the same reason.
+//
+// **Where they appear is [`wetGate`]'s answer and no other**: a surface under
+// cover has no rings for the same reason it is not wet, out of the same terrain
+// height field the drops are culled against. How many appear is
+// `environment.rain.w` — `loom_rain::sample_rain` at the eye — against the same
+// `RAIN_FULL_RATE` the streaks thin themselves by. This shader decides *where a
+// ring is*, and nothing else.
+//
+// Nothing here is state. A ring's radius is a function of the clock and its
+// cell, so there is no ripple buffer, nothing to step, and nothing that could
+// be read back into the simulation.
+// ---------------------------------------------------------------------------
+
+/// Metres per ripple cell. One ring at a time in each, which is what buys the
+/// single hash per fragment below.
+static const float RIPPLE_CELL = 1.0;
+/// Seconds between one cell's rings.
+static const float RIPPLE_PERIOD = 0.9;
+/// Seconds a ring lives. Shorter than the period, so a cell is empty part of
+/// the time and the field does not read as a permanent lattice of rings.
+static const float RIPPLE_LIFE = 0.55;
+/// Metres a ring reaches by the end of its life.
+///
+/// **Plus [`RIPPLE_WIDTH`] it must stay under a quarter of a cell**, because the
+/// centre is confined to the middle half of one and a ring that crossed the
+/// boundary would be clipped by a straight line. That bound is what keeps this
+/// to one hash per fragment instead of nine.
+static const float RIPPLE_RADIUS = 0.16;
+/// Metres across the crest of the ring.
+static const float RIPPLE_WIDTH = 0.04;
+/// How far the crest tilts the normal.
+static const float RIPPLE_STRENGTH = 0.4;
+
+/// The surface normal, perturbed by whatever ring is passing through this point.
+///
+/// `wet` is [`wetGate`] — cover, and how squarely the surface faces up. Zero
+/// under a roof, so the rings stop exactly where the wetness does.
+float3 rippleNormal(float3 worldPos, float3 normal, float wet) {
+    float rate = saturate(push.environment[0].rain.w / RAIN_FULL_RATE);
+    float strength = rate * wet;
+    if (strength <= 0.0) {
+        return normal;
+    }
+
+    const float SCALE = 1.0 / 16777216.0;
+    float2 p = worldPos.xz / RIPPLE_CELL;
+    int2 cell = int2(floor(p));
+    float2 inCell = p - float2(cell);
+
+    // `loom_hash` again — the project's one integer hash, folded over the
+    // coordinates the way `rainHash` and `loom_lattice` fold theirs.
+    uint seed = loom_hash(loom_hash(uint(cell.x)) + uint(cell.y));
+    // Phased per cell, so neighbouring rings do not appear in unison.
+    float phase = float(seed >> 8) * SCALE;
+    float s = push.environment[0].weather.z / RIPPLE_PERIOD + phase;
+    float cycle = floor(s);
+    float age = (s - cycle) * RIPPLE_PERIOD;
+    if (age >= RIPPLE_LIFE) {
+        return normal;
+    }
+
+    // **Rehashed per ring**, so the next one in this cell lands somewhere else.
+    // Hashing the centre from the cell alone makes every cell a tap dripping on
+    // one spot, and the grid becomes visible within two seconds.
+    uint h = loom_hash(seed + uint(int(cycle)));
+    uint h2 = loom_hash(h);
+    uint h3 = loom_hash(h2);
+    // Light rain rings in fewer places as well as more faintly — the same
+    // per-cell thinning against the same ratio the drops use.
+    if (float(h3 >> 8) * SCALE >= rate) {
+        return normal;
+    }
+
+    float2 centre = float2(0.25 + 0.5 * float(h >> 8) * SCALE,
+                           0.25 + 0.5 * float(h2 >> 8) * SCALE);
+    float2 offset = (inCell - centre) * RIPPLE_CELL;
+    float dist = length(offset);
+    float radius = (age / RIPPLE_LIFE) * RIPPLE_RADIUS;
+
+    // The *slope* of the ring, which is what a normal is: the derivative of a
+    // gaussian crest. Positive on the way up and negative on the way down, so
+    // the crest catches the light on one side and loses it on the other, which
+    // is what makes a ring read as raised rather than as a painted circle.
+    float x = (dist - radius) / RIPPLE_WIDTH;
+    float slope = -2.0 * x * exp(-x * x);
+    // Dying as it spreads, like a real one: the energy is fixed and the
+    // circumference is not.
+    float fade = 1.0 - age / RIPPLE_LIFE;
+    float2 dir = dist > 1e-4 ? offset / dist : float2(0.0, 0.0);
+    float3 tilt = float3(dir.x, 0.0, dir.y) * (slope * RIPPLE_STRENGTH * fade * strength);
+    return normalize(normal + tilt);
+}
+
 [shader("fragment")]
 float4 fragmentMain(VSOutput in) : SV_Target {
     // One directional sun plus ambient from the sky. The ambient used to be a
@@ -839,16 +963,10 @@ float4 fragmentMain(VSOutput in) : SV_Target {
         }
     }
 
-    float diffuse = max(dot(normal, sunDirection()), 0.0);
-    float3 ambient = hemisphereAmbient(normal) * ambientStrength();
-    // Only trace where the sun could reach anyway: a face turned away from the
-    // sun is already dark, and tracing from it costs a ray to learn nothing.
-    //
-    // Traced against the *geometric* normal, not the mapped one: a normal map
-    // can tilt a surface far enough to push the ray origin below the real
-    // surface, and the ray then starts inside its own geometry.
+    // The unmapped normal. Up here because the wet block below needs it, and
+    // because that block now *changes the normal* — see the note on the sun
+    // term underneath it.
     float3 geometric = normalize(in.normal);
-    float sun = diffuse > 0.0 ? sunVisibility(in.worldPos, geometric, in.shadowBias) : 0.0;
 
     // -----------------------------------------------------------------------
     // **Wet.** Two properties, driven by the two halves of the model, and they
@@ -871,7 +989,36 @@ float4 fragmentMain(VSOutput in) : SV_Target {
         // Toward a water film, never rougher than the surface already is: a
         // material authored smoother than standing water stays that way.
         roughness = lerp(roughness, min(roughness, WET_SMOOTH), wet * wetFilm());
+        // **And the rings, on the film rather than on the material.** Scaled by
+        // the film because a ring is a disturbance *in* standing water: once the
+        // sheen has drained there is nothing left to ripple, which is also what
+        // stops them the moment a shower ends. Only where the surface faces up
+        // — a ring running up a wall is not a thing rain does, and the tilt is
+        // in the horizontal plane.
+        normal = rippleNormal(
+            in.worldPos, normal, wet * wetFilm() * saturate(geometric.y));
     }
+
+    // **After the wet block, and that ordering is the whole feature.** These
+    // three lines used to sit above it, which was harmless while the block only
+    // touched albedo and roughness — and silently threw away most of the
+    // ripples, which are a change to the *normal*: a ring reached the specular
+    // lobe and the sky reflection, both of which read `normal` below, but not
+    // the diffuse term or the sky ambient, which had already been computed off
+    // the flat one. The measured effect was rings visible only inside the sun's
+    // highlight, a few dozen pixels of a frame, and a golden image that could
+    // not see the feature at all. A dry scene skips the block entirely, so this
+    // is pure code motion for one and the difference between working and not
+    // for the other.
+    float diffuse = max(dot(normal, sunDirection()), 0.0);
+    float3 ambient = hemisphereAmbient(normal) * ambientStrength();
+    // Only trace where the sun could reach anyway: a face turned away from the
+    // sun is already dark, and tracing from it costs a ray to learn nothing.
+    //
+    // Traced against the *geometric* normal, not the mapped one: a normal map
+    // can tilt a surface far enough to push the ray origin below the real
+    // surface, and the ray then starts inside its own geometry.
+    float sun = diffuse > 0.0 ? sunVisibility(in.worldPos, geometric, in.shadowBias) : 0.0;
 
     // Metals have no diffuse response — their albedo is the reflectance of the
     // specular lobe instead, which is why it moves into f0 rather than being
@@ -1963,19 +2110,6 @@ static const float RAIN_WIDTH = 0.02;
 /// depth fade, and the reason a streak does not end in a hard line where it
 /// crosses the ground.
 static const float RAIN_DEPTH_FADE = 0.7;
-/// Rate, in mm/h, at which the layer is at full strength. Light rain is both
-/// sparser and fainter, and nothing past this rate gets denser or brighter.
-///
-/// **Both, rather than only the density, on purpose.** Exposure at the eye
-/// moves continuously as a camera walks under a ledge; dropping cells alone
-/// would step the layer out one drop at a time, and a fade is what makes that a
-/// transition rather than a stutter.
-///
-/// **It is spelled once now.** The Rust side used to hold the same 20.0 and
-/// scale the draw count by it; a grid cannot be thinned by shortening the draw,
-/// so both halves moved here, next to the cells they thin.
-static const float RAIN_FULL_RATE = 20.0;
-
 /// The scene's depth, after the forward pass. Set 2, binding 0.
 ///
 /// **Sampled, not tested.** Rain draws in a pass of its own, into the resolved

@@ -1090,6 +1090,23 @@ impl ApplicationHandler for App {
                     camera.eye,
                     self.wind_seconds,
                 );
+                // Where that rain lands, added to whatever the plumes drew.
+                // Built fresh each frame rather than kept, because it has no
+                // state to keep — see `particles::rain_splashes`. The `Vec` is
+                // only paid for by a scene that is actually raining.
+                let crowns = crate::particles::rain_splashes(
+                    &environment,
+                    self.terrain.as_ref(),
+                    camera.eye.to_array(),
+                    self.wind_seconds,
+                );
+                let combined;
+                let particles: &[loom_render::ParticleInstance] = if crowns.is_empty() {
+                    particles
+                } else {
+                    combined = [particles, &crowns].concat();
+                    &combined
+                };
                 if let Some(viewer) = self.viewer.as_mut() {
                     viewer.environment = environment;
                     viewer.set_rain(drops);
