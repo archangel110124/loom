@@ -746,9 +746,19 @@ impl ApplicationHandler for App {
             return;
         }
 
-        let attributes = Window::default_attributes()
+        let mut attributes = Window::default_attributes()
             .with_title(&self.title)
             .with_inner_size(winit::dpi::LogicalSize::new(1440, 900));
+        // `LOOM_WINDOW_AT=x,y` puts the window on a chosen monitor — the
+        // windowed half of `cargo xtask validate` opens five of these, and on a
+        // multi-head desk they land wherever the WM feels like. Physical
+        // pixels, and a hint: X11 honours it, a compositor may not.
+        if let Some((x, y)) = std::env::var("LOOM_WINDOW_AT").ok().and_then(|s| {
+            let (x, y) = s.split_once(',')?;
+            Some((x.trim().parse::<i32>().ok()?, y.trim().parse::<i32>().ok()?))
+        }) {
+            attributes = attributes.with_position(winit::dpi::PhysicalPosition::new(x, y));
+        }
         let window = match event_loop.create_window(attributes) {
             Ok(w) => Arc::new(w),
             Err(e) => {
