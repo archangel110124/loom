@@ -1790,12 +1790,61 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
 // authoritative Phase 4 state. Everything else below is derived here.
 // ---------------------------------------------------------------------------
 
-/// The wrapping volume, in metres, centred on the eye.
+/// The block of cells the layer draws, and one cell's side in metres.
 ///
-/// Wide enough that its faces sit past the fog on a normal shot and shallow
-/// enough that a fixed drop count still reads as weather rather than as
-/// drizzle. These are calibration knobs, not physics.
-static const float3 RAIN_BOX = float3(72.0, 32.0, 72.0);
+/// **A jittered grid, not one box repeated.** Hashing a drop's position from
+/// its index alone — which is what this used to do — makes the whole field
+/// periodic with period `RAIN_CELLS * RAIN_CELL`: every copy of the block holds
+/// the *identical* arrangement of drops. Standing still that is invisible.
+/// Moving, the camera flies through a frozen tiling pattern, and every clump
+/// and void in the hash reads as a structure sliding across the screen — the
+/// "texture moving back and forth" the artifact was reported as. The vertical
+/// period was the worst of it, because a camera at head height sees several
+/// repeats of a 32 m period at once.
+///
+/// Hashing the *cell index* instead has no period at all. `loom_lattice`
+/// already establishes the shape: an integer lattice, bit-exact, unbounded.
+///
+/// 64 x 32 x 64 one-metre cells is 131,072 drops at one per cubic metre, which
+/// is the density 160,000 drops in a 72 x 32 x 72 m box already carried, over
+/// very nearly the same reach. The extent is wide enough that its faces sit
+/// past the fog on a normal shot and shallow enough that the count still reads
+/// as weather rather than as drizzle. Calibration knobs, not physics.
+///
+/// **Powers of two, and that part is not taste.** Wrapping a slot onto a cell
+/// needs `(slot - base) mod RAIN_CELLS` for a `base` of either sign, and `%`
+/// on a negative operand is the classic place for the C rule and the compiler
+/// to disagree — this went in first with `72` and a `((x % n) + n) % n`, and
+/// every camera whose block base was positive lost most of its rain on that
+/// axis. `& (n - 1)` is the mathematical modulo on two's complement whatever
+/// the sign, and there is nothing left to get wrong.
+static const int3 RAIN_CELLS = int3(64, 32, 64);
+static const int3 RAIN_MASK = RAIN_CELLS - 1;
+static const float RAIN_CELL = 1.0;
+/// Fraction of each axis a drop fades in over, from that face inwards.
+///
+/// **Reaching zero inside the outermost cell layer is a correctness bound
+/// rather than taste.** That layer is exactly where a drop changes which copy
+/// of the block it belongs to, and the swap has to happen at zero brightness.
+/// An eighth of the shortest axis is four cells, so the bound holds with room.
+///
+/// **An eighth per axis, rather than a fixed number of cells**, which
+/// reproduces the geometry of the fade this replaced exactly: 8 m along the
+/// long axes, 4 m vertically. A flat four cells everywhere is the same fade
+/// vertically and half of it horizontally, which brings distant streaks to full
+/// brightness sooner for no reason.
+///
+/// It was tried the other way and measured: `cargo xtask shimmer` on
+/// `rain_overhang` reads **2.077 per axis against 2.107 flat**, so the shape is
+/// worth almost nothing and the *reason* is worth writing down instead. The
+/// grid raised that number from **1.828** whatever the fade does, and the cause
+/// is not brightness — mean and standard deviation of the frame are within
+/// 0.15/256 of the old ones. It is that a jittered grid spreads drops far more
+/// evenly than the uniform-random field did, so the same amount of light
+/// arrives as more separate sub-pixel streaks, each twinkling on its own.
+/// Clumps are steadier to measure and they are also exactly what made the old
+/// field read as a sliding texture. Left alone deliberately.
+static const float RAIN_FADE = 0.125;
 /// Terminal velocity, m/s. Moderate rain is 6–9; the streak length the eye
 /// actually reads is derived from this rather than authored beside it.
 static const float RAIN_FALL = 8.0;
@@ -1807,15 +1856,17 @@ static const float RAIN_WIDTH = 0.02;
 /// depth fade, and the reason a streak does not end in a hard line where it
 /// crosses the ground.
 static const float RAIN_DEPTH_FADE = 0.7;
-/// Rate, in mm/h, at which the layer is at full strength. Spelled again as
-/// `RAIN_FULL_RATE` on the Rust side, which scales the *drop count* by the same
-/// ratio — so light rain is both sparser and fainter, and nothing past this
-/// rate gets denser or brighter.
+/// Rate, in mm/h, at which the layer is at full strength. Light rain is both
+/// sparser and fainter, and nothing past this rate gets denser or brighter.
 ///
-/// **Both, rather than only the count, on purpose.** Exposure at the eye moves
-/// continuously as a camera walks under a ledge; a count alone would step the
-/// layer out one drop at a time, and a fade is what makes that a transition
-/// rather than a stutter.
+/// **Both, rather than only the density, on purpose.** Exposure at the eye
+/// moves continuously as a camera walks under a ledge; dropping cells alone
+/// would step the layer out one drop at a time, and a fade is what makes that a
+/// transition rather than a stutter.
+///
+/// **It is spelled once now.** The Rust side used to hold the same 20.0 and
+/// scale the draw count by it; a grid cannot be thinned by shortening the draw,
+/// so both halves moved here, next to the cells they thin.
 static const float RAIN_FULL_RATE = 20.0;
 
 /// The scene's depth, after the forward pass. Set 2, binding 0.
@@ -1829,18 +1880,23 @@ static const float RAIN_FULL_RATE = 20.0;
 [[vk::binding(0, 2)]]
 uniform Sampler2D sceneDepth;
 
-/// Three uncorrelated values in `[0, 1)` from one drop index.
+/// Four uncorrelated values in `[0, 1)` from one integer cell: `xyz` is where
+/// in the cell its drop sits, `w` decides whether it exists at this rate.
 ///
 /// **`loom_hash` is `loom_field::noise`'s, and it is frozen ABI** — the project
 /// has exactly one integer hash and this is it. A `frac(sin(...))` one-liner is
 /// the usual choice for something outside the sim hash, and there is no reason
 /// to carry a second family of magic constants for it.
-float3 rainHash(uint index) {
-    uint h1 = loom_hash(index * 0x9e3779b9u + 0x517cc1b7u);
+///
+/// The three-way fold over the coordinates is `loom_lattice`'s, spelled the
+/// same way for the same reason.
+float4 rainHash(int3 cell) {
+    uint h1 = loom_hash(loom_hash(loom_hash(uint(cell.x)) + uint(cell.y)) + uint(cell.z));
     uint h2 = loom_hash(h1);
     uint h3 = loom_hash(h2);
+    uint h4 = loom_hash(h3);
     const float SCALE = 1.0 / 16777216.0;
-    return float3(float(h1 >> 8), float(h2 >> 8), float(h3 >> 8)) * SCALE;
+    return float4(float(h1 >> 8), float(h2 >> 8), float(h3 >> 8), float(h4 >> 8)) * SCALE;
 }
 
 struct RainOutput {
@@ -1876,20 +1932,28 @@ RainOutput rainVertexMain(uint vertexID: SV_VertexID) {
     float3 velocity = float3(rain.x, -RAIN_FALL, rain.z);
 
     // -----------------------------------------------------------------------
-    // **The wrap, and why a drop never teleports.**
+    // **A world hash grid in the frame that falls with the rain.**
     //
-    // In the frame that falls with the rain — `world - velocity * t` — the
-    // pattern is a fixed, infinitely repeating lattice of period `RAIN_BOX`.
-    // The modulo below picks the copy of drop `i` nearest the eye. Time alone
-    // therefore never moves a drop discontinuously: it slides smoothly, and
-    // only the *choice of copy* changes, at the box face.
+    // Work in `world - velocity * t`. In that frame the rain is *stationary*,
+    // so a grid pinned to it is a grid a drop never crosses: cell `c` holds one
+    // drop at `(c + hash(c)) * RAIN_CELL` forever, and its world position is
+    // that plus `velocity * t`. The fall is therefore exactly continuous in
+    // time — the only thing time does to a drop is translate it — and the
+    // arrangement has no period, because `hash` is an unbounded integer lattice
+    // rather than one tile repeated.
     //
-    // Which leaves exactly one discontinuity, at that face, whichever caused
-    // it — the fall carrying a drop out of the bottom, or the camera walking
-    // the box over it. `edge` below takes a drop's opacity to zero over the
-    // outer quarter of the box on every axis, so the swap always happens at
-    // zero brightness. That is the whole answer: continuous in time by
-    // construction, and nothing is drawn on the seam.
+    // **Which cells get drawn, and the one discontinuity.** A fixed draw call
+    // has a fixed number of slots, so slot `k` owns one residue class of cells:
+    // the single cell congruent to `k` modulo `RAIN_CELLS` that lies inside the
+    // block around the eye. As the eye advances one cell along an axis, exactly
+    // one residue class falls out of the near face and is re-issued at the far
+    // one — every other slot keeps the cell it had, and keeps it *smoothly*,
+    // because `base` and `cell` step together and cancel. So one slot per cell
+    // of camera travel teleports the width of the block, and it teleports from
+    // one face to the opposite face.
+    //
+    // `edge` below is zero across the whole outermost cell layer, which is
+    // where both ends of that teleport land. Nothing is ever drawn on the seam.
     // -----------------------------------------------------------------------
     //
     // `ponytail:` `velocity * seconds` is absolute, so its precision decays
@@ -1898,14 +1962,28 @@ RainOutput rainVertexMain(uint vertexID: SV_VertexID) {
     // periodic offset before the multiply if a run ever needs to be longer
     // than that; nothing does, and doing it now would only be arithmetic
     // nobody can check.
-    float3 pattern = rainHash(drop) * RAIN_BOX + velocity * seconds;
-    float3 rel = pattern - (eye - RAIN_BOX * 0.5);
-    rel -= RAIN_BOX * floor(rel / RAIN_BOX);
-    float3 pos = eye - RAIN_BOX * 0.5 + rel;
+    int3 slot = int3(int(drop), int(drop >> 6), int(drop >> 11)) & RAIN_MASK;
 
-    // Zero at the centre of the box, one at a face.
-    float3 toEdge = abs(rel / RAIN_BOX - 0.5) * 2.0;
-    float edge = 1.0 - smoothstep(0.75, 1.0, max(max(toEdge.x, toEdge.y), toEdge.z));
+    // The eye in the falling frame, in cells, measured from the block's low
+    // corner. `base` is the cell it sits in; `frac` is how far into it.
+    float3 eyeCell =
+        (eye - velocity * seconds) / RAIN_CELL - float3(RAIN_CELLS) * 0.5;
+    int3 base = int3(floor(eyeCell));
+    float3 frac = eyeCell - float3(base);
+
+    // The one cell congruent to `slot` inside `[base, base + RAIN_CELLS)`.
+    int3 cell = base + ((slot - base) & RAIN_MASK);
+
+    float4 hash = rainHash(cell);
+    float3 pos = (float3(cell) + hash.xyz) * RAIN_CELL + velocity * seconds;
+
+    // Where the drop sits in the block, in cells: `0` at the near face,
+    // `RAIN_CELLS - 1` at the far one. Continuous across a `base` step, since
+    // `cell - base` and `frac` each drop by exactly one and cancel.
+    float3 inBlock = float3(cell - base) + hash.xyz - frac;
+    float3 fromFace = min(inBlock, float3(RAIN_CELLS) - 1.0 - inBlock);
+    float3 faded = smoothstep(0.0, float3(RAIN_CELLS) * RAIN_FADE, fromFace);
+    float edge = min(min(faded.x, faded.y), faded.z);
 
     // -----------------------------------------------------------------------
     // **The overhang, and exactly what this can and cannot say.**
@@ -1930,7 +2008,15 @@ RainOutput rainVertexMain(uint vertexID: SV_VertexID) {
     float ground = loom_ground_height(terrainField(), pos.xz);
     float aboveGround = pos.y > ground ? 1.0 : 0.0;
 
-    float strength = saturate(rain.w / RAIN_FULL_RATE) * edge * aboveGround;
+    // **Light rain is sparser as well as fainter, and the thinning moved here.**
+    // The CPU used to shrink the draw count for it. A grid cannot be thinned
+    // that way — a shorter draw is a missing *slab* of cells, not a thinner
+    // field — so a cell keeps or drops its own drop against the same ratio.
+    // Statistically identical, and stable per cell rather than per index.
+    float rate = saturate(rain.w / RAIN_FULL_RATE);
+    float present = hash.w < rate ? 1.0 : 0.0;
+
+    float strength = rate * edge * aboveGround * present;
 
     // The streak: a ribbon along the direction of travel, turned to face the
     // eye. A drop with no strength collapses to a point and its triangles are

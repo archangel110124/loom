@@ -1744,25 +1744,31 @@ pub(crate) fn submerge_eye(
     env.water[1] = f32::from(under > 0.5);
 }
 
-/// Drops the layer draws at [`RAIN_FULL_RATE`] and above.
+/// Drops the layer draws, which is one per cell of `scene.slang`'s rain grid.
 ///
-/// A calibration knob, not physics — real rain at 8 mm/h has millions of drops
-/// per box and no renderer draws them. What this number buys is the *look* of
-/// weather at the cost of its overdraw, and it is the one dial to turn when
-/// that trade needs revisiting.
-const MAX_RAIN_DROPS: u32 = 160_000;
-
-/// Rate, in mm/h, at which the layer is at its full drop count.
+/// **`RAIN_CELLS` there, multiplied out — and unlike the count this replaced it
+/// is not free to be any number.** A drop's slot index decomposes into a cell
+/// of a 64 x 32 x 64 block by shifting and masking, so a short draw would leave
+/// out a *slab* of the block rather than thinning the field. The rate scales
+/// the layer inside the shader instead, where it can drop a cell here and a
+/// cell there.
 ///
-/// **The same number `scene.slang` fades opacity in by**, and it is one number
-/// spelled twice — see `RAIN_FULL_RATE` there for why both the count and the
-/// opacity scale rather than only the count. Past this point rain gets no
-/// denser and no brighter, so a scene authoring 200 mm/h reads as a downpour
-/// rather than as a wall.
-const RAIN_FULL_RATE: f32 = 20.0;
+/// The extent it covers is a calibration knob — real rain at 8 mm/h has
+/// millions of drops per block and no renderer draws them. What this buys is
+/// the *look* of weather at the cost of its overdraw. At light rates most of
+/// these collapse to a degenerate quad in the vertex stage and rasterise
+/// nothing, so the overdraw still scales with the rate; only the vertex work,
+/// measured at well under a tenth of a millisecond for the whole layer, does
+/// not.
+const MAX_RAIN_DROPS: u32 = 64 * 32 * 64;
 
-/// Tell the shader what the rain is doing at the camera, and how many streaks
-/// that is worth.
+/// Tell the shader what the rain is doing at the camera, and whether that is
+/// worth a draw at all.
+///
+/// **The rate no longer scales the count here, and `RAIN_FULL_RATE` is gone
+/// with it.** Both halves of "light rain is sparser *and* fainter" now live in
+/// `scene.slang`, next to the grid whose cells they thin — one number in one
+/// place instead of the same 20 mm/h spelled on both sides of the boundary.
 ///
 /// **One `sample_rain` call, at the eye, and it is the authoritative one.** The
 /// rate it returns is what `loom sim --assert "rain@x,y,z.rate"` reads, so the
@@ -1787,10 +1793,8 @@ pub(crate) fn rain_at_eye(
     }
     let sample = weather::rain_at(rain, wind, sky, eye.to_array(), seconds);
     env.rain = [sample.wind[0], sample.wind[1], sample.wind[2], sample.rate];
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    {
-        ((sample.rate / RAIN_FULL_RATE).clamp(0.0, 1.0) * MAX_RAIN_DROPS as f32) as u32
-    }
+    // Every cell, or none. A fully sheltered eye still skips the draw entirely.
+    if sample.rate > 0.0 { MAX_RAIN_DROPS } else { 0 }
 }
 
 /// The voxel volume rain shelters under, or `None` when a scene authors no
@@ -3529,6 +3533,42 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         ]));
 
         assert_eq!(code, 0, "{out}");
+    }
+
+    /// **The draw count and the shader's grid are one number, and this is the
+    /// only place they can be compared.** A drop's slot index is shifted and
+    /// masked into a cell of `RAIN_CELLS`, so `MAX_RAIN_DROPS` must be exactly
+    /// that product: too few and a whole slab of the block never gets a drop,
+    /// too many and cells are drawn twice with the streaks exactly coincident.
+    /// Neither errors, neither fails validation, and both look like a tuning
+    /// problem rather than a bug — which is the same argument
+    /// `loom_field::noise` makes for grepping its own Slang half.
+    #[test]
+    fn the_draw_count_matches_the_shaders_rain_grid() {
+        let slang = std::fs::read_to_string("../../assets/shaders/scene.slang")
+            .expect("scene.slang is readable");
+        let decl = slang
+            .split("static const int3 RAIN_CELLS = int3(")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .expect("scene.slang declares RAIN_CELLS");
+
+        let cells: Vec<u32> = decl
+            .split(',')
+            .map(|n| n.trim().parse().expect("RAIN_CELLS is three integers"))
+            .collect();
+
+        assert_eq!(cells.len(), 3, "RAIN_CELLS is `{decl}`");
+        // Powers of two, because the wrap is `& (n - 1)` — see the constant's
+        // own comment for the bug that rule exists to have already happened.
+        for n in &cells {
+            assert!(n.is_power_of_two(), "RAIN_CELLS `{decl}` is not powers of two");
+        }
+        assert_eq!(
+            MAX_RAIN_DROPS,
+            cells.iter().product::<u32>(),
+            "MAX_RAIN_DROPS does not cover RAIN_CELLS `{decl}`"
+        );
     }
 
     /// **A scene that authors no rain must be exactly as dry as it was.** The
