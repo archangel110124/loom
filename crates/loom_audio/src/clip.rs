@@ -63,6 +63,27 @@ impl Clip {
     /// [`ClipError`] if the header is not RIFF/WAVE, the format is not 16-bit
     /// PCM, or a chunk runs off the end of the data.
     pub fn decode(bytes: &[u8]) -> Result<Self, ClipError> {
+        let (samples, sample_rate, _) = Self::parse(bytes, true)?;
+        Ok(Self { samples, sample_rate })
+    }
+
+    /// Decode WAV bytes **without folding to mono**, as interleaved frames.
+    ///
+    /// Returns the samples, the rate, and the channel count.
+    ///
+    /// **For ambient beds, which are the one thing folding is wrong for.** A
+    /// positioned sound is panned per ear from its position, so a stereo file
+    /// has already made that decision and averaging it is right. Rain is not
+    /// positioned: it surrounds the listener, and its stereo image *is* the
+    /// effect. Folded to mono it collapses to a point between your eyes.
+    ///
+    /// # Errors
+    /// As [`Clip::decode`].
+    pub fn decode_interleaved(bytes: &[u8]) -> Result<(Vec<f32>, u32, u16), ClipError> {
+        Self::parse(bytes, false)
+    }
+
+    fn parse(bytes: &[u8], fold: bool) -> Result<(Vec<f32>, u32, u16), ClipError> {
         let bad = |detail: &str| ClipError {
             error: "not_a_wav",
             detail: detail.to_owned(),
@@ -122,16 +143,24 @@ impl Clip {
                 let frames = size / 2 / channels as usize;
                 samples.reserve(frames);
                 for frame in 0..frames {
-                    // Folded to mono by averaging: a positioned sound is
-                    // panned and attenuated per ear here, and a stereo file
-                    // has already decided what each ear hears.
+                    // Folded to mono by averaging when the caller wants a
+                    // positioned sound: it is panned and attenuated per ear
+                    // here, and a stereo file has already decided what each ear
+                    // hears. `decode_interleaved` keeps the channels.
                     let mut total = 0.0_f32;
                     for channel in 0..channels as usize {
                         let index = body + (frame * channels as usize + channel) * 2;
                         let raw = i16::from_le_bytes([bytes[index], bytes[index + 1]]);
-                        total += f32::from(raw) / 32768.0;
+                        let value = f32::from(raw) / 32768.0;
+                        if fold {
+                            total += value;
+                        } else {
+                            samples.push(value);
+                        }
                     }
-                    samples.push(total / f32::from(channels));
+                    if fold {
+                        samples.push(total / f32::from(channels));
+                    }
                 }
             }
 
@@ -142,10 +171,7 @@ impl Clip {
         if sample_rate == 0 {
             return Err(bad("no fmt chunk"));
         }
-        Ok(Self {
-            samples,
-            sample_rate,
-        })
+        Ok((samples, sample_rate, channels.max(1)))
     }
 
     /// Encode interleaved samples as a 16-bit PCM WAV.

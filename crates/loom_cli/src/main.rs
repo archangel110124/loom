@@ -2760,6 +2760,13 @@ fn audio_cmd(path: &str, args: &[String]) -> (u8, String) {
     let frames = (RATE as f32 * seconds) as usize;
     let mut samples = vec![0.0_f32; frames * 2];
     let mut bed = loom_audio::rain::RainBed::new(RATE);
+    // Relative to the scene, like every other asset reference. Missing falls
+    // back to the synthesiser rather than to silence.
+    let recording = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("../audio/rain.wav");
+    let source = if bed.use_recording_at(&recording) { "recording" } else { "synthesised" };
     bed.render(
         loom_audio::rain::RainAudio { intensity, openness, volume: 1.0 },
         &mut samples,
@@ -2780,6 +2787,7 @@ fn audio_cmd(path: &str, args: &[String]) -> (u8, String) {
     (0, json_line(&serde_json::json!({
         "ok": true,
         "path": path,
+        "source": source,
         "intensity": intensity,
         "openness": openness,
         "seconds": seconds,

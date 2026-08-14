@@ -1,25 +1,42 @@
-//! Rain, synthesised rather than sampled.
+//! Rain: a recording when there is one, synthesis when there is not.
 //!
-//! # Why there is no rain loop in `assets/audio/`
+//! # Two sources, one set of weather rules
 //!
-//! Property 1 of this project is that everything authored is diffable text. A
-//! rain loop is an opaque binary blob: nobody can review a change to it, and
-//! "the rain got louder" is not a line in a commit. Rain is also one of the few
-//! sounds synthesis genuinely suits — it *is* broadband noise, and its character
-//! is spectral shape plus the density of individual impacts, both of which are
-//! parameters rather than recordings.
+//! `assets/audio/rain.wav` is a 40-second stereo loop and it is what plays. The
+//! synthesiser below is the fallback for when the asset is missing — a build
+//! without assets, or a scene shipped without them — and it is not dead code: it
+//! is what stops a scene that says it is raining from falling silent because a
+//! file did not load.
 //!
-//! Two things fall out of that which a clip could not give:
+//! **Everything around the source is shared.** The level curve, the shelter
+//! low-pass, the smoothing and the headroom are facts about *weather*, not about
+//! where samples came from, so the two paths differ only in where `dry` comes
+//! from. That is the whole reason swapping the source was cheap.
 //!
-//! - **Intensity is continuous.** Drizzle to downpour is one number moving, not
-//!   a crossfade between two recordings that were made in different places.
+//! # The case each way, since both are here
+//!
+//! A recording wins on realism, and the ear is the judge of that. Measured
+//! against the supplied file with [`measure`], the synthesiser was **28% too
+//! bright** — tilt 1.54 against the recording's 1.20 — which is to say real rain
+//! has more low-mid body than an obvious first guess gives it. That is not a
+//! criticism a spectrum analyser would have volunteered; it came from having a
+//! reference.
+//!
+//! What synthesis gives that a recording cannot:
+//!
+//! - **Intensity is continuous.** Drizzle to downpour is one number moving,
+//!   rather than a level change on a recording made at one rate. With the clip,
+//!   `intensity` moves loudness only; the *character* is whatever was recorded.
 //! - **It never repeats.** The noise is a function of a monotonically rising
-//!   sample counter, so there is no loop point. A short looping buffer is
-//!   audibly periodic, and "you can see the texture moving back and forth" is
-//!   the exact complaint that was made about the *visual* rain lattice. The
-//!   same mistake is easier to make here and harder to notice.
+//!   sample counter, so there is no loop point at all. The recording is looped,
+//!   which is why it was trimmed to a stretch with no level drift and
+//!   crossfaded — "you can see the texture moving back and forth" is the exact
+//!   complaint made about the *visual* rain lattice, and it is easier to make
+//!   here and harder to notice.
+//! - **It is diffable text.** Property 1. A WAV is a binary blob nobody can
+//!   review, and this repo now has 7 MB of one.
 //!
-//! # What makes it rain rather than static
+//! # What makes the synthesised half rain rather than static
 //!
 //! White noise alone is a television between channels. Rain is three things at
 //! once, and the mix between them is what the ear reads as *how hard it is
@@ -104,6 +121,10 @@ pub struct RainBed {
     roar: f32,
     hiss: f32,
     muffle: f32,
+    /// The shelter filter's right-ear state, used only by the recording path.
+    /// The synthesised path filters one signal and splits it; a stereo source
+    /// needs a state per ear, or the filter sums them back to mono.
+    muffle_right: f32,
     /// The decaying envelope of recent drop impacts.
     patter: f32,
     /// Smoothed parameters. Rain does not start and stop between one buffer and
@@ -111,6 +132,30 @@ pub struct RainBed {
     /// reason `Voice` carries its low-pass state across buffers.
     level: f32,
     tilt: f32,
+    /// The recording, when there is one: interleaved stereo frames.
+    ///
+    /// **A recording beats synthesis on realism and the ear is the judge**, so
+    /// when `assets/audio/rain.wav` is present the bed plays it. The generator
+    /// below is what runs when it is not — headless CI, or a build without the
+    /// asset — and it is not dead code: it is what keeps a rainy scene from
+    /// falling silent because a file is missing.
+    ///
+    /// Everything around the source is shared. Level, the rate curve, the
+    /// shelter low-pass and the smoothing are properties of *weather*, not of
+    /// where the samples came from, so swapping the source changes only where
+    /// `dry` comes from.
+    clip: Option<Clip>,
+}
+
+/// A looping stereo recording, and where playback has got to.
+#[derive(Debug, Clone)]
+struct Clip {
+    /// Interleaved stereo.
+    samples: std::sync::Arc<Vec<f32>>,
+    /// Source frames per output frame, so a 44.1 kHz file plays correctly on a
+    /// 48 kHz device.
+    step: f64,
+    cursor: f64,
 }
 
 /// Seconds for the level to follow a change in the weather.
@@ -161,10 +206,63 @@ impl RainBed {
             roar: 0.0,
             hiss: 0.0,
             muffle: 0.0,
+            muffle_right: 0.0,
             patter: 0.0,
             level: 0.0,
             tilt: 1.0,
+            clip: None,
         }
+    }
+
+    /// Play `bytes` — a WAV — as the bed instead of synthesising it.
+    ///
+    /// Returns `false` and leaves the generator in place if the file will not
+    /// decode. **A bad asset must not silence the weather**: a scene that says
+    /// it is raining should rain, and falling back is strictly better than a
+    /// dry-looking storm with an error in a log nobody reads.
+    pub fn use_recording(&mut self, bytes: &[u8]) -> bool {
+        let Ok((samples, rate, channels)) = crate::Clip::decode_interleaved(bytes) else {
+            return false;
+        };
+        self.install(samples, rate, channels)
+    }
+
+    /// Install already-decoded interleaved samples.
+    ///
+    /// **Separate from [`Self::use_recording`] because the audio thread must
+    /// never decode.** Parsing seven megabytes of WAV inside the output
+    /// callback is a dropout; the file is read and decoded on whatever thread
+    /// asked for it, and only the finished samples cross over.
+    pub fn install(&mut self, samples: Vec<f32>, rate: u32, channels: u16) -> bool {
+        if samples.is_empty() || channels == 0 {
+            return false;
+        }
+        // Mono sources are duplicated so the reader below can assume stereo.
+        let interleaved = if channels == 1 {
+            samples.iter().flat_map(|s| [*s, *s]).collect()
+        } else if channels == 2 {
+            samples
+        } else {
+            // More than stereo: take the first two channels. Nothing here
+            // knows what a 5.1 layout means and guessing would be worse.
+            samples
+                .chunks(channels as usize)
+                .flat_map(|f| [f[0], f[1]])
+                .collect()
+        };
+        self.clip = Some(Clip {
+            samples: std::sync::Arc::new(interleaved),
+            step: f64::from(rate.max(1)) / f64::from(self.sample_rate.max(1.0) as u32),
+            cursor: 0.0,
+        });
+        true
+    }
+
+    /// Load the recording from a path, if it is there.
+    ///
+    /// Missing is not an error — see [`Self::use_recording`].
+    pub fn use_recording_at(&mut self, path: &std::path::Path) -> bool {
+        std::fs::read(path).is_ok_and(|bytes| self.use_recording(&bytes))
     }
 
     /// Add `seconds` of rain into `out`, which is interleaved stereo.
@@ -188,6 +286,15 @@ impl RainBed {
         // The two bands. Fixed cutoffs: these describe rain, not a scene.
         let roar_k = one_pole(420.0, self.sample_rate);
         let hiss_k = one_pole(3_000.0, self.sample_rate);
+
+        // **The recording path.** Everything the synthesised path does around
+        // the source — level, the rate curve, the shelter low-pass, smoothing —
+        // applies identically, because those are facts about weather rather
+        // than about where the samples came from.
+        if self.clip.is_some() {
+            self.render_recording(target_level, target_tilt, smoothing, out);
+            return;
+        }
 
         for frame in out.chunks_mut(2) {
             self.level += (target_level - self.level) * smoothing;
@@ -240,6 +347,58 @@ impl RainBed {
             }
 
             self.cursor = self.cursor.wrapping_add(1);
+        }
+    }
+}
+
+impl RainBed {
+    /// The recording, resampled, looped, levelled and sheltered.
+    fn render_recording(&mut self, target_level: f32, target_tilt: f32, smoothing: f32, out: &mut [f32]) {
+        let Some(clip) = self.clip.as_mut() else {
+            return;
+        };
+        let frames = clip.samples.len() / 2;
+        if frames == 0 {
+            return;
+        }
+        // **A separate muffle state per ear**, unlike the synthesised path
+        // whose two ears share one filtered signal. Filtering a stereo pair
+        // through one state sums them, which is the mono fold this whole
+        // recording path exists to avoid.
+        for frame in out.chunks_mut(2) {
+            self.level += (target_level - self.level) * smoothing;
+            self.tilt += (target_tilt - self.tilt) * smoothing;
+
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let index = clip.cursor as usize % frames;
+            let next = (index + 1) % frames;
+            #[allow(clippy::cast_possible_truncation)]
+            let t = (clip.cursor - clip.cursor.floor()) as f32;
+            // Linear interpolation, the same resampling `Voice` does. The file
+            // is 44.1 kHz and the device is usually 48 kHz; reading the nearest
+            // sample instead would add a whine at the difference frequency.
+            let l = clip.samples[index * 2] * (1.0 - t) + clip.samples[next * 2] * t;
+            let r = clip.samples[index * 2 + 1] * (1.0 - t) + clip.samples[next * 2 + 1] * t;
+
+            let cutoff = SHELTERED_CUTOFF_HZ + (OPEN_CUTOFF_HZ - SHELTERED_CUTOFF_HZ) * self.tilt;
+            let k = one_pole(cutoff, self.sample_rate);
+            self.muffle += (l - self.muffle) * k;
+            self.muffle_right += (r - self.muffle_right) * k;
+
+            let gain = self.level * HEADROOM;
+            frame[0] += self.muffle * gain;
+            if frame.len() > 1 {
+                frame[1] += self.muffle_right * gain;
+            }
+
+            clip.cursor += clip.step;
+            // Wrapped as a float so the fractional phase survives the loop
+            // point; wrapping the integer index alone would quantise it and
+            // click once a pass.
+            #[allow(clippy::cast_precision_loss)]
+            if clip.cursor >= frames as f64 {
+                clip.cursor -= frames as f64;
+            }
         }
     }
 }
@@ -403,6 +562,77 @@ mod tests {
         assert!(
             identical * 100 < frame,
             "{identical} of {frame} samples repeat after four seconds — the bed has a loop point"
+        );
+    }
+
+    /// A synthetic stereo "recording": left and right deliberately different,
+    /// so a fold to mono is detectable.
+    fn fake_recording(seconds: f32) -> Vec<u8> {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let frames = (44_100.0 * seconds) as usize;
+        let mut interleaved = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let t = i as f32 / 44_100.0;
+            interleaved.push((t * 220.0 * std::f32::consts::TAU).sin() * 0.5);
+            interleaved.push((t * 330.0 * std::f32::consts::TAU).sin() * 0.5);
+        }
+        crate::Clip::encode(&interleaved, 44_100, 2)
+    }
+
+    /// **The recording must actually be what plays.** Install one and the
+    /// output has to change; without this assertion the whole clip path could
+    /// be dead and every other test here would still pass, because they all
+    /// exercise the synthesiser.
+    #[test]
+    fn a_recording_replaces_the_synthesised_bed() {
+        let params = RainAudio { intensity: 8.0, ..RainAudio::default() };
+        let mut synth = RainBed::new(RATE);
+        let mut played = RainBed::new(RATE);
+        assert!(played.use_recording(&fake_recording(2.0)), "the test WAV did not decode");
+
+        let mut a = vec![0.0; RATE as usize * 2];
+        let mut b = vec![0.0; RATE as usize * 2];
+        synth.render(params, &mut a);
+        played.render(params, &mut b);
+        assert_ne!(a, b, "installing a recording changed nothing — the clip path is dead");
+
+        let m = measure(&b, RATE);
+        assert!(m.rms > 0.001, "the recording rendered near-silence: {}", m.rms);
+    }
+
+    /// A recording that will not decode must fall back, not silence the scene.
+    #[test]
+    fn a_broken_recording_falls_back_to_synthesis() {
+        let mut bed = RainBed::new(RATE);
+        assert!(!bed.use_recording(b"this is not a wav"), "garbage was accepted as audio");
+
+        let mut out = vec![0.0; RATE as usize * 2];
+        bed.render(RainAudio { intensity: 8.0, ..RainAudio::default() }, &mut out);
+        assert!(
+            measure(&out, RATE).rms > 0.01,
+            "a bad asset silenced a raining scene — the fallback did not run"
+        );
+    }
+
+    /// The bed must keep the recording's stereo image. `Clip::decode` folds to
+    /// mono on purpose for positioned sounds, and reaching for it here instead
+    /// of `decode_interleaved` would collapse rain to a point between the ears
+    /// with nothing failing.
+    #[test]
+    fn a_stereo_recording_stays_stereo() {
+        let mut bed = RainBed::new(RATE);
+        assert!(bed.use_recording(&fake_recording(2.0)));
+        let mut out = vec![0.0; RATE as usize * 2];
+        bed.render(RainAudio { intensity: 12.0, ..RainAudio::default() }, &mut out);
+
+        let differing = out
+            .chunks(2)
+            .filter(|f| (f[0] - f[1]).abs() > 1e-6)
+            .count();
+        assert!(
+            differing * 2 > out.len() / 2,
+            "only {differing} frames of {} differ between the ears — the bed folded to mono",
+            out.len() / 2
         );
     }
 

@@ -52,6 +52,12 @@ impl Sound {
         };
         crate::log::info(format!("audio — {}", audio.device_name()));
 
+        // The weather bed. Loaded here, once, rather than per tick — and if it
+        // is missing the synthesiser takes over, so the scene still rains.
+        if !audio.use_rain_recording(&base.join("../audio/rain.wav")) {
+            crate::log::info("no rain recording; synthesising the weather".to_owned());
+        }
+
         let mut sound = Self {
             audio,
             sources: Vec::new(),
