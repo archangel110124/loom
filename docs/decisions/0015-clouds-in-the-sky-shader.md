@@ -1,7 +1,9 @@
 # ADR 0015 — Clouds live in the sky shader, not in the particle system
 
 - **Date:** 2026-08-14
-- **Status:** **proposed** — spec, not yet built. Nothing depends on it.
+- **Status:** **proposed**, and its *scope* is superseded by ADR 0016, which makes the clouds the
+  source of the rain rather than a backdrop. **The technique decision below still stands** — sky
+  shader, not particles, not volumetric — and 0016 treats this as a sub-decision of itself.
 - **Decision touched:** adds a feature to the existing sky pass. Does **not** move a locked decision
   and does **not** add a post-process pass; that boundary stays where ADR 0010 put it.
 
