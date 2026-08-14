@@ -52,6 +52,16 @@ pub struct Viewer {
     depth_view: vk::ImageView,
     depth_alloc: Option<Allocation>,
 
+    /// The multisampled pair the forward pass rasterises into, resolving into
+    /// the scene target and `depth`.
+    ///
+    /// **The window went without this for the whole of P2 and P3**, while every
+    /// AA number in the project was measured on the offscreen path at 4x. The
+    /// human judges grass, water and rain in this window; measuring the filter
+    /// somewhere the filter is not is the same defect as framing a scene that
+    /// does not contain the subject, and it survived longer.
+    msaa: Option<crate::renderer::Msaa>,
+
     /// The anti-aliasing pass and the image the scene is drawn into first, or
     /// `None` when `LOOM_CMAA2` is unset — the default, and then the scene is
     /// drawn straight into the swapchain image exactly as before.
@@ -281,6 +291,12 @@ impl Viewer {
         // The pipeline is built for the *swapchain's* format, which is usually
         // BGRA rather than the offscreen path's RGBA. Dynamic rendering bakes
         // the attachment format into the pipeline, so this cannot be shared.
+        // **The same sample count as the offscreen path.** A pipeline's
+        // rasterisation sample count must match the attachment it draws into,
+        // and everything below draws into the multisampled pair created further
+        // down — not into the swapchain image, which the forward pass now
+        // reaches only through the resolve.
+        let samples = crate::renderer::MSAA_SAMPLES;
         let (pipeline_layout, pipeline, pipeline_cache) =
             create_pipeline(
                 &raw,
@@ -289,29 +305,25 @@ impl Viewer {
                 raytracer.as_ref().map(crate::raytrace::Raytracer::descriptor_layout),
                 materials.descriptor_layout(),
                 scene_depth.descriptor_layout(),
-                ash::vk::SampleCountFlags::TYPE_1,
+                samples,
             )?;
         let sky_pipeline =
             crate::renderer::create_sky_pipeline(
-                &raw, pipeline_layout, pipeline_cache, format,
-                ash::vk::SampleCountFlags::TYPE_1,
+                &raw, pipeline_layout, pipeline_cache, format, samples,
             )?;
         let particle_pipeline = crate::renderer::create_particle_pipeline(
             &raw,
             pipeline_layout,
             pipeline_cache,
             format,
-            ash::vk::SampleCountFlags::TYPE_1,
+            samples,
         )?;
-        // **One sample, unlike the offscreen path's four.** A pipeline's
-        // rasterisation sample count must match the attachment it draws into,
-        // and this one draws straight into the swapchain image.
         let grass_pipeline = crate::renderer::create_geometry_pipeline(
             &raw,
             pipeline_layout,
             pipeline_cache,
             format,
-            ash::vk::SampleCountFlags::TYPE_1,
+            samples,
             c"grassVertexMain",
             c"grassFragmentMain",
         )?;
@@ -325,7 +337,7 @@ impl Viewer {
             pipeline_layout,
             pipeline_cache,
             format,
-            ash::vk::SampleCountFlags::TYPE_1,
+            samples,
             c"waterVertexMain",
             c"waterFragmentMain",
         )?;
@@ -462,6 +474,18 @@ impl Viewer {
             None
         };
 
+        // Resolved into whichever image the forward pass ends up writing — the
+        // AA source when CMAA2 is on, the swapchain image when it is not — so
+        // the colour format is the swapchain's, not `COLOR_FORMAT`.
+        let msaa = crate::renderer::Msaa::new(
+            &raw,
+            &mut allocator,
+            extent.width,
+            extent.height,
+            format,
+            samples,
+        )?;
+
         names.set(pipeline, "loom.viewer_pipeline");
         names.set(grass_pipeline, "loom.viewer_grass_pipeline");
         names.set(grass_buffer, "loom.viewer_grass");
@@ -545,6 +569,7 @@ impl Viewer {
             depth_view,
             depth_alloc: Some(depth_alloc),
             aa,
+            msaa,
             vertices,
             vertices_alloc: Some(vertices_alloc),
             vertex_address,
@@ -1081,11 +1106,11 @@ impl Viewer {
         // before. Everything downstream — the UI, the present transition — is
         // unchanged either way.
         //
-        // **The UI is inside the forward pass**, so with AA on it is filtered
-        // along with the scene. CMAA2 is conservative enough that egui's own
-        // anti-aliased text is left almost entirely alone, and moving the UI
-        // into a third pass to avoid it would buy a second rendering block for
-        // a difference nobody can see.
+        // **The UI is a pass of its own, after rain** — see the comment above
+        // that pass. It is still before CMAA2, so it is filtered along with the
+        // scene; CMAA2 is conservative enough that egui's own anti-aliased text
+        // is left almost entirely alone. It is *not* multisampled: it draws
+        // into the resolved scene target, not the pair.
         let (scene_view, scene_id) = match self.aa.as_ref() {
             Some((_, image, aa_view, _)) => {
                 (*aa_view, graph.import("loom.viewer_scene", *image))
@@ -1093,24 +1118,59 @@ impl Viewer {
             None => (view, target),
         };
 
+        // **The multisampled pair goes through the graph like every other
+        // image** (never-do #4). They start UNDEFINED every frame, and skipping
+        // the transition is a validation error rather than a visual one.
+        //
+        // The scene target is written by the *resolve* when multisampling, so
+        // it is a colour write either way; the depth target becomes the resolve
+        // *destination*, which is `DepthResolve` — a write at the colour stage,
+        // and the rain pass samples it immediately afterwards.
+        let msaa_ids = self.msaa.as_ref().map(|m| {
+            (
+                graph.import("loom.viewer_msaa_color", m.image),
+                graph.import("loom.viewer_msaa_depth", m.depth_image),
+            )
+        });
+        let msaa_views = self.msaa.as_ref().map(|m| (m.view, m.depth_view));
+        let mut forward_uses = vec![(scene_id, Access::ColorWrite)];
+        if let Some((ms_color, ms_depth)) = msaa_ids {
+            forward_uses.push((ms_color, Access::ColorWrite));
+            forward_uses.push((ms_depth, Access::DepthWrite));
+            forward_uses.push((depth_id, Access::DepthResolve));
+        } else {
+            forward_uses.push((depth_id, Access::DepthWrite));
+        }
         graph.pass(
             "forward",
-            &[(scene_id, Access::ColorWrite), (depth_id, Access::DepthWrite)],
+            &forward_uses,
             move |d, cmd| {
-                // SAFETY: the graph transitioned both attachments already.
+                // SAFETY: the graph transitioned every attachment already.
                 unsafe {
-                    // The viewer renders at one sample; MSAA is the offscreen path for now.
-                    // No multisampling here, so no resolve of either kind: the
-                    // depth the rain pass samples is the one written directly.
-                    begin_rendering(
-                        d,
-                        cmd,
-                        scene_view,
-                        depth_view,
-                        None,
-                        extent.width,
-                        extent.height,
-                    );
+                    // Multisampled: rasterise into the pair and resolve into the
+                    // scene target. **Depth resolves alongside the colour** —
+                    // the rain pass samples it, and resolving colour without
+                    // depth is what once left it sampling a cleared image.
+                    match msaa_views {
+                        Some((ms_color, ms_depth)) => begin_rendering(
+                            d,
+                            cmd,
+                            ms_color,
+                            ms_depth,
+                            Some((scene_view, depth_view)),
+                            extent.width,
+                            extent.height,
+                        ),
+                        None => begin_rendering(
+                            d,
+                            cmd,
+                            scene_view,
+                            depth_view,
+                            None,
+                            extent.width,
+                            extent.height,
+                        ),
+                    }
                     set_viewport(d, cmd, extent.width, extent.height);
                     crate::renderer::draw_sky(d, cmd, sky, layout, &base_push);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
@@ -1529,6 +1589,22 @@ impl Viewer {
             // validation layers can see once the handle is reused.
             self.scene_depth.bind(depth_view);
 
+            // The multisampled pair is full-resolution too, so it resizes with
+            // the window. Nothing points at it across frames — it is an
+            // attachment, never a descriptor — so rebuilding is all it needs.
+            if let Some(msaa) = self.msaa.take() {
+                // SAFETY: the device was idled at the top of this function.
+                unsafe { msaa.destroy(&self.device, allocator) };
+                self.msaa = crate::renderer::Msaa::new(
+                    &self.device,
+                    allocator,
+                    extent.width,
+                    extent.height,
+                    self.format,
+                    crate::renderer::MSAA_SAMPLES,
+                )?;
+            }
+
             // The AA source is a full-resolution image like the depth buffer,
             // so it resizes with the window. The pass itself — pipeline,
             // sampler, descriptor set — survives; only the image it points at
@@ -1618,6 +1694,10 @@ impl Drop for Viewer {
                 self.device.destroy_image_view(view, None);
                 self.device.destroy_image(image, None);
                 let _ = allocator.free(allocation);
+            }
+            if let (Some(msaa), Some(allocator)) = (self.msaa.take(), self.allocator.as_mut()) {
+                // SAFETY: the device was idled at the top of this block.
+                msaa.destroy(&self.device, allocator);
             }
             self.device.destroy_pipeline(self.particle_pipeline, None);
             self.device.destroy_buffer(self.particle_buffer, None);

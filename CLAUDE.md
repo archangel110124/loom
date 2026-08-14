@@ -230,10 +230,20 @@ change, so your edits appear live. Two consequences:
 > Steady, diminishing, no cliff. **4x is the setting** (`MSAA_SAMPLES` in `renderer.rs`) — 8x buys
 > another 10% for double the bandwidth and can be revisited when there is a frame budget to argue
 > against. The offscreen path rasterises into a transient multisampled pair and resolves into the
-> colour target, so the readback and the golden images still see one sample per pixel. **The
-> viewer draws at one sample**, which is why every pipeline builder takes its count as a parameter:
-> a pipeline's rasterisation samples must match the attachment, and getting that wrong is four
-> validation errors, not a visual bug.
+> colour target, so the readback and the golden images still see one sample per pixel. Every
+> pipeline builder takes its sample count as a parameter, because a pipeline's rasterisation
+> samples must match the attachment, and getting that wrong is four validation errors rather than
+> a visual bug.
+>
+> **The viewer drew at one sample until after P4, and that was a measurement bug, not a setting.**
+> Every AA number in this project — the MSAA table above, the density-falloff rows, the blade-width
+> sweep — was taken on the *offscreen* path at 4x, while the window the human actually judges grass,
+> water and rain in had none of it. It is the same defect as a metric that frames a scene not
+> containing the subject, and it survived far longer: measuring the filter somewhere the filter is
+> not. The window now rasterises into the same multisampled pair and resolves into the scene target,
+> so the two paths agree. Measured on `meadow` at 1440x900, high-frequency energy over the grass
+> region **0.0436 → 0.0333 (−24%)**, forward pass **0.114 → 0.167 ms**. **Rain and the editor UI
+> stay single-sample** — both draw into the resolved target, after it.
 >
 > **The multisampled images go through the render graph** like everything else (never-do #4). They
 > start UNDEFINED every frame; skipping the transition is a validation error, and it was one. The

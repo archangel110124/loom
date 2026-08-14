@@ -312,13 +312,80 @@ pub(crate) const WATER_VERTS: u32 = 128 * 128 * 6 * 6;
 /// Held together because they live and die together: both are transient, both
 /// are recreated on resize, and a half-recreated pair is a validation error
 /// rather than a visible bug.
-struct Msaa {
-    image: vk::Image,
+pub(crate) struct Msaa {
+    pub(crate) image: vk::Image,
     alloc: Allocation,
-    view: vk::ImageView,
-    depth_image: vk::Image,
+    pub(crate) view: vk::ImageView,
+    pub(crate) depth_image: vk::Image,
     depth_allocation: Allocation,
-    depth_view: vk::ImageView,
+    pub(crate) depth_view: vk::ImageView,
+}
+
+impl Msaa {
+    /// The multisampled pair a forward pass rasterises into, or `None` at one
+    /// sample.
+    ///
+    /// **`format` is the format being resolved *into***: `COLOR_FORMAT`
+    /// offscreen, the swapchain's in the window. A resolve requires both images
+    /// to have the same format, so this cannot be a constant.
+    ///
+    /// `TRANSIENT_ATTACHMENT` is the honest usage — nothing ever reads these
+    /// images, they exist only between the first draw and the resolve.
+    pub(crate) fn new(
+        device: &ash::Device,
+        allocator: &mut Allocator,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        samples: vk::SampleCountFlags,
+    ) -> Result<Option<Self>, RenderError> {
+        if samples == vk::SampleCountFlags::TYPE_1 {
+            return Ok(None);
+        }
+        let (image, alloc) = create_image(
+            device,
+            allocator,
+            width,
+            height,
+            format,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+            1,
+            samples,
+            "loom.msaa_color",
+        )?;
+        let (depth_image, depth_allocation) = create_image(
+            device,
+            allocator,
+            width,
+            height,
+            DEPTH_FORMAT,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+            1,
+            samples,
+            "loom.msaa_depth",
+        )?;
+        let view = create_view(device, image, format, vk::ImageAspectFlags::COLOR)?;
+        let depth_view =
+            create_view(device, depth_image, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;
+        Ok(Some(Self { image, alloc, view, depth_image, depth_allocation, depth_view }))
+    }
+
+    /// # Safety
+    ///
+    /// The device must be idle: these images are attachments of every frame
+    /// still in flight.
+    pub(crate) unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
+        // SAFETY: the caller has idled the device, so nothing references these.
+        unsafe {
+            device.destroy_image_view(self.view, None);
+            device.destroy_image_view(self.depth_view, None);
+            device.destroy_image(self.image, None);
+            device.destroy_image(self.depth_image, None);
+        }
+        let _ = allocator.free(self.alloc);
+        let _ = allocator.free(self.depth_allocation);
+    }
 }
 
 /// One grass blade, as the vertex shader reads it.
@@ -647,44 +714,9 @@ impl Renderer {
         // resolved into `color` at the end of the pass, so everything
         // downstream — the readback, the golden images — still sees one
         // sample per pixel and needs no changes at all.
-        //
-        // `TRANSIENT_ATTACHMENT` is the honest usage: nothing ever reads these
-        // images, they exist only between the first draw and the resolve, and
-        // saying so lets a tiled GPU keep them entirely on-chip.
         let samples = MSAA_SAMPLES;
-        let multisampled = samples != vk::SampleCountFlags::TYPE_1;
-        let msaa = if multisampled {
-            let (image, alloc) = create_image(
-                &raw,
-                &mut allocator,
-                width,
-                height,
-                COLOR_FORMAT,
-                vk::ImageUsageFlags::COLOR_ATTACHMENT
-                    | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
-                1,
-                samples,
-                "loom.msaa_color",
-            )?;
-            let (depth_image, depth_allocation) = create_image(
-                &raw,
-                &mut allocator,
-                width,
-                height,
-                DEPTH_FORMAT,
-                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
-                    | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
-                1,
-                samples,
-                "loom.msaa_depth",
-            )?;
-            let view = create_view(&raw, image, COLOR_FORMAT, vk::ImageAspectFlags::COLOR)?;
-            let depth_view =
-                create_view(&raw, depth_image, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;
-            Some(Msaa { image, alloc, view, depth_image, depth_allocation, depth_view })
-        } else {
-            None
-        };
+        let msaa =
+            Msaa::new(&raw, &mut allocator, width, height, COLOR_FORMAT, samples)?;
 
         let color_view = create_view(&raw, color, COLOR_FORMAT, vk::ImageAspectFlags::COLOR)?;
         let depth_view = create_view(&raw, depth, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;
@@ -1999,12 +2031,8 @@ impl Drop for Renderer {
                 let _ = allocator.free(allocation);
             }
             if let (Some(msaa), Some(allocator)) = (self.msaa.take(), self.allocator.as_mut()) {
-                self.device.destroy_image_view(msaa.view, None);
-                self.device.destroy_image_view(msaa.depth_view, None);
-                self.device.destroy_image(msaa.image, None);
-                self.device.destroy_image(msaa.depth_image, None);
-                let _ = allocator.free(msaa.alloc);
-                let _ = allocator.free(msaa.depth_allocation);
+                // SAFETY: the device was idled at the top of this teardown.
+                msaa.destroy(&self.device, allocator);
             }
             self.device.destroy_pipeline(self.grass_pipeline, None);
             self.device.destroy_pipeline(self.water_pipeline, None);
