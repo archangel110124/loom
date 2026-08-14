@@ -90,10 +90,13 @@ struct EnvironmentData {
     // x turbulence, y ground drag, z seconds, w the wetness FILM — see the
     // wetness section further down, and `water.w` for its other half.
     float4 weather;
-    // **`loom_rain::sample_rain` at the eye, and nothing else.** xyz is the
-    // sheltered P1 wind a streak leans along, w the rate in mm/h that reaches
-    // the camera. Both come out of the one authoritative call; the GPU layer
-    // derives everything else and writes nothing back.
+    // **What the SKY is doing, unsheltered.** xyz is the P1 wind a streak leans
+    // along, w the rate in mm/h falling on the scene. It used to be
+    // `loom_rain::sample_rain` at the EYE — exposure-scaled where the camera
+    // stands — and the layer then switched itself off whenever the camera
+    // walked under a roof, taking the rain in the open with it. Occlusion is
+    // per drop, below, against the terrain height field. The GPU layer derives
+    // everything else from these four floats and writes nothing back.
     float4 rain;
     // x still-water level, y 1 when the eye is submerged, z 1 when the scene
     // has water, w the wetness SOAK.
@@ -815,9 +818,11 @@ static const float RAIN_FULL_RATE = 20.0;
 // **Where they appear is [`wetGate`]'s answer and no other**: a surface under
 // cover has no rings for the same reason it is not wet, out of the same terrain
 // height field the drops are culled against. How many appear is
-// `environment.rain.w` — `loom_rain::sample_rain` at the eye — against the same
-// `RAIN_FULL_RATE` the streaks thin themselves by. This shader decides *where a
-// ring is*, and nothing else.
+// `environment.rain.w` — the scene's unsheltered rate — against the same
+// `RAIN_FULL_RATE` the streaks thin themselves by. Unsheltered is right here for
+// exactly the reason `wetFilm` is: how hard it is raining is one number for the
+// scene, and WHERE that reaches is `wetGate`'s per-pixel answer. This shader
+// decides *where a ring is*, and nothing else.
 //
 // Nothing here is state. A ring's radius is a function of the clock and its
 // cell, so there is no ripple buffer, nothing to step, and nothing that could
@@ -2040,8 +2045,8 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
 // vertex input at all — the same model the rest of this renderer uses.
 //
 // **What the CPU decides, and it is only two things**: how many drops to draw,
-// and `environment.rain` — `loom_rain::sample_rain` at the eye, which is the
-// authoritative Phase 4 state. Everything else below is derived here.
+// and `environment.rain` — the scene's unsheltered wind and rate. Everything
+// else below is derived here, including which drops the world stops.
 // ---------------------------------------------------------------------------
 
 /// The block of cells the layer draws, and one cell's side in metres.
@@ -2178,11 +2183,11 @@ RainOutput rainVertexMain(uint vertexID: SV_VertexID) {
     float4 rain = push.environment[0].rain;
 
     // **One wind vector for the whole layer, sampled by the CPU at the eye.**
-    // It is `loom_rain::sample_rain(...).wind` — P1's field, already sheltered
-    // by the same S3 exposure that scaled the rate, so the lean and the rate
-    // cannot disagree about the weather. It has to be uniform in any case: a
-    // velocity that varied with position would need integrating, and a drop's
-    // position would stop being a closed form of its index and the time.
+    // P1's field, unsheltered — like the rate beside it. It has to be uniform:
+    // a velocity that varied with position would need integrating, and a drop's
+    // position would stop being a closed form of its index and the time. Which
+    // is also why sheltering it at the eye was wrong twice over — every streak
+    // in the scene straightened up the moment the camera stepped under a roof.
     float3 velocity = float3(rain.x, -RAIN_FALL, rain.z);
 
     // -----------------------------------------------------------------------
@@ -2252,9 +2257,12 @@ RainOutput rainVertexMain(uint vertexID: SV_VertexID) {
     //
     // What it does NOT do: rain blown far enough sideways to reach under a
     // ledge still stops at that column, and geometry which is not in the voxel
-    // volume — every mesh in the scene — does not stop rain at all. Neither is
-    // claimed anywhere else. The CPU's `sample_rain` at the eye, which marches
-    // S3 properly, is what scales the layer as a whole.
+    // volume — every mesh in the scene — does not stop rain at all. **And there
+    // is no longer a whole-layer fallback behind it**: the CPU used to scale
+    // the entire layer by S3's exposure at the eye, which covered a mesh roof
+    // by accident and broke a voxel one on purpose, because it made the
+    // camera's own shelter decide whether rain existed anywhere. This test is
+    // the occlusion, and it is per drop.
     //
     // Off the grid, and in a scene with no terrain, `loom_ground_height`
     // returns its large negative sentinel and nothing here is culled.

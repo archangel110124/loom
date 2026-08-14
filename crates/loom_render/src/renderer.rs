@@ -141,14 +141,20 @@ pub struct EnvironmentData {
     /// skips the whole wetness path on that, so a dry scene shades bit for bit
     /// as it did before Phase 4.
     pub weather: [f32; 4],
-    /// What the rain is doing at the camera: xyz the sheltered P1 wind a
-    /// streak leans along, w the rate in mm/h reaching the eye.
+    /// What the sky is doing: xyz the P1 wind a streak leans along, w the rate
+    /// in mm/h falling on the scene. **Both unsheltered.**
     ///
-    /// **This is `loom_rain::sample_rain` at the eye and nothing else** — one
-    /// call, the authoritative Phase 4 state, so the streaks cannot say
-    /// something different from `loom sim --assert`. The GPU layer derives
-    /// every drop from it and writes nothing back, which is what keeps rain
-    /// out of the determinism hash.
+    /// **Deliberately not the exposure-scaled reading at the eye**, which is
+    /// what this held until the layer was found to switch itself off when the
+    /// camera walked under a roof — including the rain plainly falling in the
+    /// open beside it. Occlusion is per drop, in `rainVertexMain`, against the
+    /// terrain height field; it is a property of where a drop is, not of where
+    /// the camera is standing. `loom_rain::sample_rain` is still the
+    /// authoritative answer for a *point* and is what `loom sim --assert`
+    /// reads — it was never this field's reader.
+    ///
+    /// The GPU layer derives every drop from this and writes nothing back,
+    /// which is what keeps rain out of the determinism hash.
     pub rain: [f32; 4],
     /// x still-water level, y 1 when the eye is submerged, z 1 when the scene
     /// has water, w `loom_rain::Wetness::soak` — the half of wetness that

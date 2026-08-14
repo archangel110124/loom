@@ -566,20 +566,16 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // The bed, baked once: the water reads its depth from it on the GPU and
     // the submersion test reads it on the CPU, and they must be the same grid.
     let terrain = scene_terrain_field(&scene);
-    // The scene's rain, and the volume it shelters under — both resolved once.
-    // `None` for a scene that authors none, which is dry rather than drizzly.
+    // The scene's rain, resolved once. `None` for a scene that authors none,
+    // which is dry rather than drizzly. **No sky volume is built for it any
+    // more**: the layer is handed the unsheltered rate and the height field in
+    // the shader decides which drops the world stops, so nothing in the render
+    // path marches the SDF — see `rain_at_eye`.
     let rain = weather::rain_of(&scene);
-    let rain_sky = rain_sky(&scene);
     let mut environment = environment_with_wind(&world, &weather, wind_seconds);
     submerge_eye(&mut environment, &world, &weather, terrain.as_ref(), camera.eye, wind_seconds);
-    let rain_drops = rain_at_eye(
-        &mut environment,
-        rain.as_ref(),
-        &weather,
-        rain_sky.as_ref(),
-        camera.eye,
-        wind_seconds,
-    );
+    let rain_drops =
+        rain_at_eye(&mut environment, rain.as_ref(), &weather, camera.eye, wind_seconds);
     // Where that rain is landing. **After the camera**, because impacts are
     // only drawn near the eye — and after `rain_at_eye`, because the rate they
     // are gated by is the one it stamped into the environment.
@@ -752,15 +748,16 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                         camera.eye,
                         moment,
                     );
-                    // For the same reason, and it is the stronger case: the
-                    // shot that walks under the overhang has to stop raining
-                    // partway through, which is the phase's exit criterion in
-                    // motion rather than in a still.
+                    // For the same reason: the lean advances with the clock,
+                    // and a shower with a `duration` has to stop partway
+                    // through the sweep. **What must NOT change across the
+                    // frames is whether there is rain at all** — a flythrough
+                    // that walks under the overhang keeps raining outside it,
+                    // and the frame where that stopped was the bug.
                     let drops = rain_at_eye(
                         &mut renderer.environment,
                         rain.as_ref(),
                         &weather,
-                        rain_sky.as_ref(),
                         camera.eye,
                         moment,
                     );
@@ -1789,28 +1786,40 @@ const MAX_RAIN_DROPS: u32 = 64 * 32 * 64;
 /// `scene.slang`, next to the grid whose cells they thin — one number in one
 /// place instead of the same 20 mm/h spelled on both sides of the boundary.
 ///
-/// **One `sample_rain` call, at the eye, and it is the authoritative one.** The
-/// rate it returns is what `loom sim --assert "rain@x,y,z.rate"` reads, so the
-/// streaks cannot claim weather the simulation disagrees with. What the GPU
-/// gets is four floats and a draw count; it writes nothing back, which is what
-/// keeps this whole layer out of the determinism hash.
+/// **The UNSHELTERED rate, and no sky march at all.** This used to pass the
+/// scene's voxel volume and hand the GPU `sample_rain(...).rate` at the eye —
+/// the authored intensity already scaled by S3's exposure *where the camera is
+/// standing*. The shader multiplies drop density and opacity by it, so walking
+/// under a roof scaled the whole layer toward zero and the rain falling in the
+/// open five metres away vanished with it. **Occlusion belongs to the place, not
+/// to the camera**: the per-drop test against W6's height field in
+/// `rainVertexMain` already kills exactly the drops that would fall inside the
+/// shelter, and that answer is right from any viewpoint.
 ///
-/// **A camera under cover therefore thins the whole layer**, because the
-/// exposure S3 marches is the exposure at the eye. That is per-camera, not
-/// per-drop, and it is honest about being so. The per-drop half of the answer
-/// is in the shader, against the terrain height field.
+/// So what goes to the GPU is what the sky is doing, and the shader decides
+/// which drops the world stops. `loom sim --assert "rain@x,y,z.rate"` is
+/// unaffected: it asks `sample_rain` about a *point*, which is the question
+/// exposure answers, and this was never that call's reader.
+///
+/// The wind is unsheltered for the same reason. It has to be one vector for the
+/// whole layer — a velocity that varied with position would stop a drop's
+/// position being a closed form of its index and the time — and sheltering it at
+/// the eye made every streak in the scene fall vertically the moment the camera
+/// stepped under the roof.
+///
+/// What the GPU gets is four floats and a draw count; it writes nothing back,
+/// which is what keeps this whole layer out of the determinism hash.
 pub(crate) fn rain_at_eye(
     env: &mut loom_render::EnvironmentData,
     rain: Option<&loom_scene::components::Rain>,
     wind: &loom_field::wind::Wind,
-    sky: Option<&(loom_voxel::Volume, [f32; 3])>,
     eye: Vec3,
     seconds: f32,
 ) -> u32 {
     if rain.is_none() {
         return 0;
     }
-    let sample = weather::rain_at(rain, wind, sky, eye.to_array(), seconds);
+    let sample = weather::rain_at(rain, wind, None, eye.to_array(), seconds);
     env.rain = [sample.wind[0], sample.wind[1], sample.wind[2], sample.rate];
 
     // **Wetness, at full exposure, for the whole scene.** Two scalars and no
@@ -1828,19 +1837,9 @@ pub(crate) fn rain_at_eye(
     env.weather[3] = wet.film;
     env.water[3] = wet.soak;
 
-    // Every cell, or none. A fully sheltered eye still skips the draw entirely.
+    // Every cell, or none. A shower that has ended still skips the draw
+    // entirely; a sheltered camera no longer does, which is the fix.
     if sample.rate > 0.0 { MAX_RAIN_DROPS } else { 0 }
-}
-
-/// The voxel volume rain shelters under, or `None` when a scene authors no
-/// `Rain` at all.
-///
-/// **Built once per render, never per frame.** It is the scene's op list re-run
-/// into an SDF, which `terrain_stress.loom` would pay 67 million voxels for —
-/// and a scene with no rain must pay nothing.
-pub(crate) fn rain_sky(scene: &Scene) -> Option<(loom_voxel::Volume, [f32; 3])> {
-    weather::rain_of(scene)?;
-    scene_volume(scene)
 }
 
 fn environment_of_inner(world: &World) -> loom_render::EnvironmentData {
@@ -3664,6 +3663,39 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
             MAX_RAIN_DROPS,
             cells.iter().product::<u32>(),
             "MAX_RAIN_DROPS does not cover RAIN_CELLS `{decl}`"
+        );
+    }
+
+    /// **The streak layer is told what the SKY is doing, not what the camera
+    /// can see.** An eye sealed under the overhang gets the same rate, the same
+    /// lean and the same full draw as one out in the open — occlusion is the
+    /// per-drop height-field test in `rainVertexMain`, which is right from
+    /// anywhere. Scaling the layer by the exposure at the eye is what made the
+    /// rain five metres away disappear when you stepped under a roof, and it is
+    /// the obvious thing to reach for again.
+    #[test]
+    fn a_sheltered_camera_does_not_stop_the_rain_outside() {
+        let rain = loom_scene::components::Rain { intensity: 8.0, duration: None };
+        let wind = loom_field::wind::Wind::new(20.0, 6.0, 1.2, 0.9, 0.45);
+        let stamp = |eye: Vec3| {
+            let mut env = loom_render::EnvironmentData::default();
+            let drops = rain_at_eye(&mut env, Some(&rain), &wind, eye, 1.0);
+            (env.rain, drops)
+        };
+
+        // `rain_overhang`'s roof is 20 m square at y = 8, over the world origin.
+        let (under, under_drops) = stamp(Vec3::new(0.0, 3.0, 0.0));
+        let (open, open_drops) = stamp(Vec3::new(-13.0, 3.0, -13.0));
+
+        assert_eq!(under_drops, MAX_RAIN_DROPS, "a sheltered eye skipped the draw");
+        assert_eq!(open_drops, MAX_RAIN_DROPS);
+        assert!((under[3] - 8.0).abs() < 1e-4, "the rate was sheltered at the eye: {under:?}");
+        assert!((open[3] - 8.0).abs() < 1e-4, "{open:?}");
+        // And the lean, which was sheltered by the same number: a scene whose
+        // streaks stand straight up under cover is the same artifact.
+        assert!(
+            under[0].abs() + under[2].abs() > 0.1,
+            "the lean died under the roof: {under:?}"
         );
     }
 

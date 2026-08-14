@@ -289,9 +289,17 @@ pub(crate) fn rain_splashes(
     eye: [f32; 3],
     seconds: f32,
 ) -> Vec<ParticleInstance> {
-    // `env.rain[3]` is `loom_rain::sample_rain(...).rate` at the eye — the one
-    // authoritative number, stamped by `rain_at_eye`. Reading the `Rain`
-    // component again here would be a second answer to how hard it is raining.
+    // `env.rain[3]` is the scene's UNSHELTERED rain rate, stamped by
+    // `rain_at_eye`. Reading the `Rain` component again here would be a second
+    // answer to how hard it is raining.
+    //
+    // **Unsheltered is the right input, and where a crown is allowed to land is
+    // decided by where it lands.** `loom_rain::splashes` puts every impact on
+    // the topmost surface of its column, out of the same height field the drops
+    // are culled against — so under a roof the crowns are on the *roof*, never
+    // on the floor beneath it. Gating them by the exposure at the eye instead,
+    // which is what this used to get, thinned the impacts out in the open the
+    // moment the camera stepped under cover.
     let sky = [
         f32::midpoint(env.horizon[0], env.zenith[0]),
         f32::midpoint(env.horizon[1], env.zenith[1]),

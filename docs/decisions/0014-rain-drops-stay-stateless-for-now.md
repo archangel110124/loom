@@ -80,6 +80,21 @@ falls in the open five metres away.
 SDF-collided drops would fix that properly, and would give splashes a true collision point instead of
 spawning them from exposure.
 
+**Amended after the fact: the whole-layer fallback described above has been removed, and it was worse
+than this paragraph claimed.** A human reported it as the immersion-breaking bug — standing under the
+overhang stopped *all* the rain, including what was plainly falling in the open five metres away.
+Scaling the layer by the exposure at the eye makes the camera's own shelter decide whether rain
+exists in the world, which no amount of tuning fixes. The GPU is now handed the **unsheltered** rate
+and wind; the per-drop height-field test is the only occlusion the streaks have, and it is right from
+any viewpoint. Splashes read the same unsheltered rate and are gated by *where they land* — an impact
+sits on the topmost surface of its column, so a roof catches its own and the floor beneath it gets
+none. Wetness never read the eye and is unchanged.
+
+Nothing was lost with it. The march it applied is `loom_voxel::exposure` over the **voxel volume**,
+so it never saw mesh geometry either: standing under a mesh roof already read exposure 1.0 and
+already rained on you. Trigger 2 below is therefore untouched — it is still the only thing that fixes
+mesh shelter, and there is now no partial cover for it.
+
 ## When to revisit — the trigger
 
 Build steps 3 and 4 first. Then reconsider **if any of these is true**:

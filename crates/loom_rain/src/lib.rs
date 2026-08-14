@@ -267,10 +267,16 @@ const SPLASH_FULL_RATE: f32 = 20.0;
 ///
 /// **Spawned from the rain rate and the surface, never from a drop.** That is
 /// ADR 0014's clause and it is what makes this independent of whether drops
-/// ever become stateful: `rate` is [`sample_rain`]'s — the authored intensity
-/// scaled by S3's sky-exposure march — and `ground` is W6's baked height field,
-/// which is the same grid the streak layer culls its drops against. Neither is
-/// a new answer to "does rain reach here".
+/// ever become stateful: `rate` is how hard it is raining on the scene, and
+/// `ground` is W6's baked height field, which is the same grid the streak layer
+/// culls its drops against. Neither is a new answer to "does rain reach here".
+///
+/// **`rate` is the unsheltered rate, and the occlusion is `ground`'s.** An
+/// impact lands on the topmost surface of its column, so a roof catches its own
+/// splashes and the floor under it gets none — which is occlusion decided where
+/// the crown lands. Passing a rate already scaled by exposure *somewhere else*
+/// — at the eye, which is what the renderer used to do — thins the impacts in
+/// the open as soon as the camera steps under cover.
 ///
 /// **Closed form, and there is no splash state anywhere**, exactly as
 /// [`wetness`] is. A cell's slot fires every [`SPLASH_PERIOD`] seconds at a
@@ -284,11 +290,11 @@ const SPLASH_FULL_RATE: f32 = 20.0;
 /// clock all the same, never a wall clock (never-do #8).
 ///
 /// **What it cannot say**, in the same terms the rest of the phase states its
-/// limits: `rate` is the exposure at the *eye*, so a camera under a roof thins
-/// the impacts everywhere, and a height field cannot express an overhang — a
-/// splash lands on the top of a roof and never on the floor beneath it, which
-/// is right, but rain blown sideways under a ledge still stops at that column.
-/// Both are the streak layer's limitations, deliberately, and not a third set.
+/// limits: a height field cannot express an overhang in general, and holds no
+/// mesh geometry — so rain blown sideways under a ledge still stops at that
+/// column, and a crown lands on a floor under a mesh roof as if the roof were
+/// not there. Both are the streak layer's limitations, deliberately, and not a
+/// third set.
 #[must_use]
 pub fn splashes(
     rate: f32,

@@ -193,9 +193,6 @@ struct App {
     /// stops. Re-baking it per frame is a march down the SDF per sample, which
     /// is not frame work.
     terrain: Option<loom_voxel::heightfield::HeightField>,
-    /// The voxel volume rain marches for sky exposure, or `None` when the
-    /// scene authors no `Rain`. Rebuilt beside `terrain`, on the same edit.
-    rain_sky: Option<(loom_voxel::Volume, [f32; 3])>,
     /// The handle being dragged, if one is.
     drag: Option<Drag>,
     /// Bumped whenever a mouse button comes up. Part of every gesture key, so
@@ -345,7 +342,6 @@ impl App {
             grass_uploaded: String::new(),
             terrain_uploaded: String::new(),
             terrain: None,
-            rain_sky: None,
             selected: view.paths.first().cloned().into_iter().collect(),
             view,
             base,
@@ -581,10 +577,10 @@ impl App {
             Ok(()) => {
                 self.terrain_uploaded = key;
                 self.terrain = field;
-                // The volume rain marches for sky exposure, rebuilt on the
-                // same edit that rebakes the grid — so carving the roof open
-                // in the editor lets rain in without a reload.
-                self.rain_sky = crate::rain_sky(&self.view.scene);
+                // Carving the roof open in the editor lets rain in on the next
+                // frame with no reload, and `terrain` above is the whole reason:
+                // the drops are culled against this grid, per drop, in the
+                // vertex shader. Nothing here marches the SDF.
             }
             Err(e) => crate::log::error(format!("could not upload the terrain heights: {e}")),
         }
@@ -1078,15 +1074,16 @@ impl ApplicationHandler for App {
                     camera.eye,
                     self.wind_seconds,
                 );
-                // And the rain, from the same `sample_rain` the headless path
-                // and every `--assert` read. The window gets the real version
-                // rather than a simplified one — three defects this phase were
-                // exactly that, with no gate able to see the difference.
+                // And the rain, through the same call the headless path
+                // makes. The window gets the real version rather than a
+                // simplified one — three defects this phase were exactly that,
+                // with no gate able to see the difference. **Walking the fly
+                // camera under the shelter no longer stops the rain outside
+                // it**; the per-drop cull in the shader does that, per drop.
                 let drops = crate::rain_at_eye(
                     &mut environment,
                     crate::weather::rain_of(&self.view.scene).as_ref(),
                     &wind,
-                    self.rain_sky.as_ref(),
                     camera.eye,
                     self.wind_seconds,
                 );
