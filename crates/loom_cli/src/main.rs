@@ -59,7 +59,11 @@ USAGE:
         Pixel-compare two renders. Exit 1 if they differ beyond tolerance.
 
     loom sim <scene.loom> [--ticks <n>] [--assert <expr>]
-        Step physics deterministically and print the state hash.
+        Step physics deterministically and print the state hash. --assert also
+        reads the weather where it is asked about: `wind@x,y,z.speed >= 3`, and
+        `rain@x,y,z.rate < 0.05` for the rain reaching a point in mm/h after the
+        scene's own voxels have sheltered it (`.exposure` is that shelter alone,
+        0 sealed to 1 open sky).
 
     loom scene <scene.loom> --tx <tx.json> [--dry-run]
         Apply a transaction. `expect_version` in the JSON makes the write
@@ -988,7 +992,7 @@ fn world_translation(scene: &Scene, node: &loom_scene::Node) -> [f32; 3] {
 /// **The first one wins.** A scene with two voxel volumes under one grass field
 /// is not a thing anything authors yet; when it is, this becomes a lookup per
 /// sample and gets slower.
-fn scene_volume(scene: &Scene) -> Option<(loom_voxel::Volume, [f32; 3])> {
+pub(crate) fn scene_volume(scene: &Scene) -> Option<(loom_voxel::Volume, [f32; 3])> {
     scene.nodes().iter().find_map(|node| {
         let (volume, ()) = build_volume(node.components.get("VoxelVolume")?)?;
         Some((volume, world_translation(scene, node)))
@@ -1893,17 +1897,30 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     // asserted (design doc §2.10).
     let log = runner.events().clone();
     let state = runner.state();
-    // The scene's wind, sampled at the tick the run ended on — so a wind
-    // assertion is checked against the same clock the simulation used rather
-    // than against a wall clock (never-do #8).
-    #[allow(clippy::cast_precision_loss)]
-    let weather = (weather::wind_of(&scene), ticks as f32 / 60.0);
+    let specs = flags(args, "--assert");
+    // The scene's weather, sampled at the tick the run ended on — so a wind or
+    // rain assertion is checked against the same clock the simulation used
+    // rather than against a wall clock (never-do #8).
+    let weather = weather::Weather {
+        wind: weather::wind_of(&scene),
+        rain: weather::rain_of(&scene),
+        // **Rebuilt only when something asks about rain.** The bake is a pass
+        // over every voxel in the scene and `terrain_stress.loom` has 67
+        // million of them; a run that never mentions rain must not pay for it.
+        sky: specs
+            .iter()
+            .any(|spec| spec.trim_start().starts_with("rain"))
+            .then(|| scene_volume(&scene))
+            .flatten(),
+        #[allow(clippy::cast_precision_loss)]
+        seconds: ticks as f32 / 60.0,
+    };
     let mut failures = Vec::new();
-    for spec in flags(args, "--assert") {
-        match check_assertion(&world, state, &log, &weather, &travel, &spec) {
+    for spec in &specs {
+        match check_assertion(&world, state, &log, &weather, &travel, spec) {
             Ok(true) => {}
             Ok(false) | Err(_) => {
-                let actual = assertion_actual(&world, state, &log, &weather, &travel, &spec);
+                let actual = assertion_actual(&world, state, &log, &weather, &travel, spec);
                 failures.push(serde_json::json!({
                     "assert": spec,
                     "actual": actual,
@@ -1912,7 +1929,10 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
                              300 ticks), OP one of > >= < <= == ~=. \
                              `status == won|lost|playing`, \
                              `state.<name> OP value` and `events.<kind> OP n` \
-                             check the game's rules and what happened.",
+                             check the game's rules and what happened. \
+                             `wind@x,y,z.<x|y|z|speed>` and \
+                             `rain@x,y,z.<rate|exposure>` read the weather where \
+                             it is asked about.",
                 }));
             }
         }
@@ -1954,7 +1974,7 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
             // Hex so two runs are trivially eyeball-comparable.
             "state_hash": format!("{:016x}", world.state_hash()),
             "game": game,
-            "assertions": flags(args, "--assert").len(),
+            "assertions": specs.len(),
         })),
     )
 }
@@ -2037,7 +2057,7 @@ fn assertion_value(
     world: &World,
     state: &loom_script::GameState,
     log: &loom_script::EventLog,
-    weather: &(loom_field::wind::Wind, f32),
+    weather: &weather::Weather,
     travel: &[(String, f32, f32)],
     path: &str,
     axis: &str,
@@ -2049,13 +2069,29 @@ fn assertion_value(
     // visible symptom until vegetation four phases later leans wrong.
     if let Some(rest) = path.strip_prefix("wind") {
         let at = rest.strip_prefix('@').map_or(Some([0.0, 0.0, 0.0]), parse_vec3)?;
-        let (wind, t) = weather;
-        let v = wind.at(at, *t);
+        let v = weather.wind.at(at, weather.seconds);
         return match axis {
             "x" => Some(v[0]),
             "y" => Some(v[1]),
             "z" => Some(v[2]),
             "speed" => Some(v[0].mul_add(v[0], v[2] * v[2]).sqrt()),
+            _ => None,
+        };
+    }
+
+    // `rain@2,1,-4.rate < 0.05` — **the only way Phase 4's exit criteria are
+    // checkable at all.** "Rain visibly stops under an overhang" is a claim
+    // about a still picture that a still picture cannot settle: the streaks are
+    // stateless GPU noise deliberately outside the simulation, so what has to
+    // be right is the rate the CPU says is reaching the point, and that is what
+    // this reads. Sheltering comes from S3's march of the scene's own voxels —
+    // see `loom_rain`.
+    if let Some(rest) = path.strip_prefix("rain") {
+        let at = rest.strip_prefix('@').map_or(Some([0.0, 0.0, 0.0]), parse_vec3)?;
+        let sample = weather.rain_at(at);
+        return match axis {
+            "rate" => Some(sample.rate),
+            "exposure" => Some(sample.exposure),
             _ => None,
         };
     }
@@ -2117,7 +2153,7 @@ fn check_assertion(
     world: &World,
     state: &loom_script::GameState,
     log: &loom_script::EventLog,
-    weather: &(loom_field::wind::Wind, f32),
+    weather: &weather::Weather,
     travel: &[(String, f32, f32)],
     spec: &str,
 ) -> Result<bool, ()> {
@@ -2148,7 +2184,7 @@ fn assertion_actual(
     world: &World,
     state: &loom_script::GameState,
     log: &loom_script::EventLog,
-    weather: &(loom_field::wind::Wind, f32),
+    weather: &weather::Weather,
     travel: &[(String, f32, f32)],
     spec: &str,
 ) -> serde_json::Value {
@@ -3353,6 +3389,76 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         ]));
 
         assert_eq!(code, 0, "the crate should go in once and come back out: {out}");
+    }
+
+    /// **Phase 4's first two exit criteria, as the implementation order writes
+    /// them**: rain stops under an overhang, and a CSG carve lets it back in.
+    ///
+    /// Both are claims about a *picture* that no picture can settle — the
+    /// streaks are stateless GPU noise deliberately outside the simulation, so
+    /// what has to be right is the rate the CPU reports. Measured on this
+    /// scene, which authors 8 mm/h: **8.0 in the open, 0.0 under the roof, and
+    /// 8.0 again under the skylight** — and the skylight is inside the roof's
+    /// own footprint, so the only thing letting rain through is one `subtract`
+    /// op in the recipe.
+    ///
+    /// One tick, because rain has no transient to wait out. Its rate is a
+    /// function of position and the field, not of anything that accumulates.
+    #[test]
+    fn rain_stops_under_an_overhang_and_a_carve_lets_it_in() {
+        let scene = "../../assets/test/rain_overhang.loom";
+        let (code, out) = run(&args(&[
+            "sim",
+            scene,
+            "--ticks",
+            "1",
+            // Out from under it entirely: the whole authored rate.
+            "--assert",
+            "rain@-13,3,-13.rate > 7.9",
+            // Under the slab: none of it.
+            "--assert",
+            "rain@0,3,0.rate < 0.05",
+            // Under the hole cut through that same slab: all of it back.
+            "--assert",
+            "rain@0,3,-6.rate > 7.9",
+            // And the shelter is the voxel field's own answer, not a rate that
+            // happens to come out right — S3's exposure, read directly.
+            "--assert",
+            "rain@0,3,0.exposure < 0.01",
+            "--assert",
+            "rain@-13,3,-13.exposure > 0.99",
+        ]));
+
+        assert_eq!(code, 0, "{out}");
+    }
+
+    /// **A scene that authors no rain must be exactly as dry as it was.** The
+    /// component is new and every scene in the repository predates it; if
+    /// `sample_rain` treated a missing component as its `Default` — moderate
+    /// rain — then every one of them would quietly start raining.
+    #[test]
+    fn a_scene_without_rain_reports_no_rain() {
+        // `cave` rather than something flat, because exposure is a separate
+        // fact from the rate and has to keep working in fair weather: wetness
+        // drying and rain audio both read it. Deep in the tunnel it is zero and
+        // out on the open ground it is one — in a scene that never rains.
+        let scene = "../../assets/test/cave.loom";
+        let (code, out) = run(&args(&[
+            "sim",
+            scene,
+            "--ticks",
+            "1",
+            "--assert",
+            "rain@16,7,16.rate == 0",
+            "--assert",
+            "rain@2,4,2.rate == 0",
+            "--assert",
+            "rain@16,7,16.exposure < 0.01",
+            "--assert",
+            "rain@2,4,2.exposure > 0.99",
+        ]));
+
+        assert_eq!(code, 0, "{out}");
     }
 
     /// And the same run must still be reproducible.

@@ -17,6 +17,7 @@ loom_ecs = { version = "0.0.0", path = "../loom_ecs" }
 loom_input = { version = "0.0.0", path = "../loom_input" }
 loom_particles = { version = "0.0.0", path = "../loom_particles" }
 loom_physics = { version = "0.0.0", path = "../loom_physics" }
+loom_rain = { version = "0.0.0", path = "../loom_rain" }
 loom_reflect = { version = "0.0.0", path = "../loom_reflect" }
 loom_render = { version = "0.0.0", path = "../loom_render" }
 loom_field = { version = "0.0.0", path = "../loom_field" }

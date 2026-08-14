@@ -726,6 +726,45 @@ impl Default for Wind {
     }
 }
 
+/// How hard it is raining on the whole scene.
+///
+/// **One number, because one number is what the rain actually is.** Everything
+/// else rain does — which way a streak leans, how sheltered a doorway is, how
+/// wet a wall gets — is derived rather than authored: the lean comes from
+/// [`Wind`], the shelter from the voxel field the scene already has. A second
+/// authored knob for any of those would be a place for the picture and the
+/// simulation to disagree, which is the failure this whole phase is arranged
+/// to avoid.
+///
+/// At most one per scene; the first is used, the same rule [`Wind`] and
+/// `Environment` follow. **Absent means dry** — not a default drizzle — so
+/// every scene authored before rain existed simulates exactly as it did.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Rain {
+    /// Rainfall rate in millimetres per hour.
+    ///
+    /// The meteorological unit, for the same reason [`Wind::speed`] is in m/s:
+    /// a dimensionless 0-to-1 "how rainy" leaves every consumer — streak
+    /// count, wetness rate, audio level — to invent its own curve against a
+    /// number that means nothing, and those curves then drift apart.
+    ///
+    /// For authoring: `0.5` is drizzle you would not open an umbrella for,
+    /// `2` light rain, `4` steady moderate rain, `16` heavy, `50` a tropical
+    /// downpour. Above about `100` nothing in nature sustains it for an hour,
+    /// which is why that is the ceiling.
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub intensity: f32,
+}
+
+impl Default for Rain {
+    /// Steady moderate rain — the rate a scene means when it says "raining"
+    /// and nothing more.
+    fn default() -> Self {
+        Self { intensity: 4.0 }
+    }
+}
+
 /// The most waves one body may sum.
 ///
 /// **Per-vertex cost is linear in this**, and an agent tuning "make the sea
@@ -1222,6 +1261,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<AudioSource>("AudioSource");
     reg.register::<Environment>("Environment");
     reg.register::<Wind>("Wind");
+    reg.register::<Rain>("Rain");
     reg.register::<Grass>("Grass");
     // `WaveSet`, `GerstnerWave` and `Pontoon` are deliberately absent: they are
     // fields of a `WaterBody` or a `Buoyancy`, not things a node can carry.

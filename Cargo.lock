@@ -1285,6 +1285,7 @@ dependencies = [
  "loom_input",
  "loom_particles",
  "loom_physics",
+ "loom_rain",
  "loom_reflect",
  "loom_render",
  "loom_scene",
@@ -1340,6 +1341,15 @@ dependencies = [
  "loom_scene",
  "rapier3d",
  "serde",
+]
+
+[[package]]
+name = "loom_rain"
+version = "0.0.0"
+dependencies = [
+ "loom_field",
+ "loom_scene",
+ "loom_voxel",
 ]
 
 [[package]]

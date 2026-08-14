@@ -10,7 +10,76 @@
 use loom_ecs::World;
 use loom_field::wind::Wind;
 use loom_scene::Scene;
-use loom_scene::components::WaterBody;
+use loom_scene::components::{Rain, WaterBody};
+
+/// Everything a scene says about the weather, resolved once.
+///
+/// **Carried as one value because the parts are not independent.** Rain's rate
+/// is the authored intensity scaled by the sky exposure, and the lean on a
+/// streak is P1's wind scaled by that same number — three fields that only mean
+/// anything together, threaded through the assertion path as one argument
+/// rather than as a tuple that grows a slot per phase.
+pub(crate) struct Weather {
+    /// The scene's wind, or the default breeze.
+    pub wind: Wind,
+    /// The scene's rain, or `None` — which means dry, not a default drizzle.
+    pub rain: Option<Rain>,
+    /// The voxel volume that stands between a point and the sky, with the world
+    /// position of its origin, or `None` for a scene with no terrain to shelter
+    /// under.
+    ///
+    /// **Held as a volume rather than baked into a grid**, which is the whole
+    /// difference from W6's height field: `loom_rain` marches this on every
+    /// query, so an edit to it is visible on the next call with no rebake.
+    ///
+    /// **What is not yet true is that a run can edit it.** This volume is
+    /// rebuilt from the scene's op list, and `play::Sim` keeps no `Volume` at
+    /// all — it turns one into solid cells for parry at load and drops it. So
+    /// nothing inside a `loom sim` run can carve, and until something can, the
+    /// live march is a property of the query rather than of the simulation.
+    /// Wire the carve to *this* value when a mid-run CSG op exists; do not
+    /// cache what it returns.
+    pub sky: Option<(loom_voxel::Volume, [f32; 3])>,
+    /// Simulated seconds the reading is taken at — the fixed timestep times the
+    /// tick, never a wall clock (never-do #8).
+    pub seconds: f32,
+}
+
+impl Weather {
+    /// What the rain is doing at a world point.
+    ///
+    /// The one call everything downstream makes. It exists here rather than at
+    /// each call site so that the sky's frame conversion and the "absent means
+    /// dry" rule are applied once.
+    pub fn rain_at(&self, at: [f32; 3]) -> loom_rain::RainSample {
+        loom_rain::sample_rain(
+            self.rain.as_ref(),
+            &self.wind,
+            self.sky
+                .as_ref()
+                .map(|(volume, offset)| loom_rain::Sky { volume, offset: *offset }),
+            at,
+            self.seconds,
+        )
+    }
+}
+
+/// The scene's rain, or `None` when it authors none.
+///
+/// **`None` is dry.** Unlike wind, which every outdoor scene has whether or not
+/// it says so, rain is the exception rather than the default — and every scene
+/// authored before this phase must simulate byte-identically, which a component
+/// that defaulted itself on would break.
+///
+/// At most one per scene; the first is used, the same rule `wind_of` follows.
+#[must_use]
+pub(crate) fn rain_of(scene: &Scene) -> Option<Rain> {
+    let authored = scene
+        .nodes()
+        .iter()
+        .find_map(|node| node.components.get("Rain"))?;
+    serde_json::from_value::<Rain>(authored.clone()).ok()
+}
 
 /// The one mapping from the authored scalars to the field.
 fn wind_from(authored: Option<&serde_json::Value>) -> Wind {
