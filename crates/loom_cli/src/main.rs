@@ -79,6 +79,12 @@ USAGE:
         smooth over three frames and cancels; a pixel that twinkles does not.
         This is the anti-aliasing measurement — `compare` cannot make it.
 
+    loom audio <scene.loom> [--seconds <n>] [--openness <0-1>] [--out <x.wav>]
+        Render the scene's weather bed offline and measure it: rms, peak, and
+        tilt (high-band over low-band energy — the number that says `darker`).
+        Rain is synthesised, so this is reproducible. --openness is the shelter
+        to render at; the live path takes it from the acoustics solve.
+
     loom prefab <verb> <scene.loom> --node <path> [--key <Type.field> ...]
         The three prefab operations. `revert-overrides` puts an instance back
         to the prefab; `apply-overrides` promotes its deviations into the
@@ -234,6 +240,10 @@ fn run(args: &[String]) -> (u8, String) {
         Some("flicker") => match (args.get(1), args.get(2), args.get(3)) {
             (Some(a), Some(b), Some(c)) => flicker(a, b, c),
             _ => (2, USAGE.to_owned()),
+        },
+        Some("audio") => match args.get(1) {
+            Some(path) => audio_cmd(path, args),
+            None => (2, USAGE.to_owned()),
         },
         Some("prefab") => prefab_cmd::run(args),
         Some("terrain") => match args.get(1) {
@@ -2694,6 +2704,92 @@ fn parse_at(spec: &str) -> Option<([f32; 2], Option<f32>)> {
 /// is the one moment every wave in the set is at the same phase. Both the tick
 /// count and the seconds it means are in the output, so an answer can never be
 /// read without the instant it belongs to.
+/// Render the scene's weather bed offline and measure it.
+///
+/// **The instrument, and it is the same argument S1 made for golden images.**
+/// Without it, "the rain sounds right" is a human with a speaker and nothing in
+/// the gate can see it at all — and audio is worse than pixels here, because a
+/// silent bug produces no output to look at rather than a wrong picture.
+///
+/// It reports measured quantities rather than a hash, for the reason
+/// `rain::Measurement` gives: a hash pins the arithmetic, and what is worth
+/// asserting is claims about the sound.
+fn audio_cmd(path: &str, args: &[String]) -> (u8, String) {
+    let seconds = match flag(args, "--seconds") {
+        None => 4.0_f32,
+        Some(spec) => match spec.parse::<f32>() {
+            Ok(s) if s.is_finite() && s > 0.0 && s <= 600.0 => s,
+            _ => return (2, json_line(&serde_json::json!({
+                "error": "invalid_argument", "value": spec,
+                "constraint": "--seconds takes a positive number up to 600",
+            }))),
+        },
+    };
+    let openness = match flag(args, "--openness") {
+        None => 1.0_f32,
+        Some(spec) => match spec.parse::<f32>() {
+            Ok(v) if (0.0..=1.0).contains(&v) => v,
+            _ => return (2, json_line(&serde_json::json!({
+                "error": "invalid_argument", "value": spec,
+                "constraint": "--openness takes 0 (sealed) to 1 (open sky)",
+            }))),
+        },
+    };
+
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => return (2, json_line(&serde_json::json!({
+            "error": "io_error", "path": path, "constraint": e.to_string(),
+        }))),
+    };
+    let scene = match Scene::parse(&src) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+    // A `Rain` on a prefab instance is a component like any other, and an
+    // unexpanded instance carries none — the scene would render silence and
+    // look like a working dry scene.
+    let scene = match prefab_load::for_reading(&scene, std::path::Path::new(path)) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+
+    let intensity = weather::rain_of(&scene).map_or(0.0, |r| r.intensity);
+    const RATE: u32 = 48_000;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let frames = (RATE as f32 * seconds) as usize;
+    let mut samples = vec![0.0_f32; frames * 2];
+    let mut bed = loom_audio::rain::RainBed::new(RATE);
+    bed.render(
+        loom_audio::rain::RainAudio { intensity, openness, volume: 1.0 },
+        &mut samples,
+    );
+    let measured = loom_audio::rain::measure(&samples, RATE);
+
+    let mut written = serde_json::Value::Null;
+    if let Some(out) = flag(args, "--out") {
+        let bytes = loom_audio::Clip::encode(&samples, RATE, 2);
+        if let Err(e) = std::fs::write(&out, bytes) {
+            return (2, json_line(&serde_json::json!({
+                "error": "io_error", "path": out, "constraint": e.to_string(),
+            })));
+        }
+        written = serde_json::Value::String(out);
+    }
+
+    (0, json_line(&serde_json::json!({
+        "ok": true,
+        "path": path,
+        "intensity": intensity,
+        "openness": openness,
+        "seconds": seconds,
+        "rms": measured.rms,
+        "peak": measured.peak,
+        "tilt": measured.tilt,
+        "out": written,
+    })))
+}
+
 fn water(path: &str, args: &[String]) -> (u8, String) {
     let Some((at, y)) = flag(args, "--at").and_then(|s| parse_at(&s)) else {
         return (2, json_line(&serde_json::json!({

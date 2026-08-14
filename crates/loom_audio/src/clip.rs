@@ -147,6 +147,49 @@ impl Clip {
             sample_rate,
         })
     }
+
+    /// Encode interleaved samples as a 16-bit PCM WAV.
+    ///
+    /// **The other half of [`Clip::decode`], and it exists so the offline audio
+    /// render can be listened to.** A gate that only prints numbers is a gate
+    /// nobody trusts; being able to open the file is what lets a human check
+    /// that "louder and darker" actually sounds like rain under a roof.
+    ///
+    /// Takes `channels` because the render is stereo while a `Clip` is mono —
+    /// this writes what it is given rather than assuming.
+    #[must_use]
+    pub fn encode(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
+        let channels = channels.max(1);
+        let bytes_per_sample = 2_u32;
+        let block_align = u32::from(channels) * bytes_per_sample;
+        #[allow(clippy::cast_possible_truncation)]
+        let data_len = (samples.len() * bytes_per_sample as usize) as u32;
+
+        let mut out = Vec::with_capacity(44 + data_len as usize);
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_len).to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&16_u32.to_le_bytes());
+        out.extend_from_slice(&1_u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&channels.to_le_bytes());
+        out.extend_from_slice(&sample_rate.to_le_bytes());
+        out.extend_from_slice(&(sample_rate * block_align).to_le_bytes());
+        #[allow(clippy::cast_possible_truncation)]
+        out.extend_from_slice(&(block_align as u16).to_le_bytes());
+        out.extend_from_slice(&16_u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_len.to_le_bytes());
+        for &s in samples {
+            // Clamped before scaling: a sample past 1.0 would wrap to the
+            // opposite rail as an integer, which is a loud click rather than
+            // the quiet distortion clipping sounds like.
+            #[allow(clippy::cast_possible_truncation)]
+            let v = (s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -246,5 +289,34 @@ mod tests {
         for cut in [13, 20, 30, full.len() - 2] {
             assert!(Clip::decode(&full[..cut]).is_err(), "cut at {cut}");
         }
+    }
+
+    /// **The encoder is checked against the decoder that already worked.** A
+    /// hand-written RIFF header is a pile of little-endian offsets, and every
+    /// one of them is silently wrong rather than loudly wrong — a bad header
+    /// gives a file that opens and plays noise.
+    #[test]
+    fn an_encoded_wav_decodes_back_to_what_went_in() {
+        let original: Vec<f32> =
+            (0..2000).map(|i| ((i as f32) * 0.01).sin() * 0.75).collect();
+        let bytes = Clip::encode(&original, 48_000, 1);
+        let back = Clip::decode(&bytes).expect("the encoder produced a file the decoder rejects");
+
+        assert_eq!(back.sample_rate, 48_000);
+        assert_eq!(back.samples.len(), original.len());
+        for (i, (a, b)) in original.iter().zip(&back.samples).enumerate() {
+            // 16-bit quantisation is one part in 32767; anything worse is a
+            // scaling or endianness mistake rather than rounding.
+            assert!((a - b).abs() < 1.0 / 16_000.0, "sample {i}: {a} became {b}");
+        }
+    }
+
+    /// Out-of-range input must not wrap to the opposite rail.
+    #[test]
+    fn encoding_clamps_instead_of_wrapping() {
+        let bytes = Clip::encode(&[2.0, -2.0], 48_000, 1);
+        let back = Clip::decode(&bytes).expect("decodes");
+        assert!(back.samples[0] > 0.9, "+2.0 wrapped to {}", back.samples[0]);
+        assert!(back.samples[1] < -0.9, "-2.0 wrapped to {}", back.samples[1]);
     }
 }

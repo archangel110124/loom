@@ -32,6 +32,9 @@ pub(crate) struct Sound {
     /// Which source gets a fresh occlusion solve this tick.
     next: usize,
     ears: Ears,
+    /// The scene's unsheltered rain rate in mm/h. Zero in a dry scene, and then
+    /// the bed renders exact silence.
+    rain: f32,
 }
 
 impl Sound {
@@ -54,6 +57,10 @@ impl Sound {
             sources: Vec::new(),
             next: 0,
             ears: Ears::default(),
+            // The rate the sky is producing, before any shelter. Shelter is
+            // applied per tick from the room solve, exactly as the visible
+            // layer applies it per drop rather than per camera.
+            rain: crate::weather::rain_of(scene).map_or(0.0, |r| r.intensity),
         };
 
         for entity in world.entities() {
@@ -155,14 +162,32 @@ impl Sound {
         forward: [f32; 3],
         submerged: bool,
     ) {
-        if self.sources.is_empty() {
-            return;
-        }
-
         // The room, once. It is a property of where the listener stands, not
         // of any one sound, so solving it per source would be the same answer
         // computed over and over.
+        //
+        // **Solved before the early return, because rain needs it.** This used
+        // to sit below a `sources.is_empty()` bail, and a scene whose only
+        // sound is the weather has no sources at all — the most obviously
+        // rainy scene would have been the one that never solved its room.
         let room = Acoustics::solve(physics, listener, listener, &self.ears);
+
+        // The weather. `room.openness` rather than S3's sky exposure: see
+        // `RainAudio::openness` — since ADR 0017 the visible rain is occluded
+        // by the collision world too, so these agree, and S3 would read a mesh
+        // roof as open sky.
+        //
+        // Underwater, the sky is not what you are listening through. The rain
+        // is above the surface and you are not.
+        self.audio.set_rain(loom_audio::rain::RainAudio {
+            intensity: self.rain,
+            openness: if submerged { 0.0 } else { room.openness },
+            volume: 1.0,
+        });
+
+        if self.sources.is_empty() {
+            return;
+        }
 
         // One source's occlusion per tick, round-robin.
         let index = self.next % self.sources.len();
