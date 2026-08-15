@@ -81,6 +81,25 @@ parent = "Site"
   radius = 5.0
   mode = "subtract"
 
+  # **A fine octave, and it is the cheapest realism in this file.** A texture
+  # can only ever paint detail onto a shape; it cannot change the silhouette or
+  # give a surface real self-shadowing. Ground that is geometrically flat reads
+  # as flat however good the albedo is, because the eye reads shape from
+  # shading gradients before it reads pattern.
+  #
+  # 0.6 cycles/m with 3 octaves puts the finest detail near 2.4 cycles/m, which
+  # is 0.4 m — just under two voxels at this 0.25 m size, so it is the shortest
+  # wavelength the mesher can still represent. Any higher and it aliases into
+  # the surface rather than shaping it.
+  [[node.components.VoxelVolume.ops]]
+  kind = "heightfield"
+  base = 5.0
+  amplitude = 0.22
+  frequency = 0.6
+  octaves = 3
+  seed = 91744
+  mode = "union"
+
   # **`albedo` is white and that is not laziness.** It multiplies the sampled
   # texture, so anything else tints photoscanned colour toward an authored
   # guess — which is the thing this scene exists to stop doing.
