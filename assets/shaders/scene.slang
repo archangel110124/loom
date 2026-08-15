@@ -496,6 +496,10 @@ static const float UNDERWATER_DOWN = 0.13;
 /// The sun through a rippled ceiling — a soft bloom, not a disc.
 static const float UNDERWATER_SHAFT = 0.55;
 static const float UNDERWATER_SHAFT_POWER = 6.0;
+/// How hard the caustic web reads on the underside of the surface. Stronger
+/// than on the bed: you are looking straight at the lens rather than at what
+/// it has lit, with no water in between to wash it out.
+static const float UNDERSIDE_CAUSTIC = 1.8;
 
 /// What the water looks like in a direction with nothing in that direction.
 ///
@@ -2919,6 +2923,20 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
             // it mirror. `skyColor` is the same function the background pass
             // draws, so the sun rides along in the window where a real one is.
             through = skyColor(refract(-view, normal, WATER_IOR));
+            // **The web on the underside of the ceiling.** Seen from below,
+            // the surface is the lens rather than the bed being lit by it —
+            // the same convex patches that converge sunlight into a filament
+            // on the sand are bright when you look straight at them, so the
+            // ceiling carries the identical pattern. It is the most
+            // recognisable thing about looking up from underwater and it is
+            // the same `causticWeb` at the surface's own position, with no
+            // depth to fade it.
+            //
+            // Applied to the transmitted light only, not to the mirror: the
+            // total-internal-reflection region outside Snell's window is
+            // showing the seabed, not the sky, and has no business carrying a
+            // pattern made by light coming down.
+            through *= 1.0 + causticWeb(in.worldPos, 0.0) * UNDERSIDE_CAUSTIC;
         }
         // What the underside reflects is the water itself — and since the
         // medium is one colour in every direction, the mirror comes out
@@ -2927,7 +2945,13 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         // seabed, and this one is featureless everywhere outside the window.
         // Fixing it needs the geometry behind the surface, which is the
         // refraction/reflection pass this step is explicitly not building.
-        float3 lit = lerp(through, underwaterColor(-view), fresnel);
+        // **The mirror looks where a mirror looks.** This passed `-view`, which
+        // is the direction back to the eye, not the direction the surface
+        // reflects toward — harmless while the medium returned one colour for
+        // every direction, and wrong the moment it stopped. Outside Snell's
+        // window the underside mirrors the seabed, so it should be reading the
+        // dark downward part of the column, and now it does.
+        float3 lit = lerp(through, underwaterColor(reflect(-view, normal)), fresnel);
         float fogUnder = fogAmount(push.environment[0].eye.xyz, in.worldPos);
         return float4(lerp(lit, fogColor(-view), fogUnder), 1.0);
     }
