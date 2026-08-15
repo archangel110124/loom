@@ -2346,8 +2346,35 @@ RainOutput rainVertexMain(uint vertexID: SV_VertexID) {
     side = sideLength > 1e-4 ? side / sideLength : float3(1, 0, 0);
 
     float alive = strength > 0.0 ? 1.0 : 0.0;
+
+    // **The screen-space width floor.** Measured from the drop's own width at
+    // its own depth, exactly as the grass version does: project two points a
+    // streak-width apart and read the distance in pixels. Doing it from the
+    // matrix rather than from a field-of-view constant is what makes it exact
+    // and indifferent to how the projection is laid out.
+    //
+    // Widening is paid for in `strength` below, so the light a streak adds is
+    // conserved and only its distribution changes.
+    float widen = 1.0;
+    if (RAIN_MIN_PIXELS > 0.0) {
+        float4x4 viewProj = push.objects[push.objectOffset].mvp;
+        float4 clipA = mul(viewProj, float4(pos, 1.0));
+        float4 clipB = mul(viewProj, float4(pos + side * RAIN_WIDTH, 1.0));
+        float2 ndcA = clipA.xy / max(clipA.w, 1e-4);
+        float2 ndcB = clipB.xy / max(clipB.w, 1e-4);
+        float pixelsWide =
+            length((ndcB - ndcA) * push.environment[0].viewport.xy * 0.5);
+        if (pixelsWide > 1e-4) {
+            widen = max(1.0, RAIN_MIN_PIXELS / pixelsWide);
+        }
+    }
+
     float halfLength = speed * RAIN_SHUTTER * 0.5 * alive;
-    float halfWidth = RAIN_WIDTH * 0.5 * alive;
+    float halfWidth = RAIN_WIDTH * 0.5 * alive * widen;
+    // Area went up by `widen`, so brightness comes down by it. Without this a
+    // streak gets *brighter* the further away it is, which is the failure mode
+    // that makes a naive width clamp read as a field of glowing scratches.
+    strength /= widen;
     float3 world = pos + along * (local.y * halfLength) + side * (local.x * halfWidth);
 
     RainOutput out;

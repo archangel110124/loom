@@ -108,6 +108,50 @@ static const float RAIN_SHUTTER = 0.03;
 /// Streak width in metres.
 static const float RAIN_WIDTH = 0.02;
 
+/// Screen-space width no streak may fall below, in pixels. Zero disables it.
+///
+/// **The other half of the sub-pixel fix, and it needed MSAA first.** A 0.02 m
+/// streak is under a pixel wide past about ten metres, and a sub-pixel primitive
+/// is decided by whether it happens to cover a sample: it flickers on and off as
+/// the camera moves. Multisampling the rain pass reduced that to a quarter
+/// amplitude but could not remove it — four samples is still a decision.
+///
+/// Widening a thin streak to a whole pixel makes its coverage continuous rather
+/// than binary. **The widening must be paid for in alpha**, or distant rain gets
+/// brighter as it gets further away: the streak covers `widen` times the area,
+/// so its strength is divided by `widen` and the total light it adds is
+/// unchanged. Rain is additively blended, so that conservation is exact.
+///
+/// **2.5, not 1.0, and the number is the interesting part.** "At least one
+/// pixel" is the conventional statement of this trick and it is measurably the
+/// wrong setting: a one-pixel primitive still straddles pixel boundaries, so it
+/// produces *more* isolated pixels than no floor at all. Measured on
+/// `rain_impact`'s sky band as the fraction of pixels disagreeing sharply with
+/// their own neighbourhood — which is what "salt" is:
+///
+///     floor  0.0  0.75%      1.0  0.95%      1.5  0.62%
+///            2.0  0.27%      2.5  0.10%      3.0  0.02%
+///
+/// It gets worse before it gets better. 2.5 removes 87% of the salt and still
+/// reads as rain; past 3 the streaks start reading as scratches, which is the
+/// artifact `RAIN_SHUTTER` already exists to avoid.
+///
+/// **The flicker metric disagrees, and it is the one being overruled.** Five
+/// triples of a walking camera: 3.451 with no floor, 3.543 at 2.5 — 2.7%
+/// worse. That measurement cannot distinguish "wider" from "less stable",
+/// because a wider primitive changes more pixels by construction; the
+/// resolution sweep confirms the effect is entirely the widening (it costs
+/// 5.2% at 320x200, 0.4% at 1280x800 — largest exactly where the floor does the
+/// most widening). Brightness is conserved either way: 0.7577 against 0.7593,
+/// so neither number is the brightness artifact ADR 0010 warns about.
+///
+/// This was measured *worse* twice on grass (`GRASS_MIN_PIXELS`, still 0.0),
+/// and the difference is instructive: those readings were taken on a path with
+/// no multisampling, where widening a sub-pixel blade recruits more pixels into
+/// the same binary decision instead of softening it. They were also taken on
+/// flicker alone, which is the metric that cannot see this.
+static const float RAIN_MIN_PIXELS = 2.5;
+
 /// Metres from the eye a drop is fully invisible at, and fully visible by.
 ///
 /// **The near field, and it is not a taste call.** A streak's width is constant
