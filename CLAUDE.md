@@ -509,6 +509,30 @@ change, so your edits appear live. Two consequences:
 > design. None of it needs state. **`cargo xtask shimmer` cannot measure any of this** — at its 0.2 s step a drop
 > falls 1.6 m and consecutive frames share no streaks. Use `loom render --dolly <m>`, added for it:
 > the fly-through could only *pan*, and a pan is chosen precisely because it makes no parallax.
+>
+> **P4 is complete: audio, clouds, cover-driven rain, the width floor and puddles all landed.**
+> Rain is `intensity × cloud_cover(x, z, t) × shelter` (ADR 0016 step 3), the deck is drawn from
+> the same generated `clouds_at` the simulation reads, cover drives sun strength, colour and
+> ambient, and `assets/test/squall.loom` asserts raining-here / dry-there at equal exposure.
+> Rain audio is a recording with a synthesised fallback; `loom audio` renders it offline and
+> reports rms, peak and tilt. Puddles are a shading term on the ground from concavity gated by
+> slope — `assets/test/puddles.loom`, and stubbing it moves 0.8% of that frame against a 0.1%
+> tolerance.
+>
+> **Two rules the phase produced.** *A raining scene that authors no cover gets a solid deck*,
+> because rain out of a clear sky is not a weather state and because cover 1.0 gives coverage 1
+> everywhere — which is what keeps every pre-cloud rate assertion holding unchanged. And **the
+> screen-space width floor wants 2.5 px, not 1**: at one pixel a streak still straddles pixel
+> boundaries and produces *more* isolated pixels than no floor at all (0.75% → 0.95% → 0.27% at
+> 2 px). Flicker disagrees and was overruled, because it cannot tell "wider" from "less stable";
+> the salt metric in `RAIN_MIN_PIXELS`'s docs is the one that can.
+>
+> **Known gap, created by ADR 0016 step 3 and not yet closed: wetness does not read cloud cover.**
+> The rate is per-position now, but `film` and `soak` are still one pair of scalars for the scene,
+> computed from the unsheltered rate. So under a broken deck a dry spot renders soaked, and
+> `puddles.loom` authors a solid sky rather than paper over it. Fixing it means making wetness a
+> per-position query like the rate, which is a bigger change than it sounds because the shader
+> reads it out of two environment floats.
 
 ### What M0–M12 already delivered
 

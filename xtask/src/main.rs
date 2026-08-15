@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 27] = [
+const SCENES: [&str; 28] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -91,6 +91,11 @@ const SCENES: [&str; 27] = [
     // scene authors a broken deck, and every other rain scene authors a solid
     // one and short-circuits it.
     "assets/test/squall.loom",
+    // The only scene with a dished floor, so the only one where the puddle term
+    // is anything but zero: every other rain scene has a flat slab, and
+    // concavity on a flat slab is nothing. Also the finest voxels in the list
+    // at 0.25 m, which is what a 6 cm hollow needs to exist at all.
+    "assets/test/puddles.loom",
     "assets/test/camera.loom",
     "assets/test/walker.loom",
     "assets/test/explosion.loom",
@@ -139,7 +144,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 18] = [
+const GOLDEN: [(&str, &str, &[&str]); 19] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -261,6 +266,12 @@ const GOLDEN: [(&str, &str, &[&str]); 18] = [
     // Adding a rendering path means adding a scene here, and rain that varies
     // across the frame is one.
     ("squall", "assets/test/squall.loom", &["--sim", "900"]),
+    // **Standing water, which no other reference contains.** Stubbing
+    // `puddleMask` moves 0.8% of this frame against a 0.1% tolerance — checked
+    // rather than assumed, because a puddle scene framed a few metres higher
+    // moved 0.23% and would have passed the gate while barely showing the
+    // feature.
+    ("puddles", "assets/test/puddles.loom", &["--sim", "900"]),
     // **The changelog shot, and it is deliberately not a normal gate.** Every
     // reference above protects one rendering path and moves only when that
     // path changes. This one touches terrain, water, current, grass, rain,

@@ -959,6 +959,90 @@ float wetGate(float3 worldPos, float3 geometric) {
     return open * facing;
 }
 
+// ---------------------------------------------------------------------------
+// Puddles — Phase 4's last shading item.
+//
+// **Standing water where the ground holds it, from the shape of the ground.**
+// The implementation order asks for `loom_terrain` flow accumulation gated by
+// slope and curvature, and warns in the same sentence that accumulation alone
+// marks drainage *convergence* rather than flat basins, so ungated puddles
+// climb gentle inclines.
+//
+// There is no drainage field for a voxel volume. `GroundGrid` says so where
+// grass reads the same ground: real flow means routing water downhill across
+// the whole field and counting what drains through each cell, and
+// `loom_terrain` is a separate heightmap system these scenes do not use. So
+// **concavity stands in for accumulation** — the same substitution grass
+// already makes, for the same reason — and the slope gate is exactly the one
+// that warning asks for. Replace both with real accumulation when erosion lands
+// and there is a drainage field worth reading.
+//
+// **Rendering-only, and outside the determinism hash**, the same exemption
+// grass and the rain streaks have. Nothing reads a puddle back: it is a term in
+// the ground's shading, not a body of water. That is also its honest limit —
+// see `PUDDLE_FULL`.
+// ---------------------------------------------------------------------------
+
+/// How smooth standing water is. Below `WET_SMOOTH`, because a puddle is water
+/// rather than a wet surface — the film smooths what is under it, this replaces
+/// it.
+static const float PUDDLE_ROUGHNESS = 0.03;
+
+/// How much a puddle darkens what it covers, on top of the soak.
+///
+/// Water is nearly clear; what makes a puddle dark is that most of the light
+/// reaching your eye from it is reflected sky rather than scattered ground, and
+/// the specular lobe supplies that separately. This is the other half.
+static const float PUDDLE_DARKEN = 0.45;
+
+/// Metres the ground must dish over `PUDDLE_REACH` to read as a full puddle.
+///
+/// **Small on purpose.** A hollow deep enough to be obvious is a pond, and a
+/// pond wants a `WaterBody` with a surface height, buoyancy and a shoreline —
+/// all of which exist. What has no representation until now is the two
+/// centimetres of water lying in a wheel rut, which is what a wet road is
+/// mostly made of.
+static const float PUDDLE_FULL = 0.16;
+
+/// Radius the concavity is measured over, in metres.
+static const float PUDDLE_REACH = 1.1;
+
+/// Slope, as a gradient magnitude, over which no water stands at all.
+///
+/// **This is the gate the design warning is about.** Concavity alone is happily
+/// positive on the inside of a bend halfway up a hill, and water does not
+/// collect there. 0.12 is about seven degrees.
+static const float PUDDLE_LEVEL = 0.04;
+static const float PUDDLE_SLOPE = 0.12;
+
+/// How much of the surface is standing water here, 0 to 1.
+float puddleMask(float3 worldPos) {
+    LoomHeightField field = terrainField();
+    if (field.side <= 0) {
+        return 0.0;
+    }
+    float2 xz = worldPos.xz;
+    float h = loom_ground_height(field, xz);
+    float x0 = loom_ground_height(field, xz - float2(PUDDLE_REACH, 0.0));
+    float x1 = loom_ground_height(field, xz + float2(PUDDLE_REACH, 0.0));
+    float z0 = loom_ground_height(field, xz - float2(0.0, PUDDLE_REACH));
+    float z1 = loom_ground_height(field, xz + float2(0.0, PUDDLE_REACH));
+    // **Any absent neighbour disqualifies the whole sample.** Off the grid the
+    // query returns -1e9, and a mean containing one of those is a hollow half a
+    // billion metres deep — the edge of every terrain would flood.
+    float lowest = min(min(h, min(x0, x1)), min(z0, z1));
+    if (lowest < -1.0e8) {
+        return 0.0;
+    }
+
+    // Positive is a hollow. A ridge is negative and clamps away.
+    float hollow = (x0 + x1 + z0 + z1) * 0.25 - h;
+    float2 gradient = float2(x1 - x0, z1 - z0) / (2.0 * PUDDLE_REACH);
+    float flat = 1.0 - smoothstep(PUDDLE_LEVEL, PUDDLE_SLOPE, length(gradient));
+
+    return saturate(hollow / PUDDLE_FULL) * flat;
+}
+
 /// Rate, in mm/h, at which the visual layer is at full strength. Light rain is
 /// both sparser and fainter, and nothing past this rate gets denser or
 /// brighter.
@@ -1179,8 +1263,40 @@ float4 fragmentMain(VSOutput in) : SV_Target {
         // stops them the moment a shower ends. Only where the surface faces up
         // — a ring running up a wall is not a thing rain does, and the tilt is
         // in the horizontal plane.
+        // **Puddles, and they are the film's extreme rather than a new
+        // system.** Water lies where the ground dishes and the slope is gentle,
+        // and it only lies there once there is water to lie: the mask is scaled
+        // by the same film that darkens everything else, so puddles fill as it
+        // rains and drain when it stops without any state at all.
+        //
+        // `wet` gates it too, so nothing pools under a roof — the same answer
+        // that stops the drops, out of the same height field.
+        float pool = puddleMask(in.worldPos) * wet * wetFilm();
+        if (pool > 0.0) {
+            // A puddle's surface is level whatever the ground under it does.
+            // That flattening is most of what reads as standing water rather
+            // than as a damp patch, because it is what lets a hollow reflect
+            // the sky instead of the inside of itself.
+            normal = normalize(lerp(normal, float3(0.0, 1.0, 0.0), pool));
+            // Water is smoother than anything it sits on, and darker: what you
+            // see is mostly the sky in it, which the specular lobe supplies.
+            roughness = lerp(roughness, PUDDLE_ROUGHNESS, pool);
+            albedo *= 1.0 - PUDDLE_DARKEN * pool;
+        }
+        // **And the rings, on the film rather than on the material.** Scaled by
+        // the film because a ring is a disturbance *in* standing water: once the
+        // sheen has drained there is nothing left to ripple, which is also what
+        // stops them the moment a shower ends. Only where the surface faces up
+        // — a ring running up a wall is not a thing rain does, and the tilt is
+        // in the horizontal plane.
+        //
+        // **Strongest in the puddles**, which is where there is most water to
+        // disturb — and where a ring has a flat surface to spread across rather
+        // than a tilted one.
         normal = rippleNormal(
-            in.worldPos, normal, wet * wetFilm() * saturate(geometric.y));
+            in.worldPos,
+            normal,
+            wet * wetFilm() * saturate(geometric.y) * (1.0 + pool));
     }
 
     // **After the wet block, and that ordering is the whole feature.** These
