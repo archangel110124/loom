@@ -277,6 +277,13 @@ float ambientStrength() {
 /// radius. The window matters: a bare inverse square never reaches zero, so a
 /// light either contributes everywhere — and every pixel pays for every light
 /// — or is clipped at some distance and pops when it crosses it.
+/// Ceiling on one light's contribution at one pixel.
+///
+/// Well inside fp16's 65,504 and far above any value that survives a tonemap,
+/// so it changes no picture — it exists to stop an inverse square's
+/// singularity from becoming an infinity the frame cannot recover from.
+static const float LIGHT_MAX = 4096.0;
+
 float3 pointLights(float3 worldPos, float3 normal) {
     float3 sum = float3(0.0, 0.0, 0.0);
     uint count = min(push.environment[0].lightCount, LOOM_MAX_LIGHTS);
@@ -296,7 +303,20 @@ float3 pointLights(float3 worldPos, float3 normal) {
         float window = saturate(1.0 - pow(d / radius, 4.0));
         float atten = window * window / max(d2, 1e-4);
         float ndotl = max(dot(normal, toLight / d), 0.0);
-        sum += l.color.rgb * (l.position.w * atten * ndotl);
+        // **Clamped at the singularity, which is here and not in a later
+        // pass.** The denominator is floored at 1 cm, so a surface that
+        // touches a light's centre gets `intensity / 1e-4` — 300,000 at
+        // intensity 30. Against an 8-bit fixed-point target that clamps
+        // harmlessly to 1.0 on store and nobody notices; against a float
+        // target it is `+inf`, the multisample resolve averages `(inf, x, x,
+        // x)` to inf, and fog's `lerp` then computes `inf * 0` = **NaN** — a
+        // pixel `loom compare`'s worst-channel test exists to catch, arriving
+        // from an authoring mistake rather than a rendering one.
+        //
+        // A clamp in a tonemap would be too late twice over: after the resolve
+        // has already spread the infinity, and because `clamp(NaN, ., .)` is
+        // NaN.
+        sum += min(l.color.rgb * (l.position.w * atten * ndotl), LIGHT_MAX);
     }
     return sum;
 }
