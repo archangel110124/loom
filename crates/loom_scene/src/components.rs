@@ -158,6 +158,74 @@ pub struct Material {
     /// Ignored to the extent a surface is metallic: metal has no pores.
     #[schemars(range(min = 0.0, max = 1.0))]
     pub porosity: f32,
+    /// A second material shown where the surface is too steep for the first.
+    ///
+    /// **This is what stops terrain being one colour.** Real ground is not one
+    /// substance: soil and growth sit where they can rest, and where the slope
+    /// gets away from them the bedrock underneath shows. Without it a voxel
+    /// volume samples a single texture at every angle, which reads as a hill
+    /// wrapped in wallpaper however good the wallpaper is.
+    ///
+    /// Absent by default, and absent means exactly one material — no second
+    /// sample, no blend, no cost. Every scene authored before this renders
+    /// byte-identically.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<GroundLayer>,
+}
+
+/// The steep-slope material under a [`Material`], and where it takes over.
+///
+/// It carries its own textures and its own roughness rather than only a colour,
+/// because two substances that differ in colour alone still read as one
+/// substance painted twice. Rock is smoother than soil and holds less water,
+/// and blending those is most of what makes the boundary convincing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct GroundLayer {
+    /// Linear RGB, multiplied with `albedo_map` exactly as [`Material::albedo`]
+    /// is.
+    #[schemars(inner(range(min = 0.0, max = 1.0)))]
+    pub albedo: [f32; 3],
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub roughness: f32,
+    /// Colour texture. Leave the alias empty for none.
+    pub albedo_map: AssetRef,
+    /// Tangent-space normal map. Leave the alias empty for none.
+    pub normal_map: AssetRef,
+    /// Repeats across the mesh's `0..1` UV range, independent of the base
+    /// material's — bedrock grain is a different physical size from soil grit.
+    #[schemars(inner(range(min = 0.0001, max = 10000.0)))]
+    pub uv_scale: [f32; 2],
+    /// How much water this surface holds. See [`Material::porosity`].
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub porosity: f32,
+    /// Surface normal Y below which this layer takes over — the cosine of the
+    /// slope, so `1.0` is flat and `0.0` is vertical.
+    ///
+    /// **The same quantity `loom_grass::coverage` cuts grass on, and it should
+    /// usually be the same number.** Grass stopping at one angle while the rock
+    /// beneath it starts at another draws two concentric rings around a hill,
+    /// which is worse than either boundary alone.
+    ///
+    /// The default matches `Grass::slope_cutoff`'s.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub slope: f32,
+}
+
+impl Default for GroundLayer {
+    fn default() -> Self {
+        Self {
+            albedo: [0.8; 3],
+            roughness: 0.8,
+            albedo_map: AssetRef::default(),
+            normal_map: AssetRef::default(),
+            uv_scale: [1.0; 2],
+            // Rock holds far less water than soil, which is why a cliff stays
+            // pale in rain that turns the ground beneath it black.
+            porosity: 0.15,
+            slope: 0.7,
+        }
+    }
 }
 
 impl Default for Material {
@@ -177,6 +245,9 @@ impl Default for Material {
             // whole effect opt-in per material, which is how a feature ends up
             // authored into one test scene and nowhere else.
             porosity: 0.4,
+            // Absent, so a scene authored before ground layers existed renders
+            // byte-identically and pays nothing for the feature.
+            layer: None,
         }
     }
 }
@@ -1437,3 +1508,54 @@ pub fn registry() -> TypeRegistry {
     reg
 }
 
+
+#[cfg(test)]
+mod ground_layer_tests {
+    use super::{GroundLayer, Grass, Material};
+
+    /// **A material with no layer must serialize with no `layer` key at all.**
+    ///
+    /// `loom scene --tx` round-trips every material it touches. Without
+    /// `skip_serializing_if`, the first transaction against any scene would
+    /// write a `layer` table into every material in the project — a diff
+    /// touching hundreds of lines nobody asked for, in a system whose first
+    /// property is that everything authored is diffable text.
+    ///
+    /// Mutation: delete the `skip_serializing_if` attribute and this fails on
+    /// the serialized string.
+    #[test]
+    fn a_material_without_a_layer_serializes_without_the_key() {
+        let json = serde_json::to_string(&Material::default()).expect("serialize");
+        assert!(!json.contains("layer"), "an absent layer wrote itself into the file: {json}");
+
+        let back: Material = serde_json::from_str(&json).expect("parse");
+        assert_eq!(back, Material::default());
+    }
+
+    /// A layer that IS authored survives the round trip, including the field
+    /// the shader thresholds on.
+    #[test]
+    fn an_authored_layer_round_trips() {
+        let material = Material {
+            layer: Some(GroundLayer { slope: 0.42, roughness: 0.31, ..GroundLayer::default() }),
+            ..Material::default()
+        };
+        let json = serde_json::to_string(&material).expect("serialize");
+        assert!(json.contains("layer"), "an authored layer vanished: {json}");
+        let back: Material = serde_json::from_str(&json).expect("parse");
+        assert_eq!(back, material);
+        assert!((back.layer.expect("layer").slope - 0.42).abs() < 1e-6);
+    }
+
+    /// **The layer's default slope matches `Grass::slope_cutoff`'s, and that is
+    /// not decoration.** Grass stopping at one angle while the rock beneath it
+    /// starts at another draws two concentric rings around the same hill, which
+    /// is worse than either boundary on its own.
+    #[test]
+    fn the_layer_slope_default_matches_the_grass_cutoff() {
+        assert!(
+            (GroundLayer::default().slope - Grass::default().slope_cutoff).abs() < 1e-6,
+            "the ground layer and grass would draw two different boundaries"
+        );
+    }
+}

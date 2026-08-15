@@ -51,7 +51,17 @@ pub struct MaterialData {
     pub albedo: [f32; 4],
     /// metallic, roughness, uv_scale.x, uv_scale.y.
     pub params: [f32; 4],
-    /// albedo texture index, normal texture index, flags, unused.
+    /// albedo texture index, normal texture index, flags, **layer index**.
+    ///
+    /// `maps[3]` is an index into this same material table, naming a second
+    /// record shown where the surface is too steep for this one — a full
+    /// material rather than a colour, so the layer carries its own textures,
+    /// roughness, uv_scale and flags. `NO_TEXTURE` means no layer.
+    ///
+    /// **The sentinel is `NO_TEXTURE`, not zero, and that is load-bearing:**
+    /// zero is a perfectly valid material index, so a default of zero would
+    /// give every untextured surface in the project the first material in the
+    /// table as its cliff face.
     pub maps: [u32; 4],
 }
 
@@ -64,7 +74,7 @@ impl Default for MaterialData {
         Self {
             albedo: [0.8, 0.8, 0.8, 0.4],
             params: [0.0, 0.8, 1.0, 1.0],
-            maps: [NO_TEXTURE, NO_TEXTURE, 0, 0],
+            maps: [NO_TEXTURE, NO_TEXTURE, 0, NO_TEXTURE],
         }
     }
 }

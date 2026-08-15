@@ -1330,6 +1330,50 @@ float3 rippleNormal(float3 worldPos, float3 normal, float wet) {
     return normalize(normal + tilt);
 }
 
+/// How much of the steep-slope layer shows here, 0 to 1.
+///
+/// **The threshold wanders, and that is the whole difference between a
+/// hillside and a shaved ring.** A cutoff on slope — at any value, softened by
+/// any amount — draws the boundary along a clean curve across a smooth hill,
+/// and a clean curve is the synthetic tell. `loom_grass::coverage` learned this
+/// the hard way and perturbs its *threshold* with low-frequency noise on world
+/// position; widening the fade band instead only blurs the curve, which was
+/// tried there first and looked exactly as artificial.
+///
+/// The constants below are `loom_grass::coverage`'s, spelled again because a
+/// shader cannot read a Rust constant. **They must stay equal**: grass stopping
+/// at one angle while the rock beneath it starts at another draws two
+/// concentric rings around the same hill, which is worse than either boundary
+/// on its own.
+///
+/// **Sampled in 2D, exactly as `coverage` does**, so the two agree; and then
+/// perturbed a second time in full 3D, which `coverage` does not need and this
+/// does. A 2D wander is constant all the way down a vertical face, so on a
+/// cliff it stops varying at precisely the place the layer is most visible.
+/// The 3D term is additive rather than a threshold shift, which is what makes
+/// rock appear *in places* instead of as a band at one height.
+static const float LAYER_BREAKUP = 0.14;
+static const float LAYER_BREAKUP_SCALE = 0.32;
+static const float LAYER_FADE = 0.15;
+static const float LAYER_PATCH_SCALE = 0.067;
+static const float LAYER_PATCH = 0.6;
+float groundLayerWeight(float3 p, float3 geometric, float cutoff) {
+    float wander = loom_value_noise(float3(p.x, 0.0, p.z) * LAYER_BREAKUP_SCALE) * LAYER_BREAKUP;
+    // Inverted against `coverage`: grass fades OUT as the ground steepens past
+    // the cutoff, so the rock underneath fades IN over the same band.
+    float w = 1.0 - saturate((geometric.y - cutoff - wander) / LAYER_FADE);
+    // **Scaled by the slope, so dead-flat ground is soil by construction.**
+    // Ungated, the patch term put up to 30% rock across a level field and
+    // washed it grey — which is not "outcrops in places", it is haze. `steep`
+    // is 0 where the ground is level and 1 at the cutoff angle, so patches
+    // emerge as the ground tilts and the flats stay clean. It is the same
+    // shape of guarantee `loom_grass` makes when it lets its wander only ever
+    // subtract: the parameter keeps its documented meaning at the extremes.
+    float steep = saturate((1.0 - geometric.y) / max(1.0 - cutoff, 1e-3));
+    float patch = (loom_value_noise(p * LAYER_PATCH_SCALE) - 0.5) * LAYER_PATCH * steep;
+    return saturate(w + patch);
+}
+
 [shader("fragment")]
 float4 fragmentMain(VSOutput in) : SV_Target {
     // One directional sun plus ambient from the sky. The ambient used to be a
@@ -1341,6 +1385,11 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     float metallic = 0.0;
     float roughness = 0.8;
     float porosity = WET_BLOCKOUT_POROSITY;
+
+    // The unmapped normal. Up here because the wet block below needs it, the
+    // ground layer below needs it to know the slope, and because the wet block
+    // *changes the normal* — see the note on the sun term underneath it.
+    float3 geometric = normalize(in.normal);
 
     if (in.material != NO_TEXTURE) {
         MaterialData m = push.materials[in.material];
@@ -1387,12 +1436,50 @@ float4 fragmentMain(VSOutput in) : SV_Target {
                 normal = normalize(mul(tangentNormal, frame));
             }
         }
+
+        // -------------------------------------------------------------------
+        // **The steep-slope layer: what stops terrain being one substance.**
+        //
+        // `m.maps.w` indexes a second, complete `MaterialData` — its own
+        // textures, roughness, porosity and uv_scale — shown where the ground
+        // is too steep for the first to lie on it. A colour would not do: rock
+        // is smoother than soil and holds far less water, and blending those
+        // is most of what makes the two read as different substances rather
+        // than one substance painted twice.
+        //
+        // **The branch is wave-uniform.** `in.material` is `nointerpolation`,
+        // so every lane in a wave reads the same `maps.w` and a scene with no
+        // layer pays nothing — not an identity multiply, nothing.
+        // -------------------------------------------------------------------
+        if (m.maps.w != NO_TEXTURE) {
+            MaterialData lm = push.materials[m.maps.w];
+            bool lproj = (lm.maps.z & FLAG_TRIPLANAR) != 0;
+            float2 luv = in.uv * lm.params.zw;
+            float3 lprojUv = in.worldPos * float3(lm.params.z, lm.params.w, lm.params.z);
+
+            float3 lalbedo = lm.albedo.rgb;
+            if (lm.maps.x != NO_TEXTURE) {
+                lalbedo *= (lproj ? triplanar(lm.maps.x, lprojUv, geometric)
+                                  : sampleMap(lm.maps.x, luv)).rgb;
+            }
+            float3 lnormal = geometric;
+            if (lm.maps.y != NO_TEXTURE) {
+                if (lproj) {
+                    lnormal = triplanarNormal(lm.maps.y, lprojUv, geometric);
+                } else {
+                    float3 lt = sampleMap(lm.maps.y, luv).xyz * 2.0 - 1.0;
+                    lnormal = normalize(mul(lt, cotangentFrame(geometric, in.worldPos, luv)));
+                }
+            }
+
+            float w = groundLayerWeight(in.worldPos, geometric, lm.params.x);
+            albedo = lerp(albedo, lalbedo, w);
+            normal = normalize(lerp(normal, lnormal, w));
+            roughness = lerp(roughness, lm.params.y, w);
+            porosity = lerp(porosity, lm.albedo.w, w);
+        }
     }
 
-    // The unmapped normal. Up here because the wet block below needs it, and
-    // because that block now *changes the normal* — see the note on the sun
-    // term underneath it.
-    float3 geometric = normalize(in.normal);
 
     // -----------------------------------------------------------------------
     // **Wet.** Two properties, driven by the two halves of the model, and they
