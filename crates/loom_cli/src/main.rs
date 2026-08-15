@@ -889,6 +889,8 @@ pub(crate) fn world_to_objects(
                 color: palette(index),
                 mesh: mesh_index_for(world, library, *entity),
                 material: materials.index_for(index),
+                // Scenery does not sway. Only a scatter field asks for it.
+                sway: 0.0,
             })
         })
         .collect()
@@ -1706,6 +1708,7 @@ pub(crate) fn scatter_objects(scene: &Scene, library: &MeshLibrary) -> Vec<Objec
                 // it has no index into the per-node material list. `color`
                 // carries the field's authored albedo instead.
                 material: u32::MAX,
+                sway: field.sway,
             });
         }
     }
@@ -3269,6 +3272,7 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
             color: [0.42, 0.46, 0.52],
             mesh: 0,
             material: loom_render::NO_TEXTURE,
+            sway: 0.0,
         }];
         for handle in &debris {
             let (Some(p), Some(r)) = (physics.position(*handle), physics.rotation_euler(*handle))
@@ -3289,6 +3293,7 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
                 color: [0.78, 0.42, 0.24],
                 mesh: 1,
                 material: loom_render::NO_TEXTURE,
+            sway: 0.0,
             });
         }
 

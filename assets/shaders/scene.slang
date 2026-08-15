@@ -643,6 +643,95 @@ float3 unpackNormal(uint packed) {
     return normalize(float3(xy, z));
 }
 
+/// Main bending: a whole plant leaning away from the wind.
+///
+/// **The Crytek GPU Gems 3 model, and the step that matters is the last one.**
+/// Displacing a vertex horizontally by an amount that grows with height is the
+/// easy part; doing only that *stretches* the mesh, because the displaced
+/// vertex is now further from the root than it started. At any real wind speed
+/// a trunk visibly elongates and a crown tears away from it. Rescaling the
+/// offset so the vertex keeps its original distance from the origin is what
+/// turns a stretch into a *bend*, and it is the step the paper warns is
+/// routinely skipped.
+///
+/// **Height is metres above the instance's origin, not a normalised
+/// coordinate.** The proper model divides by the bounding box height; nothing
+/// here knows an instance's bounds, and a per-object bbox is a bigger change
+/// than the bend is worth. Metres-with-a-coefficient behaves the same way for
+/// anything of ordinary size and is honest about being a coefficient — `sway`
+/// is documented in those terms.
+///
+/// **The phase comes from the instance's world origin**, so neighbouring plants
+/// are out of step with each other while every vertex of one plant agrees. The
+/// wind field itself is P1's, sampled once at the origin: sampling per vertex
+/// would let a crown and a trunk disagree about the weather, and costs a noise
+/// evaluation per vertex to do it.
+/// **Worked in MODEL space, and the reason is `o.mvp`.** The obvious shape is
+/// to bend the world position, but `mvp` already contains the model matrix, so
+/// a world-space point cannot be projected with it — and the view-projection
+/// alone is not reachable from this entry point. Bending before the model
+/// transform keeps one matrix multiply and needs nothing added to any buffer.
+///
+/// The wind is a world-space field, so the direction is rotated *into* model
+/// space: `mul(v, m)` is `transpose(m) * v`, and for a rotation with uniform
+/// scale the transpose is the inverse times a constant, which normalising
+/// removes. Exact for what a scatter field produces — translation, a yaw and a
+/// uniform scale. **Approximate under non-uniform scale**, where the direction
+/// is no longer preserved; nothing authors a non-uniformly scaled tree, and
+/// this is where to look if something does.
+float3 windBend(float3 modelPos, float3x3 m3, float3 origin, float sway) {
+    if (sway <= 0.0) {
+        return modelPos;
+    }
+    float height = max(modelPos.y, 0.0);
+    if (height <= 1e-4) {
+        // The base does not move. A plant that slides across the ground is the
+        // "swimming" artifact the grass shader has a long note about.
+        return modelPos;
+    }
+
+    float3 air = grassWind(origin);
+    float2 flow = air.xz;
+    float speed = length(flow);
+    if (speed <= 1e-4) {
+        return modelPos;
+    }
+
+    // A gentle sway on top of the steady lean, phased by where the plant is.
+    // **Phase from the global world position**, so neighbours are out of step
+    // while every vertex of one plant agrees — chunk-local coordinates would
+    // put a visible seam wherever voxel chunks meet. `weather.z` is the
+    // simulation's clock, never a wall clock (never-do #8).
+    float phase = origin.x * 0.7 + origin.z * 0.53;
+    float t = push.environment[0].weather.z;
+    float gust = 1.0 + 0.25 * sin(t * 1.7 + phase);
+
+    float3 worldFlow = float3(flow.x / speed, 0.0, flow.y / speed);
+    float3 localFlow = mul(worldFlow, m3);
+    localFlow.y = 0.0;
+    float len2 = length(localFlow);
+    if (len2 <= 1e-5) {
+        return modelPos;
+    }
+    localFlow /= len2;
+
+    // Quadratic in height: a trunk barely moves at the base and the crown
+    // carries the lean, which is how a tree actually loads.
+    float amount = sway * gust * height * height * 0.02 * min(speed, 12.0);
+    float3 bent = modelPos + localFlow * amount;
+
+    // **Normalise to length, and this is the step the paper warns is skipped.**
+    // Displacing a vertex sideways moves it further from the root than it
+    // started, so the trunk elongates and the crown tears away from it. Putting
+    // the offset vertex back on its original radius turns a stretch into a
+    // bend.
+    float len = length(bent);
+    if (len > 1e-5) {
+        bent *= length(modelPos) / len;
+    }
+    return bent;
+}
+
 [shader("vertex")]
 VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) {
     Vertex v = push.vertices[vertexID];
@@ -652,7 +741,14 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
         o.normalRow0.xyz, o.normalRow1.xyz, o.normalRow2.xyz);
 
     VSOutput out;
-    out.position = mul(o.mvp, float4(unpackPosition(v.packedPosition, o.unpack), 1.0));
+    // `sway` rides in `color.a`, which was a constant 1.0 and unread. The
+    // instance's world origin is the model matrix's last column, which is what
+    // the wind is sampled at and what phases the sway.
+    float3 modelPos = unpackPosition(v.packedPosition, o.unpack);
+    float3 origin = float3(o.model[0][3], o.model[1][3], o.model[2][3]);
+    float3x3 m3 = float3x3(o.model[0].xyz, o.model[1].xyz, o.model[2].xyz);
+    modelPos = windBend(modelPos, m3, origin, o.color.a);
+    out.position = mul(o.mvp, float4(modelPos, 1.0));
     out.normal = normalize(mul(normalMatrix, unpackNormal(v.packedNormal)));
     out.color = o.color.rgb;
     out.material = o.material.x;
@@ -675,7 +771,10 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
     // Correcting it needs the model matrix's scale, which is a change to how
     // this shader indexes a matrix and wants its own commit.
     out.shadowBias = max(SHADOW_BIAS, o.unpack.w);
-    out.worldPos = mul(o.model, float4(unpackPosition(v.packedPosition, o.unpack), 1.0)).xyz;
+    // The *bent* position, so lighting, fog and the wetness gate all see the
+    // vertex where it actually is. Recomputing the unbent one here would light
+    // a tree as though it were standing still.
+    out.worldPos = mul(o.model, float4(modelPos, 1.0)).xyz;
     out.uv = unpackUv(v.packedUv, o.uvUnpack);
     return out;
 }

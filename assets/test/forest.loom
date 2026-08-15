@@ -135,6 +135,10 @@ transform = { pos = [0.0, 0.0, 0.0] }
   # The exit criterion's own number.
   max_slope_degrees = 22.0
   density = 1.0
+  # **Phase 6's main bending.** Boulders above leave this at its default of
+  # zero, which is the point of it being per field: the same component places
+  # both, and a default that waved rocks would be wrong more often than right.
+  sway = 0.9
 
     [[node.components.Scatter.exclude]]
     field = "Vale/Boulders"

@@ -56,6 +56,16 @@ pub struct Object {
     /// `color` is used directly, which is what keeps an untextured blockout
     /// readable.
     pub material: u32,
+    /// How much this object bends in the wind. `0` is rigid.
+    ///
+    /// **Per object, because the mesh vertex shader draws everything.** A
+    /// building and a pine go through the same entry point, and a global sway
+    /// would set the walls waving. Scenery is rigid unless a `Scatter` field
+    /// says otherwise.
+    ///
+    /// Reaches the GPU in `color.a`, which was a constant 1.0 and unread. Named
+    /// here rather than left as a packing trick at the call sites.
+    pub sway: f32,
 }
 
 /// One particle, as the GPU draws it.
@@ -2575,7 +2585,7 @@ pub(crate) fn pack_objects(
                     rows.y_axis.extend(0.0).to_array(),
                     rows.z_axis.extend(0.0).to_array(),
                 ],
-                color: [object.color[0], object.color[1], object.color[2], 1.0],
+                color: [object.color[0], object.color[1], object.color[2], object.sway],
                 material: [object.material, 0, 0, 0],
             }
         })

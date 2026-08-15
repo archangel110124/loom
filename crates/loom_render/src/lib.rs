@@ -340,12 +340,14 @@ mod tests {
                 color: [0.9, 0.3, 0.3],
                 mesh: 0,
                 material: crate::NO_TEXTURE,
+            sway: 0.0,
             },
             Object {
                 model: glam::Mat4::from_scale(glam::Vec3::splat(0.8)),
                 color: [0.3, 0.9, 0.4],
                 mesh: 1,
                 material: crate::NO_TEXTURE,
+            sway: 0.0,
             },
         ];
         let camera = Camera {
@@ -455,6 +457,7 @@ mod tests {
             color: [0.9, 0.3, 0.3],
             mesh: 0,
             material: crate::NO_TEXTURE,
+            sway: 0.0,
         }];
         let camera = Camera {
             eye: glam::Vec3::new(3.0, 3.0, 6.0),

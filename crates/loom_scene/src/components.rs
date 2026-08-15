@@ -704,6 +704,14 @@ pub struct Scatter {
     /// How much the ground's moisture matters, `0` to `1`.
     #[schemars(range(min = 0.0, max = 1.0))]
     pub moisture: f32,
+    /// How much these bend in the wind. `0` is rigid — a boulder.
+    ///
+    /// Roughly "metres of lean at the top of a two-metre instance in a moderate
+    /// breeze". A tree is around `0.5`; a sapling more, a trunk less. The bend
+    /// samples the same P1 wind field the grass and the rain read, so a tree, a
+    /// blade and a raindrop agree about which way the wind is going.
+    #[schemars(range(min = 0.0, max = 4.0))]
+    pub sway: f32,
     /// Fields this one keeps away from.
     ///
     /// **Named by node path, and only fields declared earlier in the file.**
@@ -724,6 +732,10 @@ impl Default for Scatter {
             max_slope_degrees: 22.0,
             density: 1.0,
             moisture: 0.0,
+            // Rigid by default: the component places rocks as readily as trees,
+            // and a default that waved boulders would be wrong more often than
+            // right.
+            sway: 0.0,
             exclude: Vec::new(),
         }
     }
