@@ -558,4 +558,94 @@ mod tests {
         let _ = take_validation_messages();
         assert!(take_validation_messages().is_empty(), "drain leaves it empty");
     }
+
+    /// **The water block reads what the opaque half left, and the graph is
+    /// what makes that true.**
+    ///
+    /// Water samples the colour and depth of everything behind it. Those are
+    /// produced a few draws earlier in what used to be the same rendering
+    /// block, so the block is split and the two halves communicate through
+    /// `loom.scene_opaque` and `loom.depth_opaque` — which means two images
+    /// have to be moved from an attachment layout into
+    /// `SHADER_READ_ONLY_OPTIMAL` between the halves, every frame.
+    ///
+    /// A missing transition there is a validation error on every water scene,
+    /// but this asserts it directly so the ownership stays visible rather than
+    /// resting on someone running `cargo xtask validate` with the layers on.
+    ///
+    /// **Mutation that must break it:** delete `(opaque_depth_id,
+    /// Access::DepthSample)` from `water_uses` in `Renderer::render`. The
+    /// image is never moved out of its attachment layout, the `water` entries
+    /// below drop from two to one, and this fails — independently of the
+    /// validation layers, which also fire.
+    ///
+    /// The scene above deliberately has no water, so `split` is false there
+    /// and its transition list is unchanged by any of this. That is a design
+    /// constraint on the split rather than a coincidence: a scene without
+    /// water pays nothing, not even a barrier.
+    #[test]
+    fn the_water_block_reads_what_the_opaque_half_left() {
+        let Ok(instance) = Instance::new(c"loom-water-split-test") else {
+            eprintln!("skipping: no Vulkan instance");
+            return;
+        };
+        let device = match Device::new(&instance) {
+            Ok(d) => d,
+            Err(DeviceError::NoDevices) => {
+                eprintln!("skipping: no Vulkan device");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let _ = instance.check_validation();
+
+        let meshes = [loom_asset::primitives::box_mesh()];
+        let mut renderer =
+            Renderer::new(&instance, &device, 128, 96, &meshes, &[], &[]).expect("renderer");
+        // `water[2]` is the flag the water draw is skipped on, and one wave is
+        // what makes the surface non-degenerate.
+        renderer.environment.water[2] = 1.0;
+        renderer.environment.wave_count = 1;
+        renderer.environment.waves[0].wavelength = 12.0;
+        renderer.environment.waves[0].amplitude = 0.3;
+        renderer.environment.waves[0].steepness = 0.4;
+        renderer.environment.waves[0].direction = [1.0, 0.0];
+        renderer.environment.waves[0].speed_scale = 1.0;
+
+        let camera = Camera {
+            eye: glam::Vec3::new(0.0, 2.0, 6.0),
+            target: glam::Vec3::new(0.0, 0.0, 0.0),
+            fov_y_degrees: 55.0,
+        };
+        let _ = renderer.render(&[], &[], &camera).expect("render");
+        if let Err(messages) = instance.check_validation() {
+            panic!("validation was not silent:\n  {}", messages.join("\n  "));
+        }
+
+        let transitions: Vec<(&str, &str)> = renderer
+            .last_transitions()
+            .iter()
+            .map(|t| (t.pass, t.image))
+            .collect();
+
+        // **The first six entries are the split, in order.** The opaque half
+        // moves the multisampled pair out of UNDEFINED and writes its two
+        // resolve targets; the water block then moves those same two targets
+        // into a readable layout before it draws. Everything after is the
+        // water block's own attachments and the post chain.
+        assert_eq!(
+            &transitions[..6],
+            [
+                ("forward", "loom.msaa_color"),
+                ("forward", "loom.msaa_depth"),
+                ("forward", "loom.scene_opaque"),
+                ("forward", "loom.depth_opaque"),
+                ("water", "loom.scene_opaque"),
+                ("water", "loom.depth_opaque"),
+            ],
+            "the split did not hand the opaque colour and depth to the water \
+             block: {transitions:?}"
+        );
+    }
+
 }

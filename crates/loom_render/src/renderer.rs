@@ -364,6 +364,22 @@ pub(crate) struct Msaa {
     pub(crate) depth_image: vk::Image,
     depth_allocation: Allocation,
     pub(crate) depth_view: vk::ImageView,
+    /// Colour and depth of everything drawn BEFORE the water — the opaque
+    /// half of the forward pass, resolved to one sample so a fragment shader
+    /// can read it.
+    ///
+    /// **They live here rather than beside the swapchain because the forward
+    /// pass is only ever split when multisampling is on**, so their lifetime
+    /// is exactly this pair's. That is not tidiness: the viewer rebuilds these
+    /// on resize, and an image that had to be remembered separately is an
+    /// image that eventually is not — a dangling view under a live descriptor,
+    /// with no validation message once the handle is reused.
+    pub(crate) opaque_color: vk::Image,
+    opaque_color_alloc: Allocation,
+    pub(crate) opaque_color_view: vk::ImageView,
+    pub(crate) opaque_depth: vk::Image,
+    opaque_depth_alloc: Allocation,
+    pub(crate) opaque_depth_view: vk::ImageView,
 }
 
 impl Msaa {
@@ -414,10 +430,33 @@ impl Msaa {
             samples,
             "loom.msaa_depth",
         )?;
+        // **SAMPLED as well as attachment, and one sample.** These are what the
+        // water block reads: the opaque half resolves into them, and water —
+        // still multisampled — samples them per pixel. A multisampled image
+        // cannot be sampled that way without a manual per-sample fetch, which
+        // is why the resolve is the mechanism rather than an inconvenience.
+        let (opaque_color, opaque_color_alloc) = create_image(
+            device, allocator, width, height, format,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            1, vk::SampleCountFlags::TYPE_1, "loom.scene_opaque",
+        )?;
+        let (opaque_depth, opaque_depth_alloc) = create_image(
+            device, allocator, width, height, DEPTH_FORMAT,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            1, vk::SampleCountFlags::TYPE_1, "loom.depth_opaque",
+        )?;
         let view = create_view(device, image, format, vk::ImageAspectFlags::COLOR)?;
         let depth_view =
             create_view(device, depth_image, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;
-        Ok(Some(Self { image, alloc, view, depth_image, depth_allocation, depth_view }))
+        let opaque_color_view =
+            create_view(device, opaque_color, format, vk::ImageAspectFlags::COLOR)?;
+        let opaque_depth_view =
+            create_view(device, opaque_depth, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;
+        Ok(Some(Self {
+            image, alloc, view, depth_image, depth_allocation, depth_view,
+            opaque_color, opaque_color_alloc, opaque_color_view,
+            opaque_depth, opaque_depth_alloc, opaque_depth_view,
+        }))
     }
 
     /// # Safety
@@ -429,11 +468,17 @@ impl Msaa {
         unsafe {
             device.destroy_image_view(self.view, None);
             device.destroy_image_view(self.depth_view, None);
+            device.destroy_image_view(self.opaque_color_view, None);
+            device.destroy_image_view(self.opaque_depth_view, None);
             device.destroy_image(self.image, None);
             device.destroy_image(self.depth_image, None);
+            device.destroy_image(self.opaque_color, None);
+            device.destroy_image(self.opaque_depth, None);
         }
         let _ = allocator.free(self.alloc);
         let _ = allocator.free(self.depth_allocation);
+        let _ = allocator.free(self.opaque_color_alloc);
+        let _ = allocator.free(self.opaque_depth_alloc);
     }
 }
 
@@ -1552,6 +1597,21 @@ impl Renderer {
         let (width, height) = (self.width, self.height);
         let (color_view, depth_view) = (self.color_view, self.depth_view);
         let msaa_views = self.msaa.as_ref().map(|m| (m.view, m.depth_view));
+        // The opaque half's resolve targets. Imported unconditionally with the
+        // rest so the ids exist whether or not the split happens; a pass that
+        // does not declare them leaves them untouched, which is exactly what
+        // the graph is for.
+        let (opaque_color_id, opaque_depth_id) = match self.msaa.as_ref() {
+            Some(m) => (
+                graph.import("loom.scene_opaque", m.opaque_color),
+                graph.import("loom.depth_opaque", m.opaque_depth),
+            ),
+            None => (color, depth),
+        };
+        let (opaque_color_view, opaque_depth_view) = self
+            .msaa
+            .as_ref()
+            .map_or((color_view, depth_view), |m| (m.opaque_color_view, m.opaque_depth_view));
         let (pipeline, layout) = (self.pipeline, self.pipeline_layout);
         // `ready` is false until a TLAS exists — an empty scene traces nothing.
         let shadow_set = self
@@ -1612,14 +1672,39 @@ impl Renderer {
         // nothing; worse, it would hide that rain is now load-bearing for every
         // pixel rather than an overlay on a finished frame.
         let rain_resolves = msaa_ids.is_some() && rain_buffers.is_some();
+        // **The forward pass splits in two whenever there is water to draw.**
+        //
+        // Water needs the colour and depth of everything behind it, and those
+        // are produced a few draws earlier in the same block — so the block has
+        // to end, resolve, and a second one has to begin. Only when
+        // multisampling is on: the resolve IS the mechanism that turns the
+        // multisampled attachments into something a fragment shader can sample,
+        // and at one sample there is nothing to resolve and no cheap way to get
+        // a readable copy.
+        //
+        // A scene with no water takes neither the split nor its cost, and its
+        // forward pass is declared character for character as before. That is
+        // also what keeps the existing barrier-list test unchanged — its scene
+        // is two meshes and never sets `environment.water`.
+        let split = water_verts > 0 && msaa_ids.is_some();
         let mut forward_uses = Vec::new();
-        if !rain_resolves {
+        if !rain_resolves && !split {
             forward_uses.push((color, Access::ColorWrite));
         }
         if let Some((ms_color, ms_depth)) = msaa_ids {
             forward_uses.push((ms_color, Access::ColorWrite));
             forward_uses.push((ms_depth, Access::DepthWrite));
-            forward_uses.push((depth, Access::DepthResolve));
+            if split {
+                // The opaque half resolves into images of its own, and the
+                // depth resolve into `loom.depth_target` moves to the water
+                // block — so rain still samples post-water depth exactly as it
+                // does today. Leaving it here instead makes rain streaks pass
+                // through the sea, with no validation message to say so.
+                forward_uses.push((opaque_color_id, Access::ColorWrite));
+                forward_uses.push((opaque_depth_id, Access::DepthResolve));
+            } else {
+                forward_uses.push((depth, Access::DepthResolve));
+            }
         } else {
             forward_uses.push((depth, Access::DepthWrite));
         }
@@ -1645,12 +1730,17 @@ impl Renderer {
                             ms_color,
                             ms_depth,
                             Resolve {
-                                color: (!rain_resolves).then_some(color_view),
-                                depth: Some(depth_view),
-                                // The forward block is the only one drawing
-                                // into this pair today, so its samples are
-                                // consumed by the resolve.
-                                keep_samples: false,
+                                color: if split {
+                                    Some(opaque_color_view)
+                                } else {
+                                    (!rain_resolves).then_some(color_view)
+                                },
+                                depth: Some(if split { opaque_depth_view } else { depth_view }),
+                                // Split: the water block draws into this same
+                                // multisampled pair next, so its samples must
+                                // survive the resolve.
+                                keep_samples: split,
+                                load: false,
                             },
                             width,
                             height,
@@ -1754,71 +1844,125 @@ impl Renderer {
                         d.cmd_draw(cmd, grass_count * 42, 1, 0, 0);
                     }
 
-                    // **Water, with the grass and the meshes rather than with
-                    // the particles.** It is opaque and depth-written — there
-                    // is no refraction in W4 — so it belongs in the solid pass,
-                    // and drawing it after the blended one would put smoke
-                    // behind the sea it drifts over.
-                    //
-                    // One draw for the whole surface, no vertex buffer and no
-                    // instancing: the concentric LOD rings are derived from
-                    // SV_VertexID and the wave sum is evaluated per vertex.
-                    if water_verts > 0 {
-                        d.cmd_bind_pipeline(
+                    if !split {
+                        draw_water_and_particles(
+                            d,
                             cmd,
-                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            base_push,
                             water_pipeline,
-                        );
-                        let push = Push {
-                            object_offset: particle_slot,
-                            ..base_push
-                        };
-                        let bytes = std::slice::from_raw_parts(
-                            std::ptr::from_ref(&push).cast::<u8>(),
-                            size_of::<Push>(),
-                        );
-                        d.cmd_push_constants(
-                            cmd,
-                            layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            0,
-                            bytes,
-                        );
-                        d.cmd_draw(cmd, water_verts, 1, 0, 0);
-                    }
-
-                    // Particles last, over finished opaque geometry, so the
-                    // depth test they read is the final one. Six vertices per
-                    // particle and no vertex buffer: the quad is built from
-                    // SV_VertexID in the shader, which is the same
-                    // no-vertex-input model the rest of this renderer uses.
-                    if particle_count > 0 {
-                        d.cmd_bind_pipeline(
-                            cmd,
-                            vk::PipelineBindPoint::GRAPHICS,
+                            water_verts,
                             particle_pipeline,
+                            particle_count,
+                            particle_slot,
                         );
-                        let push = Push {
-                            object_offset: particle_slot,
-                            ..base_push
-                        };
-                        let bytes = std::slice::from_raw_parts(
-                            std::ptr::from_ref(&push).cast::<u8>(),
-                            size_of::<Push>(),
-                        );
-                        d.cmd_push_constants(
-                            cmd,
-                            layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            0,
-                            bytes,
-                        );
-                        d.cmd_draw(cmd, particle_count * 6, 1, 0, 0);
                     }
                     d.cmd_end_rendering(cmd);
                 }
             },
         );
+
+        // **The water block.** Everything the sea is drawn over has been
+        // resolved into `loom.scene_opaque` and `loom.depth_opaque` by the
+        // block above, and this one declares them readable — which is what
+        // lets the water shader sample what is behind it instead of guessing
+        // at a body colour.
+        //
+        // It rasterises into the SAME multisampled pair, loaded rather than
+        // cleared, so the sea keeps its 4x coverage. The horizon is the
+        // thinnest highest-contrast edge in every ocean scene and drawing it
+        // at one sample — the way rain is drawn — would have been the obvious
+        // cheaper structure and a visible regression.
+        //
+        // `ShaderRead` on a colour image is what `cmaa2_edges` already
+        // declares; `DepthSample` is what the rain pass already declares. No
+        // new `Access` variant, no new pipeline: water and grass share
+        // `create_geometry_pipeline`, and this block has the same formats and
+        // the same sample count as the one before it.
+        if split {
+            let mut water_uses = vec![
+                (opaque_color_id, Access::ShaderRead),
+                (opaque_depth_id, Access::DepthSample),
+            ];
+            if let Some((ms_color, ms_depth)) = msaa_ids {
+                water_uses.push((ms_color, Access::ColorWrite));
+                water_uses.push((ms_depth, Access::DepthWrite));
+            }
+            // The depth resolve lands here rather than in the opaque half, so
+            // the depth rain samples includes the water surface.
+            water_uses.push((depth, Access::DepthResolve));
+            if !rain_resolves {
+                water_uses.push((color, Access::ColorWrite));
+            }
+            graph.pass(
+                "water",
+                &water_uses,
+                move |d, cmd| {
+                    // SAFETY: the graph has transitioned the opaque pair to
+                    // SHADER_READ_ONLY_OPTIMAL and the attachments to their
+                    // attachment layouts before this records.
+                    unsafe {
+                        let Some((ms_color_view, ms_depth_view)) = msaa_views else {
+                            return;
+                        };
+                        begin_rendering(
+                            d,
+                            cmd,
+                            ms_color_view,
+                            ms_depth_view,
+                            Resolve {
+                                color: (!rain_resolves).then_some(color_view),
+                                depth: Some(depth_view),
+                                // Nothing draws into the pair after this, so
+                                // the samples are consumed here.
+                                keep_samples: false,
+                                // **Load, not clear.** Clearing would erase the
+                                // terrain the sea is drawn over — a black frame
+                                // with water floating in it, and no validation
+                                // message anywhere.
+                                load: true,
+                            },
+                            width,
+                            height,
+                        );
+                        // Sets 0 and 1 again: a rendering block does not
+                        // inherit them, and both are bound once for the whole
+                        // block rather than per draw (never-do #2).
+                        if let Some(set) = shadow_set {
+                            d.cmd_bind_descriptor_sets(
+                                cmd,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                layout,
+                                0,
+                                &[set],
+                                &[],
+                            );
+                        }
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            1,
+                            &[material_set],
+                            &[],
+                        );
+                        set_viewport(d, cmd, width, height);
+                        draw_water_and_particles(
+                            d,
+                            cmd,
+                            layout,
+                            base_push,
+                            water_pipeline,
+                            water_verts,
+                            particle_pipeline,
+                            particle_count,
+                            particle_slot,
+                        );
+                        d.cmd_end_rendering(cmd);
+                    }
+                },
+            );
+        }
 
         // **Rain, in a pass of its own, after the forward pass.** It has to be
         // separate: the depth buffer goes from being written as an attachment
@@ -2310,6 +2454,104 @@ pub(crate) struct Resolve {
     /// them again, so storing them is pure bandwidth and bandwidth is the
     /// entire cost of MSAA.
     pub(crate) keep_samples: bool,
+    /// Load what is already in the attachments instead of clearing them.
+    ///
+    /// **The water block's half of `keep_samples`.** The opaque half keeps its
+    /// samples; this is what makes the second block continue into them rather
+    /// than start from a cleared image. Clearing here would erase the terrain
+    /// the water is supposed to be drawn over, which is a black frame with the
+    /// sea floating in it — no validation message, and obvious only on screen.
+    pub(crate) load: bool,
+}
+
+/// The water surface and the blended particles, recorded into whichever
+/// rendering block is current.
+///
+/// **Extracted because it is now called from two places.** When the forward
+/// pass is split so water can sample what is behind it, these draws move into
+/// the second block; when it is not split — one sample, or a scene with no
+/// water — they stay exactly where they were. One copy called twice, rather
+/// than the same fifty lines maintained in two blocks that would drift.
+///
+/// Every parameter is `Copy`, which is what lets both `move` closures take it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn draw_water_and_particles(
+    d: &ash::Device,
+    cmd: vk::CommandBuffer,
+    layout: vk::PipelineLayout,
+    base_push: Push,
+    water_pipeline: vk::Pipeline,
+    water_verts: u32,
+    particle_pipeline: vk::Pipeline,
+    particle_count: u32,
+    particle_slot: u32,
+) {
+    // SAFETY: the caller is inside a rendering block whose attachments match
+    // these pipelines, and has bound sets 0 and 1.
+    unsafe {
+        // **Water, with the grass and the meshes rather than with
+        // the particles.** It is opaque and depth-written — there
+        // is no refraction in W4 — so it belongs in the solid pass,
+        // and drawing it after the blended one would put smoke
+        // behind the sea it drifts over.
+        //
+        // One draw for the whole surface, no vertex buffer and no
+        // instancing: the concentric LOD rings are derived from
+        // SV_VertexID and the wave sum is evaluated per vertex.
+        if water_verts > 0 {
+            d.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                water_pipeline,
+            );
+            let push = Push {
+                object_offset: particle_slot,
+                ..base_push
+            };
+            let bytes = std::slice::from_raw_parts(
+                std::ptr::from_ref(&push).cast::<u8>(),
+                size_of::<Push>(),
+            );
+            d.cmd_push_constants(
+                cmd,
+                layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                bytes,
+            );
+            d.cmd_draw(cmd, water_verts, 1, 0, 0);
+        }
+
+        // Particles last, over finished opaque geometry, so the
+        // depth test they read is the final one. Six vertices per
+        // particle and no vertex buffer: the quad is built from
+        // SV_VertexID in the shader, which is the same
+        // no-vertex-input model the rest of this renderer uses.
+        if particle_count > 0 {
+            d.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                particle_pipeline,
+            );
+            let push = Push {
+                object_offset: particle_slot,
+                ..base_push
+            };
+            let bytes = std::slice::from_raw_parts(
+                std::ptr::from_ref(&push).cast::<u8>(),
+                size_of::<Push>(),
+            );
+            d.cmd_push_constants(
+                cmd,
+                layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                bytes,
+            );
+            d.cmd_draw(cmd, particle_count * 6, 1, 0, 0);
+        }
+
+    }
 }
 
 pub(crate) unsafe fn begin_rendering(
@@ -2323,11 +2565,15 @@ pub(crate) unsafe fn begin_rendering(
     width: u32,
     height: u32,
 ) {
-    let Resolve { color: color_resolve, depth: depth_resolve, keep_samples: _ } = resolve;
+    let Resolve { color: color_resolve, depth: depth_resolve, keep_samples: _, load: _ } = resolve;
     let mut color_attachment = vk::RenderingAttachmentInfo::default()
         .image_view(color_view)
         .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .load_op(if resolve.load {
+            vk::AttachmentLoadOp::LOAD
+        } else {
+            vk::AttachmentLoadOp::CLEAR
+        })
         // **DONT_CARE once the samples are consumed by a resolve here.** They
         // are never read again, so storing them would be pure bandwidth — and
         // bandwidth is the whole cost of MSAA. When the resolve is deferred to
@@ -2345,7 +2591,13 @@ pub(crate) unsafe fn begin_rendering(
     let mut depth_attachment = vk::RenderingAttachmentInfo::default()
         .image_view(depth_view)
         .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
+        // Loaded with the colour, so water depth-tests against the terrain the
+        // opaque half already wrote rather than against a cleared buffer.
+        .load_op(if resolve.load {
+            vk::AttachmentLoadOp::LOAD
+        } else {
+            vk::AttachmentLoadOp::CLEAR
+        })
         // **The rain pass reads the RESOLVED depth, not these samples.**
         // `SceneDepth` is bound to `loom.depth_target` and the rain block
         // declares `(depth, Access::DepthSample)` — so when this attachment is

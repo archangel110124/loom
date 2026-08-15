@@ -1143,18 +1143,40 @@ impl Viewer {
             )
         });
         let msaa_views = self.msaa.as_ref().map(|m| (m.view, m.depth_view));
+        // The opaque half's resolve targets — see the offscreen path, which
+        // this mirrors deliberately. The two must agree: a window drawing a
+        // different structure from the headless renderer is the divergence
+        // that has already cost this project three defects, and no golden
+        // image can see it.
+        let (opaque_color_id, opaque_depth_id) = match self.msaa.as_ref() {
+            Some(m) => (
+                graph.import("loom.viewer_scene_opaque", m.opaque_color),
+                graph.import("loom.viewer_depth_opaque", m.opaque_depth),
+            ),
+            None => (scene_id, depth_id),
+        };
+        let (opaque_color_view, opaque_depth_view) = self
+            .msaa
+            .as_ref()
+            .map_or((scene_view, depth_view), |m| (m.opaque_color_view, m.opaque_depth_view));
         // **When rain defers the colour resolve, the forward pass does not
         // write the scene target at all** — the rain pass is what produces it.
         // See the same construction in `renderer.rs`.
         let rain_resolves = msaa_ids.is_some() && rain_buffers.is_some();
+        let split = water_verts > 0 && msaa_ids.is_some();
         let mut forward_uses = Vec::new();
-        if !rain_resolves {
+        if !rain_resolves && !split {
             forward_uses.push((scene_id, Access::ColorWrite));
         }
         if let Some((ms_color, ms_depth)) = msaa_ids {
             forward_uses.push((ms_color, Access::ColorWrite));
             forward_uses.push((ms_depth, Access::DepthWrite));
-            forward_uses.push((depth_id, Access::DepthResolve));
+            if split {
+                forward_uses.push((opaque_color_id, Access::ColorWrite));
+                forward_uses.push((opaque_depth_id, Access::DepthResolve));
+            } else {
+                forward_uses.push((depth_id, Access::DepthResolve));
+            }
         } else {
             forward_uses.push((depth_id, Access::DepthWrite));
         }
@@ -1175,12 +1197,14 @@ impl Viewer {
                             ms_color,
                             ms_depth,
                             crate::renderer::Resolve {
-                                color: (!rain_resolves).then_some(scene_view),
-                                depth: Some(depth_view),
-                                // The forward block is the only one drawing
-                                // into this pair today, so its samples are
-                                // consumed by the resolve.
-                                keep_samples: false,
+                                color: if split {
+                                    Some(opaque_color_view)
+                                } else {
+                                    (!rain_resolves).then_some(scene_view)
+                                },
+                                depth: Some(if split { opaque_depth_view } else { depth_view }),
+                                keep_samples: split,
+                                load: false,
                             },
                             extent.width,
                             extent.height,
@@ -1271,52 +1295,106 @@ impl Viewer {
                         d.cmd_draw(cmd, grass_count * 42, 1, 0, 0);
                     }
 
-                    // Water, in the same place in the order as offscreen:
-                    // opaque and depth-written, so before the blended pass.
-                    if water_verts > 0 {
-                        d.cmd_bind_pipeline(
+                    if !split {
+                        crate::renderer::draw_water_and_particles(
+                            d,
                             cmd,
-                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            base_push,
                             water_pipeline,
-                        );
-                        let push = crate::renderer::Push {
-                            object_offset: particle_slot,
-                            ..base_push
-                        };
-                        d.cmd_push_constants(
-                            cmd,
-                            layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            0,
-                            push.bytes(),
-                        );
-                        d.cmd_draw(cmd, water_verts, 1, 0, 0);
-                    }
-
-                    // Particles last, over finished opaque geometry.
-                    if particle_count > 0 {
-                        d.cmd_bind_pipeline(
-                            cmd,
-                            vk::PipelineBindPoint::GRAPHICS,
+                            water_verts,
                             particle_pipeline,
+                            particle_count,
+                            particle_slot,
                         );
-                        let push = crate::renderer::Push {
-                            object_offset: particle_slot,
-                            ..base_push
-                        };
-                        d.cmd_push_constants(
-                            cmd,
-                            layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            0,
-                            push.bytes(),
-                        );
-                        d.cmd_draw(cmd, particle_count * 6, 1, 0, 0);
                     }
                     d.cmd_end_rendering(cmd);
                 }
             },
         );
+
+        // **The water block**, mirroring the offscreen path exactly. See
+        // `Renderer::render` for why it exists: water samples the colour and
+        // depth of everything behind it, and those are produced a few draws
+        // earlier in the block it used to share.
+        //
+        // The two paths must stay identical. A window that draws a different
+        // structure from the headless renderer is the divergence that already
+        // cost this project three defects in one session, and no golden image
+        // can see it — the gate only ever renders offscreen.
+        if split {
+            let mut water_uses = vec![
+                (opaque_color_id, Access::ShaderRead),
+                (opaque_depth_id, Access::DepthSample),
+            ];
+            if let Some((ms_color, ms_depth)) = msaa_ids {
+                water_uses.push((ms_color, Access::ColorWrite));
+                water_uses.push((ms_depth, Access::DepthWrite));
+            }
+            water_uses.push((depth_id, Access::DepthResolve));
+            if !rain_resolves {
+                water_uses.push((scene_id, Access::ColorWrite));
+            }
+            graph.pass(
+                "water",
+                &water_uses,
+                move |d, cmd| {
+                    // SAFETY: the graph has moved the opaque pair to
+                    // SHADER_READ_ONLY_OPTIMAL and the attachments to their
+                    // attachment layouts before this records.
+                    unsafe {
+                        let Some((ms_color_view, ms_depth_view)) = msaa_views else {
+                            return;
+                        };
+                        crate::renderer::begin_rendering(
+                            d,
+                            cmd,
+                            ms_color_view,
+                            ms_depth_view,
+                            crate::renderer::Resolve {
+                                color: (!rain_resolves).then_some(scene_view),
+                                depth: Some(depth_view),
+                                keep_samples: false,
+                                load: true,
+                            },
+                            extent.width,
+                            extent.height,
+                        );
+                        if let Some(set) = shadow_set {
+                            d.cmd_bind_descriptor_sets(
+                                cmd,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                layout,
+                                0,
+                                &[set],
+                                &[],
+                            );
+                        }
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            1,
+                            &[material_set],
+                            &[],
+                        );
+                        crate::renderer::set_viewport(d, cmd, extent.width, extent.height);
+                        crate::renderer::draw_water_and_particles(
+                            d,
+                            cmd,
+                            layout,
+                            base_push,
+                            water_pipeline,
+                            water_verts,
+                            particle_pipeline,
+                            particle_count,
+                            particle_slot,
+                        );
+                        d.cmd_end_rendering(cmd);
+                    }
+                },
+            );
+        }
 
         // **Rain, then the UI, each in a pass of its own.** Rain has to be
         // separate — the depth buffer stops being an attachment and becomes a
