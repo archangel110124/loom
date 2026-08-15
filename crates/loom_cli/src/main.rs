@@ -613,6 +613,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // path marches the SDF — see `rain_at_eye`.
     let rain = weather::rain_of(&scene);
     let mut environment = environment_with_wind(&world, &weather, wind_seconds);
+    stamp_flipbook(&mut environment, &material_library);
     submerge_eye(&mut environment, &world, &weather, terrain.as_ref(), camera.eye, wind_seconds);
     let rain_drops =
         rain_at_eye(&mut environment, rain.as_ref(), &weather, camera.eye, wind_seconds);
@@ -796,6 +797,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     #[allow(clippy::cast_precision_loss)]
                     let moment = wind_seconds + elapsed as f32 / 60.0;
                     renderer.environment = environment_with_wind(&world, &weather, moment);
+                    stamp_flipbook(&mut renderer.environment, &material_library);
 
                     #[allow(clippy::cast_precision_loss)]
                     let turn = spin * index as f32;
@@ -2055,6 +2057,24 @@ fn compare(a: &str, b: &str, args: &[String]) -> (u8, String) {
 /// block, which is at 124 of its 128 bytes. The vertex shader reads them to
 /// bend a blade, so they have to reach the GPU somehow and this is the buffer
 /// for per-scene data.
+/// Point the environment at the scene's fire flipbook, if it declares one.
+///
+/// **By a reserved alias rather than a component field**, and the choice is
+/// worth stating. The flipbook is per-scene, not per-emitter: every additive
+/// particle in a frame samples the same sheet, so hanging it off
+/// `ParticleEmitter` would mean carrying a texture index per particle to the
+/// fragment shader for a value that never differs between them. A reserved
+/// name is the smaller lie — a scene declares `[[asset]] key = "fire_flipbook"`
+/// and the fire uses it.
+fn stamp_flipbook(
+    env: &mut loom_render::EnvironmentData,
+    materials: &materials::MaterialLibrary,
+) {
+    if let Some(slot) = materials.by_alias.get("fire_flipbook") {
+        env.fire_flipbook = *slot;
+    }
+}
+
 pub(crate) fn environment_with_wind(
     world: &World,
     wind: &loom_field::wind::Wind,

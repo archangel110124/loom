@@ -166,6 +166,7 @@ mod tests {
         // three of padding to keep the struct 16-byte aligned.
         assert_eq!(at(std::ptr::from_ref(&base.lights).cast()), 624, "lights");
         assert_eq!(at(std::ptr::from_ref(&base.light_count).cast()), 880, "lightCount");
+        assert_eq!(at(std::ptr::from_ref(&base.fire_flipbook).cast()), 884, "fireFlipbook");
         assert_eq!(size_of::<crate::PointLight>(), 32, "one light");
         assert_eq!(size_of::<EnvironmentData>(), 896, "the whole struct");
     }

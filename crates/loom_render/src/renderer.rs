@@ -260,7 +260,13 @@ pub struct EnvironmentData {
     pub lights: [PointLight; MAX_LIGHTS],
     /// How many of `lights` are real. Zero costs one comparison per pixel.
     pub light_count: u32,
-    pub light_pad: [u32; 3],
+    /// Bindless index of the fire flipbook, or `NO_TEXTURE`.
+    ///
+    /// **In the light block's padding rather than a new field**, because the
+    /// padding was already there to keep the struct 16-byte aligned and using
+    /// it costs nothing and moves no offset. The layout test pins it.
+    pub fire_flipbook: u32,
+    pub light_pad: [u32; 2],
 }
 
 /// A point light, as the GPU reads it.
@@ -363,7 +369,8 @@ impl Default for EnvironmentData {
             cloud: [0.0, 1200.0, 2.5, 0.0],
             lights: [PointLight::default(); MAX_LIGHTS],
             light_count: 0,
-            light_pad: [0; 3],
+            fire_flipbook: crate::NO_TEXTURE,
+            light_pad: [0; 2],
         }
     }
 }

@@ -66,6 +66,13 @@ struct MaterialData {
 
 static const uint LOOM_MAX_LIGHTS = 8;
 
+/// The fire flipbook's shape. 8x8 frames played at 18 a second, which is fast
+/// enough that a flame flickers rather than pulses and slow enough that the
+/// 64-frame loop lasts three and a half seconds before repeating.
+static const int FIRE_FLIPBOOK_GRID = 8;
+static const int FIRE_FLIPBOOK_FRAMES = 64;
+static const float FIRE_FLIPBOOK_FPS = 18.0;
+
 /// A point light. Mirrors `loom_render::PointLight` exactly — one memory
 /// layout described twice, and a mismatch is silent and looks like a shading
 /// bug.
@@ -154,9 +161,10 @@ struct EnvironmentData {
     /// Point lights. Last in the struct so every offset above is unmoved.
     LoomPointLight lights[LOOM_MAX_LIGHTS];
     uint lightCount;
+    /// Bindless index of the fire flipbook, or `NO_TEXTURE`.
+    uint fireFlipbook;
     uint lightPad0;
     uint lightPad1;
-    uint lightPad2;
 };
 
 struct GrassBlade {
@@ -1843,20 +1851,60 @@ ParticleOutput particleVertexMain(uint vertexID: SV_VertexID) {
 [shader("fragment")]
 float4 particleFragmentMain(ParticleOutput in) : SV_Target {
     float r = length(in.local);
-    if (r > 1.0) {
+    // The radial cut belongs to the procedural sprite. A flipbook frame fills
+    // its cell, so cutting a circle out of it clips the flame tongues at the
+    // corners — which is exactly where they lick.
+    bool flipbook = in.additive > 0.5 && push.environment[0].fireFlipbook != NO_TEXTURE;
+    if (r > 1.0 && !flipbook) {
         discard;
     }
 
-    // Two octaves of value noise in the quad's own space, offset per particle
-    // so neighbours do not share a pattern.
-    float2 q = in.local * 1.7 + in.seed * 7.31;
-    float wisp = 0.62 * valueNoise(q) + 0.38 * valueNoise(q * 2.4 + 3.7);
+    float3 tint = float3(1.0, 1.0, 1.0);
+    float alpha;
 
-    // Falloff from the centre, eaten into by the noise. `smoothstep` rather
-    // than a linear ramp: a linear edge on a translucent sprite reads as a
-    // visible disc boundary once several overlap.
-    float falloff = smoothstep(1.0, 0.15, r);
-    float alpha = in.color.a * falloff * (0.45 + 0.85 * wisp);
+    // **A flipbook, for additive particles, when the scene supplies one.**
+    //
+    // The procedural falloff below is a blob eaten by noise. That reads as
+    // smoke, which is what it was written for, and it cannot read as flame:
+    // fire is made of *tongues* — narrow at the base, torn at the edges,
+    // licking upward — and a radially symmetric sprite has no way to be one.
+    //
+    // **The frame comes from the clock and the particle's own seed, not from
+    // its age.** No age is carried to the fragment shader, and adding one
+    // would mean a new varying on every particle in every scene for a feature
+    // only fire uses. Seeding the phase per particle is also what stops sixty
+    // sprites playing the same frame together, which is the thing that makes a
+    // flipbook read as a flipbook.
+    if (flipbook) {
+        float2 cell = in.local * 0.5 + 0.5;
+        // Discard outside the quad happened above on a radius; a flipbook
+        // wants the whole square, so the corners are back in play and the
+        // sprite's own alpha is what shapes it.
+        float phase = push.environment[0].weather.z * FIRE_FLIPBOOK_FPS
+                    + in.seed * float(FIRE_FLIPBOOK_FRAMES);
+        uint frame = uint(phase) % uint(FIRE_FLIPBOOK_FRAMES);
+        uint gx = frame % uint(FIRE_FLIPBOOK_GRID);
+        uint gy = frame / uint(FIRE_FLIPBOOK_GRID);
+        float inv = 1.0 / float(FIRE_FLIPBOOK_GRID);
+        // Inset by half a texel of the CELL, not of the sheet: without it the
+        // linear sampler reaches into the neighbouring frame and every sprite
+        // carries a sliver of the next flame along its edge.
+        float2 uv = (float2(float(gx), float(gy)) + saturate(cell) * 0.98 + 0.01) * inv;
+        float4 book = sampleMap(push.environment[0].fireFlipbook, uv);
+        tint = book.rgb;
+        alpha = in.color.a * book.a;
+    } else {
+        // Two octaves of value noise in the quad's own space, offset per
+        // particle so neighbours do not share a pattern.
+        float2 q = in.local * 1.7 + in.seed * 7.31;
+        float wisp = 0.62 * valueNoise(q) + 0.38 * valueNoise(q * 2.4 + 3.7);
+
+        // Falloff from the centre, eaten into by the noise. `smoothstep`
+        // rather than a linear ramp: a linear edge on a translucent sprite
+        // reads as a visible disc boundary once several overlap.
+        float falloff = smoothstep(1.0, 0.15, r);
+        alpha = in.color.a * falloff * (0.45 + 0.85 * wisp);
+    }
     if (alpha <= 0.002) {
         discard;
     }

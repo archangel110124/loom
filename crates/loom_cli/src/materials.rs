@@ -25,6 +25,9 @@ pub(crate) struct MaterialLibrary {
     by_entity: BTreeMap<usize, u32>,
     /// Aliases that did not load, so the caller can report them.
     pub(crate) missing: Vec<String>,
+    /// Alias to bindless slot, for the handful of textures that are named
+    /// rather than reached through a `Material`.
+    pub(crate) by_alias: BTreeMap<String, u32>,
 }
 
 impl MaterialLibrary {
@@ -95,6 +98,7 @@ impl MaterialLibrary {
                         let slot = u32::try_from(library.textures.len()).unwrap_or(0);
                         library.textures.push(texture);
                         slots.insert(alias.to_owned(), slot);
+                        library.by_alias.insert(alias.to_owned(), slot);
                         slot
                     }
                     Err(_) => {
@@ -203,6 +207,28 @@ impl MaterialLibrary {
                 ],
             });
             library.by_entity.insert(index, slot);
+        }
+
+        // **Textures nothing references still have to be loaded.** The bindless
+        // array is filled by walking `Material` components, so an asset no
+        // material names — the fire flipbook, which the particle shader reaches
+        // by a reserved alias — is declared, validated, and never uploaded.
+        // Silently: the render simply does not use it.
+        for alias in ["fire_flipbook"] {
+            if library.by_alias.contains_key(alias) {
+                continue;
+            }
+            let Some(path) = scene.asset_path(alias) else {
+                continue;
+            };
+            match loom_asset::texture::load(&base.join(path), loom_asset::ColorSpace::Srgb) {
+                Ok(texture) => {
+                    let slot = u32::try_from(library.textures.len()).unwrap_or(0);
+                    library.textures.push(texture);
+                    library.by_alias.insert((*alias).to_owned(), slot);
+                }
+                Err(_) => library.missing.push((*alias).to_owned()),
+            }
         }
 
         library
