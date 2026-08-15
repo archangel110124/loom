@@ -113,8 +113,11 @@ USAGE:
                               [--frames <n>] [--size <WxH>] [--steps <n>]
         Carve the voxel terrain and render the result.
 
-    loom run <scene.loom> [--edit] [--frames <n>]
+    loom run <scene.loom> [--edit] [--frames <n>] [--play]
         Open the viewer. --edit gives the full editor; it reloads on change.
+        --frames closes after n frames and then prints the frame's CPU cost;
+        --play starts the simulation immediately, which is the only way to
+        measure the per-frame work a running game actually does.
 ";
 
 /// The flags each subcommand accepts, and whether each takes a value.
@@ -155,7 +158,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
             ("--size", true), ("--steps", true),
         ],
     ),
-    ("run", &[("--edit", false), ("--frames", true)]),
+    ("run", &[("--edit", false), ("--frames", true), ("--play", false)]),
 ];
 
 /// The first unrecognised flag in `args`, if any.
@@ -271,6 +274,7 @@ fn run(args: &[String]) -> (u8, String) {
                 path,
                 args.iter().any(|a| a == "--edit"),
                 flag(args, "--frames").and_then(|n| n.parse::<u32>().ok()),
+                args.iter().any(|a| a == "--play"),
             ) {
                 Ok(()) => (0, String::new()),
                 Err(e) => (1, json_line(&serde_json::json!({

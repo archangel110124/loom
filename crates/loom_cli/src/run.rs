@@ -272,6 +272,22 @@ struct App {
     /// far needed a human to open a window and close it; this is what lets
     /// `cargo xtask validate` do that instead.
     frames_left: Option<u32>,
+    /// Start the simulation as soon as there is a window.
+    ///
+    /// **This exists so a gate can reach Play.** The per-frame CPU cost that
+    /// took `forest.loom` to 9 fps only happens while the simulation advances,
+    /// and nothing headless could get there — `--frames` alone runs a paused
+    /// editor, which is exactly the case where the defect costs nothing.
+    autoplay: bool,
+    /// How many frames' CPU cost has been measured, and their total.
+    ///
+    /// **The frame's CPU work, up to the draw call — not the whole frame.**
+    /// Past the draw the thread is waiting on a queue and a presentation
+    /// engine, and folding that in would make the number mostly a measure of
+    /// the GPU and the vsync mode.
+    cpu_frames: u32,
+    cpu_total_ms: f64,
+    cpu_worst_ms: f32,
     title: String,
 }
 
@@ -387,6 +403,10 @@ impl App {
             wind_seconds: 0.0,
             fps: 0.0,
             frames_left: None,
+            autoplay: false,
+            cpu_frames: 0,
+            cpu_total_ms: 0.0,
+            cpu_worst_ms: 0.0,
             agent_changes: Vec::new(),
             title,
         }
@@ -911,6 +931,11 @@ impl ApplicationHandler for App {
                 // Clamped for the same reason the camera step is: a stall must
                 // not jump the wind forward and snap every blade.
                 self.wind_seconds += dt.min(0.1);
+                // Once, and only when there is something to play into.
+                if self.autoplay && self.play.is_none() && self.viewer.is_some() {
+                    self.autoplay = false;
+                    self.start_play();
+                }
                 // Clamp: a stall must not teleport the camera across the map.
                 self.step_camera(dt.min(0.1));
                 // Once per frame, not once per keyboard event: `end_frame`
@@ -1131,6 +1156,19 @@ impl ApplicationHandler for App {
                     viewer.set_rain_tick((self.wind_seconds * 60.0).round().max(0.0) as u64);
                 }
 
+                // Everything above is the frame's CPU work: input, the
+                // simulation step, re-deriving draw calls, the weather, the
+                // particles and the panels. Sampled here rather than at the end
+                // of the handler for the reason `cpu_frames` gives.
+                #[allow(clippy::disallowed_methods)]
+                let cpu_ms = std::time::Instant::now().duration_since(now).as_secs_f64() * 1000.0;
+                self.cpu_frames += 1;
+                self.cpu_total_ms += cpu_ms;
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    self.cpu_worst_ms = self.cpu_worst_ms.max(cpu_ms as f32);
+                }
+
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
                     (Some(viewer), Some(ui), Some(window)) => viewer.draw_with_ui(
                         drawn,
@@ -1165,6 +1203,7 @@ impl ApplicationHandler for App {
                     self.frames_left = Some(left);
                     if left == 0 {
                         crate::log::info("frame budget reached — closing");
+                        self.report_cpu();
                         self.shutdown(event_loop);
                         return;
                     }
@@ -1487,6 +1526,22 @@ impl App {
                 plumes.splash(world, at, tick);
             }
         }
+    }
+
+    /// What the frame cost on the CPU, for a bounded run.
+    ///
+    /// One line, parseable, printed when `--frames` runs out. A golden image
+    /// renders a single frame and so cannot tell placing once from placing
+    /// sixty times a second; this is the number that can.
+    fn report_cpu(&self) {
+        if self.cpu_frames == 0 {
+            return;
+        }
+        let mean = self.cpu_total_ms / f64::from(self.cpu_frames);
+        crate::log::info(format!(
+            "cpu {mean:.3} ms/frame mean, {:.3} ms worst over {} frames",
+            self.cpu_worst_ms, self.cpu_frames
+        ));
     }
 
     /// Re-derive draw calls from the simulated world.
@@ -2205,6 +2260,7 @@ pub fn run(
     session: Option<loom_scene::Session>,
     disk_seen: loom_scene::VersionToken,
     frames: Option<u32>,
+    autoplay: bool,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
     // Poll, not Wait: the camera animates continuously while keys are held, and
@@ -2222,6 +2278,7 @@ pub fn run(
         disk_seen,
     );
     app.frames_left = frames.filter(|n| *n > 0);
+    app.autoplay = autoplay;
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))
@@ -2231,7 +2288,12 @@ pub fn run(
 ///
 /// # Errors
 /// A message describing what stopped it.
-pub fn open_scene(path: &str, editable: bool, frames: Option<u32>) -> Result<(), String> {
+pub fn open_scene(
+    path: &str,
+    editable: bool,
+    frames: Option<u32>,
+    autoplay: bool,
+) -> Result<(), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let base = std::path::Path::new(path)
         .parent()
@@ -2246,5 +2308,5 @@ pub fn open_scene(path: &str, editable: bool, frames: Option<u32>) -> Result<(),
         .transpose()
         .map_err(|e| format!("{path}: {e}"))?;
 
-    run(path, view, session, disk_seen, frames)
+    run(path, view, session, disk_seen, frames, autoplay)
 }

@@ -870,6 +870,72 @@ fn validate() -> std::process::ExitCode {
             let result = run(&loom, &root, &["run", scene, "--edit", "--frames", &frames]);
             collect(&mut failures, &format!("run --edit {scene}"), &result);
         }
+
+        // **The frame's CPU cost, with the simulation actually running.**
+        //
+        // Nothing else in this gate can see this. A golden image renders one
+        // frame, and one frame is exactly the case where doing per-scene work
+        // once and doing it sixty times a second cost the same — so placing a
+        // scatter field on every frame took `forest.loom` to 9 fps while all
+        // twenty references passed. `--play` exists so this check can reach the
+        // path a running game takes; `--frames` alone runs a paused editor.
+        //
+        // **The budget is in DEBUG milliseconds**, which is what this gate
+        // runs — the validation layers are the whole reason it does. Debug is
+        // roughly thirty times slower than release here, and calibrating
+        // against a release measurement is how the first version of this check
+        // failed on correct code: 8 ms was right for release and `forest`
+        // measures 9.5 ms debug.
+        //
+        // Measured baselines, debug, with the simulation running:
+        //
+        //     forest 9.6 ms/frame      proving_ground 3.2 ms/frame
+        //
+        // 30 ms is about three times the worst of those. It is a ceiling on
+        // obvious regressions rather than a target: the defect this check was
+        // written for measured 103 ms/frame in *release*, so in debug it is
+        // orders of magnitude past this and would be caught with room to spare.
+        // Tightening it toward the baseline would turn ordinary variance into
+        // failures, which is how a gate gets ignored.
+        const CPU_BUDGET_MS: f64 = 30.0;
+        for scene in ["assets/test/forest.loom", "assets/games/proving_ground.loom"] {
+            if !root.join(scene).exists() {
+                continue;
+            }
+            checked += 1;
+            let result =
+                run(&loom, &root, &["run", scene, "--edit", "--play", "--frames", &frames]);
+            collect(&mut failures, &format!("run --play {scene}"), &result);
+
+            let text = result.as_ref().map_or_else(
+                |e| e.clone(),
+                |out| {
+                    format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    )
+                },
+            );
+            match text
+                .lines()
+                .find_map(|l| l.split_once("cpu ").map(|(_, rest)| rest))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|n| n.parse::<f64>().ok())
+            {
+                Some(mean) if mean <= CPU_BUDGET_MS => {
+                    println!("  {scene}: {mean:.3} ms/frame of CPU");
+                }
+                Some(mean) => failures.push(format!(
+                    "{scene}: {mean:.3} ms of CPU per frame, over the {CPU_BUDGET_MS} ms budget"
+                )),
+                // A run that printed no line is a run that did not measure —
+                // reported rather than treated as a pass, which is the whole
+                // lesson of the gates that reported success without looking.
+                None => failures
+                    .push(format!("{scene}: --play printed no cpu line, so nothing was measured")),
+            }
+        }
     } else {
         println!("note: no display; the windowed path was not exercised");
     }
