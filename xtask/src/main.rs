@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 26] = [
+const SCENES: [&str; 27] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -86,6 +86,11 @@ const SCENES: [&str; 26] = [
     // collision-field bake and upload path, and of the indirect splash draw
     // over a surface that is not the ground.
     "assets/test/rain_gantry.loom",
+    // Rain that varies across the world, which no other scene has: the cover
+    // evaluation in `rainVertexMain` and in `sample_rain` runs only when a
+    // scene authors a broken deck, and every other rain scene authors a solid
+    // one and short-circuits it.
+    "assets/test/squall.loom",
     "assets/test/camera.loom",
     "assets/test/walker.loom",
     "assets/test/explosion.loom",
@@ -134,7 +139,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 17] = [
+const GOLDEN: [(&str, &str, &[&str]); 18] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -249,6 +254,13 @@ const GOLDEN: [(&str, &str, &[&str]); 17] = [
     // `--sim 600` is ten seconds — well past the drop field's four-second
     // settling time, with the apron wet and the strip under the deck dry.
     ("rain_gantry", "assets/test/rain_gantry.loom", &["--sim", "600"]),
+    // **The only scene where the rain is not uniform.** Cloud cover multiplies
+    // the rate per drop, so the shower has an edge crossing open water — a
+    // rendering path no other reference covers, because every other rain scene
+    // authors a solid deck and short-circuits the cover evaluation entirely.
+    // Adding a rendering path means adding a scene here, and rain that varies
+    // across the frame is one.
+    ("squall", "assets/test/squall.loom", &["--sim", "900"]),
     // **The changelog shot, and it is deliberately not a normal gate.** Every
     // reference above protects one rendering path and moves only when that
     // path changes. This one touches terrain, water, current, grass, rain,

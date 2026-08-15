@@ -1928,25 +1928,30 @@ pub(crate) fn rain_at_eye(
     if rain.is_none() {
         return 0;
     }
-    let sample = weather::rain_at(rain, wind, None, eye.to_array(), seconds);
+    // **No deck here, deliberately.** This is the rate handed to the whole GPU
+    // layer, and cover — like shelter before it — is a property of *where a
+    // drop is*, not of where the camera stands. Passing the deck would make the
+    // cloud over the camera decide whether it rains five metres away, which is
+    // precisely the bug ADR 0014's amendment records for exposure. The shader
+    // applies `clouds_at` per drop.
+    let sample = weather::rain_at(rain, wind, None, None, eye.to_array(), seconds);
     env.rain = [sample.wind[0], sample.wind[1], sample.wind[2], sample.rate];
 
-    // **Rain puts a floor under the cloud cover, and this is the only place
-    // that knows both.** A blazing sun in a downpour was the single biggest
-    // tell in every weather scene here; ADR 0015 calls it a bigger one than
-    // having no clouds at all.
+    // **Rain out of a clear sky is not a weather state**, and this is the only
+    // place that knows both the sky and the rain. A scene that says it rains
+    // and says nothing about cover gets a solid deck.
     //
-    // Applied here rather than in `environment_of_inner` because that function
-    // reads the `Environment` component and has no business reaching for
-    // `Rain`, and rather than in the shader because "how cloudy does this much
-    // rain imply" is a fact about weather, not about drawing.
+    // Solid, not "mostly": at cover 1.0 the coverage field is 1 everywhere
+    // (measured in `loom_field`'s `coverage_shape` test), so rain stays uniform
+    // and every rate assertion written before clouds existed holds unchanged.
+    // Anything less would put dry pinholes in a downpour and make those
+    // assertions depend on where their point happened to land.
     //
-    // Light drizzle does not need an unbroken deck, so the floor climbs with
-    // the rate and stops short of solid: 2 mm/h is a grey-but-broken sky, and
-    // anything past a downpour is already fully covered.
-    if let Some(rain) = rain {
-        let implied = (rain.intensity / 12.0).clamp(0.0, 1.0).mul_add(0.35, 0.6);
-        env.cloud[0] = env.cloud[0].max(implied.min(0.95));
+    // Authoring any cover above zero takes full control — that is how a scene
+    // asks for a squall crossing a bay, and the rain then follows it because
+    // the shader reads these same three numbers.
+    if rain.is_some_and(|r| r.intensity > 0.0) && env.cloud[0] <= 0.0 {
+        env.cloud[0] = 1.0;
     }
 
     // **Wetness, at full exposure, for the whole scene.** Two scalars and no
@@ -2191,6 +2196,7 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
             .flatten(),
         #[allow(clippy::cast_precision_loss)]
         seconds: ticks as f32 / 60.0,
+        deck: weather::deck_of(&world),
     };
     let mut failures = Vec::new();
     for spec in &specs {

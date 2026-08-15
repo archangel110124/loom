@@ -475,7 +475,18 @@ pub fn clouds() -> Field {
     // The band is a constant so the divide above can never be by zero, and it
     // is wide enough that a cloud has a soft edge rather than a cut-out one.
     const BAND: f32 = 0.18;
-    let threshold = c(1.0) - cover;
+    // **The threshold has to clear both ends of the noise, not just slide.**
+    // A plain `1 - cover` puts the fade band at `[0, BAND]` when cover is 1, so
+    // wherever the fBm dips near zero the sky is not quite solid — measured at
+    // 98.8% solid with a minimum of 0.00004. Harmless in a picture and not
+    // harmless at all once rain is multiplied by it: a solid overcast would
+    // have dry pinholes in it, and every `rate > 7.9` assertion written before
+    // clouds existed would depend on where its point happened to land.
+    //
+    // Widening the map by the band makes cover 1 mean *solid* and cover 0 mean
+    // *clear*, exactly, which is the same lesson the grass slope cutoff learned:
+    // a documented endpoint has to actually be reached.
+    let threshold = (c(1.0) - cover) * c(1.0 + BAND) - c(BAND);
     let coverage = smoothstep(threshold.clone(), threshold + c(BAND), n.clone());
 
     // **`y` is the raw density, and it is not a spare channel being filled.**

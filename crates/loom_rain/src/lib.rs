@@ -68,6 +68,61 @@ pub struct RainSample {
     pub wind: [f32; 3],
 }
 
+/// The cloud deck over a scene — the term that decides *where* it rains.
+///
+/// **ADR 0016's step 3.** Rain used to be one scalar for the whole world, so it
+/// rained everywhere or nowhere, which is what made weather read as a switch.
+/// Multiplying by a coverage field lets a squall cross a bay.
+///
+/// `None` at the call site means **no deck**, and then rain is uniform exactly
+/// as it was — which is what every scene authored before clouds existed needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Deck {
+    /// 0 clear, 1 solid. **At 1 the coverage field is 1 everywhere**, measured
+    /// in `loom_field`'s `coverage_shape` test, so a solid deck gives uniform
+    /// rain and every rate assertion written before this holds unchanged.
+    pub cover: f32,
+    /// Metres across one cloud mass.
+    pub scale: f32,
+    /// Multiplier on the wind speed, because cloud-level wind is faster than
+    /// the wind at head height that `speed` describes.
+    pub drift: f32,
+}
+
+impl Default for Deck {
+    fn default() -> Self {
+        Self { cover: 1.0, scale: 1200.0, drift: 2.5 }
+    }
+}
+
+/// The expression tree, built once.
+///
+/// `loom_field::clouds()` allocates a tree of boxes; building it per query
+/// would make a per-point rain sample cost more than the march it replaces.
+static CLOUDS: std::sync::OnceLock<loom_field::Field> = std::sync::OnceLock::new();
+
+/// How much cloud is over a point, 0 to 1.
+///
+/// **The same function the sky shader draws**, by construction: one `Expr` tree,
+/// `build.rs` emits the Slang from it, and `field_agree` pins the two
+/// numerically. That is the property ADR 0016 argues this whole shape for — the
+/// clouds the eye sees and the rain the simulation feels cannot drift apart,
+/// because there is only one of them.
+#[must_use]
+pub fn cover_at(deck: Deck, wind: &Wind, at: [f32; 3], t: f32) -> f32 {
+    let field = CLOUDS.get_or_init(loom_field::clouds);
+    let mut params = loom_field::cloud_defaults();
+    params.set("cloud_cover", deck.cover.clamp(0.0, 1.0));
+    params.set("cloud_scale", deck.scale.max(1.0));
+    params.set("cloud_drift", deck.drift);
+    // The scene's own wind, so the deck drifts the way the grass leans.
+    let w = wind.params();
+    params.set("dir_x", w.get("dir_x"));
+    params.set("dir_z", w.get("dir_z"));
+    params.set("speed", w.get("speed"));
+    field.body[0].eval_with(at, t, &params).clamp(0.0, 1.0)
+}
+
 /// The rain at a world point, at a time.
 ///
 /// `rain` is the scene's authored component, or `None` for a scene that
@@ -89,6 +144,23 @@ pub fn sample_rain(
     rain: Option<&Rain>,
     wind: &Wind,
     sky: Option<Sky>,
+    at: [f32; 3],
+    t: f32,
+) -> RainSample {
+    sample_rain_under(rain, wind, sky, None, at, t)
+}
+
+/// [`sample_rain`], with a cloud deck deciding where it falls.
+///
+/// Split rather than adding a parameter to the one above, because ten call
+/// sites in this crate's own tests describe rain with no deck and each one is a
+/// claim about shelter that a `None` would only clutter.
+#[must_use]
+pub fn sample_rain_under(
+    rain: Option<&Rain>,
+    wind: &Wind,
+    sky: Option<Sky>,
+    deck: Option<Deck>,
     at: [f32; 3],
     t: f32,
 ) -> RainSample {
@@ -114,8 +186,14 @@ pub fn sample_rain(
         }
     });
 
+    // **Two multiplicands that mean genuinely different things**, and they were
+    // conflated for a whole phase: *is there cloud above me* and *is there a
+    // roof above me*. Keeping them apart is what lets a sheltered spot under a
+    // clear sky differ from an exposed one under a downpour.
+    let cover = deck.map_or(1.0, |deck| cover_at(deck, wind, at, t));
+
     RainSample {
-        rate: intensity * exposure,
+        rate: intensity * cover * exposure,
         exposure,
         wind: wind.sheltered(at, t, exposure),
     }

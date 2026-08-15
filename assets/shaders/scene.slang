@@ -336,6 +336,36 @@ float horizonFade(float3 dir) {
 /// **Two numbers because they answer different questions.** Coverage is opacity
 /// and saturates by design; shading needs something that still varies when the
 /// sky is solid, or an overcast day renders as a flat white ceiling.
+/// How much cloud is over a *world position*, 0 to 1.
+///
+/// **The term that decides where it rains** (ADR 0016 step 3), and the same
+/// `clouds_at` the sky is drawn from — one expression tree, one generated
+/// function, so what you see overhead is what falls on you.
+///
+/// A position rather than a view ray: `cloudPlane` projects a direction onto
+/// the deck, which is the right question for a pixel of sky and the wrong one
+/// for a drop that is already somewhere.
+float cloudCoverAt(float3 world) {
+    float4 cloud = push.environment[0].cloud;
+    if (cloud.x >= 1.0) {
+        // A solid deck rains everywhere. Skipping the evaluation here is what
+        // keeps every scene that authors no cover costing exactly what it did.
+        return 1.0;
+    }
+    if (cloud.x <= 0.0) {
+        return 0.0;
+    }
+    float4 wind = push.environment[0].wind;
+    CloudsParams params;
+    params.cloud_cover = cloud.x;
+    params.cloud_scale = cloud.y;
+    params.cloud_drift = cloud.z;
+    params.dir_x = wind.x;
+    params.dir_z = wind.y;
+    params.speed = wind.z;
+    return clouds_at(float3(world.x, 0.0, world.z), push.environment[0].weather.z, params).x;
+}
+
 float2 cloudSample(float3 dir) {
     float4 cloud = push.environment[0].cloud;
     if (cloud.x <= 0.0) {
@@ -2276,7 +2306,14 @@ RainOutput rainVertexMain(uint vertexID: SV_VertexID) {
     float spawn = smoothstep(0.0, RAIN_SPAWN_FADE, drop.position.w);
     float near = rainNearFade(pos, eye);
     float present = rainPresent(seed, rate) ? 1.0 : 0.0;
-    float strength = saturate(rate / RAIN_FULL_RATE) * edge * spawn * near * present;
+    // **The fifth: is there cloud above this drop.** Per drop rather than per
+    // camera, for the reason the shelter test is per drop — cover over the eye
+    // deciding whether it rains across the bay is the same bug in a new
+    // costume. A solid deck short-circuits to 1, so a scene that authors no
+    // cover pays nothing.
+    float overhead = cloudCoverAt(pos);
+    float strength =
+        saturate(rate / RAIN_FULL_RATE) * edge * spawn * near * present * overhead;
 
     // The streak: a ribbon along the direction of travel, turned to face the
     // eye. **Along this drop's own velocity**, which is what makes the layer

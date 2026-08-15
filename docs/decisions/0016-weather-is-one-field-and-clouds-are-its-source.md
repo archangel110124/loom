@@ -1,7 +1,18 @@
 # ADR 0016 — Weather is one field, and the clouds are where the rain comes from
 
 - **Date:** 2026-08-14
-- **Status:** **proposed.** Supersedes the *scope* of ADR 0015, keeps its technique conclusion.
+- **Status:** **accepted.** Steps 1-4 are built; step 5 (drops spawning from the deck) is not.
+  Supersedes the *scope* of ADR 0015, keeps its technique conclusion.
+- **The one thing building it changed.** The coverage curve's threshold had to be widened by the
+  fade band so that cover 1.0 means *solid* exactly. A plain `1 - cover` left the sky 98.8% covered
+  with a minimum of 0.00004 — invisible in a picture, and not invisible at all once rain is
+  multiplied by it, because a solid overcast would then have dry pinholes and every `rate > 7.9`
+  assertion written before clouds existed would depend on where its point happened to land.
+  `loom_field`'s `coverage_shape` test records the distribution.
+- **What it cannot do, found by building it.** The drop layer is a box about 72 m across centred on
+  the camera, so no realistic cloud scale puts a rain edge inside one frame. What this delivers is
+  *the rain follows the sky as you move*; a distant curtain of rain crossing a bay would have to be
+  drawn in the sky pass, and is a separate feature needing its own ADR.
 - **Decision touched:** reshapes Phase 4. Does not move a locked decision and adds no post-process.
 
 ## The idea

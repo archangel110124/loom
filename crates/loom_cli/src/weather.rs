@@ -43,6 +43,8 @@ pub(crate) struct Weather {
     /// Simulated seconds the reading is taken at — the fixed timestep times the
     /// tick, never a wall clock (never-do #8).
     pub seconds: f32,
+    /// The cloud deck, which decides *where* it rains. See [`deck_of`].
+    pub deck: loom_rain::Deck,
 }
 
 impl Weather {
@@ -52,7 +54,14 @@ impl Weather {
     /// each call site so that the sky's frame conversion and the "absent means
     /// dry" rule are applied once.
     pub fn rain_at(&self, at: [f32; 3]) -> loom_rain::RainSample {
-        rain_at(self.rain.as_ref(), &self.wind, self.sky.as_ref(), at, self.seconds)
+        rain_at(
+            self.rain.as_ref(),
+            &self.wind,
+            self.sky.as_ref(),
+            Some(self.deck),
+            at,
+            self.seconds,
+        )
     }
 
     /// How wet a surface at a world point is by now.
@@ -77,16 +86,50 @@ pub(crate) fn rain_at(
     rain: Option<&Rain>,
     wind: &Wind,
     sky: Option<&(loom_voxel::Volume, [f32; 3])>,
+    deck: Option<loom_rain::Deck>,
     at: [f32; 3],
     seconds: f32,
 ) -> loom_rain::RainSample {
-    loom_rain::sample_rain(
+    loom_rain::sample_rain_under(
         rain,
         wind,
         sky.map(|(volume, offset)| loom_rain::Sky { volume, offset: *offset }),
+        deck,
         at,
         seconds,
     )
+}
+
+/// The cloud deck a scene's `Environment` authors, for the term that decides
+/// where it rains.
+///
+/// **`cloud_cover` of zero with rain in the scene is read as unauthored, not as
+/// a clear sky**, and it is filled with a solid deck. Rain out of a clear sky is
+/// not a weather state; every scene written before clouds existed says nothing
+/// about cover and must keep raining exactly as it did; and a solid deck gives
+/// coverage 1 everywhere, so it does. Authoring any value above zero takes full
+/// control — that is how a scene asks for a squall.
+#[must_use]
+pub(crate) fn deck_of(world: &loom_ecs::World) -> loom_rain::Deck {
+    let defaults = loom_scene::components::Environment::default();
+    let scalar = |name: &str, fallback: f32| {
+        world
+            .environment()
+            .and_then(|c| c.get(name))
+            .and_then(serde_json::Value::as_f64)
+            .map_or(fallback, |v| {
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    v as f32
+                }
+            })
+    };
+    let authored = scalar("cloud_cover", defaults.cloud_cover);
+    loom_rain::Deck {
+        cover: if authored > 0.0 { authored } else { 1.0 },
+        scale: scalar("cloud_scale", defaults.cloud_scale),
+        drift: 2.5,
+    }
 }
 
 /// The scene's rain, or `None` when it authors none.

@@ -1,9 +1,14 @@
 # ADR 0015 — Clouds live in the sky shader, not in the particle system
 
 - **Date:** 2026-08-14
-- **Status:** **proposed**, and its *scope* is superseded by ADR 0016, which makes the clouds the
-  source of the rain rather than a backdrop. **The technique decision below still stands** — sky
+- **Status:** **accepted and built.** Its *scope* is superseded by ADR 0016, which makes the clouds
+  the source of the rain rather than a backdrop; the technique decision below still stands — sky
   shader, not particles, not volumetric — and 0016 treats this as a sub-decision of itself.
+- **What shipped, and one thing this document got wrong.** The sun-direction tap is here as
+  described, but it had to compare *density* rather than *coverage*: the coverage curve saturates,
+  so under an overcast sky both taps read 1.0 and the deck shaded to one flat tone. `clouds_at`
+  returns density alongside coverage for that reason. The gate check this ADR demanded was run —
+  stubbing the cloud term moves 53% of `homestead`'s pixels.
 - **Decision touched:** adds a feature to the existing sky pass. Does **not** move a locked decision
   and does **not** add a post-process pass; that boundary stays where ADR 0010 put it.
 

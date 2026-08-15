@@ -1,0 +1,108 @@
+# A squall: raining here, dry there, under one sky.
+#
+# **This is the scene ADR 0016 exists for.** Before it, `Rain { intensity }` was
+# one number for the whole world, so it rained everywhere or nowhere — which is
+# what made weather read as a switch rather than as weather. Rain is now
+# `intensity x cloud_cover(x, z, t) x shelter`, and those three multiplicands
+# mean genuinely different things: how hard the sky is producing, whether there
+# is cloud above this spot, and whether there is a roof above it.
+#
+# The cover field and the clouds drawn in the sky are **the same function**, not
+# two implementations that agree by discipline: `loom_field::clouds()` is one
+# expression tree, `build.rs` emits the Slang from it, and `field_agree` pins
+# the two numerically at 1.5e-6. That is the property ADR 0016 argues the whole
+# shape for.
+#
+#     loom sim assets/test/squall.loom --ticks 1 \
+#       --assert "rain@-120,4,0.rate > 6.5" \
+#       --assert "rain@0,4,0.rate < 0.05" \
+#       --assert "rain@-120,4,0.exposure > 0.99" \
+#       --assert "rain@0,4,0.exposure > 0.99"
+#
+#   * Under the cloud mass, most of the authored 8 mm/h arrives.
+#   * A hundred and twenty metres away, under a gap in the same deck, none does.
+#
+# **The last two assertions are the ones that make the first two mean
+# something.** There is no roof anywhere in this scene and no voxel volume at
+# all, so `exposure` is 1.0 at both points — and asserting that says so out
+# loud. Without them a reader could not tell whether cover or shelter did the
+# work, and the scene would still pass if the cloud term were deleted and a
+# roof quietly grew over one of the points.
+#
+# `cloud_cover = 0.45` is what makes this scene a squall rather than an
+# overcast. At 1.0 the coverage field is 1 everywhere and rain is uniform, which
+# is what every scene authored before clouds existed gets by default and why
+# none of their assertions moved. Below about 0.85 the field starts leaving real
+# gaps — the numbers are in `loom_field`'s `coverage_shape` test.
+#
+# ## What you cannot see from here, and it is not a bug in this scene
+#
+# `cloud_scale = 260` is a tenth of a real cloud mass, and it is small on
+# purpose. **The drop layer is a box about 72 m across centred on the camera**,
+# so no realistic cloud scale puts a rain edge inside one frame: at 1200 m the
+# cover over the whole drop volume is effectively constant, and the shower
+# switches on and off as you walk rather than standing there as a curtain you
+# can see the side of.
+#
+# So the honest description of what this delivers is *the rain follows the sky
+# as you move through the world*, checkable to the millimetre per hour by the
+# assertions above. **A distant wall of rain crossing a bay is a different
+# feature** — it would have to be drawn in the sky pass like the clouds are,
+# because the drops simply do not exist out there. Say so in an ADR rather than
+# quietly growing the drop volume, which is the expensive way to find out that
+# the fill rate was the reason it was a box.
+
+[scene]
+format = 1
+id = "5c1e8a03-9b47-4d62-a15e-3f8067d2c491"
+
+[[node]]
+name = "Weather"
+
+  [node.components.Environment]
+  # Sun low and ahead, so the broken deck is lit from the side and the gap
+  # reads as brightness rather than as an absence.
+  sun_direction = [0.20, 0.35, -0.92]
+  sun_strength = 1.6
+  sun_color = [1.0, 0.94, 0.84]
+  ambient = 0.55
+  sky_zenith = [0.20, 0.30, 0.46]
+  sky_horizon = [0.66, 0.70, 0.74]
+  fog_density = 0.006
+  fog_falloff = 0.04
+  # **Authored, so it is not filled in.** A raining scene that says nothing
+  # about cover is given a solid deck — rain out of a clear sky is not a
+  # weather state — and a solid deck rains uniformly. Saying 0.45 is how a
+  # scene asks for weather that has edges.
+  cloud_cover = 0.45
+  cloud_scale = 260.0
+
+  [node.components.Rain]
+  intensity = 8.0
+
+  [node.components.Wind]
+  # The deck drifts along this, so the squall crosses rather than sitting
+  # still. The grass leans the same way, which is most of what sells it.
+  direction_degrees = 250.0
+  speed = 7.0
+  gustiness = 1.2
+  turbulence = 0.8
+  ground_drag = 0.45
+
+[[node]]
+name = "Sea"
+parent = "Weather"
+
+  # Open water, so nothing in the frame occludes the sky and the only thing
+  # varying across it is the weather. It also gives the shower something to
+  # visibly fall on at distance.
+  [node.components.WaterBody]
+  surface_height = 0.0
+
+[[node]]
+name = "Camera"
+parent = "Weather"
+transform = { pos = [-90.0, 7.0, 46.0], rot_euler = [-3.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 62.0
