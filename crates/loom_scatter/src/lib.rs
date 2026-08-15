@@ -60,6 +60,31 @@
 
 use loom_field::noise::hash;
 
+/// What the ground is doing where an instance would stand.
+///
+/// **The same four fields `loom_grass::Ground` carries, declared again rather
+/// than imported.** Scatter is the more general system of the two and should
+/// not depend on grass to describe a hillside; the caller converts, which is
+/// four lines. If a third reader ever wants this shape it moves somewhere both
+/// can see it — two is not yet a pattern.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ground {
+    /// Surface height, metres.
+    pub height: f32,
+    /// Surface normal. Its Y component is the slope test.
+    pub normal: [f32; 3],
+    /// `1` bare rock or no ground at all, `0` soil.
+    pub rock: f32,
+    /// Flow accumulation, normalised. High in gullies, low on ridges.
+    pub flow: f32,
+}
+
+impl Default for Ground {
+    fn default() -> Self {
+        Self { height: 0.0, normal: [0.0, 1.0, 0.0], rock: 0.0, flow: 0.0 }
+    }
+}
+
 /// A scatter instance: where, which way, how big.
 ///
 /// **No identity and no index.** An instance is not a thing that persists — it
@@ -98,11 +123,38 @@ pub struct Rules {
     /// The rule's own seed, so two rules over the same ground do not stack
     /// their instances on top of each other.
     pub seed: u32,
+    /// Steepest ground anything will stand on, in degrees.
+    ///
+    /// The phase's exit criterion names 22 degrees. Instances thin out over the
+    /// last few degrees rather than stopping at a line, for the reason grass
+    /// learned the hard way: a hard cutoff on slope draws a clean curve across
+    /// a hillside, and a clean curve is the synthetic tell.
+    pub max_slope_degrees: f32,
+    /// How many degrees the thinning is spread over, below the limit.
+    pub slope_fade: f32,
+    /// Height band anything will grow in. Infinite by default.
+    pub altitude: [f32; 2],
+    /// How much the ground's moisture matters, 0 (not at all) to 1 (only grows
+    /// where water collects).
+    pub moisture: f32,
+    /// Overall thinning, 0 to 1. What a rule turns down to make a copse rather
+    /// than a forest without changing how far apart the trees are.
+    pub density: f32,
 }
 
 impl Default for Rules {
     fn default() -> Self {
-        Self { spacing: 4.0, jitter: 1.0, scale: [0.8, 1.25], seed: 0 }
+        Self {
+            spacing: 4.0,
+            jitter: 1.0,
+            scale: [0.8, 1.25],
+            seed: 0,
+            max_slope_degrees: 22.0,
+            slope_fade: 6.0,
+            altitude: [f32::NEG_INFINITY, f32::INFINITY],
+            moisture: 0.0,
+            density: 1.0,
+        }
     }
 }
 
@@ -158,13 +210,89 @@ fn candidate(ix: i32, iz: i32, rules: &Rules) -> ([f32; 2], u32, u32) {
     (at, priority, base)
 }
 
+/// How readily this ground would carry an instance, 0 to 1.
+///
+/// A fraction rather than a yes or no, so every boundary is a thinning rather
+/// than a line. Grass paid for that lesson twice: a cutoff at any threshold,
+/// softened by any amount, still draws a clean curve across a hillside, and a
+/// clean curve is what makes ground read as generated.
+#[must_use]
+pub fn viability(rules: &Rules, ground: &Ground) -> f32 {
+    // No ground at all is said as `rock = 1`, the same convention grass uses —
+    // so a hole blown clean through the terrain grows nothing, out of the same
+    // query rather than as a special case.
+    if ground.rock >= 1.0 {
+        return 0.0;
+    }
+    let smoothstep = |edge0: f32, edge1: f32, x: f32| {
+        if (edge1 - edge0).abs() < 1e-6 {
+            return if x < edge0 { 0.0 } else { 1.0 };
+        }
+        let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+
+    // Slope from the normal's Y, which is the cosine of the ground's angle.
+    let slope = ground.normal[1].clamp(-1.0, 1.0).acos().to_degrees();
+    let limit = rules.max_slope_degrees.max(0.0);
+    let fade = rules.slope_fade.max(0.0);
+    let by_slope = 1.0 - smoothstep(limit - fade, limit, slope);
+
+    // Altitude, faded over a tenth of the band at each end so a treeline is a
+    // treeline rather than a contour.
+    let [low, high] = rules.altitude;
+    let by_altitude = if low.is_finite() || high.is_finite() {
+        let span = (high - low).abs().max(1.0) * 0.1;
+        let above = if low.is_finite() { smoothstep(low, low + span, ground.height) } else { 1.0 };
+        let below = if high.is_finite() { 1.0 - smoothstep(high - span, high, ground.height) } else { 1.0 };
+        above * below
+    } else {
+        1.0
+    };
+
+    let by_moisture = 1.0 - rules.moisture.clamp(0.0, 1.0) * (1.0 - ground.flow.clamp(0.0, 1.0));
+
+    (rules.density.clamp(0.0, 1.0) * by_slope * by_altitude * by_moisture).clamp(0.0, 1.0)
+}
+
+/// Whether this ground can carry anything at all.
+///
+/// **The gate applied *before* elimination, and it is deliberately only the
+/// zero test.** A candidate the ground refuses outright must not compete, or a
+/// cliff sterilises the ground beside it; a candidate on merely *poor* ground
+/// must compete normally, and is thinned afterwards instead.
+fn habitable(at: [f32; 2], rules: &Rules, ground: &dyn Fn(f32, f32) -> Ground) -> bool {
+    viability(rules, &ground(at[0], at[1])) > 0.0
+}
+
+/// Whether a survivor is kept, given how good its ground is.
+///
+/// **Applied *after* elimination, and that is not interchangeable with the gate
+/// above.** Matérn II density is set by the disk radius, not by how many
+/// candidates competed — so thinning candidates beforehand barely thins the
+/// result. Measured: at 18 degrees on a 22-degree limit, pre-thinning produced
+/// *more* instances than flat ground (290 against 280), because the survivors
+/// simply had less competition. `density = 0.5` would not have halved a forest
+/// either.
+///
+/// Thinning the survivors does what both those knobs are supposed to mean.
+/// Position-derived, so it stays order-independent.
+fn kept(base: u32, at: [f32; 2], rules: &Rules, ground: &dyn Fn(f32, f32) -> Ground) -> bool {
+    let v = viability(rules, &ground(at[0], at[1]));
+    if v >= 1.0 {
+        return true;
+    }
+    let roll = f32::from_bits((hash(base ^ 0x2545_F491) >> 8) | 0x3F80_0000) - 1.0;
+    roll < v
+}
+
 /// Whether the candidate in cell `(ix, iz)` survives elimination.
 ///
 /// **The whole determinism argument lives in this function.** It reads only
 /// cells within [`REACH`] of its own, and every cell is a pure function of its
 /// coordinates — so the answer does not depend on what has been generated
 /// before, or on how the domain was divided up.
-fn survives(ix: i32, iz: i32, rules: &Rules) -> bool {
+fn survives(ix: i32, iz: i32, rules: &Rules, ground: &dyn Fn(f32, f32) -> Ground) -> bool {
     let (at, priority, _) = candidate(ix, iz, rules);
     let spacing = rules.spacing.max(1e-3);
     for dz in -REACH..=REACH {
@@ -173,6 +301,20 @@ fn survives(ix: i32, iz: i32, rules: &Rules) -> bool {
                 continue;
             }
             let (other, other_priority, _) = candidate(ix + dx, iz + dz, rules);
+            // **A neighbour the ground rejected does not compete.** This is the
+            // ordering decision of this slice, and it is visible: reject after
+            // elimination and a cliff sterilises the ground beside it, because
+            // the candidates that lost to a doomed neighbour are gone too. The
+            // result is a thinned fringe along every boundary — the same
+            // artifact as grass's shaved ring, arrived at from the other
+            // direction.
+            //
+            // It costs a ground query per neighbour rather than per instance,
+            // which is a bake-time cost and the reason `region_on` exists
+            // separately from `region`.
+            if !habitable(other, rules, ground) {
+                continue;
+            }
             // **Ties broken by coordinate, not skipped.** Two cells with equal
             // priority would otherwise both survive or both die depending on
             // which asked — and a hash collision is rare rather than
@@ -198,6 +340,22 @@ fn survives(ix: i32, iz: i32, rules: &Rules) -> bool {
 /// the regeneration test below able to compare a patch against the whole.
 #[must_use]
 pub fn region(min: [f32; 2], max: [f32; 2], rules: &Rules) -> Vec<Instance> {
+    region_on(min, max, rules, &|_, _| Ground::default())
+}
+
+/// [`region`], with the ground having its say.
+///
+/// `ground` is a closure rather than a terrain type, which is the seam that
+/// keeps this crate free of `loom_voxel` — the same one `loom_grass::tile`
+/// uses. It is called for every *candidate* in and around the region, not only
+/// for the survivors; see the note in `survives`.
+#[must_use]
+pub fn region_on(
+    min: [f32; 2],
+    max: [f32; 2],
+    rules: &Rules,
+    ground: &dyn Fn(f32, f32) -> Ground,
+) -> Vec<Instance> {
     let size = cell_size(rules.spacing);
     // A candidate can be jittered up to half a cell out of its own cell, so the
     // scan reaches one cell beyond the region on every side.
@@ -219,7 +377,15 @@ pub fn region(min: [f32; 2], max: [f32; 2], rules: &Rules) -> Vec<Instance> {
             if at[0] < min[0] || at[0] >= max[0] || at[1] < min[1] || at[1] >= max[1] {
                 continue;
             }
-            if !survives(ix, iz, rules) {
+            if !habitable(at, rules, ground) {
+                continue;
+            }
+            if !survives(ix, iz, rules, ground) {
+                continue;
+            }
+            // Last, so poor ground thins the forest rather than merely
+            // reshuffling which candidates won.
+            if !kept(base, at, rules, ground) {
                 continue;
             }
             let yaw = hash(base ^ 0x51ED_270B);
@@ -267,7 +433,13 @@ mod tests {
     use super::*;
 
     fn rules() -> Rules {
-        Rules { spacing: 3.0, jitter: 1.0, scale: [0.8, 1.25], seed: 7 }
+        Rules { spacing: 3.0, jitter: 1.0, seed: 7, ..Rules::default() }
+    }
+
+    /// Ground tilted by `degrees`, everywhere.
+    fn slope(degrees: f32) -> Ground {
+        let r = degrees.to_radians();
+        Ground { normal: [r.sin(), r.cos(), 0.0], ..Ground::default() }
     }
 
     /// The guarantee the whole thing exists for.
@@ -409,6 +581,139 @@ mod tests {
             on_lattice(&scattered),
             scattered.len()
         );
+    }
+
+    /// The exit criterion's own sentence: under 22 degrees, and not above.
+    #[test]
+    fn nothing_stands_on_ground_steeper_than_the_limit() {
+        let r = rules();
+        for degrees in [30.0_f32, 45.0, 70.0] {
+            let on = region_on([0.0, 0.0], [60.0, 60.0], &r, &|_, _| slope(degrees));
+            assert!(on.is_empty(), "{degrees} degrees grew {} instances", on.len());
+        }
+        let gentle = region_on([0.0, 0.0], [60.0, 60.0], &r, &|_, _| slope(5.0));
+        assert!(!gentle.is_empty(), "5 degrees grew nothing");
+    }
+
+    /// The slope boundary is a fade, not a line. A rule with only on and off
+    /// would draw a clean curve across a hillside, which is the tell grass
+    /// spent a slice removing.
+    #[test]
+    fn the_slope_boundary_thins_rather_than_cutting() {
+        let r = rules();
+        let count = |d: f32| region_on([0.0, 0.0], [90.0, 90.0], &r, &|_, _| slope(d)).len();
+        let (flat, mid, edge) = (count(5.0), count(18.0), count(21.0));
+        assert!(flat > mid && mid > edge, "not monotonic: {flat}, {mid}, {edge}");
+        assert!(mid > 0, "18 degrees grew nothing at all, so it is a cut not a fade");
+
+        // **Pinned to the curve, not to a threshold I picked.** `viability` is
+        // the documented shape of the fade; the count has to follow it, which
+        // is a much stronger claim than "fewer than flat ground" and catches a
+        // fade that is the wrong shape rather than merely absent.
+        let r = rules();
+        #[allow(clippy::cast_precision_loss)]
+        let measured = mid as f32 / flat as f32;
+        let expected = viability(&r, &slope(18.0));
+        assert!(
+            (measured - expected).abs() < 0.1,
+            "18 degrees kept {measured:.2} of flat ground, but the fade curve says {expected:.2}"
+        );
+    }
+
+    /// **Ground with no soil grows nothing, and that is how "no ground" is
+    /// said** — the same convention grass uses, so a hole blown through the
+    /// terrain needs no special case.
+    #[test]
+    fn bare_rock_grows_nothing() {
+        let r = rules();
+        let bare = Ground { rock: 1.0, ..Ground::default() };
+        assert!(region_on([0.0, 0.0], [60.0, 60.0], &r, &|_, _| bare).is_empty());
+    }
+
+    /// **The whole reason ground rejection happens before elimination.**
+    ///
+    /// Half the world is a cliff. Density in a strip hard against the cliff
+    /// must match density in a strip well away from it. Reject *after*
+    /// elimination instead and the candidates that lost to a doomed neighbour
+    /// are gone too, leaving a thinned fringe along every boundary — the same
+    /// artifact as grass's shaved ring, arrived at from the other direction.
+    #[test]
+    fn a_cliff_does_not_thin_the_ground_beside_it() {
+        let r = rules();
+        let world = |x: f32, _z: f32| if x > 0.0 { slope(80.0) } else { slope(0.0) };
+
+        // **One spacing wide, and that width is the test.** A twelve-metre
+        // strip was tried first and could not see the defect: the sterilised
+        // band is only about one spacing across, so measuring it inside a strip
+        // four times that wide diluted a 30% hole into a 7% dip, well inside
+        // the tolerance. A test that averages over the region where the bug
+        // is *not* will pass while the bug is there.
+        let near = region_on([-3.0, -240.0], [0.0, 240.0], &r, &world).len();
+        let far = region_on([-63.0, -240.0], [-60.0, 240.0], &r, &world).len();
+        assert!(near > 0 && far > 0, "one of the strips is empty: {near}, {far}");
+
+        #[allow(clippy::cast_precision_loss)]
+        let ratio = near as f32 / far as f32;
+        assert!(
+            (0.8..=1.25).contains(&ratio),
+            "the strip against the cliff has {ratio:.2}x the density of one away \
+             from it — the cliff is sterilising the ground beside it"
+        );
+    }
+
+    /// Moisture confines instances to where water collects.
+    #[test]
+    fn moisture_prefers_where_water_collects() {
+        let r = Rules { moisture: 1.0, ..rules() };
+        let dry = region_on([0.0, 0.0], [60.0, 60.0], &r, &|_, _| Ground::default()).len();
+        let wet = region_on([0.0, 0.0], [60.0, 60.0], &r, &|_, _| Ground {
+            flow: 1.0,
+            ..Ground::default()
+        })
+        .len();
+        assert_eq!(dry, 0, "with moisture 1 and no flow, nothing should grow");
+        assert!(wet > 0, "with moisture 1 and full flow, something must grow");
+    }
+
+    /// Altitude bands, for a treeline.
+    #[test]
+    fn the_altitude_band_is_respected() {
+        let r = Rules { altitude: [10.0, 40.0], ..rules() };
+        let at = |h: f32| {
+            region_on([0.0, 0.0], [60.0, 60.0], &r, &|_, _| Ground {
+                height: h,
+                ..Ground::default()
+            })
+            .len()
+        };
+        assert_eq!(at(0.0), 0, "below the band");
+        assert_eq!(at(60.0), 0, "above the band");
+        assert!(at(25.0) > 0, "inside the band");
+    }
+
+    /// **Order-independence has to survive the ground**, or step 6 is lost.
+    /// The same claim as the earlier patch test, now with terrain in the loop.
+    #[test]
+    fn a_patch_on_real_ground_still_matches_the_full_run() {
+        let r = Rules { moisture: 0.4, ..rules() };
+        let world = |x: f32, z: f32| Ground {
+            height: (x * 0.05).sin() * 8.0 + (z * 0.03).cos() * 5.0,
+            normal: {
+                let s = ((x * 0.05).cos() * 0.25).atan();
+                [s.sin(), s.cos(), 0.0]
+            },
+            rock: 0.0,
+            flow: ((z * 0.04).sin() * 0.5 + 0.5).clamp(0.0, 1.0),
+        };
+
+        let whole = region_on([-40.0, -40.0], [40.0, 40.0], &r, &world);
+        let patch = region_on([-6.0, 2.0], [11.0, 19.0], &r, &world);
+        let inside: Vec<Instance> = whole
+            .into_iter()
+            .filter(|i| i.at[0] >= -6.0 && i.at[0] < 11.0 && i.at[1] >= 2.0 && i.at[1] < 19.0)
+            .collect();
+        assert!(!patch.is_empty(), "the patch is empty — the test proves nothing");
+        assert_eq!(patch, inside, "the ground made scatter order-dependent");
     }
 
     /// Halton must cover the square rather than clustering, which is the only
