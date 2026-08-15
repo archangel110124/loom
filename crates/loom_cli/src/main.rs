@@ -531,7 +531,11 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         (fired, splashed) = simulate_physics(&mut world, base, ticks);
     }
 
-    let objects = world_to_objects(&world, &library, &material_library);
+    let mut objects = world_to_objects(&world, &library, &material_library);
+    // Scattered instances are objects like any other, appended after the
+    // scene's own nodes — the renderer batches consecutive same-mesh objects
+    // into one instanced draw, so a field of ten thousand trees is one call.
+    objects.extend(scatter_objects(&scene, &library));
     let particles = particles::simulate(
         &world,
         &weather,
@@ -690,7 +694,8 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                             }
                         }
                     }
-                    let objects = world_to_objects(&world, &library, &material_library);
+                    let mut objects = world_to_objects(&world, &library, &material_library);
+                    objects.extend(scatter_objects(&scene, &library));
                     #[allow(clippy::cast_possible_truncation)]
                     let particles = particles::simulate(
                         &world,
@@ -934,6 +939,20 @@ impl MeshLibrary {
                 .and_then(serde_json::Value::as_str)
             {
                 wanted.insert(asset.to_owned());
+            }
+            // **And what a scatter field places.** A `Scatter` names its mesh
+            // directly rather than through a `MeshRenderer`, so without this
+            // the library never resolves it and `index_for` falls back to the
+            // box — which is a forest of grey cubes that renders, validates and
+            // is wrong. That is exactly what the first render of `forest.loom`
+            // showed.
+            if let Some(mesh) = node
+                .components
+                .get("Scatter")
+                .and_then(|s| s.get("mesh"))
+                .and_then(serde_json::Value::as_str)
+            {
+                wanted.insert(mesh.to_owned());
             }
         }
 
@@ -1535,6 +1554,158 @@ fn hue_shift(albedo: [f32; 3], hue: f32) -> [f32; 3] {
 fn pack_rgb(colour: [f32; 3]) -> f32 {
     let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round();
     q(colour[0]).mul_add(65536.0, q(colour[1]).mul_add(256.0, q(colour[2])))
+}
+
+/// Every scattered instance in a scene, as objects the renderer draws.
+///
+/// **The wiring, and it is deliberately thin.** `loom_scatter` decides where
+/// things go and knows nothing about scenes, voxels or meshes; this reads the
+/// components, hands it a closure over the terrain, and turns what comes back
+/// into transforms. Every interesting decision is in the library, next to its
+/// tests.
+///
+/// Instances are appended to the object list and never become entities — the
+/// phase's hierarchy rule, and the same one grass and voxels follow. The tree
+/// shows one node for the field.
+pub(crate) fn scatter_objects(scene: &Scene, library: &MeshLibrary) -> Vec<Object> {
+    let mut out = Vec::new();
+    // Baking the volume costs seconds on a large scene, so one with no scatter
+    // in it must not pay for one. The same guard `grass_blades` opens with.
+    if !scene.nodes().iter().any(|n| n.components.contains_key("Scatter")) {
+        return out;
+    }
+    let terrain = scene_volume(scene);
+
+    // Fields in declaration order, because exclusion references point
+    // backwards — see `loom_scatter::scatter`.
+    let mut fields: Vec<(String, loom_scene::components::Scatter, [f32; 3])> = Vec::new();
+    for node in scene.nodes() {
+        let Some(component) = node.components.get("Scatter") else {
+            continue;
+        };
+        let Ok(field) =
+            serde_json::from_value::<loom_scene::components::Scatter>(component.clone())
+        else {
+            continue;
+        };
+        fields.push((node.path.clone(), field, world_translation(scene, node)));
+    }
+
+    // One `loom_scatter::Layer` per field. The whole set is resolved together
+    // so exclusions can see each other, and each layer's own bounds are its
+    // node's — a field only places inside its own half-extent.
+    let excludes: Vec<Vec<loom_scatter::Exclude>> = fields
+        .iter()
+        .map(|(_, f, _)| {
+            f.exclude
+                .iter()
+                .map(|e| loom_scatter::Exclude { layer: e.field.as_str(), radius: e.radius })
+                .collect()
+        })
+        .collect();
+    let layers: Vec<loom_scatter::Layer> = fields
+        .iter()
+        .zip(&excludes)
+        .map(|((path, f, _), ex)| loom_scatter::Layer {
+            name: path.as_str(),
+            rules: loom_scatter::Rules {
+                spacing: f.spacing,
+                jitter: f.jitter,
+                scale: f.scale,
+                seed: f.seed,
+                max_slope_degrees: f.max_slope_degrees,
+                slope_fade: 6.0,
+                altitude: [f32::NEG_INFINITY, f32::INFINITY],
+                moisture: f.moisture,
+                density: f.density,
+            },
+            exclude: ex.as_slice(),
+            biome: None,
+        })
+        .collect();
+
+    // The region every field together covers, so one resolve serves them all.
+    let mut min = [f32::MAX; 2];
+    let mut max = [f32::MIN; 2];
+    for (_, f, origin) in &fields {
+        min[0] = min[0].min(origin[0] - f.half_extent[0]);
+        min[1] = min[1].min(origin[2] - f.half_extent[1]);
+        max[0] = max[0].max(origin[0] + f.half_extent[0]);
+        max[1] = max[1].max(origin[2] + f.half_extent[1]);
+    }
+
+    // **The seam**, exactly as grass has it: `loom_scatter` asks a closure what
+    // the ground is doing and this is where the scene's terrain answers. A
+    // scene with no voxel volume keeps flat ground.
+    let half = [(max[0] - min[0]) * 0.5, (max[1] - min[1]) * 0.5];
+    let centre = [(min[0] + max[0]) * 0.5, 0.0, (min[1] + max[1]) * 0.5];
+    let grid = terrain
+        .as_ref()
+        .map(|(volume, offset)| GroundGrid::bake(volume, *offset, centre, half));
+    let ground = |x: f32, z: f32| {
+        grid.as_ref().map_or_else(loom_scatter::Ground::default, |g| {
+            let g = g.at(x, z);
+            loom_scatter::Ground {
+                height: g.height,
+                normal: g.normal,
+                rock: g.rock,
+                flow: g.flow,
+            }
+        })
+    };
+
+    let resolved = match loom_scatter::scatter(min, max, &layers, &ground) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            // **Said out loud, not swallowed.** `loom validate` checks schemas
+            // and asset aliases; it does not yet resolve `Scatter.exclude`
+            // references, so a typo reaches here. An empty forest with no
+            // explanation is the failure this project keeps writing tests
+            // against — a rule that placed nothing looks exactly like a rule
+            // that matched nothing.
+            crate::log::warn(format!("scatter: {e}"));
+            return out;
+        }
+    };
+
+    for ((path, field, origin), (_, instances)) in fields.iter().zip(resolved) {
+        let mesh = library.index_for(Some(field.mesh.as_str()));
+        let albedo = scene
+            .nodes()
+            .iter()
+            .find(|n| &n.path == path)
+            .and_then(|n| n.components.get("Material"))
+            .and_then(|m| {
+                serde_json::from_value::<loom_scene::components::Material>(m.clone()).ok()
+            })
+            .map_or([0.29, 0.34, 0.20], |m| m.albedo);
+
+        for instance in instances {
+            // A field only places inside its own half-extent, even though the
+            // resolve covered every field's union.
+            let (dx, dz) = (instance.at[0] - origin[0], instance.at[1] - origin[2]);
+            if dx.abs() > field.half_extent[0] || dz.abs() > field.half_extent[1] {
+                continue;
+            }
+            let g = ground(instance.at[0], instance.at[1]);
+            let model = Mat4::from_translation(Vec3::new(
+                instance.at[0],
+                origin[1] + g.height,
+                instance.at[1],
+            )) * Mat4::from_rotation_y(instance.yaw)
+                * Mat4::from_scale(Vec3::splat(instance.scale));
+            out.push(Object {
+                model,
+                color: albedo,
+                mesh,
+                // No material table entry: an instance is not a scene node, so
+                // it has no index into the per-node material list. `color`
+                // carries the field's authored albedo instead.
+                material: u32::MAX,
+            });
+        }
+    }
+    out
 }
 
 pub(crate) fn grass_blades(scene: &Scene) -> Vec<loom_render::GrassBlade> {

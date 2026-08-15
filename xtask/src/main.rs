@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 28] = [
+const SCENES: [&str; 29] = [
     "assets/test/blockout.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
@@ -96,6 +96,11 @@ const SCENES: [&str; 28] = [
     // concavity on a flat slab is nothing. Also the finest voxels in the list
     // at 0.25 m, which is what a 6 cm hollow needs to exist at all.
     "assets/test/puddles.loom",
+    // The only scene with scattered instances: a `Scatter` component resolving
+    // through `loom_scatter` onto voxel terrain, and the only exercise of a
+    // mesh reached through a scatter field rather than a `MeshRenderer` — which
+    // is the path that silently fell back to a box the first time.
+    "assets/test/forest.loom",
     "assets/test/camera.loom",
     "assets/test/walker.loom",
     "assets/test/explosion.loom",
@@ -144,7 +149,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 19] = [
+const GOLDEN: [(&str, &str, &[&str]); 20] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -272,6 +277,11 @@ const GOLDEN: [(&str, &str, &[&str]); 19] = [
     // moved 0.23% and would have passed the gate while barely showing the
     // feature.
     ("puddles", "assets/test/puddles.loom", &["--sim", "900"]),
+    // **Scattered instances, which no other reference contains.** Placement is
+    // a pure function of position, so this needs no `--sim`: the same seed and
+    // the same terrain give the same forest every time, which is the property
+    // `loom_scatter` is built around and this is the picture of it.
+    ("forest", "assets/test/forest.loom", &[]),
     // **The changelog shot, and it is deliberately not a normal gate.** Every
     // reference above protects one rendering path and moves only when that
     // path changes. This one touches terrain, water, current, grass, rain,

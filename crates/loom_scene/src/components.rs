@@ -654,6 +654,97 @@ impl Default for Environment {
     }
 }
 
+/// A field of scattered meshes — trees, rocks, bushes — as the rules that
+/// generate them.
+///
+/// **Never the instances.** A field is a million of them, and the scene tree
+/// shows one node: the same represent-the-generator principle as a voxel op
+/// list (never-do #11) and as `Grass` below. Instances are never ECS entities.
+///
+/// **Rendering only**, the same exemption grass and rain get: a sim hash must
+/// be identical with a field on or off.
+///
+/// The placement is `loom_scatter`, which is where the interesting decisions
+/// are written down — why it is not Bridson, why boundaries fade, and why a
+/// patch regenerated after a CSG op is bit-identical to a full rebuild.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Scatter {
+    /// What to place: an `[[asset]]` alias, or a primitive name like `box`.
+    ///
+    /// An unresolvable name falls back to a box, the same rule every other mesh
+    /// reference follows — a missing asset should be *visible*, not silent.
+    pub mesh: String,
+    /// Half the field's size on X and Z, in metres, centred on the node.
+    #[schemars(inner(range(min = 1.0, max = 2000.0)))]
+    pub half_extent: [f32; 2],
+    /// Minimum metres between instances. **Guaranteed, not average** — see
+    /// `loom_scatter`, which also explains why the average comes out near 1.8x
+    /// this.
+    #[schemars(range(min = 0.25, max = 200.0))]
+    pub spacing: f32,
+    /// How far an instance may wander inside its cell, `0` to `1`. Zero is a
+    /// plantation.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub jitter: f32,
+    /// Smallest and largest uniform scale.
+    #[schemars(inner(range(min = 0.01, max = 100.0)))]
+    pub scale: [f32; 2],
+    /// Which world this field is. Two fields over the same ground need
+    /// different seeds or they place in the same spots.
+    pub seed: u32,
+    /// Steepest ground anything stands on, in degrees. Thins over the last few
+    /// degrees rather than stopping at a line.
+    #[schemars(range(min = 0.0, max = 90.0))]
+    pub max_slope_degrees: f32,
+    /// Overall thinning, `0` to `1`. A copse rather than a forest, without
+    /// changing how far apart the trees are.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub density: f32,
+    /// How much the ground's moisture matters, `0` to `1`.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub moisture: f32,
+    /// Fields this one keeps away from.
+    ///
+    /// **Named by node path, and only fields declared earlier in the file.**
+    /// Backwards references are the whole cycle check: with them a cycle cannot
+    /// be written, so there is no cycle detection anywhere.
+    pub exclude: Vec<ScatterExclude>,
+}
+
+impl Default for Scatter {
+    fn default() -> Self {
+        Self {
+            mesh: "box".to_owned(),
+            half_extent: [32.0, 32.0],
+            spacing: 4.0,
+            jitter: 1.0,
+            scale: [0.8, 1.25],
+            seed: 0,
+            max_slope_degrees: 22.0,
+            density: 1.0,
+            moisture: 0.0,
+            exclude: Vec::new(),
+        }
+    }
+}
+
+/// "Not within `radius` metres of anything in `field`."
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct ScatterExclude {
+    /// The node path of an earlier `Scatter` field.
+    pub field: String,
+    #[schemars(range(min = 0.0, max = 500.0))]
+    pub radius: f32,
+}
+
+impl Default for ScatterExclude {
+    fn default() -> Self {
+        Self { field: String::new(), radius: 5.0 }
+    }
+}
+
 /// A field of grass, stored as the rules that generate it.
 ///
 /// **Never the blades.** A tile is a few thousand of them and a field is
@@ -1321,6 +1412,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<Wind>("Wind");
     reg.register::<Rain>("Rain");
     reg.register::<Grass>("Grass");
+    reg.register::<Scatter>("Scatter");
     // `WaveSet`, `GerstnerWave` and `Pontoon` are deliberately absent: they are
     // fields of a `WaterBody` or a `Buoyancy`, not things a node can carry.
     // Registering them would make `components.WaveSet = { ... }` validate

@@ -1289,6 +1289,7 @@ dependencies = [
  "loom_rain",
  "loom_reflect",
  "loom_render",
+ "loom_scatter",
  "loom_scene",
  "loom_script",
  "loom_terrain",

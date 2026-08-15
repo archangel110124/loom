@@ -100,7 +100,8 @@ impl SceneView {
         let library = crate::MeshLibrary::with_cache(&scene, base, cache);
         let materials = crate::materials::MaterialLibrary::for_scene(&world, &scene, base);
 
-        let objects = crate::world_to_objects(&world, &library, &materials);
+        let mut objects = crate::world_to_objects(&world, &library, &materials);
+        objects.extend(crate::scatter_objects(&scene, &library));
         let picks = crate::node_bounds(&world, &library);
         let bounds = crate::scene_bounds(&picks);
         let paths = scene.nodes().iter().map(|n| n.path.clone()).collect();
@@ -150,7 +151,9 @@ impl SceneView {
     /// simulated transforms, drawn with the authored scene's meshes.
     #[must_use]
     pub fn objects_of(&self, world: &World) -> Vec<Object> {
-        crate::world_to_objects(world, &self.library, &self.materials)
+        let mut objects = crate::world_to_objects(world, &self.library, &self.materials);
+        objects.extend(crate::scatter_objects(&self.scene, &self.library));
+        objects
     }
 
     /// Which nodes differ between two versions of a scene, and how.
