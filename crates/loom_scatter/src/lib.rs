@@ -413,13 +413,120 @@ pub fn region_on(
 /// Blender's Geometry Nodes have the same problem. Two mature ecosystems failed
 /// to make a node graph reviewable in a diff, and a named list recovers the two
 /// or three genuinely-DAG features without any of that.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Layer<'a> {
     /// What later layers call this one.
     pub name: &'a str,
     pub rules: Rules,
     /// Layers this one keeps away from.
     pub exclude: &'a [Exclude<'a>],
+    /// The biome this layer belongs to, or `None` for everywhere.
+    pub biome: Option<&'a str>,
+}
+
+/// A region of the world with its own character, and how strongly it claims it.
+///
+/// **Priority and bounds, which is all the phase asks for.** Where two biomes
+/// overlap the higher priority wins; the loser's layers simply do not place
+/// there. That is a scalar comparison rather than a blend of parameters, and it
+/// is deliberate: blending two rule *sets* means deciding what the average of
+/// "pines at 4 m" and "oaks at 9 m" is, which has no answer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Biome<'a> {
+    pub name: &'a str,
+    /// Axis-aligned bounds on the XZ plane.
+    pub min: [f32; 2],
+    pub max: [f32; 2],
+    /// Higher wins where biomes overlap.
+    pub priority: f32,
+    /// Metres over which membership fades at the edge.
+    ///
+    /// **The fade is resolved per instance, not by blending densities.** Within
+    /// the band an instance belongs with a probability, decided by its own
+    /// position hash — so two biomes interleave across the boundary and the
+    /// transition is a mixed wood rather than a line with a forest on one side.
+    /// A blend that scaled both densities would give a *thin* strip of both,
+    /// which reads as a mown verge.
+    pub blend: f32,
+}
+
+/// How strongly `biome` claims this point, 0 to 1, before priority.
+///
+/// **The fade reaches *outward* from the bounds, not inward.** Inward was tried
+/// first and is wrong in a way that only shows on a map: two biomes that abut
+/// then both weaken as they approach the shared edge, leaving a strip that
+/// neither claims — a bald line exactly where the transition was supposed to
+/// be. Reaching outward makes abutting biomes overlap by twice the blend, which
+/// is the transition.
+fn claim(biome: &Biome, at: [f32; 2]) -> f32 {
+    let blend = biome.blend.max(0.0);
+    let axis = |v: f32, lo: f32, hi: f32| {
+        if v >= lo && v <= hi {
+            return 1.0;
+        }
+        if blend <= 0.0 {
+            return 0.0;
+        }
+        let out = if v < lo { lo - v } else { v - hi };
+        (1.0 - out / blend).clamp(0.0, 1.0)
+    };
+    axis(at[0], biome.min[0], biome.max[0]) * axis(at[1], biome.min[1], biome.max[1])
+}
+
+/// Whether `at` belongs to `name`, given every biome competing for it.
+///
+/// **Priority is absolute; the fade only settles ties.** The highest priority
+/// claiming the point at all takes it outright — a strong biome is not diluted
+/// by a weak one overlapping it. Among equals, one is chosen with probability
+/// proportional to its claim, per instance.
+///
+/// That per-instance draw is what makes a boundary a *mixed wood* rather than a
+/// line. Picking the strongest claim instead would draw a hard edge wherever
+/// two equals meet, and scaling both densities down would give a thin strip of
+/// each — which reads as a mown verge.
+fn in_biome(name: &str, biomes: &[Biome], at: [f32; 2], seed: u32, base: u32) -> bool {
+    let mut top = f32::NEG_INFINITY;
+    let mut total = 0.0_f32;
+    for b in biomes {
+        let c = claim(b, at);
+        if c <= 0.0 {
+            continue;
+        }
+        if b.priority > top {
+            top = b.priority;
+            total = 0.0;
+        }
+        if b.priority >= top {
+            total += c;
+        }
+    }
+    if total <= 0.0 {
+        // No biome claims this point, so a layer that belongs to one cannot
+        // place here.
+        return false;
+    }
+
+    // Deterministic weighted choice among the equals, from the instance's own
+    // stream. The list order is the author's and is stable, so this is stable.
+    let roll = (f32::from_bits((hash(base ^ seed ^ 0xB5A5_3D1F) >> 8) | 0x3F80_0000) - 1.0)
+        * total;
+    let mut running = 0.0_f32;
+    for b in biomes {
+        let c = claim(b, at);
+        if c <= 0.0 || b.priority < top {
+            continue;
+        }
+        running += c;
+        if roll < running {
+            return b.name == name;
+        }
+    }
+    // Floating point can leave `roll` a hair past the last edge.
+    biomes
+        .iter()
+        .rev()
+        .find(|b| claim(b, at) > 0.0 && b.priority >= top)
+        .is_some_and(|b| b.name == name)
 }
 
 /// "Not within `radius` of anything in `layer`."
@@ -442,6 +549,8 @@ pub enum ScatterError {
     ForwardReference { layer: String, referenced: String },
     /// Two layers with the same name: a later reference would be ambiguous.
     DuplicateName { layer: String },
+    /// A layer named a biome nothing declares.
+    UnknownBiome { layer: String, biome: String },
 }
 
 impl std::fmt::Display for ScatterError {
@@ -456,6 +565,9 @@ impl std::fmt::Display for ScatterError {
                  references must point backwards"
             ),
             Self::DuplicateName { layer } => write!(f, "two layers are named {layer:?}"),
+            Self::UnknownBiome { layer, biome } => {
+                write!(f, "layer {layer:?} is in biome {biome:?}, which does not exist")
+            }
         }
     }
 }
@@ -474,6 +586,30 @@ pub fn scatter<'a>(
     layers: &[Layer<'a>],
     ground: &dyn Fn(f32, f32) -> Ground,
 ) -> Result<Vec<(&'a str, Vec<Instance>)>, ScatterError> {
+    scatter_in(min, max, layers, &[], ground)
+}
+
+/// [`scatter`], with biomes deciding which layers place where.
+///
+/// # Errors
+/// [`ScatterError`], including a layer naming a biome that does not exist.
+pub fn scatter_in<'a>(
+    min: [f32; 2],
+    max: [f32; 2],
+    layers: &[Layer<'a>],
+    biomes: &[Biome<'a>],
+    ground: &dyn Fn(f32, f32) -> Ground,
+) -> Result<Vec<(&'a str, Vec<Instance>)>, ScatterError> {
+    for layer in layers {
+        if let Some(name) = layer.biome
+            && !biomes.iter().any(|b| b.name == name)
+        {
+            return Err(ScatterError::UnknownBiome {
+                layer: layer.name.to_owned(),
+                biome: name.to_owned(),
+            });
+        }
+    }
     // Names first, so a typo is an error rather than a silently ignored rule.
     for (i, layer) in layers.iter().enumerate() {
         if layers[..i].iter().any(|l| l.name == layer.name) {
@@ -537,6 +673,13 @@ pub fn scatter<'a>(
             region_on([min[0] - m, min[1] - m], [max[0] + m, max[1] + m], &layer.rules, ground);
         let kept: Vec<Instance> = raw
             .into_iter()
+            .filter(|inst| match layer.biome {
+                // **Before the exclusion filter**, so a layer that loses a
+                // biome contest never repels anything. A tree that was never
+                // planted cannot shade a bush.
+                Some(name) => in_biome(name, biomes, inst.at, layer.rules.seed, inst.seed),
+                None => true,
+            })
             .filter(|inst| {
                 layer.exclude.iter().all(|e| {
                     let source =
@@ -572,6 +715,58 @@ pub fn scatter<'a>(
             (layer.name, inside)
         })
         .collect())
+}
+
+/// How far a change in the ground can reach, in metres.
+///
+/// **Step 6, and it is the number the whole feature turns on.** A CSG op that
+/// alters the terrain inside some box does not only change the instances
+/// standing in that box: a candidate that appears or vanishes stops or starts
+/// eliminating its neighbours, and those neighbours are up to `REACH` cells
+/// away. If the layer is named by another, the change carries further again.
+///
+/// Too small and a rebuilt patch differs from a full rebuild — which is not a
+/// crash and not a seam, but the wrong forest. Too large only costs time.
+#[must_use]
+pub fn reach_of(layers: &[Layer]) -> f32 {
+    // How far a ground change moves this layer's own instances: the
+    // elimination neighbourhood, `REACH` cells of `spacing / 2`.
+    #[allow(clippy::cast_precision_loss)]
+    let own = |r: &Rules| REACH as f32 * cell_size(r.spacing);
+
+    let mut influence: Vec<f32> = layers.iter().map(|l| own(&l.rules)).collect();
+    // Declaration order is dependency order — references point backwards — so
+    // one forward pass is enough.
+    for j in 0..layers.len() {
+        for e in layers[j].exclude {
+            if let Some(i) = layers.iter().position(|l| l.name == e.layer) {
+                let carried = influence[i] + e.radius.max(0.0) + own(&layers[j].rules);
+                influence[j] = influence[j].max(carried);
+            }
+        }
+    }
+    influence.into_iter().fold(0.0_f32, f32::max)
+}
+
+/// The region that must be re-scattered when the ground changes inside
+/// `[min, max)`.
+///
+/// Feed it a CSG op's bounds; scatter the result; splice it over the old
+/// answer. **That splice is exactly a full rebuild**, which is the phase's exit
+/// criterion and is what the test below asserts rather than assumes.
+///
+/// **The caller intersects this with its own world bounds.** Near an edge the
+/// reach runs past them, and scattering the unclipped region yields instances
+/// the full run never had — which looks like a broken splice and is not. This
+/// function does not know where the world ends; only the caller does.
+#[must_use]
+pub fn dirty_region(
+    min: [f32; 2],
+    max: [f32; 2],
+    layers: &[Layer],
+) -> ([f32; 2], [f32; 2]) {
+    let r = reach_of(layers);
+    ([min[0] - r, min[1] - r], [max[0] + r, max[1] + r])
 }
 
 /// The `i`th point of a Halton sequence in two dimensions, in `[0, 1)²`.
@@ -897,11 +1092,13 @@ mod tests {
             name: "roads",
             rules: Rules { spacing: 14.0, seed: 1, ..Rules::default() },
             exclude: &[],
+            ..Layer::default()
         };
         let trees = Layer {
             name: "trees",
             rules: Rules { spacing: 3.0, seed: 2, ..Rules::default() },
             exclude: &[Exclude { layer: "roads", radius: 6.0 }],
+            ..Layer::default()
         };
         let out = scatter([0.0, 0.0], [80.0, 80.0], &[roads, trees], &flat()).expect("resolves");
         let (road_pts, tree_pts) = (&out[0].1, &out[1].1);
@@ -942,11 +1139,13 @@ mod tests {
             name: "roads",
             rules: Rules { spacing: 11.0, seed: 3, ..Rules::default() },
             exclude: &[],
+            ..Layer::default()
         };
         let trees = Layer {
             name: "trees",
             rules: Rules { spacing: 3.0, seed: 4, ..Rules::default() },
             exclude: &[Exclude { layer: "roads", radius: 7.0 }],
+            ..Layer::default()
         };
         let list = [roads, trees];
 
@@ -977,16 +1176,19 @@ mod tests {
             // a test that reports what the coincidence did.
             rules: Rules { spacing: 9.0, seed: 5, ..Rules::default() },
             exclude: &[],
+            ..Layer::default()
         };
         let b = Layer {
             name: "b",
             rules: Rules { spacing: 3.0, seed: 6, ..Rules::default() },
             exclude: &[Exclude { layer: "a", radius: 10.0 }],
+            ..Layer::default()
         };
         let c = Layer {
             name: "c",
             rules: Rules { spacing: 2.5, seed: 7, ..Rules::default() },
             exclude: &[Exclude { layer: "b", radius: 6.0 }],
+            ..Layer::default()
         };
         let list = [a, b, c];
 
@@ -1029,11 +1231,11 @@ mod tests {
     /// nothing would look like a rule that simply did not match.
     #[test]
     fn bad_names_are_rejected() {
-        let a = Layer { name: "a", rules: Rules::default(), exclude: &[] };
+        let a = Layer { name: "a", ..Layer::default() };
         let typo = Layer {
             name: "b",
-            rules: Rules::default(),
             exclude: &[Exclude { layer: "rodes", radius: 1.0 }],
+            ..Layer::default()
         };
         assert!(matches!(
             scatter([0.0, 0.0], [10.0, 10.0], &[a, typo], &flat()),
@@ -1044,16 +1246,16 @@ mod tests {
         // because with backwards-only references a cycle cannot be written.
         let first = Layer {
             name: "first",
-            rules: Rules::default(),
             exclude: &[Exclude { layer: "second", radius: 1.0 }],
+            ..Layer::default()
         };
-        let second = Layer { name: "second", rules: Rules::default(), exclude: &[] };
+        let second = Layer { name: "second", ..Layer::default() };
         assert!(matches!(
             scatter([0.0, 0.0], [10.0, 10.0], &[first, second], &flat()),
             Err(ScatterError::ForwardReference { .. })
         ));
 
-        let dup = Layer { name: "a", rules: Rules::default(), exclude: &[] };
+        let dup = Layer { name: "a", ..Layer::default() };
         assert!(matches!(
             scatter([0.0, 0.0], [10.0, 10.0], &[a, dup], &flat()),
             Err(ScatterError::DuplicateName { .. })
@@ -1062,10 +1264,220 @@ mod tests {
         // And a layer may not exclude from itself, which is the same rule.
         let selfref = Layer {
             name: "x",
-            rules: Rules::default(),
             exclude: &[Exclude { layer: "x", radius: 1.0 }],
+            ..Layer::default()
         };
         assert!(scatter([0.0, 0.0], [10.0, 10.0], &[selfref], &flat()).is_err());
+    }
+
+    /// Two biomes, and the stronger one takes the overlap.
+    #[test]
+    fn the_higher_priority_biome_takes_the_overlap() {
+        let pine = Biome {
+            name: "highland",
+            min: [-50.0, -50.0],
+            max: [10.0, 50.0],
+            priority: 2.0,
+            blend: 0.0,
+        };
+        let oak = Biome {
+            name: "lowland",
+            min: [-10.0, -50.0],
+            max: [50.0, 50.0],
+            priority: 1.0,
+            blend: 0.0,
+        };
+        let pines = Layer {
+            name: "pines",
+            rules: Rules { spacing: 4.0, seed: 11, ..Rules::default() },
+            biome: Some("highland"),
+            ..Layer::default()
+        };
+        let oaks = Layer {
+            name: "oaks",
+            rules: Rules { spacing: 4.0, seed: 12, ..Rules::default() },
+            biome: Some("lowland"),
+            ..Layer::default()
+        };
+        let out = scatter_in([-50.0, -50.0], [50.0, 50.0], &[pines, oaks], &[pine, oak], &flat())
+            .expect("resolves");
+
+        // The overlap is -10..10. Highland wins it, so no oak may stand there,
+        // and pines must.
+        assert!(
+            out[1].1.iter().all(|i| i.at[0] >= 10.0),
+            "an oak stood inside the highland's claim"
+        );
+        assert!(
+            out[0].1.iter().any(|i| i.at[0] > -10.0 && i.at[0] < 10.0),
+            "no pine in the contested strip, so the contest proved nothing"
+        );
+        assert!(!out[1].1.is_empty(), "the losing biome has nothing anywhere");
+    }
+
+    /// **The boundary interleaves rather than blending densities.** In the fade
+    /// band both biomes place, mixed — a transition that scaled both densities
+    /// down would give a thin strip of each, which reads as a mown verge.
+    #[test]
+    fn a_blended_boundary_interleaves_the_two() {
+        let west = Biome {
+            name: "west",
+            min: [-60.0, -60.0],
+            max: [0.0, 60.0],
+            priority: 1.0,
+            blend: 18.0,
+        };
+        let east = Biome {
+            name: "east",
+            min: [0.0, -60.0],
+            max: [60.0, 60.0],
+            priority: 1.0,
+            blend: 18.0,
+        };
+        let a = Layer {
+            name: "a",
+            rules: Rules { spacing: 3.0, seed: 21, ..Rules::default() },
+            biome: Some("west"),
+            ..Layer::default()
+        };
+        let b = Layer {
+            name: "b",
+            rules: Rules { spacing: 3.0, seed: 22, ..Rules::default() },
+            biome: Some("east"),
+            ..Layer::default()
+        };
+        let out = scatter_in([-60.0, -60.0], [60.0, 60.0], &[a, b], &[west, east], &flat())
+            .expect("resolves");
+
+        let band = |v: &[Instance]| {
+            v.iter().filter(|i| i.at[0] > -12.0 && i.at[0] < -2.0).count()
+        };
+        assert!(band(&out[0].1) > 0 && band(&out[1].1) > 0, "the band is not mixed");
+
+        // Deep inside the west, the east must have nothing at all.
+        assert!(
+            out[1].1.iter().all(|i| i.at[0] > -18.0),
+            "the east placed deep inside the west"
+        );
+    }
+
+    /// **Phase 5's exit criterion, asserted rather than argued.**
+    ///
+    /// Blow a hole in the terrain, re-scatter only the region the change can
+    /// reach, splice it over the old answer — and get exactly what a full
+    /// rebuild would have produced.
+    #[test]
+    fn regenerating_only_the_dirty_region_equals_a_full_rebuild() {
+        let roads = Layer {
+            name: "roads",
+            // Dense enough that a crater reliably contains several, so the
+            // annulus where a short reach bites is reliably occupied. At
+            // spacing 9 a crater held about one road and whether the defect
+            // showed was a coin flip.
+            rules: Rules { spacing: 5.0, seed: 31, ..Rules::default() },
+            ..Layer::default()
+        };
+        let trees = Layer {
+            name: "trees",
+            rules: Rules { spacing: 3.0, seed: 32, ..Rules::default() },
+            exclude: &[Exclude { layer: "roads", radius: 10.0 }],
+            ..Layer::default()
+        };
+        let list = [roads, trees];
+        let (world_min, world_max) = ([-60.0_f32, -60.0], [60.0_f32, 60.0]);
+
+        // Before: flat everywhere. After: a crater — unclimbable inside it.
+        let before = |_: f32, _: f32| Ground::default();
+        // **Several craters, not one.** A single crater passed with the
+        // dirty reach deliberately shortened: whether the shortfall bites
+        // depends on a road happening to sit in the band between the wrong
+        // radius and the right one. One sample reports what that coincidence
+        // did; a handful reports the rule.
+        for crater in [[6.0_f32, -4.0], [-22.0, 15.0], [24.0, -21.0], [-9.0, -18.0]] {
+        let radius = 9.0_f32;
+        let after = move |x: f32, z: f32| {
+            if (x - crater[0]).hypot(z - crater[1]) < radius {
+                slope(75.0)
+            } else {
+                Ground::default()
+            }
+        };
+
+        let old = scatter(world_min, world_max, &list, &before).expect("resolves");
+        let full = scatter(world_min, world_max, &list, &after).expect("resolves");
+
+        // Only the ground inside the crater's bounds changed.
+        let (dirty_min, dirty_max) = dirty_region(
+            [crater[0] - radius, crater[1] - radius],
+            [crater[0] + radius, crater[1] + radius],
+            &list,
+        );
+        // Clipped to the world, as `dirty_region` says the caller must. The
+        // crater at [31, -28] is close enough to the edge that the unclipped
+        // region runs past it, and splicing in instances from outside the world
+        // reads as a broken rebuild.
+        let dirty_min = [dirty_min[0].max(world_min[0]), dirty_min[1].max(world_min[1])];
+        let dirty_max = [dirty_max[0].min(world_max[0]), dirty_max[1].min(world_max[1])];
+        let patch = scatter(dirty_min, dirty_max, &list, &after).expect("resolves");
+
+        let outside = |i: &Instance| {
+            i.at[0] < dirty_min[0]
+                || i.at[0] >= dirty_max[0]
+                || i.at[1] < dirty_min[1]
+                || i.at[1] >= dirty_max[1]
+        };
+        let key = |i: &Instance| (i.at[0].to_bits(), i.at[1].to_bits());
+
+        for layer in 0..2 {
+            // The splice: everything the change could not reach, kept from the
+            // old answer, plus the rebuilt patch.
+            let mut spliced: Vec<_> =
+                old[layer].1.iter().filter(|i| outside(i)).map(key).collect();
+            spliced.extend(patch[layer].1.iter().map(key));
+            spliced.sort_unstable();
+
+            let mut rebuilt: Vec<_> = full[layer].1.iter().map(key).collect();
+            rebuilt.sort_unstable();
+
+            assert_eq!(
+                spliced, rebuilt,
+                "crater {crater:?}, layer {layer}: a spliced rebuild differs from a full one"
+            );
+        }
+
+        // And the crater actually did something, or the test compares two
+        // identical worlds and proves nothing.
+        // **Sets, not counts.** Comparing lengths said "changed nothing" for a
+        // crater that had in fact moved instances and happened to end with the
+        // same number.
+        // **Checked on the roads, not the trees.** A crater always removes the
+        // roads standing in it; whether any *tree* changes depends on whether a
+        // surviving road outside still excludes the same ground, which for a
+        // dense road layer is often true. Asserting on trees said "changed
+        // nothing" about a crater that had plainly changed something.
+        let old_keys: Vec<_> = old[0].1.iter().map(key).collect();
+        let new_keys: Vec<_> = full[0].1.iter().map(key).collect();
+        assert_ne!(
+            old_keys, new_keys,
+            "the crater at {crater:?} changed no instances at all"
+        );
+        }
+    }
+
+    /// The reach must actually grow with the chain, or `dirty_region` is a
+    /// constant wearing a function's name.
+    #[test]
+    fn the_dirty_reach_grows_with_the_exclusion_chain() {
+        let a = Layer { name: "a", ..Layer::default() };
+        let b = Layer {
+            name: "b",
+            exclude: &[Exclude { layer: "a", radius: 20.0 }],
+            ..Layer::default()
+        };
+        assert!(
+            reach_of(&[a, b]) > reach_of(&[a]) + 20.0,
+            "a 20 m exclusion did not carry into the reach"
+        );
     }
 
     /// Halton must cover the square rather than clustering, which is the only
