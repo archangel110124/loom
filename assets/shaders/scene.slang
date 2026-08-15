@@ -863,7 +863,10 @@ float4 triplanar(uint index, float3 position, float3 normal) {
     // blurred texture rather than a projected one.
     float3 weight = pow(abs(normal), 4.0);
     weight /= max(weight.x + weight.y + weight.z, 1e-4);
-    return sampleMap(index, position.yz) * weight.x
+    // **`.zy`, not `.yz`.** The X plane's two axes must arrive in the order
+    // `triplanarNormal`'s whiteout blend and final swizzle assume, and albedo
+    // must agree with relief or the grain lights against its own shape.
+    return sampleMap(index, position.zy) * weight.x
          + sampleMap(index, position.xz) * weight.y
          + sampleMap(index, position.xy) * weight.z;
 }
@@ -889,7 +892,13 @@ float3 triplanarNormal(uint index, float3 position, float3 geometric) {
     float3 weight = pow(abs(geometric), 4.0);
     weight /= max(weight.x + weight.y + weight.z, 1e-4);
 
-    float3 nx = sampleMap(index, position.yz).xyz * 2.0 - 1.0;
+    // **The X plane is `position.zy`.** This is Golus's whiteout construction
+    // and it is not free to choose: the last line routes `nx.x` into world Z
+    // via `.zyx`, so `nx.x` has to BE the z-perturbation. Sampled `.yz`, `nx.x`
+    // is the y-perturbation and the X-facing normal comes out transposed --
+    // which is what it was, on every +/-X flank in every scene, invisibly,
+    // because no golden reference sampled a texture on voxel terrain.
+    float3 nx = sampleMap(index, position.zy).xyz * 2.0 - 1.0;
     float3 ny = sampleMap(index, position.xz).xyz * 2.0 - 1.0;
     float3 nz = sampleMap(index, position.xy).xyz * 2.0 - 1.0;
 
