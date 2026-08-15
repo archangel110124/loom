@@ -94,6 +94,20 @@ pub struct WaterSample {
     /// not how deep it is this instant. Negative means the bed is above the
     /// surface — dry land, which is information rather than an error.
     pub depth: f32,
+    /// How close this point is to folding: `Σ Q·k·A·sin φ`, the term
+    /// subtracted from the normal's Y just below.
+    ///
+    /// **Raw, and never normalised by `Σ Q·k·A`.** Dividing would make a
+    /// glassy sea and a storm sea both reach 1.0 at every crest, so anything
+    /// thresholding it would be measuring wave *shape* and be blind to sea
+    /// state — which is the opposite of what a whitecap is. Undivided it is
+    /// absolute: the validator's `Q·N·k·A ≤ 1` is exactly the guarantee that
+    /// it never reaches 1.0, and 1.0 is a cusp.
+    ///
+    /// Nothing in the simulation reads it. It exists for shading, which is
+    /// why it is a plain scalar and not folded into the normal that buoyancy
+    /// already gets.
+    pub fold: f32,
 }
 
 /// How much of its deep-water amplitude a wave keeps in water `depth` deep.
@@ -272,6 +286,7 @@ pub fn sample_water(
         displacement,
         velocity,
         depth,
+        fold: flatten,
     }
 }
 
@@ -338,6 +353,11 @@ struct LoomWaterSample {
     float3 displacement;
     float3 velocity;
     float depth;
+    /// `Σ Q·k·A·sin φ` — the term subtracted from the normal's Y. Raw, never
+    /// divided by `Σ Q·k·A`: 1.0 is a cusp and the validator caps the sea
+    /// below it, so this is an absolute measure of how near breaking the
+    /// surface is rather than a per-scene shape. Whitecaps read it.
+    float fold;
 };
 
 LoomWaterSample loom_sample_water(
@@ -417,6 +437,7 @@ LoomWaterSample loom_sample_water(
     result.displacement = displacement;
     result.velocity = velocity;
     result.depth = depth;
+    result.fold = flatten;
     return result;
 }
 "#

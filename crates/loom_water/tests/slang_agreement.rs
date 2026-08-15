@@ -233,6 +233,12 @@ fn the_rust_and_the_slang_compute_the_same_surface() {
     // then fed to the surface, so a divergence in the lookup shows up in every
     // field below rather than only in the last column.
     let mut inside = 0_usize;
+    // Reported below rather than hard-coded. The count used to be a literal
+    // `12` in the summary line, which is the line a human reads to believe the
+    // test ran — so a field added to `LoomWaterSample` and to `expected` but
+    // forgotten in the `printf` would have been announced as twelve values
+    // compared while thirteen existed.
+    let mut values = 0_usize;
     for (i, (sample, row)) in samples.iter().zip(&rows).enumerate() {
         let ground = bed.at(sample[0], sample[1]);
         if HeightField::has_ground(ground) {
@@ -252,9 +258,11 @@ fn the_rust_and_the_slang_compute_the_same_surface() {
             cpu.velocity[1],
             cpu.velocity[2],
             cpu.depth,
+            cpu.fold,
             ground,
         ];
         assert_eq!(row.len(), expected.len(), "row {i} has {} values", row.len());
+        values = expected.len();
         for (field, (rust, slang)) in expected.iter().zip(row).enumerate() {
             let delta = (rust - slang).abs();
             assert!(delta.is_finite(), "sample {i} field {field}: {rust} vs {slang}");
@@ -270,7 +278,7 @@ fn the_rust_and_the_slang_compute_the_same_surface() {
         "water agreement: worst absolute difference {worst:e} over {} samples \
          ({} values each), {inside} of them over real ground",
         samples.len(),
-        12
+        values
     );
     // Otherwise the depth half of this test proves nothing: a sample set that
     // missed the bed entirely would compare two sentinels and agree.
@@ -318,7 +326,7 @@ fn the_slang_half_compiles_for_the_gpu_too() {
          \x20   set.waves[0].speed_scale = 1.0;\n\
          \x20   LoomWaterSample s = loom_sample_water(set, 0.0, -4.0, float2(1.0, 2.0), 3.0, float3(0.4, 0.0, -0.2));\n\
          \x20   loom_water_probe[0] = s.height + s.normal.y + s.displacement.x\n\
-         \x20       + s.velocity.z + s.depth;\n}}\n",
+         \x20       + s.velocity.z + s.depth + s.fold;\n}}\n",
         loom_water::slang()
     );
     std::fs::write(&shader, source).expect("write shader");
@@ -402,10 +410,10 @@ fn kernel(body: &WaterBody, bed: &HeightField, samples: &[[f32; 3]]) -> String {
     let emit = "\nvoid emit(LoomWaveSet set, LoomHeightField bed, float surface_height, float2 xz, float t, float3 flow)\n\
                 {\n    float ground_height = loom_ground_height(bed, xz);\n\
                 \x20   LoomWaterSample s = loom_sample_water(set, surface_height, ground_height, xz, t, flow);\n\
-                \x20   printf(\"%.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\\n\",\n\
+                \x20   printf(\"%.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\\n\",\n\
                 \x20       s.height, s.normal.x, s.normal.y, s.normal.z,\n\
                 \x20       s.displacement.x, s.displacement.y, s.displacement.z,\n\
-                \x20       s.velocity.x, s.velocity.y, s.velocity.z, s.depth, ground_height);\n}\n";
+                \x20       s.velocity.x, s.velocity.y, s.velocity.z, s.depth, s.fold, ground_height);\n}\n";
     let split = out.find("\n[shader(\"compute\")]").expect("the kernel was just written");
     out.insert_str(split, emit);
     out

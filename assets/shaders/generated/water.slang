@@ -101,6 +101,11 @@ struct LoomWaterSample {
     float3 displacement;
     float3 velocity;
     float depth;
+    /// `Σ Q·k·A·sin φ` — the term subtracted from the normal's Y. Raw, never
+    /// divided by `Σ Q·k·A`: 1.0 is a cusp and the validator caps the sea
+    /// below it, so this is an absolute measure of how near breaking the
+    /// surface is rather than a per-scene shape. Whitecaps read it.
+    float fold;
 };
 
 LoomWaterSample loom_sample_water(
@@ -180,5 +185,6 @@ LoomWaterSample loom_sample_water(
     result.displacement = displacement;
     result.velocity = velocity;
     result.depth = depth;
+    result.fold = flatten;
     return result;
 }
