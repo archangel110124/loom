@@ -488,6 +488,14 @@ static const float UNDERWATER_EXTINCTION = 0.07;
 /// is merely a darker sky reads as night rather than as being underneath
 /// something.
 static const float3 UNDERWATER_TINT = float3(0.08, 0.30, 0.28);
+/// How much of the surface's light still reaches you looking straight DOWN.
+/// Small: below you is a deep column that has already absorbed nearly
+/// everything, which is why the sea floor of a photograph fades to black long
+/// before the surface does.
+static const float UNDERWATER_DOWN = 0.13;
+/// The sun through a rippled ceiling — a soft bloom, not a disc.
+static const float UNDERWATER_SHAFT = 0.55;
+static const float UNDERWATER_SHAFT_POWER = 6.0;
 
 /// What the water looks like in a direction with nothing in that direction.
 ///
@@ -496,11 +504,31 @@ static const float3 UNDERWATER_TINT = float3(0.08, 0.30, 0.28);
 /// taken from the sky — multiplying tint by sky *colour* would drag the
 /// blue-green back toward whatever hue the sky is, which is the one thing this
 /// is meant not to do.
-float3 underwaterColor() {
+float3 underwaterColor(float3 dir) {
     float above = ambientStrength()
                 * dot(skyGradient(float3(0.0, 1.0, 0.0)), float3(0.2126, 0.7152, 0.0722))
                 + sunStrength() * 0.25;
-    return UNDERWATER_TINT * above;
+
+    // **Which way you look matters, and it used to not.** This returned one
+    // colour for every direction, which is a flat teal void with a hard line
+    // where the seabed starts — no sense of a surface overhead, no sense of
+    // depth below.
+    //
+    // All the light down here came through the surface, so it arrives from
+    // above: looking up you see it near-undiminished, looking down you see
+    // only what has scattered back out of a deep column, which is very little.
+    // That gradient is most of what makes being submerged read as submerged.
+    float up = saturate(dir.y * 0.5 + 0.5);
+    float column = UNDERWATER_DOWN + (1.0 - UNDERWATER_DOWN) * up * up;
+
+    // The sun, still visible as a soft bloom through a rippled ceiling. Only
+    // upward — a sun glow on the seabed side would be light arriving from
+    // where there is none.
+    float shaft = pow(saturate(dot(dir, sunDirection())), UNDERWATER_SHAFT_POWER)
+                * saturate(dir.y) * sunStrength();
+
+    return UNDERWATER_TINT * above * column
+         + sunColor() * shaft * UNDERWATER_SHAFT;
 }
 
 /// Cheap 2D value noise, for shaping things that are meant to look irregular.
@@ -592,7 +620,7 @@ float3 fogColor(float3 direction) {
     // — so distant geometry dissolves into exactly the background behind it,
     // which is the property the height fog above was written for too.
     if (eyeUnderwater()) {
-        return underwaterColor();
+        return underwaterColor(direction);
     }
     float3 base = skyGradient(direction);
     float toSun = max(dot(direction, sunDirection()), 0.0);
@@ -1524,6 +1552,18 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // make the band flicker with the swell instead of tracking where it has
     // been, which is the same mistake the rain wetness made before it started
     // averaging cover over forty seconds.
+    // **Caustics on ground that is under the water.** The water shader already
+    // paints them on whatever it sees through the surface; this is the same
+    // web on the same bed for the case where the eye is under there with it.
+    // Without it, swimming down turns the seabed into flat sand while the
+    // identical sand seen from above is dappled.
+    if (waterPresent()) {
+        float submerged = stillWaterLevel() - in.worldPos.y;
+        if (submerged > 0.0) {
+            albedo *= 1.0 + causticWeb(in.worldPos, submerged);
+        }
+    }
+
     if (waterPresent() && porosity > 0.0) {
         float above = in.worldPos.y - stillWaterLevel();
         float wetBand = 1.0 - smoothstep(0.0, WET_SAND_REACH, above);
@@ -1804,21 +1844,28 @@ SkyOutput skyVertexMain(uint vertexID: SV_VertexID) {
 
 [shader("fragment")]
 float4 skyFragmentMain(SkyOutput in) : SV_Target {
-    // **Submerged, the background is water, not sky.** Looking sideways with
-    // no geometry in view, this pass used to paint a horizon and a sun glow
-    // from the bottom of a lake. There is no direction to compute: the medium
-    // is uniform, and the surface overhead is drawn by the water pass in front
-    // of this one.
-    if (eyeUnderwater()) {
-        return float4(underwaterColor(), 1.0);
-    }
-
     // Unproject both ends of the pixel's ray and take the direction between
     // them. Using only the far plane would be wrong under a perspective
     // divide that is not centred on the eye.
     float4 near = mul(push.invViewProj, float4(in.ndc, 0.0, 1.0));
     float4 far = mul(push.invViewProj, float4(in.ndc, 1.0, 1.0));
     float3 dir = normalize(far.xyz / far.w - near.xyz / near.w);
+
+    // **Submerged, the background is water, not sky.** Looking sideways with
+    // no geometry in view, this pass used to paint a horizon and a sun glow
+    // from the bottom of a lake.
+    //
+    // **The direction is computed FIRST now, and the comment that used to sit
+    // here was the bug.** It said "there is no direction to compute: the
+    // medium is uniform" and returned before the unprojection — which is true
+    // of absorption and false of everything else. All the light down here
+    // arrived through the surface, so it comes from above, and returning one
+    // colour for every direction is a flat teal void with a hard line where
+    // the seabed starts. That is precisely what it looked like.
+    if (eyeUnderwater()) {
+        return float4(underwaterColor(dir), 1.0);
+    }
+
     return float4(skyColor(dir), 1.0);
 }
 
@@ -2632,6 +2679,8 @@ static const float SHORE_FOAM_DEPTH = 0.28;
 /// depth, and how fast. Slow: a swash cycle is several seconds.
 static const float SWASH_REACH = 0.12;
 static const float SWASH_RATE = 0.55;
+/// How opaque the swash sheet gets. Well under 1: the sand must show through.
+static const float SWASH_OPACITY = 0.62;
 
 static const float WATER_FOAM_WET = 0.22;
 static const float WATER_FOAM_BREAK = 0.33;
@@ -2733,6 +2782,26 @@ static const float CAUSTIC_SHARP = 9.0;
 static const float CAUSTIC_POWER = 3.0;
 static const float CAUSTIC_STRENGTH = 0.85;
 
+/// The caustic web at a point on the bed, as a multiplier on its lit colour.
+///
+/// Extracted because it is wanted from two places: the water shader looking
+/// down through the surface, and the terrain shader when the terrain itself is
+/// underwater. A seabed with caustics seen from above and none seen from below
+/// is the same surface disagreeing with itself.
+float causticWeb(float3 bedPos, float depth) {
+    float2 cuv = bedPos.xz * CAUSTIC_SCALE;
+    float2 cdrift = float2(0.07, 0.05) * push.environment[0].weather.z;
+    float c1 = loom_value_noise(float3(cuv + cdrift, 0.0));
+    float c2 = loom_value_noise(float3(cuv * 1.31 - cdrift * 0.83, 5.7));
+    float web = pow(saturate(1.0 - abs(c1 - c2) * CAUSTIC_SHARP), CAUSTIC_POWER);
+    // Strongest just under the surface and gone by a few metres — a ripple's
+    // focal length is short and a deep column washes the web out entirely.
+    // Gone at a low sun too, since a grazing ray never focuses.
+    float fade = saturate(1.0 - depth / CAUSTIC_DEPTH)
+               * saturate(sunDirection().y * 1.6);
+    return web * CAUSTIC_STRENGTH * fade;
+}
+
 float3 waterBehind(float2 uv, float3 surfacePos, float3 eye, float bedDepth, out float3 behind) {
     behind = float3(0.0, 0.0, 0.0);
     float d = opaqueDepth.SampleLevel(uv, 0).r;
@@ -2774,17 +2843,7 @@ float3 waterBehind(float2 uv, float3 surfacePos, float3 eye, float bedDepth, out
     // very bright lines. Anchored to the BED's world position, not the
     // surface's: the pattern belongs to the sand, and anchoring it to the
     // surface would make it swim as the eye moves.
-    float2 cuv = bg.xz * CAUSTIC_SCALE;
-    float2 cdrift = float2(0.07, 0.05) * push.environment[0].weather.z;
-    float c1 = loom_value_noise(float3(cuv + cdrift, 0.0));
-    float c2 = loom_value_noise(float3(cuv * 1.31 - cdrift * 0.83, 5.7));
-    float web = pow(saturate(1.0 - abs(c1 - c2) * CAUSTIC_SHARP), CAUSTIC_POWER);
-    // Strongest just under the surface and gone by a few metres — the focal
-    // length of a ripple is short, and deep water washes the web out entirely.
-    // Also gone when the sun is low, since a grazing ray never focuses.
-    float causticFade = saturate(1.0 - min(bedDepth, 100.0) / CAUSTIC_DEPTH)
-                      * saturate(sunDirection().y * 1.6);
-    behind *= 1.0 + web * CAUSTIC_STRENGTH * causticFade;
+    behind *= 1.0 + causticWeb(bg, min(bedDepth, 100.0));
     // **Un-fog it.** The mesh pass already fogged this pixel over eye->bg, and
     // the last line of the caller fogs the composite again over eye->surface.
     // Applied twice that is 18% becoming 33% on `shore`. What is left over is
@@ -2868,7 +2927,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         // seabed, and this one is featureless everywhere outside the window.
         // Fixing it needs the geometry behind the surface, which is the
         // refraction/reflection pass this step is explicitly not building.
-        float3 lit = lerp(through, underwaterColor(), fresnel);
+        float3 lit = lerp(through, underwaterColor(-view), fresnel);
         float fogUnder = fogAmount(push.environment[0].eye.xyz, in.worldPos);
         return float4(lerp(lit, fogColor(-view), fogUnder), 1.0);
     }
@@ -3037,7 +3096,17 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // rather than a contour — a clean curve is the synthetic tell, the same
     // lesson the grass slope boundary learned.
     shoreFoam = smoothstep(fnoise * 0.5, fnoise * 0.5 + 0.5, shoreFoam * shoreFoam);
-    foam = max(foam, shoreFoam);
+    // **Capped, because swash is a thin SHEET and not a painted band.** Water
+    // running up a beach is a couple of centimetres deep: you see the wet sand
+    // straight through it, with foam gathered in streaks on top rather than a
+    // solid white rim. Letting this reach 1.0 replaces the surface entirely
+    // and throws away the refraction that is doing the most work here.
+    //
+    // Densest at the leading edge, where the sheet is thinnest and the air is
+    // actually entrained, and thinning back toward the water — which is the
+    // opposite of what a depth ramp does on its own, so it is worth the
+    // second term.
+    foam = max(foam, shoreFoam * SWASH_OPACITY);
 
     float broken = smoothstep(WATER_FOAM_BREAK, 0.50, in.fold);
     foam = max(foam, broken * smoothstep(fnoise * 0.4, fnoise * 0.4 + 0.6, broken));
