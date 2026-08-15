@@ -21,6 +21,7 @@ mod play;
 mod prefab_cmd;
 mod prefab_load;
 mod scene_view;
+mod telemetry;
 mod weather;
 mod sound;
 mod run;
@@ -688,8 +689,45 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
             Some(count) => {
                 let mut runner = play::Runner::new(&world, base)?;
                 let mut elapsed = 0_u64;
+                // **Stale frames removed before the first write.** A capture
+                // that renders 9 frames into a directory holding 20 leaves 11
+                // from the previous run, and a contact sheet built from the
+                // directory then mixes two experiments — which reads as a
+                // discontinuity that is not there.
+                // Created rather than assumed. A capture into a fresh
+                // `target/agent/frames` is the normal case, and failing on it
+                // with "No such file or directory" is a poor first experience
+                // of a tool whose whole job is to be run casually.
+                if let Some(dir) = std::path::Path::new(&out).parent()
+                    && !dir.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(dir)
+                        .map_err(|e| format!("{}: {e}", dir.display()))?;
+                }
+                let stem = std::path::Path::new(&out)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("frame")
+                    .to_owned();
+                if let Some(dir) = std::path::Path::new(&out).parent()
+                    && let Ok(entries) = std::fs::read_dir(dir)
+                {
+                    {
+                        for entry in entries.flatten() {
+                            let name = entry.file_name();
+                            let name = name.to_string_lossy();
+                            if name.starts_with(&format!("{stem}_")) && name.ends_with(".png") {
+                                let _ = std::fs::remove_file(entry.path());
+                            }
+                        }
+                    }
+                }
+                let probes = telemetry::probes(&scene, &world);
+                let mut rows = telemetry::Telemetry::default();
 
                 for index in 0..count {
+                    #[allow(clippy::disallowed_methods)]
+                    let frame_started = std::time::Instant::now();
                     if index > 0 {
                         for _ in 0..step {
                             elapsed += 1;
@@ -838,6 +876,45 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                             std::path::Path::new(&frame_path(&out, index)),
                         )
                         .map_err(|e| e.to_string())?;
+
+                    // **After the render, so `frame_time_ms` is the whole cost
+                    // of producing the frame** rather than of preparing it.
+                    #[allow(clippy::disallowed_methods)]
+                    let frame_ms = frame_started.elapsed().as_secs_f64() * 1000.0;
+                    let scattered = scatter_objects(&scene, &library);
+                    // The same three pieces `rain_at_eye` was handed, at this
+                    // frame's instant — so the CSV and the picture cannot be
+                    // reading different weather.
+                    let frame_weather = weather::Weather {
+                        wind: weather::wind_of(&scene),
+                        rain,
+                        sky: scene_volume(&scene),
+                        seconds: moment,
+                        deck: weather::deck_of(&world),
+                    };
+                    rows.push(
+                        &probes,
+                        &telemetry::Frame {
+                            index,
+                            sim_time: moment,
+                            weather: &frame_weather,
+                            eye: camera.eye.to_array(),
+                            draws: objects.len(),
+                            scattered: &scattered,
+                            blades: blades.len(),
+                            drops,
+                            frame_ms,
+                        },
+                    );
+                }
+
+                // Beside the frames, not inside them: `target/agent/frames/`
+                // holds the sequence and `target/agent/telemetry.csv` sits next
+                // to it, so clearing the frames does not take the numbers with
+                // them.
+                if let Some(dir) = std::path::Path::new(&out).parent() {
+                    let csv = dir.parent().unwrap_or(dir).join("telemetry.csv");
+                    rows.write(&csv)?;
                 }
             }
         }
