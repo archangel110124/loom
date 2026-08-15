@@ -2498,10 +2498,35 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     return out;
 }
 
+/// Beam attenuation per metre at roughly 650 / 550 / 450 nm — Pope & Fry
+/// absorption plus Morel molecular scattering. Red is gone in three metres,
+/// blue survives fifty, and that spread is why deep water is blue at all.
+static const float3 WATER_EXTINCT = float3(0.341, 0.058, 0.013);
+/// Backscatter for pure water. **The turbidity knob, and the only one.**
+/// Raising it turns navy toward teal, because what comes back up out of a
+/// water column is scattered light, not reflected light.
+static const float3 WATER_BACKSCATTER = float3(0.00035, 0.00075, 0.00175);
+
 /// What deep water looks like when you see into it rather than off it.
-/// Linear, and dark on purpose — most of what a viewer reads as "the colour of
-/// the sea" is the sky bouncing off it, which the Fresnel term below supplies.
-static const float3 WATER_DEEP = float3(0.004, 0.018, 0.030);
+///
+/// **Derived, not eyeballed.** This is the standard deep-water remote-sensing
+/// reflectance `R∞ = 0.33·b_b/(a + b_b)` — the fraction of downwelling light a
+/// semi-infinite column scatters back up — evaluated from the two coefficient
+/// sets above. It comes out (0.0003, 0.0042, 0.0391): darker than the hand-
+/// picked value it replaces in red and green, similar in blue, so the colour
+/// *range* widens and the navy goes nearly black.
+///
+/// **The comment this replaces said most of what a viewer reads as the colour
+/// of the sea is the sky bouncing off it. That is a well-known misconception
+/// and it was costing us the whole look.** Deep water is blue on a fully
+/// overcast day and blue looking straight down where nothing is being
+/// reflected, because light enters it, scatters, and comes back out. Measured
+/// on the old constant: darkening the sky to an overcast moved our sea's R/B
+/// ratio to 0.95 — neutral grey, polished pewter — against 0.62 for a
+/// photograph of a real storm sea. A mirror over a void has no colour of its
+/// own, and that is what this was.
+static const float3 WATER_DEEP =
+    0.33 * WATER_BACKSCATTER / (WATER_EXTINCT + WATER_BACKSCATTER);
 static const float3 WATER_SHALLOW = float3(0.020, 0.070, 0.075);
 /// Depth over which the tint reaches its deep value, in metres.
 static const float WATER_TINT_DEPTH = 5.0;
@@ -2539,6 +2564,23 @@ static const float WATER_IOR = 1.333;
 // about 1.4x under the fold bound, so no fixed threshold can track it. It is
 // an order-of-magnitude check only, and 4–7% against Monahan's 3.2% at this
 // scene's 14 m/s passes it.
+/// Metres of water a ray crosses at a crest and in a trough. Not measured
+/// depths — an effective path length for the wrap lobe, and the ratio between
+/// them is what carries the effect.
+static const float WATER_CREST_THICK = 0.9;
+static const float WATER_TROUGH_THICK = 4.0;
+/// How far the sun direction is bent by the surface normal before the lobe is
+/// evaluated. Widens the glow around a crest rather than pinning it to exact
+/// alignment.
+static const float WATER_SSS_DISTORT = 0.35;
+static const float WATER_SSS_POWER = 4.0;
+/// Fold value treated as "fully a crest" for SHADING ONLY.
+///
+/// **Never use this to normalise foam coverage.** Foam thresholds absolutely,
+/// which is what makes a glassy sea foamless; this is a shading ramp that only
+/// needs a sensible span on the seas we author.
+static const float WATER_FOLD_REF = 0.35;
+
 static const float WATER_FOAM_WET = 0.22;
 static const float WATER_FOAM_BREAK = 0.33;
 /// Cross-wind stretch of the noise domain. **This is what makes streaks** —
@@ -2635,12 +2677,43 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
 
     float3 body = lerp(WATER_SHALLOW, WATER_DEEP, saturate(in.depth / WATER_TINT_DEPTH));
     float toSun = max(dot(normal, sunDirection()), 0.0);
+
+    // **Sky occlusion by wave shape, and it buys more than it costs.** A trough
+    // sees a slice of the hemisphere; a crest sees all of it. That difference
+    // is most of why the troughs in a photograph of a rough sea go nearly
+    // black while the crests stay bright, and without it a sea lit by ambient
+    // is uniformly lit no matter what shape it is in. One multiply.
+    float crest = saturate(in.fold / WATER_FOLD_REF);
+    float skyView = saturate(0.55 + 0.45 * crest);
+
+    // **Backlit scatter, gated on how THIN the water is — not on view angle.**
+    //
+    // The term this replaces was `body * 6.0 * pow(dot(-view, sunDir), 3)`,
+    // which glows a trough exactly as brightly as a crest and so reads as haze
+    // laid over the whole sea rather than as light coming through a wave. A
+    // real crest glows because it is a thin sheet with the sun behind it, and
+    // thickness is what decides how much survives the crossing.
+    //
+    // Wrap-lobe form (Barré-Brisebois): perturbing the sun direction by the
+    // surface normal widens the lobe so the glow spreads around the crest
+    // instead of appearing only at exact alignment. **The hue is not authored**
+    // — it falls out of `WATER_EXTINCT` through Beer-Lambert, so the colour of
+    // a backlit wave is the colour water actually transmits: through 2 m that
+    // is (0.51, 0.89, 0.97), the luminous turquoise a breaking crest has.
+    //
+    // Dividing thickness by the sun's elevation is why crests glow at a low sun
+    // and barely at noon: a shallow sun crosses more water to reach the eye.
+    float thick = lerp(WATER_TROUGH_THICK, WATER_CREST_THICK, crest)
+                / max(sunDirection().y, 0.15);
+    float3 h = normalize(sunDirection() + normal * WATER_SSS_DISTORT);
+    float3 sss = sunColor() * sunStrength()
+               * pow(saturate(dot(-view, h)), WATER_SSS_POWER)
+               * crest * exp(-WATER_EXTINCT * thick);
+
     float3 through = body
-        * (hemisphereAmbient(normal) * ambientStrength() + sunColor() * sunStrength() * toSun)
-        // Light scattered up through a crest, which is what makes a wave read
-        // as translucent rather than as painted metal. Strongest looking into
-        // the sun, which is where a real one glows.
-        + body * 6.0 * sunStrength() * pow(saturate(dot(-view, sunDirection())), 3.0);
+        * (hemisphereAmbient(normal) * ambientStrength() * skyView
+           + sunColor() * sunStrength() * toSun)
+        + sss;
 
     float3 lit = lerp(through, skyColor(reflect(-view, normal)), fresnel);
     lit += specular(normal, view, sunDirection(), WATER_ROUGHNESS, float3(0.02))
