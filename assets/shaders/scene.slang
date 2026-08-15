@@ -2246,6 +2246,16 @@ struct WaterOutput {
     /// vertex. The cut then has cell-size-independent resolution, which
     /// matters because the cell out at the far LOD ring is 32 m across.
     float depth : TEXCOORD2;
+    /// How near this point is to breaking: `Σ Q·k·A·sin φ` from the **faded**
+    /// wave set, so it describes the surface actually rasterised rather than
+    /// the one the scene authored. Whitecaps read it.
+    ///
+    /// **Interpolated across cells up to 16 m wide out in the far rings.** In
+    /// the near field the cell is 0.5 m and the per-pixel noise erosion hides
+    /// the piecewise-linear underlay entirely; far out it is a smear, and the
+    /// honest answer is that foam is not the right tool at that range. Stated
+    /// here rather than discovered later.
+    float fold : TEXCOORD3;
 };
 
 [shader("vertex")]
@@ -2388,6 +2398,7 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     // dotted line. Everything downstream saturates by 5 m, so a hundred is far
     // past any use of the value and interpolates exactly.
     out.depth = min(surfaceAt.depth, 100.0);
+    out.fold = surfaceAt.fold;
     return out;
 }
 
@@ -2407,6 +2418,48 @@ static const float WATER_ROUGHNESS = 0.08;
 /// It is here for one number: `asin(1/1.333)` is 48.6°, the critical angle, and
 /// that cone is Snell's window.
 static const float WATER_IOR = 1.333;
+
+// ---------------------------------------------------------------------------
+// Whitecaps.
+//
+// **Thresholds on the RAW fold, and that is the whole design.** `in.fold` is
+// `Σ Q·k·A·sin φ` undivided (see `LoomWaterSample::fold`), so 1.0 is a cusp and
+// the validator's `Q·N·k·A ≤ 1` guarantees the sea never reaches it. That makes
+// an absolute threshold meaningful: the same number means the same *nearness to
+// breaking* on every scene, and a glassy sea gets no foam because it never
+// climbs that high. Normalising the fold by `Σ Q·k·A` would destroy exactly
+// this — both seas would reach 1.0 at every crest and coverage would become a
+// function of wave shape rather than of sea state.
+//
+// **Two thresholds, not one.** A single cutoff paints a white line along a
+// contour of the fold, which reads as drawn rather than as a crest's shape.
+// Between them the noise erodes; above the upper one foam wins outright.
+//
+// Set from σ(fold) = 0.189 on the seven-wave `ocean`: 0.22 is 1.17σ and 0.33
+// is 1.75σ. Measured coverage from a top-down render is 4.0–7.0% of surface
+// area. **That is a stylised sea's calibration, not a fitted physical law.**
+// Monahan's whitecap relation goes as U10^3.52 — a 25x swing between a breeze
+// and a storm — while a sum of ≤16 linear Gerstner waves can only move σ by
+// about 1.4x under the fold bound, so no fixed threshold can track it. It is
+// an order-of-magnitude check only, and 4–7% against Monahan's 3.2% at this
+// scene's 14 m/s passes it.
+static const float WATER_FOAM_WET = 0.22;
+static const float WATER_FOAM_BREAK = 0.33;
+/// Cross-wind stretch of the noise domain. **This is what makes streaks** —
+/// foam pulled out downwind rather than dropped in round blobs, which is the
+/// most recognisable thing about a real whitecap field.
+static const float WATER_FOAM_STRETCH = 6.0;
+/// Not white. Foam is packed bubbles, and bubbles are dielectric films: the
+/// brightest sea foam in a photograph sits well under paper white, and pinning
+/// it at 1.0 is what makes rendered surf read as painted.
+static const float3 WATER_FOAM_ALBEDO = float3(0.72, 0.76, 0.78);
+/// Where the second octave stops.
+///
+/// **Not taste — an aliasing bound.** Its cross-wind lattice period is
+/// `1/(WATER_FOAM_STRETCH · 2.3)` = 7.3 cm, and `loom_value_noise` is evaluated
+/// analytically with no mip chain, so past ~30 m that octave is far under a
+/// pixel and becomes a twinkle generator. One `saturate` retires it.
+static const float WATER_FOAM_FINE_RANGE = 40.0;
 
 [shader("fragment")]
 float4 waterFragmentMain(WaterOutput in) : SV_Target {
@@ -2496,6 +2549,41 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     float3 lit = lerp(through, skyColor(reflect(-view, normal)), fresnel);
     lit += specular(normal, view, sunDirection(), WATER_ROUGHNESS, float3(0.02))
          * sunColor() * sunStrength() * toSun;
+
+    // **Whitecaps.** See the constants above for why the threshold is absolute.
+    //
+    // The wind comes straight from the environment buffer rather than from
+    // `grassWind`. `grassWind` is `wind_at`, which the generated tree spends
+    // three noise taps and nine `sin` on — 2.5x this entire block — to add
+    // gusting and turbulence to a *direction* that here only needs to say which
+    // way the streaks lie.
+    float4 windv = push.environment[0].wind;
+    float2 wd = normalize(windv.xy + float2(1e-4, 0.0));
+    // Foam drifts downwind. Sampling in a frame that slides with the wind is
+    // what keeps a patch from sitting nailed to the world while the wave that
+    // made it travels out from under it.
+    float2 wp = in.worldPos.xz - wd * windv.z * push.environment[0].weather.z * 0.05;
+    float2 fuv = float2(dot(wp, wd), dot(wp, float2(-wd.y, wd.x)) * WATER_FOAM_STRETCH);
+    float fine = saturate(1.0 - length(toEye) / WATER_FOAM_FINE_RANGE);
+    float fnoise = loom_value_noise(float3(fuv * 0.55, 0.0)) * 0.65
+                 + loom_value_noise(float3(fuv * 2.3, 7.3)) * 0.35 * fine;
+    float wetc = smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, in.fold);
+    // **Eroded by the noise rather than faded by it.** A multiply would dim
+    // every foam pixel toward the water; thresholding the *coverage* against
+    // the noise instead dissolves the patch from its edges inward, which is
+    // how foam actually leaves — in shrinking lace, not in a uniform fade.
+    float foam = smoothstep(fnoise - 0.15, fnoise + 0.15, wetc);
+    // Past the breaking threshold foam wins outright, noise or no noise: a
+    // crest that has broken is white along its whole length.
+    foam = max(foam, smoothstep(WATER_FOAM_BREAK, 0.50, in.fold));
+
+    // **A material swap, not white paint.** Foam is opaque packed bubbles: it
+    // has no Fresnel and no specular lobe, and painting white *over* the sky
+    // reflection would leave a mirror shining through the surf. Replacing the
+    // shaded result is what makes it read as a different substance.
+    float3 foamLit = WATER_FOAM_ALBEDO
+        * (hemisphereAmbient(normal) * ambientStrength() + sunColor() * sunStrength() * toSun);
+    lit = lerp(lit, foamLit, foam);
 
     float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     return float4(lerp(lit, fogColor(-view), fog), 1.0);
