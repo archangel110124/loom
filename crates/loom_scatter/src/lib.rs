@@ -404,6 +404,176 @@ pub fn region_on(
     out
 }
 
+/// One named scatter rule in a list.
+///
+/// **A flat list, evaluated in order, and deliberately not a node graph.** The
+/// research the phase rests on settled that empirically: Unreal's PCG graphs
+/// are binary-only with no text export and no diff tool, and Epic's own advice
+/// is to partition content to avoid merge conflicts rather than resolve them.
+/// Blender's Geometry Nodes have the same problem. Two mature ecosystems failed
+/// to make a node graph reviewable in a diff, and a named list recovers the two
+/// or three genuinely-DAG features without any of that.
+#[derive(Debug, Clone, Copy)]
+pub struct Layer<'a> {
+    /// What later layers call this one.
+    pub name: &'a str,
+    pub rules: Rules,
+    /// Layers this one keeps away from.
+    pub exclude: &'a [Exclude<'a>],
+}
+
+/// "Not within `radius` of anything in `layer`."
+#[derive(Debug, Clone, Copy)]
+pub struct Exclude<'a> {
+    pub layer: &'a str,
+    pub radius: f32,
+}
+
+/// Why a layer list could not be resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScatterError {
+    /// A layer excluded from a name nothing declares.
+    UnknownLayer { layer: String, referenced: String },
+    /// A layer excluded from itself or from one declared later.
+    ///
+    /// **Backwards references only, and that is what makes cycles
+    /// impossible** — there is no cycle check anywhere else because there
+    /// cannot be one.
+    ForwardReference { layer: String, referenced: String },
+    /// Two layers with the same name: a later reference would be ambiguous.
+    DuplicateName { layer: String },
+}
+
+impl std::fmt::Display for ScatterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownLayer { layer, referenced } => {
+                write!(f, "layer {layer:?} excludes from {referenced:?}, which does not exist")
+            }
+            Self::ForwardReference { layer, referenced } => write!(
+                f,
+                "layer {layer:?} excludes from {referenced:?}, which is declared later — \
+                 references must point backwards"
+            ),
+            Self::DuplicateName { layer } => write!(f, "two layers are named {layer:?}"),
+        }
+    }
+}
+
+impl std::error::Error for ScatterError {}
+
+/// Resolve a list of layers over a region.
+///
+/// Returns each layer's instances, in declaration order.
+///
+/// # Errors
+/// [`ScatterError`] if a name is unknown, duplicated, or points forwards.
+pub fn scatter<'a>(
+    min: [f32; 2],
+    max: [f32; 2],
+    layers: &[Layer<'a>],
+    ground: &dyn Fn(f32, f32) -> Ground,
+) -> Result<Vec<(&'a str, Vec<Instance>)>, ScatterError> {
+    // Names first, so a typo is an error rather than a silently ignored rule.
+    for (i, layer) in layers.iter().enumerate() {
+        if layers[..i].iter().any(|l| l.name == layer.name) {
+            return Err(ScatterError::DuplicateName { layer: layer.name.to_owned() });
+        }
+        for e in layer.exclude {
+            let found = layers[..i].iter().position(|l| l.name == e.layer);
+            if found.is_none() {
+                return Err(if layers.iter().any(|l| l.name == e.layer) {
+                    ScatterError::ForwardReference {
+                        layer: layer.name.to_owned(),
+                        referenced: e.layer.to_owned(),
+                    }
+                } else {
+                    ScatterError::UnknownLayer {
+                        layer: layer.name.to_owned(),
+                        referenced: e.layer.to_owned(),
+                    }
+                });
+            }
+        }
+    }
+
+    // **How far outside the region each layer must be generated.**
+    //
+    // A layer that something else keeps 8 m away from has to be known 8 m
+    // beyond the edge, or an instance just outside the region would fail to
+    // push its neighbour out and the result would depend on where the region
+    // was cut. Margins compound backwards: if C avoids B by 5 and B avoids A by
+    // 8, then A is needed 13 m out.
+    //
+    // Getting this wrong does not crash and does not look wrong — it makes the
+    // answer depend on how the world was divided up, which is the one property
+    // this crate exists to have.
+    let mut margin = vec![0.0_f32; layers.len()];
+    for j in (0..layers.len()).rev() {
+        for e in layers[j].exclude {
+            let i = layers.iter().position(|l| l.name == e.layer).expect("checked above");
+            margin[i] = margin[i].max(e.radius.max(0.0) + margin[j]);
+        }
+    }
+
+    // **Resolved in declaration order, each layer filtered before the next
+    // reads it.** A layer keeps away from what the layer it names *actually
+    // put down*, not from that layer's raw candidates — a road removed for
+    // being on a cliff must not go on repelling trees.
+    //
+    // Generating them all first and filtering afterwards is the obvious
+    // shape and is wrong in exactly that way. It is also not a subtle wrong:
+    // in a chain of three it left the last layer completely empty, because it
+    // was avoiding every candidate of a layer that had itself been almost
+    // entirely removed.
+    //
+    // Each layer is resolved over its own *expanded* region, so a later layer
+    // reading it has the margin it needs; the restriction to the caller's
+    // region happens at the end.
+    let mut resolved: Vec<Vec<Instance>> = Vec::with_capacity(layers.len());
+    for (i, layer) in layers.iter().enumerate() {
+        let m = margin[i];
+        let raw =
+            region_on([min[0] - m, min[1] - m], [max[0] + m, max[1] + m], &layer.rules, ground);
+        let kept: Vec<Instance> = raw
+            .into_iter()
+            .filter(|inst| {
+                layer.exclude.iter().all(|e| {
+                    let source =
+                        layers.iter().position(|l| l.name == e.layer).expect("checked above");
+                    let r = e.radius.max(0.0);
+                    // `ponytail:` brute force. A quadtree matters when a layer
+                    // has a hundred thousand instances; at that point the cheap
+                    // fix is to reuse the elimination grid, which already
+                    // buckets by cell.
+                    !resolved[source].iter().any(|other| {
+                        let (dx, dz) = (other.at[0] - inst.at[0], other.at[1] - inst.at[1]);
+                        dx.mul_add(dx, dz * dz) < r * r
+                    })
+                })
+            })
+            .collect();
+        resolved.push(kept);
+    }
+
+    Ok(layers
+        .iter()
+        .zip(resolved)
+        .map(|(layer, instances)| {
+            let inside = instances
+                .into_iter()
+                .filter(|inst| {
+                    inst.at[0] >= min[0]
+                        && inst.at[0] < max[0]
+                        && inst.at[1] >= min[1]
+                        && inst.at[1] < max[1]
+                })
+                .collect();
+            (layer.name, inside)
+        })
+        .collect())
+}
+
 /// The `i`th point of a Halton sequence in two dimensions, in `[0, 1)²`.
 ///
 /// **For fixed-count coverage**, which Poisson-disk cannot give: elimination
@@ -714,6 +884,188 @@ mod tests {
             .collect();
         assert!(!patch.is_empty(), "the patch is empty — the test proves nothing");
         assert_eq!(patch, inside, "the ground made scatter order-dependent");
+    }
+
+    fn flat() -> impl Fn(f32, f32) -> Ground {
+        |_, _| Ground::default()
+    }
+
+    /// The phase's own example: trees, but not where the roads are.
+    #[test]
+    fn a_layer_keeps_away_from_the_one_it_names() {
+        let roads = Layer {
+            name: "roads",
+            rules: Rules { spacing: 14.0, seed: 1, ..Rules::default() },
+            exclude: &[],
+        };
+        let trees = Layer {
+            name: "trees",
+            rules: Rules { spacing: 3.0, seed: 2, ..Rules::default() },
+            exclude: &[Exclude { layer: "roads", radius: 6.0 }],
+        };
+        let out = scatter([0.0, 0.0], [80.0, 80.0], &[roads, trees], &flat()).expect("resolves");
+        let (road_pts, tree_pts) = (&out[0].1, &out[1].1);
+        assert!(!road_pts.is_empty() && !tree_pts.is_empty(), "a layer is empty");
+
+        for t in tree_pts {
+            for r in road_pts {
+                let d = (t.at[0] - r.at[0]).hypot(t.at[1] - r.at[1]);
+                assert!(d >= 6.0, "a tree is {d:.2} m from a road, inside the 6 m exclusion");
+            }
+        }
+
+        // And it must not have removed everything, or the test above is
+        // vacuous. The baseline is the same rule with the exclusion dropped —
+        // not the same `Layer` in a shorter list, which correctly refuses to
+        // resolve because it still names a layer that is no longer there.
+        let unrestricted = Layer { exclude: &[], ..trees };
+        let alone =
+            scatter([0.0, 0.0], [80.0, 80.0], &[unrestricted], &flat()).expect("resolves");
+        assert!(
+            tree_pts.len() * 2 > alone[0].1.len(),
+            "exclusion removed more than half the trees: {} of {}",
+            tree_pts.len(),
+            alone[0].1.len()
+        );
+        assert!(tree_pts.len() < alone[0].1.len(), "exclusion removed nothing at all");
+    }
+
+    /// **The margin test, and it is the one that matters.**
+    ///
+    /// An excluded layer has to be generated beyond the region's edge, or an
+    /// instance just outside fails to push its neighbour out and the answer
+    /// depends on where the region was cut. That is not a crash and does not
+    /// look wrong — it is the loss of the one property this crate exists for.
+    #[test]
+    fn an_excluded_patch_matches_the_full_run() {
+        let roads = Layer {
+            name: "roads",
+            rules: Rules { spacing: 11.0, seed: 3, ..Rules::default() },
+            exclude: &[],
+        };
+        let trees = Layer {
+            name: "trees",
+            rules: Rules { spacing: 3.0, seed: 4, ..Rules::default() },
+            exclude: &[Exclude { layer: "roads", radius: 7.0 }],
+        };
+        let list = [roads, trees];
+
+        let whole = scatter([-40.0, -40.0], [40.0, 40.0], &list, &flat()).expect("resolves");
+        let patch = scatter([-5.0, 1.0], [12.0, 18.0], &list, &flat()).expect("resolves");
+
+        let inside: Vec<Instance> = whole[1]
+            .1
+            .iter()
+            .copied()
+            .filter(|i| i.at[0] >= -5.0 && i.at[0] < 12.0 && i.at[1] >= 1.0 && i.at[1] < 18.0)
+            .collect();
+        assert!(!patch[1].1.is_empty(), "the patch is empty — the test proves nothing");
+        assert_eq!(patch[1].1, inside, "exclusion made the result depend on the region");
+    }
+
+    /// Margins compound: C avoids B, B avoids A, so A is needed further out
+    /// than either radius alone. A chain is where a margin bug hides.
+    #[test]
+    fn a_chain_of_exclusions_still_matches_the_full_run() {
+        let a = Layer {
+            name: "a",
+            // **Dense enough and far-reaching enough to have statistical
+            // power.** A first version used spacing 13 with an 8 m radius and
+            // passed with the compounding margin deliberately removed: `a` was
+            // so sparse that the narrow band where the defect bites usually
+            // held no instance at all. A test that relies on a coincidence is
+            // a test that reports what the coincidence did.
+            rules: Rules { spacing: 9.0, seed: 5, ..Rules::default() },
+            exclude: &[],
+        };
+        let b = Layer {
+            name: "b",
+            rules: Rules { spacing: 3.0, seed: 6, ..Rules::default() },
+            exclude: &[Exclude { layer: "a", radius: 10.0 }],
+        };
+        let c = Layer {
+            name: "c",
+            rules: Rules { spacing: 2.5, seed: 7, ..Rules::default() },
+            exclude: &[Exclude { layer: "b", radius: 6.0 }],
+        };
+        let list = [a, b, c];
+
+        // **Tiled into many small patches, not one.** A single patch was tried
+        // first and could not see a missing compounding margin: the defect only
+        // bites where an `a` instance falls in a narrow band outside the patch
+        // *and* a `b` candidate sits within its radius *and* a `c` instance is
+        // within range of that — a coincidence rare enough that one patch
+        // usually misses it. Sixteen patches expose sixteen times the boundary,
+        // which is also exactly what dirty-region regeneration does.
+        let whole = scatter([-20.0, -20.0], [20.0, 20.0], &list, &flat()).expect("resolves");
+
+        let mut tiled: Vec<Vec<Instance>> = vec![Vec::new(); 3];
+        for gz in 0_i16..4 {
+            for gx in 0_i16..4 {
+                let lo = [-20.0 + f32::from(gx) * 10.0, -20.0 + f32::from(gz) * 10.0];
+                let hi = [lo[0] + 10.0, lo[1] + 10.0];
+                let part = scatter(lo, hi, &list, &flat()).expect("resolves");
+                for (layer, out) in tiled.iter_mut().enumerate() {
+                    out.extend_from_slice(&part[layer].1);
+                }
+            }
+        }
+
+        let key = |i: &Instance| (i.at[0].to_bits(), i.at[1].to_bits());
+        for layer in 0..3 {
+            let mut from_whole: Vec<_> = whole[layer].1.iter().map(key).collect();
+            let mut from_tiles: Vec<_> = tiled[layer].iter().map(key).collect();
+            from_whole.sort_unstable();
+            from_tiles.sort_unstable();
+            assert_eq!(
+                from_tiles, from_whole,
+                "layer {layer} differs between a tiled rebuild and a whole one"
+            );
+        }
+        assert!(!tiled[2].is_empty(), "the deepest layer is empty");
+    }
+
+    /// Names are checked rather than silently ignored — a typo that scattered
+    /// nothing would look like a rule that simply did not match.
+    #[test]
+    fn bad_names_are_rejected() {
+        let a = Layer { name: "a", rules: Rules::default(), exclude: &[] };
+        let typo = Layer {
+            name: "b",
+            rules: Rules::default(),
+            exclude: &[Exclude { layer: "rodes", radius: 1.0 }],
+        };
+        assert!(matches!(
+            scatter([0.0, 0.0], [10.0, 10.0], &[a, typo], &flat()),
+            Err(ScatterError::UnknownLayer { .. })
+        ));
+
+        // Forward references are the cycle check: there is no other one,
+        // because with backwards-only references a cycle cannot be written.
+        let first = Layer {
+            name: "first",
+            rules: Rules::default(),
+            exclude: &[Exclude { layer: "second", radius: 1.0 }],
+        };
+        let second = Layer { name: "second", rules: Rules::default(), exclude: &[] };
+        assert!(matches!(
+            scatter([0.0, 0.0], [10.0, 10.0], &[first, second], &flat()),
+            Err(ScatterError::ForwardReference { .. })
+        ));
+
+        let dup = Layer { name: "a", rules: Rules::default(), exclude: &[] };
+        assert!(matches!(
+            scatter([0.0, 0.0], [10.0, 10.0], &[a, dup], &flat()),
+            Err(ScatterError::DuplicateName { .. })
+        ));
+
+        // And a layer may not exclude from itself, which is the same rule.
+        let selfref = Layer {
+            name: "x",
+            rules: Rules::default(),
+            exclude: &[Exclude { layer: "x", radius: 1.0 }],
+        };
+        assert!(scatter([0.0, 0.0], [10.0, 10.0], &[selfref], &flat()).is_err());
     }
 
     /// Halton must cover the square rather than clustering, which is the only
