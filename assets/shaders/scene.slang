@@ -345,7 +345,7 @@ float horizonFade(float3 dir) {
 /// A position rather than a view ray: `cloudPlane` projects a direction onto
 /// the deck, which is the right question for a pixel of sky and the wrong one
 /// for a drop that is already somewhere.
-float cloudCoverAt(float3 world) {
+float cloudCoverAtTime(float3 world, float t) {
     float4 cloud = push.environment[0].cloud;
     if (cloud.x >= 1.0) {
         // A solid deck rains everywhere. Skipping the evaluation here is what
@@ -363,7 +363,15 @@ float cloudCoverAt(float3 world) {
     params.dir_x = wind.x;
     params.dir_z = wind.y;
     params.speed = wind.z;
-    return clouds_at(float3(world.x, 0.0, world.z), push.environment[0].weather.z, params).x;
+    // **The time is a parameter because the deck advects along the wind**, so a
+    // lagged `t` is where the deck *was*. The wetness average below is a walk
+    // backwards through that.
+    return clouds_at(float3(world.x, 0.0, world.z), t, params).x;
+}
+
+/// Cover over a point now. The same clock the grass bends on.
+float cloudCoverAt(float3 world) {
+    return cloudCoverAtTime(world, push.environment[0].weather.z);
 }
 
 float2 cloudSample(float3 dir) {
@@ -949,6 +957,42 @@ static const float WET_COVER_SLACK = 0.5;
 ///
 /// The geometric normal, deliberately — a normal map should change how a wet
 /// surface catches the light, not whether it is wet.
+/// Seconds of history the wetness cover average looks back over, and how many
+/// samples it takes. **Mirrors `loom_rain::WET_COVER_WINDOW` and
+/// `WET_COVER_TAPS`** — a hand-written twin, because the averaging is a loop
+/// over `clouds_at` and S2's expression tree expresses scalar fields rather
+/// than loops over one. These two numbers are the whole shared contract.
+static const float WET_COVER_WINDOW = 40.0;
+static const int WET_COVER_TAPS = 3;
+
+/// How much cloud has been over this point lately, 0 to 1.
+///
+/// **Not the cover now, and that is the point.** Wetness is the integral of
+/// rain over the last minute; a deck drifting at 17 m/s crosses a thirty-metre
+/// scene in two seconds. Gating wetness on the instantaneous value would make
+/// the ground brighten and darken as cloud shadows pass, which is what *lit*
+/// ground does and not what *wet* ground does.
+float cloudCoverRecent(float3 world) {
+    // A solid deck is over everywhere, always. This is what keeps every scene
+    // that authors no cover — which is every scene that rains, by default —
+    // paying nothing for three `clouds_at` evaluations per ground pixel.
+    if (push.environment[0].cloud.x >= 1.0) {
+        return 1.0;
+    }
+    if (push.environment[0].cloud.x <= 0.0) {
+        return 0.0;
+    }
+    float now = push.environment[0].weather.z;
+    float total = 0.0;
+    for (int i = 0; i < WET_COVER_TAPS; ++i) {
+        float back = WET_COVER_TAPS > 1
+            ? WET_COVER_WINDOW * float(i) / float(WET_COVER_TAPS - 1)
+            : 0.0;
+        total += cloudCoverAtTime(world, max(now - back, 0.0));
+    }
+    return total / float(WET_COVER_TAPS);
+}
+
 float wetGate(float3 worldPos, float3 geometric) {
     // Off the grid, and in a scene with no terrain, this is a large negative
     // sentinel and nothing is ever under cover.
@@ -956,7 +1000,13 @@ float wetGate(float3 worldPos, float3 geometric) {
     float open = worldPos.y > ground - WET_COVER_SLACK ? 1.0 : 0.0;
     float facing = smoothstep(-0.3, 0.0, geometric.y)
         * lerp(WET_WALL, 1.0, saturate(geometric.y));
-    return open * facing;
+    // **And the cloud that has been over it**, which is the third of the three
+    // things that decide whether a surface is wet — the other two being the
+    // roof above it and which way it faces. The film and soak this gates are
+    // still one pair of scalars for the scene, computed from the *unsheltered,
+    // uncovered* rate; this is where both per-position terms are applied, the
+    // same division of labour the streaks follow.
+    return open * facing * cloudCoverRecent(worldPos);
 }
 
 // ---------------------------------------------------------------------------

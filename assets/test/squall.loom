@@ -22,6 +22,20 @@
 #   * Under the cloud mass, most of the authored 8 mm/h arrives.
 #   * A hundred and twenty metres away, under a gap in the same deck, none does.
 #
+# **And the ground remembers, which is the other half.** At tick 600 the deck
+# has drifted 175 m — most of a cloud mass at this scale — so *both* points read
+# a rate of 0.0 by then. The wetness does not:
+#
+#     loom sim assets/test/squall.loom --ticks 600 \
+#       --assert "wetness@-120,4,0.film > 0.5" \
+#       --assert "wetness@0,4,0.film < 0.05"
+#
+# One was rained on during the last forty seconds and one was not. Wetness is an
+# integral, so it is gated on cover *averaged over the recent past* rather than
+# on the cover now — `loom_rain::cover_recent`. Gating on the instantaneous
+# value would make the ground brighten and darken as cloud shadows crossed it,
+# which is what lit ground does and not what wet ground does.
+#
 # **The last two assertions are the ones that make the first two mean
 # something.** There is no roof anywhere in this scene and no voxel volume at
 # all, so `exposure` is 1.0 at both points — and asserting that says so out

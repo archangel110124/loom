@@ -527,12 +527,21 @@ change, so your edits appear live. Two consequences:
 > 2 px). Flicker disagrees and was overruled, because it cannot tell "wider" from "less stable";
 > the salt metric in `RAIN_MIN_PIXELS`'s docs is the one that can.
 >
-> **Known gap, created by ADR 0016 step 3 and not yet closed: wetness does not read cloud cover.**
-> The rate is per-position now, but `film` and `soak` are still one pair of scalars for the scene,
-> computed from the unsheltered rate. So under a broken deck a dry spot renders soaked, and
-> `puddles.loom` authors a solid sky rather than paper over it. Fixing it means making wetness a
-> per-position query like the rate, which is a bigger change than it sounds because the shader
-> reads it out of two environment floats.
+> **Wetness follows the cloud too, and the interesting part is the lag.** ADR 0016 step 3 made the
+> rate per-position and left wetness global, so a spot under a gap read `rain@...rate == 0` while
+> rendering soaked. It is now gated on cover like the rate — but on **cover averaged over the last
+> 40 s** (`loom_rain::cover_recent`, three taps), not the cover *now*. Wetness is an integral: a
+> deck drifting at 17 m/s crosses a thirty-metre scene in two seconds, and gating on the
+> instantaneous value would make the ground brighten and darken as cloud shadows passed — which is
+> what *lit* ground does and not what *wet* ground does. `squall.loom` asserts the consequence: at
+> tick 600 both test points read a rate of 0.0 because the shower has moved on, and one is still
+> wet while the other never was.
+>
+> `film` and `soak` are still one pair of scalars for the scene, computed from the *unsheltered,
+> uncovered* rate; `wetGate` applies shelter **and** cover per pixel. That is the same division of
+> labour the streaks follow, and it is why nothing needed a wetness grid. Cost is 0.140 → 0.211 ms
+> at 1920x1080, paid only by scenes that author a broken deck — a solid one short-circuits, which
+> is every scene that rains by default.
 
 ### What M0–M12 already delivered
 

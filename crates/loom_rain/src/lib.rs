@@ -108,6 +108,53 @@ static CLOUDS: std::sync::OnceLock<loom_field::Field> = std::sync::OnceLock::new
 /// numerically. That is the property ADR 0016 argues this whole shape for — the
 /// clouds the eye sees and the rain the simulation feels cannot drift apart,
 /// because there is only one of them.
+/// Seconds of history the wetness cover average looks back over.
+///
+/// **Wetness is an integral, and gating it on the cover *now* is wrong.** A deck
+/// drifting at 17 m/s crosses a thirty-metre scene in two seconds; ground takes
+/// tens of seconds to wet and minutes to dry. Cover-now would make the ground
+/// brighten and darken as cloud shadows pass, which is not a thing wet ground
+/// does — it is a thing *lit* ground does, and that is the sun term's job.
+///
+/// 40 s is the same order as `FILM_WET`, which is the constant that decides how
+/// fast a surface responds at all.
+pub const WET_COVER_WINDOW: f32 = 40.0;
+
+/// Samples taken across that window.
+///
+/// Three, and the count is a cost decision rather than an accuracy one: this is
+/// evaluated per ground pixel in the shader, each tap is a full `clouds_at`, and
+/// `clouds_at` is twelve noise evaluations because the expression tree has no
+/// common-subexpression elimination. A scene with a solid deck short-circuits
+/// all of it.
+pub const WET_COVER_TAPS: u32 = 3;
+
+/// Cloud cover at a point, averaged over [`WET_COVER_WINDOW`].
+///
+/// **Mirrored in `scene.slang`'s `cloudCoverRecent`**, which is a hand-written
+/// twin — the averaging is a loop over `clouds_at`, and S2's expression tree
+/// expresses scalar fields rather than loops over one. The two constants above
+/// are the whole of the shared contract; keep them spelled the same on both
+/// sides, as `loom_water::slang()` does for the wave sum.
+#[must_use]
+pub fn cover_recent(deck: Deck, wind: &Wind, at: [f32; 3], t: f32) -> f32 {
+    let taps = WET_COVER_TAPS.max(1);
+    let mut total = 0.0;
+    for i in 0..taps {
+        #[allow(clippy::cast_precision_loss)]
+        let back = if taps > 1 {
+            WET_COVER_WINDOW * (i as f32) / ((taps - 1) as f32)
+        } else {
+            0.0
+        };
+        total += cover_at(deck, wind, at, (t - back).max(0.0));
+    }
+    #[allow(clippy::cast_precision_loss)]
+    {
+        total / taps as f32
+    }
+}
+
 #[must_use]
 pub fn cover_at(deck: Deck, wind: &Wind, at: [f32; 3], t: f32) -> f32 {
     let field = CLOUDS.get_or_init(loom_field::clouds);
@@ -280,12 +327,28 @@ fn approach(t: f32, tau: f32) -> f32 {
 /// is where to record it if a scene ever needs it.
 #[must_use]
 pub fn wetness(rain: Option<&Rain>, exposure: f32, t: f32) -> Wetness {
+    wetness_under(rain, exposure, 1.0, t)
+}
+
+/// [`wetness`], with the cloud cover that has been over this point.
+///
+/// **Separate from `exposure` rather than multiplied into it**, for the reason
+/// ADR 0016 gives about the rate: *is there cloud above me* and *is there a roof
+/// above me* are different facts, and folding them together is what made rain a
+/// switch. `cover` here is [`cover_recent`], not the instantaneous value.
+///
+/// Without this, a scene under a broken deck renders every surface as wet as
+/// the wettest — the rate became per-position when ADR 0016 step 3 landed and
+/// wetness did not follow, so a spot under a gap read `rain@...rate == 0` while
+/// drawing soaked.
+#[must_use]
+pub fn wetness_under(rain: Option<&Rain>, exposure: f32, cover: f32, t: f32) -> Wetness {
     let Some(rain) = rain else {
         // The same rule `sample_rain` follows: a scene that authors no rain is
         // dry, so every scene written before this phase renders unchanged.
         return Wetness { film: 0.0, soak: 0.0 };
     };
-    let rate = rain.intensity.max(0.0) * exposure.clamp(0.0, 1.0);
+    let rate = rain.intensity.max(0.0) * exposure.clamp(0.0, 1.0) * cover.clamp(0.0, 1.0);
     let equilibrium = (rate / SOAKING_RATE).min(1.0);
 
     // `None` is rain that never stops, so the wet phase is the whole run and

@@ -70,7 +70,15 @@ impl Weather {
     /// voxels, the same number that scaled the rate. Wetness grows no occlusion
     /// of its own, which is the rule the whole phase is arranged around.
     pub fn wetness_at(&self, at: [f32; 3]) -> loom_rain::Wetness {
-        loom_rain::wetness(self.rain.as_ref(), self.rain_at(at).exposure, self.seconds)
+        // **Cover averaged over the recent past, not the cover now.** See
+        // `loom_rain::cover_recent`: wetness is an integral and the deck drifts
+        // faster than the ground responds.
+        loom_rain::wetness_under(
+            self.rain.as_ref(),
+            self.rain_at(at).exposure,
+            loom_rain::cover_recent(self.deck, &self.wind, at, self.seconds),
+            self.seconds,
+        )
     }
 }
 
