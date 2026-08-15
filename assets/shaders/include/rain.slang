@@ -152,6 +152,21 @@ static const float RAIN_WIDTH = 0.02;
 /// flicker alone, which is the metric that cannot see this.
 static const float RAIN_MIN_PIXELS = 2.5;
 
+/// How much light a streak actually adds, against the sky colour it takes.
+///
+/// **A drop is lit by scattering, and scattering is weak.** A streak's
+/// brightness does not depend on what is behind it — it is additive — but its
+/// CONTRAST does, and against dark water a full-strength sky-coloured streak
+/// reads as a white scratch rather than as rain. Photographs of rain over a
+/// dark sea show texture and haze; the individual bright streaks people
+/// remember are the ones seen against a bright sky or a bright background.
+///
+/// This was 1.0 implicitly — `strength` reaches 1 at full rate and went
+/// straight into the additive blend. The density carries the impression of
+/// rain; the per-streak brightness only decides whether it reads as weather or
+/// as damage to the film.
+static const float RAIN_STREAK_BRIGHTNESS = 0.42;
+
 /// Metres from the eye a drop is fully invisible at, and fully visible by.
 ///
 /// **The near field, and it is not a taste call.** A streak's width is constant

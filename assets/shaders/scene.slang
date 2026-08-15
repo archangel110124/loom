@@ -3135,7 +3135,8 @@ float4 rainFragmentMain(RainOutput in) : SV_Target {
     // cost of rain, and this is the version of it that needs no sorting.
     float across = 1.0 - abs(in.local.x);
     float along = 1.0 - in.local.y * in.local.y;
-    float alpha = in.strength * smoothstep(0.0, 1.0, across) * along;
+    float alpha = in.strength * smoothstep(0.0, 1.0, across) * along
+                * RAIN_STREAK_BRIGHTNESS;
 
     alpha *= rainDepthFade(in.position.xy, in.worldPos);
 
