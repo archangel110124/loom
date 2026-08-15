@@ -38,8 +38,9 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 29] = [
+const SCENES: [&str; 30] = [
     "assets/test/blockout.loom",
+    "assets/test/ground.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
     "assets/test/cave.loom",
@@ -149,7 +150,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 20] = [
+const GOLDEN: [(&str, &str, &[&str]); 21] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -282,6 +283,14 @@ const GOLDEN: [(&str, &str, &[&str]); 20] = [
     // the same terrain give the same forest every time, which is the property
     // `loom_scatter` is built around and this is the picture of it.
     ("forest", "assets/test/forest.loom", &[]),
+    // **A texture sampled on voxel terrain, which no other reference covers.**
+    // `terrain_stress` and `terrain_billion` are the only other scenes that put
+    // an `albedo_map` on a `VoxelVolume` and neither is in this list, so until
+    // this scene existed every triplanar path — three projections, the whiteout
+    // normal blend, the weight exponent — could be arbitrarily wrong and the
+    // gate would still report a full pass. One of them WAS wrong: the X-plane
+    // normal was sampled transposed. No `--sim`: nothing here moves.
+    ("ground", "assets/test/ground.loom", &[]),
     // **The changelog shot, and it is deliberately not a normal gate.** Every
     // reference above protects one rendering path and moves only when that
     // path changes. This one touches terrain, water, current, grass, rain,
