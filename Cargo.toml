@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-    "xtask","crates/loom_agent","crates/loom_asset", "crates/loom_audio", "crates/loom_cli", "crates/loom_ecs", "crates/loom_field", "crates/loom_grass", "crates/loom_input", "crates/loom_particles", "crates/loom_physics", "crates/loom_rain", "crates/loom_reflect", "crates/loom_render", "crates/loom_render_graph", "crates/loom_scene", "crates/loom_script", "crates/loom_terrain", "crates/loom_voxel", "crates/loom_water"]
+    "xtask","crates/loom_agent","crates/loom_asset", "crates/loom_audio", "crates/loom_cli", "crates/loom_ecs", "crates/loom_field", "crates/loom_grass", "crates/loom_input", "crates/loom_particles", "crates/loom_physics", "crates/loom_rain", "crates/loom_reflect", "crates/loom_render", "crates/loom_render_graph", "crates/loom_scatter", "crates/loom_scene", "crates/loom_script", "crates/loom_terrain", "crates/loom_voxel", "crates/loom_water"]
 
 # Crates land per milestone (see docs/design/LOOM-BUILD-BRIEF.md §3):
 #   M1  loom_reflect, loom_scene
