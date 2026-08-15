@@ -118,10 +118,17 @@ transform = { pos = [12.4, 4.05, 13.3], rot_euler = [0.0, 24.0, 0.0], scale = [0
 [[node]]
 name = "Firelight"
 parent = "Night"
-transform = { pos = [12.0, 4.6, 12.0] }
+transform = { pos = [12.1, 4.7, 13.3] }
 
+  # **1.35, not 22, and that is arithmetic.** The term reaching a surface is
+  # `I * albedo * h / d^3`. At 22 with this geometry red reached 1.0 by 1.77 m,
+  # green by 1.35 m and blue by 0.89 m — a white disc a metre across inside a
+  # three-metre pool where red alone was pinned, and the "soft glow" around it
+  # was the channels leaving the clamp one at a time rather than any falloff.
+  # The colour target is 8-bit fixed point with no tonemapping, so the ceiling
+  # before anything clips at all is about 1.5.
   [node.components.Light]
-  intensity = 22.0
+  intensity = 1.35
   color = [1.0, 0.52, 0.18]
 
 # The flame itself. Additive, so it reads as emission rather than as a lit
@@ -129,7 +136,7 @@ transform = { pos = [12.0, 4.6, 12.0] }
 [[node]]
 name = "Flame"
 parent = "Night"
-transform = { pos = [12.0, 5.55, 12.2] }
+transform = { pos = [12.1, 5.25, 13.3] }
 
   # **One static quad, and the flame lives inside it.** Not a stack of
   # sprites: the colour target is 8-bit and additive blending clamps at 1.0
@@ -155,7 +162,7 @@ transform = { pos = [12.0, 5.55, 12.2] }
   wind_response = 0.0
   # The quad's side. The flame occupies the middle of it and the corners are
   # discarded, so this is comfortably larger than the fire.
-  size = [2.8, 2.8]
+  size = [2.2, 2.2]
   alpha = [1.0, 1.0]
   # Only the alpha and the sign of red matter to a flame; the ramp lives in the
   # shader, where it can be capped below 1.0 so nothing clips.

@@ -1908,15 +1908,39 @@ static const float FIRE_WARP_XZ = 2.6;
 static const float FIRE_WARP_Y = 3.4;
 /// Where the field stops being flame. Rises with height so tongues pinch off
 /// rather than all reaching the top together.
+///
+/// **`FIRE_T1` must EXCEED the field's supremum, and that is arithmetic rather
+/// than taste.** `fireFbm` divides by the sum of its amplitudes and
+/// `loom_value_noise` is on [0,1), so its supremum is exactly 1.0 and its
+/// distribution is narrow — mean 0.5, sigma about 0.15. At the previous 0.66,
+/// roughly a tenth of the field still cleared the threshold at the very top of
+/// the quad, so a tenth of the column stayed lit for ever: the flame could not
+/// terminate at any height, and no amount of adjusting the exponent or the
+/// cone could make it, because the ceiling was never above the field's tail.
+/// Above 1.0 extinction is certain rather than probabilistic, and because the
+/// distribution is narrow the crossing is steep — which is what produces a
+/// PINCH that detaches a puff instead of a fade.
+///
+/// The exponent came down with it: at 2.6 the rise put most of its travel in
+/// the top third, so the flame was full width almost to the ceiling and then
+/// stopped. At 1.6 the threshold climbs through the field's distribution over
+/// the whole height, which is where the necking happens.
 static const float FIRE_T0 = 0.30;
-static const float FIRE_T1 = 0.66;
-static const float FIRE_T_POW = 2.6;
+static const float FIRE_T1 = 1.05;
+static const float FIRE_T_POW = 1.6;
 /// How hard the envelope pinches inward with height, and how many lobes the
 /// fuel line has. The lobes are what make the tongues SEPARATE at the base
 /// rather than being one sheet that noise happens to tear.
-static const float FIRE_CONE = 0.85;
-static const float FIRE_LOBES = 3.4;
-static const float FIRE_GAP = 0.30;
+///
+/// **`FIRE_GAP` is the same arithmetic as `FIRE_T1` and was wrong the same
+/// way.** At 0.30 the threshold in the middle of a gap reached only 0.60, and
+/// about a fifth of the field clears that — so the gaps between tongues were a
+/// fifth lit, every tongue joined its neighbours, and the fire was one
+/// connected blob with dark patches rather than separate flames. It has to
+/// exceed the field's tail for a gap to be a gap.
+static const float FIRE_CONE = 0.55;
+static const float FIRE_LOBES = 5.5;
+static const float FIRE_GAP = 0.72;
 /// The brightness transfer, with a floor. Without the floor, brightness inside
 /// the coverage edge is cubic in depth-into-the-flame, so the outermost pixels
 /// read as black and full colour arrives several pixels in — the shader paints
@@ -1997,7 +2021,7 @@ float4 flameColor(ParticleOutput in, float3 toEye) {
     // the field.** A multiply's edge is the mask's own gradient, which is far
     // softer than the field's, and a soft-edged gap between two tongues is
     // precisely what turns a fire back into a fireball.
-    float radial = length(float2(w.x, w.z)) / max(half_h * 0.95, 1e-3);
+    float radial = length(float2(w.x, w.z)) / max(half_h * 1.15, 1e-3);
     float cone = radial * (1.0 + FIRE_CONE * h);
     // The fuel line: a few lobes across the base, so tongues start apart
     // rather than being one sheet that noise happens to tear.
