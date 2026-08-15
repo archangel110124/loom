@@ -40,6 +40,7 @@ mod rain;
 mod raytrace;
 mod renderer;
 mod scene_depth;
+mod water_textures;
 mod ui;
 mod viewer;
 

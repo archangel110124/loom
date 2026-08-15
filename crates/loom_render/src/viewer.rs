@@ -127,6 +127,7 @@ pub struct Viewer {
     rain_drops: u32,
     /// The scene's depth, as a descriptor the rain fragment shader samples.
     scene_depth: crate::scene_depth::SceneDepth,
+    water_textures: crate::water_textures::WaterTextures,
     objects: vk::Buffer,
     environment_buffer: vk::Buffer,
     environment_alloc: Option<gpu_allocator::vulkan::Allocation>,
@@ -289,6 +290,7 @@ impl Viewer {
         )?;
 
         let scene_depth = crate::scene_depth::SceneDepth::new(&raw)?;
+        let water_textures = crate::water_textures::WaterTextures::new(&raw)?;
         scene_depth.bind(depth_view);
         let cache_path = pipeline_cache_path(instance, device);
         // The pipeline is built for the *swapchain's* format, which is usually
@@ -308,6 +310,7 @@ impl Viewer {
                 raytracer.as_ref().map(crate::raytrace::Raytracer::descriptor_layout),
                 materials.descriptor_layout(),
                 scene_depth.descriptor_layout(),
+                water_textures.descriptor_layout(),
                 samples,
             )?;
         let sky_pipeline =
@@ -490,6 +493,15 @@ impl Viewer {
             format,
             samples,
         )?;
+        // The opaque pair lives inside `Msaa`, so it only exists when
+        // multisampling does — and the split only happens then either. At one
+        // sample the descriptor points at the depth view, which is never read
+        // because the water block never runs.
+        if let Some(m) = msaa.as_ref() {
+            water_textures.bind(m.opaque_color_view, m.opaque_depth_view);
+        } else {
+            water_textures.bind(depth_view, depth_view);
+        }
 
         names.set(pipeline, "loom.viewer_pipeline");
         names.set(grass_pipeline, "loom.viewer_grass_pipeline");
@@ -558,6 +570,7 @@ impl Viewer {
             rain_tick: 0,
             rain_drops: 0,
             scene_depth,
+            water_textures,
             rt_positions,
             device: raw,
             queue: device.queue(),
@@ -1164,6 +1177,7 @@ impl Viewer {
         // See the same construction in `renderer.rs`.
         let rain_resolves = msaa_ids.is_some() && rain_buffers.is_some();
         let split = water_verts > 0 && msaa_ids.is_some();
+        let water_set = self.water_textures.descriptor_set();
         let mut forward_uses = Vec::new();
         if !rain_resolves && !split {
             forward_uses.push((scene_id, Access::ColorWrite));
@@ -1240,6 +1254,19 @@ impl Viewer {
                         layout,
                         1,
                         &[material_set],
+                        &[],
+                    );
+                    // Set 3 as well, because the water fragment shader
+                    // statically samples it and the water draw lands in THIS
+                    // block whenever the pass is not split. A statically-used
+                    // set that is not bound is a draw-time validation error,
+                    // and it fired on exactly the scenes that have water.
+                    d.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        layout,
+                        3,
+                        &[water_set],
                         &[],
                     );
                     set_viewport(d, cmd, extent.width, extent.height);
@@ -1376,6 +1403,16 @@ impl Viewer {
                             layout,
                             1,
                             &[material_set],
+                            &[],
+                        );
+                        // Set 3: the colour and depth of everything behind the
+                        // water. Bound once for the block, never per draw.
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            3,
+                            &[water_set],
                             &[],
                         );
                         crate::renderer::set_viewport(d, cmd, extent.width, extent.height);
@@ -1728,6 +1765,18 @@ impl Viewer {
                     self.format,
                     crate::renderer::MSAA_SAMPLES,
                 )?;
+            }
+
+            // **After the pair is rebuilt, not before.** This ran above the
+            // rebuild first and pointed the descriptor at the views the very
+            // next lines destroy — the validation layers caught it as an
+            // `imageView 0x0`, which is the lucky version: had the handle been
+            // reused instead it would have been a silent use-after-free, which
+            // is exactly what the comment on `scene_depth.bind` warns about.
+            if let Some(m) = self.msaa.as_ref() {
+                self.water_textures.bind(m.opaque_color_view, m.opaque_depth_view);
+            } else {
+                self.water_textures.bind(self.depth_view, self.depth_view);
             }
 
             // The AA source is a full-resolution image like the depth buffer,

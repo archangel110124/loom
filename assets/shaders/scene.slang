@@ -2599,6 +2599,68 @@ static const float3 WATER_FOAM_ALBEDO = float3(0.72, 0.76, 0.78);
 /// pixel and becomes a twinkle generator. One `saturate` retires it.
 static const float WATER_FOAM_FINE_RANGE = 40.0;
 
+/// Colour and depth of everything drawn BEFORE the water. Set 3.
+///
+/// The forward pass ends after the grass and resolves into these; the water
+/// block declares them readable and samples them here. Single-sample, because
+/// a multisampled image cannot be sampled per-pixel without a manual
+/// per-sample fetch — the resolve IS the mechanism.
+[[vk::binding(0, 3)]] Sampler2D opaqueColor;
+[[vk::binding(1, 3)]] Sampler2D opaqueDepth;
+
+/// How far light travels through water between the surface and whatever is
+/// behind it, and how much survives the trip.
+///
+/// Returns `T` — the fraction of each wavelength that makes it — and writes
+/// the background colour it found. `T = 0` means "nothing behind this pixel",
+/// which is the open-ocean answer and costs the caller nothing.
+///
+/// **The guard is on the raw depth sample, not on the subtracted distance.**
+/// The far plane is 1000 m while the water skirt reaches 50 km — the vertex
+/// shader deliberately drags it inside the clipper — so past the far plane a
+/// distance subtraction goes NEGATIVE, and a `max(.., 0)` on it would hand
+/// back `T = 1`: the sea beyond a kilometre rendered as a transparent hole
+/// onto the sky. Sky writes no depth, so one test covers the horizon skirt,
+/// the sentinel scenes and any future far-plane change at once.
+float3 waterBehind(float2 uv, float3 surfacePos, float3 eye, float bedDepth, out float3 behind) {
+    behind = float3(0.0, 0.0, 0.0);
+    float d = opaqueDepth.SampleLevel(uv, 0).r;
+    if (d >= 1.0) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    // Reconstruct where that pixel is, so the path length is the real one
+    // rather than an authored depth. `in.depth` is a still-water bed depth
+    // clamped at 100 and is a SENTINEL on any scene with no voxel volume;
+    // using it as an optical path is what would paint 27% seabed brown across
+    // every open-ocean pixel.
+    float2 ndc = uv * 2.0 - 1.0;
+    float4 world = mul(push.invViewProj, float4(ndc, d, 1.0));
+    float3 bg = world.xyz / world.w;
+
+    // Two legs, not one. The seabed was shaded IN AIR by the mesh pass, so the
+    // light that lit it already crossed the column downward before it ever
+    // reflected toward the eye. Dividing by the sun's elevation is the same
+    // secant the subsurface term four lines below already uses.
+    float viewLeg = length(bg - surfacePos);
+    float downLeg = min(bedDepth, 100.0) / max(sunDirection().y, 0.15);
+    behind = opaqueColor.SampleLevel(uv, 0).rgb;
+    // **Un-fog it.** The mesh pass already fogged this pixel over eye->bg, and
+    // the last line of the caller fogs the composite again over eye->surface.
+    // Applied twice that is 18% becoming 33% on `shore`. What is left over is
+    // the surface->bg segment, one or two metres, under a percent.
+    // Fogging is `lerp(colour, fogColour, f)`, so removing it is
+    // `(fogged - fogColour*f) / (1 - f)` — an EXTRAPOLATION away from the fog
+    // colour, not a blend toward it. Writing it as a saturated `lerp` toward
+    // `fogColor` brightens instead of removing, and since fog colour here is
+    // lit sky that reads as a warm wash: red came out 26% high on `shore` and
+    // the shallows went neutral.
+    float bgFog = fogAmount(eye, bg);
+    behind = max((behind - fogColor(normalize(bg - eye)) * bgFog) / max(1.0 - bgFog, 1e-3),
+                 float3(0.0, 0.0, 0.0));
+
+    return exp(-WATER_EXTINCT * (viewLeg + downLeg));
+}
+
 [shader("fragment")]
 float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // **The shoreline.** Where the bed is above the still-water line there is
@@ -2675,7 +2737,6 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // most of what makes a surface read as liquid.
     float fresnel = 0.02 + 0.98 * pow(saturate(1.0 - dot(normal, view)), 5.0);
 
-    float3 body = lerp(WATER_SHALLOW, WATER_DEEP, saturate(in.depth / WATER_TINT_DEPTH));
     float toSun = max(dot(normal, sunDirection()), 0.0);
 
     // **Sky occlusion by wave shape, and it buys more than it costs.** A trough
@@ -2710,10 +2771,32 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
                * pow(saturate(dot(-view, h)), WATER_SSS_POWER)
                * crest * exp(-WATER_EXTINCT * thick);
 
-    float3 through = body
-        * (hemisphereAmbient(normal) * ambientStrength() * skyView
-           + sunColor() * sunStrength() * toSun)
-        + sss;
+    // **What the eye actually receives from below, split by how much water is
+    // in the way.** `T` is the fraction that crossed the column; `1 - T` is
+    // the fraction that scattered before it got there.
+    //
+    // The old form was `body * downwelling`, where `body` interpolated
+    // `WATER_SHALLOW` toward `WATER_DEEP` by an authored bed depth. That was a
+    // hand-picked *linear* stand-in for exactly this, with no view-angle
+    // dependence, and it is deleted rather than supplemented — this is the
+    // decomposition it approximated. `L -> infinity` gives `WATER_DEEP *
+    // downwelling`, which is what it used to answer everywhere; `L -> 0` gives
+    // the background unattenuated, which is the shoreline.
+    //
+    // **The partition conserves energy**, which is why adding a seabed makes
+    // the water deeper rather than brighter.
+    float3 downwelling = hemisphereAmbient(normal) * ambientStrength() * skyView
+                       + sunColor() * sunStrength() * toSun;
+    float2 screenUv = in.clip.xy / push.environment[0].viewport.xy;
+    float3 behind;
+    // **Unrefracted UV.** The distortion offset is the next slice; getting the
+    // optics right first means one thing at a time, which is how a wrong sign
+    // in an offset does not get blamed on the absorption.
+    float3 T = waterBehind(screenUv, in.worldPos, push.environment[0].eye.xyz, in.depth, behind);
+    // `skyView` scales the volume term ONLY. `behind` was lit by its own
+    // shading pass; darkening it in a trough would dim the seabed for a reason
+    // that has nothing to do with the seabed.
+    float3 through = behind * T + WATER_DEEP * downwelling * (1.0 - T) + sss;
 
     float3 lit = lerp(through, skyColor(reflect(-view, normal)), fresnel);
     lit += specular(normal, view, sunDirection(), WATER_ROUGHNESS, float3(0.02))

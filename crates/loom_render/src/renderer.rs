@@ -700,6 +700,7 @@ pub struct Renderer {
     rain_tick: u64,
     /// The scene's depth, as a descriptor the rain fragment shader samples.
     scene_depth: crate::scene_depth::SceneDepth,
+    water_textures: crate::water_textures::WaterTextures,
     max_particles: usize,
     /// Alpha-blended, depth-tested but not depth-writing.
     particle_pipeline: vk::Pipeline,
@@ -949,9 +950,19 @@ impl Renderer {
         )?;
 
         let scene_depth = crate::scene_depth::SceneDepth::new(&raw)?;
+        let water_textures = crate::water_textures::WaterTextures::new(&raw)?;
         // The offscreen renderer's targets are fixed at construction, so this
         // is the only time the set has to be pointed anywhere.
         scene_depth.bind(depth_view);
+        // The opaque pair lives inside `Msaa`, so it only exists when
+        // multisampling does — and the split only happens then either. At one
+        // sample the descriptor points at the depth view, which is never read
+        // because the water block never runs.
+        if let Some(m) = msaa.as_ref() {
+            water_textures.bind(m.opaque_color_view, m.opaque_depth_view);
+        } else {
+            water_textures.bind(depth_view, depth_view);
+        }
         let cache_path = pipeline_cache_path(instance, device);
         let (pipeline_layout, pipeline, pipeline_cache) =
             create_pipeline(
@@ -961,6 +972,7 @@ impl Renderer {
                 raytracer.as_ref().map(Raytracer::descriptor_layout),
                 materials.descriptor_layout(),
                 scene_depth.descriptor_layout(),
+                water_textures.descriptor_layout(),
                 MSAA_SAMPLES,
             )?;
         let sky_pipeline =
@@ -1191,6 +1203,7 @@ impl Renderer {
             rain_drops: 0,
             rain_tick: 0,
             scene_depth,
+            water_textures,
             max_particles: MAX_PARTICLES,
             particle_pipeline,
             rt_positions,
@@ -1687,6 +1700,7 @@ impl Renderer {
         // also what keeps the existing barrier-list test unchanged — its scene
         // is two meshes and never sets `environment.water`.
         let split = water_verts > 0 && msaa_ids.is_some();
+        let water_set = self.water_textures.descriptor_set();
         let mut forward_uses = Vec::new();
         if !rain_resolves && !split {
             forward_uses.push((color, Access::ColorWrite));
@@ -1779,6 +1793,19 @@ impl Renderer {
                         layout,
                         1,
                         &[material_set],
+                        &[],
+                    );
+                    // Set 3 as well, because the water fragment shader
+                    // statically samples it and the water draw lands in THIS
+                    // block whenever the pass is not split. A statically-used
+                    // set that is not bound is a draw-time validation error,
+                    // and it fired on exactly the scenes that have water.
+                    d.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        layout,
+                        3,
+                        &[water_set],
                         &[],
                     );
                     set_viewport(d, cmd, width, height);
@@ -1944,6 +1971,16 @@ impl Renderer {
                             layout,
                             1,
                             &[material_set],
+                            &[],
+                        );
+                        // Set 3: the colour and depth of everything behind the
+                        // water. Bound once for the block, never per draw.
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            3,
+                            &[water_set],
                             &[],
                         );
                         set_viewport(d, cmd, width, height);
@@ -3118,6 +3155,7 @@ pub(crate) fn create_view(
 }
 
 /// Build the graphics pipeline. Dynamic rendering, so no render pass object.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_pipeline(
     device: &ash::Device,
     cache_path: Option<&std::path::Path>,
@@ -3125,6 +3163,7 @@ pub(crate) fn create_pipeline(
     set_layout: Option<vk::DescriptorSetLayout>,
     material_layout: vk::DescriptorSetLayout,
     depth_layout: vk::DescriptorSetLayout,
+    water_layout: vk::DescriptorSetLayout,
     samples: vk::SampleCountFlags,
 ) -> Result<(vk::PipelineLayout, vk::Pipeline, vk::PipelineCache), RenderError> {
     let module = create_shader_module(device, crate::SCENE_SPV)?;
@@ -3146,14 +3185,24 @@ pub(crate) fn create_pipeline(
     } else {
         None
     };
-    // Set 2 is the scene's depth, sampled by the rain pass alone. Declared on
-    // the shared layout rather than on one of its own, because every pipeline
-    // here already shares this layout and a second one would mean a second
-    // push-constant range to keep in step.
+    // Set 2 is the scene's depth, sampled by the rain pass alone. Set 3 is the
+    // colour and depth of everything drawn before the water, sampled by the
+    // water pass alone. Both are declared on the shared layout rather than on
+    // ones of their own, because every pipeline here already shares it.
+    //
+    // **Set 3 is separate from set 2 because of a layout conflict, not
+    // fastidiousness.** Set 2 points at `loom.depth_target`, and the water
+    // block declares that same image `DepthResolve` — a binding on set 2 would
+    // claim a layout the image is not in, on an attachment of the block doing
+    // the reading. The comment that used to sit here said a second set "would
+    // mean a second push-constant range to keep in step"; that is not so —
+    // `VkPipelineLayoutCreateInfo` takes ranges and set layouts independently,
+    // as the two lines below do.
     let sets: Vec<vk::DescriptorSetLayout> = vec![
         set_layout.or(empty).unwrap_or_default(),
         material_layout,
         depth_layout,
+        water_layout,
     ];
     let layout_info = vk::PipelineLayoutCreateInfo::default()
         .push_constant_ranges(&ranges)
