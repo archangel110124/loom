@@ -1797,6 +1797,16 @@ struct ParticleOutput {
     /// 1.0 for a particle that adds light instead of covering what is behind
     /// it. Carried from the sign of the radius — see `ParticleInstance`.
     nointerpolation float additive : ADDITIVE;
+    /// 1.0 when this particle is a flame field rather than a sprite.
+    ///
+    /// **Carried as the sign of the authored red channel**, which is free: the
+    /// schema clamps colour to `[0, 1]`, so the sign bit was unused — exactly
+    /// the trick the sign of the radius already plays for `additive`. Being
+    /// per-particle rather than per-scene is what lets one scene hold a
+    /// campfire and an explosion.
+    nointerpolation float flame : FLAME;
+    /// xyz the emitter's world origin, w the flame's half-height.
+    nointerpolation float4 origin : FLAMEORIGIN;
 };
 
 [shader("vertex")]
@@ -1837,6 +1847,14 @@ ParticleOutput particleVertexMain(uint vertexID: SV_VertexID) {
     out.worldPos = world;
     out.seed = float(index);
     out.additive = p.position.w < 0.0 ? 1.0 : 0.0;
+    // The sign of red selects the flame field. Free: the schema clamps colour
+    // to [0, 1] so the bit was unused, and `abs` puts the colour back.
+    out.flame = p.color.r < 0.0 ? 1.0 : 0.0;
+    out.color = float4(abs(p.color.r), p.color.g, p.color.b, p.color.a);
+    // The emitter's own position and the flame's half-height, so the field is
+    // evaluated in flame-local coordinates and does not swim when the sprite's
+    // random roll changes.
+    out.origin = float4(p.position.xyz, abs(p.position.w));
     return out;
 }
 
@@ -1848,8 +1866,175 @@ ParticleOutput particleVertexMain(uint vertexID: SV_VertexID) {
 /// The wispiness comes from breaking up the radial falloff with value noise so
 /// the edge is ragged rather than a clean circle, which is the single tell
 /// that separates a smoke puff from a fuzzy ball.
+// ---------------------------------------------------------------------------
+// Fire.
+//
+// **One additive quad, and the flame is a LEVEL SET of a noise field.** Not a
+// sprite, not a flipbook, not a stack of blobs.
+//
+// The reason is overdraw. The colour target is `R8G8B8A8_SRGB` — fixed point,
+// so every additive blend clamps at 1.0 with no rolloff anywhere. Measured on
+// the sprite path, red pinned after 2.6 overlapping particles against about
+// thirty alive, so the middle of the fire was always going to be white however
+// its shapes were authored. Summing soft sprites cannot make fire here: the
+// sum of many round things is a round thing, and then it clips.
+//
+// A single quad has overdraw of exactly one. Nothing can clip, so the colour
+// ramp is honoured everywhere, and the tongues, the black gaps between them
+// and the edges are all level sets of one function — which is why the edge is
+// one pixel wide at any distance instead of being a texture's bilinear ramp.
+// ---------------------------------------------------------------------------
+
+/// Cycles per metre of the coarsest octave.
+static const float FIRE_HZ = 2.2;
+/// How much the field is squashed vertically AFTER the warp. A flame's
+/// features are far taller than they are wide, and this is what makes them so.
+static const float FIRE_SQUASH = 0.30;
+/// How fast the field is dragged downward through the flame, in field units a
+/// second. The flame rises because the pattern moves down past a fixed
+/// envelope — the same trick a waterfall texture plays.
+static const float FIRE_RISE = 1.35;
+/// Flames accelerate as they rise, so the field is stretched with height and
+/// features lengthen toward the tips.
+static const float FIRE_ACCEL = 1.9;
+/// Domain warp amplitudes, in lattice cells.
+///
+/// **Set by the fold condition, not by taste.** A 2-octave normalised fBm has
+/// a gradient near 0.5 per cell, so `p -> p + a*w(p)` folds where `a` is above
+/// about two cells. Below that the silhouette is merely wavy; a tip that hooks
+/// back on itself needs the map to fold, and that is the difference between a
+/// flame and a flag.
+static const float FIRE_WARP_XZ = 2.6;
+static const float FIRE_WARP_Y = 3.4;
+/// Where the field stops being flame. Rises with height so tongues pinch off
+/// rather than all reaching the top together.
+static const float FIRE_T0 = 0.30;
+static const float FIRE_T1 = 0.66;
+static const float FIRE_T_POW = 2.6;
+/// How hard the envelope pinches inward with height, and how many lobes the
+/// fuel line has. The lobes are what make the tongues SEPARATE at the base
+/// rather than being one sheet that noise happens to tear.
+static const float FIRE_CONE = 0.85;
+static const float FIRE_LOBES = 3.4;
+static const float FIRE_GAP = 0.30;
+/// The brightness transfer, with a floor. Without the floor, brightness inside
+/// the coverage edge is cubic in depth-into-the-flame, so the outermost pixels
+/// read as black and full colour arrives several pixels in — the shader paints
+/// the very halo it exists to remove.
+static const float FIRE_TAU_FLOOR = 0.30;
+static const float FIRE_TAU_DEN = 0.27;
+static const float FIRE_TAU_POW = 1.6;
+static const float FIRE_TAU_H = 0.42;
+/// Where the finest octave is retired. `loom_value_noise` is analytic and has
+/// no mip chain, so past the distance at which that octave falls under a pixel
+/// it is a twinkle generator — the same bound and the same reason as
+/// `WATER_DETAIL_RANGE`. Computed from `length(toEye)`, which is analytic and
+/// therefore correct even in a quad the discard has killed.
+static const float FIRE_RANGE = 26.0;
+
+/// Fractal noise for the flame. `detail` fades the finest octave out with
+/// distance rather than dropping it abruptly, which would pop.
+float fireFbm(float3 p, int octaves, float detail) {
+    float sum = 0.0;
+    float amp = 0.5;
+    float norm = 0.0;
+    for (int i = 0; i < octaves; ++i) {
+        float w = (i == octaves - 1) ? detail : 1.0;
+        sum += loom_value_noise(p) * amp * w;
+        norm += amp * w;
+        p *= 2.03;
+        amp *= 0.5;
+    }
+    return sum / max(norm, 1e-4);
+}
+
+/// Deep amber through to a small off-white core.
+///
+/// **The peak is capped below 1.0 deliberately.** Putting red at 1.0 partway
+/// up the ramp reproduces the hue rotation this whole approach exists to
+/// avoid: the moment anything else adds light — the scene's own `Light`, a
+/// second flame behind — red is already at the clip and the sum rotates
+/// orange toward yellow toward white. The reference photograph is deep amber
+/// with white over maybe two percent of its area, and this ramp reaches its
+/// lightest value only at the very top.
+float3 fireRamp(float t) {
+    t = saturate(t);
+    float3 c = lerp(float3(0.00, 0.000, 0.000), float3(0.22, 0.012, 0.001), saturate(t / 0.15));
+    c = lerp(c, float3(0.48, 0.090, 0.006), saturate((t - 0.15) / 0.30));
+    c = lerp(c, float3(0.62, 0.210, 0.020), saturate((t - 0.45) / 0.25));
+    c = lerp(c, float3(0.68, 0.400, 0.090), saturate((t - 0.70) / 0.20));
+    c = lerp(c, float3(0.72, 0.640, 0.480), saturate((t - 0.90) / 0.10));
+    return c;
+}
+
+/// The flame at one fragment of the quad.
+float4 flameColor(ParticleOutput in, float3 toEye) {
+    // Flame-local coordinates: x across, y up from the base, z through.
+    float3 w = in.worldPos - in.origin.xyz;
+    float half_h = max(in.origin.w, 1e-3);
+    // **The quad is centred on the emitter, so the flame's base is at its
+    // BOTTOM edge, not at its middle.** Mapping `h` from `w.y / half_h` puts
+    // the fire in the upper half only, floating clear of whatever it is
+    // supposed to be burning — which is exactly what it did.
+    float h = saturate((w.y + half_h) / (2.0 * half_h));
+
+    float detail = saturate(1.0 - length(toEye) / FIRE_RANGE);
+    float t = push.environment[0].weather.z;
+
+    // **The warp is built BEFORE the vertical squash.** Warping afterwards
+    // multiplies the warp's vertical amplitude by 1/FIRE_SQUASH — about seven
+    // — along the one axis whose coherence is what makes a feature taller than
+    // it is wide, and the tongues dissolve into froth.
+    float3 qi = float3(w.x, w.y / (1.0 + FIRE_ACCEL * h) - FIRE_RISE * t, w.z) * FIRE_HZ;
+    float w1 = fireFbm(qi + 17.1, 2, detail) - 0.5;
+    float w2 = fireFbm(qi + 43.7, 2, detail) - 0.5;
+    float3 warp = float3(w1 * FIRE_WARP_XZ, w2 * FIRE_WARP_Y, (w1 - w2) * FIRE_WARP_XZ);
+    float3 q = qi + warp;
+    q.y *= FIRE_SQUASH;
+    float d = fireFbm(q, 3, detail);
+
+    // **The envelope and the fuel OFFSET the threshold; they never multiply
+    // the field.** A multiply's edge is the mask's own gradient, which is far
+    // softer than the field's, and a soft-edged gap between two tongues is
+    // precisely what turns a fire back into a fireball.
+    float radial = length(float2(w.x, w.z)) / max(half_h * 0.95, 1e-3);
+    float cone = radial * (1.0 + FIRE_CONE * h);
+    // The fuel line: a few lobes across the base, so tongues start apart
+    // rather than being one sheet that noise happens to tear.
+    float lobes = 0.5 + 0.5 * sin(w.x * FIRE_LOBES + w.z * 0.7);
+    float gap = FIRE_GAP * (1.0 - lobes) * (1.0 - h * 0.4);
+
+    float threshold = FIRE_T0 + (FIRE_T1 - FIRE_T0) * pow(h, FIRE_T_POW)
+                    + cone * 0.22 + gap;
+    float e = d - threshold;
+
+    // Coverage from the analytic screen-space width of the level set. Computed
+    // before any discard: derivatives in a quad with killed lanes are
+    // undefined, and that is the trap named for the water shoreline.
+    float cover = saturate(e / max(fwidth(e), 1e-4));
+    if (cover <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    float tau = FIRE_TAU_FLOOR
+              + (1.0 - FIRE_TAU_FLOOR) * pow(saturate(e / FIRE_TAU_DEN), FIRE_TAU_POW);
+    tau *= (1.0 - FIRE_TAU_H * h);
+
+    return float4(fireRamp(tau) * cover * in.color.a, 0.0);
+}
+
 [shader("fragment")]
 float4 particleFragmentMain(ParticleOutput in) : SV_Target {
+    float3 eyeVec = push.environment[0].eye.xyz - in.worldPos;
+    if (in.flame > 0.5) {
+        float4 fire = flameColor(in, eyeVec);
+        if (fire.r + fire.g + fire.b <= 0.0008) {
+            discard;
+        }
+        float fogF = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+        return float4(fire.rgb * (1.0 - fogF), 0.0);
+    }
+
     float r = length(in.local);
     // The radial cut belongs to the procedural sprite. A flipbook frame fills
     // its cell, so cutting a circle out of it clips the flame tongues at the

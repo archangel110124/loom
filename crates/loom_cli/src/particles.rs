@@ -78,6 +78,10 @@ fn parse(component: &serde_json::Value) -> (loom_particles::Emitter, Visual) {
                 .get("additive")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
+            flame: component
+                .get("flame")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
         },
     )
 }
@@ -89,6 +93,8 @@ struct Visual {
     color_end: [f32; 3],
     alpha: [f32; 2],
     additive: bool,
+    /// Draw a flame field over the quad instead of a sprite.
+    flame: bool,
 }
 
 /// One emitter, kept alive across frames.
@@ -246,7 +252,12 @@ fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
     let lerp = |a: f32, b: f32| a + (b - a) * t;
     // Fade in as well as out. Particles that appear at full opacity pop, and
     // the pop is at the emitter, where the eye already is.
-    let fade = (t * 8.0).min(1.0);
+    // **No fade-in for a flame.** A flame is one long-lived static quad, so
+    // `t` is essentially zero forever and an 8x ramp would leave `color.a` at
+    // a few ten-thousandths — the authored alpha would be dead and the
+    // brightness would drift with `--sim`, which is the kind of thing a golden
+    // image blesses without anyone noticing.
+    let fade = if visual.flame { 1.0 } else { (t * 8.0).min(1.0) };
     // Negative radius marks an additive particle. See `ParticleInstance` in
     // scene.slang: a radius is never legitimately negative, so its sign
     // carries the flag and the instance stays 32 bytes.
@@ -254,7 +265,12 @@ fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
     ParticleInstance {
         position: [p.position[0], p.position[1], p.position[2], radius],
         color: [
-            lerp(visual.color_start[0], visual.color_end[0]),
+            // The SIGN of red selects the flame field in the shader. Free,
+            // because the schema clamps authored colour to [0, 1] so the bit
+            // was unused — the same trick the sign of the radius plays for
+            // `additive` three lines above.
+            if visual.flame { -1.0 } else { 1.0 }
+                * lerp(visual.color_start[0], visual.color_end[0]).max(1e-3),
             lerp(visual.color_start[1], visual.color_end[1]),
             lerp(visual.color_start[2], visual.color_end[2]),
             lerp(visual.alpha[0], visual.alpha[1]) * fade,

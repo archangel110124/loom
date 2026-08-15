@@ -405,6 +405,20 @@ pub struct ParticleEmitter {
     /// gets brighter where it piles up, which is what a fireball does. Wrong
     /// for smoke, which occludes.
     pub additive: bool,
+    /// Draw a flame field across the quad instead of a sprite.
+    ///
+    /// **This is fire, and it is a different thing from a lot of orange
+    /// sprites.** The colour target is 8-bit and additive blending clamps at
+    /// 1.0 with no rolloff, so overlapping sprites pin red after about three
+    /// layers and everything past that is white — which is why a sprite
+    /// campfire is a fireball however its sprites are shaped. A flame field is
+    /// one quad with an overdraw of exactly one, so nothing clips and the
+    /// tongues, the black gaps between them and the edges are all level sets
+    /// of a single noise field.
+    ///
+    /// Use with `additive`, one long-lived particle, and no motion: the flame
+    /// moves because the field is dragged through it, not because the quad is.
+    pub flame: bool,
     /// Reproducibility, authored rather than sampled from the clock.
     pub seed: u32,
 }
@@ -431,6 +445,7 @@ impl Default for ParticleEmitter {
             delay: 0.0,
             duration: 0.0,
             additive: false,
+            flame: false,
             seed: 1,
         }
     }
