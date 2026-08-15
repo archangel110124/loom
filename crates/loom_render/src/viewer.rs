@@ -1177,6 +1177,10 @@ impl Viewer {
                             crate::renderer::Resolve {
                                 color: (!rain_resolves).then_some(scene_view),
                                 depth: Some(depth_view),
+                                // The forward block is the only one drawing
+                                // into this pair today, so its samples are
+                                // consumed by the resolve.
+                                keep_samples: false,
                             },
                             extent.width,
                             extent.height,

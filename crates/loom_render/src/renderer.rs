@@ -1647,6 +1647,10 @@ impl Renderer {
                             Resolve {
                                 color: (!rain_resolves).then_some(color_view),
                                 depth: Some(depth_view),
+                                // The forward block is the only one drawing
+                                // into this pair today, so its samples are
+                                // consumed by the resolve.
+                                keep_samples: false,
                             },
                             width,
                             height,
@@ -2298,6 +2302,14 @@ pub(crate) unsafe fn draw_sky(
 pub(crate) struct Resolve {
     pub(crate) color: Option<vk::ImageView>,
     pub(crate) depth: Option<vk::ImageView>,
+    /// Keep the multisampled samples after this block resolves them, because
+    /// a later block in the same frame draws into the same pair.
+    ///
+    /// **Default `false`, which is what makes every existing call site
+    /// unchanged.** Resolving normally consumes the samples: nothing reads
+    /// them again, so storing them is pure bandwidth and bandwidth is the
+    /// entire cost of MSAA.
+    pub(crate) keep_samples: bool,
 }
 
 pub(crate) unsafe fn begin_rendering(
@@ -2311,7 +2323,7 @@ pub(crate) unsafe fn begin_rendering(
     width: u32,
     height: u32,
 ) {
-    let Resolve { color: color_resolve, depth: depth_resolve } = resolve;
+    let Resolve { color: color_resolve, depth: depth_resolve, keep_samples: _ } = resolve;
     let mut color_attachment = vk::RenderingAttachmentInfo::default()
         .image_view(color_view)
         .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -2320,7 +2332,7 @@ pub(crate) unsafe fn begin_rendering(
         // are never read again, so storing them would be pure bandwidth — and
         // bandwidth is the whole cost of MSAA. When the resolve is deferred to
         // the rain pass they *are* read again, so they have to be stored.
-        .store_op(if color_resolve.is_some() {
+        .store_op(if color_resolve.is_some() && !resolve.keep_samples {
             vk::AttachmentStoreOp::DONT_CARE
         } else {
             vk::AttachmentStoreOp::STORE
@@ -2334,11 +2346,21 @@ pub(crate) unsafe fn begin_rendering(
         .image_view(depth_view)
         .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
         .load_op(vk::AttachmentLoadOp::CLEAR)
-        // **STORE, not DONT_CARE, and that is the rain pass.** The depth this
-        // frame produced is sampled after the forward pass to fade a streak
-        // against the geometry it crosses; discarding it here is a black or
-        // garbage read there, with no validation message to say so.
-        .store_op(vk::AttachmentStoreOp::STORE)
+        // **The rain pass reads the RESOLVED depth, not these samples.**
+        // `SceneDepth` is bound to `loom.depth_target` and the rain block
+        // declares `(depth, Access::DepthSample)` — so when this attachment is
+        // the multisampled image and a depth resolve is happening, nothing
+        // ever reads it again and storing it is 33 MB a frame at 1080p for
+        // nothing. The comment that used to sit here cited the rain pass as
+        // the reason to store, and was attached to the wrong image.
+        //
+        // Single-sample path: `depth_resolve` is `None`, this IS the image
+        // rain samples, and it stores exactly as before.
+        .store_op(if depth_resolve.is_some() && !resolve.keep_samples {
+            vk::AttachmentStoreOp::DONT_CARE
+        } else {
+            vk::AttachmentStoreOp::STORE
+        })
         .clear_value(vk::ClearValue {
             depth_stencil: vk::ClearDepthStencilValue {
                 depth: 1.0,
