@@ -1,0 +1,182 @@
+# A beach. The scene the shore features are built against.
+#
+# `shore.loom` proved the waterline works; this is the one it is judged on. It
+# is deliberately BIG — 179 m of volume, a 45 m radius of dry sand and a 44 m
+# shallow shelf — because the things a beach is made of only read at that
+# scale. Caustics need a wide expanse of shallow water to play across, foam
+# needs a waterline long enough to run along, and a shelf that shoals over four
+# metres in forty is what makes a wave flatten as it arrives instead of
+# marching in at full height.
+#
+# **The bed is one sphere and nothing else.** Radius 737 centred 723 m below
+# the surface puts the summit 1.4 m above the water and the waterline at 45 m,
+# on a bed falling about 1:11. That is a real beach gradient. A sphere is also
+# the honest shape: its flank passes through every angle continuously, so the
+# waterline sits where the terrain and the wave height put it rather than on a
+# seam somebody authored — the same reasoning `shore.loom` gives, at ten times
+# the size. It needs no floor box: centred that far down, everything inside the
+# volume below the surface is inside the sphere already.
+
+[scene]
+format = 1
+id = "e73b0a92-5c41-4d86-b0f7-3a9e21c4d658"
+
+[[asset]]
+key = "beach_sand_albedo"
+id = "9c4f21e8-3a70-4d15-b2e6-508f7a1c93db"
+path = "../textures/beach_sand_albedo.png"
+
+[[asset]]
+key = "beach_sand_normal"
+id = "2e8b5c17-46f9-4a03-9d71-c6b70e4f28a5"
+path = "../textures/beach_sand_normal.png"
+
+[[node]]
+name = "Beach"
+
+  # Bright midday sun, high and slightly behind the camera's left. Caustics are
+  # a focusing effect: they need a sun high enough that the refracted rays
+  # actually reach the bed rather than skimming it.
+  [node.components.Environment]
+  sun_direction = [0.34, 0.78, 0.52]
+  sun_strength = 1.35
+  sun_color = [1.0, 0.97, 0.90]
+  ambient = 0.45
+  sky_zenith = [0.16, 0.32, 0.58]
+  sky_horizon = [0.62, 0.72, 0.80]
+  fog_density = 0.0022
+  fog_falloff = 0.05
+
+  [node.components.Wind]
+  direction_degrees = 200.0
+  speed = 6.5
+  gustiness = 1.1
+  turbulence = 0.8
+
+[[node]]
+name = "Sand"
+parent = "Beach"
+
+  # 179 m across at 0.4 m voxels. The voxel size is coarser than the test
+  # scenes' 0.25 because nothing here is smaller than a metre — the fine detail
+  # is all in the texture and the shading, not the mesh.
+  [node.components.VoxelVolume]
+  voxel_size = 0.4
+  chunks = [14, 3, 14]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [89.6, -723.6, 89.6]
+  radius = 737.0
+  mode = "union"
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  metallic = 0.0
+  # Dry sand is matte. The wet band nearer the water is what gets a sheen, and
+  # that is driven by the water rather than authored here.
+  roughness = 0.93
+  # **High.** Sand is the archetypal porous surface — it goes visibly dark the
+  # moment a wave washes over it, which is most of what makes a waterline read
+  # as a waterline.
+  porosity = 0.85
+  albedo_map = { asset = "beach_sand_albedo" }
+  normal_map = { asset = "beach_sand_normal" }
+  # **One tile every 0.7 m.** The first attempt used 2.5 m and the ripple
+  # marks came out a metre across — the texture read as a field of dunes
+  # rather than as sand. Beach ripples are a hand's width apart, and that is
+  # what sets this number; it is not a sharpness dial.
+  # **One tile every 28 cm.** Two attempts got this wrong in opposite ways:
+  # 2.5 m read as a field of dunes, and 0.7 m as corduroy. The DeepBump normal
+  # carries deep relief because the source photograph has real ripple shadows
+  # in it, so the tile has to be small enough that a ripple is a few
+  # centimetres — which is what beach ripples are.
+  uv_scale = [3.6, 3.6]
+  triplanar = true
+
+[[node]]
+name = "Sea"
+parent = "Beach"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 12.0
+  density = 1025.0
+
+  # **`attenuation_depth` is the whole point of this list.** Every wave keeps
+  # its full height in water deeper than 9 m and flattens as the bed rises,
+  # by `tanh(k·d)/tanh(k·D)` — so the swell arrives tall out at the shelf edge
+  # and is a ripple by the time it reaches the sand, without anything being
+  # authored twice. Long waves feel the bottom in deeper water than short chop
+  # does, which is why the set is spread rather than uniform.
+  [node.components.WaterBody.waves]
+  attenuation_depth = 9.0
+  max_height = 2.5
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 34.0
+  amplitude = 0.62
+  steepness = 1.0
+  direction = [0.0, -1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 21.0
+  amplitude = 0.34
+  steepness = 1.0
+  direction = [0.22, -1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 13.0
+  amplitude = 0.18
+  steepness = 1.0
+  direction = [-0.18, -1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 7.5
+  amplitude = 0.085
+  steepness = 1.0
+  direction = [0.3, -1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 4.2
+  amplitude = 0.04
+  steepness = 1.0
+  direction = [-0.35, -1.0]
+  speed_scale = 1.0
+
+# A headland, so the horizon is not an empty line and the eye has something to
+# judge the water's scale against — the reference has rocks at both edges for
+# the same reason.
+[[node]]
+name = "Headland"
+parent = "Beach"
+transform = { pos = [22.0, 12.5, 30.0], rot_euler = [0.0, 34.0, 0.0], scale = [11.0, 7.0, 8.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.44, 0.42, 0.38]
+  roughness = 0.95
+  porosity = 0.35
+
+# Standing in ankle-deep water looking along the waterline, which is the
+# reference's framing: wet sand in the foreground, the shallow shelf across the
+# middle, open water and the horizon beyond.
+[[node]]
+name = "Camera"
+parent = "Beach"
+# Standing in ankle-deep water, looking ALONG the waterline rather than across
+# the beach — the radius from the bed's centre through here is (0.285, 0.958),
+# so a yaw of 73 degrees is its tangent. That keeps the wet sand running out of
+# the near corner, the shallow shelf across the middle and open water beyond,
+# which is the reference's composition. Pointed inland first, and the sea came
+# out a strip at the horizon.
+transform = { pos = [105.3, 13.1, 142.3], rot_euler = [-6.0, 73.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 60.0

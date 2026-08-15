@@ -2599,6 +2599,56 @@ static const float3 WATER_FOAM_ALBEDO = float3(0.72, 0.76, 0.78);
 /// pixel and becomes a twinkle generator. One `saturate` retires it.
 static const float WATER_FOAM_FINE_RANGE = 40.0;
 
+/// Capillary detail on the water surface, below anything the mesh can carry.
+///
+/// **The mesh has a hard floor and this is under it.** Waves are evaluated per
+/// vertex and a wave fades out as its wavelength approaches the cell sampling
+/// it, so the shortest one that survives is about 2 m. Real water is covered in
+/// ripples a tenth of that, and their absence is most of why a Gerstner sea
+/// reads as a smooth sheet: the specular lobe has nothing fine to break it up,
+/// so a whole swell face lights as one facet.
+///
+/// **Noise with analytic gradients, not a second wave set.** A second
+/// `LoomWaveSet` in the fragment shader was designed and rejected: it is a
+/// mutated 392-byte local array full-screen, and `scene.slang` already deleted
+/// that exact pattern from `grassWind` for being "400 bytes nobody here reads".
+/// Central differences on `loom_value_noise` at a fixed epsilon cost three taps
+/// an octave and no storage.
+///
+/// **No `ddx`/`ddy` anywhere.** The shoreline `discard` is the first statement
+/// of `waterFragmentMain`, so derivatives in those quads are undefined — and
+/// those quads are exactly the waterline that `shore` and `river` exist to
+/// protect. The distance fade is computed from `length(toEye)` instead, which
+/// is an analytic footprint and correct in a killed quad.
+static const float WATER_DETAIL_SCALE = 1.6;
+/// How hard the ripples tilt the surface. A slope, so 0.45 is roughly a
+/// 24-degree local tilt at the steepest point of a ripple — capillary waves are
+/// genuinely that steep for their length, which is why they catch so much light
+/// for so little amplitude.
+static const float WATER_DETAIL_STRENGTH = 0.30;
+/// Where the detail stops. `loom_value_noise` is analytic and has no mip chain,
+/// so past this the lattice is under a pixel and becomes a twinkle generator
+/// rather than detail — the same bound the foam's fine octaves take, for the
+/// same reason.
+static const float WATER_DETAIL_RANGE = 70.0;
+float2 waterDetailSlope(float2 xz, float t, float2 drift) {
+    float2 a = (xz - drift * t) * WATER_DETAIL_SCALE;
+    // The second octave runs crosswise and faster, so the two do not travel as
+    // one sheet — which is what a single scrolling layer always looks like.
+    float2 b = (xz + float2(-drift.y, drift.x) * t * 0.7) * (WATER_DETAIL_SCALE * 2.9);
+    const float e = 0.5;
+    float2 g;
+    g.x = (loom_value_noise(float3(a.x + e, 0.0, a.y))
+         - loom_value_noise(float3(a.x - e, 0.0, a.y))) / (2.0 * e);
+    g.y = (loom_value_noise(float3(a.x, 0.0, a.y + e))
+         - loom_value_noise(float3(a.x, 0.0, a.y - e))) / (2.0 * e);
+    g.x += (loom_value_noise(float3(b.x + e, 3.1, b.y))
+          - loom_value_noise(float3(b.x - e, 3.1, b.y))) / (2.0 * e) * 0.5;
+    g.y += (loom_value_noise(float3(b.x, 3.1, b.y + e))
+          - loom_value_noise(float3(b.x, 3.1, b.y - e))) / (2.0 * e) * 0.5;
+    return g;
+}
+
 /// Colour and depth of everything drawn BEFORE the water. Set 3.
 ///
 /// The forward pass ends after the grass and resolves into these; the water
@@ -2730,6 +2780,33 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         float3 lit = lerp(through, underwaterColor(), fresnel);
         float fogUnder = fogAmount(push.environment[0].eye.xyz, in.worldPos);
         return float4(lerp(lit, fogColor(-view), fogUnder), 1.0);
+    }
+
+    // **Capillary ripples, applied to the normal only.** This is what stops a
+    // swell face lighting as one flat facet: the specular lobe gets something
+    // finer than the mesh to break it across, which is the difference between
+    // a sheet and a surface.
+    //
+    // Faded to nothing by `WATER_DETAIL_RANGE`, because the lattice goes under
+    // a pixel out there and analytic noise has no mip chain to catch it.
+    // Calmed in the shallows by the same depth the shoaling uses, since water
+    // over a beach really is smoother than water over the shelf.
+    {
+        float detailFade = saturate(1.0 - length(toEye) / WATER_DETAIL_RANGE);
+        // Calmer over a beach than over the shelf, which is true of real water
+        // and keeps the ripples off the very edge of the shoreline cut.
+        detailFade *= saturate(in.depth * 0.7 + 0.2);
+        float2 dw = normalize(push.environment[0].wind.xy + float2(1e-4, 0.0));
+        float2 g = waterDetailSlope(
+            in.worldPos.xz,
+            push.environment[0].weather.z,
+            dw * max(push.environment[0].wind.z, 0.5) * 0.06);
+        // A slope subtracted from the normal's horizontal components — the
+        // standard perturbation. The surface stays exactly where the vertex
+        // shader put it; only how it catches light changes, which is what keeps
+        // this out of the "second opinion about the drawn surface" that the
+        // rejected wave-set version would have been.
+        normal = normalize(normal - float3(g.x, 0.0, g.y) * WATER_DETAIL_STRENGTH * detailFade);
     }
 
     // Schlick against water's f0. This is the whole trick: face-on you see
