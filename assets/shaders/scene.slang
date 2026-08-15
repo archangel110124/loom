@@ -256,6 +256,10 @@ float fogFalloff() { return push.environment[0].horizon.a; }
 /// implementation of the thing this project keeps paying to keep single.
 bool eyeUnderwater() { return push.environment[0].water.y > 0.5; }
 
+/// The scene's still-water level, and whether it has water at all.
+float stillWaterLevel() { return push.environment[0].water.x; }
+bool waterPresent() { return push.environment[0].water.z > 0.5; }
+
 
 // ---------------------------------------------------------------------------
 // The sky.
@@ -1141,6 +1145,14 @@ float wetGate(float3 worldPos, float3 geometric) {
 // see `PUDDLE_FULL`.
 // ---------------------------------------------------------------------------
 
+/// How far above the still-water line the sand still reads as wet, in metres.
+/// The swash reaches further than the mean surface and drains back slowly.
+static const float WET_SAND_REACH = 0.55;
+/// How much saturated sand darkens. High: dry sand to wet sand is one of the
+/// largest albedo changes any common material makes.
+static const float WET_SAND_DARKEN = 0.55;
+static const float WET_SAND_SMOOTH = 0.35;
+
 /// How smooth standing water is. Below `WET_SMOOTH`, because a puddle is water
 /// rather than a wet surface — the film smooths what is under it, this replaces
 /// it.
@@ -1498,6 +1510,31 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // -----------------------------------------------------------------------
     // Declared out here because the puddle's *reflection* has to be applied
     // after the lighting below, not before it. See the block near `lit`.
+    // **Wet sand: the band the sea has just been over.**
+    //
+    // A beach is not one material. Below the swash line the sand is saturated
+    // — darker, smoother, and it holds a sheen for a while after the water
+    // has gone — and that band is most of what makes a waterline read as a
+    // waterline rather than as a line where two things were authored.
+    //
+    // Driven by height above the still-water level, which is already in the
+    // environment buffer, and reaching HIGHER than the water does: the sea
+    // washes up the slope and drains back, and the sand stays wet in between.
+    // That lag is the whole point — gating on where the water is *now* would
+    // make the band flicker with the swell instead of tracking where it has
+    // been, which is the same mistake the rain wetness made before it started
+    // averaging cover over forty seconds.
+    if (waterPresent() && porosity > 0.0) {
+        float above = in.worldPos.y - stillWaterLevel();
+        float wetBand = 1.0 - smoothstep(0.0, WET_SAND_REACH, above);
+        // Rough edge, so the band is not a contour line drawn round the
+        // island. Same reasoning as the grass slope boundary and the swash.
+        wetBand *= saturate(0.65 + 0.5 * loom_value_noise(in.worldPos * 0.35));
+        wetBand = saturate(wetBand);
+        albedo *= 1.0 - WET_SAND_DARKEN * porosity * wetBand;
+        roughness = lerp(roughness, min(roughness, WET_SAND_SMOOTH), wetBand);
+    }
+
     float pool = 0.0;
     if (wetFilm() + wetSoak() > 0.0) {
         float wet = wetGate(in.worldPos, geometric);
@@ -2538,6 +2575,14 @@ static const float WATER_ROUGHNESS = 0.08;
 ///
 /// It is here for one number: `asin(1/1.333)` is 48.6°, the critical angle, and
 /// that cone is Snell's window.
+/// How rough the surface is for the purpose of capping grazing reflectance.
+///
+/// Not `WATER_ROUGHNESS`, which describes the specular lobe of the sun on a
+/// nearly-mirror surface. This is the aggregate of everything finer than the
+/// mesh — the capillary ripples above, and the ones below even those — and it
+/// is what decides how much of the sky a grazing view really returns.
+static const float WATER_CLARITY_ROUGH = 0.22;
+
 static const float WATER_IOR = 1.333;
 
 // ---------------------------------------------------------------------------
@@ -2580,6 +2625,13 @@ static const float WATER_SSS_POWER = 4.0;
 /// which is what makes a glassy sea foamless; this is a shading ramp that only
 /// needs a sensible span on the seas we author.
 static const float WATER_FOLD_REF = 0.35;
+
+/// How shallow water has to get before it is carrying broken foam, in metres.
+static const float SHORE_FOAM_DEPTH = 0.28;
+/// How far the effective waterline sweeps up and down the beach, in metres of
+/// depth, and how fast. Slow: a swash cycle is several seconds.
+static const float SWASH_REACH = 0.12;
+static const float SWASH_RATE = 0.55;
 
 static const float WATER_FOAM_WET = 0.22;
 static const float WATER_FOAM_BREAK = 0.33;
@@ -2672,6 +2724,15 @@ float2 waterDetailSlope(float2 xz, float t, float2 drift) {
 /// back `T = 1`: the sea beyond a kilometre rendered as a transparent hole
 /// onto the sky. Sky writes no depth, so one test covers the horizon skirt,
 /// the sentinel scenes and any future far-plane change at once.
+/// Metres of water past which the caustic web is washed out.
+static const float CAUSTIC_DEPTH = 4.5;
+static const float CAUSTIC_SCALE = 0.85;
+/// How tightly the two fields have to agree to count as a focus. Higher is
+/// thinner, brighter filaments.
+static const float CAUSTIC_SHARP = 9.0;
+static const float CAUSTIC_POWER = 3.0;
+static const float CAUSTIC_STRENGTH = 0.85;
+
 float3 waterBehind(float2 uv, float3 surfacePos, float3 eye, float bedDepth, out float3 behind) {
     behind = float3(0.0, 0.0, 0.0);
     float d = opaqueDepth.SampleLevel(uv, 0).r;
@@ -2694,6 +2755,36 @@ float3 waterBehind(float2 uv, float3 surfacePos, float3 eye, float bedDepth, out
     float viewLeg = length(bg - surfacePos);
     float downLeg = min(bedDepth, 100.0) / max(sunDirection().y, 0.15);
     behind = opaqueColor.SampleLevel(uv, 0).rgb;
+
+    // **Caustics: the bright web the surface focuses onto the bed.**
+    //
+    // The surface acts as a lens. Where it is convex it converges sunlight
+    // into a bright filament, where concave it spreads it — and because the
+    // ripples move, the web crawls. It is the single most recognisable thing
+    // about shallow sunlit water and no amount of correct absorption produces
+    // it, because absorption only ever removes light evenly.
+    //
+    // **The minimum of two scrolling noise fields**, which is the standard
+    // cheap construction and not an arbitrary one: a caustic web is the set of
+    // places where light from *several* directions arrives at once, so an
+    // intersection of two fields has the right topology — thin closed cells
+    // with bright junctions — where a single field only gives blobs.
+    //
+    // Sharpened hard, because real caustics are nearly all dark with a few
+    // very bright lines. Anchored to the BED's world position, not the
+    // surface's: the pattern belongs to the sand, and anchoring it to the
+    // surface would make it swim as the eye moves.
+    float2 cuv = bg.xz * CAUSTIC_SCALE;
+    float2 cdrift = float2(0.07, 0.05) * push.environment[0].weather.z;
+    float c1 = loom_value_noise(float3(cuv + cdrift, 0.0));
+    float c2 = loom_value_noise(float3(cuv * 1.31 - cdrift * 0.83, 5.7));
+    float web = pow(saturate(1.0 - abs(c1 - c2) * CAUSTIC_SHARP), CAUSTIC_POWER);
+    // Strongest just under the surface and gone by a few metres — the focal
+    // length of a ripple is short, and deep water washes the web out entirely.
+    // Also gone when the sun is low, since a grazing ray never focuses.
+    float causticFade = saturate(1.0 - min(bedDepth, 100.0) / CAUSTIC_DEPTH)
+                      * saturate(sunDirection().y * 1.6);
+    behind *= 1.0 + web * CAUSTIC_STRENGTH * causticFade;
     // **Un-fog it.** The mesh pass already fogged this pixel over eye->bg, and
     // the last line of the caller fogs the composite again over eye->surface.
     // Applied twice that is 18% becoming 33% on `shore`. What is left over is
@@ -2812,7 +2903,22 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // Schlick against water's f0. This is the whole trick: face-on you see
     // into the water, at a grazing angle you see the sky, and the crossover is
     // most of what makes a surface read as liquid.
-    float fresnel = 0.02 + 0.98 * pow(saturate(1.0 - dot(normal, view)), 5.0);
+    // **Fresnel that knows the surface is rough, which is what lets you see
+    // into the water.**
+    //
+    // Schlick's polynomial goes to 1.0 at grazing on a PERFECTLY SMOOTH
+    // surface. A real sea is covered in ripples, so at a grazing angle a good
+    // fraction of the microfacets are not grazing at all and the reflectance
+    // never reaches one — the standard roughness-aware correction, and the
+    // reason a real beach lets you see the bottom at angles where a mirror
+    // would show only sky.
+    //
+    // Without it the horizon-ward half of every water frame washes to sky and
+    // the seabed the refraction went to such trouble to fetch is invisible
+    // exactly where there is most water to look through.
+    float grazing = pow(saturate(1.0 - dot(normal, view)), 5.0);
+    float fresnelCap = max(1.0 - WATER_CLARITY_ROUGH, 0.02);
+    float fresnel = 0.02 + (fresnelCap - 0.02) * grazing;
 
     float toSun = max(dot(normal, sunDirection()), 0.0);
 
@@ -2911,6 +3017,28 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // crest is still made of bubbles, so the same noise erodes it — it simply
     // erodes far less. The narrow band is what keeps a genuinely breaking
     // crest continuous along its length instead of dissolving into speckle.
+    // **Swash: the foam that runs up a beach and slides back.**
+    //
+    // Whitecap foam is made by a crest steepening past breaking; this is a
+    // different phenomenon entirely — water that has already broken, thinned
+    // out over the sand, and is being carried up the slope by its own
+    // momentum. It is keyed on DEPTH, not on fold, which is why it appears
+    // exactly where the sea gets shallow and nowhere else.
+    //
+    // The oscillation is what makes it swash rather than a painted rim: the
+    // effective waterline advances and retreats, so the band sweeps up the
+    // beach and drains back. A sine is enough — the real thing is the sum of
+    // the same swell already in the wave list, and a second authored period
+    // would be a second opinion about the same water.
+    float swash = sin(push.environment[0].weather.z * SWASH_RATE) * SWASH_REACH;
+    float shoreDepth = in.depth - swash;
+    float shoreFoam = saturate(1.0 - shoreDepth / SHORE_FOAM_DEPTH);
+    // Eroded by the same noise as the whitecaps, so the leading edge is lacy
+    // rather than a contour — a clean curve is the synthetic tell, the same
+    // lesson the grass slope boundary learned.
+    shoreFoam = smoothstep(fnoise * 0.5, fnoise * 0.5 + 0.5, shoreFoam * shoreFoam);
+    foam = max(foam, shoreFoam);
+
     float broken = smoothstep(WATER_FOAM_BREAK, 0.50, in.fold);
     foam = max(foam, broken * smoothstep(fnoise * 0.4, fnoise * 0.4 + 0.6, broken));
 

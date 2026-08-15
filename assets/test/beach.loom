@@ -57,17 +57,26 @@ name = "Beach"
 name = "Sand"
 parent = "Beach"
 
-  # 179 m across at 0.4 m voxels. The voxel size is coarser than the test
-  # scenes' 0.25 because nothing here is smaller than a metre — the fine detail
-  # is all in the texture and the shading, not the mesh.
+  # 128 m across at 0.25 m voxels.
+  #
+  # **The voxel size is set by the WATERLINE, not by the terrain.** A bed step
+  # of one voxel becomes a horizontal stair-step of `voxel / slope` where the
+  # water plane cuts it, so a gentle beach magnifies the mesh's resolution
+  # enormously: at 0.4 m voxels on a 1:11 slope that is a 4.4 m sawtooth along
+  # the shoreline, which is exactly what it looked like. At 0.25 m on 1:6.4 it
+  # is 1.6 m, and the swash foam covers what is left.
+  #
+  # That is also why the slope is steeper than the first attempt. A shallower
+  # beach is prettier in section and multiplies every vertical error along the
+  # one line the eye is drawn to.
   [node.components.VoxelVolume]
-  voxel_size = 0.4
-  chunks = [14, 3, 14]
+  voxel_size = 0.25
+  chunks = [16, 5, 16]
 
   [[node.components.VoxelVolume.ops]]
   kind = "sphere"
-  center = [89.6, -723.6, 89.6]
-  radius = 737.0
+  center = [64.0, -366.1, 64.0]
+  radius = 380.0
   mode = "union"
 
   [node.components.Material]
@@ -154,7 +163,7 @@ parent = "Beach"
 [[node]]
 name = "Headland"
 parent = "Beach"
-transform = { pos = [22.0, 12.5, 30.0], rot_euler = [0.0, 34.0, 0.0], scale = [11.0, 7.0, 8.0] }
+transform = { pos = [18.0, 12.0, 26.0], rot_euler = [0.0, 34.0, 0.0], scale = [9.0, 6.0, 7.0] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "sphere" }
@@ -176,7 +185,7 @@ parent = "Beach"
 # the near corner, the shallow shelf across the middle and open water beyond,
 # which is the reference's composition. Pointed inland first, and the sea came
 # out a strip at the horizon.
-transform = { pos = [105.3, 13.1, 142.3], rot_euler = [-6.0, 73.0, 0.0] }
+transform = { pos = [76.5, 12.9, 103.0], rot_euler = [-6.0, 73.0, 0.0] }
 
   [node.components.Camera]
   fov_y_degrees = 60.0
