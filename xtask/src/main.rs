@@ -150,7 +150,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 21] = [
+const GOLDEN: [(&str, &str, &[&str]); 23] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -291,6 +291,18 @@ const GOLDEN: [(&str, &str, &[&str]); 21] = [
     // gate would still report a full pass. One of them WAS wrong: the X-plane
     // normal was sampled transposed. No `--sim`: nothing here moves.
     ("ground", "assets/test/ground.loom", &[]),
+    // **A buoyant body through the water surface, which no other reference
+    // covers.** Every other water scene either has nothing crossing the
+    // surface or has a static post. This is the scene that shows what happens
+    // where a floating object meets the water it displaces, and it is the one
+    // that would catch a refraction term smearing foreground geometry into the
+    // sea. Blessed BEFORE the forward pass is split, deliberately: a reference
+    // blessed afterwards proves nothing about whether the split changed it.
+    ("water_crate", "assets/test/water_crate.loom", &["--sim", "90"]),
+    // **Particles at the waterline.** Water and the blended particle pass are
+    // drawn in the same block today; anything that splits that block moves
+    // their ordering, and this is the only reference that would show it.
+    ("splash", "assets/test/splash.loom", &["--sim", "120"]),
     // **The changelog shot, and it is deliberately not a normal gate.** Every
     // reference above protects one rendering path and moves only when that
     // path changes. This one touches terrain, water, current, grass, rain,
