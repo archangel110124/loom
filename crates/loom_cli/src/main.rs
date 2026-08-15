@@ -4354,14 +4354,19 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
     }
 
     /// **Provenance is the question an author actually has.** `ocean` writes
-    /// its five waves down; a scene with a `WaterBody` and no wave list gets
+    /// its seven waves down; a scene with a `WaterBody` and no wave list gets
     /// sixteen from the wind spectrum, and the difference is invisible in every
     /// other output the engine produces.
+    ///
+    /// The count is asserted because it is what separates the two sources, not
+    /// because seven is interesting — it moved from five when the scene grew a
+    /// 3 m and a 2 m wave, and it must keep being the scene's real count or the
+    /// assertion stops distinguishing anything.
     #[test]
     fn the_wave_set_says_where_it_came_from() {
         let (_, authored) = water_at("../../assets/test/ocean.loom", &["--at", "0,0"]);
         assert_eq!(authored["waves"]["source"], "authored");
-        assert_eq!(authored["waves"]["count"], 5);
+        assert_eq!(authored["waves"]["count"], 7);
         assert!(authored["waves"]["wind_speed_10m"].is_null(), "{authored}");
 
         let dir = std::env::temp_dir().join("loom_water_derived");

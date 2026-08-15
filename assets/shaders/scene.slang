@@ -55,6 +55,8 @@ struct ObjectData {
 
 static const uint NO_TEXTURE = 0xFFFFFFFF;
 static const uint FLAG_TRIPLANAR = 1;
+// TEMPORARY COST EXPERIMENT — REVERT
+static const int EXTRA_TRIPLES = 14;
 
 // Mirrors `loom_render::MaterialData` exactly. One memory layout described
 // twice; a mismatch is silent and looks like a shading bug.
@@ -1378,6 +1380,20 @@ float4 fragmentMain(VSOutput in) : SV_Target {
                 normal = normalize(mul(tangentNormal, frame));
             }
         }
+
+        // ==== TEMPORARY COST EXPERIMENT — REVERT ====
+        if (projected && m.maps.x != NO_TEXTURE && EXTRA_TRIPLES > 0) {
+            float3 base = normalize(in.normal);
+            float3 acc = float3(0.0);
+            [unroll]
+            for (int L = 0; L < EXTRA_TRIPLES; ++L) {
+                float3 off = projectedUv
+                    + float3(float(L) * 37.13, float(L) * 11.7, float(L) * 53.91);
+                acc += triplanar(m.maps.x, off, base).rgb;
+            }
+            albedo *= 1.0 + dot(acc, float3(1e-6));
+        }
+        // ==== END EXPERIMENT ====
     }
 
     // The unmapped normal. Up here because the wet block below needs it, and

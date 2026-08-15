@@ -18,10 +18,16 @@
 # which sixteen equal-energy waves deliberately do not carry
 # (`loom_water::spectrum` says so, and says a normal map is where it belongs).
 #
-# So the gate gets a stylised sea with real slope in it — five waves with no
-# common factor, steep enough to pinch at the crests — because a reference
-# image of a mirror catches nothing and `cargo xtask shimmer` needs a specular
-# highlight that actually moves.
+# So the gate gets a stylised sea with real slope in it — seven waves with no
+# common factor, every one at the validator's steepness ceiling — because a
+# reference image of a mirror catches nothing and `cargo xtask shimmer` needs a
+# specular highlight that actually moves.
+#
+# **Stylised is the honest word and it is not an apology.** Seven linear
+# Gerstner waves cannot make the steep leading face a real storm sea has: a
+# Gerstner pinch is fore-aft symmetric, and leaning it forward needs a phase
+# skew that moves the simulation hash and voids the validator's fold proof.
+# What this list can do is carry real slope, and that is what it is tuned for.
 #
 # The camera sits low and looks at the horizon on purpose: the Fresnel
 # crossover from "seeing into the water" to "seeing the sky in it" is most of
@@ -46,12 +52,17 @@ name = "Sea"
   fog_density = 0.006
   fog_falloff = 0.04
 
-  # Beaufort 4, blowing the way the waves below run. It drives nothing here —
+  # Beaufort 7, blowing the way the waves below run. It drives nothing here —
   # the wave list wins — and it is authored anyway so the scene describes one
   # weather rather than two: delete the waves and this is the sea that arrives.
+  #
+  # **Raised from 8.0 with the steepening below, so the two halves agree.** At
+  # 8 m/s this scene claimed a fresh breeze and drew a sea with a total slope of
+  # 0.27 — glassier than a breeze makes. The waves are the thing being looked
+  # at, so they set the weather and this follows them rather than the reverse.
   [node.components.Wind]
   direction_degrees = 15.0
-  speed = 8.0
+  speed = 14.0
   gustiness = 1.3
   turbulence = 1.0
 
@@ -64,53 +75,76 @@ parent = "Sea"
   surface_height = 0.0
   density = 1025.0
 
-  # Five waves, longest first, with no common factor between the wavelengths —
-  # that is what stops the sum repeating on a visible grid. Steepness is shared
-  # out among them: the validator rejects `Q·N·k·A > 1` because past that the
-  # surface folds through itself, and the steepest of these spends about a
-  # third of that budget.
+  # Seven waves, longest first, with no common factor between the wavelengths —
+  # that is what stops the sum repeating on a visible grid.
   #
-  # Nothing shorter than 4.7 m, and that is a property of the mesh rather than
-  # taste. The LOD rings are 0.5 m cells out to 8 m, 1 m to 16 m, 2 m to 32 m
-  # and so on, so a 3 m wave is sampled twice per wavelength by the time it is
-  # 20 m away and turns into noise. `waterVertexMain` now fades a wave's
-  # amplitude as its wavelength approaches the cell sampling it (ADR 0012), so
-  # a shorter wave would not alias — it would simply be gone sooner. 4.7 m is
-  # the shortest wave that survives to 25 m, and 4 m is the shortest wave that
-  # is whole even under the camera.
+  # **Every steepness is 1.0, and that is the validator's real ceiling rather
+  # than a guess.** `scene.rs` rejects `Q·N·k·A > 1` with N the wave *count*, so
+  # at seven waves the per-wave limits are 1.075, 1.137, 1.251, 1.509, 1.781,
+  # 1.949 and 2.274 — Q = 1.0 clears all of them, with the tightest wave using
+  # 93% of its allowance. The list used to spend 0.271 of the fold budget and
+  # now spends 0.684.
+  #
+  # That number is the point. A Gerstner sea's colour range is its slope range
+  # run through Fresnel, so a flat sea is a uniform sea however it is shaded —
+  # and the whitecap term reads the same `flatten` signal, whose standard
+  # deviation goes 0.075 → 0.189 here. Foam thresholds mean nothing until this
+  # exists, which is why it comes first.
+  #
+  # **The two short waves are new, and the old comment forbidding them was
+  # stale.** It said 4.7 m was the floor because "the LOD rings are 0.5 m cells
+  # out to 8 m" — true when `WATER_RES` was 32, and ADR 0013 quadrupled it. The
+  # cell is `max(0.5, r/64)` now, clamped flat across everything level 0 draws,
+  # so a wave is whole to `16λ` and gone by `32λ`: the 3 m wave is whole to 48 m
+  # and the 2 m wave to 32 m, which is the near field this camera sits in. They
+  # fade out rather than alias (ADR 0012); they do not turn into noise.
   [[node.components.WaterBody.waves.waves]]
   wavelength = 26.0
   amplitude = 0.55
-  steepness = 0.35
+  steepness = 1.0
   direction = [1.0, 0.25]
   speed_scale = 1.0
 
   [[node.components.WaterBody.waves.waves]]
   wavelength = 17.0
   amplitude = 0.34
-  steepness = 0.45
+  steepness = 1.0
   direction = [0.85, -0.5]
   speed_scale = 1.0
 
   [[node.components.WaterBody.waves.waves]]
   wavelength = 11.0
   amplitude = 0.20
-  steepness = 0.55
+  steepness = 1.0
   direction = [1.0, 0.6]
   speed_scale = 1.0
 
   [[node.components.WaterBody.waves.waves]]
   wavelength = 7.3
   amplitude = 0.11
-  steepness = 0.6
+  steepness = 1.0
   direction = [0.7, -1.0]
   speed_scale = 1.0
 
   [[node.components.WaterBody.waves.waves]]
   wavelength = 4.7
   amplitude = 0.06
-  steepness = 0.6
+  steepness = 1.0
   direction = [1.0, 0.15]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 3.0
+  amplitude = 0.035
+  steepness = 1.0
+  direction = [-0.4, 1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 2.0
+  amplitude = 0.020
+  steepness = 1.0
+  direction = [0.9, -0.75]
   speed_scale = 1.0
 
 # Two posts standing in the water. Deliberately thin and deliberately at
