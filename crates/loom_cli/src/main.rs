@@ -2061,6 +2061,7 @@ pub(crate) fn environment_with_wind(
     seconds: f32,
 ) -> loom_render::EnvironmentData {
     let mut env = environment_of_inner(world);
+    gather_lights(world, &mut env);
     let params = wind.params();
     env.wind = [
         params.get("dir_x"),
@@ -2253,6 +2254,66 @@ pub(crate) fn rain_at_eye(
     // Every cell, or none. A shower that has ended still skips the draw
     // entirely; a sheltered camera no longer does, which is the fix.
     if sample.rate > 0.0 { MAX_RAIN_DROPS } else { 0 }
+}
+
+/// Collect every `Light` a scene declares into the environment buffer.
+///
+/// **Gathered outside `environment_of_inner` because lights are not part of
+/// the `Environment` component** — that function returns early when a scene
+/// declares no environment at all, and a scene lit only by a campfire is
+/// exactly the scene most likely to declare none.
+///
+/// World position comes from the propagated global transform, so a light
+/// parented to a moving node moves with it. The translation is the last column
+/// of a column-major matrix.
+fn gather_lights(world: &World, env: &mut loom_render::EnvironmentData) {
+    let mut count = 0usize;
+    for entity in world.entities() {
+        if count >= loom_render::MAX_LIGHTS {
+            break;
+        }
+        let Some(component) = world.light(*entity) else {
+            continue;
+        };
+        let Some(global) = world.global_transform(*entity) else {
+            continue;
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let scalar = |name: &str, fallback: f32| {
+            component
+                .get(name)
+                .and_then(serde_json::Value::as_f64)
+                .map_or(fallback, |v| v as f32)
+        };
+        let intensity = scalar("intensity", 100.0);
+        if intensity <= 0.0 {
+            continue;
+        }
+        let mut color = [1.0_f32; 3];
+        if let Some(values) = component.get("color").and_then(serde_json::Value::as_array) {
+            for (slot, value) in color.iter_mut().zip(values) {
+                if let Some(v) = value.as_f64() {
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        *slot = v as f32;
+                    }
+                }
+            }
+        }
+        let m = global.matrix;
+        // **Radius from intensity rather than authored.** A cutoff is a
+        // performance bound, not a property of a light, and asking an author
+        // for one invites a number that disagrees with the brightness. This is
+        // where an inverse square falls to roughly a hundredth of a unit,
+        // which is below what any display shows.
+        let radius = (intensity * 100.0).sqrt().clamp(1.0, 400.0);
+        env.lights[count] = loom_render::PointLight {
+            position: [m[12], m[13], m[14], intensity],
+            color: [color[0], color[1], color[2], radius],
+        };
+        count += 1;
+    }
+    env.light_count = u32::try_from(count).unwrap_or(0);
 }
 
 fn environment_of_inner(world: &World) -> loom_render::EnvironmentData {

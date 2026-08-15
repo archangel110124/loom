@@ -52,7 +52,7 @@ pub use glam;
 pub use debug_names::DebugNames;
 pub use device::{Device, DeviceError};
 pub use material::{FLAG_TRIPLANAR, MaterialData, NO_TEXTURE};
-pub use renderer::{
+pub use renderer::{PointLight, MAX_LIGHTS, 
     Camera, EnvironmentData, GrassBlade, MAX_WAVES, Object, ParticleInstance, RenderError,
     Renderer, WaterWave,
 };
@@ -160,7 +160,14 @@ mod tests {
         // of 16, so it lands flush with no padding.
         assert_eq!(at(std::ptr::from_ref(&base.eye_step).cast()), 592, "eyeStep");
         assert_eq!(at(std::ptr::from_ref(&base.cloud).cast()), 608, "cloud");
-        assert_eq!(size_of::<EnvironmentData>(), 624, "the whole struct");
+        // **The light table, appended last for the same reason the waves were,
+        // which is why every offset above it is unchanged by it.** Eight
+        // lights at two `float4`s each is 256 bytes, then a `uint` count and
+        // three of padding to keep the struct 16-byte aligned.
+        assert_eq!(at(std::ptr::from_ref(&base.lights).cast()), 624, "lights");
+        assert_eq!(at(std::ptr::from_ref(&base.light_count).cast()), 880, "lightCount");
+        assert_eq!(size_of::<crate::PointLight>(), 32, "one light");
+        assert_eq!(size_of::<EnvironmentData>(), 896, "the whole struct");
     }
 
     /// **The water draw count is the shader's, and nothing but this says so.**

@@ -38,10 +38,11 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 31] = [
+const SCENES: [&str; 32] = [
     "assets/test/blockout.loom",
     "assets/test/ground.loom",
     "assets/test/beach.loom",
+    "assets/test/campfire.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
     "assets/test/cave.loom",
@@ -151,7 +152,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 24] = [
+const GOLDEN: [(&str, &str, &[&str]); 25] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -297,6 +298,12 @@ const GOLDEN: [(&str, &str, &[&str]); 24] = [
     // bottom, and the one the shore features are judged against. `--sim 400`
     // is past the wave set's settling.
     ("beach", "assets/test/beach.loom", &["--sim", "400"]),
+    // **Night lit by a point light and nothing else.** No sun, no ambient, a
+    // near-black sky — so this is the one reference where the `Light`
+    // component is the only thing keeping the frame from being empty. Stub it
+    // and the scene goes dark, which is what makes it a gate rather than a
+    // picture of a fire.
+    ("campfire", "assets/test/campfire.loom", &["--sim", "200"]),
     // **A buoyant body through the water surface, which no other reference
     // covers.** Every other water scene either has nothing crossing the
     // surface or has a static post. This is the scene that shows what happens

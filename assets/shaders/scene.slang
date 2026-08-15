@@ -64,6 +64,18 @@ struct MaterialData {
     uint4 maps;      // albedo index, normal index, flags, unused
 };
 
+static const uint LOOM_MAX_LIGHTS = 8;
+
+/// A point light. Mirrors `loom_render::PointLight` exactly — one memory
+/// layout described twice, and a mismatch is silent and looks like a shading
+/// bug.
+struct LoomPointLight {
+    /// xyz world position, w luminous intensity.
+    float4 position;
+    /// rgb colour, w the radius past which it contributes nothing.
+    float4 color;
+};
+
 struct ParticleInstance {
     // xyz world, w radius. A NEGATIVE radius marks an additive particle —
     // fire, a spark, anything that emits light rather than blocking it. A
@@ -139,6 +151,12 @@ struct EnvironmentData {
     // the wind, w unused. Feeds the generated `clouds_at`; the cover here is
     // already the effective one, with rain's floor applied on the CPU.
     float4 cloud;
+    /// Point lights. Last in the struct so every offset above is unmoved.
+    LoomPointLight lights[LOOM_MAX_LIGHTS];
+    uint lightCount;
+    uint lightPad0;
+    uint lightPad1;
+    uint lightPad2;
 };
 
 struct GrassBlade {
@@ -241,6 +259,40 @@ float3 sunColor() {
 float ambientStrength() {
     return push.environment[0].sunColor.a * lerp(1.0, 1.8, cloudCover());
 }
+/// **What a point light adds at a surface, and it is the thing that makes a
+/// dark scene lightable.** Until this existed, `Light` was a component a scene
+/// could author and nothing read — a knob wired to nothing — so a night scene
+/// could be made black and then could not be lit back up by anything except
+/// turning the sun on, which is not night.
+///
+/// Inverse-square falloff, windowed so it reaches exactly zero at the light's
+/// radius. The window matters: a bare inverse square never reaches zero, so a
+/// light either contributes everywhere — and every pixel pays for every light
+/// — or is clipped at some distance and pops when it crosses it.
+float3 pointLights(float3 worldPos, float3 normal) {
+    float3 sum = float3(0.0, 0.0, 0.0);
+    uint count = min(push.environment[0].lightCount, LOOM_MAX_LIGHTS);
+    for (uint i = 0; i < count; ++i) {
+        LoomPointLight l = push.environment[0].lights[i];
+        float3 toLight = l.position.xyz - worldPos;
+        float d2 = dot(toLight, toLight);
+        float radius = max(l.color.w, 1e-3);
+        if (d2 >= radius * radius) {
+            continue;
+        }
+        float d = sqrt(max(d2, 1e-8));
+        // Windowed inverse square: `1/d^2` shaped by `(1 - (d/r)^4)^2`, the
+        // standard form. The squared window is what makes the derivative zero
+        // at the boundary as well as the value, so the edge of a light's reach
+        // is invisible rather than merely dim.
+        float window = saturate(1.0 - pow(d / radius, 4.0));
+        float atten = window * window / max(d2, 1e-4);
+        float ndotl = max(dot(normal, toLight / d), 0.0);
+        sum += l.color.rgb * (l.position.w * atten * ndotl);
+    }
+    return sum;
+}
+
 float3 skyZenith() { return push.environment[0].zenith.rgb; }
 float3 skyHorizon() { return push.environment[0].horizon.rgb; }
 float fogDensity() { return push.environment[0].zenith.a; }
@@ -1641,6 +1693,12 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // for the other.
     float diffuse = max(dot(normal, sunDirection()), 0.0);
     float3 ambient = hemisphereAmbient(normal) * ambientStrength();
+    // **Point lights, added to the ambient term.** They are unshadowed: a
+    // shadowed point light needs a cube map or a ray per light per pixel, and
+    // the ray tracer here is aimed at the sun. For a fire in the dark that is
+    // the right trade — what a campfire mostly does is light everything near
+    // it, and the shape it casts matters far less than that it lights at all.
+    ambient += pointLights(in.worldPos, normal);
     // Only trace where the sun could reach anyway: a face turned away from the
     // sun is already dark, and tracing from it costs a ray to learn nothing.
     //

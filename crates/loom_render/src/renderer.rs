@@ -252,7 +252,47 @@ pub struct EnvironmentData {
     /// that rule belongs with the scene, not in a shader that would have to
     /// know what rain is.
     pub cloud: [f32; 4],
+    /// Point lights, in world space.
+    ///
+    /// **Last in the struct, so every offset above it is unmoved** — the same
+    /// rule `waves` states, and the reason the layout test does not change by
+    /// one line.
+    pub lights: [PointLight; MAX_LIGHTS],
+    /// How many of `lights` are real. Zero costs one comparison per pixel.
+    pub light_count: u32,
+    pub light_pad: [u32; 3],
 }
+
+/// A point light, as the GPU reads it.
+///
+/// **Two `vec4`s, and the packing is not cosmetic.** std430 aligns a `vec3` to
+/// 16 bytes, so the natural three-field layout would leave holes the Rust side
+/// does not have and every light after the first would read shifted — the trap
+/// `scene.slang`'s push block and the grass blade layout both already document.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PointLight {
+    /// xyz world position, w luminous intensity. Zero intensity is "not a
+    /// light" and is what an unused slot holds.
+    pub position: [f32; 4],
+    /// rgb colour, w the radius past which it contributes nothing.
+    ///
+    /// A cutoff is not physical — an inverse square never reaches zero — but
+    /// an unbounded light means every pixel pays for every light in the scene.
+    /// The falloff below reaches zero AT the radius rather than being clipped
+    /// there, so nothing pops when a light drifts out of range.
+    pub color: [f32; 4],
+}
+
+/// The cap on point lights.
+///
+/// **Eight, held in the environment buffer rather than behind a pointer**, for
+/// the reason the wave set gives: this is per-scene data read once per pixel,
+/// which is what that buffer is for. Eight is what a campfire scene needs —
+/// a fire, its embers, a lantern — and a scene wanting hundreds wants a
+/// clustered or tiled forward pass, which is a different feature with its own
+/// ADR rather than a bigger array here.
+pub const MAX_LIGHTS: usize = 8;
 
 /// The cap on summed waves, mirroring `loom_scene::components::MAX_WAVES` and
 /// the generated shader's `LOOM_MAX_WAVES`.
@@ -321,6 +361,9 @@ impl Default for EnvironmentData {
             eye_step: [0.0; 4],
             // Clear sky, and the same scale `loom_field::cloud_defaults` uses.
             cloud: [0.0, 1200.0, 2.5, 0.0],
+            lights: [PointLight::default(); MAX_LIGHTS],
+            light_count: 0,
+            light_pad: [0; 3],
         }
     }
 }

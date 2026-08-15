@@ -1,0 +1,155 @@
+# Night, lit by a fire and by nothing else.
+#
+# **This is the scene that proves `Light` does something.** The component has
+# been in the schema, documented and prefab-tested since early on, and until
+# now nothing read it — a knob wired to nothing. A scene could be authored
+# black, and then the only way to see anything in it was to turn the sun back
+# on, which is not night.
+#
+# Everything that normally lights a scene is zero here: no sun, no ambient, no
+# sky. Stub the fire's `Light` and the frame goes to almost nothing, which is
+# what makes this a real gate rather than a picture of a fire.
+
+[scene]
+format = 1
+id = "7b21f9d4-06c8-4a37-95e1-c3f40b8a76d2"
+
+[[node]]
+name = "Night"
+
+  # **Every light source off.** `ambient` is the knob `Environment` documents
+  # as the one that makes a scene dark, and the sky is the other half — a black
+  # sky still lights nothing, but a blue one lights everything faintly blue and
+  # that is what stops a scene ever reading as night.
+  [node.components.Environment]
+  sun_direction = [0.0, 1.0, 0.0]
+  sun_strength = 0.0
+  sun_color = [0.0, 0.0, 0.0]
+  ambient = 0.0
+  sky_zenith = [0.008, 0.010, 0.020]
+  sky_horizon = [0.014, 0.016, 0.026]
+  fog_density = 0.006
+  fog_falloff = 0.03
+
+  [node.components.Wind]
+  direction_degrees = 40.0
+  speed = 1.4
+  gustiness = 1.6
+  turbulence = 1.2
+
+[[node]]
+name = "Ground"
+parent = "Night"
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.15
+  chunks = [5, 2, 5]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [12.0, 2.0, 12.0]
+  half_extents = [13.0, 2.0, 13.0]
+  mode = "union"
+
+  # A shallow scoop, so the firelight has curvature to fall across rather than
+  # a flat plane that shades as one value.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [12.0, 6.4, 12.0]
+  radius = 2.6
+  mode = "subtract"
+
+  [node.components.Material]
+  albedo = [0.42, 0.36, 0.30]
+  roughness = 0.95
+  porosity = 0.6
+
+# Three stones round the pit, to catch the light at different angles. A single
+# flat surface cannot show whether a point light falls off correctly.
+[[node]]
+name = "StoneA"
+parent = "Night"
+transform = { pos = [10.4, 4.15, 12.6], scale = [0.5, 0.35, 0.45] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.5, 0.47, 0.44]
+  roughness = 0.9
+
+[[node]]
+name = "StoneB"
+parent = "Night"
+transform = { pos = [13.5, 4.15, 11.4], scale = [0.45, 0.3, 0.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.48, 0.45, 0.42]
+  roughness = 0.9
+
+[[node]]
+name = "Log"
+parent = "Night"
+transform = { pos = [12.4, 4.05, 13.3], rot_euler = [0.0, 24.0, 0.0], scale = [0.9, 0.16, 0.16] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.20, 0.14, 0.10]
+  roughness = 0.95
+
+# **The fire's light.** Warm and low: a real flame is around 1800 K, which is
+# far oranger than the "warm white" a lamp means. Placed a little above the
+# fuel, where the luminous part of a flame actually is.
+[[node]]
+name = "Firelight"
+parent = "Night"
+transform = { pos = [12.0, 4.6, 12.0] }
+
+  [node.components.Light]
+  intensity = 22.0
+  color = [1.0, 0.52, 0.18]
+
+# The flame itself. Additive, so it reads as emission rather than as a lit
+# surface — the same blend the explosion fire uses.
+[[node]]
+name = "Flame"
+parent = "Night"
+transform = { pos = [12.0, 4.35, 12.2] }
+
+  [node.components.ParticleEmitter]
+  rate = 340.0
+  lifetime = 1.15
+  lifetime_jitter = 0.55
+  speed = 2.4
+  spread_degrees = 17.0
+  radius = 0.16
+  # **Negative gravity is buoyancy.** A flame rises because hot gas is less
+  # dense than the air around it, and that is the single motion that makes
+  # fire read as fire rather than as sparks.
+  gravity = -3.4
+  drag = 1.1
+  # The turbulence is what breaks the plume into the licking, curling shapes a
+  # real flame has. Without it a buoyant emitter is a smooth cone.
+  turbulence = 3.4
+  turbulence_scale = 1.6
+  size = [0.22, 0.03]
+  # **A blackbody ramp, not a colour choice.** A flame's luminous core is near
+  # white-yellow at its hottest and cools through orange to a deep red as it
+  # rises and entrains air. Linear RGB; the renderer encodes sRGB on write.
+  color_start = [1.0, 0.78, 0.34]
+  color_end = [0.55, 0.06, 0.01]
+  additive = true
+  wind_response = 0.55
+
+[[node]]
+name = "Camera"
+parent = "Night"
+transform = { pos = [12.0, 5.4, 17.4], rot_euler = [-9.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

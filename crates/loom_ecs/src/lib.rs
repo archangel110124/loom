@@ -167,6 +167,7 @@ pub struct World {
     /// for the same reason as `voxel_recipe`: resolving it needs the asset and
     /// render crates, and this one depends on neither.
     material: Storage<serde_json::Value>,
+    light: Storage<serde_json::Value>,
     /// Scene path, so callers can address an entity the way a `.loom` file does.
     paths: Storage<String>,
     /// The `.rhai` file a node's `Script` component names.
@@ -421,6 +422,9 @@ impl World {
             if let Some(emitter) = node.components.get("ParticleEmitter") {
                 world.emitter.insert(entity, emitter.clone());
             }
+            if let Some(light) = node.components.get("Light") {
+                world.light.insert(entity, light.clone());
+            }
             if let Some(material) = node.components.get("Material") {
                 world.material.insert(entity, material.clone());
             }
@@ -637,6 +641,18 @@ impl World {
     #[must_use]
     pub fn material(&self, entity: Entity) -> Option<&serde_json::Value> {
         self.material.get(entity)
+    }
+
+    /// The `Light` component a node declares, if any.
+    ///
+    /// **This store is new and the component was not.** `Light` has been in
+    /// the schema, documented and prefab-tested for a long time, and nothing
+    /// ever read it — a knob wired to nothing. A scene could be authored black
+    /// and then could not be lit by anything except turning the sun back on,
+    /// which is not night.
+    #[must_use]
+    pub fn light(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.light.get(entity)
     }
 
     /// Authored collider half-extents, if the node declares a `BoxCollider`.
