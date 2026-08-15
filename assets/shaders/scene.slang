@@ -2827,7 +2827,15 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     float foam = smoothstep(fnoise - 0.15, fnoise + 0.15, wetc);
     // Past the breaking threshold foam wins outright, noise or no noise: a
     // crest that has broken is white along its whole length.
-    foam = max(foam, smoothstep(WATER_FOAM_BREAK, 0.50, in.fold));
+    // **Past the breaking threshold foam wins — but not uniformly.** This used
+    // to be a bare `smoothstep` on the fold, which paints a solid white region
+    // with a crisp outline wherever the sea is steep enough, and that flat
+    // white is what reads as poured paint rather than as bubbles. A broken
+    // crest is still made of bubbles, so the same noise erodes it — it simply
+    // erodes far less. The narrow band is what keeps a genuinely breaking
+    // crest continuous along its length instead of dissolving into speckle.
+    float broken = smoothstep(WATER_FOAM_BREAK, 0.50, in.fold);
+    foam = max(foam, broken * smoothstep(fnoise * 0.4, fnoise * 0.4 + 0.6, broken));
 
     // **A material swap, not white paint.** Foam is opaque packed bubbles: it
     // has no Fresnel and no specular lobe, and painting white *over* the sky
