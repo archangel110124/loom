@@ -1090,7 +1090,21 @@ impl MeshLibrary {
             }
             let mesh = loom_asset::primitives::build(&name).or_else(|| {
                 let path = scene_asset_path(scene, &name).map(|p| base.join(p))?;
-                match loom_asset::mesh::import_gltf(&path) {
+                // Chosen by extension, because that is the one thing a path
+                // reliably says about its contents. OBJ is text and glTF is a
+                // binary container; sniffing would work and would be a second
+                // way to be wrong about the same file.
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let imported = if ext == "obj" {
+                    loom_asset::mesh::import_obj(&path)
+                } else {
+                    loom_asset::mesh::import_gltf(&path)
+                };
+                match imported {
                     Ok(mesh) => Some(mesh),
                     Err(e) => {
                         crate::log::warn(format!("{name}: {e}; falling back to a box"));

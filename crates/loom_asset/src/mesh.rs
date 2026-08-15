@@ -92,6 +92,154 @@ impl Mesh {
     }
 }
 
+/// Import a Wavefront OBJ, merged into one mesh.
+///
+/// **Hand-written rather than a crate, and that is the ladder rather than
+/// pride.** OBJ is six line types and the parser below is under a hundred
+/// lines of `std`; the crates that read it pull in a parser framework and an
+/// error library to do the same job. `import_gltf` earns its dependency
+/// because glTF is a binary container with buffer views, accessors, sparse
+/// storage and a JSON schema. This does not.
+///
+/// **Everything is merged, exactly as `import_gltf` merges.** A
+/// `MeshRenderer` names one mesh, and splitting a multi-object file into
+/// separate assets is the importer's job at the point where materials exist
+/// to distinguish them — which is still not yet, for the same reason.
+///
+/// Faces may be triangles or larger polygons; anything with more than three
+/// vertices is fanned from its first vertex, which is correct for the convex
+/// faces exporters emit and is what every other OBJ reader does.
+///
+/// **Missing normals are computed per face, not defaulted to up.** An OBJ
+/// without `vn` is common — it is the default for several exporters — and a
+/// tree lit as though every leaf faced the sky is worse than a slightly
+/// faceted one.
+///
+/// # Errors
+/// [`AssetError`] if the file cannot be read or contains no triangles.
+pub fn import_obj(path: &std::path::Path) -> Result<Mesh, AssetError> {
+    let text = std::fs::read_to_string(path).map_err(AssetError::Io)?;
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut mesh = Mesh {
+        name: path.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh").to_owned(),
+        ..Mesh::default()
+    };
+
+    // OBJ indices are 1-based and may be negative, which means "counting back
+    // from the end of what has been declared so far". Both appear in the wild.
+    let resolve = |raw: i64, len: usize| -> Option<usize> {
+        if raw > 0 {
+            usize::try_from(raw - 1).ok().filter(|i| *i < len)
+        } else if raw < 0 {
+            len.checked_sub(raw.unsigned_abs() as usize)
+        } else {
+            None
+        }
+    };
+
+    let three = |it: &mut std::str::SplitWhitespace<'_>| -> [f32; 3] {
+        let mut out = [0.0_f32; 3];
+        for slot in &mut out {
+            *slot = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        }
+        out
+    };
+
+    for line in text.lines() {
+        let line = line.trim();
+        let mut parts = line.split_whitespace();
+        match parts.next() {
+            Some("v") => positions.push(three(&mut parts)),
+            Some("vn") => normals.push(three(&mut parts)),
+            Some("vt") => {
+                let u = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                let v: f32 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                // OBJ's V axis points up, every GPU convention has it pointing
+                // down. Flipping here rather than in the shader keeps the one
+                // place that knows about file formats in the importer.
+                uvs.push([u, 1.0 - v]);
+            }
+            Some("f") => {
+                // `v`, `v/vt`, `v//vn` and `v/vt/vn` are all legal.
+                let corners: Vec<(i64, Option<i64>, Option<i64>)> = parts
+                    .map(|c| {
+                        let mut f = c.split('/');
+                        let v = f.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+                        let t = f.next().and_then(|x| x.parse().ok());
+                        let n = f.next().and_then(|x| x.parse().ok());
+                        (v, t, n)
+                    })
+                    .collect();
+                if corners.len() < 3 {
+                    continue;
+                }
+                for k in 1..corners.len() - 1 {
+                    for corner in [corners[0], corners[k], corners[k + 1]] {
+                        let Some(pi) = resolve(corner.0, positions.len()) else {
+                            continue;
+                        };
+                        let uv = corner
+                            .1
+                            .and_then(|t| resolve(t, uvs.len()))
+                            .map_or([0.0, 0.0], |i| uvs[i]);
+                        let normal = corner
+                            .2
+                            .and_then(|n| resolve(n, normals.len()))
+                            .map(|i| normals[i]);
+                        let index = u32::try_from(mesh.vertices.len()).unwrap_or(0);
+                        mesh.vertices.push(Vertex::with_uv(
+                            positions[pi],
+                            normal.unwrap_or([0.0, 0.0, 0.0]),
+                            uv,
+                        ));
+                        mesh.indices.push(index);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if mesh.indices.is_empty() {
+        return Err(AssetError::Unsupported(format!(
+            "{} contains no triangles",
+            path.display()
+        )));
+    }
+
+    // Fill in any normal the file did not carry, per face. A zero normal is
+    // the sentinel written above; a file with full normals never enters this.
+    for tri in mesh.indices.chunks_exact(3) {
+        let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+        if mesh.vertices[a].normal[0] != 0.0
+            || mesh.vertices[a].normal[1] != 0.0
+            || mesh.vertices[a].normal[2] != 0.0
+        {
+            continue;
+        }
+        let p = |i: usize| mesh.vertices[i].position;
+        let (pa, pb, pc) = (p(a), p(b), p(c));
+        let u = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+        let v = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+        let n = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        let n = if len > 1e-12 { [n[0] / len, n[1] / len, n[2] / len] } else { [0.0, 1.0, 0.0] };
+        for i in [a, b, c] {
+            mesh.vertices[i].normal = [n[0], n[1], n[2], 0.0];
+        }
+    }
+
+    mesh.validate()?;
+    Ok(mesh)
+}
+
 /// Import every static mesh in a glTF/GLB file, merged into one mesh.
 ///
 /// Merged because a `MeshRenderer` names one mesh; splitting a multi-primitive
