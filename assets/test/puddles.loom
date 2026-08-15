@@ -33,6 +33,25 @@
 # The camera looks along the slab so the hollows are seen at a grazing angle,
 # which is the only angle standing water reads at: a puddle from directly above
 # is a dark patch, and from a low angle it is a mirror.
+#
+# ## The framing is aspect-robust, and it did not start that way
+#
+# **A human opened this scene in the viewer and saw no puddles at all.** The
+# first framing put them near the left and right edges, which is fine at the
+# gate's 320x200 (aspect 1.6) and wrong in a window: the vertical field of view
+# is what `fov_y_degrees` fixes, so a *narrower* viewport has a narrower
+# HORIZONTAL field of view and crops the edges away. The editor's 3D viewport is
+# about 890x765 — aspect 1.16 — and both puddles fell outside it.
+#
+# Nothing was broken. The offscreen render at 890x765 showed no puddles either,
+# which is what ruled out the viewer and pointed at the framing.
+#
+# So the camera sits further back with the hollows near the centre, and it is
+# checked at both aspects. **A scene whose subject is only in frame at one
+# aspect ratio is a scene the gate can pass while the human sees nothing** —
+# which is this project's oldest failure mode wearing yet another costume.
+# Stubbing `puddleMask` moves 0.43% of the reference against a 0.1% tolerance;
+# the first framing managed 0.8% and showed nothing in a window.
 
 [scene]
 format = 1
@@ -152,7 +171,7 @@ transform = { pos = [-16.0, 0.0, -16.0] }
 [[node]]
 name = "Camera"
 parent = "Weather"
-transform = { pos = [3.0, 6.2, 11.0], rot_euler = [-17.0, 0.0, 0.0] }
+transform = { pos = [2.0, 6.8, 15.0], rot_euler = [-16.0, 0.0, 0.0] }
 
   [node.components.Camera]
   fov_y_degrees = 55.0
