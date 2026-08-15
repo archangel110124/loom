@@ -130,33 +130,33 @@ transform = { pos = [-16.0, 0.0, -16.0] }
   # Four hollows, shallow to deep. The shallowest is under `PUDDLE_FULL` and
   # should read as a partial film rather than as a full puddle — a feature with
   # only an on state would pass a golden image and look like paint.
-  # 6 cm deep: under PUDDLE_FULL, so a partial film rather than a full puddle.
+  # 6 cm deep, 3.0 m across: under PUDDLE_FULL, so a partial film.
   [[node.components.VoxelVolume.ops]]
   kind = "sphere"
-  center = [10.0, 7.94, 10.0]
-  radius = 4.0
+  center = [10.0, 78.94, 10.0]
+  radius = 75.0
   mode = "subtract"
 
-  # 10 cm.
+  # 10 cm, 3.2 m across.
   [[node.components.VoxelVolume.ops]]
   kind = "sphere"
-  center = [21.0, 7.90, 12.0]
-  radius = 4.0
+  center = [21.0, 55.10, 12.0]
+  radius = 51.2
   mode = "subtract"
 
-  # 16 cm: exactly PUDDLE_FULL.
+  # 16 cm, 3.5 m across: exactly PUDDLE_FULL.
   [[node.components.VoxelVolume.ops]]
   kind = "sphere"
-  center = [13.0, 7.84, 21.0]
-  radius = 4.0
+  center = [13.0, 42.14, 21.0]
+  radius = 38.3
   mode = "subtract"
 
-  # 24 cm: past full, so the mask saturates and this one is the reference for
-  # what "a puddle" looks like at all.
+  # 28 cm, 4.0 m across: past full, so the mask saturates and this is the
+  # reference for what a puddle looks like at all.
   [[node.components.VoxelVolume.ops]]
   kind = "sphere"
-  center = [23.0, 8.26, 22.0]
-  radius = 4.5
+  center = [23.0, 32.29, 22.0]
+  radius = 28.57
   mode = "subtract"
 
   # **The ramp, and it is the assertion the eye makes.** Its foot is a concave

@@ -1301,6 +1301,9 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // bit for bit what they were. Multiplying by an identity would very nearly
     // do that, and "very nearly" is what a golden image is there to catch.
     // -----------------------------------------------------------------------
+    // Declared out here because the puddle's *reflection* has to be applied
+    // after the lighting below, not before it. See the block near `lit`.
+    float pool = 0.0;
     if (wetFilm() + wetSoak() > 0.0) {
         float wet = wetGate(in.worldPos, geometric);
         albedo *= 1.0 - WET_DARKEN * porosity * (1.0 - metallic) * wet * wetSoak();
@@ -1321,7 +1324,7 @@ float4 fragmentMain(VSOutput in) : SV_Target {
         //
         // `wet` gates it too, so nothing pools under a roof — the same answer
         // that stops the drops, out of the same height field.
-        float pool = puddleMask(in.worldPos) * wet * wetFilm();
+        pool = puddleMask(in.worldPos) * wet * wetFilm();
         if (pool > 0.0) {
             // A puddle's surface is level whatever the ground under it does.
             // That flattening is most of what reads as standing water rather
@@ -1395,6 +1398,27 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // picking up a mirror's worth of sky.
     float3 environment = skyGradient(normalize(lerp(reflection, normal, roughness)));
     lit += environment * f0 * (1.0 - roughness * 0.7);
+
+    // **A puddle is a mirror, and this is what was missing.** The term above is
+    // a constant 4% of the sky — correct at normal incidence and wrong at every
+    // other angle, because it carries no Fresnel. Water at a grazing angle
+    // reflects nearly all of what hits it, and that is the entire reason a
+    // puddle is visible on a wet road: not that it is darker, but that it is
+    // full of sky.
+    //
+    // Without this, a puddle away from the sun's glint is a dark patch of
+    // paint. It was shipped that way, and a human reported it as puddles being
+    // invisible, which was the right description.
+    //
+    // **Schlick's, the same constants `waterFragmentMain` uses**, so a puddle
+    // and the sea it is next to agree about what water does to light. And
+    // `skyColor` rather than `skyGradient` — the reflection carries the clouds
+    // and the sun, which is most of what makes it read as a reflection at all.
+    if (pool > 0.0) {
+        float grazing = saturate(1.0 - dot(normal, view));
+        float fresnel = 0.02 + 0.98 * pow(grazing, 5.0);
+        lit = lerp(lit, skyColor(reflection), fresnel * pool);
+    }
 
     // Last, over the finished shading. Fog is what is between the eye and the
     // surface, so it replaces the surface's colour rather than joining the
