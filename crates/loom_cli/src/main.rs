@@ -1089,7 +1089,19 @@ impl MeshLibrary {
                 continue;
             }
             let mesh = loom_asset::primitives::build(&name).or_else(|| {
-                let path = scene_asset_path(scene, &name).map(|p| base.join(p))?;
+                let raw = scene_asset_path(scene, &name)?;
+                // **`file.obj#Object` selects one object out of a library.** A
+                // multi-object OBJ is a pack rather than a model — the tree
+                // file is eight species each with its own texture atlas — and
+                // one mesh can carry one material, so without this seven of
+                // the eight are wrong however they are shaded. Split before
+                // joining, or the `#` becomes part of a filename that does not
+                // exist.
+                let (raw, object) = match raw.split_once('#') {
+                    Some((file, obj)) => (file.to_owned(), Some(obj.to_owned())),
+                    None => (raw, None),
+                };
+                let path = base.join(&raw);
                 // Chosen by extension, because that is the one thing a path
                 // reliably says about its contents. OBJ is text and glTF is a
                 // binary container; sniffing would work and would be a second
@@ -1100,7 +1112,7 @@ impl MeshLibrary {
                     .unwrap_or_default()
                     .to_ascii_lowercase();
                 let imported = if ext == "obj" {
-                    loom_asset::mesh::import_obj(&path)
+                    loom_asset::mesh::import_obj_object(&path, object.as_deref())
                 } else {
                     loom_asset::mesh::import_gltf(&path)
                 };

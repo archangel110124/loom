@@ -118,13 +118,39 @@ impl Mesh {
 /// # Errors
 /// [`AssetError`] if the file cannot be read or contains no triangles.
 pub fn import_obj(path: &std::path::Path) -> Result<Mesh, AssetError> {
+    import_obj_object(path, None)
+}
+
+/// Import one named `o` group from a Wavefront OBJ, or all of them.
+///
+/// **A multi-object OBJ is a library, not a model.** The tree file this was
+/// written for is eight species in a row spanning a hundred metres, each with
+/// its own texture atlas — merging them gives one mesh that can carry one
+/// material, so seven of the eight are wrong however it is shaded. Selecting
+/// by name is what makes a downloaded pack usable without an authoring tool.
+///
+/// A scene names it with a fragment: `trees.obj#Oak_Leav`. That needs no
+/// schema change, because an asset path is already a string, and it reads the
+/// way a URL fragment reads — the part after the `#` names something inside
+/// the thing before it.
+///
+/// # Errors
+/// [`AssetError`] if the file cannot be read, or the named object does not
+/// exist, or what was selected contains no triangles.
+pub fn import_obj_object(
+    path: &std::path::Path,
+    object: Option<&str>,
+) -> Result<Mesh, AssetError> {
     let text = std::fs::read_to_string(path).map_err(AssetError::Io)?;
 
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut mesh = Mesh {
-        name: path.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh").to_owned(),
+        name: object.map_or_else(
+            || path.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh").to_owned(),
+            std::borrow::ToOwned::to_owned,
+        ),
         ..Mesh::default()
     };
 
@@ -148,21 +174,40 @@ pub fn import_obj(path: &std::path::Path) -> Result<Mesh, AssetError> {
         out
     };
 
+    // **Vertex data is collected from the WHOLE file even when one object is
+    // selected**, because OBJ indices are global: object seven's faces index
+    // into the same `v` list object one contributed to. Skipping the vertices
+    // of unselected objects would renumber everything after them.
+    let mut wanted = object.is_none();
+    let mut seen_any = false;
+
     for line in text.lines() {
         let line = line.trim();
         let mut parts = line.split_whitespace();
         match parts.next() {
+            Some("o" | "g") => {
+                if let Some(target) = object {
+                    let name = parts.next().unwrap_or_default();
+                    wanted = name == target;
+                    seen_any |= wanted;
+                }
+            }
             Some("v") => positions.push(three(&mut parts)),
             Some("vn") => normals.push(three(&mut parts)),
             Some("vt") => {
                 let u = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
                 let v: f32 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-                // OBJ's V axis points up, every GPU convention has it pointing
-                // down. Flipping here rather than in the shader keeps the one
-                // place that knows about file formats in the importer.
-                uvs.push([u, 1.0 - v]);
+                // **Taken as written, and that is measured rather than
+                // reasoned.** The textbook answer is that OBJ's V axis points
+                // up while Vulkan's points down, so an importer should flip.
+                // Flipping renders this pack's trees with bark on the leaves
+                // and foliage on the trunk — its atlases carry leaf cards
+                // above a bark region, so a vertical mirror swaps them and
+                // says so loudly. Loom's texture upload already accounts for
+                // the difference; a flip here applies it twice.
+                uvs.push([u, v]);
             }
-            Some("f") => {
+            Some("f") if wanted => {
                 // `v`, `v/vt`, `v//vn` and `v/vt/vn` are all legal.
                 let corners: Vec<(i64, Option<i64>, Option<i64>)> = parts
                     .map(|c| {
@@ -203,11 +248,31 @@ pub fn import_obj(path: &std::path::Path) -> Result<Mesh, AssetError> {
         }
     }
 
+    if let Some(target) = object.filter(|_| !seen_any) {
+        return Err(AssetError::Unsupported(format!(
+            "{} has no object named {target}",
+            path.display()
+        )));
+    }
     if mesh.indices.is_empty() {
         return Err(AssetError::Unsupported(format!(
             "{} contains no triangles",
             path.display()
         )));
+    }
+    // Selected objects sit wherever they were authored — the tree file has
+    // them in a row a hundred metres long — so a single one arrives with a
+    // large offset baked in and a scene transform cannot sensibly place it.
+    // Recentring on X and Z, but NOT on Y: a tree's base belongs at its
+    // origin, and centring vertically would bury half of it.
+    if object.is_some() {
+        let (lo, hi) = mesh.bounds();
+        let shift = [(lo[0] + hi[0]) * 0.5, lo[1], (lo[2] + hi[2]) * 0.5];
+        for v in &mut mesh.vertices {
+            v.position[0] -= shift[0];
+            v.position[1] -= shift[1];
+            v.position[2] -= shift[2];
+        }
     }
 
     // Fill in any normal the file did not carry, per face. A zero normal is
