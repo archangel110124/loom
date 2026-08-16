@@ -325,6 +325,12 @@ Error codes for M1: `parse_error`, `format_version_unsupported`, `duplicate_sibl
 `field_out_of_range`, `field_type_mismatch`, `unresolved_alias`, `non_finite_float`, and
 `not_implemented` for the §5 keys above.
 
+`invalid_voxel_op` came later, and for the same reason `not_implemented` exists: a `VoxelVolume`'s
+`ops` ride on the component as free-form JSON, so layer 1 never looks inside them. An op whose
+`kind` nothing recognises used to be dropped on the way to the bake — the volume baked *short*, drew
+a plausible surface, validated clean, and got faster for it. The volume is refused whole, naming the
+op's index and its `kind`.
+
 `unresolved_alias` is reserved for an alias that **nothing declares** — a typo in the scene, which
 is what the agent controls. A declared alias whose file is merely absent is reported as an
 `asset_file_missing` warning instead: the text is right and the workspace is incomplete, which is

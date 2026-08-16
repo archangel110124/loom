@@ -331,7 +331,7 @@ impl Sim {
             // and a trimesh on a dynamic body is never-do #10.
             if let Some(recipe) = world.voxel_recipe(*entity) {
                 match crate::build_volume(recipe) {
-                    Some((volume, ())) => {
+                    Ok(volume) => {
                         let cells = volume.solid_cells();
                         // The whole transform, not just the position: the mesh
                         // is drawn with the node's global matrix, so a rotated
@@ -364,8 +364,8 @@ impl Sim {
                             ));
                         }
                     }
-                    None => crate::log::warn(format!(
-                        "{}: voxel recipe did not rebuild; terrain will not collide",
+                    Err(e) => crate::log::warn(format!(
+                        "{}: {e}; terrain will not collide",
                         world.path(*entity).unwrap_or("?")
                     )),
                 }

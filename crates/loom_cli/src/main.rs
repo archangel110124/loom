@@ -331,6 +331,32 @@ fn validate(path: &str) -> (u8, String) {
                 return (1, json_line(&serde_json::json!({ "errors": unresolved })));
             }
 
+            // **The op list is schema-checked here and nowhere else.** It rides
+            // on the component as free-form JSON, so `Scene::parse` never looks
+            // inside it: a misspelled `kind` reached the bake, which used to
+            // drop it silently. Parsing costs nothing — no volume is baked —
+            // and this is the layer the agent's write hook runs.
+            let voxel_errors: Vec<serde_json::Value> = scene
+                .nodes()
+                .iter()
+                .filter_map(|node| {
+                    let e = parse_ops(node.components.get("VoxelVolume")?).err()?;
+                    Some(serde_json::json!({
+                        "error": "invalid_voxel_op",
+                        "node": node.path,
+                        "field": "VoxelVolume.ops",
+                        "constraint": e,
+                        "hint": "`kind` is one of sphere, box, capsule, heightfield, each with \
+                                 its own fields. The volume is refused whole rather than baked \
+                                 without this op: a volume short one op still renders, which is \
+                                 why this cannot be a warning.",
+                    }))
+                })
+                .collect();
+            if !voxel_errors.is_empty() {
+                return (1, json_line(&serde_json::json!({ "errors": voxel_errors })));
+            }
+
             // Physical sanity runs after schema validation, because a scene
             // that will not load cannot be reasoned about physically. These
             // are warnings by design (graphics doc §C.5): an unusual scene is
@@ -1044,17 +1070,10 @@ impl MeshLibrary {
         // Voxel volumes bake into a mesh at load, from the op list the scene
         // stores. never-do #11: the scene holds the recipe, never the voxels.
         for node in scene.nodes() {
-            // Grass and voxel volumes both bake a mesh from a recipe, and the
-            // caching, keying and warning are identical — only the generator
-            // differs.
-            let (kind, recipe_source, bake): (&str, _, fn(&serde_json::Value) -> Option<loom_asset::Mesh>) =
-                if let Some(volume) = node.components.get("VoxelVolume") {
-                    ("voxel", volume, bake_voxel)
-                } else {
-                    continue;
-                };
-            let volume = recipe_source;
-            let key = format!("{kind}:{}", node.path);
+            let Some(volume) = node.components.get("VoxelVolume") else {
+                continue;
+            };
+            let key = format!("voxel:{}", node.path);
             if by_name.contains_key(&key) {
                 continue;
             }
@@ -1062,10 +1081,9 @@ impl MeshLibrary {
             // force a re-bake, and two nodes with the same ops share one mesh.
             let recipe = fnv(0xcbf2_9ce4_8422_2325, volume.to_string().as_bytes());
             let baked = match cache.get(&recipe) {
-                Some(mesh) => Some(mesh.clone()),
-                None => {
-                    let mesh = bake(volume);
-                    if let Some(mesh) = mesh.clone() {
+                Some(mesh) => Ok(Some(mesh.clone())),
+                None => bake_voxel(volume).inspect(|baked| {
+                    if let Some(mesh) = baked.clone() {
                         // `ponytail:` unbounded until it isn't. Each entry is
                         // one volume's geometry and an edit session touches a
                         // handful; drop the lot rather than track ages.
@@ -1074,15 +1092,18 @@ impl MeshLibrary {
                         }
                         cache.insert(recipe, mesh);
                     }
-                    mesh
-                }
+                }),
             };
             match baked {
-                Some(mesh) => {
+                Ok(Some(mesh)) => {
                     by_name.insert(key, u32::try_from(meshes.len()).unwrap_or(0));
                     meshes.push(mesh);
                 }
-                None => crate::log::warn(format!("{}: {kind} produced no surface", node.path)),
+                Ok(None) => crate::log::warn(format!("{}: voxel produced no surface", node.path)),
+                // Loud and whole rather than quiet and short: the node draws
+                // nothing, which is visible, instead of a plausible surface
+                // missing whichever ops failed to parse.
+                Err(e) => crate::log::warn(format!("{}: {e}", node.path)),
             }
         }
 
@@ -1217,7 +1238,9 @@ fn world_translation(scene: &Scene, node: &loom_scene::Node) -> [f32; 3] {
 /// sample and gets slower.
 pub(crate) fn scene_volume(scene: &Scene) -> Option<(loom_voxel::Volume, [f32; 3])> {
     scene.nodes().iter().find_map(|node| {
-        let (volume, ()) = build_volume(node.components.get("VoxelVolume")?)?;
+        let volume = build_volume(node.components.get("VoxelVolume")?)
+            .map_err(|e| crate::log::warn(format!("{}: {e}", node.path)))
+            .ok()?;
         Some((volume, world_translation(scene, node)))
     })
 }
@@ -1907,34 +1930,16 @@ pub(crate) fn grass_blades(scene: &Scene) -> Vec<loom_render::GrassBlade> {
     out
 }
 
-fn bake_voxel(component: &serde_json::Value) -> Option<loom_asset::Mesh> {
-    #[allow(clippy::cast_possible_truncation)]
-    let voxel_size = component.get("voxel_size").and_then(serde_json::Value::as_f64)? as f32;
-    let chunks = component.get("chunks").and_then(|c| c.as_array())?;
-    let dims: Vec<usize> = chunks
-        .iter()
-        .filter_map(|v| v.as_u64().map(|n| n as usize))
-        .collect();
-    if dims.len() != 3 {
-        return None;
-    }
-    let ops: Vec<loom_voxel::VoxelOp> = component
-        .get("ops")
-        .and_then(|o| o.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    if ops.is_empty() {
-        return None;
-    }
-
-    let mut volume = loom_voxel::Volume::new([dims[0], dims[1], dims[2]], voxel_size);
-    volume.bake(&ops);
+/// A voxel volume's drawable surface, or `Ok(None)` if the recipe carves
+/// nothing solid.
+///
+/// One bake, shared with physics: this used to read `voxel_size`, `chunks` and
+/// `ops` a second time, which is two chances to disagree about what a scene
+/// means and is how the drawn surface and the collided one drift apart.
+fn bake_voxel(component: &serde_json::Value) -> Result<Option<loom_asset::Mesh>, String> {
+    let volume = build_volume(component)?;
     let mesh = loom_voxel::mesh::mesh_volume(&volume, &loom_voxel::SurfaceNets);
-    (!mesh.indices.is_empty()).then_some(mesh)
+    Ok((!mesh.indices.is_empty()).then_some(mesh))
 }
 
 /// The advisory `path` an `[[asset]]` entry carries, for importing.
@@ -3353,10 +3358,13 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
         })));
     };
 
-    let Some((mut volume, _)) = build_volume(component) else {
-        return (1, json_line(&serde_json::json!({
-            "error": "voxel_bake_failed", "node": node,
-        })));
+    let mut volume = match build_volume(component) {
+        Ok(volume) => volume,
+        Err(e) => {
+            return (1, json_line(&serde_json::json!({
+                "error": "voxel_bake_failed", "node": node, "constraint": e,
+            })));
+        }
     };
 
     // 1. Carve. The edit layer records only the chunks the blast touches.
@@ -3505,31 +3513,60 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
     )
 }
 
-/// Build a voxel volume from a component, returning it and its mesh.
-pub(crate) fn build_volume(component: &serde_json::Value) -> Option<(loom_voxel::Volume, ())> {
+/// The op list a `VoxelVolume` authors, or the first one that does not parse.
+///
+/// **An op the schema does not recognise is an error, never a skipped line.**
+/// This read used to be `filter_map(…ok())`: a misspelled `kind`, or a `sphere`
+/// missing its `radius`, was dropped on the floor. The volume then baked *short*
+/// — a plausible surface, a clean `loom validate`, and a bake that got
+/// **faster**, so a cost measurement reported an improvement on the commit that
+/// broke the scene. It is the prefab defect verbatim (CLAUDE.md: "a key it does
+/// not understand is a key it ignores"), and the fix is the same one: refuse.
+pub(crate) fn parse_ops(component: &serde_json::Value) -> Result<Vec<loom_voxel::VoxelOp>, String> {
+    let Some(ops) = component.get("ops") else {
+        return Ok(Vec::new());
+    };
+    let Some(ops) = ops.as_array() else {
+        return Err("ops must be a list of ops".to_owned());
+    };
+    ops.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            serde_json::from_value(value.clone()).map_err(|e| {
+                let kind = value
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<missing>");
+                format!("op {index} (kind = \"{kind}\"): {e}")
+            })
+        })
+        .collect()
+}
+
+/// Build and bake a voxel volume from a component.
+pub(crate) fn build_volume(component: &serde_json::Value) -> Result<loom_voxel::Volume, String> {
     #[allow(clippy::cast_possible_truncation)]
-    let voxel_size = component.get("voxel_size").and_then(serde_json::Value::as_f64)? as f32;
+    let voxel_size = component
+        .get("voxel_size")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or("voxel_size is missing or not a number")? as f32;
     let dims: Vec<usize> = component
-        .get("chunks")?
-        .as_array()?
+        .get("chunks")
+        .and_then(|c| c.as_array())
+        .ok_or("chunks is missing or not a list")?
         .iter()
         .filter_map(|v| v.as_u64().map(|n| n as usize))
         .collect();
     if dims.len() != 3 {
-        return None;
+        return Err("chunks must be three whole numbers".to_owned());
     }
-    let ops: Vec<loom_voxel::VoxelOp> = component
-        .get("ops")?
-        .as_array()?
-        .iter()
-        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-        .collect();
+    let ops = parse_ops(component)?;
     if ops.is_empty() {
-        return None;
+        return Err("the volume authors no ops, so it has no shape".to_owned());
     }
     let mut volume = loom_voxel::Volume::new([dims[0], dims[1], dims[2]], voxel_size);
     volume.bake(&ops);
-    Some((volume, ()))
+    Ok(volume)
 }
 
 fn parse_vec3(spec: &str) -> Option<[f32; 3]> {
@@ -4616,6 +4653,35 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         assert_eq!(e["error"], "unresolved_alias");
         assert_eq!(e["value"], "crate_wooden");
         assert_eq!(e["node"], "Root");
+    }
+
+    /// **The prefab defect in the voxel path.** An op whose `kind` the schema
+    /// does not know used to be dropped by a `filter_map(…ok())`: the volume
+    /// baked short, drew a plausible surface, validated clean, and baked
+    /// *faster* for it. The mutation is one word in a real scene.
+    #[test]
+    fn validate_rejects_a_voxel_op_it_does_not_recognise() {
+        let good = std::fs::read_to_string("../../assets/test/rain_gantry.loom").unwrap();
+        let dir = std::env::temp_dir().join("loom_voxel_op_check");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let scene = dir.join("a.loom");
+        // The mesh aliases are `asset = "box"`; only the op line matches this.
+        let bad = good.replace("kind = \"box\"", "kind = \"swirl\"");
+        assert_ne!(bad, good, "the mutation did not apply, so this proves nothing");
+        std::fs::write(&scene, &bad).expect("write");
+
+        let (code, out) = run(&args(&["validate", scene.to_str().unwrap()]));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(code, 1, "an op nothing can parse is invalid: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let e = &v["errors"][0];
+        assert_eq!(e["error"], "invalid_voxel_op");
+        assert_eq!(e["node"], "Weather/Apron");
+        assert!(
+            e["constraint"].as_str().unwrap_or_default().contains("swirl"),
+            "the offending kind has to be named or the agent cannot fix it: {out}"
+        );
     }
 
     /// Primitives resolve procedurally and need no `[[asset]]` entry, and the
