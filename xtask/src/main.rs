@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 36] = [
+const SCENES: [&str; 37] = [
     "assets/test/lanternhead.loom",
     // The imported PBR library. **Not in `GOLDEN`**: it adds no rendering path
     // that `materials.loom` does not already cover — it is a catalogue of
@@ -63,6 +63,11 @@ const SCENES: [&str; 36] = [
     "assets/test/office.loom",
     "assets/test/materials.loom",
     "assets/test/terrain_stress.loom",
+    // The only scene whose landform comes from a `loom_terrain` recipe rather
+    // than from `kind = "heightfield"`'s five octaves of fBm. Erosion, spline
+    // carve, flatten disc and the corridor guarantee reach the SDF here and
+    // nowhere else.
+    "assets/test/vale.loom",
     "assets/test/smoke.loom",
     "assets/test/windy.loom",
     "assets/test/meadow.loom",
@@ -166,7 +171,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 26] = [
+const GOLDEN: [(&str, &str, &[&str]); 27] = [
     // **The post-process stack's standing shot** (ADR 0018). Nothing else in
     // this list is composed around what happens *above* diffuse white: the
     // flame's core, the brazier's pool, the sun's glitter path, wet stone at
@@ -177,6 +182,15 @@ const GOLDEN: [(&str, &str, &[&str]); 26] = [
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
+    // **The recipe pipeline reaching the SDF**, which nothing else in this list
+    // covers and nothing else in the project measures. `cave` and
+    // `terrain_stress` are voxels too, but their landform is analytic — a
+    // sphere, or fBm evaluated per column — so a change to fBm's normalise
+    // step, to either erosion pass, to the spline carve or to the bilinear
+    // placement moves no pixel any gate looks at. It is not a new *rendering*
+    // path and it does not claim to be: it is the only picture of a bake that
+    // ran the whole 2D pipeline.
+    ("vale", "assets/test/vale.loom", &[]),
     ("smoke", "assets/test/smoke.loom", &[]),
     ("explosion", "assets/test/explosion.loom", &["--sim", "22"]),
     // Wind-advected particles: the one scene where the field does something

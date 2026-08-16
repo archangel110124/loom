@@ -32,6 +32,7 @@ pub mod mesh;
 pub use mesh::{Mesher, SurfaceNets};
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -250,6 +251,166 @@ impl Displace {
     }
 }
 
+/// A `loom_terrain` recipe, baked, with the two numbers derived from the bake.
+///
+/// **The whole of the join between the 2D pipeline and the 3D field.** Erosion,
+/// spline carves, flatten discs and the corridor guarantee are all 2D
+/// algorithms operating on a height array; what a voxel volume needs from them
+/// is `height_at`, and this is where that array lives once it has been
+/// computed. It is behind an `Arc` because two ops naming the same recipe — or
+/// three calls to `build_volume` in one process — must share one 231 ms bake.
+pub struct TerrainMap {
+    pub map: loom_terrain::Heightmap,
+    /// Exact Lipschitz bound of `p.y - h(x, z)` over the bilinear surface.
+    lipschitz: f32,
+    /// `map.range()`, kept because [`VoxelOp::bounds`] is called per edit and
+    /// the range is a full pass over the array.
+    range: (f32, f32),
+}
+
+impl std::fmt::Debug for TerrainMap {
+    /// Dimensions, not data. The derived one prints every height in the map,
+    /// which is 16k floats in the smallest recipe anyone would author and turns
+    /// any `{:?}` of an op list into pages of noise.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "TerrainMap({}x{}, {:.1}..{:.1} m, L = {:.2})",
+            self.map.width, self.map.height, self.range.0, self.range.1, self.lipschitz
+        )
+    }
+}
+
+impl PartialEq for TerrainMap {
+    fn eq(&self, other: &Self) -> bool {
+        self.map == other.map
+    }
+}
+
+impl TerrainMap {
+    /// Measure a baked map.
+    #[must_use]
+    pub fn new(map: loom_terrain::Heightmap) -> Self {
+        // **The exact bound of the bilinear interpolant, not a percentile of
+        // it.** Along X at fixed Y the bilinear derivative is a lerp between
+        // the two edge slopes of the cell, so it never exceeds the largest
+        // adjacent-sample difference on that axis; the same holds on Z. So
+        // taking the max of each axis separately and combining them bounds
+        // `|grad h|` everywhere, including inside cells, in one pass.
+        //
+        // A high percentile plus a safety factor was the other candidate,
+        // because one spline-carved cliff cell sets the max and the max sets
+        // `reach`. It is not a bound, though, and understating a bound is the
+        // direction that punches holes. **Measured on `vale.loom`**, which is
+        // 4.43-Lipschitz: the exact bound bakes in 31.1 ms against 17.2 ms for
+        // a pinned 1.0, and the pinned one leaves 178 surface chunks where the
+        // sound one finds 181 — three chunks of hole, which is the whole
+        // argument in one number. 14 ms against a 39 ms recipe bake and a
+        // 67 ms mesh is not where this scene's time goes.
+        let [mx, mz] = map.metres_per_pixel();
+        let (mut gx, mut gz) = (0.0_f32, 0.0_f32);
+        for y in 0..map.height {
+            for x in 0..map.width {
+                let here = map.get(x, y);
+                if x + 1 < map.width {
+                    gx = gx.max((map.get(x + 1, y) - here).abs() / mx.max(1e-6));
+                }
+                if y + 1 < map.height {
+                    gz = gz.max((map.get(x, y + 1) - here).abs() / mz.max(1e-6));
+                }
+            }
+        }
+        Self {
+            lipschitz: gz.mul_add(gz, gx.mul_add(gx, 1.0)).sqrt(),
+            range: map.range(),
+            map,
+        }
+    }
+
+    /// Height at a world position, given the rect the map covers.
+    #[must_use]
+    pub fn height(&self, rect: [f32; 4], x: f32, z: f32) -> f32 {
+        let [mx, mz] = self.map.metres_per_pixel();
+        self.map
+            .sample((x - rect[0]) / mx.max(1e-6), (z - rect[1]) / mz.max(1e-6))
+    }
+}
+
+/// Baked recipes, keyed by content hash.
+///
+/// The hash is the recipe's own [`loom_terrain::Recipe::content_hash`], so two
+/// scenes naming the same landform share one bake and an edited recipe misses
+/// automatically. Keying by *path* instead would serve a stale map after an
+/// edit, which is the failure mode a cache is worth having only if it avoids.
+///
+/// `ponytail:` unbounded, and never evicted. It holds one map per distinct
+/// recipe in a process; a tool that walked a library of hundreds would want an
+/// LRU.
+static BAKED: Mutex<BTreeMap<String, Arc<TerrainMap>>> = Mutex::new(BTreeMap::new());
+
+/// Bake the recipe every [`VoxelOp::Terrain`] names, resolving paths against
+/// `base` — the directory of the scene file that authored them.
+///
+/// **Ops that came from a scene must go through this before they are baked**,
+/// and [`Volume::bake`] asserts that they did. A `Terrain` op arrives from
+/// `serde` with no map at all, because the map is derived and a scene stores
+/// recipes rather than derived arrays (never-do #11).
+///
+/// # Errors
+/// If a recipe is missing or invalid, or if the rect it is placed over is not
+/// the size the recipe says it covers.
+pub fn resolve(ops: &mut [VoxelOp], base: &std::path::Path) -> Result<(), String> {
+    for (index, op) in ops.iter_mut().enumerate() {
+        let VoxelOp::Terrain {
+            recipe, rect, map, ..
+        } = op
+        else {
+            continue;
+        };
+        let path = base.join(&*recipe);
+        let loaded = loom_terrain::Recipe::load(&path)
+            .map_err(|e| format!("op {index} (kind = \"terrain\"): {}: {e}", path.display()))?;
+
+        // **The world rect and the recipe's `world_scale` are two independent
+        // coordinate systems**, and disagreeing about them renders a plausible
+        // landscape at the wrong scale — the one failure here that looks like
+        // an art decision. So they are required to agree, with both numbers in
+        // the message: `world_scale` means "world units this map covers", and
+        // a rect of a different size silently redefines it. It also keeps
+        // `loom terrain`'s slope and buildable numbers true of the scene,
+        // since `analyze` measures them through `world_scale`.
+        let extent = [rect[2] - rect[0], rect[3] - rect[1]];
+        let scale = loaded.world_scale;
+        if (extent[0] - scale[0]).abs() > 1e-3 * scale[0].abs().max(1.0)
+            || (extent[1] - scale[1]).abs() > 1e-3 * scale[1].abs().max(1.0)
+        {
+            return Err(format!(
+                "op {index} (kind = \"terrain\"): rect {rect:?} is {extent:?} m across but \
+                 {} says world_scale = {scale:?}. They must agree — the rect places the \
+                 recipe, it does not rescale it.",
+                path.display()
+            ));
+        }
+
+        *map = Some(baked(&loaded));
+    }
+    Ok(())
+}
+
+/// The baked map for a recipe, from the cache or into it.
+fn baked(recipe: &loom_terrain::Recipe) -> Arc<TerrainMap> {
+    let key = recipe.content_hash();
+    let mut cache = BAKED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(hit) = cache.get(&key) {
+        return Arc::clone(hit);
+    }
+    let entry = Arc::new(TerrainMap::new(recipe.bake()));
+    cache.insert(key, Arc::clone(&entry));
+    entry
+}
+
 /// One authored edit.
 ///
 /// **This is what a scene stores**, never the resulting voxels. "Carve a cave
@@ -348,6 +509,38 @@ pub enum VoxelOp {
         seed: u64,
         mode: CsgMode,
     },
+    /// Ground from a `loom_terrain` recipe: fBm, ridged, domain warp, spline
+    /// carve, flatten disc, peak, corridor guarantee, and **the two erosion
+    /// passes a 3D field cannot run at all**.
+    ///
+    /// [`Self::Heightfield`] reaches past the recipe system for a single
+    /// function, `loom_terrain::noise::fbm`, so every landscape built on it is
+    /// un-eroded fBm. This is the same op with the whole pipeline behind it:
+    /// gullies where water actually ran, talus at the angle it rests at, a
+    /// flattened pad that was *asserted* buildable, and a walkable route that
+    /// was guaranteed rather than hoped for.
+    ///
+    /// It is also the only op with an assertable feedback channel:
+    /// `loom terrain <scene.loom>` reports `buildable_pct`, `slope_mean`,
+    /// `largest_flat` and `reachable` without rendering anything.
+    ///
+    /// **Bounded, unlike a heightfield** — a recipe is a finite array, so the
+    /// rect is the whole of where it says anything.
+    Terrain {
+        /// Recipe path, relative to the scene file that names it.
+        recipe: String,
+        /// The world rect the map covers, `[x0, z0, x1, z1]`. Must be the size
+        /// the recipe's own `world_scale` claims; [`resolve`] checks it.
+        rect: [f32; 4],
+        /// World Y the recipe's `height_range` is measured from.
+        base_y: f32,
+        mode: CsgMode,
+        /// Baked by [`resolve`] at load, **never in the scene file**: it is a
+        /// derived array, and a scene stores recipes (never-do #11). Absent
+        /// until then, and [`Volume::bake`] refuses an op that never was.
+        #[serde(skip)]
+        map: Option<Arc<TerrainMap>>,
+    },
 }
 
 impl VoxelOp {
@@ -357,8 +550,17 @@ impl VoxelOp {
             Self::Sphere { mode, .. }
             | Self::Box { mode, .. }
             | Self::Capsule { mode, .. }
-            | Self::Heightfield { mode, .. } => *mode,
+            | Self::Heightfield { mode, .. }
+            | Self::Terrain { mode, .. } => *mode,
         }
+    }
+
+    /// Whether every input this op needs is in hand.
+    ///
+    /// False only for a [`Self::Terrain`] that never went through [`resolve`].
+    #[must_use]
+    pub fn is_resolved(&self) -> bool {
+        !matches!(self, Self::Terrain { map: None, .. })
     }
 
     /// World-space bounds this op can possibly affect.
@@ -453,6 +655,17 @@ impl VoxelOp {
                 [f32::MIN, base - amplitude.abs(), f32::MIN],
                 [f32::MAX, base + amplitude.abs(), f32::MAX],
             ),
+            // Bounded on every axis, which a heightfield is not: a recipe is a
+            // finite array over a stated rect, so an edit can cull against it
+            // horizontally as well as vertically.
+            Self::Terrain {
+                rect, base_y, map, ..
+            } => {
+                let (lo, hi) = map.as_ref().map_or((f32::MIN, f32::MAX), |m| {
+                    (base_y + m.range.0, base_y + m.range.1)
+                });
+                ([rect[0], lo, rect[1]], [rect[2], hi, rect[3]])
+            }
         }
     }
 
@@ -491,6 +704,14 @@ impl VoxelOp {
     }
 
     fn undisplaced_lipschitz(&self) -> f32 {
+        // Measured off the baked array rather than derived from parameters:
+        // erosion, spline carves and flatten discs all change the slope after
+        // the noise that set it, so there is nothing to derive it from. See
+        // [`TerrainMap::new`] for why it is an exact bound and not a
+        // percentile.
+        if let Self::Terrain { map, .. } = self {
+            return map.as_ref().map_or(1.0, |m| m.lipschitz);
+        }
         let Self::Heightfield {
             amplitude,
             frequency,
@@ -526,6 +747,15 @@ impl VoxelOp {
     /// there is nothing to hoist.
     #[must_use]
     pub fn height_at(&self, x: f32, z: f32) -> Option<f32> {
+        // The same hoist, and the reason it is worth as much here: one bilinear
+        // lookup replaces five octaves of fBm, and a chunk asks for the same
+        // column 32 times either way.
+        if let Self::Terrain {
+            rect, base_y, map, ..
+        } = self
+        {
+            return map.as_ref().map(|m| base_y + m.height(*rect, x, z));
+        }
         let Self::Heightfield {
             base,
             amplitude,
@@ -565,7 +795,7 @@ impl VoxelOp {
             Self::Sphere { displace, .. }
             | Self::Box { displace, .. }
             | Self::Capsule { displace, .. } => displace.as_ref(),
-            Self::Heightfield { .. } => None,
+            Self::Heightfield { .. } | Self::Terrain { .. } => None,
         }
     }
 
@@ -608,9 +838,12 @@ impl VoxelOp {
                 let h = (dot(pa, ba) / dot(ba, ba).max(1e-6)).clamp(0.0, 1.0);
                 length(sub(pa, scale(ba, h))) - radius
             }
-            Self::Heightfield { .. } => {
+            Self::Heightfield { .. } | Self::Terrain { .. } => {
                 // Height varies with X and Z; Y is up. Positive above ground.
-                // `height_at` is `Some` for exactly this variant.
+                // `height_at` is `Some` for exactly these two variants — and
+                // for an unresolved `Terrain` it is `None`, which lands on the
+                // fallback below and reads as surface everywhere. `bake`
+                // refuses that op rather than letting it be a shape.
                 let height = self.height_at(p[0], p[2]).unwrap_or(p[1]);
                 // Returned raw. The early-out's soundness is restored by
                 // widening its threshold with `lipschitz`, not by shrinking
@@ -753,7 +986,20 @@ impl Volume {
     /// and it is the difference between milliseconds and seconds.
     ///
     /// Order matters: subtract-then-union is not union-then-subtract.
+    ///
+    /// # Panics
+    /// If a [`VoxelOp::Terrain`] never went through [`resolve`]. That is a
+    /// missing call in engine code rather than a bad scene, and it is loud
+    /// here because it is silent everywhere else: an op with no map answers
+    /// "surface" at every point, which bakes a full volume of plausible
+    /// nonsense and validates clean. It is the prefab defect and the dropped-op
+    /// defect in a third costume.
     pub fn bake(&mut self, ops: &[VoxelOp]) {
+        assert!(
+            ops.iter().all(VoxelOp::is_resolved),
+            "a `terrain` op reached bake unresolved — call `loom_voxel::resolve(ops, base)` \
+             after parsing a scene's op list",
+        );
         #[allow(clippy::cast_precision_loss)]
         // Half-diagonal of a chunk in world units — the furthest any voxel in
         // it can be from its centre.
@@ -2004,5 +2250,159 @@ mod tests {
 
         assert!(min[1] <= 6.0 && max[1] >= 14.0, "got {min:?}..{max:?}");
         assert!(op.lipschitz() > 1.0, "a sloped field is never 1-Lipschitz");
+    }
+
+    /// A recipe with a carve steep enough that the bound matters.
+    ///
+    /// Written as the text an author would write, so the test exercises the
+    /// same parse the scene does rather than a struct literal that cannot
+    /// disagree with one.
+    const CARVED: &str = r#"
+        size = [64, 64]
+        world_scale = [32.0, 32.0]
+        height_range = [0.0, 12.0]
+        seed = 23070
+
+        [[layer]]
+        kind = "fbm"
+        amplitude = 1.0
+        frequency = 0.05
+        octaves = 4
+
+        [[layer]]
+        kind = "spline_carve"
+        points = [[10.0, 4.0], [30.0, 50.0]]
+        width = 6.0
+        depth = 9.0
+    "#;
+
+    fn carved_recipe() -> loom_terrain::Recipe {
+        loom_terrain::Recipe::from_toml(CARVED).expect("the test recipe parses")
+    }
+
+    fn carved_terrain() -> VoxelOp {
+        VoxelOp::Terrain {
+            recipe: "carved.toml".to_owned(),
+            rect: [0.0, 0.0, 32.0, 32.0],
+            base_y: 2.0,
+            mode: CsgMode::Union,
+            map: Some(std::sync::Arc::new(TerrainMap::new(
+                carved_recipe().bake(),
+            ))),
+        }
+    }
+
+    /// **The early-out has to be sound over a baked map**, and this is the test
+    /// that says so: a chunk skipped because its centre looked far from the
+    /// surface, when the surface runs through it, is a hole in the terrain.
+    ///
+    /// It fires. Pinning `Terrain`'s `lipschitz` back to 1.0 — the bound that
+    /// is right for a true distance field and wrong for `y - h(x, z)` — fails
+    /// it with 283 of the sampled voxels on the wrong side of the surface.
+    #[test]
+    fn a_baked_terrain_agrees_with_the_op_it_came_from() {
+        let op = carved_terrain();
+        let mut volume = Volume::new([4, 8, 4], 0.25);
+        volume.bake(std::slice::from_ref(&op));
+
+        let [rx, ry, rz] = volume.resolution();
+        let mut disagreements = Vec::new();
+        for z in (0..rz).step_by(3) {
+            for y in (0..ry).step_by(3) {
+                for x in (0..rx).step_by(3) {
+                    let world = volume.world_of(x, y, z);
+                    let truth = op.distance(world);
+                    // As the heightfield's own test: the i8 quantisation makes
+                    // a voxel within a cell of the boundary legitimately either
+                    // sign.
+                    if truth.abs() < volume.voxel_size * 2.0 {
+                        continue;
+                    }
+                    if (volume.voxel(x, y, z) < 0) != (truth < 0.0) {
+                        disagreements.push((x, y, z, truth));
+                    }
+                }
+            }
+        }
+        assert!(
+            disagreements.is_empty(),
+            "{} sampled voxels disagree with the baked recipe, e.g. {:?}",
+            disagreements.len(),
+            &disagreements[..disagreements.len().min(4)]
+        );
+        assert!(
+            op.lipschitz() > 1.5,
+            "a carved landscape is much steeper than 1-Lipschitz: {}",
+            op.lipschitz()
+        );
+    }
+
+    /// The op is bounded on every axis, which is what a heightfield is not, and
+    /// the vertical bound has to contain the whole map or an edit at the
+    /// crater's edge misses chunks.
+    #[test]
+    fn a_terrain_bounds_the_rect_it_was_placed_over() {
+        let op = carved_terrain();
+        let (min, max) = op.bounds();
+        assert_eq!([min[0], min[2]], [0.0, 0.0]);
+        assert_eq!([max[0], max[2]], [32.0, 32.0]);
+
+        let map = carved_recipe().bake();
+        let (lo, hi) = map.range();
+        assert!(min[1] <= 2.0 + lo && max[1] >= 2.0 + hi, "got {min:?}..{max:?}");
+    }
+
+    /// **An op with no map answers "surface" at every point**, which bakes a
+    /// full volume of plausible nonsense and validates clean. It is refused
+    /// instead, loudly, because every quieter treatment of it is the dropped-op
+    /// defect again.
+    #[test]
+    #[should_panic(expected = "reached bake unresolved")]
+    fn an_unresolved_terrain_op_stops_the_bake() {
+        let mut volume = Volume::new([1, 1, 1], 1.0);
+        volume.bake(&[VoxelOp::Terrain {
+            recipe: "carved.toml".to_owned(),
+            rect: [0.0, 0.0, 32.0, 32.0],
+            base_y: 0.0,
+            mode: CsgMode::Union,
+            map: None,
+        }]);
+    }
+
+    /// The rect places the recipe; it does not rescale it. Disagreeing about
+    /// that renders a plausible landscape at the wrong scale, which is the one
+    /// failure here that looks like an art decision rather than a bug.
+    #[test]
+    fn a_rect_that_is_not_the_recipes_own_size_is_refused() {
+        let dir = std::env::temp_dir().join("loom_terrain_op_test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("carved.toml"), CARVED).expect("write recipe");
+
+        let mut wrong = [VoxelOp::Terrain {
+            recipe: "carved.toml".to_owned(),
+            rect: [0.0, 0.0, 64.0, 64.0],
+            base_y: 0.0,
+            mode: CsgMode::Union,
+            map: None,
+        }];
+        let error = resolve(&mut wrong, &dir).expect_err("a 64 m rect over a 32 m recipe");
+        assert!(error.contains("world_scale"), "{error}");
+
+        let mut right = [VoxelOp::Terrain {
+            recipe: "carved.toml".to_owned(),
+            rect: [10.0, -4.0, 42.0, 28.0],
+            base_y: 0.0,
+            mode: CsgMode::Union,
+            map: None,
+        }];
+        resolve(&mut right, &dir).expect("a rect the size of the recipe, anywhere");
+        assert!(right[0].is_resolved());
+        // Placed, not rescaled: the map's own corner is at the rect's corner.
+        assert!(
+            (right[0].height_at(10.0, -4.0).expect("a terrain has a height")
+                - carved_recipe().bake().get(0, 0))
+            .abs()
+                < 1e-4
+        );
     }
 }

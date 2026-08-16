@@ -1,0 +1,122 @@
+# An eroded landscape, in a voxel volume, in a game.
+#
+# **The only scene where a landform comes from a `loom_terrain` recipe.**
+# `terrain_stress.loom` and every other voxel landscape in this library is
+# `kind = "heightfield"`, which reaches past the whole recipe system for one
+# function — five octaves of fBm and nothing else. So they have no gullies, no
+# talus, no carved trough, no flattened pad and no guaranteed route, because a
+# 3D noise field structurally cannot run the two erosion passes that produce
+# the first two and has nowhere to put the last three.
+#
+# The op below is the cable. `vale.toml` is the landform; the ops after it are
+# the 3D half, which is the half a height cannot express: a height is one value
+# per column, so it has no overhang, no undercut and no cave, ever.
+#
+# THE LOOP THIS SCENE EXISTS FOR — change a number, re-run, read a number:
+#
+#   loom terrain assets/test/vale.loom --from 22,10 --to 58,58
+#     buildable_pct 20.5 · slope_mean 30.1 · largest_flat 595 px · reachable true
+#
+# That is the only assertable feedback a landscape has in this engine. A
+# gorgeous mountain range with 3% buildable ground is a failed level, and
+# nothing in a hillshade reveals that.
+
+[scene]
+format = 1
+id = "5f2a9c41-7b08-4d3e-a916-c04e7b8d2513"
+
+[[node]]
+name = "Vale"
+
+[[node]]
+name = "Ground"
+parent = "Vale"
+
+  [node.components.VoxelVolume]
+  # 128 x 48 x 128 m at half-metre voxels. The recipe is 1 m/pixel, four times
+  # coarser on purpose: erosion has nothing to say below a metre, and sizing
+  # the map to the voxels would quadruple the bake for detail that is not there.
+  voxel_size = 0.5
+  chunks = [8, 3, 8]
+
+  # 1. THE LANDFORM. One op, and every 2D algorithm at full quality behind it —
+  #    including the hydraulic and thermal passes a 3D field cannot run at all.
+  #
+  #    `rect` places the map; it does not rescale it. It must be the size the
+  #    recipe's own `world_scale` claims and it must cover the volume, and both
+  #    are refused with the numbers rather than rendered at the wrong scale.
+  [[node.components.VoxelVolume.ops]]
+  kind = "terrain"
+  recipe = "vale.toml"
+  rect = [0.0, 0.0, 128.0, 128.0]
+  base_y = 1.0
+  mode = "union"
+
+  # 2. WHAT A HEIGHTFIELD CANNOT SAY. Three aimed ops, four lines each, and
+  #    they are the entire 3D half of this scene.
+
+  # A cave bored under the spur west of the trough. Both mouths are on ground
+  # the recipe put at ~18.8 m and the crest it passes under is at 22.7 m, so it
+  # is a tunnel rather than a trench — which is only knowable because the
+  # recipe is a queryable array and not a noise function.
+  [[node.components.VoxelVolume.ops]]
+  kind = "capsule"
+  a = [32.0, 19.0, 64.0]
+  b = [48.0, 19.0, 80.0]
+  radius = 3.0
+  mode = "subtract"
+
+  # The undercut over its northern mouth — the overhang no height can carry.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [32.0, 22.0, 64.0]
+  radius = 4.5
+  mode = "subtract"
+
+  # 3. THE BUILT THING, off the axis, on the pad the recipe flattened. At 0.5 m
+  #    voxels a wall must be >= 1.0 m: surface nets needs two voxels or a sheet
+  #    vanishes.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [58.0, 10.6, 58.0]
+  half_extents = [6.0, 2.5, 4.5]
+  yaw_degrees = 24.0
+  round = 0.4
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [58.0, 10.6, 58.0]
+  half_extents = [5.0, 2.0, 3.5]
+  yaw_degrees = 24.0
+  mode = "subtract"
+
+  [node.components.Material]
+  albedo = [0.38, 0.35, 0.26]
+  roughness = 0.9
+  metallic = 0.0
+
+# The eye is on the ridge above the pad, looking down the trough. Authored
+# rather than orbited: `xtask shimmer` and `xtask flythrough` frame whole-scene
+# bounds, and a landscape framed from its bounding sphere is a green lump.
+[[node]]
+name = "Camera"
+parent = "Vale"
+transform = { pos = [18.0, 30.0, 30.0], rot_euler = [-20.0, -135.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0
+
+[[node]]
+name = "Sun"
+parent = "Vale"
+
+  # A low sun across the trough. Landform is read almost entirely from shading,
+  # so a sun overhead flattens a gully to nothing — the one authored value here
+  # that is doing work.
+  [node.components.Environment]
+  sun_direction = [0.55, 0.42, 0.72]
+  sun_color = [1.0, 0.96, 0.88]
+  sun_strength = 0.8
+  ambient = 0.9
+  fog_density = 0.0008

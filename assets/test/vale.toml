@@ -1,0 +1,90 @@
+# The landform for `vale.loom` — the whole 2D pipeline, at a size a gate can
+# afford.
+#
+# 128 px over 128 m is 1 m/pixel, which resolves the features that matter: a
+# gully is 3-10 m wide. **Size the recipe to the feature, never to the voxels.**
+# The volume is 0.5 m, so a map matched to it would be four times the pixels for
+# detail erosion cannot put there anyway.
+#
+# Layer order is the design: noise makes the mass, art direction places what
+# gameplay needs, erosion makes it look real, and the corridor guarantee goes
+# LAST because it is a constraint and not a shape — erosion slides material
+# back into a route carved before it, and `order_warnings` says so.
+
+size = [128, 128]
+world_scale = [128.0, 128.0]
+height_range = [0.0, 34.0]
+seed = 20260816
+
+# --- the mass ------------------------------------------------------
+# Broad and warped. Unremarkable on its own, which is the job: it is what the
+# ridgeline and the trough are cut into.
+[[layer]]
+kind = "fbm"
+amplitude = 1.0
+frequency = 0.012
+octaves = 5
+warp = 6.0
+
+# --- the ridgeline -------------------------------------------------
+# Ridged weights each octave by the last, so crests get detail and troughs stay
+# smooth. That weighting is what separates commercial terrain from a sum of
+# bumps.
+[[layer]]
+kind = "ridged"
+amplitude = 0.55
+frequency = 0.018
+octaves = 5
+warp = 4.0
+
+# --- art direction -------------------------------------------------
+# The trough, running roughly north-south.
+[[layer]]
+kind = "spline_carve"
+points = [[22.0, 10.0], [32.0, 44.0], [58.0, 58.0], [64.0, 92.0], [86.0, 118.0]]
+width = 16.0
+depth = 15.0
+
+# Somewhere to build. This is the layer an agent reaches for when a fort needs
+# to sit down, and `loom terrain --from --to` is how it finds out whether the
+# fort can be walked to.
+[[layer]]
+kind = "flatten_disc"
+center = [58.0, 58.0]
+radius = 11.0
+blend = 0.6
+
+# --- erosion -------------------------------------------------------
+# Gullies where water ran, and deposits where it stopped. 8000 droplets rather
+# than the 50,000 default: hydraulic erosion is O(droplets) and flat in map
+# size, so the droplet count is the entire cost knob. Measured, the whole
+# recipe bakes in 39 ms — against 31 ms to bake the voxels from it and 67 ms to
+# mesh them, so the landform is the cheapest third of loading this scene.
+[[layer]]
+kind = "hydraulic"
+droplets = 8000
+erode_rate = 0.3
+deposit_rate = 0.3
+
+# Talus. Noise is happy to produce 70-degree ground; rock is not.
+[[layer]]
+kind = "thermal"
+talus_degrees = 36.0
+iterations = 24
+
+# --- the guarantee, LAST -------------------------------------------
+# The thing no commercial tool offers: a walkable route exists, and
+# `loom terrain assets/test/vale.loom --from 22,10 --to 58,58` says so without
+# rendering anything.
+#
+# It is a straight ramp, and it reads as one in the hillshade — the layer
+# carves from A to B in a line, following the ground but never climbing faster
+# than `max_slope`. That is what makes the guarantee cheap and checkable; a
+# route that wandered would need a search, and this is the layer that lets the
+# search be `is_reachable` instead.
+[[layer]]
+kind = "corridor"
+from = [22.0, 10.0]
+to = [58.0, 58.0]
+width = 5.0
+max_slope = 16.0

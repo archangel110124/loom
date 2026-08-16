@@ -106,9 +106,14 @@ USAGE:
         wave is at the same phase. A third component in --at asks whether that
         height is under the surface.
 
-    loom terrain <scene.loom> [--out <f.png>] [--from <x,y,z>] [--to <x,y,z>]
-                              [--max-slope <deg>]
-        Query walkable terrain between two points.
+    loom terrain <scene.loom|recipe.toml> [--out <prefix>] [--from <x,z>]
+                              [--to <x,z>] [--max-slope <deg>]
+        Measure a landform: buildable_pct, slope_mean, largest_flat, and
+        whether a walkable route exists between two points. Given a scene, it
+        reads the recipe that scene's `terrain` op names. --from/--to are
+        recipe pixels, not world metres. This is the only assertable feedback
+        a landscape has — a gorgeous range with 3% buildable ground is a
+        failed level, and nothing in a hillshade reveals that.
 
     loom explode <scene.loom> --at <x,y,z> --radius <m> [--out <f.png>]
                               [--frames <n>] [--size <WxH>] [--steps <n>]
@@ -214,6 +219,13 @@ fn run(args: &[String]) -> (u8, String) {
                 },
             })),
         );
+    }
+
+    // Every subcommand takes its subject as the first argument, so this is the
+    // one place that knows which directory a scene's `[[asset]]` paths and
+    // terrain recipes are written relative to. See `SCENE_BASE`.
+    if let Some(path) = args.get(1) {
+        set_scene_base(path);
     }
 
     match args.first().map(String::as_str) {
@@ -334,8 +346,9 @@ fn validate(path: &str) -> (u8, String) {
             // **The op list is schema-checked here and nowhere else.** It rides
             // on the component as free-form JSON, so `Scene::parse` never looks
             // inside it: a misspelled `kind` reached the bake, which used to
-            // drop it silently. Parsing costs nothing — no volume is baked —
-            // and this is the layer the agent's write hook runs.
+            // drop it silently. No volume is baked here — though a `terrain`
+            // op's recipe is, which is what makes `validate` catch a missing
+            // or mis-scaled recipe rather than leaving it to a render.
             let voxel_errors: Vec<serde_json::Value> = scene
                 .nodes()
                 .iter()
@@ -346,10 +359,10 @@ fn validate(path: &str) -> (u8, String) {
                         "node": node.path,
                         "field": "VoxelVolume.ops",
                         "constraint": e,
-                        "hint": "`kind` is one of sphere, box, capsule, heightfield, each with \
-                                 its own fields. The volume is refused whole rather than baked \
-                                 without this op: a volume short one op still renders, which is \
-                                 why this cannot be a warning.",
+                        "hint": "`kind` is one of sphere, box, capsule, heightfield, terrain, \
+                                 each with its own fields. The volume is refused whole rather \
+                                 than baked without this op: a volume short one op still \
+                                 renders, which is why this cannot be a warning.",
                     }))
                 })
                 .collect();
@@ -2958,17 +2971,28 @@ fn file_apply_error(path: &str, error: &loom_scene::FileApplyError) -> (u8, Stri
 /// gorgeous mountain range with 3% buildable ground is a failed level, and
 /// nothing in a hillshade reveals that.
 fn terrain(path: &str, args: &[String]) -> (u8, String) {
-    let recipe = match loom_terrain::Recipe::load(std::path::Path::new(path)) {
+    // **A scene, or the bare recipe it names.** The recipe is where the numbers
+    // come from either way; asking through the scene is what makes them
+    // answers about the thing that will actually be rendered, and it is the
+    // difference between a landform an agent can iterate on and a `.toml` it
+    // has to remember the name of.
+    let recipe_path = match recipe_of(path) {
+        Ok(p) => p,
+        Err(e) => return (1, e),
+    };
+    let recipe = match loom_terrain::Recipe::load(&recipe_path) {
         Ok(r) => r,
         Err(e) => {
             return (
                 1,
                 json_line(&serde_json::json!({
-                    "error": "invalid_recipe", "path": path, "constraint": e.to_string(),
+                    "error": "invalid_recipe", "path": recipe_path, "constraint": e.to_string(),
                 })),
             );
         }
     };
+    let path = recipe_path.to_string_lossy().into_owned();
+    let path = path.as_str();
 
     let map = recipe.bake();
     let stats = loom_terrain::analyze(&map);
@@ -3034,6 +3058,47 @@ fn terrain(path: &str, args: &[String]) -> (u8, String) {
             "maps": written,
         })),
     )
+}
+
+/// The recipe `loom terrain` should read: the argument itself, or the one the
+/// scene's first `terrain` op names.
+///
+/// The scene is loaded through [`prefab_load::for_reading`] like every other
+/// command that reads one — a `VoxelVolume` can arrive from a prefab, and a
+/// reader that skipped resolution would report on a scene that has no ops at
+/// all and call it fine.
+fn recipe_of(path: &str) -> Result<std::path::PathBuf, String> {
+    if !path.ends_with(".loom") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    let src = std::fs::read_to_string(path).map_err(|e| {
+        json_line(&serde_json::json!({
+            "error": "io_error", "path": path, "constraint": e.to_string(),
+        }))
+    })?;
+    let scene = Scene::parse(&src).map_err(|errors| json_line(&serde_json::json!({ "errors": errors })))?;
+    let scene = prefab_load::for_reading(&scene, std::path::Path::new(path))
+        .map_err(|errors| json_line(&serde_json::json!({ "errors": errors })))?;
+
+    let named = scene.nodes().iter().find_map(|node| {
+        node.components
+            .get("VoxelVolume")?
+            .get("ops")?
+            .as_array()?
+            .iter()
+            .find(|op| op.get("kind").and_then(serde_json::Value::as_str) == Some("terrain"))?
+            .get("recipe")?
+            .as_str()
+            .map(str::to_owned)
+    });
+    match named {
+        Some(recipe) => Ok(scene_base().join(recipe)),
+        None => Err(json_line(&serde_json::json!({
+            "error": "no_terrain_op", "path": path,
+            "hint": "This scene has no `kind = \"terrain\"` voxel op, so there is no recipe to \
+                     report on. Add one, or pass the .toml recipe directly.",
+        }))),
+    }
 }
 
 fn parse_vec2(spec: &str) -> Option<[usize; 2]> {
@@ -3523,6 +3588,13 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
 /// **faster**, so a cost measurement reported an improvement on the commit that
 /// broke the scene. It is the prefab defect verbatim (CLAUDE.md: "a key it does
 /// not understand is a key it ignores"), and the fix is the same one: refuse.
+/// **A `terrain` op is baked here**, which is the one place in the op list
+/// where parsing is not free: the recipe is loaded relative to the scene file
+/// and run, and that is 0.05–0.5 s depending on how much erosion it asks for.
+/// It happens at parse rather than at bake because an op with no map answers
+/// "surface" everywhere, and one shared funnel is what stops that reaching a
+/// volume. `loom_voxel` caches the result by recipe content hash, so the three
+/// `build_volume` calls a render makes pay for one.
 pub(crate) fn parse_ops(component: &serde_json::Value) -> Result<Vec<loom_voxel::VoxelOp>, String> {
     let Some(ops) = component.get("ops") else {
         return Ok(Vec::new());
@@ -3530,7 +3602,8 @@ pub(crate) fn parse_ops(component: &serde_json::Value) -> Result<Vec<loom_voxel:
     let Some(ops) = ops.as_array() else {
         return Err("ops must be a list of ops".to_owned());
     };
-    ops.iter()
+    let mut parsed: Vec<loom_voxel::VoxelOp> = ops
+        .iter()
         .enumerate()
         .map(|(index, value)| {
             serde_json::from_value(value.clone()).map_err(|e| {
@@ -3541,7 +3614,38 @@ pub(crate) fn parse_ops(component: &serde_json::Value) -> Result<Vec<loom_voxel:
                 format!("op {index} (kind = \"{kind}\"): {e}")
             })
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    loom_voxel::resolve(&mut parsed, &scene_base())?;
+    Ok(parsed)
+}
+
+/// The directory scene-relative paths resolve against.
+///
+/// `ponytail:` a process global. One `loom` invocation works on one scene, and
+/// the alternative is threading a base through `build_volume`, `scene_volume`,
+/// `bake_voxel`, the physics build in `play.rs` and every helper between them —
+/// forty signatures so that one op can find one file. A command that ever loads
+/// two scenes from different directories is the trigger to thread it properly.
+static SCENE_BASE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// Point scene-relative paths at the directory of `path`.
+fn set_scene_base(path: &str) {
+    let base = std::path::Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+    *SCENE_BASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(base);
+}
+
+fn scene_base() -> std::path::PathBuf {
+    SCENE_BASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
 /// Build and bake a voxel volume from a component.
@@ -3566,6 +3670,30 @@ pub(crate) fn build_volume(component: &serde_json::Value) -> Result<loom_voxel::
         return Err("the volume authors no ops, so it has no shape".to_owned());
     }
     let mut volume = loom_voxel::Volume::new([dims[0], dims[1], dims[2]], voxel_size);
+
+    // **A terrain rect that does not cover the volume is the other half of the
+    // coordinate-system trap** (`loom_voxel::resolve` catches the first). The
+    // map clamps outside its own rect, which extrudes the boundary row across
+    // everything past it — parallel ridges running to the edge of the world,
+    // and they look authored. Named with both numbers, because the fix is
+    // arithmetic the agent can do once it can see them.
+    let [rx, _, rz] = volume.resolution();
+    #[allow(clippy::cast_precision_loss)]
+    let footprint = [rx as f32 * voxel_size, rz as f32 * voxel_size];
+    for (index, op) in ops.iter().enumerate() {
+        let loom_voxel::VoxelOp::Terrain { rect, .. } = op else {
+            continue;
+        };
+        if rect[0] > 0.0 || rect[1] > 0.0 || rect[2] < footprint[0] || rect[3] < footprint[1] {
+            return Err(format!(
+                "op {index} (kind = \"terrain\"): rect {rect:?} does not cover the volume, \
+                 which is [0.0, 0.0, {}, {}]. Outside its rect a recipe repeats its edge \
+                 row forever.",
+                footprint[0], footprint[1]
+            ));
+        }
+    }
+
     volume.bake(&ops);
     Ok(volume)
 }
