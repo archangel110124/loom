@@ -48,10 +48,10 @@ const SCENES: [&str; 36] = [
     // bake, not a rendering path, and `terrain_stress.loom` sits in this list on
     // the same basis.
     //
-    // **What it is really guarding is the CPU budget.** It is the largest world
-    // in the list — 153.6 m across — and the first draft of it measured 220
-    // ms/frame here against the 30 ms below, so this line is the thing that
-    // notices if the voxel bake ever gets slower.
+    // **What it is really guarding is the CPU budget**, and this line alone
+    // does not do that — it is also in the `--play` list further down, which is
+    // where the milliseconds are measured. It is the largest world here, 153.6 m
+    // across, and its first draft measured 220.7 ms/frame against that 30 ms.
     "assets/test/mountain_pass.loom",
     // The imported PBR library. **Not in `GOLDEN`**: it adds no rendering path
     // that `materials.loom` does not already cover — it is a catalogue of
@@ -965,6 +965,18 @@ fn validate() -> std::process::ExitCode {
             "assets/test/forest.loom",
             "assets/games/proving_ground.loom",
             "assets/test/lanternhead.loom",
+            // **The biggest world in the library — 153.6 m across — and the
+            // only one whose cost is a voxel bake rather than a per-frame
+            // system.** `lanternhead` above measures 32 chunks; this one is
+            // also 32, at 1.2 m voxels instead of 0.4, and the first draft of
+            // it was 384 chunks and 220.7 ms/frame. Nothing else here would
+            // have noticed: it renders correctly, validates clean, and matches
+            // no reference because it is deliberately not in `GOLDEN`. The
+            // headroom is the point — a heightfield's early-out is disabled by
+            // its own Lipschitz constant, so bake cost is linear in the chunk
+            // count and a scene of this size is one `chunks` edit away from
+            // being eight times over budget.
+            "assets/test/mountain_pass.loom",
         ] {
             if !root.join(scene).exists() {
                 continue;
