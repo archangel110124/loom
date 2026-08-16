@@ -2419,6 +2419,111 @@ static const float FIRE_TAU_H = 0.42;
 /// therefore correct even in a quad the discard has killed.
 static const float FIRE_RANGE = 26.0;
 
+/// **How opaque the flame is, and the reason it is not zero any more.**
+///
+/// The pipeline is premultiplied — `src = ONE`, `dst = ONE_MINUS_SRC_ALPHA` —
+/// so the alpha this shader returns is exactly how much of the background the
+/// flame covers, and it used to be the literal constant `0.0` at both return
+/// sites. That is additive blending, and additive blending means the
+/// background is visible THROUGH the fire's core at full strength: on
+/// `campfire`'s night sky nothing shows because nothing is there, but on
+/// `lanternhead`'s lit deck the stone's grain reads straight through the flame
+/// and the fire is a decal painted on the wall.
+///
+/// Occlusion follows optical depth, so it climbs from zero at the boundary —
+/// a ray grazing the level set passes through almost no material, and giving
+/// its first pixel the floor's opacity would draw the flame a hard rim.
+///
+/// **It does NOT climb on `FIRE_TAU_DEN`, and reusing that number is the trap
+/// here.** `FIRE_TAU_DEN` is the width of a colour ramp: it is wide because
+/// the eye wants to see a gradient from ember to white across the body of a
+/// tongue. Optical depth is not a colour grade, and it saturates far sooner —
+/// the field's own sigma is about 0.15, so a typical lit pixel sits maybe 0.05
+/// past the threshold, which on the brightness ramp is 8% of the way up and
+/// gave the flame an alpha of 0.06. The tongues stayed windows onto the deck
+/// while the shader reported that it had fixed them.
+static const float FIRE_OPACITY = 0.85;
+static const float FIRE_ALPHA_DEN = 0.06;
+
+/// **The continuum — the flame's body between the tongues.**
+///
+/// A level set on a plane renders a slice; fire is a line integral. A view ray
+/// through a real flame crosses many small hot pockets and sums them, and that
+/// sum is smooth and connected even when every individual iso-surface it
+/// crossed is in fragments. This shader takes one slice of one field and
+/// thresholds it, so the gaps between tongues are not dim — they are the
+/// background, unattenuated.
+///
+/// The fix is not to soften the threshold. Every knob that reconnects the
+/// shards inside the level set — a lower `FIRE_HZ`, a lower `FIRE_GAP`, a
+/// wider `cover` — does it by deleting the detail that makes the thing read as
+/// fire, and converges back on the fireball this design exists to escape. So
+/// the silhouette machinery is untouched and a second, DIM, UNTHRESHOLDED term
+/// is added underneath it: the same field `d`, shaped by the same envelope,
+/// with no level set anywhere in it. It is the back layer every layered-fire
+/// reference calls for, done inside the one quad rather than as a second draw.
+///
+/// `FIRE_GLOW_TAU` is deliberately low on the ramp — this is the cool gas the
+/// tongues are burning inside of, and if it lands near the tongues' own
+/// brightness the fire becomes the fireball again by a different route.
+/// **`FIRE_GLOW_R` is the quad's inscribed circle, and it is arithmetic
+/// rather than taste.** An unthresholded term that is still at a few percent
+/// where the geometry stops draws a clean vertical line up both sides of the
+/// quad; one that has already reached zero has no edge to see, and reaching
+/// zero EARLY is free — only a non-zero value at the boundary is visible.
+///
+/// `radial` divides by `half_h * 1.15`, so `1 / 1.15` puts the zero at
+/// `|w_xz| = half_h`. `particleVertexMain` builds the quad as
+/// `right * spun.x + up * spun.y` scaled by `half_h` over corners at
+/// (±1, ±1), **so the offset runs to `sqrt(2) * half_h` at a corner, not
+/// `half_h`** — the quad is square and its corners are further out than its
+/// sides. `half_h` is therefore the inscribed circle: inside the geometry on
+/// every side and at every billboard orientation, which is the property that
+/// matters.
+///
+/// It has to be the quad's edge and not less. At 0.80 the continuum died
+/// inside the radius the level set still lights from, so the outer tongues —
+/// which are precisely the detached shards this exists to connect — sat
+/// outside the body and stayed detached.
+static const float FIRE_GLOW = 1.0;
+static const float FIRE_GLOW_LOW = 0.35;
+static const float FIRE_GLOW_W = 0.35;
+static const float FIRE_GLOW_TAU = 0.30;
+static const float FIRE_GLOW_POW = 1.6;
+/// **The continuum occludes about as much as it emits, and against a lit
+/// background occlusion is the whole of its effect.** A dim emissive veil over
+/// bright stone changes nothing: at 0.12 emitted over a deck at 0.6, covering
+/// a fifth of it lands back on 0.61. So the veil is what replaces the
+/// background with the fire's own colour, which is why the flame reads as a
+/// body rather than a tint. That it comes out DARKER than a daylit deck is
+/// correct and is the whole reason a flame photographs as a silhouette against
+/// the sky — and it is what the heavy, sooty look is made of.
+static const float FIRE_GLOW_ALPHA = 1.0;
+static const float FIRE_GLOW_R = 1.0 / 1.15;
+static const float FIRE_GLOW_H = 0.80;
+static const float FIRE_GLOW_EDGE = 0.45;
+static const float FIRE_GLOW_TOP = 0.50;
+
+/// Cooling at the fuel line and at the flanks, which is what makes
+/// `fireRamp`'s bottom rungs reachable at all.
+///
+/// `FIRE_TAU_H` cools the tip and nothing cooled the base or the edges, so
+/// with `FIRE_TAU_FLOOR = 0.30` the ramp's first two rungs — black through
+/// (0.22, 0.012, 0.001) through (0.48, 0.09, 0.006) — were dead code, and the
+/// flame was one orange value with holes in it. Both terms are physical: at
+/// the fuel line a flame is dimmer and redder because it has not finished
+/// mixing, and at the boundary the ray has passed through almost nothing.
+///
+/// **The floor stays.** It exists because brightness inside the coverage edge
+/// is cubic in depth, so without it the outermost pixels read black and the
+/// shader paints the very halo it exists to remove. These multiply it down
+/// rather than remove it, and the continuum above is what now sits behind the
+/// edge — a dim red rim over a glow is cooling gas, a dim red rim over the
+/// background is a halo.
+static const float FIRE_TAU_BASE = 0.45;
+static const float FIRE_TAU_BASE_H = 0.18;
+static const float FIRE_TAU_EDGE = 0.35;
+
 /// Fractal noise for the flame. `detail` fades the finest octave out with
 /// distance rather than dropping it abruptly, which would pop.
 float fireFbm(float3 p, int octaves, float detail) {
@@ -2516,15 +2621,67 @@ float4 flameColor(ParticleOutput in, float3 toEye) {
     // before any discard: derivatives in a quad with killed lanes are
     // undefined, and that is the trap named for the water shoreline.
     float cover = saturate(e / max(fwidth(e), 1e-4));
-    if (cover <= 0.0) {
-        return float4(0.0, 0.0, 0.0, 0.0);
+
+    // **The continuum, and it is computed whether or not the level set is
+    // lit** — that is the entire point of it, so the early return that used to
+    // stand here had to go. It occupies the flame's envelope, it is the same
+    // field `d` with no threshold applied, and it is what the gaps between the
+    // tongues are filled with instead of the background.
+    //
+    // **`radial`, not `cone`, and a plateau rather than a linear cone.** Two
+    // separate mistakes, both of which put the body where the gaps are not.
+    //
+    // `FIRE_GLOW_R` is derived from the quad's half-width, and it is `radial`
+    // the quad bounds — `cone` is `radial` scaled by up to 1.55 with height,
+    // so dividing it by the same number cut the continuum off at two thirds of
+    // the radius the level set still lights from, and the outer tongue sat
+    // outside the body and stayed a detached shard. The taper with height is
+    // the `FIRE_GLOW_H` term's job, not this one's.
+    //
+    // A term decaying linearly from the axis is down to a fifth at two thirds
+    // of the radius, which is exactly where the outer tongues are — thickest
+    // where tongues already cover it, thinnest where the gaps are.
+    // `FIRE_GLOW_EDGE` and `FIRE_GLOW_TOP` are the fractions of each extent
+    // spent coming down, so the rest of the envelope is full.
+    float envelope = saturate((1.0 - radial / FIRE_GLOW_R) / FIRE_GLOW_EDGE);
+    envelope *= pow(saturate((1.0 - h / FIRE_GLOW_H) / FIRE_GLOW_TOP), FIRE_GLOW_POW);
+    // **The FIELD has to be what shapes this, not the envelope.** Multiplying
+    // the envelope by a raw `d` — mean 0.5, sigma 0.15 — varies it by a third
+    // either way over a term that swings the whole way from 1 to 0, so the
+    // envelope wins and the result is a smooth ellipse of haze around the
+    // fire: the fireball, arrived at through the back door. Stretching `d`
+    // across its own distribution instead makes the body as streaky and
+    // warped as the tongues are, because it IS the field the tongues are level
+    // sets of. The ramp is 0.35 of field wide against the level set's one
+    // pixel, so this stays a continuum and never becomes a second silhouette.
+    float body = saturate((d - FIRE_GLOW_LOW) / FIRE_GLOW_W);
+    // **No `saturate` on the product, and that is not tidiness.** Every factor
+    // is already in [0,1] and `FIRE_GLOW` is the peak, so nothing can exceed
+    // it — but with a gain above one, clamping the product is what turns the
+    // continuum into a second silhouette: a wide region pinned at the clamp
+    // with a hard boundary where it comes off it. Measured at a gain of 2.2 it
+    // drew a crisp orange sheet twice the brazier's width. The gain IS the
+    // body's peak opacity, and it belongs at or under one.
+    float glow = FIRE_GLOW * envelope * body * in.color.a;
+
+    float3 rgb = fireRamp(FIRE_GLOW_TAU) * glow;
+    float alpha = glow * FIRE_GLOW_ALPHA;
+
+    if (cover > 0.0) {
+        // Depth into the flame, on its own, because brightness wants it under
+        // a floor and opacity wants it raw.
+        float depth = pow(saturate(e / FIRE_TAU_DEN), FIRE_TAU_POW);
+        float tau = FIRE_TAU_FLOOR + (1.0 - FIRE_TAU_FLOOR) * depth;
+        tau *= (1.0 - FIRE_TAU_H * h);
+        tau *= lerp(FIRE_TAU_BASE, 1.0, saturate(h / FIRE_TAU_BASE_H));
+        tau *= lerp(FIRE_TAU_EDGE, 1.0, depth);
+
+        float lit = cover * in.color.a;
+        rgb += fireRamp(tau) * lit;
+        alpha += lit * FIRE_OPACITY * saturate(e / FIRE_ALPHA_DEN);
     }
 
-    float tau = FIRE_TAU_FLOOR
-              + (1.0 - FIRE_TAU_FLOOR) * pow(saturate(e / FIRE_TAU_DEN), FIRE_TAU_POW);
-    tau *= (1.0 - FIRE_TAU_H * h);
-
-    return float4(fireRamp(tau) * cover * in.color.a, 0.0);
+    return float4(rgb, saturate(alpha));
 }
 
 [shader("fragment")]
@@ -2532,11 +2689,26 @@ float4 particleFragmentMain(ParticleOutput in) : SV_Target {
     float3 eyeVec = push.environment[0].eye.xyz - in.worldPos;
     if (in.flame > 0.5) {
         float4 fire = flameColor(in, eyeVec);
-        if (fire.r + fire.g + fire.b <= 0.0008) {
+        // **The extinction test has to include the alpha now.** It was an
+        // RGB-only sum, which was the right predicate exactly while the alpha
+        // was hard-coded to zero: a fragment emitting no light contributed
+        // nothing. A fragment that emits no light but still occludes does
+        // contribute, and discarding it would put a visible edge along
+        // whatever contour the RGB sum happens to cross.
+        if (fire.r + fire.g + fire.b <= 0.0008 && fire.a <= 0.0008) {
             discard;
         }
         float fogF = fogAmount(push.environment[0].eye.xyz, in.worldPos);
-        return float4(fire.rgb * (1.0 - fogF), 0.0);
+        // **The second site that hard-coded `0.0`, and the alpha has to be
+        // fogged along with the colour rather than merely passed through.**
+        // Fog sits between the eye and the flame AND between the eye and
+        // whatever is behind it, and the background already had its own fog
+        // applied when it was drawn — so at `fogF = 1` the right answer is
+        // "leave the frame alone", which is alpha 0, not an opaque hole. A
+        // flame that kept its opacity while its emission was attenuated would
+        // fade to a black silhouette at range, which is worse than the
+        // see-through this change exists to fix.
+        return float4(fire.rgb * (1.0 - fogF), fire.a * (1.0 - fogF));
     }
 
     float r = length(in.local);
