@@ -99,6 +99,15 @@ USAGE:
     loom measure <scene.loom> [--node <path>]
         Bounds and overlaps, so a change can be checked without a render.
 
+    loom measure <scene.loom|mesh.obj|mesh.gltf> --shape [--node <path>]
+        How rocky a shape is, instead of rendering it and looking. Reports
+        concave surface-area fraction and the spread of curvature magnitudes:
+        a scanned rock is 42-44% concave over 1.2-1.5 decades, a ridged
+        displaced sphere 47%/1.53, a fifty-primitive union 8.7%/0.53. It is
+        REPORT-ONLY and must never become a gate — the number is
+        resolution-dependent, so only ever compare shapes at equal voxel_size,
+        which is why every row carries its own.
+
     loom water <scene.loom> --at <x,z|x,y,z> [--sim <ticks>]
         What the water is doing at one point: surface height, normal, depth to
         the bed, and velocity. --sim picks the instant, exactly as it does for
@@ -151,7 +160,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
     ("sim", &[("--ticks", true), ("--assert", true)]),
     ("scene", &[("--tx", true), ("--dry-run", false)]),
     ("place", &[("--op", true), ("--dry-run", false), ("--expect-version", true)]),
-    ("measure", &[("--node", true)]),
+    ("measure", &[("--node", true), ("--shape", false)]),
     ("water", &[("--at", true), ("--sim", true)]),
     (
         "terrain",
@@ -3795,6 +3804,9 @@ fn place(path: &str, args: &[String]) -> (u8, String) {
 /// Cheaper than a render and catches what one camera angle hides — an object
 /// inside another object (design doc §2.8).
 fn measure(path: &str, args: &[String]) -> (u8, String) {
+    if args.iter().any(|a| a == "--shape") {
+        return measure_shape(path, args);
+    }
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => return (2, json_line(&serde_json::json!({
@@ -3854,6 +3866,148 @@ fn measure(path: &str, args: &[String]) -> (u8, String) {
             "overlaps": overlaps,
         })),
     )
+}
+
+/// The rule that makes this measurement comparable, carried in its own output.
+///
+/// Exactly the discipline `loom flicker` carries: discrete curvature on a
+/// Surface Nets mesh is resolution-dependent, so a finer bake scores higher for
+/// no shape reason at all. Emitting `voxel_size` beside every row is what makes
+/// "compare like with like" checkable by the agent rather than remembered.
+const SHAPE_RULE: &str = "report-only, never a gate: concave-area fraction is \
+     resolution-dependent, so only compare shapes measured at equal voxel_size";
+
+/// How *rocky* a shape is: `loom measure <scene|mesh> --shape`.
+///
+/// **Because the alternative is render-and-look.** `Displace` has four numbers
+/// and no way to judge them; this is the number that judges them. See
+/// `loom_asset::shape` for what it computes and
+/// `cargo run --release -p loom_voxel --example rockcalib` for the calibration
+/// it was chosen by.
+fn measure_shape(path: &str, args: &[String]) -> (u8, String) {
+    let p = std::path::Path::new(path);
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+
+    // A mesh file measures directly. That is what makes the scanned rock in
+    // `assets/meshes` usable as the target rather than as a remembered number.
+    if ext != "loom" {
+        let imported = if ext == "obj" {
+            loom_asset::mesh::import_obj(p)
+        } else {
+            loom_asset::mesh::import_gltf(p)
+        };
+        return match imported {
+            Ok(mesh) => (
+                0,
+                json_line(&serde_json::json!({
+                    "ok": true, "rule": SHAPE_RULE,
+                    "shapes": [shape_json(&mesh.name, None, &loom_asset::shape::stats(&mesh))],
+                })),
+            ),
+            Err(e) => (
+                2,
+                json_line(&serde_json::json!({
+                    "error": "import_failed", "path": path, "constraint": e.to_string(),
+                })),
+            ),
+        };
+    }
+
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                2,
+                json_line(&serde_json::json!({
+                    "error": "io_error", "path": path, "constraint": e.to_string(),
+                })),
+            );
+        }
+    };
+    let scene = match Scene::parse(&src) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+    // never-do: a scene read anywhere must go through the prefab load path, or
+    // an instance arrives with no components and measures as nothing.
+    let scene = match prefab_load::for_reading(&scene, p) {
+        Ok(s) => s,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+    let base = p.parent().unwrap_or(std::path::Path::new("."));
+    let library = MeshLibrary::for_scene(&scene, base);
+    let only = flag(args, "--node");
+
+    let mut shapes = Vec::new();
+    for node in scene.nodes() {
+        if only.as_ref().is_some_and(|n| *n != node.path) {
+            continue;
+        }
+        let voxel = node.components.get("VoxelVolume");
+        // The voxel bake is keyed by node path; a `MeshRenderer` names its asset.
+        let key = if voxel.is_some() {
+            format!("voxel:{}", node.path)
+        } else {
+            match node
+                .components
+                .get("MeshRenderer")
+                .and_then(|m| m.get("mesh"))
+                .and_then(|m| m.get("asset"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(asset) => asset.to_owned(),
+                None => continue,
+            }
+        };
+        let Some(mesh) = library.by_name.get(&key).and_then(|i| library.meshes.get(*i as usize))
+        else {
+            continue;
+        };
+        let voxel_size =
+            voxel.and_then(|v| v.get("voxel_size")).and_then(serde_json::Value::as_f64);
+        shapes.push(shape_json(&node.path, voxel_size, &loom_asset::shape::stats(mesh)));
+    }
+
+    if shapes.is_empty() {
+        return (
+            1,
+            json_line(&serde_json::json!({
+                "error": "no_geometry", "path": path, "node": only,
+                "hint": "The node must carry a VoxelVolume or a MeshRenderer whose mesh resolved.",
+            })),
+        );
+    }
+    (
+        0,
+        json_line(&serde_json::json!({ "ok": true, "rule": SHAPE_RULE, "shapes": shapes })),
+    )
+}
+
+fn shape_json(
+    name: &str,
+    voxel_size: Option<f64>,
+    s: &loom_asset::shape::ShapeStats,
+) -> serde_json::Value {
+    serde_json::json!({
+        "node": name,
+        "voxel_size": voxel_size,
+        "concave": round3(s.concave),
+        "spread": round3(s.spread),
+        "p10": round3(s.p10), "p50": round3(s.p50), "p90": round3(s.p90),
+        "triangles": s.triangles,
+        "area": round3(s.area),
+        "mean_radius": round3(s.mean_radius),
+        // Not decoration: a large open fraction means the weld failed or the
+        // shape is clipped by the volume wall, and then `concave` is measuring
+        // a subset of the surface without saying so.
+        "open": round3(s.boundary as f32 / s.vertices.max(1) as f32),
+    })
+}
+
+/// Three decimals, in `f64` — an `f32` serialises as its exact binary value and
+/// `0.442` prints as `0.44200000166893005`, which reads as false precision.
+fn round3(v: f32) -> f64 {
+    (f64::from(v) * 1000.0).round() / 1000.0
 }
 
 /// Which mesh an entity draws.
@@ -4519,6 +4673,52 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
                 .is_some_and(|d| d.contains("d^2 / albedo")),
             "doc comment should reach the agent"
         );
+    }
+
+    /// **The `Displace` recipe has to reach an agent, and `ops` is the only
+    /// door.** `VoxelVolume.ops` is `Vec<serde_json::Value>`, so nothing in
+    /// `loom_voxel::Displace`'s own doc comment — where the measured tables
+    /// live — is reflected anywhere. Without the recipe restated on `ops`, an
+    /// agent authoring a rock has exactly what it had before this work: four
+    /// numbers and a render.
+    ///
+    /// Anchored on the formula rather than a phrase, for the reason the `Light`
+    /// test above records: the test must fail if the *actionable* part is
+    /// dropped, not only if the paragraph is deleted.
+    #[test]
+    fn describe_carries_the_displacement_recipe() {
+        let (code, out) = run(&args(&["describe", "VoxelVolume"]));
+
+        assert_eq!(code, 0);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        let ops = v["properties"]["ops"]["description"].as_str().unwrap_or_default();
+        assert!(ops.contains("0.20 * R"), "the amplitude rule should reach the agent: {ops}");
+        assert!(ops.contains("0.6 / R"), "the frequency rule should reach the agent: {ops}");
+        assert!(
+            ops.contains("floor(log2(2 * amplitude / voxel_size)) + 1"),
+            "the octave cap is the expensive one to get wrong: {ops}"
+        );
+    }
+
+    /// `--shape` reports the number `Displace` is judged by, and it must carry
+    /// its own comparison rule — the metric is resolution-dependent, so a row
+    /// without a `voxel_size` beside it is not comparable to anything.
+    #[test]
+    fn measure_shape_reports_curvature_and_its_own_rule() {
+        let (code, out) = run(&args(&["measure", "../../assets/meshes/rock_boulder_a.obj", "--shape"]));
+
+        assert_eq!(code, 0, "{out}");
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert!(
+            v["rule"].as_str().is_some_and(|r| r.contains("equal voxel_size")),
+            "the rule travels with the number, as it does for flicker: {out}"
+        );
+        // A scanned rock is fractured stone: concave over a wide spread. The
+        // thresholds are deliberately loose — this checks the wiring, and
+        // `rockcalib` is where the calibration lives.
+        let rock = &v["shapes"][0];
+        assert!(rock["concave"].as_f64().is_some_and(|c| c > 0.3), "{out}");
+        assert!(rock["spread"].as_f64().is_some_and(|s| s > 1.0), "{out}");
     }
 
     /// A failed lookup lists the alternatives, so it costs one correction

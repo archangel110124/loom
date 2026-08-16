@@ -322,6 +322,29 @@ pub struct VoxelVolume {
     #[schemars(inner(range(min = 1, max = 64)))]
     pub chunks: [u32; 3],
     /// Ordered CSG operations. Order matters.
+    ///
+    /// **`displace` is what makes a rock a rock, and it has a recipe.** Every
+    /// primitive here is analytic and union is a hard minimum, so a shape
+    /// assembled from them bulges outward everywhere and creases inward only
+    /// on a curve — measured, fifty primitives read as 8.7% concave surface
+    /// area against a photogrammetry scan's 42-44%. One displaced sphere is
+    /// 43.2%. For a rock of radius R:
+    ///
+    /// ```text
+    /// amplitude = 0.20 * R    frequency = 0.6 / R    ridged = true
+    /// octaves   = floor(log2(2 * amplitude / voxel_size)) + 1   <- never more
+    /// voxel_size <= R / 20
+    /// ```
+    ///
+    /// The octave cap is not advice: at voxel_size 0.03 on R = 1.5 the three
+    /// octaves past it cost +71% bake time for +0.4 points of concavity. Check
+    /// the result with `loom measure --shape`, which reports concave fraction
+    /// and curvature spread — and read its rule, because the number is
+    /// resolution-dependent and is never a pass/fail threshold.
+    ///
+    /// **This doc string is where that recipe reaches an agent.** `ops` is
+    /// untyped JSON, so `Displace`'s own Rust doc — which carries the full
+    /// measured tables — never reaches `loom describe`.
     pub ops: Vec<serde_json::Value>,
 }
 

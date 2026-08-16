@@ -169,20 +169,92 @@ pub enum CsgMode {
 /// Costs one noise evaluation per voxel per octave, on top of an analytic
 /// distance that was a handful of arithmetic ops — see [`VoxelOp::lipschitz`]
 /// for the other price, which is that the early-out has to work harder.
+///
+/// # The recipe: start here, for a rock of radius R
+///
+/// ```text
+/// amplitude = 0.20 * R      frequency = 0.6 / R      ridged = true
+/// octaves   = floor(log2(2 * amplitude / voxel_size)) + 1   <- and never more
+/// voxel_size <= R / 20                                      <- or don't bother
+/// ```
+///
+/// **Every number there was measured, not chosen by eye** —
+/// `cargo run --release -p loom_voxel --example rockcalib` prints the sweep and
+/// `loom measure --shape` reports it for one shape. The statistic is **concave
+/// surface-area fraction** (`loom_asset::shape`), because that is what
+/// separates fractured stone from a blob: a union of analytic primitives bulges
+/// outward everywhere and creases inward only on a curve. At `voxel_size` 0.03
+/// on a 3 m boulder:
+///
+/// ```text
+/// three photogrammetry scans          concave 42.3-44.2%   spread 1.16-1.50
+/// this recipe (A = 0.20R, x5)                 43.2%               1.50
+/// A = 0.25R (was the eyeballed value)         47.0%               1.53
+/// fbm instead of ridged                       27.2%               1.19
+/// fifty primitives, hard min, no displace      8.7%               0.53
+/// ```
+///
+/// The recipe is scale-free by construction and verified so: R = 0.4, 1.5 and
+/// 6 m at proportional `voxel_size` all measure 43.2% / 1.50 / 95,182 triangles,
+/// identically.
+///
+/// **`spread` is the half you cannot cheat.** Carving subtract-spheres into the
+/// blob raises its concave fraction to 32.7% while its spread stays at 0.70 —
+/// concavity with detail at one scale. Real stone and a ridged displacement are
+/// both above 1.1. Judge a shape on both columns.
+///
+/// **Report-only.** Discrete curvature is resolution-dependent, so the same rock
+/// reads 25.7% at `voxel_size` 0.12 and 51.6% at 0.02. Never threshold it, and
+/// only ever compare shapes measured at equal `voxel_size`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Displace {
     /// How far the surface moves, in world units. Roughly the depth of the
     /// deepest crevice.
+    ///
+    /// **`0.20 * radius`.** Measured against the scans: 0.05R is 9.4% concave
+    /// and reads as a dimpled ball, 0.20R is 43.2% and lands inside the scan
+    /// band, 0.50R is 53.5% and has stopped being the shape it started as. It
+    /// is also the cheapest parameter to raise — 0.05R to 0.50R is +14% bake —
+    /// so it is the first one to reach for.
     pub amplitude: f32,
     /// Cycles per world unit of the coarsest octave. `1.0 / frequency` is the
     /// size of the largest feature.
+    ///
+    /// **`0.6 / radius`**, i.e. the largest feature is about 1.7 radii, so the
+    /// coarsest octave is what makes the rock *lopsided* rather than what
+    /// roughens it. Below 0.3/R the rock is a sphere with dents (12.9% at
+    /// 0.2/R); above 1/R it is gravel, and it costs — 2.0/R draws 1.7x the
+    /// triangles of 0.6/R for one point of concavity.
     pub frequency: f32,
-    /// Detail levels, each half the amplitude and twice the frequency. Past
-    /// the point where an octave is below one voxel it is wasted work.
+    /// Detail levels, each half the amplitude and twice the frequency.
+    ///
+    /// **Cap it at `floor(log2(2 * amplitude / voxel_size)) + 1`.** Two separate
+    /// limits bite and this is the tighter one: octave `k` has amplitude
+    /// `A/2^k`, and once that is below half a voxel it cannot place a vertex
+    /// the octave above it did not already. (The other is wavelength — octave
+    /// `k` needs `1/(f*2^k) >= 2*voxel_size` or it is below the sampling rate.
+    /// At the recipe's `A`/`f` ratio the amplitude limit is always the smaller,
+    /// by one octave.)
+    ///
+    /// Measured at `voxel_size` 0.03 on R = 1.5, where the cap is 5: octaves
+    /// 3/4/5/6/7/8 give 43.6 / 45.9 / 47.0 / 47.2 / 47.4 / 47.4% concave for
+    /// 333 / 458 / 591 / 714 / 872 / 1010 ms of bake. So the last three octaves
+    /// cost **+71% bake for +0.4 points**. At `voxel_size` 0.06 the cap drops
+    /// to 4 and the curve flattens one octave earlier, which is the check that
+    /// the rule is a rule rather than a fit to one curve.
+    ///
+    /// The cap is also worth more than the per-voxel cost suggests, because
+    /// [`Displace::gradient_bound`] grows linearly in octaves — capping octaves
+    /// caps `reach`, which shrinks the set of chunks the bake must visit.
     pub octaves: u32,
     pub seed: u64,
     /// Ridged rather than fBm. Creased and fractured instead of lumpy.
+    ///
+    /// **Leave it true.** Same amplitude, same frequency, same octaves: ridged
+    /// measures 47.0% concave over 1.53 decades and fbm 27.2% over 1.19, and
+    /// the scans are 42-44% over 1.16-1.50. fbm is a sum of smooth bumps, so it
+    /// makes a potato; a crease is where a rock broke.
     pub ridged: bool,
 }
 
@@ -1887,6 +1959,67 @@ mod tests {
             assert_eq!(plain.distance(p).to_bits(), analytic.to_bits());
         }
         assert!((plain.lipschitz() - 1.0).abs() < 1e-9);
+    }
+
+    /// **The number `Displace` is judged by, and the test that keeps it
+    /// honest.** `loom_asset::shape` measures concave surface-area fraction —
+    /// the statistic that separates fractured stone from a smooth blob, since a
+    /// union of analytic primitives bulges outward everywhere and creases
+    /// inward only on a curve. A plain sphere is convex by definition, so it is
+    /// the exact zero this asserts against.
+    ///
+    /// **This fires.** Stubbing `Displace::at` to return `0.0` takes the
+    /// displaced rock from 27.3% concave to the plain sphere's 0.0% and the
+    /// assertion fails — run, not assumed. It is the only test in the
+    /// workspace that would notice `Displace` quietly becoming the identity on
+    /// the *surface* rather than on the field.
+    ///
+    /// Deliberately not a threshold on a *target*: see
+    /// `crates/loom_voxel/examples/rockcalib.rs` and `loom measure --shape` for
+    /// the calibration, and the rule that the number is resolution-dependent
+    /// and must never become a gate.
+    #[test]
+    fn displacement_makes_a_surface_concave_and_a_plain_sphere_never_is() {
+        let rock = |displace| {
+            let mut volume = Volume::new([2, 2, 2], 0.05);
+            volume.bake(&[VoxelOp::Sphere {
+                center: [1.6, 1.6, 1.6],
+                radius: 1.0,
+                mode: CsgMode::Union,
+                displace,
+                elongate: [0.0; 3],
+            }]);
+            loom_asset::shape::stats(&mesh::mesh_volume(&volume, &SurfaceNets))
+        };
+
+        let plain = rock(None);
+        let bumpy = rock(Some(Displace {
+            // The calibrated recipe at R = 1: A = 0.20R, f = 0.6/R, and the
+            // four octaves a 0.05 voxel can resolve. Coarse on purpose — this
+            // is a unit test, and R/voxel = 20 against the 50 an authored rock
+            // gets, which is why the threshold below is well under the 43% the
+            // same recipe reaches at authoring resolution.
+            amplitude: 0.2,
+            frequency: 0.6,
+            octaves: 4,
+            seed: 0xB0D1E,
+            ridged: true,
+        }));
+
+        assert_eq!(plain.boundary, 0, "the rock must fit inside its volume");
+        assert!(plain.concave < 0.01, "a sphere is convex: {}", plain.concave);
+        assert!(
+            bumpy.concave > 0.15,
+            "a ridged displacement must produce concave area: {} vs the sphere's {}",
+            bumpy.concave,
+            plain.concave
+        );
+        assert!(
+            bumpy.spread > plain.spread * 2.0,
+            "detail at several scales is a wider curvature spread: {} vs {}",
+            bumpy.spread,
+            plain.spread
+        );
     }
 
     /// The same guarantee for the three shape transforms of §2.2.

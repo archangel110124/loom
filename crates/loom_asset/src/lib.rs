@@ -9,6 +9,7 @@ pub mod mesh;
 pub mod packed;
 pub mod meta;
 pub mod primitives;
+pub mod shape;
 pub mod texture;
 
 pub use mesh::{Mesh, Vertex};
