@@ -79,6 +79,8 @@ struct MaterialData {
     // Read by `tracedEnvironment`, which has no UVs; see the comment there.
     // w is the ALPHA-TEST THRESHOLD: discard a texel below it, 0 = opaque.
     float4 meanAlbedo;
+    // x is OPACITY: 1 opaque, less blends. yzw free.
+    float4 misc;
 };
 
 static const uint LOOM_MAX_LIGHTS = 8;
@@ -2448,7 +2450,21 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     lit = lerp(lit, fogColor(-view), fog);
 
-    return float4(lit, 1.0);
+    // **Opacity, and it is deliberately not applied to the colour.** The blend
+    // is `SRC_ALPHA, ONE_MINUS_SRC_ALPHA`, so the hardware multiplies; doing it
+    // here as well would square it and glass would come out twice as dark as
+    // authored. The opaque pipeline ignores this channel entirely, so every
+    // material at the default 1.0 writes exactly what it wrote before.
+    //
+    // **Reflections stay at full strength while transmission fades**, because
+    // `lit` already contains the specular and sky terms and they are not scaled
+    // down here — which is what a real window does: at a glancing angle it is
+    // almost a mirror, and the thing behind it disappears.
+    float opacity = 1.0;
+    if (in.material != NO_TEXTURE) {
+        opacity = push.materials[in.material].misc.x;
+    }
+    return float4(lit, opacity);
 }
 
 // ---------------------------------------------------------------------------

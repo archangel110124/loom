@@ -76,7 +76,21 @@ pub struct MaterialData {
     ///
     /// Untextured, the mean is exactly `[1, 1, 1]` and this is `albedo`
     /// bit-for-bit.
+    ///
+    /// **`w` is the alpha-test threshold**, not unused as this said until
+    /// `alpha_cutoff` landed: discard a texel below it, `0` meaning opaque.
     pub mean_albedo: [f32; 4],
+    /// `x` is **opacity** — `1` opaque, and anything less makes this material
+    /// blend (`loom_scene::components::Material::opacity`). `yzw` are free.
+    ///
+    /// **A fifth `float4` rather than another borrowed lane.** The other four
+    /// are full: `albedo.w` is porosity, `params` is metallic/roughness/uv,
+    /// `maps` is two texture indices plus flags plus the layer index, and
+    /// `mean_albedo.w` is the alpha cutoff. This table is per *material* and
+    /// uploaded once at load — not per object and not per frame — so sixteen
+    /// bytes here costs a scene with fifty materials eight hundred bytes,
+    /// which is the cheapest lane in the engine to widen.
+    pub misc: [f32; 4],
 }
 
 /// Set in `maps[2]`: project textures down the world axes instead of reading
@@ -90,6 +104,7 @@ impl Default for MaterialData {
             params: [0.0, 0.8, 1.0, 1.0],
             maps: [NO_TEXTURE, NO_TEXTURE, 0, NO_TEXTURE],
             mean_albedo: [0.8, 0.8, 0.8, 0.0],
+            misc: [1.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -236,8 +251,15 @@ impl Materials {
             buffer,
             allocation: Some(allocation),
             address,
-            // `mean_albedo.w` is the alpha-test threshold; zero is opaque.
-            cutout: materials.iter().map(|m| m.mean_albedo[3] > 0.0).collect(),
+            // **Either kind of see-through keeps a surface out of the
+            // acceleration structure**: `mean_albedo.w` is the alpha-test
+            // threshold and `misc.x` is opacity. A ray query runs no fragment
+            // shader, so a cut leaf occludes as its whole quad and a window
+            // casts a solid black pane.
+            cutout: materials
+                .iter()
+                .map(|m| m.mean_albedo[3] > 0.0 || m.misc[0] < 1.0)
+                .collect(),
         })
     }
 

@@ -195,6 +195,9 @@ impl MaterialLibrary {
                             NO_TEXTURE,
                         ],
                         mean_albedo: [la[0] * lmean[0], la[1] * lmean[1], la[2] * lmean[2], 0.0],
+                        // A ground layer is a cliff face under soil; there is
+                        // no reading of a terrain layer that is see-through.
+                        misc: [1.0, 0.0, 0.0, 0.0],
                     });
                     // The slope cosine rides in the parent's spare metallic
                     // lane below rather than growing the struct.
@@ -236,6 +239,9 @@ impl MaterialLibrary {
                     albedo[2] * mean[2],
                     scalar("alpha_cutoff", 0.0),
                 ],
+                // `x` is opacity; 1.0 is opaque and is what every material
+                // that does not ask to blend carries.
+                misc: [scalar("opacity", 1.0), 0.0, 0.0, 0.0],
             });
             library.by_entity.insert(index, slot);
         }
@@ -404,6 +410,47 @@ name = "Plain"
 "#,
         );
         assert_eq!(lib.materials[0].mean_albedo[3], 0.0);
+    }
+
+    /// **A material is opaque unless it asks not to be**, and the default must
+    /// be exactly 1.0: blending is order-dependent, so a default below one
+    /// would give the whole library a sorting bug at once.
+    #[test]
+    fn a_material_is_fully_opaque_unless_it_asks_not_to_be() {
+        let lib = library(
+            r#"
+[scene]
+format = 1
+id = "3a7e0c51-9d24-4b68-8f13-25c7e094ab6d"
+
+[[node]]
+name = "Plain"
+
+  [node.components.Material]
+  albedo = [0.5, 0.5, 0.5]
+"#,
+        );
+        assert_eq!(lib.materials[0].misc[0], 1.0);
+    }
+
+    /// Authored opacity has to reach the lane the shader blends with.
+    #[test]
+    fn an_authored_opacity_reaches_the_gpu_record() {
+        let lib = library(
+            r#"
+[scene]
+format = 1
+id = "3a7e0c51-9d24-4b68-8f13-25c7e094ab6d"
+
+[[node]]
+name = "Glass"
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  opacity = 0.25
+"#,
+        );
+        assert_eq!(lib.materials[0].misc[0], 0.25);
     }
 
     /// The authored cutoff has to reach the GPU record, in the lane the shader

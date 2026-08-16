@@ -183,6 +183,32 @@ pub struct Material {
     /// Ignored to the extent a surface is metallic: metal has no pores.
     #[schemars(range(min = 0.0, max = 1.0))]
     pub porosity: f32,
+    /// How much of what is behind this surface still shows through.
+    ///
+    /// `1.0` is opaque and is the default, so every scene authored before this
+    /// renders byte-identically and pays nothing. `0.0` would be invisible;
+    /// glass is usually `0.1` to `0.3`, because a real window reflects far more
+    /// than it transmits at a glancing angle and the reflection is most of what
+    /// you actually see.
+    ///
+    /// **This is blended transparency, not refraction.** What is behind the
+    /// surface shows through undistorted and unfocused: correct for flat
+    /// glazing, wrong for a lens, a bottle or a thick bevel.
+    ///
+    /// **Transparent surfaces are sorted back to front per OBJECT**, which is
+    /// the standard approximation and has the standard hole in it: two
+    /// transparent faces *within one mesh* are drawn in whatever order their
+    /// triangles appear, so a closed glass box shows its far wall through its
+    /// near one incorrectly. Author glazing as separate flat nodes and the
+    /// problem does not arise.
+    ///
+    /// **A transparent surface is kept out of the acceleration structure**, for
+    /// the reason [`Self::alpha_cutoff`] gives: a ray query never runs a
+    /// fragment shader, so a window would cast the solid black shadow of its
+    /// whole pane. It therefore casts no shadow at all and does not appear in
+    /// ray-traced reflections.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub opacity: f32,
     /// Throw away any pixel whose albedo-map alpha falls below this, instead of
     /// drawing it.
     ///
@@ -299,6 +325,10 @@ impl Default for Material {
             // whole effect opt-in per material, which is how a feature ends up
             // authored into one test scene and nowhere else.
             porosity: 0.4,
+            // Opaque. Anything else would make every existing surface in the
+            // project blend, and blending is order-dependent — the whole
+            // library would acquire a sorting bug at once.
+            opacity: 1.0,
             // Off. Unlike `porosity`, this one must default to nothing: an
             // alpha test applied to a texture whose alpha nobody authored
             // either does nothing or erases the surface, and which of the two
