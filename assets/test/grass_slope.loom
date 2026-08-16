@@ -13,6 +13,16 @@
 format = 1
 id = "b7f1c40e-2d95-4a83-8c16-5e07d9a2b431"
 
+[[asset]]
+key = "grass_ground_albedo"
+id = "247fe03c-9304-4079-9a10-8159cea7db83"
+path = "../textures/grass_ground_albedo.png"
+
+[[asset]]
+key = "grass_ground_normal"
+id = "08873186-0a37-46a1-8fdc-8669cf03f6fb"
+path = "../textures/grass_ground_normal.png"
+
 [[node]]
 name = "Slope"
 
@@ -74,9 +84,28 @@ parent = "Slope"
   # Dark green, not brown — the same rule `meadow.loom` states. Grass thins with
   # distance and on slopes, and the ground it thins into has to already look
   # like a meadow floor or the thinning reads as bare dirt.
+  #
+  # **This is the scene where that rule stops being enough.** The dome's flank
+  # is past `slope_cutoff`, so it carries no blades at all by construction, and
+  # a flat colour there is a smooth green shell — the synthetic tell the
+  # wandering slope threshold was added to break. Patchy turf gives the bare
+  # band something to be, and it is the surface a viewer looks straight at.
+  #
+  # The albedo stops being the meadow's colour once a map carries that, and
+  # becomes a darkening multiplier that keeps the ground under the blades
+  # rather than competing with them.
+  #
+  # `uv_scale = 0.35` is one tile per ~2.9 m, which is about what this texture
+  # photographs; against a 4096 map that is 1434 texels/m, past the ~400/m a
+  # near field can show. Triplanar because this is terrain and there are no
+  # sensible UVs on a marching-cubes surface at all.
   [node.components.Material]
-  albedo = [0.15, 0.19, 0.10]
+  albedo = [0.60, 0.66, 0.56]
   roughness = 1.0
+  albedo_map = { asset = "grass_ground_albedo" }
+  normal_map = { asset = "grass_ground_normal" }
+  uv_scale = [0.35, 0.35]
+  triplanar = true
 
 [[node]]
 name = "Field"

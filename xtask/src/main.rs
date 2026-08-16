@@ -38,8 +38,12 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 33] = [
+const SCENES: [&str; 34] = [
     "assets/test/lanternhead.loom",
+    // The imported PBR library. **Not in `GOLDEN`**: it adds no rendering path
+    // that `materials.loom` does not already cover — it is a catalogue of
+    // assets, and what it guards is that they still load and validate.
+    "assets/test/pbr_library.loom",
     "assets/test/blockout.loom",
     "assets/test/ground.loom",
     "assets/test/beach.loom",

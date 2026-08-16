@@ -15,6 +15,16 @@
 format = 1
 id = "d51a9c73-6e84-4b20-9f37-0c8b2ed4a916"
 
+[[asset]]
+key = "grass_ground_albedo"
+id = "e7758a7b-60ba-4717-b653-62e722f92af7"
+path = "../textures/grass_ground_albedo.png"
+
+[[asset]]
+key = "grass_ground_normal"
+id = "32502b17-37cd-46f9-a230-893829893f27"
+path = "../textures/grass_ground_normal.png"
+
 [[node]]
 name = "Meadow"
 
@@ -53,9 +63,26 @@ transform = { pos = [0.0, -0.06, 0.0], scale = [22.0, 0.12, 22.0] }
   # reads as bare dirt appearing. It was brown, and from the flythrough's
   # orbit the field looked ploughed. Still dark enough to read as the shadowed
   # earth between blades close up, which is what it is.
+  #
+  # **Textured now, and this is the surface that argument was always about.**
+  # A flat colour is the right *colour* and still reads as a painted plane at
+  # any distance the blades have thinned out of; patchy turf gives the far
+  # field something to be. The albedo is no longer the meadow's colour — the
+  # map carries that — so it is a darkening multiplier instead, keeping the
+  # ground below the blades rather than competing with them.
+  #
+  # `uv_scale = 0.5` is one tile per 2 m, which is about what this texture
+  # photographs. Against a 4096 map that is 2048 texels/m, comfortably past
+  # the ~400/m a near field can show (see `tools/texture/import_pbr.py` for
+  # the measurement behind that number). Triplanar because the box is 180x
+  # wider than it is tall and UV tiles would smear along it.
   [node.components.Material]
-  albedo = [0.16, 0.21, 0.10]
+  albedo = [0.62, 0.68, 0.58]
   roughness = 1.0
+  albedo_map = { asset = "grass_ground_albedo" }
+  normal_map = { asset = "grass_ground_normal" }
+  uv_scale = [0.5, 0.5]
+  triplanar = true
 
 [[node]]
 name = "Field"
