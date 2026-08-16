@@ -38,8 +38,21 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 38] = [
+const SCENES: [&str; 39] = [
     "assets/test/lanternhead.loom",
+    // A landscape out of one `heightfield` op, with the imported props on it at
+    // their real size. **Not in `GOLDEN`**: `ground.loom` already references the
+    // two-material slope blend, `grass_slope.loom` the grass over marched
+    // terrain and `materials.loom` the bindless maps, and the only thing here
+    // that no golden scene has is the heightfield op itself — which is a CPU
+    // bake, not a rendering path, and `terrain_stress.loom` sits in this list on
+    // the same basis.
+    //
+    // **What it is really guarding is the CPU budget**, and this line alone
+    // does not do that — it is also in the `--play` list further down, which is
+    // where the milliseconds are measured. It is the largest world here, 153.6 m
+    // across, and its first draft measured 220.7 ms/frame against that 30 ms.
+    "assets/test/mountain_pass.loom",
     // The imported PBR library. **Not in `GOLDEN`**: it adds no rendering path
     // that `materials.loom` does not already cover — it is a catalogue of
     // assets, and what it guards is that they still load and validate.
@@ -992,6 +1005,18 @@ fn validate() -> std::process::ExitCode {
             "assets/test/forest.loom",
             "assets/games/proving_ground.loom",
             "assets/test/lanternhead.loom",
+            // **The biggest world in the library — 153.6 m across — and the
+            // only one whose cost is a voxel bake rather than a per-frame
+            // system.** `lanternhead` above measures 32 chunks; this one is
+            // also 32, at 1.2 m voxels instead of 0.4, and the first draft of
+            // it was 384 chunks and 220.7 ms/frame. Nothing else here would
+            // have noticed: it renders correctly, validates clean, and matches
+            // no reference because it is deliberately not in `GOLDEN`. The
+            // headroom is the point — a heightfield's early-out is disabled by
+            // its own Lipschitz constant, so bake cost is linear in the chunk
+            // count and a scene of this size is one `chunks` edit away from
+            // being eight times over budget.
+            "assets/test/mountain_pass.loom",
         ] {
             if !root.join(scene).exists() {
                 continue;
