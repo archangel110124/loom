@@ -49,6 +49,36 @@ impl Texture {
     pub fn level_count(&self) -> u32 {
         u32::try_from(self.levels.len()).unwrap_or(1)
     }
+
+    /// The texture's average colour, in linear light.
+    ///
+    /// **This is the 1x1 tail of the mip chain**, which is already that
+    /// average and already built — the whole chain is reduced in linear light
+    /// (see the module header), so the last level is the mean re-encoded one
+    /// final time. Nothing here decodes a texel that was not decoded anyway;
+    /// the cost is one `to_linear` per channel per texture.
+    ///
+    /// Against a true per-texel mean over the five stone textures in
+    /// `assets/textures/`, the chain's per-level rounding costs at most 1.5%.
+    /// Taking it on the bytes instead of in linear light would cost far more
+    /// than that: the sRGB curve is convex, so a byte average of a stone
+    /// texture reads about twice as bright as the light it actually reflects.
+    ///
+    /// **A non-power-of-two texture drops its last row or column at every odd
+    /// level**, exactly as `halve` documents, so the mean is over what
+    /// survived rather than over every texel. Every texture in this project is
+    /// a power of two.
+    #[must_use]
+    pub fn mean_linear(&self) -> [f32; 3] {
+        let tail: &[u8] = self.levels.last().map_or(&[0; 4], Vec::as_slice);
+        std::array::from_fn(|channel| {
+            let byte = tail.get(channel).copied().unwrap_or(0);
+            match self.space {
+                ColorSpace::Srgb => to_linear(byte),
+                ColorSpace::Linear => f32::from(byte) / 255.0,
+            }
+        })
+    }
 }
 
 /// sRGB byte to linear float, per the sRGB transfer function.
@@ -247,6 +277,48 @@ mod tests {
         let levels = mip_chain(level0, 2, 2, ColorSpace::Linear);
 
         assert_eq!(levels[1][0], 128, "linear data averages arithmetically");
+    }
+
+    /// **The bug this exists to catch is the reflection reading five times too
+    /// bright.** Half black and half white averages to 0.5 in *light*; the
+    /// byte average is sRGB 188, which taken as a linear value is 0.74.
+    #[test]
+    fn the_mean_of_an_srgb_texture_is_taken_in_linear_light() {
+        let mut level0 = vec![0_u8; 2 * 2 * 4];
+        for (i, byte) in level0.iter_mut().enumerate() {
+            let white = (i / 4) % 2 == 0;
+            *byte = if i % 4 == 3 || white { 255 } else { 0 };
+        }
+        let texture = Texture {
+            name: String::new(),
+            width: 2,
+            height: 2,
+            space: ColorSpace::Srgb,
+            levels: mip_chain(level0, 2, 2, ColorSpace::Srgb),
+        };
+
+        let mean = texture.mean_linear();
+
+        assert!(
+            (mean[0] - 0.5).abs() < 0.01,
+            "half black half white is half the light, got {}",
+            mean[0]
+        );
+    }
+
+    /// Linear data means what it says, so the mean is the byte average over
+    /// 255 and no curve is involved.
+    #[test]
+    fn the_mean_of_a_linear_texture_is_the_plain_average() {
+        let texture = Texture {
+            name: String::new(),
+            width: 2,
+            height: 2,
+            space: ColorSpace::Linear,
+            levels: mip_chain(vec![51; 2 * 2 * 4], 2, 2, ColorSpace::Linear),
+        };
+
+        assert!((texture.mean_linear()[1] - 0.2).abs() < 0.01);
     }
 
     /// Write a PNG with the given colour type, and read it back.

@@ -61,7 +61,11 @@ static const uint FLAG_TRIPLANAR = 1;
 struct MaterialData {
     float4 albedo;   // rgb base colour, w porosity (how much it darkens wet)
     float4 params;   // metallic, roughness, uvScale.x, uvScale.y
-    uint4 maps;      // albedo index, normal index, flags, unused
+    uint4 maps;      // albedo index, normal index, flags, layer index
+    // rgb the material's AVERAGE linear albedo — the authored `albedo` times
+    // the mean colour of its albedo texture, reduced once at load. w unused.
+    // Read by `tracedEnvironment`, which has no UVs; see the comment there.
+    float4 meanAlbedo;
 };
 
 static const uint LOOM_MAX_LIGHTS = 8;
@@ -1316,12 +1320,28 @@ float3 tracedEnvironment(float3 position, float3 normal, float3 dir,
     ObjectData hitObject = push.objects[query.CommittedInstanceID()];
     float3 albedo = hitObject.color.rgb;
     if (hitObject.material.x != NO_TEXTURE) {
-        // The material's base colour, not its texture. Fetching a texel would
-        // need the triangle's UVs, which needs the index buffer, which is one
-        // more pointer than the push block has room for — and at the
-        // roughnesses this runs at, a reflection is a smear of a surface rather
-        // than a readable image of it.
-        albedo = push.materials[hitObject.material.x].albedo.rgb;
+        // **The material's AVERAGE albedo, not a texel and not its base
+        // colour.** Fetching a texel would need the triangle's UVs, which
+        // needs the index buffer, which is one more pointer than the push
+        // block has room for — and at the roughnesses this runs at, a
+        // reflection is a smear of a surface rather than a readable image of
+        // it, so an average is most of what a texel would have given.
+        //
+        // Reading `albedo.rgb` here instead was the shipped bug. Every
+        // textured material in this project authors `albedo = [1, 1, 1]` and
+        // lets the map carry the colour, while the maps average about 0.2 —
+        // so every reflected object came back a flat blown-out cream
+        // silhouette at five times its real brightness, with no tint at all.
+        // `meanAlbedo` is that average, reduced from the texture's 1x1 mip at
+        // load and multiplied by the authored colour, so it costs one more
+        // `float4` in a table already being read and nothing per pixel.
+        //
+        // **What it cannot do is vary across the reflected surface.** A
+        // piebald rock reflects as a uniform one, and a texture whose whole
+        // content is high-contrast pattern — a checkerboard, brickwork read
+        // close up — reflects as its mean grey. That is the honest ceiling of
+        // an average, and the fix for it is the index buffer above.
+        albedo = push.materials[hitObject.material.x].meanAlbedo.rgb;
     }
 
     float3 hit = origin + dir * query.CommittedRayT();

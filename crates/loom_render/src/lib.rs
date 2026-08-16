@@ -179,6 +179,32 @@ mod tests {
         assert_eq!(size_of::<EnvironmentData>(), 896, "the whole struct");
     }
 
+    /// **`MaterialData` is one memory layout described twice too**, with the
+    /// same failure mode as `EnvironmentData` above: a wrong offset is not a
+    /// build error and not a validation message, it is the shader reading
+    /// sixteen bytes of something else and shading with it.
+    ///
+    /// `meanAlbedo` is appended after `maps`, which is why the three offsets
+    /// above it are unchanged by it — 48 is a multiple of 16, so a `float4`
+    /// lands flush there with no padding.
+    #[test]
+    fn the_material_record_is_laid_out_as_the_shader_reads_it() {
+        let base = MaterialData::default();
+        let at = |field: *const u8| {
+            field as usize - std::ptr::from_ref(&base).cast::<u8>() as usize
+        };
+
+        assert_eq!(at(std::ptr::from_ref(&base.albedo).cast()), 0, "albedo");
+        assert_eq!(at(std::ptr::from_ref(&base.params).cast()), 16, "params");
+        assert_eq!(at(std::ptr::from_ref(&base.maps).cast()), 32, "maps");
+        assert_eq!(
+            at(std::ptr::from_ref(&base.mean_albedo).cast()),
+            48,
+            "meanAlbedo — what a reflected hit shades with"
+        );
+        assert_eq!(size_of::<MaterialData>(), 64, "the whole record");
+    }
+
     /// **The water draw count is the shader's, and nothing but this says so.**
     /// `WATER_VERTS` on the Rust side and `WATER_RES`/`WATER_LEVELS` in
     /// `scene.slang` are one number described twice: too few and the outermost
