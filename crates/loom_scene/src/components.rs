@@ -81,7 +81,32 @@ impl Default for BoxCollider {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Light {
-    /// Luminous intensity. Interior lights are typically 100-800.
+    /// Luminous intensity, in the units the falloff below implies.
+    ///
+    /// **The "typically 100-800" this used to say was wrong by about 40x**, and
+    /// it is why every interior scene in the library was blown out without
+    /// anyone noticing — against a fixed-point target the excess simply
+    /// clamped, so a light 40x too strong and a light correctly set produced
+    /// the same white floor.
+    ///
+    /// The shader computes `intensity * albedo * cos / d^2`, so **a surface at
+    /// `d` metres reads as fully lit at `intensity = d^2 / albedo`**:
+    ///
+    /// | the light | distance | albedo | fully lit at |
+    /// | --- | --- | --- | --- |
+    /// | a 3 m ceiling fitting | 3 m | 0.5 | **18** |
+    /// | a campfire on the ground | 0.8 m | 0.5 | **1.3** |
+    /// | a lamp across a 10 m room | 10 m | 0.5 | **200** |
+    ///
+    /// So the useful range really is wide — but it tracks `d^2`, and a value
+    /// picked without a distance in mind is a guess. `blockout.loom` authored
+    /// 800 under a 3 m ceiling: 44x over, and 13% of that frame was clipping.
+    ///
+    /// **Above about 3x fully lit there is nothing left to see.** The tonemap's
+    /// shoulder maps everything from linear 2.6 upward into sRGB 252-255
+    /// (ADR 0018), so an over-bright surface does not read as brighter, only as
+    /// flatter — and it will out-shine whatever light source is supposed to be
+    /// the brightest thing in the shot.
     #[schemars(range(min = 0.0, max = 10000.0))]
     pub intensity: f32,
     /// Linear RGB, each channel normalized 0..=1. Not 0-255.

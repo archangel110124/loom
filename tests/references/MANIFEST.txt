@@ -3,7 +3,7 @@
 # re-blessing; a change to a PNG without a change here is a mistake.
 
 2f610ac4acc4243a5404c23d3542c736661e7dce387d91ef04b0cee72b6031e5  beach.png
-c8d4d55c9cc0ce430e71d198e4375c3bb3ad93d572eb8e321b3654a0b4307588  campfire.png
+c4faeea36d0ca622596cc009be40b0c2b34b702eda28e37c5c17b32fadc7c519  campfire.png
 df3674fa3ce631aac16eccf46d591dd463a69960c75370661e57ac4479935005  cave.png
 0fa9b69f651441c0fb1ac2b9f837ad6017f9920f96343e12c8ca3243cb017c3f  explosion.png
 03afee6af3735366aa040593815b44d2a22e01e65c5774e82f0c67d9d111a01f  forest.png

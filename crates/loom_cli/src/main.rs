@@ -4340,10 +4340,16 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         assert_eq!(code, 0);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(v["properties"]["intensity"]["maximum"], 10000.0);
+        // **The rule, not a phrase.** This used to match "Interior lights",
+        // which was the sentence claiming the useful range is 100-800 — wrong
+        // by about 40x, and the reason every interior scene in the library was
+        // blown out (ADR 0018). Anchoring on the formula an agent has to apply
+        // means the test fails if the doc is emptied *or* if the actionable
+        // part of it is dropped again.
         assert!(
             v["properties"]["intensity"]["description"]
                 .as_str()
-                .is_some_and(|d| d.contains("Interior lights")),
+                .is_some_and(|d| d.contains("d^2 / albedo")),
             "doc comment should reach the agent"
         );
     }

@@ -36,9 +36,12 @@ name = "DeskLamp"
 parent = "Office/Desk"
 transform = { pos = [0.55, 0.74, 0.1] }
 
-  # Warmer and dimmer than the ceiling light.
+  # Warmer and dimmer than the ceiling light. **2.5, and it was 420** — a lamp
+  # 0.74 m over the desk is fully lit at `0.74^2 / 0.5` = 1.1, so this is a
+  # bright local pool and falls to a quarter of it by 1.5 m away, which is what
+  # a desk lamp does.
   [node.components.Light]
-  intensity = 420.0
+  intensity = 2.5
   color = [1.0, 0.92, 0.78]
 
 [[node]]
@@ -46,6 +49,10 @@ name = "CeilingLight"
 parent = "Office"
 transform = { pos = [0.0, 2.8, 0.0] }
 
+  # **20, and it was 800.** A 2.8 m ceiling over albedo ~0.5 is fully lit at
+  # 15.7. At 800, 27% of this scene's pixels were clipping — the worst in the
+  # library — and it looked deliberate, because everything above the ceiling
+  # collapses to the same white whatever the excess is.
   [node.components.Light]
-  intensity = 800.0
+  intensity = 20.0
   color = [1.0, 0.98, 0.94]

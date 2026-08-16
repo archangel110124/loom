@@ -120,15 +120,36 @@ name = "Firelight"
 parent = "Night"
 transform = { pos = [12.1, 4.7, 13.3] }
 
-  # **1.35, not 22, and that is arithmetic.** The term reaching a surface is
-  # `I * albedo * h / d^3`. At 22 with this geometry red reached 1.0 by 1.77 m,
-  # green by 1.35 m and blue by 0.89 m — a white disc a metre across inside a
-  # three-metre pool where red alone was pinned, and the "soft glow" around it
-  # was the channels leaving the clamp one at a time rather than any falloff.
-  # The colour target is 8-bit fixed point with no tonemapping, so the ceiling
-  # before anything clips at all is about 1.5.
+  # **3.0, and both 1.35 and the 22 the post-stack plan asked for are wrong.**
+  #
+  # 1.35 was chosen to hide a ceiling: against a fixed-point target at 22, red
+  # reached 1.0 by 1.77 m, green by 1.35 m and blue by 0.89 m, so the "soft
+  # glow" was the channels leaving the clamp one at a time rather than any
+  # falloff. ADR 0018 removed that reason — nothing clips now and the shoulder
+  # compresses a triple by one factor, so those radii are simply where the
+  # falloff is, with the hue intact across all of them.
+  #
+  # **But 22 is worse, and the measurement says why: the ground out-shines the
+  # fire.** Brightest code in the flame against brightest code on ground well
+  # away from it, at 640x400 after 240 ticks:
+  #
+  #     I      flame   ground   pool >= 200
+  #     1.35     253       97           957
+  #     3.0      253      141         4,675
+  #     6.0      254      193        11,349
+  #     12.0     254      243        24,696
+  #
+  # The flame's core is pinned near 253 by `fireRamp`'s own top rung whatever
+  # the light does, so raising the light only closes the gap. By 12 the sand is
+  # as bright as the fire, which is a floodlight on a beach.
+  #
+  # **The shoulder has very little discrimination above about 3x the knee** —
+  # everything from linear 2.6 upward lands in sRGB 252-255 — so "spend the
+  # range" has a practical ceiling for anything that must stay distinguishable.
+  # 3.0 doubles the pool over 1.35 and keeps the fire the brightest thing in
+  # the frame, which is what a fire is.
   [node.components.Light]
-  intensity = 1.35
+  intensity = 3.0
   color = [1.0, 0.52, 0.18]
 
 # The flame itself. Additive, so it reads as emission rather than as a lit

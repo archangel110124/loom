@@ -1996,22 +1996,39 @@ float fireFbm(float3 p, int octaves, float detail) {
     return sum / max(norm, 1e-4);
 }
 
-/// Deep amber through to a small off-white core.
+/// Deep amber through to a small white-hot core.
 ///
-/// **The peak is capped below 1.0 deliberately.** Putting red at 1.0 partway
-/// up the ramp reproduces the hue rotation this whole approach exists to
-/// avoid: the moment anything else adds light — the scene's own `Light`, a
-/// second flame behind — red is already at the clip and the sum rotates
-/// orange toward yellow toward white. The reference photograph is deep amber
-/// with white over maybe two percent of its area, and this ramp reaches its
-/// lightest value only at the very top.
+/// **The peak used to be capped below 1.0, and ADR 0018 is what removed the
+/// reason.** The cap existed because red at 1.0 partway up the ramp reproduced
+/// the hue rotation this whole approach exists to avoid: against a fixed-point
+/// target, the moment anything else added light — the scene's own `Light`, a
+/// second flame behind — red was already at the clip and the sum rotated
+/// orange toward yellow toward white. Nothing clips now, and the shoulder
+/// scales a triple by one factor, so a value above 1.0 comes back compressed
+/// with its hue intact instead of rotated.
+///
+/// **Only the top two rungs moved, and that is the whole trick.** Scaling the
+/// ramp uniformly was tried on paper first and is wrong: at 5x the *body* rung
+/// lands at sRGB 252 red against 156 green, which is the bright orange the cap
+/// was protecting against, arriving by a different route. The first three
+/// rungs are below the knee and come out of the shoulder untouched, so the
+/// flame's body is bit-identical and only its tip is re-authored.
+///
+/// The ladder, computed through the shoulder at exposure 1.0:
+///
+///     t 0.45  (0.62, 0.21, 0.02)  ->  sRGB (206, 126,  39)   deep orange
+///     t 0.70  (1.05, 0.62, 0.14)  ->  sRGB (242, 192,  97)   bright amber
+///     t 1.00  (2.60, 1.90, 1.20)  ->  sRGB (252, 219, 179)   warm white
+///
+/// The reference photograph is deep amber with white over maybe two percent of
+/// its area, which is what the last rung's width buys.
 float3 fireRamp(float t) {
     t = saturate(t);
     float3 c = lerp(float3(0.00, 0.000, 0.000), float3(0.22, 0.012, 0.001), saturate(t / 0.15));
     c = lerp(c, float3(0.48, 0.090, 0.006), saturate((t - 0.15) / 0.30));
     c = lerp(c, float3(0.62, 0.210, 0.020), saturate((t - 0.45) / 0.25));
-    c = lerp(c, float3(0.68, 0.400, 0.090), saturate((t - 0.70) / 0.20));
-    c = lerp(c, float3(0.72, 0.640, 0.480), saturate((t - 0.90) / 0.10));
+    c = lerp(c, float3(1.05, 0.620, 0.140), saturate((t - 0.70) / 0.20));
+    c = lerp(c, float3(2.60, 1.900, 1.200), saturate((t - 0.90) / 0.10));
     return c;
 }
 
