@@ -38,8 +38,21 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 35] = [
+const SCENES: [&str; 36] = [
     "assets/test/lanternhead.loom",
+    // A landscape out of one `heightfield` op, with the imported props on it at
+    // their real size. **Not in `GOLDEN`**: `ground.loom` already references the
+    // two-material slope blend, `grass_slope.loom` the grass over marched
+    // terrain and `materials.loom` the bindless maps, and the only thing here
+    // that no golden scene has is the heightfield op itself — which is a CPU
+    // bake, not a rendering path, and `terrain_stress.loom` sits in this list on
+    // the same basis.
+    //
+    // **What it is really guarding is the CPU budget.** It is the largest world
+    // in the list — 153.6 m across — and the first draft of it measured 220
+    // ms/frame here against the 30 ms below, so this line is the thing that
+    // notices if the voxel bake ever gets slower.
+    "assets/test/mountain_pass.loom",
     // The imported PBR library. **Not in `GOLDEN`**: it adds no rendering path
     // that `materials.loom` does not already cover — it is a catalogue of
     // assets, and what it guards is that they still load and validate.

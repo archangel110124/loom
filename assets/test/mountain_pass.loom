@@ -1,0 +1,557 @@
+# A waymarker on a grass shoulder below the pass, late in the afternoon.
+#
+#     loom render assets/test/mountain_pass.loom --out pass.png --size 1600x1000
+#
+# **The first landscape in the library built out of one `heightfield` op**, and
+# the first that puts the imported props at their real size against something
+# big enough to make that size mean something. `props.loom` proves the models
+# import; this is the scene that asks whether a 3 m log and a 0.48 m lantern
+# still read as a log and a lantern when the thing behind them is 60 m tall.
+#
+# ---------------------------------------------------------------------------
+# The shot
+# ---------------------------------------------------------------------------
+#
+# The eye stands at 1.8 m on the lip of a turf shoulder and looks east-north-east
+# up the basin. Four things carry the frame and each is doing one job:
+#
+# - **The waypost**, dead centre on the crest, silhouetted against the col
+#   between the two summits. It is the only vertical in the picture and the only
+#   straight line; a 2.1 m mast with a 0.96 m lantern on it is the number the
+#   eye reads the mountains against. *Broken:* move it a couple of metres either
+#   way along Z and it stops being against sky and starts being against rock,
+#   at which point a dark iron fixture on a dark slope is invisible — which is
+#   what the first three renders of it were.
+# - **The log and the stump**, five to eight metres out on the left. Human scale
+#   at arm's length, where the grass is drawn blade by blade, so there is a
+#   size reference at *both* ends of the depth range rather than only at the far
+#   one.
+# - **The bedrock shelf**, right of centre, half buried. See its node for why
+#   half.
+# - **The peaks**, 60 to 95 m away, and they are only peaks because of the fog.
+#   `fog_density = 0.011` is what separates the summit group from the ridge
+#   behind it; at the 0.002 most scenes here use, the whole massif reads as one
+#   grey cut-out and the scene is the grey lump this kind of scene always
+#   risks being.
+#
+# **Yaw 278, and it was rendered rather than reasoned about.** Almost every
+# scene in this library is yaw 0, so the convention was untested; four renders
+# from one point at 0/90/180/270 settle it — **yaw 270 looks down +X**, and
+# screen-right is then +Z. Everything in the layout below follows from that,
+# so if the convention ever changes this file's composition is the first
+# casualty and re-deriving it is four renders.
+#
+# ---------------------------------------------------------------------------
+# The terrain is one op, and the three numbers in it are the whole landform
+# ---------------------------------------------------------------------------
+#
+# `VoxelOp::Heightfield`'s slope is bounded by
+# `amplitude * 3 * octaves * frequency / norm` (that is `lipschitz()`, rearranged),
+# and the *first octave's* share of it — `amplitude * 3 * frequency / norm` — is
+# what decides whether the big shapes are mountains or downland. The first pass
+# at this scene used `amplitude 26, frequency 0.009`: 0.36, which is 20°, and it
+# rendered as moorland. **Mountains want the product `amplitude x frequency`,
+# not either one alone**; 58 x 0.018 puts the first octave at 1.67 (59°) with a
+# 56 m primary wavelength, and that is the landform in the frame.
+#
+# `octaves = 4` rather than 6 is the second lesson. Every octave contributes the
+# same slope bound, so six of them do not make the mountains steeper — they only
+# add detail at 1.7 m, which is under two voxels here and rendered as gravel
+# crawling over the whole massif.
+#
+# ---------------------------------------------------------------------------
+# The voxel budget, measured, and the surprise in it
+# ---------------------------------------------------------------------------
+#
+# Bake cost is `chunks x 32768` voxel evaluations and nothing else, because a
+# heightfield's `lipschitz()` here is 6.8 — the early-out that fills a uniform
+# chunk in O(1) needs the sample point to be 6.8 chunk-radii clear of the
+# surface, which almost nothing is. So the chunk count *is* the cost.
+#
+#     0.6 m, chunks [8, 6, 8]   384 chunks   220.7 ms/frame   <- 7x over budget
+#     1.2 m, chunks [4, 2, 4]    32 chunks    15.4 ms/frame   <- shipped
+#
+# Both measured with `loom run … --edit --play --frames 90` on the **debug**
+# build, which is what `cargo xtask validate` gates on; the release figure for
+# the shipped setting is 10.7 ms, and ~99% of both numbers is the one-off bake
+# amortised over 90 frames. `lanternhead` is 21.0 ms on the same instrument.
+#
+# **Coarsening it four times over made the mountains look better, not worse**,
+# and that was not the trade anyone expected. At 0.6 m every lit slope carried
+# horizontal corrugations that read as contour lines on a relief model — the
+# last noise octave, sampled just above its own Nyquist. At 1.2 m that octave is
+# below the voxel and simply is not there, and what is left is clean ridgelines.
+# **So resolution was not buying detail here, it was buying an artifact.** The
+# near ground under the props is the only place 1.2 m costs anything, and the
+# props are meshes.
+#
+# ---------------------------------------------------------------------------
+# The volume is a 76.8 m window onto a 116 m heightfield
+# ---------------------------------------------------------------------------
+#
+# A heightfield is unbounded in X and Z and its op declares bounds of
+# `base ± amplitude` — 116 m here — but the ground that actually exists over
+# this footprint runs **27.2 m to 88.6 m**, measured at twenty-odd points. Two
+# chunks of 1.2 m voxels is 76.8 m, so the volume is *offset* to sit over the
+# band that has terrain in it: `Ground` carries `pos = [0, 18, 0]` and the op's
+# `base` is 40 (world 58) to match. Same terrain in world space, a third of the
+# chunks.
+#
+# **Both margins are what to check if this file is ever edited.** Terrain above
+# the volume is cut off flat — a summit with a plateau on it. Terrain below it
+# leaves a column with no surface at all, which is a hole you can see the sky
+# through. As authored there is 6.2 m of headroom over the highest summit and
+# 9.2 m under the deepest valley floor, and raising `amplitude` or lowering
+# `base` spends both.
+#
+# ---------------------------------------------------------------------------
+# How the prop heights were found, since nothing in the CLI asks directly
+# ---------------------------------------------------------------------------
+#
+# `loom terrain` is a recipe tool and takes no scene; `loom place --op` places
+# against a node's *bounding box*, which for a voxel volume is its ceiling. The
+# one query that answers "how high is the ground at X, Z" is
+# **`loom water --at x,z`**, which reports `bed.height` — so every Y in this
+# file came from a scratch copy of it carrying a `WaterBody` at
+# `surface_height = 200` and nothing else. It is worth knowing before the next
+# person guesses, and worth re-running if the terrain op is ever touched: a
+# prop 20 cm in the air is obvious and a prop 20 cm under is gone.
+#
+# ---------------------------------------------------------------------------
+# Not in GOLDEN, and the reason is the rule rather than the cost
+# ---------------------------------------------------------------------------
+#
+# Every rendering path here already has a reference: voxel terrain and the
+# two-material slope blend are `ground.loom`, vertex-shader grass over a marched
+# terrain is `grass_slope.loom`, bindless albedo and normal maps on mesh
+# geometry are `materials.loom`. The one thing this scene has that no golden
+# scene does is the **`heightfield` op**, and that is a CPU bake rather than a
+# rendering path — `terrain_stress.loom` carries it in `SCENES` on exactly that
+# basis. So this goes in `SCENES` for the same reason `props.loom` does: what is
+# worth guarding is that it still loads, validates and stays inside the CPU
+# budget, not its pixels.
+
+[scene]
+format = 1
+id = "0c9f5b2e-6a41-4d38-9e07-3b18c4d7a521"
+
+[[asset]]
+key = "grass_ground_albedo"
+id = "247fe03c-9304-4079-9a10-8159cea7db83"
+path = "../textures/grass_ground_albedo.png"
+
+[[asset]]
+key = "grass_ground_normal"
+id = "08873186-0a37-46a1-8fdc-8669cf03f6fb"
+path = "../textures/grass_ground_normal.png"
+
+[[asset]]
+key = "ground_rock_albedo"
+id = "3d90f6b1-27ca-4e58-b7d4-5081a92fe6c7"
+path = "../textures/ground_rock_albedo.png"
+
+[[asset]]
+key = "ground_rock_normal"
+id = "5e14b8c3-90af-4d26-a371-6c48d0e173b9"
+path = "../textures/ground_rock_normal.png"
+
+[[asset]]
+key = "mesh_RockBeach"
+id = "3774fb7f-f3ff-4cca-ae14-670f84582b8f"
+path = "../meshes/rock_beach.obj"
+
+[[asset]]
+key = "rock_beach_albedo"
+id = "102bd405-b85b-48a2-8211-6543cc05e6d1"
+path = "../textures/rock_beach_albedo.png"
+
+[[asset]]
+key = "rock_beach_normal"
+id = "96503df9-869e-4964-ba97-22d554d66a89"
+path = "../textures/rock_beach_normal.png"
+
+[[asset]]
+key = "mesh_RockBoulderA"
+id = "299ddd04-f7a4-4d71-9d20-2ec12f9d06d9"
+path = "../meshes/rock_boulder_a.obj"
+
+[[asset]]
+key = "rock_boulder_a_albedo"
+id = "491e578b-5c25-4bbf-9875-d9a0a8456842"
+path = "../textures/rock_boulder_a_albedo.png"
+
+[[asset]]
+key = "rock_boulder_a_normal"
+id = "712a499b-8aa8-4794-8713-e9cadf69f9e1"
+path = "../textures/rock_boulder_a_normal.png"
+
+# **`rock_boulder_b` has no atlas in `assets/textures/`**, and this scene does
+# not lend it boulder A's. Every one of these maps is baked for one model's UV
+# layout, so A's atlas on B's UVs smears A's photograph across B's faces —
+# which is a mistake already in this repo's history. The mossy boulder below
+# therefore carries a flat albedo and no maps, and reads as an untextured rock
+# at mid distance, which is the honest version of not having the file.
+[[asset]]
+key = "mesh_RockBoulderB"
+id = "054f439d-098e-4567-a6d8-721b841b7225"
+path = "../meshes/rock_boulder_b.obj"
+
+[[asset]]
+key = "mesh_TreeLog"
+id = "99f25dc6-1b13-4a6d-912d-bf7eed46f35f"
+path = "../meshes/tree_log.obj"
+
+[[asset]]
+key = "tree_log_albedo"
+id = "7e0b0ed4-d1c0-4dfa-b29a-a01acc95aed7"
+path = "../textures/tree_log_albedo.png"
+
+[[asset]]
+key = "tree_log_normal"
+id = "24a58bae-5498-42b0-8a57-d3d149876393"
+path = "../textures/tree_log_normal.png"
+
+[[asset]]
+key = "mesh_TreeStump"
+id = "2f64518b-4353-4598-acbe-eed598fa57de"
+path = "../meshes/tree_stump.obj"
+
+[[asset]]
+key = "tree_stump_albedo"
+id = "f1ba9218-6780-4e22-b2c2-1a8b3bdbd22c"
+path = "../textures/tree_stump_albedo.png"
+
+[[asset]]
+key = "tree_stump_normal"
+id = "ae1d3b44-cc8f-4356-ada6-44a6735fe918"
+path = "../textures/tree_stump_normal.png"
+
+[[asset]]
+key = "mesh_Lantern"
+id = "d49c21f7-9c58-4ee3-b0a8-5b08a1ae88f2"
+path = "../meshes/lantern.obj#WallLanternExterior001_Frame_Geo_LOD0"
+
+[[asset]]
+key = "lantern_albedo"
+id = "a653ee1b-13cf-42e7-aa29-7c82ba34e84b"
+path = "../textures/lantern_albedo.png"
+
+[[asset]]
+key = "lantern_normal"
+id = "7ed14d43-b570-4d8e-a700-62c2cc63549a"
+path = "../textures/lantern_normal.png"
+
+[[node]]
+name = "Pass"
+
+  # **Sun 24.8° up and over the camera's left shoulder**, which is the only
+  # arrangement that models a mountain rather than flattening it: a face turned
+  # toward the eye is lit, the face beside it is not, and the ridge between them
+  # is the line that says which way the rock runs. `lanternhead` and `homestead`
+  # both put the sun almost down the camera's axis because both are about water,
+  # and Fresnel needs the grazing angle; nothing here is wet and a backlit
+  # massif is a silhouette.
+  #
+  # `ambient = 0.45` is high for this library and it is doing a real job.
+  # Shadowed rock at albedo 0.44 under the 0.30 this scene started with came out
+  # near black, so half the mountain was a hole. Alpine shade is bounced sky,
+  # not absence of light.
+  #
+  # **`cloud_cover = 0.45` is here for the top third of the frame.** The
+  # composition puts the horizon low, so a quarter of the picture is sky and an
+  # empty gradient there reads as a missing background. There is no `Rain` in
+  # this scene, so cover is only doing that and softening the key slightly.
+  [node.components.Environment]
+  sun_direction = [-0.52, 0.42, 0.75]
+  sun_strength = 1.6
+  sun_color = [1.0, 0.88, 0.72]
+  ambient = 0.45
+  sky_zenith = [0.10, 0.20, 0.42]
+  sky_horizon = [0.55, 0.62, 0.72]
+  cloud_cover = 0.45
+  cloud_scale = 900.0
+  fog_density = 0.011
+  fog_falloff = 0.045
+
+  [node.components.Wind]
+  direction_degrees = 200.0
+  speed = 4.0
+  gustiness = 1.1
+  turbulence = 1.0
+  ground_drag = 0.45
+
+[[node]]
+name = "Ground"
+parent = "Pass"
+transform = { pos = [0.0, 18.0, 0.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 1.2
+  chunks = [4, 2, 4]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "heightfield"
+  base = 40.0
+  amplitude = 58.0
+  frequency = 0.018
+  octaves = 4
+  seed = 920731
+  mode = "union"
+
+  # **Turf is the BASE and rock is the LAYER, which is the opposite of
+  # `lanternhead` and right for the same reason.** `groundLayerWeight` is
+  # `1 - saturate((normal.y - cutoff)/fade)`, so the layer is a *slope* rule and
+  # dead-flat ground is always the base material. A quay deck is flat, so
+  # `lanternhead` had to make stone the base; a mountain's flats are its valley
+  # floor and its turf shoulders, and its steep ground is bedrock. Author it the
+  # other way round here and the shoulder the whole shot stands on becomes a
+  # scree slope with grass growing on the cliffs above it.
+  #
+  # Green, because `meadow.loom`'s rule applies to every scene with a `Grass`
+  # field: blades fade to nothing with distance and the ground is what the far
+  # field reads as. `uv_scale = 0.35` against a 4096 map is 1434 texels/m, past
+  # the ~400/m a near field can show. Triplanar because Surface Nets emits no
+  # UVs at all.
+  [node.components.Material]
+  albedo = [0.48, 0.52, 0.40]
+  roughness = 1.0
+  porosity = 0.7
+  albedo_map = { asset = "grass_ground_albedo" }
+  normal_map = { asset = "grass_ground_normal" }
+  uv_scale = [0.35, 0.35]
+  triplanar = true
+
+  # `slope = 0.62` and **both grass fields carry `slope_cutoff = 0.62`**; two
+  # different thresholds on one hillside draw two concentric rings, which
+  # `ground.loom` states and the schema's defaults pin.
+  #
+  # `uv_scale = 2.0` — one tile every half metre, 2048 texels/m. The map is a
+  # cracked-slab photograph and at the 1.0 this started on it tiled at one metre
+  # and read as crocodile scale on the near cliffs. The bare rock at the bottom
+  # left of the frame is this layer doing its job on the lip the camera stands
+  # on, not a hole in the turf field.
+  [node.components.Material.layer]
+  albedo = [0.44, 0.43, 0.41]
+  roughness = 0.82
+  porosity = 0.12
+  uv_scale = [2.0, 2.0]
+  slope = 0.62
+  albedo_map = { asset = "ground_rock_albedo" }
+  normal_map = { asset = "ground_rock_normal" }
+
+# Two fields rather than one big rectangle, for the reason `homestead` gives:
+# `loom_grass` does not know where the shot is, and a field wide enough to reach
+# the far shoulder would also grow blades on ground the camera never sees and
+# pay a ground-grid march for all of it. `TurfNear` is centred four metres in
+# front of the eye and reaches past it, so there is no bald patch under the
+# camera; `TurfFar` is the next shoulder along, which is the one the eye reads
+# the depth against.
+#
+# `height = 0.28` against `meadow`'s 0.40 — this is turf at 1500 m, and a 0.41 m
+# log lying in 0.40 m grass is a log nobody can see.
+
+[[node]]
+name = "TurfNear"
+parent = "Pass"
+transform = { pos = [64.0, 0.0, 90.0] }
+
+  [node.components.Grass]
+  half_extent = [14.0, 14.0]
+  slope_cutoff = 0.62
+  density = 180.0
+  height = 0.28
+  width = 0.020
+  clump_facing = 0.78
+  clump_colour = 0.42
+
+  [node.components.Material]
+  albedo = [0.26, 0.36, 0.14]
+  roughness = 0.8
+
+[[node]]
+name = "TurfFar"
+parent = "Pass"
+transform = { pos = [88.0, 0.0, 96.0] }
+
+  [node.components.Grass]
+  half_extent = [11.0, 11.0]
+  slope_cutoff = 0.62
+  density = 180.0
+  height = 0.28
+  width = 0.020
+  clump_facing = 0.78
+  clump_colour = 0.42
+
+  [node.components.Material]
+  albedo = [0.26, 0.36, 0.14]
+  roughness = 0.8
+
+# **Bedrock, and it is buried on purpose.** `rock_beach.obj` is a 6.2 m pile of
+# slabs with real holes in it — open it in `props.loom` and there are black
+# voids straight through the mesh — so standing it free on a hillside gives a
+# broken lump, which is what two renders of this scene showed. Sunk so its base
+# is 1.0 m under the ground at the uphill end and about 1.1 m proud at the
+# downhill one, the voids are underground and what is left is a ledge of strata
+# breaking out of the turf, which is exactly what this ground would do.
+#
+# The 25° yaw runs its long axis along the contour rather than down it. Across
+# the 6.2 m span the ground falls 1.9 m; across the 3 m width it falls under a
+# metre, which is inside the burial.
+
+[[node]]
+name = "Shelf"
+parent = "Pass"
+transform = { pos = [71.5, 73.0, 92.5], rot_euler = [0.0, 25.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_RockBeach" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.88
+  albedo_map = { asset = "rock_beach_albedo" }
+  normal_map = { asset = "rock_beach_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "Log"
+parent = "Pass"
+transform = { pos = [61.8, 73.2, 88.8], rot_euler = [0.0, 15.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_TreeLog" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.82
+  albedo_map = { asset = "tree_log_albedo" }
+  normal_map = { asset = "tree_log_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "Stump"
+parent = "Pass"
+transform = { pos = [60.5, 73.7, 86.8], rot_euler = [0.0, -35.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_TreeStump" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.85
+  albedo_map = { asset = "tree_stump_albedo" }
+  normal_map = { asset = "tree_stump_normal" }
+  uv_scale = [1.0, 1.0]
+
+# Three erratics on the shoulder, two of them the same 1.2 m mesh at different
+# yaws and one at 1.4x, which is the cheapest way to get variety out of a
+# five-model set without any of them reading as a copy.
+
+[[node]]
+name = "BoulderNear"
+parent = "Pass"
+transform = { pos = [68.0, 74.2, 91.0], rot_euler = [0.0, 35.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_RockBoulderA" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.9
+  albedo_map = { asset = "rock_boulder_a_albedo" }
+  normal_map = { asset = "rock_boulder_a_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "BoulderFar"
+parent = "Pass"
+transform = { pos = [78.0, 73.5, 93.0], rot_euler = [0.0, -60.0, 0.0], scale = [1.4, 1.4, 1.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_RockBoulderA" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.9
+  albedo_map = { asset = "rock_boulder_a_albedo" }
+  normal_map = { asset = "rock_boulder_a_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "BoulderMossy"
+parent = "Pass"
+transform = { pos = [70.5, 69.5, 94.5], rot_euler = [0.0, 110.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_RockBoulderB" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.33, 0.24]
+  roughness = 0.92
+
+# **The waymarker, and it deliberately has NO `Light`.**
+#
+# `lantern.obj` is a *wall* fixture — a bracket and a lamp with no base — so it
+# needs something behind it, which is what the mast is; the two `o` groups in
+# the file are picked apart with the `file.obj#Object` fragment syntax at the
+# top of this file, and taking the frame alone leaves the glass out. The lantern
+# is yawed -90° because the model faces +Z by default (`props.loom` mounts it
+# that way) and this camera looks down +X.
+#
+# **A lit lamp on a 2 m post cannot be authored at this sun strength, and the
+# arithmetic says so before the render does.** `Light::intensity` is `d² / albedo`
+# for a surface `d` metres away. The pool on the ground 2 m below wants about 8;
+# at 8 the mast 0.3 m from the lamp receives `8 * 0.19 / 0.09` — twenty times
+# fully lit — and renders as a featureless cream column, which is what the first
+# two renders of this scene showed. Backing off to 3 and moving the light 0.6 m
+# clear still leaves the post at 1.2x white, because the ratio between 0.6 m and
+# 2 m is squared and it does not care what the numbers are.
+#
+# So the lantern here is an unlit fixture at three in the afternoon, which is
+# what a waymarker lamp is at three in the afternoon. A scene that wants this
+# lamp burning has to be authored at dusk, and then it is `lanternhead`'s
+# problem and `lanternhead` already solves it.
+
+[[node]]
+name = "WaypostMast"
+parent = "Pass"
+transform = { pos = [66.2, 75.2, 89.0], scale = [0.08, 1.05, 0.08] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.19, 0.16, 0.13]
+  roughness = 0.88
+
+[[node]]
+name = "Waypost"
+parent = "Pass"
+transform = { pos = [65.9, 75.6, 89.0], rot_euler = [0.0, -90.0, 0.0], scale = [2.0, 2.0, 2.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_Lantern" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.45
+  albedo_map = { asset = "lantern_albedo" }
+  normal_map = { asset = "lantern_normal" }
+  uv_scale = [1.0, 1.0]
+
+# The shot. The ground here is 75.58, so the eye is at 1.82 m.
+#
+# **Pitch -10 rather than -4, and it is the foreground that decides it.** The
+# shoulder falls away from the lip the camera stands on, so at a shallow pitch
+# the log and the stump slide off the bottom of the frame and a quarter of the
+# picture is empty sky. Ten degrees down puts both in the lower third with the
+# summits still clear of the crest, which is the only arrangement where the
+# scene has a near, a middle and a far.
+
+[[node]]
+name = "Camera"
+parent = "Pass"
+transform = { pos = [55.0, 77.4, 90.0], rot_euler = [-10.0, 278.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 52.0
