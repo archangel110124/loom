@@ -102,7 +102,15 @@ def pick(names, wanted, reject=()):
                 continue
             # PNG first: the vendors' normals are often PNG next to a JPEG
             # copy, and a normal map through JPEG is blocky where it matters.
-            rank = (pattern_rank, 0 if low.endswith(".png") else 1, len(n))
+            #
+            # **Then non-LOD before LOD.** The model sets ship both
+            # `_NRM_4K_METALNESS` and `_NRM_4K_LOD0`; the second is baked
+            # against LOD0's cage, and `tools/mesh/blend_to_obj.py` exports the
+            # LOD1 mesh these archives actually contain. Shortest-name-wins
+            # picked the LOD0 one, which is a normal map for geometry that is
+            # not in the file.
+            rank = (pattern_rank, 0 if low.endswith(".png") else 1,
+                    1 if "lod" in low else 0, len(n))
             if best is None or rank < best[0]:
                 best = (rank, n)
     return best[1] if best else None
