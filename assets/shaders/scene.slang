@@ -905,7 +905,7 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
 [[vk::binding(0, 0)]]
 uniform RaytracingAccelerationStructure sceneTLAS;
 
-/// 1 where the sun reaches this point, 0 where something blocks it.
+/// Whether anything blocks `dir` from `origin` within `range`.
 ///
 /// **Ray query, traced inline from this shader.** A shadow ray only asks
 /// *whether* anything is in the way, never what or how far, so the traversal
@@ -919,22 +919,165 @@ uniform RaytracingAccelerationStructure sceneTLAS;
 /// The flags are template arguments rather than runtime values on purpose:
 /// static flags let the driver specialise the traversal, and passing them
 /// dynamically forfeits that.
-float sunVisibility(float3 position, float3 normal, float bias) {
+bool anyHit(float3 origin, float3 dir, float tMin, float range) {
     RayDesc ray;
-    // Offset along the normal, not just by TMin: a ray starting exactly on the
-    // surface hits the surface it came from, and the whole scene self-shadows
-    // into acne.
-    ray.Origin = position + normal * bias;
-    ray.Direction = sunDirection();
-    ray.TMin = bias;
-    ray.TMax = 1e4;
+    ray.Origin = origin;
+    ray.Direction = dir;
+    ray.TMin = tMin;
+    ray.TMax = range;
 
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
            | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
     query.TraceRayInline(sceneTLAS, RAY_FLAG_NONE, 0xFF, ray);
     query.Proceed();
-    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
+    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
 }
+
+/// 1 where the sun reaches this point, 0 where something blocks it. One ray.
+///
+/// Kept alongside the soft version below because a *secondary* ray does not
+/// deserve a soft shadow: this is what a reflected surface is lit by, and
+/// spending four rays there to soften a penumbra nobody can resolve in a
+/// reflection is the definition of paying twice for nothing.
+float sunVisibilityHard(float3 position, float3 normal, float bias) {
+    return anyHit(position + normal * bias, sunDirection(), bias, 1e4) ? 0.0 : 1.0;
+}
+
+// ---------------------------------------------------------------------------
+// Sampling for the secondary rays.
+//
+// **Deterministic, and that is a hard requirement rather than a nicety.** ADR
+// 0010 rejected TAA and ADR 0018 restated it for auto-exposure on the same
+// grounds: a frame must be a function of its tick, or the golden gate is
+// comparing against an image that no longer exists. So there is no wall clock
+// and no frame counter in any of this — every sample direction is a function of
+// the pixel's integer coordinate and the sample's index, and re-rendering the
+// same tick twice gives the same bits.
+//
+// The pattern is the R2 low-discrepancy sequence, Cranley-Patterson rotated by
+// a per-pixel offset from `loom_hash` — the project's one integer hash, and the
+// same one grass places blades with. R2 rather than plain white noise because
+// four samples of white noise cluster: the variance of a stratified set of four
+// is closer to that of sixteen unstratified, which is the difference between
+// four rays being usable and not.
+// ---------------------------------------------------------------------------
+
+/// A per-pixel offset in [0,1)², stable for the life of a pixel.
+float2 rayDither(float2 pixel) {
+    uint x = uint(int(pixel.x));
+    uint y = uint(int(pixel.y));
+    uint h = loom_hash(loom_hash(x) + y);
+    // 24 bits each from two folds of the hash; the low bits of an integer hash
+    // are the ones worth trusting least, so both come off the top.
+    return float2(float(h >> 8) * (1.0 / 16777216.0),
+                  float(loom_hash(h) >> 8) * (1.0 / 16777216.0));
+}
+
+/// Sample `i` of the R2 sequence, rotated into this pixel's own offset.
+float2 raySample(float2 dither, uint i) {
+    // The two-dimensional generalisation of the golden ratio: the reciprocals
+    // of the plastic number and its square.
+    const float2 R2 = float2(0.7548776662, 0.5698402910);
+    return frac(dither + R2 * float(i + 1u));
+}
+
+/// An orthonormal pair spanning the plane perpendicular to `axis`.
+void rayBasis(float3 axis, out float3 u, out float3 v) {
+    // The reference vector must not be parallel to the axis, or the cross
+    // product vanishes and the basis collapses to a line — which sends every
+    // sample down the same direction and makes a soft shadow hard again.
+    float3 reference = abs(axis.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    u = normalize(cross(reference, axis));
+    v = cross(axis, u);
+}
+
+// ---------------------------------------------------------------------------
+// Soft sun shadows.
+//
+// The sun is a disc, not a point, so a shadow edge has a penumbra whose width
+// grows with the distance from blocker to receiver. One ray per pixel cannot
+// express that at all; `SUN_RAYS` of them, spread over the disc, is the whole
+// mechanism.
+//
+// **This is wider than the real sun, deliberately, and the measurement is what
+// says so.** The sun subtends 0.53° from Earth. At that width the penumbra is
+// at the noise floor: a 1-ray render of `materials` differs from a 64-ray one
+// in 0.13% of pixels, against the golden gate's own 0.1% threshold for "a
+// different image". Four rays at the physical angle would be four rays spent
+// on something nobody can see.
+//
+// So the angle is a *look* parameter, not a physical one, and what is measured
+// is how far from physical it has to go before the penumbra exists. Converged
+// (64-ray) renders of `materials` at 640x400, each against the 0.53° one:
+//
+//     angle    mean     worst   pixels past tolerance
+//     2.0deg   0.0139   44      0.28%
+//     4.0deg   0.0404   58      0.58%
+//
+// **2° is the smallest widening the project's own gate would call a different
+// picture** — 0.28% against its 0.1% — and it gives a penumbra of about 3.5 cm
+// per metre of blocker distance, which is narrow enough that a contact shadow
+// stays a contact shadow. 4° doubles the noise for an edge that reads as soft
+// rather than as a shadow.
+//
+// A fuller model exists and was not built: the effective source is the whole
+// bright part of the sky, so it should widen with `cloudCover()`, which this
+// file already couples the sun's strength and colour to. That is one `lerp`,
+// and it wants a scene authored under clear sky next to one under overcast to
+// judge it against.
+static const float SUN_ANGLE_DEGREES = 2.0;
+/// The disc's radius one unit along the ray, which is what the sample offset
+/// is measured in.
+static const float SUN_SPREAD = tan(radians(SUN_ANGLE_DEGREES));
+
+/// **Four, chosen where the cost curve breaks, not where the noise does.**
+///
+/// Noise against a 64-ray reference at 2°, on `materials` at 640x400, and cost
+/// on `lanternhead` at 1920x1080 with AO stubbed out, forward pass, median of
+/// three (0.447 ms for the single hard ray this replaces):
+///
+///     rays          1       2       4       8       16
+///     worst         77      43      36      28      26
+///     mean          .0257   .0160   .0115   .0071   .0047
+///     forward ms    0.452   0.456   0.467   0.559   0.851
+///
+/// Rays two to four cost 0.005 ms *each* — a sun ray is coherent, every pixel
+/// sending one in nearly the same direction, and the hardware hides three of
+/// them behind one. Rays five to eight cost 0.023 ms each and rays nine to
+/// sixteen 0.037 ms each, while the worst-channel error has already fallen from
+/// 77 (above the gate's 72) to 36 (well under it) by ray four.
+///
+/// So the cheap half of the curve ends exactly where the noise stops mattering.
+static const uint SUN_RAYS = 4;
+
+/// 1 where the sun reaches this point, 0 where something blocks it, and
+/// everything between in a penumbra.
+float sunVisibility(float3 position, float3 normal, float bias, float2 pixel) {
+    // Offset along the normal, not just by TMin: a ray starting exactly on the
+    // surface hits the surface it came from, and the whole scene self-shadows
+    // into acne.
+    float3 origin = position + normal * bias;
+    float3 toSun = sunDirection();
+    float3 u, v;
+    rayBasis(toSun, u, v);
+
+    float2 dither = rayDither(pixel);
+    float open = 0.0;
+    for (uint i = 0; i < SUN_RAYS; ++i) {
+        float2 xi = raySample(dither, i);
+        // Uniform over the disc: the sqrt is what stops the samples piling up
+        // in the middle, which would narrow the penumbra back toward a hard
+        // edge for no saving.
+        float radius = SUN_SPREAD * sqrt(xi.x);
+        float angle = 6.2831853 * xi.y;
+        float3 dir = normalize(toSun + u * (radius * cos(angle))
+                                     + v * (radius * sin(angle)));
+        open += anyHit(origin, dir, bias, 1e4) ? 0.0 : 1.0;
+    }
+    return open / float(SUN_RAYS);
+}
+
+
 
 // ---------------------------------------------------------------------------
 // Materials.
@@ -1737,7 +1880,9 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // Traced against the *geometric* normal, not the mapped one: a normal map
     // can tilt a surface far enough to push the ray origin below the real
     // surface, and the ray then starts inside its own geometry.
-    float sun = diffuse > 0.0 ? sunVisibility(in.worldPos, geometric, in.shadowBias) : 0.0;
+    float sun = diffuse > 0.0
+        ? sunVisibility(in.worldPos, geometric, in.shadowBias, in.position.xy)
+        : 0.0;
 
     // Metals have no diffuse response — their albedo is the reflectance of the
     // specular lobe instead, which is why it moves into f0 rather than being
