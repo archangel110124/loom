@@ -905,7 +905,7 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
 [[vk::binding(0, 0)]]
 uniform RaytracingAccelerationStructure sceneTLAS;
 
-/// 1 where the sun reaches this point, 0 where something blocks it.
+/// Whether anything blocks `dir` from `origin` within `range`.
 ///
 /// **Ray query, traced inline from this shader.** A shadow ray only asks
 /// *whether* anything is in the way, never what or how far, so the traversal
@@ -919,21 +919,439 @@ uniform RaytracingAccelerationStructure sceneTLAS;
 /// The flags are template arguments rather than runtime values on purpose:
 /// static flags let the driver specialise the traversal, and passing them
 /// dynamically forfeits that.
-float sunVisibility(float3 position, float3 normal, float bias) {
+bool anyHit(float3 origin, float3 dir, float tMin, float range) {
     RayDesc ray;
-    // Offset along the normal, not just by TMin: a ray starting exactly on the
-    // surface hits the surface it came from, and the whole scene self-shadows
-    // into acne.
-    ray.Origin = position + normal * bias;
-    ray.Direction = sunDirection();
-    ray.TMin = bias;
-    ray.TMax = 1e4;
+    ray.Origin = origin;
+    ray.Direction = dir;
+    ray.TMin = tMin;
+    ray.TMax = range;
 
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
            | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
     query.TraceRayInline(sceneTLAS, RAY_FLAG_NONE, 0xFF, ray);
     query.Proceed();
-    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
+    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+}
+
+/// 1 where the sun reaches this point, 0 where something blocks it. One ray.
+///
+/// Kept alongside the soft version below because a *secondary* ray does not
+/// deserve a soft shadow: this is what a reflected surface is lit by, and
+/// spending four rays there to soften a penumbra nobody can resolve in a
+/// reflection is the definition of paying twice for nothing.
+float sunVisibilityHard(float3 position, float3 normal, float bias) {
+    return anyHit(position + normal * bias, sunDirection(), bias, 1e4) ? 0.0 : 1.0;
+}
+
+// ---------------------------------------------------------------------------
+// Sampling for the secondary rays.
+//
+// **Deterministic, and that is a hard requirement rather than a nicety.** ADR
+// 0010 rejected TAA and ADR 0018 restated it for auto-exposure on the same
+// grounds: a frame must be a function of its tick, or the golden gate is
+// comparing against an image that no longer exists. So there is no wall clock
+// and no frame counter in any of this — every sample direction is a function of
+// the pixel's integer coordinate and the sample's index, and re-rendering the
+// same tick twice gives the same bits.
+//
+// The pattern is the R2 low-discrepancy sequence, Cranley-Patterson rotated by
+// a per-pixel offset from `loom_hash` — the project's one integer hash, and the
+// same one grass places blades with. R2 rather than plain white noise because
+// four samples of white noise cluster: the variance of a stratified set of four
+// is closer to that of sixteen unstratified, which is the difference between
+// four rays being usable and not.
+// ---------------------------------------------------------------------------
+
+/// A per-pixel offset in [0,1)², stable for the life of a pixel.
+float2 rayDither(float2 pixel) {
+    uint x = uint(int(pixel.x));
+    uint y = uint(int(pixel.y));
+    uint h = loom_hash(loom_hash(x) + y);
+    // 24 bits each from two folds of the hash; the low bits of an integer hash
+    // are the ones worth trusting least, so both come off the top.
+    return float2(float(h >> 8) * (1.0 / 16777216.0),
+                  float(loom_hash(h) >> 8) * (1.0 / 16777216.0));
+}
+
+/// Sample `i` of the R2 sequence, rotated into this pixel's own offset.
+float2 raySample(float2 dither, uint i) {
+    // The two-dimensional generalisation of the golden ratio: the reciprocals
+    // of the plastic number and its square.
+    const float2 R2 = float2(0.7548776662, 0.5698402910);
+    return frac(dither + R2 * float(i + 1u));
+}
+
+/// An orthonormal pair spanning the plane perpendicular to `axis`.
+void rayBasis(float3 axis, out float3 u, out float3 v) {
+    // The reference vector must not be parallel to the axis, or the cross
+    // product vanishes and the basis collapses to a line — which sends every
+    // sample down the same direction and makes a soft shadow hard again.
+    float3 reference = abs(axis.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    u = normalize(cross(reference, axis));
+    v = cross(axis, u);
+}
+
+// ---------------------------------------------------------------------------
+// Soft sun shadows.
+//
+// The sun is a disc, not a point, so a shadow edge has a penumbra whose width
+// grows with the distance from blocker to receiver. One ray per pixel cannot
+// express that at all; `SUN_RAYS` of them, spread over the disc, is the whole
+// mechanism.
+//
+// **Wider than the real sun, deliberately, and the measurement is what says
+// so — and it is an angular *radius*, not a diameter.** The sun's disc is
+// 0.53° across as seen from Earth, so its radius is 0.265° — and the smallest
+// row measured below is 0.5°, already nearly twice the real sun. Even there the
+// penumbra is at the noise floor: a 1-ray render of `materials` differs from a
+// 64-ray one in 0.13% of pixels, against the golden gate's own 0.1% threshold
+// for "a different image". Four rays at anything physical would be three rays
+// spent on something nobody can see.
+//
+// So the angle is a *look* parameter, not a physical one, and what is measured
+// is how far past physical it has to go before the penumbra exists. Converged
+// (64-ray) renders of `materials` at 640x400, each against the 0.5° one:
+//
+//     angle    mean     worst   pixels past tolerance
+//     2.0deg   0.0139   44      0.28%
+//     4.0deg   0.0404   58      0.58%
+//
+// **2° is the smallest widening the project's own gate would call a different
+// picture** — 0.28% against its 0.1% — and it gives a penumbra of about 3.5 cm
+// per metre of blocker distance, which is narrow enough that a contact shadow
+// stays a contact shadow. 4° doubles the noise for an edge that reads as soft
+// rather than as a shadow.
+//
+// A fuller model exists and was not built: the effective source is the whole
+// bright part of the sky, so it should widen with `cloudCover()`, which this
+// file already couples the sun's strength and colour to. That is one `lerp`,
+// and it wants a scene authored under clear sky next to one under overcast to
+// judge it against.
+static const float SUN_ANGLE_DEGREES = 2.0;
+/// The disc's radius one unit along the ray, which is what the sample offset
+/// is measured in.
+static const float SUN_SPREAD = tan(radians(SUN_ANGLE_DEGREES));
+
+/// **Four, chosen where the cost curve breaks, not where the noise does.**
+///
+/// Noise against a 64-ray reference at 2°, on `materials` at 640x400, and cost
+/// on `lanternhead` at 1920x1080 with AO stubbed out, forward pass, median of
+/// three (0.447 ms for the single hard ray this replaces):
+///
+///     rays          1       2       4       8       16
+///     worst         77      43      36      28      26
+///     mean          .0257   .0160   .0115   .0071   .0047
+///     forward ms    0.452   0.456   0.467   0.559   0.851
+///
+/// Rays two to four cost 0.005 ms *each* — a sun ray is coherent, every pixel
+/// sending one in nearly the same direction, and the hardware hides three of
+/// them behind one. Rays five to eight cost 0.023 ms each and rays nine to
+/// sixteen 0.037 ms each, while the worst-channel error has already fallen from
+/// 77 (above the gate's 72) to 36 (well under it) by ray four.
+///
+/// So the cheap half of the curve ends exactly where the noise stops mattering.
+static const uint SUN_RAYS = 4;
+
+/// 1 where the sun reaches this point, 0 where something blocks it, and
+/// everything between in a penumbra.
+float sunVisibility(float3 position, float3 normal, float bias, float2 pixel) {
+    // Offset along the normal, not just by TMin: a ray starting exactly on the
+    // surface hits the surface it came from, and the whole scene self-shadows
+    // into acne.
+    float3 origin = position + normal * bias;
+    float3 toSun = sunDirection();
+    float3 u, v;
+    rayBasis(toSun, u, v);
+
+    float2 dither = rayDither(pixel);
+    float open = 0.0;
+    for (uint i = 0; i < SUN_RAYS; ++i) {
+        float2 xi = raySample(dither, i);
+        // Uniform over the disc: the sqrt is what stops the samples piling up
+        // in the middle, which would narrow the penumbra back toward a hard
+        // edge for no saving.
+        float radius = SUN_SPREAD * sqrt(xi.x);
+        float angle = 6.2831853 * xi.y;
+        float3 dir = normalize(toSun + u * (radius * cos(angle))
+                                     + v * (radius * sin(angle)));
+        open += anyHit(origin, dir, bias, 1e4) ? 0.0 : 1.0;
+    }
+    return open / float(SUN_RAYS);
+}
+
+// ---------------------------------------------------------------------------
+// Ray-traced ambient occlusion.
+//
+// **This is the answer to the SSAO deferral**, and it arrives by sidestepping
+// what blocked it rather than by solving it. `docs/design/POST-STACK-PLAN.md`
+// deferred screen-space AO because a grass field puts 45,000 blades into the
+// depth buffer, and a hemisphere kernel reading that depth hairball sees one
+// enormous concavity and darkens the whole meadow. The objection is entirely
+// about the *depth buffer*, and a ray does not read one: grass is generated in
+// a vertex shader from `SV_VertexID` with no vertex or index buffer, so it is
+// not in the acceleration structure and cannot be hit. The blades therefore
+// occlude nothing, which is exactly the behaviour SSAO could not be made to
+// have.
+//
+// It is worth being plain that this is a *coincidence of the implementation*
+// and not a physical claim — real grass does occlude — but it is the behaviour
+// the project wants, and it is stable rather than tuned.
+//
+// Cosine-weighted, so the estimate is the ambient visibility term directly:
+// no division by a normalisation constant, and no cosine factor to apply after.
+// ---------------------------------------------------------------------------
+
+/// How far a ray looks for an occluder, in metres.
+///
+/// **A range, not infinity, and the two halves of the measurement disagree.**
+///
+/// AO is contact darkening — the corner where two walls meet, the ground under
+/// a crate. Against a stubbed build on `primitives` at 640x400 with 32 rays, so
+/// the numbers are the range's doing and not the sampling's:
+///
+///     range      0.25    0.5     1.0     2.0     4.0     inf
+///     worst      32      70      80      84      84      86
+///     mean       .0056   .0536   .1506   .2796   .3839   .4023
+///
+/// `worst` is how dark the deepest contact gets and `mean` is how much the
+/// whole frame dims. **They saturate at very different rates, and that gap is
+/// the entire signal.** By 1 m the deepest contact is already at 93% of its
+/// unbounded value while the overall dimming is at 37% of it. Going on to 2 m
+/// buys 5% more contact for double the flat dimming; stopping at 0.5 m gives
+/// up 12% of the contact for very little.
+///
+/// So 1 m is where contact darkening is nearly all bought and global dimming is
+/// still mostly unpaid for. It is also about a human stride, which is the scale
+/// these scenes are authored at, and small enough that the term stays a
+/// *lighting* correction rather than a crude one-bounce GI.
+static const float AO_RANGE = 1.0;
+
+/// **Eight, and the reason is an occupancy cliff rather than the noise.**
+///
+/// Noise against a 64-ray reference on `primitives` at 640x400, and cost on
+/// `lanternhead` at 1920x1080 over a 4-ray soft shadow, forward pass, median of
+/// three (0.467 ms with AO stubbed out):
+///
+///     rays          2       4       8       16      32
+///     worst         84      64      41      24      24
+///     mean          .1201   .0712   .0415   .0250   .0146
+///     forward ms    0.511   0.605   0.806   1.618   2.100
+///
+/// Rays are 0.022, 0.024 and 0.025 ms each up to eight, and then **0.101 ms
+/// each** from eight to sixteen — a fourfold jump with nothing in the shader
+/// changing but the trip count, which is what a register-pressure or occupancy
+/// cliff looks like. Sixteen rays would cost more than the whole rest of the
+/// frame to take the worst-channel error from 41 to 24, both comfortably inside
+/// the gate's 72.
+///
+/// An AO ray is also far more expensive than a sun ray at the same count — 0.024
+/// against 0.005 ms — and the reason is coherence: every pixel's sun rays go
+/// nearly the same way and share their traversal, while a hemisphere sample goes
+/// wherever the surface faces.
+static const uint AO_RAYS = 8;
+
+/// The fraction of the hemisphere above `normal` that is open, within
+/// [`AO_RANGE`].
+float ambientVisibility(float3 position, float3 normal, float bias, float2 pixel) {
+    float3 origin = position + normal * bias;
+    float3 u, v;
+    rayBasis(normal, u, v);
+
+    // Offset into the sequence, so a pixel's AO rays are not the same four
+    // directions its shadow rays used. Sharing them correlates the two terms
+    // and puts a visible dither pattern where a penumbra crosses a corner.
+    float2 dither = rayDither(pixel + float2(37.0, 11.0));
+    float open = 0.0;
+    for (uint i = 0; i < AO_RAYS; ++i) {
+        float2 xi = raySample(dither, i);
+        // Cosine-weighted: a disc sample lifted onto the hemisphere. Uniform
+        // sampling would need the cosine applied afterwards and would spend
+        // most of its rays near the horizon, where the weight is nearly zero.
+        float radius = sqrt(xi.x);
+        float angle = 6.2831853 * xi.y;
+        float3 dir = u * (radius * cos(angle))
+                   + v * (radius * sin(angle))
+                   + normal * sqrt(max(1.0 - xi.x, 0.0));
+        open += anyHit(origin, normalize(dir), bias, AO_RANGE) ? 0.0 : 1.0;
+    }
+    return open / float(AO_RAYS);
+}
+
+// ---------------------------------------------------------------------------
+// Ray-traced reflections.
+//
+// **What is in the acceleration structure, and what is not.** The TLAS holds
+// one instance per `Object` — meshes, and nothing else. Grass, water, rain,
+// fire and smoke are all generated in a vertex shader from `SV_VertexID` with
+// no vertex or index buffer, so none of them is in it and none of them can be
+// hit by a ray. A reflection is therefore a reflection of *the meshes*, and
+// this is stated here rather than discovered later because the scene the
+// feature was built against is exactly the one where it shows: in
+// `lanternhead` a wet quay at `WET_SMOOTH` roughness now carries the shed, the
+// brazier's drum and the lantern posts, and does not carry the flame two
+// metres from it. See ADR 0019 for what was measured and why it ships anyway;
+// the short version is that the fire's *light* does arrive, because the hit is
+// shaded by the same `pointLights` the primary surface is, and a brazier's
+// contribution to a reflection is mostly its pool of orange light rather than
+// its flame.
+//
+// The miss path is the term this replaces: the analytic sky gradient. So a
+// scene with nothing to reflect renders as it did, and the change is additive
+// rather than a swap.
+// ---------------------------------------------------------------------------
+
+/// How far a reflection ray looks, in metres.
+///
+/// **A bound, because fog makes one free.** Past a certain distance a hit is
+/// already fully hazed and contributes nothing but a full traversal. Measured
+/// on `lanternhead` at 960x600 against a 4 km build, worst channel difference:
+///
+///     range    15 m   30 m   60 m   120 m   240 m
+///     worst    24     1      0      0       0
+///
+/// 60 m is *bit for bit* the unbounded answer on this scene and on `materials`,
+/// which is the smallest value that can be said of. 30 m is one channel off in
+/// one pixel; 15 m is visibly short.
+///
+/// **This is per-scene in a way the number does not admit.** It is set by how
+/// thick the fog is, and a scene authored clear would want more. The honest
+/// version reads `fogDensity()` and solves for where the transmittance falls
+/// below a threshold — worth doing when a clear-air scene with a mirror in it
+/// exists, and not before.
+static const float REFLECT_RANGE = 60.0;
+
+/// Ceiling on the radiance one reflection ray may report.
+///
+/// **This is the firefly clamp, and the feature does not ship without it.** A
+/// reflected hit is shaded by the same `pointLights` the primary surface is,
+/// and that term is a windowed inverse square: neighbouring pixels on a rippled
+/// wet surface send their rays to quite different places, and a ray that lands
+/// close to a lantern comes back with a radiance two orders of magnitude above
+/// its neighbours. One sample of a high-variance integrand is what a firefly
+/// *is*. `lanternhead` showed it immediately — isolated orange pixels scattered
+/// across the quay, worst-channel error 173 against a stubbed build, well past
+/// the golden gate's own 72.
+///
+/// The two standard cures are both closed to this project: more samples per
+/// pixel (measured below, and the cost is not in the budget) and temporal
+/// accumulation (ADR 0010, ADR 0018 — a frame must stay a function of its
+/// tick). Clamping is the third, it is one `min`, and the codebase already
+/// does exactly this at `LIGHT_MAX` for the singularity of a single light.
+///
+/// Chosen by counting salt — pixels more than 24/255 from the median of their
+/// eight neighbours — on `lanternhead` at 960x600. The stubbed build already
+/// scores 8,174 from the ripples and the rain, so what matters is what the
+/// reflection *adds*:
+///
+///     clamp        1      2      4      8      16     64     none
+///     salt added   0      3      10     37     39     39     39
+///     worst        36     36     36     56     86     166    173
+///     mean         .0954  .0970  .0973  .0979  .0990  .1010  .1006
+///
+/// **4.0.** Below it the term is still gaining brightness; above it the salt
+/// nearly quadruples and the worst-channel error leaves the floor of 36 that
+/// three different clamps agree on. At 4.0 the reflection adds 10 salt pixels
+/// in 576,000 and keeps 97% of the brightness the unclamped version has.
+///
+/// The unclamped worst of 173 is the number that matters most here: it is more
+/// than twice the golden gate's own 72, so an unclamped build would have been
+/// failing the gate on noise rather than on content.
+static const float REFLECT_MAX_RADIANCE = 4.0;
+
+/// What the surface at `position` sees along `dir`.
+///
+/// `dir` is the roughness-widened lobe direction, not the mirror direction:
+/// bending toward the normal as roughness rises is the same cheap stand-in for
+/// a prefiltered environment the sky-only version used, and keeping it means a
+/// slightly rough surface reflects a slightly blurred scene rather than a sharp
+/// one.
+///
+/// **There is no roughness cutoff, and one was measured and removed.** The
+/// obvious shape for this is "trace only below some roughness, sky above it",
+/// and a single mirror ray genuinely is a poor sample of a wide lobe. But the
+/// blend at the bottom of this function already weights the traced answer to
+/// zero as roughness reaches 1, so a cutoff is a *cost* argument, and the cost
+/// is not there. `lanternhead` at 1920x1080, forward pass, against a build with
+/// the trace stubbed out at 0.782 ms:
+///
+///     cutoff       0.10    0.20    0.35    0.50    1.00 (none)
+///     forward ms   0.776   0.801   0.839   0.857   0.885
+///     pixels       0%      0.002%  1.51%   3.00%   4.39%
+///     salt added   0       0       3       -4      20
+///
+/// Picture-per-millisecond is flat across every band — 2.5, 3.3 and 3.5 units
+/// of mean difference per millisecond going up — so there is no knee to put a
+/// cutoff at, and the salt count says the wide-lobe samples are not producing
+/// blotches on these scenes. Removing it deletes a constant and a branch. If a
+/// scene ever does show single-sample blotching on a rough surface, the fix is
+/// the cutoff, and this table is where it goes back.
+float3 tracedEnvironment(float3 position, float3 normal, float3 dir,
+                         float roughness, float bias) {
+    float3 sky = skyGradient(dir);
+    float3 origin = position + normal * bias;
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = dir;
+    ray.TMin = bias;
+    ray.TMax = REFLECT_RANGE;
+
+    // **No `ACCEPT_FIRST_HIT_AND_END_SEARCH` here**, unlike every other ray in
+    // this file. A shadow ray wants any blocker; a reflection wants the
+    // *nearest* surface, and the first one traversal happens to find is not it.
+    // Using the shadow flags here compiles, runs, and reflects whatever the
+    // BVH visited first — which looks like the right objects in the wrong
+    // order and is very hard to read as a bug.
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    query.TraceRayInline(sceneTLAS, RAY_FLAG_NONE, 0xFF, ray);
+    query.Proceed();
+    if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+        return sky;
+    }
+
+    // **`CommittedInstanceID` is the object index**, packed into the TLAS
+    // instance's custom index by `raytrace.rs::build_instances` from the same
+    // mesh-sorted slice `pack_objects` fills this buffer from. That is the
+    // whole channel from traversal back to the shader, and it is enough for a
+    // colour without a second buffer or a descriptor.
+    ObjectData hitObject = push.objects[query.CommittedInstanceID()];
+    float3 albedo = hitObject.color.rgb;
+    if (hitObject.material.x != NO_TEXTURE) {
+        // The material's base colour, not its texture. Fetching a texel would
+        // need the triangle's UVs, which needs the index buffer, which is one
+        // more pointer than the push block has room for — and at the
+        // roughnesses this runs at, a reflection is a smear of a surface rather
+        // than a readable image of it.
+        albedo = push.materials[hitObject.material.x].albedo.rgb;
+    }
+
+    float3 hit = origin + dir * query.CommittedRayT();
+    // **The reversed ray direction, standing in for the hit's normal.**
+    //
+    // Exact whenever the surface faces the ray head-on and wrong by the angle
+    // of incidence otherwise, so it is right at the centre of a reflection and
+    // degrades at its edges — a floor reflecting a wall gets the wall's normal
+    // exactly, a floor reflecting a distant roof at a grazing angle does not.
+    // The alternative is the triangle's own normal, which means the index
+    // buffer, a per-mesh first-index, and three vertex fetches per reflected
+    // pixel; ADR 0019 records that trade and why it was not taken yet.
+    float3 hitNormal = -dir;
+    float visibility = sunVisibilityHard(hit, hitNormal, bias);
+    float3 shade = albedo
+        * (hemisphereAmbient(hitNormal) * ambientStrength()
+           + pointLights(hit, hitNormal)
+           + sunStrength() * max(dot(hitNormal, sunDirection()), 0.0) * visibility);
+    // See `REFLECT_MAX_RADIANCE`. Per channel rather than on the luminance, so
+    // a clamped firefly loses brightness and not its hue.
+    shade = min(shade, REFLECT_MAX_RADIANCE);
+
+    // Fogged over the distance the ray travelled, so a reflection recedes into
+    // the same haze the direct view of that surface would. Without it a wet
+    // quay reflects a crisp shed standing in front of a fogged one.
+    shade = lerp(shade, fogColor(dir), fogAmount(origin, hit));
+
+    // Toward the sky as the lobe widens, reaching it exactly at roughness 1 —
+    // which is the old sky-only term, bit for bit, for a fully rough surface.
+    return lerp(shade, sky, saturate(roughness));
 }
 
 // ---------------------------------------------------------------------------
@@ -1724,7 +2142,20 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // is pure code motion for one and the difference between working and not
     // for the other.
     float diffuse = max(dot(normal, sunDirection()), 0.0);
-    float3 ambient = hemisphereAmbient(normal) * ambientStrength();
+    // **The sky ambient, and only it, is occluded.** `hemisphereAmbient` is the
+    // sky arriving from the whole hemisphere above this surface, so "how much
+    // of that hemisphere can actually be seen" is exactly the factor it is
+    // missing — which is what makes AO a correction to this term rather than a
+    // darkening applied to the finished pixel. The sun below has its own
+    // visibility ray and does not want a second one, and the point lights after
+    // it are at known positions, so occluding them with a hemisphere average
+    // would be replacing a right answer with an approximate one.
+    //
+    // Traced against the *geometric* normal for the same reason the shadow is:
+    // a normal map can tilt the hemisphere far enough to put half its rays
+    // under the real surface, which reads as blotches of pure occlusion.
+    float3 ambient = hemisphereAmbient(normal) * ambientStrength()
+                   * ambientVisibility(in.worldPos, geometric, in.shadowBias, in.position.xy);
     // **Point lights, added to the ambient term.** They are unshadowed: a
     // shadowed point light needs a cube map or a ray per light per pixel, and
     // the ray tracer here is aimed at the sun. For a fire in the dark that is
@@ -1737,7 +2168,9 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // Traced against the *geometric* normal, not the mapped one: a normal map
     // can tilt a surface far enough to push the ray origin below the real
     // surface, and the ray then starts inside its own geometry.
-    float sun = diffuse > 0.0 ? sunVisibility(in.worldPos, geometric, in.shadowBias) : 0.0;
+    float sun = diffuse > 0.0
+        ? sunVisibility(in.worldPos, geometric, in.shadowBias, in.position.xy)
+        : 0.0;
 
     // Metals have no diffuse response — their albedo is the reflectance of the
     // specular lobe instead, which is why it moves into f0 rather than being
@@ -1762,7 +2195,13 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // toward the normal as roughness rises is the usual cheap stand-in for a
     // prefiltered environment map, and the fade keeps a chalky surface from
     // picking up a mirror's worth of sky.
-    float3 environment = skyGradient(normalize(lerp(reflection, normal, roughness)));
+    float3 lobe = normalize(lerp(reflection, normal, roughness));
+    // **And now the scene is in it too.** This was `skyGradient(lobe)` — an
+    // analytic sky and nothing else, so a mirror in a room reflected the
+    // weather through the ceiling. At roughness 1 it still is, bit for bit,
+    // which is what keeps a fully matte surface unchanged.
+    float3 environment = tracedEnvironment(in.worldPos, geometric, lobe, roughness,
+                                           in.shadowBias);
     lit += environment * f0 * (1.0 - roughness * 0.7);
 
     // **A puddle is a mirror, and this is what was missing.** The term above is

@@ -8,7 +8,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup show   # honours rust-toolchain.toml
-      - run: sudo apt-get update && sudo apt-get install -y mold clang spirv-tools
+      # libasound2-dev is required by alsa-sys, pulled in through cpal by
+      # loom_audio. Without it the build fails before clippy ever runs.
+      # The runner has no GPU and ships no Vulkan ICD, so vkCreateInstance
+      # returns ERROR_INCOMPATIBLE_DRIVER. mesa-vulkan-drivers provides
+      # lavapipe, a software device the instance and device tests can use.
+      # vulkan-validationlayers is required too: loom_render panics rather
+      # than let 'validation clean' pass vacuously without the layer.
+      - run: sudo apt-get update && sudo apt-get install -y mold clang spirv-tools libasound2-dev pkg-config vulkan-validationlayers mesa-vulkan-drivers
       # Slang is not in any distro repo. loom_render's build.rs fails loudly
       # without it (brief §7.7 / never-do #9), so CI must install it too.
       - name: Install Slang

@@ -223,7 +223,8 @@ impl Raytracer {
 
         let instances: Vec<vk::AccelerationStructureInstanceKHR> = objects
             .iter()
-            .filter_map(|object| {
+            .enumerate()
+            .filter_map(|(index, object)| {
                 let blas = self.blas.get(object.mesh as usize)?;
                 // Vulkan wants a 3x4 row-major transform; glam is column-major,
                 // so this transposes as it copies. Getting it wrong puts every
@@ -239,7 +240,30 @@ impl Raytracer {
                 Some(
                     vk::AccelerationStructureInstanceKHR {
                         transform,
-                        instance_custom_index_and_mask: vk::Packed24_8::new(0, 0xff),
+                        // **The object's index, so a ray can find out what it
+                        // hit.** A shadow ray never needed this — it asks only
+                        // whether anything is in the way — but a reflection
+                        // ray has to shade the surface it lands on, and
+                        // `CommittedInstanceID()` is the only channel from
+                        // traversal back to the shader that costs nothing.
+                        //
+                        // This index addresses `push.objects` directly:
+                        // `pack_objects` and this function are both handed the
+                        // same mesh-sorted slice, in the same order, by both
+                        // the offscreen and the windowed path. Passing an
+                        // unsorted list to one and not the other would put
+                        // every reflection's colour on the wrong object, and
+                        // nothing would validate it — so the two calls stay
+                        // next to each other in `render`.
+                        //
+                        // 24 bits, against a 4096-object buffer that grows by
+                        // doubling; `try_from` rather than `as` so an
+                        // implausibly large scene truncates to object 0 rather
+                        // than wrapping to an arbitrary one.
+                        instance_custom_index_and_mask: vk::Packed24_8::new(
+                            u32::try_from(index).unwrap_or(0) & 0x00ff_ffff,
+                            0xff,
+                        ),
                         instance_shader_binding_table_record_offset_and_flags:
                             vk::Packed24_8::new(0, 0),
                         acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {

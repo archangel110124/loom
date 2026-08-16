@@ -542,6 +542,58 @@ change, so your edits appear live. Two consequences:
 > labour the streaks follow, and it is why nothing needed a wetness grid. Cost is 0.140 → 0.211 ms
 > at 1920x1080, paid only by scenes that author a broken deck — a solid one short-circuits, which
 > is every scene that rains by default.
+>
+> ## Secondary rays: soft shadows, RTAO and reflections — ADR 0019
+>
+> **The ray-tracing hardware had been enabled since before M12 and one hard shadow ray was using
+> it.** Three terms now do: `sunVisibility` samples a 2° disc with four rays, `ambientVisibility`
+> takes eight cosine-weighted hemisphere rays out to one metre, and `tracedEnvironment` replaces
+> the analytic sky reflection with one ray that falls back to that sky on a miss. All three are
+> **inline ray queries from the fragment shader**, against the existing TLAS and its one descriptor
+> set — no pipeline, no shader binding table, no pass, no barrier. The only Rust change is that a
+> TLAS instance now carries its object index.
+>
+> **RTAO is the answer to the SSAO deferral, and the grass objection dissolves rather than being
+> solved.** `POST-STACK-PLAN.md` blocked SSAO on "45,000 blades produce a depth hairball a
+> hemisphere kernel reads as one enormous concavity". That is entirely about the *depth buffer*.
+> Grass is vertex-shader geometry with no buffers, so it is not in the acceleration structure,
+> cannot be hit, and occludes nothing. `meadow` and `grass_slope` do not move past tolerance. This
+> is a coincidence of the implementation, not a physical claim.
+>
+> **Every constant was chosen by measurement and the measurements are in the code.** Two of them
+> overturned the shape the feature was first written in: a roughness cutoff on reflections was
+> built and then **deleted** because picture-per-millisecond is flat across every band, and the
+> soft-shadow angle is a 2° *radius* rather than the sun's real 0.265° because at anything
+> physical the penumbra is *below the golden gate's own threshold* — a 1-ray render matches a
+> 64-ray one even at twice the real sun's width.
+>
+> **Watch for fireflies whenever a secondary ray shades a hit.** Reflections shipped with a
+> worst-channel error of 173 against the gate's 72 until `REFLECT_MAX_RADIANCE` landed: a
+> reflection ray that lands near a point light returns two orders of magnitude above its
+> neighbours, and a single sample of a high-variance integrand is what a firefly is. More samples
+> and temporal accumulation are both closed to this project, so **clamping is the tool**, and the
+> salt metric — not flicker, not mean — is what can see it.
+>
+> **Cost, forward pass at 1920x1080:** `lanternhead` 0.465 → 0.898 ms, `materials` 0.120 → 0.404,
+> `meadow` 0.267 → 0.575. **AO is two thirds of it** on every scene, and the reason sixteen rays
+> are not eight is an occupancy cliff: rays cost 0.024 ms each to eight and 0.101 ms each after.
+> This is three times the whole post stack and the largest single addition the forward pass has
+> taken.
+>
+> **The TLAS holds meshes only.** Grass, water, rain, fire and smoke are all generated from
+> `SV_VertexID` and none of them can be hit by any ray — so `lanternhead`'s wet quay reflects the
+> shed and not the brazier's flame. **Anything that wants to be reflected has to become an
+> `Object`.** Water still reflects the analytic sky, deliberately.
+>
+> **Nothing twinkles at rest, and that is measured.** `cargo xtask shimmer` scores `primitives`,
+> `materials`, `cave` and `ground` at exactly **0.000** — and the first two are the scenes AO
+> changes most, so the zero is load-bearing. Every sample direction is a function of the pixel's
+> integer coordinate, so the dither is **screen-locked**: it does not swim with the surface, it
+> sits still while the world moves under it. Eight AO rays leave a worst-channel error of 41
+> against a converged reference, which reads as fine grain in the contact band at 1080p. **The
+> cure, if it is ever wanted, is spatial and not temporal** — a quad-wide sample share is 16-ray
+> quality at the 8-ray price, and it needs `GroupNonUniformQuad` declared and an answer to helper
+> lanes bleeding across silhouettes. ADR 0019 has both.
 
 ### What M0–M12 already delivered
 
