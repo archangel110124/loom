@@ -2332,20 +2332,28 @@ ParticleOutput particleVertexMain(uint vertexID: SV_VertexID) {
 // ---------------------------------------------------------------------------
 // Fire.
 //
-// **One additive quad, and the flame is a LEVEL SET of a noise field.** Not a
-// sprite, not a flipbook, not a stack of blobs.
+// **One quad, and the flame is a VOLUME the fragment marches through.** Not a
+// sprite, not a flipbook, not a stack of blobs — and, since this slice, not a
+// level set on the quad's plane either.
 //
-// The reason is overdraw. The colour target is `R8G8B8A8_SRGB` — fixed point,
-// so every additive blend clamps at 1.0 with no rolloff anywhere. Measured on
-// the sprite path, red pinned after 2.6 overlapping particles against about
-// thirty alive, so the middle of the fire was always going to be white however
-// its shapes were authored. Summing soft sprites cannot make fire here: the
-// sum of many round things is a round thing, and then it clips.
+// The reason it is one quad is overdraw. That argument was written against an
+// `R8G8B8A8_SRGB` target, where every additive blend clamped at 1.0 with no
+// rolloff: measured on the sprite path, red pinned after 2.6 overlapping
+// particles against about thirty alive, so the middle of the fire was always
+// going to be white however its shapes were authored. **ADR 0018 replaced that
+// target with an HDR float frame and a tonemap, so the clipping half of the
+// argument is void** — the half that stands is that a single quad is one
+// coherent piece of geometry with an analytic silhouette, which is what lets
+// the shape be a function rather than a texture.
 //
-// A single quad has overdraw of exactly one. Nothing can clip, so the colour
-// ramp is honoured everywhere, and the tongues, the black gaps between them
-// and the edges are all level sets of one function — which is why the edge is
-// one pixel wide at any distance instead of being a texture's bilinear ramp.
+// What the quad now carries is a scalar field in world space, sampled
+// `FIRE_STEPS` times along each view ray between the front and back of the
+// emitter's own sphere, accumulating emission against transmittance. The
+// silhouette machinery underneath — the domain warp, the fold amplitude, the
+// threshold above the field's supremum, the fuel lobes — is unchanged and is
+// documented constant by constant below. What changed is that it is evaluated
+// along a line instead of on a plane, and everything that follows from that is
+// documented at `FIRE_STEPS`.
 // ---------------------------------------------------------------------------
 
 /// Cycles per metre of the coarsest octave.
@@ -2404,14 +2412,6 @@ static const float FIRE_T_POW = 1.6;
 static const float FIRE_CONE = 0.55;
 static const float FIRE_LOBES = 5.5;
 static const float FIRE_GAP = 0.72;
-/// The brightness transfer, with a floor. Without the floor, brightness inside
-/// the coverage edge is cubic in depth-into-the-flame, so the outermost pixels
-/// read as black and full colour arrives several pixels in — the shader paints
-/// the very halo it exists to remove.
-static const float FIRE_TAU_FLOOR = 0.30;
-static const float FIRE_TAU_DEN = 0.27;
-static const float FIRE_TAU_POW = 1.6;
-static const float FIRE_TAU_H = 0.42;
 /// Where the finest octave is retired. `loom_value_noise` is analytic and has
 /// no mip chain, so past the distance at which that octave falls under a pixel
 /// it is a twinkle generator — the same bound and the same reason as
@@ -2419,110 +2419,152 @@ static const float FIRE_TAU_H = 0.42;
 /// therefore correct even in a quad the discard has killed.
 static const float FIRE_RANGE = 26.0;
 
-/// **How opaque the flame is, and the reason it is not zero any more.**
+/// **The flame is a LINE INTEGRAL now, not a level set on a plane.**
 ///
-/// The pipeline is premultiplied — `src = ONE`, `dst = ONE_MINUS_SRC_ALPHA` —
-/// so the alpha this shader returns is exactly how much of the background the
-/// flame covers, and it used to be the literal constant `0.0` at both return
-/// sites. That is additive blending, and additive blending means the
-/// background is visible THROUGH the fire's core at full strength: on
-/// `campfire`'s night sky nothing shows because nothing is there, but on
-/// `lanternhead`'s lit deck the stone's grain reads straight through the flame
-/// and the fire is a decal painted on the wall.
+/// A view ray through a real flame crosses many small hot pockets and sums
+/// them, and that sum is smooth and connected even when every individual
+/// iso-surface it crossed is in fragments. The previous shader evaluated one
+/// slice of one field at the quad's own depth and thresholded it, so the gaps
+/// between the tongues were not dim — they were the background, unattenuated,
+/// and no constant inside that formulation could fix it. Every knob that
+/// reconnects the shards inside a slice does it by deleting the detail that
+/// makes the thing read as fire.
 ///
-/// Occlusion follows optical depth, so it climbs from zero at the boundary —
-/// a ray grazing the level set passes through almost no material, and giving
-/// its first pixel the floor's opacity would draw the flame a hard rim.
+/// So the fragment marches the SAME field along the view ray through a sphere
+/// of radius `half_h` about the emitter, accumulating emission and
+/// transmittance front to back. **Nothing about the silhouette machinery
+/// changed**: the domain warp, the fold amplitudes, `FIRE_T1` above the field's
+/// supremum, the fuel lobes and the post-warp squash are all evaluated exactly
+/// as before, once per sample instead of once per pixel.
 ///
-/// **It does NOT climb on `FIRE_TAU_DEN`, and reusing that number is the trap
-/// here.** `FIRE_TAU_DEN` is the width of a colour ramp: it is wide because
-/// the eye wants to see a gradient from ember to white across the body of a
-/// tongue. Optical depth is not a colour grade, and it saturates far sooner —
-/// the field's own sigma is about 0.15, so a typical lit pixel sits maybe 0.05
-/// past the threshold, which on the brightness ramp is 8% of the way up and
-/// gave the flame an alpha of 0.06. The tongues stayed windows onto the deck
-/// while the shader reported that it had fixed them.
-static const float FIRE_OPACITY = 0.85;
-static const float FIRE_ALPHA_DEN = 0.06;
-
-/// **The continuum — the flame's body between the tongues.**
+/// Three things fall out of the integral that had to be built by hand before,
+/// and their constants are deleted rather than retuned:
 ///
-/// A level set on a plane renders a slice; fire is a line integral. A view ray
-/// through a real flame crosses many small hot pockets and sums them, and that
-/// sum is smooth and connected even when every individual iso-surface it
-/// crossed is in fragments. This shader takes one slice of one field and
-/// thresholds it, so the gaps between tongues are not dim — they are the
-/// background, unattenuated.
+/// - **Coverage.** `cover = saturate(e / fwidth(e))` is gone. The silhouette is
+///   now where the chord through the level set reaches zero length, and a ray
+///   grazing a smooth iso-surface leaves it like a square root — a steeper edge
+///   than the analytic one it replaces, with no screen-space derivative in it
+///   at all, so the quad-derivative trap the water shoreline is named for no
+///   longer applies here.
+/// - **The floor** (`FIRE_TAU_FLOOR`). It existed because brightness inside the
+///   coverage edge was cubic in depth, so the outermost pixels read black while
+///   still being fully opaque — the shader painting the halo it exists to
+///   remove. In an integral the outermost pixels emit little AND occlude
+///   little, so they are simply not there.
+/// - **The continuum** (`FIRE_GLOW*`). A hand-built unthresholded veil filling
+///   the gaps is what a line integral produces on its own: a ray through a gap
+///   still crosses material at other depths, just less of it, so the gap comes
+///   out dim rather than absent. It is the same term, derived instead of
+///   authored, and it moves with the camera instead of being pinned to the
+///   billboard.
 ///
-/// The fix is not to soften the threshold. Every knob that reconnects the
-/// shards inside the level set — a lower `FIRE_HZ`, a lower `FIRE_GAP`, a
-/// wider `cover` — does it by deleting the detail that makes the thing read as
-/// fire, and converges back on the fireball this design exists to escape. So
-/// the silhouette machinery is untouched and a second, DIM, UNTHRESHOLDED term
-/// is added underneath it: the same field `d`, shaped by the same envelope,
-/// with no level set anywhere in it. It is the back layer every layered-fire
-/// reference calls for, done inside the one quad rather than as a second draw.
+/// **`FIRE_STEPS` is set by the field's Nyquist and then by the dither's
+/// residue, and by neither one alone.**
 ///
-/// `FIRE_GLOW_TAU` is deliberately low on the ramp — this is the cool gas the
-/// tongues are burning inside of, and if it lands near the tongues' own
-/// brightness the fire becomes the fireball again by a different route.
-/// **`FIRE_GLOW_R` is the quad's inscribed circle, and it is arithmetic
-/// rather than taste.** An unthresholded term that is still at a few percent
-/// where the geometry stops draws a clean vertical line up both sides of the
-/// quad; one that has already reached zero has no edge to see, and reaching
-/// zero EARLY is free — only a non-zero value at the boundary is visible.
+/// The chord is `2 * half_h` — 2.2 m in both scenes that author a flame — and
+/// the finest octave of the 3-octave field has a period of
+/// `1 / (FIRE_HZ * 2.03^2)`, about 0.11 m. Sixteen steps is 1.25 samples per
+/// period, under Nyquist, and `dField` below then retires most of that octave;
+/// by 32 it survives the march. That is the floor.
 ///
-/// `radial` divides by `half_h * 1.15`, so `1 / 1.15` puts the zero at
-/// `|w_xz| = half_h`. `particleVertexMain` builds the quad as
-/// `right * spun.x + up * spun.y` scaled by `half_h` over corners at
-/// (±1, ±1), **so the offset runs to `sqrt(2) * half_h` at a corner, not
-/// `half_h`** — the quad is square and its corners are further out than its
-/// sides. `half_h` is therefore the inscribed circle: inside the geometry on
-/// every side and at every billboard orientation, which is the property that
-/// matters.
+/// The ceiling is the dither. `FIRE_JITTER` converts step banding into
+/// per-pixel noise whose amplitude is one step's contribution to the integral,
+/// so halving the step halves the grain — and at 32 steps the interleaved
+/// gradient pattern is a visible diagonal hatch across the flame's body at 4K,
+/// **which is the resolution this is judged at**. Measured on `deck` at
+/// 3840x2160: 32 hatched, 48 clean, 64 no better than 48. The cost is paid in
+/// flame pixels only, and is measured in the commit message.
+static const int FIRE_STEPS = 48;
+/// The marched volume, as a fraction of `half_h`. **The quad's inscribed
+/// sphere, and that is arithmetic rather than taste** — `particleVertexMain`
+/// builds the quad as `right * spun.x + up * spun.y` scaled by `half_h` over
+/// corners at (±1, ±1), so `half_h` is the largest radius that stays inside the
+/// geometry on every side at every billboard orientation. A larger sphere is
+/// cut by the quad's own edge, which draws a straight vertical line up both
+/// sides of the fire. Fitting inside costs nothing: the chord length falls to
+/// zero continuously at the sphere, so the boundary carries no edge of its own.
+static const float FIRE_VOL_R = 1.0;
+/// Extinction per metre of fully-lit flame. A 0.5 m run of core material at
+/// 4.0 covers 86% of what is behind it, which is what makes the fire an object
+/// rather than a tint; a near-transparent core was the single largest defect in
+/// the slice version and this is the constant that owns it.
+static const float FIRE_SIGMA = 4.0;
+/// The field width over which a sample goes from empty to full density.
 ///
-/// It has to be the quad's edge and not less. At 0.80 the continuum died
-/// inside the radius the level set still lights from, so the outer tongues —
-/// which are precisely the detached shards this exists to connect — sat
-/// outside the body and stayed detached.
-static const float FIRE_GLOW = 1.0;
-static const float FIRE_GLOW_LOW = 0.35;
-static const float FIRE_GLOW_W = 0.35;
-static const float FIRE_GLOW_TAU = 0.30;
-static const float FIRE_GLOW_POW = 1.6;
-/// **The continuum occludes about as much as it emits, and against a lit
-/// background occlusion is the whole of its effect.** A dim emissive veil over
-/// bright stone changes nothing: at 0.12 emitted over a deck at 0.6, covering
-/// a fifth of it lands back on 0.61. So the veil is what replaces the
-/// background with the fire's own colour, which is why the flame reads as a
-/// body rather than a tint. That it comes out DARKER than a daylit deck is
-/// correct and is the whole reason a flame photographs as a silhouette against
-/// the sky — and it is what the heavy, sooty look is made of.
-static const float FIRE_GLOW_ALPHA = 1.0;
-static const float FIRE_GLOW_R = 1.0 / 1.15;
-static const float FIRE_GLOW_H = 0.80;
-static const float FIRE_GLOW_EDGE = 0.45;
-static const float FIRE_GLOW_TOP = 0.50;
-
-/// Cooling at the fuel line and at the flanks, which is what makes
-/// `fireRamp`'s bottom rungs reachable at all.
+/// **Narrow on purpose, and this is the constant that decides between fire and
+/// a fireball.** The silhouette's crispness survives the integral only while
+/// each sample's density is a steep function of `e`: then the visible edge is
+/// the fold where the chord through the iso-surface vanishes, which leaves like
+/// a square root and is steeper than a linear ramp. Widen it and the density
+/// becomes a smooth blob of the envelope, the chord shortens gently instead of
+/// pinching, and the result converges on the fireball this design exists to
+/// escape — the same failure a soft `cover` produced, arrived at along the ray
+/// instead of across the screen.
+static const float FIRE_DENS_W = 0.05;
+/// How much of a step the ray's start is dithered by. 0 samples every ray at
+/// its step midpoints; 1 spreads the starts uniformly across one step.
 ///
-/// `FIRE_TAU_H` cools the tip and nothing cooled the base or the edges, so
-/// with `FIRE_TAU_FLOOR = 0.30` the ramp's first two rungs — black through
-/// (0.22, 0.012, 0.001) through (0.48, 0.09, 0.006) — were dead code, and the
-/// flame was one orange value with holes in it. Both terms are physical: at
-/// the fuel line a flame is dimmer and redder because it has not finished
-/// mixing, and at the boundary the ray has passed through almost nothing.
+/// **This is not a nicety; without it the flame grows a comb.** Where the view
+/// ray grazes a nearly-tangent iso-surface the material it crosses is thinner
+/// than one step, so a sample is inside or outside with nothing in between, and
+/// the contour of that flip is a row of evenly spaced spikes radiating off the
+/// flame's flanks. It is visible at 4K on `campfire` and it is the single most
+/// synthetic thing the march produces. Doubling the step count halved it, which
+/// is what identified it; dithering the start removes it outright.
 ///
-/// **The floor stays.** It exists because brightness inside the coverage edge
-/// is cubic in depth, so without it the outermost pixels read black and the
-/// shader paints the very halo it exists to remove. These multiply it down
-/// rather than remove it, and the continuum above is what now sits behind the
-/// edge — a dim red rim over a glow is cooling gas, a dim red rim over the
-/// background is a halo.
+/// **A segment-coverage width was tried first and does nothing.** The idea was
+/// the deleted `cover`'s own trick along the ray: widen the density ramp to the
+/// step's change in `e`, so a step straddling the boundary reads half full.
+/// Measured against the dither at 4K it is indistinguishable from no widening
+/// at all — because at a grazing tangency `e` barely changes ALONG the ray, so
+/// the width it computes is the narrow one exactly where the artifact is. It
+/// also shifts the level set outward by half its cap, which visibly fattened
+/// the flame at a cap of 0.30. Deleted rather than gated.
+static const float FIRE_JITTER = 1.0;
+/// **Soot: material that occludes and does not emit.**
+///
+/// The flame's own products, cooled past the point where they radiate. It is
+/// the same field under its own, lower ceiling, so it hugs the tongues rather
+/// than being a second shape, and it contributes to transmittance with no
+/// contribution to `heat` — which against a premultiplied target is exactly a
+/// black smoke that eats the background. Gated on height because there is no
+/// soot at the fuel line: it is what the fire has already burned.
+///
+/// **Its own threshold is the whole of it — see the note in `fireField`.**
+/// Offsetting `FIRE_T1` instead was tried and produced no smoke above the
+/// flame, which is the one place smoke is.
+static const float FIRE_SOOT_T1 = 0.70;
+static const float FIRE_SOOT_W = 0.30;
+static const float FIRE_SOOT_SIGMA = 3.0;
+static const float FIRE_SOOT_H = 0.30;
+/// How much accumulated hot material it takes to reach the top of the ramp.
+///
+/// **The ramp is driven by the integral, not by one sample's depth into the
+/// level set.** `heat` is the transmittance-weighted quantity of emitting
+/// material the eye actually sees along the ray, bounded by one because the
+/// weights are a telescoping partition of `1 - T`. So a ray through the core
+/// crosses a lot of it and lands on the ramp's white rung, while a ray clipping
+/// a tongue's flank crosses little and lands on deep amber. That gradient is
+/// what the deleted `FIRE_TAU_DEN` and `FIRE_TAU_EDGE` were approximating from
+/// a single sample, and here it is the thing itself.
+///
+/// Judged on `deck` at 3840x2160: at 1.35 the ramp's white rung is reached by
+/// heat 0.75, which is most of the flame's body and reads as a blown-out
+/// highlight rather than a core; at 0.90 nothing reaches it and the fire is one
+/// flat orange. 1.15 puts white above heat 0.87, which in these two scenes is
+/// the core alone.
+static const float FIRE_HEAT = 1.15;
+/// Cooling with height and at the fuel line. Both are physical and neither
+/// falls out of the integral: a flame is dimmer and redder low down because it
+/// has not finished mixing, and cooler at the tip because it is running out.
+/// The cooling at the FLANKS that used to sit here is gone — a grazing ray now
+/// accumulates little heat because it genuinely crosses little material.
+static const float FIRE_TAU_H = 0.42;
 static const float FIRE_TAU_BASE = 0.45;
 static const float FIRE_TAU_BASE_H = 0.18;
-static const float FIRE_TAU_EDGE = 0.35;
+/// Peak occlusion, so a flame is never quite a wall.
+static const float FIRE_OPACITY = 0.92;
+
 
 /// Fractal noise for the flame. `detail` fades the finest octave out with
 /// distance rather than dropping it abruptly, which would pop.
@@ -2576,113 +2618,158 @@ float3 fireRamp(float t) {
     return c;
 }
 
-/// The flame at one fragment of the quad.
-float4 flameColor(ParticleOutput in, float3 toEye) {
-    // Flame-local coordinates: x across, y up from the base, z through.
-    float3 w = in.worldPos - in.origin.xyz;
-    float half_h = max(in.origin.w, 1e-3);
-    // **The quad is centred on the emitter, so the flame's base is at its
-    // BOTTOM edge, not at its middle.** Mapping `h` from `w.y / half_h` puts
-    // the fire in the upper half only, floating clear of whatever it is
-    // supposed to be burning — which is exactly what it did.
-    float h = saturate((w.y + half_h) / (2.0 * half_h));
+/// One sample of the flame's field, in emitter-local space.
+///
+/// **This is the slice shader's whole body, unchanged, hoisted into a function
+/// of an arbitrary point.** That is the entire structural change: it used to be
+/// called once, at the fragment's own position on the quad, and it is now
+/// called `FIRE_STEPS` times along the view ray. Every constant in it — the
+/// fold amplitudes, the threshold above the field's supremum, the fuel lobes,
+/// the post-warp squash — means exactly what its own comment above says.
+struct FireSample {
+    /// Signed distance from the level set, in FIELD units. Positive is inside a
+    /// tongue.
+    float e;
+    /// Height through the flame: 0 at the fuel line, 1 at the quad's top.
+    float h;
+    /// The same distance for the SOOT, which has its own ceiling.
+    float es;
+};
 
-    float detail = saturate(1.0 - length(toEye) / FIRE_RANGE);
-    float t = push.environment[0].weather.z;
+FireSample fireField(float3 p, float half_h, float t, float dField, float dWarp) {
+    FireSample s;
+    s.h = saturate((p.y + half_h) / (2.0 * half_h));
 
     // **The warp is built BEFORE the vertical squash.** Warping afterwards
     // multiplies the warp's vertical amplitude by 1/FIRE_SQUASH — about seven
     // — along the one axis whose coherence is what makes a feature taller than
     // it is wide, and the tongues dissolve into froth.
-    float3 qi = float3(w.x, w.y / (1.0 + FIRE_ACCEL * h) - FIRE_RISE * t, w.z) * FIRE_HZ;
-    float w1 = fireFbm(qi + 17.1, 2, detail) - 0.5;
-    float w2 = fireFbm(qi + 43.7, 2, detail) - 0.5;
+    float3 qi = float3(p.x, p.y / (1.0 + FIRE_ACCEL * s.h) - FIRE_RISE * t, p.z) * FIRE_HZ;
+    float w1 = fireFbm(qi + 17.1, 2, dWarp) - 0.5;
+    float w2 = fireFbm(qi + 43.7, 2, dWarp) - 0.5;
     float3 warp = float3(w1 * FIRE_WARP_XZ, w2 * FIRE_WARP_Y, (w1 - w2) * FIRE_WARP_XZ);
     float3 q = qi + warp;
     q.y *= FIRE_SQUASH;
-    float d = fireFbm(q, 3, detail);
+    float d = fireFbm(q, 3, dField);
 
     // **The envelope and the fuel OFFSET the threshold; they never multiply
     // the field.** A multiply's edge is the mask's own gradient, which is far
     // softer than the field's, and a soft-edged gap between two tongues is
     // precisely what turns a fire back into a fireball.
-    float radial = length(float2(w.x, w.z)) / max(half_h * 1.15, 1e-3);
-    float cone = radial * (1.0 + FIRE_CONE * h);
+    float radial = length(float2(p.x, p.z)) / max(half_h * 1.15, 1e-3);
+    float cone = radial * (1.0 + FIRE_CONE * s.h);
     // The fuel line: a few lobes across the base, so tongues start apart
     // rather than being one sheet that noise happens to tear.
-    float lobes = 0.5 + 0.5 * sin(w.x * FIRE_LOBES + w.z * 0.7);
-    float gap = FIRE_GAP * (1.0 - lobes) * (1.0 - h * 0.4);
+    float lobes = 0.5 + 0.5 * sin(p.x * FIRE_LOBES + p.z * 0.7);
+    float gap = FIRE_GAP * (1.0 - lobes) * (1.0 - s.h * 0.4);
 
-    float threshold = FIRE_T0 + (FIRE_T1 - FIRE_T0) * pow(h, FIRE_T_POW)
-                    + cone * 0.22 + gap;
-    float e = d - threshold;
+    s.e = d - (FIRE_T0 + (FIRE_T1 - FIRE_T0) * pow(s.h, FIRE_T_POW) + cone * 0.22 + gap);
+    // **Soot gets the same field and a lower ceiling, and the ceiling is the
+    // whole of it.** `FIRE_T1` is deliberately above the field's supremum, so
+    // above the flame's tip `e` is not merely negative, it is unreachable —
+    // hanging a smoke term off it produces no smoke anywhere the flame is not
+    // already burning, which is the one place smoke is not. `FIRE_SOOT_T1` sits
+    // BELOW the supremum, so the material survives past the height at which it
+    // stopped radiating, which is what soot is. The fuel lobes are left out for
+    // the same reason: smoke fills the gaps between tongues, it does not have
+    // gaps of its own.
+    s.es = d - (FIRE_T0 + (FIRE_SOOT_T1 - FIRE_T0) * pow(s.h, FIRE_T_POW) + cone * 0.22);
+    return s;
+}
 
-    // Coverage from the analytic screen-space width of the level set. Computed
-    // before any discard: derivatives in a quad with killed lanes are
-    // undefined, and that is the trap named for the water shoreline.
-    float cover = saturate(e / max(fwidth(e), 1e-4));
+/// The flame at one fragment of the quad: march the field through the quad's
+/// depth and integrate emission against transmittance.
+float4 flameColor(ParticleOutput in, float3 toEye) {
+    // Flame-local coordinates. **The quad is centred on the emitter, so the
+    // flame's base is at its BOTTOM edge and not at its middle** — mapping the
+    // height from `w.y / half_h` puts the fire in the upper half only, floating
+    // clear of whatever it is supposed to be burning. `fireField` owns that
+    // mapping now, for every sample rather than for the fragment.
+    float3 w0 = in.worldPos - in.origin.xyz;
+    float half_h = max(in.origin.w, 1e-3);
 
-    // **The continuum, and it is computed whether or not the level set is
-    // lit** — that is the entire point of it, so the early return that used to
-    // stand here had to go. It occupies the flame's envelope, it is the same
-    // field `d` with no threshold applied, and it is what the gaps between the
-    // tongues are filled with instead of the background.
+    // The chord of the marched sphere, analytically. `w0` lies in the billboard
+    // plane and that plane passes through the centre, so `b` is near zero and
+    // the two roots are near symmetric — but solving it properly costs three
+    // instructions and stays correct under perspective, where the plane is
+    // exactly normal to the ray only at the quad's centre.
+    float3 dir = -normalize(toEye);
+    float R = half_h * FIRE_VOL_R;
+    float b = dot(w0, dir);
+    float c = dot(w0, w0) - R * R;
+    float disc = b * b - c;
+    if (disc <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    float sq = sqrt(disc);
+    float t0 = -b - sq;
+    float dt = (2.0 * sq) / float(FIRE_STEPS);
+
+    // **Octave retirement, twice: once for the camera and once for the step.**
+    // The distance term is the original bound — an analytic noise has no mip
+    // chain, so an octave finer than a pixel is a twinkle generator. The step
+    // term is the same argument along the ray instead of across the screen: an
+    // octave whose period is shorter than twice the step is point-sampled below
+    // Nyquist, and marching it produces exactly the twinkle the distance bound
+    // exists to prevent, because a small change in ray direction re-picks which
+    // crest each sample lands on.
     //
-    // **`radial`, not `cone`, and a plateau rather than a linear cone.** Two
-    // separate mistakes, both of which put the body where the gaps are not.
-    //
-    // `FIRE_GLOW_R` is derived from the quad's half-width, and it is `radial`
-    // the quad bounds — `cone` is `radial` scaled by up to 1.55 with height,
-    // so dividing it by the same number cut the continuum off at two thirds of
-    // the radius the level set still lights from, and the outer tongue sat
-    // outside the body and stayed a detached shard. The taper with height is
-    // the `FIRE_GLOW_H` term's job, not this one's.
-    //
-    // A term decaying linearly from the axis is down to a fifth at two thirds
-    // of the radius, which is exactly where the outer tongues are — thickest
-    // where tongues already cover it, thinnest where the gaps are.
-    // `FIRE_GLOW_EDGE` and `FIRE_GLOW_TOP` are the fractions of each extent
-    // spent coming down, so the rest of the envelope is full.
-    float envelope = saturate((1.0 - radial / FIRE_GLOW_R) / FIRE_GLOW_EDGE);
-    envelope *= pow(saturate((1.0 - h / FIRE_GLOW_H) / FIRE_GLOW_TOP), FIRE_GLOW_POW);
-    // **The FIELD has to be what shapes this, not the envelope.** Multiplying
-    // the envelope by a raw `d` — mean 0.5, sigma 0.15 — varies it by a third
-    // either way over a term that swings the whole way from 1 to 0, so the
-    // envelope wins and the result is a smooth ellipse of haze around the
-    // fire: the fireball, arrived at through the back door. Stretching `d`
-    // across its own distribution instead makes the body as streaky and
-    // warped as the tongues are, because it IS the field the tongues are level
-    // sets of. The ramp is 0.35 of field wide against the level set's one
-    // pixel, so this stays a continuum and never becomes a second silhouette.
-    float body = saturate((d - FIRE_GLOW_LOW) / FIRE_GLOW_W);
-    // **No `saturate` on the product, and that is not tidiness.** Every factor
-    // is already in [0,1] and `FIRE_GLOW` is the peak, so nothing can exceed
-    // it — but with a gain above one, clamping the product is what turns the
-    // continuum into a second silhouette: a wide region pinned at the clamp
-    // with a hard boundary where it comes off it. Measured at a gain of 2.2 it
-    // drew a crisp orange sheet twice the brazier's width. The gain IS the
-    // body's peak opacity, and it belongs at or under one.
-    float glow = FIRE_GLOW * envelope * body * in.color.a;
+    // The two fbm calls get different bounds because their finest octaves are
+    // an octave apart — the warp's is `FIRE_HZ * 2.03`, the field's
+    // `FIRE_HZ * 2.03^2`. Sharing one number over-retires the warp, and the
+    // warp's fold is the silhouette.
+    float far = saturate(1.0 - length(toEye) / FIRE_RANGE);
+    float dWarp = min(far, saturate(1.0 / (FIRE_HZ * 2.03 * 2.0 * max(dt, 1e-4))));
+    float dField = min(far, saturate(1.0 / (FIRE_HZ * 2.03 * 2.03 * 2.0 * max(dt, 1e-4))));
 
-    float3 rgb = fireRamp(FIRE_GLOW_TAU) * glow;
-    float alpha = glow * FIRE_GLOW_ALPHA;
+    float t = push.environment[0].weather.z;
 
-    if (cover > 0.0) {
-        // Depth into the flame, on its own, because brightness wants it under
-        // a floor and opacity wants it raw.
-        float depth = pow(saturate(e / FIRE_TAU_DEN), FIRE_TAU_POW);
-        float tau = FIRE_TAU_FLOOR + (1.0 - FIRE_TAU_FLOOR) * depth;
-        tau *= (1.0 - FIRE_TAU_H * h);
-        tau *= lerp(FIRE_TAU_BASE, 1.0, saturate(h / FIRE_TAU_BASE_H));
-        tau *= lerp(FIRE_TAU_EDGE, 1.0, depth);
+    // **Where along its first step each ray starts.** Interleaved gradient
+    // noise on the pixel coordinate — a screen-space dither, deliberately, not
+    // a hash of the ray. A ray-space hash re-rolls every time the camera moves
+    // by a fraction of a pixel, which is a twinkle generator; this pattern is
+    // nailed to the screen and the flame slides across it.
+    float jitter = FIRE_JITTER * frac(52.9829189 * frac(dot(in.position.xy,
+                                      float2(0.06711056, 0.00583715))))
+                 + (1.0 - FIRE_JITTER) * 0.5;
 
-        float lit = cover * in.color.a;
-        rgb += fireRamp(tau) * lit;
-        alpha += lit * FIRE_OPACITY * saturate(e / FIRE_ALPHA_DEN);
+    // Front to back. `heat` is the transmittance-weighted quantity of emitting
+    // material the ray sees; it is bounded by one because its weights are a
+    // telescoping partition of `1 - T`.
+    float heat = 0.0;
+    float T = 1.0;
+    // Rolled, deliberately. Fully unrolling 32 iterations of seven noise
+    // lookups each is a shader Slang refuses to build and a compile time the
+    // agent's iteration loop cannot afford.
+    [MaxIters(FIRE_STEPS)]
+    for (int i = 0; i < FIRE_STEPS; ++i) {
+        float3 p = w0 + dir * (t0 + (float(i) + jitter) * dt);
+        FireSample s = fireField(p, half_h, t, dField, dWarp);
+
+        float hot = saturate(s.e / FIRE_DENS_W);
+        float soot = saturate(s.es / FIRE_SOOT_W) * saturate(s.h / FIRE_SOOT_H);
+        float sigma = FIRE_SIGMA * hot + FIRE_SOOT_SIGMA * soot;
+        if (sigma <= 0.0) {
+            continue;
+        }
+
+        // Local temperature, and **the ramp is deliberately not applied per
+        // sample** — a sum of ramp colours mixes hues and comes out muddy. It
+        // is applied once, to the integral, which is what keeps its authored
+        // ladder from ember through amber to white intact.
+        float temp = hot * (1.0 - FIRE_TAU_H * s.h)
+                   * lerp(FIRE_TAU_BASE, 1.0, saturate(s.h / FIRE_TAU_BASE_H));
+
+        float a = 1.0 - exp(-sigma * dt);
+        heat += T * a * temp;
+        T *= 1.0 - a;
     }
 
+    float3 rgb = fireRamp(saturate(heat * FIRE_HEAT)) * in.color.a;
+    float alpha = (1.0 - T) * FIRE_OPACITY * in.color.a;
     return float4(rgb, saturate(alpha));
 }
+
 
 [shader("fragment")]
 float4 particleFragmentMain(ParticleOutput in) : SV_Target {
