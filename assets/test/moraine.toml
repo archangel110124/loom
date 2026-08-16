@@ -1,0 +1,126 @@
+# The landform for `moraine.loom` — a glacial vale, 256 m square.
+#
+# 256 px over 256 m is 1 m/pixel. **Size the recipe to the feature, never to
+# the voxels**: the volume is 0.5 m, so a map matched to it would be four times
+# the pixels for detail no erosion pass can put there. A gully is 3-10 m wide
+# and it is resolved here with room to spare.
+#
+# Layer order is the design, and it is `vale.toml`'s order at four times the
+# area: noise makes the mass, art direction places what gameplay needs, erosion
+# makes it look real, and the corridor guarantee goes LAST because it is a
+# constraint rather than a shape — erosion slides material back into a route
+# carved before it, and `order_warnings` says so.
+#
+# What it answers, in 0.16 s and without rendering anything:
+#
+#     loom terrain assets/test/moraine.loom --from 50,96 --to 66,126
+#     buildable_pct 30.0 · slope_mean 23.9 · slope_over_45 2.6 · reachable true
+#
+# **Every layer below was tuned against those numbers and a hillshade, not
+# against a render.** Change one, re-run, read the number — that is the loop,
+# and it is the only one a landscape has.
+
+size = [256, 256]
+world_scale = [256.0, 256.0]
+# The volume is 64 m tall and `base_y` lifts this by 8, so summits land near 50
+# and the ceiling is headroom rather than a clip. A `height_range` taller than
+# the volume shaves every summit flat at exactly y = 64, which reads as a mesa.
+height_range = [0.0, 42.0]
+seed = 20260817
+
+# --- the mass ------------------------------------------------------
+# Broad and warped, and unremarkable on its own — that is the job. It is what
+# the ridgeline and the trough get cut into.
+[[layer]]
+kind = "fbm"
+amplitude = 1.0
+frequency = 0.0045
+octaves = 4
+warp = 5.0
+
+# --- the ridgelines ------------------------------------------------
+# Ridged weights each octave by the last, so crests get detail and troughs stay
+# smooth. That weighting is the difference between commercial terrain and a sum
+# of bumps, and at this size it is what puts a skyline behind the vale.
+[[layer]]
+kind = "ridged"
+amplitude = 0.55
+frequency = 0.008
+octaves = 4
+warp = 4.0
+
+# --- art direction -------------------------------------------------
+# The trough, running NNW to SSE. **Wide and shallow relative to its length**:
+# 50 m across against 24 m deep is a U at this map's resolution, where the 16 m
+# against 15 m of `vale.toml` is a V. A glacier widens what a river cuts.
+#
+# `points` and every other coordinate in this file are in **pixels**, which are
+# metres here only because `world_scale / size` is exactly 1.
+[[layer]]
+kind = "spline_carve"
+points = [[70.0, 16.0], [92.0, 68.0], [116.0, 120.0], [150.0, 178.0], [196.0, 240.0]]
+width = 50.0
+depth = 24.0
+
+# Somewhere to build, on the west shoulder above the trough floor rather than
+# in it — a floor pad in a glacial vale is where the meltwater goes.
+#
+# **`blend` is what stops the pad being a mesa, and it had to be raised twice.**
+# The flat core is `radius * (1 - blend)` and everything out to `radius` is the
+# feather, so 0.6 over r = 16 left a 6.8 m core and a 5 m step down its eastern
+# side — which the renderer painted as a band of bedrock, because
+# `groundLayerWeight` starts blending rock in at about 25 degrees. 0.8 over
+# r = 20 is a 4 m core and a 16 m feather, and the bank went back to grass.
+[[layer]]
+kind = "flatten_disc"
+center = [68.0, 130.0]
+radius = 20.0
+blend = 0.8
+
+# --- erosion -------------------------------------------------------
+# Gullies where water ran, fans where it stopped. Cost is O(droplets) and flat
+# in map size, so the droplet count is the entire cost knob: 20,000 over four
+# times `vale.toml`'s area keeps the same droplets per cell.
+[[layer]]
+kind = "hydraulic"
+droplets = 20000
+erode_rate = 0.3
+deposit_rate = 0.3
+
+# Talus. Noise is happy to produce 70-degree ground; rock is not, and the
+# `Material.layer` rock only reads as bedrock if it is on slopes rock can hold.
+[[layer]]
+kind = "thermal"
+talus_degrees = 34.0
+iterations = 40
+
+# --- the guarantee, LAST -------------------------------------------
+# `loom terrain assets/test/moraine.loom --from 50,96 --to 66,126` reports
+# `reachable: true`, without rendering anything.
+#
+# **A corridor is not a path painted on the ground — it rewrites the heights
+# under it, and it will build a causeway or cut a canyon to keep its slope
+# limit.** `carve_corridor` walks the line holding `height` within
+# `tan(max_slope) * metres_per_pixel` per step, so where the terrain falls away
+# faster than that it FILLS, and where the terrain climbs faster it CUTS. Both
+# were measured here before this route was chosen:
+#
+#   from [24,86] to the pad   ground drops faster than 16 deg near the end
+#                             -> the track arrived 9 m in the air on a causeway
+#   from [108,152] to the pad ground climbs faster than 18 deg up the bank
+#                             -> a 10 m deep trench, and the pad went with it
+#
+# So **route a corridor along ground that already obeys the limit**, and it
+# smooths a track instead of terraforming. This one falls 3 m over 34 and the
+# terrain does the same, which is why it costs nothing.
+#
+# **It is visible, and that was verified by rendering the scene with this layer
+# deleted**: the pale stony strip running from the erratics up to the shed's
+# door is this track, and without the layer the shoulder is unbroken meadow.
+# The guarantee is not an invisible annotation — it is the path in the frame.
+[[layer]]
+kind = "corridor"
+from = [50.0, 96.0]
+to = [66.0, 126.0]
+width = 6.0
+max_slope = 16.0

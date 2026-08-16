@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 37] = [
+const SCENES: [&str; 38] = [
     "assets/test/lanternhead.loom",
     // The imported PBR library. **Not in `GOLDEN`**: it adds no rendering path
     // that `materials.loom` does not already cover — it is a catalogue of
@@ -63,11 +63,32 @@ const SCENES: [&str; 37] = [
     "assets/test/office.loom",
     "assets/test/materials.loom",
     "assets/test/terrain_stress.loom",
-    // The only scene whose landform comes from a `loom_terrain` recipe rather
+    // The two scenes whose landform comes from a `loom_terrain` recipe rather
     // than from `kind = "heightfield"`'s five octaves of fBm. Erosion, spline
     // carve, flatten disc and the corridor guarantee reach the SDF here and
     // nowhere else.
     "assets/test/vale.loom",
+    // The composition scene for §5 of the voxel-shape research: a 256 m glacial
+    // vale with a recipe landform, a rotated hollow building on the pad it
+    // flattened, an arch bored through a displaced crag, imported erratics and
+    // grass, all in one frame.
+    //
+    // **In `SCENES` and not `GOLDEN`, on the stated rule.** It adds no
+    // rendering path: `vale` already covers the terrain op, `meadow` and
+    // `grass_slope` the vertex-shader blades, `ground` and `lanternhead` the
+    // steep-slope layer, `props` and `materials` the bindless mesh atlases,
+    // `campfire` the point light. What is new here is the *composition* and the
+    // authoring rules it pins, and a reference of it would be a golden image
+    // that moves whenever grass, terrain, materials or fog move — the churn
+    // `homestead` and `lanternhead` already carry for the library, twice over.
+    // `Displace` is not a rendering path either: it is an SDF term, and what
+    // guards it is `loom_voxel`'s tests and the determinism hash.
+    //
+    // **It is the most expensive scene in this list at ~11 s**, against 2.1 s
+    // for `terrain_stress` with twice the chunks. Its header has the breakdown
+    // measured; the short version is that one displaced primitive and one grass
+    // field cost more than the 1024-chunk landform bake put together.
+    "assets/test/moraine.loom",
     "assets/test/smoke.loom",
     "assets/test/windy.loom",
     "assets/test/meadow.loom",

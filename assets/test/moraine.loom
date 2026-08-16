@@ -1,0 +1,607 @@
+# A glacial vale, 256 x 64 x 256 m — the landscape §5 of the voxel-shape
+# research describes, built out of everything the four commits before it added.
+#
+#     loom render assets/test/moraine.loom --out moraine.png --size 1280x800
+#     loom terrain assets/test/moraine.loom --from 50,96 --to 66,126
+#
+# **This is the composition scene, not a unit test.** `vale.loom` proves the
+# recipe reaches the SDF in 192 chunks; this one asks what the whole vocabulary
+# is worth in one frame, and it is `homestead`'s and `lanternhead`'s class of
+# scene — it runs many systems at once, so it moves whenever any of them moves.
+#
+# In order, and this order is the recipe for a landscape rather than a habit:
+#
+#   1. the landform, from a `loom_terrain` recipe — the only op that can carry
+#      erosion, a carved trough, a flattened pad and a guaranteed route;
+#   2. the 3D half, which a height cannot express at all: an arch bored through
+#      a displaced crag, and an undercut in its flank;
+#   3. the built thing, off the axis, on the pad the recipe flattened;
+#   4. the erratics — **imported meshes, not voxels**, for the reason below;
+#   5. grass, which reads the terrain through `GroundGrid` and needs nothing
+#      authored to know where it can grow.
+#
+# --------------------------------------------------------------------------
+# The rules this scene is standing on, each of which cost a render to learn
+# --------------------------------------------------------------------------
+#
+# **The erratics are meshes and that is the measured default.** A rock reads as
+# rock at about 0.05 m, and 0.05 m over 256 m is 160 chunks per axis against a
+# schema cap of 64 — detail rock at landscape scale is structurally not a
+# single-volume problem. The research measured an imported scan at 30,223
+# triangles and 55.8% concave surface, with its own atlas — these are the same
+# LOD1 models `props.loom` catalogues; the voxel alternative at this pitch is
+# `ceil(log2(A / voxel_size)) + 2 = 2` octaves of displacement, which is a
+# potato with a crease. **Voxels win exactly three things** — craterable, CSG
+# joinable to the ground, and sharing the terrain's collider and `exposure` —
+# and none of them is wanted for a rock lying in a field.
+#
+# **The crag is the case where displacement does work**, and the difference is
+# the ratio of amplitude to voxel size rather than anything about rock. At
+# `amplitude = 1.6` and 0.5 m voxels the cap is `floor(log2(2A/v)) + 1 = 3`
+# octaves, and three octaves over a 16 m mass is a fractured bluff. The same
+# op at 1.6 m amplitude on a 1.6 m rock would be gravel.
+#
+# **Each mesh carries its OWN atlas.** These are baked per-model atlases, not
+# tiling materials: two rocks from one set have different island layouts, so the
+# wrong atlas smears rather than merely looking like the wrong stone. That bug
+# is already in this project's history — `props.loom` records it.
+#
+# **`Light::intensity` is `d^2 / albedo`.** The lantern is 6.0, which is a
+# surface 1.7 m away at albedo 0.5. The 100-800 the older scenes use is about
+# 40x over, and against a fixed-point target it simply clamped, so nobody saw.
+#
+# **`Material.layer` is a slope rule**, so flat ground *always* gets the base
+# material — the base is the meadow soil and the layer is the bedrock, which is
+# the way round every scene but `lanternhead` (a quay deck is flat, and stone
+# had to be its base). Its `slope` and `Grass::slope_cutoff` are both 0.50 and
+# must stay equal: two thresholds on one hill draw two concentric rings.
+#
+# **0.50 and not the 0.62 this started at, because the rule's *band* is what
+# bites, not its threshold.** `groundLayerWeight` is
+# `1 - saturate((n.y - cutoff - wander) / 0.15)`, so rock is fully in at the
+# cutoff and starts appearing 0.15 above it: at 0.62 that band is 24 to 52
+# degrees, and this landscape's mean slope is 24. Two thirds of the vale came
+# out bedrock. At 0.50 the band is 42 to 63 degrees, which is cliffs and the
+# crag and nothing else.
+#
+# **Any scene with a `Grass` field owes its ground a green colour**, because
+# blades fade to nothing with distance and the far field is then the ground
+# alone. `meadow`'s brown soil read as ploughed earth from an orbit.
+#
+# **Texels/m is resolution x uv_scale.** The soil is 4096 at 0.35 = 1434/m and
+# the rock 1024 at 2.2 = 2253/m, both far past the ~400/m a near field can
+# show. The rock started at 0.5 (512/m, a 2 m tile) and read as crazy paving
+# on the crag — a cobble atlas has a physical size, and tiling it to the
+# texel budget rather than to the size of a cobble is what makes it wallpaper.
+#
+# **A `Subtract` sphere makes a dish only if its centre is ABOVE the ground.**
+# Everything inside the sphere is removed, so a sphere centred a metre *under*
+# the surface excavates to its own bottom — the first seat for the big erratic
+# was a 7 m crater. For a hollow `D` deep, `centre_y = ground - D + r`, and it
+# is `2 * sqrt(r^2 - (r - D)^2)` wide: r = 4, D = 0.75, so 4.8 m across.
+#
+# **What is NOT here.** No water: `World::water()` is one body and a
+# `WaterBody` has no extent, so a tarn in the trough is an infinite plane that
+# floods the whole northern half as well. No rain, no scatter, no trees — each
+# would be a second new thing in a frame whose first new thing is the landform.
+#
+# --------------------------------------------------------------------------
+# Cost — measured, and it is not where the research said it would be
+# --------------------------------------------------------------------------
+#
+# `loom render ... --size 640x400`, twice each, on this machine:
+#
+#     the whole scene                       11.43 / 11.33 s
+#     with the grass field deleted           7.04 / 7.04     -> grass  4.3 s
+#     with the one displaced sphere deleted  7.52 / 7.31     -> that op 4.0 s
+#     the recipe alone (`loom terrain`)      0.16 s
+#
+# So the 1024-chunk landform bake, the mesh, the props and the frame together
+# are about 3.1 s, and **one displaced primitive costs more than all of it**.
+# `Displace::gradient_bound` is 4.0 per octave and `Volume::bake` takes the
+# max over ops, so three octaves widen `reach` for every chunk in the volume,
+# not just the chunks the crag is in. That is the strongest argument in the
+# scene for the research's "mesh is the default" rule, and it is a cost
+# argument rather than a fidelity one.
+#
+# **The grass field's 4.3 s is not the blades.** Measured: density 90 -> 40
+# changes nothing (11.43 -> 11.26 s) and half_extent 24 -> 20 changes nothing.
+# It is `GroundGrid`'s march of the SDF, which is per field and scales with
+# the *volume* it is marching, not with the field over it. Nothing in the
+# scene tunes it; a smaller volume would.
+#
+# All of it is load-time. `LOOM_GPU_TIMING=1` puts grass at 0.054 ms a frame.
+# This is nonetheless the most expensive scene in `SCENES` — `terrain_stress`
+# is 2.1 s with twice the chunks — and the reason it is worth that is in the
+# `SCENES` entry.
+
+[scene]
+format = 1
+id = "accf696e-2ea0-4b6b-9dec-9210944e0485"
+
+# --- ground maps ----------------------------------------------------------
+
+[[asset]]
+key = "grass_ground_albedo"
+id = "7084a98d-9451-4267-918d-ce480b9f1157"
+path = "../textures/grass_ground_albedo.png"
+
+[[asset]]
+key = "grass_ground_normal"
+id = "e44ea90b-7c69-4338-adaa-7f6457cc57f3"
+path = "../textures/grass_ground_normal.png"
+
+[[asset]]
+key = "ground_rock_albedo"
+id = "8c7ce141-2fb7-42b4-816b-108e169f83be"
+path = "../textures/ground_rock_albedo.png"
+
+[[asset]]
+key = "ground_rock_normal"
+id = "59e6f0f6-1b49-43bf-bb22-8754378d3cdf"
+path = "../textures/ground_rock_normal.png"
+
+# --- props, each with its own atlas ---------------------------------------
+
+[[asset]]
+key = "mesh_boulder_a"
+id = "3f985d91-e63d-4fb0-af77-8dcea3639192"
+path = "../meshes/rock_boulder_a.obj"
+
+[[asset]]
+key = "boulder_a_albedo"
+id = "555aab98-4900-4ff3-99df-4090d8326059"
+path = "../textures/rock_boulder_a_albedo.png"
+
+[[asset]]
+key = "boulder_a_normal"
+id = "fc4649e3-068f-4da7-a9bd-c73fa9aa2506"
+path = "../textures/rock_boulder_a_normal.png"
+
+[[asset]]
+key = "mesh_boulder_b"
+id = "e17d2992-bfbd-4d4e-94df-f6d99cf6f8a1"
+path = "../meshes/rock_boulder_b.obj"
+
+[[asset]]
+key = "boulder_b_albedo"
+id = "610128ad-4882-4dc9-900d-6d3cfc7e9e09"
+path = "../textures/rock_boulder_b_albedo.png"
+
+[[asset]]
+key = "boulder_b_normal"
+id = "005a3c3a-3297-4737-ad13-c722f3d8b1b6"
+path = "../textures/rock_boulder_b_normal.png"
+
+[[asset]]
+key = "mesh_rock_beach"
+id = "014998e2-0c89-4404-b173-3d4d0b5bcb71"
+path = "../meshes/rock_beach.obj"
+
+[[asset]]
+key = "rock_beach_albedo"
+id = "9fe83161-6540-4787-aa29-4a29709a897e"
+path = "../textures/rock_beach_albedo.png"
+
+[[asset]]
+key = "rock_beach_normal"
+id = "9295bd0f-bb43-44f3-b763-937837cbd76c"
+path = "../textures/rock_beach_normal.png"
+
+[[asset]]
+key = "mesh_tree_log"
+id = "94937807-bcdf-48b0-8a56-ee1ad3e9d793"
+path = "../meshes/tree_log.obj"
+
+[[asset]]
+key = "tree_log_albedo"
+id = "2f551f93-322d-42ef-be17-95f65076d55d"
+path = "../textures/tree_log_albedo.png"
+
+[[asset]]
+key = "tree_log_normal"
+id = "00a442c1-ddfd-459a-9cba-de7d20031395"
+path = "../textures/tree_log_normal.png"
+
+[[asset]]
+key = "mesh_tree_stump"
+id = "1b8a8f4a-6cfc-4c9d-bc63-8b288d66a3da"
+path = "../meshes/tree_stump.obj"
+
+[[asset]]
+key = "tree_stump_albedo"
+id = "b0a7f2e4-5c31-4c8e-9b0d-1f2a3c4d5e60"
+path = "../textures/tree_stump_albedo.png"
+
+[[asset]]
+key = "tree_stump_normal"
+id = "c1b8a3f5-6d42-4d9f-ac1e-2b3c4d5e6f71"
+path = "../textures/tree_stump_normal.png"
+
+[[asset]]
+key = "mesh_lantern"
+id = "d2c9b4a6-7e53-4eaf-bd2f-3c4d5e6f7a82"
+path = "../meshes/lantern.obj#WallLanternExterior001_Frame_Geo_LOD0"
+
+[[asset]]
+key = "lantern_albedo"
+id = "e3daC5b7-8f64-4fb0-ce30-4d5e6f7a8b93"
+path = "../textures/lantern_albedo.png"
+
+[[asset]]
+key = "lantern_normal"
+id = "f4ebd6c8-9075-40c1-df41-5e6f7a8b9ca4"
+path = "../textures/lantern_normal.png"
+
+[[node]]
+name = "Moraine"
+
+  # **A low sun across the vale rather than down it**, 18.7 degrees up and 95
+  # degrees off the trough's axis, so the west flank is lit and the east flank
+  # is not and the landform is read from that difference. There are no shadows
+  # in this engine yet (Phase 8), so `n . l` is the *entire* channel a
+  # landscape has, and a sun overhead has nothing to say about a 24 m trough.
+  #
+  # **It was turned 8 degrees toward the camera against a render.** Fully
+  # cross-lit, the shed's front face — the one with the door and the lantern on
+  # it — was exactly anti-lit and read as a flat black rectangle. At
+  # `[0.78, 0.32, -0.54]` that face takes `n . l = 0.13`: a grazing light that
+  # shows the stone without turning the vale into the flat frontal lighting a
+  # sun behind the camera would give.
+  [node.components.Environment]
+  sun_direction = [0.78, 0.32, -0.54]
+  sun_color = [1.0, 0.95, 0.86]
+  sun_strength = 1.9
+  ambient = 0.34
+  sky_zenith = [0.16, 0.30, 0.52]
+  sky_horizon = [0.62, 0.68, 0.72]
+  # Aerial perspective, and at 256 m it is doing structural work rather than
+  # atmosphere: the far ridgeline is 200 m out, and without haze it reads at the
+  # same contrast as the pad 20 m away and the depth collapses.
+  fog_density = 0.0035
+  fog_falloff = 0.03
+
+  # Grass is the only thing in this scene the wind reaches — no particles, no
+  # water. Modest, because a landscape still is judged on shape and a gale
+  # bends every blade the same way.
+  [node.components.Wind]
+  direction_degrees = 115.0
+  speed = 4.5
+  gustiness = 1.1
+  turbulence = 0.8
+
+[[node]]
+name = "Ground"
+parent = "Moraine"
+
+  # 256 x 64 x 256 m at half-metre voxels: 1024 chunks, the largest volume in
+  # the library after `terrain_stress`. 64 m of height is not decoration — the
+  # recipe's range is 42 m and `base_y` lifts it 8, so the summits land near 50
+  # and the ceiling is headroom rather than a clip. A `height_range` taller
+  # than the volume shaves every summit flat, which reads as a mesa.
+  [node.components.VoxelVolume]
+  voxel_size = 0.5
+  chunks = [16, 4, 16]
+
+  # 1. THE LANDFORM. One op, and the whole 2D pipeline behind it: warped fBm,
+  #    ridged crests, a 50 m spline-carved trough, a flattened pad, hydraulic
+  #    gullies, 34-degree talus, and a corridor whose walkability is a
+  #    guarantee rather than a hope.
+  #
+  #    `rect` places the map, it does not rescale it — it must be the size the
+  #    recipe's own `world_scale` claims, and `resolve` refuses it with both
+  #    numbers rather than rendering a plausible landscape at the wrong scale.
+  #
+  #    `base_y = 8.0` because the carve takes the trough floor to -6.8 m in
+  #    recipe space and a volume starts at y = 0.
+  [[node.components.VoxelVolume.ops]]
+  kind = "terrain"
+  recipe = "moraine.toml"
+  rect = [0.0, 0.0, 256.0, 256.0]
+  base_y = 8.0
+  mode = "union"
+
+  # 2. THE 3D HALF. A height is one value per column, so it has no overhang, no
+  #    undercut and no cave, ever. Everything from here to the erratics is what
+  #    that costs to fix, and it is four lines an op.
+
+  # The crag on the shoulder: one displaced, elongated sphere. `elongate`
+  # slides the sample point instead of scaling it, so it is still an exact
+  # distance field — 26 x 16 x 21 m of fractured bluff from one primitive.
+  #
+  # **The displacement numbers are the calibrated ones**: amplitude 0.20R makes
+  # it lopsided rather than dimpled, frequency 0.6/R puts the coarsest feature
+  # at about 1.7 radii, and 3 octaves is the cap `floor(log2(2A/voxel)) + 1`
+  # allows — past it an octave's amplitude is under half a voxel and cannot
+  # place a vertex the octave above did not.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [58.0, 31.3, 140.0]
+  radius = 8.0
+  elongate = [5.0, 0.0, 2.5]
+  mode = "union"
+  displace = { amplitude = 1.6, frequency = 0.075, octaves = 3, seed = 4417, ridged = true }
+
+  # The arch bored through it, on the camera's axis so the far side shows
+  # through the hole.
+  #
+  # **Both ends must clear the crag's own extent, and the first version did
+  # not.** `elongate` makes the mass reach `140 +/- (8 + 2.5)` in Z, and a
+  # capsule from z = 132 to 148 with r = 2.8 ends 2.7 m *inside* that — it
+  # grazed the tip and produced a shallow bite rather than a tunnel, which in a
+  # still is indistinguishable from a shadow. Running it 126 to 154 puts both
+  # mouths in open hillside and the hole reads as an arch.
+  #
+  # The floor tracks the ground it passes over, which is knowable because a
+  # recipe is a queryable array rather than a noise call: 26.2 against ground
+  # 26.65 at the north mouth (a cutting into the slope), 30.8 against 30.7 at
+  # the south, and about 5 m of rock over the crown in between.
+  [[node.components.VoxelVolume.ops]]
+  kind = "capsule"
+  a = [58.0, 29.2, 126.0]
+  b = [58.0, 33.6, 154.0]
+  radius = 3.0
+  mode = "subtract"
+
+  # The undercut in the crag's west flank — the overhang no height can carry,
+  # and the one shape in this scene that is impossible in the 2D pipeline
+  # rather than merely awkward.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [50.5, 30.5, 138.0]
+  radius = 4.2
+  mode = "subtract"
+
+  # 3. THE BUILT THING, off the axis at last, on the pad the recipe flattened.
+  #    At 0.5 m voxels a wall must be >= 1.0 m: surface nets needs two voxels
+  #    across a sheet or the sheet vanishes. Walls here are 1.0 m and the roof
+  #    is 1.0 m; the floor is the ground, because the inner box's underside is
+  #    below it.
+  #
+  #    `round = 0.35` is a shade under one voxel, and `half_extents` still
+  #    means the outer extent — the fillet is taken out of the slab rather than
+  #    added to it.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [68.0, 26.8, 130.0]
+  half_extents = [7.0, 3.0, 5.0]
+  yaw_degrees = 27.0
+  round = 0.35
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [68.0, 26.4, 130.0]
+  half_extents = [6.0, 2.4, 4.0]
+  yaw_degrees = 27.0
+  mode = "subtract"
+
+  # The doorway, cut LAST so there are walls to cut it from — order matters in
+  # this list exactly as it does in `cave.loom` and `homestead.loom`. Its local
+  # Z half-extent is 1.2 m against a 1.0 m wall, so it punches through instead
+  # of leaving a membrane a voxel thick.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [65.73, 26.8, 125.55]
+  half_extents = [0.9, 1.15, 1.2]
+  yaw_degrees = 27.0
+  mode = "subtract"
+
+  # The seat for the big erratic. **The seam where a mesh boulder meets voxel
+  # ground is real and no material work hides it under a low sun**; the fix the
+  # research names is to sit the rock in a dish the terrain itself carves, so
+  # the contact line is a shadowed hollow rather than a straight intersection.
+  #
+  # Centre 3.25 m above the ground with r = 4.0 leaves a hollow 0.75 m deep and
+  # 4.8 m across. **Centred below the ground instead it is a crater** — see the
+  # arithmetic in the header; the first attempt dug seven metres.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [59.0, 29.90, 106.0]
+  radius = 4.0
+  mode = "subtract"
+
+  # **Soil is the base and rock is the layer**, which is the way round every
+  # scene but `lanternhead`: `groundLayerWeight` is a slope rule, so dead-flat
+  # ground always gets the base. Flats are meadow, steep faces are the bedrock
+  # under them — which is exactly where the thermal pass left 34-degree talus.
+  [node.components.Material]
+  albedo = [0.58, 0.64, 0.52]
+  roughness = 1.0
+  albedo_map = { asset = "grass_ground_albedo" }
+  normal_map = { asset = "grass_ground_normal" }
+  uv_scale = [0.35, 0.35]
+  triplanar = true
+
+  [node.components.Material.layer]
+  albedo = [0.56, 0.55, 0.52]
+  roughness = 0.88
+  porosity = 0.15
+  uv_scale = [2.2, 2.2]
+  slope = 0.50
+  albedo_map = { asset = "ground_rock_albedo" }
+  normal_map = { asset = "ground_rock_normal" }
+
+# --------------------------------------------------------------------------
+# 4. THE ERRATICS. Imported meshes, sunk ~0.3 m so the contact line is under
+#    the surface: the heightmap is quantised to 1 m/pixel and surface nets
+#    rounds the voxel surface by up to a quarter of a voxel, so a prop placed
+#    at exactly its probed height stands on a visible gap about as often as not.
+#
+#    **They are 8 to 25 m from the eye, and that was the second placement.**
+#    The first put them on the pad beside the shed at 25 to 40 m, where a 1.5 m
+#    boulder is 25 px of a 640-wide frame and the ridge in front hid three of
+#    the five outright. A prop at landscape range is not scenery, it is noise;
+#    what a prop is for is the near field, where it gives the frame a scale to
+#    read the 200 m ridgeline against. Two are scaled up (1.4x, 1.6x) because a
+#    glacial erratic that reads as an erratic is bigger than a downloaded rock.
+# --------------------------------------------------------------------------
+
+[[node]]
+name = "ErraticBeach"
+parent = "Moraine"
+transform = { pos = [59.0, 25.90, 106.0], rot_euler = [0.0, 34.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_rock_beach" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.88
+  albedo_map = { asset = "rock_beach_albedo" }
+  normal_map = { asset = "rock_beach_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "ErraticA"
+parent = "Moraine"
+transform = { pos = [64.0, 24.10, 112.0], rot_euler = [0.0, -62.0, 0.0], scale = [1.6, 1.6, 1.6] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_boulder_a" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.9
+  albedo_map = { asset = "boulder_a_albedo" }
+  normal_map = { asset = "boulder_a_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "ErraticB"
+parent = "Moraine"
+transform = { pos = [58.0, 26.16, 109.0], rot_euler = [0.0, 118.0, 0.0], scale = [1.4, 1.4, 1.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_boulder_b" }
+
+  # **B's own atlas.** Using A's smears it — the islands are laid out per model.
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.9
+  albedo_map = { asset = "boulder_b_albedo" }
+  normal_map = { asset = "boulder_b_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "Driftwood"
+parent = "Moraine"
+transform = { pos = [62.0, 25.27, 110.0], rot_euler = [0.0, -24.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_tree_log" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.82
+  albedo_map = { asset = "tree_log_albedo" }
+  normal_map = { asset = "tree_log_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "Stump"
+parent = "Moraine"
+transform = { pos = [66.0, 25.65, 118.0], rot_euler = [0.0, 71.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_tree_stump" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.85
+  albedo_map = { asset = "tree_stump_albedo" }
+  normal_map = { asset = "tree_stump_normal" }
+  uv_scale = [1.0, 1.0]
+
+# The lantern beside the doorway. **It is a wall lantern** — a bracket and a
+# lamp with no base — so it is mounted against the shed's face, yawed 27 + 180
+# degrees so the lamp hangs out from the wall rather than into it.
+[[node]]
+name = "Lantern"
+parent = "Moraine"
+transform = { pos = [67.31, 28.10, 124.68], rot_euler = [0.0, -153.0, 0.0], scale = [2.0, 2.0, 2.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_lantern" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.45
+  albedo_map = { asset = "lantern_albedo" }
+  normal_map = { asset = "lantern_normal" }
+  uv_scale = [1.0, 1.0]
+
+# `d^2 / albedo`: a wall 1.7 m away at albedo 0.5 is fully lit at 6.0. In broad
+# daylight that is a warm fill in the doorway and on the stone under the lamp
+# and nothing at ten metres, which is what a lantern at noon actually does. The
+# 100-800 of the older scenes would put a white disc on the wall.
+[[node]]
+name = "LanternFlame"
+parent = "Moraine"
+transform = { pos = [66.9, 27.95, 124.1] }
+
+  [node.components.Light]
+  intensity = 6.0
+  color = [1.0, 0.72, 0.36]
+
+# --------------------------------------------------------------------------
+# 5. GRASS. Nothing paints a mask: coverage is slope, rock and gully flow read
+#    off the terrain through `GroundGrid`'s SDF march, so the field thins on
+#    the bank into the trough, stops on the crag, and is lush in the hollows.
+#    The rectangle only says where to look.
+#
+#    **The rectangle also covers the shed, and the shed therefore has a turf
+#    roof.** `GroundGrid` marches down to the first surface it finds, and the
+#    first surface over the pad is the roof — the field has no idea a building
+#    is there. Here it is welcome and it is why the shed's top edge is a green
+#    line rather than a slab; over a scene's rooftops it would be a bug, and
+#    the fix is the rectangle, because there is no mask.
+#
+#    **Extent x density is capped at 262,144 blades** and the engine warns and
+#    drops the overflow in generation order — a hard edge across the field, not
+#    a thinner one. 40 x 40 m at 90 lands under it with room.
+# --------------------------------------------------------------------------
+
+[[node]]
+name = "ShoulderMeadow"
+parent = "Moraine"
+transform = { pos = [62.0, 0.0, 118.0] }
+
+  [node.components.Grass]
+  half_extent = [20.0, 20.0]
+  density = 90.0
+  height = 0.42
+  width = 0.020
+  # Equal to `Material.layer.slope` above, and they must stay equal.
+  slope_cutoff = 0.50
+  clump_facing = 0.75
+  clump_colour = 0.4
+
+  [node.components.Material]
+  albedo = [0.29, 0.44, 0.14]
+  roughness = 0.75
+
+# On the shoulder north of the pad, 4.5 m above the ground: erratics in the
+# near field, the shed and the arch across the middle, and the trough opening
+# away to the left into 200 m of haze.
+#
+# **Authored, and it has to be.** `xtask shimmer` and `xtask flythrough` frame
+# whole-scene bounds, which for 256 m puts the eye hundreds of metres out, and
+# this scene's haze is authored for a 200 m ridgeline. Rendered from the orbit
+# it is a blank blue rectangle — checked rather than assumed
+# (`loom render --yaw 20 --pitch -55`). A landscape has to say where it is
+# looked at from.
+#
+# **Screen right is *decreasing* bearing**, which is worth writing down because
+# three of the compositions above were aimed at the wrong half of the frame.
+# Forward is `(-sin yaw, -cos yaw)` — so `rot_euler.y = bearing - 180` — but
+# the camera's right is `forward x up`, so a thing further clockwise in world
+# bearing appears further LEFT on screen. The trough at bearing 50 degrees is
+# on the left; the crag at -3 is on the right.
+[[node]]
+name = "Camera"
+parent = "Moraine"
+transform = { pos = [60.0, 31.0, 96.0], rot_euler = [-12.0, -165.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0
