@@ -550,6 +550,7 @@ mod tests {
             center: [32.0, 20.0, 32.0],
             half_extents: [10.0, 1.0, 10.0],
             mode: CsgMode::Union,
+            displace: None,
         }]);
         volume
     }
@@ -603,6 +604,7 @@ mod tests {
             center: [32.0, 20.0, 32.0],
             half_extents: [4.0, 3.0, 4.0],
             mode: CsgMode::Subtract,
+            displace: None,
         });
         let after = sample_rain(
             Some(&rain),
@@ -785,6 +787,7 @@ mod tests {
             center: [32.0, 1.0, 32.0],
             half_extents: [31.0, 1.0, 31.0],
             mode: CsgMode::Union,
+            displace: None,
         });
         loom_voxel::heightfield::HeightField::bake(&volume, [0.0; 3], [32.0, 32.0], 32.0)
     }

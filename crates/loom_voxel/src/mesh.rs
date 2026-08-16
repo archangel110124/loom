@@ -190,6 +190,7 @@ mod tests {
             center,
             radius,
             mode: CsgMode::Union,
+            displace: None,
         }
     }
 
@@ -305,6 +306,7 @@ mod tests {
                 center: [8.0, 2.0, 8.0],
                 half_extents: [6.0, 2.0, 6.0],
                 mode: crate::CsgMode::Union,
+                displace: None,
             }]);
 
             let field = crate::heightfield::surface_height(&volume, [0.0; 3], 8.0, 8.0);

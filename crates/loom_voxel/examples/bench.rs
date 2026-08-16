@@ -79,6 +79,7 @@ fn billions() {
                     center: [world[0] * 0.5, world[1] * 0.5, world[2] * 0.5],
                     radius: 3.0,
                     mode: CsgMode::Subtract,
+                    displace: None,
                 })
                 .len();
         });
@@ -156,6 +157,7 @@ fn terrain() {
                     center: [world[0] * 0.5, world[1] * 0.5, world[2] * 0.5],
                     radius: 3.0,
                     mode: CsgMode::Subtract,
+                    displace: None,
                 })
                 .len();
         });
@@ -198,8 +200,8 @@ fn carved_sphere() {
         println!("\n=== {label} volume ({res}^3 = {} voxels) ===", (res as u64).pow(3));
         let mut v = Volume::new(dims, 0.25);
         let ops = vec![
-            VoxelOp::Sphere { center: [res as f32*0.125, res as f32*0.125, res as f32*0.125], radius: res as f32*0.08, mode: CsgMode::Union },
-            VoxelOp::Capsule { a: [0.0, res as f32*0.125, res as f32*0.125], b: [res as f32*0.25, res as f32*0.125, res as f32*0.125], radius: res as f32*0.02, mode: CsgMode::Subtract },
+            VoxelOp::Sphere { center: [res as f32*0.125, res as f32*0.125, res as f32*0.125], radius: res as f32*0.08, mode: CsgMode::Union, displace: None },
+            VoxelOp::Capsule { a: [0.0, res as f32*0.125, res as f32*0.125], b: [res as f32*0.25, res as f32*0.125, res as f32*0.125], radius: res as f32*0.02, mode: CsgMode::Subtract, displace: None },
         ];
         t("bake (sphere + carved tunnel)", &mut || v.bake(&ops));
         let (used, dense) = v.memory();
@@ -211,7 +213,7 @@ fn carved_sphere() {
         println!("  {:<34} {:>8}", "triangles", tris);
         let mut touched = 0;
         t("runtime edit (blast a crater)", &mut || {
-            touched = v.edit(&VoxelOp::Sphere { center: [res as f32*0.15, res as f32*0.15, res as f32*0.125], radius: res as f32*0.02, mode: CsgMode::Subtract }).len();
+            touched = v.edit(&VoxelOp::Sphere { center: [res as f32*0.15, res as f32*0.15, res as f32*0.125], radius: res as f32*0.02, mode: CsgMode::Subtract, displace: None }).len();
         });
         let (after, _) = v.memory();
         println!("  {:<34} {:>8} chunks, +{:.2} MB", "crater cost", touched, (after-used) as f64/1048576.0);

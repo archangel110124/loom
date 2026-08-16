@@ -167,6 +167,121 @@ pub fn value_with_derivative(x: f32, y: f32, seed: u64) -> (f32, f32, f32) {
     )
 }
 
+/// Deterministic hash of a 3D lattice point.
+///
+/// **A third multiplier on the same mixer, not a different hash.** The 2D one
+/// above is the shape this project already trusts; a genuinely different
+/// construction here would mean two noise implementations to keep
+/// bit-identical instead of one, and ADR 0006 exists because that divergence
+/// is the expensive kind.
+fn hash3(x: i32, y: i32, z: i32, seed: u64) -> f32 {
+    let mut h = seed
+        ^ (x as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (y as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ (z as i64 as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    h ^= h >> 33;
+    #[allow(clippy::cast_precision_loss)]
+    {
+        (h >> 40) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
+    }
+}
+
+/// Value noise in -1..1, in three dimensions.
+///
+/// **The whole reason this exists: 2D noise can only make a heightfield.** A
+/// height is one value per column, so it can carve from above and nothing
+/// else — no overhang, no undercut, no cave, and no rock. Displacing a surface
+/// in all three directions needs the noise to have three.
+///
+/// Trilinear over eight corners with the same C2 `fade`, so the field stays
+/// smooth enough that a surface-nets mesher interpolates a clean zero crossing
+/// rather than a stair.
+#[must_use]
+pub fn value3(x: f32, y: f32, z: f32, seed: u64) -> f32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let (x0, y0, z0) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
+    let (fx, fy, fz) = (
+        fade(x - x.floor()),
+        fade(y - y.floor()),
+        fade(z - z.floor()),
+    );
+
+    let corner = |dx: i32, dy: i32, dz: i32| hash3(x0 + dx, y0 + dy, z0 + dz, seed);
+    let lerp = |a: f32, b: f32, t: f32| a * (1.0 - t) + b * t;
+
+    let near = lerp(
+        lerp(corner(0, 0, 0), corner(1, 0, 0), fx),
+        lerp(corner(0, 1, 0), corner(1, 1, 0), fx),
+        fy,
+    );
+    let far = lerp(
+        lerp(corner(0, 0, 1), corner(1, 0, 1), fx),
+        lerp(corner(0, 1, 1), corner(1, 1, 1), fx),
+        fy,
+    );
+    lerp(near, far, fz)
+}
+
+/// Fractal sum of [`value3`], with the parameter names [`fbm`] uses.
+#[must_use]
+// One more coordinate than `fbm`, which is already at the limit. Bundling
+// these into a struct would make the 2D and 3D versions read differently
+// for no gain, and the pair being identical is the point.
+#[allow(clippy::too_many_arguments)]
+pub fn fbm3(
+    x: f32,
+    y: f32,
+    z: f32,
+    frequency: f32,
+    octaves: u32,
+    lacunarity: f32,
+    gain: f32,
+    seed: u64,
+) -> f32 {
+    let mut sum = 0.0;
+    let mut amp = 1.0;
+    let mut freq = frequency;
+    let mut norm = 0.0;
+    for octave in 0..octaves.max(1) {
+        sum += value3(x * freq, y * freq, z * freq, seed ^ u64::from(octave)) * amp;
+        norm += amp;
+        amp *= gain;
+        freq *= lacunarity;
+    }
+    if norm > 0.0 { sum / norm } else { 0.0 }
+}
+
+/// Ridged multifractal in three dimensions.
+///
+/// **This is the one that makes stone rather than dough.** fBm is a sum of
+/// smooth bumps and displaces a sphere into a potato; inverting each octave's
+/// absolute value puts a crease where the noise crosses zero, and creases at
+/// several scales at once is what a fractured rock is. The per-octave
+/// weighting by the previous octave — the same trick [`ridged`] uses — keeps
+/// detail on the ridges and leaves hollows smooth, which is also how rock
+/// weathers.
+#[must_use]
+pub fn ridged3(x: f32, y: f32, z: f32, frequency: f32, octaves: u32, seed: u64) -> f32 {
+    let mut sum = 0.0;
+    let mut amp = 0.5;
+    let mut freq = frequency;
+    let mut weight = 1.0_f32;
+    let mut norm = 0.0;
+
+    for octave in 0..octaves.max(1) {
+        let n = 1.0 - value3(x * freq, y * freq, z * freq, seed ^ u64::from(octave)).abs();
+        let n = n * n * weight;
+        weight = (n * 2.0).clamp(0.0, 1.0);
+        sum += n * amp;
+        norm += amp;
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    if norm > 0.0 { sum / norm * 2.0 - 1.0 } else { 0.0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

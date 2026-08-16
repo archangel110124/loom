@@ -271,6 +271,7 @@ mod tests {
             center: [16.0, top - 4.0, 16.0],
             half_extents: [20.0, 4.0, 20.0],
             mode: crate::CsgMode::Union,
+            displace: None,
         }]);
         volume
     }
@@ -324,6 +325,7 @@ mod tests {
             center: [16.0, 4.0, 16.0],
             radius: 9.0,
             mode: crate::CsgMode::Union,
+            displace: None,
         }]);
         let field = HeightField::bake(&volume, [0.0; 3], [16.0, 16.0], 8.0);
 

@@ -148,6 +148,97 @@ pub enum CsgMode {
     Intersect,
 }
 
+/// Noise displacement pushed into a primitive's surface.
+///
+/// **This is what makes a rock a rock.** Every primitive here is analytic and
+/// smooth, and union is a hard minimum, so a shape assembled from them has
+/// detail at exactly one scale — the size of the pieces placed — and creases
+/// where they meet. Measured: fifty ops of spheres, capsules and subtractions
+/// read as a cluster of soap bubbles. A real rock has detail at every scale,
+/// which is what a fractal displacement supplies and what no arrangement of
+/// primitives can.
+///
+/// Applied as `d(p) - amplitude * noise(p * frequency)`, so the surface moves
+/// outward where the noise is positive and inward where it is negative.
+///
+/// **`ridged` is usually the one you want.** fBm is a sum of smooth bumps and
+/// turns a sphere into a potato; ridged noise creases where it crosses zero,
+/// and creases at several scales at once is what fractured stone is.
+///
+/// Costs one noise evaluation per voxel per octave, on top of an analytic
+/// distance that was a handful of arithmetic ops — see [`VoxelOp::lipschitz`]
+/// for the other price, which is that the early-out has to work harder.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Displace {
+    /// How far the surface moves, in world units. Roughly the depth of the
+    /// deepest crevice.
+    pub amplitude: f32,
+    /// Cycles per world unit of the coarsest octave. `1.0 / frequency` is the
+    /// size of the largest feature.
+    pub frequency: f32,
+    /// Detail levels, each half the amplitude and twice the frequency. Past
+    /// the point where an octave is below one voxel it is wasted work.
+    pub octaves: u32,
+    pub seed: u64,
+    /// Ridged rather than fBm. Creased and fractured instead of lumpy.
+    pub ridged: bool,
+}
+
+impl Default for Displace {
+    fn default() -> Self {
+        // Zero amplitude is the identity, so a `Displace` that arrives with
+        // fields missing changes nothing rather than deforming the shape by
+        // surprise.
+        Self { amplitude: 0.0, frequency: 1.0, octaves: 4, seed: 0, ridged: true }
+    }
+}
+
+impl Displace {
+    /// The displacement at a point: how far to push the surface outward.
+    #[must_use]
+    pub fn at(&self, p: [f32; 3]) -> f32 {
+        if self.amplitude.abs() < 1e-6 {
+            return 0.0;
+        }
+        let (x, y, z) = (p[0], p[1], p[2]);
+        let n = if self.ridged {
+            loom_terrain::noise::ridged3(x, y, z, self.frequency, self.octaves, self.seed)
+        } else {
+            loom_terrain::noise::fbm3(x, y, z, self.frequency, self.octaves, 2.0, 0.5, self.seed)
+        };
+        self.amplitude * n
+    }
+
+    /// Upper bound on how fast [`Self::at`] can change, per world unit.
+    ///
+    /// **The early-out in `bake` assumes a 1-Lipschitz field** and a displaced
+    /// primitive is not one: subtracting a noise field adds its gradient to the
+    /// distance's. Understating this punches holes in the surface, which is the
+    /// same failure the heightfield's own bound exists to prevent — and it
+    /// fails in the direction that looks like broken geometry rather than slow
+    /// baking, so it errs high on purpose.
+    #[must_use]
+    pub fn gradient_bound(&self) -> f32 {
+        if self.amplitude.abs() < 1e-6 {
+            return 0.0;
+        }
+        let mut slope = 0.0;
+        let mut amp = 1.0_f32;
+        let mut freq = self.frequency;
+        let mut norm = 0.0;
+        for _ in 0..self.octaves.max(1) {
+            // 3.0 is the same per-octave bound on value noise's gradient the
+            // heightfield uses; keeping one number means one thing to be wrong.
+            slope += amp * freq * 3.0;
+            norm += amp;
+            amp *= 0.5;
+            freq *= 2.0;
+        }
+        self.amplitude.abs() * slope / norm.max(1e-6)
+    }
+}
+
 /// One authored edit.
 ///
 /// **This is what a scene stores**, never the resulting voxels. "Carve a cave
@@ -160,17 +251,27 @@ pub enum VoxelOp {
         center: [f32; 3],
         radius: f32,
         mode: CsgMode,
+        /// Optional noise displacement. **Absent in every scene authored
+        /// before it existed, and `#[serde(default)]` is what keeps those
+        /// files loading unchanged** — an absent displacement is the identity,
+        /// so their voxels and therefore the sim hash do not move.
+        #[serde(default)]
+        displace: Option<Displace>,
     },
     Box {
         center: [f32; 3],
         half_extents: [f32; 3],
         mode: CsgMode,
+        #[serde(default)]
+        displace: Option<Displace>,
     },
     Capsule {
         a: [f32; 3],
         b: [f32; 3],
         radius: f32,
         mode: CsgMode,
+        #[serde(default)]
+        displace: Option<Displace>,
     },
     /// Ground: everything below a noise surface is solid.
     ///
@@ -216,6 +317,24 @@ impl VoxelOp {
     /// in a 512³ world, to change 34.
     #[must_use]
     pub fn bounds(&self) -> ([f32; 3], [f32; 3]) {
+        let (lo, hi) = self.undisplaced_bounds();
+        // **Grown by the displacement's amplitude**, because an op costs the
+        // chunks it touches and a displaced surface touches more of them. Left
+        // ungrown, the outermost crest of a rock falls outside the ops's own
+        // bounds, the bake never visits that chunk, and the shape is cleanly
+        // sliced off at a chunk boundary — which looks like a modelling
+        // mistake rather than a bookkeeping one.
+        let grow = self.displace().map_or(0.0, |d| d.amplitude.abs());
+        if grow <= 0.0 {
+            return (lo, hi);
+        }
+        (
+            [lo[0] - grow, lo[1] - grow, lo[2] - grow],
+            [hi[0] + grow, hi[1] + grow, hi[2] + grow],
+        )
+    }
+
+    fn undisplaced_bounds(&self) -> ([f32; 3], [f32; 3]) {
         match self {
             Self::Sphere { center, radius, .. } => (
                 [center[0] - radius, center[1] - radius, center[2] - radius],
@@ -281,6 +400,16 @@ impl VoxelOp {
     /// this applied, none.
     #[must_use]
     pub fn lipschitz(&self) -> f32 {
+        // A displacement adds its own gradient to whatever the shape's was.
+        // Additive rather than multiplied: the fields are summed, so their
+        // gradients are, and the bound has to hold for the sum.
+        if let Some(d) = self.displace() {
+            return self.undisplaced_lipschitz() + d.gradient_bound();
+        }
+        self.undisplaced_lipschitz()
+    }
+
+    fn undisplaced_lipschitz(&self) -> f32 {
         let Self::Heightfield {
             amplitude,
             frequency,
@@ -336,6 +465,31 @@ impl VoxelOp {
     /// Signed distance from `p` to this shape, in world units.
     #[must_use]
     pub fn distance(&self, p: [f32; 3]) -> f32 {
+        // **Subtracted from the analytic distance, not blended into it.**
+        // `d(p) - A*n(p)` moves the whole surface along its own normal, which
+        // is what a displacement means; scaling `d` instead would move the
+        // surface toward or away from the centre and turn a boulder into a
+        // balloon.
+        //
+        // The price is that the result is no longer a true distance — the
+        // gradient can exceed one — and the bake's early-out assumes it is not.
+        // `lipschitz` below is what pays it.
+        self.analytic_distance(p) - self.displace().map_or(0.0, |d| d.at(p))
+    }
+
+    /// The displacement attached to this op, if any.
+    #[must_use]
+    pub fn displace(&self) -> Option<&Displace> {
+        match self {
+            Self::Sphere { displace, .. }
+            | Self::Box { displace, .. }
+            | Self::Capsule { displace, .. } => displace.as_ref(),
+            Self::Heightfield { .. } => None,
+        }
+    }
+
+    /// Distance to the undisplaced shape.
+    fn analytic_distance(&self, p: [f32; 3]) -> f32 {
         match self {
             Self::Sphere { center, radius, .. } => length(sub(p, *center)) - radius,
             Self::Box {
@@ -872,6 +1026,7 @@ mod tests {
             center: [boundary * 0.5, boundary * 0.5, boundary * 0.5],
             half_extents: [boundary * 0.5, boundary * 0.5, boundary * 0.5],
             mode: super::CsgMode::Union,
+            displace: None,
         }]);
 
         let chunks = volume.surface_chunks();
@@ -899,11 +1054,13 @@ mod tests {
             center: [4.0, 4.0, 4.0],
             radius: 1.5,
             mode: super::CsgMode::Subtract,
+            displace: None,
         };
         let fill = super::VoxelOp::Box {
             center: [4.0, 4.0, 4.0],
             half_extents: [4.0, 4.0, 4.0],
             mode: super::CsgMode::Union,
+            displace: None,
         };
 
         let mut volume = super::Volume::new([1, 1, 1], 0.25);
@@ -946,6 +1103,7 @@ mod tests {
             center,
             radius,
             mode,
+            displace: None,
         }
     }
 
@@ -1146,6 +1304,175 @@ mod tests {
     /// not disturb — the ground above and below it is still there. Sign
     /// agreement against the source op is the property that actually holds,
     /// and these parameters were measured to break it 44 times without the fix.
+    /// **The same property the heightfield test guards, for the other field
+    /// that is not 1-Lipschitz.**
+    ///
+    /// A displaced primitive's gradient is the shape's plus the noise's, so
+    /// the bake's O(1) early-out — fill this chunk solid or empty because the
+    /// distance at its centre exceeds its radius — is unsound unless the
+    /// threshold is widened by `lipschitz`. Unwidened, it decides a chunk near
+    /// a deep cleft is far from any surface and fills it, and the rock comes
+    /// out with chunk-sized bites taken from it.
+    ///
+    /// **The widening is precautionary and I could not prove it necessary.**
+    /// Stubbing `gradient_bound` to zero leaves this test passing, at these
+    /// parameters and at three others tried, including a geometry constructed
+    /// so several chunk centres land in the window where the early-out could
+    /// be wrong. The reason is probably that a displaced primitive's error is
+    /// bounded by its *amplitude* — the surface never moves further than that
+    /// — so the tight bound is additive (`chunk_radius + 2 * amplitude`)
+    /// rather than the multiplicative one `lipschitz` expresses.
+    ///
+    /// It is kept because it errs in the safe direction and measures free:
+    /// 0.8 s against 0.7 s to bake a 590k-voxel rock. Said plainly rather than
+    /// dressed up as a verified guard, because a comment claiming a mutation
+    /// check that does not fire is worse than no comment.
+    #[test]
+    fn a_displaced_sphere_agrees_with_the_op_it_came_from() {
+        let op = VoxelOp::Sphere {
+            center: [3.2, 3.2, 3.2],
+            radius: 1.2,
+            mode: CsgMode::Union,
+            displace: Some(Displace {
+                amplitude: 0.5,
+                frequency: 2.0,
+                octaves: 4,
+                seed: 0x51D3,
+                ridged: true,
+            }),
+        };
+        let mut volume = Volume::new([4, 4, 4], 0.05);
+        volume.bake(std::slice::from_ref(&op));
+
+        let [rx, ry, rz] = volume.resolution();
+        let mut disagreements = Vec::new();
+        for z in (0..rz).step_by(3) {
+            for y in (0..ry).step_by(3) {
+                for x in (0..rx).step_by(3) {
+                    let world = volume.world_of(x, y, z);
+                    let truth = op.distance(world);
+                    // As the heightfield test: the i8 quantisation makes a
+                    // voxel within a cell of the boundary legitimately either
+                    // sign.
+                    if truth.abs() < volume.voxel_size * 2.0 {
+                        continue;
+                    }
+                    if (volume.voxel(x, y, z) < 0) != (truth < 0.0) {
+                        disagreements.push((x, y, z, truth));
+                    }
+                }
+            }
+        }
+        assert!(
+            disagreements.is_empty(),
+            "{} sampled voxels disagree with the displaced op, e.g. {:?}",
+            disagreements.len(),
+            &disagreements[..disagreements.len().min(4)]
+        );
+    }
+
+    /// A displacement must actually move the surface, and the shape must still
+    /// be a shape.
+    ///
+    /// The second half is the one worth having: a displacement larger than the
+    /// radius turns a sphere inside out, and the useful range is bounded by
+    /// that. This asserts the surface moved by something comparable to the
+    /// amplitude rather than merely being different.
+    #[test]
+    fn displacement_moves_the_surface_by_about_its_amplitude() {
+        let plain = VoxelOp::Sphere {
+            center: [0.0, 0.0, 0.0],
+            radius: 2.0,
+            mode: CsgMode::Union,
+            displace: None,
+        };
+        let bumpy = VoxelOp::Sphere {
+            center: [0.0, 0.0, 0.0],
+            radius: 2.0,
+            mode: CsgMode::Union,
+            displace: Some(Displace {
+                amplitude: 0.4,
+                frequency: 0.8,
+                octaves: 4,
+                seed: 7,
+                ridged: false,
+            }),
+        };
+
+        let mut worst: f32 = 0.0;
+        let mut any_moved = false;
+        for i in 0_i16..40 {
+            let t = f32::from(i) * 0.157;
+            let p = [t.cos() * 2.0, (t * 0.7).sin() * 2.0, t.sin() * 2.0];
+            let delta = (bumpy.distance(p) - plain.distance(p)).abs();
+            worst = worst.max(delta);
+            if delta > 1e-4 {
+                any_moved = true;
+            }
+        }
+        assert!(any_moved, "displacement changed nothing");
+        assert!(
+            worst <= 0.4 + 1e-3,
+            "displacement exceeded its own amplitude: {worst}"
+        );
+        assert!(worst > 0.05, "displacement barely moved anything: {worst}");
+    }
+
+    /// **The bounds have to grow or the bake clips the rock at a chunk edge.**
+    ///
+    /// An op costs the chunks it touches; a displaced surface touches more of
+    /// them than the analytic shape does.
+    #[test]
+    fn displaced_bounds_grow_by_the_amplitude() {
+        let plain = VoxelOp::Sphere {
+            center: [1.0, 2.0, 3.0],
+            radius: 1.0,
+            mode: CsgMode::Union,
+            displace: None,
+        };
+        let bumpy = VoxelOp::Sphere {
+            center: [1.0, 2.0, 3.0],
+            radius: 1.0,
+            mode: CsgMode::Union,
+            displace: Some(Displace {
+                amplitude: 0.5,
+                frequency: 1.0,
+                octaves: 3,
+                seed: 1,
+                ridged: true,
+            }),
+        };
+        let (plo, phi) = plain.bounds();
+        let (blo, bhi) = bumpy.bounds();
+        for axis in 0..3 {
+            assert!((plo[axis] - blo[axis] - 0.5).abs() < 1e-6);
+            assert!((bhi[axis] - phi[axis] - 0.5).abs() < 1e-6);
+        }
+    }
+
+    /// An absent displacement must be exactly the identity.
+    ///
+    /// **This is what keeps every scene authored before the field existed
+    /// producing bit-identical voxels**, and therefore keeps the pinned sim
+    /// hash where it is. If this fails, every terrain scene in the library
+    /// moved.
+    #[test]
+    fn no_displacement_is_bit_identical_to_before() {
+        let plain = VoxelOp::Sphere {
+            center: [0.5, 1.5, 2.5],
+            radius: 1.75,
+            mode: CsgMode::Union,
+            displace: None,
+        };
+        for i in 0_i16..64 {
+            let t = f32::from(i) * 0.31;
+            let p = [t.cos() * 3.0, t * 0.05, t.sin() * 3.0];
+            let analytic = length(sub(p, [0.5, 1.5, 2.5])) - 1.75;
+            assert_eq!(plain.distance(p).to_bits(), analytic.to_bits());
+        }
+        assert!((plain.lipschitz() - 1.0).abs() < 1e-9);
+    }
+
     #[test]
     fn a_baked_heightfield_agrees_with_the_op_it_came_from() {
         let op = VoxelOp::Heightfield {
