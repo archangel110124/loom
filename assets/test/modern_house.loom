@@ -254,7 +254,7 @@ transform = { pos = [-16.0, 0.0, -6.0] }
   [[node.components.VoxelVolume.ops]]
   kind = "box"
   center = [23.0, 1.85, 6.0]
-  half_extents = [0.8, 1.35, 4.2]
+  half_extents = [0.8, 1.32, 3.65]
   mode = "subtract"
 
   # The south face of the living block, onto the lawn.
@@ -409,7 +409,7 @@ transform = { pos = [15.6, 1.80, 4.4], scale = [0.11, 1.80, 0.11] }
 [[node]]
 name = "GlassGreatRoomEast"
 parent = "Site"
-transform = { pos = [7.0, 1.85, 0.0], scale = [0.05, 1.30, 4.10] }
+transform = { pos = [7.0, 1.85, 0.0], scale = [0.16, 1.30, 3.68] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -421,7 +421,7 @@ transform = { pos = [7.0, 1.85, 0.0], scale = [0.05, 1.30, 4.10] }
 [[node]]
 name = "GlassLivingSouth"
 parent = "Site"
-transform = { pos = [0.5, 1.80, 4.50], scale = [3.90, 1.15, 0.05] }
+transform = { pos = [0.5, 1.80, 4.50], scale = [4.06, 1.26, 0.16] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -433,7 +433,7 @@ transform = { pos = [0.5, 1.80, 4.50], scale = [3.90, 1.15, 0.05] }
 [[node]]
 name = "GlassClerestoryNorth"
 parent = "Site"
-transform = { pos = [-1.0, 2.55, -4.50], scale = [4.40, 0.50, 0.05] }
+transform = { pos = [-1.0, 2.55, -4.50], scale = [4.56, 0.60, 0.16] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -445,7 +445,7 @@ transform = { pos = [-1.0, 2.55, -4.50], scale = [4.40, 0.50, 0.05] }
 [[node]]
 name = "GlassBedA"
 parent = "Site"
-transform = { pos = [0.6, 1.75, 10.50], scale = [1.25, 0.90, 0.05] }
+transform = { pos = [0.6, 1.75, 10.50], scale = [1.36, 1.01, 0.16] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -457,7 +457,7 @@ transform = { pos = [0.6, 1.75, 10.50], scale = [1.25, 0.90, 0.05] }
 [[node]]
 name = "GlassBedB"
 parent = "Site"
-transform = { pos = [5.4, 1.75, 10.50], scale = [1.25, 0.90, 0.05] }
+transform = { pos = [5.4, 1.75, 10.50], scale = [1.36, 1.01, 0.16] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -469,7 +469,7 @@ transform = { pos = [5.4, 1.75, 10.50], scale = [1.25, 0.90, 0.05] }
 [[node]]
 name = "GlassBedEast"
 parent = "Site"
-transform = { pos = [8.0, 1.75, 7.50], scale = [0.05, 0.90, 1.55] }
+transform = { pos = [8.0, 1.75, 7.50], scale = [0.16, 1.01, 1.66] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -482,7 +482,7 @@ transform = { pos = [8.0, 1.75, 7.50], scale = [0.05, 0.90, 1.55] }
 [[node]]
 name = "GarageDoor"
 parent = "Site"
-transform = { pos = [-11.0, 1.20, -4.50], scale = [2.60, 1.15, 0.05] }
+transform = { pos = [-11.0, 1.20, -4.50], scale = [2.76, 1.26, 0.16] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -555,7 +555,7 @@ transform = { pos = [0.0, 3.55, 0.0], scale = [6.7, 0.08, 4.2] }
 [[node]]
 name = "ScreenWall"
 parent = "Site"
-transform = { pos = [9.4, 1.30, 9.0], scale = [0.14, 1.30, 3.2] }
+transform = { pos = [8.10, 1.30, 8.20], scale = [0.14, 1.30, 2.40] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -569,7 +569,7 @@ transform = { pos = [9.4, 1.30, 9.0], scale = [0.14, 1.30, 3.2] }
 [[node]]
 name = "TerraceEdge"
 parent = "Site"
-transform = { pos = [11.4, 0.28, 5.5], scale = [4.6, 0.28, 0.18] }
+transform = { pos = [11.4, 0.24, 5.30], scale = [4.60, 0.24, 0.16] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
