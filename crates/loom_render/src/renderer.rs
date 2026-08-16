@@ -851,6 +851,9 @@ pub struct Renderer {
     rt_positions: Option<(vk::Buffer, Allocation, vk::DeviceAddress)>,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    /// The same geometry, blended and not writing depth. Transparent objects
+    /// are drawn with this after every opaque one, sorted back to front.
+    blended_pipeline: vk::Pipeline,
     /// Fills the frame before the scene draws over it.
     sky_pipeline: vk::Pipeline,
     pipeline_cache: vk::PipelineCache,
@@ -1137,6 +1140,13 @@ impl Renderer {
                 water_textures.descriptor_layout(),
                 MSAA_SAMPLES,
             )?;
+        let blended_pipeline = create_blended_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            HDR_FORMAT,
+            MSAA_SAMPLES,
+        )?;
         let sky_pipeline =
             create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, HDR_FORMAT, MSAA_SAMPLES)?;
         let particle_pipeline =
@@ -1418,6 +1428,7 @@ impl Renderer {
             max_objects: MAX_OBJECTS,
             pipeline_layout,
             pipeline,
+            blended_pipeline,
             sky_pipeline,
             pipeline_cache,
             command_pool,
@@ -1726,7 +1737,11 @@ impl Renderer {
                 .ok_or_else(|| RenderError::Allocator("environment buffer missing".into()))?,
             std::slice::from_ref(&self.environment),
         )?;
-        let batches = batch_by_mesh(&sorted);
+        // Opaque batches and transparent draws, from the SAME slice and
+        // without reordering it -- see `split_by_blend`.
+        let blend_flags: Vec<bool> =
+            sorted.iter().map(|o| self.materials.is_blended(o.material)).collect();
+        let (batches, blended) = split_by_blend(&sorted, &blend_flags, camera.eye.to_array());
         write_slice(
             self.objects_alloc
                 .as_ref()
@@ -1835,6 +1850,7 @@ impl Renderer {
         let sky = self.sky_pipeline;
         let particle_pipeline = self.particle_pipeline;
         let grass_pipeline = self.grass_pipeline;
+        let blended_pipeline = self.blended_pipeline;
         let grass_count = self.grass_count;
         let water_pipeline = self.water_pipeline;
         // The whole water mesh is in the vertex shader, so "is there water"
@@ -1860,6 +1876,11 @@ impl Renderer {
             .filter_map(|(mesh, first, count)| {
                 self.ranges.get(*mesh as usize).map(|r| (*r, *first, *count))
             })
+            .collect();
+        // One draw per transparent object, already sorted back to front.
+        let blended_draws: Vec<(MeshRange, u32, u32)> = blended
+            .iter()
+            .filter_map(|(mesh, first)| self.ranges.get(*mesh as usize).map(|r| (*r, *first, 1)))
             .collect();
 
         // The colour target is written by the *resolve* when multisampling, so
@@ -2062,6 +2083,53 @@ impl Renderer {
                             bytes,
                         );
                         d.cmd_draw(cmd, grass_count * 42, 1, 0, 0);
+                    }
+
+                    // **Transparent meshes: after everything opaque, sorted,
+                    // writing no depth.** Grass above is opaque and belongs
+                    // with the solid geometry; glass has to come after it or a
+                    // window would erase the blades behind it.
+                    //
+                    // One draw per object rather than an instanced batch,
+                    // because the order is by distance and not by mesh -- and
+                    // that order is the whole correctness argument, since the
+                    // blended pipeline cannot use the depth buffer to sort
+                    // itself.
+                    if !blended_draws.is_empty() {
+                        d.cmd_bind_pipeline(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            blended_pipeline,
+                        );
+                        for (range, first_instance, instances) in &blended_draws {
+                            let push = Push {
+                                object_offset: *first_instance,
+                                ..base_push
+                            };
+                            let bytes = std::slice::from_raw_parts(
+                                std::ptr::from_ref(&push).cast::<u8>(),
+                                size_of::<Push>(),
+                            );
+                            d.cmd_push_constants(
+                                cmd,
+                                layout,
+                                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                                0,
+                                bytes,
+                            );
+                            d.cmd_draw_indexed(
+                                cmd,
+                                range.index_count(),
+                                *instances,
+                                range.first_index(),
+                                0,
+                                0,
+                            );
+                        }
+                        // Back to the opaque pipeline: the water and particle
+                        // draws below bind their own, but a later block in the
+                        // split path starts from whatever was left bound.
+                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
                     }
 
                     if !split {
@@ -2567,6 +2635,7 @@ impl Drop for Renderer {
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_pipeline(self.blended_pipeline, None);
             self.device.destroy_pipeline(self.sky_pipeline, None);
             self.device.destroy_pipeline_cache(self.pipeline_cache, None);
             self.device
@@ -3016,16 +3085,62 @@ pub(crate) fn combine(
 ///
 /// Assumes `objects` is already sorted by mesh, which [`Renderer::render`]
 /// guarantees.
-pub(crate) fn batch_by_mesh(objects: &[Object]) -> Vec<(u32, u32, u32)> {
-    let mut batches: Vec<(u32, u32, u32)> = Vec::new();
+/// Split a mesh-sorted slice into the opaque batches and the transparent draws.
+///
+/// **`objects` is not reordered, and that is load-bearing.** `pack_objects`
+/// fills the GPU object buffer from this exact slice and `build_instances`
+/// numbers the acceleration structure's instances by `enumerate` over it, so a
+/// reflection reads `push.objects[CommittedInstanceID()]` against this order.
+/// Sorting the slice would put every reflection's colour on the wrong object,
+/// and nothing would validate it. Both return values are therefore *indices*
+/// into the slice, used as `first_instance`.
+///
+/// Opaque geometry keeps its instanced batching. Transparent geometry is drawn
+/// one object at a time, **back to front from the eye**, because a blend is
+/// order-dependent and the depth buffer cannot sort it — the blended pipeline
+/// does not write depth. One draw per pane is affordable precisely because a
+/// scene that has thousands of transparent surfaces has a worse problem than
+/// its draw count.
+///
+/// Sorted by distance to the object's *origin*, which is the standard
+/// approximation and fails for long thin geometry that interpenetrates. Flat
+/// glazing authored as separate nodes never hits it.
+/// `(mesh, first_instance, instance_count)` — one instanced opaque draw.
+pub(crate) type OpaqueBatch = (u32, u32, u32);
+/// `(mesh, object_index)` — one transparent object, drawn on its own.
+pub(crate) type BlendedDraw = (u32, u32);
+
+pub(crate) fn split_by_blend(
+    objects: &[Object],
+    transparent: &[bool],
+    eye: [f32; 3],
+) -> (Vec<OpaqueBatch>, Vec<BlendedDraw>) {
+    let mut opaque: Vec<OpaqueBatch> = Vec::new();
+    let mut blended: Vec<(u32, u32, f32)> = Vec::new();
     for (index, object) in objects.iter().enumerate() {
         let index = u32::try_from(index).unwrap_or(0);
-        match batches.last_mut() {
-            Some((mesh, _, count)) if *mesh == object.mesh => *count += 1,
-            _ => batches.push((object.mesh, index, 1)),
+        if transparent.get(index as usize).copied().unwrap_or(false) {
+            let p = object.model.w_axis;
+            let d = (p.x - eye[0]).mul_add(p.x - eye[0], (p.y - eye[1]) * (p.y - eye[1]))
+                + (p.z - eye[2]) * (p.z - eye[2]);
+            blended.push((object.mesh, index, d));
+            continue;
+        }
+        // A transparent object between two opaque ones breaks the run, which
+        // is correct: `first_instance` plus `count` must address a contiguous
+        // span of the object buffer.
+        match opaque.last_mut() {
+            Some((mesh, first, count)) if *mesh == object.mesh && *first + *count == index => {
+                *count += 1;
+            }
+            _ => opaque.push((object.mesh, index, 1)),
         }
     }
-    batches
+    // Farthest first. `total_cmp` rather than `partial_cmp`: a NaN distance
+    // from a degenerate transform would otherwise make the ordering
+    // inconsistent and the sort's result unspecified.
+    blended.sort_by(|a, b| b.2.total_cmp(&a.2));
+    (opaque, blended.into_iter().map(|(m, i, _)| (m, i)).collect())
 }
 
 /// An index buffer, reached by binding rather than by address — index fetch is
@@ -3512,6 +3627,101 @@ pub(crate) fn create_pipeline(
     unsafe { device.destroy_shader_module(module, None) };
 
     Ok((layout, pipeline, cache))
+}
+
+/// The scene pipeline again, blending instead of writing depth.
+///
+/// Differs from [`create_pipeline`] in exactly two ways and shares everything
+/// else — the same layout, the same cache, the same `vertexMain`/`fragmentMain`.
+///
+/// **Depth is tested but not written.** A transparent surface must not occlude
+/// what comes after it, and two panes of glass must both draw. The cost is that
+/// transparent geometry cannot depth-sort itself, which is why the pass sorts
+/// on the CPU.
+///
+/// **`SRC_ALPHA, ONE_MINUS_SRC_ALPHA`, and the fragment shader does not
+/// pre-multiply.** `fragmentMain` returns opacity in alpha and leaves the
+/// colour alone; doing both would square the factor and glass would come out
+/// twice as dark as authored.
+///
+/// Alpha itself is written with `ONE, ONE_MINUS_SRC_ALPHA` rather than the
+/// colour factors. The offscreen path reads the target back as a PNG, and a
+/// destination alpha left at the source's would make a window's pixels
+/// partially transparent *in the file* — a golden image that is see-through
+/// where the glass is.
+pub(crate) fn create_blended_pipeline(
+    device: &ash::Device,
+    layout: vk::PipelineLayout,
+    cache: vk::PipelineCache,
+    color_format: vk::Format,
+    samples: vk::SampleCountFlags,
+) -> Result<vk::Pipeline, RenderError> {
+    let module = create_shader_module(device, crate::SCENE_SPV)?;
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(module)
+            .name(c"vertexMain"),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(module)
+            .name(c"fragmentMain"),
+    ];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::BACK)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .line_width(1.0);
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples);
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(true)
+        .depth_write_enable(false)
+        .depth_compare_op(vk::CompareOp::LESS);
+    let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .alpha_blend_op(vk::BlendOp::ADD);
+    let attachments = [blend_attachment];
+    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let color_formats = [color_format];
+    let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&color_formats)
+        .depth_attachment_format(DEPTH_FORMAT);
+
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterizer)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth_stencil)
+        .color_blend_state(&blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering_info);
+
+    // SAFETY: every borrowed struct above outlives this call.
+    let pipeline = unsafe { device.create_graphics_pipelines(cache, &[info], None) }
+        .map_err(|(_, r)| RenderError::Vulkan(r))?[0];
+    // SAFETY: the module is baked into the pipeline and no longer needed.
+    unsafe { device.destroy_shader_module(module, None) };
+    Ok(pipeline)
 }
 
 /// A pipeline that fills the frame with the sky, sharing the scene's layout.

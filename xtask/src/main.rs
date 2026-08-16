@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 43] = [
+const SCENES: [&str; 44] = [
     "assets/test/lanternhead.loom",
     // One building, composed. **In `SCENES` and not `GOLDEN`, on the stated
     // rule**: every path it draws is already covered — `ground` and
@@ -86,6 +86,8 @@ const SCENES: [&str; 43] = [
     "assets/test/spruce.loom",
     // The alpha test. Also in `GOLDEN`, where the reasoning is.
     "assets/test/alpha_cutout.loom",
+    // Blended transparency. Also in `GOLDEN`, where the reasoning is.
+    "assets/test/glass.loom",
     // The layered tree. In `SCENES` and not `GOLDEN`: its rendering path is
     // the alpha test, which `alpha_cutout.loom` already guards at 320x200 far
     // more legibly than 6,500 cards would. What is worth checking here is that
@@ -248,7 +250,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 29] = [
+const GOLDEN: [(&str, &str, &[&str]); 30] = [
     // **The scene the reflection bug was reported in, and it had no pixel gate
     // at all.** It sat in `SCENES` only, on the argument that `materials`
     // already sweeps metallic to 1.0 — which is true of the BRDF and false of
@@ -273,6 +275,13 @@ const GOLDEN: [(&str, &str, &[&str]); 29] = [
     // texture's alpha channel. Without this the branch in `fragmentMain` could
     // be deleted and all 27 other references would still match.
     ("alpha_cutout", "assets/test/alpha_cutout.loom", &[]),
+    // **Blended transparency, which is a second rendering path and a second
+    // pipeline.** `alpha_cutout` covers discard; this covers the blend, the
+    // no-depth-write, and the back-to-front sort that a blend cannot do for
+    // itself. Three panes over a striped floor prove transmission, and two
+    // overlapping angled panes prove the sort — swap the draw order and this
+    // reference moves.
+    ("glass", "assets/test/glass.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
     // **The recipe pipeline reaching the SDF**, which nothing else in this list

@@ -1,0 +1,177 @@
+# `Material::opacity` — blended transparency, shown against what it replaces.
+#
+#     loom render assets/test/glass.loom --out glass.png --size 1280x800
+#
+# **Three panes over the same striped floor, and the stripes are the test.**
+# Left is opaque, centre is `opacity = 0.5`, right is `opacity = 0.2`. A working
+# blend shows the floor's pattern through the glass, progressively more of it,
+# and shows it *undistorted* — this is blending, not refraction.
+#
+# **A single transparent pane would prove nothing**, which is the same trap
+# `alpha_cutout.loom` documents: a dark surface in front of a dark background
+# looks identical whether it blended or not. The stripes give the eye something
+# that can only be there if light came through.
+#
+# **The two overlapping panes at the back are the sorting test.** They are
+# separate nodes at different depths, so a correct render shows the nearer one
+# tinting the farther one, and the tint is asymmetric — swap the draw order and
+# the image changes. `split_by_blend` sorts transparent objects back to front by
+# distance to the eye, and this is the scene that would catch it not doing so.
+#
+# ## What this scene deliberately does not test
+#
+# **Two transparent faces inside ONE mesh.** Sorting is per object, so a closed
+# glass box shows its far wall through its near one in whatever order the
+# triangles happen to be in. That is the standard limitation of blended
+# transparency and it is documented on `Material::opacity` rather than hidden;
+# authoring glazing as separate flat nodes avoids it entirely.
+#
+# **Shadows through glass.** A transparent material is kept out of the
+# acceleration structure, exactly as an alpha-cut one is, because a ray query
+# runs no fragment shader and a window would otherwise cast the solid black
+# shadow of its whole pane. So these panes cast nothing at all. The floor under
+# them is unshadowed and that is correct for what the engine does.
+
+[scene]
+format = 1
+id = "89c1e0da-ef51-4b11-b616-31bf59312d2c"
+
+[[asset]]
+key = "tiles_albedo"
+id = "bbce2fd2-83d0-410b-87b8-9e4b62ea4a64"
+path = "../textures/tiles_albedo.png"
+
+[[asset]]
+key = "tiles_normal"
+id = "39180893-483f-46b7-b946-f252aca36f23"
+path = "../textures/tiles_normal.png"
+
+[[asset]]
+key = "quay_stone_albedo"
+id = "e2c127d5-4832-475e-888a-575dad9e8ab4"
+path = "../textures/quay_stone_albedo.png"
+
+[[asset]]
+key = "quay_stone_normal"
+id = "52393f9d-6af5-4cee-b7a3-3aa9f8e6d8d0"
+path = "../textures/quay_stone_normal.png"
+
+[[node]]
+name = "Bench"
+
+  [node.components.Environment]
+  sun_direction = [0.30, 0.62, 0.72]
+  sun_strength = 2.4
+  sun_color = [1.0, 0.97, 0.92]
+  ambient = 0.42
+  sky_zenith = [0.13, 0.21, 0.38]
+  sky_horizon = [0.58, 0.63, 0.68]
+  fog_density = 0.0
+
+# The patterned floor the panes are judged against. Strongly patterned on
+# purpose: a flat colour behind glass proves nothing.
+[[node]]
+name = "Floor"
+parent = "Bench"
+transform = { pos = [0.0, -0.06, 0.0], scale = [7.0, 0.06, 5.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.80, 0.78, 0.74]
+  roughness = 0.7
+  albedo_map = { asset = "tiles_albedo" }
+  normal_map = { asset = "tiles_normal" }
+  uv_scale = [1.6, 1.6]
+  triplanar = true
+
+[[node]]
+name = "Backdrop"
+parent = "Bench"
+transform = { pos = [0.0, 1.6, -3.4], scale = [7.0, 1.7, 0.12] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.52, 0.51, 0.49]
+  roughness = 0.85
+  albedo_map = { asset = "quay_stone_albedo" }
+  normal_map = { asset = "quay_stone_normal" }
+  uv_scale = [0.6, 0.6]
+  triplanar = true
+
+# ---- the three panes: opaque, half, and mostly clear --------------------
+[[node]]
+name = "PaneOpaque"
+parent = "Bench"
+transform = { pos = [-2.5, 1.0, 0.4], scale = [0.95, 1.0, 0.05] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.07, 0.10, 0.12]
+  roughness = 0.08
+
+[[node]]
+name = "PaneHalf"
+parent = "Bench"
+transform = { pos = [0.0, 1.0, 0.4], scale = [0.95, 1.0, 0.05] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.07, 0.10, 0.12]
+  roughness = 0.08
+  opacity = 0.5
+
+[[node]]
+name = "PaneClear"
+parent = "Bench"
+transform = { pos = [2.5, 1.0, 0.4], scale = [0.95, 1.0, 0.05] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.07, 0.10, 0.12]
+  roughness = 0.08
+  opacity = 0.2
+
+# ---- the sorting test: two panes at different depths, overlapping -------
+[[node]]
+name = "SortFar"
+parent = "Bench"
+transform = { pos = [-0.9, 1.0, -2.2], rot_euler = [0.0, 22.0, 0.0], scale = [1.1, 0.85, 0.05] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.10, 0.30, 0.14]
+  roughness = 0.10
+  opacity = 0.45
+
+[[node]]
+name = "SortNear"
+parent = "Bench"
+transform = { pos = [0.5, 1.0, -1.5], rot_euler = [0.0, -22.0, 0.0], scale = [1.1, 0.85, 0.05] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.36, 0.14, 0.10]
+  roughness = 0.10
+  opacity = 0.45
+
+[[node]]
+name = "Camera"
+parent = "Bench"
+transform = { pos = [0.0, 1.75, 5.4], rot_euler = [-6.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 52.0

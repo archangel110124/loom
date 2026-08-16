@@ -127,6 +127,14 @@ pub(crate) struct Materials {
     buffer: vk::Buffer,
     allocation: Option<Allocation>,
     address: vk::DeviceAddress,
+    /// Per material: does it blend?
+    ///
+    /// Distinct from [`Self::cutout`], which covers both kinds of see-through
+    /// because the acceleration structure cannot represent either. **The draw
+    /// order cares about only one of them**: an alpha-tested surface discards
+    /// and is still an ordinary opaque draw that writes depth, while a blended
+    /// one must come after everything opaque, sorted, writing no depth.
+    blended: Vec<bool>,
     /// Per material: does it alpha-test?
     ///
     /// Kept on the CPU because the **acceleration structure** needs it, and
@@ -260,6 +268,7 @@ impl Materials {
                 .iter()
                 .map(|m| m.mean_albedo[3] > 0.0 || m.misc[0] < 1.0)
                 .collect(),
+            blended: materials.iter().map(|m| m.misc[0] < 1.0).collect(),
         })
     }
 
@@ -274,6 +283,14 @@ impl Materials {
     /// `u32::MAX` is "no material", which is opaque.
     pub(crate) fn is_cutout(&self, material: u32) -> bool {
         self.cutout.get(material as usize).copied().unwrap_or(false)
+    }
+
+    /// Does this material blend, and therefore have to be drawn after every
+    /// opaque surface, sorted, with no depth write?
+    ///
+    /// `u32::MAX` is "no material", which is opaque.
+    pub(crate) fn is_blended(&self, material: u32) -> bool {
+        self.blended.get(material as usize).copied().unwrap_or(false)
     }
 
     pub(crate) fn descriptor_layout(&self) -> vk::DescriptorSetLayout {

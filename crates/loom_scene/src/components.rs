@@ -1702,7 +1702,14 @@ impl Default for AudioSource {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct GameRules {
-    /// Project-relative path to a `.rhai` file.
+    /// Path to a `.rhai` file, **resolved against the directory of the scene
+    /// that names it** — not against a project root.
+    ///
+    /// `play.rs` joins it onto the scene's own directory, which is why
+    /// `proving_ground.loom` writes `"../scripts/fps.rhai"`: the `..` only
+    /// makes sense from `assets/games/`. This said "project-relative" and
+    /// meant the opposite, which is the same defect ADR 0024 corrected in
+    /// the format spec for `[[asset]]` paths.
     pub path: String,
 }
 
@@ -1710,7 +1717,14 @@ pub struct GameRules {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Script {
-    /// Project-relative path to a `.rhai` file.
+    /// Path to a `.rhai` file, **resolved against the directory of the scene
+    /// that names it** — not against a project root.
+    ///
+    /// `play.rs` joins it onto the scene's own directory, which is why
+    /// `proving_ground.loom` writes `"../scripts/fps.rhai"`: the `..` only
+    /// makes sense from `assets/games/`. This said "project-relative" and
+    /// meant the opposite, which is the same defect ADR 0024 corrected in
+    /// the format spec for `[[asset]]` paths.
     pub path: String,
 }
 

@@ -415,8 +415,9 @@ transform = { pos = [7.0, 1.85, 0.0], scale = [0.16, 1.30, 3.68] }
   mesh = { asset = "box" }
 
   [node.components.Material]
-  albedo = [0.045, 0.060, 0.075]
-  roughness = 0.08
+  albedo = [0.055, 0.075, 0.090]
+  roughness = 0.06
+  opacity = 0.22
 
 [[node]]
 name = "GlassLivingSouth"
@@ -427,8 +428,9 @@ transform = { pos = [0.5, 1.80, 4.50], scale = [4.06, 1.26, 0.16] }
   mesh = { asset = "box" }
 
   [node.components.Material]
-  albedo = [0.045, 0.060, 0.075]
-  roughness = 0.08
+  albedo = [0.055, 0.075, 0.090]
+  roughness = 0.06
+  opacity = 0.22
 
 [[node]]
 name = "GlassClerestoryNorth"
@@ -439,8 +441,9 @@ transform = { pos = [-1.0, 2.55, -4.50], scale = [4.56, 0.60, 0.16] }
   mesh = { asset = "box" }
 
   [node.components.Material]
-  albedo = [0.045, 0.060, 0.075]
-  roughness = 0.08
+  albedo = [0.055, 0.075, 0.090]
+  roughness = 0.06
+  opacity = 0.22
 
 [[node]]
 name = "GlassBedA"
@@ -451,8 +454,9 @@ transform = { pos = [0.6, 1.75, 10.50], scale = [1.36, 1.01, 0.16] }
   mesh = { asset = "box" }
 
   [node.components.Material]
-  albedo = [0.045, 0.060, 0.075]
-  roughness = 0.08
+  albedo = [0.055, 0.075, 0.090]
+  roughness = 0.06
+  opacity = 0.22
 
 [[node]]
 name = "GlassBedB"
@@ -463,8 +467,9 @@ transform = { pos = [5.4, 1.75, 10.50], scale = [1.36, 1.01, 0.16] }
   mesh = { asset = "box" }
 
   [node.components.Material]
-  albedo = [0.045, 0.060, 0.075]
-  roughness = 0.08
+  albedo = [0.055, 0.075, 0.090]
+  roughness = 0.06
+  opacity = 0.22
 
 [[node]]
 name = "GlassBedEast"
@@ -475,8 +480,9 @@ transform = { pos = [8.0, 1.75, 7.50], scale = [0.16, 1.01, 1.66] }
   mesh = { asset = "box" }
 
   [node.components.Material]
-  albedo = [0.045, 0.060, 0.075]
-  roughness = 0.08
+  albedo = [0.055, 0.075, 0.090]
+  roughness = 0.06
+  opacity = 0.22
 
 # The garage door reads as dark ribbed metal rather than glass.
 [[node]]

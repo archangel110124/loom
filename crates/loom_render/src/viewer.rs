@@ -12,7 +12,7 @@ use ash::vk;
 
 use crate::debug_names::DebugNames;
 use crate::renderer::{
-    Camera, DEPTH_FORMAT, MeshRange, Object, ObjectData, RenderError, batch_by_mesh,
+    Camera, DEPTH_FORMAT, MeshRange, Object, ObjectData, RenderError,
     begin_rendering, combine, create_address_buffer, create_image, create_index_buffer,
     create_pipeline, create_view, pack_objects, pipeline_cache_path, set_viewport,
     view_projection, write_slice,
@@ -160,6 +160,8 @@ pub struct Viewer {
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     /// Fills the frame before the scene draws over it.
+    /// The same geometry, blended and not writing depth.
+    blended_pipeline: vk::Pipeline,
     sky_pipeline: vk::Pipeline,
     pipeline_cache: vk::PipelineCache,
     command_pool: vk::CommandPool,
@@ -324,6 +326,13 @@ impl Viewer {
                 water_textures.descriptor_layout(),
                 samples,
             )?;
+        let blended_pipeline = crate::renderer::create_blended_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            crate::renderer::HDR_FORMAT,
+            samples,
+        )?;
         let sky_pipeline =
             crate::renderer::create_sky_pipeline(
                 &raw, pipeline_layout, pipeline_cache, crate::renderer::HDR_FORMAT, samples,
@@ -645,6 +654,7 @@ impl Viewer {
             requested: vk::Extent2D { width, height },
             pipeline_layout,
             pipeline,
+            blended_pipeline,
             sky_pipeline,
             pipeline_cache,
             command_pool,
@@ -1074,7 +1084,12 @@ impl Viewer {
             self.allocator = allocator;
             result?;
         }
-        let batches = batch_by_mesh(&sorted);
+        // Same split as the offscreen path, from the same slice and in the
+        // same order -- see `split_by_blend`.
+        let blend_flags: Vec<bool> =
+            sorted.iter().map(|o| self.materials.is_blended(o.material)).collect();
+        let (batches, blended) =
+            crate::renderer::split_by_blend(&sorted, &blend_flags, camera.eye.to_array());
         // **Before the upload, not after**, the same as the offscreen path. The
         // camera moved into this buffer when the push block ran out of room, and
         // it was being written a line *below* the upload — so the window drew
@@ -1160,6 +1175,7 @@ impl Viewer {
         let sky = self.sky_pipeline;
         let particle_pipeline = self.particle_pipeline;
         let grass_pipeline = self.grass_pipeline;
+        let blended_pipeline = self.blended_pipeline;
         let grass_count = self.grass_count;
         let water_pipeline = self.water_pipeline;
         let water_verts = if self.environment.water[2] > 0.0 {
@@ -1173,6 +1189,10 @@ impl Viewer {
             .filter_map(|(mesh, first, count)| {
                 self.ranges.get(*mesh as usize).map(|r| (*r, *first, *count))
             })
+            .collect();
+        let blended_draws: Vec<(MeshRange, u32, u32)> = blended
+            .iter()
+            .filter_map(|(mesh, first)| self.ranges.get(*mesh as usize).map(|r| (*r, *first, 1)))
             .collect();
         let depth_image = self.depth;
         let depth_id = graph.import("loom.viewer_depth", depth_image);
@@ -1377,6 +1397,45 @@ impl Viewer {
                             push.bytes(),
                         );
                         d.cmd_draw(cmd, grass_count * 42, 1, 0, 0);
+                    }
+
+                    // Transparent meshes, after everything opaque and sorted
+                    // back to front. Identical to the offscreen path, which is
+                    // the point: a window that blends differently from the
+                    // golden images is the divergence this engine keeps paying
+                    // for.
+                    if !blended_draws.is_empty() {
+                        d.cmd_bind_pipeline(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            blended_pipeline,
+                        );
+                        for (range, first_instance, instances) in &blended_draws {
+                            let push = crate::renderer::Push {
+                                object_offset: *first_instance,
+                                ..base_push
+                            };
+                            let bytes = std::slice::from_raw_parts(
+                                std::ptr::from_ref(&push).cast::<u8>(),
+                                size_of::<crate::renderer::Push>(),
+                            );
+                            d.cmd_push_constants(
+                                cmd,
+                                layout,
+                                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                                0,
+                                bytes,
+                            );
+                            d.cmd_draw_indexed(
+                                cmd,
+                                range.index_count(),
+                                *instances,
+                                range.first_index(),
+                                0,
+                                0,
+                            );
+                        }
+                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
                     }
 
                     if !split {
@@ -2033,6 +2092,7 @@ impl Drop for Viewer {
             self.device.destroy_fence(self.in_flight, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_pipeline(self.blended_pipeline, None);
             self.device.destroy_pipeline(self.sky_pipeline, None);
             self.device.destroy_pipeline_cache(self.pipeline_cache, None);
             self.device

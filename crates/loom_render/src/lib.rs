@@ -202,7 +202,12 @@ mod tests {
             48,
             "meanAlbedo — what a reflected hit shades with"
         );
-        assert_eq!(size_of::<MaterialData>(), 64, "the whole record");
+        assert_eq!(
+            at(std::ptr::from_ref(&base.misc).cast()),
+            64,
+            "misc — x is opacity"
+        );
+        assert_eq!(size_of::<MaterialData>(), 80, "the whole record");
     }
 
     /// **`ObjectData` had no test at all, which is why this one exists.**
