@@ -268,6 +268,20 @@ pub enum VoxelOp {
         /// so their voxels and therefore the sim hash do not move.
         #[serde(default)]
         displace: Option<Displace>,
+        /// Stretch the sphere along each axis, in world units, by sliding the
+        /// sample point instead of scaling it: `p - clamp(p, -h, h)`.
+        ///
+        /// **Exactly distance-preserving**, so the result is still a true
+        /// distance field and `lipschitz` stays 1. One non-zero axis is a
+        /// capsule, two a stadium slab, three a rounded box — one primitive
+        /// covering a family that would otherwise be three.
+        ///
+        /// It is on `Sphere` alone because that is the only place it is not
+        /// redundant: elongating a `Box` along its own axes is the same shape
+        /// as widening `half_extents`, and a `Capsule` is already a sphere
+        /// elongated along an arbitrary segment.
+        #[serde(default)]
+        elongate: [f32; 3],
     },
     Box {
         center: [f32; 3],
@@ -275,6 +289,32 @@ pub enum VoxelOp {
         mode: CsgMode,
         #[serde(default)]
         displace: Option<Displace>,
+        /// Rotation about Y, in **degrees**, counted the same way as a node's
+        /// `Quat::from_rotation_y` so a rotated box and a rotated mesh agree.
+        ///
+        /// **Every building, quay, shed and plinth in the library is axis
+        /// aligned because the author had no choice.** A `Capsule` gets
+        /// arbitrary orientation free from its two endpoints, so the engine
+        /// could angle a tunnel but not a wall. One yaw covers essentially
+        /// every architectural case; full Euler or a quaternion is a larger
+        /// schema for cases nobody has needed.
+        ///
+        /// **Degrees, not radians, and the name says so.** `ops` is a
+        /// `Vec<serde_json::Value>` with no field-level schema, so `yaw = 45`
+        /// meant as degrees against code reading radians is a factor of 57
+        /// with no error and a plausible-looking render.
+        #[serde(default)]
+        yaw_degrees: f32,
+        /// Fillet radius, in world units. `d - r` on a box shrunk by `r`, so
+        /// **`half_extents` keeps meaning the outer extent** — round it and it
+        /// does not silently grow. Clamped to the smallest half-extent, which
+        /// is the largest radius that can be taken out of the box's own
+        /// thickness.
+        ///
+        /// Still a true distance field: subtracting a constant shifts every
+        /// level set outward by `r` and leaves the gradient alone.
+        #[serde(default)]
+        round: f32,
     },
     Capsule {
         a: [f32; 3],
@@ -347,26 +387,51 @@ impl VoxelOp {
 
     fn undisplaced_bounds(&self) -> ([f32; 3], [f32; 3]) {
         match self {
-            Self::Sphere { center, radius, .. } => (
-                [center[0] - radius, center[1] - radius, center[2] - radius],
-                [center[0] + radius, center[1] + radius, center[2] + radius],
-            ),
+            Self::Sphere {
+                center,
+                radius,
+                elongate,
+                ..
+            } => {
+                // The elongation slides the surface out along each axis by its
+                // own amount, so the extent is the radius plus it. Left out,
+                // the far end of an elongated sphere falls outside the op's
+                // own bounds and gets sliced off at a chunk boundary.
+                let e = [
+                    radius + elongate[0].abs(),
+                    radius + elongate[1].abs(),
+                    radius + elongate[2].abs(),
+                ];
+                (
+                    [center[0] - e[0], center[1] - e[1], center[2] - e[2]],
+                    [center[0] + e[0], center[1] + e[1], center[2] + e[2]],
+                )
+            }
             Self::Box {
                 center,
                 half_extents,
+                yaw_degrees,
                 ..
-            } => (
-                [
-                    center[0] - half_extents[0],
-                    center[1] - half_extents[1],
-                    center[2] - half_extents[2],
-                ],
-                [
-                    center[0] + half_extents[0],
-                    center[1] + half_extents[1],
-                    center[2] + half_extents[2],
-                ],
-            ),
+            } => {
+                // **The rotated extent, in closed form** — the support function
+                // of a box under a Y rotation, not a loop over eight corners.
+                // `Volume::edit` culls chunk spans by this, so an AABB that
+                // does not cover the rotated shape makes a runtime crater miss
+                // chunks entirely and leaves a seam or a floating slab at the
+                // crater's edge. `round` needs no term: it shrinks the box by
+                // the same radius it then adds back.
+                let (s, c) = yaw_degrees.to_radians().sin_cos();
+                let (s, c) = (s.abs(), c.abs());
+                let e = [
+                    c.mul_add(half_extents[0], s * half_extents[2]),
+                    half_extents[1],
+                    s.mul_add(half_extents[0], c * half_extents[2]),
+                ];
+                (
+                    [center[0] - e[0], center[1] - e[1], center[2] - e[2]],
+                    [center[0] + e[0], center[1] + e[1], center[2] + e[2]],
+                )
+            }
             Self::Capsule { a, b, radius, .. } => (
                 [
                     a[0].min(b[0]) - radius,
@@ -397,7 +462,12 @@ impl VoxelOp {
     /// O(1) when the distance at the centre exceeds the chunk's own radius,
     /// which is only sound if distance cannot fall faster than one unit per
     /// unit travelled. Spheres, boxes and capsules are true distance fields and
-    /// satisfy that. `y - height(x, z)` does not — on a steep slope it
+    /// satisfy that, and **so do all three shape transforms**: a yaw is an
+    /// isometry, an elongation maps each axis with slope at most one, and a
+    /// fillet subtracts a constant, which moves every level set and no
+    /// gradient. None of them appears below, and a test samples the ratio over
+    /// random point pairs rather than taking that on faith.
+    /// `y - height(x, z)` does not — on a steep slope it
     /// *overstates* how far away the surface is, and the early-out then skips
     /// chunks that do contain surface, punching holes in the terrain.
     ///
@@ -502,21 +572,35 @@ impl VoxelOp {
     /// Distance to the undisplaced shape.
     fn analytic_distance(&self, p: [f32; 3]) -> f32 {
         match self {
-            Self::Sphere { center, radius, .. } => length(sub(p, *center)) - radius,
+            Self::Sphere {
+                center,
+                radius,
+                elongate,
+                ..
+            } => length(elongated(sub(p, *center), *elongate)) - radius,
             Self::Box {
                 center,
                 half_extents,
+                yaw_degrees,
+                round,
                 ..
             } => {
-                let d = sub(p, *center);
+                let d = yawed(sub(p, *center), *yaw_degrees);
+                // **Shrink by the fillet radius before adding it back.** The
+                // authored `half_extents` is the outer extent either way, so
+                // rounding a box does not move its faces — and `bounds()` needs
+                // no rounding term. The clamp is what makes that true for any
+                // radius an author writes.
+                let thinnest = half_extents[0].min(half_extents[1]).min(half_extents[2]);
+                let r = round.max(0.0).min(thinnest.max(0.0));
                 let q = [
-                    d[0].abs() - half_extents[0],
-                    d[1].abs() - half_extents[1],
-                    d[2].abs() - half_extents[2],
+                    d[0].abs() - (half_extents[0] - r),
+                    d[1].abs() - (half_extents[1] - r),
+                    d[2].abs() - (half_extents[2] - r),
                 ];
                 let outside = length([q[0].max(0.0), q[1].max(0.0), q[2].max(0.0)]);
                 let inside = q[0].max(q[1]).max(q[2]).min(0.0);
-                outside + inside
+                outside + inside - r
             }
             Self::Capsule { a, b, radius, .. } => {
                 let pa = sub(p, *a);
@@ -1019,6 +1103,40 @@ fn index_local(x: usize, y: usize, z: usize) -> usize {
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
+
+/// Rotate a point *into* a shape yawed by `degrees` about the Y axis.
+///
+/// The shape turns the way `glam::Quat::from_rotation_y(degrees.to_radians())`
+/// turns a node, which is the only reason to prefer one sign over the other:
+/// an agent that yaws a voxel box and a mesh box by the same number gets the
+/// same heading from both. Sampling applies the *inverse*, hence the transpose.
+///
+/// The early return is not only for cost — it makes an unrotated box
+/// bit-identical to the one authored before `yaw_degrees` existed, rather than
+/// identical up to `sin(0.0)`.
+fn yawed(d: [f32; 3], degrees: f32) -> [f32; 3] {
+    if degrees == 0.0 {
+        return d;
+    }
+    let (s, c) = degrees.to_radians().sin_cos();
+    [c.mul_add(d[0], -s * d[2]), d[1], s.mul_add(d[0], c * d[2])]
+}
+
+/// Elongation: `p - clamp(p, -h, h)`, which stretches a shape along each axis
+/// by `h` **without distorting it**. The interval `[-h, h]` collapses to the
+/// origin, so every point maps to the closest point of the un-elongated shape's
+/// own frame, and distance is preserved exactly rather than approximately.
+fn elongated(d: [f32; 3], h: [f32; 3]) -> [f32; 3] {
+    if h == [0.0; 3] {
+        return d;
+    }
+    let (hx, hy, hz) = (h[0].abs(), h[1].abs(), h[2].abs());
+    [
+        d[0] - d[0].clamp(-hx, hx),
+        d[1] - d[1].clamp(-hy, hy),
+        d[2] - d[2].clamp(-hz, hz),
+    ]
+}
 fn scale(a: [f32; 3], s: f32) -> [f32; 3] {
     [a[0] * s, a[1] * s, a[2] * s]
 }
@@ -1031,6 +1149,24 @@ fn length(a: [f32; 3]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// A seeded xorshift returning `[-1, 1)`, for the property tests below.
+    ///
+    /// Seeded rather than `thread_rng` (never-do #7) so a failure is one that
+    /// can be re-run, and hand-rolled rather than a dependency because the
+    /// whole of it is three shifts.
+    fn unit_random(seed: u64) -> impl FnMut() -> f32 {
+        let mut state = seed;
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            #[allow(clippy::cast_precision_loss)]
+            {
+                ((state >> 40) as f32) / 8_388_608.0 - 1.0
+            }
+        }
+    }
+
     /// A surface lying exactly on a chunk boundary is still a surface. Both
     /// sides collapse to uniform — one all solid, one all air — so neither
     /// reported `has_surface`, `surface_chunks` skipped both, and the shared
@@ -1049,6 +1185,8 @@ mod tests {
             half_extents: [boundary * 0.5, boundary * 0.5, boundary * 0.5],
             mode: super::CsgMode::Union,
             displace: None,
+            yaw_degrees: 0.0,
+            round: 0.0,
         }]);
 
         let chunks = volume.surface_chunks();
@@ -1077,12 +1215,15 @@ mod tests {
             radius: 1.5,
             mode: super::CsgMode::Subtract,
             displace: None,
+            elongate: [0.0; 3],
         };
         let fill = super::VoxelOp::Box {
             center: [4.0, 4.0, 4.0],
             half_extents: [4.0, 4.0, 4.0],
             mode: super::CsgMode::Union,
             displace: None,
+            yaw_degrees: 0.0,
+            round: 0.0,
         };
 
         let mut volume = super::Volume::new([1, 1, 1], 0.25);
@@ -1126,6 +1267,7 @@ mod tests {
             radius,
             mode,
             displace: None,
+            elongate: [0.0; 3],
         }
     }
 
@@ -1362,6 +1504,7 @@ mod tests {
                 seed: 0x51D3,
                 ridged: true,
             }),
+            elongate: [0.0; 3],
         };
         let mut volume = Volume::new([4, 4, 4], 0.05);
         volume.bake(std::slice::from_ref(&op));
@@ -1407,6 +1550,7 @@ mod tests {
             radius: 2.0,
             mode: CsgMode::Union,
             displace: None,
+            elongate: [0.0; 3],
         };
         let bumpy = VoxelOp::Sphere {
             center: [0.0, 0.0, 0.0],
@@ -1419,6 +1563,7 @@ mod tests {
                 seed: 7,
                 ridged: false,
             }),
+            elongate: [0.0; 3],
         };
 
         let mut worst: f32 = 0.0;
@@ -1451,6 +1596,7 @@ mod tests {
             radius: 1.0,
             mode: CsgMode::Union,
             displace: None,
+            elongate: [0.0; 3],
         };
         let bumpy = VoxelOp::Sphere {
             center: [1.0, 2.0, 3.0],
@@ -1463,6 +1609,7 @@ mod tests {
                 seed: 1,
                 ridged: true,
             }),
+            elongate: [0.0; 3],
         };
         let (plo, phi) = plain.bounds();
         let (blo, bhi) = bumpy.bounds();
@@ -1485,6 +1632,7 @@ mod tests {
             radius: 1.75,
             mode: CsgMode::Union,
             displace: None,
+            elongate: [0.0; 3],
         };
         for i in 0_i16..64 {
             let t = f32::from(i) * 0.31;
@@ -1493,6 +1641,307 @@ mod tests {
             assert_eq!(plain.distance(p).to_bits(), analytic.to_bits());
         }
         assert!((plain.lipschitz() - 1.0).abs() < 1e-9);
+    }
+
+    /// The same guarantee for the three shape transforms of §2.2.
+    ///
+    /// **Zero yaw, zero fillet and zero elongation must be the identity on the
+    /// raw bits**, not merely close: every `.loom` in the library was authored
+    /// without these fields, `#[serde(default)]` gives them zero, and a change
+    /// of one ULP at a voxel that straddles the surface flips a sign in the
+    /// baked `i8` and moves a golden image.
+    #[test]
+    fn the_shape_transforms_are_bit_identical_at_zero() {
+        let center = [0.5, 1.5, 2.5];
+        let half = [1.25, 0.75, 2.0];
+        let boxed = VoxelOp::Box {
+            center,
+            half_extents: half,
+            mode: CsgMode::Union,
+            displace: None,
+            yaw_degrees: 0.0,
+            round: 0.0,
+        };
+        let sphere = VoxelOp::Sphere {
+            center,
+            radius: 1.75,
+            mode: CsgMode::Union,
+            displace: None,
+            elongate: [0.0; 3],
+        };
+        for i in 0_i16..64 {
+            let t = f32::from(i) * 0.31;
+            let p = [t.cos() * 3.0, t * 0.05 - 1.0, t.sin() * 3.0];
+            // The box arm exactly as it read before yaw and rounding existed.
+            let d = sub(p, center);
+            let q = [
+                d[0].abs() - half[0],
+                d[1].abs() - half[1],
+                d[2].abs() - half[2],
+            ];
+            let was = length([q[0].max(0.0), q[1].max(0.0), q[2].max(0.0)])
+                + q[0].max(q[1]).max(q[2]).min(0.0);
+            assert_eq!(boxed.distance(p).to_bits(), was.to_bits(), "box at {p:?}");
+            let was = length(sub(p, center)) - 1.75;
+            assert_eq!(sphere.distance(p).to_bits(), was.to_bits(), "sphere at {p:?}");
+        }
+        // And the bounds, which is the other half of what a scene depends on.
+        assert_eq!(
+            boxed.bounds(),
+            ([-0.75, 0.75, 0.5], [1.75, 2.25, 4.5]),
+            "an unrotated box's AABB moved"
+        );
+        assert!((boxed.lipschitz() - 1.0).abs() < 1e-9);
+    }
+
+    /// **A yaw is an isometry, a fillet is a constant, an elongation is a
+    /// clamp — so none of them changes the Lipschitz constant.** The task said
+    /// to confirm that rather than assume it, because `bake`'s early-out fills
+    /// a chunk in O(1) on the strength of it and a field that falls faster than
+    /// one unit per unit travelled punches holes in the surface.
+    ///
+    /// Sampled over random point pairs rather than reasoned about: the ratio
+    /// `|d(a) - d(b)| / |a - b|` is what the early-out actually needs bounded.
+    #[test]
+    fn the_shape_transforms_stay_one_lipschitz() {
+        let mut next = unit_random(0x2545_F491_4F6C_DD1D);
+        let mut worst = 0.0_f32;
+        for case in 0..64 {
+            let op = if case % 2 == 0 {
+                VoxelOp::Box {
+                    center: [next() * 2.0, next() * 2.0, next() * 2.0],
+                    half_extents: [1.0 + next(), 1.5 + next(), 2.0 + next()],
+                    mode: CsgMode::Union,
+                    displace: None,
+                    yaw_degrees: next() * 180.0,
+                    round: 0.5 + next() * 0.5,
+                }
+            } else {
+                VoxelOp::Sphere {
+                    center: [next() * 2.0, next() * 2.0, next() * 2.0],
+                    radius: 1.5 + next(),
+                    mode: CsgMode::Union,
+                    displace: None,
+                    elongate: [next() * 2.0, next() * 2.0, next() * 2.0],
+                }
+            };
+            for _ in 0..128 {
+                let a = [next() * 5.0, next() * 5.0, next() * 5.0];
+                let b = [next() * 5.0, next() * 5.0, next() * 5.0];
+                let travelled = length(sub(a, b));
+                if travelled < 1e-3 {
+                    continue;
+                }
+                worst = worst.max((op.distance(a) - op.distance(b)).abs() / travelled);
+            }
+        }
+        assert!(worst > 0.5, "the sampling never got near the bound: {worst}");
+        assert!(
+            worst <= 1.0 + 1e-4,
+            "a shape transform is not 1-Lipschitz: {worst}"
+        );
+    }
+
+    /// **`bounds()` is the one thing here that breaks quietly.** `Volume::edit`
+    /// culls chunk spans by it, so an AABB that does not cover the rotated or
+    /// elongated shape makes a runtime crater miss chunks entirely and leaves a
+    /// seam or a floating slab at its edge — geometry that looks like a
+    /// modelling mistake rather than a bookkeeping one.
+    ///
+    /// Randomised over yaw and extents on purpose: hand-listing eight corners
+    /// at 0 and 45 degrees — the two angles anyone writes by hand — passes
+    /// trivially, since both are symmetric.
+    #[test]
+    fn rotated_and_elongated_bounds_contain_the_solid() {
+        let mut next = unit_random(0x9E37_79B9_7F4A_7C15);
+        for case in 0..48 {
+            let center = [next() * 3.0, next() * 3.0, next() * 3.0];
+            let op = if case % 2 == 0 {
+                VoxelOp::Box {
+                    center,
+                    half_extents: [
+                        0.5 + next().abs() * 2.0,
+                        0.5 + next().abs() * 2.0,
+                        0.5 + next().abs() * 2.0,
+                    ],
+                    mode: CsgMode::Union,
+                    displace: None,
+                    yaw_degrees: next() * 360.0,
+                    round: next().abs() * 0.4,
+                }
+            } else {
+                VoxelOp::Sphere {
+                    center,
+                    radius: 0.5 + next().abs() * 1.5,
+                    mode: CsgMode::Union,
+                    displace: None,
+                    elongate: [next() * 2.0, next() * 2.0, next() * 2.0],
+                }
+            };
+            let (lo, hi) = op.bounds();
+            // Every point of the solid must lie inside the AABB. Marched over a
+            // region comfortably larger than the bounds, so a *missing* corner
+            // is what fails rather than a lucky sample.
+            let mut escaped = Vec::new();
+            for iz in 0..26 {
+                for iy in 0..26 {
+                    for ix in 0..26 {
+                        let f = |i: usize, axis: usize| {
+                            let (l, h) = (lo[axis] - 1.5, hi[axis] + 1.5);
+                            #[allow(clippy::cast_precision_loss)]
+                            (l + (h - l) * (i as f32) / 25.0)
+                        };
+                        let p = [f(ix, 0), f(iy, 1), f(iz, 2)];
+                        if op.distance(p) <= 0.0
+                            && (0..3).any(|a| p[a] < lo[a] - 1e-4 || p[a] > hi[a] + 1e-4)
+                        {
+                            escaped.push(p);
+                        }
+                    }
+                }
+            }
+            assert!(
+                escaped.is_empty(),
+                "case {case}: {} solid samples outside bounds {lo:?}..{hi:?}, e.g. {:?}",
+                escaped.len(),
+                &escaped[..escaped.len().min(3)]
+            );
+        }
+    }
+
+    /// A yaw turns the box the same way a node's `Quat::from_rotation_y` turns
+    /// a mesh, and 90 degrees is the case that says so unambiguously: a plank
+    /// long in X becomes a plank long in Z.
+    #[test]
+    fn a_quarter_turn_swaps_the_axes() {
+        let plank = |yaw: f32| VoxelOp::Box {
+            center: [0.0; 3],
+            half_extents: [4.0, 0.5, 1.0],
+            mode: CsgMode::Union,
+            displace: None,
+            yaw_degrees: yaw,
+            round: 0.0,
+        };
+        let (lo, hi) = plank(90.0).bounds();
+        assert!((hi[0] - 1.0).abs() < 1e-5 && (hi[2] - 4.0).abs() < 1e-5, "{lo:?}..{hi:?}");
+        // A point 3 m out along +Z is inside the turned plank and outside the
+        // straight one, which is the fact the AABB above only implies.
+        assert!(plank(90.0).distance([0.0, 0.0, 3.0]) < 0.0);
+        assert!(plank(0.0).distance([0.0, 0.0, 3.0]) > 0.0);
+        // The sign convention: +yaw carries +X toward -Z, as `from_rotation_y`
+        // does. At 90 degrees the plank's +X end is at -Z.
+        assert!(plank(90.0).distance([0.0, 0.0, -3.9]) < 0.0);
+    }
+
+    /// Elongation is **exactly** distance-preserving, and the proof available
+    /// here is that a sphere stretched along a segment is the capsule op — two
+    /// independent formulas that must agree to the float.
+    #[test]
+    fn an_elongated_sphere_is_a_capsule() {
+        let center = [1.0, 2.0, -0.5];
+        let h = 2.25_f32;
+        let stretched = VoxelOp::Sphere {
+            center,
+            radius: 0.8,
+            mode: CsgMode::Union,
+            displace: None,
+            elongate: [h, 0.0, 0.0],
+        };
+        let capsule = VoxelOp::Capsule {
+            a: [center[0] - h, center[1], center[2]],
+            b: [center[0] + h, center[1], center[2]],
+            radius: 0.8,
+            mode: CsgMode::Union,
+            displace: None,
+        };
+        let mut worst = 0.0_f32;
+        for i in 0_i16..96 {
+            let t = f32::from(i) * 0.41;
+            let p = [t.cos() * 4.0, t * 0.06, t.sin() * 3.0];
+            worst = worst.max((stretched.distance(p) - capsule.distance(p)).abs());
+        }
+        assert!(worst < 1e-5, "elongation disagrees with the capsule by {worst}");
+    }
+
+    /// Rounding takes the fillet **out of** the box rather than adding it on,
+    /// so `half_extents` keeps meaning the outer extent and `bounds()` needs no
+    /// term for it. A face centre stays exactly on the surface; the corner
+    /// moves inward, which is the fillet.
+    #[test]
+    fn rounding_keeps_the_authored_extents() {
+        let half = [2.0_f32, 1.5, 1.0];
+        let sharp = VoxelOp::Box {
+            center: [0.0; 3],
+            half_extents: half,
+            mode: CsgMode::Union,
+            displace: None,
+            yaw_degrees: 0.0,
+            round: 0.0,
+        };
+        let filleted = VoxelOp::Box {
+            center: [0.0; 3],
+            half_extents: half,
+            mode: CsgMode::Union,
+            displace: None,
+            yaw_degrees: 0.0,
+            round: 0.4,
+        };
+        assert_eq!(sharp.bounds(), filleted.bounds());
+        for axis in 0..3 {
+            let mut p = [0.0; 3];
+            p[axis] = half[axis];
+            assert!(
+                filleted.distance(p).abs() < 1e-6,
+                "the face centre moved on axis {axis}"
+            );
+        }
+        // The corner of the authored box now stands `r*(sqrt(3)-1)` clear of
+        // the filleted surface — 0.293 at r = 0.4 — which is the fillet.
+        let corner = half;
+        assert!(
+            (filleted.distance(corner) - 0.4 * (3.0_f32.sqrt() - 1.0)).abs() < 1e-5,
+            "the corner was not cut back: {}",
+            filleted.distance(corner)
+        );
+        assert!(sharp.distance(corner).abs() < 1e-6);
+        // Over-large radii clamp to the thinnest half-extent instead of growing
+        // the box past its own bounds.
+        let over = VoxelOp::Box {
+            center: [0.0; 3],
+            half_extents: half,
+            mode: CsgMode::Union,
+            displace: None,
+            yaw_degrees: 0.0,
+            round: 99.0,
+        };
+        assert!(over.distance([half[0], 0.0, 0.0]).abs() < 1e-6);
+    }
+
+    /// Only the heightfield hoists a per-column height, and the transforms must
+    /// not quietly acquire one — `bake` uses `Some` here to skip two thirds of
+    /// the work, and a rotated box has no such thing.
+    #[test]
+    fn only_the_heightfield_has_a_height() {
+        let ops = [
+            VoxelOp::Box {
+                center: [0.0; 3],
+                half_extents: [1.0; 3],
+                mode: CsgMode::Union,
+                displace: None,
+                yaw_degrees: 33.0,
+                round: 0.2,
+            },
+            VoxelOp::Sphere {
+                center: [0.0; 3],
+                radius: 1.0,
+                mode: CsgMode::Union,
+                displace: None,
+                elongate: [1.0, 0.0, 2.0],
+            },
+        ];
+        for op in ops {
+            assert!(op.height_at(0.25, 0.5).is_none());
+        }
     }
 
     #[test]

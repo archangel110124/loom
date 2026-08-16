@@ -172,6 +172,8 @@ mod tests {
             half_extents: [10.0, 1.0, 10.0],
             mode: CsgMode::Union,
             displace: None,
+            yaw_degrees: 0.0,
+            round: 0.0,
         }]);
         volume
     }
@@ -209,6 +211,8 @@ mod tests {
             half_extents: [4.0, 3.0, 4.0],
             mode: CsgMode::Subtract,
             displace: None,
+            yaw_degrees: 0.0,
+            round: 0.0,
         });
         let after = sky_exposure(&volume, point);
 
@@ -259,6 +263,8 @@ mod tests {
             half_extents: [10.0, 0.4, 10.0],
             mode: CsgMode::Union,
             displace: None,
+            yaw_degrees: 0.0,
+            round: 0.0,
         }]);
 
         // Several heights, because a single one could sit at a lucky phase of
@@ -316,6 +322,8 @@ mod tests {
             half_extents: [20.0, 2.0, 20.0],
             mode: CsgMode::Union,
             displace: None,
+            yaw_degrees: 0.0,
+            round: 0.0,
         }]);
 
         // 90 voxels below a roof, with a reach of EXPOSURE_STEPS = 64.

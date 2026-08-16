@@ -3,8 +3,8 @@ fn main() {
     use loom_voxel::*;
     let mut v = Volume::new([4,3,4], 0.25);
     v.bake(&[
-        VoxelOp::Box{center:[16.0,3.0,16.0],half_extents:[12.0,3.0,12.0],mode:CsgMode::Union, displace: None},
-        VoxelOp::Sphere{center:[16.0,7.0,16.0],radius:8.5,mode:CsgMode::Union, displace: None},
+        VoxelOp::Box{center:[16.0,3.0,16.0],half_extents:[12.0,3.0,12.0],mode:CsgMode::Union, displace: None, yaw_degrees: 0.0, round: 0.0,},
+        VoxelOp::Sphere{center:[16.0,7.0,16.0],radius:8.5,mode:CsgMode::Union, displace: None, elongate: [0.0; 3],},
         VoxelOp::Capsule{a:[5.0,7.0,16.0],b:[27.0,7.0,16.0],radius:2.0,mode:CsgMode::Subtract, displace: None},
     ]);
     let m = mesh::mesh_volume(&v, &SurfaceNets);

@@ -285,6 +285,8 @@ mod tests {
             half_extents: [15.0, 0.5, 15.0],
             mode: CsgMode::Union,
             displace: None,
+            yaw_degrees: 0.0,
+            round: 0.0,
         }]);
         volume
     }

@@ -3373,6 +3373,7 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
         radius,
         mode: loom_voxel::CsgMode::Subtract,
         displace: None,
+        elongate: [0.0; 3],
     };
     let touched = volume.edit(&blast);
     // §7.9: an edit dirties its chunks AND their neighbours, or the remesh
@@ -4801,18 +4802,22 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
                 half_extents: [14.0, 3.0, 14.0],
                 mode: loom_voxel::CsgMode::Union,
                 displace: None,
+                yaw_degrees: 0.0,
+                round: 0.0,
             },
             loom_voxel::VoxelOp::Sphere {
                 center: [9.0, 3.5, 16.0],
                 radius: 6.5,
                 mode: loom_voxel::CsgMode::Union,
                 displace: None,
+                elongate: [0.0; 3],
             },
             loom_voxel::VoxelOp::Sphere {
                 center: [19.5, 11.0, 22.0],
                 radius: 6.5,
                 mode: loom_voxel::CsgMode::Subtract,
                 displace: None,
+                elongate: [0.0; 3],
             },
         ]);
         volume
@@ -4893,6 +4898,8 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
             half_extents: [2.0, 5.0, 2.0],
             mode: loom_voxel::CsgMode::Subtract,
             displace: None,
+            yaw_degrees: 0.0,
+            round: 0.0,
         });
         let grid = GroundGrid::bake(&volume, [0.0; 3], [16.0, 0.0, 16.0], [13.0, 13.0]);
         let after = loom_grass::coverage(&rules, &grid.at(26.0, 10.0), [26.0, 10.0]);
