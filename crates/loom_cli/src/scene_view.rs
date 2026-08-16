@@ -111,6 +111,19 @@ impl SceneView {
             serde_json::to_string_pretty(&serde_json::json!({ "errors": errors }))
                 .unwrap_or_else(|_| "invalid scene".to_owned())
         })?;
+        // **Prefabs, and this line is a correctness requirement rather than
+        // tidiness.** `Scene::parse` accepts `prefab = "<alias>"` and does not
+        // resolve it: a key the parser does not understand is a key it
+        // *ignores*, so the instance arrives with no components, draws nothing,
+        // and validates clean. CLAUDE.md names this the likeliest way to
+        // regress S4, and the editor's own live view was doing it — every
+        // prefab instance in `loom run --edit` was invisible while
+        // `loom render` drew it correctly, because `render` goes through
+        // `prefab_load` and this did not.
+        let scene = crate::prefab_load::for_reading_in_dir(&scene, base).map_err(|errors| {
+            serde_json::to_string_pretty(&serde_json::json!({ "errors": errors }))
+                .unwrap_or_else(|_| "prefab resolution failed".to_owned())
+        })?;
         let world = World::from_scene(&scene);
         let library = crate::MeshLibrary::with_cache(&scene, base, cache);
         let materials = crate::materials::MaterialLibrary::for_scene(&world, &scene, base);
@@ -270,6 +283,71 @@ impl SceneView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A prefab instance must reach the editor's view, and this is the test
+    /// that was missing when it did not.**
+    ///
+    /// `Scene::parse` accepts `prefab = "<alias>"` and resolves nothing — a key
+    /// the parser does not understand is a key it *ignores* — so before
+    /// `for_reading_in_dir` was called here the instance arrived with no
+    /// components, contributed no object, appeared in neither `paths` nor
+    /// `picks`, and validated perfectly clean. `loom render` drew the room
+    /// because it goes through `prefab_load`; `loom run --edit` drew nothing
+    /// and said nothing.
+    ///
+    /// Asserting on `paths` and `picks` rather than on the object count is
+    /// deliberate: those two are what the hierarchy panel lists and what
+    /// click-to-select hit-tests, so they are the surfaces a human would have
+    /// noticed were empty.
+    #[test]
+    fn a_prefab_instance_reaches_the_view() {
+        let dir = std::env::temp_dir().join("loom_sceneview_prefab");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("lamp.loom"),
+            r#"
+[scene]
+format = 1
+id = "6d1f0b2a-77c4-4e19-9a3d-0b5e6f7a8c91"
+
+[[node]]
+name = "Lamp"
+transform = { pos = [0.0, 1.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+"#,
+        )
+        .expect("write prefab");
+
+        let scene = r#"
+[scene]
+format = 1
+id = "0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e50"
+
+[[prefab]]
+key = "lamp"
+id = "6d1f0b2a-77c4-4e19-9a3d-0b5e6f7a8c91"
+path = "lamp.loom"
+
+[[node]]
+name = "Placed"
+prefab = "lamp"
+transform = { pos = [3.0, 0.0, 0.0] }
+"#;
+
+        let view = SceneView::build(scene, &dir).expect("scene builds");
+        assert!(
+            view.paths.iter().any(|p| p.contains("Placed")),
+            "the instance must appear in the hierarchy's paths, got {:?}",
+            view.paths
+        );
+        assert!(
+            view.picks.keys().any(|p| p.contains("Placed")),
+            "the instance must be clickable, got {:?}",
+            view.picks.keys().collect::<Vec<_>>()
+        );
+    }
 
     const SCENE: &str = r#"
 [scene]

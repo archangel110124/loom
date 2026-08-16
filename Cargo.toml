@@ -17,3 +17,29 @@ members = [
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
+
+# **The compute crates are optimised even in a debug build, and the reason is
+# `cargo xtask validate`.**
+#
+# That gate must run debug: the validation layers are what it exists for, and
+# they only switch on under `cfg!(debug_assertions)` (`loom_render::Instance`).
+# But what is slow in a debug build is not the Vulkan calls — it is the CPU
+# voxel bake, marching an SDF over a thousand chunks of pure arithmetic that no
+# validation layer has an opinion about. Measured on `moraine.loom`: **89 s
+# debug against 28 s release**, and the gate renders every scene twice, so that
+# one scene cost about three minutes of a run.
+#
+# Optimising these four packages leaves the binary a debug build with
+# `debug_assertions` on and every layer armed — it changes only how fast the
+# arithmetic underneath runs. The cost is a one-time rebuild of them.
+#
+# **Not `opt-level = 3` on the whole dev profile**, which would strip the
+# assertions and overflow checks the rest of the engine is debugged with.
+[profile.dev.package.loom_voxel]
+opt-level = 3
+[profile.dev.package.loom_terrain]
+opt-level = 3
+[profile.dev.package.loom_field]
+opt-level = 3
+[profile.dev.package.loom_grass]
+opt-level = 3

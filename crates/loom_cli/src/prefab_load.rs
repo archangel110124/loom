@@ -32,6 +32,23 @@ pub(crate) fn for_reading(scene: &Scene, path: &Path) -> Result<Scene, Vec<Scene
     for_reading_with_warnings(scene, path).map(|(scene, _)| scene)
 }
 
+/// As [`for_reading`], for a caller that holds the scene's *directory* rather
+/// than its file path.
+///
+/// `prefab::library_for` takes the scene file and calls `.parent()` on it;
+/// `SceneView` has already taken that parent and kept only the base, because
+/// every asset path it resolves is relative to it. Re-attaching a filename
+/// recovers exactly what `library_for` wants **without inventing a second
+/// resolution rule** — which is the thing to avoid here, since a prefab that
+/// resolved differently in the editor than on the CLI would be far worse than
+/// the bug this exists to fix.
+///
+/// # Errors
+/// Whatever loading or resolution rejected.
+pub(crate) fn for_reading_in_dir(scene: &Scene, base: &Path) -> Result<Scene, Vec<SceneError>> {
+    for_reading(scene, &base.join("scene.loom"))
+}
+
 /// As [`for_reading`], keeping the orphaned-override warnings.
 ///
 /// # Errors

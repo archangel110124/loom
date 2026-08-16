@@ -480,7 +480,14 @@ fn alias_report(
                         format!("no `[[asset]]` declares `{alias}`. Add one pointing at the texture file.")
                     },
                 })),
-                Some(p) if !base.join(p).exists() => warnings.push(serde_json::json!({
+                // **Strip the `#Object` selector before asking the
+                // filesystem.** `file.obj#Name` selects one object out of a
+                // library, and `MeshLibrary` splits it seven hundred lines
+                // below; this did not, so it asked for a file whose name ends
+                // in `#WallLanternExterior001_Frame_Geo_LOD0`, was told it did
+                // not exist, and warned that a present file was missing.
+                // `props.loom` is in `SCENES` and carried that false warning.
+                Some(p) if !base.join(p.split_once('#').map_or(p, |(f, _)| f)).exists() => warnings.push(serde_json::json!({
                     "warning": "asset_file_missing",
                     "node": node.path,
                     "value": alias,

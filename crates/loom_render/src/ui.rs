@@ -85,7 +85,25 @@ impl Ui {
                 // against it would clip panels behind geometry.
                 enable_depth_test: false,
                 enable_depth_write: false,
-                srgb_framebuffer: false,
+                // **The swapchain is `B8G8R8A8_SRGB` (`viewer.rs:2172`), so this
+                // has to say so.** The crate's own words are "indicate whether
+                // you will target an sRGB framebuffer"; it feeds the answer to
+                // the fragment shader as specialization constant 0. Declaring
+                // `false` against an `_SRGB` target left the hardware's encode
+                // as a second, uncompensated conversion, and every UI colour
+                // displayed lifted — a `#16191E` panel arriving as `#535860`,
+                // and a contrast ratio designed at 14.6:1 landing near 6.7:1.
+                //
+                // **No golden image can see this.** `xtask image` drives the
+                // offscreen `Renderer`, which never constructs a `Ui`, so the
+                // gate cannot confirm or deny it — which is exactly why it went
+                // unnoticed, and why the check is a human looking at the editor.
+                //
+                // It matters now rather than later because the editor rework
+                // designs a palette from measured hex values (ADR 0033). Tuning
+                // colours on top of this would produce a palette that only
+                // looks right while the bug is present.
+                srgb_framebuffer: true,
             },
         )
         .map_err(|e| RenderError::Allocator(e.to_string()))?;

@@ -143,6 +143,20 @@ pub struct TransactionError {
     /// neither party intended.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current: Option<String>,
+    /// **Which op in the transaction failed**, zero-based, when one did.
+    ///
+    /// A transaction is one undo step and can be a dozen ops long; without this
+    /// a caller is told *what* went wrong and left to guess *where*. The editor
+    /// needs it to point at a row, and the agent needs it to retry the tail of
+    /// a transaction rather than the whole thing.
+    ///
+    /// `None` for failures that belong to no single op — a stale version token,
+    /// a parse error, a result that no longer loads.
+    ///
+    /// Additive to a *result* payload rather than to the scene format, so there
+    /// is no `format` bump and nothing on disk changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub op_index: Option<usize>,
 }
 
 impl std::fmt::Display for TransactionError {
@@ -190,8 +204,24 @@ pub fn apply_with(
             constraint,
             hint,
             current: None,
+            op_index: None,
         })
     };
+    // As `fail`, for the failures that belong to one op.
+    let fail_at =
+        |index: usize, error: &str, constraint: String, node: Option<String>, hint: Option<String>| {
+            let mut e = TransactionError {
+                error: error.to_owned(),
+                label: transaction.label.clone(),
+                node,
+                constraint,
+                hint,
+                current: None,
+                op_index: None,
+            };
+            e.op_index = Some(index);
+            Box::new(e)
+        };
 
     // Version first: re-applying against a scene that moved under you is the
     // whole point of the check, and doing any work before it is wasted.
@@ -211,6 +241,7 @@ pub fn apply_with(
                     .to_owned(),
             ),
             current: Some(source.to_owned()),
+            op_index: None,
         }));
     }
 
@@ -218,15 +249,16 @@ pub fn apply_with(
         .parse()
         .map_err(|e: toml_edit::TomlError| fail("parse_error", e.to_string(), None, None))?;
 
-    for op in &transaction.ops {
+    for (index, op) in transaction.ops.iter().enumerate() {
         // Unpack is the one op that needs to know what a prefab contains, so
         // it is applied here where the library is in scope rather than in
         // `apply_one`, which deliberately sees only the document.
         if let SceneOp::UnpackPrefab { node } = op {
-            unpack(&mut doc, node, library).map_err(|e| fail(&e.0, e.1, Some(e.2), e.3))?;
+            unpack(&mut doc, node, library)
+                .map_err(|e| fail_at(index, &e.0, e.1, Some(e.2), e.3))?;
             continue;
         }
-        apply_one(&mut doc, op).map_err(|e| fail(&e.0, e.1, Some(e.2), e.3))?;
+        apply_one(&mut doc, op).map_err(|e| fail_at(index, &e.0, e.1, Some(e.2), e.3))?;
     }
 
     let after = doc.to_string();
@@ -677,7 +709,24 @@ fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
                 if let Some(v) = values {
                     let mut array = toml_edit::Array::new();
                     for component in v {
-                        array.push(f64::from(*component));
+                        // **The shortest decimal that identifies the `f32`**,
+                        // not the exact `f64` widening of it. `f64::from(0.1f32)`
+                        // is 0.10000000149011612, and writing that into the file
+                        // made every gizmo drag and every scripted transform
+                        // spray seventeen digits across a diff nobody can read.
+                        // `prefab.rs:186` already does this; the two are now the
+                        // same rule.
+                        //
+                        // Round-trips exactly: the decimal is chosen to identify
+                        // the `f32` uniquely, so parsing it back gives the same
+                        // bits. Grid snapping's defaults depend on that — a snap
+                        // to 0.25 must read back as 0.25 and not as something
+                        // 1e-8 away from it.
+                        let shortest = component
+                            .to_string()
+                            .parse::<f64>()
+                            .unwrap_or_else(|_| f64::from(*component));
+                        array.push(shortest);
                     }
                     inline.insert(key, array.into());
                 }
@@ -1462,6 +1511,96 @@ components = { Light = { intensity = 400.0 } }
         let parsed = crate::Scene::parse(&applied.scene).expect("still valid");
         let node = parsed.nodes().iter().find(|n| n.path == "Room/Lamp").expect("node");
         assert_eq!(node.components["Light"]["intensity"], serde_json::json!(120.0));
+    }
+
+    /// **A failure names which op failed.** A transaction is one undo step and
+    /// can be a dozen ops long; "node not found" without an index tells the
+    /// caller what went wrong and leaves them to guess where.
+    #[test]
+    fn a_failure_says_which_op_failed() {
+        let scene = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d15\"
+
+[[node]]
+name = \"Desk\"
+";
+        let err = apply(
+            scene,
+            &tx(
+                "Two moves, the second impossible",
+                vec![
+                    SceneOp::SetTransform {
+                        node: "Desk".into(),
+                        pos: Some([1.0, 0.0, 0.0]),
+                        rot_euler: None,
+                        scale: None,
+                    },
+                    SceneOp::SetTransform {
+                        node: "NoSuchNode".into(),
+                        pos: Some([2.0, 0.0, 0.0]),
+                        rot_euler: None,
+                        scale: None,
+                    },
+                ],
+            ),
+        )
+        .expect_err("the second op cannot apply");
+
+        assert_eq!(err.op_index, Some(1), "the SECOND op failed, not the first");
+    }
+
+    /// **A transform writes the shortest decimal that identifies the `f32`.**
+    ///
+    /// `f64::from(0.1f32)` is `0.10000000149011612`, and that is what this used
+    /// to write — so a gizmo drag or a scripted move sprayed seventeen digits
+    /// across a diff a human is supposed to review. The value must still
+    /// round-trip exactly, because grid snapping's whole premise is that a snap
+    /// to 0.25 reads back as 0.25.
+    #[test]
+    fn a_transform_writes_a_readable_float_that_round_trips() {
+        let scene = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d14\"
+
+[[node]]
+name = \"Desk\"
+";
+        let applied = apply(
+            scene,
+            &tx(
+                "Move",
+                vec![SceneOp::SetTransform {
+                    node: "Desk".into(),
+                    pos: Some([0.1, 0.25, -2.5]),
+                    rot_euler: None,
+                    scale: None,
+                }],
+            ),
+        )
+        .expect("applies");
+        let text = applied.scene;
+
+        assert!(
+            text.contains("0.1") && !text.contains("0.10000000149011612"),
+            "0.1 must be written as `0.1`, got:\n{text}"
+        );
+        // And it must still be the same number when read back.
+        let reparsed = crate::Scene::parse(&text).expect("re-parses");
+        let node = reparsed
+            .nodes()
+            .iter()
+            .find(|n| n.path == "Desk")
+            .expect("the node survives");
+        let pos = node.transform.pos;
+        assert!(
+            (pos[0] - 0.1).abs() < f32::EPSILON
+                && (pos[1] - 0.25).abs() < f32::EPSILON
+                && (pos[2] + 2.5).abs() < f32::EPSILON,
+            "round-trip must be exact, got {pos:?}"
+        );
     }
 
     /// Same shape of bug on the transform: only the inline spelling was read,

@@ -160,9 +160,15 @@ impl Scene {
 
     /// The advisory `path` of an `[[asset]]` entry, by its file-local alias.
     ///
-    /// Advisory is the operative word (`docs/format/README.md` §3): identity is
-    /// the UUID. This is what an *importer* uses to find the source file, and
-    /// nothing resolves a reference through it at runtime.
+    /// **Identity is the UUID, but this path IS resolved at runtime.** The
+    /// comment here used to say nothing resolved a reference through it, while
+    /// `loom_cli`'s mesh and texture loaders have always joined it onto the
+    /// declaring scene's directory to find the file. ADR 0024 settled the
+    /// contradiction in favour of the code and amended
+    /// `docs/format/README.md` §3; this is that amendment reaching the source.
+    ///
+    /// Resolution is relative to the declaring scene file and to nothing else:
+    /// no project-relative fallback and no search path.
     #[must_use]
     pub fn asset_path(&self, key: &str) -> Option<&str> {
         self.doc
