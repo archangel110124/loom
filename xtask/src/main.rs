@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 35] = [
+const SCENES: [&str; 36] = [
     "assets/test/lanternhead.loom",
     // The imported PBR library. **Not in `GOLDEN`**: it adds no rendering path
     // that `materials.loom` does not already cover — it is a catalogue of
@@ -48,6 +48,11 @@ const SCENES: [&str; 35] = [
     // `pbr_library.loom` gives — it is a catalogue of assets, and what is worth
     // guarding is that they still load, not their pixels.
     "assets/test/props.loom",
+    // The secondary-ray demo (ADR 0019). In `SCENES` and not `GOLDEN`: the
+    // paths it shows are already covered — `materials.loom` sweeps metallic to
+    // 1.0, and sixteen references moved when the ray terms landed, so the gate
+    // already watches them. What this scene is for is a human looking at it.
+    "assets/test/stoneyard.loom",
     "assets/test/blockout.loom",
     "assets/test/ground.loom",
     "assets/test/beach.loom",

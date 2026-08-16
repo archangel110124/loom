@@ -1,0 +1,404 @@
+# A stone yard at low sun — the scene the secondary rays are for.
+#
+# **Every element here exists to make one ray term visible on its own.** ADR
+# 0019 added three, all inline ray queries from the fragment shader, and a
+# scene that mixes them indistinguishably proves none of them.
+#
+#     loom render assets/test/stoneyard.loom --out yard.png --size 1600x1000
+#
+# **Soft shadows — the leaning post.** A shadow's penumbra widens with the
+# distance between occluder and receiver, and nothing else in rendering does
+# that. The post leans, so its own shadow is sharp where it meets the ground
+# and diffuse at the tip, in one continuous object. A hard-shadow renderer
+# draws that shadow the same width along its whole length, which is the
+# comparison to make if the term is ever suspected of doing nothing.
+#
+# **Ambient occlusion — the huddle.** Three rocks set close enough to shade
+# each other, and a fissured shelf. AO multiplies the *sky* ambient only, so
+# it shows as contact darkening in the gaps between touching things and inside
+# the shelf's clefts. This is the scene half of what the SSAO deferral wanted,
+# and it works here for the reason that deferral could not: the rays are traced
+# against the TLAS, which holds meshes, and grass is not in it — so 45,000
+# blades cannot present a depth hairball to a hemisphere kernel.
+#
+# **Reflections — the wet flags.** The floor is at `roughness = 0.22`, which is
+# a damp flagstone rather than a mirror, so the rocks arrive as soft vertical
+# smears the way wet stone actually reflects. **What it will NOT contain is a
+# reflection of the flame**, because grass, water, rain and particles are all
+# generated in vertex shaders and exist in no acceleration structure. The
+# brazier's *light* still reaches the reflected point through `pointLights`,
+# which is most of what a fire contributes at this roughness — that is the
+# honest state of the feature and it is worth seeing rather than hiding.
+#
+# **And the two rocks that are not imported.** `VoxelRockA` and `VoxelRockB`
+# are one `sphere` op each with a ridged 3D displacement — the boulders on the
+# right. They stand next to photogrammetry scans on purpose: that comparison
+# is the whole justification for the displacement, and a scene is where it
+# should be arguable rather than in a commit message.
+
+[scene]
+format = 1
+id = "82d65c8a-105c-48bf-adfb-0d38bed4ac2c"
+
+[[asset]]
+key = "quay_stone_albedo"
+id = "94bc7e4f-9b55-4035-af1a-0788c10acb10"
+path = "../textures/quay_stone_albedo.png"
+
+[[asset]]
+key = "quay_stone_normal"
+id = "61878abf-c0d3-4d02-a2f0-b58cd42de502"
+path = "../textures/quay_stone_normal.png"
+
+[[asset]]
+key = "rock_beach_albedo"
+id = "d107e385-1a2c-4280-b041-58f4ea4d9bb6"
+path = "../textures/rock_beach_albedo.png"
+
+[[asset]]
+key = "rock_beach_normal"
+id = "7b590e13-6956-4115-ac6b-a2faa562c4b0"
+path = "../textures/rock_beach_normal.png"
+
+[[asset]]
+key = "rock_boulder_a_albedo"
+id = "b71443f4-9a12-4c8e-8b06-23a25a31ba19"
+path = "../textures/rock_boulder_a_albedo.png"
+
+[[asset]]
+key = "rock_boulder_a_normal"
+id = "8effad18-70d8-4d80-b7c8-beb6083f6f0c"
+path = "../textures/rock_boulder_a_normal.png"
+
+[[asset]]
+key = "rock_boulder_b_albedo"
+id = "7f9e33cc-31c0-47a4-9d0c-d0dc47d23893"
+path = "../textures/rock_boulder_b_albedo.png"
+
+[[asset]]
+key = "rock_boulder_b_normal"
+id = "cad0e285-8bfa-43c7-920a-dd21771e2f1e"
+path = "../textures/rock_boulder_b_normal.png"
+
+[[asset]]
+key = "tree_log_albedo"
+id = "83f2f985-87e5-4643-807e-9d7d183a21c3"
+path = "../textures/tree_log_albedo.png"
+
+[[asset]]
+key = "tree_log_normal"
+id = "ad88564e-3196-4c51-a921-6b68a2d4b77f"
+path = "../textures/tree_log_normal.png"
+
+[[asset]]
+key = "lantern_albedo"
+id = "022b4258-fa04-4be2-8093-3a2812bf420b"
+path = "../textures/lantern_albedo.png"
+
+[[asset]]
+key = "lantern_normal"
+id = "d0a917a4-30f7-4ca2-807b-cefe2d118039"
+path = "../textures/lantern_normal.png"
+
+[[asset]]
+key = "mesh_shelf"
+id = "38133054-28ba-496b-b366-3a456825c815"
+path = "../meshes/rock_beach.obj"
+
+[[asset]]
+key = "mesh_boulder_a"
+id = "6e617bcb-4e6f-422c-8855-7c241f11bc3c"
+path = "../meshes/rock_boulder_a.obj"
+
+[[asset]]
+key = "mesh_boulder_b"
+id = "da505e4e-62d8-4151-9f1e-2366e8ae4d7e"
+path = "../meshes/rock_boulder_b.obj"
+
+[[asset]]
+key = "mesh_log"
+id = "276d5d56-1c9a-44a0-8d80-9f24f0ea06f2"
+path = "../meshes/tree_log.obj"
+
+[[asset]]
+key = "mesh_lantern"
+id = "647a4b95-93b9-4572-b94a-28328382d426"
+path = "../meshes/lantern.obj#WallLanternExterior001_Frame_Geo_LOD0"
+
+[[node]]
+name = "Yard"
+
+  # **A low sun, and off to the left so shadows run across the frame rather
+  # than away from the camera.** A shadow pointing at the viewer is a shadow
+  # nobody can measure the penumbra of.
+  [node.components.Environment]
+  sun_direction = [-0.62, 0.26, 0.74]
+  sun_strength = 2.1
+  sun_color = [1.00, 0.88, 0.72]
+  # Deliberately generous. AO multiplies the sky ambient, so a scene with
+  # almost none has nothing for the term to remove — the commonest way to
+  # conclude an occlusion pass does nothing.
+  ambient = 0.55
+  sky_zenith = [0.10, 0.15, 0.26]
+  sky_horizon = [0.46, 0.50, 0.55]
+  fog_density = 0.004
+  fog_falloff = 0.05
+  exposure = 1.0
+
+[[node]]
+name = "Flags"
+parent = "Yard"
+transform = { pos = [0.0, -0.3, 0.0], scale = [17.0, 0.3, 13.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  # 0.22 is damp stone. Lower is a mirror and reads as ice; higher and the
+  # roughness-widened lobe smears the reflection into the ambient and the term
+  # stops being visible at all.
+  [node.components.Material]
+  albedo = [0.74, 0.74, 0.72]
+  roughness = 0.10
+  metallic = 0.0
+  albedo_map = { asset = "quay_stone_albedo" }
+  normal_map = { asset = "quay_stone_normal" }
+  uv_scale = [0.4, 0.4]
+  triplanar = true
+
+# --------------------------------------------------------------------------
+# Soft shadows: one leaning post, and a second standing upright beside it.
+# The pair is the control — same material, same light, different geometry, so
+# the only thing that can differ between their shadows is occluder distance.
+# --------------------------------------------------------------------------
+
+[[node]]
+name = "LeaningPost"
+parent = "Yard"
+transform = { pos = [-3.4, 1.5, 1.0], rot_euler = [0.0, 0.0, 24.0], scale = [0.07, 1.5, 0.07] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.27, 0.24]
+  roughness = 0.85
+
+[[node]]
+name = "UprightPost"
+parent = "Yard"
+transform = { pos = [-1.6, 1.5, 1.0], scale = [0.07, 1.5, 0.07] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.27, 0.24]
+  roughness = 0.85
+
+# --------------------------------------------------------------------------
+# Ambient occlusion: a fissured shelf and a huddle of boulders in contact.
+# --------------------------------------------------------------------------
+
+[[node]]
+name = "Shelf"
+parent = "Yard"
+transform = { pos = [-5.2, 0.0, -3.2], rot_euler = [0.0, 18.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_shelf" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.88
+  albedo_map = { asset = "rock_beach_albedo" }
+  normal_map = { asset = "rock_beach_normal" }
+
+[[node]]
+name = "BoulderA"
+parent = "Yard"
+transform = { pos = [0.9, 0.0, -0.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_boulder_a" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.90
+  albedo_map = { asset = "rock_boulder_a_albedo" }
+  normal_map = { asset = "rock_boulder_a_normal" }
+
+[[node]]
+name = "BoulderB"
+parent = "Yard"
+transform = { pos = [1.9, 0.0, -1.0], rot_euler = [0.0, 40.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_boulder_b" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.90
+  albedo_map = { asset = "rock_boulder_b_albedo" }
+  normal_map = { asset = "rock_boulder_b_normal" }
+
+[[node]]
+name = "Log"
+parent = "Yard"
+transform = { pos = [3.6, 0.18, 1.6], rot_euler = [0.0, -28.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_log" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.82
+  albedo_map = { asset = "tree_log_albedo" }
+  normal_map = { asset = "tree_log_normal" }
+
+# --------------------------------------------------------------------------
+# The voxel rocks: one sphere op each, ridged 3D displacement.
+# --------------------------------------------------------------------------
+
+[[node]]
+name = "VoxelRocks"
+parent = "Yard"
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.05
+  chunks = [4, 2, 3]
+
+  # **Two, with different seeds and amplitudes**, because one rock proves the
+  # displacement runs and two prove it is a generator rather than a single
+  # lucky shape.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [3.3, 0.42, 0.4]
+  radius = 0.42
+  mode = "union"
+  displace = { amplitude = 0.17, frequency = 1.9, octaves = 4, seed = 71223, ridged = true }
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [4.3, 0.33, 0.9]
+  radius = 0.31
+  mode = "union"
+  displace = { amplitude = 0.13, frequency = 2.6, octaves = 4, seed = 3391, ridged = true }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.9
+  albedo_map = { asset = "rock_boulder_a_albedo" }
+  normal_map = { asset = "rock_boulder_a_normal" }
+  uv_scale = [1.6, 1.6]
+  triplanar = true
+
+# --------------------------------------------------------------------------
+# A lantern, so there is a point light for the reflections to carry and a warm
+# note against the cold flags.
+# --------------------------------------------------------------------------
+
+# **The polished sphere, and it is here because a dielectric hides the term.**
+# Stone reflects about 4% of what it sees at normal incidence — Fresnel only
+# opens up at grazing angles — so a wet-looking floor viewed from a standing
+# eye shows a reflection that is real, measurable and almost invisible. That is
+# not a bug and it is not worth tuning the floor to hide: it is what stone
+# does. A metal at `metallic = 1.0` has its albedo as F0 instead of 4%, so the
+# same ray comes back at full strength and the term is unarguable.
+#
+# **Judge reflections here and everything else on the flags.**
+[[node]]
+name = "PolishedSphere"
+parent = "Yard"
+transform = { pos = [-0.2, 0.62, 0.9], scale = [0.42, 0.42, 0.42] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.86, 0.80, 0.68]
+  metallic = 1.0
+  roughness = 0.12
+
+[[node]]
+name = "SpherePlinth"
+parent = "Yard"
+transform = { pos = [-0.2, 0.10, 0.9], scale = [0.30, 0.10, 0.30] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.28, 0.26, 0.24]
+  roughness = 0.9
+
+[[node]]
+name = "LampPost"
+parent = "Yard"
+transform = { pos = [5.4, 1.15, -1.4], scale = [0.09, 1.15, 0.09] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.26, 0.23, 0.20]
+  roughness = 0.85
+
+[[node]]
+name = "Lantern"
+parent = "Yard"
+transform = { pos = [5.4, 2.45, -1.2], scale = [2.4, 2.4, 2.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_lantern" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  metallic = 0.55
+  roughness = 0.45
+  albedo_map = { asset = "lantern_albedo" }
+  normal_map = { asset = "lantern_normal" }
+
+[[node]]
+name = "LanternLight"
+parent = "Yard"
+transform = { pos = [5.4, 2.45, -1.2] }
+
+  # 2.45 m above the flags, so `d^2 / albedo` is about 10 — see the worked
+  # table on `Light::intensity`. Twelve is a shade over fully lit, which is
+  # what a lamp seen from outside its own pool should be.
+  [node.components.Light]
+  intensity = 12.0
+  color = [1.00, 0.80, 0.48]
+
+[[node]]
+name = "Glow"
+parent = "Yard"
+transform = { pos = [5.4, 2.45, -1.2] }
+
+  # A `Light` draws nothing; this is the visible source. One particle, no
+  # motion, bounded lifetime.
+  [node.components.ParticleEmitter]
+  burst = 1
+  rate = 0.0
+  lifetime = 110.0
+  lifetime_jitter = 0.0
+  speed = 0.0
+  spread_degrees = 0.0
+  radius = 0.0
+  gravity = 0.0
+  drag = 0.0
+  turbulence = 0.0
+  wind_response = 0.0
+  size = [0.5, 0.5]
+  alpha = [0.85, 0.85]
+  color_start = [1.00, 0.74, 0.40]
+  color_end = [1.00, 0.74, 0.40]
+  additive = true
+
+[[node]]
+name = "Camera"
+parent = "Yard"
+transform = { pos = [0.4, 1.55, 5.2], rot_euler = [-6.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 52.0
