@@ -24,7 +24,26 @@ import math
 import random
 
 
-def cone_sites(rng, count, height, radius, base, taper, droop, jitter):
+def whorl(t, tiers, depth):
+    """Radius multiplier for a conifer's branch tiers.
+
+    **A conifer is not a cone, it is a stack of skirts.** Branches grow in
+    whorls, one ring per year, so the silhouette steps outward at each tier and
+    pinches between them. A smooth cone of foliage is the single strongest tell
+    that a tree was placed on an envelope rather than grown, and no amount of
+    card jitter fixes it — jitter roughens the surface, it does not put gaps in
+    it.
+    """
+    if tiers <= 0 or depth <= 0.0:
+        return 1.0
+    # Sawtooth rather than a sine: a branch tier flares fast at its top and
+    # tapers away underneath, which is not symmetric.
+    phase = (t * tiers) % 1.0
+    return 1.0 - depth * phase
+
+
+def cone_sites(rng, count, height, radius, base, taper, droop, jitter,
+               tiers=0, tier_depth=0.0):
     """Positions and outward directions on a conifer's branch envelope.
 
     Placed on the *surface* of the envelope rather than through its volume:
@@ -37,7 +56,7 @@ def cone_sites(rng, count, height, radius, base, taper, droop, jitter):
         # uniform draw leaves the tip bald and the skirt matted.
         t = rng.random() ** 0.75
         y = base + t * (height - base)
-        r = radius * (1.0 - t) ** taper
+        r = radius * (1.0 - t) ** taper * whorl(t, tiers, tier_depth)
         if r <= 1e-4:
             continue
         a = rng.random() * math.tau
@@ -108,6 +127,12 @@ def main():
     ap.add_argument("--taper", type=float, default=1.0, help="cone sharpness")
     ap.add_argument("--size", type=float, default=0.20, help="card edge length")
     ap.add_argument("--size-jitter", type=float, default=0.35)
+    ap.add_argument("--tiers", type=int, default=0,
+                    help="conifer branch whorls; 0 is a smooth cone")
+    ap.add_argument("--tier-depth", type=float, default=0.28,
+                    help="how far the silhouette pinches between tiers")
+    ap.add_argument("--normal-jitter", type=float, default=0.45,
+                    help="how far a card may tilt off the envelope normal")
     ap.add_argument("--droop", type=float, default=0.35)
     ap.add_argument("--jitter", type=float, default=0.30)
     ap.add_argument("--seed", type=int, default=7)
@@ -115,9 +140,13 @@ def main():
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
-    place = cone_sites if args.preset == "spruce" else ellipsoid_sites
-    sites = place(rng, args.count, args.height, args.radius, args.base,
-                  args.taper, args.droop, args.jitter)
+    if args.preset == "spruce":
+        sites = cone_sites(rng, args.count, args.height, args.radius, args.base,
+                           args.taper, args.droop, args.jitter,
+                           args.tiers, args.tier_depth)
+    else:
+        sites = ellipsoid_sites(rng, args.count, args.height, args.radius,
+                                args.base, args.taper, args.droop, args.jitter)
 
     verts, uvs, faces = [], [], []
     # One shared UV square: every card samples the whole sprite. Reusing the
@@ -126,6 +155,15 @@ def main():
     uvs = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
 
     for pos, out, t in sites:
+        # **Tilt each card off the envelope normal.** Placed exactly outward,
+        # every card on the sunlit side catches the sun at the same angle and
+        # the canopy shades as one smooth cone — the giveaway that it is a
+        # shell wearing a leaf texture rather than a mass of separate sprigs.
+        # A perturbed normal is what makes neighbouring cards differ in
+        # brightness, which is most of what reads as depth.
+        if args.normal_jitter > 0.0:
+            out = tuple(out[i] + rng.uniform(-1.0, 1.0) * args.normal_jitter
+                        for i in range(3))
         size = args.size * (1.0 - args.size_jitter * rng.random())
         # Smaller toward the tip, which is what makes a crown read as tapering
         # rather than as the same clump scaled down bodily.

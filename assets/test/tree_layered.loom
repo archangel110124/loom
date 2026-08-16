@@ -1,0 +1,169 @@
+# The same tree built in layers, beside the one-shot generation it replaces.
+#
+#     loom render assets/test/tree_layered.loom --out layered.png --size 1280x800
+#
+# **Left is one Hunyuan3D generation. Right is that same mesh with a canopy of
+# alpha-tested cards over it.** One sprig texture, 1,399 cards, 5,596
+# triangles — against the generation's 30,000 for a lumpy solid.
+#
+# **Why the one-shot fails is structural, not a bad seed.** Hunyuan3D returns
+# one fused shell: 76% of that mesh's faces are a single component spanning the
+# whole height, trunk and branches and needles melted together, plus 1,300
+# crumbs under twenty faces. Nothing is instanced and nothing is shared — every
+# needle clump is unique geometry with its own patch of one 2048 atlas. Real
+# foliage is the opposite: one leaf drawn a thousand times. Thin things are
+# drawn by cutting their shape out of a rectangle, which is what
+# `Material::alpha_cutoff` is for and what `alpha_cutout.loom` proves.
+#
+# **The generated mesh is kept, as the armature.** It carries the trunk and the
+# branch mass, and a conifer really is dark and solid on the inside; what it
+# could never carry is a needle silhouette. Layering is the point — this is not
+# "generation was wrong", it is "generation is one of the three parts".
+#
+# The cards come from `tools/mesh/leaf_cards.py`, placed on the cone the mesh
+# already occupies, each quad emitted twice with the winding reversed because
+# the mesh pipeline culls back faces and a one-sided canopy is transparent from
+# behind.
+#
+# **The canopy casts no ray-traced shadow, deliberately.** An alpha-tested
+# object is kept out of the acceleration structure, because a ray query never
+# runs a fragment shader and would occlude as the whole quad — 1,399 hard
+# rectangles on the ground. The armature underneath is opaque and does cast,
+# which is what keeps the tree anchored.
+
+[scene]
+format = 1
+id = "8e09d2fd-58bb-43fc-a8b7-309d37e6c7a9"
+
+[[asset]]
+key = "mesh_Spruce"
+id = "3e5abc0f-51be-41ae-b0f7-795bb73b18fa"
+path = "../meshes/spruce.obj"
+
+[[asset]]
+key = "mesh_Canopy"
+id = "db868d39-0871-4b01-837e-460245a82f1a"
+path = "../meshes/spruce_canopy.obj"
+
+[[asset]]
+key = "spruce_albedo"
+id = "767d2b1b-704c-4fe5-a904-51859c32c51d"
+path = "../textures/spruce_albedo.png"
+
+[[asset]]
+key = "spruce_sprig_albedo"
+id = "3887c446-678f-4f09-8c3a-596f3908ef7a"
+path = "../textures/spruce_sprig_albedo.png"
+
+[[asset]]
+key = "ground_soil_albedo"
+id = "578f5c64-a6bb-4039-8dbc-0da019ebd710"
+path = "../textures/ground_soil_albedo.png"
+
+[[node]]
+name = "Stand"
+
+  [node.components.Environment]
+  sun_direction = [0.38, 0.66, 0.65]
+  sun_strength = 2.0
+  sun_color = [1.0, 0.97, 0.91]
+  ambient = 0.40
+  sky_zenith = [0.10, 0.15, 0.25]
+  sky_horizon = [0.53, 0.57, 0.60]
+  fog_density = 0.0012
+
+# **Dark green, not brown.** A thinning canopy shows the ground between its
+# cards, and `meadow.loom` learned the same rule the hard way: any scene whose
+# foliage is see-through owes its ground the colour of that foliage.
+[[node]]
+name = "Ground"
+parent = "Stand"
+transform = { pos = [0.0, -0.25, 0.0], scale = [18.0, 0.25, 14.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.33, 0.24]
+  roughness = 0.95
+  albedo_map = { asset = "ground_soil_albedo" }
+  uv_scale = [0.5, 0.5]
+  triplanar = true
+
+# ---- left: the one-shot generation, exactly as `spruce.loom` renders it -----
+[[node]]
+name = "OneShot"
+parent = "Stand"
+transform = { pos = [-3.4, 2.4975, 0.0], scale = [2.5, 2.5, 2.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_Spruce" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.92
+  albedo_map = { asset = "spruce_albedo" }
+
+# ---- right: the same mesh, plus a canopy ------------------------------------
+[[node]]
+name = "LayeredArmature"
+parent = "Stand"
+# **Narrowed on X and Z, full height.** At the canopy's own radius the mesh is
+# a closed cone and occludes everything behind it, so the cards only ever
+# appear at the silhouette and the tree reads as a pale solid with a fringe —
+# which is exactly what the first attempt looked like. Pulled inside the card
+# shell it becomes what a conifer's interior actually is: dark mass glimpsed
+# between foliage. The cards, not the mesh, now draw the outline.
+transform = { pos = [3.4, 2.4975, 0.0], scale = [1.30, 2.5, 1.30] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_Spruce" }
+
+  # Dark, for the same reason. It is interior mass seen between cards rather
+  # than a surface being read, and at full brightness it shows through as pale
+  # lumps however well the canopy covers it.
+  [node.components.Material]
+  albedo = [0.20, 0.24, 0.17]
+  roughness = 0.95
+  albedo_map = { asset = "spruce_albedo" }
+
+# The cards are authored in metres already, so this node is unscaled and only
+# moves — `leaf_cards.py` was given the armature's real height and radius.
+[[node]]
+name = "LayeredCanopy"
+parent = "Stand"
+transform = { pos = [3.4, 0.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_Canopy" }
+
+  # **Tinted, not left at white.** The sprite is a photograph of a real spruce
+  # — a grey-green needle with a strong specular highlight — and against the
+  # baked atlas beside it that reads as washed out. The albedo factor is the
+  # tint knob the texture path already has (`albedo *= sampled.rgb`), so the
+  # correction costs nothing and leaves the sprite reusable at other tints.
+  [node.components.Material]
+  albedo = [0.52, 0.78, 0.38]
+  roughness = 0.95
+  albedo_map = { asset = "spruce_sprig_albedo" }
+  alpha_cutoff = 0.45
+
+[[node]]
+name = "ScaleRef"
+parent = "Stand"
+transform = { pos = [0.0, 0.85, 2.6], scale = [0.06, 0.85, 0.06] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.86, 0.83, 0.76]
+  roughness = 0.6
+
+[[node]]
+name = "Camera"
+parent = "Stand"
+transform = { pos = [0.0, 3.20, 12.0], rot_euler = [-3.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 52.0

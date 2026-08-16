@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 41] = [
+const SCENES: [&str; 42] = [
     "assets/test/lanternhead.loom",
     // A landscape out of one `heightfield` op, with the imported props on it at
     // their real size. **Not in `GOLDEN`**: `ground.loom` already references the
@@ -70,6 +70,11 @@ const SCENES: [&str; 41] = [
     "assets/test/spruce.loom",
     // The alpha test. Also in `GOLDEN`, where the reasoning is.
     "assets/test/alpha_cutout.loom",
+    // The layered tree. In `SCENES` and not `GOLDEN`: its rendering path is
+    // the alpha test, which `alpha_cutout.loom` already guards at 320x200 far
+    // more legibly than 6,500 cards would. What is worth checking here is that
+    // a canopy of that size still loads and draws without a validation message.
+    "assets/test/tree_layered.loom",
     // The secondary-ray demo (ADR 0019). In `SCENES` and not `GOLDEN`: the
     // paths it shows are already covered — `materials.loom` sweeps metallic to
     // 1.0, and sixteen references moved when the ray terms landed, so the gate
