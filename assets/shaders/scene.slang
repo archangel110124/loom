@@ -288,7 +288,17 @@ float ambientStrength() {
 /// singularity from becoming an infinity the frame cannot recover from.
 static const float LIGHT_MAX = 4096.0;
 
-float3 pointLights(float3 worldPos, float3 normal) {
+/// `minDist` is the radius of the thing being lit, and it exists because a
+/// SPHERE is not a point.
+///
+/// A surface passes 1 cm and gets exactly the behaviour it always had. A smoke
+/// puff passes its own radius, because a light *inside* a ball of smoke is at
+/// zero distance from the ball's centre and `intensity / d^2` is then whatever
+/// the clamp says — measured on the deck, a puff born 15 cm under the brazier's
+/// light came out at sRGB (185, 143, 109), a hard white-hot bead floating over
+/// the sea. The mean irradiance on a ball of radius R from a light at distance
+/// d goes as `1 / max(d, R)^2`, and that is all this is.
+float3 pointLights(float3 worldPos, float3 normal, float minDist) {
     float3 sum = float3(0.0, 0.0, 0.0);
     uint count = min(push.environment[0].lightCount, LOOM_MAX_LIGHTS);
     for (uint i = 0; i < count; ++i) {
@@ -305,7 +315,7 @@ float3 pointLights(float3 worldPos, float3 normal) {
         // at the boundary as well as the value, so the edge of a light's reach
         // is invisible rather than merely dim.
         float window = saturate(1.0 - pow(d / radius, 4.0));
-        float atten = window * window / max(d2, 1e-4);
+        float atten = window * window / max(d2, minDist * minDist);
         float ndotl = max(dot(normal, toLight / d), 0.0);
         // **Clamped at the singularity, which is here and not in a later
         // pass.** The denominator is floored at 1 cm, so a surface that
@@ -323,6 +333,11 @@ float3 pointLights(float3 worldPos, float3 normal) {
         sum += min(l.color.rgb * (l.position.w * atten * ndotl), LIGHT_MAX);
     }
     return sum;
+}
+
+/// Surfaces, at the 1 cm floor this has always used. Byte-identical.
+float3 pointLights(float3 worldPos, float3 normal) {
+    return pointLights(worldPos, normal, 0.01);
 }
 
 float3 skyZenith() { return push.environment[0].zenith.rgb; }
@@ -2627,6 +2642,14 @@ static const float FIRE_TAU_BASE_H = 0.18;
 /// Peak occlusion, so a flame is never quite a wall.
 static const float FIRE_OPACITY = 0.92;
 
+/// How strongly a smoke puff takes the scene's point lights.
+///
+/// One, meaning the sprite is shaded exactly as an opaque Lambertian sphere of
+/// its authored albedo would be. Anything else is a fudge factor asking to be
+/// tuned per scene, and the knob that actually belongs to the author is the
+/// albedo — which is `color_start`/`color_end`, already in the schema.
+static const float SMOKE_LIGHT = 1.0;
+
 
 /// Fractal noise for the flame. `detail` fades the finest octave out with
 /// distance rather than dropping it abruptly, which would pop.
@@ -3001,7 +3024,47 @@ float4 particleFragmentMain(ParticleOutput in) : SV_Target {
         return float4(rgb * alpha, 0.0);
     }
 
-    float3 rgb = lerp(in.color.rgb, fogColor(-normalize(toEye)), fog);
+    // **Smoke is a sphere, and until now it was a disc.**
+    //
+    // Every alpha-blended particle emitted one flat colour over its whole quad,
+    // so a plume was N discs of identical grey stacked up: the opacity
+    // accumulated correctly — `1 - (1 - a)^N` — but nothing about the COLOUR
+    // said there was more than one, and a stack of same-coloured discs is a
+    // stack of discs however soft its edges are.
+    //
+    // The normal is the hemisphere facing the eye, taken straight off the
+    // sprite's own geometry: `origin` is the puff's centre and `origin.w` its
+    // radius, so `off + toEye * sqrt(1 - r^2) * radius` points out of the
+    // sphere the disc is standing in for. No basis to reconstruct, no varying
+    // to add, and it is correct at every billboard orientation because the
+    // billboard IS oriented to the eye.
+    //
+    // **It is ADDED to the authored colour rather than replacing it, and that
+    // is what keeps the blast radius honest.** `pointLights` returns zero in a
+    // scene with no point lights, so `1 + lit * SMOKE_LIGHT` is exactly 1 and
+    // every plume in the repo not standing next to a light renders
+    // byte-identical. Where there IS a fire, the near side of each puff picks up
+    // its colour and the far side keeps whatever the scene authored — so
+    // "genuinely black on the shadow side" becomes a scene rule the engine makes
+    // visible, rather than a grey the engine imposes.
+    //
+    // **What this cannot do, plainly.** Each puff is shaded as if it were alone.
+    // Nothing here knows how much smoke lies between this puff and the light, so
+    // a deep column does not darken its own middle and the tenth puff in from
+    // the edge is lit as brightly as the first. Real smoke is black inside
+    // because of that self-shadowing and this is not it; getting it needs the
+    // plume's optical depth rendered into an offscreen R16F target and a second
+    // draw shaded from it — one full-resolution target, a second pass over the
+    // whole particle set, and its own render-graph barriers. What is bought here
+    // is the per-puff gradient, which is the difference between discs and volume
+    // at plume distance; the column's interior still goes dark, but by
+    // transmittance rather than by shadow.
+    float3 lightDir = normalize(toEye);
+    float3 sphereN = normalize(in.worldPos - in.origin.xyz
+                             + lightDir * (sqrt(saturate(1.0 - r * r)) * in.origin.w));
+    float3 lit = pointLights(in.worldPos, sphereN, max(in.origin.w, 0.01));
+    float3 rgb = in.color.rgb * (1.0 + lit * SMOKE_LIGHT);
+    rgb = lerp(rgb, fogColor(-normalize(toEye)), fog);
     // Premultiplied: the pipeline's source factor is ONE.
     return float4(rgb * alpha, alpha);
 }

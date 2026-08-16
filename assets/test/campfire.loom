@@ -159,12 +159,15 @@ name = "Flame"
 parent = "Night"
 transform = { pos = [12.1, 5.25, 13.3] }
 
-  # **One static quad, and the flame lives inside it.** Not a stack of
-  # sprites: the colour target is 8-bit and additive blending clamps at 1.0
-  # with no rolloff, so overlapping sprites pin red after about three layers
-  # and the middle of any sprite fire is white however the sprites are shaped.
-  # That is what made the last attempt a fireball. One quad has an overdraw of
-  # exactly one, so the colour ramp survives everywhere.
+  # **One static quad, and the flame is MARCHED through it.** Not a stack of
+  # sprites, and no longer a level set on the quad's own plane either: the
+  # fragment integrates the field along its view ray through the emitter's
+  # inscribed sphere. One quad still has an overdraw of exactly one, which is
+  # what lets the ramp survive everywhere.
+  #
+  # The clipping argument this comment used to make — an 8-bit target where
+  # additive blending pins red after about three layers — was true and is void.
+  # ADR 0018 replaced that target with an HDR float frame and a tonemap.
   #
   # `lifetime` is long but BOUNDED. `cargo xtask validate` renders every scene
   # with no `--sim`, and the emitter is warmed up for two lifetimes' worth of
@@ -191,6 +194,53 @@ transform = { pos = [12.1, 5.25, 13.3] }
   color_end = [1.0, 1.0, 1.0]
   additive = true
   flame = true
+
+# **The smoke, and it is born where the FLAME DIES rather than at the fuel.**
+#
+# The flame quad is centred at 5.25 and is 2.2 m tall, so its fuel line is at
+# 4.15 and its ceiling at 6.35. Spawning at the emitter base is the commonest
+# mistake in the book and reads as two effects standing in the same place; 6.0
+# puts the first puff inside the top of the fire, so the flame hands over to the
+# smoke instead of the two overlapping. The gap below that is bridged by the
+# flame shader's own soot term, which is the same field under a lower ceiling
+# and therefore cannot disagree with the flame about where the fire is.
+#
+# **Many thin puffs, not a few thick ones, and that is what "density
+# accumulates" means in an alpha-blended path.** At 30 a second and alpha 0.60 a
+# plume is half a dozen separately readable balls — the "N discs" tell, and no
+# amount of shading fixes a thing you can count. Ninety-five a second at 0.26
+# puts four or five overlapping on any ray, and `1 - (1 - 0.26)^5 = 0.78` is the
+# same total opacity arrived at through a stack nobody can resolve.
+#
+# **The colour is soot, not grey.** `color_start` is 0.03 — three percent
+# albedo, roughly what lampblack measures — and the plume is visible at all
+# because the fire lights the side of it that faces the fire. That is the whole
+# of "black smoke": the engine adds `pointLights` on the puff's sphere normal
+# and the scene supplies an albedo dark enough for the far side to stay black.
+# Author it at 0.3 and it is grey smoke with a warm edge, which is what every
+# plume in this repo was.
+[[node]]
+name = "Smoke"
+parent = "Night"
+transform = { pos = [12.1, 6.0, 13.3] }
+
+  [node.components.ParticleEmitter]
+  rate = 95.0
+  lifetime = 3.2
+  lifetime_jitter = 0.4
+  speed = 1.15
+  spread_degrees = 20.0
+  radius = 0.11
+  gravity = 0.9
+  drag = 0.55
+  turbulence = 1.1
+  turbulence_scale = 0.35
+  wind_response = 2.2
+  size = [0.22, 1.55]
+  alpha = [0.26, 0.0]
+  color_start = [0.030, 0.027, 0.025]
+  color_end = [0.014, 0.013, 0.015]
+  seed = 4211
 
 [[node]]
 name = "Camera"
