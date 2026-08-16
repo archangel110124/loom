@@ -1048,10 +1048,30 @@ fn validate() -> std::process::ExitCode {
     std::process::ExitCode::from(1)
 }
 
-/// Simulate the same scene with both build profiles and require the same hash.
+/// Scenes simulated under both build profiles, whose hashes must agree.
+///
+/// **`tower` has no voxels in it**, and for most of this project's life it was
+/// the whole of this check — so "the sim hash is unchanged" was never once a
+/// statement about a voxel bake, in either direction.
+///
+/// `river` is the cheapest scene measured that can *see* one. Its hash reads
+/// the baked field twice over: the volume becomes solid cells for physics, and
+/// the water's bed is marched out of the same volume, so the crate floating
+/// down the channel is steered by it. Changing the channel capsule's radius
+/// from 3.0 to 2.1 moves the hash from `1c33f211d7ea9916` to `ec853d50f513842a`
+/// [measured].
+///
+/// **`rain_gantry` was tried first and cannot see a bake at all** — the report
+/// suggests it for its 8-chunk cost, but its voxels are static and nothing
+/// rests on them, so the same kind of mutation (`half_extents` 15 → 9) leaves
+/// its hash at `1f3b3d49a69f244f` [measured]. A voxel scene is not
+/// automatically a voxel *check*; the sim hash covers rigid bodies, so the
+/// terrain has to be under one.
+const DETERMINISM_SCENES: [&str; 2] = ["assets/test/tower.loom", "assets/test/river.loom"];
+
+/// Simulate the same scenes with both build profiles and require the same hash.
 fn determinism_holds(root: &Path) -> Result<String, String> {
-    let scene = "assets/test/tower.loom";
-    if !root.join(scene).exists() {
+    if DETERMINISM_SCENES.iter().any(|s| !root.join(s).exists()) {
         return Ok("skipped, no scene".to_owned());
     }
     let release = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
@@ -1062,7 +1082,7 @@ fn determinism_holds(root: &Path) -> Result<String, String> {
         return Ok("skipped, no release build".to_owned());
     }
 
-    let hash_of = |binary: &str| -> Option<String> {
+    let hash_of = |binary: &str, scene: &str| -> Option<String> {
         let out = Command::new(root.join(binary))
             .args(["sim", scene, "--ticks", "300"])
             .current_dir(root)
@@ -1077,14 +1097,26 @@ fn determinism_holds(root: &Path) -> Result<String, String> {
         Some(text[start..end].to_owned())
     };
 
-    match (hash_of("target/debug/loom"), hash_of("target/release/loom")) {
-        (Some(debug), Some(release)) if debug == release => Ok(debug),
-        (Some(debug), Some(release)) => Err(format!(
-            "determinism\n  debug and release disagree: {debug} vs {release}\n  \
-             every `loom sim --assert` depends on this holding"
-        )),
-        _ => Ok("skipped, could not read a hash".to_owned()),
+    let mut agreed = Vec::new();
+    for scene in DETERMINISM_SCENES {
+        let name = scene.rsplit('/').next().unwrap_or(scene);
+        match (
+            hash_of("target/debug/loom", scene),
+            hash_of("target/release/loom", scene),
+        ) {
+            (Some(debug), Some(release)) if debug == release => {
+                agreed.push(format!("{name} {debug}"));
+            }
+            (Some(debug), Some(release)) => {
+                return Err(format!(
+                    "determinism\n  {name}: debug and release disagree: {debug} vs {release}\n  \
+                     every `loom sim --assert` depends on this holding"
+                ));
+            }
+            _ => return Ok("skipped, could not read a hash".to_owned()),
+        }
     }
+    Ok(agreed.join(", "))
 }
 
 /// Record anything the run said that means it went wrong.
