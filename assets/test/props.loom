@@ -65,6 +65,16 @@ id = "712a499b-8aa8-4794-8713-e9cadf69f9e1"
 path = "../textures/rock_boulder_a_normal.png"
 
 [[asset]]
+key = "rock_boulder_b_albedo"
+id = "2e2a415c-68d3-452d-9dae-2f8e7875b8eb"
+path = "../textures/rock_boulder_b_albedo.png"
+
+[[asset]]
+key = "rock_boulder_b_normal"
+id = "637237e9-9ad5-4221-a069-1b670b2fc583"
+path = "../textures/rock_boulder_b_normal.png"
+
+[[asset]]
 key = "mesh_RockBoulderB"
 id = "054f439d-098e-4567-a6d8-721b841b7225"
 path = "../meshes/rock_boulder_b.obj"
@@ -200,8 +210,12 @@ transform = { pos = [6.0, 0.0, 1.5], scale = [1.0, 1.0, 1.0] }
   [node.components.Material]
   albedo = [1.0, 1.0, 1.0]
   roughness = 0.9
-  albedo_map = { asset = "rock_boulder_a_albedo" }
-  normal_map = { asset = "rock_boulder_a_normal" }
+  # **B's own atlas, and it was A's until a render caught it.** These are baked
+  # per-model atlases, not tiling materials: island layouts differ between two
+  # rocks from the same set, so the wrong one smears rather than merely looking
+  # like the wrong stone. That is why it read as an exporter bug and was not.
+  albedo_map = { asset = "rock_boulder_b_albedo" }
+  normal_map = { asset = "rock_boulder_b_normal" }
   uv_scale = [1.0, 1.0]
 
 [[node]]

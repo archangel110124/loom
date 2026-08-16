@@ -25,6 +25,22 @@ budget — 30,000 gives a 2.6 MiB OBJ per rock. Pass 0 to keep the original.
 **+Y up, which is Blender's -Z forward.** Loom is Y-up like glTF; Blender is
 Z-up. Getting this wrong lays every rock on its side, which is obvious, and
 mirrors the normals, which is not.
+
+**The V axis is flipped on the way out, and this is the one that cost a
+render.** `loom_asset::import_obj` takes `vt` *as written* — deliberately, with
+a comment saying the textbook flip renders `trees9.obj` with bark on its leaves.
+That pack's exporter had already flipped V, so "as written" is correct for it
+and wrong for anything writing standard OBJ, which is what Blender does.
+
+The symptom is specific and worth recognising: these vendor albedos are baked
+UV atlases — islands of texture separated by **black gutters** — so a flipped V
+lands some islands on texture and some on gutter, and the model renders as
+patches of correct rock mixed with black. It reads as broken geometry or a
+broken decimate, and it is neither; both were measured and cleared first.
+
+The real fix is an explicit per-asset UV convention in the scene schema rather
+than two OBJ sources disagreeing. Until that exists, the converter emits what
+this engine reads.
 """
 import sys
 
@@ -79,6 +95,22 @@ bpy.ops.wm.obj_export(
     up_axis="Y",
 )
 
+# **Flip V after the fact rather than in the mesh data.** Blender's OBJ
+# exporter has no flip option and mutating every UV layer in place would have
+# to be undone before a second export from the same file. A line rewrite is
+# exact, cheap and obvious.
+lines = []
+with open(out, encoding="utf-8", errors="ignore") as fh:
+    for line in fh:
+        if line.startswith("vt "):
+            parts = line.split()
+            u, v = float(parts[1]), float(parts[2])
+            lines.append(f"vt {u:.6f} {1.0 - v:.6f}\n")
+        else:
+            lines.append(line)
+with open(out, "w", encoding="utf-8") as fh:
+    fh.writelines(lines)
+
 names = ", ".join(o.name for o in meshes[:8])
 print(f"LOOM-EXPORT {out} objects={len(meshes)} "
-      f"faces={total_before}->{total_after} names={names}")
+      f"faces={total_before}->{total_after} uv_v=flipped names={names}")
