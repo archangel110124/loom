@@ -583,6 +583,16 @@ change, so your edits appear live. Two consequences:
 > `SV_VertexID` and none of them can be hit by any ray — so `lanternhead`'s wet quay reflects the
 > shed and not the brazier's flame. **Anything that wants to be reflected has to become an
 > `Object`.** Water still reflects the analytic sky, deliberately.
+>
+> **Nothing twinkles at rest, and that is measured.** `cargo xtask shimmer` scores `primitives`,
+> `materials`, `cave` and `ground` at exactly **0.000** — and the first two are the scenes AO
+> changes most, so the zero is load-bearing. Every sample direction is a function of the pixel's
+> integer coordinate, so the dither is **screen-locked**: it does not swim with the surface, it
+> sits still while the world moves under it. Eight AO rays leave a worst-channel error of 41
+> against a converged reference, which reads as fine grain in the contact band at 1080p. **The
+> cure, if it is ever wanted, is spatial and not temporal** — a quad-wide sample share is 16-ray
+> quality at the 8-ray price, and it needs `GroupNonUniformQuad` declared and an answer to helper
+> lanes bleeding across silhouettes. ADR 0019 has both.
 
 ### What M0–M12 already delivered
 

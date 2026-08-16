@@ -259,6 +259,35 @@ Simulation is untouched. These are fragment-shader terms; nothing here is read
 by `loom_ecs`, `loom_script` or `play.rs`, and the pinned hash `b478ea4ac2622d32`
 is unchanged in debug and release.
 
+**Measured rather than asserted.** `cargo xtask shimmer` holds the camera at the
+scene's authored eye and advances the simulation between frames, so it scores
+exactly the thing a per-pixel dither would break. `primitives`, `materials`,
+`cave` and `ground` all score **0.000** — and `primitives` and `materials` are
+the two scenes ambient occlusion changes *most*, so that zero is load-bearing
+rather than vacuous. Nothing here twinkles at rest.
+
+## The noise that is left, stated rather than hidden
+
+Eight AO rays leave visible grain in the occluded band. The number is the worst
+channel against a 64-ray reference: **41**, inside the gate's 72, and at 1080p
+it reads as fine grain confined to the contact rather than as an artifact — but
+it is there, and at 3x magnification it is obvious.
+
+The dither is a function of the pixel coordinate, so it is **screen-locked**: it
+does not swim with the surface under a moving camera, it sits still while the
+world moves under it. That is the honest trade for refusing history.
+
+The cure that was not built is a **spatial** filter, which is what the noise
+budget allows and temporal accumulation is not. The cheap form is a quad-wide
+share — give each pixel of a 2x2 quad a different rotation and average across
+the quad with `QuadReadAcross*`, which is 16-ray quality at the 8-ray price and
+sidesteps the occupancy cliff entirely. Two things stopped it here: it needs
+`GroupNonUniformQuad` in the fragment stage, which this engine neither queries
+nor declares, so it would be a device-capability dependency with no fallback;
+and a helper lane at a geometry edge shades a point slightly off the surface,
+which bleeds occlusion across exactly the silhouettes AO is drawing. Both are
+answerable, and neither is answerable in this change.
+
 ## Cost
 
 Forward pass, 1920x1080, median of three, `LOOM_GPU_TIMING=1`:
