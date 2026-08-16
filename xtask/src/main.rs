@@ -38,7 +38,8 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 32] = [
+const SCENES: [&str; 33] = [
+    "assets/test/lanternhead.loom",
     "assets/test/blockout.loom",
     "assets/test/ground.loom",
     "assets/test/beach.loom",
@@ -152,7 +153,14 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 25] = [
+const GOLDEN: [(&str, &str, &[&str]); 26] = [
+    // **The post-process stack's standing shot** (ADR 0018). Nothing else in
+    // this list is composed around what happens *above* diffuse white: the
+    // flame's core, the brazier's pool, the sun's glitter path, wet stone at
+    // `WET_SMOOTH` roughness under a low sun, and the sun disc are all past it.
+    // 2400 ticks is 40 s - exactly `WET_COVER_WINDOW`, so `cover_recent`'s
+    // three taps have a full window, and long enough for the dinghy to settle.
+    ("lanternhead", "assets/test/lanternhead.loom", &["--sim", "2400"]),
     ("primitives", "assets/test/primitives.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
@@ -932,7 +940,11 @@ fn validate() -> std::process::ExitCode {
         // Tightening it toward the baseline would turn ordinary variance into
         // failures, which is how a gate gets ignored.
         const CPU_BUDGET_MS: f64 = 30.0;
-        for scene in ["assets/test/forest.loom", "assets/games/proving_ground.loom"] {
+        for scene in [
+            "assets/test/forest.loom",
+            "assets/games/proving_ground.loom",
+            "assets/test/lanternhead.loom",
+        ] {
             if !root.join(scene).exists() {
                 continue;
             }
