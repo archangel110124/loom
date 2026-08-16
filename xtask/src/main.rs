@@ -187,6 +187,21 @@ const WINDOWED_FRAMES: u32 = 90;
 
 fn main() -> std::process::ExitCode {
     let task = std::env::args().nth(1).unwrap_or_default();
+
+    // Held for the whole run and released by `Drop` on the way out. Every task
+    // below drives the engine over dozens of scenes and will use the whole
+    // machine; see [`GateLock`] for what running two at once did.
+    let _lock = match task.as_str() {
+        "validate" | "image" | "flythrough" | "shimmer" => match GateLock::acquire(&task) {
+            Ok(lock) => Some(lock),
+            Err(e) => {
+                eprintln!("{e}");
+                return std::process::ExitCode::from(2);
+            }
+        },
+        _ => None,
+    };
+
     match task.as_str() {
         "validate" => validate(),
         "image" => image(std::env::args().any(|a| a == "--bless")),
@@ -1299,4 +1314,106 @@ fn repo_root() -> PathBuf {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Where every worktree of this repository agrees to look for the gate lock.
+///
+/// **`--git-common-dir`, not the worktree's own `.git`.** For a linked
+/// worktree that resolves to the *main* repository's git directory, which is
+/// precisely the scope the lock needs: several worktrees of one repo, on one
+/// machine, each able to saturate every core. [`repo_root`] cannot be used —
+/// it is `CARGO_MANIFEST_DIR` baked in at compile time, so each worktree
+/// builds an xtask that points at itself and they would never collide.
+fn gate_lock_path() -> PathBuf {
+    let root = repo_root();
+    let dir = std::process::Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(&root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_owned()))
+        .map_or_else(|| root.join(".git"), |p| if p.is_absolute() { p } else { root.join(p) });
+    dir.join("loom-gate.lock")
+}
+
+/// Exclusive access to the machine while a gate runs.
+///
+/// **The gates are not parallel-safe against each other, and nothing used to
+/// say so.** Each one drives the real `loom` binary as a subprocess over
+/// dozens of scenes; six agents in six worktrees running `validate` and
+/// `image` at once pegged every core on this machine, stuttered the desktop,
+/// and — worse for a gate — made `validate`'s own CPU-per-frame budget report
+/// 44.8 ms for a scene that measures 25.2 ms unloaded. A timing check that
+/// fails because *another copy of itself* is running is not a check.
+///
+/// So the gates are a singleton. A second one **waits** rather than failing:
+/// serialising them is the fix, and refusing would only turn a slow agent into
+/// a broken one.
+struct GateLock {
+    path: PathBuf,
+}
+
+impl GateLock {
+    fn acquire(task: &str) -> Result<Self, String> {
+        let path = gate_lock_path();
+        // Counted polls rather than a deadline: this crate is held to the same
+        // "never read the wall clock" lint as the simulation, and 720 polls of
+        // five seconds is an hour by construction without arguing about it.
+        const POLL: std::time::Duration = std::time::Duration::from_secs(5);
+        const MAX_POLLS: u32 = 720;
+        let mut waited = 0_u32;
+        let mut announced = false;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut f) => {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{} {task}", std::process::id());
+                    return Ok(Self { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(format!("gate lock {}: {e}", path.display())),
+            }
+
+            let holder = std::fs::read_to_string(&path).unwrap_or_default();
+            let pid = holder
+                .split_whitespace()
+                .next()
+                .and_then(|p| p.parse::<u32>().ok());
+            // **A lock whose owner is gone is not a lock.** A gate killed
+            // mid-run — which is exactly what happens to an agent that is
+            // cancelled — would otherwise block every later run forever.
+            if pid.is_none_or(|p| !Path::new(&format!("/proc/{p}")).exists()) {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            if !announced {
+                println!(
+                    "cargo xtask {task}: another gate is running ({}), waiting for it",
+                    holder.trim()
+                );
+                announced = true;
+            }
+            waited += 1;
+            if waited > MAX_POLLS {
+                return Err(format!(
+                    "waited an hour for the gate lock held by {}; \
+                     if that process is dead, delete {}",
+                    holder.trim(),
+                    path.display()
+                ));
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+}
+
+impl Drop for GateLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
