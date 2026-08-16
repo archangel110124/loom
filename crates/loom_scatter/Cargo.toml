@@ -1,0 +1,13 @@
+[package]
+name = "loom_scatter"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The frozen hash, and nothing else. Placement is a pure function of world
+# position, so this crate needs no terrain, no scene and no renderer — the
+# caller supplies what the ground is doing, exactly as `loom_grass` takes a
+# `&dyn Fn` rather than a `loom_voxel` dependency.
+loom_field = { version = "0.0.0", path = "../loom_field" }

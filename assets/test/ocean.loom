@@ -1,0 +1,197 @@
+# The sea, as a displaced surface.
+#
+# The surface is one camera-centred mesh of concentric LOD rings, generated
+# entirely in the vertex shader from the *same* wave function the CPU evaluates
+# for buoyancy — `loom_water::slang()`, emitted into the shader by `build.rs`.
+# There is no second implementation to drift.
+#
+# **This scene authors its waves, and the reason is worth knowing before you
+# copy it.** The engine's default is to derive them from the wind — a scene
+# with a `WaterBody` and no wave list gets sixteen from `loom_water::spectrum`,
+# whose significant wave height matches the published fully-developed relation,
+# and that path is checked by `the_waves_are_derived_from_the_scene_s_wind`.
+# But a Pierson-Moskowitz sea has a *slope* of only a few degrees at every wind
+# speed: raise the wind and the waves get longer as fast as they get taller. At
+# 11 m/s the sixteen waves span 30 m to 110 m, so from any camera the near
+# field is one gentle flank and the image gate would be looking at a tilted
+# mirror. The chop that makes water read as water lives in the spectral tail,
+# which sixteen equal-energy waves deliberately do not carry
+# (`loom_water::spectrum` says so, and says a normal map is where it belongs).
+#
+# So the gate gets a stylised sea with real slope in it — seven waves with no
+# common factor, every one at the validator's steepness ceiling — because a
+# reference image of a mirror catches nothing and `cargo xtask shimmer` needs a
+# specular highlight that actually moves.
+#
+# **Stylised is the honest word and it is not an apology.** Seven linear
+# Gerstner waves cannot make the steep leading face a real storm sea has: a
+# Gerstner pinch is fore-aft symmetric, and leaning it forward needs a phase
+# skew that moves the simulation hash and voids the validator's fold proof.
+# What this list can do is carry real slope, and that is what it is tuned for.
+#
+# The camera sits low and looks at the horizon on purpose: the Fresnel
+# crossover from "seeing into the water" to "seeing the sky in it" is most of
+# what makes a surface read as liquid, and it only shows when both ends of the
+# range are in frame. The posts give the waves something with a known
+# silhouette to move against — a still cannot tell a moving sea from a bumpy
+# green plane, and `cargo xtask flythrough` is where that shows.
+[scene]
+format = 1
+id = "9f2c41d8-7b3e-4a05-8c61-2e5d0a7f4b93"
+
+[[node]]
+name = "Sea"
+
+  [node.components.Environment]
+  sun_direction = [0.28, 0.36, -0.89]
+  sun_strength = 1.25
+  sun_color = [1.0, 0.94, 0.82]
+  ambient = 0.5
+  sky_zenith = [0.14, 0.28, 0.52]
+  sky_horizon = [0.58, 0.66, 0.72]
+  fog_density = 0.006
+  fog_falloff = 0.04
+
+  # Beaufort 7, blowing the way the waves below run. It drives nothing here —
+  # the wave list wins — and it is authored anyway so the scene describes one
+  # weather rather than two: delete the waves and this is the sea that arrives.
+  #
+  # **Raised from 8.0 with the steepening below, so the two halves agree.** At
+  # 8 m/s this scene claimed a fresh breeze and drew a sea with a total slope of
+  # 0.27 — glassier than a breeze makes. The waves are the thing being looked
+  # at, so they set the weather and this follows them rather than the reverse.
+  [node.components.Wind]
+  direction_degrees = 15.0
+  speed = 14.0
+  gustiness = 1.3
+  turbulence = 1.0
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+  density = 1025.0
+
+  # Seven waves, longest first, with no common factor between the wavelengths —
+  # that is what stops the sum repeating on a visible grid.
+  #
+  # **Every steepness is 1.0, and that is the validator's real ceiling rather
+  # than a guess.** `scene.rs` rejects `Q·N·k·A > 1` with N the wave *count*, so
+  # at seven waves the per-wave limits are 1.075, 1.137, 1.251, 1.509, 1.781,
+  # 1.949 and 2.274 — Q = 1.0 clears all of them, with the tightest wave using
+  # 93% of its allowance. The list used to spend 0.271 of the fold budget and
+  # now spends 0.684.
+  #
+  # That number is the point. A Gerstner sea's colour range is its slope range
+  # run through Fresnel, so a flat sea is a uniform sea however it is shaded —
+  # and the whitecap term reads the same `flatten` signal, whose standard
+  # deviation goes 0.075 → 0.189 here. Foam thresholds mean nothing until this
+  # exists, which is why it comes first.
+  #
+  # **The two short waves are new, and the old comment forbidding them was
+  # stale.** It said 4.7 m was the floor because "the LOD rings are 0.5 m cells
+  # out to 8 m" — true when `WATER_RES` was 32, and ADR 0013 quadrupled it. The
+  # cell is `max(0.5, r/64)` now, clamped flat across everything level 0 draws,
+  # so a wave is whole to `16λ` and gone by `32λ`: the 3 m wave is whole to 48 m
+  # and the 2 m wave to 32 m, which is the near field this camera sits in. They
+  # fade out rather than alias (ADR 0012); they do not turn into noise.
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 26.0
+  amplitude = 0.55
+  steepness = 1.0
+  direction = [1.0, 0.25]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 17.0
+  amplitude = 0.34
+  steepness = 1.0
+  direction = [0.85, -0.5]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 11.0
+  amplitude = 0.20
+  steepness = 1.0
+  direction = [1.0, 0.6]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 7.3
+  amplitude = 0.11
+  steepness = 1.0
+  direction = [0.7, -1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 4.7
+  amplitude = 0.06
+  steepness = 1.0
+  direction = [1.0, 0.15]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 3.0
+  amplitude = 0.035
+  steepness = 1.0
+  direction = [-0.4, 1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 2.0
+  amplitude = 0.020
+  steepness = 1.0
+  direction = [0.9, -0.75]
+  speed_scale = 1.0
+
+# Two posts standing in the water. Deliberately thin and deliberately at
+# different distances: the near one shows the waterline moving up and down its
+# side, the far one shows how much of the sea is between it and the eye.
+[[node]]
+name = "PostNear"
+parent = "Sea"
+transform = { pos = [-2.6, 0.8, -6.0], scale = [0.22, 3.2, 0.22] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.21, 0.17, 0.13]
+  roughness = 0.85
+
+[[node]]
+name = "PostFar"
+parent = "Sea"
+transform = { pos = [5.5, 0.6, -19.0], scale = [0.25, 2.8, 0.25] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.19, 0.16, 0.13]
+  roughness = 0.85
+
+# A rock breaking the surface, so there is one silhouette the waves wash
+# against rather than only vertical sticks.
+[[node]]
+name = "Rock"
+parent = "Sea"
+transform = { pos = [1.8, -0.35, -9.0], rot_euler = [0.0, 18.0, 0.0], scale = [1.7, 1.1, 1.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.24, 0.23, 0.22]
+  roughness = 0.95
+
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [0.0, 2.4, 3.0], rot_euler = [-7.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

@@ -17,7 +17,7 @@ use crate::renderer::{
     create_pipeline, create_view, pack_objects, pipeline_cache_path, set_viewport,
     view_projection, write_slice,
 };
-use loom_render_graph::{Access, RenderGraph};
+use loom_render_graph::{Access, GpuTimers, RenderGraph};
 use crate::{Device, Instance};
 use gpu_allocator::vulkan::{Allocation, Allocator, AllocatorCreateDesc};
 
@@ -29,6 +29,9 @@ const INITIAL_OBJECTS: usize = 4096;
 /// A window's swapchain and everything needed to draw into it.
 pub struct Viewer {
     device: ash::Device,
+    /// Kept rather than dropped after construction, because resizing rebuilds
+    /// images and an unnamed one is a hex handle in the next validation message.
+    names: DebugNames,
     /// Whether this device can trace rays; see `Device::supports_raytracing`.
     raytracing: bool,
     raytracer: Option<crate::raytrace::Raytracer>,
@@ -49,6 +52,34 @@ pub struct Viewer {
     depth_view: vk::ImageView,
     depth_alloc: Option<Allocation>,
 
+    /// The multisampled pair the forward pass rasterises into, resolving into
+    /// the scene target and `depth`.
+    ///
+    /// **The window went without this for the whole of P2 and P3**, while every
+    /// AA number in the project was measured on the offscreen path at 4x. The
+    /// human judges grass, water and rain in this window; measuring the filter
+    /// somewhere the filter is not is the same defect as framing a scene that
+    /// does not contain the subject, and it survived longer.
+    msaa: Option<crate::renderer::Msaa>,
+
+    /// The HDR image the forward pass resolves into. **Always present**: the
+    /// tonemap is what bridges it to the swapchain, and there is no path that
+    /// skips the tonemap.
+    scene: vk::Image,
+    scene_view: vk::ImageView,
+    scene_alloc: Option<Allocation>,
+    /// The pass that collapses `scene` into eight bits.
+    tonemap: crate::tonemap::Tonemap,
+
+    /// The anti-aliasing pass and the display-referred image the tonemap
+    /// writes into first, or `None` when `LOOM_CMAA2` is unset — the default,
+    /// and then the tonemap writes the swapchain image directly.
+    ///
+    /// **The window needs this as much as the offscreen path does**, and more:
+    /// it is where the human looks. Grass rendered offscreen and not in the
+    /// window for two slices, which is the defect this mirrors deliberately.
+    aa: Option<(crate::cmaa2::Cmaa2, vk::Image, vk::ImageView, Allocation)>,
+
     vertices: vk::Buffer,
     vertices_alloc: Option<Allocation>,
     vertex_address: vk::DeviceAddress,
@@ -62,12 +93,59 @@ pub struct Viewer {
     particle_address: vk::DeviceAddress,
     max_particles: usize,
     particle_pipeline: vk::Pipeline,
+    grass_buffer: vk::Buffer,
+    grass_alloc: Option<Allocation>,
+    grass_address: vk::DeviceAddress,
+    /// The terrain height grid the water takes its depth from — see
+    /// [`Viewer::set_terrain`]. Uploaded on load and on reload, never per frame.
+    terrain_buffer: vk::Buffer,
+    terrain_alloc: Option<Allocation>,
+    terrain_address: vk::DeviceAddress,
+    terrain_params: [f32; 4],
+    terrain_heights: vk::DeviceAddress,
+    grass_pipeline: vk::Pipeline,
+    /// The water surface. Whether it draws at all is read from
+    /// [`Viewer::environment`], which the caller sets every frame.
+    water_pipeline: vk::Pipeline,
+    /// Blades currently in the buffer. Uploaded on scene load, expanded every
+    /// frame in the vertex shader — see [`Viewer::set_grass`].
+    grass_count: u32,
+    /// The rain streaks. Additive, order-independent, in a pass of their own
+    /// after the depth buffer is finished with.
+    /// Per-pass GPU timestamps, when `LOOM_GPU_TIMING` asks for them.
+    ///
+    /// **The window had none, and that was a real gap rather than an
+    /// oversight nobody noticed.** Every timing number this project has quoted
+    /// came from the offscreen path, which pays for a readback and a PNG
+    /// encode the window does not and skips the swapchain and the UI the window
+    /// does — so "rain costs 0.03 ms" was, strictly, a claim about headless
+    /// rendering. Resolved after the same fence the offscreen one uses.
+    timers: Option<GpuTimers>,
+    print_timing: bool,
+    rain_pipeline: vk::Pipeline,
+    /// The splashes, drawn indirectly from a count only the GPU knows.
+    rain_splash_pipeline: vk::Pipeline,
+    /// The drop buffer, the collision field and the compute pipelines that
+    /// advance them — the same [`crate::rain::RainSim`] the offscreen path
+    /// owns, so the two render the same simulation rather than two of them.
+    rain_sim: crate::rain::RainSim,
+    /// The tick the drop simulation should stand at this frame.
+    rain_tick: u64,
+    /// Drops this frame — see [`Viewer::set_rain`]. There is no buffer beside
+    /// it: a drop is a pure function of its index and the clock.
+    rain_drops: u32,
+    /// The scene's depth, as a descriptor the rain fragment shader samples.
+    scene_depth: crate::scene_depth::SceneDepth,
+    water_textures: crate::water_textures::WaterTextures,
     objects: vk::Buffer,
     environment_buffer: vk::Buffer,
     environment_alloc: Option<gpu_allocator::vulkan::Allocation>,
     environment_address: vk::DeviceAddress,
     /// What the next frame draws with. Set from the scene each frame.
     pub environment: crate::renderer::EnvironmentData,
+    /// The previous frame's camera, for the streak smear. Shared implementation
+    /// with the offscreen path — see `renderer::EyeTracker`.
+    eye_tracker: crate::renderer::EyeTracker,
     objects_alloc: Option<Allocation>,
     object_address: vk::DeviceAddress,
     /// How many objects the buffer can currently hold; grown on demand.
@@ -220,26 +298,127 @@ impl Viewer {
             crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
         )?;
 
+        let scene_depth = crate::scene_depth::SceneDepth::new(&raw)?;
+        let water_textures = crate::water_textures::WaterTextures::new(&raw)?;
+        scene_depth.bind(depth_view);
         let cache_path = pipeline_cache_path(instance, device);
         // The pipeline is built for the *swapchain's* format, which is usually
         // BGRA rather than the offscreen path's RGBA. Dynamic rendering bakes
         // the attachment format into the pipeline, so this cannot be shared.
+        // **The same sample count as the offscreen path.** A pipeline's
+        // rasterisation sample count must match the attachment it draws into,
+        // and everything below draws into the multisampled pair created further
+        // down — not into the swapchain image, which the forward pass now
+        // reaches only through the resolve.
+        let samples = crate::renderer::MSAA_SAMPLES;
         let (pipeline_layout, pipeline, pipeline_cache) =
             create_pipeline(
                 &raw,
                 cache_path.as_deref(),
-                format,
+                crate::renderer::HDR_FORMAT,
                 raytracer.as_ref().map(crate::raytrace::Raytracer::descriptor_layout),
                 materials.descriptor_layout(),
+                scene_depth.descriptor_layout(),
+                water_textures.descriptor_layout(),
+                samples,
             )?;
         let sky_pipeline =
-            crate::renderer::create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, format)?;
+            crate::renderer::create_sky_pipeline(
+                &raw, pipeline_layout, pipeline_cache, crate::renderer::HDR_FORMAT, samples,
+            )?;
         let particle_pipeline = crate::renderer::create_particle_pipeline(
             &raw,
             pipeline_layout,
             pipeline_cache,
-            format,
+            crate::renderer::HDR_FORMAT,
+            samples,
         )?;
+        let grass_pipeline = crate::renderer::create_geometry_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            crate::renderer::HDR_FORMAT,
+            samples,
+            c"grassVertexMain",
+            c"grassFragmentMain",
+        )?;
+        // **And the water, in the window as well as offscreen.** Three defects
+        // this phase were the viewer being handed a simplified version of what
+        // the offscreen path does, with no gate able to see the difference —
+        // grass did not render here at all for two slices. Same pipeline, same
+        // shader, same draw.
+        let water_pipeline = crate::renderer::create_geometry_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            crate::renderer::HDR_FORMAT,
+            samples,
+            c"waterVertexMain",
+            c"waterFragmentMain",
+        )?;
+        // **And the rain, in the window as well as offscreen**, for the reason
+        // spelled out above the water pipeline — and at the scene's sample
+        // count, because rain draws into the multisampled image before the
+        // resolve in both paths now.
+        let rain_pipeline =
+            crate::renderer::create_rain_pipeline(
+                &raw,
+                pipeline_layout,
+                pipeline_cache,
+                crate::renderer::HDR_FORMAT,
+                samples,
+                c"rainVertexMain",
+                c"rainFragmentMain",
+            )?;
+        let rain_splash_pipeline = crate::renderer::create_rain_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            crate::renderer::HDR_FORMAT,
+            samples,
+            c"rainSplashVertexMain",
+            c"rainSplashFragmentMain",
+        )?;
+        let rain_sim = crate::rain::RainSim::new(
+            instance.handle(),
+            device,
+            &mut allocator,
+            pipeline_cache,
+            crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
+        )?;
+
+        // GPU timing, on the same environment variable and with the same
+        // queried-not-assumed care as the offscreen path — `timestampValidBits`
+        // is per queue family and may be zero.
+        let print_timing = crate::renderer::timing_requested();
+        let timers = if print_timing {
+            // SAFETY: `physical` came from this instance.
+            let limits = unsafe {
+                instance.handle().get_physical_device_properties(device.physical())
+            }
+            .limits;
+            // SAFETY: same.
+            let families = unsafe {
+                instance
+                    .handle()
+                    .get_physical_device_queue_family_properties(device.physical())
+            };
+            let valid_bits = families
+                .get(device.queue_family() as usize)
+                .map_or(0, |f| f.timestamp_valid_bits);
+            let timers = GpuTimers::new(
+                &raw,
+                limits.timestamp_period,
+                valid_bits,
+                crate::renderer::TIMED_PASSES,
+            )?;
+            if let Some(t) = &timers {
+                names.set(t.pool(), "loom.viewer_timestamps");
+            }
+            timers
+        } else {
+            None
+        };
 
         // Mirrors the offscreen path's ceiling. Sized once so a frame never
         // allocates, which in a live viewer would show up as a hitch.
@@ -250,6 +429,24 @@ impl Viewer {
                 &mut allocator,
                 (MAX_PARTICLES * size_of::<crate::renderer::ParticleInstance>()) as u64,
                 "loom.viewer_particles",
+                vk::BufferUsageFlags::empty(),
+            )?;
+        // Same ceiling as `renderer.rs`, and the same reason: past it the tail
+        // is dropped rather than the buffer growing mid-frame.
+        const MAX_BLADES: usize = 262_144;
+        let (grass_buffer, grass_alloc, grass_address) = crate::renderer::create_address_buffer(
+            &raw,
+            &mut allocator,
+            (MAX_BLADES * size_of::<crate::renderer::GrassBlade>()) as u64,
+            "loom.viewer_grass",
+            vk::BufferUsageFlags::empty(),
+        )?;
+        let (terrain_buffer, terrain_alloc, terrain_address) =
+            crate::renderer::create_address_buffer(
+                &raw,
+                &mut allocator,
+                (crate::renderer::MAX_TERRAIN_SAMPLES * size_of::<f32>()) as u64,
+                "loom.viewer_terrain",
                 vk::BufferUsageFlags::empty(),
             )?;
 
@@ -277,7 +474,70 @@ impl Viewer {
             rendered.push(unsafe { raw.create_semaphore(&semaphore_info, None) }?);
         }
 
+        // **Where the window's frame lives before it is eight bits.**
+        // Unconditional, unlike the AA source below: the forward pass is half
+        // float and the swapchain is not, so there is no arrangement in which
+        // the scene is drawn straight into the presentable image any more.
+        //
+        // That is a real simplification of this path. The scene image used to
+        // exist only when CMAA2 was on, so the forward pass wrote two
+        // different destinations depending on an environment variable — and
+        // the window is where the human judges everything.
+        let (scene, scene_alloc, scene_view) =
+            create_scene_target(&raw, &mut allocator, &names, extent)?;
+
+        // The AA pass reads a display-referred image and writes the swapchain,
+        // so what it needs here is a *source* the tonemap can write. The
+        // swapchain image cannot be that source: its usage is COLOR_ATTACHMENT
+        // only, and asking a presentable image for SAMPLED is not portable.
+        let aa = if crate::cmaa2::requested() {
+            Some(create_aa_target(
+                &raw,
+                &mut allocator,
+                &names,
+                pipeline_cache,
+                format,
+                extent,
+            )?)
+        } else {
+            None
+        };
+
+        // **Built for the swapchain's format, and that covers both paths.**
+        // With CMAA2 on it writes the LDR image, which is created at the
+        // swapchain's format precisely so one pipeline serves either
+        // destination; with it off it writes the presentable image directly.
+        let tonemap = crate::tonemap::Tonemap::new(
+            &raw,
+            &names,
+            pipeline_cache,
+            format,
+            scene_view,
+        )?;
+
+        // Resolved into the scene target, which is HDR in both paths now — so
+        // this no longer needs to be told a format at all.
+        let msaa = crate::renderer::Msaa::new(
+            &raw,
+            &mut allocator,
+            extent.width,
+            extent.height,
+            samples,
+        )?;
+        // The opaque pair lives inside `Msaa`, so it only exists when
+        // multisampling does — and the split only happens then either. At one
+        // sample the descriptor points at the depth view, which is never read
+        // because the water block never runs.
+        if let Some(m) = msaa.as_ref() {
+            water_textures.bind(m.opaque_color_view, m.opaque_depth_view);
+        } else {
+            water_textures.bind(depth_view, depth_view);
+        }
+
         names.set(pipeline, "loom.viewer_pipeline");
+        names.set(grass_pipeline, "loom.viewer_grass_pipeline");
+        names.set(grass_buffer, "loom.viewer_grass");
+        names.set(terrain_buffer, "loom.viewer_terrain");
         names.set(depth, "loom.viewer_depth");
         names.set(acquired, "loom.sem_image_acquired");
         for semaphore in &rendered {
@@ -313,6 +573,7 @@ impl Viewer {
         }
 
         Ok(Self {
+            names,
             raytracing,
             raytracer,
             materials,
@@ -321,6 +582,26 @@ impl Viewer {
             particle_address,
             max_particles: MAX_PARTICLES,
             particle_pipeline,
+            grass_buffer,
+            grass_alloc: Some(grass_alloc),
+            grass_address,
+            terrain_buffer,
+            terrain_alloc: Some(terrain_alloc),
+            terrain_address,
+            terrain_params: [0.0, 0.0, 1.0, 0.0],
+            terrain_heights: 0,
+            grass_pipeline,
+            water_pipeline,
+            grass_count: 0,
+            timers,
+            print_timing,
+            rain_pipeline,
+            rain_splash_pipeline,
+            rain_sim,
+            rain_tick: 0,
+            rain_drops: 0,
+            scene_depth,
+            water_textures,
             rt_positions,
             device: raw,
             queue: device.queue(),
@@ -336,6 +617,12 @@ impl Viewer {
             depth,
             depth_view,
             depth_alloc: Some(depth_alloc),
+            scene,
+            scene_view,
+            scene_alloc: Some(scene_alloc),
+            tonemap,
+            aa,
+            msaa,
             vertices,
             vertices_alloc: Some(vertices_alloc),
             vertex_address,
@@ -350,6 +637,7 @@ impl Viewer {
             environment_alloc: Some(environment_alloc),
             environment_address,
             environment: crate::renderer::EnvironmentData::default(),
+            eye_tracker: crate::renderer::EyeTracker::default(),
             object_capacity: INITIAL_OBJECTS,
             requested: vk::Extent2D { width, height },
             pipeline_layout,
@@ -363,6 +651,126 @@ impl Viewer {
             in_flight,
             physical: device.physical(),
         })
+    }
+
+    /// Hand the viewer this frame's grass.
+    ///
+    /// Mirrors [`crate::Renderer::set_grass`] exactly, including the ceiling:
+    /// past capacity the tail is dropped rather than the buffer growing. Called
+    /// on scene load and on every reload, not per frame — a blade is a pure
+    /// function of its coordinates, and what moves is the Bézier expansion and
+    /// the wind bend, both of which happen in the vertex shader.
+    ///
+    /// How many blades the buffer holds. Past this the tail is dropped, so a
+    /// caller that cares — and it should, the drop is a contiguous spatial slab
+    /// rather than a scatter — can say so before uploading.
+    #[must_use]
+    pub fn grass_capacity(&self) -> usize {
+        self.grass_alloc.as_ref().map_or(0, |a| {
+            a.size() as usize / size_of::<crate::renderer::GrassBlade>()
+        })
+    }
+
+    /// # Errors
+    /// If the buffer is gone, which means the viewer is being torn down.
+    pub fn set_grass(&mut self, blades: &[crate::renderer::GrassBlade]) -> Result<(), RenderError> {
+        let capacity = self.grass_capacity();
+        let drawn = &blades[..blades.len().min(capacity)];
+        self.grass_count = u32::try_from(drawn.len()).unwrap_or(0);
+        if drawn.is_empty() {
+            return Ok(());
+        }
+        write_slice(
+            self.grass_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("grass buffer is gone".into()))?,
+            drawn,
+        )
+    }
+
+    /// How many rain drops to draw. Mirrors [`crate::Renderer::set_rain`] —
+    /// same count, same shader, same pass.
+    pub fn set_rain(&mut self, drops: u32) {
+        self.rain_drops = drops.min(crate::rain::DROPS);
+    }
+
+    /// The simulation tick this frame stands for. Mirrors
+    /// [`crate::Renderer::set_rain_tick`], including that going backwards
+    /// re-seeds — which is what a scene reload has to do.
+    pub fn set_rain_tick(&mut self, tick: u64) {
+        if tick < self.rain_tick {
+            self.rain_sim.reset();
+        }
+        self.rain_tick = tick;
+    }
+
+    /// Hand the viewer the world raindrops collide with. Mirrors
+    /// [`crate::Renderer::set_rain_field`].
+    ///
+    /// # Errors
+    /// The driver's, if the image cannot be created or the copy fails.
+    pub fn set_rain_field(
+        &mut self,
+        sdf: &[i8],
+        dims: [usize; 3],
+        origin: [f32; 3],
+        spacing: f32,
+    ) -> Result<(), RenderError> {
+        // SAFETY: called outside a frame, on load and on reload.
+        unsafe { self.device.device_wait_idle() }?;
+        let allocator = self
+            .allocator
+            .as_mut()
+            .ok_or_else(|| RenderError::Allocator("allocator is gone".into()))?;
+        self.rain_sim.set_field(
+            allocator,
+            crate::raytrace::Submit { pool: self.command_pool, queue: self.queue },
+            sdf,
+            dims,
+            origin,
+            spacing,
+        )
+    }
+
+    /// Whether a scene-sized collision field has been uploaded.
+    #[must_use]
+    pub fn has_rain_field(&self) -> bool {
+        self.rain_sim.has_field()
+    }
+
+    /// Hand the viewer the terrain height grid the water reads.
+    ///
+    /// Mirrors [`crate::Renderer::set_terrain`], including what an empty slice
+    /// means: no terrain, and every depth query bottomless.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the viewer is being torn down.
+    pub fn set_terrain(
+        &mut self,
+        heights: &[f32],
+        origin: [f32; 2],
+        spacing: f32,
+        side: usize,
+    ) -> Result<(), RenderError> {
+        if heights.is_empty()
+            || side * side > crate::renderer::MAX_TERRAIN_SAMPLES
+            || heights.len() < side * side
+        {
+            self.terrain_params = [0.0, 0.0, 1.0, 0.0];
+            self.terrain_heights = 0;
+            return Ok(());
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.terrain_params = [origin[0], origin[1], spacing, side as f32];
+        }
+        self.terrain_heights = self.terrain_address;
+        write_slice(
+            self.terrain_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("terrain buffer is gone".into()))?,
+            &heights[..side * side],
+        )
     }
 
     /// Make sure the object buffer can hold `wanted` objects.
@@ -541,6 +949,29 @@ impl Viewer {
             d.wait_for_fences(&[self.in_flight], true, u64::MAX)?;
         }
 
+        // After that fence and before this frame resets the pool: the queries
+        // are only guaranteed available once the work that wrote them has
+        // completed, which is exactly what the wait above establishes.
+        if let Some(timers) = self.timers.as_mut() {
+            timers.resolve(&d);
+            if self.print_timing && !timers.times().is_empty() {
+                let table = timers
+                    .times()
+                    .iter()
+                    .map(|(name, ms)| format!("{name} {ms:.3} ms"))
+                    .collect::<Vec<_>>()
+                    .join("  ");
+                let total: f64 = timers.times().iter().map(|(_, ms)| ms).sum();
+                // `graph` rather than `total`, for the reason spelled out in
+                // `renderer.rs`: this is the sum of the graph's passes and not
+                // what a frame costs.
+                eprintln!(
+                    "[loom gpu window] {}x{}  {table}  graph {total:.3} ms",
+                    self.extent.width, self.extent.height,
+                );
+            }
+        }
+
         // SAFETY: the swapchain is live.
         let acquired = unsafe {
             self.swapchain_loader.acquire_next_image(
@@ -626,6 +1057,30 @@ impl Viewer {
             result?;
         }
         let batches = batch_by_mesh(&sorted);
+        // **Before the upload, not after**, the same as the offscreen path. The
+        // camera moved into this buffer when the push block ran out of room, and
+        // it was being written a line *below* the upload — so the window drew
+        // every frame with the previous frame's eye. The viewport was never
+        // written at all: it sat at its 1x1 default, which the grass shader
+        // reads as "every blade is a hundred pixels wide".
+        self.environment.eye = camera.eye.extend(0.0).to_array();
+        // Same camera, same line, same tracker as the offscreen path — the
+        // streak smear is where a window that quietly renders something simpler
+        // would be least visible and hardest to catch.
+        self.environment.eye_step = self.eye_tracker.step(camera.eye, self.rain_tick);
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.environment.viewport =
+                [self.extent.width as f32, self.extent.height as f32, 0.0, 0.0];
+        }
+        // Stamped rather than assigned by the caller, exactly as in
+        // `renderer.rs`: the window replaces `environment` every frame from the
+        // scene, and the terrain grid is not part of what a scene reload
+        // rebuilds cheaply.
+        self.environment.terrain = self.terrain_params;
+        self.environment.terrain_heights = self.terrain_heights;
+        self.environment.rain_drops = self.rain_sim.drops_address;
+        self.environment.rain_splashes = self.rain_sim.splashes_address;
         write_slice(
             self.environment_alloc
                 .as_ref()
@@ -650,6 +1105,20 @@ impl Viewer {
         let mut graph = RenderGraph::new();
         let target = graph.import("loom.swapchain_image", image);
 
+        // **The drop simulation, first in the frame**, exactly as offscreen:
+        // it writes buffers the two rain draws read, and the graph is what
+        // orders them.
+        let rain_buffers = (self.rain_drops > 0).then(|| {
+            self.rain_sim.record(
+                &mut graph,
+                self.rain_tick,
+                [self.environment.eye[0], self.environment.eye[1], self.environment.eye[2]],
+                self.environment.rain,
+                self.terrain_params,
+                self.terrain_heights,
+            )
+        });
+
         let extent = self.extent;
         let depth_view = self.depth_view;
         let (queue, pool) = (self.queue, self.command_pool);
@@ -666,12 +1135,20 @@ impl Viewer {
             environment: self.environment_address,
             materials: self.materials.address(),
             particles: self.particle_address,
+            grass: self.grass_address,
             object_offset: 0,
             inv_view_proj: view_proj.inverse().to_cols_array(),
-            eye: camera.eye.extend(0.0).to_array(),
         };
         let sky = self.sky_pipeline;
         let particle_pipeline = self.particle_pipeline;
+        let grass_pipeline = self.grass_pipeline;
+        let grass_count = self.grass_count;
+        let water_pipeline = self.water_pipeline;
+        let water_verts = if self.environment.water[2] > 0.0 {
+            crate::renderer::WATER_VERTS
+        } else {
+            0
+        };
         let index_buffer = self.indices;
         let draws: Vec<(MeshRange, u32, u32)> = batches
             .iter()
@@ -682,13 +1159,119 @@ impl Viewer {
         let depth_image = self.depth;
         let depth_id = graph.import("loom.viewer_depth", depth_image);
 
+        // The forward pass always writes the HDR scene image; the tonemap
+        // always reads it. What the AA pass changes is only where the tonemap
+        // *lands* — its own source image, or the swapchain directly.
+        let (scene_view, scene_id) = (self.scene_view, graph.import("loom.viewer_scene", self.scene));
+        // Where the frame is after the tonemap, and therefore what the UI
+        // draws onto and what is presented.
+        //
+        // **The UI is a pass of its own, after rain** — see the comment above
+        // that pass. It is after the tonemap and before CMAA2: after, because
+        // egui hands over display-referred colours and running them through a
+        // shoulder would darken its own greys; before, so it is filtered along
+        // with the scene, and CMAA2 is conservative enough that egui's own
+        // anti-aliased text is left almost entirely alone. It is *not*
+        // multisampled: it draws into the resolved target, not the pair.
+        let (post_view, post_id) = match self.aa.as_ref() {
+            Some((_, image, ldr_view, _)) => {
+                (*ldr_view, graph.import("loom.viewer_ldr", *image))
+            }
+            None => (view, target),
+        };
+
+        // **The multisampled pair goes through the graph like every other
+        // image** (never-do #4). They start UNDEFINED every frame, and skipping
+        // the transition is a validation error rather than a visual one.
+        //
+        // The scene target is written by the *resolve* when multisampling, so
+        // it is a colour write either way; the depth target becomes the resolve
+        // *destination*, which is `DepthResolve` — a write at the colour stage,
+        // and the rain pass samples it immediately afterwards.
+        let msaa_ids = self.msaa.as_ref().map(|m| {
+            (
+                graph.import("loom.viewer_msaa_color", m.image),
+                graph.import("loom.viewer_msaa_depth", m.depth_image),
+            )
+        });
+        let msaa_views = self.msaa.as_ref().map(|m| (m.view, m.depth_view));
+        // The opaque half's resolve targets — see the offscreen path, which
+        // this mirrors deliberately. The two must agree: a window drawing a
+        // different structure from the headless renderer is the divergence
+        // that has already cost this project three defects, and no golden
+        // image can see it.
+        let (opaque_color_id, opaque_depth_id) = match self.msaa.as_ref() {
+            Some(m) => (
+                graph.import("loom.viewer_scene_opaque", m.opaque_color),
+                graph.import("loom.viewer_depth_opaque", m.opaque_depth),
+            ),
+            None => (scene_id, depth_id),
+        };
+        let (opaque_color_view, opaque_depth_view) = self
+            .msaa
+            .as_ref()
+            .map_or((scene_view, depth_view), |m| (m.opaque_color_view, m.opaque_depth_view));
+        // **When rain defers the colour resolve, the forward pass does not
+        // write the scene target at all** — the rain pass is what produces it.
+        // See the same construction in `renderer.rs`.
+        let rain_resolves = msaa_ids.is_some() && rain_buffers.is_some();
+        let split = water_verts > 0 && msaa_ids.is_some();
+        let water_set = self.water_textures.descriptor_set();
+        let mut forward_uses = Vec::new();
+        if !rain_resolves && !split {
+            forward_uses.push((scene_id, Access::ColorWrite));
+        }
+        if let Some((ms_color, ms_depth)) = msaa_ids {
+            forward_uses.push((ms_color, Access::ColorWrite));
+            forward_uses.push((ms_depth, Access::DepthWrite));
+            if split {
+                forward_uses.push((opaque_color_id, Access::ColorWrite));
+                forward_uses.push((opaque_depth_id, Access::DepthResolve));
+            } else {
+                forward_uses.push((depth_id, Access::DepthResolve));
+            }
+        } else {
+            forward_uses.push((depth_id, Access::DepthWrite));
+        }
         graph.pass(
             "forward",
-            &[(target, Access::ColorWrite), (depth_id, Access::DepthWrite)],
+            &forward_uses,
             move |d, cmd| {
-                // SAFETY: the graph transitioned both attachments already.
+                // SAFETY: the graph transitioned every attachment already.
                 unsafe {
-                    begin_rendering(d, cmd, view, depth_view, extent.width, extent.height);
+                    // Multisampled: rasterise into the pair and resolve into the
+                    // scene target. **Depth resolves alongside the colour** —
+                    // the rain pass samples it, and resolving colour without
+                    // depth is what once left it sampling a cleared image.
+                    match msaa_views {
+                        Some((ms_color, ms_depth)) => begin_rendering(
+                            d,
+                            cmd,
+                            ms_color,
+                            ms_depth,
+                            crate::renderer::Resolve {
+                                color: if split {
+                                    Some(opaque_color_view)
+                                } else {
+                                    (!rain_resolves).then_some(scene_view)
+                                },
+                                depth: Some(if split { opaque_depth_view } else { depth_view }),
+                                keep_samples: split,
+                                load: false,
+                            },
+                            extent.width,
+                            extent.height,
+                        ),
+                        None => begin_rendering(
+                            d,
+                            cmd,
+                            scene_view,
+                            depth_view,
+                            crate::renderer::Resolve::default(),
+                            extent.width,
+                            extent.height,
+                        ),
+                    }
                     set_viewport(d, cmd, extent.width, extent.height);
                     crate::renderer::draw_sky(d, cmd, sky, layout, &base_push);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
@@ -710,6 +1293,19 @@ impl Viewer {
                         layout,
                         1,
                         &[material_set],
+                        &[],
+                    );
+                    // Set 3 as well, because the water fragment shader
+                    // statically samples it and the water draw lands in THIS
+                    // block whenever the pass is not split. A statically-used
+                    // set that is not bound is a draw-time validation error,
+                    // and it fired on exactly the scenes that have water.
+                    d.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        layout,
+                        3,
+                        &[water_set],
                         &[],
                     );
                     set_viewport(d, cmd, extent.width, extent.height);
@@ -740,12 +1336,16 @@ impl Viewer {
                         );
                     }
 
-                    // Particles last, over finished opaque geometry.
-                    if particle_count > 0 {
+                    // Grass after the meshes and before the particles, exactly
+                    // as the offscreen path orders it: it is opaque and
+                    // depth-written, so smoke has to blend over finished
+                    // blades. 42 vertices per blade (`GRASS_VERTS` in
+                    // `scene.slang`), no vertex buffer.
+                    if grass_count > 0 {
                         d.cmd_bind_pipeline(
                             cmd,
                             vk::PipelineBindPoint::GRAPHICS,
-                            particle_pipeline,
+                            grass_pipeline,
                         );
                         let push = crate::renderer::Push {
                             object_offset: particle_slot,
@@ -758,18 +1358,287 @@ impl Viewer {
                             0,
                             push.bytes(),
                         );
-                        d.cmd_draw(cmd, particle_count * 6, 1, 0, 0);
+                        d.cmd_draw(cmd, grass_count * 42, 1, 0, 0);
                     }
-                    // The UI goes inside the same rendering pass, after the
-                    // geometry, so panels draw over the scene without a second
-                    // pass or a render-pass object.
-                    if let Some((ui, window)) = ui {
-                        let _ = ui.draw(window, cmd, extent, queue, pool, build);
+
+                    if !split {
+                        crate::renderer::draw_water_and_particles(
+                            d,
+                            cmd,
+                            layout,
+                            base_push,
+                            water_pipeline,
+                            water_verts,
+                            particle_pipeline,
+                            particle_count,
+                            particle_slot,
+                        );
                     }
                     d.cmd_end_rendering(cmd);
                 }
             },
         );
+
+        // **The water block**, mirroring the offscreen path exactly. See
+        // `Renderer::render` for why it exists: water samples the colour and
+        // depth of everything behind it, and those are produced a few draws
+        // earlier in the block it used to share.
+        //
+        // The two paths must stay identical. A window that draws a different
+        // structure from the headless renderer is the divergence that already
+        // cost this project three defects in one session, and no golden image
+        // can see it — the gate only ever renders offscreen.
+        if split {
+            let mut water_uses = vec![
+                (opaque_color_id, Access::ShaderRead),
+                (opaque_depth_id, Access::DepthSample),
+            ];
+            if let Some((ms_color, ms_depth)) = msaa_ids {
+                water_uses.push((ms_color, Access::ColorWrite));
+                water_uses.push((ms_depth, Access::DepthWrite));
+            }
+            water_uses.push((depth_id, Access::DepthResolve));
+            if !rain_resolves {
+                water_uses.push((scene_id, Access::ColorWrite));
+            }
+            graph.pass(
+                "water",
+                &water_uses,
+                move |d, cmd| {
+                    // SAFETY: the graph has moved the opaque pair to
+                    // SHADER_READ_ONLY_OPTIMAL and the attachments to their
+                    // attachment layouts before this records.
+                    unsafe {
+                        let Some((ms_color_view, ms_depth_view)) = msaa_views else {
+                            return;
+                        };
+                        crate::renderer::begin_rendering(
+                            d,
+                            cmd,
+                            ms_color_view,
+                            ms_depth_view,
+                            crate::renderer::Resolve {
+                                color: (!rain_resolves).then_some(scene_view),
+                                depth: Some(depth_view),
+                                keep_samples: false,
+                                load: true,
+                            },
+                            extent.width,
+                            extent.height,
+                        );
+                        if let Some(set) = shadow_set {
+                            d.cmd_bind_descriptor_sets(
+                                cmd,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                layout,
+                                0,
+                                &[set],
+                                &[],
+                            );
+                        }
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            1,
+                            &[material_set],
+                            &[],
+                        );
+                        // Set 3: the colour and depth of everything behind the
+                        // water. Bound once for the block, never per draw.
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            3,
+                            &[water_set],
+                            &[],
+                        );
+                        crate::renderer::set_viewport(d, cmd, extent.width, extent.height);
+                        crate::renderer::draw_water_and_particles(
+                            d,
+                            cmd,
+                            layout,
+                            base_push,
+                            water_pipeline,
+                            water_verts,
+                            particle_pipeline,
+                            particle_count,
+                            particle_slot,
+                        );
+                        d.cmd_end_rendering(cmd);
+                    }
+                },
+            );
+        }
+
+        // **Rain, then the UI, each in a pass of its own.** Rain has to be
+        // separate — the depth buffer stops being an attachment and becomes a
+        // texture between the forward pass and this one, and only the graph
+        // may move it (never-do #4). The UI then has to follow rain rather
+        // than precede it, or streaks fall across the panels; it used to be
+        // inside the forward pass, and moving it is what that costs.
+        //
+        // Both are before the AA passes, so both are filtered as before.
+        let rain_pipeline = self.rain_pipeline;
+        let rain_splash_pipeline = self.rain_splash_pipeline;
+        let rain_args_buffer = self.rain_sim.args_buffer();
+        let rain_depth_set = self.scene_depth.descriptor_set();
+        if let Some((drops_id, args_id)) = rain_buffers {
+            let drop_count = crate::rain::DROPS;
+            let mut rain_uses =
+                vec![(scene_id, Access::ColorWrite), (depth_id, Access::DepthSample)];
+            if let Some((ms_color, _)) = msaa_ids {
+                rain_uses.push((ms_color, Access::ColorWrite));
+            }
+            graph.pass_with(
+                "rain",
+                &rain_uses,
+                &[
+                    (drops_id, loom_render_graph::BufferAccess::VertexRead),
+                    (args_id, loom_render_graph::BufferAccess::IndirectRead),
+                ],
+                move |d, cmd| {
+                    // SAFETY: the graph has put the scene target back in
+                    // COLOR_ATTACHMENT_OPTIMAL, the depth image in
+                    // SHADER_READ_ONLY_OPTIMAL, and both buffers behind a
+                    // barrier against the compute pass that wrote them.
+                    unsafe {
+                        // Multisampled: load the samples the forward pass left,
+                        // add streaks at the same rate, and resolve here.
+                        match msaa_views {
+                            Some((ms_color, _)) => crate::renderer::begin_overlay_rendering(
+                                d,
+                                cmd,
+                                ms_color,
+                                Some(scene_view),
+                                extent.width,
+                                extent.height,
+                            ),
+                            None => crate::renderer::begin_overlay_rendering(
+                                d,
+                                cmd,
+                                scene_view,
+                                None,
+                                extent.width,
+                                extent.height,
+                            ),
+                        }
+                        set_viewport(d, cmd, extent.width, extent.height);
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            2,
+                            &[rain_depth_set],
+                            &[],
+                        );
+                        let push = crate::renderer::Push {
+                            object_offset: particle_slot,
+                            ..base_push
+                        };
+                        d.cmd_push_constants(
+                            cmd,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            push.bytes(),
+                        );
+                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, rain_pipeline);
+                        d.cmd_draw(cmd, drop_count * 6, 1, 0, 0);
+                        d.cmd_bind_pipeline(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            rain_splash_pipeline,
+                        );
+                        d.cmd_draw_indirect(cmd, rain_args_buffer, 0, 1, 0);
+                        d.cmd_end_rendering(cmd);
+                    }
+                },
+            );
+        }
+
+        // **The tonemap, and after it the frame is eight bits.** Between the
+        // scene and everything that assumes a bounded frame — the UI, CMAA2,
+        // the present. Unconditional: the scene image is half float and the
+        // swapchain is not, so nothing else can join them.
+        {
+            let (pass, exposure) = (&self.tonemap, self.environment.exposure);
+            graph.pass(
+                "tonemap",
+                &[(scene_id, Access::ShaderRead), (post_id, Access::ColorWrite)],
+                move |d, cmd| {
+                    // SAFETY: the graph has put the scene image in
+                    // SHADER_READ_ONLY_OPTIMAL and the destination in
+                    // COLOR_ATTACHMENT_OPTIMAL, and `cmd` is recording outside
+                    // any rendering block.
+                    unsafe {
+                        pass.record(d, cmd, post_view, exposure, extent.width, extent.height);
+                    }
+                },
+            );
+        }
+
+        if ui.is_some() {
+            graph.pass(
+                "ui",
+                &[(post_id, Access::ColorWrite)],
+                move |d, cmd| {
+                    // SAFETY: the graph has the tonemapped target in
+                    // COLOR_ATTACHMENT_OPTIMAL, and egui's pipeline declares no
+                    // depth attachment to match this block.
+                    unsafe {
+                        // `None`: the UI draws into the resolved target at one
+                        // sample, after the tonemap has written it.
+                        // Multisampling a text overlay would cost fill rate for
+                        // a difference nobody can see.
+                        crate::renderer::begin_overlay_rendering(
+                            d,
+                            cmd,
+                            post_view,
+                            None,
+                            extent.width,
+                            extent.height,
+                        );
+                    }
+                    if let Some((ui, window)) = ui {
+                        let _ = ui.draw(window, cmd, extent, queue, pool, build);
+                    }
+                    // SAFETY: the block opened immediately above.
+                    unsafe { d.cmd_end_rendering(cmd) };
+                },
+            );
+        }
+
+        // The anti-aliasing passes: edge detection into the mask image, then
+        // the shape filter reading the finished scene and the mask and writing
+        // the swapchain image. Every transition is the graph's (never-do #4).
+        if let Some((pass, _, _, _)) = self.aa.as_ref() {
+            let edges_id = graph.import("loom.aa_edges", pass.edges_image());
+            graph.pass(
+                "cmaa2_edges",
+                &[(post_id, Access::ShaderRead), (edges_id, Access::ColorWrite)],
+                move |d, cmd| {
+                    // SAFETY: the graph has put the scene image in
+                    // SHADER_READ_ONLY_OPTIMAL and the mask in
+                    // COLOR_ATTACHMENT_OPTIMAL.
+                    unsafe { pass.record_edges(d, cmd, extent.width, extent.height) };
+                },
+            );
+            graph.pass(
+                "cmaa2",
+                &[
+                    (post_id, Access::ShaderRead),
+                    (edges_id, Access::ShaderRead),
+                    (target, Access::ColorWrite),
+                ],
+                move |d, cmd| {
+                    // SAFETY: as above, and the swapchain image is in
+                    // COLOR_ATTACHMENT_OPTIMAL.
+                    unsafe { pass.record(d, cmd, view, extent.width, extent.height) };
+                },
+            );
+        }
 
         // Presentable layout. Declared as a pass with no work, because the
         // transition IS the work — and forgetting it is the classic first
@@ -785,6 +1654,9 @@ impl Viewer {
             d.begin_command_buffer(cmd, &begin)?;
         }
 
+        if let Some(timers) = self.timers.as_mut() {
+            graph.time(timers);
+        }
         graph.execute(&d, cmd);
 
         // SAFETY: recording is complete.
@@ -934,6 +1806,103 @@ impl Viewer {
             self.depth = depth;
             self.depth_alloc = Some(depth_alloc);
             self.depth_view = depth_view;
+            // The rain pass's descriptor points at the view that was just
+            // destroyed. Repointing it is not optional and has no symptom the
+            // validation layers can see once the handle is reused.
+            self.scene_depth.bind(depth_view);
+
+            // The multisampled pair is full-resolution too, so it resizes with
+            // the window. Nothing points at it across frames — it is an
+            // attachment, never a descriptor — so rebuilding is all it needs.
+            if let Some(msaa) = self.msaa.take() {
+                // SAFETY: the device was idled at the top of this function.
+                unsafe { msaa.destroy(&self.device, allocator) };
+                self.msaa = crate::renderer::Msaa::new(
+                    &self.device,
+                    allocator,
+                    extent.width,
+                    extent.height,
+                    crate::renderer::MSAA_SAMPLES,
+                )?;
+            }
+
+            // **After the pair is rebuilt, not before.** This ran above the
+            // rebuild first and pointed the descriptor at the views the very
+            // next lines destroy — the validation layers caught it as an
+            // `imageView 0x0`, which is the lucky version: had the handle been
+            // reused instead it would have been a silent use-after-free, which
+            // is exactly what the comment on `scene_depth.bind` warns about.
+            if let Some(m) = self.msaa.as_ref() {
+                self.water_textures.bind(m.opaque_color_view, m.opaque_depth_view);
+            } else {
+                self.water_textures.bind(self.depth_view, self.depth_view);
+            }
+
+            // The scene target is full-resolution, so it resizes with the
+            // window — and the tonemap's descriptor points at the view about
+            // to be destroyed. Repointing it is not optional and has no
+            // symptom the validation layers can see once the handle is reused,
+            // which is the trap `scene_depth.bind` above already documents.
+            //
+            // **Rebuilt before the AA source below**, so the whole chain is
+            // rebuilt in the order the frame runs it.
+            // SAFETY: the device was idled at the top of this function.
+            unsafe {
+                self.device.destroy_image_view(self.scene_view, None);
+                self.device.destroy_image(self.scene, None);
+            }
+            if let Some(allocation) = self.scene_alloc.take() {
+                let _ = allocator.free(allocation);
+            }
+            let (scene, scene_alloc, scene_view) =
+                create_scene_target(&self.device, allocator, &self.names, extent)?;
+            self.scene = scene;
+            self.scene_alloc = Some(scene_alloc);
+            self.scene_view = scene_view;
+            self.tonemap.rebind(&self.device, scene_view);
+
+            // The AA source is a full-resolution image like the depth buffer,
+            // so it resizes with the window. The pass itself — pipeline,
+            // sampler, descriptor set — survives; only the image it points at
+            // is rebuilt, and the descriptor is repointed at the new view.
+            if let Some((mut pass, image, view, allocation)) = self.aa.take() {
+                // SAFETY: the device was idled at the top of this function.
+                unsafe {
+                    self.device.destroy_image_view(view, None);
+                    self.device.destroy_image(image, None);
+                }
+                let _ = allocator.free(allocation);
+                let (image, allocation) = create_image(
+                    &self.device,
+                    allocator,
+                    extent.width,
+                    extent.height,
+                    self.format,
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+                    1,
+                    vk::SampleCountFlags::TYPE_1,
+                    "loom.viewer_ldr",
+                )?;
+                let view = create_view(
+                    &self.device,
+                    image,
+                    self.format,
+                    vk::ImageAspectFlags::COLOR,
+                )?;
+                // SAFETY: the device is idle, so no command buffer references
+                // the sets being rewritten or the edge image being rebuilt.
+                unsafe {
+                    pass.rebind(
+                        &self.device,
+                        allocator,
+                        &self.names,
+                        view,
+                        extent.width,
+                        extent.height,
+                    )?;
+                }
+                self.aa = Some((pass, image, view, allocation));
+            }
         }
         Ok(())
     }
@@ -974,10 +1943,54 @@ impl Drop for Viewer {
             if let Some(allocator) = self.allocator.as_mut() {
                 self.materials.destroy(allocator);
             }
+            if let (Some((mut pass, image, view, allocation)), Some(allocator)) =
+                (self.aa.take(), self.allocator.as_mut())
+            {
+                pass.destroy(&self.device, allocator);
+                self.device.destroy_image_view(view, None);
+                self.device.destroy_image(image, None);
+                let _ = allocator.free(allocation);
+            }
+            // The tonemap holds a descriptor pointing at the scene view, so it
+            // goes before the image it reads.
+            self.tonemap.destroy(&self.device);
+            self.device.destroy_image_view(self.scene_view, None);
+            self.device.destroy_image(self.scene, None);
+            if let (Some(allocation), Some(allocator)) =
+                (self.scene_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            if let (Some(msaa), Some(allocator)) = (self.msaa.take(), self.allocator.as_mut()) {
+                // SAFETY: the device was idled at the top of this block.
+                msaa.destroy(&self.device, allocator);
+            }
             self.device.destroy_pipeline(self.particle_pipeline, None);
             self.device.destroy_buffer(self.particle_buffer, None);
             if let (Some(allocation), Some(allocator)) =
                 (self.particle_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            self.device.destroy_pipeline(self.grass_pipeline, None);
+            self.device.destroy_pipeline(self.water_pipeline, None);
+            if let Some(timers) = self.timers.as_mut() {
+                timers.destroy(&self.device);
+            }
+            self.device.destroy_pipeline(self.rain_pipeline, None);
+            self.device.destroy_pipeline(self.rain_splash_pipeline, None);
+            if let Some(allocator) = self.allocator.as_mut() {
+                self.rain_sim.destroy(allocator);
+            }
+            self.device.destroy_buffer(self.grass_buffer, None);
+            self.device.destroy_buffer(self.terrain_buffer, None);
+            if let (Some(allocation), Some(allocator)) =
+                (self.grass_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            if let (Some(allocation), Some(allocator)) =
+                (self.terrain_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
             }
@@ -1139,6 +2152,73 @@ fn create_swapchain(
     Ok((surface_format.format, extent, swapchain, images, views))
 }
 
+/// The HDR image the forward pass resolves into and the tonemap reads.
+///
+/// Its own function because `recreate` builds it again on every resize, and an
+/// image created two ways is an image whose usage flags eventually disagree.
+fn create_scene_target(
+    device: &ash::Device,
+    allocator: &mut Allocator,
+    names: &DebugNames,
+    extent: vk::Extent2D,
+) -> Result<(vk::Image, Allocation, vk::ImageView), RenderError> {
+    let (image, allocation) = create_image(
+        device,
+        allocator,
+        extent.width,
+        extent.height,
+        crate::renderer::HDR_FORMAT,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+        1,
+        vk::SampleCountFlags::TYPE_1,
+        "loom.viewer_scene",
+    )?;
+    let view =
+        create_view(device, image, crate::renderer::HDR_FORMAT, vk::ImageAspectFlags::COLOR)?;
+    names.set(image, "loom.viewer_scene");
+    names.set(view, "loom.viewer_scene.view");
+    Ok((image, allocation, view))
+}
+
+/// The display-referred image the tonemap writes when the AA pass is on, and
+/// the pass itself, already pointed at it.
+fn create_aa_target(
+    device: &ash::Device,
+    allocator: &mut Allocator,
+    names: &DebugNames,
+    cache: vk::PipelineCache,
+    format: vk::Format,
+    extent: vk::Extent2D,
+) -> Result<(crate::cmaa2::Cmaa2, vk::Image, vk::ImageView, Allocation), RenderError> {
+    let (image, allocation) = create_image(
+        device,
+        allocator,
+        extent.width,
+        extent.height,
+        format,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+        1,
+        vk::SampleCountFlags::TYPE_1,
+        "loom.viewer_ldr",
+    )?;
+    let view = create_view(device, image, format, vk::ImageAspectFlags::COLOR)?;
+    // The swapchain's format, not the offscreen path's: dynamic rendering bakes
+    // the attachment format into the pipeline, and this one writes the window.
+    let pass = crate::cmaa2::Cmaa2::new(
+        device,
+        allocator,
+        names,
+        cache,
+        format,
+        view,
+        extent.width,
+        extent.height,
+    )?;
+    names.set(image, "loom.viewer_ldr");
+    names.set(view, "loom.viewer_ldr.view");
+    Ok((pass, image, view, allocation))
+}
+
 fn create_depth(
     device: &ash::Device,
     allocator: &mut Allocator,
@@ -1151,8 +2231,11 @@ fn create_depth(
         width,
         height,
         DEPTH_FORMAT,
-        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+        // `SAMPLED` because the rain pass reads this as a texture — see the
+        // offscreen path's depth target, which says the same thing.
+        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
         1,
+        vk::SampleCountFlags::TYPE_1,
         "loom.viewer_depth",
     )?;
     let view = create_view(device, depth, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;

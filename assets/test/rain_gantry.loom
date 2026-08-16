@@ -1,0 +1,141 @@
+# **Rain under a MESH roof — ADR 0014's trigger 2, and the whole reason the
+# drop simulation exists.**
+#
+# `rain_overhang` shelters its floor with a voxel slab, which the baked terrain
+# height field could already express: rain arrives from above, so the topmost
+# surface in a column is what a falling drop meets, and killing every drop below
+# it stops rain under a voxel roof. That test passed for two slices without any
+# collision in the engine at all.
+#
+# This one cannot be passed that way. The gantry is a **mesh** with a
+# `BoxCollider` and nothing else — it is not in any voxel volume, so it does not
+# appear in the height field, and the height field's answer for every column
+# under it is the floor, four metres down. Before ADR 0015 it rained straight
+# through: the drops fell past the deck, past the legs, and landed on the
+# concrete underneath as if the structure were not there.
+#
+# What stops them now is `loom_rain::collide::bake`, which rasterises the
+# collision world — every voxel volume unioned with every static box collider —
+# into the 3D signed distance field `rain_sim.slang` marches. The rule it
+# encodes is one sentence: **rain stops where a body would stop.**
+#
+#     loom render assets/test/rain_gantry.loom --sim 600 --out gantry.png
+#
+# The camera stands in the open beside the gantry with the deck filling the
+# upper half of the frame, so both halves of the criterion are in one shot:
+# streaks and splashes on the open concrete, none under the deck, and a line
+# between them at the deck's edge rather than at the camera's own shelter.
+#
+# The floor is a voxel volume rather than a mesh so the scene also exercises the
+# union: two shapes of different kinds, in one field, with air between them.
+
+[scene]
+format = 1
+id = "b28f5c7d-1a49-4e06-8f32-6d5b90c1a4e7"
+
+[[node]]
+name = "Weather"
+
+  [node.components.Environment]
+  # Overcast, with the sun low and ahead so the wet concrete has something to
+  # reflect — the geometry `rain_impact` documents at length, and the reason a
+  # photograph of wet tarmac at dusk reads as wet.
+  sun_direction = [0.10, 0.28, -0.95]
+  sun_strength = 0.85
+  sun_color = [0.90, 0.90, 0.88]
+  ambient = 0.55
+  sky_zenith = [0.22, 0.24, 0.29]
+  sky_horizon = [0.58, 0.59, 0.62]
+  fog_density = 0.02
+  fog_falloff = 0.05
+
+  # Steady and hard, so the difference between sheltered and open is a wall of
+  # streaks against none rather than a statistical argument.
+  [node.components.Rain]
+  intensity = 18.0
+
+  # Blowing across the gantry rather than along it. **This is the second half of
+  # trigger 4**: rain driven sideways reaches a little way under the upwind edge
+  # of the deck and not at all under the downwind one, which a height field
+  # cannot express even for a voxel roof, because it has no idea a drop is
+  # moving.
+  [node.components.Wind]
+  direction_degrees = 270.0
+  speed = 5.0
+  gustiness = 0.7
+  turbulence = 0.5
+  ground_drag = 0.4
+
+# The concrete. A voxel volume, so the scene exercises a union of a voxel field
+# and a box collider rather than only the new half.
+[[node]]
+name = "Apron"
+parent = "Weather"
+transform = { pos = [-16.0, 0.0, -16.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.5
+  chunks = [2, 1, 2]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 1.0, 16.0]
+  half_extents = [15.0, 1.0, 15.0]
+  mode = "union"
+
+  [node.components.Material]
+  albedo = [0.44, 0.43, 0.41]
+  roughness = 0.85
+  porosity = 0.7
+
+# **THE GANTRY DECK.** A box mesh with a box collider, six metres up, and in no
+# voxel volume whatsoever. Everything this scene exists to test is here.
+[[node]]
+name = "Deck"
+parent = "Weather"
+transform = { pos = [0.0, 6.0, -4.0], scale = [7.0, 0.3, 5.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  # Half-extents are in the node's LOCAL frame and are scaled by its world
+  # scale, exactly as `loom_physics` scales them — so this is a 7 x 0.3 x 5 m
+  # half-box, or 14 x 0.6 x 10 m of deck.
+  [node.components.BoxCollider]
+  half_extents = [1.0, 1.0, 1.0]
+
+[[node]]
+name = "LegWest"
+parent = "Weather"
+transform = { pos = [-6.0, 3.0, -4.0], scale = [0.4, 3.0, 0.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.BoxCollider]
+  half_extents = [1.0, 1.0, 1.0]
+
+[[node]]
+name = "LegEast"
+parent = "Weather"
+transform = { pos = [6.0, 3.0, -4.0], scale = [0.4, 3.0, 0.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.BoxCollider]
+  half_extents = [1.0, 1.0, 1.0]
+
+# **Framed so both halves of the criterion are in one shot.** Standing just
+# outside the deck's near edge and looking up along it: the underside fills the
+# top of the frame with the legs either side, the sheltered volume between them
+# is empty, and the open apron beyond the far edge is full of streaks and
+# splashes. The line between them sits at the deck's edge — not at the camera's
+# own shelter, which is the bug the whole-layer fallback used to have.
+[[node]]
+name = "Camera"
+parent = "Weather"
+transform = { pos = [0.0, 3.6, 6.5], rot_euler = [-2.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 58.0

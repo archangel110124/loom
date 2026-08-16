@@ -68,6 +68,21 @@ pub struct SceneView {
     /// valid, so a transform edit costs no re-upload while a new asset or a
     /// re-baked voxel volume does.
     pub mesh_key: u64,
+    /// Scattered instances, placed once when the scene loaded.
+    ///
+    /// **Kept rather than recomputed, and that is a performance fix rather than
+    /// tidiness.** `objects_of` runs on every frame the simulation advances,
+    /// and placing a field bakes a `GroundGrid` — a march of the voxel SDF —
+    /// then resolves every layer against every other. Measured at 103 ms on
+    /// `forest.loom`, which is 9 fps and exactly what a human reported on
+    /// pressing Play.
+    ///
+    /// Placement is a pure function of the scene and the terrain, and both are
+    /// fixed for a `SceneView`'s lifetime: a file change builds a new one. So
+    /// there is nothing to invalidate here — the cache is the whole scene's
+    /// lifetime, which is why this is a field and not a keyed cache like
+    /// `grass_key`'s.
+    scattered: Vec<Object>,
     /// The resolved hierarchy. Kept because anything that edits a node's
     /// transform needs its parent's global to get from world space — where the
     /// gizmo and the camera work — into the local space the file stores.
@@ -100,7 +115,9 @@ impl SceneView {
         let library = crate::MeshLibrary::with_cache(&scene, base, cache);
         let materials = crate::materials::MaterialLibrary::for_scene(&world, &scene, base);
 
-        let objects = crate::world_to_objects(&world, &library, &materials);
+        let scattered = crate::scatter_objects(&scene, &library);
+        let mut objects = crate::world_to_objects(&world, &library, &materials);
+        objects.extend(scattered.iter().copied());
         let picks = crate::node_bounds(&world, &library);
         let bounds = crate::scene_bounds(&picks);
         let paths = scene.nodes().iter().map(|n| n.path.clone()).collect();
@@ -117,6 +134,7 @@ impl SceneView {
             paths,
             assets,
             mesh_key,
+            scattered,
             world,
         })
     }
@@ -150,7 +168,10 @@ impl SceneView {
     /// simulated transforms, drawn with the authored scene's meshes.
     #[must_use]
     pub fn objects_of(&self, world: &World) -> Vec<Object> {
-        crate::world_to_objects(world, &self.library, &self.materials)
+        let mut objects = crate::world_to_objects(world, &self.library, &self.materials);
+        // Appended from the cache. Re-placing here is what took Play to 9 fps.
+        objects.extend(self.scattered.iter().copied());
+        objects
     }
 
     /// Which nodes differ between two versions of a scene, and how.

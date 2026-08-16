@@ -1,0 +1,14 @@
+[package]
+name = "loom_grass"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The frozen hash and the wind field. Placement reuses `noise::hash` rather
+# than introducing a second mixer: it is already ABI, already has a Slang
+# twin, and a second hash would be a second thing to keep the two sides
+# agreeing about.
+loom_asset = { version = "0.0.0", path = "../loom_asset" }
+loom_field = { version = "0.0.0", path = "../loom_field" }

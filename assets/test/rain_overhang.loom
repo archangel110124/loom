@@ -1,0 +1,164 @@
+# Rain, and the roof that stops it.
+#
+# Phase 4's first two exit criteria live in this file, and both are checked
+# without rendering anything — which is the point. The streaks step 2 draws are
+# stateless GPU noise outside the simulation entirely; what has to be right, and
+# what gameplay reads, is the rate the CPU says is reaching a point.
+#
+# **It is a golden image as well now**, at `--sim 1800`, and it is the scene in
+# that list which draws rain as an ESTABLISHING SHOT — a pass after the forward
+# pass, into the resolved colour target, with the depth buffer sampled rather
+# than tested. The picture carries the first exit criterion too: streaks
+# everywhere except under the shelter, and a faint column of them through the
+# skylight below.
+#
+# **What it cannot see is the near field**, and that is why `rain_impact.loom`
+# exists beside it: its ground starts ten metres from the camera, where a splash
+# crown is a third of a pixel and a ripple ring is under one. Step 4's two
+# effects both measure below the image gate's tolerance here.
+#
+#     loom sim assets/test/rain_overhang.loom --ticks 1 \
+#       --assert "rain@-13,3,-13.rate > 7.9" \
+#       --assert "rain@0,3,0.rate < 0.05" \
+#       --assert "rain@0,3,-6.rate > 7.9"
+#
+#   * OUTSIDE the shelter, the full authored 8 mm/h arrives.
+#   * UNDER it, near nothing does.
+#   * UNDER THE SKYLIGHT, the full rate arrives again — and that third point is
+#     inside the roof's footprint. What lets rain in is one `subtract` op in the
+#     recipe below, which is exactly the CSG carve the exit criterion names.
+#
+# The shelter is not a mesh and not a marked volume: it is the scene's voxel
+# terrain, marched by `loom_voxel::exposure` (S3). Nothing here authors where
+# rain does or does not fall. Blow a hole in the roof and rain comes through it
+# because the field changed, not because anybody told the rain about it.
+#
+# The volume sits at [-16, 0, -16], so its 32 m footprint spans world x and z
+# from -16 to 16 and the assertions above are in world space, not voxel space.
+# That offset is deliberate: a query that ignored the node's translation would
+# leave the roof at the origin and pass every test in a scene built there.
+
+[scene]
+format = 1
+id = "7f2c9a41-6d38-4b05-9e17-0c4a8b3d5e62"
+
+[[node]]
+name = "Weather"
+
+  [node.components.Environment]
+  sun_direction = [0.3, 0.42, 0.85]
+  sun_strength = 0.55
+  sun_color = [0.78, 0.80, 0.86]
+  ambient = 0.7
+  sky_zenith = [0.28, 0.30, 0.34]
+  sky_horizon = [0.55, 0.56, 0.58]
+  fog_density = 0.03
+  fog_falloff = 0.06
+
+  # Steady rain, at twice the "moderate" default so the sheltered and open
+  # readings are far apart in mm/h rather than separated by a rounding error.
+  #
+  # It stops after a minute, and that is what makes the THIRD exit criterion
+  # checkable: wetness accumulates while it rains and dries afterwards, and
+  # "afterwards" needs a moment the rain ended at. Nothing before this could
+  # turn rain off, so drying was unreachable from a scene file.
+  #
+  #     loom sim assets/test/rain_overhang.loom --ticks 3600 \
+  #       --assert "wetness@-13,3,-13.film > 0.99"
+  #     loom sim assets/test/rain_overhang.loom --ticks 9000 \
+  #       --assert "wetness@-13,3,-13.film < 0.05" \
+  #       --assert "wetness@-13,3,-13.soak > 0.4"
+  #
+  # 3600 ticks is 60 s — the last instant of the shower, and the surface is as
+  # wet as it is going to get. 9000 is 150 s, ninety seconds after it stopped:
+  # the sheen is gone and most of the darkening is still there. That gap IS the
+  # two-rate dry-down, and one number could not express it.
+  #
+  # The golden image is at `--sim 1800`, thirty seconds in: the film is at its
+  # ceiling and the soak is about half way, which is a visibly wet scene rather
+  # than a nominally wet one.
+  [node.components.Rain]
+  intensity = 8.0
+  duration = 60.0
+
+  # The rain leans along this. It changes no rate — a streak's angle is not how
+  # much water arrives — but it is the vector `loom_rain` hands the renderer,
+  # and it is sheltered by the same number the rate is.
+  [node.components.Wind]
+  direction_degrees = 20.0
+  speed = 6.0
+  gustiness = 1.2
+  turbulence = 0.9
+  ground_drag = 0.45
+
+[[node]]
+name = "Shelter"
+parent = "Weather"
+transform = { pos = [-16.0, 0.0, -16.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.5
+  chunks = [2, 1, 2]
+
+  # Ops are in the volume's own metres: 64 x 32 x 64 voxels at 0.5 m is
+  # 32 x 16 x 32 m. Everything below stays well inside that, because an op that
+  # reaches the boundary gets sealed by the wall the mesher closes there.
+
+  # The ground.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 0.5, 16.0]
+  half_extents = [15.0, 0.5, 15.0]
+  mode = "union"
+
+  # The roof: a 20 m square slab 1 m thick, 8 m up. Two voxels thick, which is
+  # twice the thinnest overhang the field can hold — S3 seals a one-voxel roof,
+  # and this scene is not the place to be testing that again.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 8.0, 16.0]
+  half_extents = [10.0, 0.5, 10.0]
+  mode = "union"
+
+  # Four legs, so the thing reads as a shelter rather than a floating slab.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [7.0, 4.5, 7.0]
+  half_extents = [0.6, 3.5, 0.6]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [25.0, 4.5, 7.0]
+  half_extents = [0.6, 3.5, 0.6]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [7.0, 4.5, 25.0]
+  half_extents = [0.6, 3.5, 0.6]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [25.0, 4.5, 25.0]
+  half_extents = [0.6, 3.5, 0.6]
+  mode = "union"
+
+  # THE SKYLIGHT. One subtract op, punched clean through the roof over local
+  # [16, ., 10] — world [0, ., -6]. It is the whole second exit criterion in
+  # four lines: the roof is intact everywhere else, and rain reaches the floor
+  # here because the SDF says the column is open, not because the scene says so.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 8.0, 10.0]
+  half_extents = [2.5, 1.5, 2.5]
+  mode = "subtract"
+
+[[node]]
+name = "Camera"
+parent = "Weather"
+transform = { pos = [-4.0, 6.0, 26.0], rot_euler = [-10.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

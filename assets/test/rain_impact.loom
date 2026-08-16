@@ -1,0 +1,106 @@
+# Rain landing on wet ground — Phase 4 step 4, close enough to see it.
+#
+# **This scene exists because `rain_overhang` cannot see this feature.** That
+# one is an establishing shot: its ground runs from ten to forty-five metres
+# away, and at 320x200 a splash crown is a third of a pixel and a ripple ring
+# is under one. Both were measured there and both came out *below the image
+# gate's tolerance* — the same trap step 3 found and fixed, where a reference
+# matches with the feature in and with it stubbed out, and is therefore
+# protecting nothing.
+#
+# So the camera here is a metre above the ground looking down at it, which is
+# where impacts live: they are a near-field effect and always were. Every
+# published rain system generates splashes "only close to the screen".
+#
+# Stubbed against real, at the golden size, both effects are far above
+# tolerance — see the commit message for the numbers.
+#
+# The sun is deliberately IN FRONT of the camera and low. A wet surface is
+# mostly specular, and specular is a mirror: with the sun behind the viewer the
+# highlight goes behind the viewer too, and the ripples change nothing that
+# reaches the eye. This is the geometry a photograph of wet tarmac at dusk has,
+# and it is why that photograph reads as wet.
+
+[scene]
+format = 1
+id = "3ae91c07-52bd-4f16-9a83-71d6c2e04b58"
+
+[[node]]
+name = "Weather"
+
+  [node.components.Environment]
+  # Low sun ahead of the camera, dim, under a heavy sky — an overcast shower
+  # rather than a sunlit one, which is what rain is.
+  sun_direction = [0.05, 0.30, -0.95]
+  sun_strength = 0.9
+  sun_color = [0.92, 0.90, 0.86]
+  ambient = 0.5
+  sky_zenith = [0.24, 0.26, 0.30]
+  sky_horizon = [0.62, 0.63, 0.65]
+  fog_density = 0.02
+  fog_falloff = 0.05
+
+  # Near the visual layer's full rate, so most cells carry an impact and the
+  # ground reads as being rained on rather than as being spat at. It does not
+  # stop: this scene is about what rain landing looks like, and the drying
+  # half of the model is `rain_overhang`'s job.
+  [node.components.Rain]
+  intensity = 16.0
+
+  [node.components.Wind]
+  direction_degrees = 200.0
+  speed = 4.5
+  gustiness = 0.8
+  turbulence = 0.6
+  ground_drag = 0.5
+
+# A flat floor and nothing else. **The voxel volume is the point**, not
+# scenery: splashes land on the topmost surface of a column out of W6's baked
+# height field — the same grid the streaks cull their drops against — so a
+# scene whose floor was a box mesh would get none, and this one has to have a
+# floor the rain can find.
+[[node]]
+name = "Ground"
+parent = "Weather"
+transform = { pos = [-16.0, 0.0, -16.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.5
+  chunks = [2, 1, 2]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 1.0, 16.0]
+  half_extents = [15.0, 1.0, 15.0]
+  mode = "union"
+
+  # A canopy over the near left, and it carries the exit criterion into the
+  # near field: **nothing lands under it and nothing ripples under it.** Both
+  # stop for the same reason the floor there stays dry — the topmost surface in
+  # that column is the canopy, out of the one height field the drops, the
+  # wetness gate and the impacts all read. Drop that gate and rings appear on
+  # dry sheltered concrete, which is what the mutation check measures.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [8.0, 4.2, 22.0]
+  half_extents = [6.0, 0.4, 6.0]
+  mode = "union"
+
+  # Rough concrete: porous, so step 3's soak darkens it a long way, and matt
+  # when dry, so the film step 3 smooths it toward is the whole difference
+  # between this floor and a dry one. The default blockout colour would work
+  # for the impacts but says nothing about what they are landing on.
+  [node.components.Material]
+  albedo = [0.42, 0.41, 0.39]
+  roughness = 0.85
+  porosity = 0.7
+
+# A metre above the floor, tipped down at it. Anything higher and the impacts
+# are back under a pixel.
+[[node]]
+name = "Camera"
+parent = "Weather"
+transform = { pos = [0.0, 3.0, 9.0], rot_euler = [-16.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

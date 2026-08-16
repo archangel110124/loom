@@ -1,0 +1,420 @@
+# Overnight autonomous run — 2026-08-11
+
+Branch: `overnight/2026-08-11`, forked from `worktree-loom-companion-docs` @ `fd1ae4a`.
+Deadline: **07:15 EDT**. Started **23:44 EDT**.
+
+## Governors
+
+**Usage cannot be measured as a percentage.** `/usage` is a Claude Code CLI
+built-in and is not reachable from Bash; `ccusage blocks --live` is interactive
+and returns nothing non-interactively. `ccusage blocks --json` works and reports
+*cost and burn rate*, not percent-of-limit, so it cannot answer the 90/97/98
+thresholds the brief specifies.
+
+Per the brief's fallback, this run is therefore **conservative**: sub-agent
+fan-out never wider than 2, and a git checkpoint at least every 30 minutes.
+`ccusage` cost and burn rate are recorded at each checkpoint as the best
+available proxy.
+
+Baseline at 23:44 EDT: active block (23:00–04:00 EDT) at **$7.93**, burn
+**$13.00/h**, block projection **$63.40**. Prior block (18:00–23:00 EDT) closed
+at $248.30 / 439M tokens.
+
+## Scope note decided without the human
+
+"Stage 2" and "Stage 3" are read as the repo's **P2 (grass)** and **P3 (water)**
+from `docs/design/LOOM-IMPLEMENTATION-ORDER.md`, which is the sequencing
+document `CLAUDE.md` designates as authoritative after M12.
+
+**Grass shadowing is explicitly out of scope** and is not a gap I will try to
+close. This engine has no shadow system at all — shadows, SDFGI and the post
+stack are Phase 8, deferred with a stated reason. Building one to shadow grass
+would be exactly the "never delete or rewrite existing systems / don't invent
+new features" line the brief draws, and it would be a multi-day system, not an
+overnight piece. Recorded here so the absence is a decision rather than an
+oversight.
+
+---
+
+## Log
+
+### 23:44 — start
+
+Ran `date`, attempted usage measurement (see Governors), created branch.
+
+State inherited: P2 slices 1–6 complete and committed through `fd1ae4a` (MSAA).
+Slice 7 (the AA investigation's conclusion) was complete and green in the
+working tree but uncommitted at the moment the overnight brief arrived; it is
+committed first, below, rather than folded into overnight work, because it was
+finished and gated before the brief.
+
+### 23:45 — P2 slice 7 committed: density falloff concludes the AA investigation
+
+Not a builder/critic piece — this was already done, measured and green when the
+brief arrived. Recorded for bisect completeness.
+
+Flicker on `meadow` at 4x MSAA, one change per row:
+
+    no cull (every blade)              0.354
+    hard cull, 12% surviving at range  0.234
+    + soft fade                        0.214
+    + fading all the way to none       0.137   <- shipped
+    soft fade + alpha-to-coverage      0.212
+    soft fade + minimum-width clamp    0.419
+
+**0.354 → 0.137.** Three findings worth carrying forward:
+
+1. The previous round measured a minimum-width clamp and a hard cull *together*,
+   got 0.431, and blamed the cull. Separated, the cull is the largest single win
+   and the clamp is what nearly doubles flicker. The clamp is now deleted, not
+   gated — measured worse twice, decisively, confound removed.
+2. Fading to *none* rather than to a floor is most of the win. A sparse scatter
+   of surviving sub-pixel blades is noisier than either a full field or none.
+3. That only works because the ground under a field is authored grass-coloured.
+   `meadow`'s soil was brown and the thinned field read as ploughed earth from
+   the flythrough orbit. This is a **scene-authoring rule**, now written into
+   `CLAUDE.md`.
+
+Also found and fixed: **`meadow` was not in `GOLDEN`**, so the image gate had
+been reporting full passes for two slices without rendering a single blade.
+Grass is the only rendering path whose geometry exists solely in the vertex
+shader. Now eight scenes.
+
+Gates: clippy clean, 35 test binaries, 18 scene runs / zero validation messages,
+determinism `b478ea4ac2622d32` (unchanged — grass is outside the sim hash,
+verified rather than assumed), 8/8 images match.
+
+### 23:48 — piece A dispatched: grass on real terrain (builder running)
+
+The gap: `loom_cli::grass_blades` passes `&|_, _| Ground::default()` — a flat,
+constant ground — so grass has never responded to terrain at all. Two of Phase
+2's five exit criteria depend on it ("thins on steep slopes and thickens in
+gullies without any authored mask", "destroying terrain under a patch leaves no
+floating blades"). `loom_grass::coverage` already implements the rules and has
+tests; only the feed is missing.
+
+### 23:52 — performance: the existing harness cannot measure grass, and there is no evidence of a problem
+
+Marginal per-frame cost at 1920x1080, taken as (time for 33 frames − time for 1
+frame) / 32 so device init, the grass bake and PNG encode fall out:
+
+                     run 1              run 2
+    meadow       28.14 ms/frame     30.39 ms/frame
+    primitives   33.52 ms/frame     30.60 ms/frame
+
+Run 1 was taken while a sub-agent was using the GPU and its ordering was noise.
+Run 2 is the result: **~30 ms per frame regardless of what is in the scene.**
+`primitives` has no grass, `meadow` has ~45,000 blades at 42 vertices each, and
+they cost the same. So this number is entirely the offscreen path's per-frame
+readback and stall, and it cannot answer "does a grass field render at target
+framerate" in either direction. Reported here as two runs rather than one
+because the first, alone, would have supported a confident wrong conclusion.
+
+**Decision made without the human, and the reasoning.** The obvious next Phase 2
+item is the placement compute pass plus `vkCmdDrawIndirect`, which the design
+doc specifies. I am *not* building it next, for two reasons:
+
+1. **There is no measurement showing it is needed.** Building a GPU culling and
+   compaction path to fix an unmeasured cost is the premature optimisation this
+   project's style rules exist to prevent. Measure first.
+2. **It would create a second placement implementation.** Placement lives in
+   `loom_grass` as tested Rust. Hand-porting Voronoi clumping and the position
+   hash into Slang is exactly the CPU/GPU divergence that S2 and ADR 0006 were
+   built to make impossible, and the `Expr` tree S2 generates from is a scalar
+   field language that does not express loops, neighbourhood search or struct
+   output. Doing it properly is an architectural piece that deserves an ADR and
+   the human's judgement, not an overnight decision.
+
+So piece B is instead **GPU timestamp queries around the render graph's passes**
+— the instrument that makes any performance claim honest, that the "renders at
+target framerate" exit criterion actually requires, and that UE5 has as its GPU
+Visualizer. With real numbers, the culling decision can be made on evidence in
+the morning. Written up for the human to overrule.
+
+### 00:52 — **the human looked at the viewer and there was no grass**
+
+Woke up, ran `loom run` on `meadow`, and sent a screenshot: a bare green plane
+with the sphere on it. No blades.
+
+`crates/loom_render/src/viewer.rs:674` says why, in a comment nobody had
+surfaced:
+
+    // The viewer has no grass path yet; the headless renderer does.
+    grass: 0,
+
+**Grass has never rendered in the windowed viewer**, since slice 2. The viewer
+has a sky pipeline and a particle pipeline and no grass pipeline; its push block
+passes a null grass buffer address. Only the offscreen `loom render` path draws
+it.
+
+**Why five gates and three critics missed it, which is the part worth keeping.**
+Every image judged tonight — mine, both builders', all three critics' — came out
+of the *offscreen* renderer, because that is what `cargo xtask image`,
+`flythrough`, `shimmer` and `render` all use. `cargo xtask validate` does drive
+the windowed path across all 19 scenes, but validation layers verify that what
+you *did* is legal; they cannot object to a draw call you never made. **No gate
+in this project can detect an absent feature**, and every reviewer was looking
+down the one pipe where the feature was present.
+
+That is not a gap in the reviews, it is a gap in what was reviewable. The
+correct reading of exit criterion 1 — "a grass field renders" — was never met on
+the path `CLAUDE.md` designates as the human's live view, and the phase notes I
+wrote at 00:49 claiming the terrain response was done are, on the viewer,
+untrue.
+
+Fix dispatched: mirror the particle path, which is the same shape (device-address
+buffer, own pipeline, vertex-shader-only draw). **`TYPE_1` sample count** — the
+viewer draws into a single-sample swapchain image while the offscreen path is at
+4x, and that mismatch is four validation errors rather than a visual bug.
+
+### 01:05 — viewer grass landed (`4bfc0e8`), and the gate could not have caught it
+
+Mirrors the particle path; `TYPE_1` samples because the viewer draws into a
+single-sample swapchain image. Reload re-uploads, guarded by a `grass_key`
+because the editor calls the reload funnel on *every frame of a gizmo drag* and
+the SDF bake is 2.98 s on `grass_slope` — regenerating unconditionally would
+have made the editor unusable on any grass-over-terrain scene. Verified by
+rewriting a scene file on disk with the window open, not by reading code.
+
+**The viewer screenshot reads 145 fps**, which is the first time exit criterion
+1 ("renders at target framerate") has been *observed* in a real-time loop rather
+than inferred from one offscreen frame.
+
+**Second instance of the same disease:** `cargo xtask validate` does not run the
+windowed path over `SCENES`. It renders all 17 offscreen and then opens a window
+for exactly two hardcoded scenes, `blockout` and `cave` — neither of which has
+grass or particles. A wrong `rasterizationSamples` only errors when the pipeline
+is bound for a draw, so the check described as catching that class of bug could
+never have caught it on any scene with grass. `meadow` is in that list now.
+
+### 01:16 — the instrument had three defects, not one (`0938053`)
+
+Chasing the shimmer failure to the bottom turned up two more:
+
+  1. **The camera ignored the scene** (the one found at 00:52).
+  2. **The wind clock never advanced.** The environment was built once from
+     `--sim` and never touched again, so every frame of a fly-through sampled
+     the wind at the same instant. `cargo xtask flythrough` exists to catch
+     motion artifacts in vegetation and **had never once shown vegetation
+     moving**; with a static camera all sixteen frames were byte-identical.
+  3. **It was pointed at the wrong artifact.** It panned the camera and held the
+     scene still. That theory does not survive sub-pixel geometry: flicker
+     cancels motion linear in pixel *value*, true of smooth gradients and never
+     of blades translating two pixels a frame. Fixing the camera to pan properly
+     from the authored eye measured **5.65 with 52% of pixels changing** — the
+     mirror image of the original error.
+
+Camera bolted down, simulation advancing. Controls at exactly 0.000.
+
+### 01:26 — the AA table, re-run (`82faec6`). Two conclusions reverse
+
+    MSAA          1x 3.888   2x 3.000   4x 2.712   8x 2.502
+    falloff @4x   on 2.712   off 2.715
+    width @4x     0.020 2.712  0.035 2.635  0.060 2.338  0.100 1.973
+
+**MSAA survives.** Monotonic, 4x still right.
+
+**The density falloff did nothing.** Its 61% "win" was the deletion artifact
+entirely. Keep it as LOD and cost; it is not an AA tool.
+
+**Widening genuinely works**, monotonically. So "minimum screen-space width
+clamping is measured worse, twice, decisively" was *also* an artifact, and the
+trick the research pass called the most important for distant grass **was
+deleted on bad evidence**. Rebuilding it is dispatched.
+
+Recorded cautions: the number is strongly resolution-dependent (2.712 at
+640x400, 0.539 at 1080p) because the artifact *is* sub-pixel geometry; and
+flicker on animated geometry conflates twinkle with legitimate motion, so the
+0.000 controls prove the camera is static, not that 2.712 is bad in absolute
+terms.
+
+### 02:10 — grass colour (`1062550`), and the metric's third failure mode
+
+Two shipped scenes authored a `Material` albedo on their grass field and nothing
+read it. Live now, packed into the one free slot of the blade payload, with
+per-clump **hue** variation rather than brightness-only.
+
+**The important part is what it revealed.** Flicker moved 2.712 → 3.059 with no
+change to geometry or to any AA setting. The builder attributed it instead of
+assuming: hue variation costs ~1%, and the rest is that the field is simply
+painted **brighter**. `shimmer` measures absolute pixel differences, so the same
+geometry in a lighter colour scores higher without being less stable.
+
+Framing, animation, and now scale. **Normalising flicker by local mean is
+recorded as load-bearing.** New baselines: `meadow` 3.059, `grass_slope` 1.755.
+
+### 02:21 — P3 W0–W2 landed (`3c7062c`), critic dispatched
+
+Schema + steepness validator, `sample_water` with analytic normals, and the
+Slang twin.
+
+**The agreement test is bit-identical — worst difference 0.0 across 5,632
+values** against a 1e-4 threshold, and it is a real comparison rather than a
+tautology: `ash` is confined to `loom_render`, so the twin is compiled with
+`slangc -target cpp`, linked to a harness and run. Same IEEE f32 ops in the same
+order, hence exact rather than merely close. Mutation-checked — changing 9.81 to
+9.83 in the Slang alone fails by 0.769.
+
+**The steepness limit was validated by watching the surface fold**, not by
+asserting a formula: one test walks a wavelength and finds where the displaced X
+coordinate stops being monotonic (safe at 0.9 and 0.99, folding at 1.05 and
+1.5), and another shows four waves fold at 0.30 each and not at 0.24, which is
+what makes the `1/N` division right.
+
+Found on the way and worth the human's attention: **`loom_reflect`'s validator
+does not descend into nested components**, so `schemars` ranges on nested types
+are documentation only and `maxItems` appears in `loom describe` without being
+enforced. That affects every nested component in the project.
+
+### 23:51 — Stage 3 (P3 water) is fully specified; no spec-writing needed
+
+Checked, because the brief said to write the spec if Stage 3 was underspecified.
+It is not: `LOOM-IMPLEMENTATION-ORDER.md` gives steps W0–W9 and
+`docs/design/loom-water-system.md` gives the component schemas, the `sample_water`
+signature, the Gerstner formulation and nine named traps. There is **no existing
+water code** — one unrelated comment about smoke buoyancy in `loom_particles` is
+the only hit in the workspace. Greenfield.
+
+The first three steps are the ones worth doing tonight, because they are pure,
+deterministic and independently testable:
+
+  - **W0** `WaterBody` / `WaveSet` / `GerstnerWave` in `loom_scene::components`,
+    plus the steepness validator. The doc specifies the exact error JSON shape
+    (§5.3) including the computed limit, and caps waves at 16.
+  - **W1** `sample_water` in a new `loom_water` crate, with **analytic** normals.
+    §5.4 is explicit that finite-differencing is wrong here — Gerstner displaces
+    horizontally, so three nearby samples are not at the positions you think.
+  - **W2** the Slang twin plus an agreement test.
+
+### 00:12 — piece B built: GPU timestamps. **Grass is cheap, and the plan changes.**
+
+Builder returned; critic dispatched with fresh context and no sight of the
+builder's reasoning. Verdict pending. The measurements, subject to that:
+
+    scene         forward pass   readback   blades
+    meadow           0.105 ms    0.610 ms   45,460
+    primitives       0.050 ms    0.610 ms        0
+    meadow minus its Grass component, same camera:
+                     0.051 ms    0.610 ms        0
+
+**Grass costs ~0.054 ms** for 45,460 blades at 1920x1080 with 4x MSAA — about
+0.3% of a 16.7 ms frame. The entire forward pass of every scene in this project
+is 0.05–0.11 ms. 4x MSAA costs ~0.024 ms and almost all of that is sky and
+ground fill; the blades cost the same at 1x and 4x, which is what thin
+coverage-limited geometry should do.
+
+The builder calibrated the instrument against a quantity predictable from first
+principles rather than asserting it: the readback pass is a pure image→host copy,
+and 8.29 MB / 0.610 ms = 13.6 GB/s, which is realistic PCIe 4.0 x16. It holds at
+13.5 GB/s at 4K and 14.0 GB/s at 960x540, and readback scales 1.00 / 4.12 / 16.5x
+against a 1 / 4 / 16x pixel count. A mishandled `timestampPeriod` would have
+thrown that off by the same factor and landed somewhere absurd. Good method —
+but the critic is verifying it independently, because a confidently-wrong timing
+instrument is worse than none.
+
+**What this settles.** The ~30 ms/frame measured earlier is **0.7 ms of GPU work
+and ~29.3 ms of CPU and stall.** So:
+
+  - The placement compute pass and `vkCmdDrawIndirect` queued next in the design
+    doc are **not justified by GPU cost at this scale**. Density could rise ~10x
+    before the grass draw reaches 0.5 ms. Building them tonight would have been
+    optimising the one part of the frame that is already free.
+  - The thing actually worth instrumenting next is the **CPU** side.
+
+### 00:20 — correction: the ~29 ms is the PNG encoder, not the engine
+
+The builder attributed the non-GPU remainder partly to "per-frame blade
+regeneration on the CPU". **That is wrong and I checked it rather than repeating
+it.** `loom_cli`'s render loop calls `set_grass` once *before* the frame loop;
+blades are baked exactly once per invocation.
+
+Marginal per-frame cost of `meadow` against resolution:
+
+    960x540      4x pixels    11.97 ms/frame
+    1920x1080   16x pixels    32.26 ms/frame
+    3840x2160   64x pixels    98.29 ms/frame
+
+(A 480x270 point read 119 ms and is discarded as contaminated — sub-agents were
+compiling on the same box. Reported rather than silently dropped.)
+
+That fits **~10 ms fixed + ~11 ms per megapixel**. GPU readback is 0.61 ms at
+1080p, so the per-megapixel term is not transfer — it is **PNG compression**, in
+a loop that writes one image per frame.
+
+So the honest picture is: the offscreen path's frame time is dominated by the
+harness being a *testing* tool that encodes a PNG every frame. It never measured
+the engine at all, in either direction. Engine cost at 1080p is **0.7 ms of GPU
+and a small CPU remainder**. Nothing here indicates a CPU bottleneck in the
+engine, and the earlier entry's "the CPU side is the thing worth instrumenting"
+should be read as unproven rather than established.
+
+This is the outcome that justifies having built the instrument before the
+optimisation, and it is worth noticing that the intuition it overturned was the
+design document's own sequencing.
+
+### 00:40 — piece B: critic returns **PASS**. Committed `519eff8`
+
+The critic's calibration was better than the builder's and corrected it on a
+fact. The builder assumed PCIe 4.0 x16; the critic checked `nvidia-smi` under
+load and found the link is **gen 4 x8**, a 15.75 GB/s ceiling. Measured readback
+throughput is 13.5–14.0 GB/s across a 16x range of image sizes — **86–89% of a
+hard physical limit, never crossing it**, with a near-zero intercept. A
+mishandled `timestampPeriod` would have implied 543 GB/s; a ns/µs slip would
+have implied 13.6 MB/s. Both excluded. It also re-derived the wrap case by hand
+and checked every `ash` signature against the vendored source.
+
+Both Vulkan gates were run with the instrument **on** as well as off, which is
+the real test for timestamp code: 18 scene runs / zero validation messages and
+8/8 images, either way.
+
+**The gap it named, which I am fixing rather than only recording:** the printed
+line says `total`, and that total is the sum of graph passes only — about **2% of
+what a frame actually costs**. The per-frame TLAS rebuild is a separate submit
+outside the graph and is untimed, and the host-side read of the readback buffer
+(~410 MB/s) is invisible to it. Nothing reported is wrong, but a field labelled
+`total` sitting next to 2% of the frame is precisely the kind of number that
+gets quoted later as if it meant the frame. Renaming it is a few characters.
+
+Secondary gaps, recorded not fixed: granularity is coarse — the graph has two
+passes, so `forward` is sky + meshes + grass + particles + the MSAA resolve in
+one number, and isolating grass required an A/B between two scenes rather than a
+third timestamp pair. And the `Viewer` is uninstrumented, so the instrument
+exists only on the path whose cost profile the real game never has.
+
+### 00:30 — piece A built: grass reads the terrain. Critic dispatched; my own read first
+
+Builder returned. The mechanism works: `GroundGrid` bakes a height grid per
+field from the scene's voxel SDF (bilinear height, central-difference normal,
+concavity-proxy flow), and `grass_blades` feeds it through the existing
+`&dyn Fn` seam, so `loom_grass` still has no `loom_voxel` dependency. Coverage
+measures 0.625 flat / 0.365 on a 38° flank / 0.982 in the basin. Bake for the
+new scene is 0.14 s against 2.98 s for the naive per-candidate march — the
+builder measured the alternative rather than asserting the grid was necessary,
+which is the right instinct.
+
+**My own judgement of the render, recorded before the critic reports**, so the
+two are independent:
+
+The terrain response is real and visible — bare dome flank, grass on the cap, a
+lush ring around the basin. As a proof that the plumbing works, it passes.
+
+**Against the stated bar — UE5 landscape grass — it does not hold up yet**, and
+the reason is a single authored constant rather than the new code. `slope_cutoff`
+is 0.7 (45°) and `loom_grass::coverage` fades it out over 0.15, so grass goes
+from full to nothing across a narrow band of slope. On a dome that renders as a
+**hard shaved ring** — a clean, obviously synthetic boundary. Real hillsides
+carry grass well past 38°, thinning gradually and breaking up irregularly rather
+than stopping along a contour line. The shot reads as grass stuck to a shape
+rather than a meadow on a hill.
+
+That is a *tuning and shaping* gap, not a plumbing gap, and it is exactly the
+kind of thing the piece should be sent back for rather than accepted. Waiting for
+the critic before acting, so I am not grading against my own preconception.
+
+**W2 will follow `loom_field::noise`'s precedent, not S2's `Expr` tree.** The
+water doc's recommended Option A is "write it once in Rust, emit the Slang from
+`build.rs` as text", which is exactly what `noise::slang()` already does. S2's
+`Expr` is a *scalar field* language; Gerstner needs vector output and a loop over
+a wave set, which it does not express. Same reasoning that ruled out generating
+grass placement, and the same conclusion reached from the design doc's own
+recommendation rather than from convenience.

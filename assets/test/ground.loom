@@ -1,0 +1,177 @@
+# Textured voxel ground. The scene the image gate did not have.
+#
+# **Nothing in the four green checks sampled a texture on voxel terrain before
+# this file existed.** `terrain_stress` and `terrain_billion` are the only
+# scenes that carry an `albedo_map` on a `VoxelVolume`, and neither is in
+# `GOLDEN` — so every reference could pass while triplanar sampling was
+# arbitrarily broken, and one of them was: the X-plane normal was transposed.
+# A gate that cannot see a feature reports a full pass without ever having
+# looked at it, which has happened three times in this project already.
+#
+# The camera is deliberately CLOSE and low. Ground texture is judged at the
+# scale a person stands at, and the failure it is judged on — texels at the
+# wrong physical size — is invisible in a frame that shows a whole hillside.
+#
+# The white cube is 1 m on a side and is here to be measured against, not
+# looked at. `uv_scale` has no correct value derivable from the texture file:
+# a generated or photoscanned image carries no physical dimensions, so metres
+# per repeat is set once by eye against a known length and then written down.
+# **Wrong texel scale is a more reliable "this is a game" tell than tiling or
+# material count**, and no automated check in this repo can catch it.
+
+[scene]
+format = 1
+id = "c4a71e93-58d6-4b02-9f37-6e1250ab84cd"
+
+[[asset]]
+key = "ground_soil_albedo"
+id = "1f5c9a20-7e43-4d18-b6a2-90c3e7f45d81"
+path = "../textures/ground_soil_albedo.png"
+
+[[asset]]
+key = "ground_rock_albedo"
+id = "3d90f6b1-27ca-4e58-b7d4-5081a92fe6c7"
+path = "../textures/ground_rock_albedo.png"
+
+[[asset]]
+key = "ground_rock_normal"
+id = "5e14b8c3-90af-4d26-a371-6c48d0e173b9"
+path = "../textures/ground_rock_normal.png"
+
+[[asset]]
+key = "ground_soil_normal"
+id = "8b2e40d7-c916-4a35-89f0-2d67b14ce9a3"
+path = "../textures/ground_soil_normal.png"
+
+[[node]]
+name = "Site"
+
+  [node.components.Environment]
+  sun_direction = [0.38, 0.62, 0.69]
+  sun_strength = 1.2
+  sun_color = [1.0, 0.97, 0.90]
+  ambient = 0.40
+  sky_zenith = [0.19, 0.33, 0.54]
+  sky_horizon = [0.63, 0.69, 0.72]
+  fog_density = 0.004
+  fog_falloff = 0.05
+
+[[node]]
+name = "Ground"
+parent = "Site"
+
+  # 24 m across, 16 m tall. Small on purpose: the camera is 4 m from the
+  # subject and everything past 20 m is context rather than evidence.
+  [node.components.VoxelVolume]
+  voxel_size = 0.25
+  chunks = [3, 2, 3]
+
+  # The slab. Its top is y = 5.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [12.0, 2.5, 12.0]
+  half_extents = [11.0, 2.5, 11.0]
+  mode = "union"
+
+  # A dome, so the frame contains every surface angle from flat to near
+  # vertical at once. That matters more here than in a grass scene: triplanar
+  # blends three projections by the normal, so a scene made only of flats
+  # exercises exactly one of the three and would have passed the transposed
+  # X-plane sampling without a murmur.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [8.0, 3.0, 13.0]
+  radius = 5.0
+  mode = "union"
+
+  # A scoop, for concave curvature and an inward-facing flank.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [17.0, 8.5, 10.0]
+  radius = 5.0
+  mode = "subtract"
+
+  # **A fine octave, and it is the cheapest realism in this file.** A texture
+  # can only ever paint detail onto a shape; it cannot change the silhouette or
+  # give a surface real self-shadowing. Ground that is geometrically flat reads
+  # as flat however good the albedo is, because the eye reads shape from
+  # shading gradients before it reads pattern.
+  #
+  # 0.6 cycles/m with 3 octaves puts the finest detail near 2.4 cycles/m, which
+  # is 0.4 m — just under two voxels at this 0.25 m size, so it is the shortest
+  # wavelength the mesher can still represent. Any higher and it aliases into
+  # the surface rather than shaping it.
+  [[node.components.VoxelVolume.ops]]
+  kind = "heightfield"
+  base = 5.0
+  amplitude = 0.22
+  frequency = 0.6
+  octaves = 3
+  seed = 91744
+  mode = "union"
+
+  # **`albedo` is white and that is not laziness.** It multiplies the sampled
+  # texture, so anything else tints photoscanned colour toward an authored
+  # guess — which is the thing this scene exists to stop doing.
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  metallic = 0.0
+  # Soil is not glossy. A low roughness puts a sheen across the whole terrain
+  # that reads as wet plastic, which is the defect the water work just found in
+  # a different guise.
+  roughness = 0.95
+  albedo_map = { asset = "ground_soil_albedo" }
+  normal_map = { asset = "ground_soil_normal" }
+  # **0.5 = one 1024px tile every 2 m**, set by eye against the cube below at
+  # 1920x1080 and recorded here because it cannot be recovered from the file.
+  # The grit reads at roughly the right size for soil at that repeat; twice the
+  # number turns it to noise and half of it reads as gravel.
+  uv_scale = [0.5, 0.5]
+  # Surface Nets emits no UVs at all, so this is not an optimisation — without
+  # it the volume samples whatever happens to sit at (0, 0).
+  triplanar = true
+
+  # **The bedrock, and this is the point of the scene.** Soil lies where it can
+  # rest; past about 45 degrees it does not, and what shows is the stone it was
+  # sitting on. Without this the dome is one substance bent into a curve, which
+  # reads as a hill wrapped in wallpaper however good the wallpaper is.
+  #
+  # `slope` is the cosine of the surface angle, so 0.7 is roughly 45 degrees —
+  # the same default `Grass::slope_cutoff` carries, deliberately. Two different
+  # thresholds on one hill draw two concentric rings.
+  [node.components.Material.layer]
+  albedo = [1.0, 1.0, 1.0]
+  # Rock is smoother than soil and holds much less water. Blending both is
+  # what makes the two read as different substances rather than two colours.
+  roughness = 0.72
+  porosity = 0.12
+  albedo_map = { asset = "ground_rock_albedo" }
+  normal_map = { asset = "ground_rock_normal" }
+  # Coarser than the soil's: granite grain is physically larger than grit, and
+  # a shared scale would make the two look like one photograph twice.
+  uv_scale = [1.1, 1.1]
+  slope = 0.6
+
+# One metre, white, sitting on the slab. The ruler.
+[[node]]
+name = "MetreCube"
+parent = "Site"
+transform = { pos = [12.5, 5.5, 15.5], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.82, 0.82, 0.80]
+  roughness = 0.6
+
+# Low and close: eye height, four metres back, looking slightly down at the
+# cube with the dome's flank behind it. Both a near-flat surface and a steep
+# one are in frame, which is what makes the triplanar blend visible.
+[[node]]
+name = "Camera"
+parent = "Site"
+transform = { pos = [15.6, 6.4, 19.4], rot_euler = [-11.0, 12.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

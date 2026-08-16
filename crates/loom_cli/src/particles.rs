@@ -56,6 +56,7 @@ fn parse(component: &serde_json::Value) -> (loom_particles::Emitter, Visual) {
             drag: f("drag", defaults.drag),
             turbulence: f("turbulence", defaults.turbulence),
             turbulence_scale: f("turbulence_scale", defaults.turbulence_scale),
+            wind_response: f("wind_response", defaults.wind_response),
             #[allow(clippy::cast_possible_truncation)]
             burst: component
                 .get("burst")
@@ -77,6 +78,10 @@ fn parse(component: &serde_json::Value) -> (loom_particles::Emitter, Visual) {
                 .get("additive")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
+            flame: component
+                .get("flame")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
         },
     )
 }
@@ -88,6 +93,8 @@ struct Visual {
     color_end: [f32; 3],
     alpha: [f32; 2],
     additive: bool,
+    /// Draw a flame field over the quad instead of a sprite.
+    flame: bool,
 }
 
 /// One emitter, kept alive across frames.
@@ -120,20 +127,26 @@ struct Live {
 pub(crate) struct Plumes {
     live: Vec<Live>,
     instances: Vec<ParticleInstance>,
+    /// The air these plumes sit in. Sampled per particle, per step.
+    wind: loom_field::wind::Wind,
+    /// Seconds simulated, from the tick count — never a clock (never-do #8).
+    elapsed: f32,
 }
 
 impl Plumes {
     /// Build from a world and warm every plume to its settled population.
-    pub(crate) fn new(world: &World) -> Self {
-        let mut plumes = Self { live: Vec::new(), instances: Vec::new() };
+    pub(crate) fn new(world: &World, wind: loom_field::wind::Wind) -> Self {
+        let mut plumes =
+            Self { live: Vec::new(), instances: Vec::new(), wind, elapsed: 0.0 };
         for entity in world.entities() {
             let (Some(component), Some(global)) = (world.emitter(*entity), world.global_transform(*entity))
             else {
                 continue;
             };
             // A dormant explosion is a description, not an event: its
-            // emitters play where one is triggered, never where it sits.
-            if in_dormant_blast(world, *entity) {
+            // emitters play where one is triggered, never where it sits. A
+            // splash under the water is the same shape of thing.
+            if in_dormant_blast(world, *entity) || in_water(world, *entity) {
                 continue;
             }
             let (emitter, visual) = parse(component);
@@ -151,8 +164,14 @@ impl Plumes {
             if !one_shot {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let warm = ((emitter.lifetime * 2.0) / DT).ceil() as u32;
-                for _ in 0..warm {
-                    system.step(DT, &emitter, origin);
+                // Warmed *in the wind*, so a plume opens already bent
+                // downwind rather than standing straight up and then
+                // toppling over in the first second anyone watches.
+                for tick in 0..warm {
+                    #[allow(clippy::cast_precision_loss)]
+                    let t = tick as f32 * DT;
+                    let wind = &plumes.wind;
+                    system.step_in_wind(DT, &emitter, origin, &|at| wind.at(at, t));
                 }
             }
             plumes.live.push(Live { system, emitter, visual, origin });
@@ -167,7 +186,20 @@ impl Plumes {
     /// can be shot up for as long as the human likes without anything to
     /// clean up: a burst with a finite lifetime empties itself.
     pub(crate) fn detonate(&mut self, world: &World, at: [f32; 3], seed_salt: u64) {
-        for (emitter, visual) in blast_template(world) {
+        self.play(blast_template(world), at, seed_salt);
+    }
+
+    /// Throw up the scene's splash where something went into the water.
+    ///
+    /// Salted by *where* as well as *when*, so two things going in on the same
+    /// tick throw different spray. The salt is the same one the headless path
+    /// uses, or the window and `loom render --sim` would draw two splashes.
+    pub(crate) fn splash(&mut self, world: &World, at: [f32; 3], tick: u64) {
+        self.play(splash_template(world), at, salt(tick, at));
+    }
+
+    fn play(&mut self, template: Vec<(loom_particles::Emitter, Visual)>, at: [f32; 3], seed_salt: u64) {
+        for (emitter, visual) in template {
             self.live.push(Live {
                 system: loom_particles::System::new(emitter.seed ^ seed_salt),
                 emitter,
@@ -182,10 +214,17 @@ impl Plumes {
         if self.live.is_empty() || ticks == 0 {
             return;
         }
+        let wind = &self.wind;
         for live in &mut self.live {
+            let mut t = self.elapsed;
             for _ in 0..ticks {
-                live.system.step(DT, &live.emitter, live.origin);
+                live.system.step_in_wind(DT, &live.emitter, live.origin, &|at| wind.at(at, t));
+                t += DT;
             }
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.elapsed += ticks as f32 * DT;
         }
         self.rebuild_instances();
     }
@@ -213,7 +252,12 @@ fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
     let lerp = |a: f32, b: f32| a + (b - a) * t;
     // Fade in as well as out. Particles that appear at full opacity pop, and
     // the pop is at the emitter, where the eye already is.
-    let fade = (t * 8.0).min(1.0);
+    // **No fade-in for a flame.** A flame is one long-lived static quad, so
+    // `t` is essentially zero forever and an 8x ramp would leave `color.a` at
+    // a few ten-thousandths — the authored alpha would be dead and the
+    // brightness would drift with `--sim`, which is the kind of thing a golden
+    // image blesses without anyone noticing.
+    let fade = if visual.flame { 1.0 } else { (t * 8.0).min(1.0) };
     // Negative radius marks an additive particle. See `ParticleInstance` in
     // scene.slang: a radius is never legitimately negative, so its sign
     // carries the flag and the instance stays 32 bytes.
@@ -221,13 +265,33 @@ fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
     ParticleInstance {
         position: [p.position[0], p.position[1], p.position[2], radius],
         color: [
-            lerp(visual.color_start[0], visual.color_end[0]),
+            // The SIGN of red selects the flame field in the shader. Free,
+            // because the schema clamps authored colour to [0, 1] so the bit
+            // was unused — the same trick the sign of the radius plays for
+            // `additive` three lines above.
+            if visual.flame { -1.0 } else { 1.0 }
+                * lerp(visual.color_start[0], visual.color_end[0]).max(1e-3),
             lerp(visual.color_start[1], visual.color_end[1]),
             lerp(visual.color_start[2], visual.color_end[2]),
             lerp(visual.alpha[0], visual.alpha[1]) * fade,
         ],
     }
 }
+
+// **The CPU splash crowns are gone — ADR 0015, trigger 3.**
+//
+// They were a closed form over the rate and the baked height field: a position
+// exposure said a drop *should* have reached, at a rate derived from how open
+// the column was. That is a good approximation of where rain lands on terrain
+// and a wrong one everywhere else — under a mesh, on a sloped face, in the lee
+// of anything, and anywhere the height field flattens an overhang away.
+//
+// A splash is now a collision the drop simulation actually resolved, appended
+// to a GPU ring by `rain_sim.slang` and drawn indirectly. It carries the impact
+// point and the surface normal, neither of which the CPU could know without
+// re-deriving the whole field. `loom_rain::splashes` survives as the CPU
+// answer for anything that needs to *reason* about impacts without a GPU —
+// which nothing currently does, and which is why it has no caller here.
 
 /// Simulate every emitter in the world and return what to draw.
 ///
@@ -260,6 +324,33 @@ pub(crate) fn in_dormant_blast(world: &World, entity: loom_ecs::Entity) -> bool 
     false
 }
 
+/// Whether this node sits under the scene's `WaterBody`.
+///
+/// **A `ParticleEmitter` under the water is the scene's splash**, and a splash
+/// is an event: it plays where something went in, never where the water node
+/// happens to sit. Exactly the arrangement a dormant `Blast` already has, for
+/// exactly the same reason — an explosion prefab that played at its own
+/// position would park a permanent fireball in every scene carrying a weapon,
+/// and a splash template that played at its own position would leave one
+/// permanent spout in the middle of the sea.
+///
+/// It is where the water is rather than a flag on the emitter because the
+/// question an author is answering is "what does *this water* splash like",
+/// and the hierarchy already says which water.
+///
+/// Bounded rather than `while let`, like every other ancestor walk here.
+pub(crate) fn in_water(world: &World, entity: loom_ecs::Entity) -> bool {
+    let mut current = Some(entity);
+    for _ in 0..64 {
+        let Some(node) = current else { return false };
+        if world.is_water(node) {
+            return true;
+        }
+        current = world.parent(node);
+    }
+    false
+}
+
 /// The emitters of the scene's dormant explosion, if it has one.
 ///
 /// One template per scene for now. A second would need the script to say
@@ -273,10 +364,22 @@ fn blast_template(world: &World) -> Vec<(loom_particles::Emitter, Visual)> {
         .collect()
 }
 
+/// The emitters of the scene's splash, if the water authors one.
+fn splash_template(world: &World) -> Vec<(loom_particles::Emitter, Visual)> {
+    world
+        .entities()
+        .iter()
+        .filter(|e| world.emitter(**e).is_some() && in_water(world, **e))
+        .filter_map(|e| world.emitter(*e).map(parse))
+        .collect()
+}
+
 pub(crate) fn simulate(
     world: &World,
+    wind: &loom_field::wind::Wind,
     ticks: Option<u32>,
     fired: &[(u64, [f32; 3])],
+    splashed: &[(u64, [f32; 3])],
 ) -> Vec<ParticleInstance> {
     let mut out = Vec::new();
 
@@ -287,8 +390,9 @@ pub(crate) fn simulate(
         let Some(global) = world.global_transform(*entity) else {
             continue;
         };
-        // A prefab describes an explosion; it is not one.
-        if in_dormant_blast(world, *entity) {
+        // A prefab describes an explosion; it is not one. Nor is the water's
+        // splash a fountain in the middle of the sea.
+        if in_dormant_blast(world, *entity) || in_water(world, *entity) {
             continue;
         }
         let (emitter, visual) = parse(component);
@@ -298,8 +402,10 @@ pub(crate) fn simulate(
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let steps = ticks.unwrap_or_else(|| ((emitter.lifetime * 2.0) / DT).ceil() as u32);
         let mut system = loom_particles::System::new(emitter.seed);
-        for _ in 0..steps {
-            system.step(DT, &emitter, origin);
+        for tick in 0..steps {
+            #[allow(clippy::cast_precision_loss)]
+            let t = tick as f32 * DT;
+            system.step_in_wind(DT, &emitter, origin, &|at| wind.at(at, t));
         }
 
         for p in system.particles() {
@@ -307,20 +413,32 @@ pub(crate) fn simulate(
         }
     }
 
-    // Explosions a script set off during the run, replayed from the tick each
-    // fired on. Deterministic for the same reason everything else here is:
-    // the tick is data, not a clock reading, so `--sim N` means one thing.
-    let template = blast_template(world);
-    if !template.is_empty() {
-        for (at_tick, at) in fired {
+    // Explosions a script set off during the run, and splashes the water
+    // raised, replayed from the tick each happened on. Deterministic for the
+    // same reason everything else here is: the tick is data, not a clock
+    // reading, so `--sim N` means one thing.
+    for (template, events, by_place) in [
+        // Blasts are salted by tick alone, which is what they have always been
+        // salted by. Two set off on the same tick therefore look alike — a real
+        // if minor limitation, left as it is because changing it would move
+        // every committed reference image of a scene that fires one, which is a
+        // bigger claim than this step is making.
+        (blast_template(world), fired, false),
+        (splash_template(world), splashed, true),
+    ] {
+        if template.is_empty() {
+            continue;
+        }
+        for (at_tick, at) in events {
             #[allow(clippy::cast_possible_truncation)]
             let elapsed = ticks
                 .unwrap_or(0)
                 .saturating_sub(u32::try_from(*at_tick).unwrap_or(u32::MAX));
+            let seed_salt = if by_place { salt(*at_tick, *at) } else { *at_tick };
             for (emitter, visual) in &template {
-                let mut system = loom_particles::System::new(emitter.seed ^ *at_tick);
+                let mut system = loom_particles::System::new(emitter.seed ^ seed_salt);
                 for _ in 0..elapsed {
-                    system.step(DT, emitter, *at);
+                    system.step_in_wind(DT, emitter, *at, &|p| wind.at(p, 0.0));
                 }
                 for p in system.particles() {
                     out.push(instance(p, visual));
@@ -332,8 +450,29 @@ pub(crate) fn simulate(
     out
 }
 
+/// The seed offset for one played template, from the tick and place it played.
+///
+/// **Every bit of this is simulation state**, which is what makes a splash as
+/// reproducible as the crate that caused it: the tick is counted, never read
+/// off a clock, and the position came out of the fixed step. Two bodies going
+/// in on the same tick get different spray because their positions differ, and
+/// the same body in two runs of the same scene gets the same spray because
+/// nothing here is drawn from anywhere else.
+///
+/// The position goes in by its bits rather than by a hash of them: a float's
+/// bit pattern is already well spread across the low bits, and this is a seed
+/// offset rather than a hash table key.
+fn salt(tick: u64, at: [f32; 3]) -> u64 {
+    tick ^ (u64::from(at[0].to_bits()) << 32) ^ u64::from(at[2].to_bits())
+}
+
 #[cfg(test)]
 mod tests {
+    /// Still air, so a test measures the emitter rather than the weather.
+    fn calm() -> loom_field::wind::Wind {
+        loom_field::wind::Wind::new(0.0, 0.0, 0.0, 0.0, 1.0)
+    }
+
     use super::*;
 
     fn range() -> World {
@@ -347,7 +486,7 @@ mod tests {
     /// permanent fireball parked somewhere in it.
     #[test]
     fn a_dormant_explosion_does_not_play_where_it_sits() {
-        let quiet = simulate(&range(), Some(60), &[]);
+        let quiet = simulate(&range(), &calm(), Some(60), &[], &[]);
 
         assert!(
             quiet.is_empty(),
@@ -364,7 +503,7 @@ mod tests {
         let at = [2.0, 1.0, -7.0];
         let fired = [(10, at)];
 
-        let out = simulate(&world, Some(30), &fired);
+        let out = simulate(&world, &calm(), Some(30), &fired, &[]);
 
         assert!(!out.is_empty(), "the explosion produced nothing");
         // The prefab is parked at x = -14; every particle should be near the
@@ -389,7 +528,7 @@ mod tests {
     /// had been pressed.
     #[test]
     fn building_a_plume_does_not_fire_a_one_shot() {
-        let plumes = Plumes::new(&explosion());
+        let plumes = Plumes::new(&explosion(), calm());
 
         assert!(
             plumes.instances().is_empty(),
@@ -406,8 +545,8 @@ mod tests {
     fn rebuilding_a_plume_from_the_same_scene_gives_the_same_thing() {
         let world = explosion();
 
-        let first = Plumes::new(&world);
-        let second = Plumes::new(&world);
+        let first = Plumes::new(&world, calm());
+        let second = Plumes::new(&world, calm());
 
         assert_eq!(
             first.instances().len(),
@@ -424,9 +563,83 @@ mod tests {
         let source = std::fs::read_to_string("../../assets/test/smoke.loom").expect("fixture");
         let world = World::from_scene(&loom_scene::Scene::parse(&source).expect("valid scene"));
 
-        let plumes = Plumes::new(&world);
+        let plumes = Plumes::new(&world, calm());
 
         assert!(!plumes.instances().is_empty(), "a chimney should preview");
+    }
+
+    fn sea() -> World {
+        let source = std::fs::read_to_string("../../assets/test/splash.loom").expect("fixture");
+        World::from_scene(&loom_scene::Scene::parse(&source).expect("valid scene"))
+    }
+
+    /// **The water's splash is a description, not a fountain.** The emitter
+    /// under the `WaterBody` sits at the water node's position; if it played
+    /// there, every scene with water in it would have one permanent spout in
+    /// the middle of the sea.
+    #[test]
+    fn the_water_s_splash_does_not_play_where_it_sits() {
+        let quiet = simulate(&sea(), &calm(), Some(60), &[], &[]);
+
+        assert!(
+            quiet.is_empty(),
+            "{} particles from a splash nobody made",
+            quiet.len()
+        );
+        // And the same through the viewer's path, which builds its own state.
+        assert!(Plumes::new(&sea(), calm()).instances().is_empty());
+    }
+
+    /// And the other half: it plays where the thing went in.
+    #[test]
+    fn a_splash_plays_where_something_entered_the_water() {
+        let at = [3.0, 0.4, -6.0];
+
+        let out = simulate(&sea(), &calm(), Some(20), &[], &[(10, at)]);
+
+        assert!(!out.is_empty(), "entering the water produced no splash");
+        for p in &out {
+            assert!(
+                (p.position[0] - at[0]).abs() < 4.0 && (p.position[2] - at[2]).abs() < 4.0,
+                "droplet at {:?} is nowhere near the entry at {at:?}",
+                p.position
+            );
+        }
+    }
+
+    /// **Two things going in on the same tick throw different spray**, because
+    /// the seed is salted by where as well as when. Without the position in it
+    /// they would be the same burst drawn twice, which reads as one splash
+    /// mirrored — and the fix must not be a clock, or the picture stops being
+    /// reproducible.
+    #[test]
+    fn two_entries_on_one_tick_do_not_produce_the_same_splash() {
+        let world = sea();
+        // **One step after the burst**, so every droplet is still exactly where
+        // it was spawned. Any later and the turbulence — which is sampled by
+        // world position — would separate the two splashes on its own, and the
+        // test would pass with the seed ignored entirely.
+        let spray = |at: [f32; 3]| {
+            simulate(&world, &calm(), Some(11), &[], &[(10, at)])
+                .iter()
+                .map(|p| {
+                    [
+                        p.position[0] - at[0],
+                        p.position[1] - at[1],
+                        p.position[2] - at[2],
+                    ]
+                })
+                .collect::<Vec<[f32; 3]>>()
+        };
+
+        let left = spray([-3.0, 0.0, -6.0]);
+        let right = spray([3.0, 0.0, -6.0]);
+        assert!(!left.is_empty(), "the burst produced nothing");
+        assert_eq!(left.len(), right.len(), "the same template, so the same count");
+        assert_ne!(left, right, "both splashes are the same burst in two places");
+
+        // Deterministic all the same: the same entry, twice, is the same spray.
+        assert_eq!(left, spray([-3.0, 0.0, -6.0]));
     }
 
     /// Nothing fired means nothing drawn, even in a scene that has a template.
@@ -434,11 +647,13 @@ mod tests {
     fn no_shot_means_no_fireball() {
         let world = range();
 
-        let none = simulate(&world, Some(30), &[]);
+        let none = simulate(&world, &calm(), Some(30), &[], &[]);
         let one = simulate(
             &world,
+            &calm(),
             Some(30),
             &[(5, [0.0, 1.0, 0.0])],
+            &[],
         );
 
         assert!(none.len() < one.len(), "firing must add particles");

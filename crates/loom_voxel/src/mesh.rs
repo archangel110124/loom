@@ -98,6 +98,24 @@ impl Mesher for SurfaceNets {
 
         // Positions come back in sampled-array space; shift by the skirt and
         // scale into world units.
+        //
+        // **The `0.5` is the half-cell offset, and it was missing.** Sampled
+        // index `p` is voxel `p − 1`, and [`Volume::world_of`] places voxel `k`
+        // at `(k + 0.5) · voxel_size` — the same convention `solid_cells` hands
+        // parry and `exposure::sample` inverts, both of which say so in their
+        // own comments. This mapping said `(p − 1) · size`, so **every voxel
+        // mesh in the project was drawn half a voxel low on all three axes**
+        // while its collider and its SDF sat where the author put them.
+        //
+        // Measured against an authored box top at y = 4.0: the height field
+        // says 4.0002, the collider says 4.0000, the mesh said 3.8750 at a
+        // 0.25 m voxel and 3.7500 at 0.5 m — exactly half a voxel, both times.
+        //
+        // It was invisible for as long as nothing drew two conventions in one
+        // pixel. W6 does: the water's shoreline is cut where the SDF says the
+        // ground breaks the surface, and against a mesh half a voxel low that
+        // left a rim of beach the sea did not reach — 0.15 m of height on a
+        // 1:4 slope is 0.57 m of dry sand.
         let size = volume.voxel_size;
         #[allow(clippy::cast_precision_loss)]
         let origin = [
@@ -110,9 +128,9 @@ impl Mesher for SurfaceNets {
             .iter()
             .map(|p| {
                 [
-                    origin[0] + (p[0] - 1.0) * size,
-                    origin[1] + (p[1] - 1.0) * size,
-                    origin[2] + (p[2] - 1.0) * size,
+                    origin[0] + (p[0] - 0.5) * size,
+                    origin[1] + (p[1] - 0.5) * size,
+                    origin[2] + (p[2] - 0.5) * size,
                 ]
             })
             .collect();
@@ -263,5 +281,53 @@ mod tests {
     #[test]
     fn surface_nets_does_not_need_hermite_data() {
         assert!(!SurfaceNets.needs_hermite());
+    }
+
+    /// **The drawn surface is where the author put it, and where the collider
+    /// and the SDF agree it is.**
+    ///
+    /// Three subsystems place a voxel in world space — this mesher,
+    /// `Volume::solid_cells` for parry, and `exposure::sample` for every SDF
+    /// query — and until this test they did not all use the same convention.
+    /// The mesher was half a voxel low on all three axes, so the geometry you
+    /// saw was not the geometry you shot at, grass stood half a voxel above the
+    /// ground it was draped on, and W6's shoreline cut the sea short of a beach
+    /// that was drawn too low to meet it.
+    ///
+    /// A box top is the right probe because the answer is exact: no curvature,
+    /// no interpolation, one number the scene file states outright. Both voxel
+    /// sizes, because a bug measured in voxels hides in a single one.
+    #[test]
+    fn the_mesh_the_collider_and_the_field_place_a_surface_in_the_same_place() {
+        for voxel in [0.25_f32, 0.5] {
+            let mut volume = Volume::new([2, 2, 2], voxel);
+            volume.bake(&[crate::VoxelOp::Box {
+                center: [8.0, 2.0, 8.0],
+                half_extents: [6.0, 2.0, 6.0],
+                mode: crate::CsgMode::Union,
+            }]);
+
+            let field = crate::heightfield::surface_height(&volume, [0.0; 3], 8.0, 8.0);
+            let mesh = mesh_volume(&volume, &SurfaceNets);
+            let top = mesh
+                .vertices
+                .iter()
+                .map(|v| v.position)
+                .filter(|p| (p[0] - 8.0).abs() < 1.0 && (p[2] - 8.0).abs() < 1.0)
+                .fold(f32::MIN, |a, p| a.max(p[1]));
+
+            // Half the voxel of tolerance: Surface Nets puts its vertex at the
+            // centroid of a cell's crossings, so a flat top lands within half a
+            // cell of the plane and never on it exactly. The bug this catches
+            // was a *whole* half-voxel of systematic offset on top of that.
+            assert!(
+                (field - 4.0).abs() < voxel * 0.5,
+                "the SDF march puts the authored y = 4.0 top at {field} ({voxel} m voxels)"
+            );
+            assert!(
+                (top - 4.0).abs() < voxel * 0.5,
+                "the drawn top is at {top}, not the authored 4.0 ({voxel} m voxels)"
+            );
+        }
     }
 }

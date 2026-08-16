@@ -2,6 +2,7 @@
 //!
 //! Depends on nothing else in the workspace, and must stay that way (CLAUDE.md).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
@@ -123,7 +124,8 @@ impl TypeRegistry {
             // below — the declared type, the allowed values — is in the other
             // document. Walking the field schema as written meant an enum
             // carried no constraints at all and accepted anything.
-            let field_schema = resolve(schema.as_value(), field_schema);
+            let resolved = flatten_enum(resolve(schema.as_value(), field_schema));
+            let field_schema = resolved.as_ref();
 
             // The declared type, checked before any range: a range check on a
             // value that is not a number silently passes, because `as_f64`
@@ -211,6 +213,48 @@ fn resolve<'a>(root: &'a Value, field_schema: &'a Value) -> &'a Value {
     root.get("$defs")
         .and_then(|defs| defs.get(name))
         .unwrap_or(field_schema)
+}
+
+/// Normalise schemars' second spelling of an enum into the flat one.
+///
+/// A plain unit enum becomes `{"type": "string", "enum": [...]}`. Give its
+/// variants doc comments — which this project asks of every authored type —
+/// and schemars emits `oneOf` with a `const` per branch instead, so it can
+/// carry each variant's description. The check below looked only for the flat
+/// array, found nothing, and enforced nothing: `kind = "lava"` validated
+/// clean, was dropped at load, and the body silently became an ocean. Exactly
+/// the silent no-op the `unknown_field` comment above exists to prevent, one
+/// spelling deeper — and it failed open for *any* enum a future author
+/// documents, `Anchor` included, which was passing only by luck.
+///
+/// The shared `type` is carried across too, so a number where a name belongs
+/// stays a `field_type_mismatch` in both spellings rather than becoming "not
+/// one of these strings".
+fn flatten_enum(schema: &Value) -> Cow<'_, Value> {
+    let Some(branches) = schema.get("oneOf").and_then(Value::as_array) else {
+        return Cow::Borrowed(schema);
+    };
+    // Every branch, or none: a `oneOf` mixing consts with sub-schemas is a
+    // real union type, not an enum, and inventing a closed set from half of it
+    // would reject values that are legal.
+    let Some(values) = branches
+        .iter()
+        .map(|b| b.get("const").cloned())
+        .collect::<Option<Vec<Value>>>()
+        .filter(|v| !v.is_empty())
+    else {
+        return Cow::Borrowed(schema);
+    };
+
+    let mut flat = serde_json::Map::new();
+    let declared = branches[0].get("type");
+    if let Some(ty) = declared
+        && branches.iter().all(|b| b.get("type") == declared)
+    {
+        flat.insert("type".to_owned(), ty.clone());
+    }
+    flat.insert("enum".to_owned(), Value::Array(values));
+    Cow::Owned(Value::Object(flat))
 }
 
 /// The declared type of `field`, and whether `actual` is one.
@@ -560,5 +604,93 @@ mod tests {
             .expect_err("a corner is not a number");
 
         assert_eq!(errors[0].error, "field_type_mismatch", "{errors:?}");
+    }
+
+    /// The same enum as `Corner`, differing only in that its variants are
+    /// documented.
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    enum DocumentedCorner {
+        /// The top left one.
+        TopLeft,
+        /// The bottom right one.
+        BottomRight,
+    }
+
+    /// Something pinned to a corner of the screen.
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct DocumentedPinned {
+        /// Which corner it is measured from.
+        corner: DocumentedCorner,
+    }
+
+    /// **A doc comment must not switch validation off.** schemars emits a flat
+    /// `"enum"` array for a bare unit enum and `oneOf` + `const` once the
+    /// variants carry docs, and the check knew only the first spelling — so
+    /// every enum in the project was validated by the accident of nobody
+    /// having documented its variants yet. `WaterKind` is the first that does,
+    /// and `kind = "lava"` sailed through.
+    ///
+    /// The two enums here are identical apart from the doc comments, which is
+    /// the whole assertion: same input, same rejection.
+    #[test]
+    fn a_documented_enum_is_validated_exactly_like_an_undocumented_one() {
+        let mut reg = TypeRegistry::new();
+        reg.register::<Pinned>("Pinned");
+        reg.register::<DocumentedPinned>("DocumentedPinned");
+
+        for type_name in ["Pinned", "DocumentedPinned"] {
+            let errors = reg
+                .validate(type_name, &serde_json::json!({ "corner": "top_lefft" }))
+                .err()
+                .unwrap_or_else(|| panic!("{type_name}: that is not a corner"));
+            assert_eq!(errors[0].error, "field_not_in_enum", "{type_name}");
+            assert!(
+                errors[0].constraint.contains("top_left"),
+                "{type_name}: the rejection must list what is allowed: {}",
+                errors[0].constraint
+            );
+
+            // A number is still the other mistake, not "not one of these
+            // strings" — the shared `type` survives the normalisation.
+            let errors = reg
+                .validate(type_name, &serde_json::json!({ "corner": 3 }))
+                .err()
+                .unwrap_or_else(|| panic!("{type_name}: a corner is not a number"));
+            assert_eq!(errors[0].error, "field_type_mismatch", "{type_name}");
+
+            assert!(
+                reg.validate(type_name, &serde_json::json!({ "corner": "bottom_right" }))
+                    .is_ok(),
+                "{type_name}: a real corner still passes"
+            );
+        }
+    }
+
+    /// A `oneOf` that is a genuine union — sub-schemas rather than a `const`
+    /// per branch — is not a closed set of values, and must not be turned into
+    /// one. Rejecting more is only an improvement while it rejects the wrong
+    /// things.
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    #[serde(untagged)]
+    enum NameOrNumber {
+        Number(f64),
+        Name(String),
+    }
+
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct Either {
+        which: NameOrNumber,
+    }
+
+    #[test]
+    fn a_union_is_not_mistaken_for_an_enum() {
+        let mut reg = TypeRegistry::new();
+        reg.register::<Either>("Either");
+
+        assert!(reg.validate("Either", &serde_json::json!({ "which": 3 })).is_ok());
+        assert!(reg
+            .validate("Either", &serde_json::json!({ "which": "three" }))
+            .is_ok());
     }
 }

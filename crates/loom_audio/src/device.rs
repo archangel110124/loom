@@ -42,6 +42,17 @@ impl std::fmt::Display for AudioError {
 #[derive(Default)]
 pub struct Playing {
     pub voices: Vec<Voice>,
+    /// The weather, which is not a voice. See [`crate::rain::RainBed`] for why
+    /// an ambient bed cannot be one: a voice has a position, a distance and a
+    /// range, and rain has none of the three.
+    pub rain: crate::rain::RainAudio,
+    /// A decoded recording waiting to be installed into the bed.
+    ///
+    /// **Decoded by the caller and `take`n by the audio thread**, which must
+    /// never read a file or parse a WAV — either would be a dropout. Once
+    /// taken it is gone, so this costs one `Option` check per callback
+    /// thereafter.
+    pub rain_recording: Option<(Vec<f32>, u32, u16)>,
 }
 
 /// An open output stream.
@@ -84,6 +95,11 @@ impl Audio {
 
         let shared = Arc::clone(&playing);
         let mut stereo = Vec::new();
+        // Owned by the callback rather than shared: it is pure generator state
+        // — filters and a sample counter — and nothing outside the audio thread
+        // has any business touching it. What the game changes is the
+        // *parameters*, which go through `Playing`.
+        let mut bed = crate::rain::RainBed::new(sample_rate);
         let stream = device
             .build_output_stream(
                 config.config(),
@@ -98,6 +114,17 @@ impl Audio {
                         (Ok(mut playing), Ok(mut mixer)) => {
                             mixer.render(&mut playing.voices, &mut stereo);
                             playing.voices.retain(|v| !v.finished());
+                            if let Some((samples, rate, channels)) =
+                                playing.rain_recording.take()
+                            {
+                                bed.install(samples, rate, channels);
+                            }
+                            // **After the voices, into the same buffer**, which
+                            // is why `RainBed::render` adds rather than writes.
+                            // The bed lives on the audio thread and its cursor
+                            // never resets, so the texture has no loop point —
+                            // it is generated, not played back.
+                            bed.render(playing.rain, &mut stereo);
                         }
                         _ => stereo.fill(0.0),
                     }
@@ -177,10 +204,53 @@ impl Audio {
         }
     }
 
+    /// Play `path` as the weather bed instead of synthesising it.
+    ///
+    /// Returns `false` if the file is missing or will not decode, and the
+    /// synthesiser then stays in place — **a missing asset must not silence a
+    /// scene that says it is raining.**
+    ///
+    /// # Panics
+    /// Never: a poisoned lock is reported as failure, not unwrapped.
+    pub fn use_rain_recording(&self, path: &std::path::Path) -> bool {
+        // Read and decode here, on the caller's thread. See `rain_recording`.
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+        let Ok((samples, rate, channels)) = crate::Clip::decode_interleaved(&bytes) else {
+            return false;
+        };
+        if samples.is_empty() {
+            return false;
+        }
+        match self.playing.lock() {
+            Ok(mut playing) => {
+                playing.rain_recording = Some((samples, rate, channels));
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Set the weather the ambient bed renders.
+    ///
+    /// Cheap enough to call every tick: it moves three floats under the lock the
+    /// voices already use. The bed smooths them itself, so a rate that jumps
+    /// between ticks is still a fade.
+    pub fn set_rain(&self, rain: crate::rain::RainAudio) {
+        if let Ok(mut playing) = self.playing.lock() {
+            playing.rain = rain;
+        }
+    }
+
     /// Stop everything, for Stop in the editor.
     pub fn silence(&self) {
         if let Ok(mut playing) = self.playing.lock() {
             playing.voices.clear();
+            // **The weather too.** Stop means silence, and a bed that kept
+            // raining through it would be the one sound the editor could not
+            // stop.
+            playing.rain = crate::rain::RainAudio::default();
         }
     }
 }

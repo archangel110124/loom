@@ -46,11 +46,22 @@ pub const NO_TEXTURE: u32 = u32::MAX;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct MaterialData {
-    /// Linear RGB base colour; `w` unused.
+    /// Linear RGB base colour; `w` is porosity — how much the surface darkens
+    /// when it is wet (`loom_scene::components::Material::porosity`).
     pub albedo: [f32; 4],
     /// metallic, roughness, uv_scale.x, uv_scale.y.
     pub params: [f32; 4],
-    /// albedo texture index, normal texture index, flags, unused.
+    /// albedo texture index, normal texture index, flags, **layer index**.
+    ///
+    /// `maps[3]` is an index into this same material table, naming a second
+    /// record shown where the surface is too steep for this one — a full
+    /// material rather than a colour, so the layer carries its own textures,
+    /// roughness, uv_scale and flags. `NO_TEXTURE` means no layer.
+    ///
+    /// **The sentinel is `NO_TEXTURE`, not zero, and that is load-bearing:**
+    /// zero is a perfectly valid material index, so a default of zero would
+    /// give every untextured surface in the project the first material in the
+    /// table as its cliff face.
     pub maps: [u32; 4],
 }
 
@@ -61,9 +72,9 @@ pub const FLAG_TRIPLANAR: u32 = 1;
 impl Default for MaterialData {
     fn default() -> Self {
         Self {
-            albedo: [0.8, 0.8, 0.8, 1.0],
+            albedo: [0.8, 0.8, 0.8, 0.4],
             params: [0.0, 0.8, 1.0, 1.0],
-            maps: [NO_TEXTURE, NO_TEXTURE, 0, 0],
+            maps: [NO_TEXTURE, NO_TEXTURE, 0, NO_TEXTURE],
         }
     }
 }
@@ -273,6 +284,7 @@ fn upload(
         format,
         vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
         levels,
+        vk::SampleCountFlags::TYPE_1,
         &format!("loom.texture.{}", texture.name),
     )?;
 
@@ -385,7 +397,7 @@ fn upload(
 ///
 /// Same shape as `raytrace::Raytracer::submit_build` — initialisation work that
 /// must finish before the first frame, not per-frame work the graph schedules.
-fn record(
+pub(crate) fn record(
     device: &ash::Device,
     submit: Submit,
     record: impl FnOnce(vk::CommandBuffer),

@@ -10,18 +10,24 @@ name = "loom"
 path = "src/main.rs"
 
 [dependencies]
+png = "=0.18.1"
 loom_asset = { version = "0.0.0", path = "../loom_asset" }
 loom_audio = { version = "0.0.0", path = "../loom_audio" }
 loom_ecs = { version = "0.0.0", path = "../loom_ecs" }
 loom_input = { version = "0.0.0", path = "../loom_input" }
 loom_particles = { version = "0.0.0", path = "../loom_particles" }
 loom_physics = { version = "0.0.0", path = "../loom_physics" }
+loom_rain = { version = "0.0.0", path = "../loom_rain" }
 loom_reflect = { version = "0.0.0", path = "../loom_reflect" }
 loom_render = { version = "0.0.0", path = "../loom_render" }
+loom_field = { version = "0.0.0", path = "../loom_field" }
+loom_grass = { version = "0.0.0", path = "../loom_grass" }
+loom_scatter = { version = "0.0.0", path = "../loom_scatter" }
 loom_scene = { version = "0.0.0", path = "../loom_scene" }
 loom_script = { version = "0.0.0", path = "../loom_script" }
 loom_terrain = { version = "0.0.0", path = "../loom_terrain" }
 loom_voxel = { version = "0.0.0", path = "../loom_voxel" }
+loom_water = { version = "0.0.0", path = "../loom_water" }
 serde = "=1.0.229"
 serde_json = "=1.0.151"
 winit = "=0.30.13"

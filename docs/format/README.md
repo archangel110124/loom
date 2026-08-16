@@ -250,12 +250,17 @@ Two consequences worth stating plainly:
 
 ## 5. Prefab instances and overrides
 
-> **NOT IMPLEMENTED.** Nothing in `crates/` reads `prefab`, `extends` or
-> `[node.overrides]`. Until it does, the parser **rejects** all three with
-> `not_implemented` rather than ignoring them — a node whose components come
-> from a prefab silently had no components at all, so it drew nothing, lit
-> nothing, and the scene still validated. This section is the design to build
-> against, not a description of the code.
+> **Implemented.** `prefab`, `[node.overrides]` and `extends` are read by
+> `loom_scene::prefab` and expanded before any command looks at the tree. The
+> three operations are `loom prefab <unpack|revert-overrides|apply-overrides>`,
+> and setting a field on an instance writes an override rather than a
+> component.
+>
+> Two behaviours worth knowing, both recorded in ADR 0008: `apply-overrides`
+> writes **two** files and is therefore two undo steps, not one; and `extends`
+> merges field by field, which means resetting an inherited transform to
+> exactly identity is the one edit it cannot express (omitted *is* identity, so
+> the two are indistinguishable in the file).
 
 Unity's `PrefabInstance` delta model. The consuming file stores a **source reference plus explicit
 modifications** — never a copy of the prefab's contents.

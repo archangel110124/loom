@@ -29,6 +29,11 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("scene_edit", "loom scene --tx"),
     ("scene_place", "loom place --op"),
     ("scene_measure", "loom measure"),
+    // The only point query over a *simulated* field rather than over the scene
+    // graph, and the reason it is in the always-loaded set: everything Phase 3
+    // built is otherwise reachable only by rendering a picture or running a
+    // simulation, neither of which answers "is the water doing what I asked".
+    ("water_query", "loom water"),
     ("describe_type", "loom describe"),
     ("render_preview", "loom render"),
     ("run_scene", "loom sim --assert"),

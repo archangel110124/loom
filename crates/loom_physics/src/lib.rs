@@ -959,6 +959,60 @@ impl Physics {
         self.bodies.len()
     }
 
+    /// Where a body's mass actually is, in world space.
+    ///
+    /// The point a torque acts about, which is not the node's origin whenever
+    /// the collider is offset from it.
+    #[must_use]
+    pub fn centre_of_mass(&self, handle: RigidBodyHandle) -> Option<[f32; 3]> {
+        let c = self.bodies.get(handle)?.center_of_mass();
+        Some([c.x, c.y, c.z])
+    }
+
+    /// How fast one world-space point *on* a body is moving.
+    ///
+    /// `linvel + angvel × r`, which for anything rotating is not the body's
+    /// linear velocity: the two ends of a rolling crate move opposite ways.
+    /// Buoyancy damping reads this per pontoon, and reading the body velocity
+    /// instead would damp none of the roll — the axis that actually resonates.
+    #[must_use]
+    pub fn velocity_at_point(&self, handle: RigidBodyHandle, point: [f32; 3]) -> Option<[f32; 3]> {
+        let v = self
+            .bodies
+            .get(handle)?
+            .velocity_at_point(Vector::new(point[0], point[1], point[2]));
+        Some([v.x, v.y, v.z])
+    }
+
+    /// Apply one force and one torque to a body for exactly this step.
+    ///
+    /// **As impulses over the fixed timestep, deliberately.** rapier's
+    /// `add_force` persists until something calls `reset_forces`, so a caller
+    /// that applied a force each tick and forgot to clear it would accumulate
+    /// last tick's force into this one — and the symptom is a crate that
+    /// accelerates out of the sea over about ten seconds, which looks exactly
+    /// like the resonance buoyancy damping exists to prevent. An impulse of
+    /// `F·dt` is the same integration with no state to leak.
+    pub fn apply_force_torque(
+        &mut self,
+        handle: RigidBodyHandle,
+        force: [f32; 3],
+        torque: [f32; 3],
+    ) {
+        let dt = self.integration.dt;
+        let Some(body) = self.bodies.get_mut(handle) else {
+            return;
+        };
+        body.apply_impulse(
+            Vector::new(force[0] * dt, force[1] * dt, force[2] * dt),
+            true,
+        );
+        body.apply_torque_impulse(
+            Vector::new(torque[0] * dt, torque[1] * dt, torque[2] * dt),
+            true,
+        );
+    }
+
     /// Advance one fixed step.
     pub fn step(&mut self) {
         self.pipeline.step(

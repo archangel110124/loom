@@ -25,6 +25,8 @@
 //! **Order is not commutative.** Subtract-then-union differs from
 //! union-then-subtract, and an agent will assume otherwise unless told.
 
+pub mod exposure;
+pub mod heightfield;
 pub mod mesh;
 
 pub use mesh::{Mesher, SurfaceNets};

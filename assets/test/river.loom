@@ -1,0 +1,203 @@
+# A river, and a crate that ends up downstream of where it was dropped.
+#
+#     loom sim assets/test/river.loom --ticks 600 --assert "River/Crate.x > 14"
+#
+# **Measured: it starts at x = 6.0 and finishes at x = 17.7**, ten seconds
+# later, still in the middle of the channel at z = 24.0. Set `speed = 0.0` below
+# and it finishes at x = 6.00 — where it was dropped. Both numbers are asserted
+# in `play.rs`'s `a_crate_dropped_in_a_river_ends_up_downstream`, the second one
+# because an assertion that cannot fail proves nothing.
+#
+# **Nobody drew this river's course.** The `WaterBody` says one thing about
+# flow — how fast — and everything else is read off the ground: `loom_water`'s
+# flow module routes water downhill across the same height grid the depth comes
+# from, counts what drains through each cell, and takes the direction from the
+# bed's own gradient. Move the channel and the current moves with it; there is
+# no second description of where the water goes that could disagree with the
+# terrain. That is the water doc's §5.8, and it is the one place this engine is
+# straightforwardly better arranged than Unreal's spline-driven rivers.
+#
+# **The assertion is the point of the scene, and a screenshot cannot make it.**
+# A still frame of a river and a still frame of a lake with a crate in it are
+# the same picture. What is being claimed is that the crate *travels*, so the
+# check is a simulation assertion over 600 ticks — ten seconds — and the
+# mutation that falsifies it is one line: set `speed = 0.0` below and the crate
+# stays within a metre of where it was dropped.
+#
+# **The channel descends 2.6 m over 48 m, which is a slope and not a waterfall.**
+# The direction is the bed's gradient, so the only thing that matters is that it
+# has one; the speed is the drainage, which is why the current is fastest in the
+# middle of the channel and nearly still on the banks even though the banks are
+# far steeper.
+
+[scene]
+format = 1
+id = "9c2f4e18-6b73-4d5a-8e91-3a07d5c62b48"
+
+[[node]]
+name = "River"
+
+  [node.components.Environment]
+  # Sun down the valley, which is what puts a highlight on the moving water.
+  sun_direction = [-0.42, 0.55, 0.72]
+  sun_strength = 1.25
+  sun_color = [1.0, 0.96, 0.88]
+  ambient = 0.45
+  sky_zenith = [0.18, 0.32, 0.52]
+  sky_horizon = [0.62, 0.68, 0.72]
+  fog_density = 0.006
+  fog_falloff = 0.05
+
+  # A light breeze. It drives nothing here — the wave list below is authored,
+  # so the spectrum never runs — and it is written down so the scene describes
+  # one weather rather than half of one.
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 3.0
+  gustiness = 0.8
+  turbulence = 0.6
+
+# The valley: a plateau with a channel cut through it, 48 m along X at 0.25 m
+# voxels — a 193² height grid, which is the grid the depth, the shoreline and
+# the current are all read from. 48 m across in Z too, so the drainage running
+# into the channel comes off real ground rather than off the edge of the map.
+#
+# ORDER MATTERS. The slab lays the ground; the capsule cuts the channel out of
+# it. The capsule's axis descends from y = 8.6 to y = 5.6 across the volume, and
+# that 3 m is the entire reason there is a current: flow direction is the bed's
+# gradient, and a flat bed has none.
+#
+# Both ends run past the volume's edge on purpose, so the channel is open at the
+# top of the map and at the bottom rather than starting and ending in a bowl —
+# a bowl is a pit, and water in a pit stays there.
+[[node]]
+name = "Ground"
+parent = "River"
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.25
+  chunks = [6, 2, 6]
+
+  # The plateau, top at y = 8. Wider than the river needs, and that is the
+  # point: the water mesh reaches 512 m, so wherever the volume stops the water
+  # is bottomless and draws itself as open sea. `shore.loom` documents the same
+  # rule from the other side. 48 m of ground puts that horizon far enough back
+  # that a river reads as a river.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [24.0, 4.0, 24.0]
+  half_extents = [26.0, 4.0, 26.0]
+  mode = "union"
+
+  # The channel. Radius 3 m around an axis that drops 3 m over the length of the
+  # volume, so the bed runs from y = 5.39 at the top to y = 2.81 at the bottom
+  # and the cut breaks the surface along its whole length.
+  [[node.components.VoxelVolume.ops]]
+  kind = "capsule"
+  a = [-4.0, 8.6, 24.0]
+  b = [52.0, 5.6, 24.0]
+  radius = 3.0
+  mode = "subtract"
+
+  [node.components.Material]
+  albedo = [0.38, 0.34, 0.27]
+  roughness = 0.92
+
+[[node]]
+name = "Water"
+parent = "River"
+
+  [node.components.WaterBody]
+  kind = "river"
+  # A level plane, as every water body in this engine is (§5.2): the bed
+  # descends underneath it, so the river deepens downstream rather than the
+  # surface following the ground. It sits 1.5 m below the banks, so the water is
+  # in the channel and the plateau is dry.
+  surface_height = 6.5
+  density = 1000.0
+  # **This is what a river pushes with**, and it is the same coefficient that
+  # damps a crate bobbing in the sea: drag against the water's velocity relative
+  # to the body. There is no second "river force". High, because the term is in
+  # newtons per m/s rather than scaled by displaced mass, so what it means
+  # depends on how heavy the thing in the water is — see the crate's mass.
+  drag = 80.0
+
+  # The only thing authored about the flow. Where it goes comes from the ground.
+  # **Set this to 0.0 to falsify the assertion at the top of this file.**
+  [node.components.WaterBody.flow]
+  speed = 3.0
+
+  [node.components.WaterBody.waves]
+  # Shallow water everywhere here, so the ripples flatten toward both banks
+  # rather than lapping at a hard edge.
+  attenuation_depth = 1.5
+  max_height = 0.2
+
+  # Ripples, not swell. A river's surface is not driven by waves — the current
+  # is what moves it — so this is texture rather than motion. Authored rather
+  # than left empty because an empty wave set is filled from the wind spectrum,
+  # and a fully developed sea in a five-metre channel would be absurd.
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 3.4
+  amplitude = 0.05
+  steepness = 0.25
+  direction = [1.0, 0.15]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 1.9
+  amplitude = 0.03
+  steepness = 0.3
+  direction = [1.0, -0.4]
+  speed_scale = 1.0
+
+# Dropped upstream, into the channel. Light: the drag coefficient above is in
+# newtons per m/s, so how quickly the river takes hold of something is
+# `mass / drag` — 128 kg against 80 is a couple of seconds, and a crate ten
+# times heavier would need ten times the river to move it in the same time.
+#
+# 0.8 m cube at 250 kg/m³, so it floats high and its corners stay wet.
+[[node]]
+name = "Crate"
+parent = "River"
+transform = { pos = [6.0, 7.4, 24.0], rot_euler = [0.0, 8.0, 0.0], scale = [0.4, 0.4, 0.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.46, 0.32, 0.18]
+  roughness = 0.8
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 128.0
+
+  # Everything default: four pontoons at the crate's horizontal corners,
+  # displacing exactly its own volume.
+  [node.components.Buoyancy]
+
+# A post driven into the bank at the drop point, so a render has one fixed mark
+# to measure the crate's travel against. A still of a river cannot otherwise
+# tell moving water from a puddle.
+[[node]]
+name = "Post"
+parent = "River"
+transform = { pos = [6.0, 7.4, 26.6], scale = [0.16, 1.6, 0.16] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.18, 0.14, 0.10]
+  roughness = 0.85
+
+# Low over the bank, looking downstream — the channel runs away from the camera
+# toward +X, which is the direction the crate has to go.
+[[node]]
+name = "Camera"
+parent = "River"
+transform = { pos = [1.0, 9.6, 29.0], rot_euler = [-14.0, -58.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 58.0
