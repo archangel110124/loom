@@ -228,9 +228,20 @@ impl Displace {
         let mut freq = self.frequency;
         let mut norm = 0.0;
         for _ in 0..self.octaves.max(1) {
-            // 3.0 is the same per-octave bound on value noise's gradient the
-            // heightfield uses; keeping one number means one thing to be wrong.
-            slope += amp * freq * 3.0;
+            // **4.0, not the heightfield's 3.0, and the two differ on purpose.**
+            // They interpolate with different curves: `loom_field::noise` uses
+            // Hermite smoothstep `3t^2-2t^3`, whose derivative peaks at 1.5, and
+            // 3.0 is that over a [-1,1] range. `loom_terrain::noise` — which is
+            // what `Displace` samples — uses *smootherstep* `t^3(6t^2-15t+10)`,
+            // peaking at 1.875, so the per-axis bound is 3.75.
+            //
+            // Measured, not only derived: `cargo run -p loom_terrain --example
+            // gradbound` finds a largest |grad value3| of 3.249 over 24 seeds
+            // and a 61^3 grid inside one cell, against 2.409 for the 2D one. So
+            // the heightfield's 3.0 has room to spare and this path did not — it
+            // was copied from there and understated its own bound, which is the
+            // direction that punches holes.
+            slope += amp * freq * 4.0;
             norm += amp;
             amp *= 0.5;
             freq *= 2.0;
@@ -802,7 +813,18 @@ impl Volume {
                     // Second, tighter filter: a chunk inside the AABB but
                     // outside the shape still costs one distance evaluation,
                     // not 32,768.
-                    if op.distance(centre).abs() > chunk_radius {
+                    //
+                    // **Widened by `lipschitz`, exactly as `bake` does.** This
+                    // tested the raw chunk radius, which is only sound for a
+                    // 1-Lipschitz field: for `|grad f| <= L`, a chunk of radius
+                    // R is provably surface-free only when `|f(centre)| > L*R`.
+                    // It went unnoticed while every runtime carve was a plain
+                    // sphere — for which L is 1 and the two are the same
+                    // expression — and a displaced op is what makes it
+                    // reachable. The symptom is a chunk at a crater's edge that
+                    // holds surface and is never remeshed, so a slab hangs in
+                    // the air.
+                    if op.distance(centre).abs() > chunk_radius * op.lipschitz() {
                         continue;
                     }
 
