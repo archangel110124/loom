@@ -38,8 +38,24 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 42] = [
+const SCENES: [&str; 43] = [
     "assets/test/lanternhead.loom",
+    // One building, composed. **In `SCENES` and not `GOLDEN`, on the stated
+    // rule**: every path it draws is already covered — `ground` and
+    // `lanternhead` the two-material slope blend, `materials` the bindless
+    // tiling maps, `meadow` and `grass_slope` the vertex-shader blades, `props`
+    // the per-model atlases, `campfire` the point light and the flame,
+    // `smoke` the alpha plume, `squall` the cloud deck. Three voxel volumes in
+    // one scene is not a rendering path either; `proving_ground` already has
+    // three and sits in this list for the same reason.
+    //
+    // What it is for is a human looking at it, and what this line guards is
+    // that it still loads, bakes and validates clean.
+    //
+    // **It is deliberately NOT in the `--play` list below.** Measured at 26.0
+    // ms/frame debug against that check's 30 ms ceiling — 13% of headroom,
+    // which is variance rather than margin. Its header has the breakdown.
+    "assets/test/croft.loom",
     // A landscape out of one `heightfield` op, with the imported props on it at
     // their real size. **Not in `GOLDEN`**: `ground.loom` already references the
     // two-material slope blend, `grass_slope.loom` the grass over marched

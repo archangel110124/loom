@@ -1,0 +1,1182 @@
+# croft.loom — a stone longhouse on a grass shelf, late afternoon.
+#
+#     loom render assets/test/croft.loom --out croft.png --size 1280x800 --sim 600
+#
+# **The subject is the building.** Everything else — the shelf it stands on, the
+# bank behind it, the grass, the props — is here to make one house legible, and
+# each of them is sized against the house rather than against the world.
+#
+# ---------------------------------------------------------------------------
+# Three volumes, and why a building is not one
+# ---------------------------------------------------------------------------
+#
+# A `VoxelVolume` carries **one** `Material` plus **one** slope-keyed `layer`,
+# and `groundLayerWeight` is `1 - saturate((n.y - cutoff) / fade)` — a rule
+# about which way a face points, not about which part of the building it is. So
+# a single volume can hold exactly two substances, split flat-versus-steep. A
+# house wants three: the roof, the walls, and the dressed stone that caps every
+# horizontal (plinth ledge, sills, lintels, chimney cap, threshold).
+#
+# Walls and caps are the *natural* pair for one volume, because they really are
+# split steep-versus-flat. The roof is not: it is flat-ish like a cap and made
+# of something else entirely. Hence:
+#
+#   `Ground` — turf on the flats, bedrock on the steeps, 0.42 m voxels
+#   `House`  — dressed stone on the flats, rubble masonry on the walls, 0.16 m
+#   `Roof`   — slate, one material, no layer
+#
+# **The roof has no `layer` and must not get one**, because both its pitches
+# are the same slope: a slope rule cannot tell the two apart, and any cutoff
+# either paints the whole roof or none of it. The material break at the eaves
+# is a *volume* break.
+#
+# **Each volume's op coordinates are that volume's own space**, and the three
+# offsets are the node transforms below. They are written into the section
+# headers, because getting one wrong is the whole class of bug in this file:
+#
+#   Ground  local = world - [ 4.0, 0.0,  4.0]
+#   House   local = world - [19.0, 7.0, 14.0]
+#   Roof    local = world - [18.0, 11.0, 14.0]
+#
+# In WORLD terms the house centre is [24, ., 24], the shelf it stands on is at
+# y = 9.75, its floor is 10.0, its eaves 12.70 and its ridge 15.05.
+#
+# **`scene_volume` takes the FIRST volume with a `VoxelVolume` and only that
+# one**, and grass, rain shelter and the flow field all read it. So `Ground` is
+# first on purpose: grass must march the terrain, not the roof. The corollary
+# is that `loom_grass` has no idea the house exists — the four fields below are
+# each placed clear of its footprint by hand, because nothing else will.
+#
+# ---------------------------------------------------------------------------
+# The light, which is half of it
+# ---------------------------------------------------------------------------
+#
+# The camera stands 2.2 m over the shelf, 15.2 m out, on a bearing that puts
+# **both** visible faces at about 45 degrees. That is the whole reason for the
+# 63-degree stand-off: a three-quarter view where one face is at 10 degrees and
+# the other at 80 is not a three-quarter view, it is an elevation with a sliver,
+# and the first camera here was exactly that — 77 degrees on the gable.
+#
+# Its yaw is then 2 degrees off the bearing, at 29 rather than 27. Aiming the
+# lens at the house's *centre* is not the same as centring the house: the near
+# gable reaches further to one side than the far end does to the other, so on
+# the exact bearing the mass sits left and the frame is right-heavy.
+#
+# The sun is 17.5 degrees up and swung round so it rakes the long façade at
+# about 60 degrees of incidence and leaves the gable end — the face with the
+# door in it — **entirely unlit**. Both halves of that matter:
+#
+# - Raking, so the eaves overhang lays a shadow band down the lit wall and the
+#   sills and lintels each throw one. Flat noon light hides every bit of that.
+# - The gable dark, because the door opens on it and there is a fire inside.
+#   A raymarched flame is additive and its dim outer regions read as detached
+#   shards against anything bright (ADR 0020); against an unlit stone wall it
+#   reads as fire. The composition and the shader want the same thing here.
+#
+# Ray-traced soft shadows and AO (ADR 0019) are what make this work at all, and
+# they see voxel meshes: the eaves shadow, the contact darkening where the bank
+# piles against the back wall, and the black inside the window reveals are all
+# traced rather than painted.
+#
+# ---------------------------------------------------------------------------
+# What the building is made of, and the rules each detail is paying
+# ---------------------------------------------------------------------------
+#
+# **Nothing thinner than two voxels survives.** At 0.16 m that is 0.32 m, and
+# it sets every dimension in the House volume: walls 0.50, sills and lintels
+# 0.32 thick and 0.22 proud, the chimney cap 0.40, the eaves fascia 0.35. A
+# 0.15 m sill would have vanished silently, which is the failure this rule
+# exists for.
+#
+# **`round` is what stops it being a CAD box**, and it needs to be more than one
+# voxel to exist at all: 0.22 m on the walls is 1.4 voxels and reads as the worn
+# arris of a rubble wall, 0.30 m on the plinth as a weathered footing. A 0.10 m
+# fillet at this resolution is *nothing* — sub-voxel, and the mesher cannot
+# place a vertex for it.
+#
+# **`yaw_degrees` is doing two different jobs.** The whole house is 18 degrees
+# off the world axes so that neither its walls nor its roof line up with
+# anything else in the scene; and the byre at the far end is at +8, which is 26
+# degrees off the house, so the building reads as something added to over time
+# rather than extruded from a grid. Every op in an assembly carries the same
+# yaw AND has its centre rotated about the assembly's own pivot — yaw turns an
+# op about *itself*, so yawing six walls in place spins each on the spot and
+# leaves the box open at its corners. `lanternhead.loom` records that trap; the
+# numbers here were generated from offsets rather than typed.
+#
+# **The roof is a solid mass with two planes cut off it**, which is the only
+# way to get a pitched roof out of ops that cannot tilt. A `box` has yaw and
+# nothing else, and a `capsule` is round in section — so the roof is a box and
+# two `subtract` spheres of radius 300, tangent to the pitch at its midpoint.
+# Over the 4.25 m the pitch actually runs, the sphere departs from a true plane
+# by under a centimetre, and by 5 cm at the far corners of the roof — a roof
+# that bellies up 5 cm at its ends, which is the wrong way for an old roof to
+# sag but is under half a voxel either way. Three ops for a clean gable.
+#
+# **The order of the two roofs is load-bearing and is not a style choice.** A
+# `subtract` applies to everything accumulated so far, and a roof plane extended
+# is an infinite plane — so the byre's cutting spheres would slice the main roof
+# if they ran after it. They run first, when only the byre's own mass exists.
+# The main roof's spheres then run with both present, which is safe only because
+# the byre sits entirely *under* the main roof's planes extended — checked, and
+# the tightest clearance is 0.57 m at the byre's front eaves. Move the byre
+# outward or raise its ridge and that stops being true, silently, by shaving the
+# top off it.
+#
+# **The building sits in its ground rather than on it** three ways: the bank
+# behind it piles 0.67 m up the back wall at turf level and nothing 0.5 m up,
+# the plinth stands 0.25 m proud of the turf with a ledge the walls step in
+# from, and both boulders lie in dishes the terrain carves — `moraine.loom`'s rule, that a mesh meeting
+# voxel ground under a low sun shows its seam unless the ground hollows for it.
+# A `subtract` sphere makes a dish only if its centre is ABOVE the ground:
+# `centre_y = ground - depth + radius`, or it excavates a crater.
+#
+# ---------------------------------------------------------------------------
+# Scale, which a building has no way to assert on its own
+# ---------------------------------------------------------------------------
+#
+# A stone box is any size at all until something in the frame is not. The door
+# is 1.10 x 2.10 m, the windows 1.10 x 1.20, the wall lantern beside the door
+# is the imported 0.48 m model at 1.6x, the chopping block is the 0.55 m stump
+# and the felled log is 3.0 m. Those are the real metric sizes of the imported
+# meshes, and each one carries **its own atlas** — using one prop's atlas on
+# another smears it, which is a bug already in this project's history.
+#
+# ---------------------------------------------------------------------------
+# Cost, measured, and where it is
+# ---------------------------------------------------------------------------
+#
+# `loom run assets/test/croft.loom --edit --play --frames 90` on the **debug**
+# build, which is the one `cargo xtask validate` gates on:
+#
+#     the whole scene            26.05 ms/frame   (worst frame 2265 ms)
+#     with `Roof` deleted        22.58            -> the roof volume  3.5 ms
+#     with `House` deleted       12.88            -> the house volume 13.2 ms
+#     with the four fields gone  23.29            -> all the grass     2.8 ms
+#                                                 -> ground + frame    6.6 ms
+#
+# **Almost all of it is the one-off bake amortised over 90 frames** — the worst
+# frame is 2265 ms, which is 25.2 of the 26.0, so the steady state is under a
+# millisecond. And it is the House volume, which is 18 ops over 16 chunks at
+# 0.16 m: bake cost is per chunk times ops, and this is the file that spends
+# both. The terrain is 18 chunks at 0.42 m precisely so that it can.
+#
+# **This scene is in `SCENES` but deliberately not in the `--play` list**, whose
+# ceiling is 30 ms: 26.0 leaves 13% and that is variance rather than headroom.
+# Coarsening the House to 0.20 m would buy about a quarter of it and cost the
+# sills, which are 0.32 m and need two voxels; the measurement is what says the
+# trade is not worth taking.
+#
+# ---------------------------------------------------------------------------
+# What is deliberately not here
+# ---------------------------------------------------------------------------
+#
+# No rain and no water. Rain would make this a weather scene and every rain
+# scene in the library already is one; water needs a `WaterBody`, which has no
+# extent, so a pond on a hilltop is an infinite plane at the pond's height.
+#
+# No `Scatter` and no trees. `Scatter` gives a whole field one flat albedo with
+# `material: u32::MAX`, and the tree cards are alpha cutouts that `fragmentMain`
+# has no `discard` for — both would put an unlit rectangle next to the thing the
+# scene exists to show.
+
+[scene]
+format = 1
+id = "e425b440-491c-4495-a5b3-4a9ebf7756f2"
+
+# --- the two masonries ------------------------------------------------------
+
+[[asset]]
+key = "quay_stone_albedo"
+id = "3716ac9c-8b74-489e-bac6-31be8ac1553a"
+path = "../textures/quay_stone_albedo.png"
+
+[[asset]]
+key = "quay_stone_normal"
+id = "40a54003-199e-4cd0-8f2e-04bb9f286227"
+path = "../textures/quay_stone_normal.png"
+
+[[asset]]
+key = "concrete_worn_albedo"
+id = "5ed5d0a7-e210-4e04-8139-1e5d4a8b9ede"
+path = "../textures/concrete_worn_albedo.png"
+
+[[asset]]
+key = "concrete_worn_normal"
+id = "bd47ba80-b1a3-4918-9cd1-01f7607b9bb3"
+path = "../textures/concrete_worn_normal.png"
+
+# --- the roof ---------------------------------------------------------------
+
+[[asset]]
+key = "wood_shingle_albedo"
+id = "bbb193e2-01e9-45ae-864b-680a3037b764"
+path = "../textures/wood_shingle_albedo.png"
+
+[[asset]]
+key = "wood_shingle_normal"
+id = "e7d8efba-4419-46b8-8283-7a6fa3606c36"
+path = "../textures/wood_shingle_normal.png"
+
+# --- the ground -------------------------------------------------------------
+
+[[asset]]
+key = "grass_ground_albedo"
+id = "731d045f-cd5f-404e-89a4-27726a79de3a"
+path = "../textures/grass_ground_albedo.png"
+
+[[asset]]
+key = "grass_ground_normal"
+id = "726afe34-c7f6-48b0-afeb-ed3fe2a3e183"
+path = "../textures/grass_ground_normal.png"
+
+[[asset]]
+key = "ground_rock_albedo"
+id = "49fa619e-7863-475e-b34e-5a79e3a7d4e6"
+path = "../textures/ground_rock_albedo.png"
+
+[[asset]]
+key = "ground_rock_normal"
+id = "dcc837a8-a39f-4b37-8a08-ffe3e48fc259"
+path = "../textures/ground_rock_normal.png"
+
+# --- the props, each with its OWN atlas -------------------------------------
+
+[[asset]]
+key = "mesh_stump"
+id = "78fd19bb-d8c2-4344-978e-46881e24d954"
+path = "../meshes/tree_stump.obj"
+
+[[asset]]
+key = "stump_albedo"
+id = "33a9bd94-6ac4-4e50-a8a3-baff29e335ac"
+path = "../textures/tree_stump_albedo.png"
+
+[[asset]]
+key = "stump_normal"
+id = "5d4867c0-fdba-4c46-8d55-2f5f15097e6d"
+path = "../textures/tree_stump_normal.png"
+
+[[asset]]
+key = "mesh_log"
+id = "60afa7e7-20f4-41f7-a5c1-0dbd4fb297c4"
+path = "../meshes/tree_log.obj"
+
+[[asset]]
+key = "log_albedo"
+id = "b8d73b13-716a-48fb-9a00-6b21d69c5b01"
+path = "../textures/tree_log_albedo.png"
+
+[[asset]]
+key = "log_normal"
+id = "ef207dc2-a9c6-4c25-8119-6694a34a6049"
+path = "../textures/tree_log_normal.png"
+
+[[asset]]
+key = "mesh_boulder"
+id = "b50433e6-97aa-4d42-a4f5-12cbe484e158"
+path = "../meshes/rock_boulder_b.obj"
+
+[[asset]]
+key = "boulder_albedo"
+id = "af8d6400-6fc2-4c89-b561-40962b415d39"
+path = "../textures/rock_boulder_b_albedo.png"
+
+[[asset]]
+key = "boulder_normal"
+id = "472e1147-9e65-413b-a5b0-b18ddef0e1ad"
+path = "../textures/rock_boulder_b_normal.png"
+
+# The lantern exports as two `o` groups and the scene picks the frame alone —
+# the glass is a separate object and would arrive fused to it through glTF.
+[[asset]]
+key = "mesh_lantern"
+id = "91a02be2-80b7-45fe-9f6d-fa337b8a8cad"
+path = "../meshes/lantern.obj#WallLanternExterior001_Frame_Geo_LOD0"
+
+[[asset]]
+key = "lantern_albedo"
+id = "bbfb6594-000d-4716-90c8-807f129ef4c7"
+path = "../textures/lantern_albedo.png"
+
+[[asset]]
+key = "lantern_normal"
+id = "bc18485f-9352-4f72-9fec-941d9c26f387"
+path = "../textures/lantern_normal.png"
+
+[[node]]
+name = "Croft"
+
+  # **17.5 degrees above the horizon, swung to +X/-Z.** The elevation is what
+  # makes the eaves overhang, the sills and the lintels each cast a band rather
+  # than a line — 0.55 m of overhang at this elevation is 1.7 m of shadow down
+  # the wall.
+  #
+  # The azimuth is chosen against the two faces, not by taste. The long façade's
+  # normal points along bearing 18 degrees and the gable's along 108; putting
+  # the sun at -40 gives the façade 60 degrees of incidence (lit, and modelled
+  # rather than flat) and the gable 148 (unlit). It is 77 degrees off the view
+  # axis, so the sun disc itself is well outside a 68-degree frame.
+  #
+  # `sun_strength = 1.7` with `ambient = 0.50`: the ambient is the only thing
+  # lighting the gable end and the interior, and it is what decides whether the
+  # dark half of the building reads as stone or as a hole. It started at 0.32
+  # and the gable came out as a flat black mass with a lantern stuck to it —
+  # a face this scene needs *read*, not merely dark, since the door is in it.
+  [node.components.Environment]
+  sun_direction = [0.726, 0.301, -0.618]
+  sun_strength = 1.7
+  sun_color = [1.00, 0.82, 0.60]
+  ambient = 0.50
+  sky_zenith = [0.050, 0.100, 0.240]
+  sky_horizon = [0.58, 0.46, 0.33]
+  fog_density = 0.010
+  fog_falloff = 0.050
+  exposure = 1.0
+  cloud_cover = 0.38
+  cloud_scale = 900.0
+
+  # Gentle on purpose. Wind here drives the grass and the chimney plume and
+  # nothing else; at `lanternhead`'s 7 m/s a still house with a laid-flat meadow
+  # around it reads as a gale, which is a different picture.
+  [node.components.Wind]
+  direction_degrees = 300.0
+  speed = 2.6
+  gustiness = 0.9
+  turbulence = 0.8
+  ground_drag = 0.50
+
+# ===========================================================================
+# GROUND — local = world - [4.0, 0.0, 4.0]
+# ===========================================================================
+#
+# **0.42 m voxels and [3,2,3], which is 18 chunks for a 40 m world.** Bake cost
+# is per chunk, not per metre (`homestead.loom` measures it), and this scene
+# already spends its chunks on the building: the House and Roof volumes are 16
+# and 12 chunks at 0.16 m, and the ground is the one thing here that a coarse
+# voxel does not hurt. Nothing in the terrain is smaller than a metre.
+
+[[node]]
+name = "Ground"
+parent = "Croft"
+transform = { pos = [4.0, 0.0, 4.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.42
+  chunks = [3, 2, 3]
+
+  # **The shelf, and it is a rounded box rather than a dome.** A sphere big
+  # enough to be flat where the house stands is still falling away everywhere
+  # else, and its edge has to leave the volume somewhere — every dome tried here
+  # either cut a cliff at the volume wall or was too small to hold a camera 15 m
+  # out. A box with a 4 m fillet is dead flat over the middle 26 m and rolls
+  # over a convex brow into a rock face, which is a hilltop that ends rather
+  # than a mound: the brow hides the volume's own edge from anyone standing on
+  # top of it, which is where the camera is.
+  #
+  # Top at world y = 9.75 — 0.25 m under the floor, which is the plinth that
+  # shows.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [23.0, 4.25, 23.0]
+  half_extents = [17.0, 5.5, 17.0]
+  round = 4.0
+  mode = "union"
+
+  # **The bank the house is dug into, and it is a `capsule` because a sphere
+  # cannot be laid along a wall that is 18 degrees off the world axes.**
+  # `elongate` stretches a sphere on the world axes only, so the first version
+  # of this bank ran square to Z, drifted 2.8 m across the house's length and
+  # wrapped round the +Z gable **in front of the door** — the render showed a
+  # rock face where the doorway should have been. A capsule takes two arbitrary
+  # endpoints, so this one runs exactly parallel to the back wall, 3.4 m behind
+  # it, and stops at both gables. Its flanks are past the layer's cutoff and
+  # come out as bedrock; its crown stays turf.
+  #
+  # 4.6 m of radius against a 3.4 m stand-off puts its flank **0.67 m past the
+  # wall face at turf level and nothing at all 0.5 m up** — earth piled against
+  # a wall, which is the contact this scene exists to have. It is also why there
+  # is no pad cut in this list: an earlier version subtracted a box to flatten a
+  # building platform, and the first thing it did was clear the bank back off
+  # the wall again.
+  [[node.components.VoxelVolume.ops]]
+  kind = "capsule"
+  a = [15.145, 7.6, 13.586]
+  b = [12.302, 7.6, 22.335]
+  radius = 4.6
+  mode = "union"
+
+  # Three swells, so the shelf is not a table. Amplitudes are 0.8 to 1.7 m over
+  # 5 to 9 m, which is ground that has been walked on rather than terrain.
+  #
+  # **A swell's height is set by the layer cutoff, not by taste.** Where a sphere
+  # of radius `r` meets flat ground `d` below its centre, the surface normal
+  # there is `d / r` — so a swell whose contact normal falls under 0.55 comes out
+  # ringed in bedrock, which on a skyline is a black blob rather than a hill. The
+  # right-hand one was exactly that at 1.55 m of rise; 0.8 m is where its contact
+  # normal reaches 0.73.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [12.0, 6.8, 30.0]
+  radius = 4.6
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [30.5, 7.70, 15.0]
+  radius = 2.8
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [7.0, 7.2, 16.0]
+  radius = 4.0
+  mode = "union"
+
+  # **A `subtract` sphere makes a dish only if its centre is above the ground.**
+  # For a hollow `D` deep with radius `r`, `centre_y = ground - D + r`, and it
+  # comes out `2*sqrt(r^2 - (r-D)^2)` across.
+  #
+  # Centred *below* the surface instead it excavates to its own bottom, which is
+  # a crater; `moraine.loom` dug a seven-metre one learning that.
+  #
+  # **A dish must be narrower than the rock, not wider.** These were 2.5 m across
+  # for a 1.6 m boulder and rendered as a bare dark hollow with the rock sitting
+  # on its rim — grass is culled inside by the same slope rule, so an exposed
+  # dish is a mown circle in the lawn. 1.77 m and 2.04 m, 0.35 and 0.4 m deep.
+  #
+  # **Both of these are boulder seats and there is deliberately no third.** A
+  # 1.1 m dell was authored in the near foreground and rendered as a black pit:
+  # its inside is steep, so the slope rule paints it bedrock; a hollow sees
+  # almost no sky, so AO takes what little ambient the bedrock had; and the
+  # grass field over the top fringes the rim with blades. **A hollow in open
+  # turf needs something in it, or it is a hole in the lawn.**
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [24.97, 10.70, 20.56]
+  radius = 1.3
+  mode = "subtract"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [19.20, 10.85, 27.00]
+  radius = 1.5
+  mode = "subtract"
+
+  # **Turf is the base and bedrock is the layer**, which is the way round every
+  # scene but `lanternhead`: the layer is a slope rule, so dead-flat ground
+  # always gets the base and a flat shelf can only be the base material.
+  #
+  # The albedo is a green-grey rather than white. The density falloff fades the
+  # far blades to nothing, so beyond about 30 m the ground *is* the grass —
+  # `meadow`'s brown soil read as ploughed earth from an orbit, and any scene
+  # with a `Grass` field owes its ground the same colour.
+  [node.components.Material]
+  albedo = [0.66, 0.72, 0.56]
+  roughness = 1.0
+  porosity = 0.60
+  uv_scale = [0.35, 0.35]
+  triplanar = true
+  albedo_map = { asset = "grass_ground_albedo" }
+  normal_map = { asset = "grass_ground_normal" }
+
+  # **0.55 here and 0.55 on all four `Grass` fields, and they must stay equal**
+  # — two thresholds on one slope draw two concentric rings.
+  [node.components.Material.layer]
+  albedo = [0.56, 0.54, 0.50]
+  roughness = 0.90
+  porosity = 0.20
+  uv_scale = [0.90, 0.90]
+  slope = 0.55
+  albedo_map = { asset = "ground_rock_albedo" }
+  normal_map = { asset = "ground_rock_normal" }
+
+# ===========================================================================
+# HOUSE — local = world - [19.0, 7.0, 14.0]
+# ===========================================================================
+#
+# In world terms: plinth 8.20 to 10.00, floor 10.00, eaves 12.70, chimney 16.10.
+# The house centre is world [24, ., 24] and everything below is 18 degrees off
+# the world axes about that point.
+#
+# 0.16 m voxels, [2,2,4] = 16 chunks. The resolution is set by the smallest
+# thing that has to survive: two voxels is 0.32 m, and the sills are 0.32.
+
+[[node]]
+name = "House"
+parent = "Croft"
+transform = { pos = [19.0, 7.0, 14.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.16
+  chunks = [2, 2, 4]
+
+  # The plinth: 0.25 m wider than the walls on every side, so the wall steps in
+  # off a ledge instead of running into the turf. Rounded 0.30 — nearly two
+  # voxels, which is what a fillet needs to exist at this resolution.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [5.0, 2.1, 10.0]
+  half_extents = [3.45, 0.90, 4.85]
+  yaw_degrees = -18.0
+  round = 0.30
+  mode = "union"
+
+  # The wall shell, solid: 6.40 x 9.20 m outside, 2.70 m from floor to eaves.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [5.0, 4.35, 10.0]
+  half_extents = [3.20, 1.35, 4.60]
+  yaw_degrees = -18.0
+  round = 0.22
+  mode = "union"
+
+  # The byre at the far end, **26 degrees off the house**. Lower (1.90 m walls)
+  # and narrower, and set so its front is very nearly flush with the façade:
+  # the kink then reads as a thing added later rather than as a mistake.
+  #
+  # It runs from **9.25**, not from the floor at 10.00. The first version began
+  # at the floor and stood a quarter of a metre clear of the turf on nothing —
+  # invisible in the shot that was framed at the time, which is the whole reason
+  # to write the founding level down rather than to trust the elevation.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [7.608, 3.575, 3.592]
+  half_extents = [2.20, 1.325, 2.20]
+  yaw_degrees = 8.0
+  round = 0.20
+  mode = "union"
+
+  # The gable chimney, straddling the +Z wall so 0.87 m of it stands proud —
+  # a chimney breast, not a pipe. It runs from the floor to 15.70, which clears
+  # the ridge at 15.05 by 0.65 m, and its cap takes it to 16.10. **Slimmer than
+  # it started**: at 1.24 m square it read as a tower on the near gable rather
+  # than as a flue, and at this bearing the near gable is what fills the frame.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [3.501, 5.85, 14.613]
+  half_extents = [0.52, 2.85, 0.52]
+  yaw_degrees = -18.0
+  round = 0.14
+  mode = "union"
+
+  # Hollow both, leaving 0.50 m walls — a hair over three voxels. The
+  # subtraction runs 0.20 m past the wall head so the shell is open-topped and
+  # the roof volume closes it; the roof's own underside is 0.40 m below that.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [5.0, 4.45, 10.0]
+  half_extents = [2.70, 1.45, 4.10]
+  yaw_degrees = -18.0
+  mode = "subtract"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [7.608, 4.00, 3.592]
+  half_extents = [1.70, 1.00, 1.70]
+  yaw_degrees = 8.0
+  mode = "subtract"
+
+  # ---- the openings, cut LAST so there are walls to cut them from ----------
+  #
+  # ORDER MATTERS in this list exactly as it does in `homestead.loom`. Every
+  # opening's half-extent across the wall is 0.75 against a 0.50 wall, so it
+  # punches through rather than leaving a membrane a voxel thick.
+  #
+  # **A 0.50 m wall is the reason these read as openings from both sides.** The
+  # reveal is 0.50 m deep, so from outside each one is a black slot with a lit
+  # jamb on the sun side, and from inside the same slot frames the sky. A plane
+  # with a hole in it has neither.
+
+  # The door, 1.10 x 2.10 m, in the unlit gable — off-centre, because the
+  # chimney breast has the middle of that wall.
+  #
+  # **On the façade side of the chimney and not the other**, which is not a
+  # symmetry choice: the far side of that gable is where the bank comes round,
+  # and the first version put the door there and buried it under a hillside.
+  # A doorway needs the ground in front of it to be ground.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [4.910, 4.05, 14.807]
+  half_extents = [0.55, 1.05, 0.75]
+  yaw_degrees = -18.0
+  mode = "subtract"
+
+  # A window on the same gable, the other side of the chimney, so the fire
+  # inside shows through two openings rather than one.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [1.914, 4.75, 13.834]
+  half_extents = [0.55, 0.60, 0.75]
+  yaw_degrees = -18.0
+  mode = "subtract"
+
+  # Two windows in the lit façade, 1.10 x 1.20, 3.6 m apart.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [8.6, 4.45, 9.277]
+  half_extents = [0.75, 0.60, 0.55]
+  yaw_degrees = -18.0
+  mode = "subtract"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [7.487, 4.45, 12.701]
+  half_extents = [0.75, 0.60, 0.55]
+  yaw_degrees = -18.0
+  mode = "subtract"
+
+  # The byre door, 1.10 x 1.60 — a byre door is wide and low. **On the end the
+  # camera sees**, which is the end the sun does not: everything about the byre
+  # beyond the far gable is in shadow from this bearing, and an opening is the
+  # only thing that stops a shadowed mass being a blank.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [7.914, 3.80, 5.771]
+  half_extents = [0.55, 0.80, 0.75]
+  yaw_degrees = 8.0
+  mode = "subtract"
+
+  # ---- the dressed stone, unioned back on ---------------------------------
+  #
+  # Sills and lintels are 0.32 m thick — two voxels, the floor — and stand 0.22 m
+  # proud of the wall, which at this sun elevation is what makes each window
+  # throw two shadows instead of being a hole. **0.34 m proud was measured and is
+  # too much**: at 45 degrees of view a sill that deep reads as a corbel bracket
+  # rather than as the top of a stone.
+  #
+  # They are `union` after the openings on purpose — none of them intrudes into
+  # an opening, so the order is safe either way, but a union after a subtract is
+  # the only order that is *always* safe.
+  #
+  # Every one of these is a horizontal-topped block, which is exactly what puts
+  # it on the base material rather than the wall's.
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [8.676, 3.67, 9.302]
+  half_extents = [0.14, 0.16, 0.74]
+  yaw_degrees = -18.0
+  round = 0.07
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [7.563, 3.67, 12.725]
+  half_extents = [0.14, 0.16, 0.74]
+  yaw_degrees = -18.0
+  round = 0.07
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [8.676, 5.23, 9.302]
+  half_extents = [0.14, 0.16, 0.74]
+  yaw_degrees = -18.0
+  round = 0.07
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [7.563, 5.23, 12.725]
+  half_extents = [0.14, 0.16, 0.74]
+  yaw_degrees = -18.0
+  round = 0.07
+  mode = "union"
+
+  # The chimney cap, oversailing 0.18 m all round — the one detail at the top of
+  # the silhouette, and the only thing up there for the light to catch.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [3.501, 8.90, 14.613]
+  half_extents = [0.70, 0.20, 0.70]
+  yaw_degrees = -18.0
+  round = 0.07
+  mode = "union"
+
+  # The threshold slab, projecting 0.55 m out of the doorway.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [4.740, 2.80, 15.331]
+  half_extents = [0.85, 0.20, 0.45]
+  yaw_degrees = -18.0
+  round = 0.08
+  mode = "union"
+
+  # The hearth slab inside, against the gable wall under the chimney. It is what
+  # the fire stands on, and it is why the fire is not floating on the floor.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [3.857, 3.175, 13.519]
+  half_extents = [0.85, 0.175, 0.55]
+  yaw_degrees = -18.0
+  round = 0.06
+  mode = "union"
+
+  # **Rubble masonry on the walls, dressed stone on every flat.** The base is
+  # what a horizontal face gets and the layer is what a vertical one gets, so
+  # this pair is the right way round for a building and the *wrong* way round
+  # for terrain — the walls are the layer.
+  #
+  # Texels/m is resolution x `uv_scale`, but the physical size of the stone wins
+  # over the texel budget: the quay atlas is about fourteen courses tall, so
+  # `uv_scale = 0.31` is a 3.2 m tile and a 0.23 m course, which is a rubble
+  # wall. Tiled to hit 400 texels/m instead it would be a 2.5 m tile and 0.18 m
+  # courses, which is the mistake `moraine.loom` records as crazy paving.
+  [node.components.Material]
+  albedo = [0.56, 0.54, 0.49]
+  roughness = 0.85
+  porosity = 0.45
+  uv_scale = [0.55, 0.55]
+  triplanar = true
+  albedo_map = { asset = "concrete_worn_albedo" }
+  normal_map = { asset = "concrete_worn_normal" }
+
+  [node.components.Material.layer]
+  albedo = [0.86, 0.81, 0.73]
+  roughness = 0.82
+  porosity = 0.35
+  uv_scale = [0.31, 0.31]
+  slope = 0.62
+  albedo_map = { asset = "quay_stone_albedo" }
+  normal_map = { asset = "quay_stone_normal" }
+
+# ===========================================================================
+# ROOF — local = world - [18.0, 11.0, 14.0]
+# ===========================================================================
+#
+# Its own volume for its own material, and 12 chunks of the same 0.16 m voxel.
+# The eaves fascia is 0.35 m — two voxels and a bit, which is the floor.
+#
+# **The byre's roof is built first.** See the header: a `subtract` is applied to
+# everything present, and a roof plane extended is infinite.
+
+[[node]]
+name = "Roof"
+parent = "Croft"
+transform = { pos = [18.0, 11.0, 14.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.16
+  chunks = [3, 1, 4]
+
+  # The byre's roof mass: 0.55 m of overhang past its walls, same as the house.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [8.608, 1.45, 3.592]
+  half_extents = [2.75, 0.85, 2.60]
+  yaw_degrees = 8.0
+  round = 0.18
+  mode = "union"
+
+  # Its two pitches, 26.15 degrees — shallower than the house's 32.6, because an
+  # outbuilding that repeats the main roof's angle exactly reads as one building
+  # with a dent in it. A sphere of radius 300 tangent to the plane at the pitch's
+  # midpoint: over the 3 m from there to the furthest corner it has to cover, the
+  # surface departs from a true plane by 1.4 cm.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [140.885, 270.825, -14.998]
+  radius = 300.0
+  mode = "subtract"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [-123.669, 270.825, 22.183]
+  radius = 300.0
+  mode = "subtract"
+
+  # The house's roof mass. 3.75 m half-span against a 3.20 m wall is **0.55 m of
+  # overhang**, and the overhang is the point: it is what lays a shadow band
+  # across the top of the lit façade and keeps the wall head out of the light.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [6.0, 2.75, 10.0]
+  half_extents = [3.75, 1.45, 5.15]
+  yaw_degrees = -18.0
+  round = 0.20
+  mode = "union"
+
+  # 32.62 degrees: 2.40 m of rise over a 3.75 m half-span, eaves at world 12.65
+  # and ridge at 15.05. Shallower read as a shed; this is a house.
+  #
+  # These two run with the byre's roof already in the volume, which is safe only
+  # because the byre sits under both of these planes extended — 0.57 m of
+  # clearance at its tightest corner. That is checked arithmetic, not a margin
+  # anyone should spend.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [161.584, 255.431, 60.552]
+  radius = 300.0
+  mode = "subtract"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [-149.584, 255.431, -40.552]
+  radius = 300.0
+  mode = "subtract"
+
+  # A rolled ridge along the top. Two planes meeting give a knife edge, which is
+  # the one place a roof made this way looks like it was made this way; a 0.18 m
+  # capsule laid along the join is a ridge course.
+  [[node.components.VoxelVolume.ops]]
+  kind = "capsule"
+  a = [7.591, 4.05, 5.102]
+  b = [4.409, 4.05, 14.898]
+  radius = 0.18
+  mode = "union"
+
+  # **One material and no `layer`.** Both pitches are the same slope, so a slope
+  # rule cannot separate them from each other — and it would separate the ridge
+  # roll from the pitches, which is the one place on this roof where a material
+  # change would be nonsense.
+  #
+  # The atlas is dark slate at about 0.10 linear, so the albedo tint is left at
+  # white: there is nothing to lift it with, and a dark roof over pale walls is
+  # the contrast the building is composed on.
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.75
+  porosity = 0.55
+  uv_scale = [0.80, 0.80]
+  triplanar = true
+  albedo_map = { asset = "wood_shingle_albedo" }
+  normal_map = { asset = "wood_shingle_normal" }
+
+# ===========================================================================
+# GRASS — four fields, and not one edge of them in the frame
+# ===========================================================================
+#
+# `loom_grass` reads the FIRST voxel volume and knows nothing about the other
+# two. It will happily place a blade where the house is: the ground grid it
+# marches is the shelf, so a field over the footprint puts blades at 9.75 and
+# the house's floor is 10.00.
+#
+# **That turns out to be harmless and is used deliberately.** A blade is 0.20 m
+# and the plinth is 1.80 m of solid stone from 8.20 up, so a blade under the
+# building is inside the masonry and draws nothing. It would *not* be harmless
+# under the byre, which has only 0.75 m of footing — but that is still four
+# times the blade.
+#
+# **What is not harmless is a rectangle's edge, and that is the whole layout
+# problem.** The density falloff thins blades with *distance from the camera*,
+# never at the boundary, so a field simply stops dead at its rectangle and draws
+# a straight line across the turf. Two layouts here did exactly that and both
+# were obvious in the render. The fix is that every field runs off the flat and
+# onto the shelf's brow: the fillet passes 0.55 of slope 3.3 m in from the flat
+# edge, so a rectangle carried past that point is culled by the *terrain* first
+# and its own edge is never what the eye sees. The four overlap each other
+# everywhere else, and the only bare ground in frame is the yard around the
+# house, which a working building should have.
+#
+# `slope_cutoff = 0.55` matches `Material.layer.slope` exactly. All four fields
+# carry the same dark green, for the reason in the ground's material.
+
+[[node]]
+name = "GrassFront"
+parent = "Croft"
+transform = { pos = [35.0, 0.0, 25.0] }
+
+  [node.components.Grass]
+  half_extent = [6.5, 13.0]
+  slope_cutoff = 0.55
+  density = 190.0
+  height = 0.20
+  width = 0.017
+  clump_facing = 0.45
+  clump_colour = 0.35
+
+  [node.components.Material]
+  albedo = [0.26, 0.38, 0.14]
+  roughness = 0.75
+
+[[node]]
+name = "GrassNear"
+parent = "Croft"
+transform = { pos = [25.0, 0.0, 35.5] }
+
+  [node.components.Grass]
+  half_extent = [9.0, 8.5]
+  slope_cutoff = 0.55
+  density = 190.0
+  height = 0.20
+  width = 0.017
+  clump_facing = 0.45
+  clump_colour = 0.35
+
+  [node.components.Material]
+  albedo = [0.26, 0.38, 0.14]
+  roughness = 0.75
+
+[[node]]
+name = "GrassBank"
+parent = "Croft"
+transform = { pos = [13.5, 0.0, 26.0] }
+
+  [node.components.Grass]
+  half_extent = [5.5, 11.0]
+  slope_cutoff = 0.55
+  density = 190.0
+  height = 0.20
+  width = 0.017
+  clump_facing = 0.45
+  clump_colour = 0.35
+
+  [node.components.Material]
+  albedo = [0.26, 0.38, 0.14]
+  roughness = 0.75
+
+[[node]]
+name = "GrassFar"
+parent = "Croft"
+transform = { pos = [22.0, 0.0, 12.0] }
+
+  [node.components.Grass]
+  half_extent = [10.0, 5.0]
+  slope_cutoff = 0.55
+  density = 190.0
+  height = 0.20
+  width = 0.017
+  clump_facing = 0.45
+  clump_colour = 0.35
+
+  [node.components.Material]
+  albedo = [0.26, 0.38, 0.14]
+  roughness = 0.75
+
+# ===========================================================================
+# THE PROPS — the only things in frame whose size is not up for debate
+# ===========================================================================
+
+# 1.6 m of boulder, lying in the dish the ground carves for it.
+[[node]]
+name = "Boulder"
+parent = "Croft"
+transform = { pos = [28.97, 9.42, 24.56] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_boulder" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.90
+  albedo_map = { asset = "boulder_albedo" }
+  normal_map = { asset = "boulder_normal" }
+  uv_scale = [1.0, 1.0]
+
+# The second boulder, in the near foreground left of the door, in its own dish.
+# The same 1.6 m model at 1.15x, so 1.84 m, nine metres from the eye: the
+# nearest thing in the frame whose size is not up for debate, and the one that
+# sets the scale of everything behind it.
+[[node]]
+name = "BoulderNear"
+parent = "Croft"
+transform = { pos = [23.2, 9.45, 31.0], rot_euler = [0.0, 118.0, 0.0], scale = [1.15, 1.15, 1.15] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_boulder" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.90
+  albedo_map = { asset = "boulder_albedo" }
+  normal_map = { asset = "boulder_normal" }
+  uv_scale = [1.0, 1.0]
+
+# The chopping block, 0.55 m, a couple of paces off the threshold.
+[[node]]
+name = "ChoppingBlock"
+parent = "Croft"
+transform = { pos = [26.800, 9.72, 31.600] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_stump" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.85
+  albedo_map = { asset = "stump_albedo" }
+  normal_map = { asset = "stump_normal" }
+  uv_scale = [1.0, 1.0]
+
+# 3.0 m of felled trunk along the foot of the lit façade. It is the longest
+# horizontal in the frame that is not the building, which is what makes the
+# façade's own length readable.
+[[node]]
+name = "Log"
+parent = "Croft"
+transform = { pos = [29.4, 9.85, 22.1], rot_euler = [0.0, -18.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_log" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.88
+  albedo_map = { asset = "log_albedo" }
+  normal_map = { asset = "log_normal" }
+  uv_scale = [1.0, 1.0]
+
+# **A wall lantern, and it needs the wall.** The model is a bracket and a lamp
+# with no base — hung in open air it floats, which is what the first render of
+# `props.loom` showed. It is mounted on the gable beside the door, which is the
+# unlit face, so it is also the one fixture the eye finds in that half of the
+# frame. 0.48 m at 1.6x is 0.77 m, which is a large exterior lantern and reads
+# at 15 m; at 1.0 it is a smudge.
+[[node]]
+name = "Lantern"
+parent = "Croft"
+transform = { pos = [24.979, 11.70, 29.239], rot_euler = [0.0, -18.0, 0.0], scale = [1.6, 1.6, 1.6] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_lantern" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  metallic = 0.35
+  roughness = 0.50
+  albedo_map = { asset = "lantern_albedo" }
+  normal_map = { asset = "lantern_normal" }
+  uv_scale = [1.0, 1.0]
+
+# ===========================================================================
+# FIRE AND LIGHT
+# ===========================================================================
+#
+# **`Light::intensity` is `d^2 / albedo` for a surface `d` metres away**, not
+# the 100-800 the older scenes use. Both numbers below are worked from a
+# distance rather than dialled: above about three times fully-lit nothing is
+# distinguishable, because the tonemap maps linear 2.6 and up into sRGB 252-255.
+
+# The hearth fire, standing on the hearth slab under the chimney. One static
+# quad carrying the raymarched flame field (ADR 0020), the same standing-emitter
+# idiom `campfire.loom` uses: `burst = 1` with `rate = 0`, and a long but
+# BOUNDED lifetime, because `validate` warms every emitter for two lifetimes and
+# a nominally infinite life costs millions of ticks per render.
+[[node]]
+name = "Hearth"
+parent = "Croft"
+transform = { pos = [22.857, 10.70, 27.519] }
+
+  [node.components.ParticleEmitter]
+  burst = 1
+  rate = 0.0
+  lifetime = 110.0
+  lifetime_jitter = 0.0
+  speed = 0.0
+  spread_degrees = 0.0
+  radius = 0.0
+  gravity = 0.0
+  drag = 0.0
+  turbulence = 0.0
+  wind_response = 0.0
+  size = [0.85, 0.85]
+  alpha = [1.0, 1.0]
+  color_start = [1.0, 1.0, 1.0]
+  color_end = [1.0, 1.0, 1.0]
+  additive = true
+  flame = true
+
+# The fire's light. An additive sprite brightens its own pixels and nothing
+# else, so without this the room behind the door stays as dark as the wall.
+# 1.6 m from the gable's inner face at albedo 0.5 is fully lit at 5.1; 9.0 is
+# 1.8x that, which is what a lit room seen through a door from a dusk exterior
+# should be. It is over the top for the room itself — a camera standing beside
+# the fire renders the near wall blown — and that is the trade the shipped
+# camera buys: this light is calibrated for the doorway, seen from outside.
+[[node]]
+name = "HearthLight"
+parent = "Croft"
+transform = { pos = [22.857, 10.95, 27.519] }
+
+  [node.components.Light]
+  intensity = 9.0
+  color = [1.00, 0.52, 0.20]
+
+# The lantern's own light, 0.35 m out from its fixture. It lights the threshold
+# 1.7 m below at albedo 0.5, which is fully lit at 5.8; 2.5 is well under,
+# because an oil lantern competing with a sun 17 degrees up should lose. **5.0
+# was measured and threw a searchlight wedge across the bank behind the house**,
+# which is what an inverse-square light does with 8 m of open hillside in front
+# of it and nothing in between.
+[[node]]
+name = "LanternLight"
+parent = "Croft"
+transform = { pos = [24.880, 11.65, 29.543] }
+
+  [node.components.Light]
+  intensity = 2.5
+  color = [1.00, 0.76, 0.42]
+
+# The chimney plume, **0.3 m above the cap and not at the shaft head**. The first
+# version was authored at 15.70, which is the top of the shaft and therefore the
+# *underside of the cap*: every puff was born inside 0.4 m of stone and lived its
+# whole life there. A twenty-frame contact sheet is what found it — the still had
+# nothing to show either way. Alpha-blended, not additive: smoke occludes.
+#
+# **It is soot rather than grey, and that is what makes it visible at all.** This
+# plume is drawn against a bright overcast horizon; at 0.36 grey it was a pale
+# streak indistinguishable from the cloud deck behind it. The dark ramp reads as
+# smoke because it is *darker* than its background, which is the only cue a thin
+# plume against a bright sky has.
+#
+# `wind_response = 4.0` matches the air in about a quarter of a second, which is
+# what lays it over instead of standing it straight up — and it is the only
+# thing in this scene that shows the wind as a *direction* rather than a bend.
+[[node]]
+name = "Smoke"
+parent = "Croft"
+transform = { pos = [22.501, 16.40, 28.613] }
+
+  [node.components.ParticleEmitter]
+  rate = 55.0
+  lifetime = 2.8
+  lifetime_jitter = 0.4
+  speed = 1.3
+  spread_degrees = 16.0
+  radius = 0.14
+  gravity = 1.6
+  drag = 1.0
+  turbulence = 1.2
+  turbulence_scale = 0.35
+  wind_response = 4.0
+  size = [0.32, 2.3]
+  alpha = [0.42, 0.0]
+  color_start = [0.075, 0.070, 0.065]
+  color_end = [0.24, 0.235, 0.245]
+  seed = 4211
+
+# ===========================================================================
+# THE SHOT
+# ===========================================================================
+#
+# 2.2 m over a shelf at 9.75, on a bearing 63 degrees round from the house,
+# 15.2 m out.
+#
+# **The bearing is the composition.** It puts the long façade at 45 degrees and
+# the gable end at 45 degrees, which is the difference between a three-quarter
+# view of a building and an elevation with a sliver down one side. The first
+# camera here stood at 41 degrees, which gave the façade 31 and the gable 77 —
+# the doorway was foreshortened to nothing and the fire behind it could not be
+# seen at all.
+#
+# **The yaw is 29 and the bearing is 27**, and those are not the same number on
+# purpose. Aiming the lens at the house's centre is not the same as centring the
+# house: the near gable reaches further one way than the far end does the other,
+# so on the exact bearing the mass sits left and the frame is right-heavy.
+#
+# True eye height, 1.75 m, was rendered first and spends the bottom third of the
+# frame on grass seen edge-on. Half a metre up is still a person on a rise and it
+# buys back the yard in front of the door.
+#
+# `fov_y = 44` rather than the library's usual 50-58: this is one object at 15 m
+# and a wider lens bows the wall it is pointed at. The house fills about half the
+# frame's width, which leaves the shelf, the bank and the sky to say where it is.
+
+[[node]]
+name = "Camera"
+parent = "Croft"
+transform = { pos = [30.901, 12.00, 37.543], rot_euler = [2.5, 29.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 44.0
