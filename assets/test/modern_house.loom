@@ -1,0 +1,659 @@
+# A modern house, from a supplied first-floor plan.
+#
+#     loom render assets/test/modern_house.loom --out house.png --size 1600x1000
+#
+# **The plan was mirrored** — every label on it reads backwards — so it is built
+# un-mirrored: the garage sits west, the living block centre, the bedroom wing
+# south-east, and the covered terrace east off the great room. The plan's
+# footprint is three offset rectangles around a circulation spine with a
+# separate garage mass, and that reading is what the massing follows.
+#
+# **In no gate, deliberately.** `cargo xtask validate` renders only `SCENES` and
+# `cargo xtask image` compares only `GOLDEN`; a scene in neither is invisible to
+# both, and a `.loom` file changes no Rust and no Slang. So authoring a
+# structure costs `loom validate` (schema, about a second) and a render to look
+# at — not a thirty-minute sweep. A scene earns a gate when it covers a
+# rendering path nothing else does, and a house covers none.
+#
+# ## Why the walls are voxels and everything else is not
+#
+# **Walls are a `VoxelVolume` because they have holes in them.** A window is a
+# subtraction, and subtraction is what an SDF op-list does in one line where box
+# primitives would need four piers, a header and a sill per opening.
+#
+# **Everything crisp is a box primitive**: the roof slabs, the columns, the
+# glazing, the paving. Modern architecture is a rectilinear art and a voxel
+# surface at 0.16 m cannot hold a true arris — a roof edge built as voxels
+# reads as extruded polystyrene. The mix is the point: SDF where the geometry is
+# boolean, mesh where the geometry is a plane.
+#
+# **A `VoxelVolume` carries one `Material`**, which is the other half of the
+# reason. Walls, roof and paving are three materials, so they would be three
+# volumes and three bakes even if the roof needed no holes.
+#
+# ## The two numbers that matter
+#
+# `voxel_size = 0.16` with `round` left at zero. Croft learned that a fillet
+# under one voxel does not exist; the inverse is that a *modern* wall wants no
+# fillet at all, so the resolution is chosen for the opening reveals — 0.16 m
+# gives a 0.40 m wall four voxels of depth, enough that a window reads as a
+# hole in something thick rather than as a decal.
+#
+# Glass is a box at `roughness = 0.08` and near-black albedo. It is not
+# transparent — this engine has no transmissive material — but a dark, smooth
+# surface under a bright sky reflects that sky, and since reflected hits now
+# carry their texture it also reflects the paving and the wall opposite. That
+# is what makes it read as glazing rather than as a painted panel.
+
+[scene]
+format = 1
+id = "edba37c6-469e-4e57-9e4f-2d564ee12543"
+
+[[asset]]
+key = "concrete_worn_albedo"
+id = "a476470f-dd4b-4c71-a03b-7c9d1985c3c5"
+path = "../textures/concrete_worn_albedo.png"
+
+[[asset]]
+key = "concrete_worn_normal"
+id = "ee2b083d-d4fd-40a8-a749-b30154b53ca3"
+path = "../textures/concrete_worn_normal.png"
+
+[[asset]]
+key = "tiles_albedo"
+id = "948e33e0-d7c3-4180-9cc1-74f7a001a931"
+path = "../textures/tiles_albedo.png"
+
+[[asset]]
+key = "tiles_normal"
+id = "c2cd48ec-4bc7-4914-b1b5-538b247367a5"
+path = "../textures/tiles_normal.png"
+
+[[asset]]
+key = "grass_ground_albedo"
+id = "164a6dbf-e638-4e3b-8265-746186abf139"
+path = "../textures/grass_ground_albedo.png"
+
+[[asset]]
+key = "grass_ground_normal"
+id = "61d6d87a-77c8-420d-8a5f-9c1d811d3a69"
+path = "../textures/grass_ground_normal.png"
+
+[[asset]]
+key = "quay_stone_albedo"
+id = "6ea0cade-49ae-4eaa-bca7-4a3da0ef0807"
+path = "../textures/quay_stone_albedo.png"
+
+[[asset]]
+key = "quay_stone_normal"
+id = "d8ac91de-0c10-4ef3-a1d4-ea69d1b52065"
+path = "../textures/quay_stone_normal.png"
+
+[[asset]]
+key = "mesh_Spruce"
+id = "6a5978e7-773a-4f33-ac00-40bfbd8a95f0"
+path = "../meshes/spruce.obj"
+
+[[asset]]
+key = "spruce_albedo"
+id = "03c51ac4-b237-4b53-bc08-45cc06ca3ec8"
+path = "../textures/spruce_albedo.png"
+
+[[asset]]
+key = "mesh_Boulder"
+id = "354fdf78-5ec4-481b-b778-4214919b0195"
+path = "../meshes/rock_boulder_a.obj"
+
+[[asset]]
+key = "rock_boulder_a_albedo"
+id = "9e870371-79f7-4521-983e-0ffc2201538e"
+path = "../textures/rock_boulder_a_albedo.png"
+
+[[asset]]
+key = "rock_boulder_a_normal"
+id = "a4a6aadf-3c8f-44e9-9a71-6401ccebf173"
+path = "../textures/rock_boulder_a_normal.png"
+
+[[node]]
+name = "Site"
+
+  # Late afternoon, sun from the west-south-west so the terrace face is lit and
+  # the garage mass throws a long shadow across the approach. An architectural
+  # render lives or dies on raking light; a noon sun flattens every reveal the
+  # 0.40 m walls were built to show.
+  [node.components.Environment]
+  sun_direction = [-0.55, 0.42, 0.72]
+  sun_strength = 2.6
+  sun_color = [1.0, 0.95, 0.86]
+  # **Ambient at 0.46, not 0.34.** A 4 m cantilevered slab over a terrace is a
+  # light trap: at the lower value everything under it went to near-black and
+  # the covered half of the house simply disappeared. Ambient here is the sky
+  # dome, which is what actually lights a shaded terrace on a clear afternoon —
+  # the sun contributes nothing there by definition.
+  ambient = 0.46
+  sky_zenith = [0.17, 0.28, 0.47]
+  sky_horizon = [0.66, 0.71, 0.76]
+  fog_density = 0.0012
+
+[[node]]
+name = "Lawn"
+parent = "Site"
+transform = { pos = [0.0, -0.12, 2.0], scale = [30.0, 0.12, 24.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.52, 0.58, 0.40]
+  roughness = 0.95
+  albedo_map = { asset = "grass_ground_albedo" }
+  normal_map = { asset = "grass_ground_normal" }
+  uv_scale = [0.35, 0.35]
+  triplanar = true
+
+# The terrace deck, and the plan's whole east end. It runs under the covered
+# roof and out past it, which is what stops the roof slab reading as a lid.
+[[node]]
+name = "TerraceDeck"
+parent = "Site"
+transform = { pos = [11.4, 0.06, 0.0], scale = [4.6, 0.06, 5.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  # **Tinted hard toward neutral.** `tiles_albedo` is a terracotta and reads as
+  # a Mediterranean patio under this sun; a modern terrace is large-format grey
+  # stone, and the albedo factor is the only knob that gets there without a new
+  # texture.
+  [node.components.Material]
+  albedo = [0.62, 0.62, 0.61]
+  roughness = 0.55
+  albedo_map = { asset = "quay_stone_albedo" }
+  normal_map = { asset = "quay_stone_normal" }
+  uv_scale = [0.28, 0.28]
+  triplanar = true
+
+# The approach: a paved apron off the garage, in the darker stone so the two
+# hard surfaces do not merge into one grey field.
+[[node]]
+name = "Apron"
+parent = "Site"
+transform = { pos = [-11.0, 0.05, -8.6], scale = [4.2, 0.05, 4.2] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.56, 0.55, 0.53]
+  roughness = 0.8
+  albedo_map = { asset = "quay_stone_albedo" }
+  normal_map = { asset = "quay_stone_normal" }
+  uv_scale = [0.45, 0.45]
+  triplanar = true
+
+# ---------------------------------------------------------------------------
+# The walls. One volume, one material, every opening a subtraction.
+#
+# The volume's origin is at world (-16, 0, -6) so every op coordinate below is
+# positive and local: local x = world x + 16, local z = world z + 6. Writing
+# that down once is what keeps the op list readable; croft's byre proves what
+# happens when a founding level is left to be inferred.
+# ---------------------------------------------------------------------------
+[[node]]
+name = "Walls"
+parent = "Site"
+transform = { pos = [-16.0, 0.0, -6.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.16
+  chunks = [7, 1, 4]
+
+  # -- main living block: 14 x 9 m, 3.6 m to the underside of the roof --------
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 1.80, 6.0]
+  half_extents = [7.0, 1.80, 4.5]
+  mode = "union"
+
+  # Hollowed to a 0.40 m wall, so an opening has a reveal with a shadow in it.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 1.90, 6.0]
+  half_extents = [6.6, 1.75, 4.1]
+  mode = "subtract"
+
+  # -- garage wing, west: 8 x 7 m, lower at 3.1 m ----------------------------
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [5.0, 1.55, 5.0]
+  half_extents = [4.0, 1.55, 3.5]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [5.0, 1.65, 5.0]
+  half_extents = [3.6, 1.50, 3.1]
+  mode = "subtract"
+
+  # -- bedroom wing, south-east: 10 x 6 m, 3.3 m ----------------------------
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [19.0, 1.65, 13.5]
+  half_extents = [5.0, 1.65, 3.0]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [19.0, 1.75, 13.5]
+  half_extents = [4.6, 1.60, 2.6]
+  mode = "subtract"
+
+  # -- openings --------------------------------------------------------------
+  # The great room's glazed east wall, facing the terrace: 8.4 m of glass, sill
+  # at 0.35 so it reads as a window wall rather than a shopfront.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [23.0, 1.85, 6.0]
+  half_extents = [0.8, 1.35, 4.2]
+  mode = "subtract"
+
+  # The south face of the living block, onto the lawn.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.5, 1.80, 10.5]
+  half_extents = [4.0, 1.20, 0.8]
+  mode = "subtract"
+
+  # The north face — the plan's kitchen and dining run along it, so this is a
+  # long clerestory rather than a full-height opening.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [15.0, 2.55, 1.5]
+  half_extents = [4.5, 0.55, 0.8]
+  mode = "subtract"
+
+  # The entry, in the reveal between the living block and the bedroom wing.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [14.6, 1.20, 10.5]
+  half_extents = [0.65, 1.20, 0.8]
+  mode = "subtract"
+
+  # The garage door, west face.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [5.0, 1.20, 1.5]
+  half_extents = [2.7, 1.20, 0.8]
+  mode = "subtract"
+
+  # Bedroom wing, two windows south.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.6, 1.75, 16.5]
+  half_extents = [1.3, 0.95, 0.8]
+  mode = "subtract"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [21.4, 1.75, 16.5]
+  half_extents = [1.3, 0.95, 0.8]
+  mode = "subtract"
+
+  # Bedroom wing, east end.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [24.0, 1.75, 13.5]
+  half_extents = [0.8, 0.95, 1.6]
+  mode = "subtract"
+
+  [node.components.Material]
+  albedo = [0.80, 0.78, 0.75]
+  roughness = 0.88
+  albedo_map = { asset = "concrete_worn_albedo" }
+  normal_map = { asset = "concrete_worn_normal" }
+  uv_scale = [0.32, 0.32]
+  triplanar = true
+
+# ---------------------------------------------------------------------------
+# The roof slabs. Box primitives, not voxels: a modern roof is defined by the
+# knife edge of its fascia and the shadow its overhang throws down the wall,
+# and both die at 0.16 m resolution. Each oversails its walls by 0.5-0.6 m.
+# ---------------------------------------------------------------------------
+[[node]]
+name = "RoofMain"
+parent = "Site"
+transform = { pos = [0.0, 3.75, 0.0], scale = [7.6, 0.15, 5.1] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.085, 0.090, 0.098]
+  roughness = 0.62
+
+[[node]]
+name = "RoofTerrace"
+parent = "Site"
+# Trimmed from 9.6 m to 7.6 m of span and pulled in on Z. At its first size the
+# terrace roof plus the main roof read as one twenty-five-metre plane with a
+# house somewhere under it — the slab has to be *read against* the block it
+# projects from, not continue it.
+transform = { pos = [10.8, 3.75, 0.0], scale = [3.8, 0.14, 4.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.085, 0.090, 0.098]
+  roughness = 0.62
+
+[[node]]
+name = "RoofGarage"
+parent = "Site"
+transform = { pos = [-11.0, 3.25, -1.0], scale = [4.5, 0.15, 4.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.085, 0.090, 0.098]
+  roughness = 0.62
+
+[[node]]
+name = "RoofBedroom"
+parent = "Site"
+transform = { pos = [3.0, 3.45, 7.5], scale = [5.5, 0.15, 3.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.085, 0.090, 0.098]
+  roughness = 0.62
+
+# Two slim columns carry the terrace roof's outer edge. Slim on purpose — the
+# point of a cantilevered slab is that it looks unsupported, and a stout post
+# would make the terrace read as a carport.
+[[node]]
+name = "ColumnN"
+parent = "Site"
+transform = { pos = [15.6, 1.80, -4.4], scale = [0.11, 1.80, 0.11] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.14, 0.15, 0.16]
+  roughness = 0.45
+  metallic = 0.15
+
+[[node]]
+name = "ColumnS"
+parent = "Site"
+transform = { pos = [15.6, 1.80, 4.4], scale = [0.11, 1.80, 0.11] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.14, 0.15, 0.16]
+  roughness = 0.45
+  metallic = 0.15
+
+# ---------------------------------------------------------------------------
+# Glazing. Not transparent — this engine has no transmissive material — but a
+# near-black surface at roughness 0.08 under a bright sky mirrors that sky, the
+# paving and the opposite wall, which is what a window does from outside on a
+# sunny afternoon anyway.
+# ---------------------------------------------------------------------------
+[[node]]
+name = "GlassGreatRoomEast"
+parent = "Site"
+transform = { pos = [7.0, 1.85, 0.0], scale = [0.05, 1.30, 4.10] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.045, 0.060, 0.075]
+  roughness = 0.08
+
+[[node]]
+name = "GlassLivingSouth"
+parent = "Site"
+transform = { pos = [0.5, 1.80, 4.50], scale = [3.90, 1.15, 0.05] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.045, 0.060, 0.075]
+  roughness = 0.08
+
+[[node]]
+name = "GlassClerestoryNorth"
+parent = "Site"
+transform = { pos = [-1.0, 2.55, -4.50], scale = [4.40, 0.50, 0.05] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.045, 0.060, 0.075]
+  roughness = 0.08
+
+[[node]]
+name = "GlassBedA"
+parent = "Site"
+transform = { pos = [0.6, 1.75, 10.50], scale = [1.25, 0.90, 0.05] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.045, 0.060, 0.075]
+  roughness = 0.08
+
+[[node]]
+name = "GlassBedB"
+parent = "Site"
+transform = { pos = [5.4, 1.75, 10.50], scale = [1.25, 0.90, 0.05] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.045, 0.060, 0.075]
+  roughness = 0.08
+
+[[node]]
+name = "GlassBedEast"
+parent = "Site"
+transform = { pos = [8.0, 1.75, 7.50], scale = [0.05, 0.90, 1.55] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.045, 0.060, 0.075]
+  roughness = 0.08
+
+# The garage door reads as dark ribbed metal rather than glass.
+[[node]]
+name = "GarageDoor"
+parent = "Site"
+transform = { pos = [-11.0, 1.20, -4.50], scale = [2.60, 1.15, 0.05] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.22, 0.22, 0.23]
+  roughness = 0.40
+  metallic = 0.5
+
+# A three-quarter view from the south-east, so the terrace, the glazed east
+# wall and the bedroom wing all read, and the garage mass closes the far end.
+# **The interior floor.** The wall shells are hollowed, so every opening looked
+# into an unlit void — the great room's 8 m of glazing framed a black hole. A
+# floor slab inside each block gives the openings something to show. It is not
+# an interior; it is the difference between a window and a hole.
+[[node]]
+name = "FloorLiving"
+parent = "Site"
+transform = { pos = [0.0, 0.10, 0.0], scale = [6.7, 0.10, 4.2] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.46, 0.44, 0.42]
+  roughness = 0.45
+  albedo_map = { asset = "quay_stone_albedo" }
+  uv_scale = [0.3, 0.3]
+  triplanar = true
+
+[[node]]
+name = "FloorBedroom"
+parent = "Site"
+transform = { pos = [3.0, 0.10, 7.5], scale = [4.7, 0.10, 2.7] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.46, 0.44, 0.42]
+  roughness = 0.45
+  albedo_map = { asset = "quay_stone_albedo" }
+  uv_scale = [0.3, 0.3]
+  triplanar = true
+
+# A ceiling under each roof, for the same reason: without it the terrace roof's
+# underside is the back of a slab and the great room is open to the sky.
+[[node]]
+name = "CeilingLiving"
+parent = "Site"
+transform = { pos = [0.0, 3.55, 0.0], scale = [6.7, 0.08, 4.2] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.62, 0.60, 0.58]
+  roughness = 0.85
+
+# ---------------------------------------------------------------------------
+# The site. **Three white masses on a green plane read as a model, not a
+# building** — what makes an architectural image is the stuff that is not the
+# architecture: something with scale beside it, something to cast a shadow
+# across a wall, and a dark mass to measure the white against.
+# ---------------------------------------------------------------------------
+
+# A charcoal screen wall running off the bedroom wing, in the plan's position
+# for the entry court's edge. It is the dark note the whole composition needs
+# and it gives the entry a side.
+[[node]]
+name = "ScreenWall"
+parent = "Site"
+transform = { pos = [9.4, 1.30, 9.0], scale = [0.14, 1.30, 3.2] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.15, 0.15, 0.16]
+  roughness = 0.75
+
+# A low plinth wall closing the terrace's south side — modern houses sit *in*
+# something, and an edge stops the paving reading as a rug thrown on grass.
+[[node]]
+name = "TerraceEdge"
+parent = "Site"
+transform = { pos = [11.4, 0.28, 5.5], scale = [4.6, 0.28, 0.18] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.30, 0.31]
+  roughness = 0.7
+
+[[node]]
+name = "SpruceWest"
+parent = "Site"
+transform = { pos = [-17.5, 2.62, 3.5], scale = [2.63, 2.63, 2.63] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_Spruce" }
+
+  [node.components.Material]
+  albedo = [0.72, 0.86, 0.60]
+  roughness = 0.92
+  albedo_map = { asset = "spruce_albedo" }
+
+[[node]]
+name = "SpruceNorth"
+parent = "Site"
+transform = { pos = [-4.0, 3.09, -11.0], scale = [3.10, 3.10, 3.10] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_Spruce" }
+
+  [node.components.Material]
+  albedo = [0.72, 0.86, 0.60]
+  roughness = 0.92
+  albedo_map = { asset = "spruce_albedo" }
+
+[[node]]
+name = "SpruceEast"
+parent = "Site"
+transform = { pos = [18.5, 2.29, -3.0], scale = [2.30, 2.30, 2.30] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_Spruce" }
+
+  [node.components.Material]
+  albedo = [0.72, 0.86, 0.60]
+  roughness = 0.92
+  albedo_map = { asset = "spruce_albedo" }
+
+[[node]]
+name = "BoulderTerrace"
+parent = "Site"
+transform = { pos = [15.0, 0.35, 7.4], rot_euler = [0.0, 34.0, 0.0], scale = [0.55, 0.55, 0.55] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_Boulder" }
+
+  [node.components.Material]
+  albedo = [0.62, 0.60, 0.57]
+  roughness = 0.9
+  albedo_map = { asset = "rock_boulder_a_albedo" }
+  normal_map = { asset = "rock_boulder_a_normal" }
+
+[[node]]
+name = "BoulderLawn"
+parent = "Site"
+transform = { pos = [-6.0, 0.30, 12.0], rot_euler = [0.0, -70.0, 0.0], scale = [0.42, 0.42, 0.42] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_Boulder" }
+
+  [node.components.Material]
+  albedo = [0.62, 0.60, 0.57]
+  roughness = 0.9
+  albedo_map = { asset = "rock_boulder_a_albedo" }
+  normal_map = { asset = "rock_boulder_a_normal" }
+
+# Raised, pulled back, and **moved round to the south.** From the east the
+# bedroom wing stood directly in front of the living block and the garage was
+# hidden behind both — the plan's whole L-shape was invisible and the house read
+# as two roof planes. From here the three masses step away from the camera in
+# the order the floor plan has them.
+[[node]]
+name = "Camera"
+parent = "Site"
+transform = { pos = [9.0, 10.50, 27.0], rot_euler = [-16.5, 22.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 50.0
