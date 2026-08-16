@@ -419,6 +419,26 @@ pub struct VoxelVolume {
     /// and curvature spread — and read its rule, because the number is
     /// resolution-dependent and is never a pass/fail threshold.
     ///
+    /// **`R / 20` is the floor, and 43.2% is not what you get there.** The
+    /// rule and the number were measured at different points on the same
+    /// curve: 43.2% is `R / 50`, and the "scale-free" check that reproduces it
+    /// at R = 0.4, 1.5 and 6 m holds `R / voxel_size` at 50 throughout. One
+    /// rock, one seed, one recipe, three resolutions, measured:
+    ///
+    /// ```text
+    /// R/voxel_size   octaves   concave   spread   triangles
+    ///     13            3        20.5%    1.40       6,844
+    ///     20            4        33.3%    1.47      14,120
+    ///     50            5        49.0%    1.51      95,380
+    /// ```
+    ///
+    /// So `R / 20` is where a displaced rock stops being worth baking at all,
+    /// not where it reads as stone — and an agent that follows the recipe to
+    /// the letter at the floor lands ten points under the figure the recipe
+    /// advertises, with nothing to say why. Note `spread` barely moves: it is
+    /// the column that says *what kind of shape this is*, and it is the one to
+    /// judge a rock by when the resolution is not the reference's.
+    ///
     /// Its fields are `amplitude`, `frequency`, `octaves`, `seed`, `ridged`,
     /// and it is written inline: `displace = { amplitude = 1.6, frequency =
     /// 0.075, octaves = 3, seed = 4417, ridged = true }`. `Displace`'s own Rust
