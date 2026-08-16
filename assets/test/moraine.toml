@@ -20,7 +20,7 @@
 # against a render.** Change one, re-run, read the number — that is the loop,
 # and it is the only one a landscape has.
 
-size = [256, 256]
+size = [512, 512]
 world_scale = [256.0, 256.0]
 # The volume is 64 m tall and `base_y` lifts this by 8, so summits land near 50
 # and the ceiling is headroom rather than a clip. A `height_range` taller than
