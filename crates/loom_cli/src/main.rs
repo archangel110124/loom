@@ -3442,12 +3442,36 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
         Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
     };
 
-    // Find the voxel volume to blast.
-    let Some((node, component)) = scene
-        .nodes()
-        .iter()
-        .find_map(|n| n.components.get("VoxelVolume").map(|c| (n.path.clone(), c)))
-    else {
+    // Find the voxel volume to blast, and **take its colour with it**.
+    //
+    // This used to paint the volume a hardcoded blue-grey and the debris a
+    // hardcoded terracotta, whatever the thing was made of — so a white
+    // concrete wall rendered pale blue and shed orange rubble. Those two
+    // constants were a debug palette for rock terrain, and they made the one
+    // command whose whole job is to show a surface breaking apart show it
+    // breaking into something else.
+    let Some((node, component, surface_albedo)) = scene.nodes().iter().find_map(|n| {
+        let volume = n.components.get("VoxelVolume")?;
+        let albedo = n
+            .components
+            .get("Material")
+            .and_then(|m| m.get("albedo"))
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                let mut rgb = [0.72_f32; 3];
+                for (slot, v) in rgb.iter_mut().zip(a.iter()) {
+                    #[allow(clippy::cast_possible_truncation)]
+                    if let Some(x) = v.as_f64() {
+                        *slot = x as f32;
+                    }
+                }
+                rgb
+            })
+            // No `Material` means the node keeps its debug colour, which is
+            // the same rule the rest of the engine follows.
+            .unwrap_or([0.42, 0.46, 0.52]);
+        Some((n.path.clone(), volume, albedo))
+    }) else {
         return (1, json_line(&serde_json::json!({
             "error": "no_voxel_volume", "path": path,
             "hint": "Add a VoxelVolume component to a node first.",
@@ -3489,7 +3513,17 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
     // 3. The removed material becomes debris, thrown outward from the centre.
     let mut rng = loom_terrain::noise::Rng::new(0xB1A57);
     let mut debris = Vec::new();
-    let chunk_size = radius * 0.16;
+    // **A fragment is the size of the material's grain, not the size of the
+    // bang.** This was `radius * 0.16`, which is backwards twice over: it made
+    // rubble out of a number that has nothing to do with the wall, and it
+    // scaled the wrong way, so a bigger explosion produced *bigger* lumps
+    // rather than more of them. On a 0.16 m wall a 2.6 m blast threw 0.83 m
+    // cubes — five voxels across, visibly larger than the hole's own detail.
+    //
+    // One voxel is too fine to read as debris at any distance, so a fragment
+    // is two voxels on a side and `chunk_size` is the half-extent the `box`
+    // primitive wants.
+    let chunk_size = volume.voxel_size;
     for _ in 0..DEBRIS_CAP {
         // Sample inside the blast sphere; reject-sample so the distribution is
         // even rather than clustered at the centre.
@@ -3560,7 +3594,7 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
         }
         let mut objects = vec![Object {
             model: Mat4::IDENTITY,
-            color: [0.42, 0.46, 0.52],
+            color: surface_albedo,
             mesh: 0,
             material: loom_render::NO_TEXTURE,
             sway: 0.0,
@@ -3581,7 +3615,15 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
                     ),
                     Vec3::from_array(p),
                 ),
-                color: [0.78, 0.42, 0.24],
+                // **Darkened, not tinted.** Rubble is the same material seen
+                // from its broken faces, which have not weathered and sit in
+                // each other's shadow, so it reads a little darker than the
+                // wall it came out of — but it is emphatically the same stuff.
+                color: [
+                    surface_albedo[0] * 0.82,
+                    surface_albedo[1] * 0.82,
+                    surface_albedo[2] * 0.82,
+                ],
                 mesh: 1,
                 material: loom_render::NO_TEXTURE,
             sway: 0.0,
