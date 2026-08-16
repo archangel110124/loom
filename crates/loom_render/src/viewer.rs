@@ -85,6 +85,8 @@ pub struct Viewer {
     vertex_address: vk::DeviceAddress,
     indices: vk::Buffer,
     indices_alloc: Option<Allocation>,
+    /// The index buffer by device address. See `Renderer::index_address`.
+    index_address: vk::DeviceAddress,
     ranges: Vec<MeshRange>,
     unpack: crate::renderer::UnpackParams,
     materials: crate::material::Materials,
@@ -628,6 +630,7 @@ impl Viewer {
             vertex_address,
             indices,
             indices_alloc: Some(indices_alloc),
+            index_address,
             ranges,
             unpack,
             objects,
@@ -881,7 +884,7 @@ impl Viewer {
         )?;
         write_slice(&vertices_alloc, &combined_vertices)?;
 
-        let (indices, indices_alloc, _) = create_index_buffer(
+        let (indices, indices_alloc, index_address) = create_index_buffer(
             &self.device,
             allocator,
             (std::mem::size_of_val(combined_indices.as_slice()) as u64).max(4),
@@ -908,6 +911,12 @@ impl Viewer {
         self.vertex_address = vertex_address;
         self.indices = indices;
         self.indices_alloc = Some(indices_alloc);
+        // **Dropping this used to be free and is not any more.** The fragment
+        // shader now reads the index buffer by address, so a reload that left
+        // the old address in place would have every reflected pixel
+        // dereferencing freed memory — a fault or garbage, with no validation
+        // message.
+        self.index_address = index_address;
         self.ranges = ranges;
         self.unpack = unpack;
         Ok(())
@@ -1000,7 +1009,8 @@ impl Viewer {
         self.reserve_objects(objects.len())?;
 
         let view_proj = view_projection(camera, aspect);
-        let mut object_data = pack_objects(&sorted, view_proj, &self.unpack);
+        let mut object_data =
+            pack_objects(&sorted, view_proj, &self.unpack, &self.ranges, self.index_address);
         // The reserved slot the particle vertex shader reads its
         // view-projection from. See the note on `Push::object_offset`.
         let particle_slot = u32::try_from(object_data.len()).unwrap_or(0);

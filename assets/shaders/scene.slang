@@ -50,7 +50,19 @@ struct ObjectData {
     float4 color;
     // Material index in x. `NO_MATERIAL` means "use color directly", which is
     // what keeps an untextured blockout readable.
-    uint4 material;
+    //
+    // **y is this object's mesh's first index**, which is what turns a ray hit
+    // back into a triangle: `RayQuery` reports `CommittedPrimitiveIndex`
+    // counted from the start of the BLAS's build range, and each mesh's range
+    // begins at `y` in the shared index buffer. There is no first-*vertex*
+    // term — indices are absolute into `push.vertices`.
+    uint2 material;
+    // The shared index buffer. `uint2` and a pointer are both 8-aligned, so
+    // this and the field above occupy exactly the `uint4` that used to sit
+    // here and the record is still 240 bytes. Read only by
+    // `tracedEnvironment`; the draw itself binds the same buffer as an index
+    // buffer, because index fetch is fixed-function and cannot go by pointer.
+    uint* indices;
 };
 
 static const uint NO_TEXTURE = 0xFFFFFFFF;
@@ -1334,43 +1346,100 @@ float3 tracedEnvironment(float3 position, float3 normal, float3 dir,
     // whole channel from traversal back to the shader, and it is enough for a
     // colour without a second buffer or a descriptor.
     ObjectData hitObject = push.objects[query.CommittedInstanceID()];
-    float3 albedo = hitObject.color.rgb;
-    if (hitObject.material.x != NO_TEXTURE) {
-        // **The material's AVERAGE albedo, not a texel and not its base
-        // colour.** Fetching a texel would need the triangle's UVs, which
-        // needs the index buffer, which is one more pointer than the push
-        // block has room for — and at the roughnesses this runs at, a
-        // reflection is a smear of a surface rather than a readable image of
-        // it, so an average is most of what a texel would have given.
-        //
-        // Reading `albedo.rgb` here instead was the shipped bug. Every
-        // textured material in this project authors `albedo = [1, 1, 1]` and
-        // lets the map carry the colour, while the maps average about 0.2 —
-        // so every reflected object came back a flat blown-out cream
-        // silhouette at five times its real brightness, with no tint at all.
-        // `meanAlbedo` is that average, reduced from the texture's 1x1 mip at
-        // load and multiplied by the authored colour, so it costs one more
-        // `float4` in a table already being read and nothing per pixel.
-        //
-        // **What it cannot do is vary across the reflected surface.** A
-        // piebald rock reflects as a uniform one, and a texture whose whole
-        // content is high-contrast pattern — a checkerboard, brickwork read
-        // close up — reflects as its mean grey. That is the honest ceiling of
-        // an average, and the fix for it is the index buffer above.
-        albedo = push.materials[hitObject.material.x].meanAlbedo.rgb;
+    // `hitT`, not `distance` — Slang has a builtin of that name and shadowing
+    // it inside a function that also fogs over a distance is a trap.
+    float hitT = query.CommittedRayT();
+    float3 hit = origin + dir * hitT;
+
+    // **The hit triangle, which is what makes this a reflection of a surface
+    // rather than of a silhouette.** ADR 0021 shaded with the material's mean
+    // albedo because "fetching a texel would need the triangle's UVs, which
+    // needs the index buffer, which is one more pointer than the push block
+    // has room for". The premise was right and the conclusion was not: the
+    // pointer does not have to be in the push block. `ObjectData.indices`
+    // carries it per object, in the two `uint` lanes `material` was padding
+    // with, and the record did not grow.
+    //
+    // `material.y` is the mesh's first index; `CommittedPrimitiveIndex` counts
+    // from the start of that mesh's BLAS build range, whose `primitiveOffset`
+    // is `first_index * 4` bytes.
+    uint slot = hitObject.material.y + query.CommittedPrimitiveIndex() * 3u;
+    Vertex hv0 = push.vertices[hitObject.indices[slot]];
+    Vertex hv1 = push.vertices[hitObject.indices[slot + 1u]];
+    Vertex hv2 = push.vertices[hitObject.indices[slot + 2u]];
+    float2 bary = query.CommittedTriangleBarycentrics();
+    float3 bw = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
+
+    // **The interpolated vertex normal, not the triangle's cross product.**
+    // Both are now reachable; this one is what the rasteriser uses, so a
+    // sphere reflects as a sphere instead of as a facetted one, and a
+    // reflection agrees with the direct view of the same surface. It replaces
+    // `-dir`, which was exact only where the surface faced the ray head-on and
+    // wrong by the angle of incidence everywhere else.
+    float3 objectNormal = bw.x * unpackNormal(hv0.packedNormal)
+                        + bw.y * unpackNormal(hv1.packedNormal)
+                        + bw.z * unpackNormal(hv2.packedNormal);
+    float3 hitNormal = normalize(float3(dot(hitObject.normalRow0.xyz, objectNormal),
+                                        dot(hitObject.normalRow1.xyz, objectNormal),
+                                        dot(hitObject.normalRow2.xyz, objectNormal)));
+    // A ray hits either side of a triangle and nothing here is single-sided.
+    // Without this a reflection of a box's far wall lights from behind.
+    if (dot(hitNormal, dir) > 0.0) {
+        hitNormal = -hitNormal;
     }
 
-    float3 hit = origin + dir * query.CommittedRayT();
-    // **The reversed ray direction, standing in for the hit's normal.**
+    float2 hitUv = bw.x * unpackUv(hv0.packedUv, hitObject.uvUnpack)
+                 + bw.y * unpackUv(hv1.packedUv, hitObject.uvUnpack)
+                 + bw.z * unpackUv(hv2.packedUv, hitObject.uvUnpack);
+
+#ifdef REFLECT_INDEX_DEBUG
+    // **The test that says the indexing is right, rather than that it looks
+    // right.** Everything above is arithmetic on a primitive index whose
+    // origin is a convention — `first_index` plus three times a number
+    // traversal reports — and a wrong convention reads a *different real
+    // triangle*, which produces a plausible texture and no error anywhere.
     //
-    // Exact whenever the surface faces the ray head-on and wrong by the angle
-    // of incidence otherwise, so it is right at the centre of a reflection and
-    // degrades at its edges — a floor reflecting a wall gets the wall's normal
-    // exactly, a floor reflecting a distant roof at a grazing angle does not.
-    // The alternative is the triangle's own normal, which means the index
-    // buffer, a per-mesh first-index, and three vertex fetches per reflected
-    // pixel; ADR 0019 records that trade and why it was not taken yet.
-    float3 hitNormal = -dir;
+    // The three vertices this decoded also carry positions. Interpolating them
+    // by the same barycentrics must reproduce the point the ray query itself
+    // reports as the hit, to within packing error. Amplified 80x, this returns
+    // black if and only if the triangle is the one that was hit.
+    //
+    // To run it: put `#define REFLECT_INDEX_DEBUG` at the top of this file,
+    // render `stoneyard`, and look at the sphere. It is not a gate, because it
+    // costs three more decodes per reflected pixel to prove something that is
+    // either true for every triangle or false for every triangle.
+    //
+    // Run on `stoneyard` and `materials` at 1600x1000: **black**, and the
+    // control — `+ 1u` on `slot`, i.e. deliberately off by one vertex — is
+    // vivid green and red over the whole reflection.
+    float3 reconstructed = mul(hitObject.model, float4(
+        bw.x * unpackPosition(hv0.packedPosition, hitObject.unpack)
+      + bw.y * unpackPosition(hv1.packedPosition, hitObject.unpack)
+      + bw.z * unpackPosition(hv2.packedPosition, hitObject.unpack), 1.0)).xyz;
+    return abs(reconstructed - hit) * 80.0;
+#endif
+
+    float3 albedo = hitObject.color.rgb;
+    if (hitObject.material.x != NO_TEXTURE) {
+        MaterialData hm = push.materials[hitObject.material.x];
+        float lod = reflectLod(hitT, roughness);
+        albedo = reflectedAlbedo(hm, hit, hitNormal, hitUv, lod, true);
+
+        // **The steep-slope layer, and leaving it out is wrong rather than
+        // merely incomplete.** `lanternhead`, `ground`, `beach` and `meadow`
+        // all author a base material plus a layer blended in by slope; on
+        // `lanternhead` the flats are stone and the banks are soil, so a
+        // base-only fetch reflects a bank as stone with full conviction. The
+        // blend needs a world position and a real geometric normal, and this
+        // is the first version of this function to hold either.
+        if (hm.maps.w != NO_TEXTURE) {
+            MaterialData lm = push.materials[hm.maps.w];
+            albedo = lerp(albedo,
+                          reflectedAlbedo(lm, hit, hitNormal, hitUv, lod, false),
+                          groundLayerWeight(hit, hitNormal, lm.params.x));
+        }
+    }
+
     float visibility = sunVisibilityHard(hit, hitNormal, bias);
     float3 shade = albedo
         * (hemisphereAmbient(hitNormal) * ambientStrength()
@@ -1412,6 +1481,55 @@ float4 sampleMap(uint index, float2 uv) {
     return textures[NonUniformResourceIndex(index)].Sample(uv);
 }
 
+/// As [`sampleMap`], at a mip level the caller chose.
+///
+/// **`SampleLevel` is mandatory for anything a ray hit, not a preference.**
+/// Implicit-derivative sampling asks the neighbouring lanes in the quad what
+/// UV *they* got; for a reflection those lanes may have hit a different
+/// object, a different mesh, or the sky, so the derivative is meaningless and
+/// the chosen mip is whatever that noise implies. It compiles, it looks nearly
+/// right in a still, and it twinkles the moment the camera moves — the exact
+/// failure class a golden PNG cannot see.
+float4 sampleMapLevel(uint index, float2 uv, float lod) {
+    return textures[NonUniformResourceIndex(index)].SampleLevel(uv, lod);
+}
+
+/// How coarse a mip a reflected hit reads.
+///
+/// Two terms, because two things blur a reflection. **Distance**: the ray's
+/// footprint grows with how far it travelled, exactly as a mip chain assumes,
+/// and `log2(1 + t)` is that growth in mip units with a sane value at t = 0.
+/// **Roughness**: the direction handed to this function is already the
+/// roughness-widened lobe, so the surface it lands on should arrive blurred by
+/// the same amount, and blurring it with mips is far cheaper than more rays.
+///
+/// `ponytail:` the base is a constant, not a footprint. The honest version
+/// projects a cone of the lobe's angle onto the hit surface and converts its
+/// area to a mip level, which needs the texture's dimensions — reachable
+/// through `GetDimensions`, at the cost of a query per reflected pixel. Worth
+/// doing if a reflection ever reads too soft on a close, near-mirror surface.
+///
+/// **The roughness coefficient was measured, against the right reference.**
+/// High-frequency energy (mean |Laplacian| of luminance) in the reflected band
+/// at 3200x2000, against the *direct* view of the same surface in the same
+/// frame:
+///
+///     coefficient        4.0     2.0     direct view
+///     materials floor    4.73    5.11    5.00
+///     stoneyard ground  10.43   11.32   18.61
+///
+/// Halving it buys 8–9% and takes `materials` *past* its own direct view — and
+/// a reflection compresses a surface into fewer pixels, so more high-frequency
+/// energy per pixel than the thing itself is undersampling. The sharper-looking
+/// number is the one that aliases; `xtask shimmer` holds the camera still and
+/// cannot see the difference, so this is the reference that decides it.
+static const float REFLECT_LOD_BASE = 0.5;
+static const float REFLECT_LOD_ROUGHNESS = 4.0;
+
+float reflectLod(float t, float roughness) {
+    return REFLECT_LOD_BASE + log2(1.0 + t) + roughness * REFLECT_LOD_ROUGHNESS;
+}
+
 /// How much coarser the macro variation is than the detail tiling.
 ///
 /// A tiled texture reads as a repeating stamp the moment you can see more than
@@ -1443,6 +1561,59 @@ float4 triplanar(uint index, float3 position, float3 normal) {
     return sampleMap(index, position.zy) * weight.x
          + sampleMap(index, position.xz) * weight.y
          + sampleMap(index, position.xy) * weight.z;
+}
+
+/// As [`triplanar`], at an explicit mip. See [`sampleMapLevel`] for why a ray
+/// hit cannot use the implicit one.
+float4 triplanarLevel(uint index, float3 position, float3 normal, float lod) {
+    float3 weight = pow(abs(normal), 4.0);
+    weight /= max(weight.x + weight.y + weight.z, 1e-4);
+    return sampleMapLevel(index, position.zy, lod) * weight.x
+         + sampleMapLevel(index, position.xz, lod) * weight.y
+         + sampleMapLevel(index, position.xy, lod) * weight.z;
+}
+
+/// The albedo a reflected hit shades with.
+///
+/// The raster path's texture logic minus everything a reflection cannot use:
+/// no alpha cutout (`raytrace.rs` keeps cutout objects out of the TLAS, so
+/// there is nothing here to cut out) and no normal map.
+///
+/// Falls back to `meanAlbedo` when the material has no map, which keeps ADR
+/// 0021's guarantee exactly: with no texture the mean *is* the authored albedo,
+/// so an untextured surface reflects bit for bit as it did.
+///
+/// **`macro` is not a toggle, it is which surface this is.** The raster path
+/// applies macro variation to the base material and *not* to the steep-slope
+/// layer; a reflection that applied it to both would disagree with the direct
+/// view of the same bank, which is the whole point of reading real geometry.
+float3 reflectedAlbedo(MaterialData m, float3 hit, float3 normal, float2 uv, float lod, bool macro) {
+    if (m.maps.x == NO_TEXTURE) {
+        return m.meanAlbedo.rgb;
+    }
+    // Scaling the coordinate rather than the sample, as the raster path does:
+    // for triplanar this is world position, so a shared texture keeps one
+    // real-world size across every object however each one is scaled.
+    float3 projected = hit * float3(m.params.z, m.params.w, m.params.z);
+    if ((m.maps.z & FLAG_TRIPLANAR) == 0) {
+        // **A real UV, which is what this whole change bought.** Feeding
+        // triplanar a `packedUv` instead would sample a real texture at
+        // plausible-looking wrong coordinates — worse than a flat colour,
+        // because it is harder to disbelieve.
+        return m.albedo.rgb * sampleMapLevel(m.maps.x, uv * m.params.zw, lod).rgb;
+    }
+    float3 albedo = m.albedo.rgb * triplanarLevel(m.maps.x, projected, normal, lod).rgb;
+    if (macro) {
+        // One extra sample, top-down only, exactly as the raster path takes
+        // it. Without it a reflected terrain is uniformly bright where the
+        // surface it reflects has broad lush and dry patches, and the two do
+        // not agree where they meet — measured on `stoneyard`: reflected mean
+        // 80.6 without, 74.6 with, against 73.1 for the direct view.
+        float3 wide = sampleMapLevel(m.maps.x, projected.xz * MACRO_SCALE, lod).rgb;
+        float luma = dot(wide, float3(0.2126, 0.7152, 0.0722));
+        albedo *= max((luma - MACRO_PIVOT) * MACRO_STRENGTH + 1.0, 0.0);
+    }
+    return albedo;
 }
 
 /// Triplanar normal mapping, without a tangent frame at all.

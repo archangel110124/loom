@@ -214,7 +214,7 @@ pub struct EnvironmentData {
     /// The heights themselves, `w²` of them, row-major.
     ///
     /// **A pointer in the environment buffer rather than in the push block**,
-    /// which is at 124 of the 128 bytes Vulkan guarantees. It is per-scene data
+    /// which is at 116 of the 128 bytes Vulkan guarantees. It is per-scene data
     /// re-uploaded only when the terrain changes, which is exactly what this
     /// buffer is for.
     pub terrain_heights: vk::DeviceAddress,
@@ -623,9 +623,12 @@ pub(crate) struct Push {
     pub(crate) particles: vk::DeviceAddress,
     /// This frame's grass blades. Null when the scene has none.
     ///
-    /// **The block is at 124 of its 128 bytes with this**, which is why the
-    /// wind parameters the vertex shader also needs live in the environment
-    /// buffer instead. There is room for nothing else here.
+    /// **The block is at 116 of its 128 bytes with this** — 64 + 48 + 4,
+    /// padded to 120 — which is why the wind parameters the vertex shader also
+    /// needs live in the environment buffer instead. It is *not* full: one
+    /// more pointer fits, at 124 padded to exactly 128, and
+    /// `the_scene_push_block_is_not_full` pins that. This doc line used to say
+    /// 124 and ADR 0021 deferred a whole feature on it.
     pub(crate) grass: vk::DeviceAddress,
     /// The sky and sun. Placed before `object_offset`, not after: a device
     /// address needs eight-byte alignment, and putting it last would pad the
@@ -670,9 +673,49 @@ pub(crate) struct ObjectData {
     /// Rows of inverse-transpose(model)'s upper 3x3, padded to `vec4`.
     normal: [[f32; 4]; 3],
     color: [f32; 4],
-    /// Material index in `x`; the rest pads to the 16-byte alignment a
-    /// std430 block needs for the member that follows it.
-    material: [u32; 4],
+    /// Material index in `x`, this object's mesh's `first_index` in `y`.
+    ///
+    /// **`y` is what turns a ray hit back into a triangle.** `RayQuery`
+    /// reports `CommittedPrimitiveIndex` counted from the start of the BLAS's
+    /// build range, and each mesh's range starts at its own `first_index` in
+    /// the shared index buffer — so the slot the shader wants is
+    /// `y + 3 * primitiveIndex`. There is no first-*vertex* term: `combine`
+    /// rewrites indices absolute into the shared vertex buffer.
+    ///
+    /// This was a `uint4` with three unused lanes. Two of them pay for
+    /// [`Self::indices`] below without the record growing at all: `uint2` and
+    /// a pointer are both 8-aligned, so 224 + 8 + 8 is still 240.
+    material: [u32; 2],
+    /// The shared index buffer, by device address.
+    ///
+    /// **Per object, for a value that is the same for every object.** It costs
+    /// nothing — the two lanes it sits in were padding — and the alternative
+    /// is another pointer in `EnvironmentData`, whose Slang mirror would then
+    /// need its trailing scalars declared purely to keep an offset. A hit
+    /// object is already being fetched here; the pointer rides along.
+    indices: vk::DeviceAddress,
+}
+
+/// `(material offset, indices offset, size)` of [`ObjectData`], for the layout
+/// test in `lib.rs`. The fields are private to this module and should stay so.
+#[cfg(test)]
+pub(crate) fn object_data_layout() -> (usize, usize, usize) {
+    let base = ObjectData {
+        mvp: [0.0; 16],
+        model: [0.0; 16],
+        unpack: [0.0; 4],
+        uv_unpack: [0.0; 4],
+        normal: [[0.0; 4]; 3],
+        color: [0.0; 4],
+        material: [0, 0],
+        indices: 0,
+    };
+    let at = |field: *const u8| field as usize - std::ptr::from_ref(&base).cast::<u8>() as usize;
+    (
+        at(std::ptr::from_ref(&base.material).cast()),
+        at(std::ptr::from_ref(&base.indices).cast()),
+        size_of::<ObjectData>(),
+    )
 }
 
 /// Anything that can go wrong rendering.
@@ -731,6 +774,11 @@ pub struct Renderer {
     vertex_address: vk::DeviceAddress,
     indices: vk::Buffer,
     indices_alloc: Option<Allocation>,
+    /// The index buffer by device address, for the fragment stage.
+    ///
+    /// Bound as an index buffer for the draw *and* read as a pointer by
+    /// `tracedEnvironment`, which needs the hit triangle. See `ObjectData`.
+    index_address: vk::DeviceAddress,
     ranges: Vec<MeshRange>,
     unpack: UnpackParams,
     objects: vk::Buffer,
@@ -1356,6 +1404,7 @@ impl Renderer {
             vertex_address,
             indices,
             indices_alloc: Some(indices_alloc),
+            index_address,
             ranges,
             unpack,
             objects,
@@ -1607,7 +1656,8 @@ impl Renderer {
         // problem.
         let mut sorted: Vec<Object> = objects.to_vec();
         sorted.sort_by_key(|o| o.mesh);
-        let mut object_data = pack_objects(&sorted, view_proj, &self.unpack);
+        let mut object_data =
+            pack_objects(&sorted, view_proj, &self.unpack, &self.ranges, self.index_address);
         // The reserved slot described on `Push::object_offset`: the particle
         // vertex shader reads `mvp` from here as the view-projection, because
         // the push block cannot hold a second matrix.
@@ -3042,6 +3092,8 @@ pub(crate) fn pack_objects(
     objects: &[Object],
     view_proj: Mat4,
     unpack: &UnpackParams,
+    ranges: &[MeshRange],
+    index_address: vk::DeviceAddress,
 ) -> Vec<ObjectData> {
     objects
         .iter()
@@ -3069,7 +3121,13 @@ pub(crate) fn pack_objects(
                     rows.z_axis.extend(0.0).to_array(),
                 ],
                 color: [object.color[0], object.color[1], object.color[2], object.sway],
-                material: [object.material, 0, 0, 0],
+                material: [
+                    object.material,
+                    ranges
+                        .get(object.mesh as usize)
+                        .map_or(0, |r| r.first_index()),
+                ],
+                indices: index_address,
             }
         })
         .collect()
@@ -3477,7 +3535,8 @@ pub(crate) fn view_projection_slot(view_proj: Mat4) -> ObjectData {
         uv_unpack: [0.0, 0.0, 1.0, 0.0],
         normal: [[0.0; 4]; 3],
         color: [1.0; 4],
-        material: [crate::material::NO_TEXTURE, 0, 0, 0],
+        material: [crate::material::NO_TEXTURE, 0],
+        indices: 0,
     }
 }
 

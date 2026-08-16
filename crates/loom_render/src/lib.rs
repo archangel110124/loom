@@ -205,6 +205,50 @@ mod tests {
         assert_eq!(size_of::<MaterialData>(), 64, "the whole record");
     }
 
+    /// **`ObjectData` had no test at all, which is why this one exists.**
+    /// It is the third memory layout described twice, and the one a reflected
+    /// hit now walks a pointer out of — a stride that disagrees with Slang's
+    /// makes every object after the first read shifted, with no compile error
+    /// and no validation message.
+    ///
+    /// The record carries a `uint2` and a pointer where it used to carry a
+    /// `uint4`. Both halves are 8-aligned, so 224 + 8 + 8 is 240 exactly as
+    /// before and nothing above moved. Rust's own alignment rose from 4 to 8
+    /// with the pointer; 240 is a multiple of 8, so the stride did not.
+    ///
+    /// The numbers are Slang's, read out of the compiled module with
+    /// `spirv-dis target/debug/build/loom_render-*/out/scene.spv |
+    /// grep 'ObjectData_natural'` — `ArrayStride 240`, members at 224 and 232.
+    #[test]
+    fn the_object_record_is_laid_out_as_the_shader_reads_it() {
+        let (material, indices, size) = renderer::object_data_layout();
+        assert_eq!(material, 224, "material — index in x, mesh first index in y");
+        assert_eq!(indices, 232, "indices — the shared index buffer, by address");
+        assert_eq!(size, 240, "the whole record; Slang says ArrayStride 240");
+    }
+
+    /// **The scene push block has one free slot, and believing otherwise cost
+    /// this project a feature.**
+    ///
+    /// ADR 0021 deferred per-hit UVs because "the index buffer is one more
+    /// pointer than the push block has room for", and `renderer.rs` says
+    /// "124 of its 128 bytes" in two places and "116" in two others. The
+    /// arithmetic: a `float4x4`, six `DeviceAddress`es and a `u32` is
+    /// 64 + 48 + 4 = **116 occupied**, padded to 120 for the pointers'
+    /// 8-byte alignment. A seventh pointer would make it 64 + 56 + 4 = 124,
+    /// padded to exactly 128 — legal, with nothing spare after it.
+    ///
+    /// The only assert on a `Push` in this crate was `rain.rs`'s, on a
+    /// *different* struct of the same name. This one is the scene block.
+    #[test]
+    fn the_scene_push_block_is_not_full() {
+        assert_eq!(size_of::<renderer::Push>(), 120, "the whole block");
+        assert!(
+            size_of::<renderer::Push>() + size_of::<u64>() <= 128,
+            "one more pointer still fits inside the 128 bytes Vulkan guarantees"
+        );
+    }
+
     /// **The water draw count is the shader's, and nothing but this says so.**
     /// `WATER_VERTS` on the Rust side and `WATER_RES`/`WATER_LEVELS` in
     /// `scene.slang` are one number described twice: too few and the outermost

@@ -91,10 +91,8 @@ const SCENES: [&str; 43] = [
     // more legibly than 6,500 cards would. What is worth checking here is that
     // a canopy of that size still loads and draws without a validation message.
     "assets/test/tree_layered.loom",
-    // The secondary-ray demo (ADR 0019). In `SCENES` and not `GOLDEN`: the
-    // paths it shows are already covered — `materials.loom` sweeps metallic to
-    // 1.0, and sixteen references moved when the ray terms landed, so the gate
-    // already watches them. What this scene is for is a human looking at it.
+    // The secondary-ray demo (ADR 0019). **Also in `GOLDEN` now** — the
+    // reasoning is there.
     "assets/test/stoneyard.loom",
     "assets/test/blockout.loom",
     "assets/test/ground.loom",
@@ -250,7 +248,17 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 28] = [
+const GOLDEN: [(&str, &str, &[&str]); 29] = [
+    // **The scene the reflection bug was reported in, and it had no pixel gate
+    // at all.** It sat in `SCENES` only, on the argument that `materials`
+    // already sweeps metallic to 1.0 — which is true of the BRDF and false of
+    // what a reflection *reads*: `stoneyard`'s ground is triplanar, so it is
+    // the only reference covering a reflected hit that has no UVs and derives
+    // its texture from world position. ADR 0021 shipped and ADR 0044 fixed a
+    // visible defect here without one reference moving. Small at 320x200 —
+    // the reflected band is a few dozen pixels — but a few dozen pixels is the
+    // difference between a gate and no gate.
+    ("stoneyard", "assets/test/stoneyard.loom", &[]),
     // **The post-process stack's standing shot** (ADR 0018). Nothing else in
     // this list is composed around what happens *above* diffuse white: the
     // flame's core, the brazier's pool, the sun's glitter path, wet stone at
