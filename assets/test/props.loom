@@ -197,12 +197,16 @@ transform = { pos = [6.0, 0.0, 1.5], scale = [1.0, 1.0, 1.0] }
   [node.components.MeshRenderer]
   mesh = { asset = "mesh_RockBoulderB" }
 
+  # **No maps, because there is no `rock_boulder_b` atlas in
+  # `assets/textures/`.** This node used to wear boulder A's, and that is
+  # exactly the failure this catalogue exists to catch: these are per-model
+  # atlases baked against one model's UV layout, so A's photograph on B's UVs
+  # smears A's shadows and moss across B's faces at plausible-looking angles.
+  # A flat albedo is visibly untextured, which is the point — the missing file
+  # should look missing.
   [node.components.Material]
-  albedo = [1.0, 1.0, 1.0]
+  albedo = [0.30, 0.33, 0.24]
   roughness = 0.9
-  albedo_map = { asset = "rock_boulder_a_albedo" }
-  normal_map = { asset = "rock_boulder_a_normal" }
-  uv_scale = [1.0, 1.0]
 
 [[node]]
 name = "TreeLog"
