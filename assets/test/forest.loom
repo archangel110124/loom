@@ -1,0 +1,153 @@
+# A scattered forest: the rules, not the trees.
+#
+# **Phase 5, visible.** Everything before this was a library with tests and no
+# pixels. Two `Scatter` fields here place a few thousand instances between them,
+# and the file that describes them is forty lines — which is the point. The
+# scene tree shows two nodes, not two thousand.
+#
+# ## What each field is asserting
+#
+# `Boulders` goes down first and takes the good ground. `Pines` names it in
+# `exclude` and keeps eight metres clear, which is the phase's own example of a
+# named intermediate output — the thing a node graph is usually built to express
+# and that a flat ordered list does in one line.
+#
+# **References point backwards only.** `Pines` may name `Boulders` because
+# `Boulders` is declared first; the other way round is refused, and that is the
+# whole cycle check — with backwards-only references a cycle cannot be written.
+#
+# The refusal happens when the field is resolved, not in `loom validate`, which
+# checks schemas and asset aliases but does not yet follow `Scatter.exclude`.
+# A bad reference therefore prints `scatter: layer ... does not exist` and
+# places nothing, rather than being caught before the render. Moving it into
+# validation is worth doing and is not done.
+#
+# Both fields stand on the voxel terrain below, not on a plane: `loom_scatter`
+# takes a closure and `loom_cli` answers it from the same `GroundGrid` the grass
+# reads. The hillside is steep at its edges, so both fields thin out there —
+# `max_slope_degrees` fades rather than cutting, for the reason grass learned
+# twice.
+#
+# ## What it cannot do yet
+#
+# Instances do not sway, and they are not culled. Both are Phase 6, and both
+# need what this file finally provides: instances to sway and cull.
+#
+# Biomes are built in `loom_scatter` and have no component yet — nothing here
+# authors one. That is deliberate rather than forgotten: a second field with a
+# priority and bounds is a bigger authoring surface than one scene needs to
+# prove the wiring.
+
+[scene]
+format = 1
+id = "2f6b91d4-8c07-4e35-a1b8-73d05c9e2a68"
+
+[[node]]
+name = "Vale"
+
+  [node.components.Environment]
+  sun_direction = [0.45, 0.55, -0.70]
+  sun_strength = 2.1
+  sun_color = [1.0, 0.95, 0.86]
+  ambient = 0.55
+  sky_zenith = [0.16, 0.30, 0.52]
+  sky_horizon = [0.62, 0.70, 0.78]
+  fog_density = 0.004
+  fog_falloff = 0.05
+
+  [node.components.Wind]
+  direction_degrees = 240.0
+  speed = 4.0
+  gustiness = 0.8
+  turbulence = 0.5
+  ground_drag = 0.45
+
+[[node]]
+name = "Ground"
+parent = "Vale"
+transform = { pos = [-32.0, 0.0, -32.0] }
+
+  [node.components.Material]
+  albedo = [0.22, 0.26, 0.16]
+  roughness = 0.9
+
+  # A rolling hill: a slab with a dome on it, so there is flat ground, gentle
+  # slope and something too steep to stand on, all in one frame.
+  [node.components.VoxelVolume]
+  voxel_size = 0.5
+  chunks = [4, 2, 4]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [32.0, 4.0, 32.0]
+  half_extents = [31.5, 4.0, 31.5]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [26.0, 2.0, 30.0]
+  radius = 17.0
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [46.0, 1.0, 20.0]
+  radius = 11.0
+  mode = "union"
+
+# **Declared first, so `Pines` may name it.**
+[[node]]
+name = "Boulders"
+parent = "Vale"
+transform = { pos = [0.0, 0.0, 0.0] }
+
+  [node.components.Material]
+  albedo = [0.34, 0.33, 0.31]
+  roughness = 0.95
+
+  [node.components.Scatter]
+  mesh = "box"
+  half_extent = [30.0, 30.0]
+  spacing = 11.0
+  jitter = 1.0
+  scale = [0.5, 1.1]
+  seed = 4021
+  # Boulders sit on ground trees will not: they are not growing on it.
+  max_slope_degrees = 38.0
+  density = 0.7
+
+[[node]]
+name = "Pines"
+parent = "Vale"
+transform = { pos = [0.0, 0.0, 0.0] }
+
+  [node.components.Material]
+  albedo = [0.17, 0.29, 0.15]
+  roughness = 0.85
+
+  [node.components.Scatter]
+  mesh = "cylinder"
+  half_extent = [30.0, 30.0]
+  spacing = 3.2
+  jitter = 1.0
+  scale = [0.9, 1.8]
+  seed = 7715
+  # The exit criterion's own number.
+  max_slope_degrees = 22.0
+  density = 1.0
+  # **Phase 6's main bending.** Boulders above leave this at its default of
+  # zero, which is the point of it being per field: the same component places
+  # both, and a default that waved rocks would be wrong more often than right.
+  sway = 0.9
+
+    [[node.components.Scatter.exclude]]
+    field = "Vale/Boulders"
+    radius = 8.0
+
+[[node]]
+name = "Camera"
+parent = "Vale"
+transform = { pos = [4.0, 16.0, 40.0], rot_euler = [-16.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

@@ -1,0 +1,222 @@
+# Wind, made visible.
+#
+# The field itself draws nothing — it is a function, sampled by whatever wants
+# to know which way the air is going. This scene gives it something to carry.
+#
+# Six chimneys in a row, each releasing smoke that is pulled toward the local
+# air velocity. What the plumes show is everything the field does:
+#
+#   * they lean downwind, because the wind has a direction;
+#   * they lean *harder higher up*, because the height profile thins the wind
+#     near the ground — the same 1/7 power law that decides how hard grass
+#     leans at ankle height;
+#   * they swell and slacken together but not in unison, because the gust
+#     terms travel downwind rather than pulsing in place;
+#   * and neighbouring plumes wander apart, because the fBm turbulence is
+#     sampled per particle position rather than per emitter.
+#
+# Render it as a sequence and flick through: `cargo xtask flythrough` or
+# `loom render assets/test/windy.loom --frames 16 --step 6`. A still shows the
+# lean; only motion shows the gusts arriving.
+[scene]
+format = 1
+id = "c4e8b1a7-2d59-4f03-8b16-7a0e5d3c9ف21"
+
+[[node]]
+name = "Moor"
+
+  [node.components.Environment]
+  sun_direction = [0.35, 0.55, 0.75]
+  sun_strength = 1.1
+  sun_color = [1.0, 0.95, 0.86]
+  ambient = 0.55
+  sky_zenith = [0.16, 0.26, 0.44]
+  sky_horizon = [0.52, 0.56, 0.58]
+  fog_density = 0.010
+  fog_falloff = 0.05
+
+  # A moderate breeze — Beaufort 4 — blowing toward +X, with the gusting and
+  # swirl turned up enough to read in sixteen frames.
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 7.0
+  gustiness = 1.6
+  turbulence = 1.6
+  ground_drag = 0.45
+
+[[node]]
+name = "Ground"
+parent = "Moor"
+transform = { pos = [0.0, -0.25, 0.0], scale = [40.0, 0.5, 24.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.21, 0.20, 0.17]
+  roughness = 0.95
+
+# Six stacks across the wind, so the whole bank is visible at once and the
+# variation between neighbours is the point rather than a distraction.
+
+[[node]]
+name = "StackA"
+parent = "Moor"
+transform = { pos = [-13.0, 1.0, -7.0], scale = [0.5, 2.0, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.18, 0.16, 0.15]
+
+[[node]]
+name = "SmokeA"
+parent = "Moor"
+transform = { pos = [-13.0, 2.2, -7.0] }
+
+  [node.components.ParticleEmitter]
+  rate = 90.0
+  lifetime = 2.8
+  speed = 1.6
+  spread_degrees = 12.0
+  gravity = 1.1
+  drag = 0.35
+  turbulence = 0.5
+  turbulence_scale = 0.3
+  wind_response = 3.5
+  size = [0.45, 2.4]
+  color_start = [0.86, 0.86, 0.88]
+  color_end = [0.42, 0.44, 0.48]
+  alpha = [0.5, 0.0]
+  seed = 101
+
+[[node]]
+name = "StackB"
+parent = "Moor"
+transform = { pos = [-6.0, 1.4, 0.0], scale = [0.5, 2.8, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.18, 0.16, 0.15]
+
+[[node]]
+name = "SmokeB"
+parent = "Moor"
+transform = { pos = [-6.0, 3.0, 0.0] }
+
+  [node.components.ParticleEmitter]
+  rate = 90.0
+  lifetime = 2.8
+  speed = 1.6
+  spread_degrees = 12.0
+  gravity = 1.1
+  drag = 0.35
+  turbulence = 0.5
+  turbulence_scale = 0.3
+  wind_response = 3.5
+  size = [0.45, 2.4]
+  color_start = [0.86, 0.86, 0.88]
+  color_end = [0.42, 0.44, 0.48]
+  alpha = [0.5, 0.0]
+  seed = 202
+
+[[node]]
+name = "StackC"
+parent = "Moor"
+transform = { pos = [1.0, 0.7, 7.0], scale = [0.5, 1.4, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.18, 0.16, 0.15]
+
+# Low and close to the ground on purpose: this plume starts in the slowest air
+# in the scene, so it climbs before it travels while the tall ones lean at once.
+[[node]]
+name = "SmokeC"
+parent = "Moor"
+transform = { pos = [1.0, 1.5, 7.0] }
+
+  [node.components.ParticleEmitter]
+  rate = 90.0
+  lifetime = 2.8
+  speed = 1.6
+  spread_degrees = 12.0
+  gravity = 1.1
+  drag = 0.35
+  turbulence = 0.5
+  turbulence_scale = 0.3
+  wind_response = 3.5
+  size = [0.45, 2.4]
+  color_start = [0.86, 0.86, 0.88]
+  color_end = [0.42, 0.44, 0.48]
+  alpha = [0.5, 0.0]
+  seed = 303
+
+[[node]]
+name = "StackD"
+parent = "Moor"
+transform = { pos = [8.0, 1.6, 3.0], scale = [0.5, 3.2, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.18, 0.16, 0.15]
+
+[[node]]
+name = "SmokeD"
+parent = "Moor"
+transform = { pos = [8.0, 3.4, 3.0] }
+
+  [node.components.ParticleEmitter]
+  rate = 90.0
+  lifetime = 2.8
+  speed = 1.6
+  spread_degrees = 12.0
+  gravity = 1.1
+  drag = 0.35
+  turbulence = 0.5
+  turbulence_scale = 0.3
+  wind_response = 3.5
+  size = [0.45, 2.4]
+  color_start = [0.86, 0.86, 0.88]
+  color_end = [0.42, 0.44, 0.48]
+  alpha = [0.5, 0.0]
+  seed = 404
+
+# Embers. Same air, a tenth of the coupling — heavy things lag the wind, and
+# putting the two side by side is what shows that `wind_response` is a
+# property of the particle rather than of the weather.
+[[node]]
+name = "Embers"
+parent = "Moor"
+transform = { pos = [-6.0, 0.4, 0.0] }
+
+  [node.components.ParticleEmitter]
+  rate = 40.0
+  lifetime = 3.0
+  speed = 2.6
+  spread_degrees = 40.0
+  gravity = 0.6
+  drag = 0.5
+  turbulence = 0.4
+  turbulence_scale = 0.5
+  wind_response = 0.35
+  size = [0.10, 0.02]
+  color_start = [1.0, 0.62, 0.22]
+  color_end = [0.7, 0.16, 0.04]
+  alpha = [0.0, 0.0]
+  seed = 505
+
+[[node]]
+name = "Camera"
+parent = "Moor"
+transform = { pos = [-1.0, 12.0, 27.0], rot_euler = [-16.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 52.0

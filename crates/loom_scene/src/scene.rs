@@ -45,6 +45,37 @@ pub struct Node {
     /// component without this struct growing one accessor per type — the same
     /// reason the registry is schema-driven.
     pub components: BTreeMap<String, Value>,
+    /// File-local alias of the prefab this node instances (§5).
+    ///
+    /// Structural, like `parent`: it describes what the node *is*, not data
+    /// attached to it. An instance carries no components of its own — they
+    /// come from the prefab, and deviations go in `overrides`.
+    pub prefab: Option<String>,
+    /// Alias of the scene this one extends, on the root node only (§5).
+    ///
+    /// Godot's scene inheritance: the whole file starts from another and
+    /// changes it. Unlike `prefab`, a node with `extends` **does** carry
+    /// components — they are the changes, merged field by field over the base.
+    pub extends: Option<String>,
+    /// Per-instance deviations from the prefab, as a flat dotted map.
+    ///
+    /// `Light.intensity`, or `Child/Path::Light.intensity` to reach inside the
+    /// instanced sub-tree. **Flat on purpose** — setting one override is a
+    /// single map insert with no tree surgery, which is what makes it a
+    /// one-line `SceneOp` rather than a structural edit.
+    pub overrides: BTreeMap<String, Value>,
+}
+
+/// One `[[prefab]]` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefabDecl {
+    /// File-local alias. What nodes in *this* file write.
+    pub key: String,
+    /// The real identity, stable across files and renames.
+    pub id: String,
+    /// A hint for humans (§3). Nothing resolves a reference through it — a
+    /// loader uses it to *find* the file once, and identity stays the `id`.
+    pub path: String,
 }
 
 /// A rejection, shaped per `docs/format/README.md` §6.
@@ -66,7 +97,20 @@ pub struct SceneError {
 }
 
 impl SceneError {
-    fn new(error: &str, node: &str) -> Self {
+    /// Build one from outside the crate.
+    ///
+    /// A loader that cannot read a prefab file has a real §6-shaped error to
+    /// report and no way to construct it otherwise — and inventing a second
+    /// error type for "problems near a scene" would mean every caller
+    /// matching on two.
+    #[must_use]
+    pub fn external(error: &str, constraint: &str) -> Self {
+        let mut err = Self::new(error, "");
+        err.constraint = constraint.to_owned();
+        err
+    }
+
+    pub(crate) fn new(error: &str, node: &str) -> Self {
         Self {
             error: error.to_owned(),
             node: node.to_owned(),
@@ -130,6 +174,36 @@ impl Scene {
             .as_str()
     }
 
+    /// The `[[asset]]` declarations, in file order.
+    #[must_use]
+    pub fn assets(&self) -> Vec<PrefabDecl> {
+        declarations(&self.doc, "asset")
+    }
+
+    /// The `[scene] id`, if the file carries one.
+    #[must_use]
+    pub fn scene_id(&self) -> Option<String> {
+        self.doc.get("scene")?.get("id")?.as_str().map(str::to_owned)
+    }
+
+    /// The `[[prefab]]` declarations, in file order.
+    ///
+    /// **Identity is `id`, never the alias and never the path.** The alias is
+    /// file-local — two scenes may call the same prefab different things, and
+    /// the same word may mean different prefabs in different files — so a
+    /// library of prefabs is keyed by `id` and each file's aliases are
+    /// resolved through its own declarations (§3, the Unity lesson).
+    #[must_use]
+    pub fn prefabs(&self) -> Vec<PrefabDecl> {
+        declarations(&self.doc, "prefab")
+    }
+
+    /// The `id` a file-local prefab alias refers to.
+    #[must_use]
+    pub fn prefab_id(&self, key: &str) -> Option<String> {
+        self.prefabs().into_iter().find(|p| p.key == key).map(|p| p.id)
+    }
+
     /// Serialize back to `.loom`.
     ///
     /// For an unmodified scene this is byte-identical to the input, comments
@@ -170,6 +244,26 @@ fn check_format_version(doc: &DocumentMut) -> Result<(), Vec<SceneError>> {
     }
 }
 
+/// The `key`/`id`/`path` triples of an `[[asset]]` or `[[prefab]]` array.
+///
+/// One reader for both because they are the same shape by design (§3): a
+/// file-local alias, the UUID that is the real identity, and an advisory path.
+fn declarations(doc: &DocumentMut, table: &str) -> Vec<PrefabDecl> {
+    let Some(entries) = doc.get(table).and_then(Item::as_array_of_tables) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            Some(PrefabDecl {
+                key: entry.get("key")?.as_str()?.to_owned(),
+                id: entry.get("id").and_then(Item::as_str).unwrap_or_default().to_owned(),
+                path: entry.get("path").and_then(Item::as_str).unwrap_or_default().to_owned(),
+            })
+        })
+        .collect()
+}
+
 /// Resolve every node's path, enforcing the structural rules from §3.
 fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
     let Some(entries) = doc.get("node").and_then(Item::as_array_of_tables) else {
@@ -181,6 +275,29 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
     let mut known: BTreeSet<String> = BTreeSet::new();
     let mut children: BTreeSet<(String, String)> = BTreeSet::new();
     let mut root: Option<String> = None;
+
+    // Whether this file inherits. A derived scene's nodes may be prefab
+    // instances *in the base* without restating `prefab` here — the alias is
+    // file-local and the derived file need not even declare it — so the
+    // "overrides require prefab" rule is relaxed when the scene extends.
+    let inherits = doc
+        .get("node")
+        .and_then(Item::as_array_of_tables)
+        .is_some_and(|entries| entries.iter().any(|t| t.get("extends").is_some()));
+
+    // Declared prefab aliases, for the resolution check below. Read straight
+    // from the document rather than through `Scene::prefabs`, which needs a
+    // `Scene` that does not exist until this function returns.
+    let declared: BTreeSet<String> = doc
+        .get("prefab")
+        .and_then(Item::as_array_of_tables)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|t| t.get("key").and_then(Item::as_str).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
 
     for table in entries {
         let Some(name) = table.get("name").and_then(Item::as_str) else {
@@ -195,24 +312,23 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
             continue;
         }
 
-        // §5 of the format spec — prefab instances, `[node.overrides]`,
-        // `extends` — is documented but not built. The parser did not know
-        // these words, so it ignored them: a prefab instance node ended up
-        // with no components at all, drew nothing, lit nothing, and validated
-        // clean. Silence is the one answer that is definitely wrong; refusing
-        // says so and costs nothing when prefabs do get built.
-        for key in ["prefab", "extends", "overrides"] {
-            if table.get(key).is_some() {
-                let mut err = SceneError::new("not_implemented", name);
-                err.field = key.to_owned();
-                err.constraint = "a key this build understands".to_owned();
-                err.hint = Some(format!(
-                    "`{key}` is described in docs/format/README.md §5 (prefab \
-                     instances and overrides), which is not implemented yet. \
-                     Write the components on the node directly."
-                ));
-                errors.push(err);
-            }
+        let extends = table.get("extends").and_then(Item::as_str).map(str::to_owned);
+
+        // **Only the root extends.** Inheritance is a property of the scene,
+        // not of a node inside it — a mid-tree `extends` would be a prefab
+        // instance spelled differently, and having two spellings for one thing
+        // is how a format grows a dialect.
+        if extends.is_some() && table.get("parent").is_some() {
+            let mut err = SceneError::new("extends_on_a_child", name);
+            err.field = "extends".to_owned();
+            err.constraint = "the root node".to_owned();
+            err.hint = Some(
+                "`extends` makes the whole scene an extension of another. To \
+                 bring one scene *into* another as a node, use \
+                 `prefab = \"<alias>\"`."
+                    .to_owned(),
+            );
+            errors.push(err);
         }
 
         let parent = table.get("parent").and_then(Item::as_str);
@@ -264,6 +380,81 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
             }
         }
 
+        let prefab = table.get("prefab").and_then(Item::as_str).map(str::to_owned);
+
+        // An unresolved alias names itself and lists what *is* declared — the
+        // §3 rule for assets, and the difference between a fixable message and
+        // a scavenger hunt.
+        if let Some(alias) = prefab.as_ref().or(extends.as_ref())
+            && !declared.contains(alias)
+        {
+            {
+                let mut err = SceneError::new("unresolved_prefab", &path);
+                err.field = "prefab".to_owned();
+                err.value = Value::from(alias.clone());
+                err.constraint = "a declared `[[prefab]]` key".to_owned();
+                err.hint = Some(if declared.is_empty() {
+                    "this file declares no prefabs. Add `[[prefab]]` with \
+                     `key`, `id` and `path`."
+                        .to_owned()
+                } else {
+                    format!(
+                        "declared prefab keys: {}",
+                        declared.iter().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                });
+                errors.push(err);
+            }
+        }
+
+        // **An instance declares no components of its own.** Allowing both
+        // would give a node two sources for the same component and no rule
+        // about which wins — the override map is the one way to deviate.
+        if prefab.is_some() && !component_map.is_empty() {
+            let mut err = SceneError::new("prefab_instance_has_components", &path);
+            err.constraint = "a prefab instance takes its components from the prefab".to_owned();
+            err.hint = Some(
+                "put the deviation in `[node.overrides]` as \
+                 \"TypeName.field\" = value, or drop `prefab` to write the \
+                 components directly."
+                    .to_owned(),
+            );
+            errors.push(err);
+        }
+
+        let mut override_map = BTreeMap::new();
+        if let Some(table_like) = table.get("overrides").and_then(Item::as_table_like) {
+            if prefab.is_none() && !inherits {
+                let mut err = SceneError::new("overrides_without_prefab", &path);
+                err.constraint = "`overrides` requires `prefab`".to_owned();
+                err.hint = Some(
+                    "overrides are deviations from a prefab. A node with no \
+                     prefab has nothing to deviate from — set the fields \
+                     directly instead."
+                        .to_owned(),
+                );
+                errors.push(err);
+            }
+            for (key, item) in table_like.iter() {
+                if let Some(reason) = override_key_problem(key) {
+                    let mut err = SceneError::new("malformed_override_key", &path);
+                    err.field = key.to_owned();
+                    err.constraint = reason;
+                    err.hint = Some(
+                        "an override key is `TypeName.field`, or \
+                         `Child/Path::TypeName.field` to reach inside the \
+                         instanced sub-tree."
+                            .to_owned(),
+                    );
+                    errors.push(err);
+                    continue;
+                }
+                if let Some(value) = item_to_json(item) {
+                    override_map.insert(key.to_owned(), value);
+                }
+            }
+        }
+
         known.insert(path.clone());
         nodes.push(Node {
             name: name.to_owned(),
@@ -271,6 +462,9 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
             path,
             transform,
             components: component_map,
+            prefab,
+            extends,
+            overrides: override_map,
         });
     }
 
@@ -283,6 +477,48 @@ fn build_tree(doc: &DocumentMut) -> Result<Vec<Node>, Vec<SceneError>> {
     } else {
         Err(errors)
     }
+}
+
+/// Why an override key is not well-formed, or `None` if it is.
+///
+/// The grammar is `[<child path>::]<TypeName>.<field>`. Checked here rather
+/// than at resolution because a malformed key is wrong in the file regardless
+/// of which prefab it points at — and because a key that cannot be parsed
+/// cannot be reported against a target later.
+///
+/// **Not checked here: whether the target exists.** That needs the prefab, and
+/// a missing target is a warning with the value preserved (§5), never an
+/// error — see `resolve`.
+fn override_key_problem(key: &str) -> Option<String> {
+    let (child, field_path) = match key.split_once("::") {
+        Some((child, rest)) => (Some(child), rest),
+        None => (None, key),
+    };
+
+    if let Some(child) = child {
+        if child.is_empty() || child.starts_with('/') || child.ends_with('/') {
+            return Some("the child path before `::` is empty or has a stray `/`".to_owned());
+        }
+        if child.split('/').any(|segment| segment.is_empty() || segment.trim() != segment) {
+            return Some("every segment of the child path must be a non-empty name".to_owned());
+        }
+    }
+
+    let Some((type_name, field)) = field_path.split_once('.') else {
+        return Some("expected `TypeName.field`, with a `.` between them".to_owned());
+    };
+    if type_name.is_empty() {
+        return Some("the component type before `.` is empty".to_owned());
+    }
+    if field.is_empty() {
+        return Some("the field after `.` is empty".to_owned());
+    }
+    // Nested fields are addressed with further dots, so only the first split
+    // matters — but an empty segment anywhere is still a typo.
+    if field.split('.').any(str::is_empty) {
+        return Some("a field segment between dots is empty".to_owned());
+    }
+    None
 }
 
 /// Check every component on every node against its registered schema.
@@ -327,8 +563,151 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
                 errors.push(err);
                 continue;
             }
-            errors.extend(check(registry, type_name, item, &node.path));
+            let schema_errors = check(registry, type_name, item, &node.path);
+            // Cross-field rules run only on a component that already validates,
+            // because they read typed values: a `WaterBody` with a string where
+            // a number goes has nothing for the steepness limit to compute
+            // against, and reporting both would be reporting one fault twice.
+            if schema_errors.is_empty() && type_name == "WaterBody" {
+                errors.extend(check_water(item, &node.path));
+            }
+            errors.extend(schema_errors);
         }
+    }
+    errors
+}
+
+/// The water rules a schema range cannot express, because each one relates
+/// several fields to each other.
+///
+/// **The steepness limit is the one that matters.** A Gerstner wave whose `Q`
+/// is too large for its amplitude and wavelength loops through itself: the
+/// horizontal displacement stops being monotonic, the surface folds, and the
+/// mesh is visibly broken. An agent asked to make the sea choppier will push
+/// steepness until exactly that happens, and the symptom reads as a rendering
+/// bug rather than as a parameter it chose — so the rejection carries the
+/// computed limit and the reason.
+fn check_water(item: &Item, node: &str) -> Vec<SceneError> {
+    // Through serde rather than off the raw TOML, so an omitted field is its
+    // documented default here exactly as it will be at load. Reading the tables
+    // directly would compute the limit against zeros the runtime never sees.
+    //
+    // **A failure here is an error, never "nothing to check".** `.ok()` and an
+    // empty vector meant one unreadable field switched the whole of the water
+    // validation off — the steepness limit, the wave cap, all of it — while
+    // the file still reported `ok: true`. `kind = "lava"` and a three-element
+    // `direction` both got there, and both are spellings an agent will try.
+    // Same silent no-op the `unknown_field` comment in `loom_reflect` exists
+    // to prevent: a value this layer does not understand is a value it must
+    // refuse, not one it may ignore.
+    let body = match item_to_json(item)
+        .ok_or_else(|| "the component is not a table of values".to_owned())
+        .and_then(|v| {
+            serde_json::from_value::<components::WaterBody>(v).map_err(|e| e.to_string())
+        }) {
+        Ok(body) => body,
+        Err(why) => {
+            let mut err = SceneError::new("component_unreadable", node);
+            err.field = "WaterBody".to_owned();
+            err.constraint = "a readable WaterBody".to_owned();
+            err.hint = Some(format!(
+                "{why}. The schema check passed, so this is a field the schema \
+                 does not reach — a nested value or an enum name. None of the \
+                 water rules could run until it is fixed."
+            ));
+            return vec![err];
+        }
+    };
+
+    let mut errors = Vec::new();
+    let count = body.waves.waves.len();
+    if count > components::MAX_WAVES {
+        let mut err = SceneError::new("too_many_waves", node);
+        err.field = "WaterBody.waves.waves".to_owned();
+        err.value = Value::from(count);
+        err.constraint = format!("at most {} waves", components::MAX_WAVES);
+        err.hint = Some(
+            "per-vertex cost is linear in the wave count and the pattern stops \
+             visibly repeating well before the cap. Merge or drop the smallest \
+             waves."
+                .to_owned(),
+        );
+        errors.push(err);
+    }
+
+    // The limit is shared out among the waves, so it depends on how many there
+    // are: N waves each at the single-wave limit fold N times as hard.
+    let n = count as f64;
+    for (index, wave) in body.waves.waves.iter().enumerate() {
+        let field = |name: &str| format!("WaterBody.waves.waves[{index}].{name}");
+        let wavelength = f64::from(wave.wavelength);
+        if wavelength <= 0.0 {
+            let mut err = SceneError::new("wave_wavelength_not_positive", node);
+            err.field = field("wavelength");
+            err.value = Value::from(wave.wavelength);
+            err.constraint = "greater than zero".to_owned();
+            err.hint = Some(
+                "wavelength sets the wave number k = 2π/λ, so zero or negative \
+                 makes every derived quantity infinite or backwards."
+                    .to_owned(),
+            );
+            errors.push(err);
+            continue;
+        }
+
+        // **Not `.abs()`.** Amplitude and steepness are magnitudes, and
+        // folding a negative one through `abs` made the steepness limit report
+        // someone else's mistake: `amplitude = -5.0` blamed steepness and
+        // printed "amplitude 5", and `steepness = -9.0` produced the
+        // self-contradictory "value -9.0, constraint at most 3.183". A sign
+        // typo is its own fault and reads as one.
+        let before = errors.len();
+        for (name, value) in [("amplitude", wave.amplitude), ("steepness", wave.steepness)]
+            .into_iter()
+            .filter(|&(_, value)| value < 0.0)
+        {
+            let mut err = SceneError::new(&format!("wave_{name}_negative"), node);
+            err.field = field(name);
+            err.value = Value::from(value);
+            err.constraint = "at least zero".to_owned();
+            err.hint = Some(
+                "amplitude and steepness are magnitudes, not signed offsets — \
+                 a negative one is a sign typo. Flip the wave with `direction` \
+                 instead."
+                    .to_owned(),
+            );
+            errors.push(err);
+        }
+        // A wave with a sign typo has nothing left for the steepness limit to
+        // say — reporting both would be reporting one fault twice, which is
+        // the same rule the caller applies to schema errors.
+        if errors.len() != before {
+            continue;
+        }
+
+        let k = std::f64::consts::TAU / wavelength;
+        let amplitude = f64::from(wave.amplitude);
+        let steepness = f64::from(wave.steepness);
+        // Amplitude zero is a wave that does nothing, and its steepness is
+        // unbounded rather than infinite — nothing to reject.
+        if amplitude == 0.0 || steepness * n * k * amplitude <= 1.0 {
+            continue;
+        }
+
+        let limit = 1.0 / (n * k * amplitude);
+        let mut err = SceneError::new("wave_steepness_exceeds_limit", node);
+        err.field = field("steepness");
+        err.value = Value::from(wave.steepness);
+        err.constraint = format!(
+            "at most {limit:.3} for {count} wave(s) at wavelength {wavelength} \
+             and amplitude {amplitude}"
+        );
+        err.hint = Some(
+            "Q*k*A must stay under 1/N for N waves or the surface \
+             self-intersects. Reduce steepness or amplitude."
+                .to_owned(),
+        );
+        errors.push(err);
     }
     errors
 }

@@ -32,6 +32,9 @@ pub(crate) struct Sound {
     /// Which source gets a fresh occlusion solve this tick.
     next: usize,
     ears: Ears,
+    /// The scene's unsheltered rain rate in mm/h. Zero in a dry scene, and then
+    /// the bed renders exact silence.
+    rain: f32,
 }
 
 impl Sound {
@@ -49,11 +52,21 @@ impl Sound {
         };
         crate::log::info(format!("audio — {}", audio.device_name()));
 
+        // The weather bed. Loaded here, once, rather than per tick — and if it
+        // is missing the synthesiser takes over, so the scene still rains.
+        if !audio.use_rain_recording(&base.join("../audio/rain.wav")) {
+            crate::log::info("no rain recording; synthesising the weather".to_owned());
+        }
+
         let mut sound = Self {
             audio,
             sources: Vec::new(),
             next: 0,
             ears: Ears::default(),
+            // The rate the sky is producing, before any shelter. Shelter is
+            // applied per tick from the room solve, exactly as the visible
+            // layer applies it per drop rather than per camera.
+            rain: crate::weather::rain_of(scene).map_or(0.0, |r| r.intensity),
         };
 
         for entity in world.entities() {
@@ -143,6 +156,9 @@ impl Sound {
     }
 
     /// Re-measure and hand every voice its position for this tick.
+    ///
+    /// `submerged` is whether the listener's head is under the water — asked of
+    /// the simulation, which owns the surface, rather than worked out here.
     pub(crate) fn update(
         &mut self,
         world: &World,
@@ -150,15 +166,34 @@ impl Sound {
         listener: [f32; 3],
         right: [f32; 3],
         forward: [f32; 3],
+        submerged: bool,
     ) {
-        if self.sources.is_empty() {
-            return;
-        }
-
         // The room, once. It is a property of where the listener stands, not
         // of any one sound, so solving it per source would be the same answer
         // computed over and over.
+        //
+        // **Solved before the early return, because rain needs it.** This used
+        // to sit below a `sources.is_empty()` bail, and a scene whose only
+        // sound is the weather has no sources at all — the most obviously
+        // rainy scene would have been the one that never solved its room.
         let room = Acoustics::solve(physics, listener, listener, &self.ears);
+
+        // The weather. `room.openness` rather than S3's sky exposure: see
+        // `RainAudio::openness` — since ADR 0017 the visible rain is occluded
+        // by the collision world too, so these agree, and S3 would read a mesh
+        // roof as open sky.
+        //
+        // Underwater, the sky is not what you are listening through. The rain
+        // is above the surface and you are not.
+        self.audio.set_rain(loom_audio::rain::RainAudio {
+            intensity: self.rain,
+            openness: if submerged { 0.0 } else { room.openness },
+            volume: 1.0,
+        });
+
+        if self.sources.is_empty() {
+            return;
+        }
 
         // One source's occlusion per tick, round-robin.
         let index = self.next % self.sources.len();
@@ -177,6 +212,13 @@ impl Sound {
             source.acoustics.reverb_delay = room.reverb_delay;
             source.acoustics.reverb_gain = room.reverb_gain;
             source.acoustics.openness = room.openness;
+            // **A property of the listener, applied per source, here.** It goes
+            // on last so it can only ever muffle further, and it goes on every
+            // source at once because it is the ears that are under the water,
+            // not any one sound.
+            if submerged {
+                source.acoustics = source.acoustics.underwater();
+            }
         }
 
         let sources = &self.sources;

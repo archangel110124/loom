@@ -1,0 +1,177 @@
+# Puddles: standing water where the ground holds it.
+#
+# **Phase 4's last shading item, and the scene that can fail without it.** Every
+# other rain scene has a flat floor, and a flat floor has no concavity anywhere
+# — so the puddle term evaluates to zero across all of them and none of their
+# references would move if it were deleted. This one is dished.
+#
+# The ground is a slab with four hollows subtracted out of it at different
+# depths, and a ramp along one side. What the scene is really asserting is the
+# *gate*: the ramp is concave where it meets the flat, and water must not stand
+# there. Concavity alone is happily positive on the inside of a bend halfway up
+# a hill, and ungated puddles climb gentle inclines — which is the failure the
+# implementation order names in the same sentence that asks for the feature.
+#
+# **There is no water body in this scene.** A puddle is a term in the ground's
+# shading, not a `WaterBody` with a surface height — see `PUDDLE_FULL` in
+# `scene.slang` for where that line is drawn. Two centimetres in a wheel rut is
+# what has no representation otherwise; a pond is a `WaterBody` and always was.
+#
+# Rendering-only and outside the determinism hash, the same exemption grass and
+# the rain streaks have. What *is* assertable is the wetness that fills them:
+#
+#     loom sim assets/test/puddles.loom --ticks 600 \
+#       --assert "rain@-6,4.1,-6.rate > 5.9" \
+#       --assert "wetness@-6,4.1,-6.film > 0.5"
+#
+# **World coordinates, not the volume's.** The ops below are in the volume's own
+# frame and the node sits at [-16, 0, -16], so the first hollow's ops read
+# [10, _, 10] and it is at world [-6, _, -6]. Asserting the op coordinates
+# instead reads a point off the slab entirely, which answers 0.0 and looks like
+# a broken feature.
+#
+# The camera looks along the slab so the hollows are seen at a grazing angle,
+# which is the only angle standing water reads at: a puddle from directly above
+# is a dark patch, and from a low angle it is a mirror.
+#
+# ## The framing is aspect-robust, and it did not start that way
+#
+# **A human opened this scene in the viewer and saw no puddles at all.** The
+# first framing put them near the left and right edges, which is fine at the
+# gate's 320x200 (aspect 1.6) and wrong in a window: the vertical field of view
+# is what `fov_y_degrees` fixes, so a *narrower* viewport has a narrower
+# HORIZONTAL field of view and crops the edges away. The editor's 3D viewport is
+# about 890x765 — aspect 1.16 — and both puddles fell outside it.
+#
+# Nothing was broken. The offscreen render at 890x765 showed no puddles either,
+# which is what ruled out the viewer and pointed at the framing.
+#
+# So the camera sits further back with the hollows near the centre, and it is
+# checked at both aspects. **A scene whose subject is only in frame at one
+# aspect ratio is a scene the gate can pass while the human sees nothing** —
+# which is this project's oldest failure mode wearing yet another costume.
+# Stubbing `puddleMask` moves 0.43% of the reference against a 0.1% tolerance;
+# the first framing managed 0.8% and showed nothing in a window.
+
+[scene]
+format = 1
+id = "8d5b2f16-4a09-47c3-b8e1-6250d9f3ac74"
+
+[[node]]
+name = "Weather"
+
+  [node.components.Environment]
+  # A bright horizon and a low sun, so the sky the puddles reflect has
+  # something in it. A puddle under a featureless grey sky is a grey patch.
+  sun_direction = [0.35, 0.22, -0.91]
+  sun_strength = 1.4
+  sun_color = [1.0, 0.93, 0.82]
+  ambient = 0.45
+  sky_zenith = [0.16, 0.24, 0.40]
+  sky_horizon = [0.70, 0.72, 0.74]
+  fog_density = 0.004
+  fog_falloff = 0.05
+  # **Solid, and the reason is a coherence bug rather than taste.** Broken cloud
+  # was tried first, because a puddle wants something bright to reflect. But
+  # this slab is 31 m across and a cloud mass is hundreds, so the whole scene
+  # sits inside one cell of the coverage field — and that cell was a gap, which
+  # made `rain@...rate` read 0.0 everywhere while the ground rendered soaked.
+  #
+  # It renders soaked because **wetness does not read cloud cover**: it is a
+  # single pair of scalars for the scene, computed from the unsheltered rate,
+  # while the rate is now per-position. That is a real gap left by ADR 0016
+  # step 3 and it is written down in the phase notes; a scene should not paper
+  # over it, so this one authors a sky that actually rains on it.
+  cloud_cover = 1.0
+
+  [node.components.Rain]
+  # Six mm/h, and it does not stop: this scene is about where water collects,
+  # not about drying. `rain_overhang` owns the drying half.
+  intensity = 6.0
+
+  [node.components.Wind]
+  direction_degrees = 210.0
+  speed = 3.0
+  gustiness = 0.6
+  turbulence = 0.4
+  ground_drag = 0.5
+
+[[node]]
+name = "Ground"
+parent = "Weather"
+transform = { pos = [-16.0, 0.0, -16.0] }
+
+  # Dark and rough, like a road. The default material is a bright blue, and a
+  # puddle reads by contrast with what it is lying on — on bright blue the
+  # reflection is barely darker than the ground and the feature half disappears.
+  [node.components.Material]
+  albedo = [0.20, 0.19, 0.17]
+  roughness = 0.92
+
+  [node.components.VoxelVolume]
+  # **0.25 m voxels over four chunks, not two.** A chunk is 32 voxels, so this
+  # is 32 m across — the extent the ops below assume. Two chunks at this size is
+  # 16 m and half the scene falls outside the volume, which meshes cleanly and
+  # silently draws a quarter of what was authored.
+  #
+  # The fine voxels are not optional either: the hollows are 6-24 cm deep, and
+  # at the 0.5 m voxels the other rain scenes use, the shallowest three are
+  # below one quantisation step of the SDF and would not exist.
+  voxel_size = 0.25
+  chunks = [4, 1, 4]
+
+  # The slab.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 2.0, 16.0]
+  half_extents = [15.5, 2.0, 15.5]
+  mode = "union"
+
+  # Four hollows, shallow to deep. The shallowest is under `PUDDLE_FULL` and
+  # should read as a partial film rather than as a full puddle — a feature with
+  # only an on state would pass a golden image and look like paint.
+  # 6 cm deep, 3.0 m across: under PUDDLE_FULL, so a partial film.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [10.0, 78.94, 10.0]
+  radius = 75.0
+  mode = "subtract"
+
+  # 10 cm, 3.2 m across.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [21.0, 55.10, 12.0]
+  radius = 51.2
+  mode = "subtract"
+
+  # 16 cm, 3.5 m across: exactly PUDDLE_FULL.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [13.0, 42.14, 21.0]
+  radius = 38.3
+  mode = "subtract"
+
+  # 28 cm, 4.0 m across: past full, so the mask saturates and this is the
+  # reference for what a puddle looks like at all.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [23.0, 32.29, 22.0]
+  radius = 28.57
+  mode = "subtract"
+
+  # **The ramp, and it is the assertion the eye makes.** Its foot is a concave
+  # join with the flat slab, so concavity alone would pool water there and run
+  # it up the slope. The slope gate is what must stop it.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [4.0, -4.0, 16.0]
+  radius = 9.0
+  mode = "union"
+
+[[node]]
+name = "Camera"
+parent = "Weather"
+transform = { pos = [2.0, 6.8, 15.0], rot_euler = [-16.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

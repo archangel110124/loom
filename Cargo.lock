@@ -1270,6 +1270,7 @@ name = "loom_audio"
 version = "0.0.0"
 dependencies = [
  "cpal",
+ "loom_field",
  "loom_physics",
 ]
 
@@ -1280,15 +1281,21 @@ dependencies = [
  "loom_asset",
  "loom_audio",
  "loom_ecs",
+ "loom_field",
+ "loom_grass",
  "loom_input",
  "loom_particles",
  "loom_physics",
+ "loom_rain",
  "loom_reflect",
  "loom_render",
+ "loom_scatter",
  "loom_scene",
  "loom_script",
  "loom_terrain",
  "loom_voxel",
+ "loom_water",
+ "png",
  "serde",
  "serde_json",
  "winit",
@@ -1300,6 +1307,18 @@ version = "0.0.0"
 dependencies = [
  "loom_scene",
  "serde_json",
+]
+
+[[package]]
+name = "loom_field"
+version = "0.0.0"
+
+[[package]]
+name = "loom_grass"
+version = "0.0.0"
+dependencies = [
+ "loom_asset",
+ "loom_field",
 ]
 
 [[package]]
@@ -1327,6 +1346,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom_rain"
+version = "0.0.0"
+dependencies = [
+ "loom_field",
+ "loom_scene",
+ "loom_voxel",
+]
+
+[[package]]
 name = "loom_reflect"
 version = "0.0.0"
 dependencies = [
@@ -1347,7 +1375,10 @@ dependencies = [
  "glam 0.31.1",
  "gpu-allocator",
  "loom_asset",
+ "loom_field",
  "loom_render_graph",
+ "loom_voxel",
+ "loom_water",
  "png",
  "raw-window-handle",
  "winit",
@@ -1358,6 +1389,13 @@ name = "loom_render_graph"
 version = "0.0.0"
 dependencies = [
  "ash",
+]
+
+[[package]]
+name = "loom_scatter"
+version = "0.0.0"
+dependencies = [
+ "loom_field",
 ]
 
 [[package]]
@@ -1400,6 +1438,14 @@ dependencies = [
  "loom_terrain",
  "ndshape",
  "serde",
+]
+
+[[package]]
+name = "loom_water"
+version = "0.0.0"
+dependencies = [
+ "loom_scene",
+ "loom_voxel",
 ]
 
 [[package]]

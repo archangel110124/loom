@@ -1,0 +1,246 @@
+# The imported PBR library, one sphere each, on a floor of the first.
+#
+# **A catalogue, not a test of the shader.** `materials.loom` is the scene that
+# varies one property at a time and proves the BRDF responds; this one proves
+# something narrower and entirely about the *assets*: that a downloaded set
+# survives `tools/texture/import_pbr.py` and arrives with its albedo the right
+# colour, its normal the right way up, and its tiling intact.
+#
+#     loom render assets/test/pbr_library.loom --out pbr.png --size 1280x800
+#
+# **What to look for, in the order the failures actually happen:**
+#
+# 1. **Every bump reads as a dent.** That is a DirectX normal map imported as
+#    OpenGL - the green channel is inverted. `scene.slang` builds a
+#    `cotangentFrame` and applies the sampled normal in the usual +Y-up tangent
+#    space, so `NormalGL` is the correct variant of any set shipping both, and
+#    the importer rejects `NormalDX` by name. Worth knowing that this failure
+#    looks *plausible* rather than broken: the lighting is still smooth, the
+#    surface is simply inside out.
+# 2. **A grid across the floor.** That is a seam, and it is measured rather
+#    than eyeballed - `tools/texture/seamless.py` scores the wrap boundary
+#    against the texture's own interior gradient statistics. All six here score
+#    |z| < 2.6 against a threshold of 3.0.
+# 3. **A washed, flat surface.** That is the missing half of these sets. Every
+#    one ships Roughness, Metallic, AO and Displacement maps and **`Material`
+#    has nowhere to put any of them** - it carries `metallic` and `roughness`
+#    as single scalars and exactly two map slots. So each number below is one
+#    value standing in for a whole map.
+#
+# That third point is the real finding of this scene, and it is a gap rather
+# than a setting: a rusted sheet whose rust is rough and whose bare metal is
+# not cannot be expressed here at all. Adding `roughness_map` and
+# `metallic_map` beside the two existing slots is a small change to
+# `MaterialData`, the bindless table and this component - and it is what would
+# make these assets worth what they cost.
+
+[scene]
+format = 1
+id = "7b498fc0-8afb-492e-90e9-572555db46fc"
+
+[[asset]]
+key = "quay_stone_albedo"
+id = "c06d4a12-601b-4756-8696-88cdcaddcd88"
+path = "../textures/quay_stone_albedo.png"
+
+[[asset]]
+key = "quay_stone_normal"
+id = "d0b95861-c1e0-4152-a387-9bb8e6f8f908"
+path = "../textures/quay_stone_normal.png"
+
+[[asset]]
+key = "dirt_rocky_albedo"
+id = "7ae19549-7002-463b-8afc-9fe26f46012a"
+path = "../textures/dirt_rocky_albedo.png"
+
+[[asset]]
+key = "dirt_rocky_normal"
+id = "27aac7b4-914f-4208-a41c-bd5dbbcdbd12"
+path = "../textures/dirt_rocky_normal.png"
+
+[[asset]]
+key = "grass_ground_albedo"
+id = "5e0ff7db-c401-491a-8c18-c20aaf977b21"
+path = "../textures/grass_ground_albedo.png"
+
+[[asset]]
+key = "grass_ground_normal"
+id = "363ae04a-c565-4b20-bc87-cdc58b112be6"
+path = "../textures/grass_ground_normal.png"
+
+[[asset]]
+key = "metal_rust_albedo"
+id = "802a37eb-93b7-4118-9318-c86d9d494a80"
+path = "../textures/metal_rust_albedo.png"
+
+[[asset]]
+key = "metal_rust_normal"
+id = "a5294a50-5adc-49eb-b3e0-e455774b4a32"
+path = "../textures/metal_rust_normal.png"
+
+[[asset]]
+key = "wood_shingle_albedo"
+id = "39c97b83-79ff-423e-a4b2-842c8eac23f3"
+path = "../textures/wood_shingle_albedo.png"
+
+[[asset]]
+key = "wood_shingle_normal"
+id = "6b27be76-8cb6-4e7b-b5f4-db9380984c12"
+path = "../textures/wood_shingle_normal.png"
+
+[[asset]]
+key = "concrete_worn_albedo"
+id = "38a5d22f-5861-4680-96cf-b71120078c0d"
+path = "../textures/concrete_worn_albedo.png"
+
+[[asset]]
+key = "concrete_worn_normal"
+id = "90eb36da-8d9a-4695-a41c-35e6879ef5bd"
+path = "../textures/concrete_worn_normal.png"
+
+[[node]]
+name = "Stage"
+
+  # **Over the camera's shoulder, not behind the subject.** `sun_direction`
+  # points TOWARD the sun, and the camera looks down -Z from +Z — so a sun with
+  # a negative z lights the far side of every sphere and the catalogue shows
+  # six shadowed hemispheres. That was the first render.
+  #
+  # Still off-axis and fairly low, because a normal map lit straight on is
+  # nearly invisible, and that is how a broken one survives review.
+  [node.components.Environment]
+  sun_direction = [0.55, 0.42, 0.72]
+  sun_strength = 1.6
+  sun_color = [1.0, 0.94, 0.86]
+  ambient = 0.30
+  sky_zenith = [0.055, 0.085, 0.150]
+  sky_horizon = [0.40, 0.42, 0.46]
+  fog_density = 0.0
+
+[[node]]
+name = "Floor"
+parent = "Stage"
+transform = { pos = [0.0, -1.0, 0.0], scale = [9.0, 0.5, 5.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  # Triplanar for the reason `materials.loom` gives: this box is scaled 18x
+  # wider than it is tall, so UV-mapped tiles would smear along the long axis.
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.78
+  albedo_map = { asset = "quay_stone_albedo" }
+  normal_map = { asset = "quay_stone_normal" }
+  uv_scale = [0.35, 0.35]
+  triplanar = true
+
+[[node]]
+name = "quay_stone"
+parent = "Stage"
+transform = { pos = [-4.0, 0.6, 2.2], scale = [1.3, 1.3, 1.3] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  # split-face stone: matt, no metal
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  metallic = 0.0
+  roughness = 0.78
+  albedo_map = { asset = "quay_stone_albedo" }
+  normal_map = { asset = "quay_stone_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "dirt_rocky"
+parent = "Stage"
+transform = { pos = [0.0, 0.6, 2.2], scale = [1.3, 1.3, 1.3] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  # loose dirt scatters almost everything
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  metallic = 0.0
+  roughness = 0.92
+  albedo_map = { asset = "dirt_rocky_albedo" }
+  normal_map = { asset = "dirt_rocky_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "grass_ground"
+parent = "Stage"
+transform = { pos = [4.0, 0.6, 2.2], scale = [1.3, 1.3, 1.3] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  # patchy turf, slight sheen when wet
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  metallic = 0.0
+  roughness = 0.85
+  albedo_map = { asset = "grass_ground_albedo" }
+  normal_map = { asset = "grass_ground_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "metal_rust"
+parent = "Stage"
+transform = { pos = [-4.0, 0.6, -1.7999999999999998], scale = [1.3, 1.3, 1.3] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  # rust is dielectric, bare metal is not - one scalar cannot say both, see the header
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  metallic = 0.55
+  roughness = 0.62
+  albedo_map = { asset = "metal_rust_albedo" }
+  normal_map = { asset = "metal_rust_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "wood_shingle"
+parent = "Stage"
+transform = { pos = [0.0, 0.6, -1.7999999999999998], scale = [1.3, 1.3, 1.3] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  # split cedar, weathered
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  metallic = 0.0
+  roughness = 0.72
+  albedo_map = { asset = "wood_shingle_albedo" }
+  normal_map = { asset = "wood_shingle_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "concrete_worn"
+parent = "Stage"
+transform = { pos = [4.0, 0.6, -1.7999999999999998], scale = [1.3, 1.3, 1.3] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  # poured and worn
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  metallic = 0.0
+  roughness = 0.8
+  albedo_map = { asset = "concrete_worn_albedo" }
+  normal_map = { asset = "concrete_worn_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "Camera"
+parent = "Stage"
+transform = { pos = [0.0, 3.4, 9.5], rot_euler = [-13.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 52.0

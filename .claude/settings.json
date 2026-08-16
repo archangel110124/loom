@@ -1,0 +1,28 @@
+{
+  "$comment": [
+    "Opt-in only. LOOM_AUTO_WATCH=1 regenerates target/agent/contact_sheet.png",
+    "after an edit to a shader, a scene, or a system whose output is motion —",
+    "so an unattended run always has a current sheet to look at.",
+    "",
+    "It is off by default and the guard is deliberate. A capture is ~5 seconds",
+    "of GPU work; firing it after every file write would cost more than the",
+    "work it is watching. The matcher below is narrow on purpose: shaders and",
+    "scenes only, never Rust, never docs, never a cargo check.",
+    "",
+    "Enable with:  export LOOM_AUTO_WATCH=1"
+  ],
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 120,
+            "command": "if [ \"${LOOM_AUTO_WATCH:-0}\" = \"1\" ]; then f=$(cat | sed -n 's/.*\"file_path\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' | head -1); case \"$f\" in *.slang|*.loom) tools/watch.sh \"${LOOM_WATCH_SCENE:-homestead}\" >/dev/null 2>&1 || true ;; esac; fi"
+          }
+        ]
+      }
+    ]
+  }
+}

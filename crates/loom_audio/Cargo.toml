@@ -7,4 +7,5 @@ publish.workspace = true
 
 [dependencies]
 cpal = "=0.18.1"
+loom_field = { version = "0.0.0", path = "../loom_field" }
 loom_physics = { version = "0.0.0", path = "../loom_physics" }

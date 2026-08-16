@@ -61,6 +61,8 @@ name = "CeilingLight"
 parent = "Workshop"
 transform = { pos = [0.0, 2.6, 0.0] }
 
+  # **18, and it was 700.** A 2.6 m ceiling over albedo ~0.5 is fully lit at
+  # 13.5; 700 was 52x that and 15% of this frame was clipping.
   [node.components.Light]
-  intensity = 700.0
+  intensity = 18.0
   color = [1.0, 0.96, 0.9]

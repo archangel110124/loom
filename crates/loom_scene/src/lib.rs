@@ -6,12 +6,13 @@ pub mod components;
 pub mod edit;
 pub mod ops;
 pub mod place;
+pub mod prefab;
 mod scene;
 
 pub use edit::{FileApplyError, SaveRejected, Session, apply_to_file, write_atomically};
 pub use ops::{Applied, SceneOp, Transaction, TransactionError, VersionToken, apply};
 pub use place::{Anchor, Axis, PlaceOp};
-pub use scene::{Node, Scene, SceneError};
+pub use scene::{Node, PrefabDecl, Scene, SceneError};
 
 #[cfg(test)]
 mod tests {
@@ -150,38 +151,122 @@ name = \"Root\"
         assert!(hint.contains("transform ="), "point at the real key: {hint}");
     }
 
-    /// §5 of the format spec describes prefab instances, `[node.overrides]`
-    /// and `extends`. **None of it is implemented**, and the parser did not
-    /// know the words — it ignored them. So a prefab instance node became a
-    /// node with no components at all: it drew nothing and lit nothing, and
-    /// the scene validated clean. The spec's own flagship fixture depended on
-    /// it, which is how it went unnoticed.
-    ///
-    /// Refusing them is not a decision to never build prefabs; it is a refusal
-    /// to accept text that means nothing today.
+    /// Inheritance is a property of the *scene*, so only the root extends. A
+    /// mid-tree `extends` would be a prefab instance spelled differently, and
+    /// two spellings for one thing is how a format grows a dialect.
     #[test]
-    fn an_unimplemented_prefab_key_is_refused_rather_than_ignored() {
-        for line in ["prefab = \"lamp\"", "extends = \"base\""] {
-            let scene = format!("{TRANSFORM_SCENE}{line}\n");
+    fn extends_on_a_child_node_is_refused() {
+        let scene = format!(
+            "[[prefab]]\nkey = \"base\"\nid = \"p-1\"\npath = \"base.loom\"\n\n\
+             {TRANSFORM_SCENE}\n[[node]]\nname = \"Child\"\nparent = \"Root\"\n\
+             extends = \"base\"\n"
+        );
 
-            let Err(errs) = Scene::parse(&scene) else {
-                panic!("`{line}` does nothing today, so it must not be accepted")
-            };
-            assert_eq!(errs[0].error, "not_implemented", "for {line}: {errs:?}");
-            let hint = errs[0].hint.as_deref().unwrap_or_default();
-            assert!(hint.contains("§5"), "point at the spec section: {hint}");
-        }
+        let Err(errs) = Scene::parse(&scene) else {
+            panic!("`extends` below the root must not parse")
+        };
+
+        assert_eq!(errs[0].error, "extends_on_a_child", "{errs:?}");
+        let hint = errs[0].hint.as_deref().unwrap_or_default();
+        assert!(hint.contains("prefab"), "point at the alternative: {hint}");
     }
 
+    /// An undeclared alias is named the same way a prefab's is.
     #[test]
-    fn an_overrides_table_is_refused() {
+    fn an_undeclared_extends_alias_is_refused() {
+        let scene = format!("{TRANSFORM_SCENE}extends = \"nowhere\"\n");
+
+        let Err(errs) = Scene::parse(&scene) else { panic!("nothing declares it") };
+
+        assert_eq!(errs[0].error, "unresolved_prefab", "{errs:?}");
+    }
+
+    /// A prefab alias has to be declared, and the message lists what is —
+    /// the §3 rule for asset aliases, applied to prefabs.
+    #[test]
+    fn an_undeclared_prefab_alias_names_the_declared_ones() {
+        let scene = format!(
+            "[[prefab]]\nkey = \"lamp\"\nid = \"p-1\"\npath = \"lamp.loom\"\n\n\
+             {TRANSFORM_SCENE}prefab = \"lampp\"\n"
+        );
+
+        let Err(errs) = Scene::parse(&scene) else { panic!("a typo'd alias must not parse") };
+
+        assert_eq!(errs[0].error, "unresolved_prefab", "{errs:?}");
+        let hint = errs[0].hint.as_deref().unwrap_or_default();
+        assert!(hint.contains("lamp"), "list what is declared: {hint}");
+    }
+
+    /// **Two sources for one component, with no rule about which wins.** An
+    /// instance takes its components from the prefab; deviations go in
+    /// `overrides` and nowhere else.
+    #[test]
+    fn a_prefab_instance_may_not_also_declare_components() {
+        let scene = format!(
+            "[[prefab]]\nkey = \"lamp\"\nid = \"p-1\"\npath = \"lamp.loom\"\n\n\
+             {TRANSFORM_SCENE}prefab = \"lamp\"\n\n  \
+             [node.components.Light]\n  intensity = 5.0\n"
+        );
+
+        let Err(errs) = Scene::parse(&scene) else {
+            panic!("components on an instance must not parse")
+        };
+
+        assert_eq!(errs[0].error, "prefab_instance_has_components", "{errs:?}");
+    }
+
+    /// Overrides deviate from a prefab. Without one there is nothing to
+    /// deviate from, and the fields belong on the node directly.
+    #[test]
+    fn overrides_without_a_prefab_are_refused() {
         let scene =
             format!("{TRANSFORM_SCENE}\n  [node.overrides]\n  \"Light.intensity\" = 420.0\n");
 
         let Err(errs) = Scene::parse(&scene) else {
-            panic!("overrides do nothing today, so they must not be accepted")
+            panic!("overrides with no prefab must not parse")
         };
-        assert_eq!(errs[0].error, "not_implemented");
+
+        assert_eq!(errs[0].error, "overrides_without_prefab", "{errs:?}");
+    }
+
+    /// The key grammar is `[Child/Path::]TypeName.field`. A malformed key is
+    /// wrong in the file whatever prefab it points at, so it is caught at
+    /// parse rather than left to resolution.
+    #[test]
+    fn a_malformed_override_key_is_named() {
+        for key in ["Light", "Light.", ".intensity", "::Light.intensity", "a//b::L.f"] {
+            let scene = format!(
+                "[[prefab]]\nkey = \"lamp\"\nid = \"p-1\"\npath = \"lamp.loom\"\n\n\
+                 {TRANSFORM_SCENE}prefab = \"lamp\"\n\n  \
+                 [node.overrides]\n  \"{key}\" = 1.0\n"
+            );
+
+            let Err(errs) = Scene::parse(&scene) else { panic!("`{key}` must not parse") };
+
+            assert_eq!(errs[0].error, "malformed_override_key", "for `{key}`: {errs:?}");
+            assert_eq!(errs[0].field, key);
+        }
+    }
+
+    /// The shape the spec's own §5 example uses, end to end through the
+    /// parser: a declaration, an instance, a transform, and two overrides.
+    #[test]
+    fn the_spec_section_five_example_parses() {
+        let scene = format!(
+            "[[prefab]]\nkey = \"lamp\"\nid = \"p-1\"\npath = \"lamp.loom\"\n\n\
+             {TRANSFORM_SCENE}prefab = \"lamp\"\n\n  \
+             [node.overrides]\n  \"Light.intensity\" = 420.0\n  \
+             \"Bulb/Glass::Material.color\" = [1.0, 0.92, 0.78]\n"
+        );
+
+        let parsed = Scene::parse(&scene).expect("the §5 shape must parse");
+
+        let node = parsed.nodes().last().expect("a node");
+        assert_eq!(node.prefab.as_deref(), Some("lamp"));
+        assert_eq!(node.overrides.len(), 2);
+        assert_eq!(parsed.prefab_id("lamp").as_deref(), Some("p-1"));
+        // Round-trip is byte-identical, prefab keys included.
+        assert_eq!(parsed.to_loom_string(), scene);
     }
 
     /// §7: the three Vec3 spellings are "accepted interchangeably", and the
@@ -449,6 +534,173 @@ name = \"Hill\"
 
         assert_eq!(errs[0].field, "Light.intensity");
         assert_eq!(errs[0].constraint, "0.0..=10000.0");
+    }
+
+    /// A scene with one water body, whose wave table the test supplies.
+    fn water_scene(waves: &str) -> String {
+        format!(
+            "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f\"\n\n\
+             [[node]]\nname = \"Ocean\"\n\n\
+             [node.components.WaterBody]\nsurface_height = 0.0\n{waves}"
+        )
+    }
+
+    /// A sea an agent could plausibly author is accepted. The steepness limit
+    /// has to leave room for real water or it is just a ban on waves.
+    #[test]
+    fn an_ordinary_sea_validates() {
+        let src = water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 18.0\namplitude = 0.55\nsteepness = 0.7\ndirection = [1.0, 0.2]\n\n\
+             [[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 7.0\namplitude = 0.18\nsteepness = 0.6\ndirection = [0.8, -0.6]\n",
+        );
+
+        Scene::parse(&src).expect("an ordinary two-wave sea must validate");
+    }
+
+    /// **§5.3, the trap that reads as a rendering bug.** Too much steepness and
+    /// the wave loops through itself; the rejection has to carry the computed
+    /// limit, because "too steep" without a number is not something an agent
+    /// tuning choppiness can act on.
+    #[test]
+    fn an_over_steep_wave_is_rejected_with_its_computed_limit() {
+        // A metre of amplitude on a four-metre wave: k = 2π/4 = 1.571, so
+        // Q·k·A = 1.571 > 1 and the surface folds.
+        let src = water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 4.0\namplitude = 1.0\nsteepness = 1.0\ndirection = [1.0, 0.0]\n",
+        );
+
+        let errors = Scene::parse(&src).expect_err("Q*k*A = 1.57 > 1 is a folded surface");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "wave_steepness_exceeds_limit");
+        assert_eq!(errors[0].node, "Ocean");
+        assert_eq!(errors[0].field, "WaterBody.waves.waves[0].steepness");
+        assert_eq!(errors[0].value, serde_json::json!(1.0));
+        // The limit is 1/(N·k·A) = 0.637, and the message has to say so.
+        assert!(errors[0].constraint.starts_with("at most 0.637"), "{errors:?}");
+        assert!(
+            errors[0].hint.as_deref().is_some_and(|h| h.contains("1/N")),
+            "{errors:?}"
+        );
+    }
+
+    /// **The limit is shared out, so adding waves tightens it.** Four copies of
+    /// a wave that is fine alone fold four times as hard, which is the multi-
+    /// wave half of §5.3 and the half an agent will hit by adding detail.
+    #[test]
+    fn the_steepness_limit_tightens_as_waves_are_added() {
+        // Q·k·A = 0.9 · (2π/12) · 0.5 = 0.236: comfortable alone, over the
+        // 1/N budget once there are five of them.
+        let wave = "\n[[node.components.WaterBody.waves.waves]]\n\
+                    wavelength = 12.0\namplitude = 0.5\nsteepness = 0.9\ndirection = [1.0, 0.0]\n";
+
+        Scene::parse(&water_scene(wave)).expect("one such wave is fine");
+        let errors = Scene::parse(&water_scene(&wave.repeat(5)))
+            .expect_err("five of them exceed the shared budget");
+        assert_eq!(errors.len(), 5, "every offending wave is named: {errors:?}");
+        assert_eq!(errors[4].field, "WaterBody.waves.waves[4].steepness");
+    }
+
+    /// The cap is 16 (§5.3): per-vertex cost is linear in the count and an
+    /// agent has no intuition for that.
+    #[test]
+    fn more_than_sixteen_waves_is_rejected() {
+        let wave = "\n[[node.components.WaterBody.waves.waves]]\n\
+                    wavelength = 30.0\namplitude = 0.05\nsteepness = 0.2\ndirection = [1.0, 0.0]\n";
+
+        Scene::parse(&water_scene(&wave.repeat(components::MAX_WAVES))).expect("16 is the cap");
+        let errors = Scene::parse(&water_scene(&wave.repeat(components::MAX_WAVES + 1)))
+            .expect_err("17 is over it");
+        assert_eq!(errors[0].error, "too_many_waves");
+        assert_eq!(errors[0].constraint, "at most 16 waves");
+    }
+
+    /// A zero wavelength divides by zero on the way to the wave number, and a
+    /// non-finite anything poisons the determinism hashes (§1).
+    #[test]
+    fn a_zero_wavelength_is_rejected_before_it_becomes_infinity() {
+        let src = water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 0.0\namplitude = 0.5\nsteepness = 0.5\ndirection = [1.0, 0.0]\n",
+        );
+
+        let errors = Scene::parse(&src).expect_err("k = 2π/0 is infinite");
+        assert_eq!(errors[0].error, "wave_wavelength_not_positive");
+    }
+
+    /// **A `WaterBody` serde cannot read must not be a `WaterBody` nobody
+    /// checks.** The steepness limit is the whole reason this validation
+    /// exists, and it used to be switched off by any single field the schema
+    /// check does not reach — a nested array of the wrong length being the
+    /// cheapest example, because `direction` lives two tables down and the
+    /// registry only walks a component's top level. The wave here is over the
+    /// limit on purpose: without the rejection the file reports `ok: true`.
+    #[test]
+    fn a_water_body_that_cannot_be_read_is_rejected_rather_than_skipped() {
+        let src = water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 4.0\namplitude = 1.0\nsteepness = 1.0\n\
+             direction = [1.0, 0.0, 0.0]\n",
+        );
+
+        let errors = Scene::parse(&src).expect_err("a direction has two components");
+        assert_eq!(errors[0].error, "component_unreadable", "{errors:?}");
+        assert_eq!(errors[0].node, "Ocean");
+        assert_eq!(errors[0].field, "WaterBody");
+        // Serde's own message is the actionable half — it names what it could
+        // not read, which is the one thing this layer cannot work out.
+        assert!(
+            errors[0]
+                .hint
+                .as_deref()
+                .is_some_and(|h| h.contains("length 3")),
+            "{errors:?}"
+        );
+    }
+
+    /// The enum spelling of the same hole: `kind` is a name the schema does
+    /// reach, and it stayed unchecked because schemars emits documented
+    /// variants as `oneOf` rather than a flat `enum` array. Both layers hold
+    /// it now — the schema check gets there first, which is why the error is
+    /// the more specific one.
+    #[test]
+    fn an_invalid_water_kind_is_rejected() {
+        let src = water_scene("kind = \"lava\"\n");
+
+        let errors = Scene::parse(&src).expect_err("lava is not a kind of water");
+        assert_eq!(errors[0].error, "field_not_in_enum", "{errors:?}");
+        assert_eq!(errors[0].field, "WaterBody.kind");
+        assert!(errors[0].constraint.contains("ocean"), "{errors:?}");
+    }
+
+    /// **A sign typo is its own mistake.** Folding it through `.abs()` blamed
+    /// steepness for a negative amplitude and printed the value with the sign
+    /// flipped, and reported `steepness = -9.0` as "value -9.0, constraint at
+    /// most 3.183" — a rejection that contradicts itself is worse than none,
+    /// because an agent acting on it lowers a number that is already low.
+    #[test]
+    fn a_negative_amplitude_or_steepness_is_rejected_as_itself() {
+        let src = water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 4.0\namplitude = -5.0\nsteepness = 0.5\ndirection = [1.0, 0.0]\n",
+        );
+        let errors = Scene::parse(&src).expect_err("amplitude is a magnitude");
+        assert_eq!(errors.len(), 1, "one fault, reported once: {errors:?}");
+        assert_eq!(errors[0].error, "wave_amplitude_negative");
+        assert_eq!(errors[0].field, "WaterBody.waves.waves[0].amplitude");
+        assert_eq!(errors[0].value, serde_json::json!(-5.0));
+
+        let src = water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 4.0\namplitude = 1.0\nsteepness = -9.0\ndirection = [1.0, 0.0]\n",
+        );
+        let errors = Scene::parse(&src).expect_err("steepness is a magnitude");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "wave_steepness_negative");
+        assert_eq!(errors[0].field, "WaterBody.waves.waves[0].steepness");
+        assert_eq!(errors[0].value, serde_json::json!(-9.0));
     }
 
     /// Colour channels are normalized 0..=1. An agent writing 255 is a real

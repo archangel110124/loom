@@ -14,7 +14,7 @@
 //! rejected and reloaded, never merged — from the editor exactly as from the
 //! agent, because it is the same code path.
 
-use crate::{Applied, Transaction, TransactionError, VersionToken, apply};
+use crate::{Applied, Transaction, TransactionError, VersionToken, apply, ops::apply_with};
 
 /// Write a scene file so nobody can ever read a half-written one.
 ///
@@ -94,7 +94,16 @@ pub fn apply_to_file(
     let _guard = lock_scene(path).map_err(FileApplyError::Io)?;
 
     let source = std::fs::read_to_string(path).map_err(FileApplyError::Io)?;
-    let applied = apply(&source, transaction).map_err(FileApplyError::Rejected)?;
+
+    // **Prefabs are loaded inside the lock, from the scene as it is now.**
+    // `UnpackPrefab` needs to know what the instance stood for, and reading
+    // the declarations from a copy taken before the lock would let the file
+    // move underneath. Every other op ignores the library.
+    let library = crate::Scene::parse(&source)
+        .ok()
+        .and_then(|scene| crate::prefab::library_for(&scene, path).ok())
+        .unwrap_or_default();
+    let applied = apply_with(&source, transaction, &library).map_err(FileApplyError::Rejected)?;
     if !transaction.dry_run {
         write_atomically(path, &applied.scene).map_err(FileApplyError::Io)?;
     }

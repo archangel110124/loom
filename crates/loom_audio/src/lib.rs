@@ -33,6 +33,7 @@
 pub mod clip;
 pub mod device;
 pub mod mix;
+pub mod rain;
 
 pub use clip::{Clip, ClipError};
 pub use device::{Audio, AudioError};
@@ -63,6 +64,36 @@ pub struct Acoustics {
     pub openness: f32,
     /// Metres to the source, in a straight line.
     pub distance: f32,
+}
+
+/// How muffled everything is with the listener's head under the water.
+///
+/// **Not tuned by ear, because there are no ears in CI.** It is a low-pass
+/// nearly as closed as the one a solid wall produces, which is the right end of
+/// the range: the water surface reflects almost all airborne sound, and what
+/// crosses it arrives with its top end gone. Left short of `1.0` so a source
+/// under the water with you is still distinguishable from a wall — and so the
+/// number reads as a strong effect rather than as a mute.
+const UNDERWATER_MUFFLING: f32 = 0.9;
+
+impl Acoustics {
+    /// The same measurement, heard from under the water.
+    ///
+    /// **Submersion enters where every other acoustic fact does.** `muffling`
+    /// already means "how much of its top end survived the trip" and already
+    /// drives the low-pass in [`mix`] — so the underwater case is a bigger value
+    /// for the quantity that exists, rather than a second filter beside it with
+    /// its own state, its own cutoff and its own way of disagreeing.
+    ///
+    /// It only ever raises: a source behind a wall *and* under the water is not
+    /// heard more clearly than one behind the wall alone.
+    #[must_use]
+    pub fn underwater(self) -> Self {
+        Self {
+            muffling: self.muffling.max(UNDERWATER_MUFFLING),
+            ..self
+        }
+    }
 }
 
 /// How hard to listen.
@@ -561,6 +592,31 @@ mod tests {
             mean = add(mean, scale(*p, 1.0 / count as f32));
         }
         assert!(length(mean) < 0.05, "lopsided: {mean:?}");
+    }
+
+    /// **Going under muffles what you hear, and nothing else changes.** The
+    /// distance and the room are still whatever they were; it is the top end
+    /// that stops arriving.
+    #[test]
+    fn a_submerged_listener_hears_the_same_sound_muffled() {
+        let heard = Acoustics::solve(&field(), [0.0, 1.5, 0.0], [6.0, 1.5, 0.0], &Ears::default());
+        let under = heard.underwater();
+
+        assert!(heard.muffling < 0.1, "the fixture starts unmuffled: {heard:?}");
+        assert!(under.muffling > 0.8, "going under did not muffle: {under:?}");
+        assert_eq!(under.distance, heard.distance, "distance is not a water fact");
+        assert_eq!(under.reverb_delay, heard.reverb_delay);
+        assert_eq!(under.occlusion, heard.occlusion, "muffling is not a volume knob");
+    }
+
+    /// A wall is already worse than the water. Surfacing must not be how you
+    /// hear through it.
+    #[test]
+    fn water_never_makes_a_blocked_sound_clearer() {
+        let mut walled = Acoustics::solve(&room(), [0.0, 1.5, 0.0], [1.0, 1.5, 0.0], &Ears::default());
+        walled.muffling = 0.97;
+
+        assert!(walled.underwater().muffling >= walled.muffling, "the water un-muffled a wall");
     }
 
     /// Asking for no rays is a degenerate request, not a crash and not a

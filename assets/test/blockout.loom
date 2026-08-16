@@ -87,6 +87,16 @@ name = "CeilingLight"
 parent = "Room"
 transform = { pos = [0.0, 3.0, 0.0] }
 
+  # **24, and it was 800.** The shader computes `intensity * albedo * cos / d^2`,
+  # so a surface at `d` metres is fully lit at `d^2 / albedo` — here a 3 m
+  # ceiling over albedo ~0.5, which is 18. 800 was 44x that, and 13% of this
+  # frame was clipping.
+  #
+  # **Nobody saw it because the clamp hid it.** A light 44x too strong and a
+  # light correctly set produce the same white floor against a fixed-point
+  # target; the tonemap does not rescue it either, because the shoulder
+  # asymptotes and 44x over still lands at sRGB 254. This scene is in `SCENES`
+  # but not in `GOLDEN`, so no pixel comparison had ever looked at it.
   [node.components.Light]
-  intensity = 800.0
+  intensity = 24.0
   color = [1.0, 0.96, 0.9]

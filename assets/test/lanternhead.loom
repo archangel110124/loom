@@ -1,0 +1,839 @@
+# lanternhead.loom — a fishing quay under a headland, low sun, in the rain.
+#
+# **The standing shot for the post-process stack, and unauthorable before it.**
+# Five things in this frame sit above diffuse white: the flame's core, the
+# brazier's light pool, the sun's glitter path, wet stone under a low sun, and
+# the sun disc itself. Every one of them was previously clamped, capped in the
+# shader, or authored down by a factor of twenty. ADR 0018 is what makes them
+# expressible, and this scene is what spends that.
+#
+#     loom render assets/test/lanternhead.loom --sim 2400 \
+#       --out lanternhead.png --size 1920x1200
+#
+# **Dusk, not night, and one shader line settles it.** `grassFragmentMain` is
+# `albedo * (ambient*occlusion + sun*wrapped*occlusion)` — no `pointLights` at
+# all, which is called from exactly one place in the whole shader. So a scene
+# authored the way `campfire.loom` is, with `sun_strength = 0` and
+# `ambient = 0`, renders its grass black and its sea black. A night showcase
+# would discard grass, water, weather and wetness to demonstrate two systems
+# `campfire.loom` already demonstrates and is already golden.
+#
+# ---------------------------------------------------------------------------
+# What this scene is for, and what it is deliberately not
+# ---------------------------------------------------------------------------
+#
+# It is the second scene in the library that is **a changelog rather than a
+# unit test** — `homestead.loom`'s header states that case and it applies here
+# unchanged: it runs many systems at once so it moves whenever anything moves,
+# and that churn is the value rather than the cost. Where it differs from
+# `homestead` is the *range*: this one is composed around what happens above
+# 1.0, and nothing else in the library is.
+#
+# **No trees and no `Scatter`.** `trees.loom` is in neither `SCENES` nor
+# `GOLDEN`, so its `file.obj#Object` import path and per-tree atlas binding
+# have never been checked by any of the four green checks, and there is no
+# alpha cutout in `fragmentMain` — leaf cards are opaque quads. Landing an
+# ungated import path in the same commit as a new golden reference means
+# nobody can tell whether a wrong reference is the curve or the atlas. And
+# `Scatter` gives a whole field one flat albedo with `material: u32::MAX`,
+# which is untextured cylinders at scale.
+#
+# **No authored puddles.** `puddleMask` divides a hollow measured over
+# `PUDDLE_REACH = 1.1` by `PUDDLE_FULL = 0.16`, so a subtracted sphere needs
+# R <= 3.78 m to saturate, and the `PUDDLE_SLOPE = 0.12` gate then leaves a
+# flat centre 0.91 m across. The wet sheen needs no concavity, and that is
+# what this scene uses — `puddles.loom` owns the concavity path.
+#
+# **The smoke plume is kept.** Particles are unlit by design and every scene
+# authors their colour to suit; `smoke.loom` is in `GOLDEN` on exactly that
+# basis. Its ramp here is set for a dusk ambient, not a daylit one.
+#
+# ---------------------------------------------------------------------------
+# What this scene asserts, and why it is four checks and not two
+# ---------------------------------------------------------------------------
+#
+#   loom sim assets/test/lanternhead.loom --ticks 2400 \
+#     --assert "rain@27.6,9.5,34.0.exposure > 0.99" \
+#     --assert "rain@27.6,9.5,34.0.rate     > 4.9"  \
+#     --assert "rain@39.5,9.9,25.5.exposure < 0.05" \
+#     --assert "rain@39.5,9.9,25.5.rate     < 0.05"
+#
+# The first point is beside the brazier under open sky; the second is inside
+# the shed. **Each pair needs both halves or it proves nothing**, and this
+# scene is where that stopped being a style rule:
+#
+# - The *exposure* pair separates shelter from cover. Without it nobody can
+#   tell which of the two made the shed dry — `squall.loom` states this.
+# - The *rate* pair separates "sheltered" from "not raining". Authored at
+#   `cloud_cover = 0.45` this scene rained **nowhere**, at any point, at any
+#   tick from 60 to 5400 — and the shed's `rate < 0.05` passed happily while
+#   the render showed a dry quay in a scene whose one-line description is a
+#   lantern line in the rain. The brazier's `> 4.9` is what makes the shed's
+#   `< 0.05` mean something.
+#
+# 2400 ticks is 40 s, which is exactly `WET_COVER_WINDOW`, so `cover_recent`'s
+# three taps have a full window and the boat has settled.
+
+[scene]
+format = 1
+id = "6e6aa016-e9e4-4ecc-825d-19bd5496aefb"
+
+# The same four maps `ground.loom` and `homestead` use. **No `fire_flipbook`
+# alias**: declaring one converts EVERY additive sprite in the scene, which
+# would take the smoke plume with it.
+
+[[asset]]
+key = "ground_soil_albedo"
+id = "1f5c9a20-7e43-4d18-b6a2-90c3e7f45d81"
+path = "../textures/ground_soil_albedo.png"
+
+[[asset]]
+key = "ground_soil_normal"
+id = "8b2e40d7-c916-4a35-89f0-2d67b14ce9a3"
+path = "../textures/ground_soil_normal.png"
+
+[[asset]]
+key = "ground_rock_albedo"
+id = "3d90f6b1-27ca-4e58-b7d4-5081a92fe6c7"
+path = "../textures/ground_rock_albedo.png"
+
+[[asset]]
+key = "ground_rock_normal"
+id = "5e14b8c3-90af-4d26-a371-6c48d0e173b9"
+path = "../textures/ground_rock_normal.png"
+
+[[node]]
+name = "Lanternhead"
+
+  # **A low sun almost straight down the camera's axis**, 9.8 degrees above the
+  # horizon and 16.6 degrees off-axis. Both numbers exist for the same reason
+  # `homestead`'s do: the glitter path is a Fresnel effect and needs the
+  # grazing angle, and a sun much higher takes the water matt. Off-axis rather
+  # than dead ahead so the path runs diagonally instead of splitting the frame.
+  #
+  # **It is off-axis to -X, and that was a correction made against a render.**
+  # Toward +X it sat directly behind the shed, which occluded it and left the
+  # water with no glitter path at all — the one thing in the frame that a
+  # near-mirror at grazing incidence exists to produce. To -X it is over the
+  # open channel between the headland and the quay, which is water all the way
+  # to the volume's edge.
+  #
+  # `sun_strength = 1.9` is above the old ceiling on purpose. The wet stone
+  # below is at `WET_SMOOTH = 0.08` roughness — a near-mirror — so its
+  # specular highlight is several times diffuse white, which is exactly the
+  # value an 8-bit target destroyed.
+  [node.components.Environment]
+  sun_direction = [-0.28, 0.17, -0.94]
+  sun_strength = 1.9
+  sun_color = [1.00, 0.72, 0.42]
+  ambient = 0.11
+  sky_zenith = [0.014, 0.020, 0.042]
+  sky_horizon = [0.15, 0.105, 0.080]
+  fog_density = 0.005
+  fog_falloff = 0.045
+  # **0.85, and 0.45 was measured to rain nowhere at all.**
+  #
+  # Rain is `intensity * cloud_cover(x, z, t) * shelter` (ADR 0016 step 3), and
+  # `cloud_scale = 260` is five times this scene's 51 m footprint — so the
+  # whole scene sits inside ONE cloud cell and "broken cloud" is a coin flip
+  # for the entire map rather than a pattern moving across it. At 0.45 that
+  # coin came up gap, and `loom sim` read a rate of exactly 0.0 at every point
+  # tested, at every tick from 60 to 5400.
+  #
+  # **That made the two shelter assertions below vacuous**, which is the whole
+  # reason they are written in pairs: `rate < 0.05` inside the shed passes
+  # trivially when it is not raining anywhere, and the render still showed a
+  # dry quay while claiming to be a scene in the rain. The brazier's
+  # `rate > 4.9` is what makes the shed's `< 0.05` mean something.
+  #
+  # 0.85 is a mostly-solid deck: it rains at the full 5 mm/h over the quay at
+  # tick 2400 while still varying between 0.2 and 3.3 earlier in the run, so
+  # `cover_recent`'s window has something to integrate. Lowering `cloud_scale`
+  # instead was the other option and is worse: the sky is drawn to the horizon,
+  # where a deck small enough to vary across 51 m of quay reads as noise.
+  cloud_cover = 0.85
+  cloud_scale = 260.0
+  # **The first scene in the library to author this**, and it is 1.0 — the
+  # identity leg of the shoulder. It is written out rather than left to the
+  # default because this is the scene where somebody will want to reach for it,
+  # and a knob nobody can see is a knob nobody turns.
+  exposure = 1.0
+
+  # Across the frame and out to sea. One field, read by grass bend, smoke
+  # advection and the tilt of the rain streaks.
+  [node.components.Wind]
+  direction_degrees = 155.0
+  speed = 7.0
+  gustiness = 1.4
+  turbulence = 1.0
+  ground_drag = 0.45
+
+  # Steady rain with no `duration` — a standing shot, not a dry-down test.
+  # 5 mm/h is past `loom_rain::SOAKING_RATE`, so exposed surfaces reach their
+  # wetness equilibrium, and it is light enough that the streaks do not curtain
+  # the lanterns.
+  [node.components.Rain]
+  intensity = 5.0
+
+[[node]]
+name = "Ground"
+parent = "Lanternhead"
+
+  # 51.2 m across at 0.4 m voxels — **[4,2,4] and not the [5,2,5] at 0.32 the
+  # plan asked for, and the CPU gate is what decided it.** Same footprint
+  # either way (4 x 32 x 0.4 = 5 x 32 x 0.32 = 51.2 m); what changes is 32
+  # chunks against 50, because bake cost is per chunk, not per metre —
+  # `homestead`'s header measures that.
+  #
+  # **The gate's number is the bake, not the frame**, and that is worth knowing
+  # before anyone tries to optimise this scene. `cargo xtask validate` divides
+  # total CPU by `WINDOWED_FRAMES = 90`; at [5,2,5] the worst frame was 2858 ms
+  # and the mean 32.5 ms, so 2858/90 = 31.8 of those 32.5 milliseconds were one
+  # voxel bake at load. The steady-state cost of this scene is about 0.7 ms a
+  # frame with grass, water, rain, particles and a floating body all running.
+  #
+  # The walls stay over two voxels at this resolution — 0.85 m is 2.1 — which
+  # is the margin `rain_overhang.loom` asks for, and the shelter assertions in
+  # the header are what would go soft if it were not.
+  [node.components.VoxelVolume]
+  voxel_size = 0.4
+  chunks = [4, 2, 4]
+
+  # The sea bed, and it is a **sphere** rather than a slab for one reason: it
+  # is 5.02 m deep at r = 24 m, which is exactly `WATER_TINT_DEPTH`. So the
+  # shallow tint saturates *before* the depth grid runs out, and the grid's
+  # boundary is not drawn as a hard rectangle in the open sea — the artifact
+  # `shore.loom` and `homestead.loom` both name.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [22.0, -82.0, 30.0]
+  radius = 88.3
+  mode = "union"
+
+  # **The plinth and the dome are a pair, and neither works alone.** A dome
+  # never exceeds 46.9 degrees above the water here, so a rock layer matched to
+  # the grass's slope cutoff would never appear anywhere; the plinth supplies
+  # the vertical faces the rock needs, the dome supplies the ground the grass
+  # grows on.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [7.5, 5.2, 18.0]
+  half_extents = [7.5, 4.0, 10.0]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [7.5, -6.0, 18.0]
+  radius = 20.5
+  mode = "union"
+
+  # The quay, deck at 9.4 — 1.4 m of freeboard over the still-water line.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [37.0, 5.4, 32.0]
+  half_extents = [11.0, 4.0, 12.0]
+  mode = "union"
+
+  # The slipway. **The only gentle water's edge in the scene**, and that is
+  # what the swash needs: `beach.loom` gives the rule, that a one-voxel bed
+  # step becomes a horizontal stair of `voxel / slope`, which is 0.89 m here
+  # and is covered by the swash's own width. Everywhere else the water meets a
+  # vertical face and there is nothing to run up.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [21.0, -12.7, 32.0]
+  radius = 22.0
+  mode = "union"
+
+  # **Subtracted, not added.** A union sphere on a quay face reads as a wet
+  # black dome — `homestead.loom` records that one. Scooped, it is a shadowed
+  # undercut the water can slap into.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [26.0, 7.4, 33.0]
+  radius = 1.9
+  mode = "subtract"
+
+  # **The shed is voxel CSG, not a mesh box, and that is a rain requirement
+  # rather than a style choice.** `loom_rain::collide` bakes voxel volumes
+  # unioned with static `BoxCollider`s, and `wetGate` marches
+  # `loom_ground_height` — so a mesh shed shelters nothing at all, and the two
+  # shelter assertions in the header would pass by accident on a dry roof and
+  # fail the moment anyone looked at the render.
+  #
+  # Walls are 0.85 m, a hair over two voxels, for the reason
+  # `rain_overhang.loom` gives: S3 seals a one-voxel roof and that is already
+  # tested, so nothing here should sit on the limit.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [39.5, 10.7, 22.425]
+  half_extents = [3.5, 1.3, 0.425]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [39.5, 10.7, 28.575]
+  half_extents = [3.5, 1.3, 0.425]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [36.425, 10.7, 25.5]
+  half_extents = [0.425, 1.3, 3.075]
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [42.575, 10.7, 25.5]
+  half_extents = [0.425, 1.3, 3.075]
+  mode = "union"
+
+  # 0.6 m of overhang on every side, which is what puts the doorway's threshold
+  # in shelter rather than on its boundary.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [39.5, 12.45, 25.5]
+  half_extents = [4.1, 0.45, 4.1]
+  mode = "union"
+
+  # The doorway, 1.5 x 1.9 m, cut last so the walls exist to cut it from.
+  # ORDER MATTERS in this list exactly as it does in `homestead`.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [38.6, 10.35, 28.575]
+  half_extents = [0.75, 0.95, 0.75]
+  mode = "subtract"
+
+  # **Two substances under one rain is most of what sells wet.** Soil at
+  # porosity 0.78 darkens to about 0.68 of dry at soak 0.589; rock at 0.14
+  # barely moves. That divergence is the thing — one wetness value, two
+  # visibly different responses — and it is why both maps are here rather than
+  # a single tinted surface.
+  # **Stone is the BASE and soil is the layer, which is the reverse of every
+  # other scene in the library, and the reason is that `groundLayerWeight` is a
+  # slope rule by construction.** It is `1 - saturate((normal.y - cutoff)/fade)`
+  # with the patch term scaled by steepness, so dead-flat ground is *always*
+  # the base material — the shader's own comment says so. A quay deck is flat.
+  # Authored the usual way round it came out as a mud yard, which is what the
+  # first three renders of this scene were.
+  #
+  # So: flats are stone (the deck, the headland's cap), steep faces are earth
+  # (the cut banks, the dome's flanks). The albedo is a green-grey rather than
+  # white because a working quay is not clean granite, and because it is the
+  # ground under a `Grass` field — `meadow`'s brown soil read as ploughed earth
+  # from the flythrough's orbit, and any scene with grass owes its ground a
+  # colour the far field can fade into.
+  [node.components.Material]
+  albedo = [0.62, 0.66, 0.58]
+  roughness = 0.72
+  porosity = 0.14
+  uv_scale = [1.1, 1.1]
+  triplanar = true
+  albedo_map = { asset = "ground_rock_albedo" }
+  normal_map = { asset = "ground_rock_normal" }
+
+  # **0.62 here and 0.62 on both grass fields, and they must stay equal.** Two
+  # different thresholds on one hill draw two concentric rings — `ground.loom`
+  # states it and the schema pins them.
+  #
+  # **Two substances under one rain is most of what sells wet**, and the swap
+  # above does not cost it: soil at porosity 0.78 darkens to about 0.68 of dry
+  # at soak 0.589 while the stone at 0.14 barely moves, and both are in frame —
+  # the banks and the deck.
+  [node.components.Material.layer]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.92
+  porosity = 0.78
+  uv_scale = [0.5, 0.5]
+  slope = 0.62
+  albedo_map = { asset = "ground_soil_albedo" }
+  normal_map = { asset = "ground_soil_normal" }
+
+[[node]]
+name = "Harbour"
+parent = "Lanternhead"
+
+  # **One body reading as two, and `attenuation_depth` is the whole trick.**
+  # At 6.0 m over a basin only 1.7 m deep, the swell is flattened to nearly
+  # nothing inside the harbour — so refraction shows the bed and the caustics
+  # have something to play on — while beyond the volume the depth grid returns
+  # its sentinel and the open sea carries the full swell.
+  #
+  # This is the only option available: `World::water()` takes the first body
+  # and a `WaterBody` has no extent in the schema, so two would be two infinite
+  # planes with nothing to say where one stops.
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 8.0
+  density = 1025.0
+  drag = 60.0
+
+  [node.components.WaterBody.waves]
+  attenuation_depth = 6.0
+  max_height = 1.15
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 26.0
+  amplitude = 0.55
+  steepness = 0.35
+  direction = [0.20, 1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 15.0
+  amplitude = 0.30
+  steepness = 0.45
+  direction = [-0.30, 1.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 9.0
+  amplitude = 0.16
+  steepness = 0.50
+  direction = [0.50, 1.0]
+  speed_scale = 1.0
+
+  # Nothing shorter than about 4.7 m: the LOD rings stop resolving it
+  # (ADR 0012), and a wave the mesh cannot carry is a shimmer generator.
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 5.3
+  amplitude = 0.08
+  steepness = 0.55
+  direction = [-0.20, 1.0]
+  speed_scale = 1.0
+
+# Two fields rather than one rectangle over the headland, for the reason
+# `homestead` gives: `loom_grass` has no idea where the sea is, and coverage is
+# slope, rock and gully flow — a gully being *lusher* — so one rectangle would
+# grow a lawn down the slipway and out across the sea bed.
+
+[[node]]
+name = "GrassCrown"
+parent = "Lanternhead"
+transform = { pos = [7.5, 0.0, 16.0] }
+
+  [node.components.Grass]
+  half_extent = [5.5, 6.0]
+  slope_cutoff = 0.62
+  density = 150.0
+  height = 0.42
+  width = 0.020
+  clump_facing = 0.75
+  clump_colour = 0.4
+
+  # **Dark green, and that is a scene rule the engine cannot enforce.** The
+  # density falloff fades the far field to nothing, so the ground under a grass
+  # field is what the distance reads as; `meadow`'s brown soil read as ploughed
+  # earth from the flythrough's orbit. Any scene with a `Grass` field owes its
+  # ground the same.
+  [node.components.Material]
+  albedo = [0.24, 0.36, 0.12]
+  roughness = 0.75
+
+[[node]]
+name = "GrassShoulder"
+parent = "Lanternhead"
+transform = { pos = [8.0, 0.0, 24.0] }
+
+  [node.components.Grass]
+  half_extent = [4.5, 3.5]
+  slope_cutoff = 0.62
+  density = 150.0
+  height = 0.42
+  width = 0.020
+  clump_facing = 0.75
+  clump_colour = 0.4
+
+  [node.components.Material]
+  albedo = [0.24, 0.36, 0.12]
+  roughness = 0.75
+
+# **The brazier, on the quay's WESTERN edge, and its position was measured to.**
+#
+# The flame is an additive level set, so what it reads as depends entirely on
+# what is behind it. On the open deck it was three detached orange shards: the
+# field's dim outer lobes are individually visible against lit stone, and they
+# are disconnected, so a fire whose faint half you can see is not a fire.
+# `campfire.loom` never showed that because its background is a night sky, and
+# unlit black plus a little additive orange is still nearly black.
+#
+# Here the brazier sits where the camera's line to it continues into the dark
+# flank of the headland. Same flame, same size, same tick: against that it is
+# one coherent tongue. **A fire in this engine needs a dark backdrop, and that
+# is a composition constraint rather than a bug** — it is what the additive
+# blend means.
+
+[[node]]
+name = "Brazier"
+parent = "Lanternhead"
+transform = { pos = [27.6, 9.62, 34.0], scale = [0.42, 0.22, 0.42] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.09, 0.08, 0.07]
+  metallic = 0.6
+  roughness = 0.55
+
+[[node]]
+name = "Flame"
+parent = "Lanternhead"
+transform = { pos = [27.6, 10.4, 34.0] }
+
+  # One static quad carrying the flame field, exactly as `campfire.loom` does —
+  # overdraw of one, so `fireRamp` is honoured everywhere. Its top rung is
+  # uncapped since ADR 0018, so the core is genuinely white-hot rather than the
+  # (0.72, 0.64, 0.48) the clamp used to force.
+  #
+  # `lifetime` is long but BOUNDED: `validate` warms every emitter for two
+  # lifetimes, so a nominally infinite life costs millions of ticks per render.
+  [node.components.ParticleEmitter]
+  burst = 1
+  rate = 0.0
+  lifetime = 110.0
+  lifetime_jitter = 0.0
+  speed = 0.0
+  spread_degrees = 0.0
+  radius = 0.0
+  gravity = 0.0
+  drag = 0.0
+  turbulence = 0.0
+  wind_response = 0.0
+  size = [2.2, 2.2]
+  alpha = [1.0, 1.0]
+  color_start = [1.0, 1.0, 1.0]
+  color_end = [1.0, 1.0, 1.0]
+  additive = true
+  flame = true
+
+[[node]]
+name = "Smoke"
+parent = "Lanternhead"
+transform = { pos = [27.6, 10.9, 34.0] }
+
+  # Alpha-blended, not additive: smoke occludes. `wind_response = 4.0` is what
+  # lays the plume over toward the headland instead of standing it straight up,
+  # and it is the only thing in this scene that shows the wind field as a
+  # *direction* rather than as a bend.
+  [node.components.ParticleEmitter]
+  rate = 34.0
+  lifetime = 2.2
+  speed = 1.5
+  spread_degrees = 24.0
+  radius = 0.26
+  gravity = 1.5
+  drag = 0.9
+  turbulence = 1.6
+  turbulence_scale = 0.3
+  wind_response = 4.0
+  size = [0.40, 2.2]
+  alpha = [0.34, 0.0]
+  color_start = [0.20, 0.19, 0.18]
+  color_end = [0.46, 0.46, 0.49]
+  seed = 8837
+
+# **Every light below is physical, which is what this scene is here to show.**
+# `Light::intensity` is `d^2 / albedo` for a surface at `d` metres, so a lantern
+# 1.2 m above the deck is fully lit at about 2.9 and one at 2.5 m at about 12.
+# The library authored 100-800 for years because the clamp made 40x too strong
+# and correctly set produce the same white floor.
+
+[[node]]
+name = "BrazierLight"
+parent = "Lanternhead"
+transform = { pos = [27.6, 10.3, 34.0] }
+
+  # **4.0, and the plan asked for 30.** It sits 0.9 m above the deck, not the
+  # 2.5 m the plan assumed, so `d^2 / albedo` is 1.35 and 30 was twenty-two
+  # times over. The render showed exactly what `campfire.loom`'s sweep
+  # predicted: the pool floods the frame, and an additive flame drawn over a
+  # deck that bright washes out to a pale salmon decal instead of reading as
+  # fire.
+  #
+  # 4.0 is three times fully-lit — a hot pool a couple of metres across with
+  # the flame still the brightest thing in the shot. Nearly the same number
+  # `campfire.loom` measured its way to for nearly the same geometry.
+  [node.components.Light]
+  intensity = 4.0
+  color = [1.00, 0.50, 0.17]
+
+[[node]]
+name = "LanternA"
+parent = "Lanternhead"
+transform = { pos = [34.0, 11.9, 32.0] }
+
+  [node.components.Light]
+  intensity = 12.0
+  color = [1.00, 0.78, 0.45]
+
+[[node]]
+name = "LanternB"
+parent = "Lanternhead"
+transform = { pos = [34.0, 11.9, 24.0] }
+
+  [node.components.Light]
+  intensity = 12.0
+  color = [1.00, 0.78, 0.45]
+
+[[node]]
+name = "LanternC"
+parent = "Lanternhead"
+transform = { pos = [34.0, 11.9, 20.5] }
+
+  [node.components.Light]
+  intensity = 12.0
+  color = [1.00, 0.78, 0.45]
+
+[[node]]
+name = "ShedLamp"
+parent = "Lanternhead"
+transform = { pos = [39.5, 10.9, 25.5] }
+
+  # Inside the shed, so it reads through the doorway. 1.5 m above the floor, so
+  # fully lit at 3.75; 4.0 is a shade over, which is what a lit interior seen
+  # from outside should be.
+  [node.components.Light]
+  intensity = 4.0
+  color = [1.00, 0.80, 0.52]
+
+# The lantern posts themselves. Geometry only — the lights above are separate
+# nodes so a post can be moved without moving its light by accident.
+
+[[node]]
+name = "PostA"
+parent = "Lanternhead"
+transform = { pos = [34.0, 10.7, 32.0], scale = [0.09, 1.3, 0.09] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.13, 0.11, 0.09]
+  roughness = 0.85
+
+[[node]]
+name = "PostB"
+parent = "Lanternhead"
+transform = { pos = [34.0, 10.7, 24.0], scale = [0.09, 1.3, 0.09] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.13, 0.11, 0.09]
+  roughness = 0.85
+
+[[node]]
+name = "PostC"
+parent = "Lanternhead"
+transform = { pos = [34.0, 10.7, 20.5], scale = [0.09, 1.3, 0.09] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.13, 0.11, 0.09]
+  roughness = 0.85
+
+# **The lantern fixtures, and they exist because a `Light` is invisible.**
+# Nothing in this engine draws a light source — only what it falls on — so
+# three lanterns lighting a quay showed as three lit patches with nothing above
+# them.
+#
+# **Putting each light at its own fixture's centre does not work, and the
+# reason is one line of the shader.** `ndotl` is `max(dot(normal, toLight), 0)`,
+# so for a box's *outer* faces `toLight` points inward and every one of them
+# gets exactly zero from the light inside it. The fixture came back lit by
+# ambient alone — a dull grey box on a dark quay.
+#
+# So the glow is an additive sprite, which is the tool this engine actually has
+# for "something that emits": one particle, no motion, warm, drawn over the
+# fixture. The box behind it is the physical lantern the light hangs in.
+
+[[node]]
+name = "LampA"
+parent = "Lanternhead"
+transform = { pos = [34.0, 11.9, 32.0], scale = [0.11, 0.13, 0.11] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.86, 0.72, 0.48]
+  roughness = 0.35
+
+[[node]]
+name = "LampB"
+parent = "Lanternhead"
+transform = { pos = [34.0, 11.9, 24.0], scale = [0.11, 0.13, 0.11] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.86, 0.72, 0.48]
+  roughness = 0.35
+
+[[node]]
+name = "LampC"
+parent = "Lanternhead"
+transform = { pos = [34.0, 11.9, 20.5], scale = [0.11, 0.13, 0.11] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.86, 0.72, 0.48]
+  roughness = 0.35
+
+[[node]]
+name = "GlowA"
+parent = "Lanternhead"
+transform = { pos = [34.0, 11.9, 32.0] }
+
+  # One particle, no motion, no fade. `burst = 1` with `rate = 0` is the same
+  # standing-emitter idiom the flame uses, and `lifetime` is bounded for the
+  # same reason: `validate` warms every emitter for two lifetimes.
+  [node.components.ParticleEmitter]
+  burst = 1
+  rate = 0.0
+  lifetime = 110.0
+  lifetime_jitter = 0.0
+  speed = 0.0
+  spread_degrees = 0.0
+  radius = 0.0
+  gravity = 0.0
+  drag = 0.0
+  turbulence = 0.0
+  wind_response = 0.0
+  size = [0.55, 0.55]
+  alpha = [0.85, 0.85]
+  color_start = [1.00, 0.72, 0.36]
+  color_end = [1.00, 0.72, 0.36]
+  additive = true
+
+[[node]]
+name = "GlowB"
+parent = "Lanternhead"
+transform = { pos = [34.0, 11.9, 24.0] }
+
+  # One particle, no motion, no fade. `burst = 1` with `rate = 0` is the same
+  # standing-emitter idiom the flame uses, and `lifetime` is bounded for the
+  # same reason: `validate` warms every emitter for two lifetimes.
+  [node.components.ParticleEmitter]
+  burst = 1
+  rate = 0.0
+  lifetime = 110.0
+  lifetime_jitter = 0.0
+  speed = 0.0
+  spread_degrees = 0.0
+  radius = 0.0
+  gravity = 0.0
+  drag = 0.0
+  turbulence = 0.0
+  wind_response = 0.0
+  size = [0.55, 0.55]
+  alpha = [0.85, 0.85]
+  color_start = [1.00, 0.72, 0.36]
+  color_end = [1.00, 0.72, 0.36]
+  additive = true
+
+[[node]]
+name = "GlowC"
+parent = "Lanternhead"
+transform = { pos = [34.0, 11.9, 20.5] }
+
+  # One particle, no motion, no fade. `burst = 1` with `rate = 0` is the same
+  # standing-emitter idiom the flame uses, and `lifetime` is bounded for the
+  # same reason: `validate` warms every emitter for two lifetimes.
+  [node.components.ParticleEmitter]
+  burst = 1
+  rate = 0.0
+  lifetime = 110.0
+  lifetime_jitter = 0.0
+  speed = 0.0
+  spread_degrees = 0.0
+  radius = 0.0
+  gravity = 0.0
+  drag = 0.0
+  turbulence = 0.0
+  wind_response = 0.0
+  size = [0.55, 0.55]
+  alpha = [0.85, 0.85]
+  color_start = [1.00, 0.72, 0.36]
+  color_end = [1.00, 0.72, 0.36]
+  additive = true
+
+# Mooring posts standing in the water. **They are what makes the swell
+# readable in a still** — the same job `water_crate.loom`'s post does, and the
+# reason a floating boat alone is not enough: a still cannot tell a floating
+# hull from one resting on an invisible floor.
+
+[[node]]
+name = "MooringA"
+parent = "Lanternhead"
+transform = { pos = [25.0, 8.30, 22.0], scale = [0.13, 1.5, 0.13] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.11, 0.10, 0.08]
+  roughness = 0.88
+
+[[node]]
+name = "MooringB"
+parent = "Lanternhead"
+transform = { pos = [23.0, 8.30, 16.0], scale = [0.13, 1.5, 0.13] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.11, 0.10, 0.08]
+  roughness = 0.88
+
+[[node]]
+name = "MooringC"
+parent = "Lanternhead"
+transform = { pos = [21.5, 8.30, 11.0], scale = [0.13, 1.5, 0.13] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.11, 0.10, 0.08]
+  roughness = 0.88
+
+[[node]]
+name = "Dinghy"
+parent = "Lanternhead"
+transform = { pos = [25.0, 8.2, 14.0], rot_euler = [0.0, 16.0, 0.0], scale = [0.9, 0.35, 2.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.17]
+  roughness = 0.80
+
+  # 300 kg/m^3 over the hull's volume, which is what decides the waterline.
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 1800.0
+
+  # Everything default: four corner pontoons, Archimedes at full strength, and
+  # the damping that makes it settle rather than resonate.
+  [node.components.Buoyancy]
+
+[[node]]
+name = "Camera"
+parent = "Lanternhead"
+transform = { pos = [30.0, 10.30, 39.0], rot_euler = [-1.0, 0.0, 0.0] }
+
+  # **Yaw is 0 on purpose**, so the composition does not depend on a rotation
+  # convention nobody has rendered. 58 degrees is wide enough to hold the quay,
+  # the harbour and the headland without the lanterns becoming specks.
+  [node.components.Camera]
+  fov_y_degrees = 58.0

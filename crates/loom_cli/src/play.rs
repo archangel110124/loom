@@ -44,6 +44,14 @@ fn path_of(world: &World, entity: loom_ecs::Entity) -> String {
 /// vocabulary and is never named in here.
 const BLAST: &str = "blast";
 const DAMAGE: &str = "damage";
+/// A body went into the water, and came back out of it.
+///
+/// **Two edges of one state, not two facts.** Both come out of the same
+/// hysteretic flag, so neither can fire without the other having been true, and
+/// the splash is the reaction to the first — which is why there is no separate
+/// `splash` event to keep in step with this one.
+const SUBMERGED: &str = "submerged";
+const SURFACED: &str = "surfaced";
 
 /// How far a character's aim ray reaches, in metres.
 ///
@@ -65,6 +73,66 @@ pub struct Sim {
     dynamic: Vec<(loom_ecs::Entity, RigidBodyHandle)>,
     /// Entities with a `CharacterController`, and their walking state.
     characters: Vec<Walker>,
+    /// The scene's water, with its waves resolved once — the same resolution
+    /// the renderer does, so a crate floats on the sea it is drawn on.
+    water: Option<loom_scene::components::WaterBody>,
+    /// The ground under the scene's voxel terrain, baked once at load.
+    ///
+    /// **The same grid the water shader reads**, through the same
+    /// `loom_voxel::heightfield` lookup — which is what makes the depth a crate
+    /// floats in the depth the shoreline is drawn from. `None` when the scene
+    /// has no voxel terrain, and every depth is then bottomless.
+    ///
+    /// **Baked at load and never rebaked**, which is the honest W6 answer to
+    /// §5.2: carve the lake bed mid-run and the water this `Sim` sees is the
+    /// water the bed used to make. Reloading the scene — which is what the
+    /// viewer does on every file change, and what `loom explode` produces — is
+    /// what picks it up. See `scene_terrain_field` for the cost.
+    terrain: Option<loom_voxel::heightfield::HeightField>,
+    /// The river's current over that bed, or `None` for water that goes
+    /// nowhere — which is every ocean, every lake, and every scene authored
+    /// before rivers existed.
+    ///
+    /// **Baked from `terrain` at load and never rebaked**, exactly as the bed
+    /// is and with the same consequence: blow the bank out mid-run and the
+    /// current is the one the old bank made. Reloading picks it up.
+    flow: Option<loom_water::flow::FlowGrid>,
+    /// Bodies that float, in scene order, with their pontoons already in body
+    /// space. **Order is fixed at load and never sorted**: the forces are
+    /// summed as floats, and a different visiting order is a different number
+    /// in the determinism hash.
+    floating: Vec<Floating>,
+    /// Water events raised this step and not yet collected: entries and exits.
+    ///
+    /// Held rather than pushed straight into the log because the log belongs to
+    /// [`Runner`], and a `Sim` stepped on its own — `loom render --sim` with no
+    /// scripts — still has to be steppable. Drained by whoever owns a log, and
+    /// stamped with the tick then, so every event in it counts ticks the one
+    /// way (see [`Sim::drain_water_events`]).
+    water_events: Vec<loom_script::Event>,
+    /// Ticks stepped so far. Water is a function of position and this, times
+    /// the fixed timestep — never of a wall clock (never-do #8).
+    tick: u64,
+}
+
+/// One buoyant body: what floats, where its spheres are, and how wet it is.
+struct Floating {
+    body: RigidBodyHandle,
+    /// Scene path, resolved at load. The event log names nodes, and `float`
+    /// runs without a `World` in hand.
+    path: String,
+    buoyancy: loom_scene::components::Buoyancy,
+    /// The two thresholds the state flips at. See `loom_scene::Submersion`.
+    submersion: loom_scene::components::Submersion,
+    /// Fraction of this body under the surface, as of the last step. **Not a
+    /// second opinion** — it is what `buoyancy::solve` divided the displaced
+    /// volume by while computing the force it applied.
+    fraction: f32,
+    /// The debounced answer, which is what everything else reads.
+    submerged: bool,
+    /// Scratch, reused every tick so the solver's input does not allocate
+    /// inside the fixed step.
+    states: Vec<loom_water::buoyancy::PontoonState>,
 }
 
 /// One character, its velocity, and its script's memory.
@@ -116,6 +184,46 @@ fn character_shape(component: &serde_json::Value) -> loom_physics::CharacterShap
     }
 }
 
+/// Read a node's `Buoyancy`, with its pontoons resolved.
+///
+/// **An empty pontoon list is the documented default, made real.** Four
+/// spheres at the body's horizontal corners displacing exactly its own volume
+/// — which is both halves of the water doc's §5.6 trap answered by
+/// construction: one pontoon would give no righting torque, and hand-placed
+/// corner spheres large enough to look right displace several times what the
+/// object does and make it float like a cork.
+///
+/// A sphere is the exception and gets one pontoon of its own radius, because a
+/// sphere *is* a pontoon: four corner spheres would be a worse approximation of
+/// it, and a body with no orientation has nothing to right.
+fn buoyancy_of(
+    world: &World,
+    entity: loom_ecs::Entity,
+    half: [f32; 3],
+    ball: bool,
+) -> Option<loom_scene::components::Buoyancy> {
+    let mut component = serde_json::from_value::<loom_scene::components::Buoyancy>(
+        world.buoyancy(entity)?.clone(),
+    )
+    .ok()?;
+    if component.pontoons.is_empty() {
+        component.pontoons = if ball {
+            vec![loom_scene::components::Pontoon {
+                offset: [0.0; 3],
+                radius: half[0].max(half[1]).max(half[2]),
+            }]
+        } else {
+            loom_water::buoyancy::default_pontoons(half)
+        };
+    }
+    // The schema caps this and the validator enforces it; truncating here as
+    // well means a hand-built component cannot make the cost unbounded.
+    component
+        .pontoons
+        .truncate(loom_scene::components::MAX_PONTOONS);
+    Some(component)
+}
+
 impl Sim {
     /// Build colliders and bodies for everything in `world`.
     ///
@@ -127,6 +235,11 @@ impl Sim {
         let mut physics = Physics::new(TICK_SECONDS);
         let mut dynamic = Vec::new();
         let mut characters = Vec::new();
+        let mut floating: Vec<Floating> = Vec::new();
+        // Whether anything will ask about the bed. Read before the loop so the
+        // voxel branch can decide to bake without a second pass over the world.
+        let floats = world.water().is_some();
+        let mut terrain = None;
 
         for entity in world.entities() {
             let Some(global) = world.global_transform(*entity) else {
@@ -230,6 +343,17 @@ impl Sim {
                             volume.voxel_size * world_scale.y.abs(),
                             volume.voxel_size * world_scale.z.abs(),
                         ];
+                        // **The water's bed, off the same rebuilt volume.**
+                        // Baked here rather than in a second pass because the
+                        // volume is expensive to build and already in hand —
+                        // and only when the scene has water, because the march
+                        // is not free and nothing else in the sim reads it.
+                        if floats {
+                            terrain = Some(crate::terrain_field(
+                                &volume,
+                                [pos[0], pos[1], pos[2]],
+                            ));
+                        }
                         if physics
                             .add_static_voxels(pos, quat, sized, &cells)
                             .is_none()
@@ -267,6 +391,39 @@ impl Sim {
                     physics.add_box_body(pos, quat, half, mass)
                 };
                 dynamic.push((*entity, handle));
+                if let Some(buoyancy) = buoyancy_of(world, *entity, half, ball) {
+                    floating.push(Floating {
+                        body: handle,
+                        path: path_of(world, *entity),
+                        // Absent means the defaults, like every other
+                        // component: a body that floats has a submersion state
+                        // whether or not anyone authored the thresholds, or
+                        // half the systems that read it would have to handle
+                        // "this body has no answer".
+                        submersion: world
+                            .submersion(*entity)
+                            .and_then(|v| {
+                                serde_json::from_value::<
+                                    loom_scene::components::Submersion,
+                                >(v.clone())
+                                .ok()
+                            })
+                            .unwrap_or_default(),
+                        fraction: 0.0,
+                        submerged: false,
+                        states: vec![
+                            loom_water::buoyancy::PontoonState {
+                                at: [0.0; 3],
+                                radius: 0.0,
+                                velocity: [0.0; 3],
+                                ground: loom_voxel::heightfield::NO_GROUND,
+                                flow: [0.0; 3],
+                            };
+                            buoyancy.pontoons.len()
+                        ],
+                        buoyancy,
+                    });
+                }
             } else if world.is_renderable(*entity) && !has_dynamic_ancestor(world, *entity) {
                 if ball {
                     physics.add_static_ball(pos, radius);
@@ -282,19 +439,231 @@ impl Sim {
             characters.iter().position(|w| w.entity == entity)
         });
 
+        let water = crate::weather::water_of(world, &crate::weather::wind_of_world(world));
+        // The current, off the bed that was just baked. Both halves have to be
+        // in hand: a river with no terrain has nothing to run down, and terrain
+        // with no river has nothing to say.
+        let flow = terrain
+            .as_ref()
+            .zip(water.as_ref())
+            .and_then(|(bed, water)| crate::river_flow(bed, water));
+        if water.as_ref().is_some_and(|w| w.flow.is_some()) && flow.is_none() {
+            crate::log::warn(
+                "the WaterBody authors flow but the scene has no voxel terrain; \
+                 a river's course comes from the ground and there is none"
+                    .to_owned(),
+            );
+        }
+        if water.is_none() && !floating.is_empty() {
+            crate::log::warn(
+                "the scene has Buoyancy but no WaterBody; nothing will float".to_owned(),
+            );
+        }
+        // Submersion thresholds on a node that does not float would validate
+        // cleanly and be read by nothing — the silent no-op the type registry
+        // exists to stop, one level up. The fraction they threshold comes out
+        // of the buoyancy solver, so no `Buoyancy` is no fraction.
+        for entity in world.entities() {
+            if world.submersion(*entity).is_some() && world.buoyancy(*entity).is_none() {
+                crate::log::warn(format!(
+                    "{}: Submersion needs Buoyancy on the same node; \
+                     the submerged fraction comes from its pontoons",
+                    world.path(*entity).unwrap_or("?")
+                ));
+            }
+        }
+
         Self {
             physics,
             nav: None,
             player,
             dynamic,
             characters,
+            water,
+            terrain,
+            flow,
+            floating,
+            water_events: Vec::new(),
+            tick: 0,
         }
+    }
+
+    /// Apply this tick's buoyancy, before the solver runs.
+    ///
+    /// **Every rule that protects the determinism hash applies in here**, which
+    /// is what makes buoyancy different from the water mesh and the grass:
+    /// bodies in load order, pontoons in component order, one force and one
+    /// torque per body applied once, and the surface read from
+    /// `loom_water::sample_water` on the CPU — never from the GPU (§5.1).
+    fn float(&mut self) {
+        let Some(water) = &self.water else {
+            return;
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let t = self.tick as f32 * TICK_SECONDS;
+
+        for floating in &mut self.floating {
+            let (Some(position), Some(rotation), Some(centre)) = (
+                self.physics.position(floating.body),
+                self.physics.rotation_quat(floating.body),
+                self.physics.centre_of_mass(floating.body),
+            ) else {
+                continue;
+            };
+            let rotation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
+
+            for (state, pontoon) in floating.states.iter_mut().zip(&floating.buoyancy.pontoons) {
+                // The offset is in the body's own space and turns with it —
+                // which is the whole mechanism by which a tilted crate is
+                // righted. Applied at the node's origin rather than the centre
+                // of mass, because that is the space the offsets were authored
+                // in.
+                let at = Vec3::from_array(position)
+                    + rotation * Vec3::from_array(pontoon.offset);
+                state.at = at.to_array();
+                state.radius = pontoon.radius;
+                state.velocity = self
+                    .physics
+                    .velocity_at_point(floating.body, state.at)
+                    .unwrap_or([0.0; 3]);
+                // The bed under this pontoon, from the shared height field.
+                // Without it a crate in a foot of water rides the open sea's
+                // swell, and the surface it is drawn on is not the one it is
+                // floating on.
+                state.ground = self
+                    .terrain
+                    .as_ref()
+                    .map_or(loom_voxel::heightfield::NO_GROUND, |t| {
+                        t.at(state.at[0], state.at[2])
+                    });
+                // The current here, off the grid derived from that same bed.
+                // Per pontoon rather than per body: they are metres apart, so
+                // a crate half in the channel and half in the slack water on
+                // the inside of a bend is turned by the difference.
+                state.flow = self
+                    .flow
+                    .as_ref()
+                    .map_or([0.0; 3], |f| f.at(state.at[0], state.at[2]));
+            }
+
+            let wrench = loom_water::buoyancy::solve(
+                water,
+                &floating.buoyancy,
+                &floating.states,
+                centre,
+                t,
+            );
+            self.physics
+                .apply_force_torque(floating.body, wrench.force, wrench.torque);
+
+            // **The same number that scaled the force is the gameplay state.**
+            // Not a second query: a body cannot be pushed up by water it is not
+            // in, and this is what "one answer" means in practice.
+            floating.fraction = wrench.submerged;
+            let was = floating.submerged;
+            floating.submerged = loom_water::buoyancy::is_submerged(
+                was,
+                wrench.submerged,
+                floating.submersion.enter,
+                floating.submersion.exit,
+            );
+            if floating.submerged != was {
+                // Where the splash goes: on the surface above the body, not at
+                // its centre, which by then is under the water.
+                let ground = self
+                    .terrain
+                    .as_ref()
+                    .map_or(loom_voxel::heightfield::NO_GROUND, |t| {
+                        t.at(position[0], position[2])
+                    });
+                // No current: this asks only where the surface is, so the splash
+                // lands on the water rather than inside the body. A horizontal
+                // current does not move it up or down.
+                let surface = loom_water::sample_water(
+                    water,
+                    [position[0], position[2]],
+                    t,
+                    ground,
+                    [0.0; 3],
+                );
+                let velocity = self
+                    .physics
+                    .velocity_at_point(floating.body, position)
+                    .unwrap_or([0.0; 3]);
+                self.water_events.push(loom_script::Event {
+                    // Stamped on the way out; see `drain_water_events`.
+                    tick: 0,
+                    kind: if floating.submerged { SUBMERGED } else { SURFACED }.to_owned(),
+                    at: [position[0], surface.height, position[2]],
+                    node: floating.path.clone(),
+                    values: [
+                        ("fraction".to_owned(), f64::from(wrench.submerged)),
+                        // Positive going down, so a splash can be scaled by how
+                        // hard the thing hit rather than by which way it was
+                        // travelling.
+                        ("speed".to_owned(), f64::from(-velocity[1])),
+                    ]
+                    .into_iter()
+                    .collect(),
+                });
+            }
+        }
+    }
+
+    /// Water entries and exits since the last call, stamped with `tick`.
+    ///
+    /// The stamp happens here rather than in `float` because `Sim` counts its
+    /// own ticks from zero while a [`Runner`] counts from one, and an event log
+    /// whose ticks come from two clocks is a replay that cannot be compared
+    /// against another run.
+    fn drain_water_events(&mut self, tick: u64) -> Vec<loom_script::Event> {
+        self.water_events
+            .drain(..)
+            .map(|mut event| {
+                event.tick = tick;
+                event
+            })
+            .collect()
+    }
+
+    /// Every floating body, how much of it is under, and whether that counts.
+    ///
+    /// In load order, like everything else the simulation iterates.
+    #[must_use]
+    pub fn submersion(&self) -> Vec<(String, f32, bool)> {
+        self.floating
+            .iter()
+            .map(|f| (f.path.clone(), f.fraction, f.submerged))
+            .collect()
+    }
+
+    /// Whether a point is under the water — the listener's question.
+    ///
+    /// Same water body, same clock and same bed as the buoyancy solver, so the
+    /// tick a crate's deck goes under is the tick the sound goes muffled.
+    #[must_use]
+    pub fn submerged_at(&self, at: [f32; 3]) -> bool {
+        let Some(water) = &self.water else {
+            return false;
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let t = self.tick as f32 * TICK_SECONDS;
+        let ground = self
+            .terrain
+            .as_ref()
+            .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(at[0], at[2]));
+        loom_water::buoyancy::submersion_at(water, at, 0.0, t, ground) > 0.5
     }
 
     /// Advance whole ticks.
     pub fn step(&mut self, ticks: u32) {
         for _ in 0..ticks {
+            // Forces first, inside the same fixed step, before the solver runs
+            // — a force applied after `step` would take effect a tick late and
+            // the buoyancy would visibly lag the surface.
+            self.float();
             self.physics.step();
+            self.tick += 1;
         }
         // Baked after the first step, once, for the reason every query here
         // has the same caveat: the broad-phase tree is built during the step,
@@ -841,6 +1210,22 @@ impl Runner {
             .collect()
     }
 
+    /// Where and when something went into the water, for the splash.
+    ///
+    /// Derived from the log for the same reason `fired` is: one record of what
+    /// happened. A splash tracked alongside the event that caused it is two
+    /// records that can disagree, and the one the human sees would be the one
+    /// no assertion checks.
+    #[must_use]
+    pub fn splashed(&self) -> Vec<(u64, [f32; 3])> {
+        self.events
+            .all()
+            .iter()
+            .filter(|e| e.kind == SUBMERGED)
+            .map(|e| (e.tick, e.at))
+            .collect()
+    }
+
     /// A runner that steps physics and runs nothing, for when the scripts
     /// could not be loaded.
     #[must_use]
@@ -868,6 +1253,13 @@ impl Runner {
     /// [`loom_script::ScriptError`] from whichever script failed.
     pub fn tick(&mut self, world: &mut World, tick: u64) -> Result<(), loom_script::ScriptError> {
         self.physics.step(1);
+
+        // What the water did during the step, into the one log. Before the
+        // rules run, so a rule sees a body go under on the tick it went under
+        // rather than the tick after.
+        for event in self.physics.drain_water_events(tick) {
+            self.events.push(event);
+        }
 
         // Blasts go off after the step, because the tree the cover check walks
         // is built during it — before the first step every body is in the open
@@ -976,9 +1368,11 @@ impl Runner {
         if let Some(rules) = &self.rules {
             let positions = world.positions();
             let happened = self.events.on_tick(tick);
+            let submersion = self.physics.submersion();
             let view = loom_script::WorldView {
                 positions: &positions,
                 events: &happened,
+                submersion: &submersion,
             };
             let raised = self
                 .host
@@ -1122,6 +1516,12 @@ impl Play {
         self.runner.fired()
     }
 
+    /// Where and when something went into the water.
+    #[must_use]
+    pub fn splashed(&self) -> Vec<(u64, [f32; 3])> {
+        self.runner.splashed()
+    }
+
     /// Everything that has happened, in order.
     #[must_use]
     pub fn events(&self) -> &loom_script::EventLog {
@@ -1133,6 +1533,13 @@ impl Play {
     #[must_use]
     pub fn physics(&self) -> &loom_physics::Physics {
         self.runner.physics.world()
+    }
+
+    /// Whether the listener is under the water. What the ears hear, not what
+    /// any body is doing — see `Sim::submerged_at`.
+    #[must_use]
+    pub fn submerged_at(&self, at: [f32; 3]) -> bool {
+        self.runner.physics.submerged_at(at)
     }
 
     /// Whether a human can drive anything here.
@@ -1331,6 +1738,49 @@ transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
         World::from_scene(&Scene::parse(FALLING).expect("valid scene"))
     }
 
+    /// Run the crate scene and report where `Sea/Crate` is every tick.
+    fn crate_trajectory(source: &str, ticks: u32) -> Vec<[f32; 3]> {
+        let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
+        let mut play = Play::start(world, std::path::Path::new("."));
+        (0..ticks)
+            .map(|_| {
+                play.run(1);
+                let entity = play
+                    .world
+                    .entities()
+                    .iter()
+                    .copied()
+                    .find(|e| play.world.path(*e) == Some("Sea/Crate"))
+                    .expect("the crate");
+                play.world.transform(entity).expect("a transform").pos
+            })
+            .collect()
+    }
+
+    /// How far the sea itself rises and falls at one spot over a tick range —
+    /// the thing a floating crate's motion has to be compared against, because
+    /// a crate on a real sea is supposed to move.
+    fn sea_travel(source: &str, at: [f32; 3], ticks: std::ops::Range<u32>) -> f32 {
+        let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
+        let water = crate::weather::water_of(&world, &crate::weather::wind_of_world(&world))
+            .expect("the scene has water");
+        #[allow(clippy::cast_precision_loss)]
+        let heights: Vec<f32> = ticks
+            .map(|tick| {
+                loom_water::sample_water(&water, [at[0], at[2]], tick as f32 * TICK_SECONDS, 0.0, [0.0; 3])
+                    .height
+            })
+            .collect();
+        peak_to_peak(&heights)
+    }
+
+    /// Peak-to-peak vertical travel over a slice of a run, in metres.
+    fn peak_to_peak(window: &[f32]) -> f32 {
+        let high = window.iter().copied().fold(f32::MIN, f32::max);
+        let low = window.iter().copied().fold(f32::MAX, f32::min);
+        high - low
+    }
+
     fn height(world: &World, path: &str) -> f32 {
         world
             .entities()
@@ -1439,6 +1889,66 @@ transform = { pos = [0.0, 4.0, 0.0], rot_euler = [0.0, 0.0, 45.0], scale = [0.7,
         // Anything above zero means it landed on the terrain rather than
         // through it.
         assert!(y > 1.0, "the probe fell through the voxel terrain: y = {y}");
+    }
+
+    /// **W8's exit criterion, as a test rather than a command line.** A crate
+    /// dropped upstream arrives downstream, on a river whose course nobody
+    /// drew: the channel is carved into a voxel volume, the drainage is
+    /// computed off the bed that carving produced, and the current reaches the
+    /// crate through the drag term the solver already had.
+    ///
+    /// Measured over 600 ticks — ten seconds — from x = 6.0:
+    ///
+    /// - with the flow: **x = 17.7**, and the crate stays in the channel
+    /// - with `speed = 0.0`: **x = 6.00**, which is where it was dropped
+    ///
+    /// The second half is the mutation check, and it is in here rather than in
+    /// a comment because an assertion that cannot fail is decoration. The
+    /// threshold sits at 14 — well clear of both numbers — so a real slowdown
+    /// fails it and float noise does not.
+    #[test]
+    fn a_crate_dropped_in_a_river_ends_up_downstream() {
+        let source = std::fs::read_to_string("../../assets/test/river.loom").expect("fixture");
+        let travel = |source: &str| {
+            let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
+            let mut play = Play::start(world, std::path::Path::new("."));
+            play.run(600);
+            let entity = play
+                .world
+                .entities()
+                .iter()
+                .copied()
+                .find(|e| play.world.path(*e) == Some("River/Crate"))
+                .expect("the crate is in the scene");
+            play.world.transform(entity).expect("it has a transform").pos
+        };
+
+        let carried = travel(&source);
+        assert!(
+            carried[0] > 14.0,
+            "the river did not carry the crate downstream: x = {}",
+            carried[0]
+        );
+        // And it stayed in the river rather than being pushed at the bank,
+        // which is the failure the flow field's direction smoothing exists to
+        // prevent — the channel runs down z = 24.
+        assert!(
+            (carried[2] - 24.0).abs() < 1.5,
+            "the crate was pushed out of the channel: z = {}",
+            carried[2]
+        );
+
+        // Zero the one authored number and the claim has to stop holding.
+        let still = travel(&source.replace(
+            "[node.components.WaterBody.flow]\n  speed = 3.0",
+            "[node.components.WaterBody.flow]\n  speed = 0.0",
+        ));
+        assert!(
+            still[0] < 7.0,
+            "a river with no speed still moved the crate: x = {} — \
+             the mutation did not take, so the assertion above proves nothing",
+            still[0]
+        );
     }
 
     /// `BoxCollider` is documented and schema-validated, and the simulation
@@ -2470,6 +2980,206 @@ transform = { pos = [0.0, 6.0, 0.0] }
         // Step works anyway — that is what a step button is.
         play.run(1);
         assert_eq!(play.ticks, 1);
+    }
+
+    /// The scene the exit criterion runs on, read from disk so the test and
+    /// `loom sim assets/test/water_crate.loom` are measuring the same crate.
+    fn water_crate() -> String {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/test/water_crate.loom"),
+        )
+        .expect("the W5 test scene should exist")
+    }
+
+    /// **W6 on the physics side: the crate feels the bottom.** The same scene
+    /// with a voxel shelf a metre and a half under the surface, and an
+    /// authored `attenuation_depth`, so the waves the buoyancy solver samples
+    /// are the shallow ones.
+    ///
+    /// This is the whole CPU path in one assertion — `Sim` bakes the height
+    /// field off the volume it is already building a collider from, fills each
+    /// pontoon's `ground` from it, and `sample_water` tapers every amplitude by
+    /// `tanh(k·d)/tanh(k·D)`. Any link missing and the crate rides the open
+    /// sea's swell in five feet of water, which is what it did before W6.
+    #[test]
+    fn a_crate_in_the_shallows_rides_a_smaller_sea() {
+        let deep = water_crate();
+        let shallow = deep
+            .replace(
+                "  drag = 2.0\n",
+                "  drag = 2.0\n\n  [node.components.WaterBody.waves]\n  \
+                 attenuation_depth = 4.0\n  max_height = 1.5\n",
+            )
+            // A shelf under the whole area the crate drifts over: 16 m square,
+            // its top at y = −1.5, which is 1.5 m of water. Low enough that the
+            // crate never touches it — it floats with its underside at about
+            // −0.65 — and shallow enough that the taper is about a half.
+            + "\n[[node]]\nname = \"Shelf\"\nparent = \"Sea\"\n\
+               transform = { pos = [-8.0, -7.5, -14.0] }\n\n  \
+               [node.components.VoxelVolume]\n  voxel_size = 0.25\n  chunks = [2, 1, 2]\n\n  \
+               [[node.components.VoxelVolume.ops]]\n  kind = \"box\"\n  \
+               center = [8.0, 3.0, 8.0]\n  half_extents = [10.0, 3.0, 10.0]\n  \
+               mode = \"union\"\n";
+
+        let deep_y: Vec<f32> = crate_trajectory(&deep, 1800).iter().map(|p| p[1]).collect();
+        let shallow_y: Vec<f32> =
+            crate_trajectory(&shallow, 1800).iter().map(|p| p[1]).collect();
+
+        let open = peak_to_peak(&deep_y[1500..1800]);
+        let inshore = peak_to_peak(&shallow_y[1500..1800]);
+        assert!(
+            inshore < open * 0.75,
+            "the crate rides the same sea in 1.5 m of water as in the open: \
+             {inshore:.3} m against {open:.3} m"
+        );
+        // And it is still floating rather than sunk or beached — a taper that
+        // zeroed the surface entirely would also pass the line above.
+        let mean = shallow_y[1500..1800].iter().sum::<f32>() / 300.0;
+        assert!(
+            (-0.5..0.5).contains(&mean),
+            "the crate is not at the waterline any more: y = {mean:.3}"
+        );
+    }
+
+    /// **W5's exit criterion, as a number.** A crate dropped four metres into
+    /// the sea and left alone for 1800 ticks — thirty seconds, because
+    /// resonance is not visible in five.
+    ///
+    /// *Does not resonate* is defined here as: over the last five seconds the
+    /// crate's peak-to-peak vertical travel is **no more than the sea's own
+    /// travel at that spot**, and no larger than it was on entry. A crate on a
+    /// real sea is supposed to move, so the reference is the surface it is on
+    /// rather than a number — riding the waves is the pass, out-travelling them
+    /// is the fail. An undamped pontoon takes energy out of the wave field
+    /// every cycle with nothing to give it back to, and ends up moving several
+    /// times as far as the water under it.
+    #[test]
+    fn a_floating_crate_settles_rather_than_resonating() {
+        let scene = water_crate();
+        let track = crate_trajectory(&scene, 1800);
+        let y: Vec<f32> = track.iter().map(|p| p[1]).collect();
+
+        // Once it is in the water: the drop takes about half a second and the
+        // entry transient a couple more.
+        let entry = peak_to_peak(&y[300..600]);
+        let settled = peak_to_peak(&y[1500..1800]);
+        let sea = sea_travel(&scene, track[1799], 1500..1800);
+        // **Archimedes, measured rather than assumed.** At the waterline it
+        // settles on, the crate's four pontoons displace the crate's own mass
+        // of water — 518 kg. Any factor slip in the volume, the density or the
+        // force would leave it floating high or swamped, and every other
+        // assertion here would still pass.
+        let mean = y[1500..1800].iter().sum::<f32>() / 300.0;
+        let displaced: f32 = loom_water::buoyancy::default_pontoons([0.6, 0.6, 0.6])
+            .iter()
+            .map(|p| loom_water::buoyancy::submerged_volume(p.radius, mean + p.offset[1], 0.0))
+            .sum::<f32>()
+            * 1000.0;
+        assert!(
+            (displaced - 518.0).abs() < 30.0,
+            "resting at y = {mean:.3} it displaces {displaced:.0} kg of water, \
+             and it weighs 518 kg"
+        );
+
+        assert!(
+            settled <= entry,
+            "the bob is growing, not decaying: {entry:.3} m early, {settled:.3} m late"
+        );
+        // A quarter of slack, because the crate drifts across the surface
+        // while the reference is a fixed point — so it samples a slightly
+        // different run of crests than the spot it ends on. An undamped crate
+        // is nearly three times the sea's travel, so this costs nothing.
+        assert!(
+            settled <= sea * 1.25,
+            "the crate out-travels the sea it is floating on: {settled:.3} m \
+             against the surface's {sea:.3} m"
+        );
+        // And it is riding the waves rather than resting on an invisible floor
+        // — a crate that stopped moving entirely would pass both tests above
+        // and would mean the buoyancy had died.
+        assert!(
+            settled > sea * 0.25,
+            "the crate is barely moving on a sea that travels {sea:.3} m: {settled:.3} m"
+        );
+    }
+
+    /// The other half of the same claim: **remove the damping and the
+    /// assertion above has to fail.** Without this the test only asserts that
+    /// a crate exists.
+    #[test]
+    fn without_damping_the_same_crate_resonates() {
+        let undamped = water_crate().replace(
+            "[node.components.Buoyancy]",
+            "[node.components.Buoyancy]\n  damp_linear = 0.0\n  damp_quadratic = 0.0",
+        );
+        let track = crate_trajectory(&undamped, 1800);
+        let y: Vec<f32> = track.iter().map(|p| p[1]).collect();
+
+        let settled = peak_to_peak(&y[1500..1800]);
+        let sea = sea_travel(&undamped, track[1799], 1500..1800);
+        assert!(
+            settled > sea,
+            "damping was removed and the crate still rides the sea ({settled:.3} m \
+             against the surface's {sea:.3} m) — then the test above proves nothing"
+        );
+    }
+
+    /// **Why there are four pontoons and not one.** Force applied at an offset
+    /// is a torque; force applied through the centre of mass is not. The crate
+    /// is dropped in on its side, 60° over: four pontoons right it, because the
+    /// deeper ones push harder than the shallower ones and the difference acts
+    /// at an offset. One pontoon at the centre of mass has no offset to act
+    /// through, so the water cannot turn it at all and it stays over.
+    ///
+    /// "Cannot turn it" rather than "spins it" is the honest version of the
+    /// doc's warning: a single central pontoon does not tumble a crate, it
+    /// leaves its attitude to whatever else happens to touch it — which in open
+    /// water is nothing.
+    #[test]
+    fn four_pontoons_right_a_capsized_crate_and_one_does_not() {
+        let capsized = water_crate().replace(
+            "rot_euler = [0.0, 12.0, 0.0]",
+            "rot_euler = [0.0, 12.0, 60.0]",
+        );
+        let tilt_after = |source: &str, ticks: u32| {
+            let world = World::from_scene(&Scene::parse(source).expect("valid scene"));
+            let mut play = Play::start(world, std::path::Path::new("."));
+            play.run(ticks);
+            let entity = play
+                .world
+                .entities()
+                .iter()
+                .copied()
+                .find(|e| play.world.path(*e) == Some("Sea/Crate"))
+                .expect("the crate");
+            let rot = play.world.transform(entity).expect("a transform").rot_euler;
+            // Pitch and roll only: yaw is free for a floating box and says
+            // nothing about whether it is the right way up.
+            rot[0].abs().max(rot[2].abs())
+        };
+
+        // The wave sum's steepest slope is about 20°, and a crate that follows
+        // the surface reaches it — so level is the wrong bar and upright is the
+        // right one.
+        let four = tilt_after(&capsized, 900);
+        assert!(four < 30.0, "four pontoons should right it: {four} degrees");
+
+        // Radius chosen so the single sphere displaces the same volume the four
+        // do: this is a test of *where* the force lands, not of how much.
+        let one = tilt_after(
+            &capsized.replace(
+                "[node.components.Buoyancy]",
+                "[node.components.Buoyancy]\n  \
+                 pontoons = [{ offset = [0.0, 0.0, 0.0], radius = 0.7444 }]",
+            ),
+            900,
+        );
+        assert!(
+            one > 45.0,
+            "one central pontoon can exert no righting torque, so the crate \
+             should still be over: {one} degrees against {four} for four"
+        );
     }
 
     /// A stall must not turn into a thousand catch-up ticks.

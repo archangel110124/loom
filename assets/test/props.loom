@@ -1,0 +1,283 @@
+# Every model imported from a download, at its real size, on ground.
+#
+# **A catalogue like `pbr_library.loom`, and it exists for the same reason:**
+# to prove an import survived the pipeline. What it checks here is geometry
+# rather than maps — that a mesh arrives the right way up, at the right scale,
+# with usable normals and UVs.
+#
+#     loom render assets/test/props.loom --out props.png --size 1280x800
+#
+# **Every one of these came out of a `.blend` via `tools/mesh/blend_to_obj.py`.**
+# The archives ship a model whose geometry exists *only* inside the `.blend`;
+# `loom_asset` reads OBJ and glTF, so without that pass none of them could
+# enter the engine at all. They are LOD1 meshes at ~50,000 faces each,
+# decimated to 30,000 — measured, not assumed from the archive size.
+#
+# **The lantern is the one that shows why OBJ and not glTF.** It exports as two
+# `o` groups, `..._Frame_Geo_LOD0` and `..._Glass_Geo_LOD0`, and the scene picks
+# the frame alone with the `file.obj#Object` fragment syntax that `trees.loom`
+# proves out. `import_gltf` merges every primitive into one mesh, so through
+# that path the lantern would arrive permanently fused to its glass.
+#
+# **What is NOT here, and why.** No bushes and no grass tufts, though both are
+# in the same download set: they are alpha-cutout cards, and `fragmentMain` has
+# no `discard` and never reads the alpha channel — so every leaf card would
+# render as an opaque rectangle. That is a small, well-defined engine gap
+# (sample alpha, threshold, discard, plus an `alpha_cutoff` on `Material`) and
+# it is a shader and schema change rather than an import.
+#
+# **Scale is the thing to check first.** These are metres: the beach rock is
+# 6.2 m across, the log 3.0 m, the lantern 0.48 m tall. A model that arrived in
+# centimetres or inches would be obvious against the 1.7 m post at the centre.
+
+[scene]
+format = 1
+id = "2ef1a7fa-2050-4a8e-b4c0-54988b09df44"
+
+[[asset]]
+key = "mesh_RockBeach"
+id = "3774fb7f-f3ff-4cca-ae14-670f84582b8f"
+path = "../meshes/rock_beach.obj"
+
+[[asset]]
+key = "rock_beach_albedo"
+id = "102bd405-b85b-48a2-8211-6543cc05e6d1"
+path = "../textures/rock_beach_albedo.png"
+
+[[asset]]
+key = "rock_beach_normal"
+id = "96503df9-869e-4964-ba97-22d554d66a89"
+path = "../textures/rock_beach_normal.png"
+
+[[asset]]
+key = "mesh_RockBoulderA"
+id = "299ddd04-f7a4-4d71-9d20-2ec12f9d06d9"
+path = "../meshes/rock_boulder_a.obj"
+
+[[asset]]
+key = "rock_boulder_a_albedo"
+id = "491e578b-5c25-4bbf-9875-d9a0a8456842"
+path = "../textures/rock_boulder_a_albedo.png"
+
+[[asset]]
+key = "rock_boulder_a_normal"
+id = "712a499b-8aa8-4794-8713-e9cadf69f9e1"
+path = "../textures/rock_boulder_a_normal.png"
+
+[[asset]]
+key = "mesh_RockBoulderB"
+id = "054f439d-098e-4567-a6d8-721b841b7225"
+path = "../meshes/rock_boulder_b.obj"
+
+[[asset]]
+key = "mesh_TreeLog"
+id = "99f25dc6-1b13-4a6d-912d-bf7eed46f35f"
+path = "../meshes/tree_log.obj"
+
+[[asset]]
+key = "tree_log_albedo"
+id = "7e0b0ed4-d1c0-4dfa-b29a-a01acc95aed7"
+path = "../textures/tree_log_albedo.png"
+
+[[asset]]
+key = "tree_log_normal"
+id = "24a58bae-5498-42b0-8a57-d3d149876393"
+path = "../textures/tree_log_normal.png"
+
+[[asset]]
+key = "mesh_TreeStump"
+id = "2f64518b-4353-4598-acbe-eed598fa57de"
+path = "../meshes/tree_stump.obj"
+
+[[asset]]
+key = "tree_stump_albedo"
+id = "f1ba9218-6780-4e22-b2c2-1a8b3bdbd22c"
+path = "../textures/tree_stump_albedo.png"
+
+[[asset]]
+key = "tree_stump_normal"
+id = "ae1d3b44-cc8f-4356-ada6-44a6735fe918"
+path = "../textures/tree_stump_normal.png"
+
+[[asset]]
+key = "mesh_Lantern"
+id = "d49c21f7-9c58-4ee3-b0a8-5b08a1ae88f2"
+path = "../meshes/lantern.obj#WallLanternExterior001_Frame_Geo_LOD0"
+
+[[asset]]
+key = "lantern_albedo"
+id = "a653ee1b-13cf-42e7-aa29-7c82ba34e84b"
+path = "../textures/lantern_albedo.png"
+
+[[asset]]
+key = "lantern_normal"
+id = "7ed14d43-b570-4d8e-a700-62c2cc63549a"
+path = "../textures/lantern_normal.png"
+
+[[node]]
+name = "Yard"
+
+  # Overcast and fairly flat, because this is a catalogue: a dramatic key light
+  # would flatter the models and hide exactly the seams an import check is for.
+  [node.components.Environment]
+  sun_direction = [0.45, 0.55, 0.70]
+  sun_strength = 1.5
+  sun_color = [1.0, 0.97, 0.92]
+  ambient = 0.42
+  sky_zenith = [0.09, 0.13, 0.21]
+  sky_horizon = [0.46, 0.48, 0.50]
+  fog_density = 0.002
+
+[[node]]
+name = "Ground"
+parent = "Yard"
+transform = { pos = [0.0, -0.25, 0.0], scale = [16.0, 0.25, 12.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.66, 0.68, 0.62]
+  roughness = 0.9
+  albedo_map = { asset = "dirt_rocky_albedo" }
+  normal_map = { asset = "dirt_rocky_normal" }
+  uv_scale = [0.5, 0.5]
+  triplanar = true
+
+# A 1.7 m post at the origin: the fixed human-height reference that makes every
+# other object's scale readable at a glance. A still cannot tell a 6 m rock
+# from a 60 cm one without it.
+[[node]]
+name = "ScaleRef"
+parent = "Yard"
+transform = { pos = [0.0, 0.85, 4.5], scale = [0.06, 0.85, 0.06] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.82, 0.76]
+  roughness = 0.6
+
+[[node]]
+name = "RockBeach"
+parent = "Yard"
+transform = { pos = [-6.5, 0.0, 1.0], scale = [1.0, 1.0, 1.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_RockBeach" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.88
+  albedo_map = { asset = "rock_beach_albedo" }
+  normal_map = { asset = "rock_beach_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "RockBoulderA"
+parent = "Yard"
+transform = { pos = [0.0, 0.0, 0.5], scale = [1.0, 1.0, 1.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_RockBoulderA" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.9
+  albedo_map = { asset = "rock_boulder_a_albedo" }
+  normal_map = { asset = "rock_boulder_a_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "RockBoulderB"
+parent = "Yard"
+transform = { pos = [6.0, 0.0, 1.5], scale = [1.0, 1.0, 1.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_RockBoulderB" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.9
+  albedo_map = { asset = "rock_boulder_a_albedo" }
+  normal_map = { asset = "rock_boulder_a_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "TreeLog"
+parent = "Yard"
+transform = { pos = [-4.0, 0.0, -5.0], scale = [1.0, 1.0, 1.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_TreeLog" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.82
+  albedo_map = { asset = "tree_log_albedo" }
+  normal_map = { asset = "tree_log_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "TreeStump"
+parent = "Yard"
+transform = { pos = [2.5, 0.0, -5.5], scale = [1.0, 1.0, 1.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_TreeStump" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.85
+  albedo_map = { asset = "tree_stump_albedo" }
+  normal_map = { asset = "tree_stump_normal" }
+  uv_scale = [1.0, 1.0]
+
+# A post for the lantern to be mounted on. **It is a wall lantern** — the model
+# is a bracket and a lamp with no base, so with nothing behind it it hangs in
+# mid-air, which is what the first render of this scene showed.
+[[node]]
+name = "LanternPost"
+parent = "Yard"
+transform = { pos = [6.5, 1.1, -4.35], scale = [0.12, 1.1, 0.12] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.26, 0.22]
+  roughness = 0.85
+
+[[node]]
+name = "Lantern"
+parent = "Yard"
+transform = { pos = [6.5, 1.9, -4.1], scale = [3.0, 3.0, 3.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mesh_Lantern" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.45
+  albedo_map = { asset = "lantern_albedo" }
+  normal_map = { asset = "lantern_normal" }
+  uv_scale = [1.0, 1.0]
+
+[[asset]]
+key = "dirt_rocky_albedo"
+id = "dc601cd1-4593-4008-a938-4ecab0aaa7e5"
+path = "../textures/dirt_rocky_albedo.png"
+
+[[asset]]
+key = "dirt_rocky_normal"
+id = "f8278a0e-d451-47a8-861d-3ce21218cd8d"
+path = "../textures/dirt_rocky_normal.png"
+
+[[node]]
+name = "Camera"
+parent = "Yard"
+transform = { pos = [0.0, 3.6, 13.0], rot_euler = [-11.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

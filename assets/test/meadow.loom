@@ -1,0 +1,123 @@
+# Grass, as generated geometry.
+#
+# The scene stores the *rules* — density, height, how strongly a clump agrees
+# about which way it leans — and never the blades. A tile is a couple of
+# thousand of them; the same represent-the-generator principle as a voxel op
+# list (never-do #11).
+#
+# This is P2's first render, and it is deliberately the cheap path: blades are
+# generated on the CPU into an ordinary mesh, because the phase's real risk is
+# anti-aliasing without temporal accumulation and that question is about
+# sub-pixel geometry under a moving camera. A mesh answers it with no compute
+# pass and no indirect draw. `cargo xtask flythrough` is where the answer
+# actually shows.
+[scene]
+format = 1
+id = "d51a9c73-6e84-4b20-9f37-0c8b2ed4a916"
+
+[[asset]]
+key = "grass_ground_albedo"
+id = "e7758a7b-60ba-4717-b653-62e722f92af7"
+path = "../textures/grass_ground_albedo.png"
+
+[[asset]]
+key = "grass_ground_normal"
+id = "32502b17-37cd-46f9-a230-893829893f27"
+path = "../textures/grass_ground_normal.png"
+
+[[node]]
+name = "Meadow"
+
+  [node.components.Environment]
+  sun_direction = [0.45, 0.42, 0.62]
+  sun_strength = 1.35
+  sun_color = [1.0, 0.96, 0.85]
+  ambient = 0.42
+  sky_zenith = [0.18, 0.32, 0.52]
+  sky_horizon = [0.62, 0.68, 0.70]
+  fog_density = 0.008
+  fog_falloff = 0.06
+
+  # **Authored, and currently inert here.** Wind drives particles, and this
+  # scene has none; the grass is a mesh baked once at load, so it cannot sway
+  # whatever the field says. Bending the Bézier control points needs the
+  # vertex shader, which arrives with the compute path — the two are the same
+  # piece of work. The values are set now so the scene is ready for it.
+  [node.components.Wind]
+  direction_degrees = 20.0
+  speed = 5.0
+  gustiness = 1.2
+  turbulence = 0.9
+
+[[node]]
+name = "Soil"
+parent = "Meadow"
+transform = { pos = [0.0, -0.06, 0.0], scale = [22.0, 0.12, 22.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  # **Dark green, not brown, and that is the other half of the density
+  # falloff.** Blades thin out with distance until the field is mostly ground,
+  # so the ground has to already be the colour of a meadow or the thinning
+  # reads as bare dirt appearing. It was brown, and from the flythrough's
+  # orbit the field looked ploughed. Still dark enough to read as the shadowed
+  # earth between blades close up, which is what it is.
+  #
+  # **Textured now, and this is the surface that argument was always about.**
+  # A flat colour is the right *colour* and still reads as a painted plane at
+  # any distance the blades have thinned out of; patchy turf gives the far
+  # field something to be. The albedo is no longer the meadow's colour — the
+  # map carries that — so it is a darkening multiplier instead, keeping the
+  # ground below the blades rather than competing with them.
+  #
+  # `uv_scale = 0.5` is one tile per 2 m, which is about what this texture
+  # photographs. Against a 4096 map that is 2048 texels/m, comfortably past
+  # the ~400/m a near field can show (see `tools/texture/import_pbr.py` for
+  # the measurement behind that number). Triplanar because the box is 180x
+  # wider than it is tall and UV tiles would smear along it.
+  [node.components.Material]
+  albedo = [0.62, 0.68, 0.58]
+  roughness = 1.0
+  albedo_map = { asset = "grass_ground_albedo" }
+  normal_map = { asset = "grass_ground_normal" }
+  uv_scale = [0.5, 0.5]
+  triplanar = true
+
+[[node]]
+name = "Field"
+parent = "Meadow"
+
+  [node.components.Grass]
+  half_extent = [9.0, 9.0]
+  density = 140.0
+  height = 0.40
+  width = 0.020
+  clump_facing = 0.75
+  clump_colour = 0.4
+
+  [node.components.Material]
+  albedo = [0.29, 0.44, 0.14]
+  roughness = 0.75
+
+# A couple of stones, so there is something with a known silhouette to judge
+# the grass against — and so the shot is not only grass.
+[[node]]
+name = "Stone"
+parent = "Meadow"
+transform = { pos = [2.4, 0.22, -1.6], rot_euler = [0.0, 24.0, 0.0], scale = [0.6, 0.45, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.33, 0.31]
+  roughness = 0.9
+
+[[node]]
+name = "Camera"
+parent = "Meadow"
+transform = { pos = [0.0, 1.15, 6.5], rot_euler = [-7.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 48.0

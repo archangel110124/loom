@@ -138,6 +138,21 @@ pub struct World {
     character: Storage<serde_json::Value>,
     /// The scene's `Environment`, verbatim. At most one is used.
     environment: Storage<serde_json::Value>,
+    /// The `WaterBody` component, verbatim. Carried for the same reason as
+    /// `material`: turning it into waves needs `loom_water`, and this crate
+    /// does not depend on it.
+    water: Storage<serde_json::Value>,
+    /// The scene's `Wind`, verbatim. At most one is used, like `Environment`.
+    /// Carried rather than resolved for the same reason as `water`: turning it
+    /// into a field needs `loom_field`, which this crate does not depend on.
+    wind: Storage<serde_json::Value>,
+    /// The `Buoyancy` component, verbatim. Floating a body needs `loom_water`
+    /// and `loom_physics`, and this crate depends on neither.
+    buoyancy: Storage<serde_json::Value>,
+    /// The `Submersion` component, verbatim — the two thresholds at which a
+    /// floating body counts as being in the water. Carried for the same reason
+    /// as `buoyancy`: the fraction it thresholds comes out of the water solver.
+    submersion: Storage<serde_json::Value>,
     /// The `AudioSource` component, verbatim. Resolving it needs a decoder
     /// and a device, neither of which belongs in here.
     audio: Storage<serde_json::Value>,
@@ -152,6 +167,7 @@ pub struct World {
     /// for the same reason as `voxel_recipe`: resolving it needs the asset and
     /// render crates, and this one depends on neither.
     material: Storage<serde_json::Value>,
+    light: Storage<serde_json::Value>,
     /// Scene path, so callers can address an entity the way a `.loom` file does.
     paths: Storage<String>,
     /// The `.rhai` file a node's `Script` component names.
@@ -382,6 +398,18 @@ impl World {
             if let Some(env) = node.components.get("Environment") {
                 world.environment.insert(entity, env.clone());
             }
+            if let Some(water) = node.components.get("WaterBody") {
+                world.water.insert(entity, water.clone());
+            }
+            if let Some(wind) = node.components.get("Wind") {
+                world.wind.insert(entity, wind.clone());
+            }
+            if let Some(buoyancy) = node.components.get("Buoyancy") {
+                world.buoyancy.insert(entity, buoyancy.clone());
+            }
+            if let Some(submersion) = node.components.get("Submersion") {
+                world.submersion.insert(entity, submersion.clone());
+            }
             if let Some(audio) = node.components.get("AudioSource") {
                 world.audio.insert(entity, audio.clone());
             }
@@ -394,6 +422,9 @@ impl World {
             if let Some(emitter) = node.components.get("ParticleEmitter") {
                 world.emitter.insert(entity, emitter.clone());
             }
+            if let Some(light) = node.components.get("Light") {
+                world.light.insert(entity, light.clone());
+            }
             if let Some(material) = node.components.get("Material") {
                 world.material.insert(entity, material.clone());
             }
@@ -401,6 +432,12 @@ impl World {
                 world.mark_renderable(entity);
                 world.voxel_recipe.insert(entity, volume.clone());
             }
+            // **A grass field is deliberately not renderable.** It draws
+            // through the blade buffer rather than as an object with a mesh.
+            // Marking it renderable made it fall through to the default unit
+            // box, which put a large green cube in the middle of the meadow —
+            // the node has no mesh to resolve, and "no mesh" resolves to the
+            // placeholder.
             if let Some(renderer) = node.components.get("MeshRenderer") {
                 world.mark_renderable(entity);
                 if let Some(asset) = renderer
@@ -534,6 +571,47 @@ impl World {
         self.order.iter().find_map(|e| self.environment.get(*e))
     }
 
+    /// The scene's water, if it authors any.
+    ///
+    /// **The first one, and there is deliberately no way to ask for a second.**
+    /// A `WaterBody` has no extent in the schema — a lake is a plane, not a
+    /// region — so two of them would be two infinite surfaces at different
+    /// heights with nothing to say where one stops. When bodies gain a
+    /// boundary this becomes a list; until then one is the honest number, and
+    /// it is the same rule `environment` follows.
+    #[must_use]
+    pub fn water(&self) -> Option<&serde_json::Value> {
+        self.order.iter().find_map(|e| self.water.get(*e))
+    }
+
+    /// The scene's wind, if it authors any. The first, for the same reason
+    /// `water` takes the first: one scene, one weather.
+    #[must_use]
+    pub fn wind(&self) -> Option<&serde_json::Value> {
+        self.order.iter().find_map(|e| self.wind.get(*e))
+    }
+
+    /// The `Buoyancy` a node declares, if any.
+    #[must_use]
+    pub fn buoyancy(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.buoyancy.get(entity)
+    }
+
+    /// The `Submersion` thresholds a node declares, if any.
+    #[must_use]
+    pub fn submersion(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.submersion.get(entity)
+    }
+
+    /// Whether this node itself carries the `WaterBody`.
+    ///
+    /// For walking a node's ancestors: a `ParticleEmitter` under the water is
+    /// the scene's splash, not a plume that should play where it sits.
+    #[must_use]
+    pub fn is_water(&self, entity: Entity) -> bool {
+        self.water.get(entity).is_some()
+    }
+
     /// The `AudioSource` a node declares, if any.
     #[must_use]
     pub fn audio(&self, entity: Entity) -> Option<&serde_json::Value> {
@@ -563,6 +641,18 @@ impl World {
     #[must_use]
     pub fn material(&self, entity: Entity) -> Option<&serde_json::Value> {
         self.material.get(entity)
+    }
+
+    /// The `Light` component a node declares, if any.
+    ///
+    /// **This store is new and the component was not.** `Light` has been in
+    /// the schema, documented and prefab-tested for a long time, and nothing
+    /// ever read it — a knob wired to nothing. A scene could be authored black
+    /// and then could not be lit by anything except turning the sun back on,
+    /// which is not night.
+    #[must_use]
+    pub fn light(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.light.get(entity)
     }
 
     /// Authored collider half-extents, if the node declares a `BoxCollider`.

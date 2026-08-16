@@ -178,6 +178,21 @@ struct App {
     disk_seen: loom_scene::VersionToken,
     /// Mesh set currently on the GPU, so a moved node costs no re-upload.
     uploaded: u64,
+    /// What the grass on the GPU was placed from — see [`crate::grass_key`].
+    /// Empty means "no blades uploaded", which is also a scene with no grass.
+    grass_uploaded: String,
+    /// What the terrain height grid on the GPU was baked from — see
+    /// [`crate::terrain_key`]. Empty means none, which is also a scene with no
+    /// water to read it.
+    terrain_uploaded: String,
+    /// The same grid, kept rather than dropped after the upload.
+    ///
+    /// The GPU reads it for the water's depth; the CPU reads it to decide
+    /// whether the eye is under the surface, and both have to be the same bed
+    /// or the shoreline and the underwater view disagree about where the water
+    /// stops. Re-baking it per frame is a march down the SDF per sample, which
+    /// is not frame work.
+    terrain: Option<loom_voxel::heightfield::HeightField>,
     /// The handle being dragged, if one is.
     drag: Option<Drag>,
     /// Bumped whenever a mouse button comes up. Part of every gesture key, so
@@ -205,6 +220,9 @@ struct App {
     /// particle systems. The runner's list only grows, so the tail past this
     /// is what is new — no event queue, and nothing to miss if a frame is slow.
     detonations_seen: usize,
+    /// The same, for splashes. A separate count because the two lists grow
+    /// independently and a shared one would replay whichever moved last.
+    splashes_seen: usize,
     /// Whether the pointer is captured for first-person play. Tracked rather
     /// than asked of the window because winit has no getter, and because
     /// releasing it must not depend on the platform honouring the request.
@@ -227,6 +245,17 @@ struct App {
     /// viewer's resources would be a use-after-free.
     gpu: Option<(Instance, Device)>,
     last_frame: std::time::Instant,
+    /// Seconds of weather the window has shown, which is what bends the grass.
+    ///
+    /// **Free-running, and not the simulation clock.** Grass is rendering-only
+    /// and outside the determinism hash, so its sway does not have to agree
+    /// tick-for-tick with a headless render, and foliage that stands frozen
+    /// until you press Play is wrong in an editor — every engine animates it in
+    /// the viewport. Advanced from the same frame `dt` the camera uses.
+    ///
+    /// It is the *simulation's* wind that must stay tick-derived: particles get
+    /// theirs from `Plumes`, which advances on steps, not on seconds.
+    wind_seconds: f32,
     /// Smoothed, because a number that changes sixty times a second is not a
     /// number anyone can read.
     fps: f32,
@@ -243,6 +272,22 @@ struct App {
     /// far needed a human to open a window and close it; this is what lets
     /// `cargo xtask validate` do that instead.
     frames_left: Option<u32>,
+    /// Start the simulation as soon as there is a window.
+    ///
+    /// **This exists so a gate can reach Play.** The per-frame CPU cost that
+    /// took `forest.loom` to 9 fps only happens while the simulation advances,
+    /// and nothing headless could get there — `--frames` alone runs a paused
+    /// editor, which is exactly the case where the defect costs nothing.
+    autoplay: bool,
+    /// How many frames' CPU cost has been measured, and their total.
+    ///
+    /// **The frame's CPU work, up to the draw call — not the whole frame.**
+    /// Past the draw the thread is waiting on a queue and a presentation
+    /// engine, and folding that in would make the number mostly a measure of
+    /// the GPU and the vsync mode.
+    cpu_frames: u32,
+    cpu_total_ms: f64,
+    cpu_worst_ms: f32,
     title: String,
 }
 
@@ -308,6 +353,11 @@ impl App {
                 .camera()
                 .map_or_else(|| FlyCamera::framing(view.bounds), FlyCamera::at),
             uploaded: view.mesh_key,
+            // Not `grass_key(&view.scene)`: the viewer does not exist yet, so
+            // nothing has been uploaded. `resumed` does the first upload.
+            grass_uploaded: String::new(),
+            terrain_uploaded: String::new(),
+            terrain: None,
             selected: view.paths.first().cloned().into_iter().collect(),
             view,
             base,
@@ -324,6 +374,7 @@ impl App {
             sound: None,
             reported_status: None,
             detonations_seen: 0,
+            splashes_seen: 0,
             captured: false,
             plumes: None,
             ui: None,
@@ -349,8 +400,13 @@ impl App {
             gpu: None,
             #[allow(clippy::disallowed_methods)]
             last_frame: std::time::Instant::now(),
+            wind_seconds: 0.0,
             fps: 0.0,
             frames_left: None,
+            autoplay: false,
+            cpu_frames: 0,
+            cpu_total_ms: 0.0,
+            cpu_worst_ms: 0.0,
             agent_changes: Vec::new(),
             title,
         }
@@ -472,10 +528,94 @@ impl App {
             self.selected.extend(view.paths.first().cloned());
         }
         self.view = view;
+        // Grass is placed from the scene the same way the meshes are, so a
+        // reload has to re-place it or the window keeps showing the old field.
+        self.upload_grass();
+        self.upload_terrain();
         // The scene changed, so the emitters may have. Dropped rather than
         // patched: a reload is rare and rebuilding is a warm-up, not a frame
         // cost.
         self.plumes = None;
+    }
+
+    /// Place this scene's grass and hand it to the GPU, if it changed.
+    ///
+    /// Placement is a pure function of position, so this is not per-frame work
+    /// — the blades are uploaded once and the vertex shader expands and bends
+    /// them every frame. [`crate::grass_key`] is what keeps it that way while
+    /// `show` runs on every frame of a gizmo drag.
+    fn upload_grass(&mut self) {
+        let key = crate::grass_key(&self.view.scene);
+        if key == self.grass_uploaded {
+            return;
+        }
+        let blades = crate::grass_blades(&self.view.scene);
+        let Some(viewer) = self.viewer.as_mut() else {
+            return;
+        };
+        // The same silent-truncation trap the offscreen path has, except here
+        // it lands in the human's console rather than on stderr, which is where
+        // they are actually looking.
+        let capacity = viewer.grass_capacity();
+        if blades.len() > capacity && capacity > 0 {
+            crate::log::error(format!(
+                "the grass field needs {} blades and the buffer holds {capacity}; {} were \
+                 dropped in generation order, so expect a hard edge across the field. \
+                 Reduce density or half_extent.",
+                blades.len(),
+                blades.len() - capacity
+            ));
+        }
+        match viewer.set_grass(&blades) {
+            Ok(()) => self.grass_uploaded = key,
+            Err(e) => crate::log::error(format!("could not upload the grass: {e}")),
+        }
+    }
+
+    /// Bake this scene's terrain height grid and hand it to the GPU, if it
+    /// changed.
+    ///
+    /// **This is where a carved lake bed reaches the water.** The key is the
+    /// volume's op list, so the transaction that blows a crater rebakes and the
+    /// shoreline moves with it; a gizmo drag that touches nothing else does
+    /// not, because the bake is a march down the SDF per sample and that is not
+    /// frame work.
+    fn upload_terrain(&mut self) {
+        let key = crate::terrain_key(&self.view.scene);
+        if key == self.terrain_uploaded {
+            return;
+        }
+        let field = crate::scene_terrain_field(&self.view.scene);
+        let Some(viewer) = self.viewer.as_mut() else {
+            return;
+        };
+        let result = match field.as_ref() {
+            Some(f) => viewer.set_terrain(&f.height, f.origin, f.spacing, f.side),
+            None => viewer.set_terrain(&[], [0.0; 2], 1.0, 0),
+        };
+        // **And the world raindrops collide with, on exactly the same trigger.**
+        // Carving the roof open in the editor lets rain through on the next
+        // frame because the field was re-baked, not because anything told the
+        // rain about it — which is Phase 4's sharpest exit criterion and now
+        // applies to a mesh gantry as well as to a voxel roof.
+        let rain_field = crate::rain_collision_field(&self.view.scene, self.view.world());
+        if let Some(f) = rain_field.as_ref()
+            && let Err(e) = viewer.set_rain_field(&f.sdf, f.dims, f.origin, f.spacing)
+        {
+            crate::log::error(format!("could not upload the rain collision field: {e}"));
+        }
+        match result {
+            Ok(()) => {
+                self.terrain_uploaded = key;
+                self.terrain = field;
+                // Carving the roof open in the editor lets rain in on the next
+                // frame with no reload, and the two bakes above are the whole
+                // reason: the height grid is where a drop falls to outside the
+                // collision field, and the collision field is what a drop
+                // actually tests against. Nothing per-frame marches the SDF.
+            }
+            Err(e) => crate::log::error(format!("could not upload the terrain heights: {e}")),
+        }
     }
 
     /// Re-derive from whatever the session currently holds.
@@ -626,9 +766,19 @@ impl ApplicationHandler for App {
             return;
         }
 
-        let attributes = Window::default_attributes()
+        let mut attributes = Window::default_attributes()
             .with_title(&self.title)
             .with_inner_size(winit::dpi::LogicalSize::new(1440, 900));
+        // `LOOM_WINDOW_AT=x,y` puts the window on a chosen monitor — the
+        // windowed half of `cargo xtask validate` opens five of these, and on a
+        // multi-head desk they land wherever the WM feels like. Physical
+        // pixels, and a hint: X11 honours it, a compositor may not.
+        if let Some((x, y)) = std::env::var("LOOM_WINDOW_AT").ok().and_then(|s| {
+            let (x, y) = s.split_once(',')?;
+            Some((x.trim().parse::<i32>().ok()?, y.trim().parse::<i32>().ok()?))
+        }) {
+            attributes = attributes.with_position(winit::dpi::PhysicalPosition::new(x, y));
+        }
         let window = match event_loop.create_window(attributes) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -653,6 +803,9 @@ impl ApplicationHandler for App {
                 self.gpu = Some((instance, device));
                 self.viewer = Some(viewer);
                 self.window = Some(window);
+                // The meshes went in through `Viewer::new`; grass has no such
+                // constructor argument, so the first field is placed here.
+                self.upload_grass();
             }
             Err(e) => {
                 eprintln!("loom: {e}");
@@ -775,6 +928,14 @@ impl ApplicationHandler for App {
                     // Exponential smoothing: readable, and one line.
                     self.fps = self.fps.mul_add(0.9, (1.0 / dt) * 0.1);
                 }
+                // Clamped for the same reason the camera step is: a stall must
+                // not jump the wind forward and snap every blade.
+                self.wind_seconds += dt.min(0.1);
+                // Once, and only when there is something to play into.
+                if self.autoplay && self.play.is_none() && self.viewer.is_some() {
+                    self.autoplay = false;
+                    self.start_play();
+                }
                 // Clamp: a stall must not teleport the camera across the map.
                 self.step_camera(dt.min(0.1));
                 // Once per frame, not once per keyboard event: `end_frame`
@@ -893,9 +1054,12 @@ impl ApplicationHandler for App {
                     Some(play) => &play.world,
                     None => self.view.world(),
                 };
+                // The scene'''s own weather, so a plume in the viewer bends the
+                // same way it does in a headless render.
+                let wind = crate::weather::wind_of(&self.view.scene);
                 let plumes = self
                     .plumes
-                    .get_or_insert_with(|| crate::particles::Plumes::new(world));
+                    .get_or_insert_with(|| crate::particles::Plumes::new(world, wind));
                 plumes.advance(stepped);
                 let particles: &[loom_render::ParticleInstance] = plumes.instances();
 
@@ -933,12 +1097,76 @@ impl ApplicationHandler for App {
                 // The scene's sky, from whichever world is current: play mode
                 // holds its own, and an environment edited during play should
                 // show up like any other edit.
-                let environment = crate::environment_of(match self.play.as_ref() {
+                // **The scene's own wind, at a clock that advances.** This was
+                // `environment_of`, which passes `Wind::default()` and a time of
+                // zero — so the window bent its grass with the wrong wind and
+                // then froze it there. The authored `Wind` reached the particles
+                // and never reached the blades.
+                let world = match self.play.as_ref() {
                     Some(play) => &play.world,
                     None => self.view.world(),
-                });
+                };
+                let wind = crate::weather::wind_of(&self.view.scene);
+                let mut environment =
+                    crate::environment_with_wind(world, &wind, self.wind_seconds);
+                // Whether the eye is under the water, from the same query that
+                // muffles the sound (W7). The fly camera and a swimming
+                // character both go through here, so the window's view and the
+                // scripts' `is_submerged` cannot disagree.
+                crate::submerge_eye(
+                    &mut environment,
+                    world,
+                    &wind,
+                    self.terrain.as_ref(),
+                    camera.eye,
+                    self.wind_seconds,
+                );
+                // And the rain, through the same call the headless path
+                // makes. The window gets the real version rather than a
+                // simplified one — three defects this phase were exactly that,
+                // with no gate able to see the difference. **Walking the fly
+                // camera under the shelter no longer stops the rain outside
+                // it**; the per-drop cull in the shader does that, per drop.
+                let drops = crate::rain_at_eye(
+                    &mut environment,
+                    crate::weather::rain_of(&self.view.scene).as_ref(),
+                    &wind,
+                    camera.eye,
+                    self.wind_seconds,
+                );
+                // Where the rain lands is the GPU's answer now: a splash is a
+                // collision `rain_sim.slang` resolved against the baked world,
+                // appended to a ring and drawn indirectly (ADR 0015).
+                let crowns: Vec<loom_render::ParticleInstance> = Vec::new();
+                let combined;
+                let particles: &[loom_render::ParticleInstance] = if crowns.is_empty() {
+                    particles
+                } else {
+                    combined = [particles, &crowns].concat();
+                    &combined
+                };
                 if let Some(viewer) = self.viewer.as_mut() {
                     viewer.environment = environment;
+                    viewer.set_rain(drops);
+                    // **The drop simulation's clock, in ticks.** The same
+                    // mapping the headless path uses — `--sim N` is N/60
+                    // seconds — so a window and a `loom render --sim N` of the
+                    // same scene ask the simulation for the same instant.
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    viewer.set_rain_tick((self.wind_seconds * 60.0).round().max(0.0) as u64);
+                }
+
+                // Everything above is the frame's CPU work: input, the
+                // simulation step, re-deriving draw calls, the weather, the
+                // particles and the panels. Sampled here rather than at the end
+                // of the handler for the reason `cpu_frames` gives.
+                #[allow(clippy::disallowed_methods)]
+                let cpu_ms = std::time::Instant::now().duration_since(now).as_secs_f64() * 1000.0;
+                self.cpu_frames += 1;
+                self.cpu_total_ms += cpu_ms;
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    self.cpu_worst_ms = self.cpu_worst_ms.max(cpu_ms as f32);
                 }
 
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
@@ -975,6 +1203,7 @@ impl ApplicationHandler for App {
                     self.frames_left = Some(left);
                     if left == 0 {
                         crate::log::info("frame budget reached — closing");
+                        self.report_cpu();
                         self.shutdown(event_loop);
                         return;
                     }
@@ -1177,6 +1406,7 @@ impl App {
         // too. Leaving the counter high would make the first shot of the next
         // run look like one already seen, and it would never be drawn.
         self.detonations_seen = 0;
+        self.splashes_seen = 0;
         self.reported_status = None;
         self.plumes = None;
         // Dropping the device closes the stream, so Stop is silent rather
@@ -1219,7 +1449,10 @@ impl App {
         ]);
         // Right-handed, world up: forward cross up.
         let right = normalize([forward[2], 0.0, -forward[0]]);
-        sound.update(&play.world, play.physics(), view.eye, right, forward);
+        // The ears' own state, from the simulation that owns the surface —
+        // the same water body, clock and bed a crate floats on.
+        let submerged = play.submerged_at(view.eye);
+        sound.update(&play.world, play.physics(), view.eye, right, forward, submerged);
     }
 
     /// Say how the game ended, once.
@@ -1260,20 +1493,27 @@ impl App {
         }
     }
 
-    /// Give the particle systems any explosion a script has just set off.
+    /// Give the particle systems any explosion a script has just set off, and
+    /// any splash the water has just raised.
     fn spawn_new_detonations(&mut self) {
         let Some(play) = self.play.as_ref() else {
             return;
         };
         let fired = play.fired();
-        if fired.len() <= self.detonations_seen {
+        let splashed = play.splashed();
+        if fired.len() <= self.detonations_seen && splashed.len() <= self.splashes_seen {
             return;
         }
-        let fresh: Vec<(u64, [f32; 3])> = fired[self.detonations_seen..]
+        let fresh: Vec<(u64, [f32; 3])> = fired[self.detonations_seen.min(fired.len())..]
+            .iter()
+            .map(|(tick, at)| (*tick, *at))
+            .collect();
+        let wet: Vec<(u64, [f32; 3])> = splashed[self.splashes_seen.min(splashed.len())..]
             .iter()
             .map(|(tick, at)| (*tick, *at))
             .collect();
         self.detonations_seen = fired.len();
+        self.splashes_seen = splashed.len();
 
         // Against the play world, because that is where the dormant prefab is
         // — the same scene, but the one the simulation is holding.
@@ -1282,7 +1522,26 @@ impl App {
             for (tick, at) in fresh {
                 plumes.detonate(world, at, tick);
             }
+            for (tick, at) in wet {
+                plumes.splash(world, at, tick);
+            }
         }
+    }
+
+    /// What the frame cost on the CPU, for a bounded run.
+    ///
+    /// One line, parseable, printed when `--frames` runs out. A golden image
+    /// renders a single frame and so cannot tell placing once from placing
+    /// sixty times a second; this is the number that can.
+    fn report_cpu(&self) {
+        if self.cpu_frames == 0 {
+            return;
+        }
+        let mean = self.cpu_total_ms / f64::from(self.cpu_frames);
+        crate::log::info(format!(
+            "cpu {mean:.3} ms/frame mean, {:.3} ms worst over {} frames",
+            self.cpu_worst_ms, self.cpu_frames
+        ));
     }
 
     /// Re-derive draw calls from the simulated world.
@@ -2001,6 +2260,7 @@ pub fn run(
     session: Option<loom_scene::Session>,
     disk_seen: loom_scene::VersionToken,
     frames: Option<u32>,
+    autoplay: bool,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
     // Poll, not Wait: the camera animates continuously while keys are held, and
@@ -2018,6 +2278,7 @@ pub fn run(
         disk_seen,
     );
     app.frames_left = frames.filter(|n| *n > 0);
+    app.autoplay = autoplay;
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))
@@ -2027,7 +2288,12 @@ pub fn run(
 ///
 /// # Errors
 /// A message describing what stopped it.
-pub fn open_scene(path: &str, editable: bool, frames: Option<u32>) -> Result<(), String> {
+pub fn open_scene(
+    path: &str,
+    editable: bool,
+    frames: Option<u32>,
+    autoplay: bool,
+) -> Result<(), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let base = std::path::Path::new(path)
         .parent()
@@ -2042,5 +2308,5 @@ pub fn open_scene(path: &str, editable: bool, frames: Option<u32>) -> Result<(),
         .transpose()
         .map_err(|e| format!("{path}: {e}"))?;
 
-    run(path, view, session, disk_seen, frames)
+    run(path, view, session, disk_seen, frames, autoplay)
 }

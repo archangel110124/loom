@@ -1,0 +1,24 @@
+# A prefab is an ordinary scene. Nothing marks it as one — what makes it a
+# prefab is that another file declares it in `[[prefab]]` and instances it.
+[scene]
+format = 1
+id = "7d3e1b90-4c25-4a68-9f01-2b6ce8a4d517"
+
+[[node]]
+name = "Lamp"
+
+  [node.components.Light]
+  intensity = 120.0
+  color = [1.0, 0.94, 0.82]
+
+[[node]]
+name = "Shade"
+parent = "Lamp"
+transform = { pos = [0.0, 0.42, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.82, 0.74]
+  roughness = 0.7

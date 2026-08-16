@@ -1,0 +1,182 @@
+# Something falls in the sea. W7, which is the four things that follow from a
+# body being *in* the water rather than only floating on it.
+#
+#     loom sim assets/test/splash.loom --ticks 1800 \
+#         --assert "events.submerged == 1" \
+#         --assert "events.surfaced == 1" \
+#         --assert "status == won" \
+#         --assert "state.wet_max < 0.6" \
+#         --assert "Sea/Crate.y < 1.5" --assert "Sea/Crate.y > -1.5"
+#
+# **`events.submerged == 1` is the assertion that means something**, and the
+# `==` is doing the work. That a crate dropped into the sea goes under at all is
+# not in doubt; that it goes under *once* is. The submerged fraction of a body
+# riding the surface swings with every wave that passes — measured on this
+# crate, between **0.080 and 0.466 of it is wet** once it has settled — so a
+# state read off any single threshold inside that band flips several times a
+# second. A script watching it fires on every flip, the splash re-fires with
+# each one, and none of it is visible in a still or in a final position.
+# Measured: **1 entry and 1 exit with the two thresholds below, and 5 of each
+# with them set equal.**
+#
+# `state.wet_max < 0.6` is the other half of that, and it is why the numbers are
+# in the file rather than in a comment: it asserts that the settled band never
+# reaches `enter`, so the single entry is a property of the sea and the crate
+# rather than a run that happened to come out right.
+#
+# The other three parts of W7 are the systems that hang off the state. The
+# script observes it and ends the game on it. The `ParticleEmitter` under the
+# water is the splash, thrown where the crate went in rather than where the
+# emitter sits. And in `loom run` the sound goes muffled while the listener's
+# own head is under — the one part a headless assertion cannot reach, because
+# the audio path is in the viewer, so it is covered by unit tests in
+# `loom_audio` instead.
+#
+# **Why the crate is light and dropped from fourteen metres.** It has to go
+# properly under and then come properly back up, or only one of the two edges
+# ever happens. At 174 kg/m³ it settles high enough that the waves cannot bury
+# it again, and the fall is what gets it under in the first place: dropped from
+# six it never passed `enter` at all, and a crate heavy enough to plunge on a
+# short fall is one the swell keeps burying — which is seven entries, all of
+# them real.
+
+[scene]
+format = 1
+id = "9c2f4d81-5a63-4e07-bb19-3d8e6f2a71c4"
+
+[[node]]
+name = "Sea"
+
+  [node.components.Environment]
+  sun_direction = [0.3, 0.42, -0.85]
+  sun_strength = 1.2
+  sun_color = [1.0, 0.95, 0.85]
+  ambient = 0.5
+  sky_zenith = [0.13, 0.27, 0.5]
+  sky_horizon = [0.6, 0.68, 0.74]
+  fog_density = 0.005
+  fog_falloff = 0.04
+
+  [node.components.Wind]
+  direction_degrees = 20.0
+  speed = 6.0
+  gustiness = 1.0
+  turbulence = 0.9
+
+  # The rules watch the water, not the crate. See the script.
+  [node.components.GameRules]
+  path = "../scripts/rules_on_water.rhai"
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  # A real sea rather than a mirror: the waves are what make the state flicker
+  # if nothing stops it, so a flat surface would make the assertion above pass
+  # with the hysteresis deleted.
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+  density = 1000.0
+  drag = 2.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 21.0
+  amplitude = 0.42
+  steepness = 0.35
+  direction = [1.0, 0.3]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 13.0
+  amplitude = 0.26
+  steepness = 0.45
+  direction = [0.8, -0.6]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 8.0
+  amplitude = 0.14
+  steepness = 0.5
+  direction = [1.0, 0.7]
+  speed_scale = 1.0
+
+# **What a splash off this water looks like.** A `ParticleEmitter` under the
+# `WaterBody` node is the water's splash and never plays where it sits — the
+# same arrangement a dormant `Blast` has, for the same reason: it is a
+# description of an event, and the event happens where something goes in.
+#
+# Droplets, so: a hard burst, thrown up and outward, pulled straight back down
+# by a negative gravity, and gone in about a second. Smoke is the opposite of
+# every one of those.
+[[node]]
+name = "Splash"
+parent = "Sea/Water"
+
+  [node.components.ParticleEmitter]
+  rate = 0.0
+  burst = 90
+  lifetime = 0.85
+  lifetime_jitter = 0.45
+  speed = 5.0
+  spread_degrees = 52.0
+  radius = 0.5
+  gravity = -9.0
+  drag = 0.5
+  turbulence = 0.6
+  turbulence_scale = 0.8
+  size = [0.28, 0.07]
+  color_start = [0.86, 0.93, 0.97]
+  color_end = [0.62, 0.74, 0.82]
+  alpha = [0.85, 0.0]
+  seed = 91
+
+[[node]]
+name = "Crate"
+parent = "Sea"
+transform = { pos = [0.0, 14.0, -6.0], rot_euler = [0.0, 12.0, 0.0], scale = [0.6, 0.6, 0.6] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.42, 0.3, 0.18]
+  roughness = 0.8
+
+  [node.components.RigidBody]
+  dynamic = true
+  # 1.2 m cube at 174 kg/m³.
+  mass = 300.0
+
+  [node.components.Buoyancy]
+
+  # Measured, not guessed. Settled, this crate is between 0.080 and 0.466 wet
+  # as the swell goes past, and the entry takes it well past 0.9. So `enter`
+  # sits above everything the waves can do and `exit` sits inside that band —
+  # which is the arrangement that matters: `exit` alone would chatter five
+  # times, and it is `enter` being out of reach that holds the state still.
+  [node.components.Submersion]
+  enter = 0.6
+  exit = 0.3
+
+# A fixed silhouette to judge the crate's motion against. A still cannot tell a
+# floating crate from one resting on an invisible floor.
+[[node]]
+name = "Post"
+parent = "Sea"
+transform = { pos = [-2.4, 0.7, -7.5], scale = [0.2, 3.0, 0.2] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.2, 0.16, 0.12]
+  roughness = 0.85
+
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [0.0, 1.6, 0.5], rot_euler = [-9.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0
