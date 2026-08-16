@@ -60,15 +60,18 @@ it is that the whole thing is 0.16–0.43 ms at 1920x1080.
 uniformly over the disc, jittered per pixel.
 
 **The angle is a look parameter and the measurement is what establishes that.**
-The real sun subtends 0.53°. At that width, a one-ray render of `materials`
-differs from a converged 64-ray one in 0.13% of pixels — against the golden
-gate's own 0.1% threshold for "a different image". There is no penumbra to
-resolve at the physical angle, and four rays there would be three rays spent on
-nothing. So what is measured instead is how far from physical the source has to
-go before a penumbra exists at all; converged renders of `materials` at 640x400,
-each against the 0.53° one:
+It is an angular *radius*, not a diameter: the sun's disc is 0.53° across, so
+its radius is 0.265°, and the smallest row measured is 0.5° — already nearly
+twice the real sun. Even there, a one-ray render of `materials` differs from a
+converged 64-ray one in 0.13% of pixels, against the golden gate's own 0.1%
+threshold for "a different image". There is no penumbra to resolve at anything
+physical, and four rays there would be three rays spent on nothing.
 
-| angle | mean | worst | pixels past tolerance |
+So what is measured instead is how far *past* physical the source has to go
+before a penumbra exists at all; converged renders of `materials` at 640x400,
+each against the 0.5° one:
+
+| radius | mean | worst | pixels past tolerance |
 | --- | --- | --- | --- |
 | 2.0° | 0.0139 | 44 | 0.28% |
 | 4.0° | 0.0404 | 58 | 0.58% |

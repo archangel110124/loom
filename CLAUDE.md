@@ -563,8 +563,9 @@ change, so your edits appear live. Two consequences:
 > **Every constant was chosen by measurement and the measurements are in the code.** Two of them
 > overturned the shape the feature was first written in: a roughness cutoff on reflections was
 > built and then **deleted** because picture-per-millisecond is flat across every band, and the
-> soft-shadow angle is 2° rather than the sun's real 0.53° because at the physical angle the
-> penumbra is *below the golden gate's own threshold* — a 1-ray render matches a 64-ray one.
+> soft-shadow angle is a 2° *radius* rather than the sun's real 0.265° because at anything
+> physical the penumbra is *below the golden gate's own threshold* — a 1-ray render matches a
+> 64-ray one even at twice the real sun's width.
 >
 > **Watch for fireflies whenever a secondary ray shades a hit.** Reflections shipped with a
 > worst-channel error of 173 against the gate's 72 until `REFLECT_MAX_RADIANCE` landed: a

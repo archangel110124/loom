@@ -999,16 +999,18 @@ void rayBasis(float3 axis, out float3 u, out float3 v) {
 // express that at all; `SUN_RAYS` of them, spread over the disc, is the whole
 // mechanism.
 //
-// **This is wider than the real sun, deliberately, and the measurement is what
-// says so.** The sun subtends 0.53° from Earth. At that width the penumbra is
-// at the noise floor: a 1-ray render of `materials` differs from a 64-ray one
-// in 0.13% of pixels, against the golden gate's own 0.1% threshold for "a
-// different image". Four rays at the physical angle would be four rays spent
-// on something nobody can see.
+// **Wider than the real sun, deliberately, and the measurement is what says
+// so — and it is an angular *radius*, not a diameter.** The sun's disc is
+// 0.53° across as seen from Earth, so its radius is 0.265° — and the smallest
+// row measured below is 0.5°, already nearly twice the real sun. Even there the
+// penumbra is at the noise floor: a 1-ray render of `materials` differs from a
+// 64-ray one in 0.13% of pixels, against the golden gate's own 0.1% threshold
+// for "a different image". Four rays at anything physical would be three rays
+// spent on something nobody can see.
 //
 // So the angle is a *look* parameter, not a physical one, and what is measured
-// is how far from physical it has to go before the penumbra exists. Converged
-// (64-ray) renders of `materials` at 640x400, each against the 0.53° one:
+// is how far past physical it has to go before the penumbra exists. Converged
+// (64-ray) renders of `materials` at 640x400, each against the 0.5° one:
 //
 //     angle    mean     worst   pixels past tolerance
 //     2.0deg   0.0139   44      0.28%
