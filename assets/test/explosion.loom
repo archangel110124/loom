@@ -101,8 +101,15 @@ transform = { pos = [0.0, 0.5, 0.0] }
   turbulence = 2.2
   turbulence_scale = 0.45
   size = [1.6, 8.0]
-  color_start = [0.12, 0.10, 0.09]
-  color_end = [0.42, 0.41, 0.40]
+  # **These are albedos now, and 0.42 was a paint colour.** Particles used to be
+  # unlit, so `color_end` was the literal pixel and a mid grey was the right
+  # authoring for it. They take this scene's point lights on a hemisphere normal
+  # off the sprite's own geometry, and the "Sun" here is intensity 300 — about 6
+  # at this distance — so a 0.42 ball came out white and the blast's smoke read
+  # as steam. 0.16 is soot with a little ash in it, and the light is what shapes
+  # it.
+  color_start = [0.055, 0.048, 0.044]
+  color_end = [0.160, 0.155, 0.150]
   alpha = [0.5, 0.0]
   seed = 7
 

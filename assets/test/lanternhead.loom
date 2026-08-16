@@ -494,11 +494,17 @@ transform = { pos = [8.0, 0.0, 24.0] }
 # `campfire.loom` never showed that because its background is a night sky, and
 # unlit black plus a little additive orange is still nearly black.
 #
-# Here the brazier sits where the camera's line to it continues into the dark
-# flank of the headland. Same flame, same size, same tick: against that it is
-# one coherent tongue. **A fire in this engine needs a dark backdrop, and that
-# is a composition constraint rather than a bug** — it is what the additive
-# blend means.
+# **That constraint is gone, and the position is kept for the composition
+# rather than for the shader.** The shards were the FUEL LOBES: `lobes` was
+# `sin(w.x * 5.5 + ...)` measured from the emitter, so the flame's own axis was
+# a fuel minimum and the survivors sat 1.14 m apart straddling a dead middle. A
+# line integral through the field, a threshold that ends the fire before the
+# quad does, and a non-zero alpha are what fixed it. `tools/fire_shots.sh`
+# renders this brazier moved 3.4 m onto the open deck as the standing check that
+# it stays fixed.
+#
+# The dark flank of the headland behind it is still the better shot, and it is
+# also where a brazier on a quay would be.
 
 [[node]]
 name = "Brazier"
@@ -516,8 +522,15 @@ transform = { pos = [27.6, 9.62, 34.0], scale = [0.42, 0.22, 0.42] }
 [[node]]
 name = "Flame"
 parent = "Lanternhead"
-transform = { pos = [27.6, 10.4, 34.0] }
+transform = { pos = [27.6, 10.92, 34.0] }
 
+  # **Raised 0.52 m, because the brazier was not holding the fire — the fire was
+  # standing behind it.** The quad is 2.2 m tall, so at 10.4 its base — the fuel
+  # line, `h = 0` — sat at 9.30, and the bowl's rim is at 9.84 and its underside
+  # at 9.40. The fire's fuel was therefore *below the bottom of the bowl*, and at
+  # 4K a tongue visibly licked down the outside of it onto the cobbles. At 10.92
+  # the fuel line is at the rim, which is where a brazier's fuel is.
+  #
   # One static quad carrying the flame field, exactly as `campfire.loom` does —
   # overdraw of one, so `fireRamp` is honoured everywhere. Its top rung is
   # uncapped since ADR 0018, so the core is genuinely white-hot rather than the
@@ -547,27 +560,34 @@ transform = { pos = [27.6, 10.4, 34.0] }
 [[node]]
 name = "Smoke"
 parent = "Lanternhead"
-transform = { pos = [27.6, 10.9, 34.0] }
+transform = { pos = [27.6, 11.65, 34.0] }
 
   # Alpha-blended, not additive: smoke occludes. `wind_response = 4.0` is what
   # lays the plume over toward the headland instead of standing it straight up,
   # and it is the only thing in this scene that shows the wind field as a
   # *direction* rather than as a bend.
+  #
+  # **The albedo is soot now.** 0.20 grey against a bright sea is a pale streak;
+  # 0.035 is lampblack, and what makes it visible at all is that the brazier
+  # lights the side of each puff facing it. That is the whole of black smoke and
+  # it needs the scene to supply the dark. The rate is up and the per-puff alpha
+  # with it, because six countable balls do not become a volume by being shaded
+  # — `1 - (1 - a)^n` through a stack nobody can resolve is what does.
   [node.components.ParticleEmitter]
-  rate = 34.0
-  lifetime = 2.2
+  rate = 70.0
+  lifetime = 3.0
   speed = 1.5
   spread_degrees = 24.0
-  radius = 0.26
+  radius = 0.22
   gravity = 1.5
   drag = 0.9
   turbulence = 1.6
   turbulence_scale = 0.3
   wind_response = 4.0
   size = [0.40, 2.2]
-  alpha = [0.34, 0.0]
-  color_start = [0.20, 0.19, 0.18]
-  color_end = [0.46, 0.46, 0.49]
+  alpha = [0.55, 0.0]
+  color_start = [0.035, 0.032, 0.030]
+  color_end = [0.130, 0.130, 0.140]
   seed = 8837
 
 # **Every light below is physical, which is what this scene is here to show.**
