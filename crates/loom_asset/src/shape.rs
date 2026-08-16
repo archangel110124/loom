@@ -15,10 +15,23 @@
 //! is a concave surface with area. Measured here, on this machine:
 //!
 //! ```text
-//! photogrammetry boulder (rock_boulder_a.obj)   concave 51.9%
-//! ridged-displaced sphere, voxel 0.03           concave 44.8%
-//! 49-op union of spheres and capsules, hard min concave  4.5%
+//! photogrammetry boulder (rock_boulder_a.obj)   concave 44.2%   spread 1.29
+//! ridged-displaced sphere, voxel 0.03           concave 47.0%   spread 1.53
+//! 49-op union of spheres and capsules, hard min concave  8.7%   spread 0.53
 //! ```
+//!
+//! Those are this machine's numbers, from `cargo run --release -p loom_voxel
+//! --example rockcalib`, and they are **not** the research report's 55.8 / 49.2
+//! / 8.9 for the same three shapes. The absolute value depends on
+//! implementation detail — Voronoi against barycentric vertex area, how open
+//! boundaries are handled — so only the ordering and within-instrument
+//! comparisons are load-bearing. Reproducing a number from the report is not a
+//! check that this module is right; re-running `rockcalib` is.
+//!
+//! **Spread is the half that cannot be faked.** Carving subtract-spheres into
+//! the primitive blob takes it from 8.7% to 32.7% concave while its spread
+//! stays at 0.70; real stone and ridged displacement are both above 1.1. Read
+//! both columns, always.
 //!
 //! The radial power spectrum does not separate these; curvature sign does.
 //!
@@ -86,8 +99,9 @@ impl ShapeStats {
 
 /// Curvature statistics for one mesh.
 ///
-/// Cost is linear in triangles and dominated by the weld's sort: 2.4 ms on the
-/// 62,660-triangle `rock_boulder_a.obj` [measured].
+/// Cost is linear in triangles and dominated by the weld's sort: 27.2 ms on the
+/// 30,223-triangle `rock_boulder_a.obj`, measured by `rockcalib`'s own scan row,
+/// which times exactly this call.
 #[must_use]
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn stats(mesh: &Mesh) -> ShapeStats {

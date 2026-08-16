@@ -48,7 +48,12 @@ fn main() {
             }
         }
     }
-    println!("max |grad value3| = {max3:.3}   (Displace::gradient_bound uses 3.0)");
+    println!("max |grad value3| = {max3:.3}   (Displace::gradient_bound uses 4.0 per octave)");
     println!("max |grad value|  = {max2:.3}   (Heightfield lipschitz uses 3.0)");
     println!("analytic per-axis bound for smootherstep over a [-1,1] range = 3.75");
+    println!(
+        "NOTE: this bounds `value3` only. `ridged3` is not a weighted sum of it — \
+         gradient_bound multiplies by a further 4 for `ridged = true`, and \
+         `loom_voxel --example gradcheck` is what measures the composed field."
+    );
 }

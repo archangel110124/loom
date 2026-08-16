@@ -291,11 +291,42 @@ impl Displace {
     /// same failure the heightfield's own bound exists to prevent — and it
     /// fails in the direction that looks like broken geometry rather than slow
     /// baking, so it errs high on purpose.
+    ///
+    /// **Ridged noise is four times steeper than fBm at the same parameters**,
+    /// and this bound was written for fBm alone. [`loom_terrain::noise::ridged3`]
+    /// is not a weighted sum of `value3`: each octave is `(1 - |v|)^2` times the
+    /// previous octave's weight, and the sum is then mapped from `[0, 1]` back
+    /// to `[-1, 1]`. Those are two separate factors of two — `d/dv (1-|v|)^2` is
+    /// `2(1-|v|)`, at most 2, and the output remap is another 2 — so a per-octave
+    /// factor of `4 * 4.0` covers both.
+    ///
+    /// **It does not cover the third term analytically, and that is stated
+    /// rather than hidden.** `weight` carries each octave's value into the next,
+    /// so `dn_i` picks up a `2*dn_{i-1}` that grows with octave count in the
+    /// worst case. What settles it is measurement, in the direction the term
+    /// predicts: headroom against this bound *widens* with octaves rather than
+    /// closing, so the feedback is nowhere near its worst case on real
+    /// coefficients. If a future octave count ever runs out of headroom, this is
+    /// the term that ate it.
+    ///
+    /// Measured, because the analytic argument had been made once already and
+    /// was wrong: `cargo run --release -p loom_voxel --example gradcheck` takes
+    /// the largest `|grad at|` over six seeds and a refined grid search. Against
+    /// the fBm factor the ridged field exceeded its own bound at **every** octave
+    /// count — 3.28x at one octave, 1.62x at the recommended five, 1.22x at
+    /// eight — while fBm stayed under it at 0.42-0.83x. With this factor the
+    /// worst ratio is 0.82, at one octave, falling to 0.30 at eight.
+    /// `--example holecheck` closes the loop on what the gap cost: at
+    /// `voxel_size = R/200`, which the recipe's `<= R/20` permits, the early-out
+    /// was filling chunks that held surface — 353 voxels on the wrong side of it
+    /// across the probe, and 0 with this factor.
     #[must_use]
     pub fn gradient_bound(&self) -> f32 {
         if self.amplitude.abs() < 1e-6 {
             return 0.0;
         }
+        // See above: the squared ridge and the [0,1] -> [-1,1] remap.
+        let shape = if self.ridged { 4.0 } else { 1.0 };
         let mut slope = 0.0;
         let mut amp = 1.0_f32;
         let mut freq = self.frequency;
@@ -314,7 +345,7 @@ impl Displace {
             // the heightfield's 3.0 has room to spare and this path did not — it
             // was copied from there and understated its own bound, which is the
             // direction that punches holes.
-            slope += amp * freq * 4.0;
+            slope += amp * freq * 4.0 * shape;
             norm += amp;
             amp *= 0.5;
             freq *= 2.0;
@@ -2119,6 +2150,70 @@ mod tests {
             worst <= 1.0 + 1e-4,
             "a shape transform is not 1-Lipschitz: {worst}"
         );
+    }
+
+    /// **`lipschitz()` must bound a *displaced* op too, and it did not.**
+    ///
+    /// The transform test above sets `displace: None`, so nothing checked the
+    /// one op whose field is not a true distance — which is the only op whose
+    /// bound has to be derived rather than known. It was derived for fBm and
+    /// applied to ridged noise, which is four times steeper at the same
+    /// parameters (see [`Displace::gradient_bound`]); the early-out then filled
+    /// chunks that held surface, at any `voxel_size` fine enough that a chunk
+    /// was small against the noise's own wavelength.
+    ///
+    /// Pairs are close together on purpose. The ratio over a long segment is an
+    /// average and cannot reach the bound, so a test that sampled the whole
+    /// volume would pass on a bound half the true one — which is how this got
+    /// through. **The mutation is `Displace::gradient_bound`'s `shape` factor
+    /// back to 1.0**: run, not assumed, and it fails at 2.18 against 1.48.
+    #[test]
+    fn a_displaced_op_never_falls_faster_than_its_own_bound() {
+        let mut next = unit_random(0xD1B5_4A32_D192_ED03);
+        for &ridged in &[true, false] {
+            for &octaves in &[1_u32, 2, 3, 5] {
+                let mut worst = 0.0_f32;
+                let op = VoxelOp::Sphere {
+                    center: [0.0; 3],
+                    radius: 1.5,
+                    mode: CsgMode::Union,
+                    displace: Some(Displace {
+                        amplitude: 0.30,
+                        frequency: 0.4,
+                        octaves,
+                        seed: 9,
+                        ridged,
+                    }),
+                    elongate: [0.0; 3],
+                };
+                let bound = op.lipschitz();
+                for _ in 0..20_000 {
+                    let a = [next() * 3.0, next() * 3.0, next() * 3.0];
+                    let step = 2e-3;
+                    let b = [
+                        next().mul_add(step, a[0]),
+                        next().mul_add(step, a[1]),
+                        next().mul_add(step, a[2]),
+                    ];
+                    let travelled = length(sub(a, b));
+                    if travelled < 1e-5 {
+                        continue;
+                    }
+                    worst = worst.max((op.distance(a) - op.distance(b)).abs() / travelled);
+                }
+                assert!(
+                    worst > 0.5,
+                    "ridged={ridged} octaves={octaves}: the sampling never got near \
+                     anything, so a pass here would mean nothing: {worst}"
+                );
+                assert!(
+                    worst <= bound,
+                    "ridged={ridged} octaves={octaves}: the field falls at {worst} per unit \
+                     against a claimed bound of {bound} — the bake's early-out will skip \
+                     chunks that hold surface"
+                );
+            }
+        }
     }
 
     /// **`bounds()` is the one thing here that breaks quietly.** `Volume::edit`
