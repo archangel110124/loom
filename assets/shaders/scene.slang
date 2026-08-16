@@ -1175,6 +1175,182 @@ float ambientVisibility(float3 position, float3 normal, float bias, float2 pixel
     return open / float(AO_RAYS);
 }
 
+// ---------------------------------------------------------------------------
+// Ray-traced reflections.
+//
+// **What is in the acceleration structure, and what is not.** The TLAS holds
+// one instance per `Object` — meshes, and nothing else. Grass, water, rain,
+// fire and smoke are all generated in a vertex shader from `SV_VertexID` with
+// no vertex or index buffer, so none of them is in it and none of them can be
+// hit by a ray. A reflection is therefore a reflection of *the meshes*, and
+// this is stated here rather than discovered later because the scene the
+// feature was built against is exactly the one where it shows: in
+// `lanternhead` a wet quay at `WET_SMOOTH` roughness now carries the shed, the
+// brazier's drum and the lantern posts, and does not carry the flame two
+// metres from it. See ADR 0019 for what was measured and why it ships anyway;
+// the short version is that the fire's *light* does arrive, because the hit is
+// shaded by the same `pointLights` the primary surface is, and a brazier's
+// contribution to a reflection is mostly its pool of orange light rather than
+// its flame.
+//
+// The miss path is the term this replaces: the analytic sky gradient. So a
+// scene with nothing to reflect renders as it did, and the change is additive
+// rather than a swap.
+// ---------------------------------------------------------------------------
+
+/// How far a reflection ray looks, in metres.
+///
+/// **A bound, because fog makes one free.** Past a certain distance a hit is
+/// already fully hazed and contributes nothing but a full traversal. Measured
+/// on `lanternhead` at 960x600 against a 4 km build, worst channel difference:
+///
+///     range    15 m   30 m   60 m   120 m   240 m
+///     worst    24     1      0      0       0
+///
+/// 60 m is *bit for bit* the unbounded answer on this scene and on `materials`,
+/// which is the smallest value that can be said of. 30 m is one channel off in
+/// one pixel; 15 m is visibly short.
+///
+/// **This is per-scene in a way the number does not admit.** It is set by how
+/// thick the fog is, and a scene authored clear would want more. The honest
+/// version reads `fogDensity()` and solves for where the transmittance falls
+/// below a threshold — worth doing when a clear-air scene with a mirror in it
+/// exists, and not before.
+static const float REFLECT_RANGE = 60.0;
+
+/// Ceiling on the radiance one reflection ray may report.
+///
+/// **This is the firefly clamp, and the feature does not ship without it.** A
+/// reflected hit is shaded by the same `pointLights` the primary surface is,
+/// and that term is a windowed inverse square: neighbouring pixels on a rippled
+/// wet surface send their rays to quite different places, and a ray that lands
+/// close to a lantern comes back with a radiance two orders of magnitude above
+/// its neighbours. One sample of a high-variance integrand is what a firefly
+/// *is*. `lanternhead` showed it immediately — isolated orange pixels scattered
+/// across the quay, worst-channel error 173 against a stubbed build, well past
+/// the golden gate's own 72.
+///
+/// The two standard cures are both closed to this project: more samples per
+/// pixel (measured below, and the cost is not in the budget) and temporal
+/// accumulation (ADR 0010, ADR 0018 — a frame must stay a function of its
+/// tick). Clamping is the third, it is one `min`, and the codebase already
+/// does exactly this at `LIGHT_MAX` for the singularity of a single light.
+///
+/// Chosen by counting salt — pixels more than 24/255 from the median of their
+/// eight neighbours — on `lanternhead` at 960x600. The stubbed build already
+/// scores 8,174 from the ripples and the rain, so what matters is what the
+/// reflection *adds*:
+///
+///     clamp        1      2      4      8      16     64     none
+///     salt added   0      3      10     37     39     39     39
+///     worst        36     36     36     56     86     166    173
+///     mean         .0954  .0970  .0973  .0979  .0990  .1010  .1006
+///
+/// **4.0.** Below it the term is still gaining brightness; above it the salt
+/// nearly quadruples and the worst-channel error leaves the floor of 36 that
+/// three different clamps agree on. At 4.0 the reflection adds 10 salt pixels
+/// in 576,000 and keeps 97% of the brightness the unclamped version has.
+///
+/// The unclamped worst of 173 is the number that matters most here: it is more
+/// than twice the golden gate's own 72, so an unclamped build would have been
+/// failing the gate on noise rather than on content.
+static const float REFLECT_MAX_RADIANCE = 4.0;
+
+/// What the surface at `position` sees along `dir`.
+///
+/// `dir` is the roughness-widened lobe direction, not the mirror direction:
+/// bending toward the normal as roughness rises is the same cheap stand-in for
+/// a prefiltered environment the sky-only version used, and keeping it means a
+/// slightly rough surface reflects a slightly blurred scene rather than a sharp
+/// one.
+///
+/// **There is no roughness cutoff, and one was measured and removed.** The
+/// obvious shape for this is "trace only below some roughness, sky above it",
+/// and a single mirror ray genuinely is a poor sample of a wide lobe. But the
+/// blend at the bottom of this function already weights the traced answer to
+/// zero as roughness reaches 1, so a cutoff is a *cost* argument, and the cost
+/// is not there. `lanternhead` at 1920x1080, forward pass, against a build with
+/// the trace stubbed out at 0.782 ms:
+///
+///     cutoff       0.10    0.20    0.35    0.50    1.00 (none)
+///     forward ms   0.776   0.801   0.839   0.857   0.885
+///     pixels       0%      0.002%  1.51%   3.00%   4.39%
+///     salt added   0       0       3       -4      20
+///
+/// Picture-per-millisecond is flat across every band — 2.5, 3.3 and 3.5 units
+/// of mean difference per millisecond going up — so there is no knee to put a
+/// cutoff at, and the salt count says the wide-lobe samples are not producing
+/// blotches on these scenes. Removing it deletes a constant and a branch. If a
+/// scene ever does show single-sample blotching on a rough surface, the fix is
+/// the cutoff, and this table is where it goes back.
+float3 tracedEnvironment(float3 position, float3 normal, float3 dir,
+                         float roughness, float bias) {
+    float3 sky = skyGradient(dir);
+    float3 origin = position + normal * bias;
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = dir;
+    ray.TMin = bias;
+    ray.TMax = REFLECT_RANGE;
+
+    // **No `ACCEPT_FIRST_HIT_AND_END_SEARCH` here**, unlike every other ray in
+    // this file. A shadow ray wants any blocker; a reflection wants the
+    // *nearest* surface, and the first one traversal happens to find is not it.
+    // Using the shadow flags here compiles, runs, and reflects whatever the
+    // BVH visited first — which looks like the right objects in the wrong
+    // order and is very hard to read as a bug.
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    query.TraceRayInline(sceneTLAS, RAY_FLAG_NONE, 0xFF, ray);
+    query.Proceed();
+    if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+        return sky;
+    }
+
+    // **`CommittedInstanceID` is the object index**, packed into the TLAS
+    // instance's custom index by `raytrace.rs::build_instances` from the same
+    // mesh-sorted slice `pack_objects` fills this buffer from. That is the
+    // whole channel from traversal back to the shader, and it is enough for a
+    // colour without a second buffer or a descriptor.
+    ObjectData hitObject = push.objects[query.CommittedInstanceID()];
+    float3 albedo = hitObject.color.rgb;
+    if (hitObject.material.x != NO_TEXTURE) {
+        // The material's base colour, not its texture. Fetching a texel would
+        // need the triangle's UVs, which needs the index buffer, which is one
+        // more pointer than the push block has room for — and at the
+        // roughnesses this runs at, a reflection is a smear of a surface rather
+        // than a readable image of it.
+        albedo = push.materials[hitObject.material.x].albedo.rgb;
+    }
+
+    float3 hit = origin + dir * query.CommittedRayT();
+    // **The reversed ray direction, standing in for the hit's normal.**
+    //
+    // Exact whenever the surface faces the ray head-on and wrong by the angle
+    // of incidence otherwise, so it is right at the centre of a reflection and
+    // degrades at its edges — a floor reflecting a wall gets the wall's normal
+    // exactly, a floor reflecting a distant roof at a grazing angle does not.
+    // The alternative is the triangle's own normal, which means the index
+    // buffer, a per-mesh first-index, and three vertex fetches per reflected
+    // pixel; ADR 0019 records that trade and why it was not taken yet.
+    float3 hitNormal = -dir;
+    float visibility = sunVisibilityHard(hit, hitNormal, bias);
+    float3 shade = albedo
+        * (hemisphereAmbient(hitNormal) * ambientStrength()
+           + pointLights(hit, hitNormal)
+           + sunStrength() * max(dot(hitNormal, sunDirection()), 0.0) * visibility);
+    // See `REFLECT_MAX_RADIANCE`. Per channel rather than on the luminance, so
+    // a clamped firefly loses brightness and not its hue.
+    shade = min(shade, REFLECT_MAX_RADIANCE);
+
+    // Fogged over the distance the ray travelled, so a reflection recedes into
+    // the same haze the direct view of that surface would. Without it a wet
+    // quay reflects a crisp shed standing in front of a fogged one.
+    shade = lerp(shade, fogColor(dir), fogAmount(origin, hit));
+
+    // Toward the sky as the lobe widens, reaching it exactly at roughness 1 —
+    // which is the old sky-only term, bit for bit, for a fully rough surface.
+    return lerp(shade, sky, saturate(roughness));
+}
 
 // ---------------------------------------------------------------------------
 // Materials.
@@ -2017,7 +2193,13 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // toward the normal as roughness rises is the usual cheap stand-in for a
     // prefiltered environment map, and the fade keeps a chalky surface from
     // picking up a mirror's worth of sky.
-    float3 environment = skyGradient(normalize(lerp(reflection, normal, roughness)));
+    float3 lobe = normalize(lerp(reflection, normal, roughness));
+    // **And now the scene is in it too.** This was `skyGradient(lobe)` — an
+    // analytic sky and nothing else, so a mirror in a room reflected the
+    // weather through the ceiling. At roughness 1 it still is, bit for bit,
+    // which is what keeps a fully matte surface unchanged.
+    float3 environment = tracedEnvironment(in.worldPos, geometric, lobe, roughness,
+                                           in.shadowBias);
     lit += environment * f0 * (1.0 - roughness * 0.7);
 
     // **A puddle is a mirror, and this is what was missing.** The term above is
