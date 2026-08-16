@@ -9,7 +9,7 @@
 //!
 //! Instead every texture in the scene goes into a single array, bound once for
 //! the whole pass, and a material names its textures by *index*. Adding a
-//! material costs 48 bytes in a buffer and no API calls at all.
+//! material costs 64 bytes in a buffer and no API calls at all.
 //!
 //! # Fixed size, not `VARIABLE_DESCRIPTOR_COUNT`
 //!
@@ -63,6 +63,20 @@ pub struct MaterialData {
     /// give every untextured surface in the project the first material in the
     /// table as its cliff face.
     pub maps: [u32; 4],
+    /// `rgb` is this material's **average** linear albedo: the authored
+    /// `albedo` multiplied by the mean colour of its albedo texture. `w` is
+    /// unused.
+    ///
+    /// It exists because a ray-traced reflection has no UVs — see
+    /// `tracedEnvironment` in `scene.slang` — so it cannot fetch a texel and
+    /// used to shade a reflected hit with `albedo` alone. Every textured
+    /// material in this project authors `albedo = [1, 1, 1]` and lets the map
+    /// carry the colour, so that made every reflection a blown-out cream
+    /// silhouette at five times the right brightness.
+    ///
+    /// Untextured, the mean is exactly `[1, 1, 1]` and this is `albedo`
+    /// bit-for-bit.
+    pub mean_albedo: [f32; 4],
 }
 
 /// Set in `maps[2]`: project textures down the world axes instead of reading
@@ -75,6 +89,7 @@ impl Default for MaterialData {
             albedo: [0.8, 0.8, 0.8, 0.4],
             params: [0.0, 0.8, 1.0, 1.0],
             maps: [NO_TEXTURE, NO_TEXTURE, 0, NO_TEXTURE],
+            mean_albedo: [0.8, 0.8, 0.8, 0.0],
         }
     }
 }

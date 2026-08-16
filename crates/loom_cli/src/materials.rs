@@ -30,6 +30,17 @@ pub(crate) struct MaterialLibrary {
     pub(crate) by_alias: BTreeMap<String, u32>,
 }
 
+/// The average linear colour of a bindless slot, or white for [`NO_TEXTURE`].
+///
+/// White rather than black is what keeps an untextured material's reflection
+/// colour bit-identical to its authored `albedo`: multiplying by exactly 1.0
+/// is exact.
+fn mean_of(textures: &[loom_asset::Texture], slot: u32) -> [f32; 3] {
+    textures
+        .get(slot as usize)
+        .map_or([1.0; 3], loom_asset::Texture::mean_linear)
+}
+
 impl MaterialLibrary {
     /// The material index for an entity, or [`NO_TEXTURE`] for "no material",
     /// which leaves the object on its debug palette colour.
@@ -150,6 +161,11 @@ impl MaterialLibrary {
                     };
                     let la = lvec("albedo", [0.8; 3]);
                     let luv = lvec("uv_scale", [1.0, 1.0, 0.0]);
+                    // **Hoisted out of the struct literal below**, because the
+                    // mean has to read `library.textures` and `map` borrows it.
+                    let layer_albedo_map = map(lf("albedo_map"), loom_asset::ColorSpace::Srgb);
+                    let layer_normal_map = map(lf("normal_map"), loom_asset::ColorSpace::Linear);
+                    let lmean = mean_of(&library.textures, layer_albedo_map);
                     let slot = u32::try_from(library.materials.len()).unwrap_or(0);
                     library.materials.push(MaterialData {
                         albedo: [la[0], la[1], la[2], lscalar("porosity", 0.15)],
@@ -164,8 +180,8 @@ impl MaterialLibrary {
                             luv[1],
                         ],
                         maps: [
-                            map(lf("albedo_map"), loom_asset::ColorSpace::Srgb),
-                            map(lf("normal_map"), loom_asset::ColorSpace::Linear),
+                            layer_albedo_map,
+                            layer_normal_map,
                             // **Inherited, not defaulted, and this is the bug
                             // that ships a grey terrain.** The shader reads
                             // `FLAG_TRIPLANAR` from whichever record it is
@@ -178,6 +194,7 @@ impl MaterialLibrary {
                             // A layer has no layer of its own.
                             NO_TEXTURE,
                         ],
+                        mean_albedo: [la[0] * lmean[0], la[1] * lmean[1], la[2] * lmean[2], 0.0],
                     });
                     // The slope cosine rides in the parent's spare metallic
                     // lane below rather than growing the struct.
@@ -186,6 +203,11 @@ impl MaterialLibrary {
                 _ => None,
             };
 
+            // **What a ray-traced reflection shades with.** It has no UVs, so
+            // it cannot fetch a texel; this is the texture's average colour
+            // instead, tinted by the authored `albedo` so a material that
+            // tints its map still reflects the tint.
+            let mean = mean_of(&library.textures, albedo_map);
             let slot = u32::try_from(library.materials.len()).unwrap_or(0);
             library.materials.push(MaterialData {
                 // `w` is porosity — how much this surface darkens when wet.
@@ -205,6 +227,7 @@ impl MaterialLibrary {
                     if triplanar { FLAG_TRIPLANAR } else { 0 },
                     layer_slot.unwrap_or(NO_TEXTURE),
                 ],
+                mean_albedo: [albedo[0] * mean[0], albedo[1] * mean[1], albedo[2] * mean[2], 0.0],
             });
             library.by_entity.insert(index, slot);
         }
@@ -327,5 +350,29 @@ name = "Plain"
         );
         assert_eq!(lib.materials.len(), 1);
         assert_eq!(lib.materials[0].maps[3], NO_TEXTURE);
+    }
+
+    /// **An untextured material's reflection colour must not move at all.**
+    /// `mean_albedo` is `albedo` times the texture's mean, and with no texture
+    /// the mean is exactly 1.0 — so this is bit-identical, not merely close,
+    /// and every scene in the project that reflects a plain-coloured surface
+    /// renders byte for byte as it did.
+    #[test]
+    fn an_untextured_material_reflects_exactly_its_albedo() {
+        let lib = library(
+            r#"
+[scene]
+format = 1
+id = "3a7e0c51-9d24-4b68-8f13-25c7e094ab6d"
+
+[[node]]
+name = "Plain"
+
+  [node.components.Material]
+  albedo = [0.3, 0.27, 0.24]
+"#,
+        );
+        let m = &lib.materials[0];
+        assert_eq!(m.mean_albedo[..3], m.albedo[..3], "bit-identical, not close");
     }
 }
