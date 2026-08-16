@@ -62,9 +62,18 @@ pub struct Viewer {
     /// does not contain the subject, and it survived longer.
     msaa: Option<crate::renderer::Msaa>,
 
-    /// The anti-aliasing pass and the image the scene is drawn into first, or
-    /// `None` when `LOOM_CMAA2` is unset — the default, and then the scene is
-    /// drawn straight into the swapchain image exactly as before.
+    /// The HDR image the forward pass resolves into. **Always present**: the
+    /// tonemap is what bridges it to the swapchain, and there is no path that
+    /// skips the tonemap.
+    scene: vk::Image,
+    scene_view: vk::ImageView,
+    scene_alloc: Option<Allocation>,
+    /// The pass that collapses `scene` into eight bits.
+    tonemap: crate::tonemap::Tonemap,
+
+    /// The anti-aliasing pass and the display-referred image the tonemap
+    /// writes into first, or `None` when `LOOM_CMAA2` is unset — the default,
+    /// and then the tonemap writes the swapchain image directly.
     ///
     /// **The window needs this as much as the offscreen path does**, and more:
     /// it is where the human looks. Grass rendered offscreen and not in the
@@ -306,7 +315,7 @@ impl Viewer {
             create_pipeline(
                 &raw,
                 cache_path.as_deref(),
-                format,
+                crate::renderer::HDR_FORMAT,
                 raytracer.as_ref().map(crate::raytrace::Raytracer::descriptor_layout),
                 materials.descriptor_layout(),
                 scene_depth.descriptor_layout(),
@@ -315,20 +324,20 @@ impl Viewer {
             )?;
         let sky_pipeline =
             crate::renderer::create_sky_pipeline(
-                &raw, pipeline_layout, pipeline_cache, format, samples,
+                &raw, pipeline_layout, pipeline_cache, crate::renderer::HDR_FORMAT, samples,
             )?;
         let particle_pipeline = crate::renderer::create_particle_pipeline(
             &raw,
             pipeline_layout,
             pipeline_cache,
-            format,
+            crate::renderer::HDR_FORMAT,
             samples,
         )?;
         let grass_pipeline = crate::renderer::create_geometry_pipeline(
             &raw,
             pipeline_layout,
             pipeline_cache,
-            format,
+            crate::renderer::HDR_FORMAT,
             samples,
             c"grassVertexMain",
             c"grassFragmentMain",
@@ -342,7 +351,7 @@ impl Viewer {
             &raw,
             pipeline_layout,
             pipeline_cache,
-            format,
+            crate::renderer::HDR_FORMAT,
             samples,
             c"waterVertexMain",
             c"waterFragmentMain",
@@ -356,7 +365,7 @@ impl Viewer {
                 &raw,
                 pipeline_layout,
                 pipeline_cache,
-                format,
+                crate::renderer::HDR_FORMAT,
                 samples,
                 c"rainVertexMain",
                 c"rainFragmentMain",
@@ -365,7 +374,7 @@ impl Viewer {
             &raw,
             pipeline_layout,
             pipeline_cache,
-            format,
+            crate::renderer::HDR_FORMAT,
             samples,
             c"rainSplashVertexMain",
             c"rainSplashFragmentMain",
@@ -465,10 +474,22 @@ impl Viewer {
             rendered.push(unsafe { raw.create_semaphore(&semaphore_info, None) }?);
         }
 
-        // The AA pass reads the scene and writes the swapchain image, so what
-        // it needs here is a *source* to render the scene into. The swapchain
-        // image cannot be that source: its usage is COLOR_ATTACHMENT only, and
-        // asking a presentable image for SAMPLED is not portable.
+        // **Where the window's frame lives before it is eight bits.**
+        // Unconditional, unlike the AA source below: the forward pass is half
+        // float and the swapchain is not, so there is no arrangement in which
+        // the scene is drawn straight into the presentable image any more.
+        //
+        // That is a real simplification of this path. The scene image used to
+        // exist only when CMAA2 was on, so the forward pass wrote two
+        // different destinations depending on an environment variable — and
+        // the window is where the human judges everything.
+        let (scene, scene_alloc, scene_view) =
+            create_scene_target(&raw, &mut allocator, &names, extent)?;
+
+        // The AA pass reads a display-referred image and writes the swapchain,
+        // so what it needs here is a *source* the tonemap can write. The
+        // swapchain image cannot be that source: its usage is COLOR_ATTACHMENT
+        // only, and asking a presentable image for SAMPLED is not portable.
         let aa = if crate::cmaa2::requested() {
             Some(create_aa_target(
                 &raw,
@@ -482,15 +503,25 @@ impl Viewer {
             None
         };
 
-        // Resolved into whichever image the forward pass ends up writing — the
-        // AA source when CMAA2 is on, the swapchain image when it is not — so
-        // the colour format is the swapchain's, not `COLOR_FORMAT`.
+        // **Built for the swapchain's format, and that covers both paths.**
+        // With CMAA2 on it writes the LDR image, which is created at the
+        // swapchain's format precisely so one pipeline serves either
+        // destination; with it off it writes the presentable image directly.
+        let tonemap = crate::tonemap::Tonemap::new(
+            &raw,
+            &names,
+            pipeline_cache,
+            format,
+            scene_view,
+        )?;
+
+        // Resolved into the scene target, which is HDR in both paths now — so
+        // this no longer needs to be told a format at all.
         let msaa = crate::renderer::Msaa::new(
             &raw,
             &mut allocator,
             extent.width,
             extent.height,
-            format,
             samples,
         )?;
         // The opaque pair lives inside `Msaa`, so it only exists when
@@ -586,6 +617,10 @@ impl Viewer {
             depth,
             depth_view,
             depth_alloc: Some(depth_alloc),
+            scene,
+            scene_view,
+            scene_alloc: Some(scene_alloc),
+            tonemap,
             aa,
             msaa,
             vertices,
@@ -1124,19 +1159,23 @@ impl Viewer {
         let depth_image = self.depth;
         let depth_id = graph.import("loom.viewer_depth", depth_image);
 
-        // With the AA pass on, the scene is drawn into its own image and the
-        // pass writes the swapchain; without it, straight into the swapchain as
-        // before. Everything downstream — the UI, the present transition — is
-        // unchanged either way.
+        // The forward pass always writes the HDR scene image; the tonemap
+        // always reads it. What the AA pass changes is only where the tonemap
+        // *lands* — its own source image, or the swapchain directly.
+        let (scene_view, scene_id) = (self.scene_view, graph.import("loom.viewer_scene", self.scene));
+        // Where the frame is after the tonemap, and therefore what the UI
+        // draws onto and what is presented.
         //
         // **The UI is a pass of its own, after rain** — see the comment above
-        // that pass. It is still before CMAA2, so it is filtered along with the
-        // scene; CMAA2 is conservative enough that egui's own anti-aliased text
-        // is left almost entirely alone. It is *not* multisampled: it draws
-        // into the resolved scene target, not the pair.
-        let (scene_view, scene_id) = match self.aa.as_ref() {
-            Some((_, image, aa_view, _)) => {
-                (*aa_view, graph.import("loom.viewer_scene", *image))
+        // that pass. It is after the tonemap and before CMAA2: after, because
+        // egui hands over display-referred colours and running them through a
+        // shoulder would darken its own greys; before, so it is filtered along
+        // with the scene, and CMAA2 is conservative enough that egui's own
+        // anti-aliased text is left almost entirely alone. It is *not*
+        // multisampled: it draws into the resolved target, not the pair.
+        let (post_view, post_id) = match self.aa.as_ref() {
+            Some((_, image, ldr_view, _)) => {
+                (*ldr_view, graph.import("loom.viewer_ldr", *image))
             }
             None => (view, target),
         };
@@ -1519,23 +1558,44 @@ impl Viewer {
             );
         }
 
+        // **The tonemap, and after it the frame is eight bits.** Between the
+        // scene and everything that assumes a bounded frame — the UI, CMAA2,
+        // the present. Unconditional: the scene image is half float and the
+        // swapchain is not, so nothing else can join them.
+        {
+            let (pass, exposure) = (&self.tonemap, self.environment.exposure);
+            graph.pass(
+                "tonemap",
+                &[(scene_id, Access::ShaderRead), (post_id, Access::ColorWrite)],
+                move |d, cmd| {
+                    // SAFETY: the graph has put the scene image in
+                    // SHADER_READ_ONLY_OPTIMAL and the destination in
+                    // COLOR_ATTACHMENT_OPTIMAL, and `cmd` is recording outside
+                    // any rendering block.
+                    unsafe {
+                        pass.record(d, cmd, post_view, exposure, extent.width, extent.height);
+                    }
+                },
+            );
+        }
+
         if ui.is_some() {
             graph.pass(
                 "ui",
-                &[(scene_id, Access::ColorWrite)],
+                &[(post_id, Access::ColorWrite)],
                 move |d, cmd| {
-                    // SAFETY: the graph has the scene target in
+                    // SAFETY: the graph has the tonemapped target in
                     // COLOR_ATTACHMENT_OPTIMAL, and egui's pipeline declares no
                     // depth attachment to match this block.
                     unsafe {
-                        // `None`: the UI draws into the resolved scene target
-                        // at one sample, after rain has already resolved into
-                        // it. Multisampling a text overlay would cost fill rate
-                        // for a difference nobody can see.
+                        // `None`: the UI draws into the resolved target at one
+                        // sample, after the tonemap has written it.
+                        // Multisampling a text overlay would cost fill rate for
+                        // a difference nobody can see.
                         crate::renderer::begin_overlay_rendering(
                             d,
                             cmd,
-                            scene_view,
+                            post_view,
                             None,
                             extent.width,
                             extent.height,
@@ -1557,7 +1617,7 @@ impl Viewer {
             let edges_id = graph.import("loom.aa_edges", pass.edges_image());
             graph.pass(
                 "cmaa2_edges",
-                &[(scene_id, Access::ShaderRead), (edges_id, Access::ColorWrite)],
+                &[(post_id, Access::ShaderRead), (edges_id, Access::ColorWrite)],
                 move |d, cmd| {
                     // SAFETY: the graph has put the scene image in
                     // SHADER_READ_ONLY_OPTIMAL and the mask in
@@ -1568,7 +1628,7 @@ impl Viewer {
             graph.pass(
                 "cmaa2",
                 &[
-                    (scene_id, Access::ShaderRead),
+                    (post_id, Access::ShaderRead),
                     (edges_id, Access::ShaderRead),
                     (target, Access::ColorWrite),
                 ],
@@ -1762,7 +1822,6 @@ impl Viewer {
                     allocator,
                     extent.width,
                     extent.height,
-                    self.format,
                     crate::renderer::MSAA_SAMPLES,
                 )?;
             }
@@ -1778,6 +1837,29 @@ impl Viewer {
             } else {
                 self.water_textures.bind(self.depth_view, self.depth_view);
             }
+
+            // The scene target is full-resolution, so it resizes with the
+            // window — and the tonemap's descriptor points at the view about
+            // to be destroyed. Repointing it is not optional and has no
+            // symptom the validation layers can see once the handle is reused,
+            // which is the trap `scene_depth.bind` above already documents.
+            //
+            // **Rebuilt before the AA source below**, so the whole chain is
+            // rebuilt in the order the frame runs it.
+            // SAFETY: the device was idled at the top of this function.
+            unsafe {
+                self.device.destroy_image_view(self.scene_view, None);
+                self.device.destroy_image(self.scene, None);
+            }
+            if let Some(allocation) = self.scene_alloc.take() {
+                let _ = allocator.free(allocation);
+            }
+            let (scene, scene_alloc, scene_view) =
+                create_scene_target(&self.device, allocator, &self.names, extent)?;
+            self.scene = scene;
+            self.scene_alloc = Some(scene_alloc);
+            self.scene_view = scene_view;
+            self.tonemap.rebind(&self.device, scene_view);
 
             // The AA source is a full-resolution image like the depth buffer,
             // so it resizes with the window. The pass itself — pipeline,
@@ -1799,7 +1881,7 @@ impl Viewer {
                     vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
                     1,
                     vk::SampleCountFlags::TYPE_1,
-                    "loom.viewer_scene",
+                    "loom.viewer_ldr",
                 )?;
                 let view = create_view(
                     &self.device,
@@ -1867,6 +1949,16 @@ impl Drop for Viewer {
                 pass.destroy(&self.device, allocator);
                 self.device.destroy_image_view(view, None);
                 self.device.destroy_image(image, None);
+                let _ = allocator.free(allocation);
+            }
+            // The tonemap holds a descriptor pointing at the scene view, so it
+            // goes before the image it reads.
+            self.tonemap.destroy(&self.device);
+            self.device.destroy_image_view(self.scene_view, None);
+            self.device.destroy_image(self.scene, None);
+            if let (Some(allocation), Some(allocator)) =
+                (self.scene_alloc.take(), self.allocator.as_mut())
+            {
                 let _ = allocator.free(allocation);
             }
             if let (Some(msaa), Some(allocator)) = (self.msaa.take(), self.allocator.as_mut()) {
@@ -2060,8 +2152,36 @@ fn create_swapchain(
     Ok((surface_format.format, extent, swapchain, images, views))
 }
 
-/// The image the scene is drawn into when the AA pass is on, and the pass
-/// itself, already pointed at it.
+/// The HDR image the forward pass resolves into and the tonemap reads.
+///
+/// Its own function because `recreate` builds it again on every resize, and an
+/// image created two ways is an image whose usage flags eventually disagree.
+fn create_scene_target(
+    device: &ash::Device,
+    allocator: &mut Allocator,
+    names: &DebugNames,
+    extent: vk::Extent2D,
+) -> Result<(vk::Image, Allocation, vk::ImageView), RenderError> {
+    let (image, allocation) = create_image(
+        device,
+        allocator,
+        extent.width,
+        extent.height,
+        crate::renderer::HDR_FORMAT,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+        1,
+        vk::SampleCountFlags::TYPE_1,
+        "loom.viewer_scene",
+    )?;
+    let view =
+        create_view(device, image, crate::renderer::HDR_FORMAT, vk::ImageAspectFlags::COLOR)?;
+    names.set(image, "loom.viewer_scene");
+    names.set(view, "loom.viewer_scene.view");
+    Ok((image, allocation, view))
+}
+
+/// The display-referred image the tonemap writes when the AA pass is on, and
+/// the pass itself, already pointed at it.
 fn create_aa_target(
     device: &ash::Device,
     allocator: &mut Allocator,
@@ -2079,7 +2199,7 @@ fn create_aa_target(
         vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
         1,
         vk::SampleCountFlags::TYPE_1,
-        "loom.viewer_scene",
+        "loom.viewer_ldr",
     )?;
     let view = create_view(device, image, format, vk::ImageAspectFlags::COLOR)?;
     // The swapchain's format, not the offscreen path's: dynamic rendering bakes
@@ -2094,8 +2214,8 @@ fn create_aa_target(
         extent.width,
         extent.height,
     )?;
-    names.set(image, "loom.viewer_scene");
-    names.set(view, "loom.viewer_scene.view");
+    names.set(image, "loom.viewer_ldr");
+    names.set(view, "loom.viewer_ldr.view");
     Ok((pass, image, view, allocation))
 }
 

@@ -2402,6 +2402,7 @@ fn environment_of_inner(world: &World) -> loom_render::EnvironmentData {
             2.5,
             0.0,
         ],
+        exposure: scalar("exposure", defaults.exposure),
         // The sky is this function's business; the weather is filled in by
         // `environment_with_wind`, which is the only caller that knows the
         // scene's `Wind` and the simulation's clock.

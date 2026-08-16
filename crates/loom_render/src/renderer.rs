@@ -41,6 +41,27 @@ use crate::{Device, Instance};
 /// `_SRGB` makes the hardware do the encode on write, so the bytes read back
 /// for the PNG are already in the space the PNG says they are in.
 pub(crate) const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
+
+/// What every pass before the tonemap rasterises into.
+///
+/// **The reason is that `_SRGB` is fixed point and additive blending clamps at
+/// 1.0 with no rolloff.** Fire is the case that made it undeniable — measured
+/// on the sprite path, red pinned after 2.6 overlapping particles against
+/// about thirty alive — but it was never only fire: `fireRamp`'s top rung is
+/// capped below 1.0 to dodge the clip, the sun's specular on water washed out
+/// the same way, and every one of those is a scene constant tuned around a
+/// ceiling rather than around light.
+///
+/// Half float is the smallest thing that removes the ceiling. `B10G11R11` is
+/// half the bandwidth and was considered and rejected: it has no alpha, which
+/// the particle and rain blends need, and five bits of blue is visible banding
+/// in exactly the dark blue-grey a night sky is made of.
+///
+/// **Checked on this GPU rather than assumed** — `vulkaninfo` reports
+/// `COLOR_ATTACHMENT_BLEND_BIT` for this format and a
+/// `framebufferColorSampleCounts` including 4, which are the two properties
+/// the forward pass needs.
+pub(crate) const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 pub(crate) const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 /// One object to draw.
@@ -266,7 +287,19 @@ pub struct EnvironmentData {
     /// padding was already there to keep the struct 16-byte aligned and using
     /// it costs nothing and moves no offset. The layout test pins it.
     pub fire_flipbook: u32,
-    pub light_pad: [u32; 2],
+    /// What the tonemap multiplies the frame by before its shoulder.
+    ///
+    /// **In the light block's remaining padding**, for the reason
+    /// [`Self::fire_flipbook`] gives: the hole was already there and using it
+    /// moves no offset. No shader reads it — the tonemap takes it as a push
+    /// constant — but it rides here because it is per-scene data a scene
+    /// authors, which is exactly what this struct is.
+    ///
+    /// **1.0 means the change is invisible**, which is the whole acceptance
+    /// test: at unit exposure the shoulder is identity below its knee, so a
+    /// scene with nothing bright renders bit for bit as it did.
+    pub exposure: f32,
+    pub light_pad: [u32; 1],
 }
 
 /// A point light, as the GPU reads it.
@@ -370,7 +403,10 @@ impl Default for EnvironmentData {
             lights: [PointLight::default(); MAX_LIGHTS],
             light_count: 0,
             fire_flipbook: crate::NO_TEXTURE,
-            light_pad: [0; 2],
+            // Unit, so a scene that says nothing about exposure gets the
+            // identity leg of the shoulder and renders unchanged.
+            exposure: crate::tonemap::DEFAULT_EXPOSURE,
+            light_pad: [0; 1],
         }
     }
 }
@@ -436,9 +472,12 @@ impl Msaa {
     /// The multisampled pair a forward pass rasterises into, or `None` at one
     /// sample.
     ///
-    /// **`format` is the format being resolved *into***: `COLOR_FORMAT`
-    /// offscreen, the swapchain's in the window. A resolve requires both images
-    /// to have the same format, so this cannot be a constant.
+    /// **`HDR_FORMAT` throughout, and it used to be a parameter.** A resolve
+    /// requires source and destination to share a format, and the destination
+    /// used to be `COLOR_FORMAT` offscreen and the swapchain's in the window —
+    /// two different formats, so the caller had to say which. Both paths now
+    /// resolve into an HDR scene image that the tonemap reads, so there is one
+    /// answer and the parameter went away with the question.
     ///
     /// **Not `TRANSIENT_ATTACHMENT`, and that changed when rain moved.** The
     /// colour image used to live entirely inside the forward pass, but the rain
@@ -451,7 +490,6 @@ impl Msaa {
         allocator: &mut Allocator,
         width: u32,
         height: u32,
-        format: vk::Format,
         samples: vk::SampleCountFlags,
     ) -> Result<Option<Self>, RenderError> {
         if samples == vk::SampleCountFlags::TYPE_1 {
@@ -462,7 +500,7 @@ impl Msaa {
             allocator,
             width,
             height,
-            format,
+            HDR_FORMAT,
             vk::ImageUsageFlags::COLOR_ATTACHMENT,
             1,
             samples,
@@ -486,7 +524,7 @@ impl Msaa {
         // cannot be sampled that way without a manual per-sample fetch, which
         // is why the resolve is the mechanism rather than an inconvenience.
         let (opaque_color, opaque_color_alloc) = create_image(
-            device, allocator, width, height, format,
+            device, allocator, width, height, HDR_FORMAT,
             vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             1, vk::SampleCountFlags::TYPE_1, "loom.scene_opaque",
         )?;
@@ -495,11 +533,11 @@ impl Msaa {
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             1, vk::SampleCountFlags::TYPE_1, "loom.depth_opaque",
         )?;
-        let view = create_view(device, image, format, vk::ImageAspectFlags::COLOR)?;
+        let view = create_view(device, image, HDR_FORMAT, vk::ImageAspectFlags::COLOR)?;
         let depth_view =
             create_view(device, depth_image, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;
         let opaque_color_view =
-            create_view(device, opaque_color, format, vk::ImageAspectFlags::COLOR)?;
+            create_view(device, opaque_color, HDR_FORMAT, vk::ImageAspectFlags::COLOR)?;
         let opaque_depth_view =
             create_view(device, opaque_depth, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;
         Ok(Some(Self {
@@ -678,6 +716,11 @@ pub struct Renderer {
     color: vk::Image,
     color_view: vk::ImageView,
     color_alloc: Option<Allocation>,
+    /// The eight-bit image the tonemap writes and the readback copies. Every
+    /// pass before the tonemap works in `color` above, which is half float.
+    ldr: vk::Image,
+    ldr_view: vk::ImageView,
+    ldr_alloc: Option<Allocation>,
     depth: vk::Image,
     depth_view: vk::ImageView,
     depth_alloc: Option<Allocation>,
@@ -709,6 +752,8 @@ pub struct Renderer {
     particle_address: vk::DeviceAddress,
     /// `None` when rendering at one sample.
     msaa: Option<Msaa>,
+    /// Always present — the frame cannot leave the device without it.
+    tonemap: crate::tonemap::Tonemap,
     /// The anti-aliasing pass and the image it writes into, or `None` when
     /// `LOOM_CMAA2` is unset — which is the default. When it is present the
     /// readback reads *this* image rather than the colour target.
@@ -828,17 +873,36 @@ impl Renderer {
             &mut allocator,
             width,
             height,
+            HDR_FORMAT,
+            // `SAMPLED` because the tonemap reads this image as a texture.
+            // **No `TRANSFER_SRC` any more**: nothing copies it, because a
+            // readback of half floats is not a PNG. The image the frame
+            // leaves through is `ldr` below.
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            1,
+            vk::SampleCountFlags::TYPE_1,
+            "loom.color_target",
+        )?;
+        // **Where the frame becomes eight bits.** The tonemap writes here and
+        // everything after it — CMAA2, the readback — works on display-referred
+        // values exactly as it did before this pass existed.
+        //
+        // `SAMPLED` because CMAA2 reads it when it is on; unconditional for
+        // the same reason the old colour target's was, that a usage flag
+        // changes no pixel and a gate should not see a different image
+        // depending on an environment variable.
+        let (ldr, ldr_alloc) = create_image(
+            &raw,
+            &mut allocator,
+            width,
+            height,
             COLOR_FORMAT,
-            // `SAMPLED` because the anti-aliasing pass reads this image as a
-            // texture (ADR 0010). Declared unconditionally: a usage flag
-            // changes no pixel, and making it conditional on an environment
-            // variable would mean the gate silently changed image creation.
             vk::ImageUsageFlags::COLOR_ATTACHMENT
                 | vk::ImageUsageFlags::TRANSFER_SRC
                 | vk::ImageUsageFlags::SAMPLED,
             1,
             vk::SampleCountFlags::TYPE_1,
-            "loom.color_target",
+            "loom.ldr_target",
         )?;
         let (depth, depth_alloc) = create_image(
             &raw,
@@ -862,10 +926,10 @@ impl Renderer {
         // downstream — the readback, the golden images — still sees one
         // sample per pixel and needs no changes at all.
         let samples = MSAA_SAMPLES;
-        let msaa =
-            Msaa::new(&raw, &mut allocator, width, height, COLOR_FORMAT, samples)?;
+        let msaa = Msaa::new(&raw, &mut allocator, width, height, samples)?;
 
-        let color_view = create_view(&raw, color, COLOR_FORMAT, vk::ImageAspectFlags::COLOR)?;
+        let color_view = create_view(&raw, color, HDR_FORMAT, vk::ImageAspectFlags::COLOR)?;
+        let ldr_view = create_view(&raw, ldr, COLOR_FORMAT, vk::ImageAspectFlags::COLOR)?;
         let depth_view = create_view(&raw, depth, DEPTH_FORMAT, vk::ImageAspectFlags::DEPTH)?;
 
         // Host-visible landing zone for the finished image.
@@ -1018,7 +1082,7 @@ impl Renderer {
             create_pipeline(
                 &raw,
                 cache_path.as_deref(),
-                COLOR_FORMAT,
+                HDR_FORMAT,
                 raytracer.as_ref().map(Raytracer::descriptor_layout),
                 materials.descriptor_layout(),
                 scene_depth.descriptor_layout(),
@@ -1026,20 +1090,20 @@ impl Renderer {
                 MSAA_SAMPLES,
             )?;
         let sky_pipeline =
-            create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, COLOR_FORMAT, MSAA_SAMPLES)?;
+            create_sky_pipeline(&raw, pipeline_layout, pipeline_cache, HDR_FORMAT, MSAA_SAMPLES)?;
         let particle_pipeline =
             create_particle_pipeline(
                 &raw,
                 pipeline_layout,
                 pipeline_cache,
-                COLOR_FORMAT,
+                HDR_FORMAT,
                 MSAA_SAMPLES,
             )?;
         let grass_pipeline = create_geometry_pipeline(
             &raw,
             pipeline_layout,
             pipeline_cache,
-            COLOR_FORMAT,
+            HDR_FORMAT,
             MSAA_SAMPLES,
             c"grassVertexMain",
             c"grassFragmentMain",
@@ -1048,7 +1112,7 @@ impl Renderer {
             &raw,
             pipeline_layout,
             pipeline_cache,
-            COLOR_FORMAT,
+            HDR_FORMAT,
             MSAA_SAMPLES,
             c"waterVertexMain",
             c"waterFragmentMain",
@@ -1062,7 +1126,7 @@ impl Renderer {
             &raw,
             pipeline_layout,
             pipeline_cache,
-            COLOR_FORMAT,
+            HDR_FORMAT,
             samples,
             c"rainVertexMain",
             c"rainFragmentMain",
@@ -1074,7 +1138,7 @@ impl Renderer {
             &raw,
             pipeline_layout,
             pipeline_cache,
-            COLOR_FORMAT,
+            HDR_FORMAT,
             samples,
             c"rainSplashVertexMain",
             c"rainSplashFragmentMain",
@@ -1087,10 +1151,21 @@ impl Renderer {
             crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
         )?;
 
+        // The tonemap. Unconditional, unlike the AA pass below: the scene
+        // target is half float and the readback wants eight bits, so this is
+        // the only thing that can join them.
+        let tonemap =
+            crate::tonemap::Tonemap::new(&raw, &names, pipeline_cache, COLOR_FORMAT, color_view)?;
+
         // The anti-aliasing pass (ADR 0010), when asked for. A second colour
         // image, never the same one: the filter reads a 6x6 neighbourhood and
         // writes the centre, so reading and writing one image would make every
         // pixel's result depend on whether its neighbours had been rewritten.
+        //
+        // **It reads `ldr`, not `color`.** CMAA2 is a display-referred filter:
+        // its edge threshold is a fraction of a luma that it assumes is bounded,
+        // and handing it linear values with no ceiling would make the threshold
+        // mean something different in every part of the frame.
         let aa = if crate::cmaa2::requested() {
             let (image, allocation) = create_image(
                 &raw,
@@ -1110,7 +1185,7 @@ impl Renderer {
                 &names,
                 pipeline_cache,
                 COLOR_FORMAT,
-                color_view,
+                ldr_view,
                 width,
                 height,
             )?;
@@ -1122,6 +1197,8 @@ impl Renderer {
         };
 
         names.set(color, "loom.color_target");
+        names.set(ldr, "loom.ldr_target");
+        names.set(ldr_view, "loom.ldr_target.view");
         names.set(depth, "loom.depth_target");
         names.set(color_view, "loom.color_target.view");
         names.set(depth_view, "loom.depth_target.view");
@@ -1235,6 +1312,7 @@ impl Renderer {
             particle_alloc: Some(particle_alloc),
             particle_address,
             msaa,
+            tonemap,
             aa,
             grass_buffer,
             grass_alloc: Some(grass_alloc),
@@ -1265,6 +1343,9 @@ impl Renderer {
             color,
             color_view,
             color_alloc: Some(color_alloc),
+            ldr,
+            ldr_view,
+            ldr_alloc: Some(ldr_alloc),
             depth,
             depth_view,
             depth_alloc: Some(depth_alloc),
@@ -1705,11 +1786,16 @@ impl Renderer {
         let water_verts = if self.environment.water[2] > 0.0 { WATER_VERTS } else { 0 };
         // **The readback follows the last pass that wrote a pixel.** With the
         // AA pass on, the finished frame is in its target and copying the
-        // colour target instead would silently read the un-anti-aliased image
-        // — a bug that looks exactly like "the pass does nothing".
+        // earlier image instead would silently read the un-anti-aliased one —
+        // a bug that looks exactly like "the pass does nothing".
+        //
+        // Its floor is the LDR target rather than the colour target now. A
+        // copy from the colour target would be a copy of half floats into a
+        // buffer the PNG encoder reads as bytes, which is not a wrong colour
+        // but noise.
         let (readback, image) = (
             self.readback,
-            self.aa.as_ref().map_or(self.color, |(_, image, _, _)| *image),
+            self.aa.as_ref().map_or(self.ldr, |(_, image, _, _)| *image),
         );
         let index_buffer = self.indices;
         let draws: Vec<(MeshRange, u32, u32)> = batches
@@ -2146,8 +2232,32 @@ impl Renderer {
             );
         }
 
-        // The anti-aliasing passes, between the forward pass and the readback.
-        // Every image is the graph's (never-do #4): it moves the colour target
+        // **The tonemap, and after it the frame is eight bits.** It is the
+        // only pass between the forward work and everything that assumes a
+        // bounded frame, so it is unconditional — there is no path that skips
+        // it and no `if` deciding whether the frame gets collapsed.
+        //
+        // The graph moves `color` from COLOR_ATTACHMENT_OPTIMAL to
+        // SHADER_READ_ONLY_OPTIMAL and `ldr` out of UNDEFINED. Nothing here
+        // writes a barrier (never-do #4).
+        let ldr = graph.import("loom.ldr_target", self.ldr);
+        {
+            let (pass, view) = (&self.tonemap, self.ldr_view);
+            let exposure = self.environment.exposure;
+            graph.pass(
+                "tonemap",
+                &[(color, Access::ShaderRead), (ldr, Access::ColorWrite)],
+                move |d, cmd| {
+                    // SAFETY: the graph has put both images in the layouts this
+                    // recording requires, and `cmd` is recording outside any
+                    // rendering block.
+                    unsafe { pass.record(d, cmd, view, exposure, width, height) };
+                },
+            );
+        }
+
+        // The anti-aliasing passes, between the tonemap and the readback.
+        // Every image is the graph's (never-do #4): it moves the LDR target
         // from COLOR_ATTACHMENT_OPTIMAL to SHADER_READ_ONLY_OPTIMAL, the edge
         // mask out of UNDEFINED and then to SHADER_READ_ONLY_OPTIMAL, and the
         // AA target out of UNDEFINED. Nothing here writes a barrier.
@@ -2158,7 +2268,7 @@ impl Renderer {
                 let (aa_view, width, height) = (*aa_view, self.width, self.height);
                 graph.pass(
                     "cmaa2_edges",
-                    &[(color, Access::ShaderRead), (edges_id, Access::ColorWrite)],
+                    &[(ldr, Access::ShaderRead), (edges_id, Access::ColorWrite)],
                     move |d, cmd| {
                         // SAFETY: the graph has put both images in the layouts
                         // this recording requires, and `cmd` is recording
@@ -2169,7 +2279,7 @@ impl Renderer {
                 graph.pass(
                     "cmaa2",
                     &[
-                        (color, Access::ShaderRead),
+                        (ldr, Access::ShaderRead),
                         (edges_id, Access::ShaderRead),
                         (aa_id, Access::ColorWrite),
                     ],
@@ -2180,7 +2290,7 @@ impl Renderer {
                 );
                 aa_id
             }
-            None => color,
+            None => ldr,
         };
 
         graph.pass("readback", &[(readback_source, Access::TransferSrc)], move |d, cmd| {
@@ -2358,6 +2468,8 @@ impl Drop for Renderer {
                 self.device.destroy_buffer(buffer, None);
             }
             self.device.destroy_pipeline(self.particle_pipeline, None);
+            // Before the AA pass, which is the reverse of creation order.
+            self.tonemap.destroy(&self.device);
             if let (Some((mut pass, image, view, allocation)), Some(allocator)) =
                 (self.aa.take(), self.allocator.as_mut())
             {
@@ -2403,11 +2515,13 @@ impl Drop for Renderer {
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device.destroy_image_view(self.color_view, None);
+            self.device.destroy_image_view(self.ldr_view, None);
             self.device.destroy_image_view(self.depth_view, None);
 
             if let Some(allocator) = self.allocator.as_mut() {
                 for allocation in [
                     self.color_alloc.take(),
+                    self.ldr_alloc.take(),
                     self.depth_alloc.take(),
                     self.readback_alloc.take(),
                     self.vertices_alloc.take(),
@@ -2422,6 +2536,7 @@ impl Drop for Renderer {
                 }
             }
             self.device.destroy_image(self.color, None);
+            self.device.destroy_image(self.ldr, None);
             self.device.destroy_image(self.depth, None);
             self.device.destroy_buffer(self.readback, None);
             self.device.destroy_buffer(self.vertices, None);

@@ -40,6 +40,7 @@ mod rain;
 mod raytrace;
 mod renderer;
 mod scene_depth;
+mod tonemap;
 mod water_textures;
 mod ui;
 mod viewer;
@@ -82,6 +83,13 @@ pub const CMAA2_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cmaa2.spv
 /// The anti-aliasing pass's edge detection, which runs first and writes the
 /// mask the shape filter walks.
 pub const CMAA2_EDGES_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cmaa2_edges.spv"));
+
+/// The tonemap, embedded at build time.
+///
+/// **Unconditional, unlike CMAA2.** The scene target is `_SFLOAT` and the
+/// destination is `_SRGB`, so this pass is the only thing that can bridge them
+/// — there is no path through the renderer that skips it.
+pub const TONEMAP_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tonemap.spv"));
 
 /// The raindrop simulation (ADR 0015), embedded at build time.
 ///
@@ -410,16 +418,22 @@ mod tests {
                 // no rain, so nothing samples it; it is resolved anyway, for
                 // the same reason the usage flags are unconditional.
                 ("forward", "loom.depth_target"),
+                // **The tonemap, and after it nothing touches the colour
+                // target again.** It reads the half-float scene and writes the
+                // eight-bit image every later pass works in, which is why
+                // every name below this line is `ldr` or later.
+                ("tonemap", "loom.color_target"),
+                ("tonemap", "loom.ldr_target"),
                 // The anti-aliasing pass is **two** passes: edge detection
                 // writes a mask image, and the shape filter reads the mask and
-                // the colour target and writes a third image. The readback
+                // the tonemapped image and writes a third. The readback
                 // therefore moves onto *that* one.
                 //
-                // Note what is missing: the shape filter reads the colour
-                // target too, and there is no `("cmaa2", "loom.color_target")`
+                // Note what is missing: the shape filter reads the tonemapped
+                // image too, and there is no `("cmaa2", "loom.ldr_target")`
                 // here, because read-after-read in the same layout needs no
                 // barrier and the graph knows it.
-                ("cmaa2_edges", "loom.color_target"),
+                ("cmaa2_edges", "loom.ldr_target"),
                 ("cmaa2_edges", "loom.aa_edges"),
                 ("cmaa2", "loom.aa_edges"),
                 ("cmaa2", "loom.aa_target"),
@@ -504,7 +518,7 @@ mod tests {
             .map(|t| (t.pass, t.image))
             .collect();
         assert!(
-            transitions.contains(&("cmaa2_edges", "loom.color_target"))
+            transitions.contains(&("cmaa2_edges", "loom.ldr_target"))
                 && transitions.contains(&("cmaa2_edges", "loom.aa_edges"))
                 && transitions.contains(&("cmaa2", "loom.aa_edges"))
                 && transitions.contains(&("cmaa2", "loom.aa_target")),

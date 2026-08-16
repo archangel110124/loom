@@ -163,7 +163,11 @@ struct EnvironmentData {
     uint lightCount;
     /// Bindless index of the fire flipbook, or `NO_TEXTURE`.
     uint fireFlipbook;
-    uint lightPad0;
+    /// The tonemap's exposure. **Declared here and read by nothing in this
+    /// file** — `tonemap.slang` takes it as a push constant — but the layout
+    /// has to match the Rust struct byte for byte, and a field the CPU writes
+    /// and this side calls padding is how that agreement stops being checkable.
+    float exposure;
     uint lightPad1;
 };
 

@@ -715,6 +715,23 @@ pub struct Environment {
     /// Metres across one cloud mass. Larger is a broader, slower deck.
     #[schemars(range(min = 50.0, max = 20000.0))]
     pub cloud_scale: f32,
+    /// What the whole frame is multiplied by before the tonemap's shoulder.
+    ///
+    /// **The knob a scene turns when its lights are right and its frame is
+    /// not.** Everything the renderer computes is now linear and unbounded, so
+    /// a torch is allowed to be ten times brighter than the sky; this decides
+    /// where that range sits against the screen.
+    ///
+    /// `1.0` leaves a scene exactly as it was — the shoulder is identity below
+    /// its knee, so a frame with nothing bright in it is untouched. Raise it to
+    /// lift a night scene, lower it when a fire has taken over the frame.
+    ///
+    /// **Not automatic, deliberately.** An auto-exposure that adapts to what
+    /// the camera sees makes a frame a function of the frames before it, which
+    /// is the property ADR 0010 rejected TAA over and the one that makes a
+    /// golden image reproducible.
+    #[schemars(range(min = 0.01, max = 64.0))]
+    pub exposure: f32,
 }
 
 impl Default for Environment {
@@ -736,6 +753,9 @@ impl Default for Environment {
             // the one deliberate change to existing scenes.
             cloud_cover: 0.0,
             cloud_scale: 1200.0,
+            // Unit: the identity leg of the shoulder, so every scene authored
+            // before the tonemap existed renders unchanged.
+            exposure: 1.0,
         }
     }
 }
