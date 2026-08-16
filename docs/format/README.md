@@ -331,6 +331,19 @@ Error codes for M1: `parse_error`, `format_version_unsupported`, `duplicate_sibl
 a plausible surface, validated clean, and got faster for it. The volume is refused whole, naming the
 op's index and its `kind`.
 
+It now covers four more silent failures in the same array, all found by trying to author a scene
+from `loom describe` alone. **A field the op does not have** — `yaw` for `yaw_degrees`, or
+`elongate` on a `box`, `round` on a `sphere`, `displace` on a `terrain`, each of the three shape
+transforms being on exactly one kind — was accepted and ignored, drawing an unrotated wall with no
+message. `deny_unknown_fields` refuses it, and serde's message **enumerates the fields that kind
+does take**, which is the only reason an untyped `ops` array is discoverable at all: name a field
+wrong and validate tells you the right ones. **`mode = "intersect"` on op 0** intersects with
+nothing and bakes an empty volume. And **a `terrain` rect that misses the volume** was checked
+during the bake and not in `validate`, so the hard gate returned `"ok": true` on a scene whose
+ground then failed to bake — `loom sim` printed one line to stderr, exited 0, and left the terrain
+out of the collision world. All three now live in the single `parse_ops` funnel that `validate` and
+every bake share.
+
 `unresolved_alias` is reserved for an alias that **nothing declares** — a typo in the scene, which
 is what the agent controls. A declared alias whose file is merely absent is reported as an
 `asset_file_missing` warning instead: the text is right and the workspace is incomplete, which is

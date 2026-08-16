@@ -3050,6 +3050,14 @@ fn terrain(path: &str, args: &[String]) -> (u8, String) {
             "recipe": path,
             "content_hash": recipe.content_hash(),
             "size": recipe.size,
+            // **`size` is pixels and `world_scale` is metres**, and the two are
+            // only equal by convention in this library. A `terrain` op's `rect`
+            // must be exactly `world_scale` across — that is the one number an
+            // agent needed from here and had to open the `.toml` to get. With
+            // it, `rect` and the volume's Y extent are both arithmetic on this
+            // output: `rect = [x0, z0, x0 + world_scale[0], z0 + world_scale[1]]`
+            // and `base_y + height.max` must fit inside `chunks[1] * 32 * voxel_size`.
+            "world_scale": recipe.world_scale,
             "height": {
                 "min": stats.height_min, "max": stats.height_max, "mean": stats.height_mean,
             },
@@ -3625,17 +3633,102 @@ pub(crate) fn parse_ops(component: &serde_json::Value) -> Result<Vec<loom_voxel:
         })
         .collect::<Result<_, _>>()?;
     loom_voxel::resolve(&mut parsed, &scene_base())?;
+
+    // **`intersect` first is a silent empty volume.** The bake seeds its
+    // accumulator at `f32::MAX` and intersect is `max`, so the first op keeps
+    // the seed and every voxel stays outside; a later `union` then fills in,
+    // which is why this reads as "the landform disappeared and the props are
+    // still there" rather than as an empty scene. Verified: one intersect
+    // sphere alone bakes to nothing while `loom validate` returned `ok: true`.
+    if parsed.first().is_some_and(|op| op.mode() == loom_voxel::CsgMode::Intersect) {
+        return Err(
+            "op 0 has mode = \"intersect\", which intersects with nothing: the first op is \
+             what there is to intersect *with*, so the volume bakes empty. Make op 0 a \
+             union and intersect against it."
+                .to_owned(),
+        );
+    }
+
+    terrain_covers_the_volume(component, &parsed)?;
     Ok(parsed)
 }
 
-/// The directory scene-relative paths resolve against.
+/// A `terrain` op must cover the volume it fills.
 ///
-/// `ponytail:` a process global. One `loom` invocation works on one scene, and
-/// the alternative is threading a base through `build_volume`, `scene_volume`,
-/// `bake_voxel`, the physics build in `play.rs` and every helper between them —
-/// forty signatures so that one op can find one file. A command that ever loads
-/// two scenes from different directories is the trigger to thread it properly.
-static SCENE_BASE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+/// **This lives here, in the shared funnel, because it is the half of the
+/// coordinate-system trap `loom validate` used to miss.** `resolve` catches a
+/// rect that is not the size the recipe claims; this catches a rect that is the
+/// right size in the wrong place. Outside its rect a `TerrainMap` clamps, which
+/// extrudes the boundary row across everything past it — parallel ridges
+/// running to the edge of the world, and they look authored.
+///
+/// It was checked in `build_volume` alone, so `loom validate` returned
+/// `"ok": true` on a scene whose terrain then failed to bake: `loom sim` printed
+/// one line to stderr, exited **0**, and the ground the player stands on was
+/// simply not in the collision world. Named with both numbers, because the fix
+/// is arithmetic the agent can do the moment it can see them.
+fn terrain_covers_the_volume(
+    component: &serde_json::Value,
+    ops: &[loom_voxel::VoxelOp],
+) -> Result<(), String> {
+    if !ops.iter().any(|op| matches!(op, loom_voxel::VoxelOp::Terrain { .. })) {
+        return Ok(());
+    }
+    let (Some(voxel_size), Some(chunks)) = (
+        component.get("voxel_size").and_then(serde_json::Value::as_f64),
+        component.get("chunks").and_then(|c| c.as_array()),
+    ) else {
+        // Missing or malformed dimensions are `build_volume`'s error to name.
+        return Ok(());
+    };
+    let dims: Vec<f64> = chunks.iter().filter_map(serde_json::Value::as_f64).collect();
+    if dims.len() != 3 {
+        return Ok(());
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let footprint = [
+        (dims[0] * 32.0 * voxel_size) as f32,
+        (dims[2] * 32.0 * voxel_size) as f32,
+    ];
+    for (index, op) in ops.iter().enumerate() {
+        let loom_voxel::VoxelOp::Terrain { rect, .. } = op else {
+            continue;
+        };
+        if rect[0] > 0.0 || rect[1] > 0.0 || rect[2] < footprint[0] || rect[3] < footprint[1] {
+            return Err(format!(
+                "op {index} (kind = \"terrain\"): rect {rect:?} does not cover the volume, \
+                 which is [0.0, 0.0, {}, {}]. Op coordinates are the volume's own space: \
+                 its near corner is [0, 0, 0] and it runs in +X, +Y and +Z for \
+                 chunks * 32 * voxel_size, and the node's transform places that box in the \
+                 world. So the rect must start at or before 0 and end at or after that. \
+                 Outside its rect a recipe repeats its edge row forever.",
+                footprint[0], footprint[1]
+            ));
+        }
+    }
+    Ok(())
+}
+
+// The directory scene-relative paths resolve against.
+//
+// `ponytail:` a global. One `loom` invocation works on one scene, and the
+// alternative is threading a base through `build_volume`, `scene_volume`,
+// `bake_voxel`, the physics build in `play.rs` and every helper between them —
+// forty signatures so that one op can find one file. A command that ever loads
+// two scenes from different directories is the trigger to thread it properly.
+//
+// **Thread-local rather than a `Mutex`, and that is not a style preference.**
+// The test binary runs its cases in parallel *in one process*, so a process
+// global made every recipe-carrying scene's base whichever test set it last:
+// two tests validating scenes from two temp directories, both with the recipe
+// beside them, and one of them failing on `No such file or directory`. It was
+// not the assertion that was flaky — it was the state. Each thread getting its
+// own base is the same behaviour for the real single-threaded CLI (verified:
+// nothing in `loom_cli` or `loom_render` spawns a thread) and removes the class.
+thread_local! {
+    static SCENE_BASE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// Point scene-relative paths at the directory of `path`.
 fn set_scene_base(path: &str) {
@@ -3644,17 +3737,11 @@ fn set_scene_base(path: &str) {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
-    *SCENE_BASE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(base);
+    SCENE_BASE.with_borrow_mut(|b| *b = Some(base));
 }
 
 fn scene_base() -> std::path::PathBuf {
-    SCENE_BASE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
+    SCENE_BASE.with_borrow(|b| b.clone().unwrap_or_else(|| std::path::PathBuf::from(".")))
 }
 
 /// Build and bake a voxel volume from a component.
@@ -3678,31 +3765,10 @@ pub(crate) fn build_volume(component: &serde_json::Value) -> Result<loom_voxel::
     if ops.is_empty() {
         return Err("the volume authors no ops, so it has no shape".to_owned());
     }
+    // The terrain rect is checked in `parse_ops`, so `loom validate` catches it
+    // too — a coverage failure used to reach this point and be reported as a
+    // stderr line on an exit-0 run.
     let mut volume = loom_voxel::Volume::new([dims[0], dims[1], dims[2]], voxel_size);
-
-    // **A terrain rect that does not cover the volume is the other half of the
-    // coordinate-system trap** (`loom_voxel::resolve` catches the first). The
-    // map clamps outside its own rect, which extrudes the boundary row across
-    // everything past it — parallel ridges running to the edge of the world,
-    // and they look authored. Named with both numbers, because the fix is
-    // arithmetic the agent can do once it can see them.
-    let [rx, _, rz] = volume.resolution();
-    #[allow(clippy::cast_precision_loss)]
-    let footprint = [rx as f32 * voxel_size, rz as f32 * voxel_size];
-    for (index, op) in ops.iter().enumerate() {
-        let loom_voxel::VoxelOp::Terrain { rect, .. } = op else {
-            continue;
-        };
-        if rect[0] > 0.0 || rect[1] > 0.0 || rect[2] < footprint[0] || rect[3] < footprint[1] {
-            return Err(format!(
-                "op {index} (kind = \"terrain\"): rect {rect:?} does not cover the volume, \
-                 which is [0.0, 0.0, {}, {}]. Outside its rect a recipe repeats its edge \
-                 row forever.",
-                footprint[0], footprint[1]
-            ));
-        }
-    }
-
     volume.bake(&ops);
     Ok(volume)
 }
@@ -4700,6 +4766,39 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         );
     }
 
+    /// **`loom describe VoxelVolume` is the whole schema for an op**, because
+    /// `ops` is `Vec<serde_json::Value>` and JSON Schema says only "array".
+    ///
+    /// Authoring a volume from the schema alone was impossible until this
+    /// table existed: nothing named the `kind` values, nothing said which
+    /// fields each takes, and nothing said whether the volume's near corner is
+    /// at the origin or centred on it. Every voxel scene in the library was
+    /// authored by copying another one.
+    ///
+    /// Anchored on the field names rather than the prose, so the test fails if
+    /// the actionable part is dropped and not merely if the paragraph is
+    /// reworded. `elongate` is the one worth naming twice: it is on `sphere`
+    /// alone, and it adds to `radius` rather than replacing it.
+    #[test]
+    fn describe_carries_the_op_schema() {
+        let (code, out) = run(&args(&["describe", "VoxelVolume"]));
+
+        assert_eq!(code, 0);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        let ops = v["properties"]["ops"]["description"].as_str().unwrap_or_default();
+        for needle in [
+            "half_extents",
+            "yaw_degrees",
+            "elongate",
+            "base_y",
+            "world_scale",
+            "chunks * 32 * voxel_size",
+            "radius + elongate[i]",
+        ] {
+            assert!(ops.contains(needle), "an agent cannot author `{needle}` blind: {ops}");
+        }
+    }
+
     /// `--shape` reports the number `Displace` is judged by, and it must carry
     /// its own comparison rule — the metric is resolution-dependent, so a row
     /// without a `voxel_size` beside it is not comparable to anything.
@@ -5010,6 +5109,127 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         assert!(
             e["constraint"].as_str().unwrap_or_default().contains("swirl"),
             "the offending kind has to be named or the agent cannot fix it: {out}"
+        );
+    }
+
+    /// **The same defect one level down: a typo'd *field* inside a recognised
+    /// kind.** `000daf8` made an unknown `kind` an error and left this open —
+    /// `yaw = 30` for `yaw_degrees` on a `box` loaded clean and drew an
+    /// unrotated wall, and so did `elongate` on a box, `round` on a sphere and
+    /// `displace` on a terrain, which are the three most likely mistakes given
+    /// that each of the new transforms is on exactly one kind.
+    ///
+    /// `deny_unknown_fields` on `VoxelOp` and on `Displace` closes it, and the
+    /// error serde produces **enumerates the fields that kind does take** —
+    /// which is what makes the untyped `ops` array discoverable at all.
+    #[test]
+    fn validate_rejects_a_field_the_op_does_not_have() {
+        let good = std::fs::read_to_string("../../assets/test/vale.loom").unwrap();
+        let dir = std::env::temp_dir().join("loom_voxel_field_check");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        // The recipe is named relative to the scene, so it has to come along.
+        std::fs::copy("../../assets/test/vale.toml", dir.join("vale.toml")).expect("recipe");
+        let scene = dir.join("a.loom");
+
+        // Each is a field that exists on some other kind, which is the mistake
+        // the schema invites: `yaw_degrees` and `round` are box-only, and
+        // `elongate` is sphere-only. The expected substring is a *sibling*
+        // field of the op being mutated, so it can only come from the
+        // enumerated list serde emits.
+        for (mutation, replacement, expected) in [
+            ("  yaw_degrees = 24.0", "  yaw = 24.0", "yaw_degrees"),
+            ("  radius = 4.5", "  radius = 4.5\n  round = 1.0", "elongate"),
+            ("  round = 0.4", "  elongate = [1.0, 0.0, 0.0]", "yaw_degrees"),
+        ] {
+            let bad = good.replacen(mutation, replacement, 1);
+            assert_ne!(bad, good, "the mutation did not apply, so this proves nothing");
+            std::fs::write(&scene, &bad).expect("write");
+
+            let (code, out) = run(&args(&["validate", scene.to_str().unwrap()]));
+            assert_eq!(code, 1, "`{replacement}` is not a field of that op: {out}");
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            let e = v["errors"][0]["constraint"].as_str().unwrap_or_default().to_owned();
+            assert_eq!(v["errors"][0]["error"], "invalid_voxel_op");
+            assert!(
+                e.contains(expected),
+                "the message must list the fields that kind does take, or the agent is \
+                 guessing again: {e}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **`intersect` as op 0 bakes an empty volume and said nothing.** The
+    /// accumulator seeds at `f32::MAX` and intersect is `max`, so the first op
+    /// keeps the seed; a later union then fills in, which is why the symptom is
+    /// "the landform vanished and the props are still floating there" rather
+    /// than an obviously empty scene. Measured before the fix: a single
+    /// intersect sphere printed `voxel produced no surface` on stderr, exited
+    /// **0**, and `loom validate` said `"ok": true`.
+    #[test]
+    fn validate_rejects_an_intersect_with_nothing_to_intersect() {
+        let dir = std::env::temp_dir().join("loom_voxel_intersect_check");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let scene = dir.join("a.loom");
+        std::fs::write(
+            &scene,
+            "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f\"\n\n\
+             [[node]]\nname = \"Root\"\n\n  [node.components.VoxelVolume]\n  \
+             voxel_size = 0.5\n  chunks = [2, 2, 2]\n\n  \
+             [[node.components.VoxelVolume.ops]]\n  kind = \"sphere\"\n  \
+             center = [16.0, 16.0, 16.0]\n  radius = 8.0\n  mode = \"intersect\"\n",
+        )
+        .expect("write");
+
+        let (code, out) = run(&args(&["validate", scene.to_str().unwrap()]));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(code, 1, "an intersect with nothing to intersect is invalid: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["errors"][0]["error"], "invalid_voxel_op");
+        assert!(
+            v["errors"][0]["constraint"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("op 0"),
+            "which op is wrong is the whole message: {out}"
+        );
+    }
+
+    /// **The coverage half of the terrain coordinate trap reached `validate`
+    /// as `"ok": true`.** It was checked in `build_volume` alone, so a rect the
+    /// right size in the wrong place passed the hard gate; `loom sim` then
+    /// printed one line to stderr, exited **0**, and left the ground the player
+    /// stands on out of the collision world entirely. Both halves belong in
+    /// `parse_ops`, which is the funnel `validate` and every bake share.
+    #[test]
+    fn validate_rejects_a_terrain_rect_that_misses_the_volume() {
+        let good = std::fs::read_to_string("../../assets/test/vale.loom").unwrap();
+        let dir = std::env::temp_dir().join("loom_voxel_rect_check");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::copy("../../assets/test/vale.toml", dir.join("vale.toml")).expect("recipe");
+        let scene = dir.join("a.loom");
+        // Still 128 m across, so the size check passes and only coverage fails.
+        let bad = good.replacen(
+            "rect = [0.0, 0.0, 128.0, 128.0]",
+            "rect = [20.0, 20.0, 148.0, 148.0]",
+            1,
+        );
+        assert_ne!(bad, good, "the mutation did not apply, so this proves nothing");
+        std::fs::write(&scene, &bad).expect("write");
+
+        let (code, out) = run(&args(&["validate", scene.to_str().unwrap()]));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(code, 1, "a rect that misses the volume is invalid: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["errors"][0]["error"], "invalid_voxel_op");
+        assert!(
+            v["errors"][0]["constraint"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not cover"),
+            "{out}"
         );
     }
 

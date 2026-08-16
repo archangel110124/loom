@@ -207,7 +207,7 @@ pub enum CsgMode {
 /// reads 25.7% at `voxel_size` 0.12 and 51.6% at 0.02. Never threshold it, and
 /// only ever compare shapes measured at equal `voxel_size`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Displace {
     /// How far the surface moves, in world units. Roughly the depth of the
     /// deepest crevice.
@@ -489,7 +489,7 @@ fn baked(recipe: &loom_terrain::Recipe) -> Arc<TerrainMap> {
 /// through this hillside" is a handful of capsule subtractions — a request the
 /// agent can express correctly on the first try (voxel doc §5.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum VoxelOp {
     Sphere {
         center: [f32; 3],

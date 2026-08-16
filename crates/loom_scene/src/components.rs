@@ -323,6 +323,83 @@ pub struct VoxelVolume {
     pub chunks: [u32; 3],
     /// Ordered CSG operations. Order matters.
     ///
+    /// **This doc string is the whole schema for an op.** `ops` is
+    /// `Vec<serde_json::Value>`, so JSON Schema says only "array" and every
+    /// field name, unit and constraint below is invisible to a generated
+    /// schema. Everything an agent needs to author an op without copying an
+    /// existing scene has to be here.
+    ///
+    /// ## Coordinates
+    ///
+    /// Op coordinates are **the volume's own space**: its near corner is
+    /// `[0, 0, 0]` and it runs in +X, +Y and +Z for `chunks * 32 * voxel_size`
+    /// metres. The node's transform then places and scales that whole box in
+    /// the world. So `chunks = [8, 3, 8]` at `voxel_size = 0.5` is a
+    /// 128 x 48 x 128 m box and an op at `center = [64, 24, 64]` is in the
+    /// middle of it. There is no negative half: an op placed at a negative
+    /// coordinate contributes only where it still reaches back inside.
+    ///
+    /// ## The kinds and their fields
+    ///
+    /// ```text
+    /// kind          fields                                      also accepts
+    /// sphere        center[3]  radius                           displace  elongate[3]
+    /// box           center[3]  half_extents[3]                  displace  yaw_degrees  round
+    /// capsule       a[3]  b[3]  radius                          displace
+    /// heightfield   base  amplitude  frequency  octaves  seed
+    /// terrain       recipe  rect[4]  base_y
+    /// ```
+    ///
+    /// Every kind also takes `mode`, one of `union`, `subtract`, `intersect`.
+    ///
+    /// **A field on the wrong kind is refused, and the error lists the ones
+    /// that kind does take** — `elongate` on a `box`, `round` on a `sphere`,
+    /// `displace` on a `terrain` and `yaw` for `yaw_degrees` were all silently
+    /// ignored until `deny_unknown_fields` landed, which is the only reason
+    /// `loom describe` can be the only place this is written down: get a name
+    /// wrong and `loom validate` tells you the right ones.
+    ///
+    /// **Op 0 cannot be `intersect`.** There is nothing yet to intersect with,
+    /// so the volume bakes empty — refused at load rather than rendered as an
+    /// absence.
+    ///
+    /// **Nothing thinner than two voxels survives.** Surface nets needs a
+    /// voxel on each side of a sheet, so a 0.5 m wall at `voxel_size = 0.5`
+    /// vanishes with no error at all.
+    ///
+    /// ## The three shape transforms
+    ///
+    /// - `yaw_degrees` (box) — rotation about Y in **degrees**, counted the
+    ///   same way as a node's `rot_euler`, so a rotated box and a rotated mesh
+    ///   agree. It is the only rotation an op has; a `capsule` gets arbitrary
+    ///   orientation free from its two endpoints instead.
+    /// - `round` (box) — fillet radius in world units. `half_extents` keeps
+    ///   meaning the **outer** extent, so rounding a box does not grow it.
+    ///   Silently clamped to the smallest half-extent, which is the largest
+    ///   fillet that fits in the box's own thickness.
+    /// - `elongate` (sphere) — stretch per axis in world units, by sliding the
+    ///   sample point rather than scaling it, so the result is still an exact
+    ///   distance field. **The half-extent on an axis becomes
+    ///   `radius + elongate[i]`**, not `elongate[i]`: `radius = 8` with
+    ///   `elongate = [5, 0, 2.5]` is 26 x 16 x 21 m. One non-zero axis is a
+    ///   capsule, two a stadium slab, three a rounded box.
+    ///
+    /// ## `terrain`, and the two numbers to get from `loom terrain`
+    ///
+    /// `recipe` is a path relative to the scene file. `rect` is `[x0, z0, x1,
+    /// z1]` and **must be exactly `world_scale` across and must cover the
+    /// volume** — it places the recipe, it does not rescale it, and both are
+    /// refused with the numbers rather than rendered at the wrong scale.
+    /// `base_y` is the world Y the recipe's heights are measured from, so the
+    /// surface lands between `base_y + height.min` and `base_y + height.max`.
+    ///
+    /// `loom terrain <recipe.toml>` prints `world_scale` and `height`, which
+    /// is where both of those come from — and `buildable_pct`, `slope_mean`,
+    /// `largest_flat` and `reachable`, which are the only assertable feedback
+    /// a landscape has in this engine.
+    ///
+    /// ## Displacement
+    ///
     /// **`displace` is what makes a rock a rock, and it has a recipe.** Every
     /// primitive here is analytic and union is a hard minimum, so a shape
     /// assembled from them bulges outward everywhere and creases inward only
@@ -342,9 +419,11 @@ pub struct VoxelVolume {
     /// and curvature spread — and read its rule, because the number is
     /// resolution-dependent and is never a pass/fail threshold.
     ///
-    /// **This doc string is where that recipe reaches an agent.** `ops` is
-    /// untyped JSON, so `Displace`'s own Rust doc — which carries the full
-    /// measured tables — never reaches `loom describe`.
+    /// Its fields are `amplitude`, `frequency`, `octaves`, `seed`, `ridged`,
+    /// and it is written inline: `displace = { amplitude = 1.6, frequency =
+    /// 0.075, octaves = 3, seed = 4417, ridged = true }`. `Displace`'s own Rust
+    /// doc carries the full measured tables and never reaches `loom describe`,
+    /// which is why the actionable part is restated here.
     pub ops: Vec<serde_json::Value>,
 }
 
