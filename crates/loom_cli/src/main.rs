@@ -787,11 +787,25 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     }
                     let mut objects = world_to_objects(&world, &library, &material_library);
                     objects.extend(scatter_objects(&scene, &library));
+                    // **`sim_ticks + elapsed`, and it was `elapsed` alone.**
+                    // `--sim` warms the world and the runner, and the rain tick
+                    // two lines below already adds it — particles did not, so
+                    // every frame of every sequence simulated them from tick 0
+                    // while the rest of the scene stood at the warmed state.
+                    //
+                    // The visible symptom is that **frame 0 of any capture has
+                    // no fire in it**: a burst emitter has not produced anything
+                    // at tick 0, so `tools/watch.sh` and `cargo xtask flythrough`
+                    // both open on an unlit-looking scene whose ground is
+                    // nevertheless fully lit by the flame's `Light`. Measured on
+                    // `campfire` at `--sim 200`: a single still has 476 flame
+                    // pixels above the ground line and frame 0 of a sequence has
+                    // **0**, at the same tick.
                     #[allow(clippy::cast_possible_truncation)]
                     let particles = particles::simulate(
                         &world,
                         &weather,
-                        Some(elapsed as u32),
+                        Some((u64::from(sim_ticks) + elapsed) as u32),
                         &runner.fired(),
                         &runner.splashed(),
                     );
