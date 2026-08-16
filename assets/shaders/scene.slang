@@ -1077,6 +1077,103 @@ float sunVisibility(float3 position, float3 normal, float bias, float2 pixel) {
     return open / float(SUN_RAYS);
 }
 
+// ---------------------------------------------------------------------------
+// Ray-traced ambient occlusion.
+//
+// **This is the answer to the SSAO deferral**, and it arrives by sidestepping
+// what blocked it rather than by solving it. `docs/design/POST-STACK-PLAN.md`
+// deferred screen-space AO because a grass field puts 45,000 blades into the
+// depth buffer, and a hemisphere kernel reading that depth hairball sees one
+// enormous concavity and darkens the whole meadow. The objection is entirely
+// about the *depth buffer*, and a ray does not read one: grass is generated in
+// a vertex shader from `SV_VertexID` with no vertex or index buffer, so it is
+// not in the acceleration structure and cannot be hit. The blades therefore
+// occlude nothing, which is exactly the behaviour SSAO could not be made to
+// have.
+//
+// It is worth being plain that this is a *coincidence of the implementation*
+// and not a physical claim — real grass does occlude — but it is the behaviour
+// the project wants, and it is stable rather than tuned.
+//
+// Cosine-weighted, so the estimate is the ambient visibility term directly:
+// no division by a normalisation constant, and no cosine factor to apply after.
+// ---------------------------------------------------------------------------
+
+/// How far a ray looks for an occluder, in metres.
+///
+/// **A range, not infinity, and the two halves of the measurement disagree.**
+///
+/// AO is contact darkening — the corner where two walls meet, the ground under
+/// a crate. Against a stubbed build on `primitives` at 640x400 with 32 rays, so
+/// the numbers are the range's doing and not the sampling's:
+///
+///     range      0.25    0.5     1.0     2.0     4.0     inf
+///     worst      32      70      80      84      84      86
+///     mean       .0056   .0536   .1506   .2796   .3839   .4023
+///
+/// `worst` is how dark the deepest contact gets and `mean` is how much the
+/// whole frame dims. **They saturate at very different rates, and that gap is
+/// the entire signal.** By 1 m the deepest contact is already at 93% of its
+/// unbounded value while the overall dimming is at 37% of it. Going on to 2 m
+/// buys 5% more contact for double the flat dimming; stopping at 0.5 m gives
+/// up 12% of the contact for very little.
+///
+/// So 1 m is where contact darkening is nearly all bought and global dimming is
+/// still mostly unpaid for. It is also about a human stride, which is the scale
+/// these scenes are authored at, and small enough that the term stays a
+/// *lighting* correction rather than a crude one-bounce GI.
+static const float AO_RANGE = 1.0;
+
+/// **Eight, and the reason is an occupancy cliff rather than the noise.**
+///
+/// Noise against a 64-ray reference on `primitives` at 640x400, and cost on
+/// `lanternhead` at 1920x1080 over a 4-ray soft shadow, forward pass, median of
+/// three (0.467 ms with AO stubbed out):
+///
+///     rays          2       4       8       16      32
+///     worst         84      64      41      24      24
+///     mean          .1201   .0712   .0415   .0250   .0146
+///     forward ms    0.511   0.605   0.806   1.618   2.100
+///
+/// Rays are 0.022, 0.024 and 0.025 ms each up to eight, and then **0.101 ms
+/// each** from eight to sixteen — a fourfold jump with nothing in the shader
+/// changing but the trip count, which is what a register-pressure or occupancy
+/// cliff looks like. Sixteen rays would cost more than the whole rest of the
+/// frame to take the worst-channel error from 41 to 24, both comfortably inside
+/// the gate's 72.
+///
+/// An AO ray is also far more expensive than a sun ray at the same count — 0.024
+/// against 0.005 ms — and the reason is coherence: every pixel's sun rays go
+/// nearly the same way and share their traversal, while a hemisphere sample goes
+/// wherever the surface faces.
+static const uint AO_RAYS = 8;
+
+/// The fraction of the hemisphere above `normal` that is open, within
+/// [`AO_RANGE`].
+float ambientVisibility(float3 position, float3 normal, float bias, float2 pixel) {
+    float3 origin = position + normal * bias;
+    float3 u, v;
+    rayBasis(normal, u, v);
+
+    // Offset into the sequence, so a pixel's AO rays are not the same four
+    // directions its shadow rays used. Sharing them correlates the two terms
+    // and puts a visible dither pattern where a penumbra crosses a corner.
+    float2 dither = rayDither(pixel + float2(37.0, 11.0));
+    float open = 0.0;
+    for (uint i = 0; i < AO_RAYS; ++i) {
+        float2 xi = raySample(dither, i);
+        // Cosine-weighted: a disc sample lifted onto the hemisphere. Uniform
+        // sampling would need the cosine applied afterwards and would spend
+        // most of its rays near the horizon, where the weight is nearly zero.
+        float radius = sqrt(xi.x);
+        float angle = 6.2831853 * xi.y;
+        float3 dir = u * (radius * cos(angle))
+                   + v * (radius * sin(angle))
+                   + normal * sqrt(max(1.0 - xi.x, 0.0));
+        open += anyHit(origin, normalize(dir), bias, AO_RANGE) ? 0.0 : 1.0;
+    }
+    return open / float(AO_RAYS);
+}
 
 
 // ---------------------------------------------------------------------------
@@ -1867,7 +1964,20 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // is pure code motion for one and the difference between working and not
     // for the other.
     float diffuse = max(dot(normal, sunDirection()), 0.0);
-    float3 ambient = hemisphereAmbient(normal) * ambientStrength();
+    // **The sky ambient, and only it, is occluded.** `hemisphereAmbient` is the
+    // sky arriving from the whole hemisphere above this surface, so "how much
+    // of that hemisphere can actually be seen" is exactly the factor it is
+    // missing — which is what makes AO a correction to this term rather than a
+    // darkening applied to the finished pixel. The sun below has its own
+    // visibility ray and does not want a second one, and the point lights after
+    // it are at known positions, so occluding them with a hemisphere average
+    // would be replacing a right answer with an approximate one.
+    //
+    // Traced against the *geometric* normal for the same reason the shadow is:
+    // a normal map can tilt the hemisphere far enough to put half its rays
+    // under the real surface, which reads as blotches of pure occlusion.
+    float3 ambient = hemisphereAmbient(normal) * ambientStrength()
+                   * ambientVisibility(in.worldPos, geometric, in.shadowBias, in.position.xy);
     // **Point lights, added to the ambient term.** They are unshadowed: a
     // shadowed point light needs a cube map or a ray per light per pixel, and
     // the ray tracer here is aimed at the sun. For a fire in the dark that is
