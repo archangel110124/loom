@@ -522,8 +522,15 @@ transform = { pos = [27.6, 9.62, 34.0], scale = [0.42, 0.22, 0.42] }
 [[node]]
 name = "Flame"
 parent = "Lanternhead"
-transform = { pos = [27.6, 10.4, 34.0] }
+transform = { pos = [27.6, 10.92, 34.0] }
 
+  # **Raised 0.52 m, because the brazier was not holding the fire — the fire was
+  # standing behind it.** The quad is 2.2 m tall, so at 10.4 its base — the fuel
+  # line, `h = 0` — sat at 9.30, and the bowl's rim is at 9.84 and its underside
+  # at 9.40. The fire's fuel was therefore *below the bottom of the bowl*, and at
+  # 4K a tongue visibly licked down the outside of it onto the cobbles. At 10.92
+  # the fuel line is at the rim, which is where a brazier's fuel is.
+  #
   # One static quad carrying the flame field, exactly as `campfire.loom` does —
   # overdraw of one, so `fireRamp` is honoured everywhere. Its top rung is
   # uncapped since ADR 0018, so the core is genuinely white-hot rather than the
@@ -553,7 +560,7 @@ transform = { pos = [27.6, 10.4, 34.0] }
 [[node]]
 name = "Smoke"
 parent = "Lanternhead"
-transform = { pos = [27.6, 10.9, 34.0] }
+transform = { pos = [27.6, 11.65, 34.0] }
 
   # Alpha-blended, not additive: smoke occludes. `wind_response = 4.0` is what
   # lays the plume over toward the headland instead of standing it straight up,
