@@ -2412,12 +2412,61 @@ static const float FIRE_T_POW = 1.6;
 static const float FIRE_CONE = 0.55;
 static const float FIRE_LOBES = 5.5;
 static const float FIRE_GAP = 0.72;
+
+/// **How wide the fire is allowed to be, which is not the same question as how
+/// wide the quad is.**
+///
+/// `cone * 0.22` reaches only 0.31 at the quad's inscribed circle against a
+/// threshold base of 0.30, so about a fifth of the field still cleared it out
+/// there: a 2.2 m quad standing on a 0.84 m brazier drew a flame two and a half
+/// times the width of the thing burning. The march's own sphere ends the
+/// integral at the same radius, so this is no longer what stops the quad's edge
+/// from being visible — `FIRE_VOL_R` does that, continuously. What it buys is
+/// the WIDTH: a fire bounded by a circle it chooses rather than by a square it
+/// was handed, which is what turns a row of teeth spanning two and a half bowl
+/// widths back into a flame standing in a bowl.
+///
+/// Same arithmetic as `FIRE_T1` and `FIRE_GAP`: the term takes the threshold
+/// past the field's supremum of 1.0 before `radial` reaches the circle, so
+/// extinction there is certain rather than probabilistic. The sixth power is
+/// what keeps it out of the way inside — it adds 0.07 at `radial` 0.5 and 0.22
+/// at 0.6, and only then bites.
+///
+/// **The soot does not get it, deliberately.** Smoke spreads as it rises and it
+/// is the one thing that should be wider than the flame; the marched sphere
+/// already ends it with no edge of its own.
+static const float FIRE_EDGE_R = 1.0 / 1.15;
+static const float FIRE_EDGE_P = 6.0;
+static const float FIRE_EDGE_T = 2.0;
+
 /// Where the finest octave is retired. `loom_value_noise` is analytic and has
-/// no mip chain, so past the distance at which that octave falls under a pixel
-/// it is a twinkle generator — the same bound and the same reason as
-/// `WATER_DETAIL_RANGE`. Computed from `length(toEye)`, which is analytic and
-/// therefore correct even in a quad the discard has killed.
-static const float FIRE_RANGE = 26.0;
+/// no mip chain, so once that octave falls under a pixel it is a twinkle
+/// generator — the same reason as `WATER_DETAIL_RANGE`.
+///
+/// **The bound is Nyquist in SCREEN space, and a distance in metres was the
+/// wrong instrument.** It used to be `1 - length(toEye) / 26`, which retires
+/// the octave at a fixed world distance whatever the resolution — so at 4K,
+/// where a 2.2 m flame twenty metres away is still 250 pixels wide and its
+/// finest features are ELEVEN pixels across, the shader threw them away anyway.
+/// That is why the brazier on the deck rendered smooth while the campfire four
+/// metres from the camera had structure: not a shading difference, a detail
+/// cutoff measuring the wrong thing. It is the same defect class as an
+/// anti-aliasing metric taken on a path the filter is not on, which CLAUDE.md
+/// records the cost of.
+///
+/// `fwidth(w)` is metres per pixel on the quad. The finest of three octaves
+/// runs at `FIRE_HZ * 2.03^2`, so `metresPerPixel * FIRE_HZ * 4.12` is cycles
+/// per pixel and half a cycle per pixel is the sampling limit. Full detail
+/// below `FIRE_NYQUIST_LOW`, gone at `FIRE_NYQUIST_HIGH`, faded between so it
+/// never pops.
+///
+/// **This is the screen's bound; the march has its own along the ray** — see
+/// `dField` in `flameColor`, where the two are combined with a `min`. They ask
+/// different questions (is the octave under a pixel / is it under two steps)
+/// and either one alone twinkles.
+static const float FIRE_OCTAVE_STEP = 4.12;
+static const float FIRE_NYQUIST_LOW = 0.25;
+static const float FIRE_NYQUIST_HIGH = 0.50;
 
 /// **The flame is a LINE INTEGRAL now, not a level set on a plane.**
 ///
@@ -2458,8 +2507,8 @@ static const float FIRE_RANGE = 26.0;
 ///   authored, and it moves with the camera instead of being pinned to the
 ///   billboard.
 ///
-/// **`FIRE_STEPS` is set by the field's Nyquist and then by the dither's
-/// residue, and by neither one alone.**
+/// **`FIRE_STEPS` is set by the field's Nyquist and then by residual banding,
+/// and by neither one alone.**
 ///
 /// The chord is `2 * half_h` — 2.2 m in both scenes that author a flame — and
 /// the finest octave of the 3-octave field has a period of
@@ -2467,13 +2516,12 @@ static const float FIRE_RANGE = 26.0;
 /// period, under Nyquist, and `dField` below then retires most of that octave;
 /// by 32 it survives the march. That is the floor.
 ///
-/// The ceiling is the dither. `FIRE_JITTER` converts step banding into
-/// per-pixel noise whose amplitude is one step's contribution to the integral,
-/// so halving the step halves the grain — and at 32 steps the interleaved
-/// gradient pattern is a visible diagonal hatch across the flame's body at 4K,
-/// **which is the resolution this is judged at**. Measured on `deck` at
-/// 3840x2160: 32 hatched, 48 clean, 64 no better than 48. The cost is paid in
-/// flame pixels only, and is measured in the commit message.
+/// The ceiling is what the trapezoid rule has left over. Re-measured on `deck`
+/// at 3840x2160 after the ray dither came out: at 32 the flame's flanks carry
+/// faint horizontal striations — 18,399 pixels differ from 48 by more than 8
+/// of 255, and they are the stripes — and at 48 there are none. 64 is no better
+/// than 48. The cost is paid in flame pixels only and is measured in the commit
+/// message.
 static const int FIRE_STEPS = 48;
 /// The marched volume, as a fraction of `half_h`. **The quad's inscribed
 /// sphere, and that is arithmetic rather than taste** — `particleVertexMain`
@@ -2501,26 +2549,40 @@ static const float FIRE_SIGMA = 4.0;
 /// escape — the same failure a soft `cover` produced, arrived at along the ray
 /// instead of across the screen.
 static const float FIRE_DENS_W = 0.05;
-/// How much of a step the ray's start is dithered by. 0 samples every ray at
-/// its step midpoints; 1 spreads the starts uniformly across one step.
-///
-/// **This is not a nicety; without it the flame grows a comb.** Where the view
-/// ray grazes a nearly-tangent iso-surface the material it crosses is thinner
-/// than one step, so a sample is inside or outside with nothing in between, and
-/// the contour of that flip is a row of evenly spaced spikes radiating off the
-/// flame's flanks. It is visible at 4K on `campfire` and it is the single most
-/// synthetic thing the march produces. Doubling the step count halved it, which
-/// is what identified it; dithering the start removes it outright.
-///
-/// **A segment-coverage width was tried first and does nothing.** The idea was
-/// the deleted `cover`'s own trick along the ray: widen the density ramp to the
-/// step's change in `e`, so a step straddling the boundary reads half full.
-/// Measured against the dither at 4K it is indistinguishable from no widening
-/// at all — because at a grazing tangency `e` barely changes ALONG the ray, so
-/// the width it computes is the narrow one exactly where the artifact is. It
-/// also shifts the level set outward by half its cap, which visibly fattened
-/// the flame at a cap of 0.30. Deleted rather than gated.
-static const float FIRE_JITTER = 1.0;
+// **THERE IS NO RAY DITHER, AND THAT IS A MEASURED DECISION — read this before
+// adding one back.**
+//
+// The march used to start each ray at a dithered offset into its first step,
+// because with the RECTANGLE rule a ray grazing a nearly-tangent iso-surface
+// crosses material thinner than one step, a sample is inside or outside with
+// nothing in between, and the contour of that flip is a row of evenly spaced
+// spikes off the flame's flanks — a comb. Three ways of paying for it were
+// rendered at 3840x2160 on `deck` and on `campfire` and all three are visible:
+//
+//   - **Interleaved gradient noise.** A regular diagonal halftone across the
+//     whole flame body. IGN is designed to be cleaned up by a temporal or a
+//     spatial filter and this project has neither, so what is left is a
+//     periodic texture the eye locks onto — not grain.
+//   - **A hash of the pixel coordinate.** No period to see, and much worse in
+//     amplitude: white noise has the variance IGN's low-discrepancy pattern
+//     exists to avoid, and the flame came out salt-and-peppered.
+//   - **Nothing, under the rectangle rule.** Step quantisation instead.
+//
+// The trapezoid rule in the loop below removes the cause rather than dithering
+// the symptom, and it costs nothing (see its comment). With it, no dither at
+// any amplitude is measurably better than none: the comb does not appear on
+// either scene at 4K, and the flame body is smooth with no pattern in it.
+//
+// **What is left is not quadrature and no dither would have hidden it.** The
+// interior of a tongue carries nested contour arcs — a rolled-scroll look, most
+// visible in motion. They survive the trapezoid, they survive making `fireRamp`
+// C1 at its rungs, and widening `FIRE_DENS_W` to 0.14 only thins the flame
+// without touching them. They are the domain warp's FOLD seen in depth: the
+// warp amplitude is deliberately above the fold condition, a folded map has
+// cusps, and a line integral through one crosses the folded sheet several
+// times. Every one of the three variants judged in this investigation shows
+// them. Removing them means lowering the fold amplitude, which is the one thing
+// the silhouette is made of.
 /// **Soot: material that occludes and does not emit.**
 ///
 /// The flame's own products, cooled past the point where they radiate. It is
@@ -2660,10 +2722,28 @@ FireSample fireField(float3 p, float half_h, float t, float dField, float dWarp)
     float cone = radial * (1.0 + FIRE_CONE * s.h);
     // The fuel line: a few lobes across the base, so tongues start apart
     // rather than being one sheet that noise happens to tear.
-    float lobes = 0.5 + 0.5 * sin(p.x * FIRE_LOBES + p.z * 0.7);
+    //
+    // **`cos`, not `sin`, and the phase is the whole of the difference.** `p`
+    // is measured from the emitter, so `p.x = p.z = 0` IS the flame's axis —
+    // and `sin(0) = 0` put a fuel-line MINIMUM there, which `gap` then turned
+    // into `FIRE_GAP * 0.5 = 0.36` of extra threshold on the one column the
+    // fire is standing on. The centre of the fire was the one place guaranteed
+    // to have no fuel. With peaks `2*pi / 5.5 = 1.14 m` apart the survivors sat
+    // at x = ±0.29 and ±0.86 straddling a dead middle, which is the mechanism
+    // behind the three detached shards `lanternhead.loom` records in its own
+    // comment — **they are the fuel lobes, not noise, and not the alpha.** The
+    // integral connects what is there; it cannot invent fuel the threshold
+    // forbade. `cos` puts a peak on the axis, which is where a brazier's fuel
+    // is.
+    float lobes = 0.5 + 0.5 * cos(p.x * FIRE_LOBES + p.z * 0.7);
     float gap = FIRE_GAP * (1.0 - lobes) * (1.0 - s.h * 0.4);
 
-    s.e = d - (FIRE_T0 + (FIRE_T1 - FIRE_T0) * pow(s.h, FIRE_T_POW) + cone * 0.22 + gap);
+    // How wide the fire is allowed to be, independent of how wide its quad is.
+    // See `FIRE_EDGE_T`.
+    float edge = FIRE_EDGE_T * pow(saturate(radial / FIRE_EDGE_R), FIRE_EDGE_P);
+
+    s.e = d - (FIRE_T0 + (FIRE_T1 - FIRE_T0) * pow(s.h, FIRE_T_POW)
+             + cone * 0.22 + gap + edge);
     // **Soot gets the same field and a lower ceiling, and the ceiling is the
     // whole of it.** `FIRE_T1` is deliberately above the field's supremum, so
     // above the flame's tip `e` is not merely negative, it is unreachable —
@@ -2673,7 +2753,16 @@ FireSample fireField(float3 p, float half_h, float t, float dField, float dWarp)
     // stopped radiating, which is what soot is. The fuel lobes are left out for
     // the same reason: smoke fills the gaps between tongues, it does not have
     // gaps of its own.
-    s.es = d - (FIRE_T0 + (FIRE_SOOT_T1 - FIRE_T0) * pow(s.h, FIRE_T_POW) + cone * 0.22);
+    //
+    // **It does take the radial bound, and leaving it off was measured wrong.**
+    // Soot's ceiling is below the supremum precisely so that it survives where
+    // the flame does not — including out at the quad's rim, where the flame's
+    // own threshold has long since given up. Without the bound the soot filled
+    // the marched sphere at its equator and drew a flat grey pancake lying
+    // across the campfire's log, two brazier-widths across and at flame height:
+    // a plume is a column, and this is what makes it one.
+    s.es = d - (FIRE_T0 + (FIRE_SOOT_T1 - FIRE_T0) * pow(s.h, FIRE_T_POW)
+             + cone * 0.22 + edge);
     return s;
 }
 
@@ -2687,6 +2776,14 @@ float4 flameColor(ParticleOutput in, float3 toEye) {
     // mapping now, for every sample rather than for the fragment.
     float3 w0 = in.worldPos - in.origin.xyz;
     float half_h = max(in.origin.w, 1e-3);
+
+    // **Taken here, above the early return, and that placement is the point.**
+    // A quad derivative is only defined while every lane of the quad is still
+    // running, and the ray/sphere miss below exits non-uniformly. Reading
+    // `fwidth` after it is the water-shoreline trap with a `return` in place of
+    // a `discard`. Metres per pixel on the quad; what it is for is at
+    // `FIRE_OCTAVE_STEP`.
+    float cyclesPerPixel = length(fwidth(w0)) * FIRE_HZ * FIRE_OCTAVE_STEP;
 
     // The chord of the marched sphere, analytically. `w0` lies in the billboard
     // plane and that plane passes through the centre, so `b` is near zero and
@@ -2703,56 +2800,76 @@ float4 flameColor(ParticleOutput in, float3 toEye) {
     }
     float sq = sqrt(disc);
     float t0 = -b - sq;
-    float dt = (2.0 * sq) / float(FIRE_STEPS);
+    // `FIRE_STEPS` samples span the chord, so there are `FIRE_STEPS - 1`
+    // segments between them — the trapezoid's fencepost, and the field is
+    // evaluated exactly `FIRE_STEPS` times as the constant says.
+    float dt = (2.0 * sq) / float(FIRE_STEPS - 1);
 
-    // **Octave retirement, twice: once for the camera and once for the step.**
-    // The distance term is the original bound — an analytic noise has no mip
-    // chain, so an octave finer than a pixel is a twinkle generator. The step
-    // term is the same argument along the ray instead of across the screen: an
-    // octave whose period is shorter than twice the step is point-sampled below
-    // Nyquist, and marching it produces exactly the twinkle the distance bound
-    // exists to prevent, because a small change in ray direction re-picks which
-    // crest each sample lands on.
+    // **Octave retirement, twice: once for the screen and once for the step.**
+    // The screen term is the original bound, re-derived — an analytic noise has
+    // no mip chain, so an octave finer than a pixel is a twinkle generator, and
+    // `fwidth` on the quad's own local coordinate is metres per pixel, which is
+    // the quantity that question is actually about. A distance in metres was
+    // the wrong instrument and is what made the deck brazier smooth at 4K; see
+    // `FIRE_OCTAVE_STEP`.
+    //
+    // The step term is the same argument along the ray instead of across the
+    // screen: an octave whose period is shorter than twice the step is
+    // point-sampled below Nyquist, and marching it produces exactly the twinkle
+    // the screen bound exists to prevent, because a small change in ray
+    // direction re-picks which crest each sample lands on. Neither bound
+    // implies the other, so both are taken and the tighter wins.
     //
     // The two fbm calls get different bounds because their finest octaves are
     // an octave apart — the warp's is `FIRE_HZ * 2.03`, the field's
     // `FIRE_HZ * 2.03^2`. Sharing one number over-retires the warp, and the
     // warp's fold is the silhouette.
-    float far = saturate(1.0 - length(toEye) / FIRE_RANGE);
+    float far = saturate((FIRE_NYQUIST_HIGH - cyclesPerPixel)
+                       / (FIRE_NYQUIST_HIGH - FIRE_NYQUIST_LOW));
     float dWarp = min(far, saturate(1.0 / (FIRE_HZ * 2.03 * 2.0 * max(dt, 1e-4))));
     float dField = min(far, saturate(1.0 / (FIRE_HZ * 2.03 * 2.03 * 2.0 * max(dt, 1e-4))));
 
     float t = push.environment[0].weather.z;
-
-    // **Where along its first step each ray starts.** Interleaved gradient
-    // noise on the pixel coordinate — a screen-space dither, deliberately, not
-    // a hash of the ray. A ray-space hash re-rolls every time the camera moves
-    // by a fraction of a pixel, which is a twinkle generator; this pattern is
-    // nailed to the screen and the flame slides across it.
-    float jitter = FIRE_JITTER * frac(52.9829189 * frac(dot(in.position.xy,
-                                      float2(0.06711056, 0.00583715))))
-                 + (1.0 - FIRE_JITTER) * 0.5;
 
     // Front to back. `heat` is the transmittance-weighted quantity of emitting
     // material the ray sees; it is bounded by one because its weights are a
     // telescoping partition of `1 - T`.
     float heat = 0.0;
     float T = 1.0;
-    // Rolled, deliberately. Fully unrolling 32 iterations of seven noise
+    // **The segment, not the sample, is what gets composited, and the density
+    // over it is the average of its two ends.**
+    //
+    // This is the trapezoid rule against the rectangle rule, and here it is not
+    // an accuracy nicety — it is what removes a visible artifact. `FIRE_DENS_W`
+    // is deliberately narrow, so `hot` is very nearly a step function of `e`,
+    // and with the rectangle rule the whole segment inherits its start point's
+    // verdict. The integral then counts *how many samples landed inside*, which
+    // is an integer, and its iso-contours are drawn across the flame's body as
+    // nested arcs — an onion ring where a tongue's interior should be, crawling
+    // as the field moves. Averaging the two ends makes the density continuous
+    // along the ray, so the contours have nothing to sit on.
+    //
+    // **It costs one extra field evaluation, not `FIRE_STEPS` of them** — each
+    // sample is the far end of one segment and the near end of the next, so the
+    // loop carries its previous verdict forward. That is why the artifact is
+    // fixed here rather than by doubling `FIRE_STEPS`, which costs the same
+    // again and only halves it.
+    FireSample s = fireField(w0 + dir * t0, half_h, t, dField, dWarp);
+    float hotPrev = saturate(s.e / FIRE_DENS_W);
+    float sootPrev = saturate(s.es / FIRE_SOOT_W) * saturate(s.h / FIRE_SOOT_H);
+    float tempPrev = hotPrev * (1.0 - FIRE_TAU_H * s.h)
+                   * lerp(FIRE_TAU_BASE, 1.0, saturate(s.h / FIRE_TAU_BASE_H));
+
+    // Rolled, deliberately. Fully unrolling 48 iterations of seven noise
     // lookups each is a shader Slang refuses to build and a compile time the
     // agent's iteration loop cannot afford.
     [MaxIters(FIRE_STEPS)]
-    for (int i = 0; i < FIRE_STEPS; ++i) {
-        float3 p = w0 + dir * (t0 + (float(i) + jitter) * dt);
-        FireSample s = fireField(p, half_h, t, dField, dWarp);
+    for (int i = 1; i < FIRE_STEPS; ++i) {
+        float3 p = w0 + dir * (t0 + float(i) * dt);
+        s = fireField(p, half_h, t, dField, dWarp);
 
         float hot = saturate(s.e / FIRE_DENS_W);
         float soot = saturate(s.es / FIRE_SOOT_W) * saturate(s.h / FIRE_SOOT_H);
-        float sigma = FIRE_SIGMA * hot + FIRE_SOOT_SIGMA * soot;
-        if (sigma <= 0.0) {
-            continue;
-        }
-
         // Local temperature, and **the ramp is deliberately not applied per
         // sample** — a sum of ramp colours mixes hues and comes out muddy. It
         // is applied once, to the integral, which is what keeps its authored
@@ -2760,8 +2877,22 @@ float4 flameColor(ParticleOutput in, float3 toEye) {
         float temp = hot * (1.0 - FIRE_TAU_H * s.h)
                    * lerp(FIRE_TAU_BASE, 1.0, saturate(s.h / FIRE_TAU_BASE_H));
 
+        float sigma = FIRE_SIGMA * 0.5 * (hot + hotPrev)
+                    + FIRE_SOOT_SIGMA * 0.5 * (soot + sootPrev);
+        // The emitted temperature is weighted by the emitting material only, so
+        // a segment that is half soot does not read as half as hot.
+        float emit = (hot + hotPrev) > 1e-6
+                   ? (temp * hot + tempPrev * hotPrev) / (hot + hotPrev)
+                   : 0.0;
+        hotPrev = hot;
+        sootPrev = soot;
+        tempPrev = temp;
+        if (sigma <= 0.0) {
+            continue;
+        }
+
         float a = 1.0 - exp(-sigma * dt);
-        heat += T * a * temp;
+        heat += T * a * emit;
         T *= 1.0 - a;
     }
 
