@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 39] = [
+const SCENES: [&str; 40] = [
     "assets/test/lanternhead.loom",
     // A landscape out of one `heightfield` op, with the imported props on it at
     // their real size. **Not in `GOLDEN`**: `ground.loom` already references the
@@ -61,6 +61,13 @@ const SCENES: [&str; 39] = [
     // `pbr_library.loom` gives — it is a catalogue of assets, and what is worth
     // guarding is that they still load, not their pixels.
     "assets/test/props.loom",
+    // The first generated asset (Hunyuan3D via the `hunyuan3d-assets` skill).
+    // In `SCENES` and not `GOLDEN` for the reason `props.loom` gives: it is an
+    // import check, and a textured OBJ is not a rendering path anything else
+    // is missing. What is worth guarding is that the mesh, its 2048 atlas and
+    // Loom's UV convention still agree — a flipped V here would land the
+    // needle islands on the atlas gutters and read as black patches.
+    "assets/test/spruce.loom",
     // The secondary-ray demo (ADR 0019). In `SCENES` and not `GOLDEN`: the
     // paths it shows are already covered — `materials.loom` sweeps metallic to
     // 1.0, and sixteen references moved when the ray terms landed, so the gate
