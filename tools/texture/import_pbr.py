@@ -19,9 +19,35 @@ convention with +Y up. A DirectX normal map has its green channel inverted, and
 the failure is subtle in the worst way: lighting looks plausible but every
 bump reads as a dent.
 
-**1024x1024, matching every texture already in `assets/textures/`.** These sets
-are 2K and 4K; a 4K albedo is 17 MB of JPEG that becomes far more as PNG, and
-this engine's textures are tiled across terrain rather than inspected close up.
+**Default 1024x1024, and `--size` when a material earns more.** The deciding
+quantity is not resolution, it is **texels per metre = resolution x uv_scale**,
+against roughly 400/m for a sharp near field at 1280 px.
+
+Measured on a 40 m floor, high-frequency energy in the near field:
+
+    uv_scale 1.0 (one tile per metre)   1K  9.32   4K  9.14   8K  9.12
+    uv_scale 0.1 (one tile per 10 m)    1K  1.14   4K 14.28   8K 18.23
+
+At one tile per metre a 1K texture already supplies 1024 texels/m against a
+screen wanting ~320, so all three are **identical** — the near field is screen
+limited and the extra texels cannot be shown. Stretched ten times, 1K collapses
+to mush and the ranking inverts completely.
+
+**So the mip chain is what makes excess resolution free and useless at the same
+time**: the sampler picks the level matching screen density and discards the
+rest, which is why 8K beats 4K only where 4K is itself below the screen's
+appetite.
+
+Cost is not free, though — for one material, both maps:
+
+    1K   4.3 MiB   0.9 s to load and render
+    4K  79.9 MiB   2.0 s
+    8K 285.4 MiB   5.9 s
+
+Every `uv_scale` in this project is between 0.35 and 1.1, where 4K supplies
+1400-4500 texels/m and 8K's advantage never appears. 8K is therefore not worth
+285 MB in git per material; if a scene ever authors `uv_scale <= 0.1`, import
+that one material at `--size 8192` and say why in the scene.
 
 The maps that are thrown away are thrown away because there is nowhere to put
 them: `Material` has `metallic` and `roughness` as scalars and no map slots at
@@ -30,7 +56,7 @@ gap and the reason this script prints what it discarded rather than silently
 dropping it.
 
 Usage:
-    import_pbr.py <zip> <name> [<zip> <name> ...]
+    import_pbr.py [--size N] <zip> <name> [<zip> <name> ...]
     import_pbr.py --list <zip>          # show what a set contains
 
 Writes `assets/textures/<name>_albedo.png` and `<name>_normal.png`.
@@ -44,6 +70,16 @@ from PIL import Image
 
 SIZE = 1024
 OUT = Path("assets/textures")
+
+
+def parse_size(argv):
+    """`--size N` anywhere in the arguments, removed from the list."""
+    global SIZE
+    if "--size" in argv:
+        i = argv.index("--size")
+        SIZE = int(argv[i + 1])
+        del argv[i:i + 2]
+    return argv
 
 # Ordered: the first pattern that matches wins, so `NormalGL` is picked over
 # `NormalDX` and a PNG normal over the JPEG beside it.
@@ -83,6 +119,7 @@ def convert(zf, member, out_path, grey_ok=False):
 
 
 def main(argv):
+    argv = parse_size(list(argv))
     if not argv:
         print(__doc__)
         return 1
