@@ -216,6 +216,7 @@ impl Raytracer {
         allocator: &mut Allocator,
         target: Submit,
         objects: &[Object],
+        cutout: &[bool],
     ) -> Result<(), RenderError> {
         if self.blas.is_empty() || objects.is_empty() {
             return Ok(());
@@ -225,6 +226,25 @@ impl Raytracer {
             .iter()
             .enumerate()
             .filter_map(|(index, object)| {
+                // **An alpha-tested surface is kept out of the structure
+                // entirely.** A ray query never runs a fragment shader, so it
+                // would occlude as the full quad the leaf was cut from — a
+                // canopy of a thousand cards laying a thousand hard rectangles
+                // on the ground, and shadowing itself with them too.
+                //
+                // No shadow is not free either; it is simply the lesser wrong,
+                // and the honest one. Doing this properly means committing
+                // non-opaque hits from inside the traversal loop, which needs
+                // the hit triangle's UVs — and ADR 0021 records that a ray hit
+                // in this engine has no UVs to read. That is an ADR, not a
+                // patch.
+                //
+                // The index still comes from `enumerate` over the *whole*
+                // slice, so skipping one does not shift any other instance's
+                // custom index away from its object.
+                if cutout.get(index).copied().unwrap_or(false) {
+                    return None;
+                }
                 let blas = self.blas.get(object.mesh as usize)?;
                 // Vulkan wants a 3x4 row-major transform; glam is column-major,
                 // so this transposes as it copies. Getting it wrong puts every

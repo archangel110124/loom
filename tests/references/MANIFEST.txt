@@ -2,6 +2,7 @@
 # Written by `cargo xtask image --bless`. A change here is a deliberate
 # re-blessing; a change to a PNG without a change here is a mistake.
 
+379ff8ebebfeb36cf1c0fab2621178c39aa7956e5a2ee5ccdb1c8e82c2849d58  alpha_cutout.png
 b7a5524a262e2ad576917a65e71f8ebec7f1aca70fbe5cecedff6f61354e7128  beach.png
 47c0e17ba058cacd3243e0e5c559432372470625646c4a720f04d026943276d3  campfire.png
 ef6fd5b9d925ab1b7c6c57406ff58438079fcb1068560208797ba495a788c870  cave.png

@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 40] = [
+const SCENES: [&str; 41] = [
     "assets/test/lanternhead.loom",
     // A landscape out of one `heightfield` op, with the imported props on it at
     // their real size. **Not in `GOLDEN`**: `ground.loom` already references the
@@ -68,6 +68,8 @@ const SCENES: [&str; 40] = [
     // Loom's UV convention still agree — a flipped V here would land the
     // needle islands on the atlas gutters and read as black patches.
     "assets/test/spruce.loom",
+    // The alpha test. Also in `GOLDEN`, where the reasoning is.
+    "assets/test/alpha_cutout.loom",
     // The secondary-ray demo (ADR 0019). In `SCENES` and not `GOLDEN`: the
     // paths it shows are already covered — `materials.loom` sweeps metallic to
     // 1.0, and sixteen references moved when the ray terms landed, so the gate
@@ -212,7 +214,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 27] = [
+const GOLDEN: [(&str, &str, &[&str]); 28] = [
     // **The post-process stack's standing shot** (ADR 0018). Nothing else in
     // this list is composed around what happens *above* diffuse white: the
     // flame's core, the brazier's pool, the sun's glitter path, wet stone at
@@ -221,6 +223,12 @@ const GOLDEN: [(&str, &str, &[&str]); 27] = [
     // three taps have a full window, and long enough for the dinghy to settle.
     ("lanternhead", "assets/test/lanternhead.loom", &["--sim", "2400"]),
     ("primitives", "assets/test/primitives.loom", &[]),
+    // **The alpha test, which is a rendering path nothing else covers.** Every
+    // other `discard` in this engine is in generated geometry — the grass
+    // fade, the water shoreline, rain streaks — and none of them read a
+    // texture's alpha channel. Without this the branch in `fragmentMain` could
+    // be deleted and all 27 other references would still match.
+    ("alpha_cutout", "assets/test/alpha_cutout.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
     // **The recipe pipeline reaching the SDF**, which nothing else in this list

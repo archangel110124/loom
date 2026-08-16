@@ -112,6 +112,12 @@ pub(crate) struct Materials {
     buffer: vk::Buffer,
     allocation: Option<Allocation>,
     address: vk::DeviceAddress,
+    /// Per material: does it alpha-test?
+    ///
+    /// Kept on the CPU because the **acceleration structure** needs it, and
+    /// the acceleration structure is built where the GPU material table is
+    /// already unreachable. See [`Self::is_cutout`].
+    cutout: Vec<bool>,
 }
 
 impl Materials {
@@ -230,7 +236,22 @@ impl Materials {
             buffer,
             allocation: Some(allocation),
             address,
+            // `mean_albedo.w` is the alpha-test threshold; zero is opaque.
+            cutout: materials.iter().map(|m| m.mean_albedo[3] > 0.0).collect(),
         })
+    }
+
+    /// Does this material discard texels, and therefore lie about its own
+    /// shape to anything that cannot run a fragment shader?
+    ///
+    /// **A ray query is exactly that.** It walks the acceleration structure
+    /// and reports triangles; it never samples the albedo map, so an
+    /// alpha-tested leaf occludes as the whole quad it was cut from. A canopy
+    /// of a thousand cards then lays a thousand hard rectangles on the ground.
+    ///
+    /// `u32::MAX` is "no material", which is opaque.
+    pub(crate) fn is_cutout(&self, material: u32) -> bool {
+        self.cutout.get(material as usize).copied().unwrap_or(false)
     }
 
     pub(crate) fn descriptor_layout(&self) -> vk::DescriptorSetLayout {

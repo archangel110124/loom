@@ -1,0 +1,117 @@
+# `Material::alpha_cutoff`, shown by rendering the same card twice.
+#
+#     loom render assets/test/alpha_cutout.loom --out cutout.png --size 1280x800
+#
+# **Left card authors no cutoff and draws its whole rectangle.** Right card
+# authors `0.5` and draws only the sprig. That is the entire feature, and the
+# pair is the point: a single cut-out card proves nothing, because a texture
+# that happens to be mostly background looks the same as a working alpha test.
+#
+# **This is the gap `props.loom` names.** That scene had to leave out the
+# bushes and grass tufts that shipped with the rocks it does show, because
+# every leaf card would have rendered as an opaque rectangle. A leaf, a fern
+# frond and a chain-link fence are all shapes cut out of a rectangle, and
+# modelling them as solid geometry costs thousands of triangles each and still
+# reads as plastic.
+#
+# **In `GOLDEN`, because a `discard` is a rendering path nothing else covers.**
+# The engine's other discards are all in generated geometry — grass fade, the
+# water shoreline, rain streaks — and none of them read a texture's alpha
+# channel. Without this scene the branch could be deleted and every reference
+# would still match.
+#
+# **The two things worth knowing before authoring a cutout.**
+#
+# Mip levels average alpha, so a card thins with distance whatever the cutoff
+# is. That is expected, and it is why a distant leaf needs its own answer
+# rather than a larger number here.
+#
+# And **ray-traced shadows do not honour the cutoff**: shadow, ambient and
+# reflection rays are ray queries against the acceleration structure, which
+# never runs a fragment shader. Both cards below cast the shadow of their whole
+# quad, which is visible on the ground and is *correct* for what the engine
+# currently does — see ADR 0019 for why there is no any-hit shader here.
+
+[scene]
+format = 1
+id = "036bfa55-c96c-47e9-98aa-973cf9569e94"
+
+[[asset]]
+key = "spruce_sprig_albedo"
+id = "ef111fae-4a0b-4ca5-814a-742d94cfedb2"
+path = "../textures/spruce_sprig_albedo.png"
+
+[[asset]]
+key = "ground_soil_albedo"
+id = "e04a59ba-bfe1-4fba-bdde-1df420032aa1"
+path = "../textures/ground_soil_albedo.png"
+
+[[asset]]
+key = "ground_soil_normal"
+id = "b1be4f8d-3676-49bf-a43a-a3f9d1e69311"
+path = "../textures/ground_soil_normal.png"
+
+[[node]]
+name = "Bench"
+
+  [node.components.Environment]
+  sun_direction = [0.35, 0.70, 0.62]
+  sun_strength = 2.2
+  sun_color = [1.0, 0.98, 0.93]
+  ambient = 0.40
+  sky_zenith = [0.11, 0.16, 0.26]
+  sky_horizon = [0.54, 0.58, 0.60]
+  fog_density = 0.0
+
+[[node]]
+name = "Ground"
+parent = "Bench"
+transform = { pos = [0.0, -0.02, 0.0], scale = [8.0, 0.02, 8.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.42, 0.40, 0.34]
+  roughness = 0.95
+  albedo_map = { asset = "ground_soil_albedo" }
+  normal_map = { asset = "ground_soil_normal" }
+  uv_scale = [0.5, 0.5]
+  triplanar = true
+
+# `plane` is a 2 m quad in XZ with a +Y normal, so a pitch of 90 degrees stands
+# it up facing +Z — toward the camera.
+[[node]]
+name = "Opaque"
+parent = "Bench"
+transform = { pos = [-1.15, 1.0, 0.0], rot_euler = [90.0, 0.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "plane" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.85
+  albedo_map = { asset = "spruce_sprig_albedo" }
+
+[[node]]
+name = "Cutout"
+parent = "Bench"
+transform = { pos = [1.15, 1.0, 0.0], rot_euler = [90.0, 0.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "plane" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  roughness = 0.85
+  albedo_map = { asset = "spruce_sprig_albedo" }
+  alpha_cutoff = 0.5
+
+[[node]]
+name = "Camera"
+parent = "Bench"
+transform = { pos = [0.0, 1.05, 4.2], rot_euler = [0.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 50.0

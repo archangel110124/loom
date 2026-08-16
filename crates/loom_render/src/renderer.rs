@@ -1690,12 +1690,19 @@ impl Renderer {
         if self.raytracer.is_some() {
             let pool = self.command_pool;
             let queue = self.queue;
+            // Collected before the mutable borrow below, and in `sorted`'s
+            // order so the flags line up with the instances one for one.
+            let cutout: Vec<bool> = sorted
+                .iter()
+                .map(|o| self.materials.is_cutout(o.material))
+                .collect();
             let mut allocator = self.allocator.take();
             let result = match (self.raytracer.as_mut(), allocator.as_mut()) {
                 (Some(rt), Some(alloc)) => rt.build_instances(
                     alloc,
                     crate::raytrace::Submit { pool, queue },
                     &sorted,
+                    &cutout,
                 ),
                 _ => Ok(()),
             };

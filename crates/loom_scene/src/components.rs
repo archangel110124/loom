@@ -183,6 +183,35 @@ pub struct Material {
     /// Ignored to the extent a surface is metallic: metal has no pores.
     #[schemars(range(min = 0.0, max = 1.0))]
     pub porosity: f32,
+    /// Throw away any pixel whose albedo-map alpha falls below this, instead of
+    /// drawing it.
+    ///
+    /// **This is what makes foliage possible.** A leaf, a fern frond or a chain
+    /// link is a shape cut out of a rectangle, and without an alpha test the
+    /// rectangle is what draws — which is why `props.loom` had to leave out the
+    /// bushes and grass tufts that shipped alongside the rocks it does show.
+    /// Modelling the same shapes as solid geometry costs thousands of triangles
+    /// each and still reads as plastic.
+    ///
+    /// **`0.0` is off, and off is the default**, so every scene authored before
+    /// this renders byte-identically and pays nothing — no sample, no branch.
+    /// It is deliberately not "off means 0.5": a texture whose alpha nobody
+    /// authored is fully opaque at 1.0 in some encoders and zero in others, and
+    /// a default test would make the second kind vanish entirely.
+    ///
+    /// `0.5` is the usual value. Lower keeps more of the soft edge and more
+    /// half-transparent fringe; higher eats into the shape. Mip levels average
+    /// alpha, so a cutout thins with distance whatever the number — that is
+    /// expected, and it is why a distant leaf card needs its own answer rather
+    /// than a bigger cutoff.
+    ///
+    /// **Ray-traced shadows do not honour it.** Shadow, ambient and reflection
+    /// rays are ray queries against the acceleration structure, which never
+    /// runs a fragment shader — so an alpha-cut surface casts the shadow of its
+    /// whole triangle. Foliage that must not cast a rectangle has to stay out
+    /// of the acceleration structure.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub alpha_cutoff: f32,
     /// A second material shown where the surface is too steep for the first.
     ///
     /// **This is what stops terrain being one colour.** Real ground is not one
@@ -270,6 +299,11 @@ impl Default for Material {
             // whole effect opt-in per material, which is how a feature ends up
             // authored into one test scene and nowhere else.
             porosity: 0.4,
+            // Off. Unlike `porosity`, this one must default to nothing: an
+            // alpha test applied to a texture whose alpha nobody authored
+            // either does nothing or erases the surface, and which of the two
+            // depends on the encoder that wrote the PNG.
+            alpha_cutoff: 0.0,
             // Absent, so a scene authored before ground layers existed renders
             // byte-identically and pays nothing for the feature.
             layer: None,

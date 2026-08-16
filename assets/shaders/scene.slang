@@ -63,8 +63,9 @@ struct MaterialData {
     float4 params;   // metallic, roughness, uvScale.x, uvScale.y
     uint4 maps;      // albedo index, normal index, flags, layer index
     // rgb the material's AVERAGE linear albedo — the authored `albedo` times
-    // the mean colour of its albedo texture, reduced once at load. w unused.
+    // the mean colour of its albedo texture, reduced once at load.
     // Read by `tracedEnvironment`, which has no UVs; see the comment there.
+    // w is the ALPHA-TEST THRESHOLD: discard a texel below it, 0 = opaque.
     float4 meanAlbedo;
 };
 
@@ -1990,6 +1991,16 @@ float4 fragmentMain(VSOutput in) : SV_Target {
             float4 sampled = projected
                 ? triplanar(m.maps.x, projectedUv, normal)
                 : sampleMap(m.maps.x, uv);
+
+            // **Alpha cutout, and it has to come first.** A leaf is a shape cut
+            // out of a rectangle; without this the rectangle draws. The branch
+            // is on a threshold of exactly zero so that every material which
+            // does not author one costs a compare and nothing else — and so
+            // that a texture with no authored alpha can never erase itself.
+            if (m.meanAlbedo.w > 0.0 && sampled.a < m.meanAlbedo.w) {
+                discard;
+            }
+
             // Multiplied, not replaced: the albedo factor stays useful as a
             // tint, which is how one texture dresses several objects.
             albedo *= sampled.rgb;

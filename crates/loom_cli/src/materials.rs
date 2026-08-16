@@ -227,7 +227,15 @@ impl MaterialLibrary {
                     if triplanar { FLAG_TRIPLANAR } else { 0 },
                     layer_slot.unwrap_or(NO_TEXTURE),
                 ],
-                mean_albedo: [albedo[0] * mean[0], albedo[1] * mean[1], albedo[2] * mean[2], 0.0],
+                // `w` is the alpha-test threshold, riding in the lane that was
+                // documented as unused. Zero means opaque, which is what every
+                // material that does not ask for a cutout carries.
+                mean_albedo: [
+                    albedo[0] * mean[0],
+                    albedo[1] * mean[1],
+                    albedo[2] * mean[2],
+                    scalar("alpha_cutoff", 0.0),
+                ],
             });
             library.by_entity.insert(index, slot);
         }
@@ -374,5 +382,48 @@ name = "Plain"
         );
         let m = &lib.materials[0];
         assert_eq!(m.mean_albedo[..3], m.albedo[..3], "bit-identical, not close");
+    }
+
+    /// **A material that authors no cutoff must carry exactly zero**, because
+    /// zero is what the shader reads as "this surface is opaque, do not test
+    /// alpha at all". Anything else turns every existing scene into an
+    /// alpha-tested one against a texture whose alpha nobody authored.
+    #[test]
+    fn a_material_is_opaque_unless_it_asks_not_to_be() {
+        let lib = library(
+            r#"
+[scene]
+format = 1
+id = "3a7e0c51-9d24-4b68-8f13-25c7e094ab6d"
+
+[[node]]
+name = "Plain"
+
+  [node.components.Material]
+  albedo = [0.5, 0.5, 0.5]
+"#,
+        );
+        assert_eq!(lib.materials[0].mean_albedo[3], 0.0);
+    }
+
+    /// The authored cutoff has to reach the GPU record, in the lane the shader
+    /// reads. It rides in `mean_albedo.w`, which was documented as unused.
+    #[test]
+    fn an_authored_alpha_cutoff_reaches_the_gpu_record() {
+        let lib = library(
+            r#"
+[scene]
+format = 1
+id = "3a7e0c51-9d24-4b68-8f13-25c7e094ab6d"
+
+[[node]]
+name = "Leaf"
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  alpha_cutoff = 0.5
+"#,
+        );
+        assert_eq!(lib.materials[0].mean_albedo[3], 0.5);
     }
 }

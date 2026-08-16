@@ -1044,12 +1044,20 @@ impl Viewer {
         if self.raytracer.is_some() {
             let pool = self.command_pool;
             let queue = self.queue;
+            // In `sorted`'s order, and collected before the mutable borrow —
+            // the offscreen path does exactly this, and the two must agree or
+            // the window and the golden images disagree about what casts.
+            let cutout: Vec<bool> = sorted
+                .iter()
+                .map(|o| self.materials.is_cutout(o.material))
+                .collect();
             let mut allocator = self.allocator.take();
             let result = match (self.raytracer.as_mut(), allocator.as_mut()) {
                 (Some(rt), Some(alloc)) => rt.build_instances(
                     alloc,
                     crate::raytrace::Submit { pool, queue },
                     &sorted,
+                    &cutout,
                 ),
                 _ => Ok(()),
             };
