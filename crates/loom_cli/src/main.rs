@@ -176,23 +176,32 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
     ("run", &[("--edit", false), ("--frames", true), ("--play", false)]),
 ];
 
-/// The first unrecognised flag in `args`, if any.
+/// The first unrecognised argument in `args`, if any.
 ///
 /// Values are skipped rather than inspected, so `--node --edit` reports
 /// nothing: `--edit` is that node's name, however odd, not a flag.
+///
+/// **A bare word past the subject is rejected too, and that is the point.** It
+/// used to be skipped, so `loom render scene.loom out.png` exited 0, reported
+/// `"out": "render.png"`, and wrote to the working directory — the file the
+/// caller named was never created. Every output path in this CLI is a `--out`
+/// value; a positional one is silently the wrong destination, which turns a
+/// comparison against a leftover file into "the renders are identical" and a
+/// shader change into "my fix did nothing". A measurement tool that writes
+/// somewhere other than where it was told is worse than one that fails.
 fn unknown_flag(command: &str, args: &[String]) -> Option<(String, Vec<&'static str>)> {
     let allowed = FLAGS.iter().find(|(name, _)| *name == command)?.1;
 
-    // args[0] is the path or type name; flags follow.
-    let mut i = 1;
+    // args[0] is the path or type name; flags follow. `compare` is the only
+    // subcommand in the table with a second subject (it diffs two PNGs), so it
+    // is one line rather than a column every other row would carry as `1`.
+    let mut i = if command == "compare" { 2 } else { 1 };
     while i < args.len() {
         let arg = args[i].as_str();
         if let Some((_, takes_value)) = allowed.iter().find(|(name, _)| *name == arg) {
             i += if *takes_value { 2 } else { 1 };
-        } else if arg.starts_with("--") {
-            return Some((arg.to_owned(), allowed.iter().map(|(n, _)| *n).collect()));
         } else {
-            i += 1;
+            return Some((arg.to_owned(), allowed.iter().map(|(n, _)| *n).collect()));
         }
     }
     None
@@ -218,7 +227,11 @@ fn run(args: &[String]) -> (u8, String) {
         return (
             2,
             json_line(&serde_json::json!({
-                "error": "unknown_flag",
+                // A bare word is not a misspelled flag, and saying so sends the
+                // caller looking in the wrong place. The hint is the same
+                // either way because it answers both: the flag list is exactly
+                // where an output path or a node name was supposed to go.
+                "error": if flag.starts_with("--") { "unknown_flag" } else { "unexpected_argument" },
                 "value": flag,
                 "constraint": format!("a flag of `loom {command}`"),
                 "hint": if allowed.is_empty() {
@@ -4925,6 +4938,46 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let hint = v["hint"].as_str().unwrap();
         assert!(hint.contains("--ticks"), "should list sim's flags: {hint}");
+    }
+
+    /// **An output path in the wrong position wrote to the wrong file and said
+    /// ok.** `loom render scene.loom out.png` exited 0 with `"out":
+    /// "render.png"` and never created `out.png`, because the positional was
+    /// skipped and `--out` fell back to its default. That is the failure mode
+    /// that makes a measurement lie: the comparison then reads a leftover file
+    /// from some earlier run, reports "identical", and a shader change looks
+    /// like it did nothing. Exit 2 is the only safe answer.
+    #[test]
+    fn a_stray_positional_is_refused_rather_than_silently_ignored() {
+        let (code, out) = run(&args(&[
+            "render",
+            "../../assets/test/blockout.loom",
+            "out.png",
+        ]));
+
+        assert_eq!(code, 2, "a stray positional is a wrong invocation: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["error"], "unexpected_argument", "not a misspelled flag");
+        assert_eq!(v["value"], "out.png");
+        // The hint has to name where the path belonged.
+        let hint = v["hint"].as_str().unwrap();
+        assert!(hint.contains("--out"), "should point at --out: {hint}");
+    }
+
+    /// `compare` is the one subcommand with two subjects, so the stray-argument
+    /// rule must not eat its second PNG. This is the test that fails if that
+    /// exception is ever dropped while tidying.
+    #[test]
+    fn compare_still_takes_its_second_positional() {
+        assert!(
+            unknown_flag("compare", &args(&["a.png", "b.png", "--worst", "8"])).is_none(),
+            "compare diffs two images"
+        );
+        // A third one is still a mistake.
+        assert_eq!(
+            unknown_flag("compare", &args(&["a.png", "b.png", "c.png"])).map(|(v, _)| v),
+            Some("c.png".to_owned())
+        );
     }
 
     /// Every flag the code actually reads must be accepted, or the allowlist
