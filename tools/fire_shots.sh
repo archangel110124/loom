@@ -59,4 +59,23 @@ sed 's/27\.6, \(.*\), 34\.0/31.0, \1, 34.0/' "$root/assets/test/lanternhead.loom
     --out "$out/${prefix}deck_motion.png" --size 1920x1080 \
     --sim 2400 --frames 8 --step 6 --spin 0
 
+# **A dolly, because a pan cannot show depth and neither can a still.**
+#
+# The whole claim of a line integral over a slice is that the flame has extent
+# THROUGH the quad, so its interior slides against its silhouette as the eye
+# moves. A pan is chosen precisely because it makes no parallax, and every shot
+# above holds the camera still. `--dolly` walks the camera forward, which is the
+# only motion that can falsify the claim: if the fire were still a slice, its
+# interior would translate rigidly with its outline.
+#
+# **`--step 1`, and NOT `--step 0`, which renders nothing.** Particles are
+# stepped after a frame is written, so a zero step means they are never stepped
+# at all and every frame comes out with no fire in it — the same pre-existing
+# defect that makes frame 0000 of every motion sequence in this job empty. One
+# tick is 1/60 s, over which the flame barely moves, so what changes across
+# these frames is essentially the viewpoint alone.
+"$loom" render "$deck" \
+    --out "$out/${prefix}deck_dolly.png" --size 1920x1080 \
+    --sim 2400 --frames 8 --step 1 --spin 0 --dolly 0.35
+
 echo "wrote $(ls "$out/$prefix"*.png | wc -l) shots to $out with prefix '$prefix'"
