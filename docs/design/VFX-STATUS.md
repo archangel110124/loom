@@ -23,6 +23,8 @@ report assumes a greenfield; this engine had already shipped several of its mile
 | **W6** | interactive ripples, CPU-authoritative, two-way coupled | ✅ verified · **ADR 0046** |
 | **W7** | the GPU particle pool | ✅ verified |
 | **W8** | windowed FFT detail tier | **REFUSED on evidence — D16** |
+| **W11** | the capillary detail hears the wind | ✅ built · **ADR 0052** · gates pending |
+| **W12** | the water rises where a body goes in | ✅ built · gates pending |
 | **fire** | the research doc §3's list | ✅ verified · items 1–3, 5 shipped with ADR 0020; item 4 landed as `Light.flicker` |
 
 **Everything is built and verified. W8 is refused rather than pending** — the evidence went the
@@ -38,6 +40,56 @@ read both before accepting.
 and carries `18f5ecce259831aa` with its two-way-coupling assertion passing. The re-pin burden was
 zero because `WaterBody::ripples` is `Option` and absent by default, and an absent grid adds an
 exact `0.0` to the surface.
+
+## W11 and W12 — what the human asked for after looking at it
+
+Two sentences, and they are different requests:
+
+> "add the ripples from the wind where they be integrated with what we have right now"
+
+> "the water caresses up and … maybe you could see some particles coming from it"
+
+**W11 is presentation and it is an *integration* rather than an addition.**
+`WATER_DETAIL_STRENGTH = 0.30` was painted unconditionally on every water
+surface in the repository, with a floor under its drift — Cox–Munk inverts 0.30
+to about 17 m/s, so `pool.loom`, authored `Wind.speed = 0`, rendered covered in
+chop that crawled across it. The strength is now `sqrt(0.003 + 5.12e-3·U)` with
+`U` read **per pixel** from the same generated `wind_at` the grass bends to, and
+the drift has no floor. The wind forcing was kept **off** the ADR 0046 ripple
+grid — **ADR 0052**, five measured reasons, of which the two to remember are
+that the grid's white-noise response sits at a 3.08 m wavelength against
+capillary ripples at 1–10 cm, and that wind forcing has no saturating term on a
+scheme where `damping = 1.0` is a legal setting that then diverges.
+
+**W12 is `loom_water::spray::column`** — a ballistic rim with a wall of soft
+quads hanging from it, beside `crown` and sharing its arguments, its gate and
+its clock. It is **rendered, not injected into the grid**, because
+`loom water --at 0,0 --sim {50,60,120}` reads −0.2712 / −0.4079 / +0.2530: the
+grid is at its *deepest* exactly when the column should stand and its rebound
+arrives a second late as a two-metre mound. `SPLASH_RING`/`SPLASH_BANDS` went
+8×3 → 16×4 and droplets gained a per-droplet size jitter, because a band shares
+one `fraction` and was therefore a string of identical beads.
+
+**A shipped no-op fell out of the both-paths test.** `Plumes::advance` returned
+early when `live` was empty — and `pool.loom`, the scene W9's crown exists for,
+authors no `ParticleEmitter` at all, so on the *window* path the crown was
+registered, closed-form-correct and drawn nowhere. Fourth of this class.
+
+**No hash moves and nothing reaches a force.** pool@600 `c01fa14e2ee6b7c9`,
+pool@300 `43186f1040b5fa11`, wake@600 `18f5ecce259831aa`, all three unmoved, and
+the `wake`-minus-`[ripples]` copy still fails `Buoy.bob > 0.02` at 3.5e-6 while
+the shipped scene passes. **14 golden references move and all 14 have water in
+shot** — lanternhead, mirrorpool, ocean, whitecaps, shore, river, squall, beach,
+water_crate, wake, splash, pool, spindrift, homestead — against 23 byte-identical.
+Blessing is the verifier's; the gates have not been run from this worktree.
+
+**Never compare a flicker or shimmer number across W11.** Calmer water lowers
+flicker and will masquerade as an AA win. Re-baseline after the bless.
+
+**Still owed:** the crosswind anisotropy slice (`WATER_FOAM_STRETCH = 6.0` is the
+precedent) — deliberately not built, because it wants the fly-through to judge,
+and shelter on the wind field, which grass needs too and which belongs in
+`loom_field::wind` rather than a second exposure query.
 
 ## What "verified" means here
 
