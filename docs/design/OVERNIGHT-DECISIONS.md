@@ -208,6 +208,59 @@ between here and closing W8 permanently. The scratch scenes are in `$CLAUDE_JOB_
 **What would reopen it:** a game camera that actually looks at the sea from altitude, *and* a
 spectrum sea that still tiles at it. Neither is demonstrated.
 
+### D17 — I briefed a work item on a false premise, and the judge caught it
+
+**What I got wrong.** I told the human "the fire itself was never touched — W4 generalised the
+machinery to *smoke*, and the flame is unchanged", and launched a workflow to implement the
+research doc's §3.
+
+**ADR 0020 *is* the flame rewrite.** Commits `b3050d4` through `631e2f7`, 16 Aug — before I wrote
+that brief — delivered §3's items 1, 2, 3 *and* 5. I had read ADR 0020's title ("the flame is a
+line integral") as describing a technique rather than as the implementation of the very list I
+was about to commission. Only item 4, the light flicker, was outstanding.
+
+**What saved it:** the design phase read the source instead of the brief, and the judge stated
+the correction plainly rather than working around it. The cost was one wasted design pass; the
+alternative — a builder re-implementing shipped work from a doc whose status nobody had
+updated — is the failure this project keeps finding, and it nearly happened to me.
+
+**The lesson is specific and I would rather write it down than feel bad about it:** a research
+document that predates the work it recommends will read as current forever unless someone marks
+it. `63ecb0e` puts a status banner on §3 for exactly that reason.
+
+### D18 — Three of §3's claims are now known to be wrong, and one is unfalsifiable
+
+Recorded because the doc is still in the tree and will be read again.
+
+1. **Item 4's "scene-side, zero shader work" was wrong.** `Light.intensity` is a static scalar
+   with no expression language, so the modulation needed a new `Light.flicker` field and engine
+   evaluation in `gather_lights`. Landed at `8d2866e`.
+2. **Item 3's flank-cooling half is affirmatively wrong** against the marched shader. A grazing
+   ray already accumulates little heat because it crosses little material, so an explicit flank
+   term double-counts and deadens the edges. It was built, measured, and deleted.
+3. **§2's diagnosis is stale.** "N disjoint hard-edged shards over a transparent core" describes
+   a shader that no longer exists — I looked: `campfire`'s flame is one connected gradient body,
+   and `lanternhead`'s brazier is opaque over the lit deck.
+4. **§3's ranking is unfalsifiable, not confirmed.** It claims alpha is "the biggest single win"
+   and the continuum term "the highest value per line". Items 1–3 landed in one commit — per §3's
+   own advice that separating them measures nothing — and the march then subsumed items 2 and 3's
+   implementations. No separate-render evidence exists and none can now be produced.
+
+### D19 — My design agents are doing implementation, and that is an orchestration bug
+
+**Observed twice now.** The W5/W6 judge said "these are not two competing designs — they are two
+reports of the same shared worktree"; the fire judge said "both designs are reports of the same
+concurrent session, files changed under one mid-run, and only committed work survived."
+
+My design-phase briefs ask agents to verify claims against source and render their own work — and
+agents that can render will also edit. Two of them in one worktree is a race, and the fire
+workflow's actual build agent then died on a 529 with `built: null`, so **everything that
+survived was committed by the "designers".**
+
+**Fix for the next workflow, not applied retroactively:** design-phase agents get an explicit
+read-only instruction, or their own worktree. The judge and builder stay as they are.
+**Confidence: high.** This cost no work — but only because the design agents happened to commit.
+
 ## Routine calls, logged for completeness
 
 ### D4 — Subagents no longer run `cargo xtask` gates
