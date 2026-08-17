@@ -148,9 +148,21 @@ transform = { pos = [12.1, 4.7, 13.3] }
   # range" has a practical ceiling for anything that must stay distinguishable.
   # 3.0 doubles the pool over 1.35 and keeps the fire the brightest thing in
   # the frame, which is what a fire is.
+  # **And it flutters, which is the piece ADR 0020 named and did not build.**
+  # The march gives the flame a temperature gradient and a core that reaches
+  # the ramp's white rung; under a perfectly still lamp the ground pool under
+  # it was byte-identical to the pre-fire baseline, so half of what a night
+  # fire is judged on was missing. `flicker` is a fraction of `intensity`,
+  # driven off the simulation's clock and never the wall clock, and it shifts
+  # hue as well as brightness — the dim part of the cycle is redder.
+  #
+  # 0.22 is a fire with fuel. It is large enough to read on the sand at four
+  # metres and small enough that the pool never darkens to where the log's
+  # silhouette is lost, which is what 0.5 does.
   [node.components.Light]
   intensity = 3.0
   color = [1.0, 0.52, 0.18]
+  flicker = 0.22
 
 # The flame itself. Additive, so it reads as emission rather than as a lit
 # surface — the same blend the explosion fire uses.

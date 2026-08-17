@@ -2314,7 +2314,7 @@ pub(crate) fn environment_with_wind(
     seconds: f32,
 ) -> loom_render::EnvironmentData {
     let mut env = environment_of_inner(world);
-    gather_lights(world, &mut env);
+    gather_lights(world, &mut env, seconds);
     let params = wind.params();
     env.wind = [
         params.get("dir_x"),
@@ -2509,6 +2509,24 @@ pub(crate) fn rain_at_eye(
     if sample.rate > 0.0 { MAX_RAIN_DROPS } else { 0 }
 }
 
+/// Firelight flutter, as a signed fraction, from the simulation's clock.
+///
+/// **Three incommensurate sines rather than a noise lookup**, and the choice is
+/// deliberate rather than lazy: `loom_field::noise` is a frozen ABI compared
+/// exactly between Rust and Slang, and the wrong way to earn a bug is to give
+/// it a second caller in the render path for a value no shader will ever
+/// recompute. Sines cost nothing, have no ABI, and their sum has no period a
+/// scene will outlive at these ratios.
+///
+/// The band is measured rather than invented: a flame's luminance flutter sits
+/// around 5-12 Hz, over a slower breathing of the fuel. So 6.9 Hz carries the
+/// body, 2.8 Hz is the breath and 11.3 Hz is the tongue detail. The amplitudes
+/// sum to one, so the return is exactly `[-1, 1]`.
+fn flicker_at(seconds: f32, phase: f32) -> f32 {
+    let s = seconds + phase;
+    0.55 * (s * 43.4).sin() + 0.30 * (s * 17.9 + 1.7).sin() + 0.15 * (s * 71.3 + 4.2).sin()
+}
+
 /// Collect every `Light` a scene declares into the environment buffer.
 ///
 /// **Gathered outside `environment_of_inner` because lights are not part of
@@ -2519,7 +2537,7 @@ pub(crate) fn rain_at_eye(
 /// World position comes from the propagated global transform, so a light
 /// parented to a moving node moves with it. The translation is the last column
 /// of a column-major matrix.
-fn gather_lights(world: &World, env: &mut loom_render::EnvironmentData) {
+fn gather_lights(world: &World, env: &mut loom_render::EnvironmentData, seconds: f32) {
     let mut count = 0usize;
     for entity in world.entities() {
         if count >= loom_render::MAX_LIGHTS {
@@ -2559,7 +2577,33 @@ fn gather_lights(world: &World, env: &mut loom_render::EnvironmentData) {
         // for one invites a number that disagrees with the brightness. This is
         // where an inverse square falls to roughly a hundredth of a unit,
         // which is below what any display shows.
+        //
+        // **Taken from the AUTHORED intensity, above the flicker below.** The
+        // radius is a performance bound, and one that breathes with the flame
+        // would pop distant surfaces in and out of lit at 7 Hz — a far worse
+        // artifact than the one the flicker exists to fix.
         let radius = (intensity * 100.0).sqrt().clamp(1.0, 400.0);
+
+        let flicker = scalar("flicker", 0.0).clamp(0.0, 1.0);
+        let mut intensity = intensity;
+        if flicker > 0.0 {
+            // **Phase off the light's own position**, so two fires in one scene
+            // do not pulse in lockstep — the same argument the grass clump hash
+            // makes about neighbouring blades. It is a function of the scene
+            // file, so it is as deterministic as everything else here.
+            let phase = m[12] * 0.317 + m[14] * 0.211;
+            // Floored rather than clamped to zero: at `flicker = 1.0` the
+            // modulation reaches -1 exactly, and a light that truly extinguishes
+            // is a failing bulb rather than a fire.
+            let s = (1.0 + flicker * flicker_at(seconds, phase)).max(0.05);
+            intensity *= s;
+            // **Dimmer is redder.** Red is already carried by `intensity`;
+            // green and blue take progressively steeper powers of the same
+            // modulation, because a cooling flame sheds blue fastest.
+            color[1] *= s.powf(0.5);
+            color[2] *= s.powf(1.3);
+        }
+
         env.lights[count] = loom_render::PointLight {
             position: [m[12], m[13], m[14], intensity],
             color: [color[0], color[1], color[2], radius],
@@ -4460,6 +4504,82 @@ mod tests {
         environment_with_wind(&world, &crate::weather::wind_of(&scene), 0.0)
     }
 
+    /// **A light with `flicker = 0` is byte-identical, and a flickering one is
+    /// dimmer-is-redder and steady in radius.**
+    ///
+    /// Four claims in one, because they are one feature and separating them
+    /// buys nothing:
+    ///
+    /// - The default is off. Every scene in the library predates this field and
+    ///   none of their references may move.
+    /// - The clock is the simulation's. Two calls at the same `seconds` agree
+    ///   exactly; two at different `seconds` do not. That is what makes the
+    ///   golden gate able to see this at all — and reading the wall clock here
+    ///   would make it invisible to every instrument in the project.
+    /// - **The hue shifts.** At the modulation's minimum the light is not
+    ///   merely darker, it is measurably redder — `b/r` falls. A bare scale
+    ///   would leave the ratio pinned and is the half of firelight this misses.
+    /// - **The radius does not flicker.** It is a performance bound taken from
+    ///   the authored intensity; one that breathed at 7 Hz would pop distant
+    ///   surfaces in and out of lit, which is worse than the defect.
+    #[test]
+    fn a_flickering_light_is_on_the_sim_clock_and_shifts_hue() {
+        let of = |flicker: f32, seconds: f32| {
+            let text = format!(
+                "[scene]\nformat = 1\n\n[[node]]\nname = \"Fire\"\n\
+                 transform = {{ pos = [0.0, 1.0, 0.0] }}\n\n\
+                 [node.components.Light]\nintensity = 3.0\n\
+                 color = [1.0, 0.52, 0.18]\nflicker = {flicker}\n"
+            );
+            let scene = loom_scene::Scene::parse(&text).expect("valid scene");
+            let world = World::from_scene(&scene);
+            environment_with_wind(&world, &crate::weather::wind_of(&scene), seconds).lights[0]
+        };
+
+        let off_a = of(0.0, 0.0);
+        let off_b = of(0.0, 7.25);
+        assert_eq!(off_a, off_b, "flicker 0 must not see the clock at all");
+        assert!((off_a.position[3] - 3.0).abs() < 1e-6, "authored intensity");
+
+        // Sweep a couple of seconds of ticks and keep the extremes.
+        let (mut dim, mut bright) = (off_a, off_a);
+        for tick in 0..240 {
+            #[allow(clippy::cast_precision_loss)]
+            let light = of(0.22, tick as f32 / 60.0);
+            assert_eq!(
+                light,
+                of(0.22, tick as f32 / 60.0),
+                "the same clock must give the same light"
+            );
+            assert!(
+                (light.color[3] - off_a.color[3]).abs() < 1e-6,
+                "the cutoff radius must not flicker"
+            );
+            if light.position[3] < dim.position[3] {
+                dim = light;
+            }
+            if light.position[3] > bright.position[3] {
+                bright = light;
+            }
+        }
+
+        assert!(
+            bright.position[3] > off_a.position[3] * 1.15
+                && dim.position[3] < off_a.position[3] * 0.85,
+            "0.22 must actually reach most of its own amplitude: {} .. {}",
+            dim.position[3],
+            bright.position[3]
+        );
+        // Dimmer is redder: blue falls faster than red, so the ratio drops.
+        let ratio = |l: loom_render::PointLight| l.color[2] / l.color[0];
+        assert!(
+            ratio(dim) < ratio(bright) * 0.85,
+            "the dim end must be redder, not merely darker: {} vs {}",
+            ratio(dim),
+            ratio(bright)
+        );
+    }
+
     /// **The underwater flag is a fact about the camera, and it is W7's fact.**
     ///
     /// A flat sea at y = 0 and three eyes: well under, well over, and exactly
@@ -4467,6 +4587,56 @@ mod tests {
     /// that shipped before this existed renders from above, and a flag that
     /// came on for them would turn eleven references green-black at once.
     ///
+    /// **The two properties `flicker` is safe on, and neither is observable
+    /// from a still.**
+    ///
+    /// A light that does not author it must land in the environment buffer bit
+    /// for bit as it did before the field existed — that is the whole licence
+    /// for adding it without moving twenty-odd references, and it is checked
+    /// here at a tick where the modulation is emphatically not 1.0 rather than
+    /// at zero, where a broken implementation would pass by luck.
+    ///
+    /// And the modulation is bounded: `flicker_at` sums amplitudes to exactly
+    /// one, so `1 + flicker * f` cannot reach zero below `flicker = 1.0` and
+    /// cannot exceed `1 + flicker`. A light that swings past those is one whose
+    /// cutoff radius — computed from the authored intensity, deliberately —
+    /// stops matching the light it is bounding.
+    #[test]
+    fn a_light_that_authors_no_flicker_is_untouched_by_the_clock() {
+        const LIT: &str = "[scene]\nformat = 1\n\n[[node]]\nname = \"Lamp\"\n\
+             transform = { pos = [1.0, 2.0, 3.0] }\n\n  [node.components.Light]\n  \
+             intensity = 40.0\n  color = [1.0, 0.5, 0.25]\n";
+        let scene = loom_scene::Scene::parse(LIT).expect("valid scene");
+        let world = World::from_scene(&scene);
+        let steady = {
+            let mut env = loom_render::EnvironmentData::default();
+            gather_lights(&world, &mut env, 0.0);
+            env.lights[0]
+        };
+        // 3.7 s, not 0.0: at zero every sine but one is near its own offset and
+        // a no-op implementation and a correct one agree by accident.
+        let later = {
+            let mut env = loom_render::EnvironmentData::default();
+            gather_lights(&world, &mut env, 3.7);
+            env.lights[0]
+        };
+        assert_eq!(steady.position, later.position, "intensity moved with no flicker authored");
+        assert_eq!(steady.color, later.color, "colour moved with no flicker authored");
+        assert!((steady.position[3] - 40.0).abs() < 1e-6, "authored intensity not preserved");
+
+        // Bounded, sampled densely enough to catch a rewritten amplitude set.
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for i in 0..20_000 {
+            let f = flicker_at(i as f32 * 0.001, 0.0);
+            lo = lo.min(f);
+            hi = hi.max(f);
+        }
+        assert!(lo >= -1.0 && hi <= 1.0, "flicker_at left [-1, 1]: {lo} to {hi}");
+        // And it genuinely uses the range — a stuck-at-zero modulation would
+        // pass the bound above and light nothing.
+        assert!(lo < -0.6 && hi > 0.6, "flicker_at barely moves: {lo} to {hi}");
+    }
+
     /// No terrain here, which is a scene with no volume: the bed is
     /// bottomless, the waves are unattenuated, and the answer comes from
     /// `sample_water` alone — the same call `Physics::submerged_at` makes for

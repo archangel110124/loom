@@ -611,9 +611,15 @@ transform = { pos = [27.6, 10.3, 34.0] }
   # 4.0 is three times fully-lit — a hot pool a couple of metres across with
   # the flame still the brightest thing in the shot. Nearly the same number
   # `campfire.loom` measured its way to for nearly the same geometry.
+  # Flutters like `campfire`'s and at the same depth. **The brazier's light is
+  # the only one on this deck that gets it** — the five lanterns beside it are
+  # wicks in glass and a steady flame is what a lantern is for, so leaving them
+  # at a hard 0.0 is the contrast that makes the brazier read as a fire rather
+  # than as a fixture.
   [node.components.Light]
   intensity = 4.0
   color = [1.00, 0.50, 0.17]
+  flicker = 0.22
 
 [[node]]
 name = "LanternA"

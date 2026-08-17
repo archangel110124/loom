@@ -112,6 +112,33 @@ pub struct Light {
     /// Linear RGB, each channel normalized 0..=1. Not 0-255.
     #[schemars(inner(range(min = 0.0, max = 1.0)))]
     pub color: [f32; 3],
+    /// How much the light flutters, as a fraction of [`Self::intensity`].
+    ///
+    /// **Zero by default, so every scene authored before this field renders
+    /// byte-identically** — the same exemption `ParticleEmitter::wind_response`
+    /// takes, and for the same reason.
+    ///
+    /// **The clock is the simulation's, never the wall clock** (never-do #8).
+    /// It is the `seconds` `environment_with_wind` already carries, which is
+    /// the tick timebase the shader reads as `weather.z`, so a headless render
+    /// at `--sim 200` and the viewer at tick 200 light the scene identically
+    /// and the golden gate can see this at all.
+    ///
+    /// **It shifts hue as well as brightness.** A flame that loses fuel loses
+    /// temperature, and blue falls off fastest, so the dim part of the cycle is
+    /// redder rather than merely darker — which is the half of firelight that a
+    /// bare multiply misses. The cutoff radius is deliberately computed from
+    /// the *authored* intensity and does not flutter with it: the radius is a
+    /// performance bound, and a breathing one would pop distant surfaces in and
+    /// out of lit.
+    ///
+    /// ADR 0020 named this as the piece the line integral did not fix — a flame
+    /// core reaching the ramp's white rung under a perfectly still lamp is half
+    /// of what a filmic fire is judged on. 0.15-0.25 is a campfire; 1.0 is a
+    /// light that goes fully out and back, which is a failing bulb rather than a
+    /// fire.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub flicker: f32,
 }
 
 impl Default for Light {
@@ -119,6 +146,7 @@ impl Default for Light {
         Self {
             intensity: 100.0,
             color: [1.0; 3],
+            flicker: 0.0,
         }
     }
 }
