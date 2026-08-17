@@ -34,6 +34,7 @@
 mod cmaa2;
 mod debug_names;
 mod device;
+mod gpu_particles;
 mod instance;
 mod material;
 mod rain;
@@ -54,6 +55,7 @@ mod viewer;
 pub use glam;
 
 pub use debug_names::DebugNames;
+pub use gpu_particles::GpuEmitter;
 pub use device::{Device, DeviceError};
 pub use material::{FLAG_TRIPLANAR, MaterialData, NO_TEXTURE};
 pub use renderer::{PointLight, MAX_LIGHTS, 
@@ -101,6 +103,14 @@ pub const TONEMAP_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tonemap
 /// collides it against the baked world, `rainSplashArgsMain` writes the splash
 /// draw's indirect arguments.
 pub const RAIN_SIM_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rain_sim.spv"));
+
+/// The GPU particle pool's simulation (ADR 0047), embedded at build time.
+///
+/// One compute entry point: `gpuParticleSimulateMain` advances every slot and
+/// writes the `ParticleInstance` the *existing* particle vertex shader draws.
+/// There is no second particle renderer.
+pub const GPU_PARTICLES_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/gpu_particles.spv"));
 
 /// The compute shader that evaluates the generated fields, for the S2
 /// agreement test. Nothing in the runtime dispatches it — see `field_agree`.

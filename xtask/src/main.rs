@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 44] = [
+const SCENES: [&str; 45] = [
     "assets/test/lanternhead.loom",
     // One building, composed. **In `SCENES` and not `GOLDEN`, on the stated
     // rule**: every path it draws is already covered — `ground` and
@@ -133,6 +133,12 @@ const SCENES: [&str; 44] = [
     // field cost more than the 1024-chunk landform bake put together.
     "assets/test/moraine.loom",
     "assets/test/smoke.loom",
+    // The GPU particle pool. Also in `GOLDEN`, where the reasoning is; here
+    // because the compute dispatch, the pipeline layout with no descriptor set
+    // at all, and the compute-write/vertex-read buffer dependency are three
+    // things the validation layers have an opinion about and the compiler has
+    // none.
+    "assets/test/emberfall.loom",
     "assets/test/windy.loom",
     "assets/test/meadow.loom",
     "assets/test/grass_slope.loom",
@@ -213,7 +219,7 @@ fn main() -> std::process::ExitCode {
     // below drives the engine over dozens of scenes and will use the whole
     // machine; see [`GateLock`] for what running two at once did.
     let _lock = match task.as_str() {
-        "validate" | "image" | "flythrough" | "shimmer" => match GateLock::acquire(&task) {
+        "validate" | "image" | "flythrough" | "shimmer" | "repeat" => match GateLock::acquire(&task) {
             Ok(lock) => Some(lock),
             Err(e) => {
                 eprintln!("{e}");
@@ -228,11 +234,13 @@ fn main() -> std::process::ExitCode {
         "image" => image(std::env::args().any(|a| a == "--bless")),
         "flythrough" => flythrough(),
         "shimmer" => shimmer(),
+        "repeat" => repeat(),
         other => {
             eprintln!(
                 "unknown task {other:?}\n\nUSAGE:\n    cargo xtask validate\n    \
                  cargo xtask image [--bless]\n    cargo xtask flythrough
-    cargo xtask shimmer"
+    cargo xtask shimmer
+    cargo xtask repeat"
             );
             std::process::ExitCode::from(2)
         }
@@ -250,7 +258,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 31] = [
+const GOLDEN: [(&str, &str, &[&str]); 32] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -306,6 +314,20 @@ const GOLDEN: [(&str, &str, &[&str]); 31] = [
     // ran the whole 2D pipeline.
     ("vale", "assets/test/vale.loom", &[]),
     ("smoke", "assets/test/smoke.loom", &[]),
+    // **The GPU particle pool is its own rendering path** (ADR 0047), and it
+    // is the only one whose instances the CPU never writes: a compute dispatch
+    // fills a device-local buffer and the existing particle vertex shader
+    // expands it. `smoke`, `explosion`, `windy`, `campfire` and the rest all
+    // upload their instances from the host, so every one of them would keep
+    // matching with the dispatch deleted.
+    //
+    // A 16,200-slot pool, about 12,000 of them live at once, against `smoke`'s
+    // ~725 — the scale that justifies the path existing at all.
+    //
+    // `--sim 600` is ten seconds, past the four-second lifetime, so the
+    // fountain is at its settled population. At tick zero the pool is empty,
+    // which is the least representative frame there is.
+    ("emberfall", "assets/test/emberfall.loom", &["--sim", "600"]),
     ("explosion", "assets/test/explosion.loom", &["--sim", "22"]),
     // Wind-advected particles: the one scene where the field does something
     // visible, so a wind regression shows up as a picture rather than only as
@@ -1300,6 +1322,133 @@ fn collect(failures: &mut Vec<String>, what: &str, result: &Result<Output, Strin
             tail.into_iter().rev().collect::<Vec<_>>().join("\n  ")
         ));
     }
+}
+
+/// **Three fresh processes, byte-compared.** ADR 0045 clause 3.
+///
+/// ADR 0017 claimed the raindrop buffer was "verified byte-identical across
+/// three processes", and it was — once, by hand, on one RTX 4090. That claim is
+/// the entire licence for GPU-stateful rendering in this project, and it rests
+/// on assumptions that are not guaranteed: that additive blending is
+/// order-independent (float addition is not associative), that nothing in the
+/// dispatch reads a counter another thread is writing, and that seeding is a
+/// pure function of the scene. A hand check does not survive the next stateful
+/// path, and the VFX overhaul queues several.
+///
+/// **Every scene in `GOLDEN`, not a list of the stateful ones.** A hand-kept
+/// list of "the scenes with state in them" is the same artefact `SCENES` and
+/// `GOLDEN` are, and it has gone stale three times: the gate reports a full
+/// pass having never looked at the thing under test. Deriving it from `GOLDEN`
+/// means adding a rendering path adds it here too, for free.
+///
+/// Not part of `image`, because they answer different questions. `image` asks
+/// whether the render matches what was blessed, at a calibrated tolerance.
+/// This asks whether the render is the *same* twice, exactly — a property with
+/// no tolerance at all, which a tolerant comparison cannot see.
+fn repeat() -> std::process::ExitCode {
+    let root = repo_root();
+    let loom = match build_debug(&root) {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("xtask: {message}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    if !has_vulkan_device(&loom, &root) {
+        println!("skip: cargo xtask repeat — no usable Vulkan device on this machine");
+        return std::process::ExitCode::SUCCESS;
+    }
+
+    let scratch = root.join("target/xtask-repeat");
+    let _ = std::fs::create_dir_all(&scratch);
+
+    /// Renders of each scene. Three rather than two, so a difference says
+    /// which run is the odd one out rather than only that two disagree.
+    const RUNS: usize = 3;
+
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    println!("{RUNS} fresh processes per scene, compared byte for byte.");
+    println!();
+
+    for (name, scene, extra) in GOLDEN {
+        if !root.join(scene).exists() {
+            failures.push(format!("{name}: {scene} is missing"));
+            continue;
+        }
+        checked += 1;
+
+        let mut renders: Vec<Option<Vec<u8>>> = Vec::new();
+        for index in 0..RUNS {
+            let path = scratch.join(format!("{name}_{index}.png"));
+            let path_string = path.to_string_lossy().into_owned();
+            let mut argv: Vec<&str> =
+                vec!["render", scene, "--out", &path_string, "--size", GOLDEN_SIZE];
+            argv.extend_from_slice(extra);
+            match run(&loom, &root, &argv) {
+                Ok(output) if output.status.success() => {
+                    renders.push(std::fs::read(&path).ok());
+                }
+                Ok(output) => {
+                    failures.push(format!(
+                        "render {name} (run {index}): {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ));
+                    renders.push(None);
+                }
+                Err(e) => {
+                    failures.push(format!("render {name} (run {index}): {e}"));
+                    renders.push(None);
+                }
+            }
+        }
+
+        let digests: Vec<String> = renders
+            .iter()
+            .map(|bytes| bytes.as_deref().map_or_else(|| "-".to_owned(), digest))
+            .collect();
+        let identical = renders
+            .iter()
+            .all(|bytes| bytes.is_some() && *bytes == renders[0]);
+        println!(
+            "{name:<18} {}  {}",
+            if identical { "same" } else { "DIFFER" },
+            digests.join(" ")
+        );
+        if !identical {
+            failures.push(format!(
+                "{name}: three runs of one scene produced different bytes ({}) — \
+                 a GPU-stateful path is depending on something that is not the \
+                 scene and the tick",
+                digests.join(" ")
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        println!();
+        println!("cargo xtask repeat: {checked} scene(s) reproduce byte for byte");
+        return std::process::ExitCode::SUCCESS;
+    }
+    eprintln!();
+    for failure in &failures {
+        eprintln!("  repeat: {failure}");
+    }
+    std::process::ExitCode::from(1)
+}
+
+/// A short, readable fingerprint of a rendered PNG.
+///
+/// FNV-1a rather than SHA-256: the *comparison* above is a full byte-for-byte
+/// equality, so this is only ever printed, never trusted — and a hash used
+/// purely as a log line does not justify a dependency.
+fn digest(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn run(loom: &Path, root: &Path, args: &[&str]) -> Result<Output, String> {

@@ -62,6 +62,15 @@ pub(crate) const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 /// `framebufferColorSampleCounts` including 4, which are the two properties
 /// the forward pass needs.
 pub(crate) const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
+
+/// The simulation's fixed timestep, as the GPU particle pool integrates it.
+///
+/// **Passed to the shader rather than declared there**, so it is bit-for-bit
+/// the `f32` `loom_particles::births_by` divides by on the other side of the
+/// device boundary. `1.0 / 60.0` folded by `rustc` and by `slangc` is a
+/// one-ulp risk sitting on the comparison that decides how many particles
+/// exist — which is not a risk worth taking to save a push-constant lane.
+pub(crate) const SIM_DT: f32 = 1.0 / 60.0;
 pub(crate) const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 /// One object to draw.
@@ -851,12 +860,15 @@ pub struct Renderer {
     /// The drop buffer, the collision field, and the two compute pipelines that
     /// advance them. ADR 0015.
     rain_sim: crate::rain::RainSim,
+    gpu_particles: crate::gpu_particles::GpuParticles,
     /// Whether the scene is raining at all. Zero skips the simulation and both
     /// draws, so a scene with no `Rain` costs exactly what it did.
     rain_drops: u32,
     /// The simulation tick this frame stands for, handed to the drop sim so it
     /// can advance by the difference since it last ran.
     rain_tick: u64,
+    /// The tick the GPU particle pool's state should stand for.
+    gpu_particle_tick: u64,
     /// The scene's depth, as a descriptor the rain fragment shader samples.
     scene_depth: crate::scene_depth::SceneDepth,
     water_textures: crate::water_textures::WaterTextures,
@@ -1224,6 +1236,12 @@ impl Renderer {
             pipeline_cache,
             crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
         )?;
+        let gpu_particles = crate::gpu_particles::GpuParticles::new(
+            instance.handle(),
+            device,
+            &mut allocator,
+            pipeline_cache,
+        )?;
 
         // The tonemap. Unconditional, unlike the AA pass below: the scene
         // target is half float and the readback wants eight bits, so this is
@@ -1403,8 +1421,10 @@ impl Renderer {
             rain_pipeline,
             rain_splash_pipeline,
             rain_sim,
+            gpu_particles,
             rain_drops: 0,
             rain_tick: 0,
+            gpu_particle_tick: 0,
             scene_depth,
             water_textures,
             max_particles: MAX_PARTICLES,
@@ -1614,6 +1634,21 @@ impl Renderer {
             self.rain_sim.reset();
         }
         self.rain_tick = tick;
+    }
+
+    /// Hand the renderer the scene's GPU emitter, and the tick its pool should
+    /// stand for.
+    ///
+    /// **One call carrying both**, rather than a setter each, because they are
+    /// never independently true: a pool without a tick is state with no clock,
+    /// and the shape of the bug that produces — a plume frozen at whatever tick
+    /// the caller last remembered — is precisely the kind that renders fine.
+    ///
+    /// `None` is a scene with no GPU emitter, which costs nothing: no dispatch,
+    /// no draw, and the buffers sit untouched.
+    pub fn set_gpu_emitter(&mut self, emitter: Option<crate::GpuEmitter>, tick: u64) {
+        self.gpu_particles.set_emitter(emitter);
+        self.gpu_particle_tick = tick;
     }
 
     /// Hand the renderer the world raindrops collide with.
@@ -1835,6 +1870,24 @@ impl Renderer {
             )
         });
 
+        // **The particle pool, beside the drop simulation and for the same
+        // reasons.** It writes an instance buffer the forward pass reads as a
+        // vertex shader, and the graph is what puts the barrier between them.
+        let gpu_particle_buffer = self.gpu_particles.record(
+            &mut graph,
+            self.gpu_particle_tick,
+            SIM_DT,
+            self.environment.wind,
+            self.environment.weather,
+        );
+        let gpu_particle_uses: Vec<(loom_render_graph::BufferId, loom_render_graph::BufferAccess)> =
+            gpu_particle_buffer
+                .into_iter()
+                .map(|id| (id, loom_render_graph::BufferAccess::VertexRead))
+                .collect();
+        let gpu_particle_count = self.gpu_particles.count();
+        let gpu_particle_address = self.gpu_particles.instances_address;
+
         let (width, height) = (self.width, self.height);
         let (color_view, depth_view) = (self.color_view, self.depth_view);
         let msaa_views = self.msaa.as_ref().map(|m| (m.view, m.depth_view));
@@ -1961,9 +2014,13 @@ impl Renderer {
         } else {
             forward_uses.push((depth, Access::DepthWrite));
         }
-        graph.pass(
+        graph.pass_with(
             "forward",
             &forward_uses,
+            // The pool's instance buffer, read by the particle vertex shader.
+            // Empty when the scene has no GPU emitter, so a scene without one
+            // declares exactly what it always did.
+            &gpu_particle_uses,
             move |d, cmd| {
                 // SAFETY: the graph has already transitioned both attachments
                 // into the layouts this recording requires.
@@ -2168,6 +2225,8 @@ impl Renderer {
                             particle_pipeline,
                             particle_count,
                             particle_slot,
+                            gpu_particle_address,
+                            gpu_particle_count,
                         );
                     }
                     d.cmd_end_rendering(cmd);
@@ -2207,9 +2266,13 @@ impl Renderer {
             if !rain_resolves {
                 water_uses.push((color, Access::ColorWrite));
             }
-            graph.pass(
+            graph.pass_with(
                 "water",
                 &water_uses,
+                // The particle draws move into this block when the pass splits,
+                // so the instance buffer is read here too. Read-after-read
+                // needs no barrier, which is why declaring it twice is free.
+                &gpu_particle_uses,
                 move |d, cmd| {
                     // SAFETY: the graph has transitioned the opaque pair to
                     // SHADER_READ_ONLY_OPTIMAL and the attachments to their
@@ -2280,6 +2343,8 @@ impl Renderer {
                             particle_pipeline,
                             particle_count,
                             particle_slot,
+                            gpu_particle_address,
+                            gpu_particle_count,
                         );
                         d.cmd_end_rendering(cmd);
                     }
@@ -2671,6 +2736,7 @@ impl Drop for Renderer {
             self.device.destroy_pipeline(self.rain_splash_pipeline, None);
             if let Some(allocator) = self.allocator.as_mut() {
                 self.rain_sim.destroy(allocator);
+                self.gpu_particles.destroy(allocator);
             }
             self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.terrain_buffer, None);
@@ -2871,6 +2937,9 @@ pub(crate) unsafe fn draw_water_and_particles(
     particle_pipeline: vk::Pipeline,
     particle_count: u32,
     particle_slot: u32,
+    // The GPU pool's instance buffer, and how many slots it holds.
+    gpu_particles: vk::DeviceAddress,
+    gpu_particle_count: u32,
 ) {
     // SAFETY: the caller is inside a rendering block whose attachments match
     // these pipelines, and has bound sets 0 and 1.
@@ -2937,6 +3006,36 @@ pub(crate) unsafe fn draw_water_and_particles(
             d.cmd_draw(cmd, particle_count * 6, 1, 0, 0);
         }
 
+        // **The GPU pool, through the same pipeline and the same vertex
+        // shader.** Only the instance pointer differs, which is the whole
+        // point: a GPU plume is billboarded, blended and fogged identically to
+        // a CPU one, and there is no second particle renderer to drift from
+        // this one.
+        //
+        // After the CPU particles rather than before, because the pool is
+        // additive by construction (`loom_scene` refuses anything else) and
+        // additive draws are order-independent, while the CPU stream is sorted
+        // and must not have anything interleaved into its order.
+        if gpu_particle_count > 0 {
+            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, particle_pipeline);
+            let push = Push {
+                object_offset: particle_slot,
+                particles: gpu_particles,
+                ..base_push
+            };
+            let bytes = std::slice::from_raw_parts(
+                std::ptr::from_ref(&push).cast::<u8>(),
+                size_of::<Push>(),
+            );
+            d.cmd_push_constants(
+                cmd,
+                layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                bytes,
+            );
+            d.cmd_draw(cmd, gpu_particle_count * 6, 1, 0, 0);
+        }
     }
 }
 

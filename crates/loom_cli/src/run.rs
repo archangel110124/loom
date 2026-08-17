@@ -1273,7 +1273,15 @@ impl ApplicationHandler for App {
                     // seconds — so a window and a `loom render --sim N` of the
                     // same scene ask the simulation for the same instant.
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    viewer.set_rain_tick((self.wind_seconds * 60.0).round().max(0.0) as u64);
+                    let tick = (self.wind_seconds * 60.0).round().max(0.0) as u64;
+                    viewer.set_rain_tick(tick);
+                    // **The GPU particle pool, on that same clock.** The window
+                    // and `loom render --sim N` therefore ask the pool for the
+                    // same instant — which is the whole reason the viewer got
+                    // this wiring rather than being left on the CPU path. A
+                    // filter measured somewhere the filter is not is the defect
+                    // that cost this project a night on MSAA.
+                    viewer.set_gpu_emitter(crate::particles::gpu_emitter(world), tick);
                 }
 
                 // Everything above is the frame's CPU work: input, the

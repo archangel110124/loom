@@ -86,6 +86,72 @@ fn parse(component: &serde_json::Value) -> (loom_particles::Emitter, Visual) {
     )
 }
 
+/// Whether this emitter is simulated on the device (ADR 0047).
+///
+/// Read on its own as well as through [`parse`], because the *first* thing
+/// every caller here does with a GPU emitter is skip it: it has no CPU
+/// particles to step, and stepping it anyway would draw the plume twice.
+fn is_gpu(component: &serde_json::Value) -> bool {
+    component
+        .get("gpu")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The scene's GPU emitter, if it authors one.
+///
+/// **At most one**, which `loom_scene` refuses at load rather than leaving to
+/// this `find` to silently decide — the renderer owns exactly one pool, and a
+/// second emitter that quietly did not draw is the failure mode no gate in this
+/// project can see.
+///
+/// A dormant blast's emitters and the water's splash template are skipped for
+/// the reason they are skipped everywhere else: they describe an event and play
+/// where one is triggered, never where they sit.
+pub(crate) fn gpu_emitter(world: &World) -> Option<loom_render::GpuEmitter> {
+    let entity = *world.entities().iter().find(|e| {
+        world.emitter(**e).is_some_and(is_gpu)
+            && !in_dormant_blast(world, **e)
+            && !in_water(world, **e)
+    })?;
+    let component = world.emitter(entity)?;
+    let global = world.global_transform(entity)?;
+    let (emitter, visual) = parse(component);
+    Some(loom_render::GpuEmitter {
+        // Column 3 of the model matrix is its translation.
+        origin: [global.matrix[12], global.matrix[13], global.matrix[14]],
+        radius: emitter.radius,
+        speed: emitter.speed,
+        // Converted here rather than in the shader, so the degree-to-radian
+        // constant lives on the side that owns the component's units.
+        spread: emitter.spread_degrees.to_radians(),
+        gravity: emitter.gravity,
+        drag: emitter.drag,
+        turbulence: emitter.turbulence,
+        turbulence_scale: emitter.turbulence_scale,
+        wind_response: emitter.wind_response,
+        lifetime: emitter.lifetime,
+        lifetime_jitter: emitter.lifetime_jitter,
+        rate: emitter.rate,
+        delay: emitter.delay,
+        duration: emitter.duration,
+        burst: emitter.burst,
+        size: visual.size,
+        color_start: visual.color_start,
+        color_end: visual.color_end,
+        alpha: visual.alpha,
+        additive: visual.additive,
+        flame: visual.flame,
+        #[allow(clippy::cast_possible_truncation)]
+        seed: emitter.seed as u32,
+        // The one number the renderer will not recompute: the pool that holds
+        // this emitter's live population without lapping. `loom_scene` has
+        // already refused anything over the ceiling, with the number in the
+        // error.
+        pool: loom_particles::pool_size(&emitter),
+    })
+}
+
 /// The part of an emitter that only the renderer cares about.
 struct Visual {
     size: [f32; 2],
@@ -147,6 +213,12 @@ impl Plumes {
             // emitters play where one is triggered, never where it sits. A
             // splash under the water is the same shape of thing.
             if in_dormant_blast(world, *entity) || in_water(world, *entity) {
+                continue;
+            }
+            // **A GPU emitter has no CPU particles at all.** Stepping it here
+            // as well would draw the plume twice, once from each simulation,
+            // which reads as a denser plume rather than as a bug.
+            if is_gpu(component) {
                 continue;
             }
             let (emitter, visual) = parse(component);
@@ -359,7 +431,14 @@ fn blast_template(world: &World) -> Vec<(loom_particles::Emitter, Visual)> {
     world
         .entities()
         .iter()
-        .filter(|e| world.emitter(**e).is_some() && in_dormant_blast(world, **e))
+        // **A GPU emitter cannot be a template.** A template is *played*, once
+        // per event, at wherever the event happened; the pool is one emitter at
+        // one origin. So a `gpu = true` emitter under a dormant blast is
+        // dropped here rather than silently CPU-simulated under a name that
+        // says otherwise.
+        .filter(|e| {
+            world.emitter(**e).is_some_and(|c| !is_gpu(c)) && in_dormant_blast(world, **e)
+        })
         .filter_map(|e| world.emitter(*e).map(parse))
         .collect()
 }
@@ -369,7 +448,7 @@ fn splash_template(world: &World) -> Vec<(loom_particles::Emitter, Visual)> {
     world
         .entities()
         .iter()
-        .filter(|e| world.emitter(**e).is_some() && in_water(world, **e))
+        .filter(|e| world.emitter(**e).is_some_and(|c| !is_gpu(c)) && in_water(world, **e))
         .filter_map(|e| world.emitter(*e).map(parse))
         .collect()
 }
@@ -393,6 +472,12 @@ pub(crate) fn simulate(
         // A prefab describes an explosion; it is not one. Nor is the water's
         // splash a fountain in the middle of the sea.
         if in_dormant_blast(world, *entity) || in_water(world, *entity) {
+            continue;
+        }
+        // The device owns this one; see `Plumes::new` above, which skips it for
+        // the same reason — stepping it here as well would draw the plume
+        // twice, once from each simulation.
+        if is_gpu(component) {
             continue;
         }
         let (emitter, visual) = parse(component);

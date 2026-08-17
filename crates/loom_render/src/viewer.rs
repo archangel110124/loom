@@ -147,6 +147,9 @@ pub struct Viewer {
     /// advance them — the same [`crate::rain::RainSim`] the offscreen path
     /// owns, so the two render the same simulation rather than two of them.
     rain_sim: crate::rain::RainSim,
+    gpu_particles: crate::gpu_particles::GpuParticles,
+    /// The tick the GPU particle pool's state should stand for.
+    gpu_particle_tick: u64,
     /// The tick the drop simulation should stand at this frame.
     rain_tick: u64,
     /// Drops this frame — see [`Viewer::set_rain`]. There is no buffer beside
@@ -413,6 +416,12 @@ impl Viewer {
             pipeline_cache,
             crate::raytrace::Submit { pool: command_pool, queue: device.queue() },
         )?;
+        let gpu_particles = crate::gpu_particles::GpuParticles::new(
+            instance.handle(),
+            device,
+            &mut allocator,
+            pipeline_cache,
+        )?;
 
         // GPU timing, on the same environment variable and with the same
         // queried-not-assumed care as the offscreen path — `timestampValidBits`
@@ -628,6 +637,8 @@ impl Viewer {
             rain_pipeline,
             rain_splash_pipeline,
             rain_sim,
+            gpu_particles,
+            gpu_particle_tick: 0,
             rain_tick: 0,
             rain_drops: 0,
             scene_depth,
@@ -734,6 +745,14 @@ impl Viewer {
             self.rain_sim.reset();
         }
         self.rain_tick = tick;
+    }
+
+    /// The scene's GPU emitter and the tick its pool stands for. Mirrors
+    /// [`crate::Renderer::set_gpu_emitter`] — same pool, same shader, same
+    /// draw, so the window and the golden image cannot disagree about it.
+    pub fn set_gpu_emitter(&mut self, emitter: Option<crate::GpuEmitter>, tick: u64) {
+        self.gpu_particles.set_emitter(emitter);
+        self.gpu_particle_tick = tick;
     }
 
     /// Hand the viewer the world raindrops collide with. Mirrors
@@ -1268,6 +1287,22 @@ impl Viewer {
                 self.terrain_heights,
             )
         });
+        // And the particle pool, for the same reason: a compute write and a
+        // vertex read of one buffer in one command buffer.
+        let gpu_particle_buffer = self.gpu_particles.record(
+            &mut graph,
+            self.gpu_particle_tick,
+            crate::renderer::SIM_DT,
+            self.environment.wind,
+            self.environment.weather,
+        );
+        let gpu_particle_uses: Vec<(loom_render_graph::BufferId, loom_render_graph::BufferAccess)> =
+            gpu_particle_buffer
+                .into_iter()
+                .map(|id| (id, loom_render_graph::BufferAccess::VertexRead))
+                .collect();
+        let gpu_particle_count = self.gpu_particles.count();
+        let gpu_particle_address = self.gpu_particles.instances_address;
 
         let extent = self.extent;
         // **The scene's rectangle, from the frame that was just laid out** —
@@ -1415,9 +1450,12 @@ impl Viewer {
         } else {
             forward_uses.push((depth_id, Access::DepthWrite));
         }
-        graph.pass(
+        graph.pass_with(
             "forward",
             &forward_uses,
+            // The pool's instance buffer, read by the particle vertex shader.
+            // Empty in a scene with no GPU emitter.
+            &gpu_particle_uses,
             move |d, cmd| {
                 // SAFETY: the graph transitioned every attachment already.
                 unsafe {
@@ -1593,6 +1631,8 @@ impl Viewer {
                             particle_pipeline,
                             particle_count,
                             particle_slot,
+                            gpu_particle_address,
+                            gpu_particle_count,
                         );
                     }
                     d.cmd_end_rendering(cmd);
@@ -1622,9 +1662,12 @@ impl Viewer {
             if !rain_resolves {
                 water_uses.push((scene_id, Access::ColorWrite));
             }
-            graph.pass(
+            graph.pass_with(
                 "water",
                 &water_uses,
+                // Declared here too, because the particle draws move into this
+                // block when the pass splits. Read-after-read costs nothing.
+                &gpu_particle_uses,
                 move |d, cmd| {
                     // SAFETY: the graph has moved the opaque pair to
                     // SHADER_READ_ONLY_OPTIMAL and the attachments to their
@@ -1686,6 +1729,8 @@ impl Viewer {
                             particle_pipeline,
                             particle_count,
                             particle_slot,
+                            gpu_particle_address,
+                            gpu_particle_count,
                         );
                         d.cmd_end_rendering(cmd);
                     }
@@ -2228,6 +2273,7 @@ impl Drop for Viewer {
             self.device.destroy_pipeline(self.rain_splash_pipeline, None);
             if let Some(allocator) = self.allocator.as_mut() {
                 self.rain_sim.destroy(allocator);
+                self.gpu_particles.destroy(allocator);
             }
             self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.terrain_buffer, None);

@@ -617,6 +617,104 @@ name = \"Hill\"
         assert_eq!(errors[0].constraint, "at most 16 waves");
     }
 
+    /// A scene with one emitter, whose body the test supplies.
+    fn emitter_scene(body: &str) -> String {
+        format!(
+            "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e50\"\n\n\
+             [[node]]\nname = \"Embers\"\n\n\
+             [node.components.ParticleEmitter]\n{body}"
+        )
+    }
+
+    /// The CPU path is untouched by any of the GPU rules, which is what makes
+    /// `gpu = false` a safe default for the eight blessed particle scenes.
+    #[test]
+    fn an_ordinary_cpu_emitter_is_unaffected_by_the_gpu_rules() {
+        Scene::parse(&emitter_scene("rate = 4000.0\nlifetime = 60.0\n"))
+            .expect("a huge CPU plume is the CPU's problem, not the pool's");
+    }
+
+    /// **No GPU sort exists, so alpha is refused rather than scrambled.**
+    /// Drawing a blended pool in slot order is not a subtle degradation — it is
+    /// a visibly wrong picture with nothing in the frame to blame.
+    #[test]
+    fn a_gpu_emitter_must_be_additive() {
+        let errors = Scene::parse(&emitter_scene("gpu = true\nadditive = false\n"))
+            .expect_err("alpha on the GPU has no sort");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "gpu_emitter_needs_additive");
+        assert_eq!(errors[0].field, "ParticleEmitter.additive");
+        assert!(
+            errors[0].hint.as_deref().is_some_and(|h| h.contains("additive = true")),
+            "the rejection has to say what to write: {errors:?}"
+        );
+
+        Scene::parse(&emitter_scene("gpu = true\nadditive = true\n"))
+            .expect("additive is the supported mode");
+    }
+
+    /// **The pool-lapping rule, and the number has to be in the error.** "Too
+    /// many particles" without the required slot count is not something an
+    /// agent tuning a rate can act on.
+    #[test]
+    fn a_gpu_emitter_over_the_pool_is_rejected_with_the_count_it_needs() {
+        // 4000/s for 30 s at the default 0.35 jitter is 162,000 slots.
+        let errors = Scene::parse(&emitter_scene(
+            "gpu = true\nadditive = true\nrate = 4000.0\nlifetime = 30.0\n",
+        ))
+        .expect_err("162,000 live particles do not fit a 65,536 pool");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "gpu_emitter_pool_too_small");
+        assert!(
+            errors[0].constraint.contains("162000")
+                && errors[0].constraint.contains(&components::GPU_POOL_MAX.to_string()),
+            "both numbers, or the author cannot tell how far over they are: {errors:?}"
+        );
+
+        // And the same emitter one third as long fits.
+        Scene::parse(&emitter_scene(
+            "gpu = true\nadditive = true\nrate = 4000.0\nlifetime = 10.0\n",
+        ))
+        .expect("54,000 slots fit");
+    }
+
+    /// One pool, so a second GPU emitter would silently not draw. Refusing is
+    /// the whole point: an absent feature is the one thing no gate here can
+    /// see.
+    #[test]
+    fn a_second_gpu_emitter_in_one_scene_is_refused() {
+        let one = "\n[[node]]\nname = \"A\"\n\n\
+                   [node.components.ParticleEmitter]\ngpu = true\nadditive = true\n";
+        let two = "\n[[node]]\nname = \"B\"\nparent = \"A\"\n\n\
+                   [node.components.ParticleEmitter]\ngpu = true\nadditive = true\n";
+        let head = "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e51\"\n";
+
+        Scene::parse(&format!("{head}{one}")).expect("one pool is what there is");
+        let errors = Scene::parse(&format!("{head}{one}{two}")).expect_err("two pools do not exist");
+        assert_eq!(errors.len(), 1, "the SECOND is named, not both: {errors:?}");
+        assert_eq!(errors[0].error, "second_gpu_emitter");
+        assert_eq!(errors[0].node, "A/B");
+    }
+
+    /// **A catch-up dispatch has one origin**, so an emitter on a body that
+    /// physics moves lays its whole trail at the body's final position. That
+    /// is a wrong picture that looks like a wrong scene.
+    #[test]
+    fn a_gpu_emitter_on_a_rigid_body_is_refused() {
+        let src = "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e52\"\n\n\
+                   [[node]]\nname = \"Rocket\"\n\n\
+                   [node.components.RigidBody]\ndynamic = true\n\n\
+                   [node.components.ParticleEmitter]\ngpu = true\nadditive = true\n";
+
+        let errors = Scene::parse(src).expect_err("a moving GPU emitter is a wrong trail");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "gpu_emitter_on_a_moving_node");
+        assert!(
+            errors[0].hint.as_deref().is_some_and(|h| h.contains("ONE dispatch")),
+            "{errors:?}"
+        );
+    }
+
     /// A zero wavelength divides by zero on the way to the wave number, and a
     /// non-finite anything poisons the determinism hashes (§1).
     #[test]

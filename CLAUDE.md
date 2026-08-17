@@ -53,9 +53,16 @@ cargo clippy --workspace -- -D warnings   # 1. clean
 cargo xtask validate                      # 2. ZERO Vulkan validation messages
 cargo test --workspace                    # 3. unit tests + determinism hashes match
 cargo xtask image                         # 4. renders match their reference PNGs
+cargo xtask repeat                        # 5. and they render the SAME twice
 ```
 
-`scripts/green.sh` runs all four. Check 4 is S1 of the implementation order and
+**Check 5 is new (ADR 0045).** Three fresh processes per `GOLDEN` scene,
+compared **byte for byte** — no tolerance, which is exactly what check 4 cannot
+express. Every GPU-stateful path in the engine (the raindrop buffer, the
+particle pool) is licensed by that property, and until this existed it had been
+checked by hand once, on one GPU.
+
+`scripts/green.sh` runs all five. Check 4 is S1 of the implementation order and
 is new: until it existed, "golden images" was aspirational and every render in
 this project was verified by a human opening the PNG. It renders eight scenes
 chosen for coverage of *rendering paths* — mesh, bindless textures, voxels,
@@ -149,6 +156,76 @@ change, so your edits appear live. Two consequences:
 
 ## Current phase
 
+> **The project has pivoted: the editor rework (`docs/design/editor/PLAN.md`) is ON HOLD and the
+> whole effort is the VFX overhaul — fire, smoke and water.** Read
+> `docs/design/VFX-IMPLEMENTATION-REPORT.md` (the maths) and
+> `docs/design/NIAGARA-AND-FIRE-RESEARCH.md` (the priorities, Loom-specific) before designing
+> anything in it. Where they disagree on priority the second wins; on maths, the first.
+>
+> **ADR 0045 is the constraint everything in that overhaul obeys. Read it first.** Four clauses:
+> the sim hash stays physics-only and does not grow; anything that produces a force on a rapier
+> body or is readable by `loom sim --assert` or `rhai` is computed **on the CPU** as a
+> deterministic function of (scene, tick) — closed-form at a point, or state stepped inside the
+> fixed step; **GPU floats never cross that line and there is no readback, ever** (the report's
+> milestone-4 "read back the height field" for buoyancy is refused — buoyancy is already built
+> correctly on CPU pontoons); GPU-stateful *rendering* effects are admissible only under ADR
+> 0017's conditions, now gated by `cargo xtask repeat`; and an FFT ocean, if ever built, exists
+> only as a windowed force-free detail tier behind its own ADR. One trap ruled there: **a
+> force-producing CPU sim grid anchors to sim state, never to the camera** — a camera-following
+> domain makes physics depend on the viewer.
+>
+> **`cargo xtask repeat` is new and is a fifth check** (in `scripts/green.sh`). It renders every
+> `GOLDEN` scene in three fresh processes and compares the PNGs **byte for byte**. `image`
+> compares at a tolerance, which is the right question for "did the picture change" and cannot
+> see "is the picture the same twice" — and that second property is the entire licence for
+> GPU-stateful rendering here. It derives its list from `GOLDEN` rather than from a hand-kept
+> list of stateful scenes, because a hand-kept list of scenes has gone stale three times.
+>
+> **The GPU particle pool landed — ADR 0047**, which is the report's milestone 1 and the answer
+> to the research doc's §4.6 blocker. `ParticleEmitter.gpu = true` (default **false**, so all
+> eight blessed particle references are untouched) moves an emitter's population into a
+> device-local buffer advanced by `gpu_particles.slang`. **There is no free list and no atomic
+> anywhere on the seed path**: slot `i` holds the largest birth ordinal `n < births_by(tick)` with
+> `n ≡ i (mod N)`, which is arithmetic. `loom_particles::births_by` is the CPU twin of that
+> allocator and a test compares them at every tick out to ten thousand — exactly, because the
+> closed form and the CPU accumulator first disagree by one particle at tick 26,363. `dt` is
+> **passed to the shader** so both sides divide by the same `f32`.
+>
+> **It writes `ParticleInstance`s, so there is no second particle renderer.** A GPU plume is
+> billboarded, blended and fogged by the same vertex shader as a CPU one; only the pointer
+> differs. A dead slot writes a degenerate quad. **No indirect draw** — rain has one because its
+> splash count is a GPU fact; the pool's slot count is a CPU fact. One arrives with a cull.
+>
+> **Four load-time refusals, not comments** (`loom_scene`): `gpu` needs `additive` (no GPU sort
+> exists or is planned); the pool must fit `burst + ceil(rate·lifetime·(1+jitter))` slots, with
+> the required number in the error, or a live particle is overwritten and the plume blinks; one
+> GPU emitter per scene; and not beside a `RigidBody`, because a catch-up dispatch has one origin
+> and lays the whole trail where the node ended.
+>
+> **Measured on `emberfall.loom`** (16,200 slots, 12,083 live — `rate × lifetime`, as the sizing
+> rule predicts), 1920x1080: the dispatch is **0.008 ms** in a steady frame and 0.677 ms for a
+> 600-tick catch-up; the forward pass is 0.430 ms, so **overdraw is now the cost, not the
+> simulation**. Whole `--sim 600` render, wall clock: **0.64 s on the GPU against 5.70 s on the
+> CPU**. That gap is the trigger — at `smoke.loom`'s ~725 particles the CPU path is 0.02 ms a tick
+> and this would be optimising something already free.
+>
+> **`gpu = true` is not the same pixels as `gpu = false`, deliberately.** Same force chain, but
+> the CPU draws from a serial seeded `Rng` and the GPU hashes the birth ordinal, and the swirl
+> uses `loom_value_noise` because that is the noise with a Slang half. Two plumes, one effect.
+> GPU particles are also **unreadable by `--assert` and by scripts**, by construction — ADR 0045
+> clause 1, not a gap to close.
+>
+> **Next in the VFX order, and none of it is started:** W1 screen-space refraction distortion
+> (`scene.slang:4524` already names it; `WATER-REFRACTION-PLAN.md` has the acceptance), W2
+> whitecaps from the closed-form `WaterSample::fold`, W3 one traced reflection ray on water
+> (extends ADR 0019), W4 smoke as a marched soot volume (generalises ADR 0020's line integral —
+> no grid, no Jacobi), W5 spray from fold threshold and submersion events, W6 interactive ripples
+> (CPU-authoritative, own ADR — **0046 is reserved for it**). Rejected on evidence: a GPU sort
+> (additive-only instead), a grid gas solver, six-way flipbooks, the module stack / parameter map
+> / simulation stages, and any noise or FFT from a crate.
+>
+> ---
+>
 > **Phase 0 complete; P1 done. P2 (grass) in progress — blades render and bend in the wind.** See
 > `docs/design/LOOM-IMPLEMENTATION-ORDER.md`, which is the sequencing document for everything
 > after M12 and **supersedes the build orders inside the companion docs wherever they conflict**.

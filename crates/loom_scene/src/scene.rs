@@ -534,6 +534,9 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
     };
 
     let mut errors = Vec::new();
+    // GPU emitters seen so far. Scene-wide rather than per-node, because "one
+    // per scene" is a property of the file and no single node can see it.
+    let mut gpu_emitters = 0_usize;
     for (table, node) in entries.iter().zip(nodes) {
         // `transform` is sugar for the Transform component (§1.1), but it used
         // to be the one field that skipped this pass — it went straight through
@@ -577,9 +580,133 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
             if schema_errors.is_empty() && type_name == "WaterBody" {
                 errors.extend(check_water(item, &node.path));
             }
+            if schema_errors.is_empty() && type_name == "ParticleEmitter" {
+                let has_body = components.get("RigidBody").is_some();
+                errors.extend(check_emitter(item, &node.path, has_body, &mut gpu_emitters));
+            }
             errors.extend(schema_errors);
         }
     }
+    errors
+}
+
+/// The GPU-emitter rules, which are refusals rather than comments.
+///
+/// **The S4 lesson, applied before it can bite.** A key the loader does not
+/// understand is a key it ignores, and a *constraint* nobody enforces is a
+/// constraint the author discovers as a rendering artifact three commits later.
+/// Every one of these has a symptom that looks like a bug in the engine:
+///
+/// - alpha blending with no sort reads as a scrambled plume,
+/// - a pool smaller than the live population reads as blinking particles,
+/// - a second GPU emitter reads as one of them silently not drawing.
+///
+/// `gpu` is the number of GPU emitters seen so far in this scene, carried
+/// across nodes because "one per scene" is not a property of any single node.
+fn check_emitter(
+    item: &Item,
+    node: &str,
+    has_rigid_body: bool,
+    gpu: &mut usize,
+) -> Vec<SceneError> {
+    // Through serde for the reason `check_water` gives at length: an omitted
+    // field must be its documented default here exactly as it will be at load.
+    let emitter = match item_to_json(item)
+        .ok_or_else(|| "the component is not a table of values".to_owned())
+        .and_then(|v| {
+            serde_json::from_value::<components::ParticleEmitter>(v).map_err(|e| e.to_string())
+        }) {
+        Ok(emitter) => emitter,
+        Err(why) => {
+            let mut err = SceneError::new("component_unreadable", node);
+            err.field = "ParticleEmitter".to_owned();
+            err.constraint = "a readable ParticleEmitter".to_owned();
+            err.hint = Some(format!(
+                "{why}. The schema check passed, so this is a field the schema \
+                 does not reach. None of the emitter rules could run until it \
+                 is fixed."
+            ));
+            return vec![err];
+        }
+    };
+    if !emitter.gpu {
+        return Vec::new();
+    }
+
+    *gpu += 1;
+    let mut errors = Vec::new();
+    let mut refuse = |code: &str, field: &str, value: Value, constraint: String, hint: &str| {
+        let mut err = SceneError::new(code, node);
+        err.field = format!("ParticleEmitter.{field}");
+        err.value = value;
+        err.constraint = constraint;
+        err.hint = Some(hint.to_owned());
+        errors.push(err);
+    };
+
+    if !emitter.additive {
+        refuse(
+            "gpu_emitter_needs_additive",
+            "additive",
+            Value::from(false),
+            "true when gpu = true".to_owned(),
+            "there is no GPU sort and none is planned, so a GPU pool draws in \
+             slot order — which is correct for additive blending and a visible \
+             scramble for alpha. Set `additive = true`, or drop `gpu` and let \
+             the CPU path sort it back to front.",
+        );
+    }
+
+    // Two ordinals N apart share a slot, and they are born N/rate seconds
+    // apart; a particle lives at most lifetime*(1 + jitter). The burst is
+    // additive because its ordinals are all born at once. Duplicated from
+    // `loom_particles::pool_size` on purpose: this crate depends on nothing in
+    // the workspace, and the number has to be in the error.
+    let live = emitter.rate.max(0.0) * emitter.lifetime.max(0.0)
+        * (1.0 + emitter.lifetime_jitter.max(0.0));
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let needed = u64::from(emitter.burst) + live.ceil().max(0.0) as u64;
+    if needed > u64::from(components::GPU_POOL_MAX) {
+        refuse(
+            "gpu_emitter_pool_too_small",
+            "rate",
+            Value::from(emitter.rate),
+            format!(
+                "a pool of {needed} slots, over the {} the renderer holds",
+                components::GPU_POOL_MAX
+            ),
+            "the pool needs burst + ceil(rate * lifetime * (1 + \
+             lifetime_jitter)) slots, or a live particle is overwritten by its \
+             successor and the plume blinks. Lower `rate`, `lifetime` or \
+             `burst`.",
+        );
+    }
+
+    if has_rigid_body {
+        refuse(
+            "gpu_emitter_on_a_moving_node",
+            "gpu",
+            Value::from(true),
+            "a node with no RigidBody".to_owned(),
+            "a headless `--sim N` catches the pool up in ONE dispatch, so every \
+             particle born during those N ticks is born at the origin the node \
+             ended at — the trail is laid along the wrong path. Put the emitter \
+             on a static node, or drop `gpu`.",
+        );
+    }
+
+    if *gpu > 1 {
+        refuse(
+            "second_gpu_emitter",
+            "gpu",
+            Value::from(true),
+            "at most one GPU emitter per scene".to_owned(),
+            "the renderer owns exactly one pool. A second would silently not \
+             draw, which is the failure this refusal exists to replace. Move \
+             the extra emitters to the CPU path by dropping `gpu`.",
+        );
+    }
+
     errors
 }
 

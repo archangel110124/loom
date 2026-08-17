@@ -1,0 +1,128 @@
+# The GPU particle pool, which is a rendering path nothing else here covers.
+#
+# ADR 0047. One `ParticleEmitter` with `gpu = true`: its population lives in a
+# device-local buffer, is advanced by `gpu_particles.slang`, and reaches the
+# draw as `ParticleInstance`s the *existing* particle vertex shader expands.
+# Nothing about that is visible in a still except by its absence — which is
+# exactly why this file exists. Stub the compute pass and the frame is a dark
+# slab with a plinth on it.
+#
+# **What makes it a path and not another plume:**
+#
+#   - the only compute dispatch in the project that is not rain's,
+#   - the only draw whose instances the CPU never wrote,
+#   - the only buffer that is compute-written and vertex-read in the same
+#     command buffer other than the drop buffer.
+#
+# **The scale is the argument.** A 16,200-slot pool holding about 12,000 live
+# embers at any instant (`rate * lifetime`), against `smoke.loom`'s ~725
+# across three plumes. The CPU path would step every one of them inside the
+# fixed timestep; here the CPU uploads 144 bytes of parameters and the device
+# does the rest. That is the trigger ADR 0047 names, made visible.
+#
+# Additive, because the pool refuses anything else: there is no GPU sort, so
+# slot order has to be an order that does not matter. `loom validate` says so
+# with the reason if you change it.
+#
+# Rendered at `--sim 600` — ten seconds, comfortably past the four-second
+# lifetime, so the fountain is at its settled population rather than mid-fill.
+# At tick zero it is empty, which is the least representative frame there is.
+
+[scene]
+format = 1
+id = "5c9a71d3-8e42-4bb0-91f7-6a03e5d1c284"
+
+[[node]]
+name = "Emberfall"
+
+  # Dark, so an additive plume reads as light rather than as orange paint. The
+  # same composition `campfire.loom` uses and for the same reason.
+  [node.components.Environment]
+  sun_direction = [0.35, 0.86, 0.37]
+  sun_strength = 0.45
+  sun_color = [0.30, 0.26, 0.30]
+  ambient = 0.08
+  sky_zenith = [0.010, 0.012, 0.024]
+  sky_horizon = [0.030, 0.026, 0.034]
+  fog_density = 0.010
+  fog_falloff = 0.05
+
+  # The pool samples this field unsheltered, exactly as grass does — there is
+  # no GPU form of the S3 voxel march. Gentle, because `wind_response` is what
+  # this scene is testing reaches the device at all, not how hard it blows.
+  [node.components.Wind]
+  direction_degrees = 65.0
+  speed = 2.6
+  gustiness = 1.2
+  turbulence = 0.8
+
+# Ground, so the embers depth-test against real geometry rather than floating
+# over everything.
+[[node]]
+name = "Ground"
+parent = "Emberfall"
+transform = { pos = [0.0, -0.5, 0.0], scale = [30.0, 0.5, 30.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.06, 0.055, 0.05]
+  roughness = 0.95
+
+# Something for the fountain to stand on, and a solid silhouette in front of
+# the plume so the additive blend has an edge to be judged against.
+[[node]]
+name = "Plinth"
+parent = "Emberfall"
+transform = { pos = [0.0, 0.5, 0.0], scale = [1.1, 1.0, 1.1] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.10, 0.09, 0.085]
+  roughness = 0.8
+
+# **The pool.** 3,000 a second for four seconds at 0.35 jitter is 16,200 live
+# slots — `loom_particles::pool_size` computes it, `loom_scene` refuses it if it
+# will not fit, and `gpu_particles.slang` allocates by arithmetic rather than by
+# a free list.
+[[node]]
+name = "Embers"
+parent = "Emberfall"
+transform = { pos = [0.0, 1.1, 0.0] }
+
+  [node.components.ParticleEmitter]
+  gpu = true
+  additive = true
+  rate = 3000.0
+  lifetime = 4.0
+  lifetime_jitter = 0.35
+  speed = 5.2
+  spread_degrees = 26.0
+  radius = 0.5
+  # Negative: embers fall. Every other emitter in the repo rises, so this is
+  # also the only scene where the sign of `gravity` is exercised downward.
+  gravity = -2.4
+  drag = 0.35
+  turbulence = 1.8
+  turbulence_scale = 0.6
+  # Carried by the air, which is what makes the fall lean downwind rather than
+  # dropping straight. Zero everywhere else by default.
+  wind_response = 1.4
+  size = [0.10, 0.03]
+  # Hot at birth, cooling to a deep red. Linear RGB, not 0-255, and kept well
+  # under 1.0 because twelve thousand additive quads accumulate.
+  color_start = [0.90, 0.42, 0.10]
+  color_end = [0.28, 0.05, 0.01]
+  alpha = [0.40, 0.0]
+  seed = 90210
+
+[[node]]
+name = "Camera"
+parent = "Emberfall"
+transform = { pos = [0.0, 3.4, 13.0], rot_euler = [-8.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 50.0

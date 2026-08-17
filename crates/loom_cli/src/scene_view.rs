@@ -587,6 +587,13 @@ name = \"Desk\"
     /// was measured rather than guessed.
     #[test]
     #[ignore = "timing, not a gate — run with --ignored"]
+    // never-do #8 forbids the wall clock in *simulation* code, and the lint is
+    // deliberately blunt about where that is. This is a stopwatch around a
+    // rebuild: there is nothing simulated here and the elapsed time is the
+    // whole output. Without the allow, `clippy --all-targets` — which is what
+    // `scripts/green.sh` runs — fails on a test that has been in the tree since
+    // `70a40eb`.
+    #[allow(clippy::disallowed_methods)]
     fn what_a_rebuild_costs() {
         for scene in [
             "../../assets/test/materials.loom",

@@ -630,9 +630,50 @@ pub struct ParticleEmitter {
     /// Use with `additive`, one long-lived particle, and no motion: the flame
     /// moves because the field is dragged through it, not because the quad is.
     pub flame: bool,
+    /// Simulate this emitter on the GPU instead of the CPU (ADR 0047).
+    ///
+    /// **A scale switch, and it costs three things.** The CPU path
+    /// (`loom_particles`) is the default and is what every scene in the repo
+    /// uses; it is deterministic simulation state, it can be sorted back to
+    /// front, and a script could in principle read it. The GPU pool trades all
+    /// three away for a population the CPU cannot afford:
+    ///
+    /// - **Additive only.** There is no GPU sort and none is planned, so an
+    ///   alpha-blended plume would draw in slot order and read as a scramble.
+    ///   `additive = true` is required and refused otherwise.
+    /// - **Unreadable by `loom sim --assert` and by `rhai`.** ADR 0045 clause
+    ///   1: a particle a script must reason about is a CPU particle. Nothing is
+    ///   read back from the device, ever.
+    /// - **One per scene**, because the renderer owns exactly one pool. A
+    ///   second is refused with the reason rather than silently ignored.
+    ///
+    /// It is also **wrong on a node that moves**. A headless `--sim N` catches
+    /// the pool up in a single dispatch, so every particle born during those N
+    /// ticks is born at the origin the node ended at — a trail laid along the
+    /// wrong path. `RigidBody` on the same node is refused; a parent that moves
+    /// is not detectable here and is the author's to avoid.
+    ///
+    /// The pool is sized from `burst + ceil(rate * lifetime * (1 +
+    /// lifetime_jitter))` and refused above [`GPU_POOL_MAX`], because a pool
+    /// smaller than the live population laps — a live particle overwritten by
+    /// its successor, which reads as the plume blinking.
+    pub gpu: bool,
     /// Reproducibility, authored rather than sampled from the clock.
     pub seed: u32,
 }
+
+/// Particles one GPU emitter's pool can hold.
+///
+/// **The authoritative copy, here rather than in `loom_render`,** because it is
+/// an authoring constraint before it is a buffer size: an author needs the
+/// number in the rejection, and `loom_scene` depends on nothing that could tell
+/// it. `loom_render::gpu_particles::POOL` mirrors it and a test there reads
+/// this file to prove they agree — the same shape as the rain constants, which
+/// are declared in the shader header and mirrored in Rust.
+///
+/// 65,536 matches `MAX_PARTICLES`, the CPU path's own instance-buffer ceiling,
+/// so moving an emitter to the GPU never lowers what a scene may ask for.
+pub const GPU_POOL_MAX: u32 = 65_536;
 
 impl Default for ParticleEmitter {
     fn default() -> Self {
@@ -657,6 +698,11 @@ impl Default for ParticleEmitter {
             duration: 0.0,
             additive: false,
             flame: false,
+            // Off, so all eight golden references carrying a `ParticleEmitter`
+            // keep the CPU path they were blessed on. A default that moved
+            // them would be a re-bless of eight images for a feature nothing
+            // asked for yet.
+            gpu: false,
             seed: 1,
         }
     }

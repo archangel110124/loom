@@ -767,6 +767,11 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         // and advances to here in one dispatch, so a still at `--sim N` is
         // always seed-then-advance-N and reproduces run to run (ADR 0015).
         renderer.set_rain_tick(u64::from(sim_ticks));
+        // **The GPU particle pool, on the same clock** (ADR 0047). Its state is
+        // seeded and advanced to exactly `--sim N` in one dispatch, which is
+        // what makes a headless still reproducible; `cargo xtask repeat`
+        // proves it rather than asserting it.
+        renderer.set_gpu_emitter(particles::gpu_emitter(&world), u64::from(sim_ticks));
         // And the world those drops collide with, baked once. This is what
         // fires ADR 0014's trigger 2: the field is the collision world — voxel
         // volumes unioned with static box colliders — so a mesh roof stops rain
@@ -990,6 +995,10 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     // `moment` above is built from, so the rain and the wind
                     // cannot be looking at different instants.
                     renderer.set_rain_tick(u64::from(sim_ticks) + elapsed);
+                    renderer.set_gpu_emitter(
+                        particles::gpu_emitter(&world),
+                        u64::from(sim_ticks) + elapsed,
+                    );
 
                     renderer
                         .render_to_png(

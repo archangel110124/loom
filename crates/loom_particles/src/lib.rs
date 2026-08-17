@@ -135,6 +135,81 @@ impl Default for Emitter {
     }
 }
 
+/// How many particles this emitter has ever released by the end of tick
+/// `tick`, counting from zero.
+///
+/// **The CPU twin of the GPU pool's spawn ordinal** (ADR 0047). A GPU emitter
+/// has no free list and no atomic: slot `i` owns the largest birth ordinal
+/// `n < births_by(tick)` with `n ≡ i (mod N)`, and that is the whole of its
+/// allocation. So this number is not bookkeeping — it *is* the allocator, and
+/// it has to mean the same thing on both sides of the device boundary.
+///
+/// Written as a closed form rather than as an accumulator, and both halves of
+/// that matter:
+///
+/// - The GPU cannot carry [`System::owed`]'s residual across a dispatch
+///   boundary without making the answer depend on how the ticks were grouped,
+///   which is exactly the property `--sim N` in one dispatch must not have.
+/// - `floor(rate * n * dt)` is a multiply and a floor, both correctly rounded
+///   in IEEE-754, so the CPU and the GPU compute it bit-identically from the
+///   same inputs. An accumulated sum would not: float addition is not
+///   associative and the drift is real (see the test below, which measures it).
+///
+/// `dt` is the fixed timestep, never a measured frame time.
+#[must_use]
+pub fn births_by(emitter: &Emitter, tick: u64, dt: f32) -> u32 {
+    if dt <= 0.0 {
+        return 0;
+    }
+    // The first step whose age has reached the delay. `System::spawn` compares
+    // `ticks as f32 * dt` against `delay`, so this is the same boundary.
+    let first = (emitter.delay.max(0.0) / dt).ceil();
+    #[allow(clippy::cast_precision_loss)]
+    let ticks = tick as f32;
+    if ticks <= first {
+        // Step `first` has not run yet: nothing has been released at all, not
+        // even the burst.
+        return 0;
+    }
+
+    // Steps that were allowed to emit continuously. A `duration` of zero is
+    // "forever" — never "emit nothing" — which is the same asymmetry
+    // `System::spawn` documents.
+    let last = if emitter.duration > 0.0 {
+        ticks.min(((emitter.delay.max(0.0) + emitter.duration) / dt).ceil())
+    } else {
+        ticks
+    };
+    let emitting = (last - first).max(0.0);
+    let continuous = (emitter.rate.max(0.0) * (emitting * dt)).floor();
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let continuous = continuous.clamp(0.0, f32::from(u16::MAX) * 64.0) as u32;
+    emitter.burst.saturating_add(continuous)
+}
+
+/// Slots a GPU pool needs so that a slot is never reused before its occupant
+/// has died.
+///
+/// **The capacity rule, and it is a correctness rule rather than a budget.**
+/// Ordinal `n` and ordinal `n + N` share a slot, and they are born
+/// `N / rate` seconds apart. A particle lives at most
+/// `lifetime * (1 + lifetime_jitter)`. So the pool laps — a live particle
+/// being overwritten by its successor, which reads as blades of the plume
+/// blinking out — unless `N / rate >= max lifetime`. The burst is additive
+/// because its ordinals are all born at the same instant and hold their slots
+/// for a full lifetime while continuous emission carries on behind them.
+///
+/// Returned rather than clamped, so the load-time validator can put the
+/// required number in its error instead of silently drawing a lapping plume.
+#[must_use]
+pub fn pool_size(emitter: &Emitter) -> u32 {
+    let live = emitter.rate.max(0.0) * emitter.lifetime.max(0.0) * (1.0 + emitter.lifetime_jitter.max(0.0));
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let live = live.ceil().clamp(0.0, 4_294_000_000.0) as u32;
+    emitter.burst.saturating_add(live).max(1)
+}
+
 /// One emitter's live particles.
 pub struct System {
     particles: Vec<Particle>,
@@ -323,6 +398,136 @@ impl System {
                 jitter,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod ordinal_tests {
+    use super::*;
+
+    const DT: f32 = 1.0 / 60.0;
+
+    /// Total ever released, by never letting anything die.
+    fn released(emitter: &Emitter, ticks: u64) -> u32 {
+        let mut system = System::new(emitter.seed);
+        for _ in 0..ticks {
+            system.step(DT, emitter, [0.0; 3]);
+        }
+        u32::try_from(system.particles().len()).expect("test population fits")
+    }
+
+    fn immortal(rate: f32) -> Emitter {
+        Emitter { rate, lifetime: 1.0e9, lifetime_jitter: 0.0, ..Emitter::default() }
+    }
+
+    /// **The twin test.** `births_by` is what the GPU pool allocates slots
+    /// with, and `System`'s `owed` accumulator is what the CPU emitter has
+    /// always spawned with. If they disagree by more than a rounding, a scene
+    /// authored with `gpu = true` holds a visibly different number of
+    /// particles from the same scene with it off, and nothing else in the
+    /// project would say so.
+    ///
+    /// 37.3 a second at 1/60 s is 0.6217 per tick — deliberately awkward, so
+    /// the carried remainder is exercised on every single step rather than
+    /// landing on a whole number periodically.
+    ///
+    /// **Exact, at every one of the ten thousand ticks, and that bound is
+    /// measured rather than hoped for.** The two are not the same arithmetic:
+    /// the accumulator adds a float once per step and this multiplies once, and
+    /// float addition is not associative, so they must eventually part. Swept
+    /// out to 200,000 ticks at this rate the first disagreement is a single
+    /// particle at tick **26,363** — which is 7.3 minutes of simulation, an
+    /// order of magnitude past the longest `--sim` in the repo. Ten thousand is
+    /// inside the exact region deliberately, so this is a real gate: rounding
+    /// instead of flooring, or dropping the delay boundary, fails it.
+    #[test]
+    fn births_by_matches_the_owed_accumulator_over_ten_thousand_ticks() {
+        let emitter = immortal(37.3);
+        // One pass rather than 10,000 replays: with nothing dying, the live
+        // population after `t` steps *is* the number ever released.
+        let mut system = System::new(emitter.seed);
+        for tick in 1..=10_000_u64 {
+            system.step(DT, &emitter, [0.0; 3]);
+            let accumulated = u32::try_from(system.particles().len()).expect("fits");
+            assert_eq!(
+                births_by(&emitter, tick, DT),
+                accumulated,
+                "the closed form and the accumulator parted at tick {tick}"
+            );
+        }
+    }
+
+    /// A rate that divides evenly has no excuse to drift at all.
+    #[test]
+    fn a_whole_rate_agrees_exactly() {
+        let emitter = immortal(60.0);
+        for ticks in [1_u64, 30, 120, 601] {
+            assert_eq!(
+                births_by(&emitter, ticks, DT),
+                released(&emitter, ticks),
+                "at {ticks} ticks"
+            );
+        }
+    }
+
+    /// The burst, the delay and the duration are the three gates `System`
+    /// applies, and the closed form has to apply all three or a GPU explosion
+    /// would fire on tick zero and never stop.
+    #[test]
+    fn the_closed_form_respects_burst_delay_and_duration() {
+        let blast = Emitter {
+            rate: 60.0,
+            burst: 50,
+            delay: 0.5,
+            duration: 0.25,
+            lifetime: 1.0e9,
+            lifetime_jitter: 0.0,
+            ..Emitter::default()
+        };
+        // Nothing before the delay: half a second is step 30, and at tick 30
+        // that step has not run.
+        assert_eq!(births_by(&blast, 30, DT), 0, "fired early");
+        assert_eq!(released(&blast, 30), 0, "and the accumulator agrees");
+        // Step 30 releases the burst *and* the first continuous particle, in
+        // that order — the accumulator does both in one call to `spawn`, so
+        // the closed form has to as well.
+        assert_eq!(births_by(&blast, 31, DT), 51, "the burst plus one tick");
+        assert_eq!(released(&blast, 31), 51);
+        // A quarter second of 60/s past the delay, and then it stops for good.
+        let at_end = births_by(&blast, 46, DT);
+        assert_eq!(at_end, 65, "burst plus 0.25 s at 60/s");
+        assert_eq!(births_by(&blast, 600, DT), at_end, "duration did not stop it");
+        assert_eq!(released(&blast, 600), at_end, "and the accumulator agrees");
+    }
+
+    /// A `duration` of zero means forever, matching `System::spawn`. Reading
+    /// it as "emit nothing" would silently switch off every chimney in the
+    /// repo the moment it moved to the GPU.
+    #[test]
+    fn a_duration_of_zero_emits_forever() {
+        let emitter = immortal(60.0);
+        assert_eq!(births_by(&emitter, 3_600, DT), 3_600);
+    }
+
+    /// **The pool-lapping rule.** A slot is reused every `N / rate` seconds
+    /// and its occupant lives up to `lifetime * (1 + jitter)`, so the size has
+    /// to cover the longer of the two or a live particle is overwritten.
+    #[test]
+    fn the_pool_covers_the_longest_life_a_particle_can_have() {
+        let emitter = Emitter { rate: 40.0, lifetime: 3.0, lifetime_jitter: 0.35, burst: 0, ..Emitter::default() };
+        let n = pool_size(&emitter);
+        let longest = emitter.lifetime * (1.0 + emitter.lifetime_jitter);
+        let laps_after = f32::from(u16::try_from(n).expect("small pool")) / emitter.rate;
+        assert!(
+            laps_after >= longest,
+            "{n} slots lap in {laps_after} s against a {longest} s life"
+        );
+        // And the burst holds slots of its own for a full lifetime.
+        let blast = Emitter { burst: 500, ..emitter };
+        assert_eq!(pool_size(&blast), n + 500);
+        // Never zero: a dispatch of no threads draws nothing and reports no
+        // error, which is the shape of bug this whole crate is written against.
+        assert_eq!(pool_size(&Emitter { rate: 0.0, burst: 0, ..emitter }), 1);
     }
 }
 
