@@ -45,6 +45,17 @@ pub struct View {
     right: Vec3,
     up: Vec3,
     tan_half_fov: f32,
+    /// Where the scene's rectangle starts, in window pixels.
+    ///
+    /// **The mapping lives here rather than at each consumer**, and that is
+    /// the point. `pick_at_cursor`, `drag_gizmo`, `press_in_viewport`, the
+    /// handle recomputation and `agent_marks` all speak window pixels, because
+    /// that is what winit reports and what egui draws in. Asking each of them
+    /// to convert would be five places to get it right and five places for a
+    /// later reader to miss one — and a missed one is a click that selects the
+    /// wrong object, which reads as a picking bug rather than as a coordinate
+    /// bug.
+    origin: (f32, f32),
     width: f32,
     height: f32,
 }
@@ -52,6 +63,18 @@ pub struct View {
 impl View {
     #[must_use]
     pub fn new(camera: &Camera, width: f32, height: f32) -> Self {
+        Self::at(camera, (0.0, 0.0), width, height)
+    }
+
+    /// A view onto a scene drawn into a sub-rectangle of the window.
+    ///
+    /// `origin` is where that rectangle starts, and `width`/`height` are its
+    /// size — the same numbers the renderer's `ViewportPlacement` carries. The
+    /// aspect ratio comes from the rectangle, matching the projection the
+    /// renderer actually used; taking it from the window instead is how the
+    /// gizmo ends up slightly off the object it is attached to.
+    #[must_use]
+    pub fn at(camera: &Camera, origin: (f32, f32), width: f32, height: f32) -> Self {
         let forward = (camera.target - camera.eye).normalize_or_zero();
         let right = forward.cross(Vec3::Y).normalize_or_zero();
         Self {
@@ -60,9 +83,22 @@ impl View {
             right,
             up: right.cross(forward),
             tan_half_fov: (camera.fov_y_degrees.to_radians() * 0.5).tan(),
+            origin,
             width,
             height,
         }
+    }
+
+    /// A window pixel in viewport space.
+    #[must_use]
+    pub fn to_viewport(&self, window: (f32, f32)) -> (f32, f32) {
+        (window.0 - self.origin.0, window.1 - self.origin.1)
+    }
+
+    /// A viewport pixel in window space.
+    #[must_use]
+    pub fn to_window(&self, viewport: (f32, f32)) -> (f32, f32) {
+        (viewport.0 + self.origin.0, viewport.1 + self.origin.1)
     }
 
     /// A world point in window pixels, or `None` when it is behind the camera.
@@ -79,16 +115,17 @@ impl View {
         let aspect = self.width / self.height;
         let ndc_x = v.dot(self.right) / (z * self.tan_half_fov * aspect);
         let ndc_y = v.dot(self.up) / (z * self.tan_half_fov);
-        Some((
+        Some(self.to_window((
             (ndc_x + 1.0) * 0.5 * self.width,
             (1.0 - ndc_y) * 0.5 * self.height,
-        ))
+        )))
     }
 
     /// A window pixel as a world-space ray direction. The inverse of
     /// [`Self::project`], and the reason picking and the gizmo agree.
     #[must_use]
     pub fn ray(&self, x: f32, y: f32) -> Vec3 {
+        let (x, y) = self.to_viewport((x, y));
         let aspect = self.width / self.height;
         let ndc_x = (x / self.width) * 2.0 - 1.0;
         let ndc_y = 1.0 - (y / self.height) * 2.0;
@@ -221,6 +258,47 @@ mod tests {
             direction.dot(to_point) > 0.9999,
             "the ray through a projected point must point back at it"
         );
+    }
+
+    /// **The inverse has to hold at a non-zero origin too**, which is the
+    /// whole reason the origin exists: the editor draws the scene into the
+    /// rectangle the panels leave, and every click arrives in window pixels.
+    ///
+    /// A `project` that forgot to add the origin and a `ray` that forgot to
+    /// subtract it are *still inverses of each other* — so this test only
+    /// catches the bug because it also checks where the projection lands.
+    #[test]
+    fn project_and_ray_are_inverses_at_a_non_zero_origin() {
+        let camera = Camera {
+            eye: Vec3::new(0.0, 0.0, 10.0),
+            target: Vec3::ZERO,
+            fov_y_degrees: 60.0,
+        };
+        let origin = (220.0, 130.0);
+        let view = View::at(&camera, origin, 800.0, 600.0);
+        let world = Vec3::new(1.5, -0.8, 2.0);
+
+        let (x, y) = view.project(world).expect("in front of the camera");
+        let direction = view.ray(x, y);
+        let to_point = (world - view.eye()).normalize();
+        assert!(
+            direction.dot(to_point) > 0.9999,
+            "the ray through a projected point must point back at it"
+        );
+
+        // And the projection is offset by exactly the origin — the half of
+        // this that "inverses of each other" cannot see.
+        let centred = View::new(&camera, 800.0, 600.0);
+        let (cx, cy) = centred.project(world).expect("visible");
+        assert!(
+            (x - (cx + origin.0)).abs() < 0.01 && (y - (cy + origin.1)).abs() < 0.01,
+            "projection did not move with the viewport: {x},{y} against {cx},{cy}"
+        );
+
+        // The round trip both ways, which is what the overlay and the picker
+        // each rely on in opposite directions.
+        let round = view.to_viewport(view.to_window((17.0, 42.0)));
+        assert!((round.0 - 17.0).abs() < 1e-6 && (round.1 - 42.0).abs() < 1e-6);
     }
 
     #[test]

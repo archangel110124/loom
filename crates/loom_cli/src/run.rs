@@ -836,35 +836,20 @@ impl ApplicationHandler for App {
                     Err(e) => crate::log::error(format!("no editor UI ({e}); continuing bare")),
                 }
                 self.gpu = Some((instance, device));
-                // **The scene becomes a rectangle rather than the whole
-                // window — behind `LOOM_DOCK_VIEWPORT=1`, deliberately.**
+                // **The scene is a rectangle rather than the whole window.**
+                // Only when there is a UI to leave room for it — bare mode and
+                // `--frames` still fill the window, and so does every headless
+                // path, which is what keeps `loom render` and `loom run` in
+                // agreement.
                 //
-                // The rendering half is finished and gated by the
-                // `viewport_rect` reference, but viewport *coordinates* are
-                // not: picking, the gizmo handles and the agent overlay still
-                // work in window pixels, so with this on a click lands offset
-                // by the rectangle's origin. Turning it on by default would
-                // trade a working editor for a preview of one.
-                //
-                // It is opt-in rather than absent because Stage 2's human
-                // check — drag the window edge and watch the seam between the
-                // scene and the panel — is what proves the `Ui` split fixed
-                // the one-frame lag, and there is no other way to see it.
-                // Stage 3's `to_viewport`/`to_window` deletes this flag.
-                //
-                // Same shape as `LOOM_GPU_TIMING`, which this codebase already
-                // uses for instrumentation that is not a scene property.
+                // On by default now that input goes through `App::projection`:
+                // every cursor position is mapped into the rectangle the scene
+                // was actually drawn in, so picking, the gizmo handles and the
+                // agent overlay all land where they look. It was behind
+                // `LOOM_DOCK_VIEWPORT=1` for exactly one stage, while that was
+                // not true.
                 let mut viewer = viewer;
-                let docked = self.ui.is_some()
-                    && std::env::var("LOOM_DOCK_VIEWPORT").is_ok_and(|v| v == "1");
-                viewer.set_dock_viewport(docked);
-                if docked {
-                    crate::log::warn(
-                        "LOOM_DOCK_VIEWPORT=1: the scene is inset, but clicks are not \
-                         remapped yet — picking will be offset until Stage 3"
-                            .to_owned(),
-                    );
-                }
+                viewer.set_dock_viewport(self.ui.is_some());
                 self.viewer = Some(viewer);
                 self.window = Some(window);
                 // The meshes went in through `Viewer::new`; grass has no such
@@ -1090,9 +1075,7 @@ impl ApplicationHandler for App {
                             fov_y_degrees: view.fov_y_degrees,
                         },
                     );
-                let extent = self.viewer.as_ref().map_or((1, 1), Viewer::extent);
-                #[allow(clippy::cast_precision_loss)]
-                let projection = gizmo::View::new(&camera, extent.0 as f32, extent.1 as f32);
+                let projection = self.projection_for(&camera);
 
                 // Handles for the focused node, recomputed each frame and kept
                 // so the next mouse press hit-tests exactly what was drawn.
@@ -2133,13 +2116,40 @@ impl App {
     /// picking needs a second pass writing entity ids and a readback; an AABB
     /// test is thirty lines and is right for a blockout editor where nodes are
     /// boxes. Upgrade when picking a thin or concave mesh matters.
-    fn pick_at_cursor(&mut self) {
-        let Some(viewer) = self.viewer.as_ref() else {
-            return;
-        };
-        let (w, h) = viewer.extent();
+    /// The projection the last frame actually rendered with.
+    ///
+    /// **One place builds this, and every consumer goes through it.** The
+    /// scene may be drawn into a sub-rectangle of the window, so a projection
+    /// built from the window's size — which is what every one of these call
+    /// sites used to do — is both the wrong aspect ratio and the wrong origin.
+    /// Wrong aspect puts the gizmo slightly off the object; wrong origin makes
+    /// a click select whatever is that far away instead.
+    fn projection(&self) -> gizmo::View {
+        self.projection_for(&self.camera.camera())
+    }
+
+    /// As [`Self::projection`], for a camera that is not the fly camera —
+    /// a scene-authored `Camera` while playing, for one.
+    fn projection_for(&self, camera: &loom_render::Camera) -> gizmo::View {
+        let extent = self.viewer.as_ref().map_or((1, 1), Viewer::extent);
+        let placement = self.viewer.as_ref().and_then(Viewer::last_placement);
         #[allow(clippy::cast_precision_loss)]
-        let projection = gizmo::View::new(&self.camera.camera(), w as f32, h as f32);
+        match placement {
+            Some(p) => gizmo::View::at(
+                camera,
+                (p.x as f32, p.y as f32),
+                p.width as f32,
+                p.height as f32,
+            ),
+            None => gizmo::View::new(camera, extent.0 as f32, extent.1 as f32),
+        }
+    }
+
+    fn pick_at_cursor(&mut self) {
+        if self.viewer.is_none() {
+            return;
+        }
+        let projection = self.projection();
         let dir = projection.ray(self.cursor.0, self.cursor.1);
 
         let mut best: Option<(f32, &String)> = None;

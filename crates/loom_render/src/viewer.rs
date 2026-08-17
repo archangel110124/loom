@@ -35,6 +35,11 @@ pub struct Viewer {
     /// rectangle comes from the frame egui just laid out, so that it cannot be
     /// a frame stale.
     placement: Option<crate::ViewportPlacement>,
+    /// The rectangle the last frame drew the scene into, if it was inset.
+    ///
+    /// Input arrives in window pixels and the scene was rasterised into this,
+    /// so picking and the gizmo need it to agree with what is on screen.
+    last_placement: Option<crate::ViewportPlacement>,
     /// Take the scene's rectangle from the UI rather than from `placement`.
     ///
     /// Off for the runtime and for anything without panels, where the scene
@@ -596,6 +601,7 @@ impl Viewer {
 
         Ok(Self {
             placement: None,
+            last_placement: None,
             dock_viewport: false,
             names,
             raytracing,
@@ -861,6 +867,16 @@ impl Viewer {
     /// (VUID-vkCmdSetScissor-x-00595). Both are reachable by ordinary use.
     pub fn set_placement(&mut self, placement: Option<crate::ViewportPlacement>) {
         self.placement = placement;
+    }
+
+    /// Where the last frame drew the scene, in window pixels.
+    ///
+    /// `None` when it filled the window. Everything that turns a cursor
+    /// position into a world ray, or a world point into something to draw over
+    /// the viewport, has to go through this — see `gizmo::View::at`.
+    #[must_use]
+    pub fn last_placement(&self) -> Option<crate::ViewportPlacement> {
+        self.last_placement
     }
 
     /// Draw the scene into whatever rectangle the panels leave, every frame.
@@ -1270,6 +1286,9 @@ impl Viewer {
         } else {
             self.placement
         };
+        // Kept so that input can be mapped into the same rectangle the scene
+        // was drawn in. Written *after* the layout, so it is this frame's.
+        self.last_placement = placement;
         // **The scene passes render at the ORIGIN, sized to the placement.**
         // Only the tonemap moves the result to `placement.x, y`. That way no
         // image is reallocated when the splitter moves and every pass upstream
