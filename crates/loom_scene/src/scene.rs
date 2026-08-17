@@ -842,6 +842,91 @@ fn check_water(item: &Item, node: &str) -> Vec<SceneError> {
         );
         errors.push(err);
     }
+    errors.extend(check_ripples(&body, node));
+    errors
+}
+
+/// The Courant condition, refused at load with both numbers in the message.
+///
+/// **This is the only stability bound in the engine that an author can type
+/// their way past.** Everything else about the water is a closed form that
+/// cannot diverge; a ripple grid is an explicit finite-difference scheme, and
+/// the explicit 2D wave equation is unconditionally unstable above
+/// `c·dt/h ≤ 1/√2`. Past it the field does not look wrong — it doubles every
+/// few ticks, reaches `inf` inside a second, and every body floating on it
+/// leaves the scene. That failure is unattributable from the symptom, so it is
+/// refused where the numbers are still in hand.
+///
+/// The second rule is a cost bound rather than a correctness one: the grid is
+/// stepped on the CPU inside the fixed step, next to `rapier`, so its cell
+/// count is a per-tick cost an agent has no intuition for.
+fn check_ripples(body: &components::WaterBody, node: &str) -> Vec<SceneError> {
+    let Some(ripples) = body.ripples else {
+        return Vec::new();
+    };
+    let mut errors = Vec::new();
+    if ripples.cell <= 0.0 || ripples.extent <= 0.0 {
+        let (name, value) = if ripples.cell <= 0.0 {
+            ("cell", ripples.cell)
+        } else {
+            ("extent", ripples.extent)
+        };
+        let mut err = SceneError::new("ripple_size_not_positive", node);
+        err.field = format!("WaterBody.ripples.{name}");
+        err.value = Value::from(value);
+        err.constraint = "greater than zero".to_owned();
+        err.hint = Some(
+            "the grid is `extent / cell` samples on a side; a non-positive \
+             either makes it empty or divides by zero."
+                .to_owned(),
+        );
+        errors.push(err);
+        return errors;
+    }
+
+    let side = components::ripple_side(ripples.extent, ripples.cell);
+    if side * side > components::MAX_RIPPLE_CELLS {
+        let mut err = SceneError::new("ripple_grid_too_large", node);
+        err.field = "WaterBody.ripples.cell".to_owned();
+        err.value = Value::from(ripples.cell);
+        err.constraint = format!(
+            "at most {} cells; {} m / {} m is {side}x{side} = {}",
+            components::MAX_RIPPLE_CELLS,
+            ripples.extent,
+            ripples.cell,
+            side * side
+        );
+        err.hint = Some(
+            "the grid is stepped on the CPU every fixed tick, beside rapier. \
+             Widen `cell` or shrink `extent`."
+                .to_owned(),
+        );
+        errors.push(err);
+    }
+
+    let courant = f64::from(ripples.speed) * f64::from(components::TICK_SECONDS)
+        / f64::from(ripples.cell);
+    if courant > components::COURANT_LIMIT {
+        let limit = components::COURANT_LIMIT * f64::from(ripples.cell)
+            / f64::from(components::TICK_SECONDS);
+        let mut err = SceneError::new("ripple_speed_exceeds_courant", node);
+        err.field = "WaterBody.ripples.speed".to_owned();
+        err.value = Value::from(ripples.speed);
+        err.constraint = format!(
+            "at most {limit:.3} m/s: c*dt/h = {courant:.3} exceeds the 2D limit \
+             1/sqrt(2) = {:.3} at dt = {} s and h = {} m",
+            components::COURANT_LIMIT,
+            components::TICK_SECONDS,
+            ripples.cell
+        );
+        err.hint = Some(
+            "the explicit wave stencil diverges above the Courant limit — the \
+             field reaches infinity within a second and takes every floating \
+             body with it. Lower `speed` or widen `cell`."
+                .to_owned(),
+        );
+        errors.push(err);
+    }
     errors
 }
 

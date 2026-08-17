@@ -185,6 +185,11 @@ const SCENES: [&str; 49] = [
     // here binds the particle pipeline off the back of a physics run. Nothing
     // else in this list does that.
     "assets/test/splash.loom",
+    // The only scene whose sea throws spray: `WaterBody::spray` is zero
+    // everywhere else, so `loom_water::spray` is never called and no gate would
+    // ever look at a droplet. It is a CPU particle population derived from the
+    // `fold` threshold rather than from an emitter, which nothing else here is.
+    "assets/test/spindrift.loom",
     // The only scene with rain: a third pass in the frame, a pipeline with no
     // depth attachment at all, and the depth buffer sampled as a texture
     // rather than tested against. None of the twenty-three above records a
@@ -545,6 +550,12 @@ const GOLDEN: [(&str, &str, &[&str]); 35] = [
     // drawn in the same block today; anything that splits that block moves
     // their ordering, and this is the only reference that would show it.
     ("splash", "assets/test/splash.loom", &["--sim", "120"]),
+    // **The spray off a breaking crest — W5.** The population is a closed form
+    // over `WaterSample::fold`, the same quantity the whitecaps are painted
+    // from, so this reference is what would catch the two drifting apart:
+    // droplets in the air over water that is not white, or foam with nothing
+    // leaving it. `--sim 240` is four seconds in, well past the first crest.
+    ("spindrift", "assets/test/spindrift.loom", &["--sim", "240"]),
     // **The changelog shot, and it is deliberately not a normal gate.** Every
     // reference above protects one rendering path and moves only when that
     // path changes. This one touches terrain, water, current, grass, rain,

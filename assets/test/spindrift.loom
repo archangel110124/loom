@@ -1,0 +1,127 @@
+# A sea steep enough to throw spray — W5's first source, and the scene that
+# covers it in both gates.
+#
+#     loom render assets/test/spindrift.loom --sim 240 -o /tmp/spindrift.png
+#
+# **The spray comes off the same number the whitecaps do.** `WaterSample::fold`
+# is `Σ Q·k·A·sin φ`, undivided, and 1.0 is a cusp; the water shader paints foam
+# between 0.22 and 0.33 of it and `loom_water::spray` throws droplets above
+# 0.33. So a crown always leaves water that is already going white, and the two
+# cannot drift apart without somebody editing one of the two numbers.
+#
+# **The wave set is authored to break, not to look pretty.** Three waves with no
+# common factor between their wavelengths, each carrying about a fifth of the
+# fold budget the validator allows — the sum reaches past 0.33 where two of them
+# crest together, which is a few percent of the surface at any instant, which is
+# what a spraying sea looks like. A single wave at the same total steepness
+# would break in a corrugated line across the whole scene.
+#
+# `spray = 3.0` is a multiplier on how many crests throw, not on how hard they
+# throw: a droplet's arc is what the crest that threw it can do. Zero is the
+# default and is every other sea in this repository.
+
+[scene]
+format = 1
+id = "3f7a1c92-8d40-4b6e-9a75-2c1e8b3d4f60"
+
+[[node]]
+name = "Sea"
+
+  # A low sun across the wave direction, because spray is only visible when it
+  # is lit from the side — front-lit droplets against a bright sky are nothing.
+  [node.components.Environment]
+  sun_direction = [0.75, 0.22, -0.62]
+  sun_strength = 1.5
+  sun_color = [1.0, 0.93, 0.8]
+  ambient = 0.42
+  sky_zenith = [0.11, 0.22, 0.42]
+  sky_horizon = [0.55, 0.62, 0.7]
+  fog_density = 0.006
+  fog_falloff = 0.03
+
+  [node.components.Wind]
+  direction_degrees = 250.0
+  speed = 14.0
+  gustiness = 1.2
+  turbulence = 1.0
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+  density = 1025.0
+  drag = 2.0
+  # How many crests throw. See the header.
+  spray = 3.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 17.0
+  amplitude = 0.62
+  steepness = 0.42
+  direction = [1.0, 0.25]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 9.0
+  amplitude = 0.34
+  steepness = 0.5
+  direction = [0.85, -0.5]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 5.0
+  amplitude = 0.16
+  steepness = 0.55
+  direction = [1.0, 0.6]
+  speed_scale = 1.0
+
+# What a droplet off this water looks like. A `ParticleEmitter` under the
+# `WaterBody` is the water's splash and never plays where it sits — spray
+# borrows its colour and size rather than inventing a second answer to "what
+# does this water throw".
+[[node]]
+name = "Splash"
+parent = "Sea/Water"
+
+  [node.components.ParticleEmitter]
+  rate = 0.0
+  burst = 70
+  lifetime = 0.8
+  lifetime_jitter = 0.4
+  speed = 4.5
+  spread_degrees = 55.0
+  radius = 0.4
+  gravity = -9.0
+  drag = 0.5
+  turbulence = 0.6
+  turbulence_scale = 0.8
+  size = [0.22, 0.06]
+  color_start = [0.94, 0.97, 1.0]
+  color_end = [0.68, 0.78, 0.86]
+  alpha = [0.9, 0.0]
+  seed = 47
+
+# A fixed silhouette to judge the sea against. Without it a still of open water
+# has no scale in it and a droplet could be any size at all.
+[[node]]
+name = "Post"
+parent = "Sea"
+transform = { pos = [-3.5, 0.9, -9.0], scale = [0.22, 3.4, 0.22] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.18, 0.15, 0.12]
+  roughness = 0.85
+
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [0.0, 1.1, 2.0], rot_euler = [-6.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 58.0

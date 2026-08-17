@@ -56,6 +56,23 @@ pub struct PontoonState {
     /// entering an eddy turn: the pontoons are metres apart, the current
     /// differs between them, and the difference is a torque.
     pub flow: [f32; 3],
+    /// The interactive ripple grid at this pontoon: `(height, ∂h/∂x, ∂h/∂z)`.
+    ///
+    /// **Pre-sampled by the caller for the same reason `ground` and `flow`
+    /// are**, and this is the one that carries a force. The grid is stepped
+    /// state that lives beside the physics ([`crate::ripples::RippleGrid`]);
+    /// keeping it out here is what lets `solve` and `sample_water` stay
+    /// functions of their arguments, which is the property the Slang half is
+    /// transcribed from.
+    ///
+    /// `[0.0; 3]` is water with no ripples on it — every scene authored before
+    /// ADR 0046, and every point outside an authored domain.
+    ///
+    /// Per pontoon rather than per body, and for a sharper reason than `flow`:
+    /// **a wake is what tips a boat.** A ripple crest passing under one end of
+    /// a hull and not the other is a torque, and averaging it to the centre
+    /// would delete exactly the thing this feature exists to produce.
+    pub ripple: [f32; 3],
 }
 
 /// One force and one torque, in world space, about the centre of mass — and
@@ -150,6 +167,7 @@ pub fn solve(
             t,
             pontoon.ground,
             pontoon.flow,
+            pontoon.ripple,
         );
 
         let volume = submerged_volume(pontoon.radius, pontoon.at[1], surface.height);
@@ -268,11 +286,18 @@ pub fn submersion_at(
     radius: f32,
     t: f32,
     ground: f32,
+    ripple: [f32; 3],
 ) -> f32 {
     // No flow: this asks *where the surface is*, and a current is horizontal —
     // it moves the water without raising or lowering it. Passing one in would
     // be sampling a number this function then discards.
-    let surface = sample_water(water, [at[0], at[2]], t, ground, [0.0; 3]);
+    //
+    // **`ripple`, though, is not optional.** A wake raises the surface, so a
+    // listener standing in one goes under sooner — and this is the query the
+    // audio path and the eye-underwater flag both ask. Passing zero here would
+    // be a second opinion about where the surface is, which is the one thing
+    // this crate's header forbids.
+    let surface = sample_water(water, [at[0], at[2]], t, ground, [0.0; 3], ripple);
     if radius <= 0.0 {
         return f32::from(u8::from(surface.height > at[1]));
     }
@@ -403,7 +428,7 @@ mod tests {
             at: [0.0, 0.0, 0.0],
             radius: 1.0,
             velocity: [0.0; 3],
-            ground: DEEP, flow: [0.0; 3],
+            ground: DEEP, flow: [0.0; 3], ripple: [0.0; 3],
         }];
 
         let w = solve(&water, &buoyancy, &pontoons, [0.0; 3], 0.0);
@@ -433,7 +458,7 @@ mod tests {
                 at: [p.offset[0], p.offset[0] * -0.6, p.offset[2]],
                 radius: p.radius,
                 velocity: [0.0; 3],
-                ground: DEEP, flow: [0.0; 3],
+                ground: DEEP, flow: [0.0; 3], ripple: [0.0; 3],
             })
             .collect();
 
@@ -454,7 +479,7 @@ mod tests {
                 at: [0.0, 0.0, 0.0],
                 radius: 0.5,
                 velocity: [0.0; 3],
-                ground: DEEP, flow: [0.0; 3],
+                ground: DEEP, flow: [0.0; 3], ripple: [0.0; 3],
             }],
             [0.0; 3],
             0.0,
@@ -481,7 +506,7 @@ mod tests {
                     at: [0.0, -1.0, 0.0],
                     radius: 1.0,
                     velocity: [0.0, -speed, 0.0],
-                    ground: DEEP, flow: [0.0; 3],
+                    ground: DEEP, flow: [0.0; 3], ripple: [0.0; 3],
                 }],
                 [0.0; 3],
                 0.0,
@@ -513,7 +538,7 @@ mod tests {
                 at: [0.0, 9.0, 0.0],
                 radius: 0.5,
                 velocity: [0.0, -20.0, 3.0],
-                ground: DEEP, flow: [0.0; 3],
+                ground: DEEP, flow: [0.0; 3], ripple: [0.0; 3],
             }],
             [0.0; 3],
             0.0,
@@ -547,12 +572,12 @@ mod tests {
         // Away from the origin: at phase zero the orbital motion is purely
         // vertical, so a test placed there would be checking nothing.
         let at = [3.0, -0.4, 0.0];
-        let flow = sample_water(&water, [at[0], at[2]], 0.0, 0.0, [0.0; 3]).velocity;
+        let flow = sample_water(&water, [at[0], at[2]], 0.0, 0.0, [0.0; 3], [0.0; 3]).velocity;
 
         let w = solve(
             &water,
             &buoyancy,
-            &[PontoonState { at, radius: 0.5, velocity: [0.0; 3], ground: DEEP, flow: [0.0; 3] }],
+            &[PontoonState { at, radius: 0.5, velocity: [0.0; 3], ground: DEEP, flow: [0.0; 3], ripple: [0.0; 3] }],
             [0.0; 3],
             0.0,
         );
@@ -588,6 +613,7 @@ mod tests {
             velocity: [0.0; 3],
             ground: DEEP,
             flow,
+            ripple: [0.0; 3],
         };
 
         let still = solve(&water, &buoyancy, &[pontoon([0.0; 3])], [0.0; 3], 0.0);
@@ -629,7 +655,7 @@ mod tests {
                 at: [p.offset[0], p.offset[1] - 0.2, p.offset[2]],
                 radius: p.radius,
                 velocity: [0.3, -0.7, 0.1],
-                ground: DEEP, flow: [0.0; 3],
+                ground: DEEP, flow: [0.0; 3], ripple: [0.0; 3],
             })
             .collect();
 
@@ -654,7 +680,7 @@ mod tests {
                     at: [p.offset[0], y, p.offset[2]],
                     radius: p.radius,
                     velocity: [0.0; 3],
-                    ground: DEEP, flow: [0.0; 3],
+                    ground: DEEP, flow: [0.0; 3], ripple: [0.0; 3],
                 })
                 .collect::<Vec<PontoonState>>()
         };
@@ -692,11 +718,11 @@ mod tests {
         let mut sea = still();
         sea.surface_height = 2.0;
 
-        assert_eq!(submersion_at(&sea, [3.0, 1.0, -4.0], 0.0, 0.0, DEEP), 1.0);
-        assert_eq!(submersion_at(&sea, [3.0, 3.0, -4.0], 0.0, 0.0, DEEP), 0.0);
+        assert_eq!(submersion_at(&sea, [3.0, 1.0, -4.0], 0.0, 0.0, DEEP, [0.0; 3]), 1.0);
+        assert_eq!(submersion_at(&sea, [3.0, 3.0, -4.0], 0.0, 0.0, DEEP, [0.0; 3]), 0.0);
         // A sphere straddling it is neither, which is what makes the same
         // function usable for a head as for a hull.
-        let straddling = submersion_at(&sea, [3.0, 2.0, -4.0], 0.5, 0.0, DEEP);
+        let straddling = submersion_at(&sea, [3.0, 2.0, -4.0], 0.5, 0.0, DEEP, [0.0; 3]);
         assert!((straddling - 0.5).abs() < 1e-5, "{straddling}");
     }
 

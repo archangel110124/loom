@@ -67,6 +67,16 @@ const EPSILON: f32 = 1e-6;
 /// differ so a swap shows as a failure rather than as luck.
 const FLOW: [f32; 3] = [0.7, 0.0, -0.4];
 
+/// The interactive ripple handed to both halves at every sample —
+/// `(height, dh/dx, dh/dz)`.
+///
+/// **Non-zero for exactly the reason `FLOW` is**, and it matters more here:
+/// this term reaches a *force*, and the CPU grid is the authoritative copy.
+/// All three components differ so a swapped slope shows as a failure rather
+/// than as luck, and the height is the size of a real wake rather than a
+/// token.
+const RIPPLE: [f32; 3] = [0.07, 0.031, -0.052];
+
 /// How many `(x, z, t)` points both sides evaluate.
 const SAMPLES: usize = 512;
 
@@ -245,7 +255,7 @@ fn the_rust_and_the_slang_compute_the_same_surface() {
             inside += 1;
         }
         let cpu =
-            loom_water::sample_water(&body, [sample[0], sample[1]], sample[2], ground, FLOW);
+            loom_water::sample_water(&body, [sample[0], sample[1]], sample[2], ground, FLOW, RIPPLE);
         let expected = [
             cpu.height,
             cpu.normal[0],
@@ -324,7 +334,7 @@ fn the_slang_half_compiles_for_the_gpu_too() {
          \x20   set.waves[0].amplitude = 0.5;\n\
          \x20   set.waves[0].steepness = 0.5;\n\
          \x20   set.waves[0].speed_scale = 1.0;\n\
-         \x20   LoomWaterSample s = loom_sample_water(set, 0.0, -4.0, float2(1.0, 2.0), 3.0, float3(0.4, 0.0, -0.2));\n\
+         \x20   LoomWaterSample s = loom_sample_water(set, 0.0, -4.0, float2(1.0, 2.0), 3.0, float3(0.4, 0.0, -0.2), float3(0.05, 0.02, -0.03));\n\
          \x20   loom_water_probe[0] = s.height + s.normal.y + s.displacement.x\n\
          \x20       + s.velocity.z + s.depth + s.fold;\n}}\n",
         loom_water::slang()
@@ -399,17 +409,24 @@ fn kernel(body: &WaterBody, bed: &HeightField, samples: &[[f32; 3]]) -> String {
 
     for [x, z, t] in samples {
         out.push_str(&format!(
-            "    emit(set, bed, {:?}, float2({x:?}, {z:?}), {t:?}, float3({:?}, {:?}, {:?}));\n",
-            body.surface_height, FLOW[0], FLOW[1], FLOW[2],
+            "    emit(set, bed, {:?}, float2({x:?}, {z:?}), {t:?}, float3({:?}, {:?}, {:?}), \
+             float3({:?}, {:?}, {:?}));\n",
+            body.surface_height,
+            FLOW[0],
+            FLOW[1],
+            FLOW[2],
+            RIPPLE[0],
+            RIPPLE[1],
+            RIPPLE[2],
         ));
     }
     out.push_str("}\n");
 
     // Declared above `computeMain` in the emitted text, since Slang wants it
     // before use.
-    let emit = "\nvoid emit(LoomWaveSet set, LoomHeightField bed, float surface_height, float2 xz, float t, float3 flow)\n\
+    let emit = "\nvoid emit(LoomWaveSet set, LoomHeightField bed, float surface_height, float2 xz, float t, float3 flow, float3 ripple)\n\
                 {\n    float ground_height = loom_ground_height(bed, xz);\n\
-                \x20   LoomWaterSample s = loom_sample_water(set, surface_height, ground_height, xz, t, flow);\n\
+                \x20   LoomWaterSample s = loom_sample_water(set, surface_height, ground_height, xz, t, flow, ripple);\n\
                 \x20   printf(\"%.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\\n\",\n\
                 \x20       s.height, s.normal.x, s.normal.y, s.normal.z,\n\
                 \x20       s.displacement.x, s.displacement.y, s.displacement.z,\n\

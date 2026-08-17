@@ -317,7 +317,13 @@ impl Plumes {
 
 /// One particle's drawable form: size and colour interpolated over its life.
 fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
-    let t = p.fraction();
+    drawn_at(p.position, p.fraction(), visual)
+}
+
+/// The same, for anything that knows where it is and how old it is without
+/// being a `loom_particles::Particle` — the water's spray, which is a closed
+/// form and has no system behind it.
+fn drawn_at(position: [f32; 3], t: f32, visual: &Visual) -> ParticleInstance {
     // Smoke expands and pales as it cools and mixes with air; a plume whose
     // particles keep their birth size and colour reads as a stream of blobs.
     let size = visual.size[0] + (visual.size[1] - visual.size[0]) * t;
@@ -335,7 +341,7 @@ fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
     // carries the flag and the instance stays 32 bytes.
     let radius = if visual.additive { -size * 0.5 } else { size * 0.5 };
     ParticleInstance {
-        position: [p.position[0], p.position[1], p.position[2], radius],
+        position: [position[0], position[1], position[2], radius],
         color: [
             // The SIGN of red selects the flame field in the shader. Free,
             // because the schema clamps authored colour to [0, 1] so the bit
@@ -440,6 +446,51 @@ fn blast_template(world: &World) -> Vec<(loom_particles::Emitter, Visual)> {
             world.emitter(**e).is_some_and(|c| !is_gpu(c)) && in_dormant_blast(world, **e)
         })
         .filter_map(|e| world.emitter(*e).map(parse))
+        .collect()
+}
+
+/// The droplets a breaking sea is throwing right now — W5's first source.
+///
+/// **Closed form, so there is nothing to step and nothing to keep.** Unlike
+/// every other emitter in this file, spray has no `System` behind it: a droplet
+/// is a function of the wave set, the tick and where the eye is, so the whole
+/// population is recomputed each time it is asked for and the answer is the
+/// same in the viewer as in `loom render --sim N`. That is the same shape
+/// `loom_rain::splashes` has, and the reason neither needs the `repeat` gate.
+///
+/// **What a droplet looks like is the water's own splash**, when the scene
+/// authors one — the `ParticleEmitter` under the `WaterBody` that already says
+/// what this water throws when something falls in it. A sea that authors spray
+/// but no splash gets a plain white droplet rather than nothing, because the
+/// authoring switch for spray is `WaterBody::spray` and a feature that silently
+/// needs a second component is the kind of no-op this project keeps finding.
+pub(crate) fn spray(
+    world: &World,
+    water: &loom_scene::components::WaterBody,
+    ground: &dyn Fn(f32, f32) -> f32,
+    eye: [f32; 3],
+    seconds: f32,
+) -> Vec<ParticleInstance> {
+    let droplets = loom_water::spray::spray(water, eye, seconds, ground);
+    if droplets.is_empty() {
+        return Vec::new();
+    }
+    let visual = splash_template(world).into_iter().next().map_or(
+        Visual {
+            // Small, shrinking, and white going to a pale blue-grey: a droplet
+            // is not a smoke puff and the default `Visual` is one.
+            size: [0.16, 0.05],
+            color_start: [0.92, 0.96, 1.0],
+            color_end: [0.70, 0.80, 0.88],
+            alpha: [0.9, 0.0],
+            additive: false,
+            flame: false,
+        },
+        |(_, visual)| visual,
+    );
+    droplets
+        .iter()
+        .map(|d| drawn_at(d.position, d.fraction, &visual))
         .collect()
 }
 
@@ -725,6 +776,51 @@ mod tests {
 
         // Deterministic all the same: the same entry, twice, is the same spray.
         assert_eq!(left, spray([-3.0, 0.0, -6.0]));
+    }
+
+    /// **The spray a breaking sea throws, drawn with the water's own splash.**
+    /// `splash.loom`'s sea authors no spray, so the first half of this is also
+    /// the compatibility check: turning it on is the only thing that produces a
+    /// droplet.
+    #[test]
+    fn a_breaking_sea_sprays_and_a_calm_one_does_not() {
+        let world = sea();
+        let mut body = crate::weather::water_of(&world, &calm()).expect("splash.loom has water");
+        let deep = |_x: f32, _z: f32| -1000.0_f32;
+        let eye = [0.0, 1.6, 0.0];
+
+        // As authored: `spray` defaults to zero and nothing is thrown, at any
+        // moment of the run.
+        for tick in [0_u32, 60, 300, 900] {
+            #[allow(clippy::cast_precision_loss)]
+            let t = f32::from(u16::try_from(tick).expect("small")) / 60.0;
+            assert!(spray(&world, &body, &deep, eye, t).is_empty(), "tick {tick}");
+        }
+
+        // Authored on, and this sea's crests break: 21 m at 0.42 m amplitude
+        // with two shorter waves over it clears the 0.33 fold threshold.
+        body.spray = 4.0;
+        let thrown: usize = (0..600)
+            .map(|tick| {
+                #[allow(clippy::cast_precision_loss)]
+                let t = tick as f32 / 60.0;
+                spray(&world, &body, &deep, eye, t).len()
+            })
+            .sum();
+        assert!(thrown > 0, "a breaking sea threw no spray in ten seconds");
+
+        // And it is drawn as droplets rather than as smoke: the splash
+        // template's own colour, which is nearly white.
+        body.spray = 8.0;
+        let drops: Vec<ParticleInstance> = (0..600)
+            .flat_map(|tick| {
+                #[allow(clippy::cast_precision_loss)]
+                let t = tick as f32 / 60.0;
+                spray(&world, &body, &deep, eye, t)
+            })
+            .collect();
+        let first = drops.first().expect("droplets");
+        assert!(first.color[0] > 0.5 && first.color[2] > 0.5, "{first:?} is not spray-coloured");
     }
 
     /// Nothing fired means nothing drawn, even in a scene that has a template.

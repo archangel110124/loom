@@ -50,7 +50,9 @@
 
 pub mod buoyancy;
 pub mod flow;
+pub mod ripples;
 pub mod spectrum;
+pub mod spray;
 
 use loom_scene::components::{MAX_WAVES, WaterBody};
 
@@ -190,6 +192,20 @@ pub fn shoal(k: f32, depth: f32, attenuation_depth: f32) -> f32 {
 /// crests — which is precisely where a lighting error is visible. The closed
 /// form costs nothing extra, because it reuses the `sin`/`cos` pair the
 /// position evaluation already computed.
+///
+/// # Ripples
+///
+/// `ripple` is `(height, ∂h/∂x, ∂h/∂z)` from the interactive grid at this
+/// point — [`ripples::RippleGrid::at`] — and `[0.0; 3]` is a body with no
+/// ripples, which is every scene authored before ADR 0046. It is **pre-sampled
+/// by the caller for exactly the reason `ground_height` and `flow` are**: the
+/// grid is stepped state living beside the physics, and this function must stay
+/// a function of its arguments or the Slang half cannot be the same function.
+///
+/// It is added to the height and to the two slopes rather than replacing
+/// anything, so a ripple tilts the surface it raises. **A height with no slope
+/// would displace the geometry without lighting it** — a bulge you can only see
+/// against the horizon, which is how this goes wrong.
 #[must_use]
 pub fn sample_water(
     body: &WaterBody,
@@ -197,6 +213,7 @@ pub fn sample_water(
     t: f32,
     ground_height: f32,
     flow: [f32; 3],
+    ripple: [f32; 3],
 ) -> WaterSample {
     let mut displacement = [0.0_f32; 3];
     // **The current is the base the orbital motion is summed onto**, rather
@@ -265,6 +282,13 @@ pub fn sample_water(
         velocity[1] -= amplitude * omega * cos_phase;
         velocity[2] += qa * d[1] * omega * sin_phase;
     }
+
+    // The ripple grid, folded in last. Its height rides on top of the swell and
+    // its slopes add to the swell's, which is what makes a ring spreading
+    // across a wave read as being *on* the wave.
+    displacement[1] += ripple[0];
+    let slope_x = slope_x + ripple[1];
+    let slope_z = slope_z + ripple[2];
 
     let normal = [-slope_x, 1.0 - flatten, -slope_z];
     let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
@@ -369,7 +393,11 @@ LoomWaterSample loom_sample_water(
     // The river's current here, m/s, sampled from the flow grid by the caller —
     // `float3(0, 0, 0)` for an ocean or a lake. Pre-sampled for the same reason
     // `ground_height` is: this function knows nothing about the terrain.
-    float3 flow)
+    float3 flow,
+    // The interactive ripple grid at this point: (height, dh/dx, dh/dz).
+    // `float3(0, 0, 0)` for water with no ripples. The CPU grid is
+    // authoritative and this is its upload — ADR 0046.
+    float3 ripple)
 {
     float3 displacement = float3(0.0, 0.0, 0.0);
     // The current is what the orbital motion is summed onto, so the two are one
@@ -418,6 +446,12 @@ LoomWaterSample loom_sample_water(
         velocity.y -= amplitude * omega * cos_phase;
         velocity.z += qa * d.y * omega * sin_phase;
     }
+
+    // The ripple grid, folded in last: its height rides on the swell and its
+    // slopes add to the swell's, so a ring spreading across a wave is on it.
+    displacement.y += ripple.x;
+    slope_x += ripple.y;
+    slope_z += ripple.z;
 
     float3 normal = float3(-slope_x, 1.0 - flatten, -slope_z);
     float normal_length = sqrt(normal.x * normal.x
@@ -468,7 +502,7 @@ mod tests {
         let mut still = body(Vec::new());
         still.surface_height = 3.5;
 
-        let s = sample_water(&still, [12.0, -7.0], 4.25, -2.0, [0.0; 3]);
+        let s = sample_water(&still, [12.0, -7.0], 4.25, -2.0, [0.0; 3], [0.0; 3]);
 
         assert_eq!(s.height, 3.5);
         assert_eq!(s.normal, [0.0, 1.0, 0.0]);
@@ -488,7 +522,7 @@ mod tests {
         let w = wave(std::f32::consts::TAU, 0.5, 0.4, [1.0, 0.0]);
         let sea = body(vec![w]);
 
-        let s = sample_water(&sea, [0.0, 0.0], 0.0, 0.0, [0.0; 3]);
+        let s = sample_water(&sea, [0.0, 0.0], 0.0, 0.0, [0.0; 3], [0.0; 3]);
 
         assert!(s.height.abs() < 1e-6, "sin(0) = 0, so the surface is at rest level: {s:?}");
         assert!((s.displacement[0] - 0.2).abs() < 1e-6, "Q·A·cos(0) = 0.2: {s:?}");
@@ -507,7 +541,7 @@ mod tests {
     fn the_analytic_normal_is_not_what_finite_differencing_would_give() {
         let sea = body(vec![wave(9.0, 1.2, 0.9, [1.0, 0.0])]);
         let t = 1.0;
-        let height = |x: f32| sample_water(&sea, [x, 0.0], t, 0.0, [0.0; 3]).height;
+        let height = |x: f32| sample_water(&sea, [x, 0.0], t, 0.0, [0.0; 3], [0.0; 3]).height;
 
         // Walk a wavelength: the two disagree everywhere, and the question is
         // how badly at the worst point — which is at the crests, where the
@@ -516,7 +550,7 @@ mod tests {
         let mut worst = 0.0_f32;
         for i in 0..900 {
             let x = i as f32 * (9.0 / 900.0);
-            let analytic = sample_water(&sea, [x, 0.0], t, 0.0, [0.0; 3]).normal;
+            let analytic = sample_water(&sea, [x, 0.0], t, 0.0, [0.0; 3], [0.0; 3]).normal;
 
             // What a finite difference sees: three base points, whose heights
             // are read as if the surface were still above those base points. It
@@ -546,8 +580,8 @@ mod tests {
     /// lights the whole sea wrong.
     #[test]
     fn the_normal_follows_the_wave_direction() {
-        let along_x = sample_water(&body(vec![wave(8.0, 0.4, 0.7, [1.0, 0.0])]), [1.0, 1.0], 0.0, 0.0, [0.0; 3]);
-        let along_z = sample_water(&body(vec![wave(8.0, 0.4, 0.7, [0.0, 1.0])]), [1.0, 1.0], 0.0, 0.0, [0.0; 3]);
+        let along_x = sample_water(&body(vec![wave(8.0, 0.4, 0.7, [1.0, 0.0])]), [1.0, 1.0], 0.0, 0.0, [0.0; 3], [0.0; 3]);
+        let along_z = sample_water(&body(vec![wave(8.0, 0.4, 0.7, [0.0, 1.0])]), [1.0, 1.0], 0.0, 0.0, [0.0; 3], [0.0; 3]);
 
         assert!(along_x.normal[0].abs() > 0.1, "{along_x:?}");
         assert_eq!(along_x.normal[2], 0.0, "a wave along +X tilts nothing on Z");
@@ -574,7 +608,7 @@ mod tests {
             let mut folds = false;
             for i in 0..2000 {
                 let x = i as f32 * (std::f32::consts::TAU / 2000.0);
-                let moved = x + sample_water(&sea, [x, 0.0], 0.0, 0.0, [0.0; 3]).displacement[0];
+                let moved = x + sample_water(&sea, [x, 0.0], 0.0, 0.0, [0.0; 3], [0.0; 3]).displacement[0];
                 if moved < previous {
                     folds = true;
                 }
@@ -600,7 +634,7 @@ mod tests {
             let mut folds = false;
             for i in 0..2000 {
                 let x = i as f32 * (std::f32::consts::TAU / 2000.0);
-                let moved = x + sample_water(&sea, [x, 0.0], 0.0, 0.0, [0.0; 3]).displacement[0];
+                let moved = x + sample_water(&sea, [x, 0.0], 0.0, 0.0, [0.0; 3], [0.0; 3]).displacement[0];
                 if moved < previous {
                     folds = true;
                 }
@@ -628,7 +662,7 @@ mod tests {
 
         for tick in 0..500 {
             let t = tick as f32 / 60.0;
-            let s = sample_water(&sea, [t * 3.0 - 400.0, 90.0 - t], t, -5.0, [0.0; 3]);
+            let s = sample_water(&sea, [t * 3.0 - 400.0, 90.0 - t], t, -5.0, [0.0; 3], [0.0; 3]);
             for v in [s.height, s.depth] {
                 assert!(v.is_finite(), "{s:?}");
             }
@@ -647,8 +681,8 @@ mod tests {
     #[test]
     fn only_the_first_sixteen_waves_are_summed() {
         let small = wave(11.0, 0.1, 0.3, [1.0, 0.3]);
-        let capped = sample_water(&body(vec![small; MAX_WAVES]), [3.0, 5.0], 2.0, 0.0, [0.0; 3]);
-        let over = sample_water(&body(vec![small; MAX_WAVES + 4]), [3.0, 5.0], 2.0, 0.0, [0.0; 3]);
+        let capped = sample_water(&body(vec![small; MAX_WAVES]), [3.0, 5.0], 2.0, 0.0, [0.0; 3], [0.0; 3]);
+        let over = sample_water(&body(vec![small; MAX_WAVES + 4]), [3.0, 5.0], 2.0, 0.0, [0.0; 3], [0.0; 3]);
 
         assert_eq!(capped.height, over.height);
         assert_eq!(capped.displacement, over.displacement);
@@ -662,15 +696,15 @@ mod tests {
         let sea = body(vec![wave(10.0, 0.4, 0.5, [1.0, 0.0])]);
         let at = [0.0, 0.0];
 
-        let now = sample_water(&sea, at, 0.0, 0.0, [0.0; 3]).height;
-        let later = sample_water(&sea, at, 0.7, 0.0, [0.0; 3]).height;
+        let now = sample_water(&sea, at, 0.0, 0.0, [0.0; 3], [0.0; 3]).height;
+        let later = sample_water(&sea, at, 0.7, 0.0, [0.0; 3], [0.0; 3]).height;
         assert!((now - later).abs() > 0.05, "the surface is frozen: {now} vs {later}");
 
         // ω = sqrt(g·k), so the crest travels sqrt(g/k) metres per second. One
         // period later the same point is back where it started.
         let k = std::f32::consts::TAU / 10.0;
         let period = std::f32::consts::TAU / (GRAVITY * k).sqrt();
-        let one_period = sample_water(&sea, at, period, 0.0, [0.0; 3]).height;
+        let one_period = sample_water(&sea, at, period, 0.0, [0.0; 3], [0.0; 3]).height;
         assert!((now - one_period).abs() < 1e-3, "{now} vs {one_period} after one period");
     }
 
@@ -695,7 +729,7 @@ mod tests {
             let (mut low, mut high) = (f32::INFINITY, f32::NEG_INFINITY);
             for i in 0..200 {
                 let t = i as f32 * 0.05;
-                let h = sample_water(&sea, [0.0, 0.0], t, ground, [0.0; 3]).height;
+                let h = sample_water(&sea, [0.0, 0.0], t, ground, [0.0; 3], [0.0; 3]).height;
                 low = low.min(h);
                 high = high.max(h);
             }
@@ -739,8 +773,8 @@ mod tests {
         // Including a bed a metre under the surface: with no authored depth,
         // even that must not change a single bit of the answer.
         for ground in [-1000.0, -6.0, -1.0, 0.5] {
-            let a = sample_water(&open, [3.0, -4.0], 1.25, ground, [0.0; 3]);
-            let b = sample_water(&open, [3.0, -4.0], 1.25, -1000.0, [0.0; 3]);
+            let a = sample_water(&open, [3.0, -4.0], 1.25, ground, [0.0; 3], [0.0; 3]);
+            let b = sample_water(&open, [3.0, -4.0], 1.25, -1000.0, [0.0; 3], [0.0; 3]);
             assert_eq!(a.height, b.height, "ground {ground} moved the surface");
             assert_eq!(a.displacement, b.displacement);
             assert_eq!(a.velocity, b.velocity);
@@ -763,7 +797,7 @@ mod tests {
             let mut previous = f32::NEG_INFINITY;
             for i in 0..2000 {
                 let x = i as f32 * (std::f32::consts::TAU / 2000.0);
-                let moved = x + sample_water(&sea, [x, 0.0], 0.0, ground, [0.0; 3]).displacement[0];
+                let moved = x + sample_water(&sea, [x, 0.0], 0.0, ground, [0.0; 3], [0.0; 3]).displacement[0];
                 assert!(
                     moved >= previous,
                     "the surface folds at depth {}: x = {x} moved to {moved} behind {previous}",
@@ -800,7 +834,7 @@ mod tests {
             for i in 0..8000 {
                 let x = i as f32 * (SHORE / 8000.0);
                 let ground = rise * (x - SHORE);
-                let moved = x + sample_water(&sea, [x, 0.0], 0.0, ground, [0.0; 3]).displacement[0];
+                let moved = x + sample_water(&sea, [x, 0.0], 0.0, ground, [0.0; 3], [0.0; 3]).displacement[0];
                 if moved < previous {
                     folded = true;
                 }

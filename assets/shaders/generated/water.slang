@@ -55,6 +55,56 @@ float loom_ground_height(LoomHeightField field, float2 xz) {
     return (b - a) * fz + a;
 }
 
+// The interactive ripple grid, sampled. The Rust half is
+// `loom_water::ripples::RippleGrid::at`; they are one implementation written
+// twice. Never edit this by hand.
+
+struct LoomRippleGrid {
+    // World xz of sample (0, 0).
+    float2 origin;
+    // Metres between samples.
+    float cell;
+    // Samples per axis. Zero means this water has no ripples.
+    int side;
+    // Row-major, `side * side` of them.
+    float* height;
+};
+
+// Bilinear, and zero outside the domain — a body that drifts off the grid
+// floats on the plain Gerstner sea, and the sponge band has already taken the
+// amplitude to nothing before the edge. The upper edge is excluded so the
+// `+1` taps are always in range, which is the Rust's `locate` rule.
+float loom_ripple_height(LoomRippleGrid grid, float2 xz) {
+    if (grid.side <= 0) { return 0.0; }
+    float gx = (xz.x - grid.origin.x) / grid.cell;
+    float gz = (xz.y - grid.origin.y) / grid.cell;
+    float last = float(grid.side - 1);
+    if (!(gx >= 0.0 && gz >= 0.0 && gx < last && gz < last)) { return 0.0; }
+    int x0 = int(gx);
+    int z0 = int(gz);
+    float fx = gx - float(x0);
+    float fz = gz - float(z0);
+    float h00 = grid.height[z0 * grid.side + x0];
+    float h10 = grid.height[z0 * grid.side + x0 + 1];
+    float h01 = grid.height[(z0 + 1) * grid.side + x0];
+    float h11 = grid.height[(z0 + 1) * grid.side + x0 + 1];
+    float top = h00 + (h10 - h00) * fx;
+    float bottom = h01 + (h11 - h01) * fx;
+    return top + (bottom - top) * fz;
+}
+
+// (height, dh/dx, dh/dz) — `loom_sample_water`'s `ripple` argument.
+float3 loom_ripple_at(LoomRippleGrid grid, float2 xz) {
+    if (grid.side <= 0) { return float3(0.0, 0.0, 0.0); }
+    float e = grid.cell;
+    float h = loom_ripple_height(grid, xz);
+    float dx = loom_ripple_height(grid, xz + float2(e, 0.0))
+             - loom_ripple_height(grid, xz - float2(e, 0.0));
+    float dz = loom_ripple_height(grid, xz + float2(0.0, e))
+             - loom_ripple_height(grid, xz - float2(0.0, e));
+    return float3(h, dx / (2.0 * e), dz / (2.0 * e));
+}
+
 // The water surface. The Rust half is `loom_water::sample_water`; they are one
 // implementation written twice, and `slang_agreement` compiles this and
 // compares the two numerically.
@@ -117,7 +167,11 @@ LoomWaterSample loom_sample_water(
     // The river's current here, m/s, sampled from the flow grid by the caller —
     // `float3(0, 0, 0)` for an ocean or a lake. Pre-sampled for the same reason
     // `ground_height` is: this function knows nothing about the terrain.
-    float3 flow)
+    float3 flow,
+    // The interactive ripple grid at this point: (height, dh/dx, dh/dz).
+    // `float3(0, 0, 0)` for water with no ripples. The CPU grid is
+    // authoritative and this is its upload — ADR 0046.
+    float3 ripple)
 {
     float3 displacement = float3(0.0, 0.0, 0.0);
     // The current is what the orbital motion is summed onto, so the two are one
@@ -166,6 +220,12 @@ LoomWaterSample loom_sample_water(
         velocity.y -= amplitude * omega * cos_phase;
         velocity.z += qa * d.y * omega * sin_phase;
     }
+
+    // The ripple grid, folded in last: its height rides on the swell and its
+    // slopes add to the swell's, so a ring spreading across a wave is on it.
+    displacement.y += ripple.x;
+    slope_x += ripple.y;
+    slope_z += ripple.z;
 
     float3 normal = float3(-slope_x, 1.0 - flatten, -slope_z);
     float normal_length = sqrt(normal.x * normal.x

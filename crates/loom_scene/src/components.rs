@@ -1490,8 +1490,135 @@ pub struct WaterBody {
     /// is water that goes nowhere, which is every scene authored before this
     /// existed and every ocean and lake authored after it.
     pub flow: Option<FlowField>,
+    /// Interactive ripples: a CPU wave-equation grid over this body. ADR 0046.
+    ///
+    /// **Absent — the default — is exactly the water this engine had before**,
+    /// which is the property that keeps every committed reference image and
+    /// both determinism hashes unmoved. A body that authors one gains state
+    /// inside the fixed step, and that is a deliberate act.
+    pub ripples: Option<Ripples>,
+    /// How much spray a breaking crest throws, as a multiplier. `0` is none.
+    ///
+    /// **Zero by default, and that is the whole compatibility story**: spray
+    /// is drawn from `WaterSample::fold` — the same closed-form quantity the
+    /// whitecaps read — so a sea that authors nothing throws nothing and
+    /// renders bit for bit as it did.
+    ///
+    /// It scales how many droplets a crest throws, not how high. A crest that
+    /// is not breaking throws none at any multiplier.
+    #[schemars(range(min = 0.0, max = 8.0))]
+    pub spray: f32,
     /// The surface material.
     pub material: AssetRef,
+}
+
+/// A CPU-authoritative interactive ripple grid — ADR 0046.
+///
+/// **This is the one piece of the water that is stepped rather than sampled.**
+/// Everything else in [`WaterBody`] is a closed form in `(x, z, t)`; this is an
+/// explicit 2D wave equation advanced one fixed tick at a time, so that a body
+/// moving through the water leaves a wake that outlives it and that other
+/// bodies can feel. The height it carries is added to the Gerstner surface
+/// **on the force path**, so `loom sim --assert` sees it and a barrel rocks in
+/// a crate's wake.
+///
+/// **The domain is anchored to the water node, never to the camera.** ADR 0045
+/// names camera-following sim grids as the trap: a force that depended on
+/// where the viewer stood would make `loom render --sim N` and `loom run`
+/// compute different physics. So the square is centred on this node's world
+/// position and does not move. Outside it the water is the plain Gerstner
+/// surface, which is what an ocean past the harbour should be anyway.
+///
+/// **`speed` is bounded by stability, not by taste.** The explicit stencil
+/// below is unconditionally unstable above the Courant limit `c·dt/h ≤ 1/√2`;
+/// past it the grid does not look wrong, it explodes to `inf` within a second
+/// and takes every buoyant body with it. `loom validate` refuses at load with
+/// both numbers in the message rather than leaving a comment about it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Ripples {
+    /// Side of the square domain in metres, centred on this node.
+    #[schemars(range(min = 1.0, max = 512.0))]
+    pub extent: f32,
+    /// Metres between grid samples — `h` in the Courant condition.
+    ///
+    /// Half a metre matches the water mesh's finest cell, so a ripple this
+    /// grid resolves is a ripple the surface has vertices for. Coarser is
+    /// cheaper and blurrier; finer costs quadratically and buys geometry the
+    /// mesh cannot draw.
+    #[schemars(range(min = 0.05, max = 8.0))]
+    pub cell: f32,
+    /// Wave speed `c` in m/s. Bounded by the Courant condition at load.
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub speed: f32,
+    /// Per-tick multiplier on the whole field, slightly below 1.
+    ///
+    /// This is what makes a wake fade instead of ringing around the domain
+    /// forever. `0.995` at 60 Hz is a little under three quarters left after a
+    /// second; `1.0` is a perfectly elastic pond and reflects off its own
+    /// boundary for the rest of the run.
+    #[schemars(range(min = 0.5, max = 1.0))]
+    pub damping: f32,
+    /// Metres of displacement injected per m/s of a body's vertical motion.
+    ///
+    /// The coupling constant, and the only one an author tunes for look. It
+    /// scales the wake without touching stability — the Courant condition
+    /// bounds `speed` and nothing else.
+    #[schemars(range(min = 0.0, max = 2.0))]
+    pub strength: f32,
+}
+
+/// The fixed timestep, in seconds.
+///
+/// Spelled here as well as in `loom_cli::play` and four other places because
+/// the Courant refusal has to run at *load*, in the crate that depends on
+/// nothing (CLAUDE.md's dependency rules), and a bound quoted against the
+/// wrong clock is worse than no bound.
+pub const TICK_SECONDS: f32 = 1.0 / 60.0;
+
+/// The 2D Courant limit for the explicit five-point wave stencil: `1/√2`.
+pub const COURANT_LIMIT: f64 = std::f64::consts::FRAC_1_SQRT_2;
+
+/// The most ripple cells one body may carry — 256², about 260 kB of state.
+///
+/// A cost bound, not a correctness one. The grid is stepped on the CPU every
+/// fixed tick beside `rapier`, and a cell count is the one parameter here an
+/// agent has no feel for.
+pub const MAX_RIPPLE_CELLS: usize = 256 * 256;
+
+/// Samples per axis for a domain of `extent` metres at `cell` spacing.
+///
+/// **One definition, because three would drift.** The validator quotes it in
+/// its refusal, `loom_water::ripple` allocates it, and the renderer uploads
+/// it; a grid whose side is computed differently in any of the three is a
+/// buffer read past its end.
+#[must_use]
+pub fn ripple_side(extent: f32, cell: f32) -> usize {
+    if extent <= 0.0 || cell <= 0.0 {
+        return 0;
+    }
+    // Round up so the domain always covers the authored extent, and add the
+    // closing sample: N cells need N+1 lattice points.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let cells = (extent / cell).ceil() as usize;
+    cells + 1
+}
+
+impl Default for Ripples {
+    fn default() -> Self {
+        Self {
+            // A harbour rather than an ocean: 24 m at 0.5 m is 49² cells,
+            // which is 2,401 floats and about 15 µs a tick.
+            extent: 24.0,
+            cell: 0.5,
+            // Well under the 21.2 m/s the Courant condition allows at this
+            // cell size, and slow enough that a wake visibly trails a moving
+            // body rather than outrunning it.
+            speed: 3.0,
+            damping: 0.995,
+            strength: 0.06,
+        }
+    }
 }
 
 impl Default for WaterBody {
@@ -1505,6 +1632,9 @@ impl Default for WaterBody {
             density: 1025.0,
             drag: 1.0,
             flow: None,
+            ripples: None,
+            // No spray, so a sea authored before W5 throws none.
+            spray: 0.0,
             material: AssetRef::default(),
         }
     }

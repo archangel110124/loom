@@ -2359,7 +2359,7 @@ pub(crate) fn submerge_eye(
     // taper flattens the waves over it — off the grid it is bottomless, which
     // is what an open ocean wants.
     let ground = terrain.map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(eye.x, eye.z));
-    let under = loom_water::buoyancy::submersion_at(&body, eye.to_array(), 0.0, seconds, ground);
+    let under = loom_water::buoyancy::submersion_at(&body, eye.to_array(), 0.0, seconds, ground, [0.0; 3]);
     env.water[1] = f32::from(under > 0.5);
 }
 
@@ -3496,7 +3496,7 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
         .and_then(|g| river_flow(g, &body))
         .map_or([0.0; 3], |grid| grid.at(at[0], at[1]));
 
-    let sample = loom_water::sample_water(&body, at, seconds, ground, flow);
+    let sample = loom_water::sample_water(&body, at, seconds, ground, flow, [0.0; 3]);
     // `sample_water` sums the orbital motion onto the current, so the wave half
     // is the difference. Subtracted rather than sampled a second time with no
     // flow: two samples is two chances to disagree.
@@ -3550,7 +3550,7 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
             },
             // Null when `--at` named no height: not "no", but "not asked".
             "submerged": y.map(|y| {
-                loom_water::buoyancy::submersion_at(&body, [at[0], y, at[1]], 0.0, seconds, ground)
+                loom_water::buoyancy::submersion_at(&body, [at[0], y, at[1]], 0.0, seconds, ground, [0.0; 3])
                     > 0.5
             }),
         })),
@@ -5152,7 +5152,7 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         let world = World::from_scene(&scene);
         let wind = crate::weather::wind_of_world(&world);
         let body = crate::weather::water_of(&world, &wind).expect("ocean has water");
-        let expected = loom_water::sample_water(&body, [3.5, -9.0], 90.0 / 60.0, -1.0e9, [0.0; 3]);
+        let expected = loom_water::sample_water(&body, [3.5, -9.0], 90.0 / 60.0, -1.0e9, [0.0; 3], [0.0; 3]);
 
         assert_eq!(v["surface"]["height"].as_f64().unwrap() as f32, expected.height);
         assert_eq!(v["surface"]["normal"][1].as_f64().unwrap() as f32, expected.normal[1]);

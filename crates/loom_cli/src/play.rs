@@ -97,6 +97,19 @@ pub struct Sim {
     /// is and with the same consequence: blow the bank out mid-run and the
     /// current is the one the old bank made. Reloading picks it up.
     flow: Option<loom_water::flow::FlowGrid>,
+    /// The interactive ripple grid, when the body authors one — ADR 0046.
+    ///
+    /// **The one piece of stepped state this simulation owns besides `rapier`,
+    /// and it is on the force path.** It is `None` for every scene authored
+    /// before ADR 0046, which is what keeps both determinism hashes unmoved.
+    ///
+    /// **Anchored to the water node's world position, never to the camera.**
+    /// ADR 0045's trap clause: a domain that followed the eye would make the
+    /// buoyant force on a crate a function of where the viewer was standing,
+    /// so `loom render --sim N` and `loom run` would disagree about physics.
+    /// `Sim` cannot see a camera at all, which is the structural half of that
+    /// guarantee.
+    ripples: Option<loom_water::ripples::RippleGrid>,
     /// Bodies that float, in scene order, with their pontoons already in body
     /// space. **Order is fixed at load and never sorted**: the forces are
     /// summed as floats, and a different visiting order is a different number
@@ -418,6 +431,7 @@ impl Sim {
                                 velocity: [0.0; 3],
                                 ground: loom_voxel::heightfield::NO_GROUND,
                                 flow: [0.0; 3],
+                                ripple: [0.0; 3],
                             };
                             buoyancy.pontoons.len()
                         ],
@@ -454,6 +468,28 @@ impl Sim {
                     .to_owned(),
             );
         }
+        // **Centred on the water node, which is the anchor ADR 0045 demands.**
+        // The node's own world position rather than the scene's origin or the
+        // bounds of what floats: it is a thing the author placed and can move,
+        // it is in the file, and it does not depend on what happens during the
+        // run — a domain that tracked the bodies would move when one sank.
+        let ripples = water.as_ref().and_then(|body| body.ripples).and_then(|params| {
+            let centre = world
+                .entities()
+                .iter()
+                .find(|e| world.is_water(**e))
+                .and_then(|e| world.global_transform(*e))
+                .map_or([0.0, 0.0], |g| [g.matrix[12], g.matrix[14]]);
+            let grid = loom_water::ripples::RippleGrid::new(centre, &params);
+            if grid.is_none() {
+                crate::log::warn(
+                    "the WaterBody authors ripples the grid could not be built from; \
+                     the surface is the plain Gerstner one"
+                        .to_owned(),
+                );
+            }
+            grid
+        });
         if water.is_none() && !floating.is_empty() {
             crate::log::warn(
                 "the scene has Buoyancy but no WaterBody; nothing will float".to_owned(),
@@ -482,6 +518,7 @@ impl Sim {
             water,
             terrain,
             flow,
+            ripples,
             floating,
             water_events: Vec::new(),
             tick: 0,
@@ -544,6 +581,15 @@ impl Sim {
                     .flow
                     .as_ref()
                     .map_or([0.0; 3], |f| f.at(state.at[0], state.at[2]));
+                // **The wake, read here and applied by the solver.** This is
+                // W6's whole selling point in one line: the height a *previous*
+                // tick's disturbance left in the grid is added to the Gerstner
+                // surface inside `sample_water`, so a barrel rocks in a crate's
+                // wake and `loom sim --assert` can see it happen.
+                state.ripple = self
+                    .ripples
+                    .as_ref()
+                    .map_or([0.0; 3], |r| r.at(state.at[0], state.at[2]));
             }
 
             let wrench = loom_water::buoyancy::solve(
@@ -555,6 +601,16 @@ impl Sim {
             );
             self.physics
                 .apply_force_torque(floating.body, wrench.force, wrench.torque);
+
+            // **The other half of the coupling: the body pushes back.** In
+            // pontoon order, like everything else here, and scaled by how much
+            // of the body the water actually had hold of — a pontoon waving
+            // about in the air must not stir the surface under it.
+            if let Some(grid) = self.ripples.as_mut() {
+                for state in &floating.states {
+                    grid.push(state.at, state.velocity[1], wrench.submerged);
+                }
+            }
 
             // **The same number that scaled the force is the gameplay state.**
             // Not a second query: a body cannot be pushed up by water it is not
@@ -585,6 +641,11 @@ impl Sim {
                     t,
                     ground,
                     [0.0; 3],
+                    // The wake included, so the splash lands on the surface
+                    // the body actually broke rather than on the one under it.
+                    self.ripples
+                        .as_ref()
+                        .map_or([0.0; 3], |r| r.at(position[0], position[2])),
                 );
                 let velocity = self
                     .physics
@@ -608,6 +669,26 @@ impl Sim {
                 });
             }
         }
+
+        // **The grid advances last, after every body has read it and pushed
+        // into it.** One place, one order: read → force → inject → step. Any
+        // fixed order is deterministic; this one is the one that makes a wake
+        // a tick old rather than a tick early, and it is the order the hash is
+        // pinned against.
+        if let Some(grid) = self.ripples.as_mut() {
+            grid.step();
+        }
+    }
+
+    /// The interactive ripple grid, for the renderer to upload. `None` when the
+    /// body authors none, which is every scene before ADR 0046.
+    ///
+    /// **Read-only, and one direction only.** The CPU grid is authoritative;
+    /// the GPU gets a copy to displace the surface with and never writes one
+    /// back (ADR 0045 clause 2).
+    #[must_use]
+    pub fn ripples(&self) -> Option<&loom_water::ripples::RippleGrid> {
+        self.ripples.as_ref()
     }
 
     /// Water entries and exits since the last call, stamped with `tick`.
@@ -652,7 +733,8 @@ impl Sim {
             .terrain
             .as_ref()
             .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(at[0], at[2]));
-        loom_water::buoyancy::submersion_at(water, at, 0.0, t, ground) > 0.5
+        let ripple = self.ripples.as_ref().map_or([0.0; 3], |r| r.at(at[0], at[2]));
+        loom_water::buoyancy::submersion_at(water, at, 0.0, t, ground, ripple) > 0.5
     }
 
     /// Advance whole ticks.
@@ -1767,7 +1849,7 @@ transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
         #[allow(clippy::cast_precision_loss)]
         let heights: Vec<f32> = ticks
             .map(|tick| {
-                loom_water::sample_water(&water, [at[0], at[2]], tick as f32 * TICK_SECONDS, 0.0, [0.0; 3])
+                loom_water::sample_water(&water, [at[0], at[2]], tick as f32 * TICK_SECONDS, 0.0, [0.0; 3], [0.0; 3])
                     .height
             })
             .collect();

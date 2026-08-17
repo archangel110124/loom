@@ -108,6 +108,11 @@ impl Probe for WaterProbe {
                     frame.sim_time,
                     loom_voxel::heightfield::NO_GROUND,
                     [0.0; 3],
+                    // No ripples: this measures the *sea state* — how big the
+                    // waves are — and a wake is a local disturbance rather
+                    // than weather. Folding one in would make the reading
+                    // depend on what happened to be floating past.
+                    [0.0; 3],
                 );
                 // Height above the still surface, which is the quantity that
                 // reads as "how big are the waves".
