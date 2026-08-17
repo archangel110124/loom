@@ -58,7 +58,11 @@ USAGE:
         produces parallax.
 
     loom compare <a.png> <b.png> [--channel <0-255>] [--fraction <0-1>] [--worst <0-255>]
+                                 [--rect <x,y,w,h>]
         Pixel-compare two renders. Exit 1 if they differ beyond tolerance.
+        --rect also reports the mean R, G and B of that crop in BOTH images,
+        which is the question a hue acceptance test asks and the diff cannot
+        answer: whether the water in a named band is turquoise or grey.
 
     loom sim <scene.loom> [--ticks <n>] [--assert <expr>]
         Step physics deterministically and print the state hash. --assert also
@@ -153,7 +157,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
     ),
     (
         "compare",
-        &[("--channel", true), ("--fraction", true), ("--worst", true)],
+        &[("--channel", true), ("--fraction", true), ("--worst", true), ("--rect", true)],
     ),
     ("sim", &[("--ticks", true), ("--assert", true)]),
     ("scene", &[("--tx", true), ("--dry-run", false)]),
@@ -2175,6 +2179,27 @@ fn compare(a: &str, b: &str, args: &[String]) -> (u8, String) {
         }
     };
 
+    // **`--rect` answers a different question and answers it about both
+    // images.** `compare` says whether a picture moved; this says what colour
+    // a named band of it *is*, which is what a hue acceptance test needs — and
+    // reporting it beside the diff is what makes the number reproducible by a
+    // shipped command rather than by somebody's scratch script.
+    let rect = flag(args, "--rect").and_then(|v| {
+        let mut parts = v.split(',').map(str::parse::<u32>);
+        match (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some(Ok(x)), Some(Ok(y)), Some(Ok(w)), Some(Ok(h)), None) => Some((x, y, w, h)),
+            _ => None,
+        }
+    });
+    let rect_report = rect.map(|r| {
+        let (a_means, b_means) = (imagediff::rect_means(&left, r), imagediff::rect_means(&right, r));
+        serde_json::json!({
+            "rect": [r.0, r.1, r.2, r.3],
+            "a": { "r": a_means[0], "g": a_means[1], "b": a_means[2] },
+            "b": { "r": b_means[0], "g": b_means[1], "b": b_means[2] },
+        })
+    });
+
     match imagediff::compare(&left, &right, tolerance) {
         Err(e) => (
             1,
@@ -2184,24 +2209,25 @@ fn compare(a: &str, b: &str, args: &[String]) -> (u8, String) {
         ),
         Ok(diff) => {
             let passed = diff.passes(tolerance);
-            (
-                u8::from(!passed),
-                json_line(&serde_json::json!({
-                    "ok": passed,
-                    "a": a,
-                    "b": b,
-                    "pixels": diff.pixels,
-                    "differing": diff.differing,
-                    "fraction": diff.fraction(),
-                    "worst": diff.worst,
-                    "mean": diff.mean,
-                    "tolerance": {
-                        "channel": tolerance.channel,
-                        "fraction": tolerance.fraction,
-                        "worst": tolerance.worst,
-                    },
-                })),
-            )
+            let mut report = serde_json::json!({
+                "ok": passed,
+                "a": a,
+                "b": b,
+                "pixels": diff.pixels,
+                "differing": diff.differing,
+                "fraction": diff.fraction(),
+                "worst": diff.worst,
+                "mean": diff.mean,
+                "tolerance": {
+                    "channel": tolerance.channel,
+                    "fraction": tolerance.fraction,
+                    "worst": tolerance.worst,
+                },
+            });
+            if let (Some(means), Some(object)) = (rect_report, report.as_object_mut()) {
+                object.insert("means".to_owned(), means);
+            }
+            (u8::from(!passed), json_line(&report))
         }
     }
 }
@@ -5077,6 +5103,10 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         assert!(
             unknown_flag("compare", &args(&["a.png", "b.png", "--worst", "8"])).is_none(),
             "compare diffs two images"
+        );
+        assert!(
+            unknown_flag("compare", &args(&["a.png", "b.png", "--rect", "1,2,3,4"])).is_none(),
+            "--rect is read by compare, so the allowlist must carry it"
         );
         // A third one is still a mistake.
         assert_eq!(

@@ -4134,11 +4134,34 @@ static const float WATER_IOR = 1.333;
 // about 1.4x under the fold bound, so no fixed threshold can track it. It is
 // an order-of-magnitude check only, and 4–7% against Monahan's 3.2% at this
 // scene's 14 m/s passes it.
-/// Metres of water a ray crosses at a crest and in a trough. Not measured
-/// depths — an effective path length for the wrap lobe, and the ratio between
-/// them is what carries the effect.
-static const float WATER_CREST_THICK = 0.9;
+/// Metres of water a ray crosses in a trough **when there is no bed to
+/// measure** — the open-sea fallback, and nothing else uses it now that
+/// `waterBehind` returns the real column.
 static const float WATER_TROUGH_THICK = 4.0;
+/// How much thinner the crossing is at a crest than in a trough.
+///
+/// This is the old `WATER_CREST_THICK = 0.9` written as the ratio it always
+/// was — `0.9 / 4.0` — so a bedless sea comes out bit for bit as before while
+/// the same crest-thinning applies to a measured column of any depth.
+static const float WATER_CREST_THIN = 0.225;
+/// Column, in metres, past which thin-water scatter has stopped.
+///
+/// **A gate, not a strength.** How much light survives the crossing is
+/// `exp(-WATER_EXTINCT * thick)` and is not tuned here; this only says where
+/// the effect is switched off entirely, so that a deep column cannot glow
+/// through the wrap lobe. Six metres is `shore`'s own shelf: the shallow band
+/// glows, the water past the drop-off does not, and the sea with no bed under
+/// it (`column == WATER_NO_BED`) is left to `crest` alone — which is what
+/// keeps `ocean` and `squall` byte-identical.
+static const float WATER_GLOW_COLUMN = 6.0;
+/// What `WaterOutput::depth` clamps to off the height grid. Not a hundred
+/// metres of water — "this scene has no voxel volume under it", which is why
+/// it gates the column below rather than being fed to it.
+static const float WATER_DEPTH_SENTINEL = 100.0;
+/// The column `waterBehind` reports when there is nothing behind the water.
+/// Large enough that every gate reading it is off, small enough to stay exact
+/// in a float.
+static const float WATER_NO_BED = 1.0e4;
 /// How far the sun direction is bent by the surface normal before the lobe is
 /// evaluated. Widens the glow around a crest rather than pinning it to exact
 /// alignment.
@@ -4320,6 +4343,20 @@ float2 waterProbeUv(float3 surfacePos, float3 refracted, float drop, float2 stra
     return lerp(straightUv, uv, saturate(min(edge.x, edge.y) / WATER_REFRACT_EDGE));
 }
 
+/// Secant of the path a downward ray takes through water, from the cosine of
+/// its angle to the vertical **in air**.
+///
+/// Snell, written as the only thing the absorption needs. It replaces a
+/// hand-picked `WATER_DOWN_SEC` and a `1 / max(sunDirection().y, 0.15)`, and
+/// it is bounded by construction: `1/cos(asin(1/1.333))` is **1.5124** at
+/// grazing incidence, so a sun on the horizon lights a 6 m bed through 9 m of
+/// water and not through infinity. That bound is why the old clamp existed and
+/// why it is no longer needed — the physics does the clamping.
+float loomWaterSecant(float cosAir) {
+    float sinT2 = (1.0 - cosAir * cosAir) / (WATER_IOR * WATER_IOR);
+    return 1.0 / sqrt(max(1.0 - sinT2, 1e-4));
+}
+
 /// Unproject a depth sample back to where it was drawn.
 float3 waterUnproject(float2 uv, float d) {
     float4 world = mul(push.invViewProj, float4(uv * 2.0 - 1.0, d, 1.0));
@@ -4332,9 +4369,14 @@ float3 waterBehind(
     float3 eye,
     float bedDepth,
     float3 refracted,
-    out float3 behind)
+    out float3 behind,
+    /// Metres of water the light crossed, both legs — `WATER_NO_BED` when
+    /// there is nothing behind the surface. The wrap lobe reads it, so that
+    /// how thin the water is is measured once rather than authored twice.
+    out float column)
 {
     behind = float3(0.0, 0.0, 0.0);
+    column = WATER_NO_BED;
     float d = opaqueDepth.SampleLevel(uv, 0).r;
     if (d >= 1.0) {
         return float3(0.0, 0.0, 0.0);
@@ -4387,12 +4429,27 @@ float3 waterBehind(
         }
     }
 
-    // Two legs, not one. The seabed was shaded IN AIR by the mesh pass, so the
-    // light that lit it already crossed the column downward before it ever
-    // reflected toward the eye. Dividing by the sun's elevation is the same
-    // secant the subsurface term four lines below already uses.
-    float viewLeg = length(bg - surfacePos);
-    float downLeg = min(bedDepth, 100.0) / max(sunDirection().y, 0.15);
+    // **Two legs, and both of them are inside the water.** The seabed was
+    // shaded IN AIR by the mesh pass, so the light that lit it already crossed
+    // the column downward before it ever reflected toward the eye.
+    //
+    // Both legs are the *refracted* path, not the air one. The view leg
+    // descends `drop` metres along the ray this fragment already bent, and the
+    // down leg takes Snell on the sun's elevation. On `shore`'s low sun the
+    // old `1 / sunDirection().y` was 17.6 m of water against the 8.5 m light
+    // actually crosses — the same air-path mistake the probe above refuses to
+    // make, in the other direction.
+    float drop = max(surfacePos.y - bg.y, 0.0);
+    float viewLeg = drop / max(-refracted.y, 0.05);
+    float downLeg = min(bedDepth, WATER_DEPTH_SENTINEL) * loomWaterSecant(sunDirection().y);
+    // **Only a bed the height grid actually knows about reports a column.** At
+    // the sentinel the depth is not 100 m of water, it is "no voxel volume
+    // here" — so `ocean`'s submerged posts must not tell the wrap lobe they
+    // are standing in a hundred metres. `T` still uses it, and gets the same
+    // answer it always did: nothing survives that path either way.
+    if (bedDepth < WATER_DEPTH_SENTINEL) {
+        column = viewLeg + downLeg;
+    }
     behind = opaqueColor.SampleLevel(uv, 0).rgb;
 
     // **Caustics: the bright web the surface focuses onto the bed.**
@@ -4413,7 +4470,7 @@ float3 waterBehind(
     // very bright lines. Anchored to the BED's world position, not the
     // surface's: the pattern belongs to the sand, and anchoring it to the
     // surface would make it swim as the eye moves.
-    behind *= 1.0 + causticWeb(bg, min(bedDepth, 100.0));
+    behind *= 1.0 + causticWeb(bg, min(bedDepth, WATER_DEPTH_SENTINEL));
     // **Un-fog it.** The mesh pass already fogged this pixel over eye->bg, and
     // the last line of the caller fogs the composite again over eye->surface.
     // Applied twice that is 18% becoming 33% on `shore`. What is left over is
@@ -4588,7 +4645,25 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     float crest = saturate(in.fold / WATER_FOLD_REF);
     float skyView = saturate(0.55 + 0.45 * crest);
 
-    // **Backlit scatter, gated on how THIN the water is — not on view angle.**
+    float2 screenUv = in.clip.xy / push.environment[0].viewport.xy;
+    float3 behind;
+    // **The ray bends here, once, at the real index.** `refract` takes the
+    // incident direction — from the eye INTO the surface — and `eta` as
+    // n_incident/n_transmitted, which is the convention the underwater branch
+    // above already pins by passing `WATER_IOR` for the water->air trip. Going
+    // the other way it is the reciprocal.
+    //
+    // **No total-internal-reflection guard, deliberately.** Air->water gives
+    // `sinT2 <= 1/1.333^2 = 0.5628` at every incidence angle, so `refract`
+    // cannot return zero here, and a guard would advertise a case that does
+    // not exist.
+    float3 refracted = refract(-view, normal, 1.0 / WATER_IOR);
+    float column;
+    float3 T = waterBehind(screenUv, in.worldPos, push.environment[0].eye.xyz,
+                           in.depth, refracted, behind, column);
+
+    // **Backlit scatter, gated on how THIN the water is — not on view angle
+    // and, as of this commit, not on crest either.**
     //
     // The term this replaces was `body * 6.0 * pow(dot(-view, sunDir), 3)`,
     // which glows a trough exactly as brightly as a crest and so reads as haze
@@ -4596,21 +4671,36 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // real crest glows because it is a thin sheet with the sun behind it, and
     // thickness is what decides how much survives the crossing.
     //
+    // **`crest` was the wrong gate over a beach and that is what cost `shore`
+    // its turquoise.** Shoaling flattens the swell as it comes onto the shelf,
+    // so `in.fold` — and with it `crest` — goes to zero across exactly the
+    // shallow band where a real sea glows most. The term was gated on the one
+    // quantity guaranteed to vanish where it was needed. It now gates on the
+    // column `waterBehind` measures: light that crossed two metres of water
+    // and came back up is thin-water scatter whatever shape the surface is in,
+    // which is the ambient-driven body term `0651775` deleted, arriving from
+    // the physics rather than from a constant. `crest` stays as the *other*
+    // way to be thin, which is what keeps a breaking wave glowing in deep
+    // water.
+    //
     // Wrap-lobe form (Barré-Brisebois): perturbing the sun direction by the
     // surface normal widens the lobe so the glow spreads around the crest
     // instead of appearing only at exact alignment. **The hue is not authored**
     // — it falls out of `WATER_EXTINCT` through Beer-Lambert, so the colour of
     // a backlit wave is the colour water actually transmits: through 2 m that
     // is (0.51, 0.89, 0.97), the luminous turquoise a breaking crest has.
-    //
-    // Dividing thickness by the sun's elevation is why crests glow at a low sun
-    // and barely at noon: a shallow sun crosses more water to reach the eye.
-    float thick = lerp(WATER_TROUGH_THICK, WATER_CREST_THICK, crest)
-                / max(sunDirection().y, 0.15);
+    float thick = (column < WATER_NO_BED)
+        ? column * lerp(1.0, WATER_CREST_THIN, crest)
+        // No bed to measure: the open sea, where the old pair of authored
+        // thicknesses is still the only answer available. Written as the same
+        // ratio so a bedless scene comes out bit for bit as before.
+        : WATER_TROUGH_THICK * lerp(1.0, WATER_CREST_THIN, crest)
+          / max(sunDirection().y, 0.15);
     float3 h = normalize(sunDirection() + normal * WATER_SSS_DISTORT);
     float3 sss = sunColor() * sunStrength()
                * pow(saturate(dot(-view, h)), WATER_SSS_POWER)
-               * crest * exp(-WATER_EXTINCT * thick);
+               * max(crest, saturate(1.0 - column / WATER_GLOW_COLUMN))
+               * exp(-WATER_EXTINCT * thick);
 
     // **What the eye actually receives from below, split by how much water is
     // in the way.** `T` is the fraction that crossed the column; `1 - T` is
@@ -4628,21 +4718,6 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // the water deeper rather than brighter.
     float3 downwelling = hemisphereAmbient(normal) * ambientStrength() * skyView
                        + sunColor() * sunStrength() * toSun;
-    float2 screenUv = in.clip.xy / push.environment[0].viewport.xy;
-    float3 behind;
-    // **The ray bends here, once, at the real index.** `refract` takes the
-    // incident direction — from the eye INTO the surface — and `eta` as
-    // n_incident/n_transmitted, which is the convention the underwater branch
-    // above already pins by passing `WATER_IOR` for the water->air trip. Going
-    // the other way it is the reciprocal.
-    //
-    // **No total-internal-reflection guard, deliberately.** Air->water gives
-    // `sinT2 <= 1/1.333^2 = 0.5628` at every incidence angle, so `refract`
-    // cannot return zero here, and a guard would advertise a case that does
-    // not exist.
-    float3 refracted = refract(-view, normal, 1.0 / WATER_IOR);
-    float3 T = waterBehind(screenUv, in.worldPos, push.environment[0].eye.xyz,
-                           in.depth, refracted, behind);
     // `skyView` scales the volume term ONLY. `behind` was lit by its own
     // shading pass; darkening it in a trough would dim the seabed for a reason
     // that has nothing to do with the seabed.

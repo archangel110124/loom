@@ -210,6 +210,40 @@ pub(crate) fn compare(a: &Image, b: &Image, tolerance: Tolerance) -> Result<Diff
     })
 }
 
+/// Mean R, G and B over a rectangle, in 0-255 units.
+///
+/// **The measurement neither `compare` nor `flicker` can make.** Both answer
+/// "did it change"; the water work needs "what colour is it", because the
+/// acceptance test for refraction is a hue and a green-over-red excess in a
+/// named crop of `shore`, hand-measured off a render from before the
+/// regression. Without this the only way to check it is a private script,
+/// and a number nobody else can reproduce is not a measurement.
+///
+/// Out-of-bounds is clamped rather than rejected: a crop is a region of
+/// interest, not an index.
+pub(crate) fn rect_means(image: &Image, rect: (u32, u32, u32, u32)) -> [f64; 3] {
+    let (x, y, w, h) = rect;
+    let x1 = (x + w).min(image.width);
+    let y1 = (y + h).min(image.height);
+    let mut total = [0.0_f64; 3];
+    let mut count = 0_u64;
+    for row in y.min(image.height)..y1 {
+        for column in x.min(image.width)..x1 {
+            let base = ((row * image.width + column) * 4) as usize;
+            for (channel, sum) in total.iter_mut().enumerate() {
+                *sum += f64::from(image.pixels[base + channel]);
+            }
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return [0.0; 3];
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let n = count as f64;
+    [total[0] / n, total[1] / n, total[2] / n]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +409,37 @@ mod tests {
         let diff = compare(&a, &b, Tolerance::default()).expect("same size");
 
         assert!(!diff.passes(Tolerance::default()));
+    }
+
+    /// **The crop has to be the crop.** The whole value of `--rect` is that it
+    /// reports the colour of one band and not of the frame, so an off-by-one
+    /// origin or a mean taken over everything is the failure that matters. The
+    /// surround here is deliberately the complement of the patch in every
+    /// channel: averaging any of it in moves the answer immediately.
+    #[test]
+    fn rect_means_read_the_rectangle_and_nothing_around_it() {
+        let mut image = flat(16, 16, [200, 0, 200, 255]);
+        for row in 4..12 {
+            for column in 2..10 {
+                let base = ((row * 16 + column) * 4) as usize;
+                image.pixels[base..base + 4].copy_from_slice(&[10, 60, 110, 255]);
+            }
+        }
+
+        assert_eq!(rect_means(&image, (2, 4, 8, 8)), [10.0, 60.0, 110.0]);
+        // One column further left is one column of surround, and 8 of 64
+        // pixels of magenta is a shift no rounding can hide.
+        assert!(rect_means(&image, (1, 4, 8, 8))[1] < 60.0);
+    }
+
+    /// A crop that runs off the edge is clamped, not an error: it is a region
+    /// of interest, not an index, and a render at a different size should
+    /// still answer rather than refuse.
+    #[test]
+    fn a_rect_past_the_edge_is_clamped() {
+        let image = flat(8, 8, [40, 50, 60, 255]);
+
+        assert_eq!(rect_means(&image, (4, 4, 999, 999)), [40.0, 50.0, 60.0]);
+        assert_eq!(rect_means(&image, (99, 99, 4, 4)), [0.0, 0.0, 0.0]);
     }
 }
