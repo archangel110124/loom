@@ -2282,7 +2282,15 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // web on the same bed for the case where the eye is under there with it.
     // Without it, swimming down turns the seabed into flat sand while the
     // identical sand seen from above is dappled.
-    if (waterPresent()) {
+    //
+    // **Only when the eye is under there with it, which is what the comment
+    // above always said and the code did not.** Seen from above, the water
+    // shader paints this exact web on this exact bed through `waterBehind` —
+    // so an unguarded multiply here applied it twice, and a web squared is a
+    // web with brighter filaments and darker cells than the one the surface
+    // is focusing. It read as more caustic rather than as wrong, which is why
+    // it survived a blessing.
+    if (waterPresent() && eyeUnderwater()) {
         float submerged = stillWaterLevel() - in.worldPos.y;
         if (submerged > 0.0) {
             albedo *= 1.0 + causticWeb(in.worldPos, submerged);
@@ -4416,8 +4424,17 @@ float3 waterBehind(
     // `fogColor` brightens instead of removing, and since fog colour here is
     // lit sky that reads as a warm wash: red came out 26% high on `shore` and
     // the shallows went neutral.
+    //
+    // **Clamped at 0.15, which is where the extrapolation stops being
+    // information.** A fragment 90% fogged out has a tenth of its own colour
+    // left in it and dividing by `1 - f` multiplies whatever survived — and
+    // now the offset feeds this UVs from a neighbourhood, so one dark texel
+    // beside a bright one becomes a bright texel in a place it was never
+    // drawn. At `1e-3` the multiplier reached a thousand. Past 85% fog the
+    // surface itself is fogged out too, so the term it is feeding is invisible
+    // either way.
     float bgFog = fogAmount(eye, bg);
-    behind = max((behind - fogColor(normalize(bg - eye)) * bgFog) / max(1.0 - bgFog, 1e-3),
+    behind = max((behind - fogColor(normalize(bg - eye)) * bgFog) / max(1.0 - bgFog, 0.15),
                  float3(0.0, 0.0, 0.0));
 
     return exp(-WATER_EXTINCT * (viewLeg + downLeg));
