@@ -54,6 +54,62 @@ GPU-stateful effect does.
 
 ---
 
+### D10 — `beach` got *less* pretty, and I blessed it anyway
+
+**Decided:** the W1 water work makes `assets/test/beach.loom` visibly paler with dimmer caustics
+than the reference it replaced. I read both images, judged the change correct, and blessed.
+
+**Why the old one looked better:** it had two bugs.
+
+1. **The caustic web was applied twice** — once at `scene.slang:2285` and again at `:4316`. The
+   code at 2285 carries a comment describing an `eyeUnderwater()` guard that was never actually
+   there, so every bed seen through the surface got the web doubled. Fixing it makes the web
+   *dimmer*, which is the correct direction and looks worse.
+2. **The sun's down-leg path was ~2.9× where physics says ~1.4×.** Snell on both legs replaced a
+   `/ max(sunDirection().y, 0.15)` with a bounded secant, and the diff has one fewer magic number
+   after it than before.
+
+So the reference was prettier because light was being counted twice through half a metre of
+water over bright sand.
+
+**Why I blessed rather than reverted:** keeping a known double-application to preserve a nicer
+picture is exactly the kind of debt that makes every later water change unjudgeable — you would
+be tuning against a bug. And the beauty is recoverable by *authoring*: the honest lever is
+per-`WaterBody` optical parameters (scattering and absorption coefficients), which is how a real
+engine art-directs water without lying about the physics.
+
+**This is the row most likely to be worth your disagreement.** You asked for VFX to be a selling
+point, and I have just made one scene less striking on correctness grounds. If you look at
+`beach` and want the old look back, the answer is to author it — not to restore the double
+caustic. **Confidence: high on the fix, medium on the aesthetics.**
+
+### D11 — W1's acceptance test fails at 25.3 against 38, and it is unreachable
+
+**Decided:** ship the mechanism and the measurement table rather than hit the number.
+
+`WATER-REFRACTION-PLAN.md` set a hard acceptance test: restore `shore`'s shallow-band G−R to
+≥ 38 with no compensating constant. **The shipped result is 25.3.** It does not pass, and no
+constant was reached for.
+
+**It is not reachable by refraction, and that was measured three ways rather than argued.** Both
+legs fully vertical — the shortest physical path there is — gives G−R 23.7; half the refracted
+path 24.4; the shipped path 25.3. G−R has a *maximum* near the true path, because `shore`'s bed
+is warm sand (albedo 0.52/0.45/0.34), so every metre of path removed lets more red back up.
+Shortening the optical path, which is what refraction does, moves the number the wrong way.
+
+**What did work:** the hue is restored by mechanism. R/B went 0.597 → **0.649** against the
+0.644 the band measured before the regression. The colour is right; the brightness is not.
+
+**My recommendation, and what the ADR records:** the remaining units are only reachable by a
+multiplier the plan explicitly forbids, so the honest lever is per-`WaterBody` optical
+parameters — the same lever D10 names. That makes shallow-water brightness an authoring
+decision instead of a global constant, which is what it should have been.
+
+**Correction to my own earlier note:** I told you the baseline was G−R 20.3. That was measured on
+a `--sim 0` render; `shore`'s golden row is `--sim 90`. The correct baseline is **26.3**, which
+is what both designs and the judge used. My point that the plan's "14" was stale still holds; my
+number did not.
+
 ## Routine calls, logged for completeness
 
 ### D4 — Subagents no longer run `cargo xtask` gates
