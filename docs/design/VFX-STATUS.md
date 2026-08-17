@@ -19,13 +19,23 @@ report assumes a greenfield; this engine had already shipped several of its mile
 | **W2** | whitecaps from `fold`, with a downwind trail | ✅ verified |
 | **W3** | water reflects the scene, not only the sky | ✅ verified |
 | **W4** | smoke as a marched soot volume | ✅ verified |
-| **W5** | splash/spray from fold + submersion events | not started |
-| **W6** | interactive ripples, CPU-authoritative | not started · **needs its own ADR** |
+| **W5** | splash/spray from fold + submersion events | ✅ built · **`spindrift` unblessed** |
+| **W6** | interactive ripples, CPU-authoritative | ✅ built · **ADR 0046** · **`wake` unblessed** |
 | **W7** | the GPU particle pool | ✅ verified |
 | **W8** | windowed FFT detail tier | deferred behind evidence (D2) |
 
-Six of eight. W5 and W6 are the remainder; W8 is deliberately gated on a measurement nobody has
-taken yet.
+Seven of eight built; W8 is deliberately gated on a measurement nobody has taken yet.
+
+**W5 and W6 have not been through the gates.** They were built after the verification pass above,
+in a worktree that must not take the gate lock. Two golden references are missing —
+`spindrift` and `wake` — so `cargo xtask image` reports them absent until somebody reads the
+diffs and blesses them. `wake`'s wave set is flat by design and `spindrift`'s was retuned twice;
+read both before accepting.
+
+**Neither moved an existing hash.** `tower.loom` is still `b478ea4ac2622d32`; `wake.loom` is new
+and carries `18f5ecce259831aa` with its two-way-coupling assertion passing. The re-pin burden was
+zero because `WaterBody::ripples` is `Option` and absent by default, and an absent grid adds an
+exact `0.0` to the surface.
 
 ## What "verified" means here
 
@@ -52,11 +62,16 @@ Scenes went 44 → 49; golden references 30 → 35.
   gate. **This is the one to read if you read one.**
 - **0047 — the GPU particle pool.** Slot ownership is arithmetic, so there is no free list and no
   atomic on any seed path.
+- **0046 — interactive ripples are CPU-authoritative**, and anchored to the water node rather than
+  to the camera. The one item here that puts new state on the *force* path, so it is the one that
+  needed clause 1 of 0045 quoted at it. Read §"the two failures this cost": both looked like a
+  lively buoy rather than an unstable simulation, and neither was visible in under thirty seconds
+  of simulated time.
 - **0048, 0049 — the W1/W2 findings**, including the acceptance test that cannot be met.
 - **0050 — W3 and W4**, recorded together because they share one fact: the TLAS holds meshes
   only, so a reflected flame or plume does not appear.
 
-## Three defects found that nobody was looking for
+## Four defects found that nobody was looking for
 
 1. **The caustic web was applied twice** — `scene.slang:2285` carried a comment describing a
    guard that had never been written, so every bed seen through the surface got the web doubled.
@@ -67,7 +82,15 @@ Scenes went 44 → 49; golden references 30 → 35.
    in the repo covered it; `bare_sea.loom` was written for it, and reverting the fix fires the
    VUID on that scene and no other.
 
-The third is crash-class and would have shipped.
+4. **`Renderer::set_ripples` and the shader's `loom_ripple_at` shipped with no caller** — so W6's
+   wake was felt by the buoyancy solver, agreed with by `submersion_at`, measurable by `loom sim
+   --assert`, and drawn as dead flat water. It survived a commit, an ADR that stated the upload had
+   not been written, and a review. Fixed with one accessor and three call sites; `wake.loom` is in
+   `GOLDEN` now specifically so it cannot recur.
+
+The third is crash-class and would have shipped. The fourth is the class this project keeps
+finding — a feature that is *present*, *tested* and *invisible* — and no gate in the repo can
+detect an absent effect.
 
 ## What to look at first, when you have a machine
 
@@ -78,6 +101,12 @@ The third is crash-class and would have shipped.
    optical parameters, not restoring the bugs.
 4. **`shore`** — the hue is right (R/B 0.649 against a 0.644 target) and the brightness is not
    (G−R 25.3 against an acceptance test of 38, which is unreachable — D11).
+5. **`wake` at `--sim 200`** — the ripple grid. Measured against a build with the upload removed:
+   2.8% of pixels at tick 45 (the buoy settling alone), 26.6% at 200, 4.8% at 900 once it has
+   decayed, and the water beyond the 24 m domain bit-identical. It is **subtle to the eye** — the
+   ring reads as extra high-frequency structure in the specular highlights near the crate, not as
+   a visible wave — because the grid's amplitude is centimetres against a surface whose authored
+   detail is larger. Judge it on the ablation, not on the still.
 
 ## What is not measured
 
