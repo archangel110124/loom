@@ -42,7 +42,10 @@ mod renderer;
 mod scene_depth;
 mod tonemap;
 mod water_textures;
-mod ui;
+// **Public because the editor's token table has to reach `ui::tok`.** The
+// pre-warp lives beside the `srgb_framebuffer` flag it compensates for rather
+// than in `loom_editor`, because the runtime links this module for the HUD.
+pub mod ui;
 mod viewer;
 
 /// Re-exported because this crate's public API is expressed in `glam` types.

@@ -1281,6 +1281,7 @@ dependencies = [
  "loom_asset",
  "loom_audio",
  "loom_ecs",
+ "loom_editor",
  "loom_field",
  "loom_grass",
  "loom_input",
@@ -1305,6 +1306,16 @@ dependencies = [
 name = "loom_ecs"
 version = "0.0.0"
 dependencies = [
+ "loom_scene",
+ "serde_json",
+]
+
+[[package]]
+name = "loom_editor"
+version = "0.0.0"
+dependencies = [
+ "loom_reflect",
+ "loom_render",
  "loom_scene",
  "serde_json",
 ]

@@ -10,12 +10,10 @@
 //! parser dependency. Switch to `clap` when M9 lands `scene place/measure/...`
 //! and the count goes past four — `run` is the seam, so it is a local change.
 
-mod gizmo;
 mod hud;
 mod imagediff;
 mod log;
 mod materials;
-mod panels;
 mod particles;
 mod play;
 mod prefab_cmd;

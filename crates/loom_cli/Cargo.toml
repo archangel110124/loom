@@ -9,11 +9,21 @@ publish.workspace = true
 name = "loom"
 path = "src/main.rs"
 
+# `loom-play` (Stage 5) is this same crate built `--no-default-features`.
+# **The `loom` binary carries no `required-features`**: gating it on the editor
+# would make `loom validate`, `loom render`, `loom sim` and `loom scene --tx` —
+# the entire agent surface, and everything `cargo xtask` drives — unbuildable
+# without the editor.
+[features]
+default = ["editor"]
+editor = ["dep:loom_editor"]
+
 [dependencies]
 png = "=0.18.1"
 loom_asset = { version = "0.0.0", path = "../loom_asset" }
 loom_audio = { version = "0.0.0", path = "../loom_audio" }
 loom_ecs = { version = "0.0.0", path = "../loom_ecs" }
+loom_editor = { version = "0.0.0", path = "../loom_editor", optional = true }
 loom_input = { version = "0.0.0", path = "../loom_input" }
 loom_particles = { version = "0.0.0", path = "../loom_particles" }
 loom_physics = { version = "0.0.0", path = "../loom_physics" }

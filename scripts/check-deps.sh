@@ -12,7 +12,31 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 fail=0
-ws_deps() { cargo tree -p "$1" --depth 1 --prefix none 2>/dev/null | tail -n +2 | grep -oE '^loom_[a-z_]+' || true; }
+
+# **Prove the manifests parse before trusting a single rule below.** Every
+# check here is gated on `has`, which is a grep over `cargo metadata` — so a
+# manifest that fails to load makes `has` false for every crate, skips every
+# stanza, and prints "dependency rules: ok" having checked nothing. That is
+# the one failure mode this file must not have.
+if ! cargo metadata --no-deps --format-version 1 >/dev/null 2>&1; then
+  echo "FAIL: cargo metadata does not load — no dependency rule below was checked"
+  cargo metadata --no-deps --format-version 1 >/dev/null
+  exit 1
+fi
+
+# The `|| true` keeps a crate with no in-workspace deps from tripping `set -e`,
+# but it also used to swallow `cargo tree` *failing* — and a cyclic dependency
+# makes it fail, which is precisely the violation these rules exist to catch.
+# So the failure is separated from the empty result and reported.
+ws_deps() {
+  local out
+  if ! out=$(cargo tree -p "$1" --depth 1 --prefix none 2>&1); then
+    echo "FAIL: cargo tree -p $1 failed — the graph is broken, likely a cycle" >&2
+    echo "$out" >&2
+    return 1
+  fi
+  printf '%s\n' "$out" | tail -n +2 | grep -oE '^loom_[a-z_]+' || true
+}
 has() { cargo metadata --no-deps --format-version 1 | grep -q "\"name\":\"$1\""; }
 
 # loom_reflect: no in-workspace dependencies at all.
@@ -37,6 +61,29 @@ if has loom_agent; then
     [ "$c" = "loom_agent" ] && continue
     if ws_deps "$c" | grep -qx loom_agent; then
       echo "FAIL: $c depends on loom_agent — nothing may depend on it"; fail=1
+    fi
+  done
+fi
+
+# loom_editor: depended on by nothing but loom_cli. Same shape as the loom_agent
+# rule above. "Stripping the editor" means not linking this crate (ADR 0022) —
+# egui stays unconditional in loom_render because the HUD is drawn with it, so
+# the removability guarantee rests entirely on this edge.
+if has loom_editor; then
+  for c in $(cargo metadata --no-deps --format-version 1 | grep -oE '"name":"loom_[a-z_]+"' | grep -oE 'loom_[a-z_]+'); do
+    case "$c" in loom_editor|loom_cli) continue ;; esac
+    if ws_deps "$c" | grep -qx loom_editor; then
+      echo "FAIL: $c depends on loom_editor — only loom_cli may"; fail=1
+    fi
+  done
+
+  # The other half: the editor must actually drop out without its feature.
+  # This checks the dependency *edge*, which is what containment means; that
+  # `--no-default-features` also compiles is Stage 5's exit criterion, because
+  # run.rs is not split until then.
+  for forbidden in loom_editor egui_dock; do
+    if cargo tree -p loom_cli --no-default-features -e normal 2>/dev/null | grep -qE "^[^a-z]*$forbidden v"; then
+      echo "FAIL: loom_cli --no-default-features still pulls in $forbidden"; fail=1
     fi
   done
 fi

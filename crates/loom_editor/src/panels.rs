@@ -17,7 +17,6 @@
 use loom_render::egui;
 
 use crate::gizmo::{Handle, Mode};
-use crate::scene_view::SceneView;
 
 /// What a panel interaction asked for.
 #[derive(Debug, Clone, PartialEq)]
@@ -56,8 +55,26 @@ pub enum UiAction {
 }
 
 /// State the panels need that is not in the scene.
+///
+/// **The five scene fields are borrowed individually rather than as a
+/// `SceneView`.** `SceneView` lives in `loom_cli` and is welded to the asset
+/// pipeline — `MeshLibrary`, `VoxelCache`, `world_to_objects`, `scatter_objects`
+/// — and `loom_cli` depends on *this* crate, so borrowing it here would invert
+/// the edge. What the panels actually read is five plain values, every one of
+/// them a `loom_scene` or `loom_render` type, so naming them costs four lines
+/// and needs no trait (never-do #12) and no move of the model layer.
 pub struct PanelState<'a> {
-    pub view: &'a SceneView,
+    /// The parsed scene, for the inspector's component tables.
+    pub scene: &'a loom_scene::Scene,
+    /// Every node path, in hierarchy order.
+    pub paths: &'a [String],
+    /// Which paths can be picked in the viewport — a node with no bounds
+    /// draws nothing, and the hierarchy marks it.
+    pub picks: &'a std::collections::BTreeMap<String, loom_scene::place::Bounds>,
+    /// Asset aliases, for the asset panel and the mesh picker.
+    pub assets: &'a [String],
+    /// How many draw calls the scene resolved to — a status-bar count only.
+    pub object_count: usize,
     pub selected: &'a [String],
     pub history: &'a [String],
     pub can_undo: bool,
@@ -79,6 +96,12 @@ pub struct PanelState<'a> {
     /// What somebody else just changed: screen-space box, label, and how
     /// faded it is (1.0 fresh, 0.0 gone).
     pub agent_marks: &'a [AgentMark],
+    /// Console rows, oldest first — a snapshot the caller took this frame.
+    pub console: &'a [crate::console::Entry],
+    /// Seconds per simulation tick, so the transport can show elapsed time.
+    /// Passed rather than assumed: the fixed timestep is the runtime's fact,
+    /// and a second copy of it here is a number that can silently disagree.
+    pub tick_seconds: f32,
     /// Ticks run, whether paused, and how many bodies — `None` in edit mode.
     pub playing: Option<(u32, bool, usize)>,
 }
@@ -211,7 +234,7 @@ fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiActi
             }
 
             if let Some((ticks, paused, bodies)) = state.playing {
-                let seconds = f64::from(ticks) * f64::from(crate::play::TICK_SECONDS);
+                let seconds = f64::from(ticks) * f64::from(state.tick_seconds);
                 ui.label(
                     egui::RichText::new(format!(
                         "{} tick {ticks} · {seconds:.2}s · {bodies} bodies",
@@ -237,8 +260,8 @@ fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiActi
                     egui::RichText::new(format!(
                         "{:.0} fps · {} nodes · {} draws",
                         state.fps,
-                        state.view.paths.len(),
-                        state.view.objects.len()
+                        state.paths.len(),
+                        state.object_count
                     ))
                     .weak()
                     .monospace(),
@@ -378,7 +401,7 @@ fn hierarchy(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAc
             ui.heading("Hierarchy");
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for path in &state.view.paths {
+                for path in state.paths {
                     // Indent by depth, so the hierarchy reads as a tree rather
                     // than a flat list of slash-separated strings.
                     let depth = path.matches('/').count();
@@ -389,7 +412,7 @@ fn hierarchy(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAc
                         ui.add_space(depth as f32 * 14.0);
                         // Nodes that draw nothing are still real; showing which
                         // do saves opening the inspector to find out.
-                        let marker = if state.view.picks.contains_key(path) {
+                        let marker = if state.picks.contains_key(path) {
                             "▪"
                         } else {
                             "·"
@@ -468,7 +491,7 @@ fn inspector(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAc
                 ui.weak("nothing selected");
                 return;
             };
-            let Some(node) = state.view.scene.nodes().iter().find(|n| &n.path == path) else {
+            let Some(node) = state.scene.nodes().iter().find(|n| &n.path == path) else {
                 return;
             };
 
@@ -549,7 +572,7 @@ fn assets(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiActio
             ui.separator();
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    for asset in &state.view.assets {
+                    for asset in state.assets {
                         // Voxel meshes are baked per node from the scene's op
                         // list, not assignable to anything else.
                         if asset.starts_with("voxel:") {
@@ -585,13 +608,13 @@ fn console(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiActi
             // said and what the scene did are read together, and the second
             // explains the first.
             ui.columns(2, |columns| {
-                console_column(&mut columns[0], actions);
+                console_column(&mut columns[0], state.console, actions);
                 transactions(&mut columns[1], state.history);
             });
         });
 }
 
-fn console_column(ui: &mut egui::Ui, actions: &mut Vec<UiAction>) {
+fn console_column(ui: &mut egui::Ui, entries: &[crate::console::Entry], actions: &mut Vec<UiAction>) {
     ui.horizontal(|ui| {
         ui.heading("Console");
         if ui.small_button("Clear").clicked() {
@@ -603,17 +626,16 @@ fn console_column(ui: &mut egui::Ui, actions: &mut Vec<UiAction>) {
         .stick_to_bottom(true)
         .id_salt("console_scroll")
         .show(ui, |ui| {
-                    let entries = crate::log::entries();
                     if entries.is_empty() {
                         ui.weak("nothing yet");
                     }
                     for entry in entries {
                         let (color, tag) = match entry.level {
-                            crate::log::Level::Info => (egui::Color32::GRAY, " "),
-                            crate::log::Level::Warn => {
+                            crate::console::Level::Info => (egui::Color32::GRAY, " "),
+                            crate::console::Level::Warn => {
                                 (egui::Color32::from_rgb(230, 180, 90), "!")
                             }
-                            crate::log::Level::Error => {
+                            crate::console::Level::Error => {
                                 (egui::Color32::from_rgb(230, 110, 100), "✖")
                             }
                         };

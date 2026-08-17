@@ -17,8 +17,8 @@ use loom_input::{ActionMap, InputState};
 use loom_render::glam::Vec3;
 use loom_render::{Camera, Device, Instance, Ui, Viewer, ash, ash_window};
 
-use crate::gizmo::{self, Mode};
-use crate::panels::{PanelState, UiAction};
+use loom_editor::gizmo::{self, Mode};
+use loom_editor::panels::{PanelState, UiAction};
 use crate::scene_view::{Change, SceneView};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
@@ -423,7 +423,7 @@ impl App {
         &mut self,
         projection: &gizmo::View,
         now: std::time::Instant,
-    ) -> Vec<crate::panels::AgentMark> {
+    ) -> Vec<loom_editor::panels::AgentMark> {
         self.agent_changes
             .retain(|(_, at)| now.duration_since(*at).as_secs_f32() < Self::CHANGE_FADE);
 
@@ -456,7 +456,7 @@ impl App {
             }
             let age = now.duration_since(*at).as_secs_f32();
             let name = change.path.rsplit('/').next().unwrap_or(&change.path);
-            marks.push(crate::panels::AgentMark {
+            marks.push(loom_editor::panels::AgentMark {
                 rect: (x0, y0, x1, y1),
                 label: format!("{name} · {}", change.kind.label()),
                 freshness: 1.0 - (age / Self::CHANGE_FADE),
@@ -1076,9 +1076,23 @@ impl ApplicationHandler for App {
                 };
 
                 let mut actions = Vec::new();
+                // Snapshotted once per frame rather than read inside the
+                // panel: the panels crate cannot reach the global store, and
+                // one snapshot per frame is also one lock rather than one per
+                // row.
+                let console = crate::log::entries();
                 let state = PanelState {
                     agent_marks: &marks,
-                    view: &self.view,
+                    console: &console,
+                    tick_seconds: crate::play::TICK_SECONDS,
+                    // Spelled out rather than passed as `&self.view`: the
+                    // panels live in `loom_editor`, which cannot see
+                    // `SceneView` — see `PanelState`'s doc comment.
+                    scene: &self.view.scene,
+                    paths: &self.view.paths,
+                    picks: &self.view.picks,
+                    assets: &self.view.assets,
+                    object_count: self.view.objects.len(),
                     playing: self.play.as_ref().map(|p| (p.ticks, p.paused, p.bodies())),
                     selected: &self.selected,
                     history: self.session.as_ref().map_or(&[][..], |s| s.history()),
@@ -1180,7 +1194,7 @@ impl ApplicationHandler for App {
                             // whatever they leave over, and before they are
                             // added that is the entire window — which is how
                             // the score ended up on top of the hierarchy.
-                            actions.extend(crate::panels::draw(root, &state));
+                            actions.extend(loom_editor::panels::draw(root, &state));
                             let _ = crate::hud::draw(root, &overlay);
                         },
                     ),

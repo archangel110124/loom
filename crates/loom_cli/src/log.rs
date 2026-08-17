@@ -12,21 +12,11 @@
 
 use std::sync::{Mutex, OnceLock};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Level {
-    Info,
-    Warn,
-    Error,
-}
-
-#[derive(Debug, Clone)]
-pub struct Entry {
-    pub level: Level,
-    pub text: String,
-    /// How many times in a row this same message arrived. A per-frame
-    /// rejection would otherwise scroll everything else off the panel.
-    pub repeats: u32,
-}
+// **The types live in `loom_editor::console`, the store lives here.** The
+// panel that draws a row cannot see `loom_cli`, so the vocabulary had to sit
+// somewhere both crates can reach; everything that makes this module worth
+// having — the repeat collapsing, the cap, the stderr mirror — is untouched.
+pub use loom_editor::console::{Entry, Level};
 
 /// Beyond this the oldest entries are dropped — a window's worth of scrollback
 /// is what a human reads; a session's worth is what a log file is for.

@@ -17,6 +17,55 @@ use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use crate::renderer::RenderError;
 use crate::{Device, Instance};
 
+/// Pre-warp an authored screen-space sRGB hex into the byte egui must be given.
+///
+/// **This lives here, beside `srgb_framebuffer`, and not in the editor**, because
+/// `ui.rs` is linked by the runtime as well: the HUD is game content that ships
+/// to players. The encode fix below and this compensation are two halves of one
+/// correction, and separating them would leave a shipped game's HUD holding only
+/// the half that darkens it.
+///
+/// Three stages act on an egui colour and they do not cancel:
+///
+/// 1. `egui-ash-renderer-0.12.0/src/shaders/shader.vert:25` raises the vertex
+///    colour to the power 2.2.
+/// 2. `shader.frag:23` passes it through unchanged, because specialization
+///    constant 0 (`SRGB_FRAMEBUFFER`) is `true` — see [`Ui::new`].
+/// 3. The swapchain is `B8G8R8A8_SRGB`, so the hardware applies the sRGB encode.
+///
+/// So a hex `h` authored naively reaches the screen as `srgb_encode((h/255)^2.2)`,
+/// about 36% darker: `#16191E` arrives as `#0E1218`. This is the exact inverse,
+/// so what a table says is what the display shows.
+///
+/// **Correct only while `srgb_framebuffer` is `true`.** Under the `false` it was
+/// set to before this was fixed, stage 2's `LINEARtoSRGB` cancels stage 1 exactly
+/// and stage 3 is left uncompensated — `#16191E` arrives as `#535860`, *brighter*
+/// rather than darker, and this function would then double the error instead of
+/// removing it. The two settings need opposite corrections.
+///
+/// **No gate can see any of this.** `cargo xtask image` drives the offscreen
+/// `Renderer`, which never constructs a [`Ui`]. The check is a human sampling
+/// swatches off a screenshot.
+#[must_use]
+pub fn tok(hex: u32) -> egui::Color32 {
+    let channel = |byte: u32| {
+        #[allow(clippy::cast_precision_loss)]
+        let s = (byte & 0xFF) as f32 / 255.0;
+        // The sRGB *decode*, undoing stage 3.
+        let linear = if s <= 0.040_45 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        };
+        // The inverse of stage 1's `pow(2.2)`.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            (linear.powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8
+        }
+    };
+    egui::Color32::from_rgb(channel(hex >> 16), channel(hex >> 8), channel(hex))
+}
+
 /// egui, wired to Vulkan and winit.
 pub struct Ui {
     context: egui::Context,
