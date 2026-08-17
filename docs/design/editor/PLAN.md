@@ -101,6 +101,25 @@ presentation grounds only.
 
 ---
 
+## 0. ON HOLD — the VFX overhaul took priority
+
+**Paused after Stage 3, 16 Aug 2026, by the human's decision.** Fire, smoke and water are
+being overhauled to become a headline feature of the engine; that is engine-roadmap work
+(P3 water and a fire rework) and is tracked by `../VFX-IMPLEMENTATION-REPORT.md` and
+`../NIAGARA-AND-FIRE-RESEARCH.md`. This document resumes when that lands.
+
+**Where it stopped.** Stages 0-2 complete. Stage 3 is substantially complete — viewport
+coordinates, the applied theme, and `egui_dock` with the carve are all in and gated. It owes
+four things, none structural: the Window menu, maximise-on-hover, `icons.rs`, and real bodies
+for the four placeholder tabs (Problems, History, Prefabs, Agent). Stages 4-12 are untouched.
+
+**Read `MANUAL-CHECKS.md` before resuming.** Everything Stages 1-3 shipped is gated and none
+of it has been looked at by a human — no gate in this project has ever seen a pixel of the
+editor. The dock in particular has a failure mode no gate can detect: if the carve is subtly
+wrong, viewport clicks silently stop selecting.
+
+---
+
 ## 1. The editor in one page
 
 **What it is.** A Unity-shaped, docked, dark-themed editor for Loom, launched as `loom edit`
