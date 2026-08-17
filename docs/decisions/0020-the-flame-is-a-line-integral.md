@@ -131,12 +131,14 @@ boundaries. With it, no dither at any amplitude measures better than none.
   column does not darken its own middle. That needs the plume's optical depth in
   an offscreen R16F target and a second draw of the whole particle set, with its
   own render-graph barriers. Costed, not built.
-- **The light does not agree with the fire.** `campfire.loom`'s `Light` is a
-  constant 3.0 and the ground pool it casts is byte-identical to the pre-fire
-  baseline. A flame core reaching the ramp's white rung under a still lamp is
-  half of what a filmic fire is judged on. It is scene- and engine-side work
-  (a modulation authored on `Light`, driven off `weather.z` and never the wall
-  clock) and it is not in this change.
+- ~~**The light does not agree with the fire.**~~ **Built afterwards, exactly as
+  described here.** `Light.flicker` is a fraction of `intensity`, zero by
+  default, driven off the `seconds` `environment_with_wind` already carries —
+  the tick timebase the shader reads as `weather.z`, never the wall clock. It
+  shifts hue as well as brightness (blue falls fastest, so the dim part of the
+  cycle is redder) and its cutoff radius is taken from the authored intensity so
+  it does not breathe. `campfire` and `lanternhead`'s brazier author it; the
+  latter's five lanterns deliberately do not.
 - **A tongue never pinches off and rises.** Nothing in a level-set formulation
   sheds, because nothing in it curls.
 

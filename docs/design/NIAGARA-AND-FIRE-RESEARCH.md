@@ -198,6 +198,37 @@ The **shading is the ceiling**, and the reason is one sentence: **a level set on
 
 ## 3. Fix the fire without rewriting anything
 
+> ## ⚠ STATUS: ITEMS 1–5 ARE BUILT. READ THIS BEFORE ACTING ON THE LIST BELOW.
+>
+> This section was written against the pre-ADR-0020 shader and is kept for its
+> reasoning, not as a work list. **`ADR 0020` took item 5** — the march — and
+> item 5's own last line is why 1–3 came with it: the integral *subsumes* them.
+> Against `assets/shaders/scene.slang` today:
+>
+> - **Item 1 is done at both sites.** `flameColor` returns
+>   `(1 - T) * FIRE_OPACITY * in.color.a`, and the fog return fogs the alpha as
+>   well as the colour rather than passing it through — a flame that kept its
+>   opacity while its emission was attenuated would fade to a black silhouette
+>   at range. **The discard trap this section flags was real and is closed**:
+>   the predicate is now `rgb sum <= 0.0008 && a <= 0.0008`.
+> - **Item 2 is done by deletion.** The hand-built `FIRE_GLOW*` veil was written
+>   and then removed, because a ray through a gap between tongues still crosses
+>   material at other depths — the same term, derived instead of authored, and
+>   it parallaxes with the camera instead of being pinned to the billboard.
+> - **Item 3 is done, and half of it turned out to be wrong.** Base cooling is
+>   `FIRE_TAU_BASE`/`FIRE_TAU_BASE_H`; `FIRE_TAU_FLOOR` is gone, so the ramp's
+>   bottom rungs are reached. The **flank** cooling this item asked for was
+>   built and then deleted: a grazing ray accumulates little `heat` because it
+>   genuinely crosses little material, so the term was double-counting.
+> - **Item 4 is done and it needed engine work, not the "zero shader work,
+>   scene-side" this section predicted.** `Light.intensity` is a static scalar
+>   with no expression language behind it, so the modulation is a new
+>   `Light.flicker` field evaluated in `gather_lights` from the `seconds` the
+>   environment already carries. The amendment held exactly: the clock is the
+>   tick timebase, and the hue shifts with the brightness.
+>
+> **Items 6, 7 and 8 are still open** and are still authoring/measurement work.
+
 **This section can carry most of the win, and I say that plainly.** Items 1–4 are one function, roughly fifteen lines, two golden references, no ADR, no locked decision touched. Do them in one commit and look at `lanternhead`'s deck before considering anything in §4.
 
 Ranked cheapest-first. Each is a change to `flameColor` in `assets/shaders/scene.slang` unless stated.
