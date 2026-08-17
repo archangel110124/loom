@@ -1100,9 +1100,18 @@ impl ApplicationHandler for App {
                 // one snapshot per frame is also one lock rather than one per
                 // row.
                 let console = crate::log::entries();
+                // From the session's text, which is the *unresolved* file —
+                // the resolved `SceneView` has no overrides left to report.
+                // Empty in read-only mode, where nothing is revertable anyway.
+                let overrides = self
+                    .session
+                    .as_ref()
+                    .map(|s| crate::override_map(s.text()))
+                    .unwrap_or_default();
                 let state = PanelState {
                     agent_marks: &marks,
                     console: &console,
+                    overrides: &overrides,
                     tick_seconds: crate::play::TICK_SECONDS,
                     // Spelled out rather than passed as `&self.view`: the
                     // panels live in `loom_editor`, which cannot see
@@ -1285,6 +1294,29 @@ impl App {
         match action {
             UiAction::Select { path, extend } => self.select(&path, extend),
             UiAction::SetField(node, field, value) => self.set_field(&node, &field, value),
+            UiAction::Splice(node, field, index, remove, insert) => {
+                // **Not coalesced into a gesture.** A drag on a slider is one
+                // continuous act and undoes as one; adding and removing entries
+                // are separate decisions and each earns its own undo step.
+                self.transact(
+                    format!("Splice {node} {field}"),
+                    vec![loom_scene::SceneOp::SpliceArray {
+                        node,
+                        field,
+                        index,
+                        remove,
+                        insert,
+                    }],
+                );
+            }
+            UiAction::RevertOverride(node, field) => {
+                let keys = if field.is_empty() { Vec::new() } else { vec![field.clone()] };
+                let what = if field.is_empty() { "all overrides".to_owned() } else { field };
+                self.transact(
+                    format!("Revert {node} {what}"),
+                    vec![loom_scene::SceneOp::RevertOverrides { node, keys }],
+                );
+            }
             UiAction::SetMode(mode) => self.mode = mode,
             UiAction::Focus => {
                 self.camera = FlyCamera::framing_at(self.focus_bounds(), self.camera.fov_y_degrees);

@@ -457,6 +457,69 @@ transform = { pos = [0.0, 0.0, 0.0] }
         );
     }
 
+
+    /// **An override key naming a child resolves to `instance/child`.**
+    ///
+    /// Getting this wrong is quiet and nasty: the marker lands on the instance
+    /// root, and the revert button next to it issues `RevertOverrides` for a
+    /// field that node does not have. The key grammar is `[child::]Type.field`
+    /// and `child` names a node *inside* the prefab.
+    #[test]
+    fn override_map_places_child_keys_under_the_child_path() {
+        let text = "\
+[scene]
+format = 1
+id = \"22222222-2222-4222-8222-222222222222\"
+
+[[prefab]]
+key = \"lamp\"
+id = \"33333333-3333-4333-8333-333333333333\"
+path = \"lamp.loom\"
+
+[[node]]
+name = \"Office\"
+
+[[node]]
+name = \"Lamp\"
+parent = \"Office\"
+prefab = \"lamp\"
+
+  [node.overrides]
+  \"Transform.scale\" = [2.0, 2.0, 2.0]
+  \"Bulb::Light.intensity\" = 9.0
+";
+        let map = crate::override_map(text);
+
+        assert_eq!(
+            map.get("Office/Lamp").map(|s| s.iter().cloned().collect::<Vec<_>>()),
+            Some(vec!["Transform.scale".to_owned()]),
+            "a bare key belongs to the instance root"
+        );
+        assert_eq!(
+            map.get("Office/Lamp/Bulb").map(|s| s.iter().cloned().collect::<Vec<_>>()),
+            Some(vec!["Light.intensity".to_owned()]),
+            "a `child::` key belongs to the child, and `::` is not part of the field"
+        );
+    }
+
+    /// A node that instances nothing has no overrides to report, and a file
+    /// caught mid-save yields an empty map rather than an error — the editor
+    /// polls this every frame.
+    #[test]
+    fn override_map_ignores_plain_nodes_and_survives_a_broken_file() {
+        let plain = "\
+[scene]
+format = 1
+id = \"22222222-2222-4222-8222-222222222222\"
+
+[[node]]
+name = \"Desk\"
+";
+        assert!(crate::override_map(plain).is_empty());
+        assert!(crate::override_map("[scene]\nformat = ").is_empty());
+        assert!(crate::override_map("").is_empty());
+    }
+
     /// A re-baked voxel volume produces different geometry under the same
     /// alias, so the key must notice.
     #[test]

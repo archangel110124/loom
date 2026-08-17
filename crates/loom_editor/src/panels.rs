@@ -24,6 +24,17 @@ pub enum UiAction {
     Select { path: String, extend: bool },
     /// `node`, `Type.field`, new value.
     SetField(String, String, serde_json::Value),
+    /// `node`, `Type.field`, index, how many to remove, what to insert.
+    ///
+    /// The inspector's only way to change an array of objects. It is not
+    /// [`UiAction::SetField`] with a rewritten array because that re-emits the
+    /// whole list inline and takes the human's comments and formatting with
+    /// it — see `SceneOp::SpliceArray`.
+    Splice(String, String, usize, usize, Vec<serde_json::Value>),
+    /// `node`, `Type.field` — put one overridden field back to the prefab.
+    ///
+    /// Empty `field` reverts the whole instance.
+    RevertOverride(String, String),
     SetMode(Mode),
     /// Frame the selection.
     Focus,
@@ -96,6 +107,14 @@ pub struct PanelState<'a> {
     /// What somebody else just changed: screen-space box, label, and how
     /// faded it is (1.0 fresh, 0.0 gone).
     pub agent_marks: &'a [AgentMark],
+    /// Which `Type.field` keys each node overrides, by resolved node path.
+    ///
+    /// **Derived from the *unresolved* file, because resolution erases it.**
+    /// `prefab_load::for_reading` folds an override into the component it
+    /// targets and replaces the instance with the subtree it stood for, so the
+    /// scene the inspector reads carries no trace of which values came from an
+    /// override. Without this the marker and the revert button cannot exist.
+    pub overrides: &'a std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     /// Console rows, oldest first — a snapshot the caller took this frame.
     pub console: &'a [crate::console::Entry],
     /// Seconds per simulation tick, so the transport can show elapsed time.
@@ -528,6 +547,12 @@ fn inspector(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAc
             ui.add_space(6.0);
             let editing = state.editable && state.playing.is_none();
 
+            let empty = std::collections::BTreeSet::new();
+            let ctx = FieldContext {
+                assets: state.assets,
+                overridden: state.overrides.get(path).unwrap_or(&empty),
+            };
+
             egui::ScrollArea::vertical().show(ui, |ui| {
                 // Transform first — it is what a human reaches for, and it is
                 // the node-key sugar rather than a component table.
@@ -551,6 +576,7 @@ fn inspector(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAc
                         value,
                         state.registry,
                         editing,
+                        &ctx,
                         actions,
                     );
                 }
@@ -796,6 +822,78 @@ fn inspect_transform(
 
 /// Build widgets for a component from its **schema**, not from a hand-written
 /// match on the type name.
+/// How wide the label column is, so every field's control starts at the same x.
+///
+/// Ragged left edges are what make a generated inspector look generated: the
+/// widget for `roughness` began 40 px right of the one for `uv` purely because
+/// the word is longer, and the eye reads that as disorder rather than as
+/// hierarchy.
+const LABEL_WIDTH: f32 = 96.0;
+
+/// Does this field hold a colour rather than three unrelated numbers?
+///
+/// **A heuristic, and deliberately a narrow one.** The schema cannot answer it:
+/// `albedo` and a position are both `[f32; 3]` with identical JSON Schema, so
+/// there is nothing to read. Rather than guess from the value — a position that
+/// happens to sit in 0..1 would sprout a colour picker and then stop having one
+/// when the node moved — this matches the name, which is stable.
+///
+/// The drag row is drawn either way. The swatch is *added*, never substituted,
+/// so a wrong guess costs a redundant button rather than an uneditable field.
+fn looks_like_a_colour(field: &str) -> bool {
+    const NAMES: [&str; 6] = ["color", "colour", "albedo", "tint", "emissive", "sky"];
+    let lower = field.to_ascii_lowercase();
+    NAMES.iter().any(|n| lower.contains(n))
+}
+
+/// The constraint line that goes last in a tooltip.
+///
+/// Last rather than first: the doc comment says what the field *means*, which
+/// is what someone hovering wants; the range is what they want a second later,
+/// when the slider will not go where they are pushing it.
+fn range_note(schema: Option<&serde_json::Value>) -> Option<String> {
+    let s = schema?;
+    let lo = s.get("minimum").and_then(serde_json::Value::as_f64);
+    let hi = s.get("maximum").and_then(serde_json::Value::as_f64);
+    match (lo, hi) {
+        (Some(lo), Some(hi)) => Some(format!("range: {lo} to {hi}")),
+        (Some(lo), None) => Some(format!("minimum: {lo}")),
+        (None, Some(hi)) => Some(format!("maximum: {hi}")),
+        (None, None) => None,
+    }
+}
+
+/// The label column of one field row, with its tooltip.
+fn field_label(ui: &mut egui::Ui, field: &str, doc: &str, constraint: Option<String>) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(LABEL_WIDTH, ui.spacing().interact_size.y),
+        egui::Sense::hover(),
+    );
+    let mut label = ui.put(
+        rect,
+        egui::Label::new(egui::RichText::new(field).monospace())
+            .halign(egui::Align::LEFT)
+            .truncate(),
+    );
+    let tip = match (doc.is_empty(), constraint) {
+        (true, None) => String::new(),
+        (true, Some(c)) => c,
+        (false, None) => doc.to_owned(),
+        (false, Some(c)) => format!("{doc}\n\n{c}"),
+    };
+    if !tip.is_empty() {
+        label = label.on_hover_text(tip);
+    }
+    let _ = label;
+}
+
+/// One component's fields, generated from its schema.
+///
+/// **Nothing here is hand-written per component type.** A new component gets an
+/// inspector the same way it gets a JSON Schema and a CLI `describe`: for free,
+/// with its ranges enforced and its doc comment as the tooltip. A hand-written
+/// inspector is a second description of every type and it drifts by Thursday.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn inspect_component(
     ui: &mut egui::Ui,
     path: &str,
@@ -803,10 +901,11 @@ fn inspect_component(
     value: &serde_json::Value,
     registry: &loom_reflect::TypeRegistry,
     editable: bool,
+    ctx: &FieldContext<'_>,
     actions: &mut Vec<UiAction>,
 ) {
-    let schema = registry.describe(type_name).and_then(|s| s.as_object());
-    let properties = schema
+    let root = registry.describe(type_name).map(loom_reflect::SchemaHandle::as_value);
+    let properties = root
         .and_then(|s| s.get("properties"))
         .and_then(serde_json::Value::as_object);
 
@@ -815,106 +914,421 @@ fn inspect_component(
     };
 
     for (field, current) in fields {
-        let field_schema = properties.and_then(|p| p.get(field));
-        // The doc comment became the schema `description` at M1, and it becomes
-        // the tooltip here — writing a good doc comment, teaching the agent,
-        // and labelling the editor are all one act.
-        let tooltip = field_schema
+        let key = format!("{type_name}.{field}");
+        // One walker, shared with the validator: `$ref` followed through
+        // `$defs` and both spellings of an enum flattened. See
+        // `loom_reflect::field_schema`.
+        let resolved = match (root, properties.and_then(|p| p.get(field))) {
+            (Some(r), Some(f)) => Some(loom_reflect::field_schema(r, f)),
+            _ => None,
+        };
+        let schema = resolved.as_deref();
+        let doc = schema
             .and_then(|f| f.get("description"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        // Ranges come from `#[schemars(range(...))]`, so a slider cannot be
-        // dragged out of what the validator would accept.
-        let bounds = field_schema.map(|f| {
-            (
-                f.get("minimum").and_then(serde_json::Value::as_f64),
-                f.get("maximum").and_then(serde_json::Value::as_f64),
-            )
-        });
 
         ui.horizontal(|ui| {
-            let label = ui.label(egui::RichText::new(format!("  {field:<12}")).monospace());
-            if !tooltip.is_empty() {
-                label.on_hover_text(tooltip);
+            field_label(ui, field, doc, range_note(schema));
+
+            // **An overridden field is marked and revertable.** `RevertOverrides`
+            // has existed since S4 and the editor had never issued it, so the
+            // only way back to the prefab's value was to edit the file.
+            if ctx.overridden.contains(&key)
+                && ui
+                    .small_button("●")
+                    .on_hover_text("overridden — click to revert to the prefab")
+                    .clicked()
+            {
+                actions.push(UiAction::RevertOverride(path.to_owned(), key.clone()));
             }
 
-            match current {
-                serde_json::Value::Number(n) => {
-                    let mut v = n.as_f64().unwrap_or(0.0);
-                    let widget = match bounds {
-                        Some((Some(lo), Some(hi))) => {
-                            ui.add_enabled(editable, egui::Slider::new(&mut v, lo..=hi))
-                        }
-                        _ => ui.add_enabled(editable, egui::DragValue::new(&mut v).speed(0.1)),
-                    };
-                    if widget.changed() {
-                        actions.push(UiAction::SetField(
-                            path.to_owned(),
-                            format!("{type_name}.{field}"),
-                            serde_json::json!(v),
-                        ));
+            draw_field(ui, path, &key, field, current, schema, editable, ctx, actions);
+        });
+    }
+}
+
+/// Everything the widgets need that is not the field itself.
+pub(crate) struct FieldContext<'a> {
+    /// Asset aliases, for the reference picker.
+    pub assets: &'a [String],
+    /// `Type.field` keys this node overrides, when it instances a prefab.
+    pub overridden: &'a std::collections::BTreeSet<String>,
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn draw_field(
+    ui: &mut egui::Ui,
+    path: &str,
+    key: &str,
+    field: &str,
+    current: &serde_json::Value,
+    schema: Option<&serde_json::Value>,
+    editable: bool,
+    ctx: &FieldContext<'_>,
+    actions: &mut Vec<UiAction>,
+) {
+    let set = |v: serde_json::Value| UiAction::SetField(path.to_owned(), key.to_owned(), v);
+
+    // An enum is a dropdown, whichever way schemars spelled it. Typing into a
+    // text box and having the validator reject it is the failure this removes.
+    if let Some(variants) = schema
+        .and_then(|s| s.get("enum"))
+        .and_then(serde_json::Value::as_array)
+        && let Some(chosen) = current.as_str()
+    {
+        let mut picked = chosen.to_owned();
+        egui::ComboBox::from_id_salt((path, key))
+            .selected_text(&picked)
+            .show_ui(ui, |ui| {
+                for variant in variants {
+                    if let Some(name) = variant.as_str() {
+                        ui.selectable_value(&mut picked, name.to_owned(), name);
                     }
                 }
-                serde_json::Value::Bool(b) => {
-                    let mut v = *b;
-                    if ui.add_enabled(editable, egui::Checkbox::new(&mut v, "")).changed() {
-                        actions.push(UiAction::SetField(
-                            path.to_owned(),
-                            format!("{type_name}.{field}"),
-                            serde_json::json!(v),
-                        ));
-                    }
+            });
+        if editable && picked != chosen {
+            actions.push(set(serde_json::json!(picked)));
+        }
+        return;
+    }
+
+    match current {
+        serde_json::Value::Number(n) => {
+            let mut v = n.as_f64().unwrap_or(0.0);
+            let bounds = (
+                schema.and_then(|s| s.get("minimum")).and_then(serde_json::Value::as_f64),
+                schema.and_then(|s| s.get("maximum")).and_then(serde_json::Value::as_f64),
+            );
+            let widget = match bounds {
+                (Some(lo), Some(hi)) => {
+                    ui.add_enabled(editable, egui::Slider::new(&mut v, lo..=hi))
                 }
-                serde_json::Value::Array(items)
-                    if items.iter().all(serde_json::Value::is_number) =>
+                _ => ui.add_enabled(editable, egui::DragValue::new(&mut v).speed(0.1)),
+            };
+            if widget.changed() {
+                actions.push(set(serde_json::json!(v)));
+            }
+        }
+
+        serde_json::Value::Bool(b) => {
+            let mut v = *b;
+            if ui.add_enabled(editable, egui::Checkbox::new(&mut v, "")).changed() {
+                actions.push(set(serde_json::json!(v)));
+            }
+        }
+
+        // **Strings are editable now, and this was the single most limiting
+        // gap.** `Script.path`, `GameRules.path`, `Name.value` and every enum
+        // this project has not documented were read-only labels, so the
+        // inspector could show you what your script was and never let you
+        // change it.
+        serde_json::Value::String(s) => {
+            let buffer_id = egui::Id::new(("field", path, key));
+            let mut text = ui
+                .data_mut(|d| d.get_temp::<String>(buffer_id))
+                .unwrap_or_else(|| s.clone());
+            // The file is the truth: if it changed under us and the human is
+            // not mid-edit, follow it.
+            let focused = ui.memory(|m| m.has_focus(buffer_id));
+            if !focused && text != *s {
+                text = s.clone();
+            }
+            let response = ui.add_enabled(
+                editable,
+                egui::TextEdit::singleline(&mut text).id(buffer_id).desired_width(f32::INFINITY),
+            );
+            if response.changed() {
+                ui.data_mut(|d| d.insert_temp(buffer_id, text.clone()));
+            }
+            // On commit, not per keystroke: a transaction per character would
+            // bury the transaction log and make undo useless. Same rule the
+            // rename field has followed since M12.
+            let committed = response.lost_focus()
+                && (ui.input(|i| i.key_pressed(egui::Key::Enter)) || !response.has_focus());
+            if committed && text != *s {
+                actions.push(set(serde_json::json!(text)));
+                ui.data_mut(|d| d.remove::<String>(buffer_id));
+            }
+        }
+
+        serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_number) => {
+            let mut edited: Vec<f64> =
+                items.iter().filter_map(serde_json::Value::as_f64).collect();
+            let (lo, hi) = schema
+                .and_then(|f| f.get("items"))
+                .map(|i| {
+                    (
+                        i.get("minimum").and_then(serde_json::Value::as_f64),
+                        i.get("maximum").and_then(serde_json::Value::as_f64),
+                    )
+                })
+                .unwrap_or((None, None));
+
+            // The swatch first, so it lands at the column edge where the eye
+            // is already looking. Added to the drags, never replacing them —
+            // see `looks_like_a_colour`.
+            if looks_like_a_colour(field) && (edited.len() == 3 || edited.len() == 4) {
+                #[allow(clippy::cast_possible_truncation)]
+                let mut rgb = [edited[0] as f32, edited[1] as f32, edited[2] as f32];
+                // **Authored linear, shown as sRGB.** `Material::albedo` is a
+                // linear value; handing it to a picker raw makes a mid grey
+                // look nearly black and every colour a human picks come out
+                // wrong. egui's `rgb` picker is the sRGB one.
+                let mut srgb = rgb.map(|c| c.clamp(0.0, 1.0).powf(1.0 / 2.2));
+                if ui.add_enabled(editable, ColourButton(&mut srgb)).changed() {
+                    rgb = srgb.map(|c| c.powf(2.2));
+                    let mut next: Vec<f64> = rgb.iter().map(|c| f64::from(*c)).collect();
+                    // A four-element colour keeps whatever the fourth
+                    // component meant — on `albedo` it is porosity, not alpha,
+                    // and a picker must not silently overwrite it.
+                    if edited.len() == 4 {
+                        next.push(edited[3]);
+                    }
+                    actions.push(set(serde_json::json!(next)));
+                }
+            }
+
+            let mut changed = false;
+            for v in &mut edited {
+                let widget = match (lo, hi) {
+                    (Some(lo), Some(hi)) => egui::DragValue::new(v).range(lo..=hi).speed(0.02),
+                    _ => egui::DragValue::new(v).speed(0.05),
+                };
+                changed |= ui.add_enabled(editable, widget).changed();
+            }
+            if changed {
+                actions.push(set(serde_json::json!(edited)));
+            }
+        }
+
+        // An asset reference: `{ "asset": "alias" }`. A dropdown of what this
+        // scene actually declared, rather than a name to be typed correctly.
+        serde_json::Value::Object(map)
+            if map.len() == 1 && map.contains_key("asset") =>
+        {
+            let chosen = map["asset"].as_str().unwrap_or("");
+            let mut picked = chosen.to_owned();
+            egui::ComboBox::from_id_salt((path, key))
+                .selected_text(if picked.is_empty() { "<none>" } else { &picked })
+                .show_ui(ui, |ui| {
+                    for alias in ctx.assets {
+                        ui.selectable_value(&mut picked, alias.clone(), alias);
+                    }
+                });
+            if editable && picked != chosen {
+                actions.push(set(serde_json::json!({ "asset": picked })));
+            }
+        }
+
+        // **An array of objects gets rows and a splice, not a JSON blob.**
+        // `WaterBody.waves`, `Buoyancy.pontoons`, `Scatter.excludes` and a
+        // voxel recipe were all a single unreadable line that could only be
+        // edited in a text editor.
+        serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_object) => {
+            array_of_objects(ui, path, key, items, schema, editable, actions);
+        }
+
+        _ => {
+            ui.add(egui::Label::new(egui::RichText::new(summarise(current)).weak()).wrap());
+        }
+    }
+}
+
+/// Rows for an array of objects, each removable, with an add button.
+///
+/// Every mutation is a `SpliceArray`, so the entries the human did not touch
+/// keep their comments and their `[[header]]` spelling on disk.
+fn array_of_objects(
+    ui: &mut egui::Ui,
+    path: &str,
+    key: &str,
+    items: &[serde_json::Value],
+    schema: Option<&serde_json::Value>,
+    editable: bool,
+    actions: &mut Vec<UiAction>,
+) {
+    ui.vertical(|ui| {
+        for (index, item) in items.iter().enumerate() {
+            ui.horizontal(|ui| {
+                // The most identifying field first: a voxel op's `kind`, a
+                // wave's `kind`. "3 items" tells you nothing about which one
+                // to delete.
+                let title = item
+                    .get("kind")
+                    .or_else(|| item.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(|| format!("[{index}]"), |k| format!("[{index}] {k}"));
+                ui.label(egui::RichText::new(title).monospace());
+                if editable
+                    && ui.small_button("✖").on_hover_text("remove this entry").clicked()
                 {
-                    let mut edited: Vec<f64> =
-                        items.iter().filter_map(serde_json::Value::as_f64).collect();
-                    let mut changed = false;
-                    let (lo, hi) = field_schema
-                        .and_then(|f| f.get("items"))
-                        .map(|i| {
-                            (
-                                i.get("minimum").and_then(serde_json::Value::as_f64),
-                                i.get("maximum").and_then(serde_json::Value::as_f64),
-                            )
-                        })
-                        .unwrap_or((None, None));
-                    for v in &mut edited {
-                        let widget = match (lo, hi) {
-                            (Some(lo), Some(hi)) => {
-                                egui::DragValue::new(v).range(lo..=hi).speed(0.02)
-                            }
-                            _ => egui::DragValue::new(v).speed(0.05),
-                        };
-                        changed |= ui.add_enabled(editable, widget).changed();
-                    }
-                    if changed {
-                        actions.push(UiAction::SetField(
-                            path.to_owned(),
-                            format!("{type_name}.{field}"),
-                            serde_json::json!(edited),
-                        ));
-                    }
+                    actions.push(UiAction::Splice(
+                        path.to_owned(),
+                        key.to_owned(),
+                        index,
+                        1,
+                        Vec::new(),
+                    ));
                 }
-                serde_json::Value::String(s) => {
-                    ui.add(egui::Label::new(egui::RichText::new(s).monospace().weak()).wrap());
-                }
-                // Nested objects (an AssetRef, say) are shown read-only rather
-                // than half-edited. Editing an asset reference is what the
-                // Assets panel is for.
-                //
-                // **Wrapped, and summarised when long.** A voxel volume's op
-                // list is a few hundred characters of JSON on one line, and an
-                // unwrapped label demands the width to draw it: the inspector
-                // sized itself to the widest thing in it, took most of the
-                // window, and squeezed the viewport into a strip. A label that
-                // wraps asks for no particular width, so no single field can
-                // dictate the layout again.
-                _ => {
-                    ui.add(egui::Label::new(egui::RichText::new(summarise(current)).weak()).wrap());
+            });
+            ui.add(
+                egui::Label::new(egui::RichText::new(summarise(item)).weak().small()).wrap(),
+            );
+        }
+        if editable && ui.small_button("+ add").clicked() {
+            // A new entry at the schema's defaults, which for an untyped
+            // recipe is an empty table the human then fills in. Appending
+            // something invalid would be worse: the transaction would be
+            // rejected and the button would look broken.
+            let blank = default_entry(schema);
+            actions.push(UiAction::Splice(
+                path.to_owned(),
+                key.to_owned(),
+                items.len(),
+                0,
+                vec![blank],
+            ));
+        }
+    });
+}
+
+/// What "+ add" appends: the required fields of the array's item schema, at
+/// their defaults, so the result validates.
+fn default_entry(schema: Option<&serde_json::Value>) -> serde_json::Value {
+    let Some(items) = schema.and_then(|s| s.get("items")) else {
+        return serde_json::json!({});
+    };
+    let mut entry = serde_json::Map::new();
+    if let Some(properties) = items.get("properties").and_then(serde_json::Value::as_object) {
+        let required: Vec<&str> = items
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .map(|r| r.iter().filter_map(serde_json::Value::as_str).collect())
+            .unwrap_or_default();
+        for name in required {
+            if let Some(field) = properties.get(name) {
+                entry.insert(name.to_owned(), default_for(field));
+            }
+        }
+    }
+    serde_json::Value::Object(entry)
+}
+
+/// A schema's `default`, or the emptiest legal value of its declared type.
+fn default_for(schema: &serde_json::Value) -> serde_json::Value {
+    if let Some(default) = schema.get("default") {
+        return default.clone();
+    }
+    // An enum's first variant is a real choice rather than an empty string,
+    // which would fail validation the moment it was written.
+    if let Some(first) = schema
+        .get("enum")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|v| v.first())
+    {
+        return first.clone();
+    }
+    match schema.get("type").and_then(serde_json::Value::as_str) {
+        Some("number" | "integer") => serde_json::json!(0),
+        Some("boolean") => serde_json::json!(false),
+        Some("array") => serde_json::json!([]),
+        Some("object") => serde_json::json!({}),
+        _ => serde_json::json!(""),
+    }
+}
+
+/// egui's colour button, as a `Widget` so it can go through `add_enabled`.
+struct ColourButton<'a>(&'a mut [f32; 3]);
+
+impl egui::Widget for ColourButton<'_> {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        ui.color_edit_button_rgb(self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_entry, default_for, looks_like_a_colour, range_note};
+
+    /// The swatch is offered for the fields that hold colours and not for the
+    /// ones that hold three unrelated numbers.
+    ///
+    /// A heuristic on the name, so it is worth pinning what it answers — and
+    /// worth stating what it costs when wrong, which is a redundant button
+    /// beside a drag row that still works.
+    #[test]
+    fn colour_fields_are_recognised_and_positions_are_not() {
+        for yes in ["albedo", "color", "sky_colour", "tint", "emissive"] {
+            assert!(looks_like_a_colour(yes), "{yes} should offer a swatch");
+        }
+        for no in ["pos", "rot_euler", "scale", "half_extents", "center", "uv_scale"] {
+            assert!(!looks_like_a_colour(no), "{no} is not a colour");
+        }
+    }
+
+    /// The range goes in the tooltip, in whichever of the four shapes the
+    /// schema declared.
+    #[test]
+    fn the_constraint_line_reads_from_the_schema() {
+        let both = serde_json::json!({"minimum": 0.0, "maximum": 1.0});
+        assert_eq!(range_note(Some(&both)).as_deref(), Some("range: 0 to 1"));
+        let lo = serde_json::json!({"minimum": 0.0});
+        assert_eq!(range_note(Some(&lo)).as_deref(), Some("minimum: 0"));
+        let hi = serde_json::json!({"maximum": 8.0});
+        assert_eq!(range_note(Some(&hi)).as_deref(), Some("maximum: 8"));
+        assert_eq!(range_note(Some(&serde_json::json!({}))), None);
+        assert_eq!(range_note(None), None);
+    }
+
+    /// **"+ add" must append something that validates**, or the button looks
+    /// broken: the transaction is rejected, the row never appears, and the
+    /// human has no way to tell that the entry they asked for was illegal
+    /// rather than that the editor is buggy.
+    #[test]
+    fn a_new_array_entry_carries_its_required_fields() {
+        let schema = serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["kind", "amplitude"],
+                "properties": {
+                    "kind": { "enum": ["sine", "gerstner"] },
+                    "amplitude": { "type": "number" },
+                    "phase": { "type": "number" }
                 }
             }
         });
+        let entry = default_entry(Some(&schema));
+        assert_eq!(entry["kind"], "sine", "an enum takes its first variant");
+        assert_eq!(entry["amplitude"], 0);
+        assert!(
+            entry.get("phase").is_none(),
+            "only required fields — an optional one left out keeps the file minimal"
+        );
+    }
+
+    /// A declared `default` beats the type's empty value, because the schema
+    /// author knew better than this function does.
+    #[test]
+    fn a_declared_default_wins() {
+        let with = serde_json::json!({"type": "number", "default": 0.5});
+        assert_eq!(default_for(&with), 0.5);
+        let without = serde_json::json!({"type": "boolean"});
+        assert_eq!(default_for(&without), false);
+        let untyped = serde_json::json!({});
+        assert_eq!(default_for(&untyped), "");
+    }
+
+    /// An array with no item schema — a voxel recipe, which is a union of five
+    /// shapes and therefore untyped — appends an empty table rather than
+    /// guessing at fields it cannot know.
+    #[test]
+    fn an_untyped_array_appends_an_empty_entry() {
+        assert_eq!(default_entry(None), serde_json::json!({}));
+        assert_eq!(
+            default_entry(Some(&serde_json::json!({"type": "array"}))),
+            serde_json::json!({})
+        );
     }
 }

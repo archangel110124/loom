@@ -1256,6 +1256,44 @@ impl MeshLibrary {
 
 /// FNV-1a over bytes. The engine's one hash, so every fingerprint it compares
 /// is stable across runs and machines.
+/// Which `Type.field` keys each node overrides, keyed by **resolved** path.
+///
+/// Parsed from the unresolved text on purpose. `prefab_load::for_reading`
+/// folds every override into the component it targets and replaces the
+/// instance with the subtree it stood for, so by the time the inspector sees a
+/// scene there is nothing left to say "this value came from an override" — and
+/// the marker and the per-field revert button both need exactly that.
+///
+/// An override key is `[child::]Type.field`, and `child` names a node *inside*
+/// the prefab, so the resolved path is `instance/child`. Getting that mapping
+/// wrong would put the marker on the instance root and the revert would target
+/// a field the node does not have.
+///
+/// A file that does not parse yields an empty map rather than an error: the
+/// editor polls this every frame and a half-saved file is a normal transient.
+pub(crate) fn override_map(
+    text: &str,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    let mut map: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    let Ok(scene) = loom_scene::Scene::parse(text) else {
+        return map;
+    };
+    for node in scene.nodes() {
+        if node.prefab.is_none() {
+            continue;
+        }
+        for key in node.overrides.keys() {
+            let (path, field) = match key.split_once("::") {
+                Some((child, rest)) => (format!("{}/{child}", node.path), rest.to_owned()),
+                None => (node.path.clone(), key.clone()),
+            };
+            map.entry(path).or_default().insert(field);
+        }
+    }
+    map
+}
+
 fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
     for b in bytes {
         h ^= u64::from(*b);

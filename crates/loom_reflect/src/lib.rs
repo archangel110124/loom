@@ -6,6 +6,11 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
+
+// Re-exported so a consumer can name the type `describe` returns without
+// pinning schemars itself — `loom_editor` draws its inspector from these and
+// must not carry a second, independently-versioned copy of the crate.
+pub use schemars::Schema as SchemaHandle;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -202,6 +207,20 @@ impl TypeRegistry {
 /// Only local references, which is all schemars produces. Anything else is
 /// returned unchanged rather than chased: a validator that fetches documents
 /// is a different and much larger thing than this one.
+/// A field's schema with `$ref` followed and an enum flattened, ready to draw.
+///
+/// **The inspector calls this rather than walking `$defs` itself.** The two
+/// spellings of an enum are the reason: a plain unit enum is
+/// `{"type": "string", "enum": [...]}` and one whose variants carry doc
+/// comments is a `oneOf` of `const` branches. A second walker that knew only
+/// the flat form would silently draw a text box where a dropdown belongs, for
+/// exactly the types this project documents best — and validation would then
+/// reject what the human typed. One walker, one answer.
+#[must_use]
+pub fn field_schema<'a>(root: &'a Value, field_schema: &'a Value) -> Cow<'a, Value> {
+    flatten_enum(resolve(root, field_schema))
+}
+
 fn resolve<'a>(root: &'a Value, field_schema: &'a Value) -> &'a Value {
     let Some(name) = field_schema
         .get("$ref")
