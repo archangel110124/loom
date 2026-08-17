@@ -261,6 +261,59 @@ survived was committed by the "designers".**
 read-only instruction, or their own worktree. The judge and builder stay as they are.
 **Confidence: high.** This cost no work — but only because the design agents happened to commit.
 
+### D20 — Smoke's cost under coverage is measured, and D15's worry was overstated
+
+**Measured at 1280x720, `plume.loom` with the quad scaled and the camera untouched:**
+
+| quad | forward | smoke coverage |
+|---|---|---|
+| 8 m (authored) | 0.429 ms | 6.8% |
+| 14 m | 0.577 ms | 19.5% |
+| 22 m | 0.755 ms | 36.4% |
+| 34 m | 0.810 ms | 69.0% |
+
+**Ten times the coverage costs 1.9x the forward pass.** The march early-outs on transmittance, so
+once the column is opaque the remaining steps are skipped. Extrapolated to a full screen of smoke:
+roughly **0.85-0.9 ms**, not the ~2.8 ms D15 carried forward from the build report.
+
+**So the cost model does not change shape after all.** D15 said smoke was "the first effect priced
+by screen coverage rather than population" and flagged that CLAUDE.md's timing numbers would read
+as misleadingly cheap beside it. That was the right worry from the data available; it is wrong on
+measurement. Walking a camera into a plume roughly doubles the forward pass. It does not blow the
+budget.
+
+### D21 — I reported a timing number four times for a frame with no plume in it
+
+**This is the most embarrassing entry here and the most useful.**
+
+`plume.loom` emits its smoke as a single long-lived particle. Rendered **without `--sim`, the
+particle has not been emitted and the frame contains no plume at all** — just the fire bar and the
+wall. Its golden row is `("plume", ..., &["--sim", "200"])`, and I did not read it.
+
+Four consequences, in order:
+
+1. A camera "inside the plume" that was actually pointed at empty sky — 0.164 ms.
+2. A second camera placement, also missing it.
+3. A 40 m quad that I concluded made the plume *vanish*, and nearly wrote up as a bug in the
+   marched volume. It had never been there.
+4. A size sweep whose four rows were **identical to the last digit**, which I correctly read as
+   suspicious — and the baseline matched them, because my crop was pure sky as well.
+
+**And it invalidates a number I told the human.** I reported "0.371 ms at the authored camera,
+confirming the builder's 0.35 ms". That frame had no smoke in it. The real figure with `--sim 200`
+is **0.779 ms** — more than double — of which the smoke is about 0.41 ms.
+
+**What actually caught it, every time, was opening the image.** The numbers were internally
+consistent and plausible at each step; four of them agreeing to the last digit is what finally
+made me look at the crop rather than the value. CLAUDE.md's standing warning is that a metric
+which frames a scene automatically will stop containing its subject and then reward whatever
+removes it fastest. The same hazard applies to a metric a *person* aims by hand, and I hit it four
+times in one afternoon on one number.
+
+**The rule I would write for the next person:** before any measurement of a particle effect, check
+the scene's `SCENES`/`GOLDEN` row for `--sim`. A scene whose subject is a particle is empty at
+tick zero, and every downstream number is then a measurement of the sky.
+
 ## Routine calls, logged for completeness
 
 ### D4 — Subagents no longer run `cargo xtask` gates

@@ -145,12 +145,12 @@ and density evolve smoothly. **No popping, no swimming.**
 
 ## What is still not measured
 
-- **Smoke's cost under coverage.** 0.371 ms at `plume`'s authored camera at 1080p, confirmed. The
-  full-screen figure remains an extrapolation. Two attempts to place a camera inside the plume
-  produced frames that **did not contain the plume** — the first read 0.164 ms, which would have
-  been reported as "smoke is cheap under coverage" had the image not been looked at. That is the
-  metric-without-its-subject failure this repo documents, and it is why the number is still
-  missing rather than wrong. It needs a purpose-built scene, not a camera nudge.
+- ~~Smoke's cost under coverage~~ — **now measured, see D20/D21.** At 1280x720, ten times the
+  screen coverage costs 1.9x the forward pass (0.429 ms at 6.8% to 0.810 ms at 69%), because the
+  march early-outs on transmittance. A full screen of smoke is ~0.85-0.9 ms, not the ~2.8 ms
+  previously carried. **The authored camera costs 0.779 ms, not the 0.371 ms reported earlier** —
+  that figure was measured without `--sim`, and `plume` emits one long-lived particle, so the
+  frame contained no plume at all.
 - **Reproducibility on other hardware.** `cargo xtask repeat` proves byte-identity on this
   RTX 4090. The concern it was built for — that additive-blend order-independence is not
   *guaranteed* across GPUs — cannot be settled by any gate on one machine.
