@@ -123,9 +123,16 @@ first anyway, because you asked for milestone 1 and everything in the report han
 difference (0.61 s against 5.55 s for `--sim 600`). So the pool exists because a scene needs it,
 which is the condition the gate was asking for.
 
-**Confidence: high**, with one caveat I have not closed: `cargo xtask repeat` has been run by
-hand on the new scene only. The other 31 golden scenes are unproven under it, and it is entirely
-possible a pre-existing scene fails the new check. I am running it.
+**Confidence: high**, and the caveat is now closed. I ran `cargo xtask repeat` across all 32
+golden scenes: **every one reproduces byte for byte across three fresh processes.** No
+pre-existing scene fails the new check, which was the open risk. All five gates pass on the
+pool — clippy, 46 test binaries, 32 golden images, 56 scene runs with zero validation messages,
+and the new repeat gate — with the determinism hashes unmoved.
+
+**What that does not prove:** reproducibility on *other* hardware. The original concern was that
+additive-blend order-independence is not guaranteed across GPUs, and no gate running on one
+RTX 4090 can settle that. The gate catches regressions here, which is worth having and is less
+than the question asked.
 
 ## Still owed to you, unresolved
 
