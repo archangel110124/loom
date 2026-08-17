@@ -19,12 +19,14 @@ report assumes a greenfield; this engine had already shipped several of its mile
 | **W2** | whitecaps from `fold`, with a downwind trail | ✅ verified |
 | **W3** | water reflects the scene, not only the sky | ✅ verified |
 | **W4** | smoke as a marched soot volume | ✅ verified |
-| **W5** | splash/spray from fold + submersion events | ✅ built · **`spindrift` unblessed** |
-| **W6** | interactive ripples, CPU-authoritative | ✅ built · **ADR 0046** · **`wake` unblessed** |
+| **W5** | splash/spray from fold + submersion events | ✅ verified |
+| **W6** | interactive ripples, CPU-authoritative, two-way coupled | ✅ verified · **ADR 0046** |
 | **W7** | the GPU particle pool | ✅ verified |
-| **W8** | windowed FFT detail tier | deferred behind evidence (D2) |
+| **W8** | windowed FFT detail tier | **REFUSED on evidence — D16** |
+| **fire** | the research doc §3's list | ✅ verified · items 1–3, 5 shipped with ADR 0020; item 4 landed as `Light.flicker` |
 
-Seven of eight built; W8 is deliberately gated on a measurement nobody has taken yet.
+**Everything is built and verified. W8 is refused rather than pending** — the evidence went the
+other way, see D16 and the section below.
 
 **W5 and W6 have not been through the gates.** They were built after the verification pass above,
 in a worktree that must not take the gate lock. Two golden references are missing —
@@ -46,13 +48,13 @@ subagent's word. The final state:
 |---|---|
 | `cargo clippy --workspace -- -D warnings` | clean |
 | `cargo test --workspace` | 46 binaries, zero failures |
-| `cargo xtask image` | 35 references, every diff read before blessing |
-| `cargo xtask validate` | **60 scene runs, zero validation messages** |
-| `cargo xtask repeat` | 35 scenes byte-identical across 3 processes |
+| `cargo xtask image` | 37 references, every diff read before blessing |
+| `cargo xtask validate` | **63 scene runs, zero validation messages** |
+| `cargo xtask repeat` | 37 scenes byte-identical across 3 processes |
 | `scripts/check-deps.sh` | ok |
 | determinism | `b478ea4ac2622d32` / `1c33f211d7ea9916`, unmoved all session |
 
-Scenes went 44 → 49; golden references 30 → 35.
+Scenes went 44 → 51; golden references 30 → 37.
 
 ## The ADRs this produced
 
@@ -108,14 +110,49 @@ detect an absent effect.
    a visible wave — because the grid's amplitude is centimetres against a surface whose authored
    detail is larger. Judge it on the ablation, not on the still.
 
-## What is not measured
+## W8 is refused, and here is the evidence
 
-- **Smoke's cost under coverage.** 0.35 ms at `plume`'s camera, ~2.8 ms extrapolated to full
-  screen. Nobody has walked a camera *into* a plume and looked at the frame time. This is the
-  first effect priced by screen coverage rather than by population, and the timing numbers in
-  CLAUDE.md will read as misleadingly cheap beside it (D15).
-- **Motion.** `cargo xtask flythrough` has not been run on the new water or the plume. A plume
-  that pops or swims, or foam that snaps rather than drifting, is invisible in every still above.
+D2 deferred the FFT ocean behind evidence that the Gerstner sea visibly tiles at authored
+cameras. The evidence was gathered and it points the other way.
+
+`ocean.loom` rendered from 120 m up at 42° — a wide oblique shot, because a repeat period is only
+visible when you can see several of them — **does visibly tile**: regular parallel corrugations
+reading as fabric, foam on an even grid.
+
+But `ocean.loom` does not use the engine's wave generator. It hand-authors seven waves and says
+so, because a `WaterBody` with no wave list gets **sixteen** from `loom_water::spectrum`, and a
+Pierson–Moskowitz sea has a slope of only a few degrees, which reads as too gentle for a test
+scene. **Rendered at the identical camera, the spectrum sea does not tile at all.**
+
+So the artifact is one scene's art direction, not the technique. Seven superimposed sinusoids have
+a visible beat structure however incommensurate the wavelengths — and `ocean.loom` already applies
+that mitigation and still tiles; sixteen do not. If `ocean` should look less repetitive from
+altitude, the fix is more waves in the authored set: closed-form, buoyancy-exact, no engineering.
+
+**What would reopen it:** a game camera that actually looks at the sea from height, *and* a
+spectrum sea that still tiles at it. Neither is demonstrated.
+
+## Motion is measured, and it is clean
+
+`cargo xtask flythrough` run on every scene; frame-to-frame change measured across each 16-frame
+orbit as a ratio to that scene's **own** median, because medians run from 1.55 (`smoke`) to 33.2
+(`whitecaps`) and a cross-scene comparison would say nothing.
+
+Six of seven sit at 1.0–1.6×. `plume`'s 2.4× is the only outlier and it is explained: the orbit
+carries the plume off the sky and onto a high-contrast white wall, so the metric is measuring the
+background changing behind a semi-transparent volume. Both frames were looked at — shape, position
+and density evolve smoothly. **No popping, no swimming.**
+
+## What is still not measured
+
+- **Smoke's cost under coverage.** 0.371 ms at `plume`'s authored camera at 1080p, confirmed. The
+  full-screen figure remains an extrapolation. Two attempts to place a camera inside the plume
+  produced frames that **did not contain the plume** — the first read 0.164 ms, which would have
+  been reported as "smoke is cheap under coverage" had the image not been looked at. That is the
+  metric-without-its-subject failure this repo documents, and it is why the number is still
+  missing rather than wrong. It needs a purpose-built scene, not a camera nudge.
 - **Reproducibility on other hardware.** `cargo xtask repeat` proves byte-identity on this
   RTX 4090. The concern it was built for — that additive-blend order-independence is not
   *guaranteed* across GPUs — cannot be settled by any gate on one machine.
+- **Everything a human has to look at.** No gate in this project has seen a pixel of the editor,
+  and none can judge whether the fire, the sea or the plume read as *good*.
