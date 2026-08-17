@@ -38,7 +38,13 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 51] = [
+const SCENES: [&str; 52] = [
+    // A sphere dropped into a still pool. Not in GOLDEN: it adds no rendering
+    // path, and what it is *for* — the entry, the crown, the ring — is a
+    // sequence that one still cannot hold. It earns its place here because it
+    // loads, bakes and validates the whole water stack at once, and because it
+    // is the scene that showed the impact spray source does not exist.
+    "assets/test/pool.loom",
     "assets/test/lanternhead.loom",
     // One building, composed. **In `SCENES` and not `GOLDEN`, on the stated
     // rule**: every path it draws is already covered — `ground` and

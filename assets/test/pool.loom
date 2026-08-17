@@ -1,0 +1,159 @@
+# A sphere dropped into a still pool.
+#
+# **This scene exists to be watched, not photographed.** Every other water scene
+# in the repository is judged on one still at one tick; this one is a sequence,
+# because the thing under test — a body falling, breaking the surface, throwing
+# a splash, sinking, rebounding and setting a ring travelling — only exists as a
+# progression. A single frame of it is either "sphere above water" or "sphere in
+# water" and neither is the subject.
+#
+# It exercises four systems at once and is the first scene that does:
+#
+#   - `Buoyancy`, whose pontoons decide when the sphere is wet and by how much
+#   - the `[ripples]` grid (ADR 0046), which the entry dents and which then
+#     carries the ring outward at `speed`
+#   - the submersion event, which puts a splash on the surface *above* the body
+#     rather than at its centre, and includes the wake in that height
+#   - refraction and absorption (W1), which is what makes the submerged half of
+#     the sphere look submerged rather than merely overlapped
+#
+# **The pool is dead calm on purpose.** `waves` is empty, so `sample_water`
+# returns `surface_height` everywhere and every millimetre of surface motion in
+# the sequence is the sphere's doing. `Wind` is explicitly zero for the same
+# reason — the default breeze would build a spectrum and put a real sea under
+# the experiment. `spray` is left at zero because spray is drawn from
+# `WaterSample::fold`, the crest-steepness term, and a flat pool has none: the
+# splash here is the submersion event's, not the sea's.
+#
+# The tiles are what make the ripple visible. A single-colour floor gives the
+# refraction nothing to bend, and the ring would read only as a specular
+# wobble; a grid gives it straight lines to distort, which is the oldest trick
+# there is for showing that water is water.
+
+[scene]
+format = 1
+id = "7b3e91c4-2d5a-4f18-9c06-3e8a17d4b592"
+
+[[asset]]
+key = "sphere"
+path = "sphere"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[node]]
+name = "Pool"
+
+  [node.components.Environment]
+  sun_direction = [0.30, 0.62, -0.72]
+  sun_strength = 1.25
+  sun_color = [1.0, 0.97, 0.90]
+  ambient = 0.55
+  sky_zenith = [0.14, 0.28, 0.52]
+  sky_horizon = [0.62, 0.70, 0.76]
+  fog_density = 0.002
+  fog_falloff = 0.04
+
+  # Dead calm. See the header: the only water motion here is the sphere's.
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 0.0
+  gustiness = 0.0
+  turbulence = 0.0
+
+# The tiled bed, one metre under the surface. Shallow deliberately: the whole
+# point of refraction is that you can see the bottom through the water, and at
+# four metres the absorption would swallow the tiles and there would be nothing
+# to bend.
+[[node]]
+name = "Bed"
+parent = "Pool"
+transform = { pos = [0.0, -1.0, 0.0], scale = [14.0, 0.2, 14.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.72, 0.70, 0.66]
+  roughness = 0.85
+
+[[node]]
+name = "Water"
+parent = "Pool"
+
+  [node.components.WaterBody]
+  kind = "lake"
+  surface_height = 0.0
+  density = 1000.0
+  drag = 2.0
+
+    # 16 m across at half-metre cells — 33x33 = 1,089 cells, well inside the
+    # cost ADR 0046 measured (7.2 us a tick at 2,401). The domain is anchored
+    # to this node, never the camera: ADR 0045's trap clause.
+    #
+    # `speed = 2.4` puts the ring at the pool's edge in about three seconds,
+    # which is slow enough to watch across a twenty-frame sequence and fast
+    # enough that it has visibly moved between consecutive frames.
+    # c*dt/h = 2.4/60/0.5 = 0.08 against the 0.7071 stability limit.
+    [node.components.WaterBody.ripples]
+    extent = 16.0
+    cell = 0.5
+    speed = 2.4
+    damping = 0.997
+    strength = 0.9
+
+# **The sphere.** Dropped from three metres, which is a 0.78 s fall and about
+# 7.7 m/s at the surface — fast enough that the entry is an impact rather than
+# a settling, and slow enough that the pontoons resolve it instead of tunnelling
+# through the surface in one tick.
+#
+# 260 kg/m^3 floats: it goes under on momentum, decelerates, and comes back up.
+# A sinker would give one ring and then nothing, and half the interest here is
+# the rebound.
+[[node]]
+name = "Sphere"
+parent = "Pool"
+transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.82, 0.24, 0.16]
+  roughness = 0.35
+  metallic = 0.0
+
+  [node.components.RigidBody]
+  dynamic = true
+  # A 1 m sphere is 0.524 m^3; at 260 kg/m^3 that is 136 kg.
+  mass = 136.0
+
+  [node.components.Buoyancy]
+
+# A post at the pool's edge, standing in the water. It is the fixed reference a
+# still needs: without something that does not move, a frame of a ring cannot
+# be told from a frame of a flat pool with a different specular.
+[[node]]
+name = "Post"
+parent = "Pool"
+transform = { pos = [4.5, 0.4, -2.0], scale = [0.16, 1.4, 0.16] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.30, 0.26]
+  roughness = 0.9
+
+# Low and close, because a splash is a vertical event and a high camera flattens
+# it into a ring seen from above. At 1.5 m the sphere breaks the surface roughly
+# at eye level and the crown, if there is one, is against the sky rather than
+# against the bed.
+[[node]]
+name = "Camera"
+parent = "Pool"
+transform = { pos = [0.0, 1.5, 6.5], rot_euler = [-7.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 50.0
