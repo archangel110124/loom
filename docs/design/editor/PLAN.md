@@ -1452,6 +1452,30 @@ Built:
 - **`Viewer::set_materials`** — a rebuild written as a sibling of `set_meshes`, copying its
   `device_wait_idle`-then-`reset_command_buffer` discipline and its "build the new before destroying
   the old" structure (`viewer.rs:841-876`). The minimum that makes a colour picker real.
+
+  > **Correction, found while reading the source rather than while writing the code: a rebuild is
+  > not unconditionally safe, and for a colour picker it is not needed at all.**
+  >
+  > `Materials::new` sizes its descriptor set layout from the texture count —
+  > `descriptor_count(slots)` at `material.rs:160-166`, `slots = textures.len().max(1)`. Two
+  > descriptor set layouts are pipeline-compatible only when *identically defined*, and a different
+  > `descriptor_count` is not identically defined. So a rebuild that changes the **texture set**
+  > invalidates every pipeline built against the old layout, and binding the new set is a validation
+  > error rather than a wrong pixel. The plan's one-line "rebuild as a sibling of `set_meshes`" does
+  > not cover that, and `set_meshes` is not a precedent for it: meshes live in buffers reached by
+  > device address, which have no descriptor and therefore no compatibility rule.
+  >
+  > **So the operation splits, and the split follows what the inspector actually does:**
+  >
+  > 1. **A value changed, the texture set did not** — every colour swatch, every scalar, i.e. all of
+  >    Stage 1. This needs no descriptor work and no rebuild: rewrite the material buffer's contents
+  >    and nothing else. Cheapest correct thing, and it cannot desynchronise a pipeline.
+  > 2. **The texture set changed** — assigning an `albedo_map`, which is Stage 4's asset picker. This
+  >    needs the full rebuild *plus* pipeline recreation, and it should be built when the feature
+  >    that needs it is, with the validation layers watching.
+  >
+  > Stage 1 builds (1) only, and the name should say so. Building (2) speculatively is exactly the
+  > shape of thing this plan cuts elsewhere.
 - **The inspector**: a recursive schema walk following `$ref` through `$defs` with
   `loom_reflect`'s existing `resolve` (never a second walker); string editing; enum dropdowns via
   the `oneOf`+`const` spelling `loom_reflect/src/lib.rs:233-258` already parses; `[f32;3]` colour
