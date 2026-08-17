@@ -1507,6 +1507,7 @@ dependencies = [
 name = "loom_water"
 version = "0.0.0"
 dependencies = [
+ "loom_field",
  "loom_scene",
  "loom_voxel",
 ]

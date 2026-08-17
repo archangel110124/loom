@@ -11,6 +11,10 @@ publish.workspace = true
 # whatever generates the shader.
 [dependencies]
 loom_scene = { version = "0.0.0", path = "../loom_scene" }
+# The frozen integer hash, for the spray's cell and slot jitter. ADR 0006: noise
+# lives in `loom_field` and is never taken from a crate, because a crate bump
+# must not be able to move a hash that is in a golden image.
+loom_field = { version = "0.0.0", path = "../loom_field" }
 
 # **Tests only.** W6's depth comes from `loom_voxel::heightfield`, and the
 # agreement test compiles that crate's Slang half beside this one's so the two
