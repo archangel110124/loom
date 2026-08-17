@@ -12,3 +12,7 @@ render.png
 
 # Worktrees live inside the repo but are separate checkouts, never content.
 .claude/worktrees/
+
+# `loom render --frames` writes telemetry beside its output, so a relative
+# `--out` lands one of these at the repo root. Harmless, and not content.
+telemetry.csv
