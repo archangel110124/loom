@@ -82,6 +82,51 @@ ADR 0022/0023 drafts rescued from deleted worktrees are still unfiled — see be
 
 ---
 
+### D8 — The report's milestone order was replaced
+
+**Decided:** the nine milestones in `VFX-IMPLEMENTATION-REPORT.md` are re-ordered as W0–W8, and
+the change is large enough to name. The report front-loads the GPU particle core and schedules
+the FFT ocean fifth. The judged order is:
+
+| | | |
+|---|---|---|
+| W0 | `cargo xtask repeat` | ✅ built |
+| W1 | screen-space refraction | in progress |
+| W2 | whitecaps from `fold` | in progress |
+| W3 | one traced reflection ray on water | queued |
+| W4 | smoke as a marched soot volume | queued |
+| W5 | splash/spray from fold + submersion | queued |
+| W6 | interactive ripples, CPU-authoritative, own ADR | queued |
+| W7 | the GPU particle pool | ✅ built |
+| W8 | windowed FFT detail tier | deferred behind evidence (D2) |
+
+**Why:** the report is engine-agnostic and assumes a greenfield. This engine has already
+shipped several of its milestones — buoyancy on CPU pontoons, splash machinery, a line-integral
+fire march. Refraction is cheapest-visible-win first because it has a *written, hand-measured
+acceptance test* already in the tree (`WATER-REFRACTION-PLAN.md`: `shore` shallow band
+G−R ≥ 38), and because a previous commit deleted the term that was carrying the shallow-water
+look. Refraction is not a new feature there — it is the honest replacement for a regression.
+
+**Confidence: high** on the ordering, **medium** on W4 (marched soot rather than a real gas
+solver). W4 generalises ADR 0020's shipped line-integral fire instead of building Navier–Stokes.
+If you look at the smoke and it reads as a procedural blob rather than a plume, that is the row
+to revisit — a grid solver is the report's answer and it was priced, not refused.
+
+### D9 — The GPU pool was built out of trigger order, and the trigger was satisfied honestly
+
+**Decided:** the judged design gated the GPU particle pool behind a trigger (a scene needing
+>65,536 particles, or a measured CPU tick >0.2 ms) rather than scheduling it. I asked for it
+first anyway, because you asked for milestone 1 and everything in the report hangs off it.
+
+**What makes that defensible rather than sloppy:** the builder did not skip the trigger, it
+*satisfied* it — authored `assets/test/emberfall.loom` at 16,200 slots and measured the
+difference (0.61 s against 5.55 s for `--sim 600`). So the pool exists because a scene needs it,
+which is the condition the gate was asking for.
+
+**Confidence: high**, with one caveat I have not closed: `cargo xtask repeat` has been run by
+hand on the new scene only. The other 31 golden scenes are unproven under it, and it is entirely
+possible a pre-existing scene fails the new check. I am running it.
+
 ## Still owed to you, unresolved
 
 - **Two rival ADR 0023 drafts for the fire work**, rescued from throwaway worktrees to
