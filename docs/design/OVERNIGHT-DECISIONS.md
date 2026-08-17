@@ -165,6 +165,49 @@ plume and looks at the frame time. Flagging it because it is the first time the 
 model changes shape, and the existing `LOOM_GPU_TIMING` numbers in CLAUDE.md will read as
 misleadingly cheap next to it.
 
+### D16 — W8 (the FFT ocean) is REFUSED on evidence, not deferred
+
+**This supersedes D2.** D2 deferred the FFT tier behind evidence that the Gerstner sea visibly
+tiles at authored cameras. I went and got the evidence, and it says the opposite of what everyone
+assumed.
+
+**What I did.** Rendered `ocean.loom` from 120 m up at 42° — a wide oblique shot, because a
+repeat period is only visible when you can see several of them, and no authored camera in the
+repo looks at the sea that way. The sea **visibly tiles**: regular parallel corrugations across
+the upper quadrants, reading as fabric rather than water, with foam on a suspiciously even grid.
+
+That looked like W8's justification. It is not, and the reason is the interesting part.
+
+**`ocean.loom` does not use the engine's wave generator.** It authors seven waves by hand and
+says so, with the reason: a `WaterBody` with no wave list gets **sixteen** waves from
+`loom_water::spectrum`, whose significant wave height matches the published fully-developed
+relation and which is pinned by `the_waves_are_derived_from_the_scene_s_wind`. `ocean` opts out
+because a Pierson–Moskowitz sea has a slope of only a few degrees at any wind speed, and reads
+as too gentle for a test scene.
+
+**So I rendered the engine's default path at the same camera. It does not tile.** The regular
+ridge pattern is simply absent. It is flatter — which is the slope complaint the scene comment
+already makes — but there is no repetition to see.
+
+**Conclusion: the tiling is an artifact of one test scene's art direction, not of the Gerstner
+technique.** Seven superimposed sinusoids have a visible beat structure however incommensurate
+you make the wavelengths, and `ocean.loom` already applies that mitigation ("no common factor
+between the wavelengths") and still tiles. Sixteen do not.
+
+**Recommendation: do not build W8.** If `ocean` should look less repetitive from a wide camera,
+the fix is **more waves in the authored set**, keeping the steepness that made someone hand-author
+it in the first place. That is a scene edit: closed-form, CPU-evaluable, buoyancy stays exact,
+zero engineering, no ADR, and no new determinism exposure.
+
+**Confidence: high on the measurement, medium on the recommendation.** The measurement is
+reproducible in two renders. What I cannot judge for you is whether a spectrum sea with *more
+authored steepness* still reads well — that is an art call, and it is the only thing standing
+between here and closing W8 permanently. The scratch scenes are in `$CLAUDE_JOB_DIR/tmp/`
+(`zz_ocean_high`, `zz_ocean_spectrum`) if you want to look at both.
+
+**What would reopen it:** a game camera that actually looks at the sea from altitude, *and* a
+spectrum sea that still tiles at it. Neither is demonstrated.
+
 ## Routine calls, logged for completeness
 
 ### D4 — Subagents no longer run `cargo xtask` gates
