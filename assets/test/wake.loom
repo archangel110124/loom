@@ -1,0 +1,170 @@
+# Two-way coupling, and the assertion that proves it — W6, ADR 0046.
+#
+#     loom sim assets/test/wake.loom --ticks 600 \
+#         --assert "Harbour/Buoy.bob > 0.02" \
+#         --assert "Harbour/Buoy.y < 1.5" --assert "Harbour/Buoy.y > -1.5"
+#
+# **The buoy never touches the crate and never touches a wave.** The water is
+# authored dead flat — no `waves`, so `sample_water` returns the still surface
+# at every point and every instant — and the wind is calm, so the spectrum has
+# nothing to build a sea from either. On this scene the *only* thing that can
+# move the buoy vertically is the ripple grid.
+#
+# So `Harbour/Buoy.bob` is a direct measurement of two-way coupling: the crate
+# is dropped in six metres away, the ripple grid records the dent its pontoons
+# made, the wave equation carries that ring outward at 3 m/s, and the buoy's
+# pontoons read the ring back through `sample_water` and are lifted by it.
+# **Measured at 600 ticks: 0.0339 m of travel with the `[ripples]` table,
+# 0.0000035 m without it** — four orders of magnitude, so the threshold is not
+# a close call. Delete the table and the assertion fails, which is what makes
+# it an assertion rather than a description.
+#
+# **And it decays, which is the property that took two goes to get.** Over the
+# last 300 ticks of progressively longer runs: 0.0339 m at 10 s, 0.0056 at 30 s,
+# 0.00015 at 60 s, 4.5e-8 at 120 s. The first two implementations of the
+# coupling did not — one settled into a 6.85 m limit cycle and the other reached
+# `NaN` inside a minute, and *both* looked like a lively buoy rather than an
+# unstable simulation. `RippleGrid::push` carries the post-mortem. Run this
+# scene long and watch `bob` fall: a two-way coupling that adds energy is the
+# failure mode, and a short run cannot see it.
+#
+# **This scene's determinism hash is its own.** It is new, so nothing in the
+# repository moves; a scene that *gains* ripples moves its hash and the re-pin
+# belongs in the commit that gains them. Every existing scene authors no
+# `ripples` table, `WaterBody::ripples` is `Option` and defaults to absent, and
+# the grid is not built at all when it is — so `Sim::float` does exactly what
+# it did before this feature existed, instruction for instruction.
+#
+# **The Courant condition is why `speed` is 3.0 and not 30.0.** At `cell = 0.5`
+# and the 1/60 s fixed step the limit is `c ≤ 0.7071 × 0.5 × 60 = 21.2 m/s`.
+# Author 30 and `loom validate` refuses the file with all four numbers in the
+# message. That refusal is the point: the explicit stencil does not degrade
+# above the limit, it reaches infinity inside a second and takes the crate, the
+# buoy and every hash with it.
+#
+# **The domain is anchored to this node**, which is at the origin, so it covers
+# x,z ∈ [-12, 12]. Not to the camera — a force that depended on where the eye
+# was would make `loom render --sim N` and `loom run` compute different physics,
+# which is ADR 0045's trap clause and the single easiest way to get W6 wrong.
+
+[scene]
+format = 1
+id = "7b3e5a10-49cd-4f22-8e6b-1d09a7c35b84"
+
+[[node]]
+name = "Harbour"
+
+  [node.components.Environment]
+  sun_direction = [0.35, 0.55, -0.76]
+  sun_strength = 1.3
+  sun_color = [1.0, 0.96, 0.88]
+  ambient = 0.5
+  sky_zenith = [0.12, 0.25, 0.48]
+  sky_horizon = [0.58, 0.66, 0.73]
+  fog_density = 0.004
+  fog_falloff = 0.05
+
+  # **Dead calm, and that is load-bearing.** With no `Wind` the wave spectrum
+  # is built from the default breeze, which would put a real sea under both
+  # bodies and make `bob` measure the swell rather than the wake. Explicitly
+  # zero, so the only water motion in this scene is the one under test.
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 0.0
+  gustiness = 0.0
+  turbulence = 0.0
+
+[[node]]
+name = "Water"
+parent = "Harbour"
+
+  # A millpond. `waves` is empty on purpose: `sample_water` then returns
+  # `surface_height` everywhere, so anything the buoy does is the ripple grid.
+  [node.components.WaterBody]
+  kind = "lake"
+  surface_height = 0.0
+  density = 1000.0
+  drag = 2.0
+
+    # 24 m across at half-metre samples — 49x49 = 2,401 cells, the same
+    # spacing as the water mesh's finest ring, so a ripple this grid resolves
+    # is a ripple the surface has vertices for.
+    #
+    # **Measured cost: 7.2 µs a tick**, over 18,000 ticks against the same
+    # scene with the table removed (0.15 s against 0.02 s). That is 0.04% of a
+    # 16.7 ms frame, spent on the CPU inside the fixed step beside rapier. It
+    # is linear in the cell count: at the 65,536-cell cap it is 167 µs, which
+    # is 1% of a frame, and that is the number an author widening `extent`
+    # should have in mind.
+    [node.components.WaterBody.ripples]
+    extent = 24.0
+    cell = 0.5
+    # c*dt/h = 3.0/60/0.5 = 0.1, against the 0.7071 limit. Room to raise it to
+    # 21.2 before the file is refused.
+    speed = 3.0
+    damping = 0.995
+    strength = 0.4
+
+[[node]]
+name = "Crate"
+parent = "Harbour"
+transform = { pos = [0.0, 5.0, 0.0], scale = [0.6, 0.6, 0.6] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.42, 0.3, 0.18]
+  roughness = 0.8
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 518.0
+
+  [node.components.Buoyancy]
+
+# **The instrument.** Small, light and six metres away — outside anything the
+# crate touches, and far enough that the ring takes two seconds to arrive,
+# which is what makes the arrival visible in a tick log rather than
+# simultaneous with the entry.
+[[node]]
+name = "Buoy"
+parent = "Harbour"
+transform = { pos = [6.0, 0.0, 0.0], scale = [0.3, 0.3, 0.3] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.25, 0.15]
+  roughness = 0.6
+
+  [node.components.RigidBody]
+  dynamic = true
+  # 0.6 m cube at 210 kg/m³ — floats high, so a few centimetres of ripple is a
+  # large fraction of its waterline rather than a rounding error.
+  mass = 45.0
+
+  [node.components.Buoyancy]
+
+# A fixed silhouette. A still cannot tell a floating buoy from one resting on
+# an invisible floor, which is the same reason `water_crate.loom` has a post.
+[[node]]
+name = "Post"
+parent = "Harbour"
+transform = { pos = [-3.0, 0.7, -4.0], scale = [0.2, 3.0, 0.2] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.2, 0.16, 0.12]
+  roughness = 0.85
+
+[[node]]
+name = "Camera"
+parent = "Harbour"
+transform = { pos = [3.0, 2.2, 9.0], rot_euler = [-11.0, 12.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

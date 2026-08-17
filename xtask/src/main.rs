@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 50] = [
+const SCENES: [&str; 51] = [
     "assets/test/lanternhead.loom",
     // One building, composed. **In `SCENES` and not `GOLDEN`, on the stated
     // rule**: every path it draws is already covered — `ground` and
@@ -164,6 +164,19 @@ const SCENES: [&str; 50] = [
     // only drawn against it, so it is the only one whose `render --sim` runs
     // the buoyancy solver at all.
     "assets/test/water_crate.loom",
+    // The interactive ripple grid — ADR 0046. **In `SCENES` and deliberately
+    // not in `GOLDEN` yet**, on the stated rule: it adds no *rendering* path.
+    // The grid feeds a force and nothing uploads it, so what it changes is the
+    // buoyancy solver and `loom sim --assert`, neither of which a still image
+    // can see. It earns a `GOLDEN` row on the commit that gives it a vertex
+    // shader to displace, and not before — a reference blessed now would
+    // record a picture the feature does not touch.
+    //
+    // It is here rather than nowhere because it is the only scene that runs
+    // `RippleGrid::step` at all, so a `--sim` render is where a panic, a NaN
+    // reaching the transform, or a validation message from the buoyant bodies
+    // would surface.
+    "assets/test/wake.loom",
     // The only scene where water meets land: a depth grid uploaded over buffer
     // device address, a shoreline discard, and waves attenuating in the
     // shallows — none of which `ocean` draws a pixel of.

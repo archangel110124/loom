@@ -1559,11 +1559,23 @@ pub struct Ripples {
     /// boundary for the rest of the run.
     #[schemars(range(min = 0.5, max = 1.0))]
     pub damping: f32,
-    /// Metres of displacement injected per m/s of a body's vertical motion.
+    /// Fraction of a body's vertical motion **relative to the water** that the
+    /// water takes each tick. Dimensionless.
     ///
-    /// The coupling constant, and the only one an author tunes for look. It
-    /// scales the wake without touching stability — the Courant condition
-    /// bounds `speed` and nothing else.
+    /// The coupling constant, and the only one an author tunes for look. `1.0`
+    /// is water that instantly matches the body; `0.0` is a body that slides
+    /// through without making a wave.
+    ///
+    /// **Relative, and per tick, for reasons that were measured rather than
+    /// designed** — see `loom_water::ripples::RippleGrid::push`. Coupling to
+    /// the body's *absolute* velocity makes a self-excited oscillator, because
+    /// a floating body reads the grid at the same point it pushes it; and
+    /// injecting a displacement rather than a velocity fraction makes the
+    /// constant a `1/dt` amplifier. Both failed as a lively-looking buoy
+    /// rather than as an obvious instability.
+    ///
+    /// It does not touch stability — the Courant condition bounds `speed`, and
+    /// only `speed`.
     #[schemars(range(min = 0.0, max = 2.0))]
     pub strength: f32,
 }
@@ -1616,7 +1628,10 @@ impl Default for Ripples {
             // body rather than outrunning it.
             speed: 3.0,
             damping: 0.995,
-            strength: 0.06,
+            // The water takes a little under half a body's relative motion per
+            // tick. Measured on `wake.loom`: a wake that lifts a buoy six
+            // metres away by three centimetres and is gone in a minute.
+            strength: 0.4,
         }
     }
 }

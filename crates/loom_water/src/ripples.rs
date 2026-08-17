@@ -166,14 +166,49 @@ impl RippleGrid {
     /// which is what makes a bounded domain safe rather than a hidden clamp at
     /// its edge.
     ///
+    /// **This is the delicate line of the whole feature, and it took two
+    /// measured failures to get right.** Both are recorded because the symptom
+    /// of each was "the buoy is lively", not "the simulation is unstable".
+    ///
+    /// *First failure — the body reads the dent it just made.* Injecting the
+    /// body's own velocity makes a self-excited oscillator: the dent under a
+    /// floating body lowers its own buoyancy, so it falls further, so the dent
+    /// deepens. On `assets/test/wake.loom` the buoy reached a **6.85 m** limit
+    /// cycle. It *saturated* rather than diverging, which is worse — a limit
+    /// cycle reads as an energetic float rather than as a bug — and dropping
+    /// `strength` twelve-fold only lowered the plateau to 1.15 m. Subtracting
+    /// the surface's own vertical velocity closes that loop: once the water is
+    /// already moving with the body, nothing further is injected. It is also
+    /// what the physics says, since a body makes waves by moving *through*
+    /// water.
+    ///
+    /// *Second failure — the units.* Adding `Δ` to `now` alone does not add a
+    /// displacement, it adds an *impulse*: the scheme infers velocity from
+    /// `now − prev`, so the surface acquires `Δ/dt`. At 60 Hz that made
+    /// `strength = 0.06` a **3.6× velocity amplifier** — the water was handed
+    /// three and a half times the body's own speed every tick, and the first
+    /// fix alone still ended in a `NaN` inside a minute of simulated time.
+    /// Multiplying by the timestep is what makes `strength` mean what its
+    /// documentation claims: the fraction of the body's relative motion the
+    /// water takes each tick, dimensionless and bounded, stable by
+    /// construction below 1.
+    ///
+    /// With both fixes, `wake.loom`'s buoy peak-to-peak travel over the last
+    /// 300 ticks decays monotonically — **0.034 m at 10 s, 0.0056 at 30 s,
+    /// 1.5e-4 at 60 s, 4.5e-8 at 120 s** — against 3.5e-6 with the grid
+    /// removed entirely. A wake that arrives, lifts the buoy three centimetres
+    /// and dies.
+    ///
     /// `ponytail:` velocity coupling only — a body moving *horizontally* at
     /// constant depth injects nothing, so there is no bow wave. Entries,
     /// bobbing and rocking all work, which is what the two-way coupling
     /// demonstration needs. A real bow wave wants displacement-driven
-    /// injection, and that closes a feedback loop with the body's own buoyancy
-    /// which needs its own measurement before it ships.
+    /// injection, which closes the same feedback loop this comment is about
+    /// and would need the same relative-velocity treatment plus its own
+    /// measurement.
     pub fn push(&mut self, at: [f32; 3], vertical_velocity: f32, scale: f32) {
-        let amount = vertical_velocity * self.strength * scale;
+        let relative = vertical_velocity - self.vertical_velocity_at(at[0], at[2]);
+        let amount = relative * TICK_SECONDS * self.strength * scale;
         if amount == 0.0 {
             return;
         }
@@ -186,6 +221,26 @@ impl RippleGrid {
                 self.now[(z0 + dz) * side + x0 + dx] += amount * wx * wz;
             }
         }
+    }
+
+    /// How fast the surface itself is moving up at a world point, m/s.
+    ///
+    /// The scheme is second order in time and keeps last tick's field, so this
+    /// is a backward difference over the fixed step and costs no extra state.
+    /// Zero outside the domain. Only [`Self::push`] reads it — see there for
+    /// why the coupling needs it.
+    #[must_use]
+    fn vertical_velocity_at(&self, x: f32, z: f32) -> f32 {
+        let Some((x0, z0, fx, fz)) = self.locate(x, z) else {
+            return 0.0;
+        };
+        let side = self.side;
+        let at = |ix: usize, iz: usize| {
+            (self.now[iz * side + ix] - self.prev[iz * side + ix]) / TICK_SECONDS
+        };
+        let top = at(x0, z0) + (at(x0 + 1, z0) - at(x0, z0)) * fx;
+        let bottom = at(x0, z0 + 1) + (at(x0 + 1, z0 + 1) - at(x0, z0 + 1)) * fx;
+        top + (bottom - top) * fz
     }
 
     /// `(height, ∂h/∂x, ∂h/∂z)` at a world point — what [`crate::sample_water`]
