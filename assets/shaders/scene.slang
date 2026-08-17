@@ -4729,11 +4729,49 @@ static const float WATER_FOAM_FINE_RANGE = 40.0;
 /// protect. The distance fade is computed from `length(toEye)` instead, which
 /// is an analytic footprint and correct in a killed quad.
 static const float WATER_DETAIL_SCALE = 1.6;
-/// How hard the ripples tilt the surface. A slope, so 0.45 is roughly a
-/// 24-degree local tilt at the steepest point of a ripple — capillary waves are
-/// genuinely that steep for their length, which is why they catch so much light
-/// for so little amplitude.
-static const float WATER_DETAIL_STRENGTH = 0.30;
+
+// -- How hard the capillary detail tilts the surface — W11 -------------------
+//
+// **It used to be one number, `WATER_DETAIL_STRENGTH = 0.30`, applied
+// unconditionally to every water surface in every scene.** That is a real
+// wind speed — Cox–Munk inverts 0.30 to about 17 m/s, a near gale — so
+// `pool.loom`, whose header calls it dead calm and authors `Wind.speed = 0`,
+// was drawn covered in chop. The human asked for "the ripples from the wind,
+// integrated with what we have"; the integration is that the term which was
+// already painting wind texture starts *hearing* the wind, rather than a
+// second ripple system growing beside it.
+//
+// **Presentation only.** Nothing here reaches a force, a script or `loom sim
+// --assert` — the force-path ripple grid (ADR 0046) is untouched and its
+// hashes do not move. See ADR 0052 for why wind forcing was kept off the grid.
+
+/// Cox & Munk (1954), from sun-glitter photographs of the Pacific: the
+/// mean-square slope of a wind-roughened surface is `0.003 + 5.12e-3 · U`, with
+/// `U` the wind speed in m/s. The detail term is an RMS *slope*, so it is the
+/// square root of that — and the two constants are the intercept and the
+/// gradient of that line rather than anything anybody tuned.
+///
+/// The intercept is what a dead calm gets: 0.055, a fifth of the old constant,
+/// which is the difference between a millpond and a lake in a breeze. It is
+/// deliberately not zero — real water is never a mirror, and a perfectly
+/// specular pool reads as glass rather than as water.
+static const float WATER_DETAIL_CALM = 0.003;
+static const float WATER_DETAIL_COXMUNK = 5.12e-3;
+/// Fraction of the wind speed the pattern is carried downwind at.
+///
+/// **The floor is gone and that is the point.** This was `max(speed, 0.5)`, so
+/// a scene at `speed = 0` still had its chop crawling across the surface at
+/// 3 cm/s — the single most visible reason a calm pool did not read as calm.
+///
+/// **Global, while the amplitude above is per pixel**, and the asymmetry is
+/// deliberate. Advecting the noise domain by a *spatially varying* velocity
+/// makes `xz - drift(xz)·t` fold once `t·∂drift` approaches the gust
+/// wavelength — a smear that appears only after minutes of `loom run` and that
+/// no still could catch. The pattern is a metre across and the gust field is a
+/// hundred, so a per-pixel drift would buy nothing visible for that risk. The
+/// gusts still travel: `wind_at` carries its own `t`, so the patches move
+/// because the wind field does.
+static const float WATER_DETAIL_DRIFT = 0.03;
 
 // -- The interactive wake, made visible — W10 -------------------------------
 //
@@ -5195,17 +5233,28 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         // the term the wake should suppress. Local, so nothing outside the
         // domain moves at all.
         detailFade *= 1.0 - RIPPLE_CALM * ripCalm;
-        float2 dw = normalize(push.environment[0].wind.xy + float2(1e-4, 0.0));
+        // **The wind, read where this pixel is — W11.** `grassWind` is the
+        // same generated `wind_at` the grass bends to and the particles drift
+        // in, so a gust that runs across a meadow runs across the pond beside
+        // it, out of one field rather than two that can disagree (ADR 0006).
+        // Per pixel and not from `wind.z`, because a global scalar can only
+        // roughen the whole sea in unison: a cat's paw is a *patch* of
+        // roughened water travelling downwind, and that is the thing being
+        // asked for.
+        float4 windv = push.environment[0].wind;
+        float2 dw = normalize(windv.xy + float2(1e-4, 0.0));
+        float local = length(grassWind(in.worldPos).xz);
+        float detailStrength = sqrt(WATER_DETAIL_CALM + WATER_DETAIL_COXMUNK * local);
         float2 g = waterDetailSlope(
             in.worldPos.xz,
             push.environment[0].weather.z,
-            dw * max(push.environment[0].wind.z, 0.5) * 0.06);
+            dw * windv.z * WATER_DETAIL_DRIFT);
         // A slope subtracted from the normal's horizontal components — the
         // standard perturbation. The surface stays exactly where the vertex
         // shader put it; only how it catches light changes, which is what keeps
         // this out of the "second opinion about the drawn surface" that the
         // rejected wave-set version would have been.
-        normal = normalize(normal - float3(g.x, 0.0, g.y) * WATER_DETAIL_STRENGTH * detailFade);
+        normal = normalize(normal - float3(g.x, 0.0, g.y) * detailStrength * detailFade);
     }
 
     // Schlick against water's f0. This is the whole trick: face-on you see
