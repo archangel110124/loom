@@ -642,8 +642,12 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // on the crates being visible.
     let mut fired = Vec::new();
     let mut splashed = Vec::new();
+    // The ripple grid that run left behind, copied out before the runner is
+    // dropped. A still of `--sim 300` has to show the surface the simulation
+    // arrived at, not the flat one it started from (ADR 0046 §7).
+    let mut ripples = None;
     if let Some(ticks) = flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()) {
-        (fired, splashed) = simulate_physics(&mut world, base, ticks);
+        (fired, splashed, ripples) = simulate_physics(&mut world, base, ticks);
     }
 
     let mut objects = world_to_objects(&world, &library, &material_library);
@@ -780,6 +784,16 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         if let Some(field) = terrain.as_ref() {
             renderer
                 .set_terrain(&field.height, field.origin, field.spacing, field.side)
+                .map_err(|e| e.to_string())?;
+        }
+        // **The wake, now seen as well as felt** — ADR 0046 §7. Unlike the bed
+        // above this is simulation state, so it is whatever the `--sim` run
+        // left in the grid. A scene with no `[ripples]` table uploads nothing
+        // and the shader's every lookup returns zero, which is the plain
+        // Gerstner surface bit for bit.
+        if let Some((heights, origin, cell, side)) = ripples.as_ref() {
+            renderer
+                .set_ripples(heights, *origin, *cell, *side)
                 .map_err(|e| e.to_string())?;
         }
         renderer.set_rain(rain_drops);
@@ -1019,6 +1033,17 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                         particles::gpu_emitter(&world),
                         u64::from(sim_ticks) + elapsed,
                     );
+                    // **The ripple grid this runner has stepped to**, re-read
+                    // every frame because it is the one thing here that is
+                    // stepped state on the CPU. This is what makes a wake
+                    // *travel* across a sequence rather than sitting still —
+                    // the exact class of artifact a still cannot show, which is
+                    // why the fly-through exists.
+                    if let Some(grid) = runner.ripples() {
+                        renderer
+                            .set_ripples(grid.heights(), grid.origin(), grid.cell(), grid.side())
+                            .map_err(|e| e.to_string())?;
+                    }
 
                     renderer
                         .render_to_png(
@@ -2849,19 +2874,33 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
 /// When and where something the particles have to replay happened.
 type Happenings = Vec<(u64, [f32; 3])>;
 
+/// A copy of the ripple grid in the four arguments `Renderer::set_ripples`
+/// takes: the heights, the world xz of the corner, the cell size, the side.
+///
+/// Owned rather than borrowed because the simulation that made it is dropped
+/// before the frame is drawn — and one direction only, which is the whole of
+/// ADR 0045 clause 2 as it applies here: nothing comes back.
+type RippleUpload = (Vec<f32>, [f32; 2], f32, usize);
+
+/// The grid as an upload, or `None` for water that authors no ripples.
+fn ripple_upload(grid: Option<&loom_water::ripples::RippleGrid>) -> Option<RippleUpload> {
+    grid.map(|g| (g.heights().to_vec(), g.origin(), g.cell(), g.side()))
+}
+
 fn simulate_physics(
     world: &mut World,
     base: &std::path::Path,
     ticks: u32,
-) -> (Happenings, Happenings) {
+) -> (Happenings, Happenings, Option<RippleUpload>) {
     let mut runner = match play::Runner::new(world, base) {
         Ok(r) => r,
         Err(json) => {
             log::warn(format!("scripts did not load, running physics only: {json}"));
             let mut sim = play::Sim::new(world);
             sim.step(ticks);
+            let ripples = ripple_upload(sim.ripples());
             sim.write_back(world);
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), ripples);
         }
     };
     for tick in 1..=u64::from(ticks) {
@@ -2870,7 +2909,7 @@ fn simulate_physics(
             break;
         }
     }
-    (runner.fired(), runner.splashed())
+    (runner.fired(), runner.splashed(), ripple_upload(runner.ripples()))
 }
 
 /// Every value given for a repeated flag.

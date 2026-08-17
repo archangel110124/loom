@@ -680,12 +680,18 @@ impl Sim {
         }
     }
 
-    // **No `ripples()` accessor yet, deliberately.** The renderer's upload is
-    // the next W6 slice; an accessor with no caller is dead code clippy
-    // refuses, and this project would rather have the refusal than the
-    // `#[allow]`. When it lands it is read-only and one direction only — the
-    // CPU grid is authoritative and the GPU never writes one back (ADR 0045
-    // clause 2).
+    /// This tick's ripple grid, for whoever is drawing the surface.
+    ///
+    /// **Read-only, and one direction only.** The CPU grid is authoritative;
+    /// the renderer is handed a copy of where it got to and never writes one
+    /// back (ADR 0045 clause 2, ADR 0046 §4). `None` is water with no ripples,
+    /// which is every scene authored before ADR 0046, and the shader then
+    /// returns zero from every lookup — the plain Gerstner surface, bit for
+    /// bit.
+    #[must_use]
+    pub fn ripples(&self) -> Option<&loom_water::ripples::RippleGrid> {
+        self.ripples.as_ref()
+    }
 
     /// Water entries and exits since the last call, stamped with `tick`.
     ///
@@ -1302,6 +1308,15 @@ impl Runner {
             .filter(|e| e.kind == SUBMERGED)
             .map(|e| (e.tick, e.at))
             .collect()
+    }
+
+    /// This tick's ripple grid, for whoever is drawing the surface.
+    ///
+    /// Straight through to [`Sim::ripples`] — the simulation owns the grid and
+    /// the renderer is only shown it.
+    #[must_use]
+    pub fn ripples(&self) -> Option<&loom_water::ripples::RippleGrid> {
+        self.physics.ripples()
     }
 
     /// A runner that steps physics and runs nothing, for when the scripts

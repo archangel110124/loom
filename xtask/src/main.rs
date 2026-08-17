@@ -164,18 +164,19 @@ const SCENES: [&str; 51] = [
     // only drawn against it, so it is the only one whose `render --sim` runs
     // the buoyancy solver at all.
     "assets/test/water_crate.loom",
-    // The interactive ripple grid — ADR 0046. **In `SCENES` and deliberately
-    // not in `GOLDEN` yet**, on the stated rule: it adds no *rendering* path.
-    // The grid feeds a force and nothing uploads it, so what it changes is the
-    // buoyancy solver and `loom sim --assert`, neither of which a still image
-    // can see. It earns a `GOLDEN` row on the commit that gives it a vertex
-    // shader to displace, and not before — a reference blessed now would
-    // record a picture the feature does not touch.
+    // The interactive ripple grid — ADR 0046. **Now in `GOLDEN` too**, on the
+    // same rule that kept it out: it earns a reference on the commit that
+    // uploads the grid to the surface, because that is the commit where it
+    // becomes a rendering path. Until then the wake was felt by the buoyancy
+    // solver and by `loom sim --assert` and drew nothing, so a reference would
+    // have recorded a picture the feature does not touch.
     //
-    // It is here rather than nowhere because it is the only scene that runs
-    // `RippleGrid::step` at all, so a `--sim` render is where a panic, a NaN
-    // reaching the transform, or a validation message from the buoyant bodies
-    // would surface.
+    // The `SCENES` row still earns its place, and for the opposite reason:
+    // this pass renders with **no `--sim`**, so no grid is ever built and
+    // nothing is uploaded. It is therefore the scene that proves a file
+    // carrying a `[ripples]` table still parses, passes `check_ripples` and
+    // draws its plain Gerstner surface — the null branch, which the `GOLDEN`
+    // row at `--sim 200` never takes.
     "assets/test/wake.loom",
     // The only scene where water meets land: a depth grid uploaded over buffer
     // device address, a shoreline discard, and waves attenuating in the
@@ -293,7 +294,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 36] = [
+const GOLDEN: [(&str, &str, &[&str]); 37] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -559,6 +560,20 @@ const GOLDEN: [(&str, &str, &[&str]); 36] = [
     // sea. Blessed BEFORE the forward pass is split, deliberately: a reference
     // blessed afterwards proves nothing about whether the split changed it.
     ("water_crate", "assets/test/water_crate.loom", &["--sim", "90"]),
+    // **The interactive ripple grid displacing the surface — W6, ADR 0046.**
+    // The only reference where the water's height comes from *stepped CPU
+    // state* rather than from a closed form in `(x, z, t)`, so it is the only
+    // one that can catch the upload being dropped. That is not hypothetical:
+    // `Renderer::set_ripples` and the shader's `loom_ripple_at` both shipped a
+    // commit before anything called them, and the wake was felt by buoyancy
+    // and by `--assert` while the surface drew dead flat.
+    //
+    // `--sim 200` is chosen from the diff against a build with the upload
+    // removed: 2.8% of pixels at tick 45 (the buoy alone, settling), **26.6%
+    // at 200** with the crate's ring across the whole domain, 4.8% at 900 once
+    // it has decayed. 200 is where the feature is largest on screen, which is
+    // what a reference wants.
+    ("wake", "assets/test/wake.loom", &["--sim", "200"]),
     // **Particles at the waterline.** Water and the blended particle pass are
     // drawn in the same block today; anything that splits that block moves
     // their ordering, and this is the only reference that would show it.
