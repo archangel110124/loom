@@ -646,8 +646,11 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // dropped. A still of `--sim 300` has to show the surface the simulation
     // arrived at, not the flat one it started from (ADR 0046 §7).
     let mut ripples = None;
+    // Kept alive for the fly-through, which continues this run rather than
+    // starting a second one. See `simulate_physics`.
+    let mut warmed = None;
     if let Some(ticks) = flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()) {
-        (fired, splashed, ripples) = simulate_physics(&mut world, base, ticks);
+        (fired, splashed, ripples, warmed) = simulate_physics(&mut world, base, ticks);
     }
 
     let mut objects = world_to_objects(&world, &library, &material_library);
@@ -834,8 +837,18 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
             // only the world misses anything that depends on view angle, which
             // is most aliasing.
             Some(count) => {
-                let mut runner = play::Runner::new(&world, base)?;
-                let mut elapsed = 0_u64;
+                // **The warm run, continued — never restarted.** A fresh runner
+                // here starts every body from rest with an empty ripple grid,
+                // because `write_back` writes a pose and nothing else. See
+                // `simulate_physics` for what that cost.
+                let mut runner = match warmed {
+                    Some(r) => r,
+                    None => play::Runner::new(&world, base)?,
+                };
+                // One clock, counted from where the warm run left off, so an
+                // event's tick means the same thing to the runner, the rain
+                // simulation and the particles.
+                let mut elapsed = u64::from(sim_ticks);
                 // **Stale frames removed before the first write.** A capture
                 // that renders 9 frames into a directory holding 20 leaves 11
                 // from the previous run, and a contact sheet built from the
@@ -899,11 +912,15 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     // `campfire` at `--sim 200`: a single still has 476 flame
                     // pixels above the ground line and frame 0 of a sequence has
                     // **0**, at the same tick.
+                    //
+                    // **`elapsed` is now that one clock**, counted from the warm
+                    // run rather than from zero beside it, so the runner's own
+                    // event ticks need no shifting to line up with it.
                     #[allow(clippy::cast_possible_truncation)]
                     let particles = particles::simulate(
                         &world,
                         &weather,
-                        Some((u64::from(sim_ticks) + elapsed) as u32),
+                        Some(elapsed as u32),
                         &runner.fired(),
                         &runner.splashed(),
                     );
@@ -1028,10 +1045,10 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     // `--sim` first, then the frames: the same clock
                     // `moment` above is built from, so the rain and the wind
                     // cannot be looking at different instants.
-                    renderer.set_rain_tick(u64::from(sim_ticks) + elapsed);
+                    renderer.set_rain_tick(elapsed);
                     renderer.set_gpu_emitter(
                         particles::gpu_emitter(&world),
-                        u64::from(sim_ticks) + elapsed,
+                        elapsed,
                     );
                     // **The ripple grid this runner has stepped to**, re-read
                     // every frame because it is the one thing here that is
@@ -2931,11 +2948,27 @@ fn ripple_upload(grid: Option<&loom_water::ripples::RippleGrid>) -> Option<Rippl
     grid.map(|g| (g.heights().to_vec(), g.origin(), g.cell(), g.side()))
 }
 
+/// **The runner comes back out**, and that is not tidiness.
+///
+/// A fly-through used to warm the world here, drop this runner, and build a
+/// *fresh* one from the written-back scene. `write_back` writes a pose and
+/// nothing else, so the second runner started every body **from rest**, with an
+/// empty event log and an empty ripple grid — the simulation was not continued,
+/// it was restarted from a snapshot of where things happened to be.
+///
+/// Measured on `pool.loom`, a sphere dropped three metres: at `--sim 41` the
+/// still has it moving at about 7 m/s, and frame 0 of `--frames 20 --step 1`
+/// from the same tick has it hanging at that height with zero velocity and
+/// falling from there. **The entry the scene exists to show happened eleven
+/// ticks late and at a third of the speed**, and the crown W9 adds first
+/// appeared at tick 55 in the sequence against 44 in the still. Every
+/// frame-to-frame number ever taken on that sequence — including the profile in
+/// this work's own brief — measured the wrong drop.
 fn simulate_physics(
     world: &mut World,
     base: &std::path::Path,
     ticks: u32,
-) -> (Happenings, Happenings, Option<RippleUpload>) {
+) -> (Happenings, Vec<play::Splash>, Option<RippleUpload>, Option<play::Runner>) {
     let mut runner = match play::Runner::new(world, base) {
         Ok(r) => r,
         Err(json) => {
@@ -2944,7 +2977,7 @@ fn simulate_physics(
             sim.step(ticks);
             let ripples = ripple_upload(sim.ripples());
             sim.write_back(world);
-            return (Vec::new(), Vec::new(), ripples);
+            return (Vec::new(), Vec::new(), ripples, None);
         }
     };
     for tick in 1..=u64::from(ticks) {
@@ -2953,7 +2986,8 @@ fn simulate_physics(
             break;
         }
     }
-    (runner.fired(), runner.splashed(), ripple_upload(runner.ripples()))
+    let happened = (runner.fired(), runner.splashed(), ripple_upload(runner.ripples()));
+    (happened.0, happened.1, happened.2, Some(runner))
 }
 
 /// Every value given for a repeated flag.

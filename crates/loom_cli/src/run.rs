@@ -1698,10 +1698,8 @@ impl App {
             .iter()
             .map(|(tick, at)| (*tick, *at))
             .collect();
-        let wet: Vec<(u64, [f32; 3])> = splashed[self.splashes_seen.min(splashed.len())..]
-            .iter()
-            .map(|(tick, at)| (*tick, *at))
-            .collect();
+        let wet: Vec<crate::play::Splash> =
+            splashed[self.splashes_seen.min(splashed.len())..].to_vec();
         self.detonations_seen = fired.len();
         self.splashes_seen = splashed.len();
 
@@ -1712,8 +1710,8 @@ impl App {
             for (tick, at) in fresh {
                 plumes.detonate(world, at, tick);
             }
-            for (tick, at) in wet {
-                plumes.splash(world, at, tick);
+            for splash in wet {
+                plumes.splash(world, splash);
             }
         }
     }

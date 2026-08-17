@@ -52,6 +52,18 @@ const DAMAGE: &str = "damage";
 /// `splash` event to keep in step with this one.
 const SUBMERGED: &str = "submerged";
 const SURFACED: &str = "surfaced";
+/// The surface broke — W9.
+///
+/// **Not the same event as [`SUBMERGED`], and that is the point.** That pair is
+/// a hysteretic gameplay state: 0.6 of the body under before it counts as gone
+/// in, 0.3 before it counts as out. A splash is the instant the surface parts,
+/// which is the first tick any of the body is wet, and the two can be many
+/// ticks apart or — on `assets/test/pool.loom` — never both happen at all. See
+/// the trigger in `Sim::float` for the measurement.
+///
+/// Carries `speed` (positive downward) and `radius` (the body's waterplane
+/// radius), which are what size the crown.
+const SPLASH: &str = "splash";
 
 /// How far a character's aim ray reaches, in metres.
 ///
@@ -146,6 +158,40 @@ struct Floating {
     /// Scratch, reused every tick so the solver's input does not allocate
     /// inside the fixed step.
     states: Vec<loom_water::buoyancy::PontoonState>,
+}
+
+/// One entry into the water, for whoever is drawing the splash.
+///
+/// Four numbers rather than two because the crown is sized by the impact: the
+/// speed sets the droplets' velocity and how many bands there are, and the
+/// radius is where the ring starts. Read off the event log, never tracked
+/// beside it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Splash {
+    pub tick: u64,
+    /// On the surface above the body — the wake included.
+    pub at: [f32; 3],
+    /// How hard it hit, m/s, positive downward.
+    pub speed: f32,
+    /// The waterplane radius of the thing that hit. See `waterplane_radius`.
+    pub radius: f32,
+}
+
+/// How wide the hole this body punched in the surface is, in metres.
+///
+/// The furthest a pontoon reaches from the splash point, plus its own radius —
+/// the pontoons are where the buoyancy solver thinks the body is, so they are
+/// the right answer to "how much water did it move aside" without this file
+/// needing to know what shape the collider is.
+///
+/// Never zero: a body with no pontoons at all still made a splash, and a crown
+/// of radius zero is a spout out of a point.
+fn waterplane_radius(floating: &Floating, at: [f32; 3]) -> f32 {
+    floating
+        .states
+        .iter()
+        .map(|s| (s.at[0] - at[0]).hypot(s.at[2] - at[2]) + s.radius)
+        .fold(0.05_f32, f32::max)
 }
 
 /// One character, its velocity, and its script's memory.
@@ -612,6 +658,22 @@ impl Sim {
                 }
             }
 
+            // **The surface broke this tick.** An edge on the fraction itself,
+            // not on the hysteretic flag below — and the difference is the
+            // whole of W9.
+            //
+            // The flag needs 0.6 of the body under before it counts as *gone
+            // in*, which is the right question for gameplay and the wrong one
+            // for a splash: the splash happens when the surface parts, which is
+            // the first instant any of the body is wet. On `pool.loom` the two
+            // are not even the same event — a sphere dropped from three metres
+            // fires no `submerged` at all, because **the ripple grid's own dent
+            // tracks the body down and holds the local fraction under the
+            // threshold**. Measured: `events.submerged` is 0 with the `[ripples]`
+            // table, >= 1 with it stripped, and >= 1 again at `strength = 0`.
+            // So the hysteresis flag can never be the splash trigger, and no
+            // amount of tuning either number would have made it one.
+            let entered = floating.fraction <= 0.0 && wrench.submerged > 0.0;
             // **The same number that scaled the force is the gameplay state.**
             // Not a second query: a body cannot be pushed up by water it is not
             // in, and this is what "one answer" means in practice.
@@ -623,7 +685,11 @@ impl Sim {
                 floating.submersion.enter,
                 floating.submersion.exit,
             );
-            if floating.submerged != was {
+            let crossed = floating.submerged != was;
+            if entered || crossed {
+                // Hoisted above both consumers, so the splash and the
+                // submersion event cannot disagree about where the surface was.
+                //
                 // Where the splash goes: on the surface above the body, not at
                 // its centre, which by then is under the water.
                 let ground = self
@@ -651,22 +717,47 @@ impl Sim {
                     .physics
                     .velocity_at_point(floating.body, position)
                     .unwrap_or([0.0; 3]);
-                self.water_events.push(loom_script::Event {
-                    // Stamped on the way out; see `drain_water_events`.
-                    tick: 0,
-                    kind: if floating.submerged { SUBMERGED } else { SURFACED }.to_owned(),
-                    at: [position[0], surface.height, position[2]],
-                    node: floating.path.clone(),
-                    values: [
-                        ("fraction".to_owned(), f64::from(wrench.submerged)),
-                        // Positive going down, so a splash can be scaled by how
-                        // hard the thing hit rather than by which way it was
-                        // travelling.
-                        ("speed".to_owned(), f64::from(-velocity[1])),
-                    ]
-                    .into_iter()
-                    .collect(),
-                });
+                let at = [position[0], surface.height, position[2]];
+                // Positive going down, so a splash can be scaled by how hard the
+                // thing hit rather than by which way it was travelling.
+                let speed = -velocity[1];
+                if crossed {
+                    self.water_events.push(loom_script::Event {
+                        // Stamped on the way out; see `drain_water_events`.
+                        tick: 0,
+                        kind: if floating.submerged { SUBMERGED } else { SURFACED }.to_owned(),
+                        at,
+                        node: floating.path.clone(),
+                        values: [
+                            ("fraction".to_owned(), f64::from(wrench.submerged)),
+                            ("speed".to_owned(), f64::from(speed)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    });
+                }
+                // **The gate is what makes an entry an impact.** Without it a
+                // body authored already floating splashes on its first solve:
+                // `fraction` starts at zero, so the first time the solver runs
+                // reads as a crossing. It is also barely moving, which is
+                // exactly what tells the two apart.
+                if entered && speed >= loom_water::spray::SPLASH_MIN_SPEED {
+                    self.water_events.push(loom_script::Event {
+                        tick: 0,
+                        kind: SPLASH.to_owned(),
+                        at,
+                        node: floating.path.clone(),
+                        values: [
+                            ("speed".to_owned(), f64::from(speed)),
+                            // The waterplane radius of the thing that hit, so
+                            // the crown can rise from the rim of the cavity
+                            // rather than from the body's centre.
+                            ("radius".to_owned(), f64::from(waterplane_radius(floating, position))),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    });
+                }
             }
         }
 
@@ -1294,19 +1385,29 @@ impl Runner {
             .collect()
     }
 
-    /// Where and when something went into the water, for the splash.
+    /// Every entry into the water, for the splash.
     ///
     /// Derived from the log for the same reason `fired` is: one record of what
     /// happened. A splash tracked alongside the event that caused it is two
     /// records that can disagree, and the one the human sees would be the one
     /// no assertion checks.
+    ///
+    /// **Reads [`SPLASH`], not [`SUBMERGED`]** — see that constant. It used to
+    /// read the hysteretic one, which is why `pool.loom` drew nothing at all.
     #[must_use]
-    pub fn splashed(&self) -> Vec<(u64, [f32; 3])> {
+    pub fn splashed(&self) -> Vec<Splash> {
         self.events
             .all()
             .iter()
-            .filter(|e| e.kind == SUBMERGED)
-            .map(|e| (e.tick, e.at))
+            .filter(|e| e.kind == SPLASH)
+            .map(|e| Splash {
+                tick: e.tick,
+                at: e.at,
+                #[allow(clippy::cast_possible_truncation)]
+                speed: e.values.get("speed").copied().unwrap_or(0.0) as f32,
+                #[allow(clippy::cast_possible_truncation)]
+                radius: e.values.get("radius").copied().unwrap_or(0.0) as f32,
+            })
             .collect()
     }
 
@@ -1609,9 +1710,9 @@ impl Play {
         self.runner.fired()
     }
 
-    /// Where and when something went into the water.
+    /// Every entry into the water.
     #[must_use]
-    pub fn splashed(&self) -> Vec<(u64, [f32; 3])> {
+    pub fn splashed(&self) -> Vec<Splash> {
         self.runner.splashed()
     }
 

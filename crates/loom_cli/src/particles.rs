@@ -197,13 +197,23 @@ pub(crate) struct Plumes {
     wind: loom_field::wind::Wind,
     /// Seconds simulated, from the tick count — never a clock (never-do #8).
     elapsed: f32,
+    /// Impact crowns in the air, each with the `elapsed` it was thrown at.
+    ///
+    /// Not systems: a crown is a closed form, so there is nothing to step. They
+    /// are dropped from here when the last band has landed.
+    crowns: Vec<(crate::play::Splash, f32)>,
 }
 
 impl Plumes {
     /// Build from a world and warm every plume to its settled population.
     pub(crate) fn new(world: &World, wind: loom_field::wind::Wind) -> Self {
-        let mut plumes =
-            Self { live: Vec::new(), instances: Vec::new(), wind, elapsed: 0.0 };
+        let mut plumes = Self {
+            live: Vec::new(),
+            instances: Vec::new(),
+            wind,
+            elapsed: 0.0,
+            crowns: Vec::new(),
+        };
         for entity in world.entities() {
             let (Some(component), Some(global)) = (world.emitter(*entity), world.global_transform(*entity))
             else {
@@ -266,8 +276,21 @@ impl Plumes {
     /// Salted by *where* as well as *when*, so two things going in on the same
     /// tick throw different spray. The salt is the same one the headless path
     /// uses, or the window and `loom render --sim` would draw two splashes.
-    pub(crate) fn splash(&mut self, world: &World, at: [f32; 3], tick: u64) {
-        self.play(splash_template(world), at, salt(tick, at));
+    ///
+    /// **A scene that authors no splash gets the impact crown**, kept here
+    /// beside the live systems rather than replayed: the window has no tick to
+    /// replay from, only elapsed time. Same default and same closed form as
+    /// `simulate`'s branch — W9's rule is that both paths reach it, because the
+    /// last time a water effect was wired on one path only (`set_ripples`,
+    /// ADR 0046 §7) the window drew flat water over a wake it was nevertheless
+    /// feeling.
+    pub(crate) fn splash(&mut self, world: &World, splash: crate::play::Splash) {
+        let template = splash_template(world);
+        if template.is_empty() {
+            self.crowns.push((splash, self.elapsed));
+        } else {
+            self.play(template, splash.at, salt(splash.tick, splash.at));
+        }
     }
 
     fn play(&mut self, template: Vec<(loom_particles::Emitter, Visual)>, at: [f32; 3], seed_salt: u64) {
@@ -312,6 +335,28 @@ impl Plumes {
                 self.instances.push(instance(p, &live.visual));
             }
         }
+        // Crowns are re-evaluated rather than stepped, and a crown that has
+        // landed returns nothing — which is also how it is retired, so there is
+        // no second opinion about when it ends.
+        let visual = default_droplet();
+        let instances = &mut self.instances;
+        let elapsed = self.elapsed;
+        self.crowns.retain(|(splash, born)| {
+            let drops = loom_water::spray::crown(
+                splash.at,
+                splash.speed,
+                splash.radius,
+                elapsed - born,
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    salt(splash.tick, splash.at) as u32
+                },
+            );
+            for d in &drops {
+                instances.push(drawn_at(d.position, d.fraction, &visual));
+            }
+            !drops.is_empty()
+        });
     }
 }
 
@@ -502,19 +547,7 @@ pub(crate) fn spray(
     if droplets.is_empty() {
         return Vec::new();
     }
-    let visual = splash_template(world).into_iter().next().map_or(
-        Visual {
-            // Small, shrinking, and white going to a pale blue-grey: a droplet
-            // is not a smoke puff and the default `Visual` is one.
-            size: [0.16, 0.05],
-            color_start: [0.92, 0.96, 1.0],
-            color_end: [0.70, 0.80, 0.88],
-            alpha: [0.9, 0.0],
-            additive: false,
-            flame: false,
-        },
-        |(_, visual)| visual,
-    );
+    let visual = droplet_visual(world);
     droplets
         .iter()
         .map(|d| drawn_at(d.position, d.fraction, &visual))
@@ -536,7 +569,7 @@ pub(crate) fn simulate(
     wind: &loom_field::wind::Wind,
     ticks: Option<u32>,
     fired: &[(u64, [f32; 3])],
-    splashed: &[(u64, [f32; 3])],
+    splashed: &[crate::play::Splash],
 ) -> Vec<ParticleInstance> {
     let mut out = Vec::new();
 
@@ -576,41 +609,114 @@ pub(crate) fn simulate(
         }
     }
 
-    // Explosions a script set off during the run, and splashes the water
-    // raised, replayed from the tick each happened on. Deterministic for the
-    // same reason everything else here is: the tick is data, not a clock
-    // reading, so `--sim N` means one thing.
-    for (template, events, by_place) in [
-        // Blasts are salted by tick alone, which is what they have always been
-        // salted by. Two set off on the same tick therefore look alike — a real
-        // if minor limitation, left as it is because changing it would move
-        // every committed reference image of a scene that fires one, which is a
-        // bigger claim than this step is making.
-        (blast_template(world), fired, false),
-        (splash_template(world), splashed, true),
-    ] {
+    // Explosions a script set off during the run, replayed from the tick each
+    // happened on. Deterministic for the same reason everything else here is:
+    // the tick is data, not a clock reading, so `--sim N` means one thing.
+    //
+    // Blasts are salted by tick alone, which is what they have always been
+    // salted by. Two set off on the same tick therefore look alike — a real if
+    // minor limitation, left as it is because changing it would move every
+    // committed reference image of a scene that fires one, which is a bigger
+    // claim than this step is making.
+    let blast = blast_template(world);
+    for (at_tick, at) in fired {
+        for (emitter, visual) in &blast {
+            let mut system = loom_particles::System::new(emitter.seed ^ *at_tick);
+            for _ in 0..elapsed_since(ticks, *at_tick) {
+                system.step_in_wind(DT, emitter, *at, &|p| wind.at(p, 0.0));
+            }
+            for p in system.particles() {
+                out.push(instance(p, visual));
+            }
+        }
+    }
+
+    // And the splashes the water raised, salted by place as well as tick so two
+    // things going in together do not throw one burst drawn twice.
+    let template = splash_template(world);
+    for s in splashed {
+        let steps = elapsed_since(ticks, s.tick);
         if template.is_empty() {
+            out.extend(crown(world, s, age_of(steps)));
             continue;
         }
-        for (at_tick, at) in events {
-            #[allow(clippy::cast_possible_truncation)]
-            let elapsed = ticks
-                .unwrap_or(0)
-                .saturating_sub(u32::try_from(*at_tick).unwrap_or(u32::MAX));
-            let seed_salt = if by_place { salt(*at_tick, *at) } else { *at_tick };
-            for (emitter, visual) in &template {
-                let mut system = loom_particles::System::new(emitter.seed ^ seed_salt);
-                for _ in 0..elapsed {
-                    system.step_in_wind(DT, emitter, *at, &|p| wind.at(p, 0.0));
-                }
-                for p in system.particles() {
-                    out.push(instance(p, visual));
-                }
+        for (emitter, visual) in &template {
+            let mut system = loom_particles::System::new(emitter.seed ^ salt(s.tick, s.at));
+            for _ in 0..steps {
+                system.step_in_wind(DT, emitter, s.at, &|p| wind.at(p, 0.0));
+            }
+            for p in system.particles() {
+                out.push(instance(p, visual));
             }
         }
     }
 
     out
+}
+
+/// Ticks between an event and the frame being drawn.
+fn elapsed_since(ticks: Option<u32>, at_tick: u64) -> u32 {
+    #[allow(clippy::cast_possible_truncation)]
+    ticks.unwrap_or(0).saturating_sub(u32::try_from(at_tick).unwrap_or(u32::MAX))
+}
+
+/// Seconds, from a tick count. Never a clock (never-do #8).
+fn age_of(steps: u32) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    {
+        steps as f32 * DT
+    }
+}
+
+/// **The impact crown, which is what a scene that authors no splash gets.**
+///
+/// The same arrangement `spray` above has and for the same reason: the
+/// authoring switch for a splash is the entry itself, and a feature that
+/// silently needs a second component to produce anything is the no-op class
+/// this project keeps finding. `pool.loom` authors no `ParticleEmitter` under
+/// its water and is the scene W9 exists for.
+///
+/// Closed form — a function of the event and how old it is — so it needs no
+/// system, no state and no `repeat` gate, exactly like the crest spray.
+fn crown(world: &World, splash: &crate::play::Splash, age: f32) -> Vec<ParticleInstance> {
+    let visual = droplet_visual(world);
+    loom_water::spray::crown(
+        splash.at,
+        splash.speed,
+        splash.radius,
+        age,
+        // The same salt the authored template is seeded by, narrowed: two
+        // bodies going in on one tick turn their rings differently.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            salt(splash.tick, splash.at) as u32
+        },
+    )
+    .iter()
+    .map(|d| drawn_at(d.position, d.fraction, &visual))
+    .collect()
+}
+
+/// What a droplet looks like: the water's own splash when the scene authors
+/// one, and a small pale droplet when it does not.
+///
+/// Shared by the crest spray and the impact crown, because they are the same
+/// substance and an author who described one meant both.
+fn droplet_visual(world: &World) -> Visual {
+    splash_template(world).into_iter().next().map_or_else(default_droplet, |(_, visual)| visual)
+}
+
+/// Small, shrinking, and white going to a pale blue-grey: a droplet is not a
+/// smoke puff and the default `Visual` is one.
+fn default_droplet() -> Visual {
+    Visual {
+        size: [0.16, 0.05],
+        color_start: [0.92, 0.96, 1.0],
+        color_end: [0.70, 0.80, 0.88],
+        alpha: [0.9, 0.0],
+        additive: false,
+        flame: false,
+    }
 }
 
 /// The seed offset for one played template, from the tick and place it played.
@@ -634,6 +740,11 @@ mod tests {
     /// Still air, so a test measures the emitter rather than the weather.
     fn calm() -> loom_field::wind::Wind {
         loom_field::wind::Wind::new(0.0, 0.0, 0.0, 0.0, 1.0)
+    }
+
+    /// One entry into the water, hard enough to throw a full crown.
+    fn entry(tick: u64, at: [f32; 3]) -> crate::play::Splash {
+        crate::play::Splash { tick, at, speed: 7.1, radius: 0.5 }
     }
 
     use super::*;
@@ -758,7 +869,7 @@ mod tests {
     fn a_splash_plays_where_something_entered_the_water() {
         let at = [3.0, 0.4, -6.0];
 
-        let out = simulate(&sea(), &calm(), Some(20), &[], &[(10, at)]);
+        let out = simulate(&sea(), &calm(), Some(20), &[], &[entry(10, at)]);
 
         assert!(!out.is_empty(), "entering the water produced no splash");
         for p in &out {
@@ -783,7 +894,7 @@ mod tests {
         // world position — would separate the two splashes on its own, and the
         // test would pass with the seed ignored entirely.
         let spray = |at: [f32; 3]| {
-            simulate(&world, &calm(), Some(11), &[], &[(10, at)])
+            simulate(&world, &calm(), Some(11), &[], &[entry(10, at)])
                 .iter()
                 .map(|p| {
                     [

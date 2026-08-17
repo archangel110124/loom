@@ -39,11 +39,10 @@ use std::process::{Command, Output};
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
 const SCENES: [&str; 52] = [
-    // A sphere dropped into a still pool. Not in GOLDEN: it adds no rendering
-    // path, and what it is *for* — the entry, the crown, the ring — is a
-    // sequence that one still cannot hold. It earns its place here because it
-    // loads, bakes and validates the whole water stack at once, and because it
-    // is the scene that showed the impact spray source does not exist.
+    // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
+    // crown it threw nothing of is a rendering path, and the reasoning is on
+    // that row. It still earns this line for what it always did — it loads,
+    // bakes and validates the whole water stack at once.
     "assets/test/pool.loom",
     "assets/test/lanternhead.loom",
     // One building, composed. **In `SCENES` and not `GOLDEN`, on the stated
@@ -300,7 +299,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 37] = [
+const GOLDEN: [(&str, &str, &[&str]); 38] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -584,6 +583,24 @@ const GOLDEN: [(&str, &str, &[&str]); 37] = [
     // drawn in the same block today; anything that splits that block moves
     // their ordering, and this is the only reference that would show it.
     ("splash", "assets/test/splash.loom", &["--sim", "120"]),
+    // **The impact crown — W9, and the reason this scene's exclusion is now
+    // obsolete.** `pool.loom` sat in `SCENES` and not here on the stated
+    // grounds that it "adds no rendering path" and that what it is *for* is a
+    // sequence a still cannot hold. The first half was true only because the
+    // feature did not exist: `loom_water::spray` was driven entirely by
+    // `WaterSample::fold`, so a dead-calm pool threw nothing and there was
+    // nothing in the still to protect.
+    //
+    // There is now. The crown is the only closed-form particle population
+    // driven by an *event* rather than by a field — `spindrift` above covers
+    // the crest half and cannot cover this one — and it is what would catch
+    // the trigger silently reverting to the hysteretic `submerged` flag, which
+    // on this scene never fires at all.
+    //
+    // `--sim 50` is six ticks after the entry at 44, with all three bands up
+    // and the sphere at the waterline: 24 droplets, against 0 at tick 41 and 0
+    // by tick 80 [measured].
+    ("pool", "assets/test/pool.loom", &["--sim", "50"]),
     // **The spray off a breaking crest — W5.** The population is a closed form
     // over `WaterSample::fold`, the same quantity the whitecaps are painted
     // from, so this reference is what would catch the two drifting apart:
