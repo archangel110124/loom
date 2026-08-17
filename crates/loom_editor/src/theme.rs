@@ -1,10 +1,9 @@
 //! The one colour table, and the gamma correction that makes it true.
 //!
-//! **A token module only.** No `apply`, no `Visuals`, no spacing — those land
-//! in Stage 3. The table exists now so that the inspector, which is the
-//! largest new surface in the rework, is written against named tokens on its
-//! first line rather than against `Color32::from_rgb` literals that Stage 3
-//! would then have to find and replace by hand.
+//! The table landed a stage before [`apply`] did, deliberately: the inspector
+//! is the largest new surface in the rework, and writing it against named
+//! tokens from its first line was cheaper than finding and replacing
+//! `Color32::from_rgb` literals across it afterwards.
 //!
 //! # Why every value goes through [`tok`]
 //!
@@ -26,7 +25,7 @@
 //! `Renderer`, which never constructs a `Ui`. The check is a human running
 //! the swatch probe and sampling three squares.
 
-use loom_render::egui::Color32;
+use loom_render::egui::{self, Color32};
 
 /// Pre-warp an authored hex into the byte egui must be given.
 ///
@@ -214,10 +213,143 @@ pub fn tokens(high_contrast: bool) -> Tokens {
     }
 }
 
+
+/// One widget tier's colours, so the five of them read as a table.
+fn widget(
+    bg: Color32,
+    weak_bg: Color32,
+    bg_stroke_width: f32,
+    bg_stroke: Color32,
+    fg_stroke_width: f32,
+    fg: Color32,
+) -> egui::style::WidgetVisuals {
+    egui::style::WidgetVisuals {
+        bg_fill: bg,
+        weak_bg_fill: weak_bg,
+        bg_stroke: egui::Stroke::new(bg_stroke_width, bg_stroke),
+        fg_stroke: egui::Stroke::new(fg_stroke_width, fg),
+        corner_radius: 4.into(),
+        expansion: 0.0,
+    }
+}
+
+/// The type scale.
+///
+/// **Monospace for every numeric field**, not just for paths and console
+/// output: a proportional digit changes width as it changes value, so a
+/// scrubbed `DragValue` shimmers and a column of numbers does not line up.
+fn text_styles() -> std::collections::BTreeMap<egui::TextStyle, egui::FontId> {
+    use egui::FontFamily::{Monospace, Proportional};
+    [
+        (egui::TextStyle::Small, egui::FontId::new(11.0, Proportional)),
+        (egui::TextStyle::Body, egui::FontId::new(13.0, Proportional)),
+        // The same size as `Body` on purpose, so a button never sits a
+        // half-pixel off the label beside it.
+        (egui::TextStyle::Button, egui::FontId::new(13.0, Proportional)),
+        (egui::TextStyle::Monospace, egui::FontId::new(12.0, Monospace)),
+        (egui::TextStyle::Heading, egui::FontId::new(15.0, Proportional)),
+        (
+            egui::TextStyle::Name("Title".into()),
+            egui::FontId::new(18.0, Proportional),
+        ),
+        (
+            egui::TextStyle::Name("Display".into()),
+            egui::FontId::new(24.0, Proportional),
+        ),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// Spacing.
+///
+/// **`interact_size.y = 22.0` against egui's default 18.0 is the single change
+/// that most makes this read as an application rather than a debug overlay.**
+/// Rows get room. Everything else here is proportioned around it.
+fn spacing() -> egui::style::Spacing {
+    egui::style::Spacing {
+        item_spacing: egui::vec2(8.0, 4.0),
+        button_padding: egui::vec2(8.0, 4.0),
+        // `Margin` is `i8` in egui 0.35, not `f32`.
+        window_margin: egui::Margin::same(8),
+        menu_margin: egui::Margin::same(6),
+        indent: 14.0,
+        interact_size: egui::vec2(56.0, 22.0),
+        icon_width: 14.0,
+        icon_width_inner: 8.0,
+        icon_spacing: 6.0,
+        slider_width: 120.0,
+        ..Default::default()
+    }
+}
+
+/// Install the palette on a context.
+///
+/// **`all_styles_mut`, not `set_style`.** egui keeps a style per theme and
+/// picks between them from the `ThemePreference` it believes the system has;
+/// setting only one leaves the other in place, so the editor would flip to
+/// egui's stock light theme the moment the desktop reported a preference
+/// change. Writing both makes the theme unconditional, which is what "there is
+/// no light theme" means in code rather than in prose.
+pub fn apply(ctx: &egui::Context, t: &Tokens) {
+    ctx.all_styles_mut(|s| {
+        let v = &mut s.visuals;
+        v.dark_mode = true;
+        v.panel_fill = t.surface;
+        v.window_fill = t.raised;
+        v.extreme_bg_color = t.sunken;
+        v.code_bg_color = t.sunken;
+        v.faint_bg_color = t.raised.gamma_multiply(0.31);
+        v.hyperlink_color = t.accent;
+        v.warn_fg_color = t.warn;
+        v.error_fg_color = t.error;
+        v.weak_text_color = Some(t.text_weak);
+        v.window_stroke = egui::Stroke::new(1.0, t.line_strong);
+        v.disabled_alpha = 0.45;
+
+        v.widgets.noninteractive = widget(t.surface, t.surface, 1.0, t.line, 1.0, t.text);
+        v.widgets.inactive = widget(t.raised, t.raised, 1.0, t.line_strong, 1.0, t.text);
+        v.widgets.hovered = widget(t.hover, t.hover, 1.0, t.line_strong, 1.0, t.text_strong);
+        // **The focus ring is `accent`, never `line_strong`.** At 1.97:1 the
+        // latter fails WCAG's 3:1 for a meaningful non-text indicator, and a
+        // hairline and a focus ring are not the same kind of mark — conflating
+        // them is how a keyboard user loses the caret.
+        v.widgets.active = widget(t.press, t.press, 2.0, t.accent, 1.0, t.text_strong);
+        v.widgets.open = widget(t.press, t.press, 1.0, t.line_strong, 1.0, t.text_strong);
+
+        v.selection.bg_fill = t.accent_deep.gamma_multiply(0.35);
+        v.selection.stroke = egui::Stroke::new(1.0, t.accent);
+
+        v.button_frame = true;
+        v.striped = true;
+        // Off by default in egui, and it is what makes a slider read as a
+        // value rather than as a knob on a rail.
+        v.slider_trailing_fill = true;
+        // A tree with no rails is unreadable past two levels.
+        v.indent_has_left_vline = true;
+        v.handle_shape = egui::style::HandleShape::Rect { aspect_ratio: 0.4 };
+        v.interact_cursor = Some(egui::CursorIcon::PointingHand);
+        v.window_corner_radius = 6.into();
+        v.menu_corner_radius = 6.into();
+        v.window_shadow = egui::epaint::Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 0,
+            color: t.ground.gamma_multiply(0.63),
+        };
+
+        s.spacing = spacing();
+        s.text_styles = text_styles();
+        // Short enough to feel immediate, long enough to read as a transition
+        // rather than a jump.
+        s.animation_time = 0.12;
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DARK, HIGH_CONTRAST, Tokens, tok, tokens};
-    use loom_render::egui::Color32;
+    use loom_render::egui::{self, Color32};
 
     /// WCAG relative luminance of an **authored** (un-warped) colour.
     fn luminance(c: Color32) -> f64 {
@@ -236,6 +368,55 @@ mod tests {
         let (x, y) = (luminance(a), luminance(b));
         let (hi, lo) = if x > y { (x, y) } else { (y, x) };
         (hi + 0.05) / (lo + 0.05)
+    }
+
+
+    /// **`apply` must write *both* style variants.**
+    ///
+    /// egui keeps a style per theme and chooses between them from the
+    /// `ThemePreference` it believes the system has. `set_style` writes one, so
+    /// the editor would flip to egui's stock light theme the moment the desktop
+    /// reported a preference change — a bug that appears on somebody else's
+    /// machine and never on the author's. `all_styles_mut` writes both, and
+    /// this is what keeps it that way.
+    #[test]
+    fn the_theme_is_installed_on_every_style_variant() {
+        let ctx = egui::Context::default();
+        let t = tokens(false);
+        super::apply(&ctx, &t);
+
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let style = ctx.style_of(theme);
+            assert_eq!(
+                style.visuals.panel_fill, t.surface,
+                "{theme:?} kept egui's own panel fill"
+            );
+            assert_eq!(
+                style.spacing.interact_size.y, 22.0,
+                "{theme:?} kept egui's 18 px rows"
+            );
+            assert!(
+                style.visuals.slider_trailing_fill,
+                "{theme:?} lost the filled slider track"
+            );
+        }
+    }
+
+    /// The focus ring is `accent` and not `line_strong`, because at 1.97:1 the
+    /// latter fails WCAG's 3:1 for a meaningful non-text indicator. A hairline
+    /// and a focus ring are not the same kind of mark.
+    #[test]
+    fn the_focus_ring_clears_the_non_text_contrast_floor() {
+        let ctx = egui::Context::default();
+        let t = tokens(false);
+        super::apply(&ctx, &t);
+        let style = ctx.style_of(egui::Theme::Dark);
+
+        assert_eq!(style.visuals.widgets.active.bg_stroke.color, t.accent);
+        assert!(
+            contrast(DARK.accent, DARK.surface) >= 3.0,
+            "the focus ring must clear 3:1 against the surface it sits on"
+        );
     }
 
     /// **The doc comments state contrast ratios; this recomputes them.**

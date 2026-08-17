@@ -832,7 +832,14 @@ impl ApplicationHandler for App {
             Ok((instance, device, viewer)) => {
                 crate::log::info(format!("rendering on {}", device.name()));
                 match Ui::new(&instance, &device, &window, viewer.color_format()) {
-                    Ok(ui) => self.ui = Some(ui),
+                    Ok(ui) => {
+                        // The palette, before the first frame is laid out —
+                        // `Style` affects sizes as well as colours, so
+                        // applying it later would make frame one a different
+                        // shape from every frame after it.
+                        loom_editor::apply_theme(ui.context(), &loom_editor::tokens(false));
+                        self.ui = Some(ui);
+                    }
                     Err(e) => crate::log::error(format!("no editor UI ({e}); continuing bare")),
                 }
                 self.gpu = Some((instance, device));

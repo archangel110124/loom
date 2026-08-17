@@ -202,6 +202,15 @@ impl Ui {
         })
     }
 
+    /// The egui context, so a caller can install a theme on it.
+    ///
+    /// Read-only: `Context` is an `Arc` internally and its mutators take
+    /// `&self`, so this hands out no more authority than it looks like.
+    #[must_use]
+    pub fn context(&self) -> &egui::Context {
+        &self.context
+    }
+
     /// Feed a window event to egui.
     ///
     /// Returns `true` when egui consumed it — the caller must then **not** act
