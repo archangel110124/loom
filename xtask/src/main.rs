@@ -1216,6 +1216,16 @@ fn validate() -> std::process::ExitCode {
             // count and a scene of this size is one `chunks` edit away from
             // being eight times over budget.
             "assets/test/mountain_pass.loom",
+            // **`wake`, for the buffer the window allocates itself.** The
+            // viewer keeps its own ripple buffer and its own `set_ripples`,
+            // exactly as it does for the terrain grid `shore` is here to
+            // cover — and the two are worse than the terrain case, because
+            // this one is written *every frame* from stepped CPU state. A null
+            // or stale device address there is a fault on the first wave and
+            // no headless gate can reach it: `--frames` alone runs a paused
+            // editor, which builds no grid at all, so only `--play` takes the
+            // branch. Measured 0.735 ms/frame debug, well inside the budget.
+            "assets/test/wake.loom",
         ] {
             if !root.join(scene).exists() {
                 continue;

@@ -1282,6 +1282,23 @@ impl ApplicationHandler for App {
                     // filter measured somewhere the filter is not is the defect
                     // that cost this project a night on MSAA.
                     viewer.set_gpu_emitter(crate::particles::gpu_emitter(world), tick);
+                    // **And the ripple grid Play has stepped to** — ADR 0046
+                    // §7. Not on the tick clock above: this is the CPU's own
+                    // stepped state, so it is whatever the simulation is
+                    // holding right now, and there is nothing for the window to
+                    // re-derive. In edit mode there is no simulation and the
+                    // call is skipped, which leaves the plain Gerstner surface
+                    // every scene had before ripples existed.
+                    if let Some(grid) = self.play.as_ref().and_then(crate::play::Play::ripples)
+                        && let Err(e) = viewer.set_ripples(
+                            grid.heights(),
+                            grid.origin(),
+                            grid.cell(),
+                            grid.side(),
+                        )
+                    {
+                        crate::log::warn(format!("ripples: {e}"));
+                    }
                 }
 
                 // Everything above is the frame's CPU work: input, the

@@ -1635,6 +1635,16 @@ impl Play {
         self.runner.physics.submerged_at(at)
     }
 
+    /// This tick's ripple grid, for the window to displace the surface with.
+    ///
+    /// `None` in edit mode as well as for water with no ripples, because there
+    /// is no simulation then and so nothing has stepped a grid — which is the
+    /// same flat surface every scene had before ADR 0046.
+    #[must_use]
+    pub fn ripples(&self) -> Option<&loom_water::ripples::RippleGrid> {
+        self.runner.ripples()
+    }
+
     /// Whether a human can drive anything here.
     #[must_use]
     pub fn has_player(&self) -> bool {
