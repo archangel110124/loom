@@ -5,8 +5,13 @@
 - **Supersedes / extends:** nothing. It is the ADR ADR 0045 clause 1 said this
   work would need, because it puts new state on the force path.
 - **Applies to:** `loom_water::ripples`, `WaterBody::ripples`,
-  `PontoonState::ripple`, `sample_water`'s sixth argument, and the two load-time
-  refusals in `loom_scene::scene::check_ripples`.
+  `PontoonState::ripple`, `sample_water`'s sixth argument, the two load-time
+  refusals in `loom_scene::scene::check_ripples`, and the one-direction upload
+  `Renderer::set_ripples` / `Viewer::set_ripples`.
+- **Amended:** 2026-08-17, §6 and the first bullet of "what this does not
+  settle". The upload was written as a separate slice and had already landed
+  when this was first filed; the ADR said it had not, and it did not ratify the
+  deviation from the plan's `R16F` image. Both are corrected below.
 
 ## Context
 
@@ -113,6 +118,34 @@ displace the surface with and never writes one back.
 no-op. **Both determinism hashes are unmoved.** A scene that *gains* ripples
 moves its own hash, and that re-pin belongs in the commit that gains them.
 
+### 6. The copy the GPU gets is a float buffer at a device address, not `R16F`
+
+`VFX-IMPLEMENTATION-REPORT.md` §2.2a and the work order both say the upload is
+an `R16F` texture. It is a `float` buffer reached by buffer device address, the
+same shape `terrain_heights` beside it already had, and this ratifies that
+rather than leaving it as something the next reader discovers.
+
+An image would need a layout, a transition owned by the render graph, a sampler,
+a descriptor and a second copy of all of it in `Viewer`. A buffer needs a
+`float*` in the environment block and one `write_slice`. The shader wants
+*bilinear over four taps it fetches itself* — `loom_ripple_at` returns a height
+and two slopes and cannot take a hardware bilinear tap for the slopes anyway —
+so the one thing a sampled image would have bought is not bought. The `f32`
+costs 256 KB against 128 KB at the cap; that is the whole price.
+
+The two halves are named separately because they are separate risks: the
+buffer's contents are a *copy* and the CPU grid stays authoritative (§4), while
+the buffer's *format* is an implementation detail this paragraph now owns.
+
+### 7. The upload happens wherever the simulation is stepped
+
+Every path that steps `Sim` hands the grid to the surface: `loom render`'s
+still and its fly-through, and `loom run`'s window. The grid is the simulation's
+and the renderer is only shown it, so a path that forgets the call draws flat
+water over a wake that is nevertheless *felt* — which is the silent-no-op class
+this repository keeps finding. `wake.loom` is in `GOLDEN` for that reason and
+not because the picture is interesting.
+
 ## The two failures this cost, both of which looked like a lively buoy
 
 Recorded at length because the symptom in each case was not "unstable" and no
@@ -161,10 +194,12 @@ is the difference between it and every other number in the VFX overhaul.
 
 ## What this does not settle
 
-- **Rendering.** The GPU upload is a separate slice. Until it lands the wake is
-  *felt* and not *seen*: buoyancy, `submersion_at`, the audio listener and
-  `loom sim --assert` all read it, and the water mesh does not. That ordering is
-  deliberate — the force path is the part that needed an ADR.
+- ~~**Rendering.** The GPU upload is a separate slice.~~ **Stale, corrected
+  2026-08-17.** This was written believing the upload had not landed; the
+  shader half and `Renderer::set_ripples` were already in the tree, uncalled,
+  and the missing piece was one caller. It is now wired on all three paths —
+  see §6 and §7. The ordering the paragraph described was still the right one:
+  the force path is the part that needed an ADR, and the picture followed it.
 - **A bow wave.** The coupling is velocity-only, so a body moving horizontally
   at constant depth injects nothing. Entries, bobbing and rocking all work,
   which is what two-way coupling needed to demonstrate. Displacement-driven
