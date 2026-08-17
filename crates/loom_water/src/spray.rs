@@ -75,6 +75,17 @@ pub struct Droplet {
     pub position: [f32; 3],
     /// How far through its life it is, in `[0, 1)`. Drives the fade.
     pub fraction: f32,
+    /// How big this one is, as a multiple of what the visual says.
+    ///
+    /// **A band of a crown is one `fraction`, so without this every droplet in
+    /// it is the same size to the pixel** — which is why a still of the crown
+    /// reads as a string of manufactured beads rather than as torn water. It is
+    /// per droplet rather than per band because the beads within a band are
+    /// what line up.
+    ///
+    /// 1.0 everywhere it is not deliberately varied, so it is an exact no-op
+    /// for the crest spray and the sheet.
+    pub scale: f32,
 }
 
 /// The largest `fold` this wave set can ever reach, anywhere, ever.
@@ -229,7 +240,11 @@ fn crown_in(
             up,
             drift[1] + angle.sin() * outward,
         ];
-        out.push(Droplet { position: ballistic(base, v, age), fraction: age / SPRAY_LIFETIME });
+        out.push(Droplet {
+            position: ballistic(base, v, age),
+            fraction: age / SPRAY_LIFETIME,
+            scale: 1.0,
+        });
     }
 }
 
@@ -289,9 +304,23 @@ pub const SPLASH_UP_FRAC: f32 = 0.34;
 pub const SPLASH_OUT_FRAC: f32 = 0.22;
 
 /// Droplets per band of the crown.
-pub const SPLASH_RING: usize = 8;
+///
+/// **Raised from 8 with [`SPLASH_BANDS`], because the human asked to see more
+/// of them and count is the knob that answers that.** Size is not: at
+/// `pool.loom`'s camera a droplet is already 17 px against water at a luma of
+/// about 70, and a bigger one reads as hail rather than as spray. Lifetime is
+/// not either — it is `2·up/g` and falls out of the velocity, so buying more of
+/// it means throwing the droplets higher, which is a different splash.
+pub const SPLASH_RING: usize = 16;
 /// Bands at full strength. A marginal entry throws fewer — see [`crown`].
-pub const SPLASH_BANDS: usize = 3;
+pub const SPLASH_BANDS: usize = 4;
+
+/// How much a droplet's size may vary from its band's, either way.
+///
+/// See [`Droplet::scale`]. 0.45 is wide enough to break the necklace and narrow
+/// enough that the biggest droplet is not twice the smallest, which starts
+/// reading as two different substances.
+const SPLASH_SIZE_JITTER: f32 = 0.45;
 
 /// The crown an impact throws, `age` seconds after it happened.
 ///
@@ -357,7 +386,17 @@ pub fn crown(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec<
             // The rim. See the doc comment: this is the whole geometry.
             let base = [dir_x.mul_add(radius, at[0]), at[1], dir_z.mul_add(radius, at[2])];
             let v = [dir_x * outward, up, dir_z * outward];
-            out.push(Droplet { position: ballistic(base, v, age), fraction: age / lifetime });
+            // **Per droplet, from the same hash the ring is turned by.** A band
+            // shares one `fraction` and therefore one size, so without this the
+            // crown is a string of identical beads — see [`Droplet::scale`].
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+            let unit = ((hash(seed.wrapping_add((band * SPLASH_RING + i) as u32 + 1)) >> 8) as f32)
+                * (1.0 / 16_777_216.0);
+            out.push(Droplet {
+                position: ballistic(base, v, age),
+                fraction: age / lifetime,
+                scale: SPLASH_SIZE_JITTER.mul_add(unit.mul_add(2.0, -1.0), 1.0),
+            });
         }
     }
     out
@@ -498,6 +537,9 @@ pub fn column(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec
             out.push(Droplet {
                 position: [angle.cos().mul_add(r, at[0]), at[1] + y, angle.sin().mul_add(r, at[2])],
                 fraction: age / lifetime,
+                // Never jittered: the sheet's quads have to overlap into a
+                // surface, and a small one is a hole in it.
+                scale: 1.0,
             });
         }
     }

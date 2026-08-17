@@ -363,10 +363,10 @@ impl Plumes {
                 loom_water::spray::column(splash.at, splash.speed, splash.radius, age, seed);
             let sheet = column_visual(splash.radius);
             for d in &column {
-                instances.push(drawn_at(d.position, d.fraction, &sheet));
+                instances.push(drawn_drop(d, &sheet));
             }
             for d in &drops {
-                instances.push(drawn_at(d.position, d.fraction, &visual));
+                instances.push(drawn_drop(d, &visual));
             }
             // **Retired on the union, not on the crown.** The sheet outlives
             // the droplets — 0.72 s against 0.46 s at `pool.loom`'s entry — so
@@ -378,16 +378,23 @@ impl Plumes {
 
 /// One particle's drawable form: size and colour interpolated over its life.
 fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
-    drawn_at(p.position, p.fraction(), visual)
+    drawn_at(p.position, p.fraction(), 1.0, visual)
+}
+
+/// The same, for a droplet the water threw — those carry their own size
+/// multiplier, which is what stops a band of a crown reading as identical
+/// beads. See `loom_water::spray::Droplet::scale`.
+fn drawn_drop(d: &loom_water::spray::Droplet, visual: &Visual) -> ParticleInstance {
+    drawn_at(d.position, d.fraction, d.scale, visual)
 }
 
 /// The same, for anything that knows where it is and how old it is without
 /// being a `loom_particles::Particle` — the water's spray, which is a closed
 /// form and has no system behind it.
-fn drawn_at(position: [f32; 3], t: f32, visual: &Visual) -> ParticleInstance {
+fn drawn_at(position: [f32; 3], t: f32, scale: f32, visual: &Visual) -> ParticleInstance {
     // Smoke expands and pales as it cools and mixes with air; a plume whose
     // particles keep their birth size and colour reads as a stream of blobs.
-    let size = visual.size[0] + (visual.size[1] - visual.size[0]) * t;
+    let size = (visual.size[0] + (visual.size[1] - visual.size[0]) * t) * scale;
     let lerp = |a: f32, b: f32| a + (b - a) * t;
     // Fade in as well as out. Particles that appear at full opacity pop, and
     // the pop is at the emitter, where the eye already is.
@@ -566,7 +573,7 @@ pub(crate) fn spray(
     let visual = droplet_visual(world);
     droplets
         .iter()
-        .map(|d| drawn_at(d.position, d.fraction, &visual))
+        .map(|d| drawn_drop(d, &visual))
         .collect()
 }
 
@@ -709,12 +716,12 @@ fn crown(world: &World, splash: &crate::play::Splash, age: f32) -> Vec<ParticleI
     let mut out: Vec<ParticleInstance> =
         loom_water::spray::column(splash.at, splash.speed, splash.radius, age, seed)
             .iter()
-            .map(|d| drawn_at(d.position, d.fraction, &sheet))
+            .map(|d| drawn_drop(d, &sheet))
             .collect();
     out.extend(
         loom_water::spray::crown(splash.at, splash.speed, splash.radius, age, seed)
             .iter()
-            .map(|d| drawn_at(d.position, d.fraction, &visual)),
+            .map(|d| drawn_drop(d, &visual)),
     );
     out
 }
