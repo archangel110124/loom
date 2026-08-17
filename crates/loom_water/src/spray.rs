@@ -229,15 +229,138 @@ fn crown_in(
             up,
             drift[1] + angle.sin() * outward,
         ];
-        out.push(Droplet {
-            position: [
-                base[0] + v[0] * age,
-                base[1] + v[1] * age - 0.5 * SPRAY_GRAVITY * age * age,
-                base[2] + v[2] * age,
-            ],
-            fraction: age / SPRAY_LIFETIME,
-        });
+        out.push(Droplet { position: ballistic(base, v, age), fraction: age / SPRAY_LIFETIME });
     }
+}
+
+/// Where a droplet launched at `v` from `base` is after `age` seconds.
+///
+/// The one line both crowns share. Plain `g` and no drag, for the reason
+/// [`SPRAY_GRAVITY`] gives.
+fn ballistic(base: [f32; 3], v: [f32; 3], age: f32) -> [f32; 3] {
+    [
+        base[0] + v[0] * age,
+        v[1].mul_add(age, base[1]) - 0.5 * SPRAY_GRAVITY * age * age,
+        base[2] + v[2] * age,
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// W9: the impact crown — the *other* source §2.2e names.
+// ---------------------------------------------------------------------------
+//
+// **W5 specified two sources and shipped one.** Everything above is driven by
+// `WaterSample::fold`, the crest-steepness term, so a flat pool throws nothing
+// however hard something falls into it — `assets/test/pool.loom` exists to make
+// that visible and did. This half is driven by the *event*: a body broke the
+// surface at a speed, and the impact sets the droplets' velocity.
+//
+// It is the same kind of object as the one above — a pure function of
+// `(where, how hard, how old, a seed)`, no state, no readback, nothing an
+// assertion can see. ADR 0045 clause 1 satisfied by having nothing to argue
+// about, exactly as the crest crown satisfies it.
+
+/// Downward speed, m/s, below which an entry is a settling rather than a splash.
+///
+/// **The gate that suppresses the phantom at tick zero as well.** A body
+/// authored already floating has `fraction == 0.0` before its first solve, so
+/// its first solve reads as an entry; it is also barely moving, so this is what
+/// tells the two apart. Both jobs are one number on purpose — a second constant
+/// would be a second thing to keep in step.
+pub const SPLASH_MIN_SPEED: f32 = 1.0;
+
+/// Impact speed at which the crown is at full size, m/s.
+///
+/// `pool.loom`'s sphere enters at about 7.1 m/s measured, so a three-metre drop
+/// throws very nearly the largest crown there is and a half-metre drop throws a
+/// visibly smaller one. That ratio is the acceptance test, not the absolute.
+pub const SPLASH_FULL_SPEED: f32 = 8.0;
+
+/// Fraction of the impact speed a droplet leaves with, upward and outward.
+///
+/// **Not tuned by eye: the ratio is what sets the crown's height**, and the
+/// lifetime falls out of it ballistically rather than being a second authored
+/// number that can disagree. At `SPLASH_FULL_SPEED` the upward fraction gives
+/// 2.7 m/s, so the tallest droplet reaches 0.37 m and is gone in 0.55 s — a
+/// crown, on the scale of the thing that made it, rather than a fountain.
+pub const SPLASH_UP_FRAC: f32 = 0.34;
+/// Outward fraction. Under the upward one: a crown is taller than it is wide,
+/// which is what distinguishes it from a ring of spray.
+pub const SPLASH_OUT_FRAC: f32 = 0.22;
+
+/// Droplets per band of the crown.
+pub const SPLASH_RING: usize = 8;
+/// Bands at full strength. A marginal entry throws fewer — see [`crown`].
+pub const SPLASH_BANDS: usize = 3;
+
+/// The crown an impact throws, `age` seconds after it happened.
+///
+/// `at` is the point on the surface the body broke — the surface *including*
+/// the wake, which the caller already computed for the submersion event.
+/// `speed` is positive **downward**: how hard it hit. `radius` is the body's
+/// waterplane radius, and it is the geometric point of this function —
+///
+/// **the ring starts at the rim of the cavity, never at the centre.** A crown
+/// rises from the edge of the hole the body punched; droplets launched from the
+/// centre would be launched from inside the body, and on anything wider than a
+/// droplet the crown reads as a spout coming out of the object rather than as
+/// water thrown aside by it.
+///
+/// Empty below [`SPLASH_MIN_SPEED`], and empty once every band has landed.
+/// Returned in band-then-ring order and never sorted, like [`spray`].
+#[must_use]
+pub fn crown(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec<Droplet> {
+    let strength =
+        ((speed - SPLASH_MIN_SPEED) / (SPLASH_FULL_SPEED - SPLASH_MIN_SPEED)).clamp(0.0, 1.0);
+    if strength <= 0.0 || age < 0.0 {
+        return Vec::new();
+    }
+    // **Count follows the impact, not only speed.** A marginal entry throws one
+    // band and a hard one throws three, so how much water is in the air is a
+    // reading of how hard the thing hit rather than a constant with a scale on
+    // it. `ceil` rather than `round`: anything past the gate throws something.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let bands = (strength * SPLASH_BANDS as f32).ceil().max(1.0) as usize;
+    #[allow(clippy::cast_precision_loss)]
+    let spin = ((hash(seed) >> 8) as f32) * (1.0 / 16_777_216.0) * std::f32::consts::TAU;
+    // **Saturated, not extrapolated.** The velocity is a fraction of the impact
+    // speed, so an unbounded speed is an unbounded crown: a body arriving at
+    // 40 m/s would throw droplets thirteen metres up and leave them in the air
+    // for nearly three seconds, which is a geyser rather than a splash and
+    // would sit in a `--sim N` still long after the thing that caused it. The
+    // ramp already stops counting at this speed; the arc stops with it.
+    let impact = speed.min(SPLASH_FULL_SPEED);
+
+    let mut out = Vec::new();
+    for band in 0..bands {
+        // 0 for the innermost band, approaching 1 for the outermost. The outer
+        // water is thrown out and the inner water is thrown up, which is the
+        // shape of a real crown and also what makes it collapse from the
+        // outside in: a flatter arc lands sooner.
+        #[allow(clippy::cast_precision_loss)]
+        let tilt = (band as f32 + 0.5) / bands as f32;
+        let up = impact * SPLASH_UP_FRAC * 0.45f32.mul_add(-tilt, 1.0);
+        let outward = impact * SPLASH_OUT_FRAC * 0.9f32.mul_add(tilt, 0.55);
+        // Ballistic, so the lifetime is not a second authored number that can
+        // disagree with the velocity: up, over, and back to the surface.
+        let lifetime = 2.0 * up / SPRAY_GRAVITY;
+        if age >= lifetime {
+            continue;
+        }
+        for i in 0..SPLASH_RING {
+            // Half-step per band so the bands interleave rather than stacking
+            // into eight radial spokes.
+            #[allow(clippy::cast_precision_loss)]
+            let angle = std::f32::consts::TAU
+                .mul_add((i as f32 + 0.5 * band as f32) / SPLASH_RING as f32, spin);
+            let (dir_x, dir_z) = (angle.cos(), angle.sin());
+            // The rim. See the doc comment: this is the whole geometry.
+            let base = [dir_x.mul_add(radius, at[0]), at[1], dir_z.mul_add(radius, at[2])];
+            let v = [dir_x * outward, up, dir_z * outward];
+            out.push(Droplet { position: ballistic(base, v, age), fraction: age / lifetime });
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -419,5 +542,85 @@ mod tests {
             let out = spray(&shore, [0.0, 2.0, 0.0], tick as f32 / 60.0, &land);
             assert!(out.is_empty(), "spray on dry land: {out:?}");
         }
+    }
+
+    // -- W9, the impact crown -------------------------------------------------
+
+    /// **A gentle entry throws nothing**, which is the gate that keeps a body
+    /// authored already floating from splashing on its first solve: its
+    /// fraction starts at zero, so the edge detector reads an entry, and this
+    /// is what tells that apart from an impact.
+    #[test]
+    fn a_settling_body_throws_no_crown() {
+        for speed in [0.0_f32, 0.2, 0.9, SPLASH_MIN_SPEED] {
+            assert!(
+                crown([0.0, 0.0, 0.0], speed, 0.5, 0.0, 1).is_empty(),
+                "an entry at {speed} m/s threw a crown"
+            );
+        }
+    }
+
+    /// **The crown starts at the rim, not at the centre.** Every droplet is at
+    /// the body's own waterplane radius at birth, which is the correction that
+    /// keeps a crown from reading as a spout out of the object.
+    #[test]
+    fn the_ring_starts_at_the_cavity_rim() {
+        let radius = 0.5;
+        let out = crown([3.0, 0.25, -2.0], 7.1, radius, 0.0, 7);
+        assert!(!out.is_empty());
+        for d in &out {
+            let r = (d.position[0] - 3.0).hypot(d.position[2] + 2.0);
+            assert!((r - radius).abs() < 1e-4, "born {r} m out, not at the {radius} m rim");
+            assert!((d.position[1] - 0.25).abs() < 1e-6, "born off the surface: {d:?}");
+        }
+    }
+
+    /// **Size follows the impact.** A three-metre drop and a half-metre drop
+    /// differ in droplet count and in peak height by about the speed ratio —
+    /// which is the whole reason the event carries a speed.
+    #[test]
+    fn a_harder_impact_throws_a_bigger_crown() {
+        let peak = |speed: f32| {
+            let mut best: f32 = 0.0;
+            let mut count = 0;
+            for step in 0..120 {
+                #[allow(clippy::cast_precision_loss)]
+                let age = step as f32 / 60.0;
+                let out = crown([0.0, 0.0, 0.0], speed, 0.5, age, 3);
+                count = count.max(out.len());
+                for d in &out {
+                    best = best.max(d.position[1]);
+                }
+            }
+            (best, count)
+        };
+        // 3 m and 0.55 m of free fall: 7.1 m/s measured on `pool.loom`, 3.3 m/s.
+        let (hard, hard_n) = peak(7.1);
+        let (soft, soft_n) = peak(3.3);
+        assert!(hard > soft * 2.0, "peak {hard} m against {soft} m is not a harder impact");
+        assert!(hard_n > soft_n, "{hard_n} droplets against {soft_n}");
+        assert!(soft_n > 0, "a 0.55 m drop threw nothing at all");
+    }
+
+    /// **It ends.** Every band is ballistic, so the crown empties itself rather
+    /// than needing a lifetime nobody can see — and a still at `--sim 120` must
+    /// not have last second's splash hanging in the air.
+    #[test]
+    fn the_crown_lands() {
+        let full = crown([0.0, 0.0, 0.0], SPLASH_FULL_SPEED, 0.5, 0.0, 5);
+        assert_eq!(full.len(), SPLASH_RING * SPLASH_BANDS, "a full crown is every band");
+        // The tallest band is 2*up/g at the saturated impact speed: 0.55 s.
+        assert!(crown([0.0, 0.0, 0.0], 40.0, 0.5, 1.0, 5).is_empty(), "the crown never landed");
+    }
+
+    /// **Two impacts on one tick are two different crowns.** Same shape, turned
+    /// differently — the seed is the caller's `salt(tick, at)`, so two bodies
+    /// going in together do not throw one splash drawn twice.
+    #[test]
+    fn the_seed_turns_the_ring() {
+        let a = crown([0.0, 0.0, 0.0], 6.0, 0.4, 0.1, 11);
+        let b = crown([0.0, 0.0, 0.0], 6.0, 0.4, 0.1, 12);
+        assert_eq!(a.len(), b.len());
+        assert!(a != b, "two seeds threw the same crown");
     }
 }
