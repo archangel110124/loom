@@ -4272,7 +4272,60 @@ float causticWeb(float3 bedPos, float depth) {
     return web * CAUSTIC_STRENGTH * fade;
 }
 
-float3 waterBehind(float2 uv, float3 surfacePos, float3 eye, float bedDepth, out float3 behind) {
+/// How close to the frame border the offset is given up, in UV.
+///
+/// Outside the image there is nothing to bend into — the opaque pass drew what
+/// the camera saw and no more — so a lookup that leaves the frame clamps and
+/// smears the border pixel along the whole edge. Fading back to the straight
+/// UV over the last 6% costs the offset where it is least visible and where
+/// there is no honest answer available anyway.
+static const float WATER_REFRACT_EDGE = 0.06;
+/// Metres the offset lookup must land BEHIND the surface before it is trusted.
+///
+/// **Attenuated, never rejected.** A hard switch traces the silhouette of
+/// anything crossing the water as an outline that breathes with the waves, and
+/// the depth target is a `SAMPLE_ZERO` resolve, so there is no coverage
+/// information to soften it with. Fading the offset out instead falls back to
+/// the un-offset UV, which can never be wrong: this fragment *is* water there.
+static const float WATER_REFRACT_ACCEPT = 0.35;
+
+/// Where a ray leaving the surface downward lands, in screen UV.
+///
+/// **Marched along the refracted ray by the depth of the water, never by the
+/// distance to the background.** The background was found along the *air* ray,
+/// which on a grazing view is bent tens of degrees away from this one — on
+/// `shore` that is 35 m against a column of 6 — so marching the air distance
+/// puts the probe deep inside the seabed and the offset comes out enormous.
+/// `drop / -refracted.y` is the distance along this ray that descends the
+/// column, which is the only length that means anything here.
+float2 waterProbeUv(float3 surfacePos, float3 refracted, float drop, float2 straightUv) {
+    // 0.05 is a 3-degree floor on the descent. Air->water can only bend a ray
+    // toward the vertical, so this is unreachable in practice and is here so a
+    // degenerate normal cannot divide by zero.
+    float3 probe = surfacePos + refracted * (drop / max(-refracted.y, 0.05));
+    float4 clip = mul(push.objects[push.objectOffset].mvp, float4(probe, 1.0));
+    if (clip.w <= 0.0) {
+        return straightUv;
+    }
+    float2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+    float2 edge = min(uv, 1.0 - uv);
+    return lerp(straightUv, uv, saturate(min(edge.x, edge.y) / WATER_REFRACT_EDGE));
+}
+
+/// Unproject a depth sample back to where it was drawn.
+float3 waterUnproject(float2 uv, float d) {
+    float4 world = mul(push.invViewProj, float4(uv * 2.0 - 1.0, d, 1.0));
+    return world.xyz / world.w;
+}
+
+float3 waterBehind(
+    float2 uv,
+    float3 surfacePos,
+    float3 eye,
+    float bedDepth,
+    float3 refracted,
+    out float3 behind)
+{
     behind = float3(0.0, 0.0, 0.0);
     float d = opaqueDepth.SampleLevel(uv, 0).r;
     if (d >= 1.0) {
@@ -4283,9 +4336,48 @@ float3 waterBehind(float2 uv, float3 surfacePos, float3 eye, float bedDepth, out
     // clamped at 100 and is a SENTINEL on any scene with no voxel volume;
     // using it as an optical path is what would paint 27% seabed brown across
     // every open-ocean pixel.
-    float2 ndc = uv * 2.0 - 1.0;
-    float4 world = mul(push.invViewProj, float4(ndc, d, 1.0));
-    float3 bg = world.xyz / world.w;
+    float3 bg = waterUnproject(uv, d);
+
+    // **The offset: what the surface actually shows, rather than what is
+    // directly behind it.** The straight lookup above is the right *column* —
+    // it is the water under this pixel — but it is the wrong *pixel*: a tilted
+    // surface bends the view ray, which is why a stick in water has a kink in
+    // it and why a rippled pool's floor swims. There is no strength knob; the
+    // offset weakens with distance for free, because the same world
+    // displacement subtends fewer pixels further away, which is exactly what a
+    // `normal.xz * strength` fudge cannot do.
+    //
+    // **One refinement.** The first probe descends by the drop measured under
+    // the straight ray; the second uses the drop it actually found. Two steps
+    // is where a fixed point of this shape stops moving visibly — the
+    // remaining error is the bed's slope across the offset, which is metres of
+    // sand, not a silhouette.
+    {
+        float2 probeUv = waterProbeUv(surfacePos, refracted,
+                                      max(surfacePos.y - bg.y, 0.0), uv);
+        float pd = opaqueDepth.SampleLevel(probeUv, 0).r;
+        if (pd < 1.0) {
+            float3 probeBg = waterUnproject(probeUv, pd);
+            probeUv = waterProbeUv(surfacePos, refracted,
+                                   max(surfacePos.y - probeBg.y, 0.0), uv);
+            pd = opaqueDepth.SampleLevel(probeUv, 0).r;
+            if (pd < 1.0) {
+                probeBg = waterUnproject(probeUv, pd);
+                // How far behind the surface the offset landed. Something in
+                // FRONT of the water — a hull, a post, the near bank — scores
+                // zero and the offset dissolves back to the straight lookup
+                // rather than smearing an above-water pixel into the sea.
+                float accept = smoothstep(0.0, WATER_REFRACT_ACCEPT,
+                                          length(probeBg - eye) - length(surfacePos - eye));
+                // Colour, caustic anchor and path length all move together:
+                // the alternative is a bed shaded from one place and measured
+                // from another, which flickers along the accept band.
+                uv = lerp(uv, probeUv, accept);
+                d = opaqueDepth.SampleLevel(uv, 0).r;
+                bg = waterUnproject(uv, d);
+            }
+        }
+    }
 
     // Two legs, not one. The seabed was shaded IN AIR by the mesh pass, so the
     // light that lit it already crossed the column downward before it ever
@@ -4521,10 +4613,19 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
                        + sunColor() * sunStrength() * toSun;
     float2 screenUv = in.clip.xy / push.environment[0].viewport.xy;
     float3 behind;
-    // **Unrefracted UV.** The distortion offset is the next slice; getting the
-    // optics right first means one thing at a time, which is how a wrong sign
-    // in an offset does not get blamed on the absorption.
-    float3 T = waterBehind(screenUv, in.worldPos, push.environment[0].eye.xyz, in.depth, behind);
+    // **The ray bends here, once, at the real index.** `refract` takes the
+    // incident direction — from the eye INTO the surface — and `eta` as
+    // n_incident/n_transmitted, which is the convention the underwater branch
+    // above already pins by passing `WATER_IOR` for the water->air trip. Going
+    // the other way it is the reciprocal.
+    //
+    // **No total-internal-reflection guard, deliberately.** Air->water gives
+    // `sinT2 <= 1/1.333^2 = 0.5628` at every incidence angle, so `refract`
+    // cannot return zero here, and a guard would advertise a case that does
+    // not exist.
+    float3 refracted = refract(-view, normal, 1.0 / WATER_IOR);
+    float3 T = waterBehind(screenUv, in.worldPos, push.environment[0].eye.xyz,
+                           in.depth, refracted, behind);
     // `skyView` scales the volume term ONLY. `behind` was lit by its own
     // shading pass; darkening it in a trough would dim the seabed for a reason
     // that has nothing to do with the seabed.
