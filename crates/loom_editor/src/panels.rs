@@ -502,8 +502,7 @@ fn inspector(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAc
             ui.separator();
 
             if state.selected.len() > 1 {
-                ui.label(format!("{} nodes selected", state.selected.len()));
-                ui.weak("Move, duplicate and delete apply to all of them.");
+                multi_inspector(ui, state, actions);
                 return;
             }
             let Some(path) = state.selected.first() else {
@@ -820,8 +819,108 @@ fn inspect_transform(
     }
 }
 
-/// Build widgets for a component from its **schema**, not from a hand-written
-/// match on the type name.
+/// Fields the whole selection shares, and whether they agree on a value.
+///
+/// **Only components *every* selected node carries.** Offering a field that
+/// half the selection lacks would either write it onto nodes that should not
+/// have it or silently skip them, and both are worse than not offering it.
+pub(crate) fn common_fields(
+    scene: &loom_scene::Scene,
+    selected: &[String],
+) -> Vec<(String, String, serde_json::Value, bool)> {
+    let nodes: Vec<&loom_scene::Node> = selected
+        .iter()
+        .filter_map(|p| scene.nodes().iter().find(|n| &n.path == p))
+        .collect();
+    let Some((first, rest)) = nodes.split_first() else {
+        return Vec::new();
+    };
+    if rest.len() + 1 != selected.len() {
+        // A path that resolved to nothing: the selection is mid-reload and
+        // half of it does not exist yet. Offering an edit against that would
+        // write to whichever nodes happened to be present.
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for (type_name, value) in &first.components {
+        let Some(fields) = value.as_object() else { continue };
+        for (field, current) in fields {
+            let others: Vec<Option<&serde_json::Value>> = rest
+                .iter()
+                .map(|n| n.components.get(type_name).and_then(|c| c.get(field)))
+                .collect();
+            if others.iter().any(Option::is_none) {
+                continue;
+            }
+            let agreed = others.iter().all(|v| *v == Some(current));
+            out.push((type_name.clone(), field.clone(), current.clone(), agreed));
+        }
+    }
+    out
+}
+
+/// The inspector for more than one node.
+///
+/// Edits fan out: one `SetField` per selected node, all inside the same
+/// transaction the caller builds, so a multi-edit is **one** undo step. That is
+/// never-do #16 — the editor issues the same ops the agent does — and it is why
+/// this returns actions rather than writing anything.
+fn multi_inspector(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+    ui.label(format!("{} nodes selected", state.selected.len()));
+    ui.weak("Move, duplicate and delete apply to all of them.");
+    ui.add_space(8.0);
+
+    let shared = common_fields(state.scene, state.selected);
+    if shared.is_empty() {
+        ui.weak("no components in common");
+        return;
+    }
+    let editing = state.editable && state.playing.is_none();
+    let empty = std::collections::BTreeSet::new();
+    let ctx = FieldContext { assets: state.assets, overridden: &empty };
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        let mut last_type = "";
+        for (type_name, field, current, agreed) in &shared {
+            if type_name != last_type {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(type_name).strong());
+                last_type = type_name;
+            }
+            let key = format!("{type_name}.{field}");
+            // **A disagreeing field is shown, not hidden.** Hiding it would
+            // make the panel's contents depend on values rather than on types,
+            // so a field would appear and disappear as the human scrubbed it.
+            // The marker says the values differ; editing sets them all.
+            let mut fanned = Vec::new();
+            ui.horizontal(|ui| {
+                field_label(ui, field, "", None);
+                if !agreed {
+                    ui.label(egui::RichText::new("≠").weak())
+                        .on_hover_text("these nodes do not agree — editing sets all of them");
+                }
+                // The first node's value stands in for the group, which is why
+                // the marker matters: without it a mixed field would look like
+                // a settled one.
+                draw_field(
+                    ui, &state.selected[0], &key, field, current, None, editing, &ctx, &mut fanned,
+                );
+            });
+            // One action per node, from whatever the widget produced for the
+            // first. `Splice` and `RevertOverride` are deliberately not fanned
+            // out: an index into one node's array means nothing in another's.
+            for action in fanned {
+                if let UiAction::SetField(_, key, value) = action {
+                    for path in state.selected {
+                        actions.push(UiAction::SetField(path.clone(), key.clone(), value.clone()));
+                    }
+                }
+            }
+        }
+    });
+}
+
 /// How wide the label column is, so every field's control starts at the same x.
 ///
 /// Ragged left edges are what make a generated inspector look generated: the
@@ -1250,6 +1349,94 @@ impl egui::Widget for ColourButton<'_> {
 #[cfg(test)]
 mod tests {
     use super::{default_entry, default_for, looks_like_a_colour, range_note};
+
+
+    /// **Only fields every selected node has.** Offering one that half the
+    /// selection lacks would either write it onto nodes that should not carry
+    /// it or silently skip them, and a multi-edit that quietly applies to a
+    /// subset is worse than one that refuses.
+    #[test]
+    fn multi_edit_offers_the_intersection_and_flags_disagreement() {
+        let scene = loom_scene::Scene::parse(
+            "\
+[scene]
+format = 1
+id = \"22222222-2222-4222-8222-222222222222\"
+
+[[node]]
+name = \"Room\"
+
+[[node]]
+name = \"A\"
+parent = \"Room\"
+
+  [node.components.Light]
+  intensity = 100.0
+  color = [1.0, 1.0, 1.0]
+
+[[node]]
+name = \"B\"
+parent = \"Room\"
+
+  [node.components.Light]
+  intensity = 100.0
+
+[[node]]
+name = \"C\"
+parent = \"Room\"
+
+  [node.components.Light]
+  intensity = 250.0
+  color = [1.0, 1.0, 1.0]
+",
+        )
+        .expect("valid scene");
+
+        let both = ["Room/A".to_owned(), "Room/C".to_owned()];
+        let shared = super::common_fields(&scene, &both);
+        let named: Vec<(&str, bool)> = shared
+            .iter()
+            .map(|(_, field, _, agreed)| (field.as_str(), *agreed))
+            .collect();
+        assert!(
+            named.contains(&("intensity", false)),
+            "100 and 250 disagree and must be marked: {named:?}"
+        );
+        assert!(
+            named.contains(&("color", true)),
+            "both are white and must read as settled: {named:?}"
+        );
+
+        // `B` has no `range`, so it drops out of the shared set entirely.
+        let with_b = ["Room/A".to_owned(), "Room/B".to_owned()];
+        let shared = super::common_fields(&scene, &with_b);
+        let fields: Vec<&str> = shared.iter().map(|(_, f, _, _)| f.as_str()).collect();
+        assert_eq!(fields, ["intensity"], "color is not shared with B");
+    }
+
+    /// A selection naming a node that does not exist offers nothing rather
+    /// than editing whichever members happened to resolve — the state during a
+    /// reload, and the one where a partial write would be invisible.
+    #[test]
+    fn multi_edit_refuses_a_selection_it_cannot_fully_resolve() {
+        let scene = loom_scene::Scene::parse(
+            "\
+[scene]
+format = 1
+id = \"22222222-2222-4222-8222-222222222222\"
+
+[[node]]
+name = \"A\"
+
+  [node.components.Light]
+  intensity = 100.0
+",
+        )
+        .expect("valid scene");
+
+        let stale = ["A".to_owned(), "Deleted".to_owned()];
+        assert!(super::common_fields(&scene, &stale).is_empty());
+    }
 
     /// The swatch is offered for the fields that hold colours and not for the
     /// ones that hold three unrelated numbers.
