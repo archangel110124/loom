@@ -3914,6 +3914,9 @@ struct WaterOutput {
     /// honest answer is that foam is not the right tool at that range. Stated
     /// here rather than discovered later.
     float fold : TEXCOORD3;
+    /// How much foam this point is still carrying from crests that have
+    /// already passed: the trail. See `FOAM_TRAIL_STEP`.
+    float foamHist : TEXCOORD4;
 };
 
 [shader("vertex")]
@@ -4055,8 +4058,46 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     // discarded them, and the grid's boundary drew itself in the sea as a
     // dotted line. Everything downstream saturates by 5 m, so a hundred is far
     // past any use of the value and interpolates exactly.
-    out.depth = min(surfaceAt.depth, 100.0);
+    out.depth = min(surfaceAt.depth, WATER_DEPTH_SENTINEL);
     out.fold = surfaceAt.fold;
+
+    // **Foam outlives the crest that made it, and that is what makes it foam.**
+    //
+    // `in.fold` says how near this point is to breaking *now*, so a whitecap
+    // painted from it alone is a highlight welded to the wave: it appears when
+    // the crest steepens, vanishes the instant the crest passes, and never
+    // sits on the water. Real whitecaps are entrained air. The crest makes
+    // them in a second and they take ten to go, drifting downwind while they
+    // do — a foam field is a *record* of where crests have been.
+    //
+    // **Closed form, not an accumulation buffer.** The obvious implementation
+    // is a texture that decays each frame, which is GPU state and takes ADR
+    // 0045 clause 3's whole burden: seeding, one-dispatch catch-up to
+    // `--sim N`, the `repeat` gate, a warm-up. None of that is needed, because
+    // `fold` is a pure function of `(x, t)`: the recurrence
+    // `F(x,t) = max(f(x,t), d·F(x - v·dt, t - dt))` unrolls into a maximum
+    // over a few past samples of a function we can simply evaluate. Three taps
+    // buy 3.3 s of trail. See ADR 0049.
+    //
+    // Sampled at `xz - drift·tau` because a patch made `tau` ago was made
+    // upwind of where it has drifted to. The ground height is this column's:
+    // the taps are under a metre away and re-marching the height grid three
+    // times to move the shoaling by nothing is the wrong trade.
+    float2 trailWind = normalize(push.environment[0].wind.xy + float2(1e-4, 0.0))
+                     * push.environment[0].wind.z * FOAM_TRAIL_DRIFT;
+    float decay = 1.0;
+    float trail = 0.0;
+    [unroll]
+    for (int tap = 1; tap <= FOAM_TRAIL_TAPS; ++tap) {
+        float tau = float(tap) * FOAM_TRAIL_STEP;
+        decay *= FOAM_TRAIL_DECAY;
+        LoomWaterSample past = loom_sample_water(
+            faded, surface, ground, xz - trailWind * tau,
+            push.environment[0].weather.z - tau,
+            float3(0.0, 0.0, 0.0));
+        trail = max(trail, decay * smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, past.fold));
+    }
+    out.foamHist = trail;
     return out;
 }
 
@@ -4185,6 +4226,31 @@ static const float SWASH_OPACITY = 0.62;
 
 static const float WATER_FOAM_WET = 0.22;
 static const float WATER_FOAM_BREAK = 0.33;
+
+// ---------------------------------------------------------------------------
+// The foam trail (W2). Read `waterVertexMain` for why it is closed-form.
+// ---------------------------------------------------------------------------
+/// Seconds between history taps. Three taps at 1.1 s is a 3.3 s trail — long
+/// enough that a patch visibly lags the crest that made it and short enough
+/// that the samples are still correlated: past about two seconds a Gerstner
+/// crest has moved further than the patch is wide, and the taps stop being a
+/// trail and become three separate whitecaps.
+static const float FOAM_TRAIL_STEP = 1.1;
+static const int FOAM_TRAIL_TAPS = 3;
+/// What a patch is worth one tap later. 0.60 over three taps leaves 22%, which
+/// is under the noise erosion's floor — so the trail dissolves rather than
+/// ending.
+///
+/// **Zero reproduces the pre-W2 picture exactly**, which is the stub the
+/// golden gate is measured against: with no decay every tap is worth nothing
+/// and `wetc` falls back to the instantaneous fold.
+static const float FOAM_TRAIL_DECAY = 0.60;
+/// Fraction of the wind speed foam is carried at. Surface drift is a few
+/// percent of the wind over open water, and this is deliberately slower than
+/// the *pattern* drift the fragment shader applies to the noise: the noise
+/// slides so a patch is not nailed to the world, this moves where the patch
+/// was born.
+static const float FOAM_TRAIL_DRIFT = 0.02;
 /// Cross-wind stretch of the noise domain. **This is what makes streaks** —
 /// foam pulled out downwind rather than dropped in round blobs, which is the
 /// most recognisable thing about a real whitecap field.
@@ -4744,7 +4810,14 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     float fine = saturate(1.0 - length(toEye) / WATER_FOAM_FINE_RANGE);
     float fnoise = loom_value_noise(float3(fuv * 0.55, 0.0)) * 0.65
                  + loom_value_noise(float3(fuv * 2.3, 7.3)) * 0.35 * fine;
-    float wetc = smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, in.fold);
+    // **The trail is the coverage's floor, not an addition to it.** A point
+    // under a steepening crest is foamy because of the crest; a point the
+    // crest has left is foamy because of what the crest did. Taking the
+    // maximum keeps a fresh whitecap exactly as bright as it was before W2 and
+    // lets the old foam persist behind it, which is what a `max` of a coverage
+    // means. Adding them would make a crest passing over its own wake brighter
+    // than paper.
+    float wetc = max(smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, in.fold), in.foamHist);
     // **Eroded by the noise rather than faded by it.** A multiply would dim
     // every foam pixel toward the water; thresholding the *coverage* against
     // the noise instead dissolves the patch from its edges inward, which is

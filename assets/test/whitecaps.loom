@@ -1,0 +1,122 @@
+# Whitecaps, and the trail they leave behind them (W2).
+#
+# **The scene exists because no other one can see the feature.** `ocean` is the
+# sea's reference and it is framed at the horizon from 2.4 m up, so a whitecap
+# there is a few pixels on a flank seen edge-on: a foam patch could lag its
+# crest by three seconds and nothing in the frame would say so. `shore` and
+# `beach` are shallow, and shoaling flattens the swell, which is precisely
+# where the fold — and with it every whitecap — goes to zero. `homestead` and
+# `river` are inland water in near-still air.
+#
+# So this camera is six metres up at 25 degrees of depression looking downwind,
+# which puts a whole field of crests on screen at once with the *water surface*
+# between them visible rather than foreshortened away. That is the geometry a
+# lagging patch is legible in: you see the white sitting behind the crest
+# instead of on it.
+#
+# **One dominant wave direction**, unlike `ocean`'s spread of seven headings.
+# A trail is a direction, and a sea running six ways at once hides it — the
+# foam would be a texture rather than a wake. Five waves, all within 20 degrees
+# of the wind, every one at the validator's steepness ceiling so the fold
+# actually reaches the breaking threshold across a good fraction of the frame.
+#
+# No `VoxelVolume`: open sea, so the depth is the sentinel everywhere, no
+# shoaling, and the reference is measuring the whitecap path and nothing else.
+[scene]
+format = 1
+id = "3d7a15c9-64e8-4b20-9f13-8a06c2e5b471"
+
+[[node]]
+name = "Sea"
+
+  [node.components.Environment]
+  # A storm sky: a low sun ahead of the camera so the foam is lit from the
+  # front and reads as white rather than as a grey texture, over a cold zenith.
+  sun_direction = [0.20, 0.42, -0.88]
+  sun_strength = 1.35
+  sun_color = [1.0, 0.95, 0.86]
+  ambient = 0.55
+  sky_zenith = [0.13, 0.24, 0.44]
+  sky_horizon = [0.55, 0.62, 0.70]
+  fog_density = 0.005
+  fog_falloff = 0.05
+
+  # Beaufort 8. **Strong on purpose**: the trail drifts at
+  # `FOAM_TRAIL_DRIFT` of this, so a light breeze would leave the patch where
+  # the crest made it and the scene would prove only the decay, not the drift.
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 18.0
+  gustiness = 1.4
+  turbulence = 1.0
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+  density = 1025.0
+
+  # Five waves, longest first, no common factor between the wavelengths, every
+  # heading within 20 degrees of the wind. Steepness 1.0 throughout is the
+  # validator's real ceiling at N = 5 (`Q·N·k·A <= 1`), which is what makes the
+  # fold reach `WATER_FOAM_BREAK` at all — a gentler list foams nowhere and the
+  # reference would be a picture of grey water.
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 23.0
+  amplitude = 0.62
+  steepness = 1.0
+  direction = [1.0, 0.0]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 14.0
+  amplitude = 0.34
+  steepness = 1.0
+  direction = [1.0, 0.30]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 9.0
+  amplitude = 0.19
+  steepness = 1.0
+  direction = [1.0, -0.26]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 5.3
+  amplitude = 0.085
+  steepness = 1.0
+  direction = [1.0, 0.14]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 3.1
+  amplitude = 0.040
+  steepness = 1.0
+  direction = [1.0, -0.10]
+  speed_scale = 1.0
+
+# One buoy, so a still frame has a fixed silhouette to read the sea's scale and
+# motion against. `ocean`'s posts do the same job there.
+[[node]]
+name = "Buoy"
+parent = "Sea"
+transform = { pos = [3.4, 0.1, -11.0], scale = [0.9, 1.4, 0.9] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.42, 0.16, 0.12]
+  roughness = 0.7
+
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [0.0, 6.0, 8.0], rot_euler = [-25.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

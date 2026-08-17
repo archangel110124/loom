@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 45] = [
+const SCENES: [&str; 46] = [
     "assets/test/lanternhead.loom",
     // One building, composed. **In `SCENES` and not `GOLDEN`, on the stated
     // rule**: every path it draws is already covered — `ground` and
@@ -143,6 +143,11 @@ const SCENES: [&str; 45] = [
     "assets/test/meadow.loom",
     "assets/test/grass_slope.loom",
     "assets/test/ocean.loom",
+    // The whitecap trail (W2). Three extra `loom_sample_water` taps per water
+    // vertex and a fifth varying out of `waterVertexMain`, which is the one
+    // place a wrong `TEXCOORD` index or an overflowed output signature would
+    // show up as a validation message rather than as a picture.
+    "assets/test/whitecaps.loom",
     // The only scene where a rigid body is driven by the water rather than
     // only drawn against it, so it is the only one whose `render --sim` runs
     // the buoyancy solver at all.
@@ -258,7 +263,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 32] = [
+const GOLDEN: [(&str, &str, &[&str]); 33] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -362,6 +367,21 @@ const GOLDEN: [(&str, &str, &[&str]); 32] = [
     // every wave's phase is zero would be the least representative frame there
     // is.
     ("ocean", "assets/test/ocean.loom", &["--sim", "90"]),
+    // **The whitecap trail, which no other reference can see** (W2, ADR 0049).
+    // Foam that outlives the crest that made it is the difference between a
+    // highlight welded to a wave and a sea with a memory, and every other
+    // water scene here is blind to it: `ocean` looks at the horizon from 2.4 m
+    // up, so a whitecap is a few pixels seen edge-on; `shore` and `beach` are
+    // shallow, and shoaling flattens the swell, which is exactly where the
+    // fold and every whitecap with it go to zero; `homestead` and `river` are
+    // inland water in near-still air.
+    //
+    // Six metres up at 25 degrees over a storm sea running one way, so a patch
+    // is legible sitting *behind* its crest rather than on it. **Stubbing the
+    // trail (`FOAM_TRAIL_DECAY = 0.0`) moves 20.2% of this frame** against a
+    // 0.1% tolerance — and reproduces every other water reference byte for
+    // byte, which is the mutation proving the trail is what does the work.
+    ("whitecaps", "assets/test/whitecaps.loom", &["--sim", "300"]),
     // **Water against terrain**, which `ocean` cannot cover: it has no voxel
     // volume at all, so its depth is the sentinel everywhere and its waves are
     // never attenuated. Everything W6 added is visible here and nowhere else —
