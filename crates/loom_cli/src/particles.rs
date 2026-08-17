@@ -471,6 +471,33 @@ pub(crate) fn spray(
     eye: [f32; 3],
     seconds: f32,
 ) -> Vec<ParticleInstance> {
+    // **A sea too gentle to break can never spray, and nothing else would say
+    // so.** `fold` is `Σ Q·k·A·sin φ`, so `Σ Q·k·A` is its ceiling; under
+    // `SPRAY_BREAK` the crest test inside `spray()` fails at every point and
+    // every instant, and the author sees an empty sky and concludes the
+    // feature is broken. It was not hypothetical — *every* sea in this
+    // repository was under the threshold when spray shipped.
+    //
+    // Warned from here rather than refused at load, because a sea whose waves
+    // are raised later is a legitimate thing to author, and this is a look
+    // rather than a correctness matter. Once per process: it is asked every
+    // frame, and a warning sixty times a second is one nobody reads.
+    if water.spray > 0.0 {
+        let peak = loom_water::spray::peak_fold(water);
+        if peak < loom_water::spray::SPRAY_BREAK {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                crate::log::warn(format!(
+                    "the WaterBody authors spray = {:.2} but its waves peak at a fold of \
+                     {peak:.3}, under the {:.2} a crest has to reach to break — so no \
+                     droplet can ever be thrown. Raise `steepness` or `amplitude`, or \
+                     shorten `wavelength`.",
+                    water.spray,
+                    loom_water::spray::SPRAY_BREAK,
+                ));
+            });
+        }
+    }
     let droplets = loom_water::spray::spray(water, eye, seconds, ground);
     if droplets.is_empty() {
         return Vec::new();

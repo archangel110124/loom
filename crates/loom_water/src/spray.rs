@@ -77,6 +77,33 @@ pub struct Droplet {
     pub fraction: f32,
 }
 
+/// The largest `fold` this wave set can ever reach, anywhere, ever.
+///
+/// `fold` is `Σ Q·k·A·sin φ` and the phases are independent, so the ceiling is
+/// `Σ Q·k·A` — reached only at a point where every wave crests together, which
+/// a real sea approaches and never quite hits. Under [`SPRAY_BREAK`] no point
+/// of this sea can break at any place or instant, so [`spray`] returns nothing
+/// for the whole run however large `WaterBody::spray` is.
+///
+/// **This exists because that no-op is invisible.** Authoring `spray = 2.0` on
+/// a gentle swell produces no droplet, no warning and no error, and the author
+/// concludes the feature is broken. It was: every sea in this repository was
+/// under the threshold when spray shipped, which is how the threshold came to
+/// be measured at all.
+///
+/// Computed at full depth, which is the ceiling: `shoal` only ever *reduces*
+/// an amplitude, so a shelving sea folds less than this and never more.
+#[must_use]
+pub fn peak_fold(body: &WaterBody) -> f32 {
+    body.waves
+        .waves
+        .iter()
+        .take(loom_scene::components::MAX_WAVES)
+        .filter(|w| w.wavelength > 0.0)
+        .map(|w| w.steepness * (std::f32::consts::TAU / w.wavelength) * w.amplitude)
+        .sum()
+}
+
 /// Every droplet in the air around `eye` at time `t`.
 ///
 /// `ground` answers the bed height under a point, for the same reason
@@ -336,6 +363,45 @@ mod tests {
             let distance = (d.position[0] - eye[0]).hypot(d.position[2] - eye[2]);
             // The crown is born inside the range and travels a little further.
             assert!(distance < SPRAY_RANGE + 6.0, "{d:?} is {distance} m from {eye:?}");
+        }
+    }
+
+    /// **`peak_fold` is a ceiling, and the warning built on it is sound.**
+    ///
+    /// Two halves, because a bound that is not a bound sends the author to fix
+    /// waves that were fine: no sample anywhere in the field may exceed it, and
+    /// a sea whose ceiling is under `SPRAY_BREAK` must throw nothing — which is
+    /// exactly the claim `particles::spray` prints.
+    #[test]
+    fn peak_fold_bounds_every_sample_and_predicts_a_dry_sea() {
+        for body in [sea(0.12, 0.2), sea(0.55, 0.85), sea(0.3, 0.5)] {
+            let ceiling = peak_fold(&body);
+            let mut worst = f32::NEG_INFINITY;
+            for tick in 0..120 {
+                #[allow(clippy::cast_precision_loss)]
+                let t = tick as f32 / 60.0;
+                for i in -20_i16..20 {
+                    for j in -20_i16..20 {
+                        let at = [f32::from(i) * 0.7, f32::from(j) * 0.7];
+                        worst = worst
+                            .max(sample_water(&body, at, t, -400.0, [0.0; 3], [0.0; 3]).fold);
+                    }
+                }
+            }
+            assert!(
+                worst <= ceiling + 1e-4,
+                "fold reached {worst}, over the {ceiling} ceiling peak_fold promised"
+            );
+            if ceiling < SPRAY_BREAK {
+                let thrown: usize = (0..240)
+                    .map(|tick| {
+                        #[allow(clippy::cast_precision_loss)]
+                        let t = tick as f32 / 60.0;
+                        spray(&body, [0.0, 2.0, 0.0], t, &deep).len()
+                    })
+                    .sum();
+                assert_eq!(thrown, 0, "a sea under the ceiling threw {thrown} droplets");
+            }
         }
     }
 
