@@ -162,29 +162,14 @@ fn summarise(value: &serde_json::Value) -> String {
     format!("{prefix}{clipped}…")
 }
 
-/// Draw every panel, returning whatever the human asked for.
-///
-/// Panels attach to a root `Ui`, and **order matters**: the first added is
-/// outermost, and anything filling the centre must come last or it eats the
-/// space the side panels needed.
-pub fn draw(root: &mut egui::Ui, state: &PanelState<'_>) -> Vec<UiAction> {
-    let mut actions = Vec::new();
+// **There is no `draw` here any more; [`crate::dock::Dock`] is the layout.**
+// It used to fix the arrangement in code — a left panel, a right panel, two
+// bottom panels — and keeping that alongside the dock would be two layouts of
+// the same panels, drifting apart from the first time one of them gained a
+// heading the other did not. The toolbar and the banner are still chrome on
+// the root `Ui`; everything else is a tab body now and takes a plain `Ui`.
 
-    toolbar(root, state, &mut actions);
-    if state.conflict {
-        conflict_banner(root, &mut actions);
-    }
-    hierarchy(root, state, &mut actions);
-    inspector(root, state, &mut actions);
-    console(root, state, &mut actions);
-    assets(root, state, &mut actions);
-    gizmo_overlay(root, state);
-    agent_overlay(root, state);
-
-    actions
-}
-
-fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+pub(crate) fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
     egui::Panel::top("toolbar").show(root, |ui| {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("loom").strong());
@@ -386,7 +371,7 @@ fn transport(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiActi
 /// never-do #15: two divergent versions are never merged. Both are intact —
 /// one in memory, one on disk — and the choice is stated in terms of what is
 /// lost, because that is the only thing worth knowing here.
-fn conflict_banner(root: &mut egui::Ui, actions: &mut Vec<UiAction>) {
+pub(crate) fn conflict_banner(root: &mut egui::Ui, actions: &mut Vec<UiAction>) {
     egui::Panel::top("conflict").show(root, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(
@@ -412,234 +397,213 @@ fn conflict_banner(root: &mut egui::Ui, actions: &mut Vec<UiAction>) {
     });
 }
 
-fn hierarchy(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
-    egui::Panel::left("hierarchy")
-        .default_size(230.0)
-        .resizable(true)
-        .show(root, |ui| {
-            ui.heading("Hierarchy");
-            ui.separator();
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for path in state.paths {
-                    // Indent by depth, so the hierarchy reads as a tree rather
-                    // than a flat list of slash-separated strings.
-                    let depth = path.matches('/').count();
-                    let name = path.rsplit('/').next().unwrap_or(path);
-                    let selected = state.selected.iter().any(|p| p == path);
-                    ui.horizontal(|ui| {
-                        #[allow(clippy::cast_precision_loss)]
-                        ui.add_space(depth as f32 * 14.0);
-                        // Nodes that draw nothing are still real; showing which
-                        // do saves opening the inspector to find out.
-                        let marker = if state.picks.contains_key(path) {
-                            "▪"
-                        } else {
-                            "·"
-                        };
-                        // A row is both a drag source and a drop target, which
-                        // is what makes reparenting a drag rather than a menu.
-                        // The op layer refuses cycles and name collisions, so
-                        // an impossible drop is rejected with a reason rather
-                        // than prevented by duplicated rules here.
-                        let id = egui::Id::new(("hierarchy", path));
-                        let response = ui
-                            .dnd_drag_source(id, path.clone(), |ui| {
-                                ui.selectable_label(selected, format!("{marker} {name}"))
-                            })
-                            .response
-                            .on_hover_text(path);
-                        if let Some(dragged) = response.dnd_release_payload::<String>()
-                            && *dragged != *path
-                        {
-                            actions.push(UiAction::Reparent {
-                                node: (*dragged).clone(),
-                                parent: path.clone(),
-                            });
+pub(crate) fn hierarchy(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+    ui.heading("Hierarchy");
+    ui.separator();
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for path in state.paths {
+            // Indent by depth, so the hierarchy reads as a tree rather
+            // than a flat list of slash-separated strings.
+            let depth = path.matches('/').count();
+            let name = path.rsplit('/').next().unwrap_or(path);
+            let selected = state.selected.iter().any(|p| p == path);
+            ui.horizontal(|ui| {
+                #[allow(clippy::cast_precision_loss)]
+                ui.add_space(depth as f32 * 14.0);
+                // Nodes that draw nothing are still real; showing which
+                // do saves opening the inspector to find out.
+                let marker = if state.picks.contains_key(path) {
+                    "▪"
+                } else {
+                    "·"
+                };
+                // A row is both a drag source and a drop target, which
+                // is what makes reparenting a drag rather than a menu.
+                // The op layer refuses cycles and name collisions, so
+                // an impossible drop is rejected with a reason rather
+                // than prevented by duplicated rules here.
+                let id = egui::Id::new(("hierarchy", path));
+                let response = ui
+                    .dnd_drag_source(id, path.clone(), |ui| {
+                        ui.selectable_label(selected, format!("{marker} {name}"))
+                    })
+                    .response
+                    .on_hover_text(path);
+                if let Some(dragged) = response.dnd_release_payload::<String>()
+                    && *dragged != *path
+                {
+                    actions.push(UiAction::Reparent {
+                        node: (*dragged).clone(),
+                        parent: path.clone(),
+                    });
+                }
+                if response.clicked() {
+                    actions.push(UiAction::Select {
+                        path: path.clone(),
+                        // Ctrl-click extends, as everywhere else.
+                        extend: ui.input(|i| i.modifiers.ctrl),
+                    });
+                }
+                if state.editable {
+                    response.context_menu(|ui| {
+                        if ui.button("Add child").clicked() {
+                            actions.push(UiAction::AddChild(path.clone()));
+                            ui.close();
                         }
-                        if response.clicked() {
+                        if ui.button("Duplicate").clicked() {
                             actions.push(UiAction::Select {
                                 path: path.clone(),
-                                // Ctrl-click extends, as everywhere else.
-                                extend: ui.input(|i| i.modifiers.ctrl),
+                                extend: false,
                             });
+                            actions.push(UiAction::Duplicate);
+                            ui.close();
                         }
-                        if state.editable {
-                            response.context_menu(|ui| {
-                                if ui.button("Add child").clicked() {
-                                    actions.push(UiAction::AddChild(path.clone()));
-                                    ui.close();
-                                }
-                                if ui.button("Duplicate").clicked() {
-                                    actions.push(UiAction::Select {
-                                        path: path.clone(),
-                                        extend: false,
-                                    });
-                                    actions.push(UiAction::Duplicate);
-                                    ui.close();
-                                }
-                                if ui.button("Delete").clicked() {
-                                    actions.push(UiAction::Select {
-                                        path: path.clone(),
-                                        extend: false,
-                                    });
-                                    actions.push(UiAction::Delete);
-                                    ui.close();
-                                }
+                        if ui.button("Delete").clicked() {
+                            actions.push(UiAction::Select {
+                                path: path.clone(),
+                                extend: false,
                             });
+                            actions.push(UiAction::Delete);
+                            ui.close();
                         }
                     });
                 }
             });
-        });
+        }
+    });
 }
 
-fn inspector(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
-    egui::Panel::right("inspector")
-        .default_size(320.0)
-        .resizable(true)
-        .show(root, |ui| {
-            ui.heading("Inspector");
-            ui.separator();
+pub(crate) fn inspector(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+    ui.heading("Inspector");
+    ui.separator();
 
-            if state.selected.len() > 1 {
-                multi_inspector(ui, state, actions);
-                return;
-            }
-            let Some(path) = state.selected.first() else {
-                ui.weak("nothing selected");
-                return;
-            };
-            let Some(node) = state.scene.nodes().iter().find(|n| &n.path == path) else {
-                return;
-            };
+    if state.selected.len() > 1 {
+        multi_inspector(ui, state, actions);
+        return;
+    }
+    let Some(path) = state.selected.first() else {
+        ui.weak("nothing selected");
+        return;
+    };
+    let Some(node) = state.scene.nodes().iter().find(|n| &n.path == path) else {
+        return;
+    };
 
-            let editable_now = state.editable && state.playing.is_none();
-            let short = path.rsplit('/').next().unwrap_or(path);
-            // **The buffer has to outlive the frame.** It used to be rebuilt
-            // from the node's name every frame, so each typed character was
-            // overwritten before the next repaint and Rename could never fire —
-            // the field looked editable and was inert. egui's own per-id store
-            // keeps it across frames; keying it on the path means selecting a
-            // different node starts a fresh buffer rather than carrying the
-            // previous node's half-typed name over.
-            let buffer_id = egui::Id::new(("rename", path));
-            let mut renamed = ui
-                .data_mut(|d| d.get_temp::<String>(buffer_id))
-                .unwrap_or_else(|| short.to_owned());
+    let editable_now = state.editable && state.playing.is_none();
+    let short = path.rsplit('/').next().unwrap_or(path);
+    // **The buffer has to outlive the frame.** It used to be rebuilt
+    // from the node's name every frame, so each typed character was
+    // overwritten before the next repaint and Rename could never fire —
+    // the field looked editable and was inert. egui's own per-id store
+    // keeps it across frames; keying it on the path means selecting a
+    // different node starts a fresh buffer rather than carrying the
+    // previous node's half-typed name over.
+    let buffer_id = egui::Id::new(("rename", path));
+    let mut renamed = ui
+        .data_mut(|d| d.get_temp::<String>(buffer_id))
+        .unwrap_or_else(|| short.to_owned());
+    ui.horizontal(|ui| {
+        ui.label("name");
+        let response = ui.add_enabled(
+            editable_now,
+            egui::TextEdit::singleline(&mut renamed).desired_width(180.0),
+        );
+        if response.changed() {
+            ui.data_mut(|d| d.insert_temp(buffer_id, renamed.clone()));
+        }
+        // On commit, not per keystroke: a transaction per character
+        // would bury the log and make undo useless.
+        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            actions.push(UiAction::Rename(path.clone(), renamed.clone()));
+            ui.data_mut(|d| d.remove::<String>(buffer_id));
+        }
+    });
+    ui.label(egui::RichText::new(path).monospace().weak());
+    ui.add_space(6.0);
+    let editing = state.editable && state.playing.is_none();
+
+    let empty = std::collections::BTreeSet::new();
+    let ctx = FieldContext {
+        assets: state.assets,
+        overridden: state.overrides.get(path).unwrap_or(&empty),
+    };
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        // Transform first — it is what a human reaches for, and it is
+        // the node-key sugar rather than a component table.
+        inspect_transform(ui, path, &node.transform, editing, actions);
+
+        for (type_name, value) in &node.components {
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label("name");
-                let response = ui.add_enabled(
-                    editable_now,
-                    egui::TextEdit::singleline(&mut renamed).desired_width(180.0),
-                );
-                if response.changed() {
-                    ui.data_mut(|d| d.insert_temp(buffer_id, renamed.clone()));
-                }
-                // On commit, not per keystroke: a transaction per character
-                // would bury the log and make undo useless.
-                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    actions.push(UiAction::Rename(path.clone(), renamed.clone()));
-                    ui.data_mut(|d| d.remove::<String>(buffer_id));
+                ui.label(egui::RichText::new(type_name).strong());
+                if editing && ui.small_button("✖").on_hover_text("remove").clicked() {
+                    actions.push(UiAction::RemoveComponent(
+                        path.clone(),
+                        type_name.clone(),
+                    ));
                 }
             });
-            ui.label(egui::RichText::new(path).monospace().weak());
-            ui.add_space(6.0);
-            let editing = state.editable && state.playing.is_none();
+            inspect_component(
+                ui,
+                path,
+                type_name,
+                value,
+                state.registry,
+                editing,
+                &ctx,
+                actions,
+            );
+        }
 
-            let empty = std::collections::BTreeSet::new();
-            let ctx = FieldContext {
-                assets: state.assets,
-                overridden: state.overrides.get(path).unwrap_or(&empty),
-            };
-
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                // Transform first — it is what a human reaches for, and it is
-                // the node-key sugar rather than a component table.
-                inspect_transform(ui, path, &node.transform, editing, actions);
-
-                for (type_name, value) in &node.components {
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(type_name).strong());
-                        if editing && ui.small_button("✖").on_hover_text("remove").clicked() {
-                            actions.push(UiAction::RemoveComponent(
-                                path.clone(),
-                                type_name.clone(),
-                            ));
-                        }
-                    });
-                    inspect_component(
-                        ui,
-                        path,
-                        type_name,
-                        value,
-                        state.registry,
-                        editing,
-                        &ctx,
-                        actions,
-                    );
-                }
-
-                ui.add_space(12.0);
-                add_component_menu(ui, node, state, editing, actions);
-            });
-        });
+        ui.add_space(12.0);
+        add_component_menu(ui, node, state, editing, actions);
+    });
 }
 
 /// Unity's Project panel, cut to what this engine has: the assets the scene
 /// actually resolved. Clicking one points the selection at it.
-fn assets(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
-    egui::Panel::bottom("assets")
-        .default_size(120.0)
-        .resizable(true)
-        .show(root, |ui| {
-            ui.heading("Assets");
-            ui.separator();
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for asset in state.assets {
-                        // Voxel meshes are baked per node from the scene's op
-                        // list, not assignable to anything else.
-                        if asset.starts_with("voxel:") {
-                            ui.add_enabled(false, egui::Button::new(format!("⛰ {asset}")))
-                                .on_disabled_hover_text(
-                                    "baked from this node's op list — never a raw voxel array",
-                                );
-                            continue;
-                        }
-                        let enabled = state.editable && !state.selected.is_empty();
-                        if ui
-                            .add_enabled(enabled, egui::Button::new(format!("◻ {asset}")))
-                            .on_hover_text("assign to the selection")
-                            .clicked()
-                        {
-                            actions.push(UiAction::AssignMesh(asset.clone()));
-                        }
-                    }
-                });
-            });
+pub(crate) fn assets(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+    ui.heading("Assets");
+    ui.separator();
+    egui::ScrollArea::horizontal().show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for asset in state.assets {
+                // Voxel meshes are baked per node from the scene's op
+                // list, not assignable to anything else.
+                if asset.starts_with("voxel:") {
+                    ui.add_enabled(false, egui::Button::new(format!("⛰ {asset}")))
+                        .on_disabled_hover_text(
+                            "baked from this node's op list — never a raw voxel array",
+                        );
+                    continue;
+                }
+                let enabled = state.editable && !state.selected.is_empty();
+                if ui
+                    .add_enabled(enabled, egui::Button::new(format!("◻ {asset}")))
+                    .on_hover_text("assign to the selection")
+                    .clicked()
+                {
+                    actions.push(UiAction::AssignMesh(asset.clone()));
+                }
+            }
         });
+    });
 }
 
 /// Unity's Console. The reason it exists is that the messages worth reading —
 /// a rejected transaction, a scene that moved on disk — were going to a
 /// terminal nobody has in front of them.
-fn console(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
-    egui::Panel::bottom("console")
-        .default_size(170.0)
-        .resizable(true)
-        .show(root, |ui| {
-            // Two columns rather than two strips of screen: what the engine
-            // said and what the scene did are read together, and the second
-            // explains the first.
-            ui.columns(2, |columns| {
-                console_column(&mut columns[0], state.console, actions);
-                transactions(&mut columns[1], state.history);
-            });
-        });
-}
-
-fn console_column(ui: &mut egui::Ui, entries: &[crate::console::Entry], actions: &mut Vec<UiAction>) {
+///
+/// **It used to be two columns of one panel and is now two tabs.** They were
+/// side by side because what the engine said and what the scene did are read
+/// together; docked, the human can put them side by side or stack them, which
+/// is strictly more than the hard-coded pair offered.
+pub(crate) fn console_column(
+    ui: &mut egui::Ui,
+    entries: &[crate::console::Entry],
+    actions: &mut Vec<UiAction>,
+) {
     ui.horizontal(|ui| {
         ui.heading("Console");
         if ui.small_button("Clear").clicked() {
@@ -679,7 +643,7 @@ fn console_column(ui: &mut egui::Ui, entries: &[crate::console::Entry], actions:
 }
 
 /// The transaction log: every change to the scene, by its label.
-fn transactions(ui: &mut egui::Ui, history: &[String]) {
+pub(crate) fn transactions(ui: &mut egui::Ui, history: &[String]) {
     ui.heading("Transactions");
     ui.separator();
     egui::ScrollArea::vertical()
@@ -707,7 +671,7 @@ fn transactions(ui: &mut egui::Ui, history: &[String]) {
 ///
 /// Deliberately not a modal, not a list to acknowledge, not a notification to
 /// dismiss: the human is looking at the viewport already.
-fn agent_overlay(root: &mut egui::Ui, state: &PanelState<'_>) {
+pub(crate) fn agent_overlay(root: &mut egui::Ui, state: &PanelState<'_>) {
     if state.agent_marks.is_empty() {
         return;
     }
@@ -745,7 +709,7 @@ fn agent_overlay(root: &mut egui::Ui, state: &PanelState<'_>) {
 ///
 /// In the background layer: over the 3D image, under every panel, so a handle
 /// never draws on top of the inspector it is behind.
-fn gizmo_overlay(root: &mut egui::Ui, state: &PanelState<'_>) {
+pub(crate) fn gizmo_overlay(root: &mut egui::Ui, state: &PanelState<'_>) {
     if state.handles.is_empty() {
         return;
     }

@@ -169,6 +169,11 @@ struct App {
     scene_path: std::path::PathBuf,
     /// egui, when editing. `None` in read-only mode, so a viewer costs no UI.
     ui: Option<Ui>,
+    /// The docked panel arrangement, built with the window and saved on exit.
+    ///
+    /// `None` until `resumed`, and for the same reason as `ui`: there is no
+    /// layout without a window to lay out.
+    dock: Option<loom_editor::Dock>,
     /// Cursor position in window pixels, for picking and for gizmo drags.
     cursor: (f32, f32),
     registry: loom_reflect::TypeRegistry,
@@ -412,6 +417,7 @@ impl App {
             input: InputState::new(),
             window: None,
             viewer: None,
+            dock: None,
             gpu: None,
             #[allow(clippy::disallowed_methods)]
             last_frame: std::time::Instant::now(),
@@ -839,6 +845,21 @@ impl ApplicationHandler for App {
                         // shape from every frame after it.
                         loom_editor::apply_theme(ui.context(), &loom_editor::tokens(false));
                         self.ui = Some(ui);
+                        // **`--frames` never reads or writes the saved
+                        // layout.** The windowed half of `cargo xtask validate`
+                        // opens a window per scene, and a gate whose viewport
+                        // depends on where the human last dragged a splitter is
+                        // not a gate. It would also overwrite that layout on
+                        // the way out.
+                        //
+                        // Logical points, because `egui_dock` splits by
+                        // fraction and `BOTTOM_HEIGHT` is authored in points.
+                        let height = window
+                            .inner_size()
+                            .to_logical::<f32>(window.scale_factor())
+                            .height;
+                        self.dock =
+                            Some(loom_editor::Dock::new(self.frames_left.is_none(), height));
                     }
                     Err(e) => crate::log::error(format!("no editor UI ({e}); continuing bare")),
                 }
@@ -1268,6 +1289,9 @@ impl ApplicationHandler for App {
                     self.cpu_worst_ms = self.cpu_worst_ms.max(cpu_ms as f32);
                 }
 
+                // Bound out of `self` before the match so the borrow checker
+                // sees three disjoint fields rather than one `&mut self`.
+                let mut dock = self.dock.as_mut();
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
                     (Some(viewer), Some(ui), Some(window)) => viewer.draw_with_ui(
                         drawn,
@@ -1279,7 +1303,14 @@ impl ApplicationHandler for App {
                             // whatever they leave over, and before they are
                             // added that is the entire window — which is how
                             // the score ended up on top of the hierarchy.
-                            actions.extend(loom_editor::panels::draw(root, &state));
+                            // The dock carves the viewport tab back out of the
+                            // root, so `available_rect_before_wrap` — which is
+                            // what `hud::draw` anchors to — is that tab.
+                            // Reborrowed rather than moved: the build closure
+                            // is `FnMut`, so it may run more than once.
+                            if let Some(dock) = dock.as_deref_mut() {
+                                actions.extend(dock.draw(root, &state));
+                            }
                             let _ = crate::hud::draw(root, &overlay);
                         },
                     ),
@@ -1338,6 +1369,18 @@ impl ApplicationHandler for App {
             // degenerates, which makes strafing snap around.
             self.camera.pitch = (self.camera.pitch - dy * LOOK_SENSITIVITY)
                 .clamp(-FRAC_PI_2 + 0.01, FRAC_PI_2 - 0.01);
+        }
+    }
+
+    /// The layout is written once, on the way out.
+    ///
+    /// Not per frame and not on every splitter drag: a dock rearrangement is
+    /// worth a file at the end of the session, and writing one on each of the
+    /// sixty frames a drag spans is a filesystem write per frame for a
+    /// convenience. `Dock::save` is a no-op when persistence is off.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(dock) = self.dock.as_ref() {
+            dock.save();
         }
     }
 }

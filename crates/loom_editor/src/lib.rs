@@ -20,7 +20,9 @@ pub mod panels;
 pub mod theme;
 
 pub use console::{Entry, Level};
-pub use dock::Tab;
+pub use dock::{Dock, Tab};
 pub use theme::{Tokens, apply as apply_theme, tokens};
 pub use gizmo::{Handle, Mode};
-pub use panels::{AgentMark, PanelState, UiAction, draw};
+// No `draw`: the dock is the layout, and a second entry point that laid the
+// same panels out differently is exactly the drift `Dock` exists to prevent.
+pub use panels::{AgentMark, PanelState, UiAction};

@@ -23,7 +23,12 @@ publish.workspace = true
 # must print exactly one version.
 #
 # Upgrading means moving egui, `egui-winit` and `egui-ash-renderer` together.
-egui_dock = "=0.20.1"
+#
+# The `serde` feature is what makes layout persistence possible at all: it turns
+# on `dep:serde` plus `egui/serde` so `DockState`, `Tree`, `Node` and `LeafNode`
+# carry their derives. It changes no API and moves no pin — `egui/serde` is a
+# feature of the egui this workspace already builds, not a second copy.
+egui_dock = { version = "=0.20.1", features = ["serde"] }
 loom_reflect = { version = "0.0.0", path = "../loom_reflect" }
 loom_render = { version = "0.0.0", path = "../loom_render" }
 loom_scene = { version = "0.0.0", path = "../loom_scene" }
