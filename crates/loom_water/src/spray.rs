@@ -363,6 +363,147 @@ pub fn crown(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec<
     out
 }
 
+// ---------------------------------------------------------------------------
+// W12: the water that rises — the sheet the droplets come off.
+// ---------------------------------------------------------------------------
+//
+// **What the human asked for and what was there.** "The water caresses up and
+// maybe you could see some particles coming from it." The particles are
+// [`crown`] above and they read; what is missing is the *water itself rising* —
+// the sheet that stands up out of the hole a body punched, before it falls
+// back. A crown of droplets around a flat surface is beads on a table.
+//
+// **It is rendered, not injected into the ripple grid, and that is a
+// measurement rather than a preference.** The obvious physical answer is to
+// push the grid down and then up at the entry point so the surface really
+// rises. Two things say no:
+//
+//   - The grid is already at its deepest exactly when the column should stand.
+//     `loom water --at 0,0 --sim {50,60,120}` on `pool.loom` reads
+//     -0.2712 / -0.4079 / +0.2530: the dent bottoms out around tick 60 and the
+//     rebound does not arrive until tick 120, a full second late, and it comes
+//     back as a mound over two metres wide because the rebound timescale is
+//     dent-width over `speed`. `speed` is the same constant carrying the wake
+//     ring outward, and the two timescales are about 7x apart — one number
+//     cannot serve both.
+//   - A deliberate upward injection is ADR 0046's first failure with the sign
+//     chosen to pump it. That failure saturates only because the injection is
+//     taken *relative to the surface's own velocity*; an injection derived from
+//     the event rather than from the body's velocity has no such term, and ADR
+//     0051 already measured what moving that knob costs — at 5.6x the authored
+//     strength the sphere never surfaces at all.
+//
+// So this is presentation, on the same footing as the crown and the crest
+// spray: a pure function of `(where, how hard, how old, a seed)`, drawn through
+// the particle pipeline, invisible to `sample_water`, to buoyancy and to
+// `loom sim --assert`. Every hash and every `loom water` reading is unmoved,
+// which is checked rather than claimed.
+
+/// Fraction of the impact speed the sheet's rim leaves with, upward.
+///
+/// **Anchored on the height, not the velocity.** At `pool.loom`'s measured
+/// 7.1 m/s entry this lifts the tip to `(0.5·7.1)²/2g` = 0.64 m — about one
+/// body radius above the surface for a 0.5 m sphere, which is what a splash at
+/// this Froude number does. Over [`SPLASH_UP_FRAC`] deliberately: the sheet is
+/// water and the droplets are what tears off it, so the sheet stands above the
+/// ring rather than the ring standing above nothing.
+pub const COLUMN_UP_FRAC: f32 = 0.50;
+
+/// How far the sheet flares out by the time it is at its apex, as a multiple of
+/// the cavity radius.
+///
+/// A crown is a cone opening upward — the wall leans out as it rises, which is
+/// what makes it read as water thrown aside rather than as a pipe. Coming back
+/// down it narrows again, because the water is falling into the hole it came
+/// out of.
+pub const COLUMN_FLARE: f32 = 1.6;
+
+/// Quads around each ring, and rings up the sheet.
+///
+/// Twelve rather than [`SPLASH_RING`]'s eight because these have to *overlap*
+/// into a surface. The binding case is the widest the ring ever gets: at a
+/// 0.5 m cavity flared to [`COLUMN_FLARE`] the circle is 5.0 m around, so twelve
+/// quads sit 0.42 m apart, which is what `default_column`'s quad size is set
+/// from. Fewer and the sheet reads as a necklace, which is exactly the thing it
+/// exists to stop looking like.
+pub const COLUMN_RING: usize = 12;
+/// Rings up the sheet. Four is what covers 0.64 m without banding.
+pub const COLUMN_RINGS: usize = 4;
+
+/// The sheet of water an impact throws up, `age` seconds after it happened.
+///
+/// Same arguments as [`crown`] and deliberately so — the caller has one event
+/// and hands it to both, so the two can never disagree about where the impact
+/// was or how hard it was. Same gate, same saturation, same `seed` turning the
+/// ring, and the same ballistic arc, so the sheet and the droplets leaving it
+/// share one clock.
+///
+/// **One ballistic rim, and the wall hangs from it.** The first version gave
+/// every ring its own launch speed, which is the more physical-sounding option
+/// and is visibly wrong: the fast rings outrun the slow ones, the sheet tears
+/// off its own base, and by mid-flight there is a detached puff of white
+/// hanging over flat water reading as steam. A crown wall is *attached to the
+/// water* — that attachment is the whole thing being asked for, since a
+/// detached white blob is spray, and spray is what [`crown`] already draws. So
+/// the rim is ballistic and the rings below it interpolate down to the surface,
+/// which stretches and thins the sheet as it rises and lets it settle back
+/// into the hole it came out of.
+///
+/// Empty below [`SPLASH_MIN_SPEED`] and empty once the rim is back down,
+/// exactly like [`crown`]. No lifetime is authored anywhere and none can
+/// disagree with the velocity.
+#[must_use]
+pub fn column(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec<Droplet> {
+    let strength =
+        ((speed - SPLASH_MIN_SPEED) / (SPLASH_FULL_SPEED - SPLASH_MIN_SPEED)).clamp(0.0, 1.0);
+    if strength <= 0.0 || age < 0.0 {
+        return Vec::new();
+    }
+    // Saturated for [`crown`]'s reason: an unbounded speed would otherwise
+    // stand a column in the air for seconds after the thing that made it.
+    let impact = speed.min(SPLASH_FULL_SPEED);
+    let up = impact * COLUMN_UP_FRAC;
+    let lifetime = 2.0 * up / SPRAY_GRAVITY;
+    if age >= lifetime {
+        return Vec::new();
+    }
+    let apex = up * up / (2.0 * SPRAY_GRAVITY);
+    // The rim: one launch, straight up, back down. Everything else hangs off it.
+    let tip = up.mul_add(age, -0.5 * SPRAY_GRAVITY * age * age);
+    if tip <= 0.0 {
+        return Vec::new();
+    }
+    // A different turn from the crown's, so the sheet's seams and the droplets
+    // do not line up into spokes.
+    #[allow(clippy::cast_precision_loss)]
+    let spin =
+        ((hash(seed ^ 0x0005_1eed) >> 8) as f32) * (1.0 / 16_777_216.0) * std::f32::consts::TAU;
+
+    let mut out = Vec::new();
+    for ring in 0..COLUMN_RINGS {
+        #[allow(clippy::cast_precision_loss)]
+        let fraction = (ring as f32 + 1.0) / COLUMN_RINGS as f32;
+        let y = tip * fraction;
+        // **Flare with the current height, not with the ring index.** Widening
+        // by index would make the sheet a fixed cone that slides upward; this
+        // makes it open as it rises and close as it falls, which is the water
+        // going out and coming back into the hole it left.
+        let r = radius * (COLUMN_FLARE - 1.0).mul_add(y / apex, 1.0);
+        for i in 0..COLUMN_RING {
+            // Half a step per ring, so the seams spiral instead of stacking
+            // into vertical ribs — the same trick the crown's bands play.
+            #[allow(clippy::cast_precision_loss)]
+            let angle = std::f32::consts::TAU
+                .mul_add((i as f32 + 0.5 * ring as f32) / COLUMN_RING as f32, spin);
+            out.push(Droplet {
+                position: [angle.cos().mul_add(r, at[0]), at[1] + y, angle.sin().mul_add(r, at[2])],
+                fraction: age / lifetime,
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +752,103 @@ mod tests {
         assert_eq!(full.len(), SPLASH_RING * SPLASH_BANDS, "a full crown is every band");
         // The tallest band is 2*up/g at the saturated impact speed: 0.55 s.
         assert!(crown([0.0, 0.0, 0.0], 40.0, 0.5, 1.0, 5).is_empty(), "the crown never landed");
+    }
+
+    // -- W12, the rising sheet -----------------------------------------------
+
+    /// **The same gate as the crown.** A settling body lifts no water either,
+    /// and the two must agree about that or a scene would get a column with no
+    /// droplets on it — which is the one shape a splash never takes.
+    #[test]
+    fn a_settling_body_lifts_no_column() {
+        for speed in [0.0_f32, 0.2, 0.9, SPLASH_MIN_SPEED] {
+            assert!(
+                column([0.0, 0.0, 0.0], speed, 0.5, 0.0, 1).is_empty(),
+                "an entry at {speed} m/s raised a column"
+            );
+            assert!(crown([0.0, 0.0, 0.0], speed, 0.5, 0.0, 1).is_empty());
+        }
+    }
+
+    /// **The water goes up and comes back, and it stands above the droplets.**
+    ///
+    /// Three claims in one test because they are one shape: the sheet rises out
+    /// of the surface (not below it), it clears the crown it threw (or it is a
+    /// wall with beads stuck to it rather than a splash), and it empties itself
+    /// so a still at `--sim N` does not have last second's water hanging in the
+    /// air.
+    #[test]
+    fn the_column_rises_above_the_crown_and_falls_back() {
+        let speed = SPLASH_FULL_SPEED;
+        let mut sheet_peak: f32 = 0.0;
+        let mut drop_peak: f32 = 0.0;
+        let mut last_alive = 0.0_f32;
+        for step in 0..180 {
+            #[allow(clippy::cast_precision_loss)]
+            let age = step as f32 / 60.0;
+            let sheet = column([0.0, 0.0, 0.0], speed, 0.5, age, 5);
+            for d in &sheet {
+                assert!(d.position[1] > 0.0, "the sheet dipped under the surface: {d:?}");
+                sheet_peak = sheet_peak.max(d.position[1]);
+            }
+            if !sheet.is_empty() {
+                last_alive = age;
+            }
+            for d in crown([0.0, 0.0, 0.0], speed, 0.5, age, 5) {
+                drop_peak = drop_peak.max(d.position[1]);
+            }
+        }
+        assert!(sheet_peak > drop_peak, "sheet {sheet_peak} m under crown {drop_peak} m");
+        // 2*up/g at the saturated speed: 0.815 s. Anything past that is water
+        // that never came down.
+        assert!(last_alive < 0.9, "the column was still up at {last_alive} s");
+        assert!(column([0.0, 0.0, 0.0], 40.0, 0.5, 1.0, 5).is_empty(), "the column never fell");
+    }
+
+    /// **It is a ring at the cavity rim that flares as it rises**, never a
+    /// spout out of the body's centre — the same geometry the crown's doc
+    /// comment is about, and the reason both take a `radius`.
+    #[test]
+    fn the_sheet_is_a_flaring_ring() {
+        let radius = 0.5;
+        let at = [3.0, 0.25, -2.0];
+        let mut widest: f32 = 0.0;
+        for step in 1..48 {
+            #[allow(clippy::cast_precision_loss)]
+            let age = step as f32 / 60.0;
+            for d in column(at, 7.1, radius, age, 7) {
+                let r = (d.position[0] - at[0]).hypot(d.position[2] - at[2]);
+                assert!(r >= radius - 1e-4, "born {r} m out, inside the {radius} m rim");
+                assert!(
+                    r <= radius * COLUMN_FLARE + 1e-4,
+                    "flared to {r} m, past the {} m the flare allows",
+                    radius * COLUMN_FLARE
+                );
+                widest = widest.max(r);
+            }
+        }
+        assert!(widest > radius * 1.4, "the sheet never flared: {widest} m at a {radius} m rim");
+    }
+
+    /// **A harder impact throws a taller sheet**, for the same reason the crown
+    /// gets more bands: how much water comes up is a reading of how hard the
+    /// thing hit.
+    #[test]
+    fn a_harder_impact_lifts_a_taller_column() {
+        let peak = |speed: f32| {
+            let mut best: f32 = 0.0;
+            for step in 0..120 {
+                #[allow(clippy::cast_precision_loss)]
+                let age = step as f32 / 60.0;
+                for d in column([0.0, 0.0, 0.0], speed, 0.5, age, 3) {
+                    best = best.max(d.position[1]);
+                }
+            }
+            best
+        };
+        let (hard, soft) = (peak(7.1), peak(3.3));
+        assert!(hard > soft * 2.0, "peak {hard} m against {soft} m is not a harder impact");
+        assert!(soft > 0.0, "a 0.55 m drop lifted nothing at all");
     }
 
     /// **Two impacts on one tick are two different crowns.** Same shape, turned
