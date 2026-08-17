@@ -110,6 +110,61 @@ a `--sim 0` render; `shore`'s golden row is `--sim 90`. The correct baseline is 
 is what both designs and the judge used. My point that the plan's "14" was stale still holds; my
 number did not.
 
+### D12 — W3/W4's build agent crashed *after* committing, and I verified the commit instead
+
+**What happened:** the W3/W4 workflow's build phase hit `StructuredOutput retry cap (5) exceeded`
+— five attempts to serialise its final report, none valid. The design and judge phases succeeded.
+
+**Why it did not cost the work:** the agent had already committed. `e2af1b7` was on the branch
+with a clean tree, and its commit message carries everything the structured report would have —
+the measurements, the cost figures, the scene list, and an explicit note that blessing is the
+verifier's job. I verified the commit directly rather than re-running the builder.
+
+**Decided:** do not re-run. Re-running would have rebuilt work that already exists and burned
+the remaining time. The lesson for future workflows is that the report schema was too demanding
+— seven required fields including three long prose ones — and a smaller schema would have
+survived. **Confidence: high.**
+
+### D13 — A real Vulkan bug was found, and the scene that catches it did not exist
+
+**Recorded because it is the best argument for this project's own discipline.**
+
+Once `waterFragmentMain` statically references `sceneTLAS`, a scene containing water and **no
+mesh** draws with descriptor set 0 unbound — VUID-vkCmdDraw-None-08600. `build_instances` now
+always builds a TLAS, and set 0 is bound only when `ready()`.
+
+**No scene in the repo covered that case.** `assets/test/bare_sea.loom` was written to, and the
+fix was verified the right way round: reverting it fires the VUID on `bare_sea` and on no other
+scene. That is a latent crash-class defect that would have shipped and then appeared the first
+time somebody authored an ocean with nothing floating in it.
+
+### D14 — Two smoke constants were wrong for reasons a still image cannot show
+
+**`SMOKE_HZ` was 2.6, which is 1.4 noise cycles across the plume's width.** One blob of noise
+over an envelope with a hard boundary, so whether the silhouette read as smoke was a lottery on
+which region of the noise field it happened to land in. It was found by *adding seed
+decorrelation*, which turned a wispy column into a solid oval — the decorrelation did not break
+it, it revealed that the original was luck. Now 6.5, which erodes the cone everywhere and renders
+as the same kind of thing at offsets 0, 8 and 32.
+
+**`SMOKE_STEPS = 20` was chosen on the flicker floor, not on the still.** An under-resolved
+volumetric march does not blur — it *crawls*, and only a moving instrument sees that.
+
+Both are the same lesson this project keeps relearning: the still image is the weakest instrument
+it owns, and the constants that matter are the ones a still cannot judge.
+
+### D15 — Smoke is the first effect whose cost scales with coverage, not population
+
+0.35 ms at `plume`'s camera; **~2.8 ms extrapolated to full-screen coverage.** Every other effect
+here is priced by how many things exist — 45,000 grass blades at 0.054 ms, 131,072 rain drops at
+0.022 ms. A volumetric march is priced by how much of the screen it covers, so a camera walked
+into the plume costs an order of magnitude more than one looking at it from across the yard.
+
+**No budget decision was taken on this** and none should be until somebody walks a camera into a
+plume and looks at the frame time. Flagging it because it is the first time the engine's cost
+model changes shape, and the existing `LOOM_GPU_TIMING` numbers in CLAUDE.md will read as
+misleadingly cheap next to it.
+
 ## Routine calls, logged for completeness
 
 ### D4 — Subagents no longer run `cargo xtask` gates
