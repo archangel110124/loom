@@ -105,10 +105,28 @@ detect an absent effect.
    (G−R 25.3 against an acceptance test of 38, which is unreachable — D11).
 5. **`wake` at `--sim 200`** — the ripple grid. Measured against a build with the upload removed:
    2.8% of pixels at tick 45 (the buoy settling alone), 26.6% at 200, 4.8% at 900 once it has
-   decayed, and the water beyond the 24 m domain bit-identical. It is **subtle to the eye** — the
-   ring reads as extra high-frequency structure in the specular highlights near the crate, not as
-   a visible wave — because the grid's amplitude is centimetres against a surface whose authored
-   detail is larger. Judge it on the ablation, not on the still.
+   decayed, and the water beyond the 24 m domain bit-identical.
+
+   ~~It is **subtle to the eye**~~ — **superseded by W10, 2026-08-17.** The description was fair
+   and the diagnosis was half right. The grid's amplitude *is* centimetres, and
+   `loom water --at x,0 --sim 200` now says exactly how many: a ring whose slope is **0.012 to
+   0.033** out to six metres. What it was competing with is the other half:
+   `WATER_DETAIL_STRENGTH = 0.30` of capillary noise, applied **unconditionally**, with a floor
+   under its drift, on a scene authored at `wind.speed = 0`. A 0.03 slope against a 0.30 one is
+   not a contest.
+
+   W10 changed the presentation and no physics: the slope is read per pixel rather than at the
+   mesh's 0.5 m cells, the wake calms the capillary noise locally in proportion to its own slope,
+   and its crest goes white as a floor on the foam coverage. Measured over the crest band
+   (rect 180,300,180x40 at 640x400), ripples against none: **G +1.5 levels before, +8.1 after**;
+   whole-frame ablation mean **2.79 → 5.20**. It now reads as a smooth band sweeping across the
+   foreground — a wave — rather than as differently-textured chop. Judge it on the still *and*
+   the ablation.
+
+   **`strength` is not the lever and must not be reached for.** It is saturated by the
+   relative-velocity coupling that makes ADR 0046 stable: 5.6x the authored value moves the
+   ablation mean from 2.29 to 2.83 while silently changing the simulation's outcome. The schema's
+   ranges are enforced at load now, which they were not — `strength = 5.0` used to validate clean.
 
 ## W8 is refused, and here is the evidence
 
