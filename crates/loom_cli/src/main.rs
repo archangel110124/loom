@@ -623,7 +623,12 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     let mut world = World::from_scene(&scene);
     let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
     let library = MeshLibrary::for_scene(&scene, base);
-    let material_library = materials::MaterialLibrary::for_scene(&world, &scene, base);
+    let material_library = materials::MaterialLibrary::for_scene(
+        &world,
+        &scene,
+        base,
+        &mut TextureCache::new(),
+    );
 
     // --sim steps physics before drawing, which is what makes a still image a
     // useful view of a simulation rather than only of its initial state.
@@ -1093,6 +1098,25 @@ pub(crate) fn world_to_objects(
 
 /// Baked voxel meshes, keyed by the op list that produced them.
 pub(crate) type VoxelCache = std::collections::BTreeMap<u64, loom_asset::Mesh>;
+
+/// Decoded textures, keyed by path and colour space.
+///
+/// **The same reason [`VoxelCache`] exists, for a cost that turned out to be
+/// larger.** Rebuilding a `SceneView` re-ran `loom_asset::texture::load` for
+/// every map in the scene — a PNG decode plus a full mip chain, from disk,
+/// every time. On `materials.loom` that was the difference between 4.2 ms and
+/// well under one, and a `SceneView` is rebuilt on every frame of a gizmo drag
+/// or a scrubbed slider.
+///
+/// Keyed by `(path, space)` because the same file legitimately loads twice: an
+/// image used as both an albedo map and a normal map is decoded once as sRGB
+/// and once as linear, and they are different pixels.
+///
+/// **Never invalidated**, which is the same limitation `MaterialLibrary::key`
+/// documents: editing a `.png` outside the editor and saving it will not be
+/// picked up until the scene is reopened.
+pub(crate) type TextureCache =
+    std::collections::BTreeMap<(String, u8), loom_asset::Texture>;
 
 /// Every mesh a scene needs, plus the mapping from asset alias to draw index.
 ///

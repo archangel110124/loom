@@ -35,6 +35,35 @@ pub(crate) struct MaterialLibrary {
 /// White rather than black is what keeps an untextured material's reflection
 /// colour bit-identical to its authored `albedo`: multiplying by exactly 1.0
 /// is exact.
+/// Decode a texture, or hand back a copy of one already decoded.
+///
+/// The copy is a memcpy of the mip chain; the miss is a PNG decode plus mip
+/// generation from disk. Both were being paid on every rebuild, which on a
+/// gizmo drag is every frame.
+pub(crate) fn cached_load(
+    cache: &mut crate::TextureCache,
+    path: &std::path::Path,
+    space: loom_asset::ColorSpace,
+) -> Result<loom_asset::Texture, ()> {
+    // The colour space is part of the key: one file used as both an albedo map
+    // and a normal map is two different decodes, and returning the sRGB one
+    // for a normal map would tilt every normal in the scene.
+    let key = (
+        path.to_string_lossy().into_owned(),
+        u8::from(matches!(space, loom_asset::ColorSpace::Srgb)),
+    );
+    if let Some(hit) = cache.get(&key) {
+        return Ok(hit.clone());
+    }
+    match loom_asset::texture::load(path, space) {
+        Ok(texture) => {
+            cache.insert(key, texture.clone());
+            Ok(texture)
+        }
+        Err(_) => Err(()),
+    }
+}
+
 fn mean_of(textures: &[loom_asset::Texture], slot: u32) -> [f32; 3] {
     textures
         .get(slot as usize)
@@ -84,7 +113,12 @@ impl MaterialLibrary {
     }
 
     /// Resolve every `Material` a scene declares.
-    pub(crate) fn for_scene(world: &World, scene: &Scene, base: &std::path::Path) -> Self {
+    pub(crate) fn for_scene(
+        world: &World,
+        scene: &Scene,
+        base: &std::path::Path,
+        cache: &mut crate::TextureCache,
+    ) -> Self {
         let mut library = Self::default();
         // Alias to slot, so two materials naming the same texture upload it
         // once. A scene that dresses forty crates in one texture should cost
@@ -139,7 +173,7 @@ impl MaterialLibrary {
                     library.missing.push(alias.to_owned());
                     return NO_TEXTURE;
                 };
-                match loom_asset::texture::load(&base.join(path), space) {
+                match cached_load(cache, &base.join(path), space) {
                     Ok(texture) => {
                         let slot = u32::try_from(library.textures.len()).unwrap_or(0);
                         library.textures.push(texture);
@@ -293,7 +327,7 @@ impl MaterialLibrary {
             let Some(path) = scene.asset_path(alias) else {
                 continue;
             };
-            match loom_asset::texture::load(&base.join(path), loom_asset::ColorSpace::Srgb) {
+            match cached_load(cache, &base.join(path), loom_asset::ColorSpace::Srgb) {
                 Ok(texture) => {
                     let slot = u32::try_from(library.textures.len()).unwrap_or(0);
                     library.textures.push(texture);
@@ -318,7 +352,12 @@ mod tests {
         let world = World::from_scene(&scene);
         // No `[[asset]]` entries, so no texture ever loads and the base path is
         // never read. What is under test is the *record*, not the image.
-        MaterialLibrary::for_scene(&world, &scene, std::path::Path::new("."))
+        MaterialLibrary::for_scene(
+            &world,
+            &scene,
+            std::path::Path::new("."),
+            &mut crate::TextureCache::new(),
+        )
     }
 
     const WITH_LAYER: &str = r#"

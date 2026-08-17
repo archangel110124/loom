@@ -99,7 +99,12 @@ impl SceneView {
     /// # Errors
     /// The validation errors, as JSON, when the text is not a valid scene.
     pub fn build(text: &str, base: &std::path::Path) -> Result<Self, String> {
-        Self::build_cached(text, base, &mut crate::VoxelCache::default())
+        Self::build_cached(
+            text,
+            base,
+            &mut crate::VoxelCache::default(),
+            &mut crate::TextureCache::new(),
+        )
     }
 
     /// As [`Self::build`], reusing voxel meshes whose recipe has not changed.
@@ -110,6 +115,7 @@ impl SceneView {
         text: &str,
         base: &std::path::Path,
         cache: &mut crate::VoxelCache,
+        textures: &mut crate::TextureCache,
     ) -> Result<Self, String> {
         let scene = Scene::parse(text).map_err(|errors| {
             serde_json::to_string_pretty(&serde_json::json!({ "errors": errors }))
@@ -130,7 +136,8 @@ impl SceneView {
         })?;
         let world = World::from_scene(&scene);
         let library = crate::MeshLibrary::with_cache(&scene, base, cache);
-        let materials = crate::materials::MaterialLibrary::for_scene(&world, &scene, base);
+        let materials =
+            crate::materials::MaterialLibrary::for_scene(&world, &scene, base, textures);
 
         let scattered = crate::scatter_objects(&scene, &library);
         let mut objects = crate::world_to_objects(&world, &library, &materials);
@@ -518,6 +525,92 @@ name = \"Desk\"
         assert!(crate::override_map(plain).is_empty());
         assert!(crate::override_map("[scene]\nformat = ").is_empty());
         assert!(crate::override_map("").is_empty());
+    }
+
+
+
+    /// **A rebuild must not re-decode textures**, which is what made a gizmo
+    /// drag stall: `SceneView` is rebuilt on every frame of a drag, and each
+    /// rebuild was re-reading every PNG in the scene from disk and
+    /// regenerating its mip chain.
+    ///
+    /// Asserted on the cache's contents rather than on a duration, because a
+    /// timing assertion on a shared machine is a test that fails for reasons
+    /// that are not the bug. The measured effect is in `what_a_rebuild_costs`:
+    /// 43.5 ms to 4.2 ms debug, 4.22 ms to 0.89 ms release, on
+    /// `materials.loom`.
+    #[test]
+    fn a_second_rebuild_reuses_the_decoded_textures() {
+        let path = "../../assets/test/materials.loom";
+        let text = std::fs::read_to_string(path).expect("fixture");
+        let base = std::path::Path::new("../../assets/test");
+
+        let mut voxels = crate::VoxelCache::default();
+        let mut textures = crate::TextureCache::new();
+
+        SceneView::build_cached(&text, base, &mut voxels, &mut textures).expect("builds");
+        let after_first = textures.len();
+        assert!(
+            after_first > 0,
+            "the scene declares textures but none were cached — the cache is not on the load path"
+        );
+
+        SceneView::build_cached(&text, base, &mut voxels, &mut textures).expect("builds again");
+        assert_eq!(
+            textures.len(),
+            after_first,
+            "a second rebuild added cache entries, so it decoded something again"
+        );
+    }
+
+    /// One file used as both an albedo map and a normal map is two different
+    /// decodes, and handing back the sRGB one for a normal map would tilt
+    /// every normal in the scene. The key carries the colour space.
+    #[test]
+    fn the_texture_cache_keys_on_colour_space() {
+        let mut cache = crate::TextureCache::new();
+        let path = std::path::Path::new("../../assets/textures/beach_sand_albedo.png");
+        if !path.exists() {
+            return;
+        }
+        let srgb = crate::materials::cached_load(&mut cache, path, loom_asset::ColorSpace::Srgb);
+        let linear =
+            crate::materials::cached_load(&mut cache, path, loom_asset::ColorSpace::Linear);
+        assert!(srgb.is_ok() && linear.is_ok());
+        assert_eq!(cache.len(), 2, "one path, two colour spaces, two entries");
+    }
+
+    /// **What one frame of a gizmo drag actually costs.**
+    ///
+    /// Not a gate — it prints and asserts nothing tight — but the number is
+    /// what decides whether the drag path needs coalescing or a cache, and it
+    /// was measured rather than guessed.
+    #[test]
+    #[ignore = "timing, not a gate — run with --ignored"]
+    fn what_a_rebuild_costs() {
+        for scene in [
+            "../../assets/test/materials.loom",
+            "../../assets/test/proving_ground.loom",
+            "../../assets/games/proving_ground.loom",
+        ] {
+            let Ok(text) = std::fs::read_to_string(scene) else {
+                continue;
+            };
+            let base = std::path::Path::new(scene).parent().unwrap();
+            let mut cache = crate::VoxelCache::default();
+            let mut textures = crate::TextureCache::new();
+            // Warm, so the number is a *repeat* rebuild — which is what a drag
+            // frame is.
+            let _ = SceneView::build_cached(&text, base, &mut cache, &mut textures);
+
+            let start = std::time::Instant::now();
+            const N: u32 = 10;
+            for _ in 0..N {
+                let _ = SceneView::build_cached(&text, base, &mut cache, &mut textures);
+            }
+            let per = start.elapsed().as_secs_f64() * 1000.0 / f64::from(N);
+            println!("{scene}: {per:.2} ms per rebuild");
+        }
     }
 
     /// A re-baked voxel volume produces different geometry under the same

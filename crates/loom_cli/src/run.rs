@@ -156,6 +156,9 @@ struct App {
     base: std::path::PathBuf,
     /// Reused across rebuilds so a drag does not re-bake voxel volumes.
     voxels: crate::VoxelCache,
+    /// Decoded textures, so a rebuild does not re-read every PNG from disk.
+    /// See [`crate::TextureCache`] — this was most of a gizmo drag's cost.
+    texture_cache: crate::TextureCache,
     /// `Some` when `--edit` was passed. Read-only otherwise.
     session: Option<loom_scene::Session>,
     /// Selected node paths. Paths rather than indices: the agent can insert a
@@ -176,6 +179,12 @@ struct App {
     /// Version of the file as we last read or wrote it. Anything else on disk
     /// is somebody else's write.
     disk_seen: loom_scene::VersionToken,
+    /// A cursor move arrived and the drag has not been applied yet.
+    ///
+    /// See the comment in the `CursorMoved` arm: the drag is applied once per
+    /// frame because applying it per event rebuilt the scene sixteen times a
+    /// frame.
+    drag_dirty: bool,
     /// Mesh set currently on the GPU, so a moved node costs no re-upload.
     uploaded: u64,
     /// Materials currently on the GPU, keyed separately from the meshes: an
@@ -355,6 +364,7 @@ impl App {
             camera: view
                 .camera()
                 .map_or_else(|| FlyCamera::framing(view.bounds), FlyCamera::at),
+            drag_dirty: false,
             uploaded: view.mesh_key,
             materials_uploaded: view.material_key,
             // Not `grass_key(&view.scene)`: the viewer does not exist yet, so
@@ -366,6 +376,7 @@ impl App {
             view,
             base,
             voxels: crate::VoxelCache::default(),
+            texture_cache: crate::TextureCache::new(),
             session,
             scene_path,
             disk_seen,
@@ -509,7 +520,12 @@ impl App {
     /// the viewport because a file was caught mid-save would be worse than
     /// useless.
     fn show(&mut self, text: &str) {
-        let view = match SceneView::build_cached(text, &self.base, &mut self.voxels) {
+        let view = match SceneView::build_cached(
+            text,
+            &self.base,
+            &mut self.voxels,
+            &mut self.texture_cache,
+        ) {
             Ok(view) => view,
             Err(e) => {
                 crate::log::error(format!("scene did not parse; showing the last good one: {e}"));
@@ -821,12 +837,34 @@ impl ApplicationHandler for App {
                 }
                 self.gpu = Some((instance, device));
                 // **The scene becomes a rectangle rather than the whole
-                // window.** Only when there is a UI to leave room for it —
-                // bare mode and `--frames` still fill the window, and so does
-                // every headless path, which is what keeps `loom render` and
-                // `loom run` in agreement.
+                // window — behind `LOOM_DOCK_VIEWPORT=1`, deliberately.**
+                //
+                // The rendering half is finished and gated by the
+                // `viewport_rect` reference, but viewport *coordinates* are
+                // not: picking, the gizmo handles and the agent overlay still
+                // work in window pixels, so with this on a click lands offset
+                // by the rectangle's origin. Turning it on by default would
+                // trade a working editor for a preview of one.
+                //
+                // It is opt-in rather than absent because Stage 2's human
+                // check — drag the window edge and watch the seam between the
+                // scene and the panel — is what proves the `Ui` split fixed
+                // the one-frame lag, and there is no other way to see it.
+                // Stage 3's `to_viewport`/`to_window` deletes this flag.
+                //
+                // Same shape as `LOOM_GPU_TIMING`, which this codebase already
+                // uses for instrumentation that is not a scene property.
                 let mut viewer = viewer;
-                viewer.set_dock_viewport(self.ui.is_some());
+                let docked = self.ui.is_some()
+                    && std::env::var("LOOM_DOCK_VIEWPORT").is_ok_and(|v| v == "1");
+                viewer.set_dock_viewport(docked);
+                if docked {
+                    crate::log::warn(
+                        "LOOM_DOCK_VIEWPORT=1: the scene is inset, but clicks are not \
+                         remapped yet — picking will be offset until Stage 3"
+                            .to_owned(),
+                    );
+                }
                 self.viewer = Some(viewer);
                 self.window = Some(window);
                 // The meshes went in through `Viewer::new`; grass has no such
@@ -908,7 +946,23 @@ impl ApplicationHandler for App {
                 {
                     self.cursor = (position.x as f32, position.y as f32);
                 }
-                self.drag_gizmo();
+                // **The drag is applied once per frame, not once per event.**
+                // A gizmo drag rebuilds the whole `SceneView` — mesh library,
+                // material library, scatter, bounds — and a mouse reporting at
+                // 1000 Hz delivers about sixteen `CursorMoved` events per
+                // 60 Hz frame. That was sixteen full rebuilds per frame, and
+                // on `materials.loom` a rebuild is 4.2 ms in release: about
+                // 67 ms of work for one frame of dragging, which is the stall
+                // that got reported.
+                //
+                // The inspector never showed it because egui resolves a
+                // `DragValue` once per frame by construction, so its edit rate
+                // was already one per frame. This makes the gizmo match.
+                //
+                // Coalescing the *transaction* was already handled — the
+                // gesture key means a drag is one undo step — but that
+                // collapses the undo history, not the work.
+                self.drag_dirty = true;
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
@@ -945,6 +999,12 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
+                // The frame's one application of whatever the mouse did since
+                // the last one. Absolute from the drag's start rather than
+                // accumulated, so collapsing events loses nothing.
+                if std::mem::take(&mut self.drag_dirty) {
+                    self.drag_gizmo();
+                }
                 // See the note in `App::new` — presentation, not simulation.
                 #[allow(clippy::disallowed_methods)]
                 let now = std::time::Instant::now();
