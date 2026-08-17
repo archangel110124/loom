@@ -190,7 +190,20 @@ mod tests {
         assert_eq!(at(std::ptr::from_ref(&base.light_count).cast()), 880, "lightCount");
         assert_eq!(at(std::ptr::from_ref(&base.fire_flipbook).cast()), 884, "fireFlipbook");
         assert_eq!(size_of::<crate::PointLight>(), 32, "one light");
-        assert_eq!(size_of::<EnvironmentData>(), 896, "the whole struct");
+        // **The ripple grid, appended after the light table for the same
+        // reason the light table was appended after the waves** — every offset
+        // above it is unmoved, which is what keeps this test a one-line diff
+        // per addition rather than a rewrite. 896 is a multiple of 16, so the
+        // `float4` lands flush, the pointer follows it at 912, and two words of
+        // padding take the stride back to 16-byte alignment. The stride
+        // matters because `environment` is an array in the push block.
+        assert_eq!(at(std::ptr::from_ref(&base.ripple).cast()), 896, "ripple");
+        assert_eq!(
+            at(std::ptr::from_ref(&base.ripple_heights).cast()),
+            912,
+            "rippleHeights — the grid the water surface is displaced by"
+        );
+        assert_eq!(size_of::<EnvironmentData>(), 928, "the whole struct");
     }
 
     /// **`MaterialData` is one memory layout described twice too**, with the

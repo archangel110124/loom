@@ -99,6 +99,11 @@ fn generate_water(shader_dir: &Path) {
     // as an argument and does not call this itself, but `scene.slang` needs
     // both and Slang wants a function declared before it is used.
     text.push_str(loom_voxel::heightfield::slang());
+    // The ripple grid's sampler, before the surface that takes its result as an
+    // argument — same ordering rule as the height field above, and the same
+    // reason: the CPU grid is authoritative and this is the half that reads its
+    // upload (ADR 0046).
+    text.push_str(loom_water::ripples::slang());
     text.push_str(loom_water::slang());
     write_generated(shader_dir, "water.slang", &text);
 }

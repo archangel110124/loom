@@ -188,6 +188,18 @@ struct EnvironmentData {
     /// and this side calls padding is how that agreement stops being checkable.
     float exposure;
     uint lightPad1;
+    /// The interactive ripple grid: xy world origin, z metres between samples,
+    /// w samples per axis. **Zero samples means this water has no ripples**,
+    /// which is every scene authored before ADR 0046.
+    float4 ripple;
+    /// The heights, `ripple.w²` of them. **A copy of the CPU grid, which is
+    /// the authoritative one** — nothing here ever writes back, because a GPU
+    /// float reaching a force is what ADR 0045 clause 2 forbids.
+    float* rippleHeights;
+    /// Keeps the struct's stride 16-byte aligned on both sides. `environment`
+    /// is an array in the push block, so the stride has to match even though
+    /// only element zero is read.
+    uint2 ripplePad;
 };
 
 struct GrassBlade {
@@ -1752,6 +1764,22 @@ LoomHeightField terrainField() {
     field.side = int(push.environment[0].terrain.w);
     field.height = push.environment[0].terrainHeights;
     return field;
+}
+
+/// This tick's ripple grid, assembled from the two environment fields that
+/// carry it. `side == 0` is water with no ripples: every lookup returns zero,
+/// which is the plain Gerstner surface bit for bit.
+///
+/// **The grid is the CPU's** — ADR 0046. It is stepped inside the fixed step
+/// beside `rapier`, it is what buoyancy reads through `sample_water`, and this
+/// is a copy uploaded for drawing. Nothing here writes it.
+LoomRippleGrid rippleField() {
+    LoomRippleGrid grid;
+    grid.origin = push.environment[0].ripple.xy;
+    grid.cell = push.environment[0].ripple.z;
+    grid.side = int(push.environment[0].ripple.w);
+    grid.height = push.environment[0].rippleHeights;
+    return grid;
 }
 
 // ---------------------------------------------------------------------------
@@ -4367,6 +4395,13 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
             WATER_FADE_GONE, WATER_FADE_WHOLE, faded.waves[w].wavelength / sampleCell);
     }
 
+    // **The ripple grid, sampled at the base point rather than at the
+    // displaced one.** The Gerstner pinch moves this vertex sideways *after*
+    // the sum, so asking the grid where the vertex ends up would be a circular
+    // definition — and it would disagree with the CPU, which asks at the
+    // pontoon's own xz. One base point, one lookup, both sides.
+    float3 rippleAt = loom_ripple_at(rippleField(), xz);
+
     LoomWaterSample surfaceAt = loom_sample_water(
         faded,
         surface,
@@ -4380,7 +4415,8 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
         // flow grid would be a second buffer feeding a value nothing samples.
         // A flow-map material — a river whose *texture* scrolls downstream —
         // is what would need it, and that is river mesh shaping, not W8.
-        float3(0.0, 0.0, 0.0));
+        float3(0.0, 0.0, 0.0),
+        rippleAt);
 
     // The horizontal displacement is half of what makes a Gerstner wave read
     // as water rather than as a sine: crests pinch toward each other. It is
@@ -4454,9 +4490,14 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     for (int tap = 1; tap <= FOAM_TRAIL_TAPS; ++tap) {
         float tau = float(tap) * FOAM_TRAIL_STEP;
         decay *= FOAM_TRAIL_DECAY;
+        // **No ripple on the trail taps.** The foam trail asks what the *swell*
+        // was doing a second ago; the ripple grid has no history to ask — it is
+        // a snapshot of this tick, so feeding it into a past sample would paint
+        // foam from a wake that had not happened yet.
         LoomWaterSample past = loom_sample_water(
             faded, surface, ground, xz - trailWind * tau,
             push.environment[0].weather.z - tau,
+            float3(0.0, 0.0, 0.0),
             float3(0.0, 0.0, 0.0));
         trail = max(trail, decay * smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, past.fold));
     }

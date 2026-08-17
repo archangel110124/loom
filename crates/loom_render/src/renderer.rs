@@ -309,6 +309,28 @@ pub struct EnvironmentData {
     /// scene with nothing bright renders bit for bit as it did.
     pub exposure: f32,
     pub light_pad: [u32; 1],
+    /// The interactive ripple grid: xy world origin, z metres between samples,
+    /// w samples per axis. **`w == 0` means this water has no ripples**, which
+    /// is every scene authored before ADR 0046 and is how the shader skips the
+    /// whole lookup without a second flag.
+    ///
+    /// Same four-float shape as [`Self::terrain`] and for the same reason: a
+    /// `LoomRippleGrid` puts its pointer last, and a `float4` has to stay
+    /// 16-byte aligned.
+    pub ripple: [f32; 4],
+    /// The heights, `ripple.w²` of them, row-major, in metres of displacement.
+    ///
+    /// **The CPU grid is authoritative and this is a copy of it** (ADR 0046).
+    /// It is written every tick rather than once per scene — the grid is
+    /// stepped state, unlike the terrain bake beside it — and it is never read
+    /// back, because a GPU float reaching a force is what ADR 0045 clause 2
+    /// forbids. `loom_water` cannot import `ash` at all, which is what makes
+    /// that structural rather than a convention.
+    pub ripple_heights: vk::DeviceAddress,
+    /// Keeps the struct 16-byte aligned, as `light_pad` above does. The array
+    /// is indexed in the shader (`push.environment[0]`), so its stride has to
+    /// match on both sides even though only element zero is ever read.
+    pub ripple_pad: [u32; 2],
 }
 
 /// A point light, as the GPU reads it.
@@ -416,6 +438,9 @@ impl Default for EnvironmentData {
             // identity leg of the shoulder and renders unchanged.
             exposure: crate::tonemap::DEFAULT_EXPOSURE,
             light_pad: [0; 1],
+            ripple: [0.0, 0.0, 1.0, 0.0],
+            ripple_heights: 0,
+            ripple_pad: [0; 2],
         }
     }
 }
@@ -437,6 +462,14 @@ pub(crate) const MSAA_SAMPLES: vk::SampleCountFlags = vk::SampleCountFlags::TYPE
 /// that fills this lives at the CLI layer. The number is a ceiling: the CPU
 /// coarsens its grid rather than exceeding it.
 pub const MAX_TERRAIN_SAMPLES: usize = 256 * 256;
+
+/// Heights the ripple buffer holds: `loom_scene::components::MAX_RIPPLE_CELLS`.
+///
+/// Spelled here rather than imported for the same reason the line above is —
+/// the renderer depends on neither `loom_scene` nor `loom_water`. The scene
+/// validator refuses a grid larger than this at load, so this is the ceiling
+/// that refusal quotes rather than a second policy.
+pub const MAX_RIPPLE_SAMPLES: usize = 256 * 256;
 
 /// Vertices in one water draw: `WATER_RES² × WATER_LEVELS × 6`.
 ///
@@ -846,6 +879,19 @@ pub struct Renderer {
     /// The address handed to the shader: `terrain_address`, or null when the
     /// scene has no terrain.
     terrain_heights: vk::DeviceAddress,
+    /// The interactive ripple grid, uploaded **every tick** — see
+    /// [`Renderer::set_ripples`]. Host-visible for exactly that reason: the
+    /// terrain bake beside it changes when the terrain does, this changes
+    /// sixty times a second because it is simulation state.
+    ripple_buffer: vk::Buffer,
+    ripple_alloc: Option<Allocation>,
+    ripple_address: vk::DeviceAddress,
+    /// xy origin, z cell size, w samples per axis; stamped into the
+    /// environment at render time so a caller replacing the environment
+    /// wholesale cannot lose it, exactly as `terrain_params` is.
+    ripple_params: [f32; 4],
+    /// `ripple_address`, or null when this scene's water has no ripples.
+    ripple_heights: vk::DeviceAddress,
     /// The water surface. Drawn only when the environment says the scene has
     /// water; the mesh itself is entirely in the vertex shader, so there is no
     /// buffer beside this.
@@ -1113,6 +1159,17 @@ impl Renderer {
             &mut allocator,
             (MAX_TERRAIN_SAMPLES * size_of::<f32>()) as u64,
             "loom.terrain",
+            vk::BufferUsageFlags::empty(),
+        )?;
+        // The ripple grid: `loom_scene::components::MAX_RIPPLE_CELLS` floats,
+        // which the validator refuses to exceed at load. 256 KB, written every
+        // tick — the one buffer here whose contents are simulation state rather
+        // than a bake.
+        let (ripple_buffer, ripple_alloc, ripple_address) = create_address_buffer(
+            &raw,
+            &mut allocator,
+            (MAX_RIPPLE_SAMPLES * size_of::<f32>()) as u64,
+            "loom.ripples",
             vk::BufferUsageFlags::empty(),
         )?;
 
@@ -1416,6 +1473,11 @@ impl Renderer {
             terrain_address,
             terrain_params: [0.0, 0.0, 1.0, 0.0],
             terrain_heights: 0,
+            ripple_buffer,
+            ripple_alloc: Some(ripple_alloc),
+            ripple_address,
+            ripple_params: [0.0, 0.0, 1.0, 0.0],
+            ripple_heights: 0,
             water_pipeline,
             grass_count: 0,
             rain_pipeline,
@@ -1597,6 +1659,48 @@ impl Renderer {
             self.terrain_alloc
                 .as_ref()
                 .ok_or_else(|| RenderError::Allocator("terrain buffer is gone".into()))?,
+            &heights[..side * side],
+        )
+    }
+
+    /// Hand the renderer this tick's ripple grid.
+    ///
+    /// **Per tick, unlike [`Self::set_terrain`] beside it**, because this is
+    /// simulation state rather than a bake: the CPU grid is stepped inside the
+    /// fixed step and this is a copy of where it got to. Nothing is ever read
+    /// back — a GPU float reaching a force is what ADR 0045 clause 2 forbids,
+    /// and `loom_water` cannot import `ash` at all, which makes that structural.
+    ///
+    /// An empty slice is water with no ripples, and every lookup in the shader
+    /// then returns zero — which is the plain Gerstner surface, bit for bit.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the renderer is being torn down.
+    pub fn set_ripples(
+        &mut self,
+        heights: &[f32],
+        origin: [f32; 2],
+        cell: f32,
+        side: usize,
+    ) -> Result<(), RenderError> {
+        // Dropped whole rather than in part, like the terrain grid: half a
+        // ripple field is a discontinuity down the middle of the water, which
+        // is a far worse artifact than no ripples at all. The validator refuses
+        // anything over the cap at load, so this is a guard and not a path.
+        if heights.is_empty() || side * side > MAX_RIPPLE_SAMPLES || heights.len() < side * side {
+            self.ripple_params = [0.0, 0.0, 1.0, 0.0];
+            self.ripple_heights = 0;
+            return Ok(());
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.ripple_params = [origin[0], origin[1], cell, side as f32];
+        }
+        self.ripple_heights = self.ripple_address;
+        write_slice(
+            self.ripple_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("ripple buffer is gone".into()))?,
             &heights[..side * side],
         )
     }
@@ -1787,6 +1891,9 @@ impl Renderer {
         // which is a shoreline that vanishes on frame two.
         self.environment.terrain = self.terrain_params;
         self.environment.terrain_heights = self.terrain_heights;
+        // And the ripple grid, for the same reason and by the same rule.
+        self.environment.ripple = self.ripple_params;
+        self.environment.ripple_heights = self.ripple_heights;
         // Same argument again: the drop and splash buffers are the renderer's
         // and no caller has any business knowing their addresses.
         self.environment.rain_drops = self.rain_sim.drops_address;
@@ -2740,6 +2847,7 @@ impl Drop for Renderer {
             }
             self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.terrain_buffer, None);
+            self.device.destroy_buffer(self.ripple_buffer, None);
             self.device.destroy_buffer(self.particle_buffer, None);
             if let (Some(allocation), Some(allocator)) =
                 (self.grass_alloc.take(), self.allocator.as_mut())
@@ -2748,6 +2856,11 @@ impl Drop for Renderer {
             }
             if let (Some(allocation), Some(allocator)) =
                 (self.terrain_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            if let (Some(allocation), Some(allocator)) =
+                (self.ripple_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
             }
