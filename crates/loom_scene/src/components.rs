@@ -1619,6 +1619,19 @@ pub const TICK_SECONDS: f32 = 1.0 / 60.0;
 /// The 2D Courant limit for the explicit five-point wave stencil: `1/√2`.
 pub const COURANT_LIMIT: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
+/// How many cells wide the ripple grid's absorbing edge is.
+///
+/// Spelled here rather than in `loom_water` — which is where it is *used*,
+/// as `EDGE_CELLS` — for the same reason [`TICK_SECONDS`] is: the refusal has
+/// to run at load, in the crate that depends on nothing. `loom_water` takes its
+/// constant from this one, so there is one number and not two.
+///
+/// **A fixed cell count, not a fraction of the domain**, which is what makes a
+/// small grid a trap: at `side` under three times this the taper reaches the
+/// middle from both directions and the field is damped to nothing everywhere.
+/// A wake authored on a 2 m domain would simply not appear, with no error.
+pub const RIPPLE_EDGE_CELLS: usize = 4;
+
 /// The most ripple cells one body may carry — 256², about 260 kB of state.
 ///
 /// A cost bound, not a correctness one. The grid is stepped on the CPU every

@@ -4308,6 +4308,21 @@ struct WaterOutput {
     /// How much foam this point is still carrying from crests that have
     /// already passed: the trail. See `FOAM_TRAIL_STEP`.
     float foamHist : TEXCOORD4;
+    /// The **undisplaced** xz this vertex was evaluated at.
+    ///
+    /// Carried so the fragment shader can sample the ripple grid itself. Not
+    /// `worldPos.xz`: the Gerstner pinch moves the vertex sideways after the
+    /// sum, and asking the grid where the vertex ended up is the circular
+    /// definition the vertex shader already refuses. The base point is linear
+    /// across a triangle, so interpolating it is exact.
+    float2 baseXZ : TEXCOORD5;
+    /// The ripple slope this vertex used, `(∂h/∂x, ∂h/∂z)`.
+    ///
+    /// **Carried so the per-pixel slope can be added as a difference rather
+    /// than as a second copy.** `normal` already has this term baked into it
+    /// by `loom_sample_water`; subtracting what the vertex knew and adding what
+    /// the pixel knows recovers the resolution without counting the wake twice.
+    float2 rippleSlope : TEXCOORD6;
 };
 
 [shader("vertex")]
@@ -4502,6 +4517,8 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
         trail = max(trail, decay * smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, past.fold));
     }
     out.foamHist = trail;
+    out.baseXZ = xz;
+    out.rippleSlope = rippleAt.yz;
     return out;
 }
 
@@ -4717,6 +4734,41 @@ static const float WATER_DETAIL_SCALE = 1.6;
 /// genuinely that steep for their length, which is why they catch so much light
 /// for so little amplitude.
 static const float WATER_DETAIL_STRENGTH = 0.30;
+
+// -- The interactive wake, made visible — W10 -------------------------------
+//
+// **Presentation only, all three of these.** The grid is stepped on the CPU and
+// is what buoyancy reads (ADR 0046); nothing below reaches a force, a script or
+// `loom sim --assert`, and none of it is fed back into `WaterSample::fold`.
+// They exist because the wake was *measured* — 34–44% of pixels move on
+// `pool.loom` at tick 150 — and could not be *seen*, which is half a feature.
+//
+// The physics knobs are deliberately untouched. `strength` is measured
+// saturated by the relative-velocity coupling that keeps it stable: 5.6x the
+// authored value moves the ripple-vs-none mean only 2.29 to 2.83 while
+// silently changing the simulation's outcome. An invisible physics change
+// bought for a presentation problem is the worst trade available here.
+
+/// Slope at which the wake's crest is fully white.
+///
+/// The reciprocal of a slope: a ring the grid honestly produces tilts the
+/// surface by 0.06–0.12, so 8.0 puts a strong ring's crest at full coverage and
+/// a decayed one at a fraction of it. **It is not a brightness dial** — the
+/// coverage it produces is then eroded by the same lace noise every other foam
+/// term goes through, so a weak wake dissolves rather than dimming.
+static const float RIPPLE_FOAM_SLOPE = 10.0;
+/// How white the wake's crest is allowed to get, as a coverage.
+///
+/// Under 1.0 because a wake is not a breaking crest: it entrains a streak of
+/// bubbles along its steepest line, not a solid cap. At 1.0 the ring reads as
+/// painted rather than as water.
+static const float RIPPLE_FOAM_MAX = 0.50;
+/// How much of the capillary detail the wake's own slope suppresses.
+///
+/// See the use site. Under 1.0 so the crest keeps *some* fine structure — a
+/// mirror-flat band would read as a hole rather than as a wave.
+static const float RIPPLE_CALM_SLOPE = 25.0;
+static const float RIPPLE_CALM = 1.0;
 /// Where the detail stops. `loom_value_noise` is analytic and has no mip chain,
 /// so past this the lattice is under a pixel and becomes a twinkle generator
 /// rather than detail — the same bound the foam's fine octaves take, for the
@@ -5092,12 +5144,56 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // that ends up pointing below the real surface starts inside the seabed
     // and comes back with a lit sand sample — one bright pixel among dark
     // ones, which is what a firefly is.
+    // **The wake, re-read per pixel — W10.** The vertex shader samples the grid
+    // at the mesh's own cells, which in the near ring are 0.5 m: the same
+    // spacing as the grid itself, so a two-metre ring arrives as five linear
+    // segments and its slope as a staircase. The base point is a linear
+    // varying, so sampling here is the exact value at this pixel.
+    //
+    // `dRipple` is the *difference* from what the vertex already folded into
+    // `normal`. Adding the whole slope again would draw the wake twice.
+    //
+    // **Branched on `side > 0`, and that is not an optimisation.** Water with
+    // no `[ripples]` table must render bit for bit as it did, and
+    // `normalize(normal - 0)` is not a no-op — it is a second normalise of an
+    // already-normalised vector, which moves the last bit. Measured: `ocean`
+    // and `water_crate` both came back byte-different from their references
+    // with this unguarded, inside the image gate's tolerance and therefore
+    // exactly the kind of drift only `cargo xtask repeat` can see. Every term
+    // below multiplies by `ripSteep`, so the zero makes the rest exact.
+    LoomRippleGrid ripples = rippleField();
+    float3 ripple = float3(0.0, 0.0, 0.0);
+    // How steep the wake is here, read twice with two different reciprocals:
+    // see `RIPPLE_FOAM_SLOPE` and `RIPPLE_CALM_SLOPE` for why they differ by
+    // more than a factor of two rather than being one number.
+    float ripSteep = 0.0;
+    float ripCalm = 0.0;
+    if (ripples.side > 0) {
+        ripple = loom_ripple_at(ripples, in.baseXZ);
+        float2 dRipple = ripple.yz - in.rippleSlope;
+        normal = normalize(normal - float3(dRipple.x, 0.0, dRipple.y));
+        float steep = length(ripple.yz);
+        ripSteep = saturate(steep * RIPPLE_FOAM_SLOPE);
+        ripCalm = saturate(steep * RIPPLE_CALM_SLOPE);
+    }
+
     float3 flatN = normal;
     {
         float detailFade = saturate(1.0 - length(toEye) / WATER_DETAIL_RANGE);
         // Calmer over a beach than over the shelf, which is true of real water
         // and keeps the ripples off the very edge of the shoreline cut.
         detailFade *= saturate(in.depth * 0.7 + 0.2);
+        // **And calmer where the wake is, which is what makes the wake
+        // visible.** The contest is not close on its own terms: a ring the
+        // ripple grid can honestly produce tilts the normal by 0.06–0.12,
+        // against this unconditional 0.30 of capillary noise with a wind floor
+        // under it, so the ring arrives as a change in the *texture* of a
+        // shimmering field rather than as a shape. Water really does go glassy
+        // where a wave is passing under it, because the orbital motion
+        // stretches the surface — so the term that hides the wake is exactly
+        // the term the wake should suppress. Local, so nothing outside the
+        // domain moves at all.
+        detailFade *= 1.0 - RIPPLE_CALM * ripCalm;
         float2 dw = normalize(push.environment[0].wind.xy + float2(1e-4, 0.0));
         float2 g = waterDetailSlope(
             in.worldPos.xz,
@@ -5270,7 +5366,24 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // lets the old foam persist behind it, which is what a `max` of a coverage
     // means. Adding them would make a crest passing over its own wake brighter
     // than paper.
+    // **The wake's own crest goes white — W10, and it is the one lever with
+    // enough contrast to matter.** Foam against navy is a hundred levels;
+    // tilting the specular of an already-shimmering surface is two or three,
+    // which is why the ring measured as 34–44% of pixels moving and read as
+    // nothing. A ring travelling out from an impact does entrain air along its
+    // crest, so this is the same physical claim `in.fold` makes about a swell,
+    // read off the grid's slope instead of off `Σ Q·k·A·sin φ`.
+    //
+    // **Here and nowhere else.** It is a term in the fragment shader's foam
+    // mix; it is never fed back into `WaterSample::fold`, which is the
+    // closed-form quantity ADR 0045 clause 1 and the CPU/GPU agreement test
+    // both rest on.
+    //
+    // A floor on the coverage, like the trail below it, not an addition: a
+    // wake crossing an already-white crest must not come out brighter than
+    // paper.
     float wetc = max(smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, in.fold), in.foamHist);
+    wetc = max(wetc, ripSteep * RIPPLE_FOAM_MAX);
     // **Eroded by the noise rather than faded by it.** A multiply would dim
     // every foam pixel toward the water; thresholding the *coverage* against
     // the noise instead dissolves the patch from its edges inward, which is

@@ -817,4 +817,85 @@ name = \"Hill\"
                 .is_ok()
         );
     }
+
+    /// A scene whose water carries one authored `[ripples]` table.
+    fn ripple_scene(table: &str) -> String {
+        format!(
+            "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f\"\n\n\
+             [[node]]\nname = \"Water\"\n\n  [node.components.WaterBody]\n  \
+             kind = \"lake\"\n\n    [node.components.WaterBody.ripples]\n{table}"
+        )
+    }
+
+    fn ripple_errors(table: &str) -> Vec<String> {
+        match Scene::parse(&ripple_scene(table)) {
+            Ok(_) => Vec::new(),
+            Err(errors) => errors.iter().map(|e| e.error.clone()).collect(),
+        }
+    }
+
+    /// **The `[ripples]` bounds are refused, not merely documented.**
+    ///
+    /// `#[schemars(range(...))]` on `Ripples` is read by `loom describe` and by
+    /// nothing else, so every one of these validated clean. `strength` is the
+    /// one that matters: it is what an agent asked to make the ripples livelier
+    /// reaches for, it is measured *saturated* by the relative-velocity
+    /// coupling, and past its bound it changes what the simulation does without
+    /// changing what anyone sees.
+    #[test]
+    fn a_ripple_grid_outside_its_schema_is_refused() {
+        let ok = "    extent = 16.0\n    cell = 0.5\n    speed = 2.4\n    \
+                  damping = 0.997\n    strength = 0.9\n";
+        assert!(ripple_errors(ok).is_empty(), "the authored bounds are refused");
+
+        for (field, bad) in [
+            ("strength", "strength = 5.0"),
+            ("cell", "cell = 20.0"),
+            ("damping", "damping = 0.2"),
+            ("extent", "extent = 0.5"),
+        ] {
+            let table = ok.replace(
+                ok.lines().find(|l| l.contains(field)).expect("the field"),
+                &format!("    {bad}"),
+            );
+            assert!(
+                !ripple_errors(&table).is_empty(),
+                "{bad} validated clean"
+            );
+        }
+    }
+
+    /// **A grid too small to hold three edge bands is all edge.** The sponge is
+    /// a fixed cell count, so on a tiny domain it damps the field to nothing
+    /// everywhere and the authored wake never appears — silently, which is the
+    /// class of no-op this repository keeps finding.
+    #[test]
+    fn a_ripple_grid_narrower_than_its_own_sponge_is_refused() {
+        let small = "    extent = 4.0\n    cell = 0.5\n    speed = 2.4\n    \
+                     damping = 0.997\n    strength = 0.9\n";
+        assert!(
+            ripple_errors(small).iter().any(|e| e == "ripple_grid_too_small"),
+            "a {}-cell grid inside a {}-cell taper validated clean",
+            components::ripple_side(4.0, 0.5),
+            components::RIPPLE_EDGE_CELLS
+        );
+        // Twelve samples is exactly three bands and is accepted.
+        let edge = "    extent = 5.5\n    cell = 0.5\n    speed = 2.4\n    \
+                    damping = 0.997\n    strength = 0.9\n";
+        assert_eq!(components::ripple_side(5.5, 0.5), 12);
+        assert!(ripple_errors(edge).is_empty(), "the smallest usable grid was refused");
+    }
+
+    /// **And the Courant refusal, which had no test at all.** ADR 0046 §3: the
+    /// explicit stencil diverges above `c·dt/h = 1/√2` and takes every floating
+    /// body with it.
+    #[test]
+    fn a_ripple_speed_past_the_courant_limit_is_refused() {
+        let fast = "    extent = 16.0\n    cell = 0.5\n    speed = 40.0\n    \
+                    damping = 0.997\n    strength = 0.9\n";
+        assert!(
+            ripple_errors(fast).iter().any(|e| e == "ripple_speed_exceeds_courant"),
+            "40 m/s at a half-metre cell validated clean"
+        );
+    }
 }

@@ -29,6 +29,17 @@
 # refraction nothing to bend, and the ring would read only as a specular
 # wobble; a grid gives it straight lines to distort, which is the oldest trick
 # there is for showing that water is water.
+#
+# **The bed is a voxel volume and it has to be, which this scene got wrong for
+# its whole life.** It was a `MeshRenderer` box, and the water's bed depth
+# comes from the voxel height field and from nowhere else — so `loom water
+# --at 0,0` reported `bed.depth: null`, the shader took `WATER_DEPTH_SENTINEL`,
+# and every depth-driven term in the water was disabled: no refraction leg to
+# bend the tiles with, no absorption tint, and `detailFade` at its full
+# unconditional 1.0 over a pool the header calls dead calm. The paragraph above
+# described a mechanism the scene could not reach. A voxel bed is textured
+# triplanar, which is what `beach.loom` already does with its sand and is the
+# reason a voxel mesh needs no UVs.
 
 [scene]
 format = 1
@@ -41,6 +52,16 @@ path = "sphere"
 [[asset]]
 key = "box"
 path = "box"
+
+[[asset]]
+key = "tiles_albedo"
+id = "bbce2fd2-83d0-410b-87b8-9e4b62ea4a64"
+path = "../textures/tiles_albedo.png"
+
+[[asset]]
+key = "tiles_normal"
+id = "39180893-483f-46b7-b946-f252aca36f23"
+path = "../textures/tiles_normal.png"
 
 [[node]]
 name = "Pool"
@@ -66,17 +87,38 @@ name = "Pool"
 # point of refraction is that you can see the bottom through the water, and at
 # four metres the absorption would swallow the tiles and there would be nothing
 # to bend.
+#
+# The volume is 32 m of local space at half-metre voxels and the node puts its
+# local origin at world [-16, -17, -16], so the slab's top face — local y 16 —
+# lands exactly on world y = -1.0. Twenty-four metres square, comfortably wider
+# than the 16 m ripple domain, so the ring never runs off the bottom it is
+# being seen against.
 [[node]]
 name = "Bed"
 parent = "Pool"
-transform = { pos = [0.0, -1.0, 0.0], scale = [14.0, 0.2, 14.0] }
+transform = { pos = [-16.0, -17.0, -16.0] }
 
-  [node.components.MeshRenderer]
-  mesh = { asset = "box" }
+  [node.components.VoxelVolume]
+  voxel_size = 0.5
+  chunks = [2, 1, 2]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 8.0, 16.0]
+  half_extents = [12.0, 8.0, 12.0]
+  mode = "union"
 
   [node.components.Material]
-  albedo = [0.72, 0.70, 0.66]
-  roughness = 0.85
+  albedo = [0.86, 0.85, 0.82]
+  roughness = 0.75
+  albedo_map = { asset = "tiles_albedo" }
+  normal_map = { asset = "tiles_normal" }
+  # **Half-metre tiles.** Big enough that a single tile is several pixels wide
+  # from the camera at six metres, which is what the refraction has to bend to
+  # be visible at all; smaller and the grid aliases into grey before the wake
+  # gets to it.
+  uv_scale = [2.0, 2.0]
+  triplanar = true
 
 [[node]]
 name = "Water"

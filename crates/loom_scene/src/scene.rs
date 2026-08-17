@@ -884,7 +884,60 @@ fn check_ripples(body: &components::WaterBody, node: &str) -> Vec<SceneError> {
         return errors;
     }
 
+    // **The schema's ranges, enforced.** `#[schemars(range(...))]` documents
+    // them and the loader does not read them, so `strength = 5.0` and
+    // `cell = 20.0` both validated clean — and `strength` in particular is a
+    // number an agent asked to make the ripples livelier will reach for. It is
+    // measured *saturated* by the relative-velocity coupling (5.6x the authored
+    // value moves the ripple-vs-none picture by a fifth) while silently
+    // changing what the simulation does, which is the worst combination there
+    // is: no visible gain, an invisible physics change. Refused with the number
+    // in the message, the way the Courant bound already is.
+    for (name, value, low, high) in [
+        ("extent", ripples.extent, 1.0, 512.0),
+        ("cell", ripples.cell, 0.05, 8.0),
+        ("speed", ripples.speed, 0.0, 100.0),
+        ("damping", ripples.damping, 0.5, 1.0),
+        ("strength", ripples.strength, 0.0, 2.0),
+    ] {
+        if value < low || value > high {
+            let mut err = SceneError::new("ripple_value_out_of_range", node);
+            err.field = format!("WaterBody.ripples.{name}");
+            err.value = Value::from(value);
+            err.constraint = format!("between {low} and {high}, and this is {value}");
+            err.hint = Some(
+                "these are the schema's own bounds — `loom describe WaterBody` \
+                 prints them — and outside them the grid is either a no-op or \
+                 an invisible change to the physics rather than to the picture."
+                    .to_owned(),
+            );
+            errors.push(err);
+        }
+    }
+
     let side = components::ripple_side(ripples.extent, ripples.cell);
+    // **A grid narrower than three edge bands is all edge.** The sponge is a
+    // fixed number of cells, not a fraction, so on a small domain it reaches
+    // the middle from both sides and damps the field to nothing everywhere —
+    // an authored wake that never appears and never errors.
+    if side < 3 * components::RIPPLE_EDGE_CELLS {
+        let mut err = SceneError::new("ripple_grid_too_small", node);
+        err.field = "WaterBody.ripples.extent".to_owned();
+        err.value = Value::from(ripples.extent);
+        err.constraint = format!(
+            "at least {} samples a side; {} m / {} m is {side}",
+            3 * components::RIPPLE_EDGE_CELLS,
+            ripples.extent,
+            ripples.cell
+        );
+        err.hint = Some(format!(
+            "the absorbing edge is {} cells wide at every border, so under \
+             three times that the taper covers the whole grid and no wake can \
+             survive anywhere in it. Widen `extent` or narrow `cell`.",
+            components::RIPPLE_EDGE_CELLS
+        ));
+        errors.push(err);
+    }
     if side * side > components::MAX_RIPPLE_CELLS {
         let mut err = SceneError::new("ripple_grid_too_large", node);
         err.field = "WaterBody.ripples.cell".to_owned();

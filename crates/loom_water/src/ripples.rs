@@ -46,7 +46,12 @@ use loom_scene::components::{COURANT_LIMIT, Ripples, TICK_SECONDS, ripple_side};
 /// surface takes over, which draws the domain as a visible square in the sea.
 /// Ramping the field to zero over the outer cells absorbs the reflection and
 /// hides the seam with the same four lines.
-const EDGE_CELLS: usize = 4;
+///
+/// Taken from `loom_scene` rather than spelled here, because the load-time
+/// refusal of a grid too small to hold three of these has to run in the crate
+/// that depends on nothing, and a bound quoted against the wrong width is worse
+/// than no bound.
+const EDGE_CELLS: usize = loom_scene::components::RIPPLE_EDGE_CELLS;
 
 /// A stepped height field over one body of water.
 ///

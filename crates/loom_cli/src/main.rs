@@ -3629,7 +3629,28 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
         .and_then(|g| river_flow(g, &body))
         .map_or([0.0; 3], |grid| grid.at(at[0], at[1]));
 
-    let sample = loom_water::sample_water(&body, at, seconds, ground, flow, [0.0; 3]);
+    // **The wake, stepped — and it used to be a hard-coded zero.** This is the
+    // probe an agent reaches for to ask what the water is doing, and it was
+    // blind to the only part of the water that has any history: on a scene with
+    // a live `[ripples]` grid, `loom water --at 0,0 --sim 150` reported a
+    // displacement of exactly [0, 0, 0] while the renderer drew a ring and
+    // buoyancy felt it. `--sim` moved the wave clock and nothing else.
+    //
+    // The grid is state, so the only way to read it is to run the simulation —
+    // on a copy of the world, because this command reports and does not write.
+    // Free when `--sim` is absent, which is every existing caller.
+    let ripple = if ticks == 0 {
+        [0.0; 3]
+    } else {
+        let mut stepped = world.clone();
+        let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+        let (_, _, _, warmed) = simulate_physics(&mut stepped, base, ticks);
+        warmed
+            .as_ref()
+            .and_then(|r| r.ripples())
+            .map_or([0.0; 3], |g| g.at(at[0], at[1]))
+    };
+    let sample = loom_water::sample_water(&body, at, seconds, ground, flow, ripple);
     // `sample_water` sums the orbital motion onto the current, so the wave half
     // is the difference. Subtracted rather than sampled a second time with no
     // flow: two samples is two chances to disagree.
@@ -3657,6 +3678,14 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
                 "still_height": body.surface_height,
                 "normal": sample.normal,
                 "displacement": sample.displacement,
+            },
+            // The interactive grid's own contribution at this point, separately
+            // from the surface it has already been added to: metres, and the
+            // two slopes. All zero for water that authors no `[ripples]`, and
+            // at `--sim 0` for water that does — the grid starts flat.
+            "ripple": {
+                "height": ripple[0],
+                "slope": [ripple[1], ripple[2]],
             },
             "bed": {
                 "height": grounded.then_some(ground),
