@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 49] = [
+const SCENES: [&str; 50] = [
     "assets/test/lanternhead.loom",
     // One building, composed. **In `SCENES` and not `GOLDEN`, on the stated
     // rule**: every path it draws is already covered — `ground` and
@@ -280,7 +280,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 35] = [
+const GOLDEN: [(&str, &str, &[&str]); 36] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to

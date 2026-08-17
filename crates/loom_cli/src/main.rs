@@ -651,7 +651,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // scene's own nodes — the renderer batches consecutive same-mesh objects
     // into one instanced draw, so a field of ten thousand trees is one call.
     objects.extend(scatter_objects(&scene, &library));
-    let particles = particles::simulate(
+    let mut particles = particles::simulate(
         &world,
         &weather,
         flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()),
@@ -716,6 +716,22 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // The bed, baked once: the water reads its depth from it on the GPU and
     // the submersion test reads it on the CPU, and they must be the same grid.
     let terrain = scene_terrain_field(&scene);
+    // **Spray off the breaking crests — W5.** Appended here rather than inside
+    // `particles::simulate` because it needs two things that do not exist until
+    // now: the bed the waves shoal over, and the eye. It is a closed form over
+    // `WaterSample::fold`, so there is nothing to step and the population at
+    // `--sim N` is the same population `loom run` shows at tick N.
+    //
+    // The region follows the eye, which is allowed because spray only ever
+    // draws — ADR 0045's trap clause is about grids that produce a *force*.
+    if let Some(body) = weather::water_of(&world, &weather) {
+        let ground = |x: f32, z: f32| {
+            terrain
+                .as_ref()
+                .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(x, z))
+        };
+        particles.extend(particles::spray(&world, &body, &ground, camera.eye.to_array(), wind_seconds));
+    }
     // The scene's rain, resolved once. `None` for a scene that authors none,
     // which is dry rather than drizzly. **No sky volume is built for it any
     // more**: the layer is handed the unsheltered rate and the height field in

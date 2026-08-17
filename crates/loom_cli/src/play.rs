@@ -680,16 +680,12 @@ impl Sim {
         }
     }
 
-    /// The interactive ripple grid, for the renderer to upload. `None` when the
-    /// body authors none, which is every scene before ADR 0046.
-    ///
-    /// **Read-only, and one direction only.** The CPU grid is authoritative;
-    /// the GPU gets a copy to displace the surface with and never writes one
-    /// back (ADR 0045 clause 2).
-    #[must_use]
-    pub fn ripples(&self) -> Option<&loom_water::ripples::RippleGrid> {
-        self.ripples.as_ref()
-    }
+    // **No `ripples()` accessor yet, deliberately.** The renderer's upload is
+    // the next W6 slice; an accessor with no caller is dead code clippy
+    // refuses, and this project would rather have the refusal than the
+    // `#[allow]`. When it lands it is read-only and one direction only — the
+    // CPU grid is authoritative and the GPU never writes one back (ADR 0045
+    // clause 2).
 
     /// Water entries and exits since the last call, stamped with `tick`.
     ///

@@ -416,8 +416,14 @@ mod tests {
     /// axis swap is invisible in anything but a moving picture.
     #[test]
     fn the_slope_climbs_toward_the_peak() {
+        // **Pushed *up*, so there is a peak to climb toward.** `push` takes a
+        // vertical velocity positive up, which is the body's own: a rising
+        // body pulls the water up after it and a falling one dents it. The
+        // dent case is what `a_push_spreads_outward_at_the_wave_speed` covers,
+        // and getting these two the same way round is the sign error this
+        // test exists for.
         let mut grid = grid();
-        grid.push([0.0, 0.0, 0.0], -1.0, 1.0);
+        grid.push([0.0, 0.0, 0.0], 1.0, 1.0);
 
         assert!(grid.at(-0.5, 0.0)[1] > 0.0, "{:?}", grid.at(-0.5, 0.0));
         assert!(grid.at(0.5, 0.0)[1] < 0.0, "{:?}", grid.at(0.5, 0.0));

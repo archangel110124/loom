@@ -797,9 +797,35 @@ mod tests {
             assert!(spray(&world, &body, &deep, eye, t).is_empty(), "tick {tick}");
         }
 
-        // Authored on, and this sea's crests break: 21 m at 0.42 m amplitude
-        // with two shorter waves over it clears the 0.33 fold threshold.
+        // **Authored on is not enough — the sea also has to break, and
+        // `splash.loom`'s does not.** Measured rather than assumed: its three
+        // waves sum to `Σ Q·k·A = 0.156`, which is the *supremum* of `fold`
+        // and reached only if every crest aligns; `SPRAY_BREAK` is 0.33. So
+        // `spray = 4.0` on this sea throws nothing at any tick, and a test
+        // that stopped here would have been asserting against a threshold no
+        // scene in the repository can reach — the exact shape of gate that
+        // reports a pass without ever looking at the subject. The steep set
+        // below is `spindrift.loom`'s, at `Σ Q·k·A = 0.75`.
         body.spray = 4.0;
+        for tick in [0_u32, 120, 600] {
+            #[allow(clippy::cast_precision_loss)]
+            let t = f32::from(u16::try_from(tick).expect("small")) / 60.0;
+            assert!(
+                spray(&world, &body, &deep, eye, t).is_empty(),
+                "a sea whose fold never reaches SPRAY_BREAK sprayed at tick {tick}"
+            );
+        }
+
+        for (wave, (wavelength, amplitude, steepness)) in body
+            .waves
+            .waves
+            .iter_mut()
+            .zip([(17.0, 1.0, 0.676), (9.0, 0.5, 0.716), (5.0, 0.28, 0.71)])
+        {
+            wave.wavelength = wavelength;
+            wave.amplitude = amplitude;
+            wave.steepness = steepness;
+        }
         let thrown: usize = (0..600)
             .map(|tick| {
                 #[allow(clippy::cast_precision_loss)]

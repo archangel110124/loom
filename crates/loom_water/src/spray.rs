@@ -35,16 +35,16 @@ use loom_scene::components::WaterBody;
 pub const SPRAY_BREAK: f32 = 0.33;
 
 /// Metres per candidate cell. One crown per cell per [`SPRAY_PERIOD`] at most.
-pub const SPRAY_CELL: f32 = 3.0;
+pub const SPRAY_CELL: f32 = 1.5;
 
 /// Seconds between a cell's chances to throw.
-pub const SPRAY_PERIOD: f32 = 0.7;
+pub const SPRAY_PERIOD: f32 = 0.5;
 
 /// How long a droplet lives, in seconds.
 ///
 /// Under [`SPRAY_PERIOD`] × 2, which is what lets the search below look at only
 /// two slots: a droplet born three slots ago is already gone.
-pub const SPRAY_LIFETIME: f32 = 1.1;
+pub const SPRAY_LIFETIME: f32 = 0.9;
 
 /// How far from the eye spray is thrown, in metres.
 ///
