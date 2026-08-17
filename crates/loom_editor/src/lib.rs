@@ -14,11 +14,13 @@
 //! on *it*.
 
 pub mod console;
+pub mod dock;
 pub mod gizmo;
 pub mod panels;
 pub mod theme;
 
 pub use console::{Entry, Level};
+pub use dock::Tab;
 pub use theme::{Tokens, apply as apply_theme, tokens};
 pub use gizmo::{Handle, Mode};
 pub use panels::{AgentMark, PanelState, UiAction, draw};

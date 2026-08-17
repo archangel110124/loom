@@ -14,6 +14,16 @@ publish.workspace = true
 # `egui_dock` and any icon or font crate land *here* when they land, never in
 # `loom_cli` or `loom_render`.
 [dependencies]
+# **0.20.1, not the latest.** `egui_dock` 0.21.x moved to egui 0.36 while this
+# workspace is pinned to 0.35, and `cargo add egui_dock` takes the latest — which
+# links *two* egui versions and makes `DockArea::show` refuse our `Context` as a
+# different type. That is the failure the comment above describes, arriving
+# through a transitive edge rather than a direct pin, and `cargo tree` reports it
+# in one line: `cargo tree -p loom_editor -e normal | grep -oE "egui v[0-9.]+"`
+# must print exactly one version.
+#
+# Upgrading means moving egui, `egui-winit` and `egui-ash-renderer` together.
+egui_dock = "=0.20.1"
 loom_reflect = { version = "0.0.0", path = "../loom_reflect" }
 loom_render = { version = "0.0.0", path = "../loom_render" }
 loom_scene = { version = "0.0.0", path = "../loom_scene" }
