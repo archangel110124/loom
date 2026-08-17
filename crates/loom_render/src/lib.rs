@@ -60,7 +60,8 @@ pub use renderer::{PointLight, MAX_LIGHTS,
     Camera, EnvironmentData, GrassBlade, MAX_WAVES, Object, ParticleInstance, RenderError,
     Renderer, WaterWave,
 };
-pub use ui::Ui;
+pub use renderer::{MIN_VIEWPORT, ViewportPlacement};
+pub use ui::{Ui, UiFrame};
 pub use viewer::Viewer;
 
 /// Re-exported so the CLI builds panels without its own egui dependency.
@@ -518,6 +519,49 @@ mod tests {
                 ("readback", "loom.aa_target"),
             ],
             "graph did not place the expected barriers"
+        );
+
+        // **The placement path, in the same test, because it changes this
+        // list.** `chrome_clear` is a pass and therefore a transition, and it
+        // exists only when the scene does not fill the target — which is also
+        // the assertion that a placement of `None` leaves every existing
+        // scene's barriers untouched.
+        renderer.set_placement(Some(crate::ViewportPlacement::new(
+            32,
+            24,
+            160,
+            120,
+            (256, 192),
+        )));
+        let inset = renderer.render(&objects, &[], &camera).expect("render inset");
+
+        if let Err(messages) = instance.check_validation() {
+            panic!("validation was not silent with a placement:\n  {}", messages.join("\n  "));
+        }
+
+        let with_placement: Vec<(&str, &str)> = renderer
+            .last_transitions()
+            .iter()
+            .map(|t| (t.pass, t.image))
+            .collect();
+        assert!(
+            with_placement.contains(&("chrome_clear", "loom.ldr_target")),
+            "chrome_clear did not go through the graph: {with_placement:?}"
+        );
+        assert_eq!(
+            with_placement.len(),
+            transitions.len() + 1,
+            "a placement should add exactly one pass, not rearrange the graph"
+        );
+
+        // And it must actually have cleared: the corner is `ground`, not the
+        // sky the scene would have put there.
+        let corner = [inset[0], inset[1], inset[2]];
+        assert_eq!(
+            corner,
+            [0x0E, 0x10, 0x13],
+            "the chrome is not the palette's `ground` — a clear value for an \
+             _SRGB attachment is linear and gets encoded on write"
         );
     }
 

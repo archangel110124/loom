@@ -148,7 +148,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
         &[
             ("--out", true), ("--size", true), ("--sim", true), ("--yaw", true),
             ("--pitch", true), ("--frames", true), ("--spin", true), ("--step", true),
-            ("--dolly", true),
+            ("--dolly", true), ("--viewport", true),
         ],
     ),
     (
@@ -561,6 +561,41 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         None => (960, 640),
     };
 
+    // **The editor's sub-rectangle, on the headless path.** It exists here so
+    // that the placement has a golden image at all: the window cannot be
+    // photographed by any gate, and a rectangle that is subtly wrong — off by
+    // the panel's border, or letting the tonemap sample outside the region the
+    // scene wrote — is exactly the class of defect a still PNG catches.
+    let viewport = match flag(args, "--viewport") {
+        Some(spec) => {
+            let parts: Vec<&str> = spec.split(',').collect();
+            let parsed: Option<Vec<i64>> =
+                parts.iter().map(|p| p.trim().parse::<i64>().ok()).collect();
+            match parsed {
+                Some(v) if v.len() == 4 && v[2] > 0 && v[3] > 0 => Some(
+                    loom_render::ViewportPlacement::new(
+                        i32::try_from(v[0]).unwrap_or(0),
+                        i32::try_from(v[1]).unwrap_or(0),
+                        u32::try_from(v[2]).unwrap_or(1),
+                        u32::try_from(v[3]).unwrap_or(1),
+                        (width, height),
+                    ),
+                ),
+                _ => {
+                    return (
+                        2,
+                        json_line(&serde_json::json!({
+                            "error": "bad_argument",
+                            "value": spec,
+                            "hint": "--viewport takes x,y,w,h in pixels, e.g. 120,80,720,480",
+                        })),
+                    );
+                }
+            }
+        }
+        None => None,
+    };
+
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -706,6 +741,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         )
         .map_err(|e| e.to_string())?;
         renderer.environment = environment;
+        renderer.set_placement(viewport);
         // Placement is a pure function of position, so the blades go up once
         // and the vertex shader re-expands and re-bends them every frame.
         let blades = grass_blades(&scene);

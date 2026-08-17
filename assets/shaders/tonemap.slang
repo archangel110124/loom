@@ -16,6 +16,18 @@
 [[vk::binding(0, 0)]] Texture2D<float4> scene;
 
 struct TonemapPush {
+    /// Where in the destination this copy lands, in pixels.
+    ///
+    /// **`SV_Position` is in framebuffer coordinates, not viewport-relative
+    /// ones**, so an offset destination viewport reports coordinates the
+    /// source image does not have: the scene is rendered at the *origin* of a
+    /// window-sized image and only the tonemap moves it. Subtracting this is
+    /// what turns a destination pixel back into the source pixel it came from.
+    ///
+    /// `int2` first and `float` second is 12 bytes under either packing rule,
+    /// so the Rust side and the shader cannot disagree about the offset of
+    /// `exposure`.
+    int2 origin;
     float exposure;
 };
 [[vk::push_constant]] TonemapPush push;
@@ -64,7 +76,7 @@ float4 tonemapVertexMain(uint id: SV_VertexID) : SV_Position {
 
 [shader("fragment")]
 float4 tonemapFragmentMain(float4 pos: SV_Position) : SV_Target {
-    float3 hdr = scene.Load(int3(int2(pos.xy), 0)).rgb * push.exposure;
+    float3 hdr = scene.Load(int3(int2(pos.xy) - push.origin, 0)).rgb * push.exposure;
     // `max` before the curve: a negative can only arrive from an authored
     // colour or a numerical accident, and feeding one to the shoulder's divide
     // turns it into a NaN the golden gate reports as a corrupt pixel rather

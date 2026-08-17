@@ -29,6 +29,17 @@ const INITIAL_OBJECTS: usize = 4096;
 /// A window's swapchain and everything needed to draw into it.
 pub struct Viewer {
     device: ash::Device,
+    /// Where in the swapchain the scene is drawn. `None` fills the window.
+    ///
+    /// Only consulted when [`Self::dock_viewport`] is false; in the editor the
+    /// rectangle comes from the frame egui just laid out, so that it cannot be
+    /// a frame stale.
+    placement: Option<crate::ViewportPlacement>,
+    /// Take the scene's rectangle from the UI rather than from `placement`.
+    ///
+    /// Off for the runtime and for anything without panels, where the scene
+    /// fills the window and the whole placement path is inert.
+    dock_viewport: bool,
     /// Kept rather than dropped after construction, because resizing rebuilds
     /// images and an unnamed one is a hex handle in the next validation message.
     names: DebugNames,
@@ -584,6 +595,8 @@ impl Viewer {
         }
 
         Ok(Self {
+            placement: None,
+            dock_viewport: false,
             names,
             raytracing,
             raytracer,
@@ -837,6 +850,28 @@ impl Viewer {
         Ok(())
     }
 
+    /// Draw the scene into a sub-rectangle of the swapchain.
+    ///
+    /// `None` fills the window, which is what the runtime uses and what makes
+    /// `loom run` and `loom render` agree pixel for pixel.
+    ///
+    /// Clamped by [`crate::ViewportPlacement::new`], so a splitter dragged to
+    /// the window edge cannot produce a zero-width viewport
+    /// (VUID-VkViewport-width-01770) or a scissor past the attachment
+    /// (VUID-vkCmdSetScissor-x-00595). Both are reachable by ordinary use.
+    pub fn set_placement(&mut self, placement: Option<crate::ViewportPlacement>) {
+        self.placement = placement;
+    }
+
+    /// Draw the scene into whatever rectangle the panels leave, every frame.
+    ///
+    /// **Viewport coordinates are not yet remapped**: picking, the gizmo
+    /// handles and the agent overlay still work in window pixels, so a click
+    /// lands offset by the rectangle's origin until `to_viewport` exists.
+    pub fn set_dock_viewport(&mut self, on: bool) {
+        self.dock_viewport = on;
+    }
+
     /// Replace the textures and materials this viewer draws with.
     ///
     /// **This is what makes the inspector's colour swatch real.** Without it
@@ -1006,10 +1041,21 @@ impl Viewer {
         objects: &[Object],
         particles: &[crate::renderer::ParticleInstance],
         camera: &Camera,
-        ui: Option<(&mut crate::Ui, &winit::window::Window)>,
+        mut ui: Option<(&mut crate::Ui, &winit::window::Window)>,
         build: impl FnMut(&mut egui::Ui),
     ) -> Result<(), RenderError> {
         let d = self.device.clone();
+
+        // **egui lays out here, before the graph is built.** It used to lay out
+        // and record together, from inside the `ui` pass closure, which the
+        // graph runs after the forward and tonemap closures have recorded — so
+        // a rectangle read from the dock to place the scene was always the
+        // previous frame's. See `Ui::layout`.
+        let ui_frame = ui
+            .as_mut()
+            .map(|(ui, window)| ui.layout(window, build));
+
+
 
         // SAFETY: waiting on the previous frame's fence before touching any
         // per-frame resource is what makes reuse of the command buffer legal.
@@ -1059,7 +1105,13 @@ impl Viewer {
         };
 
         #[allow(clippy::cast_precision_loss)]
-        let aspect = self.extent.width as f32 / self.extent.height as f32;
+        // The placement's aspect, for the reason spelled out on the offscreen
+        // path: the scene is rasterised into the placement, so a projection
+        // built from the window stretches it.
+        let (aw, ah) = self
+            .placement
+            .map_or((self.extent.width, self.extent.height), |p| (p.width, p.height));
+        let aspect = aw as f32 / ah as f32;
         let mut sorted: Vec<Object> = objects.to_vec();
         sorted.sort_by_key(|o| o.mesh);
         // Grow rather than refuse. An agent that generates a five-thousand
@@ -1202,6 +1254,30 @@ impl Viewer {
         });
 
         let extent = self.extent;
+        // **The scene's rectangle, from the frame that was just laid out** —
+        // which is the entire reason `Ui::draw` was split. Reading it from a
+        // frame egui had not produced yet gave last frame's rectangle, and a
+        // stale scene rect against a live panel edge is visible on every frame
+        // of a splitter drag.
+        //
+        // `None` means fill the window, which is byte-identical to the
+        // behaviour before placements existed.
+        let placement = if self.dock_viewport {
+            ui_frame.as_ref().map(|frame| {
+                let (x, y, w, h) = frame.scene_rect();
+                crate::ViewportPlacement::new(x, y, w, h, (extent.width, extent.height))
+            })
+        } else {
+            self.placement
+        };
+        // **The scene passes render at the ORIGIN, sized to the placement.**
+        // Only the tonemap moves the result to `placement.x, y`. That way no
+        // image is reallocated when the splitter moves and every pass upstream
+        // is unchanged except in how much of its attachment it touches.
+        let scene_extent = placement.map_or(extent, |p| vk::Extent2D {
+            width: p.width,
+            height: p.height,
+        });
         let depth_view = self.depth_view;
         let (queue, pool) = (self.queue, self.command_pool);
         let (pipeline, layout) = (self.pipeline, self.pipeline_layout);
@@ -1346,8 +1422,8 @@ impl Viewer {
                                 keep_samples: split,
                                 load: false,
                             },
-                            extent.width,
-                            extent.height,
+                            scene_extent.width,
+                            scene_extent.height,
                         ),
                         None => begin_rendering(
                             d,
@@ -1355,11 +1431,11 @@ impl Viewer {
                             scene_view,
                             depth_view,
                             crate::renderer::Resolve::default(),
-                            extent.width,
-                            extent.height,
+                            scene_extent.width,
+                            scene_extent.height,
                         ),
                     }
-                    set_viewport(d, cmd, extent.width, extent.height);
+                    set_viewport(d, cmd, scene_extent.width, scene_extent.height);
                     crate::renderer::draw_sky(d, cmd, sky, layout, &base_push);
                     d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
                     // Bound once for the pass, never per draw (never-do #2).
@@ -1395,7 +1471,7 @@ impl Viewer {
                         &[water_set],
                         &[],
                     );
-                    set_viewport(d, cmd, extent.width, extent.height);
+                    set_viewport(d, cmd, scene_extent.width, scene_extent.height);
                     d.cmd_bind_index_buffer(cmd, index_buffer, 0, vk::IndexType::UINT32);
                     for (range, first_instance, instances) in draws {
                         let push = crate::renderer::Push {
@@ -1549,8 +1625,8 @@ impl Viewer {
                                 keep_samples: false,
                                 load: true,
                             },
-                            extent.width,
-                            extent.height,
+                            scene_extent.width,
+                            scene_extent.height,
                         );
                         if let Some(set) = shadow_set {
                             d.cmd_bind_descriptor_sets(
@@ -1580,7 +1656,7 @@ impl Viewer {
                             &[water_set],
                             &[],
                         );
-                        crate::renderer::set_viewport(d, cmd, extent.width, extent.height);
+                        crate::renderer::set_viewport(d, cmd, scene_extent.width, scene_extent.height);
                         crate::renderer::draw_water_and_particles(
                             d,
                             cmd,
@@ -1638,19 +1714,19 @@ impl Viewer {
                                 cmd,
                                 ms_color,
                                 Some(scene_view),
-                                extent.width,
-                                extent.height,
+                                scene_extent.width,
+                                scene_extent.height,
                             ),
                             None => crate::renderer::begin_overlay_rendering(
                                 d,
                                 cmd,
                                 scene_view,
                                 None,
-                                extent.width,
-                                extent.height,
+                                scene_extent.width,
+                                scene_extent.height,
                             ),
                         }
-                        set_viewport(d, cmd, extent.width, extent.height);
+                        set_viewport(d, cmd, scene_extent.width, scene_extent.height);
                         d.cmd_bind_descriptor_sets(
                             cmd,
                             vk::PipelineBindPoint::GRAPHICS,
@@ -1688,8 +1764,34 @@ impl Viewer {
         // scene and everything that assumes a bounded frame — the UI, CMAA2,
         // the present. Unconditional: the scene image is half float and the
         // swapchain is not, so nothing else can join them.
+        // Before the tonemap, for the reason spelled out on the offscreen
+        // path's copy: with a placement the scene no longer covers the target,
+        // and a swapchain image the compositor just handed back holds whatever
+        // was in it.
+        if placement.is_some() {
+            graph.pass(
+                "chrome_clear",
+                &[(post_id, Access::ColorWrite)],
+                move |d, cmd| {
+                    // SAFETY: the graph has put the target in
+                    // COLOR_ATTACHMENT_OPTIMAL and `cmd` is recording outside
+                    // any rendering block.
+                    unsafe {
+                        crate::renderer::clear_chrome(
+                            d,
+                            cmd,
+                            post_view,
+                            extent.width,
+                            extent.height,
+                        );
+                    }
+                },
+            );
+        }
         {
             let (pass, exposure) = (&self.tonemap, self.environment.exposure);
+            let placement = placement
+                .unwrap_or_else(|| crate::ViewportPlacement::full(scene_extent.width, scene_extent.height));
             graph.pass(
                 "tonemap",
                 &[(scene_id, Access::ShaderRead), (post_id, Access::ColorWrite)],
@@ -1699,7 +1801,7 @@ impl Viewer {
                     // COLOR_ATTACHMENT_OPTIMAL, and `cmd` is recording outside
                     // any rendering block.
                     unsafe {
-                        pass.record(d, cmd, post_view, exposure, extent.width, extent.height);
+                        pass.record(d, cmd, post_view, exposure, extent.width, extent.height, placement);
                     }
                 },
             );
@@ -1727,8 +1829,8 @@ impl Viewer {
                             extent.height,
                         );
                     }
-                    if let Some((ui, window)) = ui {
-                        let _ = ui.draw(window, cmd, extent, queue, pool, build);
+                    if let (Some((ui, _)), Some(frame)) = (ui, ui_frame.as_ref()) {
+                        let _ = ui.record(frame, cmd, extent, queue, pool);
                     }
                     // SAFETY: the block opened immediately above.
                     unsafe { d.cmd_end_rendering(cmd) };

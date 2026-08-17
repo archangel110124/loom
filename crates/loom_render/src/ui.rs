@@ -66,6 +66,43 @@ pub fn tok(hex: u32) -> egui::Color32 {
     egui::Color32::from_rgb(channel(hex >> 16), channel(hex >> 8), channel(hex))
 }
 
+/// One frame of laid-out UI, between [`Ui::layout`] and [`Ui::record`].
+///
+/// Opaque on purpose: the split exists so that a rectangle read from egui is
+/// current, not so that callers can inspect egui's tessellation.
+pub struct UiFrame {
+    primitives: Vec<egui::ClippedPrimitive>,
+    textures_delta: egui::TexturesDelta,
+    pixels_per_point: f32,
+    /// What the panels left for the scene, in egui's logical points.
+    scene: egui::Rect,
+}
+
+impl UiFrame {
+    /// The rectangle the panels left for the scene, in **window pixels**.
+    ///
+    /// Current rather than a frame stale, which is the whole point of the
+    /// split — it belongs to the frame that laid it out, so there is no way to
+    /// read it from the wrong one.
+    ///
+    /// Converted from the logical points egui works in by this frame's
+    /// `pixels_per_point`, because a swapchain is sized in pixels and
+    /// conflating the two puts a HiDPI viewport half a panel off.
+    #[must_use]
+    pub fn scene_rect(&self) -> (i32, i32, u32, u32) {
+        let scale = self.pixels_per_point;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            (
+                (self.scene.min.x * scale).round() as i32,
+                (self.scene.min.y * scale).round() as i32,
+                (self.scene.width() * scale).round().max(0.0) as u32,
+                (self.scene.height() * scale).round().max(0.0) as u32,
+            )
+        }
+    }
+}
+
 /// egui, wired to Vulkan and winit.
 pub struct Ui {
     context: egui::Context,
@@ -177,45 +214,90 @@ impl Ui {
         self.winit.on_window_event(window, event).consumed
     }
 
-    /// Build and record the UI for one frame.
+    /// Run egui's layout for one frame and hand back what it produced.
     ///
-    /// # Errors
-    /// [`RenderError`] if egui's renderer fails to record.
-    pub fn draw(
+    /// **This must happen before the render graph is built, not inside it.**
+    /// The UI used to lay out and record in one call, from inside the `ui`
+    /// pass closure — which `RenderGraph::execute` runs *after* the forward and
+    /// tonemap closures have already recorded. So egui's layout for frame N
+    /// happened after the scene for frame N was recorded, and any rectangle
+    /// read from egui to place the scene could only ever be frame N−1's.
+    ///
+    /// That is invisible while the scene fills the window and glaring the
+    /// moment it does not: dragging a splitter would show a stale scene rect
+    /// against a live panel edge on every frame, and `chrome_clear` would paint
+    /// the gap a tidy black that reads as intentional rather than as a bug.
+    /// Splitting the call is the fix, and it has to land before anything reads
+    /// a rectangle from the dock.
+    ///
+    /// The returned [`UiFrame`] must be given to [`Self::record`] in the same
+    /// frame; holding one across frames leaks the texture delta.
+    pub fn layout(
         &mut self,
         window: &winit::window::Window,
+        mut build: impl FnMut(&mut egui::Ui),
+    ) -> UiFrame {
+        // egui 0.35 hands the closure a root `Ui` rather than a `Context`, and
+        // panels attach to that Ui rather than to the context directly.
+        let input = self.winit.take_egui_input(window);
+        // **The scene rect is read here, immediately after the panels are
+        // added and while the root `Ui` still exists.** `egui::Context` has no
+        // `available_rect` in 0.35 — the answer lives on the root `Ui`, which
+        // `run_ui` owns and drops — so the closure is wrapped rather than the
+        // context queried afterwards. This is the same
+        // `available_rect_before_wrap` the HUD anchors to.
+        let mut scene = egui::Rect::ZERO;
+        let output = self.context.run_ui(input, |ui| {
+            build(ui);
+            scene = ui.available_rect_before_wrap();
+        });
+        self.winit
+            .handle_platform_output(window, output.platform_output);
+        let primitives = self
+            .context
+            .tessellate(output.shapes, output.pixels_per_point);
+        UiFrame {
+            primitives,
+            textures_delta: output.textures_delta,
+            pixels_per_point: output.pixels_per_point,
+            scene,
+        }
+    }
+
+    /// Record a laid-out frame into the command buffer.
+    ///
+    /// Stays inside the `ui` render-graph pass, because that is where the
+    /// target is in `COLOR_ATTACHMENT_OPTIMAL` and the rendering block is open.
+    /// Nothing here computes a layout, so nothing here can be a frame stale.
+    ///
+    /// # Errors
+    /// [`RenderError`] if egui's renderer fails to upload or record.
+    pub fn record(
+        &mut self,
+        frame: &UiFrame,
         cmd: vk::CommandBuffer,
         extent: vk::Extent2D,
         queue: vk::Queue,
         pool: vk::CommandPool,
-        build: impl FnMut(&mut egui::Ui),
     ) -> Result<(), RenderError> {
-        // egui 0.35 hands the closure a root `Ui` rather than a `Context`, and
-        // panels attach to that Ui rather than to the context directly.
-        let input = self.winit.take_egui_input(window);
-        let output = self.context.run_ui(input, build);
-        self.winit
-            .handle_platform_output(window, output.platform_output);
-
-        let primitives = self
-            .context
-            .tessellate(output.shapes, output.pixels_per_point);
-        if !output.textures_delta.set.is_empty() {
+        if !frame.textures_delta.set.is_empty() {
             // Font atlas and any user textures. Uploaded on the graphics queue
             // and pool the caller passes in — the only queue this engine uses,
             // since Vulkan doc §6's multi-queue work is deferred.
             self.renderer
-                .set_textures(queue, pool, output.textures_delta.set.as_slice())
+                .set_textures(queue, pool, frame.textures_delta.set.as_slice())
                 .map_err(|e| RenderError::Allocator(e.to_string()))?;
         }
         self.renderer
-            .cmd_draw(cmd, extent, output.pixels_per_point, &primitives)
+            .cmd_draw(cmd, extent, frame.pixels_per_point, &frame.primitives)
             .map_err(|e| RenderError::Allocator(e.to_string()))?;
-        if !output.textures_delta.free.is_empty() {
-            self.renderer.free_textures(&output.textures_delta.free).ok();
+        if !frame.textures_delta.free.is_empty() {
+            self.renderer.free_textures(&frame.textures_delta.free).ok();
         }
         Ok(())
     }
+
+
 
     /// Whether the pointer is over a panel, so the caller can ignore the click.
     #[must_use]

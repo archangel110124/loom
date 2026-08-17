@@ -764,6 +764,11 @@ pub struct Renderer {
     queue: vk::Queue,
     allocator: Option<Allocator>,
 
+    /// Where in the target the scene lands. `None` fills it, which is
+    /// byte-identical to the behaviour before placements existed — and that
+    /// equality is what keeps the golden gate a valid check on both paths.
+    placement: Option<ViewportPlacement>,
+
     width: u32,
     height: u32,
 
@@ -1373,6 +1378,7 @@ impl Renderer {
         };
 
         Ok(Self {
+            placement: None,
             timers,
             print_timing,
             raytracer,
@@ -1669,7 +1675,15 @@ impl Renderer {
         let cmd = self.command_buffer;
 
         #[allow(clippy::cast_precision_loss)]
-        let aspect = self.width as f32 / self.height as f32;
+        // **The placement's aspect, not the target's.** The scene is
+        // rasterised into a viewport the size of the placement, so a
+        // projection built from the whole image stretches it by exactly the
+        // ratio between the two — invisible when the rectangle happens to
+        // share the window's shape and obvious the moment a panel is dragged.
+        let (aw, ah) = self
+            .placement
+            .map_or((self.width, self.height), |p| (p.width, p.height));
+        let aspect = aw as f32 / ah as f32;
         let view_proj = view_projection(camera, aspect);
 
         // Grouped by mesh so each mesh is one instanced draw. Sorting here
@@ -2377,9 +2391,29 @@ impl Renderer {
         // SHADER_READ_ONLY_OPTIMAL and `ldr` out of UNDEFINED. Nothing here
         // writes a barrier (never-do #4).
         let ldr = graph.import("loom.ldr_target", self.ldr);
+        // **Before the tonemap, and only when the scene does not fill the
+        // target.** With no placement the tonemap covers every pixel, so a
+        // clear would be bandwidth spent on values about to be overwritten —
+        // and, more importantly, adding a pass would change the barrier list
+        // for every existing scene, which is exactly the "byte-identical when
+        // `None`" property the golden gate depends on.
+        if self.placement.is_some() {
+            let view = self.ldr_view;
+            graph.pass(
+                "chrome_clear",
+                &[(ldr, Access::ColorWrite)],
+                move |d, cmd| {
+                    // SAFETY: the graph has put the target in
+                    // COLOR_ATTACHMENT_OPTIMAL and `cmd` is recording outside
+                    // any rendering block.
+                    unsafe { clear_chrome(d, cmd, view, width, height) };
+                },
+            );
+        }
         {
             let (pass, view) = (&self.tonemap, self.ldr_view);
             let exposure = self.environment.exposure;
+            let placement = self.placement.unwrap_or_else(|| ViewportPlacement::full(width, height));
             graph.pass(
                 "tonemap",
                 &[(color, Access::ShaderRead), (ldr, Access::ColorWrite)],
@@ -2387,7 +2421,12 @@ impl Renderer {
                     // SAFETY: the graph has put both images in the layouts this
                     // recording requires, and `cmd` is recording outside any
                     // rendering block.
-                    unsafe { pass.record(d, cmd, view, exposure, width, height) };
+                    unsafe {
+                        // The offscreen path always fills its target: there is
+                        // no dock, and `loom render --viewport` sets this
+                        // through `set_placement` instead.
+                        pass.record(d, cmd, view, exposure, width, height, placement);
+                    }
                 },
             );
         }
@@ -2532,7 +2571,15 @@ impl Renderer {
     }
 
     /// The layout transitions the graph emitted on the last [`Self::render`].
-    #[must_use]
+    /// Draw the scene into a sub-rectangle of the target instead of all of it.
+    ///
+    /// `None` — the default — fills the target and is byte-identical to the
+    /// behaviour before placements existed, which is what keeps this path and
+    /// the window in agreement and the golden gate a valid check on both.
+    pub fn set_placement(&mut self, placement: Option<ViewportPlacement>) {
+        self.placement = placement;
+    }
+
     pub fn last_transitions(&self) -> &[Transition] {
         &self.last_transitions
     }
@@ -3015,6 +3062,87 @@ pub(crate) unsafe fn set_viewport(
     unsafe {
         d.cmd_set_viewport(cmd, 0, &[viewport]);
         d.cmd_set_scissor(cmd, 0, &[scissor]);
+    }
+}
+
+/// Where in the swapchain the scene is drawn.
+///
+/// **A sub-rectangle of the window, not a texture the UI samples.** The editor
+/// needs the scene to occupy the dock's centre region rather than the whole
+/// window, and there are two ways to do that. Render-to-texture means a new
+/// image, a sampler, a descriptor set, a resize policy, and a colour round-trip
+/// through egui's shader — a second place the window and the offscreen path can
+/// disagree, which this project has already paid three defects for. A
+/// sub-rectangle costs a viewport, a scissor and a push constant.
+///
+/// **The scene is rendered at the *origin* of window-sized images**, sized to
+/// this rectangle, and the tonemap copies it to `x, y`. That way every pass
+/// upstream of the tonemap is unchanged except for how much of its attachment
+/// it touches, and nothing reallocates when the splitter moves.
+///
+/// `None` everywhere is byte-identical to drawing full-window, which is what
+/// keeps `loom render` and `loom run` in agreement — and what lets the golden
+/// gate stay a valid check on both.
+///
+/// # What this forecloses
+///
+/// Render scale, a scrolled or clipped viewport, a viewport floating beneath a
+/// translucent panel, and any egui effect applied to the scene image. The first
+/// of those that is actually wanted is the trigger to adopt the texture path;
+/// its mechanism is `add_user_texture` over `create_vulkan_descriptor_set`, so
+/// the reversal is cheap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportPlacement {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Below this in either axis the editor skips the scene passes entirely.
+///
+/// A splitter dragged to the edge leaves a rectangle a few pixels wide, and
+/// rendering a whole frame into it is work nobody can see. It is also where
+/// the degenerate cases live — a 1-px viewport with 4× MSAA and a depth
+/// pre-pass is a lot of surface for one pixel of output.
+pub const MIN_VIEWPORT: u32 = 8;
+
+impl ViewportPlacement {
+    /// A placement clamped to the swapchain and to a minimum of 1×1.
+    ///
+    /// **Both clamps are load-bearing.** A zero-width viewport is
+    /// VUID-VkViewport-width-01770 and a scissor reaching past the attachment
+    /// is VUID-vkCmdSetScissor-x-00595 — and both are reachable by ordinary
+    /// use, because a human can drag a splitter to the window edge and egui
+    /// will hand back a rectangle of zero or negative size. Clamping here
+    /// rather than at each of the four call sites means there is one place to
+    /// get it right.
+    #[must_use]
+    pub fn new(x: i32, y: i32, width: u32, height: u32, swapchain: (u32, u32)) -> Self {
+        let x = x.clamp(0, i32::try_from(swapchain.0).unwrap_or(i32::MAX).saturating_sub(1));
+        let y = y.clamp(0, i32::try_from(swapchain.1).unwrap_or(i32::MAX).saturating_sub(1));
+        // Sized so that `x + width` never passes the edge, which is what the
+        // scissor rule actually requires.
+        let room_x = swapchain.0.saturating_sub(u32::try_from(x).unwrap_or(0));
+        let room_y = swapchain.1.saturating_sub(u32::try_from(y).unwrap_or(0));
+        Self {
+            x,
+            y,
+            width: width.clamp(1, room_x.max(1)),
+            height: height.clamp(1, room_y.max(1)),
+        }
+    }
+
+    /// The whole swapchain — the runtime's placement, and the offscreen path's.
+    #[must_use]
+    pub fn full(width: u32, height: u32) -> Self {
+        Self { x: 0, y: 0, width: width.max(1), height: height.max(1) }
+    }
+
+    /// Too small to be worth rendering into. See [`MIN_VIEWPORT`].
+    #[must_use]
+    pub fn is_degenerate(&self) -> bool {
+        self.width < MIN_VIEWPORT || self.height < MIN_VIEWPORT
     }
 }
 
@@ -4109,6 +4237,61 @@ impl EyeTracker {
     }
 }
 
+/// Paint the whole target the chrome colour, before the tonemap writes its
+/// sub-rectangle into it.
+///
+/// **Needed because the tonemap stopped covering the target.** With a
+/// placement, the scene occupies part of the image and the rest is whatever
+/// was last there — which on a freshly acquired swapchain image is
+/// uninitialised, and in a golden PNG is uninitialised memory presented as a
+/// rendered frame. Clearing is one `LOAD_OP_CLEAR` with no draw.
+///
+/// It is a graph pass rather than a raw `vkCmdClearColorImage` because the
+/// target has to be in `COLOR_ATTACHMENT_OPTIMAL` first, and putting that
+/// transition anywhere but the graph is never-do #4.
+///
+/// # Safety
+/// `cmd` must be recording outside any rendering block, with `color_view` in
+/// `COLOR_ATTACHMENT_OPTIMAL`.
+pub(crate) unsafe fn clear_chrome(
+    d: &ash::Device,
+    cmd: vk::CommandBuffer,
+    color_view: vk::ImageView,
+    width: u32,
+    height: u32,
+) {
+    let color_attachments = [vk::RenderingAttachmentInfo::default()
+        .image_view(color_view)
+        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .clear_value(vk::ClearValue {
+            color: vk::ClearColorValue {
+                // **`ground` from the editor's token table (`#0E1013`), as
+                // LINEAR values.** The target is `_SRGB`, and a clear value
+                // for an sRGB attachment is interpreted linear and encoded on
+                // write — so writing the hex bytes here produces a chrome four
+                // times too bright. It did: `#0E1013` came out around `#434A55`,
+                // a mid slate rather than the near-black the palette specifies.
+                // These are `srgb_decode(hex / 255)` per channel.
+                float32: [0.004_39, 0.005_18, 0.006_51, 1.0],
+            },
+        })];
+    let rendering = vk::RenderingInfo::default()
+        .render_area(vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: vk::Extent2D { width, height },
+        })
+        .layer_count(1)
+        .color_attachments(&color_attachments);
+    // SAFETY: the caller guarantees the layout and that `cmd` is recording;
+    // the slices outlive the call. No draw — the clear is the whole pass.
+    unsafe {
+        d.cmd_begin_rendering(cmd, &rendering);
+        d.cmd_end_rendering(cmd);
+    }
+}
+
 pub(crate) unsafe fn begin_overlay_rendering(
     d: &ash::Device,
     cmd: vk::CommandBuffer,
@@ -4238,3 +4421,70 @@ pub(crate) fn create_shader_module(
     Ok(unsafe { device.create_shader_module(&info, None) }?)
 }
 
+
+#[cfg(test)]
+mod placement_tests {
+    use super::{MIN_VIEWPORT, ViewportPlacement};
+
+    /// **A splitter dragged to the window edge must not produce an illegal
+    /// viewport.** A zero-width viewport is VUID-VkViewport-width-01770 and a
+    /// scissor reaching past the attachment is VUID-vkCmdSetScissor-x-00595 —
+    /// both reachable by ordinary use, because egui hands back a rectangle of
+    /// zero or negative size when a panel eats the whole window.
+    #[test]
+    fn a_degenerate_rectangle_is_clamped_rather_than_passed_on() {
+        let swapchain = (800, 600);
+
+        let zero = ViewportPlacement::new(0, 0, 0, 0, swapchain);
+        assert_eq!((zero.width, zero.height), (1, 1), "zero size is illegal");
+
+        // Past the right edge: the width shrinks so `x + width` stays inside.
+        let over = ViewportPlacement::new(700, 0, 400, 100, swapchain);
+        assert_eq!(over.x, 700);
+        assert_eq!(over.width, 100, "the scissor must not pass the attachment");
+
+        // An origin past the edge entirely is pulled back to the last pixel,
+        // and the size then clamps to the one pixel of room left.
+        let outside = ViewportPlacement::new(9000, 9000, 50, 50, swapchain);
+        assert_eq!((outside.x, outside.y), (799, 599));
+        assert_eq!((outside.width, outside.height), (1, 1));
+
+        // A negative origin — egui produces these while a panel is animating.
+        let negative = ViewportPlacement::new(-40, -40, 100, 100, swapchain);
+        assert_eq!((negative.x, negative.y), (0, 0));
+    }
+
+    /// A rectangle that fits is passed through untouched, or the clamp would
+    /// be quietly changing every frame's framing.
+    #[test]
+    fn a_rectangle_that_fits_is_left_alone() {
+        let p = ViewportPlacement::new(120, 80, 400, 240, (640, 400));
+        assert_eq!((p.x, p.y, p.width, p.height), (120, 80, 400, 240));
+    }
+
+    /// `full` is what the runtime and the offscreen path use, and it must be
+    /// exactly the target — the "byte-identical when `None`" property rests on
+    /// this being the same rectangle the code used before placements existed.
+    #[test]
+    fn full_covers_the_whole_target() {
+        let p = ViewportPlacement::full(1920, 1080);
+        assert_eq!((p.x, p.y, p.width, p.height), (0, 0, 1920, 1080));
+        // Even a degenerate swapchain yields a legal viewport.
+        let tiny = ViewportPlacement::full(0, 0);
+        assert_eq!((tiny.width, tiny.height), (1, 1));
+    }
+
+    /// Below the floor the editor skips the scene passes entirely: a whole
+    /// frame rendered into four pixels is work nobody can see, and it is where
+    /// the degenerate cases live.
+    #[test]
+    fn a_sliver_reports_itself_degenerate() {
+        let swapchain = (800, 600);
+        assert!(ViewportPlacement::new(0, 0, 4, 400, swapchain).is_degenerate());
+        assert!(ViewportPlacement::new(0, 0, 400, 4, swapchain).is_degenerate());
+        assert!(
+            !ViewportPlacement::new(0, 0, MIN_VIEWPORT, MIN_VIEWPORT, swapchain).is_degenerate(),
+            "the floor itself is allowed"
+        );
+    }
+}

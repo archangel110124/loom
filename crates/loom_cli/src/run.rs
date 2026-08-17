@@ -820,6 +820,13 @@ impl ApplicationHandler for App {
                     Err(e) => crate::log::error(format!("no editor UI ({e}); continuing bare")),
                 }
                 self.gpu = Some((instance, device));
+                // **The scene becomes a rectangle rather than the whole
+                // window.** Only when there is a UI to leave room for it —
+                // bare mode and `--frames` still fill the window, and so does
+                // every headless path, which is what keeps `loom render` and
+                // `loom run` in agreement.
+                let mut viewer = viewer;
+                viewer.set_dock_viewport(self.ui.is_some());
                 self.viewer = Some(viewer);
                 self.window = Some(window);
                 // The meshes went in through `Viewer::new`; grass has no such

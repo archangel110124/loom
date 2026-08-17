@@ -89,7 +89,9 @@ impl Tonemap {
         let ranges = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::FRAGMENT)
             .offset(0)
-            .size(4)];
+            // `int2 origin; float exposure;` — 12 bytes under either packing
+            // rule, which is why the origin goes first.
+            .size(12)];
         // SAFETY: both slices outlive the call.
         let pipeline_layout = unsafe {
             device.create_pipeline_layout(
@@ -141,6 +143,7 @@ impl Tonemap {
     /// `cmd` must be recording outside any rendering block, the source must be
     /// in `SHADER_READ_ONLY_OPTIMAL` and the destination in
     /// `COLOR_ATTACHMENT_OPTIMAL`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn record(
         &self,
         device: &ash::Device,
@@ -149,6 +152,9 @@ impl Tonemap {
         exposure: f32,
         width: u32,
         height: u32,
+        // Where in `destination` the scene lands. The source is always read
+        // from the origin — see `TonemapPush::origin` in `tonemap.slang`.
+        placement: crate::renderer::ViewportPlacement,
     ) {
         // No depth attachment: there is no geometry to test. The pipeline
         // declares `UNDEFINED` for depth to match, because a pipeline that
@@ -161,6 +167,11 @@ impl Tonemap {
             // be bandwidth spent on values about to be overwritten.
             .load_op(vk::AttachmentLoadOp::DONT_CARE)
             .store_op(vk::AttachmentStoreOp::STORE)];
+        // **The render area is the whole target, the viewport is the
+        // sub-rectangle.** Two different rectangles on purpose: `LOAD_OP` is
+        // `DONT_CARE` and the render area is what that applies to, so a render
+        // area matching the viewport would leave the rest of the attachment
+        // formally undefined rather than holding what `chrome_clear` put there.
         let rendering = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
@@ -170,7 +181,15 @@ impl Tonemap {
             .color_attachments(&attachments);
 
         #[allow(clippy::cast_precision_loss)]
-        let (fw, fh) = (width as f32, height as f32);
+        let (fw, fh) = (placement.width as f32, placement.height as f32);
+        #[allow(clippy::cast_precision_loss)]
+        let (fx, fy) = (placement.x as f32, placement.y as f32);
+
+        // `int2 origin; float exposure;` — 12 bytes, matching the shader.
+        let mut push = [0u8; 12];
+        push[0..4].copy_from_slice(&placement.x.to_ne_bytes());
+        push[4..8].copy_from_slice(&placement.y.to_ne_bytes());
+        push[8..12].copy_from_slice(&exposure.to_ne_bytes());
 
         // SAFETY: the caller guarantees the layouts and that `cmd` is
         // recording; every slice outlives its call.
@@ -180,8 +199,8 @@ impl Tonemap {
                 cmd,
                 0,
                 &[vk::Viewport {
-                    x: 0.0,
-                    y: 0.0,
+                    x: fx,
+                    y: fy,
                     width: fw,
                     height: fh,
                     min_depth: 0.0,
@@ -192,8 +211,11 @@ impl Tonemap {
                 cmd,
                 0,
                 &[vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: vk::Extent2D { width, height },
+                    offset: vk::Offset2D { x: placement.x, y: placement.y },
+                    extent: vk::Extent2D {
+                        width: placement.width,
+                        height: placement.height,
+                    },
                 }],
             );
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
@@ -210,7 +232,7 @@ impl Tonemap {
                 self.pipeline_layout,
                 vk::ShaderStageFlags::FRAGMENT,
                 0,
-                &exposure.to_ne_bytes(),
+                &push,
             );
             // One oversized triangle rather than a quad: a quad is two
             // triangles with a seam down the diagonal where the rasteriser

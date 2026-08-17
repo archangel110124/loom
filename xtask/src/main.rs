@@ -250,7 +250,19 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 30] = [
+const GOLDEN: [(&str, &str, &[&str]); 31] = [
+    // **The editor's sub-rectangle, which no other reference can see.** The
+    // scene is `materials` deliberately — this entry is not about content, it
+    // is about *where the content lands*: that the tonemap copies the scene to
+    // the placement's origin rather than sampling outside what the forward pass
+    // wrote, that the projection uses the rectangle's aspect and not the
+    // image's, and that `chrome_clear` fills the rest with `ground` rather than
+    // leaving uninitialised memory.
+    //
+    // It is the only gate on the editor's viewport at all. The window cannot be
+    // photographed by anything here, so without this row the whole placement
+    // path would ship on a human having looked at it once.
+    ("viewport_rect", "assets/test/materials.loom", &["--viewport", "60,40,200,120"]),
     // **The scene the reflection bug was reported in, and it had no pixel gate
     // at all.** It sat in `SCENES` only, on the argument that `materials`
     // already sweeps metallic to 1.0 — which is true of the BRDF and false of
