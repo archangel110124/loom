@@ -4744,10 +4744,11 @@ static const float WATER_DETAIL_STRENGTH = 0.30;
 // `pool.loom` at tick 150 — and could not be *seen*, which is half a feature.
 //
 // The physics knobs are deliberately untouched. `strength` is measured
-// saturated by the relative-velocity coupling that keeps it stable: 5.6x the
-// authored value moves the ripple-vs-none mean only 2.29 to 2.83 while
-// silently changing the simulation's outcome. An invisible physics change
-// bought for a presentation problem is the worst trade available here.
+// saturated by the relative-velocity coupling that keeps it stable: on
+// `pool.loom`, 5.6x the authored value moves the ripple-vs-none mean only
+// 7.02 to 11.37 while leaving the sphere at -0.500 m at tick 300 instead of
+// +0.140 m [measured]. An invisible physics change bought for a presentation
+// problem is the worst trade available here.
 
 /// Slope at which the wake's crest is fully white.
 ///

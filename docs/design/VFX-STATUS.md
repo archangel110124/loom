@@ -124,8 +124,9 @@ detect an absent effect.
    the ablation.
 
    **`strength` is not the lever and must not be reached for.** It is saturated by the
-   relative-velocity coupling that makes ADR 0046 stable: 5.6x the authored value moves the
-   ablation mean from 2.29 to 2.83 while silently changing the simulation's outcome. The schema's
+   relative-velocity coupling that makes ADR 0046 stable: on `pool.loom` 5.6x the authored value
+   moves the ablation mean from 7.02 to 11.37 while leaving the sphere half a metre lower at tick
+   300, never surfacing at all. The schema's
    ranges are enforced at load now, which they were not — `strength = 5.0` used to validate clean.
 
 ## W8 is refused, and here is the evidence

@@ -47,9 +47,10 @@ so it has to be re-run, not assumed.
 this as the reason the wake is only centimetres tall. It is not. The coupling is
 injected *relative to the surface's own velocity* (ADR 0046, first failure), so
 it saturates: once the water is moving with the body, nothing further goes in.
-Measured on `pool.loom`, `strength` at 5.6x its authored value moves the
-ripple-vs-none ablation mean from 2.29 only to 2.83 — while changing where the
-sphere ends up by half a metre. A larger injection constant does not buy a
+Measured on `pool.loom` at tick 150, `strength` at 5.6x its authored value
+moves the ripple-vs-none ablation mean from 7.02 only to 11.37 — while leaving
+the sphere at -0.500 m at tick 300 instead of +0.140 m, half a metre lower and
+never surfacing. A larger injection constant does not buy a proportionally
 larger wake; it buys an invisible physics change.
 
 **A probe that drives a constant relative velocity will overstate the

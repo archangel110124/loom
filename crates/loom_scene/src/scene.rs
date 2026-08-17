@@ -888,11 +888,12 @@ fn check_ripples(body: &components::WaterBody, node: &str) -> Vec<SceneError> {
     // them and the loader does not read them, so `strength = 5.0` and
     // `cell = 20.0` both validated clean — and `strength` in particular is a
     // number an agent asked to make the ripples livelier will reach for. It is
-    // measured *saturated* by the relative-velocity coupling (5.6x the authored
-    // value moves the ripple-vs-none picture by a fifth) while silently
-    // changing what the simulation does, which is the worst combination there
-    // is: no visible gain, an invisible physics change. Refused with the number
-    // in the message, the way the Courant bound already is.
+    // measured *saturated* by the relative-velocity coupling: on `pool.loom`
+    // 5.6x the authored value moves the ripple-vs-none picture by 1.6x while
+    // leaving the sphere half a metre lower at tick 300 [measured]. That is the
+    // worst combination there is — little visible gain, an invisible physics
+    // change. Refused with the number in the message, the way the Courant bound
+    // already is.
     for (name, value, low, high) in [
         ("extent", ripples.extent, 1.0, 512.0),
         ("cell", ripples.cell, 0.05, 8.0),
