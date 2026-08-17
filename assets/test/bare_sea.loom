@@ -1,0 +1,55 @@
+# Water and nothing else.
+#
+# **The scene that has no acceleration structure to trace against**, and it
+# exists for exactly one draw call's worth of validation.
+#
+# `Raytracer::ready()` is false when the TLAS holds nothing, and `renderer.rs`
+# skips binding descriptor set 0 when it is — which was safe for as long as
+# every pipeline that *statically uses* `sceneTLAS` also had a mesh in the
+# frame. The water fragment shader now traces its reflection (W3), so that
+# stopped being true, and a scene with a `WaterBody` and no `MeshRenderer`
+# draws with set 0 unbound: `VUID-vkCmdDraw-None-08600`.
+#
+# **Every other water scene in the repository happens to own a mesh**, so
+# nothing was covering it — which is the same absent-coverage failure the
+# `GOLDEN` list keeps being caught by. A scene of nothing but alpha-cutout
+# meshes has the identical shape, because `cutout` objects are deliberately
+# kept out of the TLAS, and there is no such scene either.
+#
+# In `SCENES` and not in `GOLDEN` on the stated rule: it draws no rendering
+# path `ocean` does not already have a reference for. What it draws is a
+# *binding state*, and the validation layers are the only instrument that can
+# see one.
+
+[scene]
+format = 1
+id = "6d1e77a2-3c04-4b5e-9a18-2f7c05b3e841"
+
+[[node]]
+name = "Sea"
+
+  [node.components.Environment]
+  sun_direction = [0.3, 0.45, -0.84]
+  sun_strength = 2.0
+  ambient = 0.5
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+  density = 1000.0
+  drag = 2.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 18.0
+  amplitude = 0.16
+  steepness = 0.22
+  direction = [1.0, 0.2]
+  speed_scale = 1.0
+
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [0.0, 2.0, 6.0], rot_euler = [-6.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

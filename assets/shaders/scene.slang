@@ -1319,9 +1319,16 @@ static const float REFLECT_MAX_RADIANCE = 4.0;
 /// blotches on these scenes. Removing it deletes a constant and a branch. If a
 /// scene ever does show single-sample blotching on a rough surface, the fix is
 /// the cutoff, and this table is where it goes back.
+/// **`miss` is what the ray sees when it hits nothing, and it is a parameter
+/// rather than `skyGradient(dir)` because water needs a different sky.** The
+/// opaque path reflects `skyGradient` — a gradient with no sun disc and no
+/// cloud — which is the right stand-in for a prefiltered probe on a rough
+/// metal. `waterFragmentMain` has always reflected `skyColor`, and the sun's
+/// glitter path on a sea IS the reflected sun disc; passing the gradient there
+/// would delete it. Same function, two skies, one line.
 float3 tracedEnvironment(float3 position, float3 normal, float3 dir,
-                         float roughness, float bias) {
-    float3 sky = skyGradient(dir);
+                         float roughness, float bias, float3 miss) {
+    float3 sky = miss;
     float3 origin = position + normal * bias;
     RayDesc ray;
     ray.Origin = origin;
@@ -2428,7 +2435,7 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // weather through the ceiling. At roughness 1 it still is, bit for bit,
     // which is what keeps a fully matte surface unchanged.
     float3 environment = tracedEnvironment(in.worldPos, geometric, lobe, roughness,
-                                           in.shadowBias);
+                                           in.shadowBias, skyGradient(lobe));
     lit += environment * f0 * (1.0 - roughness * 0.7);
 
     // **A puddle is a mirror, and this is what was missing.** The term above is
@@ -2876,6 +2883,141 @@ static const float FIRE_OPACITY = 0.92;
 /// albedo — which is `color_start`/`color_end`, already in the schema.
 static const float SMOKE_LIGHT = 1.0;
 
+// ---------------------------------------------------------------------------
+// The soot volume — ADR 0020's line integral, with the emission taken out and
+// a plume put in its place.
+//
+// **The selector is `flame && !additive`, and it costs no schema.** The sign of
+// the authored red already says "this quad is a marched field" and the sign of
+// the radius already says "this quad emits light". A marched field that does
+// not emit is a field that only absorbs, which is what soot is. No scene in the
+// repository authors that pair today — all three `flame = true` scenes are
+// additive — so every blessed particle reference is untouched by construction.
+//
+// **One quad per plume, and that is the overdraw answer.** The fire's comment
+// block above already made this argument for emission; it is stronger here. A
+// sprite plume is ~700 translucent quads with an overdraw of thirty; this is
+// one quad with an overdraw of exactly one, and its cost is
+// `covered pixels x steps`, which is two constants away rather than a
+// population away.
+// ---------------------------------------------------------------------------
+
+/// How many samples span the chord. **A quarter of `FIRE_STEPS`, and the
+/// reason is Nyquist rather than thrift.** A flame's field is thresholded just
+/// under its own supremum, so its density is very nearly a step function of the
+/// field and the march is resolving a discontinuity; soot's is a smooth ramp
+/// over `SMOKE_W`, which is band-limited and needs far fewer samples to
+/// integrate. What it does need is the same trapezoid — see `hotPrev` in
+/// `flameColor` for what the rectangle rule draws.
+///
+/// **Swept, on the two instruments that answer different halves of it.**
+/// `plume` at 1920x1080, forward pass, against a 64-step march as the converged
+/// reference; flicker at the scene's own camera, held still, 12 ticks apart:
+///
+///     steps         4      6      8     12     16     20     28     64
+///     forward ms  0.518  0.554  0.583  0.660  0.735  0.799  0.940  1.70
+///     mean diff   0.661  0.366  0.246  0.155  0.110  0.083  0.052   -
+///     picture/ms   -      8.4    4.0    1.22   0.60   0.42   0.22   -
+///     flicker       -      -    0.1223 0.1152 0.1129 0.1111 0.1122  -
+///
+/// Picture-per-millisecond has a knee between 8 and 12 and is flat after it, so
+/// a still alone would argue for 12. **Flicker is what argues for 20**, and it
+/// is the instrument that matters here: the sample positions slide along the
+/// ray as the camera or the field moves, so an under-resolved march does not
+/// look soft, it *crawls*. It falls to a floor at 16-20 and 28 does not beat
+/// 20 — that last pair is the noise floor, which is how the floor is known to
+/// be one. 20 is the first count at it.
+///
+/// A 12-step build is a legitimate quality setting and this table is where it
+/// goes; it is 0.14 ms cheaper and reaches the same still.
+static const int SMOKE_STEPS = 20;
+/// Stop marching once this little light gets through. A plume is opaque in its
+/// middle long before the far side of the ellipsoid, and the samples past that
+/// point are multiplied by a transmittance under 2%.
+static const float SMOKE_T_MIN = 0.02;
+/// Horizontal semi-axis of the marched ellipsoid, as a fraction of the
+/// vertical one. **The quad is square** — `ParticleEmitter.size` is one radius
+/// — so a column has to be carved out of it, and everything outside is rejected
+/// by the chord test before a single noise lookup.
+static const float SMOKE_ASPECT = 0.55;
+/// The plume's radius at the source, and how much it flares by the top.
+static const float SMOKE_R0 = 0.34;
+static const float SMOKE_FLARE = 0.95;
+static const float SMOKE_FLARE_P = 0.75;
+/// Height over which the column establishes itself above the source, and the
+/// height at which it starts dissipating. Without the first the plume begins as
+/// a flat disc sitting on the fire.
+static const float SMOKE_FOOT = 0.10;
+static const float SMOKE_TOP = 0.68;
+/// How far the top of the plume is carried downwind, in plume radii per m/s.
+/// **P1's wind, from the environment buffer** — the same `wind` the grass bends
+/// to and the foam drifts on, so a scene's smoke and its grass lean together.
+static const float SMOKE_DRIFT = 0.26;
+/// Metres per second the material rises. This is what makes the pattern a
+/// Lagrangian one: a feature is born at the source and travels up, rather than
+/// the field sliding through a stationary envelope.
+static const float SMOKE_RISE = 0.55;
+/// Turns of the column per unit height. Entrainment twists a plume; without it
+/// the rising features climb in a perfectly straight line and read as a
+/// scrolling texture however good the noise is.
+static const float SMOKE_TWIST = 1.30;
+/// Cycles of the coarsest octave across the plume's own half-height.
+///
+/// **The number is set by the plume's RADIUS, not by its height, and that is
+/// what 2.6 got wrong.** `SMOKE_ASPECT` makes the column 0.55 as wide as it is
+/// tall, so 2.6 cycles per half-height is 1.4 cycles across the whole width —
+/// one blob of noise, laid over the envelope. The envelope's radial term is a
+/// linear cone with a definite boundary, and with only one blob to erode it
+/// **whether the silhouette read as smoke or as an ellipsoid was a lottery on
+/// which region of the noise the plume happened to land in.** That is not a
+/// tuning complaint: moving the field by `sootOffset` alone turned a wispy
+/// column into a hard-edged oval, which is how it was found.
+///
+/// At 6.5 there are ~3.6 cycles across the width, the noise erodes the cone
+/// everywhere, and the silhouette is the field's rather than the envelope's.
+/// Rendered at offsets 0, 8 and 32 it reads as the same *kind* of thing three
+/// times, which is the property that was missing:
+///
+///     SMOKE_HZ   2.6                    4.5              6.5
+///     offset 0   wispy, hard right edge  billowing        billowing
+///     offset 8   solid oval, hard edge   soft, some edge  billowing
+///     offset 32  solid oval, hard edge   -                billowing
+///
+/// It is scale-invariant by construction — the field is sampled at
+/// `SMOKE_HZ / R` — so this is a statement about how detailed soot is, not a
+/// per-scene tune. It costs nothing: the same three octaves are evaluated, and
+/// the step bound below retires the finest to ~0.33 in return.
+static const float SMOKE_HZ = 6.5;
+/// Amplitude of the divergence-free warp, and the finite-difference step the
+/// stream function's perpendicular gradient is taken with.
+///
+/// **Divergence-free is the whole point and it is why this is not the fire's
+/// warp.** `fireField` displaces by two independent noise fields, which has
+/// sources and sinks: over a flame's ~0.2 s residence time that is invisible,
+/// and over a plume's several seconds the sinks pull density into knots that
+/// read as blobs — the "procedural blob rather than a plume" failure. The
+/// perpendicular gradient of a scalar stream function has zero divergence in
+/// the plane it is taken in, which is the meridional (radial, vertical) plane
+/// where a plume's vortex rings actually roll. The third noise axis varies
+/// slowly across those planes, so the field is 2.5D: exactly divergence-free
+/// where the rolling happens and only slowly varying across it.
+static const float SMOKE_WARP = 0.55;
+static const float SMOKE_EPS = 0.18;
+/// Where the noise has to reach before there is any soot, and over what width
+/// it arrives. `SMOKE_T0` below the field's 0.5 mean is what leaves holes for
+/// the sky to come through, which is most of what separates a plume from a
+/// cone of fog.
+static const float SMOKE_T0 = 0.36;
+static const float SMOKE_W = 0.30;
+/// Extinction per metre at full density.
+static const float SMOKE_SIGMA = 3.2;
+/// Henyey-Greenstein asymmetry. Positive is forward-scattering, which is what
+/// gives a plume a bright rim when the sun is behind it.
+static const float SMOKE_G = 0.42;
+/// How much sky a sample deep inside the column still sees. Not zero: a real
+/// plume's core is dark, not black, and zero here makes it a hole.
+static const float SMOKE_AMB_FLOOR = 0.18;
+
 
 /// Fractal noise for the flame. `detail` fades the finest octave out with
 /// distance rather than dropping it abruptly, which would pop.
@@ -3151,9 +3293,230 @@ float4 flameColor(ParticleOutput in, float3 toEye) {
 }
 
 
+/// The plume's envelope: how much of the column is at `p`, before any noise.
+///
+/// One function so the density and the sun-shadow chord cannot disagree about
+/// where the plume is, which is the same reason `fireField` computes soot and
+/// flame from one `d`.
+float sootEnvelope(float3 p, float R, out float h, out float2 rel) {
+    h = saturate((p.y + R) / (2.0 * R));
+    float2 wd = normalize(push.environment[0].wind.xy + float2(1e-4, 0.0));
+    // The bend is superlinear in height because drag on a rising parcel has had
+    // longer to act on it; a linear lean is a tilted cylinder, not a plume.
+    rel = p.xz - wd * (push.environment[0].wind.z * SMOKE_DRIFT * R * pow(h, 1.6));
+    float rMax = R * SMOKE_ASPECT * (SMOKE_R0 + SMOKE_FLARE * pow(h, SMOKE_FLARE_P));
+    return saturate(1.0 - length(rel) / max(rMax, 1e-4))
+         * smoothstep(0.0, SMOKE_FOOT, h)
+         * (1.0 - smoothstep(SMOKE_TOP, 1.0, h));
+}
+
+/// Where in the noise this particular plume reads its field from.
+///
+/// **Two plumes in one scene are otherwise the same column twice.** Everything
+/// in `sootDensity` is a function of plume-local position and time, so a second
+/// emitter marches a bit-identical field and the pair reads as a copy-paste —
+/// which is precisely the tell a procedural volume exists to avoid.
+///
+/// **Bounded, and that is the whole design of it.** `in.seed` is
+/// `float(index)`, the particle's slot, which reaches 16,200 on `emberfall`;
+/// `seed * scale` at that magnitude lands the lattice coordinate where a
+/// `float` has no fractional bits left to distinguish neighbouring samples, and
+/// the field degenerates. `frac` of an irrational multiple is equidistributed
+/// over `[0, 1)` and never leaves it, so the offset is a well-conditioned
+/// lattice coordinate however many particles the emitter has. Three different
+/// irrationals rather than one, so the offset is a point in the volume and not
+/// a slide along its diagonal.
+///
+/// The same trap is live one function family over: `in.seed * 7.31` at
+/// `particleFragmentMain`'s flipbook is the unbounded form, and is only safe
+/// because the sprite path's populations have stayed small.
+float3 sootOffset(float seed) {
+    return frac(seed * float3(0.6180339887, 0.7548776662, 0.5698402910)) * 32.0;
+}
+
+/// Soot density at `p`, in plume-local coordinates.
+///
+/// `warp` is off for the sun-shadow taps: the shadow integrates a length of
+/// column, and the curl's job is the silhouette, which two taps along a chord
+/// cannot resolve anyway. That is two fbm evaluations saved per shadow sample.
+float sootDensity(float3 p, float R, float t, float3 off, float dF, float dW, bool warp) {
+    float h;
+    float2 rel;
+    float body = sootEnvelope(p, R, h, rel);
+    if (body <= 0.0) {
+        return 0.0;
+    }
+    // **The material coordinate, and it is what makes this rise rather than
+    // scroll.** Subtracting `SMOKE_RISE * t` from the vertical axis means a
+    // feature keeps its coordinate as it climbs: it is born at the source and
+    // carried up, deforming, instead of the envelope standing still while a
+    // pattern slides through it.
+    float3 m = float3(rel.x, p.y - SMOKE_RISE * t, rel.y) * (SMOKE_HZ / R);
+    float a = h * SMOKE_TWIST;
+    float ca = cos(a), sa = sin(a);
+    m = float3(m.x * ca - m.z * sa, m.y, m.x * sa + m.z * ca);
+
+    // **`off` is added at the lookup, never to `m` itself.** It has to miss two
+    // things. The twist rotates `m` about the column's axis, so an offset
+    // carried through it would be spun by an angle that grows with height —
+    // a second, enormous twist. And the warp takes its radial direction from
+    // `m.xz`, so an offset of tens of units there would swamp the radius and
+    // leave `rd` nearly constant, which is exactly the meridional-plane
+    // property the stream function is built on. Shifting only where the noise
+    // is *read* decorrelates the pattern and leaves every geometric quantity
+    // in this function untouched.
+    if (warp) {
+        // Perpendicular gradient of one stream function, in the meridional
+        // plane. Three taps, one of them shared with nothing else — see
+        // `SMOKE_WARP` for why this is not `fireField`'s two-field warp.
+        float rr = max(length(m.xz), 1e-3);
+        float3 rd = float3(m.x / rr, 0.0, m.z / rr);
+        float psi0 = fireFbm(m + off, 2, dW);
+        float psiR = fireFbm(m + off + rd * SMOKE_EPS, 2, dW);
+        float psiY = fireFbm(m + off + float3(0.0, SMOKE_EPS, 0.0), 2, dW);
+        float dpdr = (psiR - psi0) / SMOKE_EPS;
+        float dpdy = (psiY - psi0) / SMOKE_EPS;
+        m += (rd * dpdy - float3(0.0, 1.0, 0.0) * dpdr) * SMOKE_WARP * (0.25 + h);
+    }
+    float d = fireFbm(m + off, 3, dF);
+    return saturate((d - SMOKE_T0) / SMOKE_W) * body;
+}
+
+/// Henyey-Greenstein, scaled so isotropic is 1 rather than 1/4pi. Keeping the
+/// normalisation out of it means `g` can be tuned without re-tuning albedo.
+float smokePhase(float c) {
+    float g2 = SMOKE_G * SMOKE_G;
+    return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * SMOKE_G * c, 1e-4), 1.5);
+}
+
+/// A soot volume at one fragment: march the plume and integrate scattered light
+/// against transmittance.
+float4 smokeColor(ParticleOutput in, float3 toEye) {
+    float3 w0 = in.worldPos - in.origin.xyz;
+    float R = max(in.origin.w, 1e-3);
+    // Same placement as `flameColor`'s, and for the same reason: a derivative
+    // is only defined while every lane is live, and the chord test below exits
+    // non-uniformly.
+    float cyclesPerPixel = length(fwidth(w0)) * (SMOKE_HZ / R) * FIRE_OCTAVE_STEP;
+
+    // **The chord of an ELLIPSOID, solved in the space where it is a sphere.**
+    // Scaling the ray by the inverse semi-axes leaves `t` in world metres,
+    // because origin and direction are scaled by the same factor.
+    float3 dir = -normalize(toEye);
+    float3 inv = float3(1.0 / (R * SMOKE_ASPECT), 1.0 / R, 1.0 / (R * SMOKE_ASPECT));
+    float3 o = w0 * inv;
+    float3 e = dir * inv;
+    float A = dot(e, e);
+    float B = dot(o, e);
+    float C = dot(o, o) - 1.0;
+    float disc = B * B - A * C;
+    if (disc <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    float sq = sqrt(disc);
+    float t0 = (-B - sq) / A;
+    float t1 = (-B + sq) / A;
+    float dt = (t1 - t0) / float(SMOKE_STEPS - 1);
+
+    // Octave retirement, both bounds, exactly as `flameColor` derives them.
+    float far = saturate((FIRE_NYQUIST_HIGH - cyclesPerPixel)
+                       / (FIRE_NYQUIST_HIGH - FIRE_NYQUIST_LOW));
+    // **Two octaves for the warp, three for the field, so two different step
+    // bounds** — the same split `flameColor` makes and for the same reason. The
+    // field's finest octave is one octave above the warp's, so sharing a number
+    // either over-retires the warp (and the warp's fold is the silhouette) or
+    // under-retires the field (and an octave finer than twice the step is the
+    // twinkle generator both bounds exist to prevent).
+    float hz = SMOKE_HZ / R;
+    float dW = min(far, saturate(1.0 / (hz * 2.03 * 2.0 * max(dt, 1e-4))));
+    float dF = min(far, saturate(1.0 / (hz * 2.03 * 2.03 * 2.0 * max(dt, 1e-4))));
+    // **The step bound is what a close-up plume runs into**, and it is worth
+    // knowing which way round it goes. Walking the camera in makes `far` go to
+    // 1 (there are more pixels per metre, so the screen stops being the binding
+    // constraint) while `dt` grows with the chord — so a plume filling the
+    // frame is *softer* than a distant one, not sharper. That is the bound
+    // working: the alternative is a march that crawls. It is also the ceiling
+    // on this shape, and the lever is `SMOKE_STEPS`.
+    // `ponytail: fixed step count, make it a function of the chord if a scene
+    // ever needs a plume the camera walks into.`
+
+    float t = push.environment[0].weather.z;
+    float3 off = sootOffset(in.seed);
+    float3 sunDir = sunDirection();
+    float phase = smokePhase(dot(dir, sunDir));
+    float3 ambient = hemisphereAmbient(float3(0.0, 1.0, 0.0)) * ambientStrength();
+    float3 sun = sunColor() * sunStrength();
+
+    float3 acc = float3(0.0, 0.0, 0.0);
+    float T = 1.0;
+    float densPrev = sootDensity(w0 + dir * t0, R, t, off, dF, dW, true);
+
+    [MaxIters(SMOKE_STEPS)]
+    for (int i = 1; i < SMOKE_STEPS; ++i) {
+        float3 p = w0 + dir * (t0 + float(i) * dt);
+        float dens = sootDensity(p, R, t, off, dF, dW, true);
+        float sigma = SMOKE_SIGMA * 0.5 * (dens + densPrev) * in.color.a;
+        densPrev = dens;
+        if (sigma <= 1e-5) {
+            continue;
+        }
+
+        // **The self-shadow, and it is the whole reason this is a volume.** Two
+        // taps along the analytic chord from this sample to where the sun
+        // leaves the ellipsoid. The chord is closed form, so the expensive part
+        // is two density evaluations rather than a second march — and the
+        // envelope is a good model of the column that does the occluding, which
+        // is what makes two taps enough. `ponytail: two fixed taps, raise to a
+        // short march if a deep plume's core reads flat.`
+        float tauSun = 0.0;
+        {
+            float3 so = p * inv;
+            float3 se = sunDir * inv;
+            float sA = dot(se, se);
+            float sB = dot(so, se);
+            float sdisc = sB * sB - sA * (dot(so, so) - 1.0);
+            if (sdisc > 0.0) {
+                float exit = (-sB + sqrt(sdisc)) / sA;
+                float s1 = sootDensity(p + sunDir * (exit * 0.22), R, t, off, dF, dW, false);
+                float s2 = sootDensity(p + sunDir * (exit * 0.58), R, t, off, dF, dW, false);
+                tauSun = (s1 + s2) * 0.5 * exit * in.color.a;
+            }
+        }
+
+        float hDummy;
+        float2 relDummy;
+        float body = sootEnvelope(p, R, hDummy, relDummy);
+        float3 light = sun * exp(-SMOKE_SIGMA * tauSun) * phase
+                     + ambient * lerp(1.0, SMOKE_AMB_FLOOR, body)
+                     + pointLights(in.worldPos + (p - w0), normalize(p + float3(0.0, R, 0.0)),
+                                   max(R * 0.25, 0.05));
+
+        float a = 1.0 - exp(-sigma * dt);
+        acc += T * a * in.color.rgb * light;
+        T *= 1.0 - a;
+        if (T < SMOKE_T_MIN) {
+            break;
+        }
+    }
+
+    return float4(acc, saturate(1.0 - T));
+}
+
 [shader("fragment")]
 float4 particleFragmentMain(ParticleOutput in) : SV_Target {
     float3 eyeVec = push.environment[0].eye.xyz - in.worldPos;
+    if (in.flame > 0.5 && in.additive <= 0.5) {
+        float4 smoke = smokeColor(in, eyeVec);
+        if (smoke.a <= 0.002) {
+            discard;
+        }
+        float fogS = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+        // Premultiplied throughout, so the fog target is the fog colour times
+        // this fragment's own coverage — blending toward the bare fog colour
+        // would add light the fragment does not cover.
+        return float4(lerp(smoke.rgb, fogColor(-normalize(eyeVec)) * smoke.a, fogS),
+                      smoke.a);
+    }
     if (in.flame > 0.5) {
         float4 fire = flameColor(in, eyeVec);
         // **The extinction test has to include the alpha now.** It was an
@@ -4151,6 +4514,25 @@ static const float WATER_CLARITY_ROUGH = 0.22;
 
 static const float WATER_IOR = 1.333;
 
+/// How much sky the traced reflection is diluted with. See the call site.
+///
+/// Deliberately near zero: `tracedEnvironment` uses its roughness twice — once
+/// to widen the lobe direction and once to `lerp` the traced answer back to the
+/// miss colour, reaching it exactly at 1.0. A sea's broadening comes from the
+/// capillary ripples perturbing the normal per pixel, which is geometry rather
+/// than a blend, so paying for it twice would wash the reflection out.
+static const float WATER_REFLECT_ROUGH = 0.06;
+/// Ray origin offset above the surface, in metres.
+///
+/// Two centimetres rather than the millimetre the opaque path uses: the water
+/// mesh is displaced in the vertex shader from a wave sum, so a fragment's
+/// interpolated position sits off the true surface by up to half a cell's
+/// worth of curvature, and the cell is 0.5 m in the near ring.
+static const float WATER_REFLECT_BIAS = 0.02;
+/// How much the traced reflection is blurred toward the sky at the range where
+/// the capillary ripples have faded out. Tuned on added salt; see the table.
+static const float WATER_REFLECT_RANGE = 25.0;
+
 // ---------------------------------------------------------------------------
 // Whitecaps.
 //
@@ -4663,6 +5045,13 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // a pixel out there and analytic noise has no mip chain to catch it.
     // Calmed in the shallows by the same depth the shoaling uses, since water
     // over a beach really is smoother than water over the shelf.
+    // The mesh's own normal, kept before the capillary ripples tilt it. The
+    // reflection ray is offset along THIS and clamped to its hemisphere: a
+    // ripple can tilt the shading normal several degrees, and a reflected ray
+    // that ends up pointing below the real surface starts inside the seabed
+    // and comes back with a lit sand sample — one bright pixel among dark
+    // ones, which is what a firefly is.
+    float3 flatN = normal;
     {
         float detailFade = saturate(1.0 - length(toEye) / WATER_DETAIL_RANGE);
         // Calmer over a beach than over the shelf, which is true of real water
@@ -4789,7 +5178,30 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // that has nothing to do with the seabed.
     float3 through = behind * T + WATER_DEEP * downwelling * (1.0 - T) + sss;
 
-    float3 lit = lerp(through, skyColor(reflect(-view, normal)), fresnel);
+    // **The sea reflects the scene now, and it is one ray.** This was
+    // `skyColor(reflect(...))` — an analytic sky and nothing else, so a quay
+    // standing in the water reflected the weather and not the quay. ADR 0019
+    // already put an inline ray query in this file with a sky fallback and a
+    // radiance clamp; the only reason water did not use it was that its miss
+    // colour was hard-coded to `skyGradient`, which would have deleted the
+    // sun's glitter path. `miss` is that one parameter.
+    //
+    // **Clamped into the surface's own hemisphere first.** See `flatN`.
+    //
+    // **`WATER_REFLECT_ROUGH`, not `WATER_ROUGHNESS`.** The lobe widening
+    // inside `tracedEnvironment` also blends the traced answer toward the miss
+    // colour, reaching it at 1.0 — so this number is how much sky a reflected
+    // shed is diluted with, and 0.08 would be reading the sun-glint lobe's
+    // width as if it were that. The capillary ripples already do the
+    // broadening geometrically, per pixel, which is the honest version of it.
+    float3 mirror = reflect(-view, normal);
+    mirror = normalize(mirror - flatN * min(dot(mirror, flatN), 0.0));
+    float reflectRough = saturate(WATER_REFLECT_ROUGH
+                                + length(toEye) / WATER_REFLECT_RANGE);
+    float3 env = tracedEnvironment(in.worldPos, flatN, mirror,
+                                   reflectRough, WATER_REFLECT_BIAS,
+                                   skyColor(mirror));
+    float3 lit = lerp(through, env, fresnel);
     lit += specular(normal, view, sunDirection(), WATER_ROUGHNESS, float3(0.02))
          * sunColor() * sunStrength() * toSun;
 

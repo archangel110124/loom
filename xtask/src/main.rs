@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 46] = [
+const SCENES: [&str; 49] = [
     "assets/test/lanternhead.loom",
     // One building, composed. **In `SCENES` and not `GOLDEN`, on the stated
     // rule**: every path it draws is already covered — `ground` and
@@ -100,6 +100,18 @@ const SCENES: [&str; 46] = [
     "assets/test/ground.loom",
     "assets/test/beach.loom",
     "assets/test/campfire.loom",
+    // The marched soot volume (W4) and the water reflection ray (W3) — see the
+    // two `GOLDEN` rows for why each is a path nothing else covers.
+    "assets/test/plume.loom",
+    "assets/test/mirrorpool.loom",
+    // **Here for the validation layers and for nothing else**, so it is in this
+    // list and not in `GOLDEN`. Water with no mesh in the frame means an empty
+    // TLAS, and once the water shader statically uses `sceneTLAS` an empty TLAS
+    // is an unbound descriptor set 0. Every other water scene owns a mesh, so
+    // the whole repository had no coverage of it — verified by reverting
+    // `raytrace.rs`'s zero-instance build, which fires
+    // `VUID-vkCmdDraw-None-08600` on this scene and on no other.
+    "assets/test/bare_sea.loom",
     "assets/test/tower.loom",
     "assets/test/primitives.loom",
     "assets/test/cave.loom",
@@ -263,7 +275,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 33] = [
+const GOLDEN: [(&str, &str, &[&str]); 35] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -319,6 +331,32 @@ const GOLDEN: [(&str, &str, &[&str]); 33] = [
     // ran the whole 2D pipeline.
     ("vale", "assets/test/vale.loom", &[]),
     ("smoke", "assets/test/smoke.loom", &[]),
+    // **The marched soot volume, which is a third rendering path for smoke and
+    // the only scene that draws it.** `smoke` is the alpha sprite billboards,
+    // `emberfall` is the GPU pool, `windy` is the wind coupling — and every one
+    // of them would keep matching with `smokeColor` deleted, because a soot
+    // volume is `flame = true` with `additive = false` and no other scene in
+    // the repository authors that pair.
+    //
+    // It is also the only frame with an additive marched quad and an alpha
+    // marched quad in it at once, so it is the only gate on the two being
+    // sorted against each other.
+    //
+    // `--sim 200` for the same reason `campfire` uses it: the field rises with
+    // the tick, and t = 0 is the one instant where the column has no history in
+    // it.
+    ("plume", "assets/test/plume.loom", &["--sim", "200"]),
+    // **A traced reflection of scene geometry in water** (W3). Every other
+    // water reference here looks at open sea or at a shoreline with nothing
+    // standing beside it, so the reflection term is the analytic sky in all of
+    // them and would keep being so with the ray deleted. This is a still pool
+    // with a lit shed on its bank at a grazing angle, and the reflection is a
+    // legible region rather than a few pixels.
+    //
+    // The lamp is on the bank deliberately: a reflection ray landing near a
+    // point light is what ADR 0019 shipped `REFLECT_MAX_RADIANCE` for, and this
+    // is the only scene that puts one where a water ray can find it.
+    ("mirrorpool", "assets/test/mirrorpool.loom", &["--sim", "90"]),
     // **The GPU particle pool is its own rendering path** (ADR 0047), and it
     // is the only one whose instances the CPU never writes: a compute dispatch
     // fills a device-local buffer and the existing particle vertex shader

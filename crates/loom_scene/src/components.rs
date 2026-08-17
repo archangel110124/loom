@@ -616,7 +616,7 @@ pub struct ParticleEmitter {
     /// gets brighter where it piles up, which is what a fireball does. Wrong
     /// for smoke, which occludes.
     pub additive: bool,
-    /// Draw a flame field across the quad instead of a sprite.
+    /// Draw a **marched volume** across the quad instead of a sprite.
     ///
     /// **This is fire, and it is a different thing from a lot of orange
     /// sprites.** The colour target is 8-bit and additive blending clamps at
@@ -627,8 +627,18 @@ pub struct ParticleEmitter {
     /// tongues, the black gaps between them and the edges are all level sets
     /// of a single noise field.
     ///
-    /// Use with `additive`, one long-lived particle, and no motion: the flame
-    /// moves because the field is dragged through it, not because the quad is.
+    /// **`additive` picks which volume**, and both are real settings:
+    ///
+    /// - `flame = true, additive = true` — **fire.** The field emits, and the
+    ///   quad adds its light to what is behind it (ADR 0020).
+    /// - `flame = true, additive = false` — **a soot plume.** The same march
+    ///   with the emission taken out: the field absorbs and scatters, and is
+    ///   shaded by the sun, the sky and the scene's `Light`s through its own
+    ///   depth, so the column self-shadows. `color_start`/`color_end` are the
+    ///   soot's albedo rather than an emitted colour.
+    ///
+    /// Either way: **one long-lived particle, and no motion.** The volume moves
+    /// because the field is dragged through it, not because the quad is.
     pub flame: bool,
     /// Simulate this emitter on the GPU instead of the CPU (ADR 0047).
     ///

@@ -1,0 +1,168 @@
+# A pyre and its plume, under a low sun.
+#
+# **The only scene with a marched soot volume**, which is a rendering path
+# nothing else in either gate can see. Every other smoke in this repository is
+# the sprite path — `smoke.loom` for the alpha billboards, `windy` for the wind
+# coupling, `emberfall` for the GPU pool — and all of them would keep matching
+# with `smokeColor` deleted.
+#
+# It is composed for the three things a marched volume can do and a stack of
+# billboards structurally cannot:
+#
+#   Self-shadow.  The sun is low and to the LEFT, across the plume rather than
+#                 behind the camera, so the column's sunward shoulder is bright
+#                 and its far side is genuinely dark. A sprite plume shades
+#                 each puff as if it were alone and cannot produce that.
+#   Phase.        Low sun plus a forward-scattering phase function is what puts
+#                 a bright rim on the column's edge.
+#   Lit from below. The fire's `Light` reaches the underside of the plume
+#                 through the same `pointLights` every other surface uses, and
+#                 the self-shadow is what keeps it from reaching the top.
+#
+# The flame under it is the existing `flame = true, additive = true` march, so
+# this scene also covers the two marched volumes drawn in one frame — an
+# additive quad and an alpha quad, sorted against each other.
+
+[scene]
+format = 1
+id = "a1c37e05-6d92-4f18-b0e4-93f5c2d871a6"
+
+[[node]]
+name = "Pyre"
+
+  # A low sun across the shot, not behind the camera: a plume lit from the
+  # front is a grey cone, and every photograph of smoke that reads as smoke is
+  # lit from the side or from behind.
+  [node.components.Environment]
+  sun_direction = [-0.82, 0.26, -0.51]
+  sun_strength = 1.6
+  sun_color = [1.0, 0.82, 0.62]
+  ambient = 0.30
+  sky_zenith = [0.10, 0.16, 0.30]
+  sky_horizon = [0.42, 0.40, 0.38]
+  fog_density = 0.010
+  fog_falloff = 0.05
+
+  # Steady and moderate. The plume's lean is `wind.speed`, so a scene with no
+  # wind draws a vertical column and this one draws one that leans.
+  [node.components.Wind]
+  direction_degrees = 65.0
+  speed = 3.2
+  gustiness = 0.6
+  turbulence = 0.8
+
+[[node]]
+name = "Ground"
+parent = "Pyre"
+transform = { pos = [0.0, -0.25, 0.0], scale = [30.0, 0.25, 30.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.27, 0.22]
+  roughness = 0.95
+
+# Something for the plume to be seen against at its own height, and for the
+# low sun to throw a shadow from. A column against nothing but sky reads as a
+# decal.
+[[node]]
+name = "Wall"
+parent = "Pyre"
+transform = { pos = [4.6, 1.6, -3.2], scale = [0.35, 1.6, 3.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.46, 0.42, 0.36]
+  roughness = 0.9
+
+[[node]]
+name = "Log"
+parent = "Pyre"
+transform = { pos = [0.0, 0.16, 0.0], rot_euler = [0.0, 32.0, 0.0], scale = [0.75, 0.16, 0.16] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.18, 0.12, 0.09]
+  roughness = 0.95
+
+# The fire's light, which is also what lights the underside of the plume.
+[[node]]
+name = "Firelight"
+parent = "Pyre"
+transform = { pos = [0.0, 0.75, 0.0] }
+
+  [node.components.Light]
+  intensity = 5.0
+  color = [1.0, 0.50, 0.17]
+
+# The flame: ADR 0020's marched emission, unchanged.
+[[node]]
+name = "Flame"
+parent = "Pyre"
+transform = { pos = [0.0, 0.85, 0.0] }
+
+  [node.components.ParticleEmitter]
+  burst = 1
+  rate = 0.0
+  lifetime = 110.0
+  lifetime_jitter = 0.0
+  speed = 0.0
+  spread_degrees = 0.0
+  radius = 0.0
+  gravity = 0.0
+  drag = 0.0
+  turbulence = 0.0
+  wind_response = 0.0
+  size = [1.7, 1.7]
+  alpha = [1.0, 1.0]
+  color_start = [1.0, 1.0, 1.0]
+  color_end = [1.0, 1.0, 1.0]
+  additive = true
+  flame = true
+
+# **The plume: `flame = true` with `additive = false`.**
+#
+# The same one-quad marched-volume machinery with the emission taken out — a
+# field that absorbs and scatters instead of one that radiates. The quad is
+# centred so its BOTTOM edge sits at the top of the flame, which is where a
+# real plume starts: smoke is born where the fire stops burning, not at the
+# fuel.
+#
+# `color_start`/`color_end` are the soot's albedo and nothing else; the shading
+# is the sun, the sky and the fire, integrated through the column.
+[[node]]
+name = "Plume"
+parent = "Pyre"
+transform = { pos = [0.0, 5.5, 0.0] }
+
+  [node.components.ParticleEmitter]
+  burst = 1
+  rate = 0.0
+  lifetime = 110.0
+  lifetime_jitter = 0.0
+  speed = 0.0
+  spread_degrees = 0.0
+  radius = 0.0
+  gravity = 0.0
+  drag = 0.0
+  turbulence = 0.0
+  wind_response = 0.0
+  size = [8.0, 8.0]
+  alpha = [1.0, 1.0]
+  color_start = [0.30, 0.29, 0.28]
+  color_end = [0.30, 0.29, 0.28]
+  additive = false
+  flame = true
+
+[[node]]
+name = "Camera"
+parent = "Pyre"
+transform = { pos = [-2.8, 4.6, 13.0], rot_euler = [-4.0, -9.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 52.0

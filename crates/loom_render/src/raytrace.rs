@@ -218,10 +218,10 @@ impl Raytracer {
         objects: &[Object],
         cutout: &[bool],
     ) -> Result<(), RenderError> {
-        if self.blas.is_empty() || objects.is_empty() {
-            return Ok(());
-        }
-
+        // **No early return for an empty scene.** See the note further down:
+        // the TLAS has to exist whenever the device can trace, because a
+        // shader's *static* use of `sceneTLAS` is a property of the shader and
+        // not of what the scene happens to hold.
         let instances: Vec<vk::AccelerationStructureInstanceKHR> = objects
             .iter()
             .enumerate()
@@ -293,14 +293,29 @@ impl Raytracer {
                 )
             })
             .collect();
-        if instances.is_empty() {
-            return Ok(());
+        // **An empty scene still gets a TLAS, and that is a validation
+        // requirement rather than tidiness.** This used to return early, so
+        // `ready()` was false and `renderer.rs` skipped binding set 0 — which
+        // was safe only while every pipeline that statically uses `sceneTLAS`
+        // also had nothing to draw. That stopped being true when the water
+        // fragment shader started tracing a reflection: `assets/test/ocean`
+        // draws water and no meshes, and the draw is
+        // `VUID-vkCmdDraw-None-08600`, "uses set 0 but that set is not bound".
+        //
+        // A scene of nothing but alpha-cutout meshes had the same shape
+        // already — `cutout` objects are deliberately kept out of the TLAS, so
+        // the opaque pipeline could draw with set 0 unbound — and no scene in
+        // the repository happened to be one. Building a zero-instance TLAS
+        // fixes both at the root: every ray misses, which is exactly the
+        // behaviour `ready() == false` was standing in for, and there is no
+        // longer a shader-visible state the descriptor is absent in.
+        // The instance buffer is allocated even for a zero-instance build: the
+        // geometry's `data` address has to be a real one, and `max(1)` is the
+        // smallest that keeps `grow_instances` from being asked for nothing.
+        if instances.len() > self.instance_capacity || self.instances_alloc.is_none() {
+            self.grow_instances(allocator, instances.len().max(1))?;
         }
-
-        if instances.len() > self.instance_capacity {
-            self.grow_instances(allocator, instances.len())?;
-        }
-        if let Some(allocation) = self.instances_alloc.as_ref() {
+        if let (Some(allocation), false) = (self.instances_alloc.as_ref(), instances.is_empty()) {
             write_slice(allocation, &instances)?;
         }
 

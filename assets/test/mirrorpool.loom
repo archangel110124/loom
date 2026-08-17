@@ -1,0 +1,149 @@
+# A still pool with something standing beside it.
+#
+# **The only scene in either gate where water reflects scene geometry.** Every
+# other water reference looks at open sea (`ocean`, `whitecaps`), at a shoreline
+# with nothing on it (`shore`, `beach`), from underneath (`underwater`), or at
+# inland water in near-still air with the buildings behind the camera
+# (`homestead`, `river`). In all of them the reflection term is the analytic sky
+# and would stay the analytic sky with the traced ray deleted.
+#
+# Three things are authored deliberately and none of them is decoration:
+#
+#   Nearly still.  One long, low swell. A choppy surface scatters the mirror
+#                  direction per pixel, and a reflection that is a field of
+#                  broken highlights cannot be read as a reflection OF
+#                  anything, which is what a gate on this needs to see.
+#   Grazing.       The camera is 1.5 m above a surface at 0.0, so Fresnel is
+#                  near its cap over most of the water and the reflection is
+#                  most of what the pixels carry.
+#   A lamp on the bank. A reflection ray landing near a point light returns two
+#                  orders of magnitude above its neighbours, and one sample of
+#                  that is a firefly. `REFLECT_MAX_RADIANCE` exists for it and
+#                  no other scene puts a point light where a *water* ray can
+#                  find one.
+
+[scene]
+format = 1
+id = "3f8a2d61-97b4-4c05-8e72-1d6b40fa5c93"
+
+[[node]]
+name = "Pool"
+
+  # A low evening sun from behind the shed, so the shed's reflection is a dark
+  # shape against a bright sky rather than a bright shape against a bright sky.
+  [node.components.Environment]
+  sun_direction = [0.42, 0.20, -0.88]
+  sun_strength = 2.2
+  sun_color = [1.0, 0.86, 0.68]
+  ambient = 0.55
+  sky_zenith = [0.09, 0.15, 0.33]
+  sky_horizon = [0.50, 0.44, 0.36]
+  fog_density = 0.004
+  fog_falloff = 0.05
+
+  # Nearly still. The reflection's legibility is the point of the scene and
+  # `wind.speed` is what drives both the capillary ripples and the foam.
+  [node.components.Wind]
+  direction_degrees = 20.0
+  speed = 0.9
+  gustiness = 0.3
+  turbulence = 0.4
+
+[[node]]
+name = "Water"
+parent = "Pool"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+  density = 1000.0
+  drag = 2.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 26.0
+  amplitude = 0.10
+  steepness = 0.18
+  direction = [1.0, 0.25]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 11.0
+  amplitude = 0.035
+  steepness = 0.20
+  direction = [0.7, -0.7]
+  speed_scale = 1.0
+
+# The bank the shed stands on. Above the water line, so the shoreline discard
+# cuts the sea against it and the reflection has a base to stand on.
+[[node]]
+name = "Bank"
+parent = "Pool"
+transform = { pos = [0.0, 0.35, -13.0], scale = [16.0, 0.45, 4.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.31, 0.25]
+  roughness = 0.92
+
+# The shed. Bright and large enough that its reflection is a legible region
+# rather than a handful of pixels at 320x200.
+[[node]]
+name = "Shed"
+parent = "Pool"
+transform = { pos = [-2.6, 2.2, -13.4], scale = [2.6, 1.7, 1.8] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.72, 0.58, 0.36]
+  roughness = 0.85
+
+[[node]]
+name = "Roof"
+parent = "Pool"
+transform = { pos = [-2.6, 4.0, -13.4], scale = [2.9, 0.18, 2.1] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.16, 0.14, 0.13]
+  roughness = 0.9
+
+# A second, differently coloured mass, so the reflection is asymmetric — a
+# mirrored image of one box is hard to tell from a shadow.
+[[node]]
+name = "Drum"
+parent = "Pool"
+transform = { pos = [2.4, 1.3, -12.4], scale = [0.7, 0.7, 0.7] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.16, 0.34, 0.42]
+  roughness = 0.6
+  metallic = 0.4
+
+# **The lamp, and it is here for the firefly clamp rather than for the light.**
+# Low, close to the water, and warm, so a reflection ray that grazes the bank
+# lands in its falloff.
+[[node]]
+name = "Lamp"
+parent = "Pool"
+transform = { pos = [1.0, 1.1, -11.4] }
+
+  [node.components.Light]
+  intensity = 6.0
+  color = [1.0, 0.62, 0.28]
+
+[[node]]
+name = "Camera"
+parent = "Pool"
+transform = { pos = [0.4, 1.5, 4.0], rot_euler = [-5.0, 2.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0
