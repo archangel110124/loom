@@ -837,6 +837,55 @@ impl Viewer {
         Ok(())
     }
 
+    /// Replace the textures and materials this viewer draws with.
+    ///
+    /// **This is what makes the inspector's colour swatch real.** Without it
+    /// the viewer's only mutation verbs were geometry, terrain, grass and rain
+    /// — so editing a `Material` changed the file, and the window went on
+    /// drawing the colour it was launched with until the process restarted.
+    ///
+    /// Handles both kinds of edit, and deliberately does not distinguish them:
+    /// changing an albedo and assigning a new `albedo_map` are the same call.
+    /// That is possible because `material::TEXTURE_CAPACITY` fixes the size of
+    /// the bindless array, so the descriptor set layout never changes and no
+    /// pipeline is ever invalidated. Sizing the binding to the scene's texture
+    /// count — as this did until the editor needed to write to it — would have
+    /// made the second kind of edit a validation error.
+    ///
+    /// Idles the device first, for the reason `set_meshes` does: the frame in
+    /// flight is sampling the images about to be freed.
+    ///
+    /// # Errors
+    /// [`RenderError`] if the device will not idle, the scene exceeds
+    /// `TEXTURE_CAPACITY`, or the upload fails. On failure the viewer is left
+    /// drawable with its previous materials.
+    pub fn set_materials(
+        &mut self,
+        textures: &[loom_asset::Texture],
+        materials: &[crate::material::MaterialData],
+    ) -> Result<(), RenderError> {
+        let Some(allocator) = self.allocator.as_mut() else {
+            return Ok(());
+        };
+        // SAFETY: idling is what makes freeing the old images legal.
+        unsafe { self.device.device_wait_idle() }?;
+        // And the reset, for the same reason as `set_meshes`: idle does not
+        // stop a *recorded* command buffer from referencing the images, and
+        // validation refuses `vkDestroyImage` on one that does.
+        //
+        // SAFETY: the device is idle, so this command buffer is not executing.
+        unsafe {
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+        }?;
+        self.materials.replace(
+            allocator,
+            textures,
+            materials,
+            crate::raytrace::Submit { pool: self.command_pool, queue: self.queue },
+        )
+    }
+
     /// Replace the geometry this viewer draws from.
     ///
     /// This is what lets a window follow a file that is still being written —

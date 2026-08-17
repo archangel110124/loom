@@ -68,6 +68,10 @@ pub struct SceneView {
     /// valid, so a transform edit costs no re-upload while a new asset or a
     /// re-baked voxel volume does.
     pub mesh_key: u64,
+    /// Fingerprint of the textures and materials the GPU holds, so a reload
+    /// re-uploads them only when one actually moved. See
+    /// [`crate::materials::MaterialLibrary::key`].
+    pub material_key: u64,
     /// Scattered instances, placed once when the scene loaded.
     ///
     /// **Kept rather than recomputed, and that is a performance fix rather than
@@ -135,6 +139,7 @@ impl SceneView {
         let bounds = crate::scene_bounds(&picks);
         let paths = scene.nodes().iter().map(|n| n.path.clone()).collect();
         let mesh_key = library.key();
+        let material_key = materials.key();
         let assets = library.names().map(str::to_owned).collect();
 
         Ok(Self {
@@ -147,6 +152,7 @@ impl SceneView {
             paths,
             assets,
             mesh_key,
+            material_key,
             scattered,
             world,
         })
@@ -405,6 +411,50 @@ transform = { pos = [0.0, 0.0, 0.0] }
         let after = view(&SCENE.replace("pos = [0.0, 0.0, 0.0]", "pos = [5.0, 0.0, 0.0]"));
 
         assert_eq!(before.mesh_key, after.mesh_key);
+    }
+
+    /// **The two keys must move independently, or one of them is useless.**
+    ///
+    /// Editing a colour moves no vertex, so `mesh_key` cannot carry it — that
+    /// is exactly why the viewport kept drawing the launch colour until
+    /// `material_key` existed. And moving a node must not re-upload every
+    /// texture in the scene, which is why the material upload is not simply
+    /// folded into the mesh one.
+    #[test]
+    fn a_colour_edit_moves_the_material_key_and_not_the_mesh_key() {
+        const LIT: &str = r#"
+[scene]
+format = 1
+id = "0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f"
+
+[[node]]
+name = "Desk"
+transform = { pos = [0.0, 0.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.8, 0.2, 0.2]
+"#;
+        let before = view(LIT);
+        let after = view(&LIT.replace("albedo = [0.8, 0.2, 0.2]", "albedo = [0.2, 0.2, 0.8]"));
+
+        assert_ne!(
+            before.material_key, after.material_key,
+            "a changed albedo must reach the GPU"
+        );
+        assert_eq!(
+            before.mesh_key, after.mesh_key,
+            "a colour is not geometry — re-uploading buffers for it would be absurd"
+        );
+
+        // And the converse, on the same fixture.
+        let moved = view(&LIT.replace("pos = [0.0, 0.0, 0.0]", "pos = [5.0, 0.0, 0.0]"));
+        assert_eq!(
+            before.material_key, moved.material_key,
+            "moving a node must not re-upload the textures"
+        );
     }
 
     /// A re-baked voxel volume produces different geometry under the same

@@ -446,6 +446,7 @@ name = \"Room\"
                 parent: "Room".into(),
                 name: name.into(),
                 mesh: Some("box".into()),
+                prefab: None,
             }],
             dry_run: false,
             expect_version: None,
@@ -461,6 +462,7 @@ name = \"Room\"
                 parent: "Room".into(),
                 name: format!("Box{i}"),
                 mesh: Some("box".into()),
+                prefab: None,
             })
             .collect();
         session
@@ -619,6 +621,7 @@ name = \"Room\"
                             parent: "Room".to_owned(),
                             name: format!("N{i}"),
                             mesh: None,
+                            prefab: None,
                         }],
                         dry_run: false,
                         expect_version: None,
@@ -686,6 +689,7 @@ name = \"Room\"
                                 parent: "Room".to_owned(),
                                 name: "AgentNode".to_owned(),
                                 mesh: None,
+                                prefab: None,
                             }],
                             dry_run: false,
                             expect_version: None,

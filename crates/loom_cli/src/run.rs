@@ -178,6 +178,9 @@ struct App {
     disk_seen: loom_scene::VersionToken,
     /// Mesh set currently on the GPU, so a moved node costs no re-upload.
     uploaded: u64,
+    /// Materials currently on the GPU, keyed separately from the meshes: an
+    /// albedo edit moves no vertex, and moving a node changes no colour.
+    materials_uploaded: u64,
     /// What the grass on the GPU was placed from — see [`crate::grass_key`].
     /// Empty means "no blades uploaded", which is also a scene with no grass.
     grass_uploaded: String,
@@ -353,6 +356,7 @@ impl App {
                 .camera()
                 .map_or_else(|| FlyCamera::framing(view.bounds), FlyCamera::at),
             uploaded: view.mesh_key,
+            materials_uploaded: view.material_key,
             // Not `grass_key(&view.scene)`: the viewer does not exist yet, so
             // nothing has been uploaded. `resumed` does the first upload.
             grass_uploaded: String::new(),
@@ -519,6 +523,21 @@ impl App {
             match viewer.set_meshes(view.meshes()) {
                 Ok(()) => self.uploaded = view.mesh_key,
                 Err(e) => crate::log::error(format!("could not upload the new geometry: {e}")),
+            }
+        }
+
+        // **The colours, separately from the geometry.** Editing a `Material`
+        // moves no vertex, so `mesh_key` does not budge and this used not to
+        // run at all — the file changed, the inspector showed the new value,
+        // and the viewport went on drawing the old one until the process was
+        // restarted. Keyed independently because the reverse is just as
+        // common: moving a node must not re-upload every texture in the scene.
+        if view.material_key != self.materials_uploaded
+            && let Some(viewer) = self.viewer.as_mut()
+        {
+            match viewer.set_materials(view.textures(), view.material_table()) {
+                Ok(()) => self.materials_uploaded = view.material_key,
+                Err(e) => crate::log::error(format!("could not upload the new materials: {e}")),
             }
         }
 
@@ -1815,6 +1834,7 @@ impl App {
                 parent: parent.to_owned(),
                 name: name.clone(),
                 mesh: Some("box".to_owned()),
+                prefab: None,
             }],
         );
         self.selected = vec![format!("{parent}/{name}")];
@@ -1852,6 +1872,7 @@ impl App {
                 parent: parent.clone(),
                 name: copy.clone(),
                 mesh: None,
+                prefab: None,
             });
             let t = &node.transform;
             ops.push(transform_op(

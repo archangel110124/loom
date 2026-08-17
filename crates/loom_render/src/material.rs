@@ -40,6 +40,33 @@ use crate::renderer::{RenderError, create_image, write_slice};
 /// on it anyway, and `0` is a perfectly valid texture index.
 pub const NO_TEXTURE: u32 = u32::MAX;
 
+/// How many texture slots the bindless array declares, regardless of how many
+/// a scene actually uses.
+///
+/// **This is fixed so that editing a material cannot invalidate a pipeline.**
+/// The binding used to be `descriptor_count(textures.len().max(1))`, which made
+/// the descriptor set layout a function of the scene's texture count — and two
+/// descriptor set layouts are pipeline-compatible only when *identically
+/// defined*. Assigning an `albedo_map` from the inspector changed the count,
+/// which changed the layout, which invalidated the shared `pipeline_layout` and
+/// every one of the eight pipelines built against it. Binding the new set would
+/// have been a validation error rather than a wrong pixel.
+///
+/// With a fixed count the layout is constant for the life of the device, so
+/// replacing the entire texture set is a `vkUpdateDescriptorSets` on the *same*
+/// descriptor set and nothing else moves. The unused slots cost nothing: the
+/// binding is `PARTIALLY_BOUND`, so a descriptor that is never written is legal
+/// as long as it is never accessed, and every material without a map names
+/// [`NO_TEXTURE`].
+///
+/// **1024 is not measured against this device's limit in code** — `Materials`
+/// holds an `ash::Device`, and `maxPerStageDescriptorSampledImages` is an
+/// *instance* query. It does not need to be: exceeding the limit is a
+/// validation error at layout creation, which is green check 2, on the real
+/// device, every run. The scenes in this repository use at most a couple of
+/// dozen.
+pub const TEXTURE_CAPACITY: u32 = 1024;
+
 /// One material, as the GPU reads it. Mirrors `MaterialData` in `scene.slang`
 /// exactly; the two are one memory layout described twice and a mismatch is
 /// silent.
@@ -157,7 +184,18 @@ impl Materials {
     ) -> Result<Self, RenderError> {
         // An empty array is not a legal descriptor binding, and an empty
         // buffer is not a legal allocation. Both floors are one element.
-        let slots = u32::try_from(textures.len()).unwrap_or(1).max(1);
+        //
+        // **Fixed, not `textures.len()`.** See [`TEXTURE_CAPACITY`]: sizing the
+        // binding to the scene made the descriptor set layout a function of the
+        // texture count, and therefore made every pipeline in the engine a
+        // function of it too.
+        let slots = TEXTURE_CAPACITY;
+        if textures.len() > slots as usize {
+            return Err(RenderError::TooManyTextures {
+                found: textures.len(),
+                capacity: slots as usize,
+            });
+        }
 
         let binding = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -270,6 +308,142 @@ impl Materials {
                 .collect(),
             blended: materials.iter().map(|m| m.misc[0] < 1.0).collect(),
         })
+    }
+
+    /// Replace every texture and every material, in place.
+    ///
+    /// **One method rather than a fast path and a slow path**, because
+    /// [`TEXTURE_CAPACITY`] made them the same operation. The descriptor set
+    /// layout, the pool, the set handle and the sampler are all constant for
+    /// the life of this object, so changing a colour and assigning a new
+    /// `albedo_map` differ only in how much work they do — neither can
+    /// invalidate a pipeline, and the caller needs no idea which it is doing.
+    ///
+    /// The material buffer is reallocated because the material *count* can
+    /// change. Its device address is pushed to the shader every frame rather
+    /// than baked into anything, so a new address needs no other update.
+    ///
+    /// # Safety and ordering
+    ///
+    /// The caller **must** have idled the device and reset any command buffer
+    /// that references the old images or the old buffer. Idling alone is not
+    /// enough: a recorded command buffer still holds them, and
+    /// `vkDestroyImage` on something a recorded buffer references is
+    /// VUID-vkDestroyImage-image-01000. [`crate::Viewer::set_materials`] is the
+    /// caller that does this correctly.
+    ///
+    /// # Errors
+    /// [`RenderError`] if the textures exceed [`TEXTURE_CAPACITY`], or if the
+    /// upload or reallocation fails. **On the error paths that can fail after
+    /// work has begun, `self` is left holding live handles** — the new buffer
+    /// is built before the old one is destroyed, matching `set_meshes`.
+    pub(crate) fn replace(
+        &mut self,
+        allocator: &mut Allocator,
+        textures: &[loom_asset::Texture],
+        materials: &[MaterialData],
+        submit: Submit,
+    ) -> Result<(), RenderError> {
+        if textures.len() > TEXTURE_CAPACITY as usize {
+            return Err(RenderError::TooManyTextures {
+                found: textures.len(),
+                capacity: TEXTURE_CAPACITY as usize,
+            });
+        }
+
+        // Upload the new images first. A failure here must leave the old set
+        // intact and drawable, so nothing is destroyed until this succeeds.
+        let mut resident = Vec::with_capacity(textures.len());
+        for texture in textures {
+            match upload(&self.device, allocator, texture, submit) {
+                Ok(image) => resident.push(image),
+                Err(e) => {
+                    // Unwind what this call already uploaded, or the failure
+                    // leaks every image before the one that broke.
+                    for mut image in resident {
+                        // SAFETY: these were created in this loop, are
+                        // referenced by no command buffer, and the device is
+                        // idle by the caller's contract.
+                        unsafe {
+                            self.device.destroy_image_view(image.view, None);
+                            self.device.destroy_image(image.image, None);
+                        }
+                        if let Some(allocation) = image.allocation.take() {
+                            let _ = allocator.free(allocation);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        // Same for the buffer: build, then destroy.
+        let fallback = [MaterialData::default()];
+        let records = if materials.is_empty() { &fallback[..] } else { materials };
+        let (buffer, allocation, address) = crate::renderer::create_address_buffer(
+            &self.device,
+            allocator,
+            std::mem::size_of_val(records) as u64,
+            "loom.materials",
+            vk::BufferUsageFlags::empty(),
+        )?;
+        write_slice(&allocation, records)?;
+
+        // Past this point nothing can fail, so tearing down the old state is
+        // safe. SAFETY: the device is idle and the command buffer has been
+        // reset by the caller, so nothing references these.
+        unsafe {
+            for texture in &self.textures {
+                self.device.destroy_image_view(texture.view, None);
+                self.device.destroy_image(texture.image, None);
+            }
+            self.device.destroy_buffer(self.buffer, None);
+        }
+        for texture in &mut self.textures {
+            if let Some(allocation) = texture.allocation.take() {
+                let _ = allocator.free(allocation);
+            }
+        }
+        if let Some(allocation) = self.allocation.take() {
+            let _ = allocator.free(allocation);
+        }
+
+        self.textures = resident;
+        self.buffer = buffer;
+        self.allocation = Some(allocation);
+        self.address = address;
+        self.cutout = materials
+            .iter()
+            .map(|m| m.mean_albedo[3] > 0.0 || m.misc[0] < 1.0)
+            .collect();
+        self.blended = materials.iter().map(|m| m.misc[0] < 1.0).collect();
+
+        // Rewrite the descriptor array. **The same set, not a new one** — that
+        // is the whole point of the fixed capacity, and it is why no pipeline
+        // has to be rebuilt. Slots past `textures.len()` keep whatever they
+        // held; they are `PARTIALLY_BOUND` and unreachable, because a material
+        // that lost its map names `NO_TEXTURE` and never indexes them.
+        let infos: Vec<vk::DescriptorImageInfo> = self
+            .textures
+            .iter()
+            .map(|r| {
+                vk::DescriptorImageInfo::default()
+                    .sampler(self.sampler)
+                    .image_view(r.view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            })
+            .collect();
+        if !infos.is_empty() {
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(self.set)
+                .dst_binding(0)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&infos);
+            // SAFETY: every view in `infos` is live and `infos` outlives the call.
+            unsafe { self.device.update_descriptor_sets(&[write], &[]) };
+        }
+        Ok(())
     }
 
     /// Does this material discard texels, and therefore lie about its own

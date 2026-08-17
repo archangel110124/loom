@@ -286,6 +286,7 @@ pub fn resolve(op: &PlaceOp, geometry: &Geometry<'_>) -> Result<Vec<SceneOp>, Pl
                         parent: geometry.parent.clone(),
                         name: name.clone(),
                         mesh: Some(mesh.clone()),
+                        prefab: None,
                     });
                     ops.push(SceneOp::SetTransform {
                         node: format!("{}/{name}", geometry.parent),

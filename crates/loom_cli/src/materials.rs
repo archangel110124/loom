@@ -42,6 +42,41 @@ fn mean_of(textures: &[loom_asset::Texture], slot: u32) -> [f32; 3] {
 }
 
 impl MaterialLibrary {
+    /// A cheap fingerprint of what the GPU currently holds.
+    ///
+    /// The editor rebuilds this library on every frame of a gizmo drag, so
+    /// `show` needs to know whether anything a material cares about actually
+    /// moved before idling the device and re-uploading every texture.
+    ///
+    /// **Textures are hashed by shape, not by content.** Editing a `.png`
+    /// outside the editor and saving it will not move this key, so the window
+    /// keeps the image it loaded — the same limitation `MeshLibrary::key` has,
+    /// and the same fix: reopen the scene. Hashing megabytes of texels on
+    /// every frame of a drag to catch that would cost far more than it saves.
+    pub(crate) fn key(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for material in &self.materials {
+            // Bit patterns, not values — §7.5's rule for any hash compared
+            // across runs.
+            for f in material.albedo.iter().chain(material.mean_albedo.iter()).chain(material.misc.iter()) {
+                h = crate::fnv(h, &f.to_bits().to_le_bytes());
+            }
+            for m in &material.maps {
+                h = crate::fnv(h, &m.to_le_bytes());
+            }
+            for f in &material.params {
+                h = crate::fnv(h, &f.to_bits().to_le_bytes());
+            }
+        }
+        for texture in &self.textures {
+            h = crate::fnv(h, texture.name.as_bytes());
+            h = crate::fnv(h, &texture.width.to_le_bytes());
+            h = crate::fnv(h, &texture.height.to_le_bytes());
+            h = crate::fnv(h, &texture.levels.len().to_le_bytes());
+        }
+        h
+    }
+
     /// The material index for an entity, or [`NO_TEXTURE`] for "no material",
     /// which leaves the object on its debug palette colour.
     pub(crate) fn index_for(&self, entity_index: usize) -> u32 {

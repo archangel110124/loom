@@ -726,6 +726,12 @@ pub enum RenderError {
     /// Validation was not silent. Carries the messages.
     Validation(Vec<String>),
     Io(std::io::Error),
+    /// More textures than the bindless array declares slots for.
+    ///
+    /// A hard error rather than a silent truncation: a dropped texture is a
+    /// material sampling whatever occupies the slot it was given, which reads
+    /// as a wrong picture with no message anywhere.
+    TooManyTextures { found: usize, capacity: usize },
 }
 
 impl std::fmt::Display for RenderError {
@@ -735,6 +741,11 @@ impl std::fmt::Display for RenderError {
             Self::Allocator(e) => write!(f, "allocation failed: {e}"),
             Self::Validation(m) => write!(f, "validation was not silent:\n  {}", m.join("\n  ")),
             Self::Io(e) => write!(f, "io error: {e}"),
+            Self::TooManyTextures { found, capacity } => write!(
+                f,
+                "scene uses {found} textures; the bindless array declares {capacity} slots \
+                 (raise `loom_render::material::TEXTURE_CAPACITY`)"
+            ),
         }
     }
 }

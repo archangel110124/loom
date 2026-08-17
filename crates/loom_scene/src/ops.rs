@@ -52,6 +52,70 @@ pub enum SceneOp {
         /// Asset alias for a `MeshRenderer`, if it should draw something.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mesh: Option<String>,
+        /// Prefab alias to instance, if this node stands for a prefab.
+        ///
+        /// **Mutually exclusive with `mesh`.** An instance owns no components
+        /// — that is what makes overrides well-defined — so a node that is
+        /// both would have two sources for the same data with no rule about
+        /// which wins, which is precisely what the parser rejects.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefab: Option<String>,
+    },
+    /// Splice a node's array-valued field: remove `remove` entries at `index`,
+    /// then insert `insert` in their place.
+    ///
+    /// **One op rather than three named ones** (append / remove / replace),
+    /// because all three are this with different arguments, and because the
+    /// callers that need it — the sculpt brush, `WaterBody.waves`,
+    /// `Buoyancy.pontoons`, `Scatter.excludes`, the paint stroke lists —
+    /// otherwise each pick a different one and the inspector has to know which.
+    ///
+    /// **The spelling on disk is preserved.** `[[node.components.X.ops]]` stays
+    /// an array of tables and `ops = [...]` stays inline, because the two parse
+    /// to different `toml_edit` items and this branches on which it found
+    /// rather than on a policy. `crates/loom_scene/tests/toml_edit_contract.rs`
+    /// pins that.
+    ///
+    /// A dotted path into the array (`ops.3.radius`) is deliberately **not**
+    /// supported: [`SceneOp::SetField`] splits its field name once and uses the
+    /// remainder as a literal TOML key, so it would write a key spelled
+    /// `ops.3.radius` rather than reaching the third op.
+    ///
+    /// **`remove > insert.len()` is a net deletion**, which the destructive
+    /// classifier treats as such — recorded here so that rule is discoverable
+    /// from the op that triggers it rather than only from the classifier.
+    SpliceArray {
+        node: String,
+        /// `ComponentType.field`, e.g. `VoxelVolume.ops`.
+        field: String,
+        /// Where to splice. Clamped to the array's length, so an append is
+        /// `index: usize::MAX` or simply the current length.
+        index: usize,
+        /// How many existing entries to drop. Clamped to what is there.
+        #[serde(default)]
+        remove: usize,
+        /// What to put in their place. May be empty, which makes this a
+        /// deletion.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        insert: Vec<Value>,
+    },
+    /// Write an `[[asset]]` or `[[prefab]]` declaration.
+    ///
+    /// Authoring these was CLI-only, which meant the editor could reference an
+    /// asset but never introduce one — so importing a mesh or creating a prefab
+    /// could not be an editor action at all.
+    Declare {
+        /// `asset` or `prefab`.
+        kind: String,
+        /// The alias other nodes will use. File-local.
+        key: String,
+        /// The stable identity, for a prefab. A library is keyed by `id` and
+        /// never by the alias, because two files may use one word for
+        /// different prefabs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// Path to the file, relative to the scene.
+        path: String,
     },
     /// Replace a node's transform fields. Omitted fields are left alone.
     SetTransform {
@@ -462,6 +526,93 @@ fn set_override(
     Ok(())
 }
 
+/// Apply a splice to a plain JSON array, with both bounds clamped.
+///
+/// Clamped rather than validated: an editor issuing a splice against an array
+/// that another write shortened should land at the end, not reject. The op is
+/// still rejected when the *field* is missing, which is the error that means
+/// something is actually wrong.
+fn splice_values(mut current: Vec<Value>, index: usize, remove: usize, insert: &[Value]) -> Vec<Value> {
+    let at = index.min(current.len());
+    let drop = remove.min(current.len() - at);
+    current.splice(at..at + drop, insert.iter().cloned());
+    current
+}
+
+/// What a prefab instance's array field currently resolves to.
+///
+/// Reads the instance's own override when it has one. **When it does not, this
+/// returns empty rather than reaching into the prefab**, because `apply_one`
+/// deliberately sees only the document it is editing — the prefab library is
+/// not in scope here, the same way it is not for any other op except
+/// `UnpackPrefab`. The consequence is honest and worth stating: splicing a
+/// field an instance has never overridden starts from nothing rather than from
+/// the prefab's list. The editor always sends the resolved array it displayed,
+/// so the case it hits is the one that works; a hand-written transaction
+/// against an un-overridden field should set the whole field first.
+fn resolved_array(doc: &DocumentMut, index: usize, key: &str) -> Result<Vec<Value>, OpFailure> {
+    let existing = doc["node"]
+        .as_array_of_tables()
+        .and_then(|a| a.get(index))
+        .and_then(|t| t.get("overrides"))
+        .and_then(Item::as_table_like)
+        .and_then(|o| o.get(key))
+        .and_then(Item::as_value)
+        .and_then(toml_edit::Value::as_array);
+    let Some(array) = existing else {
+        return Ok(Vec::new());
+    };
+    array
+        .iter()
+        .map(|v| {
+            toml_to_json(v).ok_or_else(|| {
+                (
+                    "unsupported_value".to_owned(),
+                    format!("`{key}` holds a value this op cannot read back"),
+                    String::new(),
+                    None,
+                )
+            })
+        })
+        .collect()
+}
+
+/// A `toml_edit` value as JSON, for the splice round-trip.
+fn toml_to_json(v: &toml_edit::Value) -> Option<Value> {
+    Some(match v {
+        toml_edit::Value::String(s) => Value::String(s.value().clone()),
+        toml_edit::Value::Integer(i) => Value::from(*i.value()),
+        toml_edit::Value::Float(f) => Value::from(*f.value()),
+        toml_edit::Value::Boolean(b) => Value::Bool(*b.value()),
+        toml_edit::Value::Array(a) => {
+            Value::Array(a.iter().map(toml_to_json).collect::<Option<Vec<_>>>()?)
+        }
+        toml_edit::Value::InlineTable(t) => Value::Object(
+            t.iter()
+                .map(|(k, v)| toml_to_json(v).map(|v| (k.to_owned(), v)))
+                .collect::<Option<serde_json::Map<_, _>>>()?,
+        ),
+        toml_edit::Value::Datetime(_) => return None,
+    })
+}
+
+/// One spliced entry as a `[[header]]` table.
+fn json_to_table(entry: &Value, field: &str) -> Result<Table, OpFailure> {
+    let Value::Object(map) = entry else {
+        return Err((
+            "not_a_table".to_owned(),
+            format!("`{field}` is an array of tables, so every entry must be an object"),
+            String::new(),
+            Some("For example `{ \"kind\": \"box\", \"mode\": \"union\" }`.".to_owned()),
+        ));
+    };
+    let mut table = Table::new();
+    for (key, v) in map {
+        table[key.as_str()] = Item::Value(json_to_toml(v, field)?);
+    }
+    Ok(table)
+}
+
 /// A node name must be usable as one path segment.
 fn check_name(name: &str) -> Result<(), OpFailure> {
     if name.is_empty() || name.contains('/') {
@@ -618,7 +769,19 @@ type OpFailure = (String, String, String, Option<String>);
 
 fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
     match op {
-        SceneOp::SpawnNode { parent, name, mesh } => {
+        SceneOp::SpawnNode { parent, name, mesh, prefab } => {
+            if mesh.is_some() && prefab.is_some() {
+                return Err((
+                    "mesh_and_prefab".to_owned(),
+                    "a node instances a prefab or draws a mesh, never both".to_owned(),
+                    name.clone(),
+                    Some(
+                        "A prefab instance owns no components of its own; give the \
+                         instance an override instead, or unpack it."
+                            .to_owned(),
+                    ),
+                ));
+            }
             if name.is_empty() || name.contains('/') {
                 return Err((
                     "invalid_name".to_owned(),
@@ -647,6 +810,9 @@ fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
             let mut table = Table::new();
             table["name"] = value(name.as_str());
             table["parent"] = value(parent.as_str());
+            if let Some(prefab) = prefab {
+                table["prefab"] = value(prefab.as_str());
+            }
             if let Some(mesh) = mesh {
                 let mut renderer = Table::new();
                 let mut asset = toml_edit::InlineTable::new();
@@ -823,6 +989,150 @@ fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
                 // Canonical form on the first write rather than the second.
                 key.leaf_decor_mut().set_suffix(" ");
             }
+            Ok(())
+        }
+
+        SceneOp::SpliceArray { node, field, index, remove, insert } => {
+            let (type_name, field_name) = field.split_once('.').ok_or_else(|| {
+                (
+                    "invalid_field".to_owned(),
+                    format!("`{field}` must be `ComponentType.field`"),
+                    node.clone(),
+                    Some("For example `VoxelVolume.ops`.".to_owned()),
+                )
+            })?;
+            let node_index = require_node(doc, node)?;
+
+            // **On a prefab instance, materialise the resolved array as an
+            // override and splice that.** Splicing "the array" on an instance
+            // has no other well-defined reading: the instance owns no
+            // components, so index 3 would mean the prefab's index 3, and the
+            // result would silently change when the prefab did. Materialising
+            // makes the edit mean what the human saw when they made it.
+            if is_prefab_instance(doc, node_index) {
+                let current = resolved_array(doc, node_index, field)?;
+                let spliced = splice_values(current, *index, *remove, insert);
+                return set_override(doc, node_index, node, field, &Value::Array(spliced));
+            }
+
+            let array = doc["node"].as_array_of_tables_mut().unwrap();
+            let table = array.get_mut(node_index).unwrap();
+            let components = table
+                .get_mut("components")
+                .and_then(Item::as_table_like_mut)
+                .ok_or_else(|| {
+                    (
+                        "unknown_component".to_owned(),
+                        format!("`{node}` has no `{type_name}`"),
+                        node.clone(),
+                        Some("Splicing needs the array to exist; set the field first.".to_owned()),
+                    )
+                })?;
+            let component = components
+                .get_mut(type_name)
+                .and_then(Item::as_table_like_mut)
+                .ok_or_else(|| {
+                    (
+                        "unknown_component".to_owned(),
+                        format!("`{node}` has no `{type_name}`"),
+                        node.clone(),
+                        Some("Splicing needs the array to exist; set the field first.".to_owned()),
+                    )
+                })?;
+
+            match component.get_mut(field_name) {
+                // The header spelling. Kept as one, entry by entry, so the
+                // human's comments and indentation on every op they did not
+                // touch survive.
+                Some(Item::ArrayOfTables(existing)) => {
+                    let at = (*index).min(existing.len());
+                    let drop = (*remove).min(existing.len().saturating_sub(at));
+                    for _ in 0..drop {
+                        existing.remove(at);
+                    }
+                    for (offset, entry) in insert.iter().enumerate() {
+                        let table = json_to_table(entry, field)?;
+                        existing.insert(at + offset, table);
+                    }
+                    Ok(())
+                }
+                // The inline spelling, and the fallback for a value that is
+                // an ordinary array of scalars.
+                Some(item) => {
+                    let existing = item.as_value().and_then(toml_edit::Value::as_array).ok_or_else(
+                        || {
+                            (
+                                "not_an_array".to_owned(),
+                                format!("`{field}` on `{node}` is not an array"),
+                                node.clone(),
+                                Some("Only array-valued fields can be spliced.".to_owned()),
+                            )
+                        },
+                    )?;
+                    let mut next = existing.clone();
+                    let at = (*index).min(next.len());
+                    let drop = (*remove).min(next.len().saturating_sub(at));
+                    for _ in 0..drop {
+                        next.remove(at);
+                    }
+                    for (offset, entry) in insert.iter().enumerate() {
+                        next.insert(at + offset, json_to_toml(entry, field)?);
+                    }
+                    *item = Item::Value(toml_edit::Value::Array(next));
+                    Ok(())
+                }
+                None => Err((
+                    "unknown_field".to_owned(),
+                    format!("`{node}` has no `{field}`"),
+                    node.clone(),
+                    Some("Splicing needs the array to exist; set the field first.".to_owned()),
+                )),
+            }
+        }
+
+        SceneOp::Declare { kind, key, id, path } => {
+            if kind != "asset" && kind != "prefab" {
+                return Err((
+                    "invalid_declaration".to_owned(),
+                    format!("`{kind}` is not a declaration kind"),
+                    key.clone(),
+                    Some("Only `asset` and `prefab` can be declared.".to_owned()),
+                ));
+            }
+            check_name(key)?;
+            // A duplicate alias is a file where one word means two things, and
+            // the loader would silently take one of them.
+            if let Some(existing) = doc.get(kind).and_then(Item::as_array_of_tables)
+                && existing
+                    .iter()
+                    .any(|t| t.get("key").and_then(Item::as_str) == Some(key.as_str()))
+            {
+                return Err((
+                    "duplicate_alias".to_owned(),
+                    format!("`{key}` is already declared as a {kind} in this file"),
+                    key.clone(),
+                    Some("Aliases are file-local and must be unique within it.".to_owned()),
+                ));
+            }
+
+            let mut table = Table::new();
+            table["key"] = value(key.as_str());
+            if let Some(id) = id {
+                table["id"] = value(id.as_str());
+            }
+            table["path"] = value(path.as_str());
+            doc.entry(kind)
+                .or_insert(Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
+                .as_array_of_tables_mut()
+                .ok_or_else(|| {
+                    (
+                        "parse_error".to_owned(),
+                        format!("`{kind}` is not an array of tables"),
+                        key.clone(),
+                        None,
+                    )
+                })?
+                .push(table);
             Ok(())
         }
 
@@ -1163,6 +1473,275 @@ transform = { pos = [0.0, 0.0, 0.0] }
             dry_run: false,
             expect_version: None,
         }
+    }
+
+    /// A scene whose voxel ops use the header spelling every `.loom` file on
+    /// disk actually uses.
+    const VOXELS: &str = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[node]]
+name = \"Ground\"
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.25
+
+  # The slab, and this comment must survive a splice.
+  [[node.components.VoxelVolume.ops]]
+  kind = \"box\"
+  mode = \"union\"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = \"sphere\"
+  mode = \"subtract\"
+";
+
+    fn splice(index: usize, remove: usize, insert: Vec<Value>) -> SceneOp {
+        SceneOp::SpliceArray {
+            node: "Ground".into(),
+            field: "VoxelVolume.ops".into(),
+            index,
+            remove,
+            insert,
+        }
+    }
+
+    /// **The spelling on disk survives.** A splice that re-emitted the array
+    /// inline would rewrite every op in the recipe as one unreadable line and
+    /// take the human's comments with it — which is what `SetField` on `ops`
+    /// does, and the reason this op exists.
+    #[test]
+    fn splicing_keeps_the_array_of_tables_spelling_and_the_comments() {
+        let applied = apply(
+            VOXELS,
+            &tx(
+                "Carve a capsule",
+                vec![splice(2, 0, vec![serde_json::json!({"kind": "capsule", "mode": "union"})])],
+            ),
+        )
+        .expect("splice applies");
+
+        assert_eq!(
+            applied.scene.matches("[[node.components.VoxelVolume.ops]]").count(),
+            3,
+            "the appended op was written inline:\n{}",
+            applied.scene
+        );
+        assert!(applied.scene.contains("# The slab, and this comment must survive a splice."));
+        assert!(applied.scene.contains("capsule"));
+    }
+
+    /// A splice is not only an append — voxel ops apply in order, so where an
+    /// op lands changes the surface.
+    #[test]
+    fn splicing_in_the_middle_keeps_order() {
+        let applied = apply(
+            VOXELS,
+            &tx("Insert", vec![splice(1, 0, vec![serde_json::json!({"kind": "capsule"})])]),
+        )
+        .expect("splice applies");
+
+        let order: Vec<&str> = applied
+            .scene
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("kind = "))
+            .collect();
+        assert_eq!(order, ["\"box\"", "\"capsule\"", "\"sphere\""]);
+    }
+
+    /// `remove` with nothing to insert is a deletion, and the entries around
+    /// it keep their decor.
+    #[test]
+    fn splicing_can_delete() {
+        let applied = apply(VOXELS, &tx("Drop the sphere", vec![splice(1, 1, vec![])]))
+            .expect("splice applies");
+
+        assert_eq!(
+            applied.scene.matches("[[node.components.VoxelVolume.ops]]").count(),
+            1
+        );
+        assert!(!applied.scene.contains("sphere"));
+        assert!(applied.scene.contains("# The slab"));
+    }
+
+    /// Both bounds clamp rather than reject: an index past the end appends.
+    /// The op still fails when the *field* is absent, which is the case that
+    /// actually means something is wrong.
+    #[test]
+    fn an_out_of_range_splice_appends_and_a_missing_field_does_not() {
+        let applied = apply(
+            VOXELS,
+            &tx("Append", vec![splice(usize::MAX, 99, vec![serde_json::json!({"kind": "capsule"})])]),
+        )
+        .expect("clamped, not rejected");
+        assert_eq!(
+            applied.scene.matches("[[node.components.VoxelVolume.ops]]").count(),
+            3
+        );
+
+        let err = apply(
+            VOXELS,
+            &tx(
+                "Nonsense",
+                vec![SceneOp::SpliceArray {
+                    node: "Ground".into(),
+                    field: "VoxelVolume.nope".into(),
+                    index: 0,
+                    remove: 0,
+                    insert: vec![serde_json::json!({"kind": "box"})],
+                }],
+            ),
+        )
+        .expect_err("a field that does not exist is an error");
+        assert_eq!(err.error, "unknown_field");
+        assert_eq!(err.op_index, Some(0));
+    }
+
+    /// **R14: a splice against a prefab instance materialises an override.**
+    ///
+    /// Splicing "the array" on an instance has no other well-defined reading —
+    /// the instance owns no components, so an index would refer to the
+    /// prefab's list and the result would change silently when the prefab did.
+    #[test]
+    fn splicing_a_prefab_instance_writes_an_override() {
+        const INSTANCED: &str = "\
+[scene]
+format = 1
+id = \"3c7e1f88-9a05-4b21-bd6e-51f0a2c48d13\"
+
+[[prefab]]
+key = \"rock\"
+id = \"11111111-2222-3333-4444-555555555555\"
+path = \"rock.loom\"
+
+[[node]]
+name = \"Boulder\"
+prefab = \"rock\"
+
+  [node.overrides]
+  \"VoxelVolume.ops\" = [ { kind = \"box\" } ]
+";
+        let applied = apply(
+            INSTANCED,
+            &tx(
+                "Carve the boulder",
+                vec![SceneOp::SpliceArray {
+                    node: "Boulder".into(),
+                    field: "VoxelVolume.ops".into(),
+                    index: 1,
+                    remove: 0,
+                    insert: vec![serde_json::json!({"kind": "sphere"})],
+                }],
+            ),
+        )
+        .expect("splice applies to an instance");
+
+        // An override, not a component: an instance that grew a `[components]`
+        // table would have two sources for one field and the parser rejects it.
+        assert!(
+            !applied.scene.contains("[node.components"),
+            "the instance grew a component:\n{}",
+            applied.scene
+        );
+        assert!(applied.scene.contains("VoxelVolume.ops"));
+        assert!(applied.scene.contains("sphere"));
+        // The existing entry survived and the new one landed after it.
+        let ops_line = applied
+            .scene
+            .lines()
+            .find(|l| l.contains("VoxelVolume.ops"))
+            .expect("the override line");
+        let box_at = ops_line.find("box").expect("box kept");
+        let sphere_at = ops_line.find("sphere").expect("sphere added");
+        assert!(box_at < sphere_at, "order lost: {ops_line}");
+        // And it still parses, which is the check that the override is legal
+        // rather than merely present.
+        crate::Scene::parse(&applied.scene).expect("the spliced instance must still load");
+    }
+
+    /// `Declare` is how the editor introduces an asset at all — referencing
+    /// one was possible, authoring one was CLI-only.
+    #[test]
+    fn declaring_an_asset_and_rejecting_a_duplicate_alias() {
+        let applied = apply(
+            SCENE,
+            &tx(
+                "Import lamp.glb",
+                vec![SceneOp::Declare {
+                    kind: "asset".into(),
+                    key: "lamp".into(),
+                    id: None,
+                    path: "meshes/lamp.glb".into(),
+                }],
+            ),
+        )
+        .expect("declaration applies");
+        assert!(applied.scene.contains("[[asset]]"));
+        assert!(applied.scene.contains("meshes/lamp.glb"));
+        crate::Scene::parse(&applied.scene).expect("still loads");
+
+        let err = apply(
+            &applied.scene,
+            &tx(
+                "Import it twice",
+                vec![SceneOp::Declare {
+                    kind: "asset".into(),
+                    key: "lamp".into(),
+                    id: None,
+                    path: "meshes/other.glb".into(),
+                }],
+            ),
+        )
+        .expect_err("one alias cannot mean two things in one file");
+        assert_eq!(err.error, "duplicate_alias");
+    }
+
+    /// A node instances a prefab or draws a mesh. Both is the state the parser
+    /// rejects, so the op must refuse to author it.
+    #[test]
+    fn spawning_a_prefab_instance_and_refusing_mesh_plus_prefab() {
+        let applied = apply(
+            SCENE,
+            &tx(
+                "Place a rock",
+                // Declared and instanced in one transaction, which is what
+                // dropping a prefab into the viewport actually is — and the
+                // validator refuses the instance on its own, correctly.
+                vec![
+                    SceneOp::Declare {
+                        kind: "prefab".into(),
+                        key: "rock".into(),
+                        id: Some("11111111-2222-3333-4444-555555555555".into()),
+                        path: "rock.loom".into(),
+                    },
+                    SceneOp::SpawnNode {
+                        parent: "Room".into(),
+                        name: "Boulder".into(),
+                        mesh: None,
+                        prefab: Some("rock".into()),
+                    },
+                ],
+            ),
+        )
+        .expect("spawn applies");
+        assert!(applied.scene.contains("prefab = \"rock\""));
+
+        let err = apply(
+            SCENE,
+            &tx(
+                "Both",
+                vec![SceneOp::SpawnNode {
+                    parent: "Room".into(),
+                    name: "Confused".into(),
+                    mesh: Some("box".into()),
+                    prefab: Some("rock".into()),
+                }],
+            ),
+        )
+        .expect_err("a node is one or the other");
+        assert_eq!(err.error, "mesh_and_prefab");
     }
 
     /// Renaming has to rewrite every descendant's `parent`, because a parent
@@ -1663,8 +2242,7 @@ parent = \"Room\"
                     SceneOp::SpawnNode {
                         parent: "Room".into(),
                         name: "Shelf".into(),
-                        mesh: Some("box".into()),
-                    },
+                        mesh: Some("box".into()), prefab: None, },
                     // ...and an existing node declared *before* it moves in,
                     // so the subtree genuinely has to be reordered.
                     SceneOp::ReparentNode {
@@ -1863,8 +2441,7 @@ parent = \"Room\"
                 vec![SceneOp::SpawnNode {
                     parent: "Room".into(),
                     name: "Lamp".into(),
-                    mesh: Some("sphere".into()),
-                }],
+                    mesh: Some("sphere".into()), prefab: None, }],
             ),
         )
         .expect("should apply");
@@ -1891,8 +2468,7 @@ parent = \"Room\"
                     vec![SceneOp::SpawnNode {
                         parent: "Room".into(),
                         name: "Late".into(),
-                        mesh: None,
-                    }],
+                        mesh: None, prefab: None, }],
                 )
             },
         )
@@ -1915,8 +2491,7 @@ parent = \"Room\"
                     vec![SceneOp::SpawnNode {
                         parent: "Room".into(),
                         name: "Fresh".into(),
-                        mesh: None,
-                    }],
+                        mesh: None, prefab: None, }],
                 )
             },
         )
@@ -1937,6 +2512,7 @@ parent = \"Room\"
                 parent: "Room".into(),
                 name: format!("Box{i}"),
                 mesh: Some("box".into()),
+                prefab: None,
             })
             .collect();
 
@@ -1958,13 +2534,11 @@ parent = \"Room\"
                     SceneOp::SpawnNode {
                         parent: "Room".into(),
                         name: "Fine".into(),
-                        mesh: None,
-                    },
+                        mesh: None, prefab: None, },
                     SceneOp::SpawnNode {
                         parent: "Nowhere".into(),
                         name: "Broken".into(),
-                        mesh: None,
-                    },
+                        mesh: None, prefab: None, },
                 ],
             ),
         )
