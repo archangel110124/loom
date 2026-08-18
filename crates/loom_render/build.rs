@@ -104,6 +104,10 @@ fn generate_water(shader_dir: &Path) {
     // reason: the CPU grid is authoritative and this is the half that reads its
     // upload (ADR 0046).
     text.push_str(loom_water::ripples::slang());
+    // The river's current, on the same rule: the bake and its bilinear are the
+    // CPU's, and this is the half that reads the upload. Presentation only —
+    // nothing on the GPU side of it reaches a force.
+    text.push_str(loom_water::flow::slang());
     text.push_str(loom_water::slang());
     write_generated(shader_dir, "water.slang", &text);
 }

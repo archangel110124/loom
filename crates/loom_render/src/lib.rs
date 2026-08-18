@@ -203,7 +203,17 @@ mod tests {
             912,
             "rippleHeights — the grid the water surface is displaced by"
         );
-        assert_eq!(size_of::<EnvironmentData>(), 928, "the whole struct");
+        // **The current, appended after the ripple block on the same rule**:
+        // 928 is a multiple of 16, so the `float4` lands flush, the pointer
+        // follows it at 944, and two words of padding take the stride back to
+        // 16-byte alignment.
+        assert_eq!(at(std::ptr::from_ref(&base.flow).cast()), 928, "flow");
+        assert_eq!(
+            at(std::ptr::from_ref(&base.flow_velocities).cast()),
+            944,
+            "flowVelocity — the current the surface detail is advected by"
+        );
+        assert_eq!(size_of::<EnvironmentData>(), 960, "the whole struct");
     }
 
     /// **`MaterialData` is one memory layout described twice too**, with the

@@ -331,6 +331,23 @@ pub struct EnvironmentData {
     /// is indexed in the shader (`push.environment[0]`), so its stride has to
     /// match on both sides even though only element zero is ever read.
     pub ripple_pad: [u32; 2],
+    /// The river's current: xy world origin, z metres between nodes, w nodes
+    /// per axis. **`w < 2` means this water has no current**, which is every
+    /// scene that does not author `WaterBody.flow` — and every one of them then
+    /// takes the branch that leaves its picture bit for bit unchanged.
+    ///
+    /// Appended after the ripple block for the reason that block was appended
+    /// after the lights: every offset above it is unmoved.
+    pub flow: [f32; 4],
+    /// The velocities, `flow.w²` of them, row-major, `(x, z)` in m/s.
+    ///
+    /// **A bake, uploaded once, like [`Self::terrain_heights`]** — the drainage
+    /// is derived from the bed at load and the bed does not move. And read
+    /// only: the current the buoyancy solver integrates is `FlowGrid::at` on
+    /// the CPU, and this is the copy the shader advects its noise with.
+    pub flow_velocities: vk::DeviceAddress,
+    /// Keeps the struct's stride 16-byte aligned, as `ripple_pad` does.
+    pub flow_pad: [u32; 2],
 }
 
 /// A point light, as the GPU reads it.
@@ -441,6 +458,9 @@ impl Default for EnvironmentData {
             ripple: [0.0, 0.0, 1.0, 0.0],
             ripple_heights: 0,
             ripple_pad: [0; 2],
+            flow: [0.0, 0.0, 1.0, 0.0],
+            flow_velocities: 0,
+            flow_pad: [0; 2],
         }
     }
 }
@@ -470,6 +490,10 @@ pub const MAX_TERRAIN_SAMPLES: usize = 256 * 256;
 /// validator refuses a grid larger than this at load, so this is the ceiling
 /// that refusal quotes rather than a second policy.
 pub const MAX_RIPPLE_SAMPLES: usize = 256 * 256;
+
+/// Velocities the flow buffer holds. Same geometry as the terrain grid it is
+/// derived from, so the same ceiling — `loom_voxel::heightfield::MAX_SIDE²`.
+pub const MAX_FLOW_SAMPLES: usize = 256 * 256;
 
 /// Vertices in one water draw: `WATER_RES² × WATER_LEVELS × 6`.
 ///
@@ -892,6 +916,17 @@ pub struct Renderer {
     ripple_params: [f32; 4],
     /// `ripple_address`, or null when this scene's water has no ripples.
     ripple_heights: vk::DeviceAddress,
+    /// The river's current, uploaded **once per scene** — see
+    /// [`Renderer::set_flow`]. A bake off the bed, like the terrain grid, not
+    /// state like the ripples between them.
+    flow_buffer: vk::Buffer,
+    flow_alloc: Option<Allocation>,
+    flow_address: vk::DeviceAddress,
+    /// xy origin, z spacing, w nodes per axis; stamped at render time for the
+    /// reason `terrain_params` is.
+    flow_params: [f32; 4],
+    /// `flow_address`, or null when this scene's water has no current.
+    flow_velocities: vk::DeviceAddress,
     /// The water surface. Drawn only when the environment says the scene has
     /// water; the mesh itself is entirely in the vertex shader, so there is no
     /// buffer beside this.
@@ -1170,6 +1205,16 @@ impl Renderer {
             &mut allocator,
             (MAX_RIPPLE_SAMPLES * size_of::<f32>()) as u64,
             "loom.ripples",
+            vk::BufferUsageFlags::empty(),
+        )?;
+        // The river's current, over the same grid geometry as the bed above it
+        // and therefore with the same ceiling — two floats a node rather than
+        // one, so 512 KB, once, for a scene that authors a river.
+        let (flow_buffer, flow_alloc, flow_address) = create_address_buffer(
+            &raw,
+            &mut allocator,
+            (MAX_FLOW_SAMPLES * size_of::<[f32; 2]>()) as u64,
+            "loom.flow",
             vk::BufferUsageFlags::empty(),
         )?;
 
@@ -1478,6 +1523,11 @@ impl Renderer {
             ripple_address,
             ripple_params: [0.0, 0.0, 1.0, 0.0],
             ripple_heights: 0,
+            flow_buffer,
+            flow_alloc: Some(flow_alloc),
+            flow_address,
+            flow_params: [0.0, 0.0, 1.0, 0.0],
+            flow_velocities: 0,
             water_pipeline,
             grass_count: 0,
             rain_pipeline,
@@ -1705,6 +1755,52 @@ impl Renderer {
         )
     }
 
+    /// Hand the renderer the river's current, baked off the bed.
+    ///
+    /// **Once per scene, like [`Self::set_terrain`]** — the drainage is derived
+    /// from the bed at load and the bed does not move under it (`loom_water`'s
+    /// flow module says the same about blowing a bank out mid-run).
+    ///
+    /// **The shader only ever draws with it.** The current a floating body
+    /// feels is `FlowGrid::at` on the CPU inside the fixed step; this copy
+    /// advects the capillary detail, the foam and the caustic web so that a
+    /// river stops reading as a pane of glass. Nothing is read back.
+    ///
+    /// An empty slice — every scene that authors no `WaterBody.flow` — is
+    /// water with no current, and the shader then takes a branch that leaves
+    /// the picture bit for bit as it was. That is not an optimisation: the
+    /// two-phase blend of one sample is `w·n + (1-w)·n`, which is not `n` in
+    /// floats, and it is what would move every reference in the repository.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the renderer is being torn down.
+    pub fn set_flow(
+        &mut self,
+        velocities: &[[f32; 2]],
+        origin: [f32; 2],
+        spacing: f32,
+        side: usize,
+    ) -> Result<(), RenderError> {
+        // `side < 2` rather than `== 0`: the bilinear needs a `+1` tap, which
+        // is the same bound `FlowGrid::at` states on the Rust side.
+        if side < 2 || side * side > MAX_FLOW_SAMPLES || velocities.len() < side * side {
+            self.flow_params = [0.0, 0.0, 1.0, 0.0];
+            self.flow_velocities = 0;
+            return Ok(());
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.flow_params = [origin[0], origin[1], spacing, side as f32];
+        }
+        self.flow_velocities = self.flow_address;
+        write_slice(
+            self.flow_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("flow buffer is gone".into()))?,
+            &velocities[..side * side],
+        )
+    }
+
     /// How many blades the buffer holds.
     #[must_use]
     pub fn grass_capacity(&self) -> usize {
@@ -1894,6 +1990,9 @@ impl Renderer {
         // And the ripple grid, for the same reason and by the same rule.
         self.environment.ripple = self.ripple_params;
         self.environment.ripple_heights = self.ripple_heights;
+        // And the current, for the third time by the same rule.
+        self.environment.flow = self.flow_params;
+        self.environment.flow_velocities = self.flow_velocities;
         // Same argument again: the drop and splash buffers are the renderer's
         // and no caller has any business knowing their addresses.
         self.environment.rain_drops = self.rain_sim.drops_address;
@@ -2848,6 +2947,7 @@ impl Drop for Renderer {
             self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.terrain_buffer, None);
             self.device.destroy_buffer(self.ripple_buffer, None);
+            self.device.destroy_buffer(self.flow_buffer, None);
             self.device.destroy_buffer(self.particle_buffer, None);
             if let (Some(allocation), Some(allocator)) =
                 (self.grass_alloc.take(), self.allocator.as_mut())
@@ -2861,6 +2961,11 @@ impl Drop for Renderer {
             }
             if let (Some(allocation), Some(allocator)) =
                 (self.ripple_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            if let (Some(allocation), Some(allocator)) =
+                (self.flow_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
             }

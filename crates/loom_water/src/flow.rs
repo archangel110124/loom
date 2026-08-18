@@ -92,6 +92,14 @@ pub struct FlowGrid {
 /// first time one does.
 pub const SMOOTHING_RADIUS: f32 = 3.0;
 
+/// How far past the grid the current is carried before it has dispersed, in
+/// metres. See [`FlowGrid::at`] for why it decays outward rather than inward.
+///
+/// **Module-level rather than a local, because the Slang half quotes it.** A
+/// test asserts the emitted text still contains this number, which is the
+/// cheapest thing that fails when one side is changed alone.
+pub const PLUME_METRES: f32 = 24.0;
+
 /// The eight neighbours, and the reciprocal of the distance to each in units of
 /// the grid spacing.
 ///
@@ -277,7 +285,6 @@ impl FlowGrid {
         // extrude. The decay length is a calibration knob like
         // `SMOOTHING_RADIUS` is, not an authorable field, until something needs
         // it to be.
-        const PLUME_METRES: f32 = 24.0;
         let gx = raw_gx.clamp(0.0, limit - 1e-4);
         let gz = raw_gz.clamp(0.0, limit - 1e-4);
         let outside = ((raw_gx - gx).abs().max((raw_gz - gz).abs())) * self.spacing;
@@ -313,6 +320,17 @@ impl FlowGrid {
         [v[0] * plume, 0.0, v[1] * plume]
     }
 
+    /// The velocities themselves, row-major, `side²` of them.
+    ///
+    /// **For the upload and nothing else.** Every reader on the force path goes
+    /// through [`Self::at`], which is the bilinear both halves share; handing
+    /// out the nodes is how the renderer copies the grid to the GPU without
+    /// `loom_render` learning what a `FlowGrid` is.
+    #[must_use]
+    pub fn velocities(&self) -> &[[f32; 2]] {
+        &self.velocity
+    }
+
     /// The fastest current anywhere on the grid, m/s. For tests and reporting.
     #[must_use]
     pub fn peak_speed(&self) -> f32 {
@@ -321,6 +339,74 @@ impl FlowGrid {
             .map(|v| (v[0] * v[0] + v[1] * v[1]).sqrt())
             .fold(0.0, f32::max)
     }
+}
+
+/// The Slang half of [`FlowGrid::at`], emitted into the generated shader.
+///
+/// **This and the Rust are one thing written twice**, exactly as
+/// `loom_water::ripples::slang` is, and for the same reason: two bilinears over
+/// one grid is a difference nobody would ever trace back. The Rust half is the
+/// authoritative one — it is what buoyancy integrates — and this side only ever
+/// reads the copy the renderer uploads.
+///
+/// **What the GPU does with it is presentation and only presentation.** It
+/// advects the capillary detail, the foam and the caustic web downstream so a
+/// river stops reading as glass; nothing here reaches a force, a script or
+/// `loom sim --assert`, and `river`'s determinism hash is unmoved by it.
+///
+/// It returns two components rather than three: the vertical is always zero
+/// (see [`FlowGrid::at`]) and a shader that only wants a direction on the
+/// surface has no use for it.
+#[must_use]
+pub fn slang() -> &'static str {
+    r#"
+// The river's current, sampled. The Rust half is `loom_water::flow::FlowGrid::at`;
+// they are one implementation written twice. Never edit this by hand.
+
+struct LoomFlowGrid {
+    // World xz of node (0, 0).
+    float2 origin;
+    // Metres between nodes.
+    float spacing;
+    // Nodes per axis. Under two means this water has no current.
+    int side;
+    // Row-major, `side * side` of them, m/s.
+    float2* velocity;
+};
+
+// How far past the grid the current is carried before it has dispersed.
+static const float LOOM_FLOW_PLUME = 24.0;
+
+// Bilinear inside the grid, and carried outward with a smoothstep decay past
+// it — a river does not stop at its mouth, it disperses past it. Clamped
+// rather than zeroed, which is the Rust's `plume` rule.
+float2 loom_flow_at(LoomFlowGrid grid, float2 xz) {
+    if (grid.side < 2) { return float2(0.0, 0.0); }
+    float rawGx = (xz.x - grid.origin.x) / grid.spacing;
+    float rawGz = (xz.y - grid.origin.y) / grid.spacing;
+    float limit = float(grid.side - 1);
+    float gx = clamp(rawGx, 0.0, limit - 1e-4);
+    float gz = clamp(rawGz, 0.0, limit - 1e-4);
+    float outside = max(abs(rawGx - gx), abs(rawGz - gz)) * grid.spacing;
+    float plume = 1.0;
+    if (outside > 0.0) {
+        float t = clamp(1.0 - outside / LOOM_FLOW_PLUME, 0.0, 1.0);
+        plume = t * t * (3.0 - 2.0 * t);
+    }
+    if (plume <= 0.0) { return float2(0.0, 0.0); }
+    int i = int(gx);
+    int j = int(gz);
+    float fx = gx - float(i);
+    float fz = gz - float(j);
+    float2 v00 = grid.velocity[j * grid.side + i];
+    float2 v10 = grid.velocity[j * grid.side + i + 1];
+    float2 v01 = grid.velocity[(j + 1) * grid.side + i];
+    float2 v11 = grid.velocity[(j + 1) * grid.side + i + 1];
+    float2 low = (v10 - v00) * fx + v00;
+    float2 high = (v11 - v01) * fx + v01;
+    return ((high - low) * fz + low) * plume;
+}
+"#
 }
 
 /// One central difference of the height field, or `None` where a neighbour is
@@ -465,6 +551,34 @@ mod tests {
     /// A `side`-square grid whose height is a function of its coordinates.
     fn grid(side: usize, height: impl Fn(usize, usize) -> f32) -> Vec<f32> {
         (0..side * side).map(|k| height(k % side, k / side)).collect()
+    }
+
+    /// The Slang half carries the same names, the same taps and — the one
+    /// number the two sides could silently disagree about — the same plume.
+    #[test]
+    fn the_slang_half_is_present() {
+        for needle in ["LoomFlowGrid", "loom_flow_at", "float2* velocity"] {
+            assert!(slang().contains(needle), "the Slang half is missing `{needle}`");
+        }
+        assert!(
+            slang().contains(&format!("LOOM_FLOW_PLUME = {PLUME_METRES:?}")),
+            "the Slang half's plume is not `PLUME_METRES`"
+        );
+    }
+
+    /// The nodes the renderer uploads are the nodes the bilinear reads.
+    #[test]
+    fn the_uploaded_nodes_are_the_sampled_ones() {
+        let side = 8;
+        #[allow(clippy::cast_precision_loss)]
+        let heights = grid(side, |i, _| 10.0 - i as f32 * 0.1);
+        let flow = FlowGrid::bake([0.0, 0.0], 1.0, side, &heights, 2.0);
+        assert_eq!(flow.velocities().len(), side * side);
+        // A node is exactly what `at` reports there — the bilinear's weights
+        // collapse on a lattice point, which is what makes the upload a copy
+        // rather than a second opinion.
+        let v = flow.at(3.0, 4.0);
+        assert_eq!(flow.velocities()[4 * side + 3], [v[0], v[2]]);
     }
 
     /// A plane tilted down toward +X. The current has to run down it.

@@ -790,6 +790,19 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                 .set_terrain(&field.height, field.origin, field.spacing, field.side)
                 .map_err(|e| e.to_string())?;
         }
+        // **And the current routed off that bed — W8.** The same
+        // `river_flow` the buoyancy solver and `loom water --at` call, so the
+        // surface a river is drawn with travels the way the crate on it does.
+        // A scene authoring no `WaterBody.flow` uploads nothing and every
+        // water pixel in it is bit for bit unchanged.
+        if let Some(grid) = terrain
+            .as_ref()
+            .and_then(|f| weather::water_of(&world, &weather).and_then(|b| river_flow(f, &b)))
+        {
+            renderer
+                .set_flow(grid.velocities(), grid.origin, grid.spacing, grid.side)
+                .map_err(|e| e.to_string())?;
+        }
         // **The wake, now seen as well as felt** — ADR 0046 §7. Unlike the bed
         // above this is simulation state, so it is whatever the `--sim` run
         // left in the grid. A scene with no `[ripples]` table uploads nothing

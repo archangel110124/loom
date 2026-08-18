@@ -200,6 +200,15 @@ struct EnvironmentData {
     /// is an array in the push block, so the stride has to match even though
     /// only element zero is read.
     uint2 ripplePad;
+    /// The river's current: xy world origin, z metres between nodes, w nodes
+    /// per axis. **Under two nodes means this water has no current**, which is
+    /// every scene that does not author `WaterBody.flow`.
+    float4 flow;
+    /// The velocities, `flow.w²` of them, `(x, z)` in m/s. A copy of the bake
+    /// `loom_water::flow` derives from the bed; nothing here writes it, and
+    /// what it drives is texture rather than force.
+    float2* flowVelocity;
+    uint2 flowPad;
 };
 
 struct GrassBlade {
@@ -1780,6 +1789,78 @@ LoomRippleGrid rippleField() {
     grid.side = int(push.environment[0].ripple.w);
     grid.height = push.environment[0].rippleHeights;
     return grid;
+}
+
+/// This scene's river current, assembled from the two environment fields that
+/// carry it. `side < 2` is water with no current: every lookup returns exactly
+/// zero, and every term that reads it then takes the branch that leaves the
+/// picture bit for bit as it was.
+///
+/// **The grid is the CPU's** — it is baked from the bed at load and it is what
+/// `loom_water::flow::FlowGrid::at` hands the buoyancy solver. This is a copy
+/// uploaded for drawing, and what it draws is where the surface *texture*
+/// travels. It never reaches `WaterSample`, so `river`'s determinism hash is
+/// unmoved by everything downstream of here.
+LoomFlowGrid flowField() {
+    LoomFlowGrid grid;
+    grid.origin = push.environment[0].flow.xy;
+    grid.spacing = push.environment[0].flow.z;
+    grid.side = int(push.environment[0].flow.w);
+    grid.velocity = push.environment[0].flowVelocity;
+    return grid;
+}
+
+// ---------------------------------------------------------------------------
+// Two-phase flow maps (Vlachos, Portal 2 / GDC 2010).
+//
+// **The problem being solved is that advecting a noise field by a spatially
+// varying velocity folds it.** `xz - flow(xz)·t` is a valid warp only while
+// `t·∂flow` stays under the pattern's own wavelength; a river's shear across a
+// bank reaches that in a couple of seconds and the texture smears into streaks
+// that keep stretching forever. The capillary term above already refuses a
+// per-pixel drift for exactly this reason and settles for a global one.
+//
+// The fix is to bound `t`. Two copies of the pattern run the same warp on a
+// sawtooth of period `WATER_FLOW_PERIOD`, half a cycle out of phase, and each
+// is cross-faded to nothing at the instant it resets. The warp never exceeds
+// one period's worth of displacement, so it never folds — and because the two
+// weights sum to exactly one, the blend has no visible pulse at the boundary.
+//
+// **`w = 1 − |1 − 2p|` is what makes the sum exact.** At `p` and `p + 0.5` the
+// two weights are `1 − |1 − 2p|` and `|1 − 2p|`, which add to one for every `p`
+// in `[0, 1)`. A cosine window looks the same in a still and does not, so the
+// brightness would breathe once per period — invisible in a PNG and the first
+// thing a fly-through shows.
+// ---------------------------------------------------------------------------
+
+/// Seconds in one flow-map cycle.
+///
+/// **The one knob, and it is a trade between two artifacts.** Long, and the
+/// warp gets far enough to smear: at `river`'s 3 m/s a 2 s period displaces the
+/// pattern 6 m, which is ten lattice cells of the capillary noise. Short, and
+/// the cross-fade is always half-way, which reads as a soft double image
+/// rather than as moving water. 2.0–2.5 s is the usable band; 2.0 is chosen
+/// because this river is fast and the smear is the worse of the two.
+static const float WATER_FLOW_PERIOD = 2.0;
+
+/// Where to sample the two phases of a flow map, and what the first is worth.
+struct LoomFlowPhase {
+    float2 uvA;
+    float2 uvB;
+    /// The second phase is worth exactly `1 - wA`. Stated once rather than
+    /// stored twice, because the identity is the whole reason there is no
+    /// pulse.
+    float wA;
+};
+
+LoomFlowPhase waterFlowPhase(float2 xz, float2 flow, float t) {
+    float pa = frac(t / WATER_FLOW_PERIOD);
+    float pb = frac(t / WATER_FLOW_PERIOD + 0.5);
+    LoomFlowPhase p;
+    p.uvA = xz - flow * (pa * WATER_FLOW_PERIOD);
+    p.uvB = xz - flow * (pb * WATER_FLOW_PERIOD);
+    p.wA = 1.0 - abs(1.0 - 2.0 * pa);
+    return p;
 }
 
 // ---------------------------------------------------------------------------
@@ -4964,6 +5045,15 @@ static const float3 WATER_FOAM_ALBEDO = float3(0.72, 0.76, 0.78);
 /// pixel and becomes a twinkle generator. One `saturate` retires it.
 static const float WATER_FOAM_FINE_RANGE = 40.0;
 
+/// The foam's lace, in the downwind frame. Split out so the flow map can
+/// evaluate it twice; `wd` is the wind direction the streaks lie along and
+/// `fine` retires the second octave at range.
+float waterFoamNoise(float2 wp, float2 wd, float fine) {
+    float2 fuv = float2(dot(wp, wd), dot(wp, float2(-wd.y, wd.x)) * WATER_FOAM_STRETCH);
+    return loom_value_noise(float3(fuv * 0.55, 0.0)) * 0.65
+         + loom_value_noise(float3(fuv * 2.3, 7.3)) * 0.35 * fine;
+}
+
 /// Capillary detail on the water surface, below anything the mesh can carry.
 ///
 /// **The mesh has a hard floor and this is under it.** Waves are evaluated per
@@ -5070,7 +5160,9 @@ static const float RIPPLE_CALM = 1.0;
 /// rather than detail — the same bound the foam's fine octaves take, for the
 /// same reason.
 static const float WATER_DETAIL_RANGE = 70.0;
-float2 waterDetailSlope(float2 xz, float t, float2 drift) {
+/// The capillary slope at one point, with the wind's global drift and nothing
+/// else. Split out so the flow map below can evaluate it twice.
+float2 waterDetailSlopeAt(float2 xz, float t, float2 drift) {
     float2 a = (xz - drift * t) * WATER_DETAIL_SCALE;
     // The second octave runs crosswise and faster, so the two do not travel as
     // one sheet — which is what a single scrolling layer always looks like.
@@ -5086,6 +5178,24 @@ float2 waterDetailSlope(float2 xz, float t, float2 drift) {
     g.y += (loom_value_noise(float3(b.x, 3.1, b.y + e))
           - loom_value_noise(float3(b.x, 3.1, b.y - e))) / (2.0 * e) * 0.5;
     return g;
+}
+
+/// The capillary slope, carried downstream by the river's own current.
+///
+/// **The branch is not an optimisation.** Still water must render bit for bit
+/// as it did, and `wA·g + (1-wA)·g` is not `g` in floats — it is a rounding
+/// difference in every water pixel of every scene in the repository, which is
+/// exactly the drift only `cargo xtask repeat` can see. The wake's own
+/// `ripples.side > 0` guard is here for the same reason and was measured.
+///
+/// A gradient is linear, so blending the two phases' slopes is the same thing
+/// as blending the two phases' surfaces and differencing — no approximation is
+/// being made by doing it in this order, only two taps saved.
+float2 waterDetailSlope(float2 xz, float t, float2 drift, float2 flow) {
+    if (dot(flow, flow) <= 0.0) { return waterDetailSlopeAt(xz, t, drift); }
+    LoomFlowPhase p = waterFlowPhase(xz, flow, t);
+    return waterDetailSlopeAt(p.uvA, t, drift) * p.wA
+         + waterDetailSlopeAt(p.uvB, t, drift) * (1.0 - p.wA);
 }
 
 /// Colour and depth of everything drawn BEFORE the water. Set 3.
@@ -5126,12 +5236,35 @@ static const float CAUSTIC_STRENGTH = 0.85;
 /// down through the surface, and the terrain shader when the terrain itself is
 /// underwater. A seabed with caustics seen from above and none seen from below
 /// is the same surface disagreeing with itself.
-float causticWeb(float3 bedPos, float depth) {
-    float2 cuv = bedPos.xz * CAUSTIC_SCALE;
-    float2 cdrift = float2(0.07, 0.05) * push.environment[0].weather.z;
+/// The web itself at one point, before the depth and sun fades. Split out so
+/// the flow map can evaluate it twice.
+float causticWebAt(float2 cuv, float2 cdrift) {
     float c1 = loom_value_noise(float3(cuv + cdrift, 0.0));
     float c2 = loom_value_noise(float3(cuv * 1.31 - cdrift * 0.83, 5.7));
-    float web = pow(saturate(1.0 - abs(c1 - c2) * CAUSTIC_SHARP), CAUSTIC_POWER);
+    return pow(saturate(1.0 - abs(c1 - c2) * CAUSTIC_SHARP), CAUSTIC_POWER);
+}
+
+float causticWeb(float3 bedPos, float depth) {
+    float2 cdrift = float2(0.07, 0.05) * push.environment[0].weather.z;
+    // **The bed's own position, advected by the current above it — W8.** The
+    // filaments are the surface's focus lines projected down, so they travel
+    // with the surface; a static web under a moving river is the tell that the
+    // water is a texture rather than a fluid.
+    //
+    // `flowField()` rather than an argument, because this is called from two
+    // places — the water looking down and the terrain shader when the terrain
+    // is itself underwater — and a seabed with a crawling web seen from above
+    // and a still one seen from below is the same surface disagreeing with
+    // itself. The branch keeps every still-water scene exact.
+    float2 flow = loom_flow_at(flowField(), bedPos.xz);
+    float web;
+    if (dot(flow, flow) <= 0.0) {
+        web = causticWebAt(bedPos.xz * CAUSTIC_SCALE, cdrift);
+    } else {
+        LoomFlowPhase p = waterFlowPhase(bedPos.xz, flow, push.environment[0].weather.z);
+        web = causticWebAt(p.uvA * CAUSTIC_SCALE, cdrift) * p.wA
+            + causticWebAt(p.uvB * CAUSTIC_SCALE, cdrift) * (1.0 - p.wA);
+    }
     // Strongest just under the surface and gone by a few metres — a ripple's
     // focal length is short and a deep column washes the web out entirely.
     // Gone at a low sun too, since a grazing ray never focuses.
@@ -5502,10 +5635,16 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         float2 dw = normalize(windv.xy + float2(1e-4, 0.0));
         float local = length(grassWind(in.worldPos).xz);
         float detailStrength = sqrt(WATER_DETAIL_CALM + WATER_DETAIL_COXMUNK * local);
+        // **And carried by the river — W8.** The current is the one advection
+        // in this shader that is honestly per-pixel: it is a bake off the bed,
+        // it is what the buoyancy solver integrates, and a river whose surface
+        // texture stands still while a crate floats past it is the single most
+        // visible thing wrong with `river.loom`.
         float2 g = waterDetailSlope(
             in.worldPos.xz,
             push.environment[0].weather.z,
-            dw * windv.z * WATER_DETAIL_DRIFT);
+            dw * windv.z * WATER_DETAIL_DRIFT,
+            loom_flow_at(flowField(), in.worldPos.xz));
         // A slope subtracted from the normal's horizontal components — the
         // standard perturbation. The surface stays exactly where the vertex
         // shader put it; only how it catches light changes, which is what keeps
@@ -5662,10 +5801,20 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // what keeps a patch from sitting nailed to the world while the wave that
     // made it travels out from under it.
     float2 wp = in.worldPos.xz - wd * windv.z * push.environment[0].weather.z * 0.05;
-    float2 fuv = float2(dot(wp, wd), dot(wp, float2(-wd.y, wd.x)) * WATER_FOAM_STRETCH);
     float fine = saturate(1.0 - length(toEye) / WATER_FOAM_FINE_RANGE);
-    float fnoise = loom_value_noise(float3(fuv * 0.55, 0.0)) * 0.65
-                 + loom_value_noise(float3(fuv * 2.3, 7.3)) * 0.35 * fine;
+    // **And downstream, where there is a stream — W8.** Foam floating on a
+    // river goes where the river goes; the wind drift above is the open-sea
+    // answer and is a few percent of a wind speed, which on `river.loom` is
+    // nothing at all beside a 3 m/s current.
+    float2 fflow = loom_flow_at(flowField(), in.worldPos.xz);
+    float fnoise;
+    if (dot(fflow, fflow) <= 0.0) {
+        fnoise = waterFoamNoise(wp, wd, fine);
+    } else {
+        LoomFlowPhase fp = waterFlowPhase(wp, fflow, push.environment[0].weather.z);
+        fnoise = waterFoamNoise(fp.uvA, wd, fine) * fp.wA
+               + waterFoamNoise(fp.uvB, wd, fine) * (1.0 - fp.wA);
+    }
     // **The trail is the coverage's floor, not an addition to it.** A point
     // under a steepening crest is foamy because of the crest; a point the
     // crest has left is foamy because of what the crest did. Taking the

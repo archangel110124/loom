@@ -105,6 +105,53 @@ float3 loom_ripple_at(LoomRippleGrid grid, float2 xz) {
     return float3(h, dx / (2.0 * e), dz / (2.0 * e));
 }
 
+// The river's current, sampled. The Rust half is `loom_water::flow::FlowGrid::at`;
+// they are one implementation written twice. Never edit this by hand.
+
+struct LoomFlowGrid {
+    // World xz of node (0, 0).
+    float2 origin;
+    // Metres between nodes.
+    float spacing;
+    // Nodes per axis. Under two means this water has no current.
+    int side;
+    // Row-major, `side * side` of them, m/s.
+    float2* velocity;
+};
+
+// How far past the grid the current is carried before it has dispersed.
+static const float LOOM_FLOW_PLUME = 24.0;
+
+// Bilinear inside the grid, and carried outward with a smoothstep decay past
+// it — a river does not stop at its mouth, it disperses past it. Clamped
+// rather than zeroed, which is the Rust's `plume` rule.
+float2 loom_flow_at(LoomFlowGrid grid, float2 xz) {
+    if (grid.side < 2) { return float2(0.0, 0.0); }
+    float rawGx = (xz.x - grid.origin.x) / grid.spacing;
+    float rawGz = (xz.y - grid.origin.y) / grid.spacing;
+    float limit = float(grid.side - 1);
+    float gx = clamp(rawGx, 0.0, limit - 1e-4);
+    float gz = clamp(rawGz, 0.0, limit - 1e-4);
+    float outside = max(abs(rawGx - gx), abs(rawGz - gz)) * grid.spacing;
+    float plume = 1.0;
+    if (outside > 0.0) {
+        float t = clamp(1.0 - outside / LOOM_FLOW_PLUME, 0.0, 1.0);
+        plume = t * t * (3.0 - 2.0 * t);
+    }
+    if (plume <= 0.0) { return float2(0.0, 0.0); }
+    int i = int(gx);
+    int j = int(gz);
+    float fx = gx - float(i);
+    float fz = gz - float(j);
+    float2 v00 = grid.velocity[j * grid.side + i];
+    float2 v10 = grid.velocity[j * grid.side + i + 1];
+    float2 v01 = grid.velocity[(j + 1) * grid.side + i];
+    float2 v11 = grid.velocity[(j + 1) * grid.side + i + 1];
+    float2 low = (v10 - v00) * fx + v00;
+    float2 high = (v11 - v01) * fx + v01;
+    return ((high - low) * fz + low) * plume;
+}
+
 // The water surface. The Rust half is `loom_water::sample_water`; they are one
 // implementation written twice, and `slang_agreement` compiles this and
 // compares the two numerically.

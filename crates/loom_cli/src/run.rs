@@ -634,6 +634,22 @@ impl App {
             Some(f) => viewer.set_terrain(&f.height, f.origin, f.spacing, f.side),
             None => viewer.set_terrain(&[], [0.0; 2], 1.0, 0),
         };
+        // **The current, on the same trigger and for the same reason** — it is
+        // routed off the bed that was just baked, so carving the bank rebakes
+        // both. Uploaded here rather than per frame because it is a bake, not
+        // state: the ripple grid beside it is the one that moves every tick.
+        let world = self.view.world();
+        let flow = field.as_ref().and_then(|f| {
+            crate::weather::water_of(world, &crate::weather::wind_of_world(world))
+                .and_then(|body| crate::river_flow(f, &body))
+        });
+        let flow_result = match flow.as_ref() {
+            Some(g) => viewer.set_flow(g.velocities(), g.origin, g.spacing, g.side),
+            None => viewer.set_flow(&[], [0.0; 2], 1.0, 0),
+        };
+        if let Err(e) = flow_result {
+            crate::log::error(format!("could not upload the river current: {e}"));
+        }
         // **And the world raindrops collide with, on exactly the same trigger.**
         // Carving the roof open in the editor lets rain through on the next
         // frame because the field was re-baked, not because anything told the
