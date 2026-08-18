@@ -109,6 +109,23 @@ pub struct Sim {
     /// is and with the same consequence: blow the bank out mid-run and the
     /// current is the one the old bank made. Reloading picks it up.
     flow: Option<loom_water::flow::FlowGrid>,
+    /// The cinematic tier's volumetric solver — ADR 0053, ADR 0057.
+    ///
+    /// **`None` for every scene in this repository**, which is the acceptance
+    /// criterion ADR 0053 §1 states rather than hopes for: a body that does not
+    /// opt in never reaches this and every existing render is bit-identical.
+    ///
+    /// When it is `Some`, the deterministic buoyancy path below is switched off
+    /// entirely for bodies inside the domain — one water, one force, no
+    /// double-dipping.
+    fluid: Option<loom_render::FluidSolver>,
+    /// Scratch for the solver's per-tick inputs, so the fixed step does not
+    /// allocate.
+    fluid_solids: Vec<loom_render::FluidSolid>,
+    fluid_probes: Vec<loom_render::FluidProbe>,
+    /// Milliseconds the device round trip cost, summed over the run, and the
+    /// ticks that paid it — ADR 0053 §4 asks for this to be reported.
+    fluid_cost: (f64, f64, u64),
     /// The interactive wavelet events — ADR 0056.
     ///
     /// **The one piece of stepped state this simulation owns besides `rapier`,
@@ -193,6 +210,76 @@ fn waterplane_radius(floating: &Floating, at: [f32; 3]) -> f32 {
         .iter()
         .map(|s| (s.at[0] - at[0]).hypot(s.at[2] - at[2]) + s.radius)
         .fold(0.05_f32, f32::max)
+}
+
+/// Build the cinematic solver for a scene that opts into the tier.
+///
+/// **The domain is centred on the water node and sized by `extent`** — ADR
+/// 0053 §5, anchored to sim state and never to the camera. `None` when the
+/// device refuses, and the caller says so loudly rather than silently
+/// rendering an empty tank.
+fn build_fluid(
+    world: &World,
+    body: &loom_scene::components::WaterBody,
+    obstacles: &[loom_render::FluidSolid],
+) -> Option<loom_render::FluidSolver> {
+    let extent = body.extent?;
+    let centre = world
+        .water_node()
+        .and_then(|(entity, _)| world.global_transform(entity))
+        .map_or([0.0, 0.0, 0.0], |g| [g.matrix[12], g.matrix[13], g.matrix[14]]);
+    let (dims, cell) = loom_render::fluid_grid(extent);
+    let origin = [
+        centre[0] - extent[0] * 0.5,
+        centre[1] - extent[1] * 0.5,
+        centre[2] - extent[2] * 0.5,
+    ];
+
+    // The static bake, once: everything the scene calls scenery, rasterised at
+    // cell centres. The tank's own walls are the domain boundary and need no
+    // authoring — the solver treats everything outside the grid as solid.
+    let mut solid = vec![0_u8; dims[0] * dims[1] * dims[2]];
+    for obstacle in obstacles {
+        for k in 0..dims[2] {
+            for j in 0..dims[1] {
+                for i in 0..dims[0] {
+                    #[allow(clippy::cast_precision_loss)]
+                    let p = [
+                        origin[0] + (i as f32 + 0.5) * cell,
+                        origin[1] + (j as f32 + 0.5) * cell,
+                        origin[2] + (k as f32 + 0.5) * cell,
+                    ];
+                    let hit = if obstacle.ball {
+                        let d = [
+                            p[0] - obstacle.centre[0],
+                            p[1] - obstacle.centre[1],
+                            p[2] - obstacle.centre[2],
+                        ];
+                        d[0].mul_add(d[0], d[1].mul_add(d[1], d[2] * d[2]))
+                            <= obstacle.radius * obstacle.radius
+                    } else {
+                        (0..3).all(|a| (p[a] - obstacle.centre[a]).abs() <= obstacle.half[a])
+                    };
+                    if hit {
+                        solid[i + dims[0] * (j + dims[1] * k)] = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    match loom_render::FluidSolver::new(
+        loom_render::FluidDomain { centre, extent, fill: body.fill },
+        &solid,
+    ) {
+        Ok(solver) => Some(solver),
+        Err(e) => {
+            crate::log::warn(format!(
+                "the cinematic tier needs a Vulkan compute device and there is none ({e}).                  ADR 0053: this scene's water is GPU-stateful by its own request, so there                  is no CPU fallback to demote to."
+            ));
+            None
+        }
+    }
 }
 
 /// One character, its velocity, and its script's memory.
@@ -296,6 +383,7 @@ impl Sim {
         let mut dynamic = Vec::new();
         let mut characters = Vec::new();
         let mut floating: Vec<Floating> = Vec::new();
+        let mut obstacles: Vec<loom_render::FluidSolid> = Vec::new();
         // Whether anything will ask about the bed. Read before the loop so the
         // voxel branch can decide to bake without a second pass over the world.
         let floats = world.water().is_some();
@@ -493,6 +581,17 @@ impl Sim {
                 } else {
                     physics.add_static_box(pos, quat, half);
                 }
+                // And what the cinematic solver's obstacle bake is made of.
+                // Collected here rather than walked again, because this branch
+                // already knows which nodes are static scenery and what shape
+                // each one is.
+                obstacles.push(loom_render::FluidSolid {
+                    centre: pos,
+                    half,
+                    radius,
+                    ball,
+                    velocity: [0.0; 3],
+                });
             }
         }
 
@@ -546,12 +645,21 @@ impl Sim {
             }
         }
 
+        let fluid = water
+            .as_ref()
+            .filter(|w| w.simulation == loom_scene::components::WaterSimTier::Cinematic)
+            .and_then(|w| build_fluid(world, w, &obstacles));
+
         Self {
             physics,
             nav: None,
             player,
             dynamic,
             characters,
+            fluid,
+            fluid_solids: Vec::new(),
+            fluid_probes: Vec::new(),
+            fluid_cost: (0.0, 0.0, 0),
             water,
             terrain,
             flow,
@@ -563,6 +671,126 @@ impl Sim {
         }
     }
 
+    /// Advance the cinematic solver and let it push the bodies — ADR 0053.
+    ///
+    /// **The force law is not duplicated.** The pontoons, the spherical cap,
+    /// the buoyant force, the damping and the drag are all
+    /// `loom_water::buoyancy::solve`, exactly as the deterministic tier uses
+    /// them. What changes is where the surface and the water's velocity come
+    /// from: a GPU readback rather than a closed form, arriving through the
+    /// same two `PontoonState` fields the wavelet field and the river already
+    /// use. One force law, two sources of surface.
+    ///
+    /// **The tier does not leak** (ADR 0053 §5). A pontoon whose ring of
+    /// columns found no water reads no surface and gets no force, so a body
+    /// outside the domain is pushed by nothing at all rather than falling back
+    /// to the analytic sea — which would be the same body forced by two waters.
+    fn float_cinematic(&mut self) {
+        let (Some(water), Some(solver)) = (self.water.as_ref(), self.fluid.as_mut()) else {
+            return;
+        };
+        self.fluid_solids.clear();
+        self.fluid_probes.clear();
+
+        // The pontoons are what the fluid sees of a body, in both directions:
+        // the solid it must flow round, and the place it is asked what it is
+        // doing. One description, so the push and the lift cannot disagree
+        // about where the body is.
+        for floating in &mut self.floating {
+            let (Some(position), Some(rotation)) = (
+                self.physics.position(floating.body),
+                self.physics.rotation_quat(floating.body),
+            ) else {
+                continue;
+            };
+            let rotation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
+            for (state, pontoon) in floating.states.iter_mut().zip(&floating.buoyancy.pontoons) {
+                let at = Vec3::from_array(position) + rotation * Vec3::from_array(pontoon.offset);
+                state.at = at.to_array();
+                state.radius = pontoon.radius;
+                state.velocity = self
+                    .physics
+                    .velocity_at_point(floating.body, state.at)
+                    .unwrap_or([0.0; 3]);
+                self.fluid_solids.push(loom_render::FluidSolid {
+                    centre: state.at,
+                    half: [pontoon.radius; 3],
+                    radius: pontoon.radius,
+                    ball: true,
+                    velocity: state.velocity,
+                });
+                self.fluid_probes.push(loom_render::FluidProbe {
+                    at: state.at,
+                    radius: pontoon.radius,
+                });
+            }
+        }
+
+        let out = solver.step(&loom_render::FluidInputs {
+            solids: &self.fluid_solids,
+            probes: &self.fluid_probes,
+        });
+        self.fluid_cost.0 += out.step_ms;
+        self.fluid_cost.1 += out.fence_wait_ms;
+        self.fluid_cost.2 += 1;
+
+        // A flat copy of the body: the solver's free surface is the whole
+        // surface, so letting `sample_water` add a Gerstner swell on top would
+        // be two seas at once.
+        let mut flat = water.clone();
+        flat.waves.waves.clear();
+        let mut probe = 0;
+        for floating in &mut self.floating {
+            let Some(centre) = self.physics.centre_of_mass(floating.body) else {
+                continue;
+            };
+            for state in &mut floating.states {
+                let Some(read) = out.probes.get(probe) else { break };
+                probe += 1;
+                state.ground = loom_voxel::heightfield::NO_GROUND;
+                state.flow = read.velocity;
+                // The readback, in the one field `sample_water` already adds to
+                // the still-water level. Dry reads a surface far below the
+                // body, which is what "no water here" means to the cap.
+                state.wavelet = if read.wetness > 0.0 {
+                    [read.surface - flat.surface_height, 0.0, 0.0]
+                } else {
+                    [-1.0e9, 0.0, 0.0]
+                };
+            }
+            let wrench = loom_water::buoyancy::solve(
+                &flat,
+                &floating.buoyancy,
+                &floating.states,
+                centre,
+                0.0,
+            );
+            self.physics
+                .apply_force_torque(floating.body, wrench.force, wrench.torque);
+            floating.fraction = wrench.submerged;
+            floating.submerged = loom_water::buoyancy::is_submerged(
+                floating.submerged,
+                wrench.submerged,
+                floating.submersion.enter,
+                floating.submersion.exit,
+            );
+        }
+    }
+
+    /// What the device round trip cost this run: total ms, fence ms, ticks.
+    #[must_use]
+    pub fn fluid_cost(&self) -> (f64, f64, u64) {
+        self.fluid_cost
+    }
+
+    /// The cinematic fluid's particles, as draw instances.
+    ///
+    /// Through the one particle renderer (ADR 0047's rule) — there is no
+    /// second particle path and no fluid draw path.
+    pub fn fluid_particles(&mut self) -> Vec<loom_render::ParticleInstance> {
+        self.fluid.as_mut().map_or_else(Vec::new, loom_render::FluidSolver::instances)
+    }
+
     /// Apply this tick's buoyancy, before the solver runs.
     ///
     /// **Every rule that protects the determinism hash applies in here**, which
@@ -571,6 +799,10 @@ impl Sim {
     /// torque per body applied once, and the surface read from
     /// `loom_water::sample_water` on the CPU — never from the GPU (§5.1).
     fn float(&mut self) {
+        if self.fluid.is_some() {
+            self.float_cinematic();
+            return;
+        }
         let Some(water) = &self.water else {
             return;
         };
@@ -1531,6 +1763,21 @@ impl Runner {
     #[must_use]
     pub fn collision_world(&self) -> &loom_physics::Physics {
         self.physics.world()
+    }
+
+    /// The cinematic fluid's particles, as draw instances — ADR 0057.
+    ///
+    /// Empty for every scene that does not opt into the tier, which is every
+    /// scene in this repository.
+    pub fn fluid_particles(&mut self) -> Vec<loom_render::ParticleInstance> {
+        self.physics.fluid_particles()
+    }
+
+    /// What the cinematic tier's device round trip cost: total ms, fence ms,
+    /// ticks. Zero when there is no solver.
+    #[must_use]
+    pub fn fluid_cost(&self) -> (f64, f64, u64) {
+        self.physics.fluid_cost()
     }
 
     /// A runner that steps physics and runs nothing, for when the scripts

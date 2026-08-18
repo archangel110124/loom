@@ -653,7 +653,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     let mut foam = None;
     // Kept alive for the fly-through, which continues this run rather than
     // starting a second one. See `simulate_physics`.
-    let mut warmed = None;
+    let mut warmed: Option<play::Runner> = None;
     if let Some(ticks) = flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()) {
         (fired, splashed, wavelets, foam, warmed) = simulate_physics(&mut world, base, ticks);
     }
@@ -674,6 +674,26 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         // drips, which is the honest answer: at tick zero nothing has fallen.
         warmed.as_ref().map(crate::play::Runner::collision_world),
     );
+    // **The cinematic fluid's particles** — ADR 0057. Read back from the solver
+    // the run left behind, and appended to the ordinary particle list: they go
+    // through the one particle renderer (ADR 0047's rule), so a droplet of
+    // volumetric water is billboarded, blended and fogged by the same vertex
+    // shader as a spark. A scene that does not opt into the tier appends
+    // nothing.
+    if let Some(runner) = warmed.as_mut() {
+        particles.extend(runner.fluid_particles());
+        let (total, fence, ticks) = runner.fluid_cost();
+        if ticks > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let n = ticks as f64;
+            log::info(format!(
+                "cinematic water: {:.2} ms/tick, {:.2} ms of it the device round trip,                  over {ticks} ticks ({:.2} s)",
+                total / n,
+                fence / n,
+                total / 1000.0
+            ));
+        }
+    }
     // `--sim` as a tick count, which is what the rain simulation's clock is.
     let sim_ticks = flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
     let yaw = flag(args, "--yaw").and_then(|v| v.parse::<f32>().ok());
@@ -2511,6 +2531,16 @@ fn add_water(
     let Some(body) = weather::water_of(world, wind) else {
         return;
     };
+    // **A cinematic body draws no analytic surface at all** — ADR 0053/0057.
+    // The volumetric solver *is* the water, and the Gerstner plane is an
+    // unbounded sheet at `surface_height`: left on, it covers the tank, the
+    // horizon and the particles inside it with a sea that is not there. The
+    // surface mesh built from the solver's own free surface is the next slice;
+    // until it exists the water is its particles, which is exactly what
+    // reference image 65 is.
+    if body.simulation == loom_scene::components::WaterSimTier::Cinematic {
+        return;
+    }
     let waves = &body.waves.waves;
 
     // Depth is no longer in here: it is a per-vertex query against the terrain

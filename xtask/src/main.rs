@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 60] = [
+const SCENES: [&str; 61] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -172,6 +172,7 @@ const SCENES: [&str; 60] = [
     // foam source that cannot be evaluated backwards from a position, which is
     // exactly what the field exists for. Also in `GOLDEN`.
     "assets/test/plough.loom",
+    "assets/test/slosh.loom",
     // The falling sheet — ADR 0054. Two of them, because the whole claim is
     // that one authored discharge moves the picture between them: `spout` is
     // past its break length for the last third of a 2 m drop and `cascade` is
@@ -320,7 +321,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 47] = [
+const GOLDEN: [(&str, &str, &[&str]); 48] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -732,6 +733,22 @@ const GOLDEN: [(&str, &str, &[&str]); 47] = [
     // and the sphere at the waterline: 24 droplets, against 0 at tick 41 and 0
     // by tick 80 [measured].
     ("pool", "assets/test/pool.loom", &["--sim", "50"]),
+    // **The cinematic tier, and it is the only scene outside the deterministic
+    // one** — ADR 0053, solver ADR 0057. Volumetric APIC water in a bounded
+    // tank, a pillar it breaks against, and a ball that pushes it and is pushed
+    // back. It covers a rendering path nothing else does: the fluid's own
+    // particles, written as `ParticleInstance`s by a compute pass and drawn as
+    // velocity-stretched droplets.
+    //
+    // `--sim 150` is 1.4 s after the ball's entry, with the slosh piled against
+    // the far side of the pillar and a trough behind it — a still at 60 has the
+    // impact but a flat far end, and one at 300 has settled.
+    //
+    // **It must never enter `DETERMINISM_SCENES` or the pinned-hash tests.** It
+    // is reproducible on this device, driver and dispatch order and nowhere
+    // else, which is exactly what `cargo xtask repeat` checks and exactly what
+    // a pinned hash would claim wrongly.
+    ("slosh", "assets/test/slosh.loom", &["--sim", "150"]),
     // **The Worthington jet, which does not exist at tick 50 and never could.**
     //
     // A splash is a sequence and Loom used to fire all of it at t = 0; the jet

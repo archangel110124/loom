@@ -126,16 +126,32 @@ static const uint FLUID_GROUP = 256;
 
 /// The most particles one cell's bucket is re-sorted by index.
 ///
-/// `ponytail:` a ceiling, not a cap on storage — every particle is still
-/// stored and still transferred. Only the *ordering* of a bucket past this
-/// many is left in arrival order, and a cell holding 128 particles is sixteen
-/// times rest density, which means the solve has already failed. Raise it, or
-/// switch to a block radix sort, if a scene ever reaches it.
-static const uint FLUID_SORT_MAX = 128;
+/// **This is not a performance knob. It is the reproducibility ceiling, and
+/// 128 was measured to be too low.** The scatter above hands out slots in
+/// arrival order and the sort takes that decision back — but only for the
+/// first `FLUID_SORT_MAX` of a bucket. Past it the tail keeps arrival order,
+/// the gather sums those particles' floats in that order, and the whole
+/// float-atomic ban has been defeated with no atomic in sight.
+///
+/// Measured on `slosh.loom` at `--sim 150`, three fresh processes: at 128 the
+/// three PNGs had three different hashes, 7.2% of pixels apart with a worst
+/// channel of 153. At 1024 they are byte-identical. So a cell in that scene
+/// does hold more than 128 particles — sixteen times rest density — which is
+/// itself a finding about the solve rather than about the sort.
+///
+/// `ponytail:` an insertion sort is O(k²) in the bucket, so this ceiling is
+/// also a hang risk if a cell ever reaches it. The upgrade is a block radix
+/// sort with scan-derived ranks; the reason it is not here is that a bucket
+/// holds about eight particles and 1024 has never been approached except by a
+/// solve that has already failed.
+static const uint FLUID_SORT_MAX = 1024;
 
 /// Probe slots. The output block starts here, so the CPU knows where to read
 /// without the count it wrote being part of the address.
 static const int FLUID_MAX_PROBES = 64;
+
+/// Particles a full cell holds, mirroring `loom_render::FLUID_PER_CELL`.
+static const uint FLUID_PER_CELL = 8;
 
 int3 gridDims(FluidConsts* c, uint level) { return c->levels[level].dim.xyz; }
 int gridBase(FluidConsts* c, uint level) { return c->levels[level].dim.w; }
@@ -472,7 +488,7 @@ void fluidRestrictMarkerMain(uint3 tid: SV_DispatchThreadID) {
     int3 fdim = gridDims(c, level - 1u);
     int fbase = gridBase(c, level - 1u);
 
-    bool anyFluid = false;
+    int fluidChildren = 0;
     bool allSolid = true;
     for (int k = 0; k < 2; ++k) {
         for (int j = 0; j < 2; ++j) {
@@ -480,13 +496,20 @@ void fluidRestrictMarkerMain(uint3 tid: SV_DispatchThreadID) {
                 int3 f = p * 2 + int3(i, j, k);
                 if (!inside(fdim, f)) { continue; }
                 uint m = c->marker[fbase + cellIndex(fdim, f)];
-                if (m == FLUID_FLUID) { anyFluid = true; }
+                if (m == FLUID_FLUID) { fluidChildren += 1; }
                 if (m != FLUID_SOLID) { allSolid = false; }
             }
         }
     }
+    // **A majority, not "any".** Calling a coarse cell fluid because one of
+    // its eight children is puts the coarse grid's Dirichlet surface a level
+    // higher than the fine grid's, and the correction that comes back down is
+    // a pressure the fine surface never asked for. Measured: with "any", three
+    // V-cycles collapsed a settled tank by 25 cm and ten V-cycles collapsed it
+    // further — the classic sign of a coarse operator that is not an
+    // approximation of the fine one.
     c->marker[gridBase(c, level) + int(tid.x)] =
-        allSolid ? FLUID_SOLID : (anyFluid ? FLUID_FLUID : FLUID_AIR);
+        allSolid ? FLUID_SOLID : (fluidChildren >= 4 ? FLUID_FLUID : FLUID_AIR);
 }
 
 /// `b = -div(u) h²`, and the initial guess is zero.
@@ -650,7 +673,14 @@ void fluidProjectMain(uint3 tid: SV_DispatchThreadID) {
 
     float pa = ma == FLUID_FLUID ? c->pressureA[cellIndex(d, lower)] : 0.0;
     float pb = mb == FLUID_FLUID ? c->pressureA[cellIndex(d, n)] : 0.0;
-    faceBuffer(c, axis)[tid.x] -= (pb - pa) / c->origin.w;
+    // **Clamped here as well as in `fluidForcesMain`.** The CFL guard has to
+    // hold on what comes OUT of the projection, not only on what goes in: a
+    // fast-moving solid drives a large divergence into a cell whose only other
+    // neighbour is air, and three V-cycles of Jacobi answer that with a
+    // pressure spike. Unclamped, the probe readback then hands the rigid-body
+    // drag a water velocity of a thousand metres a second.
+    float v = faceBuffer(c, axis)[tid.x] - (pb - pa) / c->origin.w;
+    faceBuffer(c, axis)[tid.x] = clamp(v, -c->timing.z, c->timing.z);
 }
 
 // ------------------------------------------------------------------ G2P ----
@@ -738,11 +768,25 @@ void fluidG2PMain(uint3 tid: SV_DispatchThreadID) {
 
 // -------------------------------------------------------------- readback ---
 
-/// One thread per probe, sampling a fixed lattice inside the pontoon sphere.
+/// One thread per probe: where the free surface is around this pontoon, and
+/// how fast the water there is moving.
 ///
-/// **Serial on purpose.** It is a few hundred samples per probe and there are
-/// a handful of probes, so there is nothing to parallelise, and a serial loop
-/// is a summation order the buffer decides rather than the scheduler.
+/// **The surface is read from the columns AROUND the pontoon, not from the one
+/// it is in, and that is the whole subtlety of the readback.** The body is
+/// rasterised into the solid mask so that it pushes the fluid — which means
+/// the cells it occupies hold no particles, so a column through it reports the
+/// water level at the *bottom* of the hull and a floating crate reads as dry.
+/// The water level a body floats in is the level of the water beside it, which
+/// is what a waterline is.
+///
+/// What comes back is therefore a **surface height**, and the CPU turns it into
+/// a displaced volume with the same `submerged_volume` spherical cap the
+/// deterministic tier uses. One formula for "how wet is this pontoon", two
+/// sources for the surface.
+///
+/// **Serial on purpose.** Eight columns of at most 64 cells is nothing to
+/// parallelise, and a serial loop is a summation order the buffer decides
+/// rather than the scheduler.
 [numthreads(1, 1, 1)]
 void fluidProbeMain(uint3 tid: SV_DispatchThreadID) {
     FluidConsts* c = push.c;
@@ -751,36 +795,61 @@ void fluidProbeMain(uint3 tid: SV_DispatchThreadID) {
     int3 d = c->dims.xyz;
     float h = c->origin.w;
 
-    int hits = 0;
+    // Eight columns on a ring just clear of the pontoon.
+    float surface = 0.0;
+    int wetColumns = 0;
+    const int RING = 8;
+    for (int r = 0; r < RING; ++r) {
+        float a = 6.2831853 * float(r) / float(RING);
+        float3 at = probe.xyz + float3(cos(a), 0.0, sin(a)) * probe.w * 1.5;
+        int ix = int(floor((at.x - c->origin.x) / h));
+        int iz = int(floor((at.z - c->origin.z) / h));
+        if (ix < 0 || iz < 0 || ix >= d.x || iz >= d.z) { continue; }
+        for (int j = d.y - 1; j >= 0; --j) {
+            // **Half rest density, not one particle.** A cell holding a single
+            // particle is a fleck of spray, and taking the highest such cell as
+            // the free surface reads the top of the highest speck in the column
+            // — which drifts upward over a run and shows up as a tank that
+            // slowly gains volume when nothing of the sort is happening.
+            int here = cellIndex(d, int3(ix, j, iz));
+            if (c->marker[here] != FLUID_FLUID) { continue; }
+            if (c->cellCount[here] * 2u < FLUID_PER_CELL) { continue; }
+            surface += c->origin.y + float(j + 1) * h;
+            wetColumns += 1;
+            break;
+        }
+    }
+
+    // The water's velocity over the pontoon itself, from the fluid cells it
+    // touches. Zero when it is clear of the water, which is the honest answer.
     int wet = 0;
     float3 vel = float3(0.0);
-    float pressure = 0.0;
-    const int N = 6;
+    const int N = 4;
     for (int k = 0; k < N; ++k) {
         for (int j = 0; j < N; ++j) {
             for (int i = 0; i < N; ++i) {
                 float3 t = (float3(float(i), float(j), float(k)) + 0.5) / float(N) * 2.0 - 1.0;
                 if (dot(t, t) > 1.0) { continue; }
-                hits += 1;
                 float3 x = probe.xyz + t * probe.w;
                 int3 p = int3(floor((x - c->origin.xyz) / h));
                 if (!inside(d, p)) { continue; }
                 if (c->marker[cellIndex(d, p)] != FLUID_FLUID) { continue; }
                 wet += 1;
                 float vx, vy, vz;
-                float3 r;
-                gatherAxis(c, 0u, x, vx, r);
-                gatherAxis(c, 1u, x, vy, r);
-                gatherAxis(c, 2u, x, vz, r);
+                float3 row;
+                gatherAxis(c, 0u, x, vx, row);
+                gatherAxis(c, 1u, x, vy, row);
+                gatherAxis(c, 2u, x, vz, row);
                 vel += float3(vx, vy, vz);
-                pressure += c->pressureA[cellIndex(d, p)];
             }
         }
     }
-    float inv = wet > 0 ? 1.0 / float(wet) : 0.0;
+
     int out0 = FLUID_MAX_PROBES + int(tid.x) * 2;
-    c->probes[out0] = float4(hits > 0 ? float(wet) / float(hits) : 0.0, vel * inv);
-    c->probes[out0 + 1] = float4(pressure * inv, 0.0, 0.0, 0.0);
+    float level = wetColumns > 0 ? surface / float(wetColumns) : -1e9;
+    c->probes[out0] = float4(level, wet > 0 ? vel / float(wet) : float3(0.0));
+    c->probes[out0 + 1] =
+        float4(float(wetColumns) / float(RING), float(wet), 0.0, 0.0);
 }
 
 /// Every `stride`-th particle, as a `ParticleInstance` the one particle
@@ -802,7 +871,7 @@ void fluidInstanceMain(uint3 tid: SV_DispatchThreadID) {
         radius = c->origin.w * 0.42;
     }
     c->instances[tid.x * 3u] = float4(x, radius);
-    c->instances[tid.x * 3u + 1u] = float4(0.55, 0.72, 0.86, 1.0);
+    c->instances[tid.x * 3u + 1u] = float4(0.20, 0.40, 0.56, 1.0);
     // The shutter is slice 2's: a droplet moving fast is a smear, which is
     // what turns a bead field into thrown water.
     c->instances[tid.x * 3u + 2u] = float4(v, 1.0 / 120.0);

@@ -52,9 +52,31 @@ pub const FLUID_PER_CELL: usize = 8;
 /// tick, which is the property ADR 0053 §6 keeps.
 const SUBSTEPS: u32 = 2;
 
-/// V-cycles per projection. **Fixed, never residual-tested**, for the same
-/// reason.
+/// V-cycles per projection, and smoothing sweeps per level. **Fixed, never
+/// residual-tested**, for the same reason as the substeps: the dispatch
+/// sequence must be a function of the tick alone.
+///
+/// **2 pre + 2 post was not enough and the failure was not subtle.** A settled
+/// tank held its surface for forty ticks and then collapsed — 0.00 m at tick
+/// 40, -0.04 at 80, -0.65 at 119, accelerating, until the water was packed
+/// five times over at the bottom. An incompressible projection only removes
+/// the divergent part of the velocity field; what it leaves behind at the free
+/// surface, every substep, has nothing to push back against it, so an
+/// under-converged solve does not jitter, it compresses. Sixty flat Jacobi
+/// sweeps were worse still (-0.45 by tick 40), which is what said the problem
+/// was convergence rather than the discretisation.
+///
+/// 4 pre + 4 post with twelve sweeps at the coarsest level holds the surface
+/// at **exactly 0.0000** through 120 ticks, and costs *less* than the broken
+/// version did — a collapsed tank has forty particles in a cell and the P2G
+/// gather pays for every one of them.
 const CYCLES: u32 = 3;
+
+/// Damped-Jacobi sweeps before and after each restriction. See [`CYCLES`].
+const SMOOTHS: u32 = 4;
+
+/// Sweeps at the coarsest level, which stands in for an exact solve.
+const COARSE_SMOOTHS: u32 = 12;
 
 /// Multigrid levels, 64 down to 8.
 const LEVELS: usize = 4;
@@ -129,13 +151,15 @@ pub struct FluidInputs<'a> {
 /// What the fluid is doing at one pontoon.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FluidProbeResult {
-    /// Fraction of the pontoon's volume in a cell the solver calls fluid.
-    pub fraction: f32,
+    /// World Y of the free surface **beside** this pontoon, or a large
+    /// negative number where the water does not reach. See `fluidProbeMain`
+    /// for why it is beside rather than through.
+    pub surface: f32,
     /// Mean fluid velocity over the wetted part, m/s.
     pub velocity: [f32; 3],
-    /// Mean pressure potential there. Reported because it is free; nothing
-    /// reads it yet.
-    pub pressure: f32,
+    /// Fraction of the ring of columns that found water — 0 when the pontoon
+    /// is outside the domain or over dry ground.
+    pub wetness: f32,
 }
 
 /// What comes back across the boundary, as plain `f32`.
@@ -186,11 +210,23 @@ struct Consts {
     instances: vk::DeviceAddress,
 }
 
-/// Mirrors `FluidPush`. 24 bytes of the 128 guaranteed.
+/// Mirrors `FluidPush`. 32 bytes of the 128 guaranteed.
+///
+/// **The eight bytes of padding are load-bearing and cost a night.** A `uint4`
+/// aligns to sixteen in std430, so Slang puts `args` at offset 16 while a
+/// naive Rust `{u64, [u32;4]}` puts it at 8. Every dispatch then read its
+/// level, axis and parity out of the eight bytes past the end of a 24-byte
+/// push block — which the driver serves as zero rather than faulting. The
+/// symptom was a tank of water that held its shape perfectly and never moved:
+/// `axis` was always 0, so `if (axis == 1) v += gravity * dt` never fired, and
+/// a fluid with no gravity is a lattice. `spirv-dis | grep 'OpMemberDecorate
+/// %FluidPush'` is the check, and the test below is it pinned.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Push {
     consts: vk::DeviceAddress,
+    /// See the note above. Never remove this.
+    pad: u64,
     args: [u32; 4],
 }
 
@@ -721,9 +757,9 @@ impl FluidSolver {
                 )
             };
             self.out.probes.push(FluidProbeResult {
-                fraction: a[0],
+                surface: a[0],
                 velocity: [a[1], a[2], a[3]],
-                pressure: b[0],
+                wetness: b[0],
             });
         }
     }
@@ -741,7 +777,7 @@ impl FluidSolver {
         }
         let pipeline = self.pipelines.instance;
         let layout = self.layout;
-        let push = Push { consts: self.consts_address(), args: [0; 4] };
+        let push = Push { consts: self.consts_address(), pad: 0, args: [0; 4] };
         #[allow(clippy::cast_possible_truncation)]
         let groups = (count as u32).div_ceil(GROUP);
         let particles = self.bufs[0].buffer;
@@ -868,7 +904,7 @@ impl FluidSolver {
                           args: [u32; 4],
                           groups: u32,
                           uses: &[(BufferId, BufferAccess)]| {
-                let push = Push { consts, args };
+                let push = Push { consts, pad: 0, args };
                 graph.pass_with(name, &[], uses, move |d, cmd| {
                     record_dispatch(d, cmd, layout, pipeline, push, groups);
                 });
@@ -917,16 +953,16 @@ impl FluidSolver {
                 for _ in 0..CYCLES {
                     for level in 0..LEVELS - 1 {
                         #[allow(clippy::cast_possible_truncation)]
-                        for parity in 0..2_u32 {
+                        for parity in 0..SMOOTHS {
                             go(&mut graph, "fluid_jacobi", p.jacobi,
-                               [level as u32, 0, parity, 0], level_groups[level], jacobi);
+                               [level as u32, 0, parity % 2, 0], level_groups[level], jacobi);
                         }
                         #[allow(clippy::cast_possible_truncation)]
                         go(&mut graph, "fluid_restrict", p.restrict,
                            [(level + 1) as u32, 0, 0, 0], level_groups[level + 1],
                            &[(bmk, ro), (brh, rw), (bpa, rw), (bpb, rw)]);
                     }
-                    for parity in 0..4_u32 {
+                    for parity in 0..COARSE_SMOOTHS {
                         #[allow(clippy::cast_possible_truncation)]
                         go(&mut graph, "fluid_jacobi", p.jacobi,
                            [(LEVELS - 1) as u32, 0, parity % 2, 0], level_groups[LEVELS - 1],
@@ -937,9 +973,9 @@ impl FluidSolver {
                         go(&mut graph, "fluid_prolong", p.prolong, [level as u32, 0, 0, 0],
                            level_groups[level], &[(bmk, ro), (bpa, rw)]);
                         #[allow(clippy::cast_possible_truncation)]
-                        for parity in 0..2_u32 {
+                        for parity in 0..SMOOTHS {
                             go(&mut graph, "fluid_jacobi", p.jacobi,
-                               [level as u32, 0, parity, 0], level_groups[level], jacobi);
+                               [level as u32, 0, parity % 2, 0], level_groups[level], jacobi);
                         }
                     }
                 }
@@ -1082,8 +1118,10 @@ mod tests {
     fn the_constant_block_is_the_shape_the_shader_reads() {
         // 5 vectors, 4 levels of 32 bytes, 16 device addresses.
         assert_eq!(size_of::<Level>(), 32);
-        assert_eq!(size_of::<Consts>(), 80 + 128 + 128);
-        assert_eq!(size_of::<Push>(), 24);
+        // Five vectors, four levels of 32 bytes, seventeen device addresses.
+        assert_eq!(size_of::<Consts>(), 80 + 128 + 17 * 8);
+        assert_eq!(size_of::<Push>(), 32);
+        assert_eq!(std::mem::offset_of!(Push, args), 16, "see the note on `Push::pad`");
     }
 
     /// Water fills the bottom half of a sealed tank and stays there.
@@ -1114,10 +1152,38 @@ mod tests {
         let mut out = (0.0, 0.0);
         for _ in 0..120 {
             let step = solver.step(&FluidInputs { solids: &[], probes: &probes });
-            out = (step.probes[0].fraction, step.probes[1].fraction);
+            out = (step.probes[0].surface, step.probes[0].wetness);
         }
-        assert!(out.0 > 0.9, "the tank drained: submerged probe read {}", out.0);
-        assert!(out.1 < 0.1, "the tank overflowed: probe above the surface read {}", out.1);
+        // The tank is 1.6 m tall centred on the origin and half full, so the
+        // surface sits at y = 0 give or take a cell.
+        assert!(out.1 > 0.9, "the tank drained: only {} of the ring found water", out.1);
+        assert!(
+            out.0.abs() < 0.1,
+            "the surface settled at {} rather than 0 — the tank is not holding its volume",
+            out.0
+        );
+
+        // A solid ball driven down through the surface must throw water: the
+        // level beside it rises. **This is the two-way half**, and it fails
+        // silently — a body that displaces nothing still floats correctly,
+        // because buoyancy reads the surface and the surface is flat.
+        let mut peak: f32 = 0.0;
+        for tick in 0_u8..40 {
+            let y = 0.6 - f32::from(tick) * 0.02;
+            let ball = FluidSolid {
+                centre: [0.0, y, 0.0],
+                half: [0.3; 3],
+                radius: 0.3,
+                ball: true,
+                velocity: [0.0, -1.2, 0.0],
+            };
+            let watch = [FluidProbe { at: [0.45, 0.0, 0.0], radius: 0.08 }];
+            let s = solver.step(&FluidInputs { solids: &[ball], probes: &watch });
+            let v = s.probes[0].velocity;
+            peak = peak.max(v[0].hypot(v[1]).hypot(v[2]));
+        }
+        println!("displacement: the water beside the ball reached {peak:.4} m/s");
+        assert!(peak > 0.05, "a ball driven into the tank moved nothing: {peak}");
 
         let mut step = 0.0;
         let mut wait = 0.0;

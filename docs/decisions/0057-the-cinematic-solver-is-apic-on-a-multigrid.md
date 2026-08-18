@@ -83,10 +83,19 @@ index and of nothing else — and it is thirty lines rather than a block radix
 sort. Buckets hold about eight particles, so it is ~32 comparisons in the
 common case.
 
-The ceiling is honest and named: `FLUID_SORT_MAX = 128`. Every particle is
-still stored and still transferred; only the *ordering* past 128 in one cell is
-left in arrival order. A cell holding 128 particles is sixteen times rest
-density, which means the solve has already failed.
+**The ceiling on that sort is not a performance knob, and setting it wrong
+reproduced the exact failure this section is about.** `FLUID_SORT_MAX` began at
+128 — sixteen times rest density, and surely unreachable. `slosh.loom` at
+`--sim 150`, rendered in three fresh processes, gave **three different hashes,
+7.2% of pixels apart with a worst channel of 153**. At 1024 the same three
+renders are **byte-identical**. So a cell in that scene really does hold more
+than 128 particles, the tail past the cap kept arrival order, and the gather
+summed its floats in that order.
+
+That is worth stating plainly: the trap was written down, the mechanism to
+avoid it was implemented, and it still fired — through a ceiling that looked
+like a safety valve and was actually the hole. Anything that leaves *any*
+particle's rank to arrival order is the same defect.
 
 The two integer atomics that remain — the histogram and that cursor — are
 licensed because integer addition **is** associative: the count and the set are
@@ -96,9 +105,9 @@ back by the sort.
 ### 4. Multigrid, not PCG — ADR 0053 §5
 
 A MAC grid in storage buffers. Pressure is solved with a **fixed 3 V-cycles**,
-4 levels (64→8), damped Jacobi at ω = 2/3, 2 pre and 2 post smooths, four
+4 levels (64→8), damped Jacobi at ω = 2/3, **4 pre and 4 post smooths**, twelve
 sweeps at the coarsest level, full-weighting restriction, trilinear
-prolongation.
+prolongation. The smooth counts are measured, not chosen — see failure 2 below.
 
 - **No residual test and no early exit, ever.** The dispatch sequence must be a
   fixed function of the tick alone, which is also ADR 0053 §6's reworded
@@ -112,7 +121,10 @@ prolongation.
 - Free surface by marker cells — air is a Dirichlet zero and still counts in
   the diagonal; solid is Neumann and does not.
 - Coarse markers are **restricted, not re-baked**: a coarse cell is solid only
-  when all eight children are, and fluid when any is.
+  when all eight children are, and fluid when **a majority** of them are.
+  "Fluid when any is" was tried first and puts the coarse Dirichlet surface a
+  level above the fine one, so the correction coming back down is a pressure
+  the fine surface never asked for.
 
 ### 5. Substeps and the CFL guard
 
@@ -128,15 +140,29 @@ ADR 0053 §3. One `vkQueueSubmit` and one fence wait per tick, so tick N reads
 the result of exactly N dispatches. Asynchronous or frame-delayed is forbidden:
 it would lose the tick ordering, which is the sequencing the tier keeps.
 
-**Probes, not the grid.** For each pontoon inside the domain, one `float4` in
-and two out: `{fluid_fraction, velocity xyz}` and `{pressure}`. A few hundred
-bytes a tick, not megabytes. The probe kernel is one thread per probe and its
-sample loop is serial on purpose — there is nothing to parallelise in 216
-samples, and a serial loop is a summation order the buffer decides.
+**Probes, not the grid.** For each pontoon, one `float4` in and two out:
+`{surface_y, velocity xyz}` and `{wetness}`. A few hundred bytes a tick, not
+megabytes. The probe kernel is one thread per probe and its loops are serial on
+purpose — there is nothing to parallelise in eight columns of sixty-four cells,
+and a serial loop is a summation order the buffer decides.
 
-Forces reuse the existing pontoon shape: `ρ g V_sphere · fraction` up, plus
-drag against `(u_fluid − v_body)`, through the same `apply_force_torque` path
-`buoyancy.rs` uses. **The body pushes back through the rasterised coverage** —
+**What comes back is a surface height, not a fraction, and that is the one
+subtlety of the readback.** The body is rasterised into the solid mask so that
+it pushes the fluid, which means the cells it occupies hold no particles — so a
+column *through* a pontoon reports the water level at the bottom of the hull
+and a floating crate reads as dry. The level a body floats in is the level of
+the water *beside* it, which is what a waterline is, so the probe scans eight
+columns on a ring at 1.5 radii and averages. A column's surface is its highest
+cell holding at least **half** rest density: one particle is a fleck of spray,
+and taking the top of the highest speck drifts upward over a run and reads as a
+tank slowly gaining volume.
+
+The CPU then turns that height into a displaced volume with the *same*
+`submerged_volume` spherical cap the deterministic tier uses, and calls the
+*same* `loom_water::buoyancy::solve` — the surface arrives in the field the
+wavelet pool already writes and the velocity in the field the river already
+writes. **One force law, two sources of surface**, and no second coefficient to
+disagree with the first. **The body pushes back through the rasterised coverage** —
 a face touching a solid takes that solid's own velocity, so the coupling is
 two-way with no second force term to disagree with the first.
 
@@ -176,8 +202,13 @@ At 64×32×64 cells and 524,288 particles on a 4090 capped to 300 W:
 
 | | ms/tick |
 | --- | --- |
-| whole step, CPU rasterisation included | **9.73** |
-| of which the fence wait | 8.76 |
+| whole step, CPU rasterisation included | **6.93** |
+| of which the fence wait | 5.87 |
+
+And on `slosh.loom`'s own domain — 64x16x32 cells, 131,072 particles — the
+whole step is **3.1 ms/tick** with 2.3 ms of it the device round trip, so a
+600-tick catch-up costs 1.9 s of wall clock. The device sync is therefore
+roughly three quarters of the cost and is not the part worth attacking.
 
 The **budget in the brief was 3 ms and it is not met**, and the reason is
 structural rather than a missing optimisation: the gather P2G reads about 288
@@ -200,6 +231,43 @@ is not done, and it is where the remaining factor of three is.
 Two V-cycles or four make **no measurable difference** (13.90 ms at three,
 13.91 at one, both at two substeps) — the pressure solve is not the cost, which
 is worth knowing before anyone optimises it.
+
+## The two failures found by measurement, and one still open
+
+**1. The push block's `uint4` aligns to sixteen, and a naive Rust mirror put it
+at eight.** Slang emits `OpMemberDecorate %FluidPush 1 Offset 16`; `{u64,
+[u32;4]}` in Rust is offset 8. Every dispatch then read its level, axis and
+parity from past the end of a 24-byte push range, which the driver serves as
+zero rather than faulting. The symptom was a tank of water that held its shape
+perfectly and never moved a millimetre — `axis` was always 0, so `if (axis ==
+1) v += gravity * dt` never fired, and a fluid with no gravity is a lattice.
+Two visual checks and a settling test all passed on it. `spirv-dis | grep
+OpMemberDecorate` is the check and a layout test now pins it.
+
+**2. Two pre and two post smooths do not converge, and an under-converged
+projection does not jitter — it compresses.** A settled tank held its surface
+for forty ticks and then collapsed: 0.00 m at tick 40, −0.04 at 80, −0.65 at
+119, accelerating, until the water was packed five times over at the bottom.
+Sixty flat Jacobi sweeps with no multigrid at all were worse (−0.45 by tick
+40), which is what identified it as convergence rather than discretisation: an
+incompressible projection only removes the divergent part of the velocity
+field, and what it leaves behind at the free surface has nothing pushing back.
+**4 pre + 4 post with twelve sweeps at the coarsest level holds the surface at
+exactly 0.0000 through 120 ticks** — and costs *less* than the broken version,
+because a collapsed tank puts forty particles in a cell and the P2G gather pays
+for every one.
+
+**3. Still open: `slosh.loom` is reproducible at tick 150 and is not at 300.**
+Three fresh processes agree byte for byte at `--sim 150` — the tick the
+`GOLDEN` row is taken at — and disagree at `--sim 300` and `--sim 600`. The
+step cost at 600 rises to **59.9 ms/tick from 3.1**, which is the signature of
+the same compression as failure 2: cells accumulate far past rest density, the
+gather slows in proportion, and buckets pass even the 1024 sort ceiling. So the
+remaining nondeterminism is a *symptom* of a remaining volume instability under
+sustained solid coupling, not an independent defect, and the fix is more
+convergence or a density term in the right-hand side rather than a bigger sort.
+**Until that is closed, the tier is honest only over the first few seconds of a
+scene**, and that is what the `GOLDEN` row measures.
 
 ## Consequences
 

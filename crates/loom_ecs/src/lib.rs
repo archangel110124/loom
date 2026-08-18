@@ -597,6 +597,16 @@ impl World {
         self.order.iter().find_map(|e| self.water.get(*e))
     }
 
+    /// The scene's water and the entity carrying it.
+    ///
+    /// The entity comes back because a cinematic domain is centred on the node
+    /// (ADR 0053 §5 — anchored to sim state, never to the camera), and the
+    /// caller needs the global transform to place it.
+    #[must_use]
+    pub fn water_node(&self) -> Option<(Entity, &serde_json::Value)> {
+        self.order.iter().find_map(|e| self.water.get(*e).map(|w| (*e, w)))
+    }
+
     /// The scene's waterfall and the entity carrying it, if it authors one.
     ///
     /// **The first, and the validator refuses a second** — the environment

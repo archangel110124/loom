@@ -1,0 +1,215 @@
+# A bounded tank of volumetric water with a pillar in it, and a ball dropped in.
+#
+# **The first scene in this repository to leave the deterministic tier** — ADR
+# 0053, and the solver is ADR 0057. Its water is not a height field with a
+# closed form: it is half a million APIC particles in a 64x16x32 MAC grid,
+# advanced by compute dispatches inside the fixed step and read back
+# synchronously so that the ball floats on what the solver actually did.
+#
+# What it exists to show, and what none of the other water scenes can:
+#
+#   - water that **parts volumetrically** round a solid, rather than a surface
+#     that happens to be drawn with a hole in it
+#   - a **free surface with a shape of its own** — piled against a wall after a
+#     slosh, thin over the pillar's shoulders, hollow behind the ball
+#   - **two-way coupling**: the ball pushes the water (its cells become solid
+#     cells carrying its velocity) and the water pushes the ball (the free
+#     surface beside each pontoon comes back over PCIe every tick)
+#
+# Reference image 65 is the bar, and this is that image without a surface mesh:
+# the particles themselves are drawn, as velocity-stretched droplets through
+# the one particle renderer.
+#
+# **The tank's walls are the domain, not the geometry.** `extent` is
+# [6.4, 1.6, 3.2] centred on the Water node, so the solver's box runs from
+# world y = 0 to y = 1.6 and treats everything outside it as solid. The stone
+# sides below are *scenery standing just outside that box* — they are what
+# makes the picture read as a tank, and they are deliberately clear of every
+# cell centre so that the obstacle bake does not eat the water's own edges.
+# The pillar is the one piece of geometry that is inside on purpose.
+#
+# **The extent is what sets the cost**, not the size in metres: the grid is 64
+# cells along the longest axis whatever that axis measures, so a tall tank
+# costs more than a long one. 6.4 x 1.6 x 3.2 gives 10 cm cells and 32,768 of
+# them, which is a quarter of what a cube of the same longest axis would be —
+# and a long shallow tank is also the shape a slosh reads best in, because the
+# wave has somewhere to run.
+#
+# **This scene must never enter `DETERMINISM_SCENES` or the pinned-hash tests.**
+# ADR 0053 §3: it is reproducible on this device, driver and dispatch order and
+# nowhere else, so a hash pinned here means nothing on another machine.
+# `cargo xtask repeat` is the gate that still applies, and it is the one that
+# proves the solver has no float reduction in it.
+
+[scene]
+format = 1
+id = "0c9f4a71-6b52-4d8e-9137-5ae2c8b04f36"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[asset]]
+key = "sphere"
+path = "sphere"
+
+[[node]]
+name = "Tank"
+
+  [node.components.Environment]
+  sun_direction = [0.34, 0.68, -0.65]
+  sun_strength = 1.35
+  sun_color = [1.0, 0.96, 0.89]
+  ambient = 0.60
+  sky_zenith = [0.13, 0.27, 0.50]
+  sky_horizon = [0.64, 0.72, 0.78]
+  fog_density = 0.0015
+  fog_falloff = 0.05
+
+  # Still air. Nothing here is wind-driven and a default breeze would only put
+  # a spectrum on a surface the solver already owns.
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 0.0
+  gustiness = 0.0
+  turbulence = 0.0
+
+# The solver's domain, anchored to this node and to nothing else (ADR 0053 §5 —
+# a camera-following domain would make physics depend on where the viewer
+# stands). Centre y = 0.8 with a 1.6 m extent puts the floor of the box exactly
+# on world y = 0, which is the top of the stone below.
+#
+# `fill = 0.5` is the whole initial condition: 0.8 m of water, eight particles
+# per cell on a jittered lattice. There is deliberately no shape function — the
+# first three ticks of gravity rearrange anything one could author.
+[[node]]
+name = "Water"
+parent = "Tank"
+transform = { pos = [0.0, 0.8, 0.0] }
+
+  [node.components.WaterBody]
+  kind = "lake"
+  simulation = "cinematic"
+  extent = [6.4, 1.6, 3.2]
+  fill = 0.5
+  surface_height = 0.8
+  density = 1000.0
+  drag = 2.0
+
+# The stone the tank is made of. Every piece stands clear of the domain: the
+# sides are at x = +-3.275 against a domain edge of 3.2 and a last cell centre
+# at 3.15, so no cell centre lands inside one. Getting this wrong is not a
+# validation error — it is a strip of water quietly frozen along each wall.
+[[node]]
+name = "Floor"
+parent = "Tank"
+transform = { pos = [0.0, -0.15, 0.0], scale = [3.5, 0.15, 1.85] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.29, 0.27]
+  roughness = 0.85
+
+[[node]]
+name = "WallLeft"
+parent = "Tank"
+transform = { pos = [-3.35, 0.5, 0.0], scale = [0.15, 0.65, 1.85] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.33, 0.31]
+  roughness = 0.85
+
+[[node]]
+name = "WallRight"
+parent = "Tank"
+transform = { pos = [3.35, 0.5, 0.0], scale = [0.15, 0.65, 1.85] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.33, 0.31]
+  roughness = 0.85
+
+[[node]]
+name = "WallBack"
+parent = "Tank"
+transform = { pos = [0.0, 0.5, -1.75], scale = [3.5, 0.65, 0.15] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.33, 0.31]
+  roughness = 0.85
+
+# The front is low, because it is what the camera looks over.
+[[node]]
+name = "WallFront"
+parent = "Tank"
+transform = { pos = [0.0, 0.2, 1.75], scale = [3.5, 0.35, 0.15] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.33, 0.31]
+  roughness = 0.85
+
+# **The obstacle, and the only geometry inside the domain.** It is baked into
+# the solid mask at load, so the water flows round it rather than through it,
+# and a slosh breaks against it — which is the half of reference image 65 that
+# a bare tank cannot show.
+[[node]]
+name = "Pillar"
+parent = "Tank"
+transform = { pos = [0.4, 0.75, 0.0], scale = [0.28, 0.75, 0.28] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.42, 0.40, 0.36]
+  roughness = 0.7
+
+# The ball, dropped from just under the domain's ceiling at one end.
+#
+# 0.7 m across is seven cells, which is the smallest thing this grid can
+# usefully push water with — a body under about two cells wide rasterises into
+# a mask the solver can barely see. At 520 kg/m^3 it floats about half out,
+# after going under on the entry and coming back up.
+[[node]]
+name = "Ball"
+parent = "Tank"
+transform = { pos = [-2.1, 3.4, 0.0], scale = [0.45, 0.45, 0.45] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.86, 0.31, 0.18]
+  roughness = 0.30
+
+  [node.components.RigidBody]
+  dynamic = true
+  # A 0.9 m sphere is 0.382 m^3; at 630 kg/m^3 that is 240 kg.
+  mass = 240.0
+
+  [node.components.Buoyancy]
+
+# **Close, and deliberately so.** Every other water scene in this repository is
+# framed from ten or twenty metres, where a height field and a volume look
+# identical. The whole claim of the cinematic tier is visible only near enough
+# to see individual droplets thrown off a breaking front.
+[[node]]
+name = "Camera"
+parent = "Tank"
+transform = { pos = [0.0, 2.3, 5.4], rot_euler = [-16.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 48.0
