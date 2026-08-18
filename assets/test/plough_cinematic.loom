@@ -1,0 +1,245 @@
+# A driven hull ploughing a volumetric pool — reference image 64, in full.
+#
+# **This is the tier comparison the docs point at.** `plough.loom` is the same
+# event on a height field: a crate down a ramp into a dead-calm pool, with the
+# foam field remembering where the hull went. Everything it can show is a
+# *surface* — a track of white drawn on a sheet that never opens. Put the same
+# event on the cinematic tier and three things appear that a height field
+# cannot express at any resolution:
+#
+#   - the water **parts** around the bow, as volume moved aside rather than a
+#     shape drawn on a plane
+#   - there is a **dry hollow** behind the hull, with the bed visible through it
+#   - the sheets thrown off the bow are **connected to the water they came
+#     from**, because they are the same fluid
+#
+# Keep both scenes. The pair is the argument for ADR 0053 existing.
+#
+# **The hull is driven by a ramp and nothing else**, exactly as `plough.loom`
+# is: gravity, a slope past `atan(0.8)` and rapier. There is no scripted
+# velocity anywhere, so the entry is an impact and the track is momentum, which
+# is what makes the picture honest. The ramp stands entirely outside the
+# domain — its lowest point is at x = -3.28 against a domain edge at -3.20 —
+# because anything inside is baked into the solid mask at load and a ramp in
+# the pool is a wall in the pool.
+#
+# **The pool's shape is chosen for cost, not for looks.** The grid is 64 cells
+# along the *longest* axis whatever that axis measures, so 6.4 x 1.6 x 3.2 is
+# 32,768 cells and a cube of the same length would be eight times that. A long
+# shallow tank is also the shape a plough reads best in.
+#
+# **Never in `DETERMINISM_SCENES` or the pinned-hash tests** — ADR 0053 §3.
+# `cargo xtask repeat` is the gate that still applies.
+
+[scene]
+format = 1
+id = "6b2d90fe-4a17-4c83-95e2-08d3fb761a45"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[asset]]
+key = "tiles_albedo"
+id = "bbce2fd2-83d0-410b-87b8-9e4b62ea4a64"
+path = "../textures/tiles_albedo.png"
+
+[[asset]]
+key = "tiles_normal"
+id = "39180893-483f-46b7-b946-f252aca36f23"
+path = "../textures/tiles_normal.png"
+
+[[node]]
+name = "Plough"
+
+  # Low and behind the camera's shoulder, so the foam and the thrown sheets are
+  # lit from the front and read white rather than as a grey texture —
+  # `whitecaps.loom`'s reasoning, and `plough.loom` uses the same sun.
+  [node.components.Environment]
+  sun_direction = [0.24, 0.58, -0.78]
+  sun_strength = 1.30
+  sun_color = [1.0, 0.96, 0.88]
+  ambient = 0.55
+  sky_zenith = [0.14, 0.28, 0.52]
+  sky_horizon = [0.62, 0.70, 0.76]
+  fog_density = 0.002
+  fog_falloff = 0.04
+
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 0.0
+  gustiness = 0.0
+  turbulence = 0.0
+
+# The domain, anchored to this node (ADR 0053 §5). Centre y = 0.8 with a 1.6 m
+# extent puts the floor of the box exactly on world y = 0, which is the top of
+# the bed below; `fill = 0.5` is eight cell layers, 0.8 m, which is where
+# `surface_height` comes from.
+[[node]]
+name = "Water"
+parent = "Plough"
+transform = { pos = [0.0, 0.8, 0.0] }
+
+  [node.components.WaterBody]
+  kind = "lake"
+  simulation = "cinematic"
+  extent = [6.4, 1.6, 3.2]
+  fill = 0.5
+  surface_height = 0.8
+  density = 1000.0
+  drag = 0.6
+
+# The tiled bed. Straight lines under the water are what make the hollow behind
+# the hull legible: a dry patch over a flat colour is a dry patch over a flat
+# colour. Its top face is on world y = 0, clear of the first cell centre at
+# 0.05.
+[[node]]
+name = "Bed"
+parent = "Plough"
+transform = { pos = [0.0, -0.2, 0.0], scale = [3.6, 0.2, 2.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.82, 0.80, 0.76]
+  roughness = 0.75
+  albedo_map = { asset = "tiles_albedo" }
+  normal_map = { asset = "tiles_normal" }
+  uv_scale = [2.0, 2.0]
+  triplanar = true
+
+# The kerbs. Their tops are at the still water line, which is what lets a raised
+# camera see the pool at all — a kerb above it hides the water and a kerb below
+# it leaves the water hanging over a ledge. Every one stands clear of a cell
+# centre: |z| = 1.60 against a last centre at 1.55, x = 3.20 against 3.15.
+[[node]]
+name = "KerbBack"
+parent = "Plough"
+transform = { pos = [0.0, 0.4, -1.7], scale = [3.6, 0.4, 0.1] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.36, 0.33, 0.30]
+  roughness = 0.85
+
+[[node]]
+name = "KerbFront"
+parent = "Plough"
+transform = { pos = [0.0, 0.4, 1.7], scale = [3.6, 0.4, 0.1] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.36, 0.33, 0.30]
+  roughness = 0.85
+
+[[node]]
+name = "KerbEnd"
+parent = "Plough"
+transform = { pos = [3.3, 0.4, 0.0], scale = [0.1, 0.4, 1.8] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.36, 0.33, 0.30]
+  roughness = 0.85
+
+# **The ramp. Fifty-five degrees, and the number is physics rather than taste.**
+# `loom_physics` gives every collider a friction of 0.8, so a body only slides
+# once the slope passes `atan(0.8)` = 38.7°. `plough.loom` records the
+# measurement: at the 22° it was first authored with, the crate sat still for
+# the whole run and the scene rendered an empty pool.
+#
+# Its lowest point is at x = -3.28, y = 1.14 — outside the domain and above the
+# water, so the hull leaves it in the air and enters the pool as an impact.
+#
+# **The sign of `rot_euler.z` decides which way the hull slides, and reading it
+# off the rotation matrix got it backwards.** At -55 the crate slid away from
+# the pool and ended at x = -8.3; at +55 it reaches x = -1.3 by tick 120. The
+# check is one line and worth doing before rendering anything:
+#
+#     loom sim assets/test/plough_cinematic.loom --ticks 120 \
+#       --assert "Plough/Hull.x > 100"
+#
+# which fails and prints where the hull actually is.
+[[node]]
+name = "Ramp"
+parent = "Plough"
+transform = { pos = [-5.0, 3.6, 0.0], rot_euler = [0.0, 0.0, 55.0], scale = [3.0, 0.15, 1.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.38, 0.34, 0.30]
+  roughness = 0.85
+
+  [node.components.BoxCollider]
+  half_extents = [1.0, 1.0, 1.0]
+
+# **The hull.** A 0.7 m crate at 620 kg/m³, heavy enough to shoulder the water
+# aside rather than skate over it and light enough to float rather than sink out
+# of the shot — `plough.loom`'s hull exactly, so the pair differs in the tier
+# and in nothing else.
+#
+# A crate and not a sphere because `BoxCollider` is the only collider a scene
+# can author; a sphere with a box collider would be a lie the physics tells
+# about the picture.
+[[node]]
+name = "Hull"
+parent = "Plough"
+transform = { pos = [-5.00, 4.60, 0.0], rot_euler = [0.0, 0.0, 55.0], scale = [0.35, 0.35, 0.35] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.80, 0.26, 0.14]
+  roughness = 0.35
+
+  [node.components.RigidBody]
+  dynamic = true
+  # 0.7 m cubed is 0.343 m³; at 620 kg/m³ that is 213 kg.
+  mass = 213.0
+
+  [node.components.BoxCollider]
+  half_extents = [1.0, 1.0, 1.0]
+
+  [node.components.Buoyancy]
+
+# A post, for the reason `pool.loom` and `plough.loom` both have one: a still of
+# a moving thing needs something that is not moving to be read against. Outside
+# the domain, so it is scenery and not an obstacle.
+[[node]]
+name = "Post"
+parent = "Plough"
+transform = { pos = [3.9, 0.7, -1.2], scale = [0.12, 1.1, 0.12] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.30, 0.26]
+  roughness = 0.9
+
+# **Raised and looking down, which is the opposite of `plough.loom`'s camera and
+# is the whole difference the tier makes.** A height field's wake is a pattern
+# *on* a surface and reads best along its length from near water level. A
+# volume's is a hole *in* one, and a hollow is only a hollow from above: at eye
+# level the same frame is a flat sheet with white on it. Reference image 64 is
+# shot from above the pool for exactly this reason.
+#
+# Authored, because the metric harnesses frame whole-scene bounds and this
+# scene's bounds include a ramp four metres outside the pool.
+[[node]]
+name = "Camera"
+parent = "Plough"
+transform = { pos = [-0.80, 3.60, 5.20], rot_euler = [-32.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 46.0

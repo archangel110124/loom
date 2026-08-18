@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 61] = [
+const SCENES: [&str; 63] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -173,6 +173,12 @@ const SCENES: [&str; 61] = [
     // exactly what the field exists for. Also in `GOLDEN`.
     "assets/test/plough.loom",
     "assets/test/slosh.loom",
+    // The cinematic tier's other two — ADR 0057 addendum. `ribbon` is the only
+    // scene with an inflow at all (a `Cascade` over cinematic water, recycled
+    // by ordinal) and `plough_cinematic` is the only one where a driven hull
+    // opens a hollow in a volume. Both in `GOLDEN`, where the reasoning is.
+    "assets/test/ribbon.loom",
+    "assets/test/plough_cinematic.loom",
     // The falling sheet — ADR 0054. Two of them, because the whole claim is
     // that one authored discharge moves the picture between them: `spout` is
     // past its break length for the last third of a 2 m drop and `cascade` is
@@ -321,7 +327,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 48] = [
+const GOLDEN: [(&str, &str, &[&str]); 50] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -749,6 +755,31 @@ const GOLDEN: [(&str, &str, &[&str]); 48] = [
     // else, which is exactly what `cargo xtask repeat` checks and exactly what
     // a pinned hash would claim wrongly.
     ("slosh", "assets/test/slosh.loom", &["--sim", "150"]),
+    // **The cinematic free surface, and the two scenes it exists for** — ADR
+    // 0057 addendum. Both are marching-cubes meshes shaded by
+    // `waterFragmentMain`, so they cover a rendering path nothing else does:
+    // refraction, absorption and a traced reflection over geometry that came
+    // out of a fluid solver rather than out of a closed form.
+    //
+    // `ribbon` at 180 is 3 s after the spout starts and 1.5 s after the stream
+    // reaches the pool — the fall is fully established and the pool has not yet
+    // finished filling in behind it. Both 60 and 400 show the same connected
+    // sheet; 180 is chosen because it is where the impact churn is widest.
+    //
+    // **`plough_cinematic` at 110 and not at 300, and the tick is load
+    // bearing.** The hull enters at about 60, ploughs to a stop by 120 and has
+    // settled by 150; 110 is the one frame with all three of the reads the tier
+    // exists for in it at once — water parted round the bow, a hollow behind it
+    // with the tiled bed visible through the trough, and connected sheets
+    // thrown off the entry. At 300 it is a still pool with foam on it, which
+    // `plough.loom` can already draw, and it costs 83 seconds to render because
+    // the projection has compressed by then (see `FLUID_SORT_MAX`).
+    //
+    // **Neither may enter `DETERMINISM_SCENES` or the pinned-hash tests** — ADR
+    // 0053 §3. `cargo xtask repeat` is the gate that applies, and both are
+    // byte-identical across three fresh processes at these ticks.
+    ("ribbon", "assets/test/ribbon.loom", &["--sim", "180"]),
+    ("plough_cinematic", "assets/test/plough_cinematic.loom", &["--sim", "110"]),
     // **The Worthington jet, which does not exist at tick 50 and never could.**
     //
     // A splash is a sequence and Loom used to fire all of it at t = 0; the jet

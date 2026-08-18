@@ -279,3 +279,141 @@ scene**, and that is what the `GOLDEN` row measures.
 - The tier does not leak: only bodies whose pontoons are inside the domain are
   touched, and a cinematic `WaterBody` applies **no** analytic buoyancy to
   anything, so no body is pushed by both.
+
+---
+
+# Addendum — the free surface, and where the reproducibility actually broke
+
+- **Date:** 2026-08-18
+- **Status:** **proposed** — needs human approval with the rest of this ADR.
+
+## The surface is marched on the CPU, and that is forced rather than chosen
+
+The plan was marching cubes as a compute pass: a counting pass, an exclusive
+scan for the output offsets, an emit pass, and an indirect draw, all so that no
+triangle's position depends on the order threads happened to append.
+
+**It cannot go there, and the reason is in §"Why this owns a device" of
+`fluid.rs`.** The solver holds a Vulkan device of its own — `loom_cli` has no
+renderer and `loom sim` has no window — so a vertex buffer written on the
+solver's device is not something the renderer's device can draw from. The
+surface crosses the process boundary as plain `f32` whatever is built.
+
+Once it must cross anyway, the GPU version buys nothing. A CPU loop over cells
+in index order emits triangles in index order with **no atomic and no reduction
+anywhere**, which is a stronger guarantee than the scan was going to give, in a
+tenth of the code. `crates/loom_render/src/fluid_surface.rs` is 350 lines
+including its tests.
+
+It is **marching tetrahedra**, not cubes: six tets about the cube's main
+diagonal need no case table at all where marching cubes needs 256 hand-written
+rows. Winding is not decided either — the water pipeline culls nothing and the
+normal comes from the density gradient, so a back-facing triangle shades
+identically.
+
+Two things about the field it marches:
+
+- **A trilinear splat, not `cellCount`.** A count is a step function of the cell
+  a particle is in, so an isosurface on it is a staircase at the cell size —
+  10 cm on `slosh.loom`, which reads as Minecraft water. The splat is fixed-point
+  integer atomics (ADR 0053 §5); a float `InterlockedAdd` here would make the
+  surface depend on scheduler order.
+- **The normal is differentiated from a copy smoothed six passes further than
+  the one the surface's position comes from.** Shared, the far half of a tank
+  reads as crushed tinfoil: the fraction field is a count of eight, its shot
+  noise is ±12%, and a gradient differentiates exactly that. Smoothed together
+  instead, the water visibly pulls in from the walls.
+
+## Shading: there is no second water look
+
+The mesh is drawn inside the existing water block by a new vertex entry point
+and **the existing `waterFragmentMain`**, so cinematic water gets two-leg Snell
+refraction (ADR 0048), per-channel Beer–Lambert, roughness-aware Fresnel, one
+traced reflection ray with the analytic sky as its miss (ADR 0019) and 4x MSAA.
+Water pass on `slosh.loom` at 1920x1080: **0.193 ms for 22,512 triangles**. The
+march is 7–10 ms of CPU, once per frame *drawn* rather than once per tick.
+
+**The fluid mesh does not enter the TLAS, and that is deferred loudly.** The
+TLAS holds meshes only; entering it means a per-frame BLAS refit costed at
+0.3–0.8 ms and unmeasured. The consequence is that the fluid does not appear in
+*other* surfaces' traced reflections — the same accepted gap as the nappe (ADR
+0054 §6). Revisit trigger: a scene where the fluid must visibly appear in
+another surface's reflection on camera.
+
+## Whitewater: the readback, into the field that already advects
+
+Two CPU routes and no new machinery. A wetted probe deposits
+`saturate(|v_water − v_body| / 2)` into `loom_water::foam`; a probe whose
+wetness crosses zero is a submersion the *solver* resolved and deposits at full
+strength and fires slice 3's SPLASH event. `waterFragmentMain` already floors
+its coverage on `loom_foam_at` and the cinematic vertex path reaches it, so the
+drawing side needed nothing. The honest ceiling is `FOAM_CELL` = 0.5 m, chosen
+for open water: on `slosh.loom`'s tank, six cells across, the foam reads as a
+patch rather than as lace.
+
+`float_cinematic` returned before the foam field was ever stepped, so a
+cinematic scene carried an allocated field that nothing wrote and nothing read.
+
+## `FLUID_SORT_MAX` was too low for the second time — and failure 1 and failure 3 are one bug
+
+§3 above records `slosh.loom` giving three different PNGs past ~200 ticks and
+attributes it to the sort ceiling; §"failure 3" records the volume instability
+separately. **They are the same defect seen twice.**
+
+`ribbon.loom` — a cascade landing in a shallow pool — packs a cell to well over
+a thousand particles during the transient. Past `FLUID_SORT_MAX` the bucket's
+tail keeps its arrival order, the P2G gather sums those particles' floats in
+that order, and the whole float-atomic ban is defeated with no atomic in sight.
+Three fresh processes gave three pictures **37% of pixels apart**. At 4096:
+
+| scene | tick | three fresh processes |
+| --- | --- | --- |
+| `ribbon` | 180 | byte-identical |
+| `ribbon` | 400 | byte-identical |
+| `plough_cinematic` | 110 | byte-identical |
+| `slosh` | 150 | byte-identical |
+| `slosh` | 600 | byte-identical **(§3's failing run)** |
+
+The cost is the O(k²) insertion sort: `ribbon` at 180 is 52 ms a tick against
+`slosh`'s 3, and `plough_cinematic` at 300 is 277 ms a tick, which is 83 seconds
+to render one still. **That is the volume instability presenting as time.**
+
+Two undeclared buffer reads were found while chasing it, and both are real
+(never-do #4). `fluidDivergenceMain` and `fluidProbeMain` both read `cellCount`
+without the graph being told; the probe one is the readback pass, so an
+undeclared dependency there does not stay on the GPU — it goes through buoyancy
+into rapier and comes back next tick as the solid mask. Every device-local
+buffer is also zeroed in the first submit now: fresh device memory is undefined
+and the coarse multigrid levels are only ever partially written.
+
+## A density correction was built, measured, and rejected on the pictures
+
+Steering the target divergence by how over-full a cell is (Ando et al.) is the
+textbook fix for failure 3, and it works on the number it targets: `ribbon`'s
+peak occupancy fell from 850 particles to 46 and its step from 37 ms to 2.4.
+
+It is not shipped, because all three formulations broke a scene:
+
+| form | what happened |
+| --- | --- |
+| one-sided from rest density | `slosh` became shattered foam filling the frame — eight particles a cell is a *mean* with σ = 2.8, so half the cells are over-full at any instant and a term that can only push apart has no restoring force |
+| symmetric | the free surface collapsed: a surface cell genuinely holds two or three particles and pulling it toward eight is the original compression under a new name (peak 1,207, 157 ms a tick) |
+| one-sided past a 2× deadband | still threw water out of the tank |
+
+**The compression is real and the fix is not this.** The next thing to try is a
+proper free-surface boundary condition (a ghost-fluid pressure at the air
+interface rather than a hard Dirichlet zero), which is what makes the projection
+conserve volume in the first place, and a block radix sort with scan-derived
+ranks so that `FLUID_SORT_MAX` stops being a cost cliff.
+
+## The two scenes
+
+`ribbon.loom` (image 61) and `plough_cinematic.loom` (image 64) are both
+`GOLDEN`, both with close authored cameras. `plough.loom` stays exactly as it
+is; the pair is the tier comparison.
+
+`ribbon`'s inflow is a **closed loop**: a `Cascade` authors the discharge, and
+`per_tick` particles are recycled to the lip each tick chosen round-robin by
+ordinal — the free-list-free arithmetic of ADR 0047, because a drain needs a
+free list, which needs a compaction, which needs an atomic append. The particle
+count never changes, so volume is exactly conserved.
