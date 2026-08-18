@@ -142,6 +142,10 @@ pub struct World {
     /// `material`: turning it into waves needs `loom_water`, and this crate
     /// does not depend on it.
     water: Storage<serde_json::Value>,
+    /// The `Cascade` component, verbatim — a waterfall's lip and discharge.
+    /// Carried rather than resolved for the same reason as `water`: turning it
+    /// into a sheet needs `loom_water::nappe`, which this crate cannot see.
+    cascade: Storage<serde_json::Value>,
     /// The scene's `Wind`, verbatim. At most one is used, like `Environment`.
     /// Carried rather than resolved for the same reason as `water`: turning it
     /// into a field needs `loom_field`, which this crate does not depend on.
@@ -401,6 +405,9 @@ impl World {
             if let Some(water) = node.components.get("WaterBody") {
                 world.water.insert(entity, water.clone());
             }
+            if let Some(cascade) = node.components.get("Cascade") {
+                world.cascade.insert(entity, cascade.clone());
+            }
             if let Some(wind) = node.components.get("Wind") {
                 world.wind.insert(entity, wind.clone());
             }
@@ -582,6 +589,17 @@ impl World {
     #[must_use]
     pub fn water(&self) -> Option<&serde_json::Value> {
         self.order.iter().find_map(|e| self.water.get(*e))
+    }
+
+    /// The scene's waterfall and the entity carrying it, if it authors one.
+    ///
+    /// **The first, and the validator refuses a second** — the environment
+    /// buffer carries one lip, so a second cascade would validate and then not
+    /// draw. The entity comes back with it because the lip is authored in node
+    /// space and the caller needs the global transform to place it.
+    #[must_use]
+    pub fn cascade(&self) -> Option<(Entity, &serde_json::Value)> {
+        self.order.iter().find_map(|e| self.cascade.get(*e).map(|c| (*e, c)))
     }
 
     /// Whether this scene's water is in the cinematic tier — ADR 0053.

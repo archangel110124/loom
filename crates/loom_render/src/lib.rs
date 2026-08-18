@@ -228,7 +228,13 @@ mod tests {
             984,
             "foamEdgeCells"
         );
-        assert_eq!(size_of::<EnvironmentData>(), 992, "the whole struct");
+        // **The cascade, appended after the foam block on the same rule** —
+        // ADR 0054. 992 is a multiple of 16, so three `float4`s land flush and
+        // the struct's stride stays 16-byte aligned with no padding at all.
+        assert_eq!(at(std::ptr::from_ref(&base.cascade_a).cast()), 992, "cascadeA");
+        assert_eq!(at(std::ptr::from_ref(&base.cascade_b).cast()), 1008, "cascadeB");
+        assert_eq!(at(std::ptr::from_ref(&base.cascade_c).cast()), 1024, "cascadeC");
+        assert_eq!(size_of::<EnvironmentData>(), 1040, "the whole struct");
     }
 
     /// **`ParticleInstance` is written by a shader as well as by the CPU**,

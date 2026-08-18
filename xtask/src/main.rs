@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 57] = [
+const SCENES: [&str; 59] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -172,6 +172,12 @@ const SCENES: [&str; 57] = [
     // foam source that cannot be evaluated backwards from a position, which is
     // exactly what the field exists for. Also in `GOLDEN`.
     "assets/test/plough.loom",
+    // The falling sheet — ADR 0054. Two of them, because the whole claim is
+    // that one authored discharge moves the picture between them: `spout` is
+    // past its break length for the last third of a 2 m drop and `cascade` is
+    // nowhere near its own over 6 m. Both in `GOLDEN`.
+    "assets/test/spout.loom",
+    "assets/test/cascade.loom",
     // The only scene where a rigid body is driven by the water rather than
     // only drawn against it, so it is the only one whose `render --sim` runs
     // the buoyancy solver at all.
@@ -311,7 +317,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 44] = [
+const GOLDEN: [(&str, &str, &[&str]); 46] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -515,6 +521,24 @@ const GOLDEN: [(&str, &str, &[&str]); 44] = [
     // patch it left has begun to break up into lace — which is the half of the
     // feature a fresh deposit cannot show.
     ("plough", "assets/test/plough.loom", &["--sim", "240"]),
+    // **The falling sheet, and no other reference contains one** — ADR 0054.
+    // The nappe is the only geometry in this engine generated from `SV_VertexID`
+    // *past* another mesh in the same draw, and `nappeColor` is a branch no
+    // other water scene ever takes. Adding a rendering path means adding a
+    // scene here.
+    //
+    // **Two rows for one feature, because the feature is a discrimination.**
+    // `spout` at `q = 0.10` breaks up at 1.31 m over a 2 m fall and opens into
+    // strings; `cascade` at `q = 2.0` breaks up at 9.7 m over a 6 m fall and
+    // never does. A single row would leave half the shader — `broken`, and
+    // everything the break length feeds — uncovered, and the two pictures are
+    // one authored number apart.
+    //
+    // `--sim 120` on both: the streaks are a function of the clock, so tick 0
+    // is the one moment the noise field is unshifted, and a reference taken
+    // there would agree with a broken scroll.
+    ("spout", "assets/test/spout.loom", &["--sim", "120"]),
+    ("cascade", "assets/test/cascade.loom", &["--sim", "120"]),
     // **Water against terrain**, which `ocean` cannot cover: it has no voxel
     // volume at all, so its depth is the sentinel everywhere and its waves are
     // never attenuated. Everything W6 added is visible here and nowhere else —

@@ -548,6 +548,17 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
             .and_then(Item::as_table_like)
             .is_some_and(|c| c.get("GameRules").is_some())
     });
+    // Same shape, same reason: a cascade's fall ends at the scene's still-water
+    // level, and the `WaterBody` that supplies it may be authored on a later
+    // node than the cascade.
+    let has_water = entries.iter().any(|table| {
+        table
+            .get("components")
+            .and_then(Item::as_table_like)
+            .is_some_and(|c| c.get("WaterBody").is_some())
+    });
+    // Cascades seen so far. Scene-wide, exactly as `gpu_emitters` is.
+    let mut cascades = 0_usize;
     for (table, node) in entries.iter().zip(nodes) {
         // `transform` is sugar for the Transform component (§1.1), but it used
         // to be the one field that skipped this pass — it went straight through
@@ -591,6 +602,9 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
             if schema_errors.is_empty() && type_name == "WaterBody" {
                 errors.extend(check_water(item, &node.path, has_game_rules));
             }
+            if schema_errors.is_empty() && type_name == "Cascade" {
+                errors.extend(check_cascade(item, &node.path, has_water, &mut cascades));
+            }
             if schema_errors.is_empty() && type_name == "ParticleEmitter" {
                 let has_body = components.get("RigidBody").is_some();
                 errors.extend(check_emitter(item, &node.path, has_body, &mut gpu_emitters));
@@ -614,6 +628,91 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
 ///
 /// `gpu` is the number of GPU emitters seen so far in this scene, carried
 /// across nodes because "one per scene" is not a property of any single node.
+/// The cascade rules — ADR 0054, and refusals rather than comments.
+///
+/// Each of these is a bug that would otherwise be diagnosed as "the waterfall
+/// does not draw", which is the least informative symptom a scene can produce:
+///
+/// - a cascade in a scene with no `WaterBody` has nothing to fall *to*, and the
+///   water pass it is drawn inside is skipped entirely, so it is invisible;
+/// - a second cascade is silently not drawn, because the environment buffer
+///   carries one;
+/// - a lip whose two ends coincide has no direction for the water to leave
+///   along, and the strip collapses to a line.
+fn check_cascade(item: &Item, node: &str, has_water: bool, seen: &mut usize) -> Vec<SceneError> {
+    // Through serde for the reason `check_water` gives at length: an omitted
+    // field must be its documented default here exactly as it will be at load.
+    let cascade = match item_to_json(item)
+        .ok_or_else(|| "the component is not a table of values".to_owned())
+        .and_then(|v| {
+            serde_json::from_value::<components::Cascade>(v).map_err(|e| e.to_string())
+        }) {
+        Ok(cascade) => cascade,
+        Err(why) => {
+            let mut err = SceneError::new("component_unreadable", node);
+            err.field = "Cascade".to_owned();
+            err.constraint = "a readable Cascade".to_owned();
+            err.hint = Some(format!(
+                "{why}. The schema check passed, so this is a field the schema \
+                 does not reach. None of the cascade rules could run until it \
+                 is fixed."
+            ));
+            return vec![err];
+        }
+    };
+
+    *seen += 1;
+    let mut errors = Vec::new();
+    let mut refuse = |code: &str, field: &str, value: Value, constraint: &str, hint: &str| {
+        let mut err = SceneError::new(code, node);
+        err.field = format!("Cascade.{field}");
+        err.value = value;
+        err.constraint = constraint.to_owned();
+        err.hint = Some(hint.to_owned());
+        errors.push(err);
+    };
+
+    if !has_water {
+        refuse(
+            "cascade_needs_water_to_fall_into",
+            "discharge",
+            Value::from(f64::from(cascade.discharge)),
+            "a WaterBody somewhere in the scene",
+            "the sheet is drawn inside the water block and ends at the scene's \
+             still-water level, so a scene with no WaterBody draws no cascade \
+             at all. Add a WaterBody node with the pool's surface_height.",
+        );
+    }
+    if *seen > 1 {
+        refuse(
+            "one_cascade_per_scene",
+            "discharge",
+            Value::from(f64::from(cascade.discharge)),
+            "at most one Cascade per scene",
+            "the environment buffer carries one lip, so a second cascade would \
+             validate and then not draw. Two falls need two scenes today.",
+        );
+    }
+    let span = [
+        cascade.lip_b[0] - cascade.lip_a[0],
+        cascade.lip_b[1] - cascade.lip_a[1],
+        cascade.lip_b[2] - cascade.lip_a[2],
+    ];
+    let length = span.iter().map(|c| c * c).sum::<f32>().sqrt();
+    if length < 1.0e-3 {
+        refuse(
+            "cascade_lip_has_no_length",
+            "lip_b",
+            Value::from(f64::from(length)),
+            "lip_a and lip_b at least a millimetre apart",
+            "the water leaves along `cross(lip_b - lip_a, +Y)`, so a lip with \
+             coincident ends has no direction and the sheet collapses to a \
+             line. Swap the two ends to send the fall the other way.",
+        );
+    }
+    errors
+}
+
 fn check_emitter(
     item: &Item,
     node: &str,

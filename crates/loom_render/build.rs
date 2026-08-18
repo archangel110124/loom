@@ -112,6 +112,12 @@ fn generate_water(shader_dir: &Path) {
     // the CPU inside the fixed step and this is the half that reads its upload
     // (ADR 0055). Before the surface, because `scene.slang` needs both.
     text.push_str(loom_water::foam::slang());
+    // The falling sheet. Independent of the surface — it takes a discharge and
+    // a depth, not a wave set — but it lives in this file for the same reason
+    // everything above it does: it is force-capable, so the Rust and the Slang
+    // must be one implementation, and the generator is what makes that true
+    // (ADR 0054).
+    text.push_str(loom_water::nappe::slang());
     text.push_str(loom_water::slang());
     write_generated(shader_dir, "water.slang", &text);
 }

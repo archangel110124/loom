@@ -1799,6 +1799,80 @@ impl Default for FlowField {
     }
 }
 
+/// A waterfall: water leaving a lip and falling free — ADR 0054.
+///
+/// **A component, never a second `WaterBody`.** A `WaterBody` is a surface with
+/// a height everywhere and no extent; a cascade is a sheet in the air between
+/// two points. Modelling one as the other would give the scene two surfaces
+/// with nothing to say which one buoyancy reads, and `World::water` takes the
+/// first — so the second would be authored, validated and silently ignored.
+///
+/// Everything about the sheet comes out of [`Self::discharge`] through
+/// `loom_water::nappe`: how far it is thrown, how fast it falls, how thick it
+/// is, how white, and at what depth it stops being a sheet. Two look knobs
+/// remain and they are honestly knobs — see that module for why the literature
+/// does not let them be derived.
+///
+/// # The lip, and which way the water goes
+///
+/// [`Self::lip_a`] and [`Self::lip_b`] are the ends of the brink, in the node's
+/// **local** space, so the node's transform carries the whole cascade. Water
+/// leaves horizontally along `cross(lip_b − lip_a, +Y)` — **swap the two ends to
+/// send it the other way**. That is one convention instead of a fourth vector
+/// nobody would get right first time, and it is visible the instant the scene is
+/// rendered.
+///
+/// How *far* it falls is not authored: the sheet ends at the scene's still-water
+/// level, which is where a waterfall ends. A cascade therefore needs a
+/// `WaterBody` in the scene, and `loom validate` says so rather than drawing
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Cascade {
+    /// One end of the lip, node-local metres.
+    pub lip_a: [f32; 3],
+    /// The other end. Swapping the two reverses the direction of the fall.
+    pub lip_b: [f32; 3],
+    /// Discharge per metre of lip, m²/s. **The only number that matters.**
+    ///
+    /// `0.1` is a stone spout that breaks into strings within a metre and a
+    /// third; `2.0` is a canyon fall that is still a coherent white sheet ten
+    /// metres down. The whole discrimination is in `Nappe::break_length`.
+    #[schemars(range(min = 0.001, max = 50.0))]
+    pub discharge: f32,
+    /// `δ_out` — how fast the outer surface of the sheet spreads, per metre
+    /// fallen. Ervine & Falvey's range is `0.015..0.04`; this is the middle.
+    ///
+    /// It sets how quickly the fall goes white, because the air it entrains is
+    /// the gap between the spreading outside and the thinning water inside.
+    #[schemars(range(min = 0.015, max = 0.04))]
+    pub spread: f32,
+    /// `δ_in` — how fast the coherent core is eaten, per metre fallen.
+    /// Bollaert's range is `0.005..0.01`; this is the middle.
+    ///
+    /// Larger breaks the sheet into droplets sooner. See `loom_water::nappe`
+    /// for why this is authored rather than derived from turbulence intensity.
+    #[schemars(range(min = 0.005, max = 0.01))]
+    pub breakup: f32,
+}
+
+impl Default for Cascade {
+    fn default() -> Self {
+        Self {
+            // A two-metre lip across the node's X axis, so a cascade authored
+            // with nothing but a discharge is still a waterfall rather than a
+            // degenerate line.
+            lip_a: [-1.0, 0.0, 0.0],
+            lip_b: [1.0, 0.0, 0.0],
+            // The stone spout, because it is the one that shows both regimes in
+            // a two-metre drop.
+            discharge: 0.1,
+            spread: 0.03,
+            breakup: 0.0075,
+        }
+    }
+}
+
 /// The most pontoons one floating body may carry.
 ///
 /// Every pontoon is a full water sample plus a force accumulation, per body,
@@ -2069,6 +2143,7 @@ pub fn registry() -> TypeRegistry {
     // cleanly and then be read by nothing, which is the silent-no-op failure
     // the registry exists to stop.
     reg.register::<WaterBody>("WaterBody");
+    reg.register::<Cascade>("Cascade");
     reg.register::<Buoyancy>("Buoyancy");
     reg.register::<Submersion>("Submersion");
     reg.register::<Script>("Script");

@@ -1,0 +1,143 @@
+# A canyon waterfall into a still pool — reference image 62.
+#
+# **The thick end of the nappe, and the same component that draws `spout.loom`.**
+# `discharge = 2.0` puts the break length at 9.7 m by `loom_water::nappe`, and
+# the lip is 6 m above the pool — so the sheet never reaches its break-up at all
+# and stays a coherent white curtain the whole way down. `spout.loom` authors
+# `0.10` over 2 m, is past `Z_b` for its last third, and opens into strings. The
+# two pictures are one formula and one authored number apart; nothing else in
+# either scene differs in kind.
+#
+# **It is white because of `aeration`, not because of a colour.** At 6 m the
+# sheet is 80% air by the closed form — measured in
+# `nappe::tests::a_big_fall_is_four_fifths_air_by_the_time_it_lands` — which is
+# what the shader turns into opacity. Nothing here paints a waterfall white.
+#
+# The cliff and the basin are one voxel volume, so the pool has a real bed and
+# a real shoreline: the water is cut off where the rock rises through it by
+# `waterFragmentMain`'s depth discard, which is why the fall reads as being *in*
+# a canyon rather than as a plane with rocks lying on it.
+
+[scene]
+format = 1
+id = "2a4f8d61-77c3-4e09-b5da-06e1937c8ef4"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[node]]
+name = "Cascade"
+
+  # Desert noon: a hard high sun, a deep sky and enough ambient that the shaded
+  # canyon wall is not black. The reference is shot in full daylight and most of
+  # what makes the fall read as bright is that everything around it is too.
+  [node.components.Environment]
+  sun_direction = [0.24, 0.82, 0.52]
+  sun_strength = 1.5
+  sun_color = [1.0, 0.96, 0.88]
+  ambient = 0.7
+  sky_zenith = [0.09, 0.22, 0.52]
+  sky_horizon = [0.58, 0.68, 0.80]
+  fog_density = 0.0035
+  fog_falloff = 0.03
+  cloud_cover = 0.35
+  cloud_scale = 900.0
+
+  # Still air: the pool in the reference is a mirror, and a default breeze would
+  # build a spectrum on it and delete the reflection this scene is half about.
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 0.0
+  gustiness = 0.0
+  turbulence = 0.0
+
+# The canyon: one volume holding the cliff the water leaves and the basin it
+# falls into. Local space is 32 x 16 x 32 m at half-metre voxels; the node puts
+# local origin at world [-16, -10, -16], so local y 16 is world y 6 — the lip.
+[[node]]
+name = "Canyon"
+parent = "Cascade"
+transform = { pos = [-16.0, -10.0, -16.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.5
+  chunks = [2, 1, 2]
+
+  # The cliff, filling the back half up to the lip.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 12.0, 6.0]
+  half_extents = [16.0, 8.0, 8.0]
+  mode = "union"
+
+  # The basin floor, four metres under the surface. **Deep on purpose**: at two
+  # metres the caustic web the water focuses onto bright rock covers the whole
+  # pool in a bright green lattice and there is nothing left to reflect with.
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 3.0, 24.0]
+  half_extents = [16.0, 3.0, 10.0]
+  mode = "union"
+
+  # Two buttresses either side of the fall, so the sheet is framed by rock
+  # rather than hanging off a straight edge.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [4.5, 11.0, 13.0]
+  radius = 4.0
+  mode = "union"
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [27.5, 11.0, 13.5]
+  radius = 4.5
+  mode = "union"
+
+  # A boulder standing in the pool, right of the fall. It is the fixed reference
+  # a still needs, and it is what the pool has to reflect.
+  [[node.components.VoxelVolume.ops]]
+  kind = "sphere"
+  center = [24.0, 8.6, 26.0]
+  radius = 2.2
+  mode = "union"
+
+  [node.components.Material]
+  albedo = [0.52, 0.27, 0.19]
+  roughness = 0.92
+  triplanar = true
+
+[[node]]
+name = "Water"
+parent = "Cascade"
+
+  [node.components.WaterBody]
+  kind = "lake"
+  surface_height = 0.0
+  density = 1000.0
+  drag = 2.0
+
+# **The lip**, on the cliff's front edge at world z = -2. `lip_a` at +X and
+# `lip_b` at −X sends the water along `cross(lip_b − lip_a, +Y)` = +Z, out of
+# the cliff and toward the camera.
+[[node]]
+name = "Fall"
+parent = "Cascade"
+transform = { pos = [0.0, 6.0, -2.0] }
+
+  [node.components.Cascade]
+  lip_a = [2.0, 0.0, 0.0]
+  lip_b = [-2.0, 0.0, 0.0]
+  discharge = 2.0
+  spread = 0.03
+  breakup = 0.0075
+
+# Back and a little above the water, so the fall is seen whole against the cliff
+# and the pool takes up the bottom third — the reference's composition, and the
+# one that shows the reflection at all.
+[[node]]
+name = "Camera"
+parent = "Cascade"
+transform = { pos = [0.0, 5.2, 16.5], rot_euler = [-12.0, 0.0, 0.0] }
+
+  [node.components.Camera]

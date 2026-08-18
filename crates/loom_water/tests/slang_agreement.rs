@@ -363,6 +363,155 @@ fn the_slang_half_compiles_for_the_gpu_too() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Absolute agreement threshold for the nappe, on quantities reaching tens of
+/// metres per second.
+///
+/// **Looser than [`EPSILON`] on purpose, and it is S2's own threshold.** The
+/// surface above is add-multiply-`sin` in one order on both sides and lands on
+/// exactly 0.0; the nappe raises to a fractional power twice, and `powf` on the
+/// Rust side is not the same code as `pow` in Slang's C++ backend. The run
+/// prints the worst difference it saw — read that, not this.
+const NAPPE_EPSILON: f32 = 1.0e-3;
+
+/// **The nappe is force-capable, so its twin gets measured like the surface.**
+///
+/// A fall pushes what stands under it, which puts `loom_water::nappe` on the
+/// same footing as `sample_water`: the number a force would read and the number
+/// the vertex shader draws must be one number. The mechanism is the same one
+/// the surface uses — written twice, adjacent, and compared here rather than
+/// trusted.
+#[test]
+fn the_rust_and_the_slang_compute_the_same_nappe() {
+    let Some(slangc) = tool("slangc") else {
+        eprintln!("skipping: slangc is not on PATH");
+        return;
+    };
+    let Some(cxx) = tool("c++").or_else(|| tool("g++")).or_else(|| tool("clang++")) else {
+        eprintln!("skipping: no C++ compiler");
+        return;
+    };
+
+    // The same integer hash the surface's sample set uses, spread over the
+    // authored ranges of `Cascade`: discharge across four orders of magnitude,
+    // both δ's across the literature's bands, and a fall depth reaching past
+    // any `Z_b` those produce so the break-up branch is exercised on both
+    // sides.
+    let cases: Vec<[f32; 4]> = (0..SAMPLES)
+        .map(|i| {
+            let h = |k: u32| {
+                let mut x = (i as u32).wrapping_mul(0x9E37_79B9).wrapping_add(k);
+                x ^= x >> 16;
+                x = x.wrapping_mul(0x7FEB_352D);
+                x ^= x >> 15;
+                f32::from(x as u16) / f32::from(u16::MAX)
+            };
+            [
+                // Log-spread, because a linear sweep over [0.01, 20] puts
+                // nineteen twentieths of the samples on canyon falls and never
+                // visits the spout the discrimination table turns on.
+                (h(1).mul_add(7.6, -4.6)).exp(),
+                h(2).mul_add(0.025, 0.015), // spread
+                h(3).mul_add(0.005, 0.005), // breakup
+                h(4) * 30.0,                // Z, metres below the lip
+            ]
+        })
+        .collect();
+
+    let dir = std::env::temp_dir().join(format!("loom_nappe_agree_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let shader = dir.join("nappe.slang");
+
+    let mut source = String::from(loom_water::nappe::slang());
+    source.push_str(
+        "\nvoid emit(float q, float dout, float din, float z)\n{\n\
+         \x20   LoomNappe n = loom_nappe_brink(q, dout, din);\n\
+         \x20   LoomNappeAt s = loom_nappe_at(n, z);\n\
+         \x20   printf(\"%.9g %.9g %.9g %.9g %.9g %.9g %.9g\\n\", n.brink_depth,\n\
+         \x20       n.exit_speed, loom_nappe_break_length(n), s.throwX, s.speed,\n\
+         \x20       s.water_thickness, s.aeration);\n}\n\n\
+         [shader(\"compute\")]\n[numthreads(1,1,1)]\n\
+         void computeMain(uint3 tid : SV_DispatchThreadID)\n{\n",
+    );
+    for [q, dout, din, z] in &cases {
+        source.push_str(&format!("    emit({q:?}, {dout:?}, {din:?}, {z:?});\n"));
+    }
+    source.push_str("}\n");
+    std::fs::write(&shader, source).expect("write shader");
+    std::fs::write(dir.join("harness.cpp"), HARNESS).expect("write harness");
+
+    let kernel_cpp = dir.join("kernel.cpp");
+    run(
+        Command::new(slangc)
+            .arg(&shader)
+            .args(["-target", "cpp", "-entry", "computeMain", "-stage", "compute"])
+            .arg("-o")
+            .arg(&kernel_cpp),
+        "slangc",
+    );
+    let binary = dir.join("harness");
+    run(
+        Command::new(cxx)
+            .args(["-O0", "-w", "-std=c++17"])
+            .arg(format!("-I{}", dir.display()))
+            .arg(dir.join("harness.cpp"))
+            .arg("-o")
+            .arg(&binary),
+        "c++",
+    );
+
+    let output = Command::new(&binary).output().expect("run the compiled kernel");
+    assert!(output.status.success(), "the kernel exited {}", output.status);
+    let text = String::from_utf8(output.stdout).expect("kernel output is utf-8");
+    let rows: Vec<Vec<f32>> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.split_whitespace().map(|n| n.parse().expect("a number")).collect())
+        .collect();
+    assert_eq!(rows.len(), cases.len(), "the kernel printed {} rows", rows.len());
+
+    let mut worst = 0.0_f32;
+    let mut worst_at = (0, 0);
+    // Otherwise this agrees for free, exactly as the surface's guard says.
+    let largest = rows.iter().flatten().fold(0.0_f32, |a, b| a.max(b.abs()));
+    assert!(largest > 1.0, "the Slang nappe is degenerate — largest value {largest}");
+
+    for (i, ([q, dout, din, z], row)) in cases.iter().zip(&rows).enumerate() {
+        let n = loom_water::nappe::brink(*q, *dout, *din);
+        let s = n.at(*z);
+        let expected = [
+            n.brink_depth,
+            n.exit_speed,
+            n.break_length(),
+            s.throw,
+            s.speed,
+            s.water_thickness,
+            s.aeration,
+        ];
+        assert_eq!(row.len(), expected.len(), "row {i} has {} values", row.len());
+        for (field, (rust, slang)) in expected.iter().zip(row).enumerate() {
+            let delta = (rust - slang).abs();
+            assert!(delta.is_finite(), "sample {i} field {field}: {rust} vs {slang}");
+            if delta > worst {
+                worst = delta;
+                worst_at = (i, field);
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+    eprintln!(
+        "nappe agreement: worst absolute difference {worst:e} over {} samples (7 values each)",
+        cases.len()
+    );
+    assert!(
+        worst < NAPPE_EPSILON,
+        "the Rust and the Slang disagree by {worst} at sample {} field {} — \
+         the two halves of `loom_water::nappe` have diverged",
+        worst_at.0,
+        worst_at.1
+    );
+}
+
 /// The Slang source: both twins, plus a kernel that prints the sample set.
 fn kernel(body: &WaterBody, bed: &HeightField, samples: &[[f32; 3]]) -> String {
     // The height field first: the water half does not use it, but the kernel

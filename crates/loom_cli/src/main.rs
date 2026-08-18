@@ -2385,7 +2385,72 @@ pub(crate) fn environment_with_wind(
     ];
     env.weather = [params.get("turbulence"), params.get("ground_drag"), seconds, 0.0];
     add_water(&mut env, world, wind);
+    // After the water, and that ordering is load-bearing: the fall ends at the
+    // still-water level `add_water` just stamped.
+    add_cascade(&mut env, world);
     env
+}
+
+/// Put the scene's waterfall into the environment the shader reads — ADR 0054.
+///
+/// **The lip is authored in node space and resolved here**, through the same
+/// propagated global transform `gather_lights` uses, so a cascade parented to a
+/// moving node moves with it and a rotated node turns the fall.
+///
+/// Three things the shader would otherwise have to work out per vertex are
+/// worked out once here, because the CPU is holding what it takes:
+///
+/// - **which way the water goes.** `cross(lip, +Y)`, normalised. The convention
+///   is documented on the component: swap the two ends to reverse it. A fourth
+///   authored vector would be a number nobody gets right first time and that
+///   nothing checks.
+/// - **how far it falls.** The lip's height above the still-water level, which
+///   is where a waterfall ends. Not authored, because an authored drop that
+///   disagreed with the pool would hang the sheet in the air or bury it.
+/// - **whether there is one at all.** A zero discharge is the flag the strip
+///   collapses on, so a scene that authors no cascade renders unchanged.
+fn add_cascade(env: &mut loom_render::EnvironmentData, world: &World) {
+    let Some((entity, component)) = world.cascade() else {
+        return;
+    };
+    let Ok(cascade) =
+        serde_json::from_value::<loom_scene::components::Cascade>(component.clone())
+    else {
+        return;
+    };
+    let Some(global) = world.global_transform(entity) else {
+        return;
+    };
+    let m = global.matrix;
+    // Column-major, the same convention `gather_lights` reads translations out
+    // of. A point, so the translation column applies.
+    let place = |p: [f32; 3]| {
+        [
+            m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+            m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+            m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+        ]
+    };
+    let a = place(cascade.lip_a);
+    let b = place(cascade.lip_b);
+
+    // `cross(lip, +Y)` in the horizontal plane is `(dz, -dx)`. The validator
+    // has already refused a lip whose ends coincide, so this normalises.
+    let (dx, dz) = (b[0] - a[0], b[2] - a[2]);
+    let length = dx.hypot(dz);
+    if length < 1.0e-4 {
+        return;
+    }
+    let fall = [dz / length, -dx / length];
+
+    // The lip's height above the pool. Clamped positive: a lip authored below
+    // the water line is a mistake the scene can make, and a negative drop would
+    // send the sheet upward rather than draw nothing.
+    let drop = (a[1].min(b[1]) - env.water[0]).max(0.0);
+
+    env.cascade_a = [a[0], a[1], a[2], cascade.discharge];
+    env.cascade_b = [b[0], b[1], b[2], cascade.spread];
+    env.cascade_c = [fall[0], fall[1], cascade.breakup, drop];
 }
 
 /// Put the scene's sea into the environment the shader reads.

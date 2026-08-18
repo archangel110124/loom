@@ -230,6 +230,16 @@ struct EnvironmentData {
     /// in, so `loom_water::foam::FOAM_EDGE_CELLS` cannot drift away from it.
     float foamEdgeCells;
     uint foamPad;
+    /// The waterfall's lip, end A: xyz world, w the discharge in m²/s.
+    /// **Zero discharge means this scene has no cascade** (ADR 0054), and the
+    /// nappe's slice of the water draw then collapses to a point.
+    float4 cascadeA;
+    /// The lip, end B: xyz world, w `δ_out` — how fast the outside of the sheet
+    /// spreads, per metre fallen.
+    float4 cascadeB;
+    /// xy the horizontal direction the water leaves along, z `δ_in` — the core
+    /// spread — w how far the sheet falls before it reaches the pool.
+    float4 cascadeC;
 };
 
 struct GrassBlade {
@@ -4814,10 +4824,137 @@ struct WaterOutput {
     /// across the triangle. Foam streaks lie along it — ADR 0053 §7 deleted the
     /// global-wind frame this replaces.
     float2 breakDir : TEXCOORD8;
+    /// **The falling sheet, and zero on every surface vertex** — ADR 0054.
+    ///
+    /// `x` is the flag the fragment shader branches on; `y` the aeration at
+    /// this depth; `z` how far below the lip it is, in metres; `w` the
+    /// **departure time** of the water here — the clock reading when this
+    /// parcel left the brink.
+    ///
+    /// That last one is the whole streak model. Texturing against depth would
+    /// make a pattern nailed to the air; texturing against departure time makes
+    /// one nailed to the *water*, and it stretches as it falls for free,
+    /// because a fixed interval of departure time covers more metres the faster
+    /// the sheet is going. No scroll speed is authored anywhere.
+    float4 nappe : TEXCOORD9;
 };
+
+/// Quads across the lip, and down the fall. 32 x 28.
+///
+/// Chosen by look rather than by cost: the strip is 5,376 vertices against the
+/// surface's 589,824, so it is inside the noise of the draw it rides in. Across
+/// the lip it only has to be smooth; down the fall it has to resolve the
+/// throw's parabola near the lip, which the bias below is what actually buys.
+static const uint NAPPE_COLS = 32;
+static const uint NAPPE_ROWS = 28;
+
+/// How the rows are packed down the fall: `Z = drop · (v)^NAPPE_BIAS`.
+///
+/// **Above 1, so rows crowd toward the lip.** Everything that changes fastest —
+/// the throw's curvature, the thickness, the aeration going from nothing to
+/// most of the sheet — happens in the first metre, and a uniform `v` spends
+/// most of its rows in the straight part where nothing does. 1.3 is gentle
+/// enough that the far rows are still under a metre apart on a ten-metre fall.
+static const float NAPPE_BIAS = 1.3;
+
+/// Vertices in the surface's rings, after which the nappe's strip begins.
+///
+/// **One draw, two meshes, and this is the seam.** `WATER_VERTS` in
+/// `renderer.rs` is this plus the strip; a mismatch draws the top of the
+/// waterfall as a stray water quad, which is why a test pins both.
+static const uint WATER_SURFACE_VERTS = WATER_RES * WATER_RES * WATER_LEVELS * 6;
+
+/// The falling sheet's vertex, from its index within the strip.
+///
+/// Everything about the shape comes out of `loom_nappe_at`, generated from
+/// `loom_water::nappe` — never hand-written here, because the nappe is
+/// force-capable and a shader-only copy of the hydraulics is exactly the
+/// divergence that puts a character in the wrong part of a waterfall.
+WaterOutput nappeVertex(uint nappeID) {
+    uint quad = nappeID / 6;
+    uint corner = nappeID % 6;
+    const uint2 CORNERS[6] = {
+        uint2(0, 0), uint2(0, 1), uint2(1, 0),
+        uint2(1, 0), uint2(0, 1), uint2(1, 1),
+    };
+    uint cu = quad % NAPPE_COLS;
+    uint cv = quad / NAPPE_COLS;
+    float u = float(cu + CORNERS[corner].x) / float(NAPPE_COLS);
+    float v = float(cv + CORNERS[corner].y) / float(NAPPE_ROWS);
+
+    float3 lipA = push.environment[0].cascadeA.xyz;
+    float3 lipB = push.environment[0].cascadeB.xyz;
+    float discharge = push.environment[0].cascadeA.w;
+    float2 fall = push.environment[0].cascadeC.xy;
+    float drop = push.environment[0].cascadeC.w;
+
+    WaterOutput out;
+    // **Collapsed to a point when there is no cascade**, the same trick the
+    // covered centre of a water ring uses: a vertex shader cannot decline to
+    // emit, and a degenerate triangle is discarded before rasterisation for
+    // free. Every scene in the repository takes this branch.
+    if (discharge <= 0.0 || drop <= 0.0) {
+        out.clip = mul(push.objects[push.objectOffset].mvp, float4(lipA, 1.0));
+        out.worldPos = lipA;
+        out.normal = float3(0.0, 1.0, 0.0);
+        out.depth = 1.0;
+        out.fold = 0.0;
+        out.foamHist = 0.0;
+        out.baseXZ = lipA.xz;
+        out.rippleSlope = float2(0.0, 0.0);
+        out.breakMu = 0.0;
+        out.breakDir = float2(0.0, 0.0);
+        out.nappe = float4(0.0, 0.0, 0.0, 0.0);
+        return out;
+    }
+
+    LoomNappe nappe = loom_nappe_brink(discharge, push.environment[0].cascadeB.w,
+                                       push.environment[0].cascadeC.z);
+    float z = drop * pow(v, NAPPE_BIAS);
+    LoomNappeAt at = loom_nappe_at(nappe, z);
+
+    float3 base = lerp(lipA, lipB, u);
+    float3 world = base
+        + float3(fall.x, 0.0, fall.y) * at.throwX
+        + float3(0.0, -z, 0.0);
+
+    out.clip = mul(push.objects[push.objectOffset].mvp, float4(world, 1.0));
+    out.worldPos = world;
+    // **The sheet's face, tilted back along the trajectory.** Purely horizontal
+    // reads as a pane of glass hung in the air; leaning it into the fall by the
+    // ratio of the two velocities is the surface's real slope and costs a
+    // normalize. `V_i/V_j` is 1 at the lip and goes to zero as the sheet turns
+    // vertical, which is exactly how the face turns to meet the eye.
+    float lean = nappe.exit_speed / at.speed;
+    out.normal = normalize(float3(fall.x, lean, fall.y));
+    // Positive so the shoreline discard in `waterFragmentMain` is not what
+    // decides whether a waterfall is drawn; the nappe branch runs before it.
+    out.depth = 1.0;
+    out.fold = 0.0;
+    out.foamHist = 0.0;
+    // The lip parameter, so the fragment can put strings across the sheet. It
+    // rides in `baseXZ` because a nappe fragment never samples the ripple grid.
+    out.baseXZ = float2(u, 0.0);
+    out.rippleSlope = float2(0.0, 0.0);
+    out.breakMu = 0.0;
+    out.breakDir = float2(0.0, 0.0);
+    // **Departure time, from the jet velocity rather than from a clock.** Free
+    // fall gives `t_fall = (V_j − V_i)/g` exactly, so this parcel left the
+    // brink that long ago. See `WaterOutput::nappe`.
+    float departure = push.environment[0].weather.z - (at.speed - nappe.exit_speed) / 9.81;
+    out.nappe = float4(1.0, at.aeration, z, departure);
+    return out;
+}
 
 [shader("vertex")]
 WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
+    // The falling sheet rides in the same draw, past the surface's rings —
+    // ADR 0054. It shares this entry point because it wants the same pipeline,
+    // the same multisampled attachments and the same depth test against the
+    // pool it pours into.
+    if (vertexID >= WATER_SURFACE_VERTS) {
+        return nappeVertex(vertexID - WATER_SURFACE_VERTS);
+    }
     uint quad = vertexID / 6;
     uint corner = vertexID % 6;
     uint level = quad / (WATER_RES * WATER_RES);
@@ -5013,6 +5150,9 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     out.foamHist = trail;
     out.baseXZ = xz;
     out.rippleSlope = rippleAt.yz;
+    // Not a falling sheet. The fragment shader branches on this and every
+    // surface vertex has to say so.
+    out.nappe = float4(0.0, 0.0, 0.0, 0.0);
     return out;
 }
 
@@ -5796,8 +5936,160 @@ float3 waterBehind(
     return exp(-WATER_EXTINCT * (viewLeg + downLeg));
 }
 
+// ---------------------------------------------------------------------------
+// The falling sheet's shading — ADR 0054.
+//
+// It is drawn INSIDE the water block, on the water pipeline, into the same
+// multisampled pair, and it reads the same set-3 background textures. That is
+// what buys it Fresnel against the same sky the sea uses, the same refracted
+// background, MSAA on its silhouette, and a depth test against the pool it
+// pours into — with no sort, no blend and no second pass.
+//
+// **Nothing here is a look constant standing in for hydraulics.** How white the
+// sheet is, is `aeration` out of the generated `loom_nappe_at`; how far it is
+// thrown, is that function's throw; where it stops being a sheet, is its break
+// length. What is left below is what those genuinely do not answer: how a
+// stringy nappe is textured, and one authored term at the lip.
+// ---------------------------------------------------------------------------
+
+/// Strings across the sheet, in cycles over the whole lip.
+///
+/// A nappe leaving a rough stone lip is not smooth across its width — it leaves
+/// in ligaments. This is how many of them, and 26 across a two-metre spout is
+/// roughly the reference photograph's count.
+static const float NAPPE_STREAK_ACROSS = 26.0;
+/// Cycles per second of **departure time**, which is what makes the streaks
+/// stretch as they fall — see `WaterOutput::nappe`. A metre of a fast sheet
+/// covers less departure time than a metre of a slow one, so the same number
+/// draws long smears low down and short ones at the lip, with no LOD term.
+static const float NAPPE_STREAK_ALONG = 9.0;
+
+/// How much of the sheet's opacity the entrained air is worth.
+///
+/// **Not 1.0**, because `aeration` is the air *fraction* of the sheet and not
+/// its opacity: a half-aerated sheet is still mostly clear water with bubbles
+/// in it, and painting it half-white makes a two-metre spout read as milk.
+static const float NAPPE_OPACITY = 0.85;
+
+/// The lip boil: an extra whitening in the first few centimetres,
+/// `NAPPE_BOIL · exp(−Z / NAPPE_BOIL_DEPTH)`.
+///
+/// **Authored, and labelled as such.** In reference image 60 the whitest band
+/// of the whole fall is at the lip, where `aeration` is by construction zero —
+/// the water there has had no distance in which to entrain anything. What is
+/// white there is *exit turbulence*: the channel behind the brink is already
+/// broken up before it arrives. That is not in the free-fall model at all and
+/// no coefficient in it stands in for it, so it is one exponential with two
+/// numbers picked by eye rather than a derivation dressed up as one.
+static const float NAPPE_BOIL = 0.7;
+static const float NAPPE_BOIL_DEPTH = 0.3;
+
+/// Where the sheet finishes turning into a curtain of drops, as a multiple of
+/// the break length. `Z_b` is where the coherent core is used up; the sheet
+/// does not vanish there, it opens.
+static const float NAPPE_BROKEN_END = 1.8;
+
+/// Metres of gap to the geometry behind over which the sheet fades in.
+///
+/// **At both ends, and it is the same number.** At the top the sheet leaves a
+/// stone lip it intersects; at the bottom it enters the pool. Without this it
+/// terminates in a hard straight line across both, which is the single most
+/// obvious tell of a card standing in for a waterfall.
+static const float NAPPE_DEPTH_FADE = 0.3;
+
+float4 nappeColor(WaterOutput in) {
+    float3 toEye = push.environment[0].eye.xyz - in.worldPos;
+    float3 view = normalize(toEye);
+    float3 normal = normalize(in.normal);
+    if (dot(normal, view) < 0.0) {
+        normal = -normal;
+    }
+
+    float aeration = in.nappe.y;
+    float z = in.nappe.z;
+    float departure = in.nappe.w;
+    float u = in.baseXZ.x;
+
+    // **Two octaves of the shared value noise, in (across, departure time).**
+    // `loom_value_noise` is `loom_field::noise`, written in Rust and Slang side
+    // by side and compared exactly — never a hand-rolled hash here (ADR 0006).
+    float3 p = float3(u * NAPPE_STREAK_ACROSS, departure * NAPPE_STREAK_ALONG, 0.5);
+    float strings = loom_value_noise(p) * 0.65
+                  + loom_value_noise(p * 2.7 + float3(11.3, 5.1, 0.0)) * 0.35;
+
+    LoomNappe nappe = loom_nappe_brink(push.environment[0].cascadeA.w,
+                                       push.environment[0].cascadeB.w,
+                                       push.environment[0].cascadeC.z);
+    // **Past the break length the sheet opens into strings**, which is the
+    // whole discrimination between the two reference waterfalls: a spout at
+    // `q = 0.1` breaks at 1.31 m and is stringy for the last third of a
+    // two-metre drop; a canyon fall at `q = 2` breaks at 9.7 m and never gets
+    // there. Implemented as coverage on the same noise rather than as a second
+    // particle system — the holes ARE the droplet curtain, and they are already
+    // moving with the water.
+    float broken = smoothstep(1.0, NAPPE_BROKEN_END, z / loom_nappe_break_length(nappe));
+
+    float boil = NAPPE_BOIL * exp(-z / NAPPE_BOIL_DEPTH);
+    float opacity = saturate(aeration * NAPPE_OPACITY + boil);
+    // The strings modulate what is there; they do not invent whiteness in clear
+    // water, which is why this multiplies rather than adds.
+    opacity *= lerp(0.55 + 0.9 * strings, smoothstep(0.30, 0.72, strings), broken);
+
+    float2 screenUv = in.clip.xy / push.environment[0].viewport.xy;
+    // The refracted background, offset by the sheet's own thickness. Water a
+    // few centimetres thick bends the view ray by a few centimetres, so there
+    // is no strength knob here either — the displacement is the physical one
+    // and it shrinks with distance for free.
+    float3 refracted = refract(-view, normal, 1.0 / WATER_IOR);
+    float3 behindPos = in.worldPos + refracted * in.nappe.y;
+    float4 offsetClip = mul(push.objects[push.objectOffset].mvp, float4(behindPos, 1.0));
+    if (offsetClip.w > 0.0) {
+        screenUv = saturate(offsetClip.xy / offsetClip.w * float2(0.5, 0.5) + 0.5);
+    }
+    float sceneDepth = opaqueDepth.SampleLevel(screenUv, 0).r;
+    float3 behind = opaqueColor.SampleLevel(screenUv, 0).rgb;
+
+    // **The fade at both ends.** How far the geometry behind this pixel is,
+    // measured the way `waterBehind` measures it: unproject and compare true
+    // distances, rather than subtracting two nonlinear depth values.
+    if (sceneDepth < 1.0) {
+        float3 bg = waterUnproject(screenUv, sceneDepth);
+        float gap = length(bg - push.environment[0].eye.xyz) - length(toEye);
+        opacity *= smoothstep(0.0, NAPPE_DEPTH_FADE, gap);
+    }
+
+    // **Discarded rather than drawn clear.** The sheet is opaque geometry in an
+    // unblended pass, so a fully transparent fragment still writes depth — and
+    // it would then occlude the mist behind the fall, which is exactly where
+    // the mist is. Clear water at the lip is meant to be a hole.
+    if (opacity < 0.01) {
+        discard;
+    }
+
+    float3 whitewater = WATER_FOAM_ALBEDO
+        * (hemisphereAmbient(normal) * ambientStrength()
+           + sunColor() * sunStrength() * saturate(dot(normal, sunDirection())));
+    float3 lit = lerp(behind, whitewater, opacity);
+
+    // Fresnel against the same sky the sea reflects, so a fall and the pool
+    // under it agree about what water does to light. Weakened by the aerated
+    // part: a specular sheen belongs to a smooth surface, and past break-up
+    // there is no surface left to have one.
+    float fresnel = 0.02 + 0.98 * pow(saturate(1.0 - dot(normal, view)), 5.0);
+    lit = lerp(lit, skyColor(reflect(-view, normal)), fresnel * (1.0 - 0.7 * aeration));
+
+    float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+    return float4(lerp(lit, fogColor(-view), fog), 1.0);
+}
+
 [shader("fragment")]
 float4 waterFragmentMain(WaterOutput in) : SV_Target {
+    // The falling sheet, which shares this pipeline and nothing else — ADR
+    // 0054. Before the shoreline discard, because a nappe hangs in the air over
+    // dry ground as often as not.
+    if (in.nappe.x > 0.5) {
+        return nappeColor(in);
+    }
     // **The shoreline.** Where the bed is above the still-water line there is
     // no water, and drawing it anyway is a sheet of sea lying over a hill —
     // the single most obvious thing wrong with water that ignores terrain.

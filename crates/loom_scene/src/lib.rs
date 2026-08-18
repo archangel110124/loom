@@ -626,6 +626,80 @@ name = \"Hill\"
         )
     }
 
+    /// A scene with one cascade, whose body the test supplies, and a
+    /// `WaterBody` unless `water` says otherwise.
+    fn cascade_scene(body: &str, water: bool) -> String {
+        let pool = if water {
+            "\n[[node]]\nname = \"Pool\"\nparent = \"Scene\"\n\n\
+             [node.components.WaterBody]\nsurface_height = 0.0\n"
+        } else {
+            ""
+        };
+        format!(
+            "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e51\"\n\n\
+             [[node]]\nname = \"Scene\"\n\n\
+             [[node]]\nname = \"Fall\"\nparent = \"Scene\"\n\n\
+             [node.components.Cascade]\n{body}{pool}"
+        )
+    }
+
+    /// The component round-trips its schema with nothing but a discharge, which
+    /// is the claim its documentation makes: one number, and the rest is
+    /// hydraulics.
+    #[test]
+    fn a_cascade_needs_only_a_discharge() {
+        Scene::parse(&cascade_scene("discharge = 0.10\n", true))
+            .expect("a lip, a spread and a break-up all have documented defaults");
+    }
+
+    /// **A cascade with nothing to fall into is invisible, not subtle.** The
+    /// sheet is drawn inside the water block and the water block is skipped
+    /// entirely in a scene with no `WaterBody`, so the whole waterfall silently
+    /// does not exist — the least informative failure a scene can produce.
+    #[test]
+    fn a_cascade_without_water_is_refused() {
+        let errors = Scene::parse(&cascade_scene("discharge = 0.10\n", false))
+            .expect_err("there is nothing for the fall to end at");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "cascade_needs_water_to_fall_into");
+        assert!(
+            errors[0].hint.as_deref().is_some_and(|h| h.contains("WaterBody")),
+            "the rejection has to name what to add: {errors:?}"
+        );
+    }
+
+    /// **The environment buffer carries one lip.** A second cascade would
+    /// validate and then not draw, which is the silent-no-op the registry and
+    /// every rule beside this one exist to stop.
+    #[test]
+    fn a_second_cascade_is_refused() {
+        let scene = format!(
+            "{}\n[[node]]\nname = \"Fall2\"\nparent = \"Scene\"\n\n\
+             [node.components.Cascade]\ndischarge = 0.5\n",
+            cascade_scene("discharge = 0.10\n", true)
+        );
+        let errors = Scene::parse(&scene).expect_err("one lip fits in the buffer");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "one_cascade_per_scene");
+    }
+
+    /// A lip whose ends coincide has no direction for the water to leave along
+    /// — `cross(lip, +Y)` is zero — and the strip collapses to a line.
+    #[test]
+    fn a_cascade_with_a_zero_length_lip_is_refused() {
+        let errors = Scene::parse(&cascade_scene(
+            "lip_a = [0.0, 0.0, 0.0]\nlip_b = [0.0, 0.0, 0.0]\n",
+            true,
+        ))
+        .expect_err("a lip of no length has no normal");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "cascade_lip_has_no_length");
+        assert!(
+            errors[0].hint.as_deref().is_some_and(|h| h.contains("Swap")),
+            "the rejection has to explain the convention: {errors:?}"
+        );
+    }
+
     /// The CPU path is untouched by any of the GPU rules, which is what makes
     /// `gpu = false` a safe default for the eight blessed particle scenes.
     #[test]

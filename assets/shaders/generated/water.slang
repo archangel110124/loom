@@ -192,6 +192,56 @@ float loom_foam_at(LoomFoamField field, float2 xz) {
     return (top + (bottom - top) * fz) * fade;
 }
 
+// The falling sheet. The Rust half is `loom_water::nappe`; they are one
+// implementation written twice, and `slang_agreement` compares them.
+//
+// Never edit this by hand: it is emitted from the Rust.
+
+struct LoomNappe {
+    float brink_depth;
+    float exit_speed;
+    float spread;
+    float breakup;
+};
+
+struct LoomNappeAt {
+    float throwX;
+    float speed;
+    float water_thickness;
+    float outer_thickness;
+    float aeration;
+};
+
+LoomNappe loom_nappe_brink(float discharge, float spread, float breakup) {
+    float q = max(discharge, 1.0e-4);
+    float critical = pow(q * q / 9.81, 1.0 / 3.0);
+    LoomNappe n;
+    n.brink_depth = 0.715 * critical;
+    n.exit_speed = q / n.brink_depth;
+    n.spread = max(spread, 0.0);
+    n.breakup = max(breakup, 1.0e-5);
+    return n;
+}
+
+// Depth at which the coherent core is used up. Past it the sheet is drawn as
+// droplets rather than as a surface.
+float loom_nappe_break_length(LoomNappe n) {
+    float numerator = n.brink_depth * n.exit_speed;
+    float denominator = 2.0 * n.breakup * sqrt(2.0 * 9.81);
+    return pow(numerator / denominator, 2.0 / 3.0);
+}
+
+LoomNappeAt loom_nappe_at(LoomNappe n, float z) {
+    z = max(z, 0.0);
+    LoomNappeAt s;
+    s.speed = sqrt(n.exit_speed * n.exit_speed + 2.0 * 9.81 * z);
+    s.water_thickness = n.brink_depth * n.exit_speed / s.speed;
+    s.outer_thickness = n.brink_depth + 2.0 * n.spread * z;
+    s.throwX = n.exit_speed * sqrt(2.0 * z / 9.81);
+    s.aeration = max(1.0 - s.water_thickness / s.outer_thickness, 0.0);
+    return s;
+}
+
 // The water surface. The Rust half is `loom_water::sample_water`; they are one
 // implementation written twice, and `slang_agreement` compiles this and
 // compares the two numerically.

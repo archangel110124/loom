@@ -389,6 +389,25 @@ pub struct EnvironmentData {
     pub foam_edge_cells: f32,
     /// Keeps the struct's stride 16-byte aligned, as `flow_pad` does.
     pub foam_pad: [u32; 1],
+    /// The waterfall's lip, end A: xyz world, w the discharge in m²/s.
+    ///
+    /// **`w == 0` means this scene has no cascade**, which is every scene in
+    /// the repository before ADR 0054, and is how the nappe's slice of the
+    /// water draw collapses without a second flag.
+    ///
+    /// Appended after the foam block for the reason that block was appended
+    /// after the flow one: every offset above it is unmoved.
+    pub cascade_a: [f32; 4],
+    /// The lip, end B: xyz world, w `δ_out`, the outer spread per metre.
+    pub cascade_b: [f32; 4],
+    /// xy the horizontal direction the water leaves along, z `δ_in` — the core
+    /// spread — w how far the sheet falls before it reaches the pool, metres.
+    ///
+    /// **The fall depth is computed on the CPU rather than in the shader**,
+    /// because it is the lip's height above `water.x` and the CPU is holding
+    /// both. Deriving it per vertex would be the same subtraction done 5,376
+    /// times to reach the same answer.
+    pub cascade_c: [f32; 4],
 }
 
 /// A point light, as the GPU reads it.
@@ -506,6 +525,12 @@ impl Default for EnvironmentData {
             foam_coverage: 0,
             foam_edge_cells: 1.0,
             foam_pad: [0; 1],
+            // No cascade: the discharge in `cascade_a[3]` is the flag the
+            // nappe's quads collapse on, so a scene that authors none renders
+            // exactly as it did.
+            cascade_a: [0.0; 4],
+            cascade_b: [0.0; 4],
+            cascade_c: [0.0; 4],
         }
     }
 }
@@ -560,6 +585,22 @@ pub const FOAM_EDGE_CELLS: f32 = 6.0;
 /// rather than computed from named constants on this side, because the numbers
 /// that matter are the shader's; a test asserts they still agree.
 pub(crate) const WATER_VERTS: u32 = 128 * 128 * 6 * 6;
+
+/// Vertices in the nappe strip that follows the surface in the same draw:
+/// `NAPPE_COLS × NAPPE_ROWS × 6` — ADR 0054.
+///
+/// **Appended to the water draw rather than given a pipeline of its own.** It
+/// wants the same rasterisation state, the same multisampled attachments and
+/// the same set-3 background textures, and it must be depth-tested against the
+/// surface it pours into. A second draw would be a second pipeline, a second
+/// bind and a second entry point to keep in step for a strip of 5,376
+/// vertices. `waterVertexMain` branches on the vertex ID instead.
+///
+/// The strip collapses to a point when the scene authors no cascade, exactly as
+/// the water rings' covered centres do — a degenerate triangle is discarded
+/// before rasterisation for free — so the cost of carrying it in a scene
+/// without a waterfall is 5,376 vertex-shader invocations that emit nothing.
+pub(crate) const NAPPE_VERTS: u32 = 32 * 28 * 6;
 
 /// The multisampled render targets, when there are any.
 ///
@@ -2268,7 +2309,10 @@ impl Renderer {
         // The whole water mesh is in the vertex shader, so "is there water"
         // is the only thing the CPU decides — and the environment already
         // carries the answer, which is why there is no `set_water`.
-        let water_verts = if self.environment.water[2] > 0.0 { WATER_VERTS } else { 0 };
+        // The nappe rides in the same draw (ADR 0054) and is refused at load in
+        // a scene with no `WaterBody`, so there is one flag rather than two.
+        let water_verts =
+            if self.environment.water[2] > 0.0 { WATER_VERTS + NAPPE_VERTS } else { 0 };
         // **The readback follows the last pass that wrote a pixel.** With the
         // AA pass on, the finished frame is in its target and copying the
         // earlier image instead would silently read the un-anti-aliased one —

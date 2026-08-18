@@ -51,6 +51,7 @@
 pub mod buoyancy;
 pub mod flow;
 pub mod foam;
+pub mod nappe;
 pub mod ripples;
 pub mod spectrum;
 pub mod spray;
