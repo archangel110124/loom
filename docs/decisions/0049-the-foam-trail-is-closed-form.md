@@ -105,3 +105,87 @@ hull, spray landing back on the surface, an interactive ripple (W6). None of
 those can be evaluated backwards in time from a position, so none of them
 unroll, and the first one that ships is the trigger to revisit the buffer with
 ADR 0045 clause 3's checklist in hand.
+
+---
+
+# Amendment, 2026-08-18 — the taps, the threshold, and where the trail stops
+
+- **Status:** **proposed** — needs human approval before this branch merges.
+- **Amends:** the constants section above, and one sentence of the decision.
+- **Companion:** ADR 0055, which is the buffer this ADR declined to build,
+  built for the sources this ADR's own "what would change this" section names.
+
+## The step was set by an argument and the argument was wrong
+
+The original text bounds the step from above by tap correlation, reasoning that
+"past about two seconds a Gerstner crest has travelled further than a foam patch
+is wide". Measured on `whitecaps.loom`'s own wave set — the correlation between
+the coverage now and the coverage at the same drifting point `tau` earlier:
+
+    tau   0.1s  0.91     0.4s  0.36     0.7s  -0.00
+          0.2s  0.73     0.5s  0.20     1.0s  -0.14
+          0.3s  0.54     0.6s  0.08     1.1s  -0.14
+
+**It crosses zero at 0.70 s**, well inside the shipped 1.1 s step. So the three
+taps were three independent draws of the same field rather than a trail. Against
+the recurrence they unroll — stepped one fixed tick at a time out to 3.3 s:
+
+     3 taps at 1.10s   recovers 33.7%   misses 45.2%
+     5 taps at 0.66s   recovers 56.7%   misses 22.3%
+     6 taps at 0.55s   recovers 63.5%   misses 17.3%
+     8 taps at 0.41s   recovers 73.0%   misses 11.5%
+    10 taps at 0.33s   recovers 78.6%   misses  8.5%   <- shipped
+    16 taps at 0.21s   recovers 87.1%   misses  4.5%
+
+"Misses" is the fraction of points carrying real trail that the taps give
+nothing at all — a point that was white 0.6 s ago and is not white now got
+nothing from any of the three old taps.
+
+**`FOAM_TRAIL_STEP` is 0.33 s, `FOAM_TRAIL_TAPS` is 10, `FOAM_TRAIL_DECAY` is
+0.858.** The trail is the same 3.3 s long and the half-life does not move: 0.858
+per 0.33 s is 0.600 per 1.1 s, exactly the old decay. Sixteen taps is where the
+curve flattens and is not worth 60% more samples.
+
+**Cost, water pass at 1920x1080, six runs:** `whitecaps` 0.402 → 0.509 ms,
+`ocean` 0.336 → 0.586 ms. The design predicted +0.06 ms; the true figure is
++0.11 and +0.25, because the taps run the scene's whole wave loop and `ocean`
+has seven waves to `whitecaps`' five. It is the largest single addition the
+water pass has taken, and it is paid per water vertex rather than per pixel, so
+it does not scale with resolution.
+
+## The criterion the taps threshold is no longer the trace
+
+`WaterSample::fold` is `Σ Q·k·A·sin φ`, which is the **trace** of the horizontal
+compression — the sum of both principal compressions. Two swells crossing at 90°
+add their compressions and read as broken while neither axis has folded.
+Measured on exactly that pair, two 10 m swells at `Q·k·A = 0.32` each: the trace
+calls **12.32%** of the surface past breaking, the largest eigenvalue **0.00%**.
+
+Every foam threshold now reads `mu_max`. On a single-direction sea — which is
+most of this repository — the two agree to 1.5e-8, so this is a change only
+where the sea crosses.
+
+## `WATER_FOAM_STRETCH` is `WATER_FOAM_STREAK`
+
+The streaks lay across the *global wind*, which is right only for a pure wind
+sea and was invisible on `whitecaps.loom` precisely because that scene authors
+every wave within 20° of the wind. They now lie along `break_dir`, the local
+compression's eigenvector — ADR 0053 §7.
+
+## Foam ages
+
+`age = foamHist / max(instantaneous, foamHist)`, free, because both numbers were
+already in hand. It drives the albedo 0.72 → 0.28 and the substitution opacity
+1.0 → 0.55: Koepke's whitecap reflectance falls 55% → 3–10% over about ten
+seconds as the raft drains. The epsilon in the denominator is not tidiness —
+without it the expression is 0/0 wherever the foam came from ADR 0055's field
+alone, and a NaN age lerps the shaded result to NaN, which resolves to black.
+Measured: `whitecaps` came back with the field's footprint punched out of it in
+solid black.
+
+## What is unchanged
+
+The decision itself. The trail is still closed-form, still takes no buffer,
+still costs ADR 0045 clause 3 nothing. ADR 0055 does not replace it: the trail
+is what remembers a *wave*, everywhere on an unbounded sea, and the field is
+what remembers a hull inside a 63.5 m domain. The shader takes the maximum.
