@@ -1618,8 +1618,15 @@ impl Viewer {
         let blended_pipeline = self.blended_pipeline;
         let grass_count = self.grass_count;
         let water_pipeline = self.water_pipeline;
+        // **The nappe rides in this draw too** — ADR 0054, and `renderer.rs`
+        // has counted it since the cascade landed. The window did not, so
+        // `loom run assets/test/cascade.loom` was a canyon with a sea in it and
+        // no waterfall: the same both-paths defect as the commit above this
+        // one, one feature over, found the same way — by opening the window.
+        // One flag rather than two, because a nappe is refused at load in a
+        // scene with no `WaterBody`.
         let water_verts = if self.environment.water[2] > 0.0 {
-            crate::renderer::WATER_VERTS
+            crate::renderer::WATER_VERTS + crate::renderer::NAPPE_VERTS
         } else {
             0
         };
