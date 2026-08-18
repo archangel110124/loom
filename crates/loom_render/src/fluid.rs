@@ -271,8 +271,8 @@ struct Buf {
     buffer: vk::Buffer,
     allocation: Option<Allocation>,
     address: vk::DeviceAddress,
-    /// Bytes, so the first submit can zero it. See `fluid_zero`.
-    size: u64,
+    /// Whether the first submit zeroes it. See `fluid_zero`.
+    zero: bool,
 }
 
 /// The twenty compute pipelines, one per entry point.
@@ -625,11 +625,11 @@ impl FluidSolver {
         let mut consts_alloc = None;
         let mut density_alloc = None;
         for (index, (buffer, allocation, address)) in bufs_list.into_iter().enumerate() {
-            // **The size the first submit zeroes, and the host-visible ones get
-            // zero.** `fluid_zero` runs inside the first command buffer, after
-            // the CPU has already written the constants and the solid mask into
-            // their mappings — filling those would erase them.
-            let size = allocation.size();
+            // **Which buffers the first submit zeroes, and the host-visible
+            // ones are not among them.** `fluid_zero` runs inside the first
+            // command buffer, after the CPU has already written the constants
+            // and the solid mask into their mappings — filling those would
+            // erase them.
             let keep = match index {
                 13 => &mut solid_alloc,
                 14 => &mut probes_alloc,
@@ -637,12 +637,12 @@ impl FluidSolver {
                 16 => &mut consts_alloc,
                 18 => &mut density_alloc,
                 _ => {
-                    bufs.push(Buf { buffer, allocation: Some(allocation), address, size });
+                    bufs.push(Buf { buffer, allocation: Some(allocation), address, zero: true });
                     continue;
                 }
             };
             *keep = Some(allocation);
-            bufs.push(Buf { buffer, allocation: None, address, size: 0 });
+            bufs.push(Buf { buffer, allocation: None, address, zero: false });
         }
 
         let mut solver = Self {
@@ -1008,7 +1008,7 @@ impl FluidSolver {
         let probe_groups = self.consts.counts[3].max(0) as u32;
 
         let handles: Vec<vk::Buffer> = self.bufs.iter().map(|b| b.buffer).collect();
-        let spans: Vec<u64> = self.bufs.iter().map(|b| b.size).collect();
+        let zeroed: Vec<bool> = self.bufs.iter().map(|b| b.zero).collect();
 
         // **Not `material::record`**, which submits and waits in one call. The
         // fence wait is the number ADR 0053 §4 asks for by name, so it has to
@@ -1069,16 +1069,25 @@ impl FluidSolver {
                 // (never-do #4).
                 let all: Vec<(BufferId, BufferAccess)> =
                     ids.iter().map(|id| (*id, rw)).collect();
-                let sizes: Vec<(vk::Buffer, u64)> =
-                    handles.iter().copied().zip(spans.iter().copied()).collect();
+                // **`WHOLE_SIZE`, not a length this code carries.** It used to
+                // carry `Allocation::size()`, which is gpu-allocator's
+                // *padded* size and not the buffer's: on ribbon's grid that is
+                // eight bytes past the end of `loom.fluid.vel_u`, which is
+                // `VUID-vkCmdFillBuffer-size-00027` in debug and an
+                // out-of-bounds write in release. `WHOLE_SIZE` fills to the end
+                // of the *buffer*, so the only copy of the length is the one
+                // `vkCreateBuffer` was given.
+                let targets: Vec<vk::Buffer> = handles
+                    .iter()
+                    .copied()
+                    .zip(zeroed.iter().copied())
+                    .filter_map(|(buffer, zero)| zero.then_some(buffer))
+                    .collect();
                 graph.pass_with("fluid_zero", &[], &all, move |d, cmd| {
-                    for (buffer, size) in &sizes {
-                        if *size == 0 {
-                            continue;
-                        }
+                    for buffer in &targets {
                         // SAFETY: every buffer is live and the graph has
                         // ordered this against whatever touches them next.
-                        unsafe { d.cmd_fill_buffer(cmd, *buffer, 0, *size, 0) };
+                        unsafe { d.cmd_fill_buffer(cmd, *buffer, 0, vk::WHOLE_SIZE, 0) };
                     }
                 });
                 go(&mut graph, "fluid_seed", p.seed, [0; 4], particle_groups, &[(bp, rw)]);
