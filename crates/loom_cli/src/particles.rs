@@ -364,38 +364,32 @@ impl Plumes {
             let age = elapsed - born;
             #[allow(clippy::cast_possible_truncation)]
             let seed = salt(splash.tick, splash.at) as u32;
+            // Crown, then jet, then satellites — one clock, one call, in blend
+            // order. See `loom_water::spray::impact`.
             let drops =
-                loom_water::spray::crown(splash.at, splash.speed, splash.radius, age, seed);
-            // **The water itself, drawn before the droplets that leave it.**
-            // Order is what the renderer blends in, so the sheet goes down
-            // first and the droplets read as being in front of it.
-            let column =
-                loom_water::spray::column(splash.at, splash.speed, splash.radius, age, seed);
-            let sheet = column_visual(splash.radius);
-            for d in &column {
-                instances.push(drawn_drop(d, &sheet));
-            }
+                loom_water::spray::impact(splash.at, splash.speed, splash.radius, age, seed);
             for d in &drops {
                 instances.push(drawn_drop(d, &visual));
             }
-            // **Retired on the union, not on the crown.** The sheet outlives
-            // the droplets — 0.72 s against 0.46 s at `pool.loom`'s entry — so
-            // retiring on the crown alone would cut the water off halfway up.
-            !drops.is_empty() || !column.is_empty()
+            // **Retired on the whole impact, not on the crown.** The jet fires
+            // after the rim has started to collapse and outlives it, so
+            // retiring on the crown alone would cut the splash off before its
+            // tallest moment.
+            !drops.is_empty()
         });
     }
 }
 
 /// One particle's drawable form: size and colour interpolated over its life.
 fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
-    drawn_at(p.position, p.velocity, p.fraction(), 1.0, visual)
+    drawn_at(p.position, p.velocity, p.fraction(), 1.0, 1.0, visual)
 }
 
 /// The same, for a droplet the water threw — those carry their own size
 /// multiplier, which is what stops a band of a crown reading as identical
 /// beads. See `loom_water::spray::Droplet::scale`.
 fn drawn_drop(d: &loom_water::spray::Droplet, visual: &Visual) -> ParticleInstance {
-    drawn_at(d.position, d.velocity, d.fraction, d.scale, visual)
+    drawn_at(d.position, d.velocity, d.fraction, d.scale, d.alpha, visual)
 }
 
 /// Seconds one water droplet's smear stands for.
@@ -417,6 +411,7 @@ fn drawn_at(
     velocity: [f32; 3],
     t: f32,
     scale: f32,
+    opacity: f32,
     visual: &Visual,
 ) -> ParticleInstance {
     // Smoke expands and pales as it cools and mixes with air; a plume whose
@@ -461,7 +456,11 @@ fn drawn_at(
                 * lerp(visual.color_start[0], visual.color_end[0]).max(1e-3),
             lerp(visual.color_start[1], visual.color_end[1]),
             lerp(visual.color_start[2], visual.color_end[2]),
-            lerp(visual.alpha[0], visual.alpha[1]) * fade,
+            // `opacity` is the crown's fingering and nothing else — 1.0 for
+            // every particle in the engine that is not a droplet off a rim, so
+            // it is an exact no-op everywhere else. See
+            // `loom_water::spray::Droplet::alpha`.
+            lerp(visual.alpha[0], visual.alpha[1]) * fade * opacity,
         ],
         // **Zero shutter is a disc**, which is every emitter but the water's
         // own droplets: a shutter open for no time records no smear, so the
@@ -756,27 +755,19 @@ fn age_of(steps: u32) -> f32 {
 /// system, no state and no `repeat` gate, exactly like the crest spray.
 fn crown(world: &World, splash: &crate::play::Splash, age: f32) -> Vec<ParticleInstance> {
     let visual = droplet_visual(world);
-    let sheet = column_visual(splash.radius);
     // The same salt the authored template is seeded by, narrowed: two bodies
     // going in on one tick turn their rings differently.
     #[allow(clippy::cast_possible_truncation)]
     let seed = salt(splash.tick, splash.at) as u32;
-    // **The rising water first, then the droplets that came off it** — W12,
-    // and the order is the blend order. Both halves are wired here *and* in
-    // `Plumes::rebuild_instances`, because the last time a water effect reached
-    // one path only (`set_ripples`, ADR 0046 §7) the window drew flat water
-    // over a wake it was nevertheless feeling.
-    let mut out: Vec<ParticleInstance> =
-        loom_water::spray::column(splash.at, splash.speed, splash.radius, age, seed)
-            .iter()
-            .map(|d| drawn_drop(d, &sheet))
-            .collect();
-    out.extend(
-        loom_water::spray::crown(splash.at, splash.speed, splash.radius, age, seed)
-            .iter()
-            .map(|d| drawn_drop(d, &visual)),
-    );
-    out
+    // **One call, so this path and `Plumes::rebuild_instances` cannot draw
+    // different splashes.** The last time a water effect reached one path only
+    // (`set_ripples`, ADR 0046 §7) the window drew flat water over a wake it
+    // was nevertheless feeling; two call sites composing the same three
+    // populations by hand is the same hazard with a longer fuse.
+    loom_water::spray::impact(splash.at, splash.speed, splash.radius, age, seed)
+        .iter()
+        .map(|d| drawn_drop(d, &visual))
+        .collect()
 }
 
 /// What a droplet looks like: the water's own splash when the scene authors
@@ -786,48 +777,6 @@ fn crown(world: &World, splash: &crate::play::Splash, age: f32) -> Vec<ParticleI
 /// substance and an author who described one meant both.
 fn droplet_visual(world: &World) -> Visual {
     splash_template(world).into_iter().next().map_or_else(default_droplet, |(_, visual)| visual)
-}
-
-/// What the rising sheet is made of — W12.
-///
-/// **Not the droplet visual scaled up, and not the water's authored splash
-/// either.** A droplet is a bead: small, bright, and it keeps its opacity to
-/// the end of its arc. A sheet is aerated water, so it has to be broad enough
-/// that adjacent quads overlap into a surface, and it disappears by going
-/// transparent rather than by shrinking.
-///
-/// **The size is a function of the cavity, and that is the whole reason this
-/// takes an argument.** A fixed size was written first and it is wrong for
-/// every body but the one it was set on: the ring spacing is
-/// `2π · COLUMN_FLARE · radius / COLUMN_RING`, so a quad that closes the sheet
-/// on `pool.loom`'s 0.5 m sphere leaves visible gaps on `water_crate`'s wider
-/// crate — a necklace of beads, which is precisely the artifact the sheet
-/// exists to remove. 0.84 is that expression with the constants in it, so the
-/// rim just closes at the widest the sheet ever gets and the base overlaps
-/// heavily.
-///
-/// **It does not shrink.** A sheet that shrank like a droplet would open the
-/// same gaps halfway through its life, which is when it is largest on screen.
-///
-/// **Deliberately not `droplet_visual`.** That function answers "what does this
-/// water's *spray* look like", and a scene authoring a splash emitter is
-/// describing droplets; taking the sheet from it would make a scene with an
-/// authored smoke-coloured splash raise a column of smoke.
-fn column_visual(radius: f32) -> Visual {
-    let quad = 0.84 * radius;
-    Visual {
-        size: [quad, quad],
-        color_start: [0.88, 0.93, 0.97],
-        color_end: [0.72, 0.81, 0.88],
-        alpha: [0.72, 0.0],
-        additive: false,
-        flame: false,
-        // **The sheet is not smeared.** Its quads have to overlap into a
-        // surface; stretching each one along its own motion tears holes
-        // between them. `spray::column` hands back a zero velocity for the
-        // same reason, so this is belt and braces on one decision.
-        shutter: 0.0,
-    }
 }
 
 /// Small, shrinking, and white going to a pale blue-grey: a droplet is not a
@@ -1112,56 +1061,66 @@ mod tests {
         assert!(first.color[0] > 0.5 && first.color[2] > 0.5, "{first:?} is not spray-coloured");
     }
 
-    /// **The rising water reaches BOTH paths — W12.**
+    /// **The jet reaches BOTH paths, and it arrives after the crown.**
     ///
     /// This is the test the `set_ripples` defect (ADR 0046 §7) says this
     /// repository owes every water effect: a feature wired into `simulate` and
     /// not into `Plumes` is present, tested, and invisible in the window the
     /// human actually watches. So both are asked, and both are asked for the
-    /// thing that distinguishes a column from a crown — water standing *above*
-    /// the droplets' own ceiling.
+    /// thing that distinguishes the new anatomy from the old mushroom — water
+    /// standing above the droplets' own ceiling, *and not there yet* six ticks
+    /// in.
     ///
     /// `pool.loom` is the fixture because it authors no `ParticleEmitter` under
-    /// its water, which is the branch the crown and the column live on.
+    /// its water, which is the branch the impact anatomy lives on.
     #[test]
-    fn the_rising_water_reaches_both_the_headless_and_the_window_path() {
+    fn the_jet_reaches_both_paths_and_arrives_after_the_crown() {
         let world = {
             let source = std::fs::read_to_string("../../assets/test/pool.loom").expect("fixture");
             World::from_scene(&loom_scene::Scene::parse(&source).expect("valid scene"))
         };
         let at = [0.0, 0.0, 0.0];
-        // Six ticks after the entry — the frame `pool.loom`'s golden reference
-        // is taken on, so this is the population that image protects.
-        let ticks = 6;
         let splash = entry(0, at);
-        #[allow(clippy::cast_precision_loss)]
-        let age = ticks as f32 * DT;
-        // The tallest droplet the crown can ever reach at this entry. Anything
-        // above it is water, not spray.
-        let ceiling = loom_water::spray::crown(at, splash.speed, splash.radius, age, 0)
-            .iter()
+        let top = |ticks: u32| {
+            let headless = simulate(&world, &calm(), Some(ticks), &[], &[splash]);
+            let mut plumes = Plumes::new(&world, calm());
+            plumes.splash(&world, splash);
+            plumes.advance(ticks);
+            let window = plumes.instances().to_vec();
+            assert_eq!(
+                headless.len(),
+                window.len(),
+                "the two paths drew different populations for one entry at tick {ticks}"
+            );
+            let high = |out: &[loom_render::ParticleInstance]| {
+                out.iter().fold(0.0_f32, |best, p| best.max(p.position[1]))
+            };
+            let (a, b) = (high(&headless), high(&window));
+            assert!((a - b).abs() < 1e-6, "headless topped out at {a} m, the window at {b} m");
+            a
+        };
+
+        // The crown's own ceiling — the tallest droplet the rim can ever reach.
+        let ceiling = (0..120)
+            .flat_map(|step| {
+                #[allow(clippy::cast_precision_loss)]
+                loom_water::spray::crown(at, splash.speed, splash.radius, step as f32 * DT, 0)
+            })
             .fold(0.0_f32, |best, d| best.max(d.position[1]));
         assert!(ceiling > 0.0, "the crown threw nothing to compare against");
 
-        let headless = simulate(&world, &calm(), Some(ticks), &[], &[splash]);
-
-        let mut plumes = Plumes::new(&world, calm());
-        plumes.splash(&world, splash);
-        plumes.advance(ticks);
-        let window = plumes.instances().to_vec();
-
-        for (path, out) in [("headless", &headless), ("window", &window)] {
-            let top = out.iter().fold(0.0_f32, |best, p| best.max(p.position[1]));
-            assert!(
-                top > ceiling,
-                "{path} drew nothing above the crown's {ceiling} m ceiling — top was {top} m, \
-                 so the water is not rising on that path"
-            );
-        }
-        assert_eq!(
-            headless.len(),
-            window.len(),
-            "the two paths drew different populations for one entry"
+        // Six ticks in — inside the crown, before the jet fires at ~13.6.
+        assert!(
+            top(6) < ceiling,
+            "something was already above the crown's {ceiling} m ceiling at tick 6, so the \
+             jet is firing with the rim rather than after it"
+        );
+        // Thirty ticks in — the jet is up and past the rim, on both paths. The
+        // jet apex itself is at tick ~35 (0.59 s after the entry), which is
+        // half a second after the crown; that gap is the anatomy.
+        assert!(
+            top(30) > ceiling,
+            "neither path drew anything above the crown's {ceiling} m ceiling at tick 30"
         );
     }
 

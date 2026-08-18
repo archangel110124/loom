@@ -97,6 +97,19 @@ pub struct Droplet {
     /// 1.0 everywhere it is not deliberately varied, so it is an exact no-op
     /// for the crest spray and the sheet.
     pub scale: f32,
+    /// How opaque this one is, as a multiple of what the visual says.
+    ///
+    /// **The other half of the fingering, and it cannot be done with
+    /// [`Self::scale`].** A crown rim is not a ring of equal beads: the
+    /// Rayleigh–Plateau instability drains the sheet into a few dozen
+    /// *ligaments* with thin water between them, so the ring is alternately
+    /// thick and nearly empty. Size alone makes small beads; size and opacity
+    /// together make ligaments with gaps, which is what stops the rim reading
+    /// as a manufactured necklace.
+    ///
+    /// 1.0 everywhere it is not deliberately varied — an exact no-op for the
+    /// crest spray.
+    pub alpha: f32,
 }
 
 /// The largest `fold` this wave set can ever reach, anywhere, ever.
@@ -256,6 +269,7 @@ fn crown_in(
             velocity: ballistic_velocity(v, age),
             fraction: age / SPRAY_LIFETIME,
             scale: 1.0,
+            alpha: 1.0,
         });
     }
 }
@@ -325,15 +339,51 @@ pub const SPLASH_OUT_FRAC: f32 = 0.22;
 
 /// Droplets per band of the crown.
 ///
-/// **Raised from 8 with [`SPLASH_BANDS`], because the human asked to see more
-/// of them and count is the knob that answers that.** Size is not: at
-/// `pool.loom`'s camera a droplet is already 17 px against water at a luma of
-/// about 70, and a bigger one reads as hail rather than as spray. Lifetime is
-/// not either — it is `2·up/g` and falls out of the velocity, so buying more of
-/// it means throwing the droplets higher, which is a different splash.
-pub const SPLASH_RING: usize = 16;
+/// **32 x 8, and the count was chosen by measurement rather than by budget.**
+/// The brief for this slice assumed overdraw would be the binding constraint;
+/// it is not, at anything like this scale. Probed on `pool.loom` at
+/// 1920x1080, `--sim 52`, with `LOOM_GPU_TIMING=1`:
+///
+/// ```text
+///     112 particles (16x4 rim + the old sheet)   forward 0.144 ms  water 0.268 ms
+///     272 particles (32x8 rim + the old sheet)   forward 0.136 ms  water 0.267 ms
+///    1840 particles (128x16 rim + the sheet)     forward 0.133 ms  water 0.280 ms
+/// ```
+///
+/// A sixteen-fold rise in quads costs **0.012 ms** in the pass that draws them
+/// and nothing at all in the forward pass — three runs each, whole-render wall
+/// clock unmoved at 0.69 s against 0.74 s. So the counts here are set by what
+/// the rim has to *look* like and not by what it costs: 32 around is what lets
+/// [`SPLASH_FINGERS`] fingers be told apart at all, since a ring sampled at 16
+/// points cannot express twenty ligaments.
+pub const SPLASH_RING: usize = 32;
 /// Bands at full strength. A marginal entry throws fewer — see [`crown`].
-pub const SPLASH_BANDS: usize = 4;
+pub const SPLASH_BANDS: usize = 8;
+
+/// Fingers a crown's rim tears into, at the lowest and the highest impact.
+///
+/// **This is the one cosine that stops a splash reading as a mushroom.** A
+/// rising crown wall is a thin liquid sheet with a thickened rim, and a
+/// thickened rim is Rayleigh–Plateau unstable: it drains into a set of
+/// evenly-spaced ligaments, and the droplets come off *those* rather than off
+/// the whole circumference. Every photograph of a milk-drop crown is a count
+/// of them.
+///
+/// `n = round(6 + 14 · smoothstep(SPLASH_MIN_SPEED, SPLASH_FULL_SPEED, U))` —
+/// **a fitted shape, not a derivation.** The real count goes as the square
+/// root of the Weber number, which needs a surface tension and a sheet
+/// thickness this engine has nowhere to put; the ramp reproduces the right
+/// range (a gentle entry tears into a handful of lobes, a hard one into ~20)
+/// off quantities the event already carries.
+pub const SPLASH_FINGERS: (f32, f32) = (6.0, 14.0);
+
+/// How deep the fingering cuts, as a fraction of the rim radius.
+///
+/// `r(θ) = R · (1 + 0.25·cos(nθ + φ))` on the birth radius **and on the
+/// outward velocity**, so a ligament is both further out to start with and
+/// travelling faster — which is what makes it a finger in flight rather than a
+/// scalloped ring that stays a ring.
+const SPLASH_FINGER_DEPTH: f32 = 0.25;
 
 /// How much a droplet's size may vary from its band's, either way.
 ///
@@ -380,6 +430,17 @@ pub fn crown(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec<
     // ramp already stops counting at this speed; the arc stops with it.
     let impact = speed.min(SPLASH_FULL_SPEED);
 
+    // The fingering. `n` is a count of ligaments and `phi` turns them, so two
+    // impacts do not tear the same way — see [`SPLASH_FINGERS`].
+    #[allow(clippy::cast_precision_loss)]
+    let fingers = {
+        let s = smoothstep(SPLASH_MIN_SPEED, SPLASH_FULL_SPEED, speed);
+        SPLASH_FINGERS.1.mul_add(s, SPLASH_FINGERS.0).round()
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let phi = ((hash(seed ^ 0x00f1_9e12) >> 8) as f32) * (1.0 / 16_777_216.0)
+        * std::f32::consts::TAU;
+
     let mut out = Vec::new();
     for band in 0..bands {
         // 0 for the innermost band, approaching 1 for the outermost. The outer
@@ -403,9 +464,16 @@ pub fn crown(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec<
             let angle = std::f32::consts::TAU
                 .mul_add((i as f32 + 0.5 * band as f32) / SPLASH_RING as f32, spin);
             let (dir_x, dir_z) = (angle.cos(), angle.sin());
+            // **The ligament, one cosine of it.** `finger` is 0.75 between
+            // ligaments and 1.25 on one; it swells the birth radius, throws
+            // that droplet further out, and — through `alpha` below — leaves
+            // the water between them thin. Doing only the radius makes a
+            // scalloped ring; doing only the alpha makes a dotted one.
+            let finger = SPLASH_FINGER_DEPTH.mul_add(fingers.mul_add(angle, phi).cos(), 1.0);
             // The rim. See the doc comment: this is the whole geometry.
-            let base = [dir_x.mul_add(radius, at[0]), at[1], dir_z.mul_add(radius, at[2])];
-            let v = [dir_x * outward, up, dir_z * outward];
+            let base =
+                [dir_x.mul_add(radius * finger, at[0]), at[1], dir_z.mul_add(radius * finger, at[2])];
+            let v = [dir_x * outward * finger, up, dir_z * outward * finger];
             // **Per droplet, from the same hash the ring is turned by.** A band
             // shares one `fraction` and therefore one size, so without this the
             // crown is a string of identical beads — see [`Droplet::scale`].
@@ -417,157 +485,249 @@ pub fn crown(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec<
                 velocity: ballistic_velocity(v, age),
                 fraction: age / lifetime,
                 scale: SPLASH_SIZE_JITTER.mul_add(unit.mul_add(2.0, -1.0), 1.0),
+                // `0.55 + 0.45·cos(nθ + φ)` — the same cosine, on the other
+                // axis. Never zero, because a droplet that is exactly nothing
+                // is a quad that costs what it always cost and draws no water.
+                alpha: 0.45f32.mul_add(fingers.mul_add(angle, phi).cos(), 0.55),
             });
         }
     }
     out
 }
 
+/// The classic `smoothstep`, spelled out — Rust has no such thing in `std` and
+/// this file is not adding a dependency for three multiplies.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (-2.0f32).mul_add(t, 3.0)
+}
+
 // ---------------------------------------------------------------------------
-// W12: the water that rises — the sheet the droplets come off.
+// The Worthington jet, and the satellites that pinch off its tip.
 // ---------------------------------------------------------------------------
 //
-// **What the human asked for and what was there.** "The water caresses up and
-// maybe you could see some particles coming from it." The particles are
-// [`crown`] above and they read; what is missing is the *water itself rising* —
-// the sheet that stands up out of the hole a body punched, before it falls
-// back. A crown of droplets around a flat surface is beads on a table.
+// **This replaces W12's rising sheet, which ADR 0053 §7 lists for tear-out.**
+// That sheet was `spray::column`: twelve quads round a ring, four rings up,
+// launched at t = 0 with the crown and hanging off one ballistic rim. Three
+// judges rendered it independently and all three called it a grey mushroom,
+// and the reason is not the quad count — it is the *clock*. Loom fired every
+// part of a splash at t = 0, so the wall, the rim and the droplets all rose
+// together and the eye read one solid dome.
 //
-// **It is rendered, not injected into the ripple grid, and that is a
-// measurement rather than a preference.** The obvious physical answer is to
-// push the grid down and then up at the entry point so the surface really
-// rises. Two things say no:
+// A real impact is a sequence. The crown goes up and starts to collapse; the
+// cavity the body punched closes from the sides; the collapse focuses on the
+// axis and drives a thin, fast **jet** straight up, well past where the crown
+// ever reached; the jet's tip necks and pinches off into satellites. The jet is
+// the tall spike in every photograph of a drop hitting a pool, and Loom has
+// never drawn it.
 //
-//   - The grid is already at its deepest exactly when the column should stand.
-//     `loom water --at 0,0 --sim {50,60,120}` on `pool.loom` reads
-//     -0.2712 / -0.4079 / +0.2530: the dent bottoms out around tick 60 and the
-//     rebound does not arrive until tick 120, a full second late, and it comes
-//     back as a mound over two metres wide because the rebound timescale is
-//     dent-width over `speed`. `speed` is the same constant carrying the wake
-//     ring outward, and the two timescales are about 7x apart — one number
-//     cannot serve both.
-//   - A deliberate upward injection is ADR 0046's first failure with the sign
-//     chosen to pump it. That failure saturates only because the injection is
-//     taken *relative to the surface's own velocity*; an injection derived from
-//     the event rather than from the body's velocity has no such term, and ADR
-//     0051 already measured what moving that knob costs — at 5.6x the authored
-//     strength the sphere never surfaces at all.
-//
-// So this is presentation, on the same footing as the crown and the crest
-// spray: a pure function of `(where, how hard, how old, a seed)`, drawn through
-// the particle pipeline, invisible to `sample_water`, to buoyancy and to
-// `loom sim --assert`. Every hash and every `loom water` reading is unmoved,
-// which is checked rather than claimed.
+// Same kind of object as everything else in this file: a pure function of
+// `(where, how hard, how old, a seed)`. No state, no readback, nothing an
+// assertion can see — ADR 0045 clause 1 satisfied by having nothing to argue
+// about, exactly as the crest crown satisfies it.
 
-/// Fraction of the impact speed the sheet's rim leaves with, upward.
+/// Fraction of the impact speed the jet's tip leaves with.
 ///
-/// **Anchored on the height, not the velocity.** At `pool.loom`'s measured
-/// 7.1 m/s entry this lifts the tip to `(0.5·7.1)²/2g` = 0.64 m — about one
-/// body radius above the surface for a 0.5 m sphere, which is what a splash at
-/// this Froude number does. Over [`SPLASH_UP_FRAC`] deliberately: the sheet is
-/// water and the droplets are what tears off it, so the sheet stands above the
-/// ring rather than the ring standing above nothing.
-pub const COLUMN_UP_FRAC: f32 = 0.50;
+/// **Anchored on the apex, not on the velocity**, and it is the coefficient
+/// `COLUMN_UP_FRAC` was measured at — reapplied to the event it belongs to.
+/// The apex is `(0.5U)²/2g = 0.0127·U²`: at `pool.loom`'s measured 7.1 m/s
+/// entry that is 0.64 m, against the crown's tallest band at 0.30 m. **The jet
+/// must exceed the crown**, or the anatomy is wrong and this constant is what
+/// says so.
+pub const JET_UP_FRAC: f32 = 0.50;
 
-/// How far the sheet flares out by the time it is at its apex, as a multiple of
-/// the cavity radius.
+/// The jet's radius at its base and at its tip, as fractions of the cavity.
 ///
-/// A crown is a cone opening upward — the wall leans out as it rises, which is
-/// what makes it read as water thrown aside rather than as a pipe. Coming back
-/// down it narrows again, because the water is falling into the hole it came
-/// out of.
-pub const COLUMN_FLARE: f32 = 1.6;
+/// A jet is *thin* — that is most of what distinguishes it from a column. It
+/// tapers upward because the tip is travelling fastest and the water stretches.
+const JET_RADIUS: (f32, f32) = (0.25, 0.15);
 
-/// Quads around each ring, and rings up the sheet.
-///
-/// Twelve rather than [`SPLASH_RING`]'s eight because these have to *overlap*
-/// into a surface. The binding case is the widest the ring ever gets: at a
-/// 0.5 m cavity flared to [`COLUMN_FLARE`] the circle is 5.0 m around, so twelve
-/// quads sit 0.42 m apart, which is what `default_column`'s quad size is set
-/// from. Fewer and the sheet reads as a necklace, which is exactly the thing it
-/// exists to stop looking like.
-pub const COLUMN_RING: usize = 12;
-/// Rings up the sheet. Four is what covers 0.64 m without banding.
-pub const COLUMN_RINGS: usize = 4;
+/// Droplets around the jet and segments up it: 6 x 14 = 84 quads.
+const JET_RING: usize = 6;
+const JET_SEGMENTS: usize = 14;
 
-/// The sheet of water an impact throws up, `age` seconds after it happened.
+/// Seconds after the jet launches at which its tip pinches off.
 ///
-/// Same arguments as [`crown`] and deliberately so — the caller has one event
-/// and hands it to both, so the two can never disagree about where the impact
-/// was or how hard it was. Same gate, same saturation, same `seed` turning the
-/// ring, and the same ballistic arc, so the sheet and the droplets leaving it
-/// share one clock.
+/// Rayleigh–Plateau again, on a cylinder this time rather than on a rim: a
+/// stretching liquid thread necks and breaks, and the tip is where it is
+/// thinnest. Fitted, for [`SPLASH_FINGERS`]'s reason — the real time depends on
+/// a surface tension nothing in this engine holds.
+const SATELLITE_DELAY: f32 = 0.08;
+
+/// Droplets pinched off the jet tip.
+const SATELLITE_COUNT: usize = 40;
+
+/// How wide the satellites spread, in metres per second, sideways.
+const SATELLITE_SPREAD: f32 = 1.1;
+
+/// When the jet leaves, in seconds after the impact.
 ///
-/// **One ballistic rim, and the wall hangs from it.** The first version gave
-/// every ring its own launch speed, which is the more physical-sounding option
-/// and is visibly wrong: the fast rings outrun the slow ones, the sheet tears
-/// off its own base, and by mid-flight there is a detached puff of white
-/// hanging over flat water reading as steam. A crown wall is *attached to the
-/// water* — that attachment is the whole thing being asked for, since a
-/// detached white blob is spray, and spray is what [`crown`] already draws. So
-/// the rim is ballistic and the rings below it interpolate down to the surface,
-/// which stretches and thins the sheet as it rises and lets it settle back
-/// into the hole it came out of.
+/// `t_jet = R / sqrt(g · max(h_cavity, R))` — the cavity's collapse time, which
+/// is how long the sides take to fall back in under gravity across a gap of
+/// their own size.
 ///
-/// Empty below [`SPLASH_MIN_SPEED`] and empty once the rim is back down,
-/// exactly like [`crown`]. No lifetime is authored anywhere and none can
-/// disagree with the velocity.
+/// **`h_cavity` is not available at the event and the formula already says what
+/// to do about it.** The submersion event carries where, how hard and how wide,
+/// and nothing measures how deep the hole got; `max(h_cavity, R)` with an
+/// unknown `h_cavity` is `R`, so this is `sqrt(R/g)`. At `pool.loom`'s 0.5 m
+/// sphere that is 0.226 s — **13.6 ticks after the entry**, which is what puts
+/// the jet visibly *after* the crown in a `--sim` sweep rather than inside it.
 #[must_use]
-pub fn column(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec<Droplet> {
-    let strength =
-        ((speed - SPLASH_MIN_SPEED) / (SPLASH_FULL_SPEED - SPLASH_MIN_SPEED)).clamp(0.0, 1.0);
-    if strength <= 0.0 || age < 0.0 {
+pub fn jet_delay(radius: f32) -> f32 {
+    (radius.max(1e-3) / SPRAY_GRAVITY).sqrt()
+}
+
+/// The jet an impact drives up out of the closing cavity, `age` seconds after
+/// the impact — empty before [`jet_delay`] and empty once it has fallen back.
+///
+/// Same arguments as [`crown`] and deliberately so: one event, handed to both,
+/// so the two can never disagree about where the impact was or how hard it hit.
+///
+/// **One ballistic tip, and the column hangs under it.** Every segment sits at
+/// a fixed fraction of the tip's current height, so its velocity is that
+/// fraction of the tip's — the exact derivative, not a second integration.
+/// Giving each segment its own launch was tried on the sheet this replaces and
+/// is what tore it into a detached puff.
+#[must_use]
+pub fn jet(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec<Droplet> {
+    let Some((up, jet_age)) = jet_state(speed, radius, age) else {
         return Vec::new();
-    }
-    // Saturated for [`crown`]'s reason: an unbounded speed would otherwise
-    // stand a column in the air for seconds after the thing that made it.
-    let impact = speed.min(SPLASH_FULL_SPEED);
-    let up = impact * COLUMN_UP_FRAC;
-    let lifetime = 2.0 * up / SPRAY_GRAVITY;
-    if age >= lifetime {
-        return Vec::new();
-    }
-    let apex = up * up / (2.0 * SPRAY_GRAVITY);
-    // The rim: one launch, straight up, back down. Everything else hangs off it.
-    let tip = up.mul_add(age, -0.5 * SPRAY_GRAVITY * age * age);
+    };
+    let tip = up.mul_add(jet_age, -0.5 * SPRAY_GRAVITY * jet_age * jet_age);
     if tip <= 0.0 {
         return Vec::new();
     }
-    // A different turn from the crown's, so the sheet's seams and the droplets
-    // do not line up into spokes.
+    let lifetime = 2.0 * up / SPRAY_GRAVITY;
+    // A turn of its own, so the jet's seams and the crown's ligaments do not
+    // line up into spokes.
     #[allow(clippy::cast_precision_loss)]
     let spin =
-        ((hash(seed ^ 0x0005_1eed) >> 8) as f32) * (1.0 / 16_777_216.0) * std::f32::consts::TAU;
+        ((hash(seed ^ 0x000d_7e70) >> 8) as f32) * (1.0 / 16_777_216.0) * std::f32::consts::TAU;
 
     let mut out = Vec::new();
-    for ring in 0..COLUMN_RINGS {
+    for segment in 0..JET_SEGMENTS {
         #[allow(clippy::cast_precision_loss)]
-        let fraction = (ring as f32 + 1.0) / COLUMN_RINGS as f32;
-        let y = tip * fraction;
-        // **Flare with the current height, not with the ring index.** Widening
-        // by index would make the sheet a fixed cone that slides upward; this
-        // makes it open as it rises and close as it falls, which is the water
-        // going out and coming back into the hole it left.
-        let r = radius * (COLUMN_FLARE - 1.0).mul_add(y / apex, 1.0);
-        for i in 0..COLUMN_RING {
-            // Half a step per ring, so the seams spiral instead of stacking
-            // into vertical ribs — the same trick the crown's bands play.
+        let f = (segment as f32 + 1.0) / JET_SEGMENTS as f32;
+        let y = tip * f;
+        let r = radius * (JET_RADIUS.1 - JET_RADIUS.0).mul_add(f, JET_RADIUS.0);
+        // The exact derivative of `y = tip(jet_age) · f`.
+        let rise = f * SPRAY_GRAVITY.mul_add(-jet_age, up);
+        for i in 0..JET_RING {
             #[allow(clippy::cast_precision_loss)]
             let angle = std::f32::consts::TAU
-                .mul_add((i as f32 + 0.5 * ring as f32) / COLUMN_RING as f32, spin);
+                .mul_add((i as f32 + 0.5 * segment as f32) / JET_RING as f32, spin);
             out.push(Droplet {
                 position: [angle.cos().mul_add(r, at[0]), at[1] + y, angle.sin().mul_add(r, at[2])],
-                // **Still, deliberately.** The sheet's quads have to overlap
-                // into a surface; smearing each one along its own motion tears
-                // holes between them. See [`Droplet::velocity`].
-                velocity: [0.0; 3],
+                // **Smeared, unlike the sheet it replaces.** A sheet's quads
+                // had to overlap into a surface and a streak tore holes in it;
+                // a jet is a fast thread of water, and the vertical smear is
+                // what makes six quads round a 0.1 m circle read as one spout.
+                velocity: [0.0, rise, 0.0],
                 fraction: age / lifetime,
-                // Never jittered: the sheet's quads have to overlap into a
-                // surface, and a small one is a hole in it.
-                scale: 1.0,
+                // Fat at the base where the water is still a column, thinning
+                // toward the tip that is about to break up.
+                scale: 0.8f32.mul_add(-f, 1.5),
+                alpha: 1.0,
             });
         }
     }
+    out
+}
+
+/// The droplets that pinch off the jet's tip, [`SATELLITE_DELAY`] after it left.
+///
+/// Launched from where the tip actually was at that instant and carrying the
+/// tip's own velocity plus a spread, so they lead the jet up and then rain back
+/// past it. Small — a satellite is what is left when a thread necks, not a
+/// second crown.
+#[must_use]
+pub fn satellites(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec<Droplet> {
+    let Some((up, jet_age)) = jet_state(speed, radius, age) else {
+        return Vec::new();
+    };
+    let flight = jet_age - SATELLITE_DELAY;
+    if flight < 0.0 {
+        return Vec::new();
+    }
+    // Where the tip was, and how fast it was going, when the thread broke.
+    let y0 = up.mul_add(SATELLITE_DELAY, -0.5 * SPRAY_GRAVITY * SATELLITE_DELAY * SATELLITE_DELAY);
+    let rise = SPRAY_GRAVITY.mul_add(-SATELLITE_DELAY, up);
+    let base = [at[0], at[1] + y0, at[2]];
+
+    let mut out = Vec::new();
+    for i in 0..SATELLITE_COUNT {
+        #[allow(clippy::cast_precision_loss)]
+        let unit = |shift: u32| {
+            ((hash((seed ^ 0x0057_a721).wrapping_add(i as u32 * 3 + shift)) >> 8) as f32)
+                * (1.0 / 16_777_216.0)
+        };
+        // A cone: mostly up, spread sideways by the neck's own instability.
+        let angle = unit(0) * std::f32::consts::TAU;
+        let out_speed = SATELLITE_SPREAD * unit(1).sqrt();
+        // The tip's velocity, varied either way — the ones that keep more of it
+        // go highest and land last, which is what makes a spray rather than a
+        // shell.
+        let v = [
+            angle.cos() * out_speed,
+            rise * 0.35f32.mul_add(unit(2), 0.75),
+            angle.sin() * out_speed,
+        ];
+        // Ballistic from the break, and gone when it is back at the surface.
+        let lifetime = 2.0 * v[1] / SPRAY_GRAVITY + (2.0 * y0 / SPRAY_GRAVITY).sqrt();
+        if flight >= lifetime {
+            continue;
+        }
+        let position = ballistic(base, v, flight);
+        if position[1] <= at[1] {
+            continue;
+        }
+        out.push(Droplet {
+            position,
+            velocity: ballistic_velocity(v, flight),
+            fraction: flight / lifetime,
+            scale: 0.3f32.mul_add(unit(2), 0.35),
+            alpha: 1.0,
+        });
+    }
+    out
+}
+
+/// The jet's launch speed and how long it has been flying, or `None` before it
+/// launches and once the impact is too gentle to drive one.
+///
+/// One place, so [`jet`] and [`satellites`] cannot disagree about when the jet
+/// left — which is the failure the sheet's per-ring launch already demonstrated
+/// once.
+fn jet_state(speed: f32, radius: f32, age: f32) -> Option<(f32, f32)> {
+    if speed <= SPLASH_MIN_SPEED || age < 0.0 {
+        return None;
+    }
+    let jet_age = age - jet_delay(radius);
+    if jet_age < 0.0 {
+        return None;
+    }
+    // Saturated for [`crown`]'s reason: an unbounded speed would otherwise
+    // stand a jet in the air for seconds after the thing that caused it.
+    Some((speed.min(SPLASH_FULL_SPEED) * JET_UP_FRAC, jet_age))
+}
+
+/// Everything one impact throws, at `age` seconds: the crown, then the jet,
+/// then the satellites off its tip.
+///
+/// **One function because it is one event on one clock**, and because the two
+/// call sites in `loom_cli::particles` — the headless replay and the window's
+/// live plumes — have to draw the same population. Wiring a water effect into
+/// one path only is a mistake this repository has made three times
+/// (`set_ripples`, ADR 0046 §7), and a single entry point is what makes it
+/// impossible rather than merely tested.
+///
+/// Ordered crown, jet, satellites: that is the blend order, and the jet stands
+/// in front of the rim it came up through.
+#[must_use]
+pub fn impact(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec<Droplet> {
+    let mut out = crown(at, speed, radius, age, seed);
+    out.extend(jet(at, speed, radius, age, seed));
+    out.extend(satellites(at, speed, radius, age, seed));
     out
 }
 
@@ -778,7 +938,15 @@ mod tests {
         assert!(!out.is_empty());
         for d in &out {
             let r = (d.position[0] - 3.0).hypot(d.position[2] + 2.0);
-            assert!((r - radius).abs() < 1e-4, "born {r} m out, not at the {radius} m rim");
+            // The rim, scalloped by the fingering and no further — see
+            // `SPLASH_FINGER_DEPTH`. The bound is the point: a ligament reaches
+            // further out than the mean rim, and nothing reaches past it.
+            assert!(
+                ((1.0 - SPLASH_FINGER_DEPTH) * radius - 1e-4
+                    ..=(1.0 + SPLASH_FINGER_DEPTH) * radius + 1e-4)
+                    .contains(&r),
+                "born {r} m out, off the {radius} m rim by more than the fingering"
+            );
             assert!((d.position[1] - 0.25).abs() < 1e-6, "born off the surface: {d:?}");
         }
     }
@@ -821,93 +989,120 @@ mod tests {
         assert!(crown([0.0, 0.0, 0.0], 40.0, 0.5, 1.0, 5).is_empty(), "the crown never landed");
     }
 
-    // -- W12, the rising sheet -----------------------------------------------
+    // -- The jet and its satellites -------------------------------------------
 
-    /// **The same gate as the crown.** A settling body lifts no water either,
-    /// and the two must agree about that or a scene would get a column with no
+    /// **The same gate as the crown.** A settling body drives no jet either,
+    /// and the two must agree about that or a scene would get a spout with no
     /// droplets on it — which is the one shape a splash never takes.
     #[test]
-    fn a_settling_body_lifts_no_column() {
+    fn a_settling_body_drives_no_jet() {
         for speed in [0.0_f32, 0.2, 0.9, SPLASH_MIN_SPEED] {
-            assert!(
-                column([0.0, 0.0, 0.0], speed, 0.5, 0.0, 1).is_empty(),
-                "an entry at {speed} m/s raised a column"
-            );
-            assert!(crown([0.0, 0.0, 0.0], speed, 0.5, 0.0, 1).is_empty());
-        }
-    }
-
-    /// **The water goes up and comes back, and it stands above the droplets.**
-    ///
-    /// Three claims in one test because they are one shape: the sheet rises out
-    /// of the surface (not below it), it clears the crown it threw (or it is a
-    /// wall with beads stuck to it rather than a splash), and it empties itself
-    /// so a still at `--sim N` does not have last second's water hanging in the
-    /// air.
-    #[test]
-    fn the_column_rises_above_the_crown_and_falls_back() {
-        let speed = SPLASH_FULL_SPEED;
-        let mut sheet_peak: f32 = 0.0;
-        let mut drop_peak: f32 = 0.0;
-        let mut last_alive = 0.0_f32;
-        for step in 0..180 {
-            #[allow(clippy::cast_precision_loss)]
-            let age = step as f32 / 60.0;
-            let sheet = column([0.0, 0.0, 0.0], speed, 0.5, age, 5);
-            for d in &sheet {
-                assert!(d.position[1] > 0.0, "the sheet dipped under the surface: {d:?}");
-                sheet_peak = sheet_peak.max(d.position[1]);
-            }
-            if !sheet.is_empty() {
-                last_alive = age;
-            }
-            for d in crown([0.0, 0.0, 0.0], speed, 0.5, age, 5) {
-                drop_peak = drop_peak.max(d.position[1]);
-            }
-        }
-        assert!(sheet_peak > drop_peak, "sheet {sheet_peak} m under crown {drop_peak} m");
-        // 2*up/g at the saturated speed: 0.815 s. Anything past that is water
-        // that never came down.
-        assert!(last_alive < 0.9, "the column was still up at {last_alive} s");
-        assert!(column([0.0, 0.0, 0.0], 40.0, 0.5, 1.0, 5).is_empty(), "the column never fell");
-    }
-
-    /// **It is a ring at the cavity rim that flares as it rises**, never a
-    /// spout out of the body's centre — the same geometry the crown's doc
-    /// comment is about, and the reason both take a `radius`.
-    #[test]
-    fn the_sheet_is_a_flaring_ring() {
-        let radius = 0.5;
-        let at = [3.0, 0.25, -2.0];
-        let mut widest: f32 = 0.0;
-        for step in 1..48 {
-            #[allow(clippy::cast_precision_loss)]
-            let age = step as f32 / 60.0;
-            for d in column(at, 7.1, radius, age, 7) {
-                let r = (d.position[0] - at[0]).hypot(d.position[2] - at[2]);
-                assert!(r >= radius - 1e-4, "born {r} m out, inside the {radius} m rim");
-                assert!(
-                    r <= radius * COLUMN_FLARE + 1e-4,
-                    "flared to {r} m, past the {} m the flare allows",
-                    radius * COLUMN_FLARE
-                );
-                widest = widest.max(r);
-            }
-        }
-        assert!(widest > radius * 1.4, "the sheet never flared: {widest} m at a {radius} m rim");
-    }
-
-    /// **A harder impact throws a taller sheet**, for the same reason the crown
-    /// gets more bands: how much water comes up is a reading of how hard the
-    /// thing hit.
-    #[test]
-    fn a_harder_impact_lifts_a_taller_column() {
-        let peak = |speed: f32| {
-            let mut best: f32 = 0.0;
             for step in 0..120 {
                 #[allow(clippy::cast_precision_loss)]
                 let age = step as f32 / 60.0;
-                for d in column([0.0, 0.0, 0.0], speed, 0.5, age, 3) {
+                assert!(
+                    impact([0.0, 0.0, 0.0], speed, 0.5, age, 1).is_empty(),
+                    "an entry at {speed} m/s threw something at {age} s"
+                );
+            }
+        }
+    }
+
+    /// **The jet comes AFTER the crown, and that ordering is the whole slice.**
+    ///
+    /// Loom fired every part of a splash at t = 0, which is why three judges
+    /// independently called the result a mushroom. So: nothing above the rim
+    /// early, a spike later, and the spike clears the tallest droplet the crown
+    /// can ever reach.
+    #[test]
+    fn the_jet_arrives_after_the_crown_and_exceeds_it() {
+        let (speed, radius) = (7.1_f32, 0.5_f32);
+        let delay = jet_delay(radius);
+        // `pool.loom`'s sphere, and the number the scene comment quotes.
+        assert!((0.20..0.25).contains(&delay), "the jet fires at {delay} s");
+
+        // Before it: the jet is empty, and so are the satellites.
+        for step in 0..12 {
+            #[allow(clippy::cast_precision_loss)]
+            let age = step as f32 / 60.0;
+            assert!(age >= delay || jet([0.0; 3], speed, radius, age, 3).is_empty());
+            assert!(age >= delay || satellites([0.0; 3], speed, radius, age, 3).is_empty());
+        }
+
+        let ceiling = (0..120)
+            .flat_map(|step| {
+                #[allow(clippy::cast_precision_loss)]
+                crown([0.0; 3], speed, radius, step as f32 / 60.0, 3)
+            })
+            .fold(0.0_f32, |best, d| best.max(d.position[1]));
+        let apex = (0..180)
+            .flat_map(|step| {
+                #[allow(clippy::cast_precision_loss)]
+                jet([0.0; 3], speed, radius, step as f32 / 60.0, 3)
+            })
+            .fold(0.0_f32, |best, d| best.max(d.position[1]));
+
+        assert!(ceiling > 0.0, "the crown threw nothing to compare against");
+        assert!(
+            apex > ceiling * 1.5,
+            "the jet reached {apex} m against the crown's {ceiling} m — if it does not \
+             exceed the crown the constants are wrong, not the reference"
+        );
+        // `(0.5U)²/2g` at the saturated impact speed, which is what
+        // `JET_UP_FRAC` claims.
+        let predicted = (JET_UP_FRAC * speed).powi(2) / (2.0 * crate::GRAVITY);
+        assert!(
+            (apex - predicted).abs() < 0.03,
+            "apex {apex} m against the predicted {predicted} m"
+        );
+    }
+
+    /// **It is a thin thread on the axis**, never a flaring cone — that is what
+    /// distinguishes a jet from the sheet it replaces, and the reason it takes
+    /// a radius at all.
+    #[test]
+    fn the_jet_is_a_narrow_tapering_thread() {
+        let radius = 0.5;
+        let at = [3.0, 0.25, -2.0];
+        let mut widest: f32 = 0.0;
+        for step in 0..90 {
+            #[allow(clippy::cast_precision_loss)]
+            let age = step as f32 / 60.0;
+            for d in jet(at, 7.1, radius, age, 7) {
+                let r = (d.position[0] - at[0]).hypot(d.position[2] - at[2]);
+                assert!(
+                    r <= radius * JET_RADIUS.0 + 1e-4,
+                    "the jet is {r} m wide, past the {} m its base allows",
+                    radius * JET_RADIUS.0
+                );
+                assert!(d.position[1] > at[1], "the jet dipped under the surface: {d:?}");
+                widest = widest.max(r);
+            }
+        }
+        assert!(widest > 0.0, "the jet never fired");
+    }
+
+    /// **Everything lands.** Both new populations are ballistic, so a still at
+    /// `--sim N` must not have last second's water hanging in the air.
+    #[test]
+    fn the_whole_impact_ends() {
+        assert!(
+            impact([0.0, 0.0, 0.0], 40.0, 0.5, 2.0, 5).is_empty(),
+            "something was still in the air two seconds after the impact"
+        );
+    }
+
+    /// **A harder impact drives a taller jet**, for the same reason the crown
+    /// gets more bands: how much water comes up is a reading of how hard the
+    /// thing hit.
+    #[test]
+    fn a_harder_impact_drives_a_taller_jet() {
+        let peak = |speed: f32| {
+            let mut best: f32 = 0.0;
+            for step in 0..180 {
+                #[allow(clippy::cast_precision_loss)]
+                let age = step as f32 / 60.0;
+                for d in jet([0.0, 0.0, 0.0], speed, 0.5, age, 3) {
                     best = best.max(d.position[1]);
                 }
             }
@@ -915,7 +1110,66 @@ mod tests {
         };
         let (hard, soft) = (peak(7.1), peak(3.3));
         assert!(hard > soft * 2.0, "peak {hard} m against {soft} m is not a harder impact");
-        assert!(soft > 0.0, "a 0.55 m drop lifted nothing at all");
+        assert!(soft > 0.0, "a 0.55 m drop drove nothing at all");
+    }
+
+    /// **The satellites leave the jet's tip and lead it.** They pinch off
+    /// `SATELLITE_DELAY` after the jet fires, from where the tip was then — so
+    /// they are above the jet's own top for most of the flight, which is what
+    /// a photograph of a Worthington jet shows.
+    #[test]
+    fn the_satellites_pinch_off_the_tip_and_lead_it() {
+        let (speed, radius) = (7.1_f32, 0.5_f32);
+        let start = jet_delay(radius) + SATELLITE_DELAY;
+        for step in 0..120 {
+            #[allow(clippy::cast_precision_loss)]
+            let age = step as f32 / 60.0;
+            let sats = satellites([0.0; 3], speed, radius, age, 9);
+            assert!(age >= start || sats.is_empty(), "satellites at {age} s, before {start} s");
+        }
+        let top = |f: fn([f32; 3], f32, f32, f32, u32) -> Vec<Droplet>| {
+            (0..180)
+                .flat_map(|step| {
+                    #[allow(clippy::cast_precision_loss)]
+                    f([0.0; 3], speed, radius, step as f32 / 60.0, 9)
+                })
+                .fold(0.0_f32, |best, d| best.max(d.position[1]))
+        };
+        assert!(
+            top(satellites) > top(jet),
+            "the satellites ({} m) never cleared the jet ({} m)",
+            top(satellites),
+            top(jet)
+        );
+    }
+
+    /// **The rim tears into ligaments rather than into equal beads.**
+    ///
+    /// The count follows the impact — that is [`SPLASH_FINGERS`] — and the
+    /// evidence that the cosine is doing anything is that a band's droplets no
+    /// longer share one radius and one opacity. A ring of identical beads is
+    /// exactly the mushroom this replaces.
+    #[test]
+    fn the_rim_is_fingered() {
+        let out = crown([0.0, 0.0, 0.0], 7.1, 0.5, 0.0, 7);
+        let radii: Vec<f32> =
+            out.iter().take(SPLASH_RING).map(|d| d.position[0].hypot(d.position[2])).collect();
+        let (lo, hi) = radii.iter().fold((f32::MAX, 0.0_f32), |(lo, hi), r| (lo.min(*r), hi.max(*r)));
+        assert!(
+            (hi / lo - (1.0 + SPLASH_FINGER_DEPTH) / (1.0 - SPLASH_FINGER_DEPTH)).abs() < 0.05,
+            "the rim runs {lo} m to {hi} m — the fingering is not cutting to depth"
+        );
+        let alpha_lo = out.iter().fold(f32::MAX, |lo, d| lo.min(d.alpha));
+        let alpha_hi = out.iter().fold(0.0_f32, |hi, d| hi.max(d.alpha));
+        assert!(alpha_lo < 0.2 && alpha_hi > 0.9, "opacity ran {alpha_lo} to {alpha_hi}");
+
+        // And a gentler impact tears into fewer ligaments than a harder one.
+        let count = |speed: f32| {
+            let s = smoothstep(SPLASH_MIN_SPEED, SPLASH_FULL_SPEED, speed);
+            SPLASH_FINGERS.1.mul_add(s, SPLASH_FINGERS.0).round()
+        };
+        assert!(count(2.0) < count(7.1), "{} against {}", count(2.0), count(7.1));
+        assert!((count(SPLASH_FULL_SPEED) - 20.0).abs() < 0.5);
     }
 
     /// **Two impacts on one tick are two different crowns.** Same shape, turned

@@ -302,7 +302,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 41] = [
+const GOLDEN: [(&str, &str, &[&str]); 42] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -654,6 +654,23 @@ const GOLDEN: [(&str, &str, &[&str]); 41] = [
     // and the sphere at the waterline: 24 droplets, against 0 at tick 41 and 0
     // by tick 80 [measured].
     ("pool", "assets/test/pool.loom", &["--sim", "50"]),
+    // **The Worthington jet, which does not exist at tick 50 and never could.**
+    //
+    // A splash is a sequence and Loom used to fire all of it at t = 0; the jet
+    // is driven by the *cavity closing*, so it launches `sqrt(R/g)` after the
+    // entry — 13.6 ticks at `pool.loom`'s 0.5 m sphere — and reaches its apex
+    // at 0.59 s, half a second after the rim. The row above photographs the
+    // crown at its widest; this one photographs the jet and the satellites
+    // pinched off its tip, and **neither frame contains the other population**.
+    //
+    // The same scene twice is deliberate and is the lesson this repository
+    // keeps re-learning: grass shipped two slices with the gate reporting a
+    // full pass over an absent subject, and a rendering path that only exists
+    // in a window of ticks needs a reference inside that window or it is
+    // unverified. `--sim 70` is 26 ticks after the entry: the jet is 0.52 m up
+    // against the crown's 0.28 m ceiling, and the satellites are fanning off
+    // its tip [measured].
+    ("pool_jet", "assets/test/pool.loom", &["--sim", "70"]),
     // **The spray off a breaking crest — W5.** The population is a closed form
     // over `WaterSample::fold`, the same quantity the whitecaps are painted
     // from, so this reference is what would catch the two drifting apart:
