@@ -47,6 +47,30 @@
 #include "generated/fields.slang"
 #include "include/rain.slang"
 
+/// The scene's water, as the drop simulation needs to see it.
+///
+/// **Behind a pointer because a `LoomWaveSet` is 392 bytes and the push block
+/// has eight to spare.** One more `float4` would not fit either; a device
+/// address does, and it puts the block at exactly the 128 bytes Vulkan
+/// guarantees. The Rust half is `loom_render::rain::Water`, and the two are one
+/// memory layout described twice — the layout test says so.
+struct RainWater {
+    LoomWaveSet waves;
+    /// Still-water level, metres. `EnvironmentData::water.x`.
+    float surfaceHeight;
+    /// **The highest this sea can ever reach**, anywhere, ever:
+    /// `surfaceHeight + Σ amplitude`. Computed on the CPU, once per frame,
+    /// because it is what gates the wave sum: a drop above it cannot possibly
+    /// be under the water, so the 16-iteration `loom_sample_water` runs only
+    /// for drops actually near the surface. Without it every one of 131,072
+    /// drops would sum the sea every tick, most of them a hundred metres up.
+    float crest;
+    /// Zero when the scene has no `WaterBody`, which is most of them, and is
+    /// what makes this whole path free for them.
+    uint present;
+    uint pad;
+};
+
 struct RainSimPush {
     /// xyz eye position, w the simulated time at the END of this run.
     float4 eye;
@@ -74,6 +98,11 @@ struct RainSimPush {
     uint* splashArgs;
     /// The terrain heights, `terrain.w` squared of them, row-major.
     float* terrainHeights;
+    /// The scene's water. Always a valid pointer; `present` is the flag.
+    ///
+    /// **Appended last on purpose**, so every offset above is unmoved and the
+    /// layout test does not change by one line.
+    RainWater* water;
 };
 
 [[vk::push_constant]] RainSimPush rainPush;
@@ -104,6 +133,19 @@ float3 rainFieldUv(float3 p) {
     return (voxel + 0.5) / float3(rainPush.dims.xyz);
 }
 
+/// The terrain height grid, assembled from the push block.
+///
+/// One place, because [`rainSolidAt`] and the water test below both need it and
+/// a second copy is a second thing to keep in step.
+LoomHeightField rainTerrain() {
+    LoomHeightField grid;
+    grid.origin = rainPush.terrain.xy;
+    grid.spacing = rainPush.terrain.z;
+    grid.side = int(rainPush.terrain.w);
+    grid.height = rainPush.terrainHeights;
+    return grid;
+}
+
 /// Signed distance in metres to the nearest solid, positive in air.
 ///
 /// Outside the baked field this falls back to the terrain height grid, which is
@@ -118,12 +160,59 @@ float rainSolidAt(float3 p) {
     if (inside) {
         return rainField.SampleLevel(uv, 0.0).r * rainRange();
     }
-    LoomHeightField grid;
-    grid.origin = rainPush.terrain.xy;
-    grid.spacing = rainPush.terrain.z;
-    grid.side = int(rainPush.terrain.w);
-    grid.height = rainPush.terrainHeights;
-    return p.y - loom_ground_height(grid, p.xz);
+    return p.y - loom_ground_height(rainTerrain(), p.xz);
+}
+
+/// How far a point is above the water surface at time `t`, and the surface
+/// normal there — or a large positive with an up normal when there is no water.
+///
+/// **Closed form in `t`, which is the whole reason this is admissible.** ADR
+/// 0045 clause 3 asks that catch-up to `--sim N` be a fixed function of N; the
+/// sea is `loom_sample_water`, an evaluation at `(xz, t)` with no state behind
+/// it, so a drop crossing the surface on tick 900 of a 1,800-tick catch-up
+/// crosses it in exactly the same place on every run. No new buffer, no new
+/// atomic, and still one dispatch.
+///
+/// **Flow and the ripple grid are deliberately zero.** A river's current
+/// displaces the surface by nothing and the interactive wake by centimetres,
+/// and neither pointer is in this push block; a drop lands on the swell, which
+/// is the metre-scale term. Worth revisiting only if a scene ever rains on a
+/// wake being watched from a metre away.
+float rainWaterGap(float3 p, float t, out float3 normal) {
+    normal = float3(0.0, 1.0, 0.0);
+    // **The guard is on two scalars, and it does not buy back what you would
+    // expect.** Measured on `rain_gantry`, which authors no water at all: the
+    // 600-tick catch-up goes 0.57 ms to 1.35 ms with this function present,
+    // and it stays at 1.35 with `present` forced to zero on the CPU. So the
+    // cost is not the data and not this branch — it is the inlined sixteen-wave
+    // sum's registers, paid by every drop in the kernel whichever way the
+    // branch goes. Binding the whole `RainWater` struct first was tried and is
+    // no worse; `[noinline]` was tried and is worse (1.9 ms).
+    //
+    // It is accepted rather than fixed because the ratio is frightening and
+    // the number is not: 1.35 ms for six hundred ticks is **0.0022 ms of one
+    // simulated tick**, against a 16.7 ms frame. The fix, if a frame ever wants
+    // it, is to stop the generated wave loop unrolling — which is a change to
+    // `loom_water`'s Slang emitter and to every water scene's instruction
+    // stream, and is not worth two microseconds.
+    if (rainPush.water[0].present == 0u) {
+        return 1e6;
+    }
+    // Above the highest crest this sea can reach: no sum can put the surface
+    // here, so there is nothing to test.
+    if (p.y > rainPush.water[0].crest) {
+        return 1e6;
+    }
+    LoomWaterSample s = loom_sample_water(
+        rainPush.water[0].waves,
+        rainPush.water[0].surfaceHeight,
+        loom_ground_height(rainTerrain(), p.xz),
+        p.xz,
+        t,
+        float3(0.0, 0.0, 0.0),
+        float3(0.0, 0.0, 0.0));
+    normal = s.normal;
+    return p.y - s.height;
 }
 
 /// The surface normal at a point inside a solid, by central differences.
@@ -284,11 +373,28 @@ void rainSimulateMain(uint3 tid: SV_DispatchThreadID) {
         float3 to = from + drop.velocity.xyz * RAIN_TICK;
         float distance = rainSolidAt(to);
 
+        // **The water, tested beside the solid rather than instead of it.** A
+        // pool's bed is in the collision field too, a metre or two below its
+        // surface, so a drop that only tested the solid fell straight through
+        // the water and splashed on the tiles. Whichever surface the drop is
+        // under first is the one it hit, and the water is above the bed by
+        // construction — so `min` is the whole arbitration.
+        float3 waterNormal;
+        float waterGap = rainWaterGap(to, t, waterNormal);
+        bool onWater = waterGap < distance;
+        if (onWater) {
+            distance = waterGap;
+        }
+
         if (distance <= 0.0) {
             // **The collision, and it is the whole reason this file exists.**
             // Project back out along the field's gradient: the SDF is accurate
             // near the surface, so `to + n * (-d)` lands on it.
-            float3 normal = rainSurfaceNormal(to);
+            //
+            // The water's normal is analytic — `loom_sample_water` returns it —
+            // so a splash on a swell leans the way the crest does without six
+            // extra fetches.
+            float3 normal = onWater ? waterNormal : rainSurfaceNormal(to);
             float3 hit = to - normal * distance;
 
             if (step + rainPush.control.y >= steps && rainPresent(seed, rainPush.wind.w)) {

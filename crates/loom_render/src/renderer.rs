@@ -2093,6 +2093,7 @@ impl Renderer {
                 self.environment.rain,
                 self.terrain_params,
                 self.terrain_heights,
+                &crate::rain::Water::from_environment(&self.environment),
             )
         });
 

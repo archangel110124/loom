@@ -1410,6 +1410,7 @@ impl Viewer {
                 self.environment.rain,
                 self.terrain_params,
                 self.terrain_heights,
+                &crate::rain::Water::from_environment(&self.environment),
             )
         });
         // And the particle pool, for the same reason: a compute write and a

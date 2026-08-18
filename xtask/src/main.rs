@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 55] = [
+const SCENES: [&str; 56] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -222,6 +222,11 @@ const SCENES: [&str; 55] = [
     // collision-field bake and upload path, and of the indirect splash draw
     // over a surface that is not the ground.
     "assets/test/rain_gantry.loom",
+    // And the only scene whose rain is stopped by *water*: `rainWaterGap` in
+    // `rain_sim.slang` runs only where a scene has both a `WaterBody` and a
+    // `Rain`, and this is the only one that puts the camera close enough to
+    // see which surface a drop ended on.
+    "assets/test/rain_pool.loom",
     // Rain that varies across the world, which no other scene has: the cover
     // evaluation in `rainVertexMain` and in `sample_rain` runs only when a
     // scene authors a broken deck, and every other rain scene authors a solid
@@ -302,7 +307,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 42] = [
+const GOLDEN: [(&str, &str, &[&str]); 43] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -573,6 +578,23 @@ const GOLDEN: [(&str, &str, &[&str]); 42] = [
     // `--sim 600` is ten seconds — well past the drop field's four-second
     // settling time, with the apron wet and the strip under the deck dry.
     ("rain_gantry", "assets/test/rain_gantry.loom", &["--sim", "600"]),
+    // **Rain stopped by water rather than by a solid, which nothing else in
+    // this list covers.** Every rain scene before this one collided its drops
+    // against the baked collision world alone, so a drop over a pool fell
+    // straight through the surface and splashed on the bed a metre down; this
+    // is the only frame where that difference is legible, because it is the
+    // only rain scene whose camera is close enough to the water to see where a
+    // streak ends.
+    //
+    // Stubbing the water test moves 14% of this frame [measured at 960x600].
+    // It is also the only reference that would catch `LoomWaveSet` drifting
+    // out of step between `EnvironmentData` and `RainWater` — two descriptions
+    // of one memory layout, which is the class of defect this repository has
+    // paid for repeatedly.
+    //
+    // `--sim 300` is five seconds: past the drop field's four-second settling
+    // time, and long enough for the splash ring to be full.
+    ("rain_pool", "assets/test/rain_pool.loom", &["--sim", "300"]),
     // **The only scene where the rain is not uniform.** Cloud cover multiplies
     // the rate per drop, so the shower has an edge crossing open water — a
     // rendering path no other reference covers, because every other rain scene

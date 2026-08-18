@@ -66,9 +66,51 @@ struct Splash {
     surface: [f32; 4],
 }
 
+/// The scene's water, mirroring `RainWater` in `rain_sim.slang`.
+///
+/// **Behind a device address, not in the push block**, for the reason the
+/// shader's own comment gives: a `LoomWaveSet` is 392 bytes and there were
+/// eight to spare. The wave table's layout is the one `EnvironmentData` already
+/// pins — 24 bytes a wave, sixteen of them — because it is the same
+/// `LoomWaveSet` on the other side.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct Water {
+    waves: [crate::renderer::WaterWave; crate::renderer::MAX_WAVES],
+    count: u32,
+    attenuation_depth: f32,
+    surface_height: f32,
+    /// `surface_height + Σ amplitude` — the ceiling of this sea. See the
+    /// shader: it is the branch that keeps 131,072 drops from summing sixteen
+    /// waves a tick to discover they are eighty metres up.
+    crest: f32,
+    present: u32,
+    pad: u32,
+}
+
+impl Water {
+    /// Read the scene's water out of the environment block the renderer already
+    /// fills, so there is no second opinion about what the sea is.
+    pub(crate) fn from_environment(env: &crate::renderer::EnvironmentData) -> Self {
+        let count = env.wave_count.min(crate::renderer::MAX_WAVES as u32);
+        let lift: f32 = env.waves[..count as usize].iter().map(|w| w.amplitude.abs()).sum();
+        Self {
+            waves: env.waves,
+            count,
+            attenuation_depth: env.attenuation_depth,
+            surface_height: env.water[0],
+            crest: env.water[0] + lift,
+            // `water[2]` is the scene's "there is a WaterBody" flag, set by the
+            // same caller that fills the wave table.
+            present: u32::from(env.water[2] > 0.5),
+            pad: 0,
+        }
+    }
+}
+
 /// The push block, mirroring `RainSimPush` in `rain_sim.slang`.
 ///
-/// **120 bytes of the 128 Vulkan guarantees.** Vectors first, then the two-word
+/// **128 bytes, exactly the guarantee.** Vectors first, then the two-word
 /// control, then the pointers: a device address needs 8-byte alignment, and
 /// every member here lands on its natural one with no padding. The offsets were
 /// read out of the compiled module with
@@ -92,6 +134,7 @@ pub(crate) struct Push {
     pub splashes: vk::DeviceAddress,
     pub splash_args: vk::DeviceAddress,
     pub terrain_heights: vk::DeviceAddress,
+    pub water: vk::DeviceAddress,
 }
 
 impl Push {
@@ -136,6 +179,11 @@ pub(crate) struct RainSim {
     args: vk::Buffer,
     args_alloc: Option<Allocation>,
     args_address: vk::DeviceAddress,
+
+    /// The scene's water, rewritten every frame the layer runs.
+    water: vk::Buffer,
+    water_alloc: Option<Allocation>,
+    water_address: vk::DeviceAddress,
 
     field: Field,
     sampler: vk::Sampler,
@@ -200,9 +248,20 @@ impl RainSim {
             MemoryLocation::CpuToGpu,
         )?;
         write_slice(&args_alloc, &[0_u32; 8])?;
+        // Host-visible for the reason the arguments are: the CPU is the only
+        // thing that writes it, once a frame, and it is 400 bytes.
+        let (water, water_alloc, water_address) = create_address_buffer_in(
+            &raw,
+            allocator,
+            size_of::<Water>() as u64,
+            "loom.rain.water",
+            vk::BufferUsageFlags::empty(),
+            MemoryLocation::CpuToGpu,
+        )?;
         names.set(drops, "loom.rain.drops");
         names.set(splashes, "loom.rain.splashes");
         names.set(args, "loom.rain.splash_args");
+        names.set(water, "loom.rain.water");
 
         // A one-voxel field of open air, so the descriptor is always valid even
         // in a scene with nothing to collide with. Replaced wholesale by
@@ -288,6 +347,9 @@ impl RainSim {
             args,
             args_alloc: Some(args_alloc),
             args_address,
+            water,
+            water_alloc: Some(water_alloc),
+            water_address,
             field,
             sampler,
             set_layout,
@@ -380,8 +442,17 @@ impl RainSim {
         wind: [f32; 4],
         terrain: [f32; 4],
         terrain_heights: vk::DeviceAddress,
+        water: &Water,
     ) -> (loom_render_graph::BufferId, loom_render_graph::BufferId) {
         use loom_render_graph::BufferAccess;
+
+        // **Written here rather than through a setter**, because it is derived
+        // from the environment block wholesale every frame and a setter would
+        // be a second place for it to go stale — the mistake `set_ripples`
+        // made once already.
+        if let Some(alloc) = self.water_alloc.as_ref() {
+            let _ = write_slice(alloc, std::slice::from_ref(water));
+        }
 
         let seed = self.tick.is_none();
         let steps = u32::try_from(to_tick.saturating_sub(self.tick.unwrap_or(0))).unwrap_or(u32::MAX);
@@ -408,6 +479,7 @@ impl RainSim {
             splashes: self.splashes_address,
             splash_args: self.args_address,
             terrain_heights,
+            water: self.water_address,
         };
 
         let drops_id = graph.import_buffer("loom.rain.drops", self.drops);
@@ -496,11 +568,13 @@ impl RainSim {
             self.device.destroy_buffer(self.drops, None);
             self.device.destroy_buffer(self.splashes, None);
             self.device.destroy_buffer(self.args, None);
+            self.device.destroy_buffer(self.water, None);
         }
         for allocation in [
             self.drops_alloc.take(),
             self.splashes_alloc.take(),
             self.args_alloc.take(),
+            self.water_alloc.take(),
         ]
         .into_iter()
         .flatten()
@@ -701,6 +775,7 @@ mod tests {
             splashes: 0,
             splash_args: 0,
             terrain_heights: 0,
+            water: 0,
         };
         let at = |field: *const u8| field as usize - std::ptr::from_ref(&push).cast::<u8>() as usize;
 
@@ -714,8 +789,64 @@ mod tests {
             112,
             "terrainHeights"
         );
-        assert_eq!(size_of::<Push>(), 120, "the whole block");
+        assert_eq!(at(std::ptr::from_ref(&push.water).cast()), 120, "water");
+        assert_eq!(size_of::<Push>(), 128, "the whole block");
         assert!(size_of::<Push>() <= 128, "past the guaranteed push-constant size");
+    }
+
+    /// **`RainWater` is one memory layout described twice too**, and a
+    /// mismatch here is not a crash — it is rain landing at the wrong height,
+    /// or a scene with no water suddenly having some. The offsets are Slang's,
+    /// read out of the compiled module with
+    /// `spirv-dis | grep 'OpMemberDecorate %RainWater_natural'`.
+    #[test]
+    fn the_rain_water_block_is_laid_out_as_the_shader_reads_it() {
+        let water = Water::from_environment(&crate::renderer::EnvironmentData::default());
+        let at = |field: *const u8| field as usize - std::ptr::from_ref(&water).cast::<u8>() as usize;
+
+        // Sixteen waves at Slang's `ArrayStride 24`, then `LoomWaveSet`'s own
+        // two scalars, then the three this struct adds.
+        assert_eq!(at(std::ptr::from_ref(&water.count).cast()), 384, "count");
+        assert_eq!(at(std::ptr::from_ref(&water.attenuation_depth).cast()), 388, "attenuationDepth");
+        assert_eq!(at(std::ptr::from_ref(&water.surface_height).cast()), 392, "surfaceHeight");
+        assert_eq!(at(std::ptr::from_ref(&water.crest).cast()), 396, "crest");
+        assert_eq!(at(std::ptr::from_ref(&water.present).cast()), 400, "present");
+        assert_eq!(size_of::<Water>(), 408, "the whole block");
+
+        // **A default environment has no water**, which is what keeps the
+        // whole path off every scene that does not author a `WaterBody`.
+        assert_eq!(water.present, 0);
+    }
+
+    /// **The crest is a ceiling, and the shader's early-out rests on it.** A
+    /// sea can never rise above `surface_height + Σ amplitude`, so a drop above
+    /// that is unambiguously in the air and needs no wave sum.
+    #[test]
+    fn the_crest_bounds_the_sea() {
+        use crate::renderer::{EnvironmentData, WaterWave};
+        let mut env = EnvironmentData { water: [1.5, 0.0, 1.0, 0.0], ..Default::default() };
+        env.waves[0] = WaterWave {
+            direction: [1.0, 0.0],
+            wavelength: 9.0,
+            amplitude: 0.4,
+            steepness: 0.5,
+            speed_scale: 1.0,
+        };
+        env.waves[1] = WaterWave {
+            direction: [0.3, 0.9],
+            wavelength: 5.0,
+            amplitude: 0.25,
+            steepness: 0.5,
+            speed_scale: 1.0,
+        };
+        env.wave_count = 2;
+        let water = Water::from_environment(&env);
+        assert_eq!(water.present, 1);
+        assert!((water.crest - (1.5 + 0.65)).abs() < 1e-5, "crest was {}", water.crest);
+        // A wave the count does not reach must not raise the ceiling: the
+        // table is fixed-size and only `count` of it is real.
+        env.wave_count = 1;
+        assert!((Water::from_environment(&env).crest - 1.9).abs() < 1e-5);
     }
 
     /// **The counts are the shader's**, and nothing but this says so: too few
