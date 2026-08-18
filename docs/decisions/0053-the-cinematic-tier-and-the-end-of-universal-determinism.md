@@ -50,13 +50,51 @@ features; it is large measured in *look*, which is the thing being bought.
 fluid may be GPU-stateful, may be read back, and may produce forces on
 `rapier3d` bodies. Outside it, ADR 0045 stands unchanged.**
 
-### 1. The opt-in is per body, in the scene text, and it defaults off
+### 1. The opt-in is per effect, in the scene text, and it defaults off
+
+**The tier is a property of any cinematic effect, not of water.** Water is merely
+its first user, because water is what was being rebuilt when the human approved
+it. The same treatment is wanted for fire, smoke, rain and sparks, and the
+mechanism is therefore **general from the start** rather than retro-fitted:
 
 ```toml
 [node.components.WaterBody]
 kind = "pool"
 simulation = "cinematic"   # default "deterministic"
+
+[node.components.ParticleEmitter]   # fire, smoke, sparks
+simulation = "cinematic"
+
+[node.components.Weather]           # rain
+simulation = "cinematic"
 ```
+
+`simulation` is **one shared type in `loom_scene`**, parsed and defaulted in one
+place, not a field re-declared per component. A component-local copy is how a
+second, subtly different meaning gets born, and this project has paid for that
+pattern before.
+
+**Most VFX do not need clause 1 relaxed, and it is worth being exact about
+this.** Rain (ADR 0017), the GPU particle pool (ADR 0047) and marched smoke
+(ADR 0020/0050) are *already* presentation-only, already outside the sim hash,
+and already unreadable by `--assert`. Nothing about them is blocked by ADR 0045
+today. What the tier actually buys them is narrower and should not be
+overstated:
+
+- **Forces.** A fire's updraft lifting debris, sparks that bounce off geometry
+  and come to rest, rain that accumulates and drains, smoke that a passing body
+  displaces. These are the genuinely new capability.
+- **Readback**, and with it the ability for those effects to influence anything
+  the CPU can see.
+- **A grid gas solver**, which this project previously rejected *on evidence*.
+  That rejection was made under ADR 0045's constraints; those constraints have
+  moved, so the rejection is vacated for effects inside the tier and must be
+  re-argued on its own merits rather than assumed either way.
+
+What the tier does **not** buy is the visual ambition itself. Niagara-class
+fire, smoke and sparks are mostly a *rendering and authoring* problem, and a
+large fraction of that work needs no clause relaxed at all. Do not reach for the
+tier where presentation would do; §4's costs are real and are paid per scene.
 
 Default off is not politeness. Every scene in the repository today, every
 blessed reference, every pinned hash and `proving_ground` itself must be
