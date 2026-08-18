@@ -19,7 +19,13 @@ No web target. Single developer + agent.
 
 1. Everything authored is **diffable text**, schema-validated on load.
 2. The agent can **see and test its own work** — headless PNG render, deterministic headless sim.
-3. The runtime is **deterministic**, so those assertions are trustworthy.
+3. The runtime is **deterministic**, so those assertions are trustworthy — **by
+   default, and no longer everywhere. ADR 0053** lets a `WaterBody` opt into a
+   `cinematic` tier that is GPU-stateful, read back, and allowed to push rigid
+   bodies; inside it, reproducibility is *machine-local* and `--assert` refuses
+   loudly rather than answering. The project's stance moved from *the agent is
+   the main author* to *the agent is heavily assisted*, and this is what that
+   bought. Default is `deterministic`; every pre-0053 scene is bit-identical.
 
 ---
 
