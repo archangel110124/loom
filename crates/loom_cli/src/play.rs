@@ -791,6 +791,20 @@ impl Sim {
         self.fluid.as_mut().map_or_else(Vec::new, loom_render::FluidSolver::instances)
     }
 
+    /// The cinematic fluid's free surface, marched — ADR 0057 addendum.
+    ///
+    /// **Call this before [`Self::fluid_particles`].** It is what fills the
+    /// density field the particle path culls its spray against; the other way
+    /// round draws every particle, including the ones inside the mesh.
+    pub fn fluid_surface(&mut self) -> Vec<loom_render::FluidVertex> {
+        let Some(solver) = self.fluid.as_mut() else {
+            return Vec::new();
+        };
+        let (dims, cell) = solver.grid();
+        let (origin, _) = solver.bounds();
+        loom_render::fluid_surface::march(solver.density(), dims, cell, origin)
+    }
+
     /// Apply this tick's buoyancy, before the solver runs.
     ///
     /// **Every rule that protects the determinism hash applies in here**, which
@@ -1771,6 +1785,12 @@ impl Runner {
     /// scene in this repository.
     pub fn fluid_particles(&mut self) -> Vec<loom_render::ParticleInstance> {
         self.physics.fluid_particles()
+    }
+
+    /// The cinematic fluid's free surface — ADR 0057 addendum. Call it before
+    /// [`Self::fluid_particles`]; see [`Sim::fluid_surface`].
+    pub fn fluid_surface(&mut self) -> Vec<loom_render::FluidVertex> {
+        self.physics.fluid_surface()
     }
 
     /// What the cinematic tier's device round trip cost: total ms, fence ms,

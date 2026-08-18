@@ -107,6 +107,11 @@ struct FluidConsts {
     /// block.
     float4* probes;
     float4* instances;
+    /// Fluid fraction per cell in fixed point, `FLUID_DENSITY_SCALE` per
+    /// particle. Host-visible: the surface is extracted on the CPU (ADR 0057
+    /// addendum), because the solver holds a device of its own and the renderer
+    /// holds another.
+    uint* density;
 };
 
 struct FluidPush {
@@ -852,6 +857,61 @@ void fluidProbeMain(uint3 tid: SV_DispatchThreadID) {
         float4(float(wetColumns) / float(RING), float(wet), 0.0, 0.0);
 }
 
+/// Fixed-point scale for the density splat below. See `fluidDensitySplatMain`.
+static const uint FLUID_DENSITY_SCALE = 4096u;
+
+/// Clear the density field the surface is extracted from.
+[numthreads(256, 1, 1)]
+void fluidDensityClearMain(uint3 tid: SV_DispatchThreadID) {
+    FluidConsts* c = push.c;
+    if (int(tid.x) >= c->sizes.x) { return; }
+    c->density[tid.x] = 0u;
+}
+
+/// Splat every particle into the density field with a trilinear kernel.
+///
+/// **This is not `cellCount`, and the difference is the whole surface.** A
+/// count is a step function of the cell a particle happens to be in, so an
+/// isosurface built on it is a staircase at the cell size — 10 cm on
+/// `slosh.loom`, which reads as Minecraft water. A trilinear splat spreads each
+/// particle over the eight cell centres around it, which is a one-cell-wide
+/// filter applied at the source rather than a smoothing pass applied after, and
+/// it is what makes the free surface move continuously as a particle crosses a
+/// cell boundary instead of jumping.
+///
+/// **Fixed-point integer atomics, and that is ADR 0053 §5 in one line.** Float
+/// `InterlockedAdd` would make this field depend on the order the scheduler
+/// happened to run the particles in, and `cargo xtask repeat` compares PNGs
+/// byte for byte. Integer addition is associative; the scale below is the
+/// price, and 1/4096 of a particle is four orders below anything the isosurface
+/// can express.
+[numthreads(256, 1, 1)]
+void fluidDensitySplatMain(uint3 tid: SV_DispatchThreadID) {
+    FluidConsts* c = push.c;
+    if (tid.x >= uint(c->dims.w)) { return; }
+    int3 d = c->dims.xyz;
+    float h = c->origin.w;
+    // Cell-centre lattice coordinates: 0.0 is the centre of cell 0.
+    float3 g = (c->particles[tid.x].position.xyz - c->origin.xyz) / h - 0.5;
+    int3 base = int3(floor(g));
+    float3 f = g - float3(base);
+    for (int k = 0; k < 2; ++k) {
+        for (int j = 0; j < 2; ++j) {
+            for (int i = 0; i < 2; ++i) {
+                int3 p = base + int3(i, j, k);
+                if (!inside(d, p)) { continue; }
+                float w = (i == 0 ? 1.0 - f.x : f.x)
+                        * (j == 0 ? 1.0 - f.y : f.y)
+                        * (k == 0 ? 1.0 - f.z : f.z);
+                uint q = uint(w * float(FLUID_DENSITY_SCALE));
+                if (q == 0u) { continue; }
+                uint ignored;
+                InterlockedAdd(c->density[cellIndex(d, p)], q, ignored);
+            }
+        }
+    }
+}
+
 /// Every `stride`-th particle, as a `ParticleInstance` the one particle
 /// renderer already draws (ADR 0047's rule — there is no second one).
 [numthreads(256, 1, 1)]
@@ -869,6 +929,20 @@ void fluidInstanceMain(uint3 tid: SV_DispatchThreadID) {
         // A droplet the size of the volume one drawn particle stands for, so
         // the field reads as water rather than as freckles.
         radius = c->origin.w * 0.42;
+        // **Spray only, once there is a surface.** A particle in a cell at or
+        // above half rest density is *inside* the marched mesh (ADR 0057
+        // addendum: that fraction is the isovalue), so drawing it puts a blue
+        // billboard over refracting water — which is what the whole surface
+        // exists to stop. What is left is the thrown droplets, which is the
+        // half of reference image 65 a mesh cannot express.
+        //
+        // Zero radius rather than a skipped slot: the instance stride is a CPU
+        // fact and a degenerate quad is discarded before rasterisation, the
+        // same trick the grass fade and the covered water rings use.
+        int cell = particleCell(c, x);
+        if (c->density[cell] >= FLUID_DENSITY_SCALE * FLUID_PER_CELL / 2u) {
+            radius = 0.0;
+        }
     }
     c->instances[tid.x * 3u] = float4(x, radius);
     c->instances[tid.x * 3u + 1u] = float4(0.20, 0.40, 0.56, 1.0);

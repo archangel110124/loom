@@ -407,6 +407,17 @@ pub struct EnvironmentData {
     /// both. Deriving it per vertex would be the same subtraction done 5,376
     /// times to reach the same answer.
     pub cascade_c: [f32; 4],
+    /// The cinematic free surface's vertices — ADR 0057 addendum.
+    ///
+    /// Two `float4`s each, as [`crate::FluidVertex`] packs them. Null on every
+    /// scene that does not opt into the tier, and the draw is then skipped from
+    /// the CPU side, so no shader on any other scene reads this at all.
+    ///
+    /// Appended after the cascade block for the reason that block was appended
+    /// after the foam one: every offset above it is unmoved.
+    pub fluid_vertices: vk::DeviceAddress,
+    /// Keeps the struct's stride 16-byte aligned, as `foam_pad` does.
+    pub fluid_pad: [u32; 2],
 }
 
 /// A point light, as the GPU reads it.
@@ -530,6 +541,8 @@ impl Default for EnvironmentData {
             cascade_a: [0.0; 4],
             cascade_b: [0.0; 4],
             cascade_c: [0.0; 4],
+            fluid_vertices: 0,
+            fluid_pad: [0; 2],
         }
     }
 }
@@ -1045,6 +1058,22 @@ pub struct Renderer {
     /// water; the mesh itself is entirely in the vertex shader, so there is no
     /// buffer beside this.
     water_pipeline: vk::Pipeline,
+    /// The cinematic free surface — ADR 0057 addendum. Its own vertex entry
+    /// point because its vertex count is a run-time fact and the analytic
+    /// surface's is a constant; **the same fragment shader**, which is the
+    /// whole point of the slice.
+    fluid_pipeline: vk::Pipeline,
+    /// The marched surface, re-uploaded every frame drawn. Host-visible for
+    /// the reason the wavelet pool is: it is state, not a bake.
+    fluid_buffer: vk::Buffer,
+    fluid_alloc: Option<Allocation>,
+    fluid_address: vk::DeviceAddress,
+    /// Vertices in `fluid_buffer`. Zero on every scene outside the tier.
+    fluid_verts: u32,
+    /// `fluid_address`, or null when this scene has no cinematic water.
+    /// Stamped into the environment at render time on the same rule the
+    /// terrain, wavelet, flow and foam pointers follow.
+    fluid_address_or_null: vk::DeviceAddress,
     /// Blades uploaded this frame. Zero draws nothing at all.
     grass_count: u32,
     /// The rain streaks. Additive, order-independent, in a pass of their own
@@ -1332,6 +1361,18 @@ impl Renderer {
             vk::BufferUsageFlags::empty(),
         )?;
 
+        // The cinematic free surface: 393,216 vertices of 32 bytes, 12 MB, and
+        // it is a ceiling rather than an expectation — `slosh.loom` uses a
+        // twentieth of it. Written every frame *drawn*, which is far rarer than
+        // every tick: the solver steps 150 times to produce one still.
+        let (fluid_buffer, fluid_alloc, fluid_address) = create_address_buffer(
+            &raw,
+            &mut allocator,
+            (crate::fluid_surface::MAX_VERTICES * size_of::<crate::FluidVertex>()) as u64,
+            "loom.fluid.surface",
+            vk::BufferUsageFlags::empty(),
+        )?;
+
         // The foam field: 128² coverages, 64 KB, written every tick like the
         // event pool above and for the same reason — it is stepped CPU state
         // rather than a bake (ADR 0055).
@@ -1428,6 +1469,15 @@ impl Renderer {
             HDR_FORMAT,
             MSAA_SAMPLES,
             c"waterVertexMain",
+            c"waterFragmentMain",
+        )?;
+        let fluid_pipeline = create_geometry_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            HDR_FORMAT,
+            MSAA_SAMPLES,
+            c"fluidVertexMain",
             c"waterFragmentMain",
         )?;
         // **Rain rasterises at the scene's sample count**, because it now draws
@@ -1659,6 +1709,12 @@ impl Renderer {
             flow_params: [0.0, 0.0, 1.0, 0.0],
             flow_velocities: 0,
             water_pipeline,
+            fluid_pipeline,
+            fluid_buffer,
+            fluid_alloc: Some(fluid_alloc),
+            fluid_address,
+            fluid_verts: 0,
+            fluid_address_or_null: 0,
             grass_count: 0,
             rain_pipeline,
             rain_splash_pipeline,
@@ -1968,6 +2024,39 @@ impl Renderer {
         )
     }
 
+    /// Hand the renderer the cinematic fluid's free surface — ADR 0057 addendum.
+    ///
+    /// One [`crate::FluidVertex`] per vertex, three per triangle, as
+    /// [`crate::fluid_surface::march`] produced them. An empty slice is a scene
+    /// outside the tier, and the draw is then skipped entirely — no vertices,
+    /// no pipeline bind, and the environment pointer stays null.
+    ///
+    /// **Once per frame drawn, not once per tick.** The solver steps 150 times
+    /// to produce one still and this is called once at the end of it.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the renderer is being torn down.
+    pub fn set_fluid_surface(&mut self, vertices: &[crate::FluidVertex]) -> Result<(), RenderError> {
+        // Truncated to whole triangles rather than refused: the marcher already
+        // caps itself at the same number, so a longer slice means the two
+        // copies of one constant have drifted and the useful answer is to draw
+        // what fits.
+        let count = (vertices.len().min(crate::fluid_surface::MAX_VERTICES) / 3) * 3;
+        if count == 0 {
+            self.fluid_verts = 0;
+            self.fluid_address_or_null = 0;
+            return Ok(());
+        }
+        self.fluid_verts = u32::try_from(count).unwrap_or(0);
+        self.fluid_address_or_null = self.fluid_address;
+        write_slice(
+            self.fluid_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("fluid surface buffer is gone".into()))?,
+            &vertices[..count],
+        )
+    }
+
     /// How many blades the buffer holds.
     #[must_use]
     pub fn grass_capacity(&self) -> usize {
@@ -2164,6 +2253,8 @@ impl Renderer {
         self.environment.foam = self.foam_params;
         self.environment.foam_coverage = self.foam_coverage;
         self.environment.foam_edge_cells = FOAM_EDGE_CELLS;
+        // And the cinematic free surface, for the fifth.
+        self.environment.fluid_vertices = self.fluid_address_or_null;
         // Same argument again: the drop and splash buffers are the renderer's
         // and no caller has any business knowing their addresses.
         self.environment.rain_drops = self.rain_sim.drops_address;
@@ -2316,6 +2407,14 @@ impl Renderer {
         // a scene with no `WaterBody`, so there is one flag rather than two.
         let water_verts =
             if self.environment.water[2] > 0.0 { WATER_VERTS + NAPPE_VERTS } else { 0 };
+        // **The cinematic surface is a second draw in the same block, not more
+        // vertices on the first.** Its count is a run-time fact — the marcher
+        // produced it a moment ago — while `WATER_VERTS` is a compile-time
+        // constant the vertex shader indexes against, so folding the two into
+        // one draw would put a run-time split point inside `waterVertexMain`.
+        // A cinematic scene draws no analytic surface at all (ADR 0057), so
+        // this is usually the only thing in the block.
+        let (fluid_pipeline, fluid_verts) = (self.fluid_pipeline, self.fluid_verts);
         // **The readback follows the last pass that wrote a pixel.** With the
         // AA pass on, the finished frame is in its target and copying the
         // earlier image instead would silently read the un-anti-aliased one —
@@ -2372,7 +2471,7 @@ impl Renderer {
         // forward pass is declared character for character as before. That is
         // also what keeps the existing barrier-list test unchanged — its scene
         // is two meshes and never sets `environment.water`.
-        let split = water_verts > 0 && msaa_ids.is_some();
+        let split = (water_verts > 0 || fluid_verts > 0) && msaa_ids.is_some();
         let water_set = self.water_textures.descriptor_set();
         let mut forward_uses = Vec::new();
         if !rain_resolves && !split {
@@ -2603,6 +2702,8 @@ impl Renderer {
                             base_push,
                             water_pipeline,
                             water_verts,
+                            fluid_pipeline,
+                            fluid_verts,
                             particle_pipeline,
                             particle_count,
                             particle_slot,
@@ -2721,6 +2822,8 @@ impl Renderer {
                             base_push,
                             water_pipeline,
                             water_verts,
+                            fluid_pipeline,
+                            fluid_verts,
                             particle_pipeline,
                             particle_count,
                             particle_slot,
@@ -3113,6 +3216,7 @@ impl Drop for Renderer {
             }
             self.device.destroy_pipeline(self.grass_pipeline, None);
             self.device.destroy_pipeline(self.water_pipeline, None);
+            self.device.destroy_pipeline(self.fluid_pipeline, None);
             self.device.destroy_pipeline(self.rain_pipeline, None);
             self.device.destroy_pipeline(self.rain_splash_pipeline, None);
             if let Some(allocator) = self.allocator.as_mut() {
@@ -3124,6 +3228,7 @@ impl Drop for Renderer {
             self.device.destroy_buffer(self.ripple_buffer, None);
             self.device.destroy_buffer(self.flow_buffer, None);
             self.device.destroy_buffer(self.foam_buffer, None);
+            self.device.destroy_buffer(self.fluid_buffer, None);
             self.device.destroy_buffer(self.particle_buffer, None);
             if let (Some(allocation), Some(allocator)) =
                 (self.grass_alloc.take(), self.allocator.as_mut())
@@ -3147,6 +3252,11 @@ impl Drop for Renderer {
             }
             if let (Some(allocation), Some(allocator)) =
                 (self.foam_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            if let (Some(allocation), Some(allocator)) =
+                (self.fluid_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
             }
@@ -3333,6 +3443,11 @@ pub(crate) unsafe fn draw_water_and_particles(
     base_push: Push,
     water_pipeline: vk::Pipeline,
     water_verts: u32,
+    // The cinematic free surface — ADR 0057 addendum. Same fragment shader as
+    // the analytic sea, its own vertex entry point, and a count the CPU knows
+    // because it marched the mesh itself.
+    fluid_pipeline: vk::Pipeline,
+    fluid_verts: u32,
     particle_pipeline: vk::Pipeline,
     particle_count: u32,
     particle_slot: u32,
@@ -3374,6 +3489,26 @@ pub(crate) unsafe fn draw_water_and_particles(
                 bytes,
             );
             d.cmd_draw(cmd, water_verts, 1, 0, 0);
+        }
+
+        // The cinematic free surface, drawn with the water and before the
+        // particles for exactly the same reason: it is opaque, depth-written
+        // water, and the spray thrown off it has to sort against it.
+        if fluid_verts > 0 {
+            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, fluid_pipeline);
+            let push = Push { object_offset: particle_slot, ..base_push };
+            let bytes = std::slice::from_raw_parts(
+                std::ptr::from_ref(&push).cast::<u8>(),
+                size_of::<Push>(),
+            );
+            d.cmd_push_constants(
+                cmd,
+                layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                bytes,
+            );
+            d.cmd_draw(cmd, fluid_verts, 1, 0, 0);
         }
 
         // Particles last, over finished opaque geometry, so the

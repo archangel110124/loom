@@ -680,7 +680,22 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // volumetric water is billboarded, blended and fogged by the same vertex
     // shader as a spark. A scene that does not opt into the tier appends
     // nothing.
+    // **And its free surface, marched first** — ADR 0057 addendum. First
+    // because the density field it reads is what the particle path culls its
+    // spray against: a particle inside the mesh is a blue billboard over
+    // refracting water, and the surface exists to stop exactly that.
+    let mut fluid_surface = Vec::new();
     if let Some(runner) = warmed.as_mut() {
+        #[allow(clippy::disallowed_methods)]
+        let started = std::time::Instant::now();
+        fluid_surface = runner.fluid_surface();
+        let marched = started.elapsed().as_secs_f64() * 1000.0;
+        if !fluid_surface.is_empty() {
+            log::info(format!(
+                "cinematic surface: {} triangles, marched in {marched:.1} ms",
+                fluid_surface.len() / 3
+            ));
+        }
         particles.extend(runner.fluid_particles());
         let (total, fence, ticks) = runner.fluid_cost();
         if ticks > 0 {
@@ -846,6 +861,11 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                 .set_foam(coverage, *origin, *cell, *side)
                 .map_err(|e| e.to_string())?;
         }
+        // **The cinematic free surface** — ADR 0057 addendum. Stepped state
+        // like the two above it: what is uploaded is the isosurface of whatever
+        // the `--sim N` run left in the solver. Empty on every scene outside
+        // the tier, and the draw is then skipped entirely.
+        renderer.set_fluid_surface(&fluid_surface).map_err(|e| e.to_string())?;
         renderer.set_rain(rain_drops);
         // **The drop simulation's clock.** A fresh renderer seeds at tick zero
         // and advances to here in one dispatch, so a still at `--sim N` is
@@ -1121,6 +1141,17 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                             )
                             .map_err(|e| e.to_string())?;
                     }
+                    // And the cinematic surface, re-marched every frame for the
+                    // third time by the same rule — it is the whole picture on
+                    // a scene in the tier, and a fly-through of a frozen one
+                    // would be sixteen photographs of tick zero.
+                    // (The spray beside it is not re-read here, and that is a
+                    // known gap the fly-through inherits from slice 7: the
+                    // particle list is built once, before the loop. The surface
+                    // is the picture; the spray is a garnish sitting one moment
+                    // behind it.)
+                    let surface = runner.fluid_surface();
+                    renderer.set_fluid_surface(&surface).map_err(|e| e.to_string())?;
 
                     renderer
                         .render_to_png(

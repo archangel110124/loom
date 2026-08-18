@@ -240,6 +240,21 @@ struct EnvironmentData {
     /// xy the horizontal direction the water leaves along, z `δ_in` — the core
     /// spread — w how far the sheet falls before it reaches the pool.
     float4 cascadeC;
+    /// The cinematic free surface's vertices — ADR 0057 addendum. Null on every
+    /// scene outside the tier, and the draw that reads it is skipped from the
+    /// CPU, so no other scene's shader touches this at all.
+    LoomFluidVertex* fluidVertices;
+    uint2 fluidPad;
+};
+
+/// One vertex of the cinematic free surface, as `loom_render::FluidVertex`
+/// packs it. Two `float4`s: std430 aligns a `float3` to 16 anyway, so the
+/// natural six-float layout would be a hole on one side and not the other.
+struct LoomFluidVertex {
+    /// xyz world, w metres of water under this point.
+    float4 position;
+    /// xyz outward normal, w whitewater coverage.
+    float4 normal;
 };
 
 struct GrassBlade {
@@ -4941,6 +4956,52 @@ WaterOutput nappeVertex(uint nappeID) {
     // brink that long ago. See `WaterOutput::nappe`.
     float departure = push.environment[0].weather.z - (at.speed - nappe.exit_speed) / 9.81;
     out.nappe = float4(1.0, at.aeration, z, departure);
+    return out;
+}
+
+/// The cinematic tier's free surface — ADR 0057 addendum.
+///
+/// **A vertex fetch and nothing else.** Every other water vertex in this file
+/// is *generated* — the rings from `SV_VertexID`, the nappe from the
+/// hydraulics — because their shape is a closed form. This one's shape is what
+/// a GPU fluid solver actually did, marched into triangles by
+/// `loom_render::fluid_surface` on the CPU, so the only honest thing here is to
+/// read it.
+///
+/// **It shares `waterFragmentMain`, which is the entire point of the slice.**
+/// Cinematic water gets the same two-leg Snell refraction, the same
+/// per-channel Beer-Lambert column, the same roughness-aware Fresnel, the same
+/// traced reflection ray with its sky fallback and the same 4x MSAA as the
+/// analytic sea. There is no second water look in this engine and there is not
+/// going to be one.
+///
+/// The varyings the analytic surface derives from its wave sum are set to the
+/// values that mean "no wave here": `fold` and `breakMu` zero, so no whitecap
+/// threshold fires and `crest` is zero; `waveletSlope` zero, so the per-pixel
+/// wake difference is nothing; `nappe.x` zero, so the falling-sheet branch is
+/// not taken. `depth` is the water's own height above the domain floor and is
+/// positive everywhere, which is what keeps the shoreline discard - a query
+/// against a terrain height field this water does not stand on - from cutting
+/// holes in a tank.
+[shader("vertex")]
+WaterOutput fluidVertexMain(uint vertexID: SV_VertexID) {
+    LoomFluidVertex v = push.environment[0].fluidVertices[vertexID];
+    WaterOutput out;
+    out.clip = mul(push.objects[push.objectOffset].mvp, float4(v.position.xyz, 1.0));
+    out.worldPos = v.position.xyz;
+    out.normal = v.normal.xyz;
+    out.depth = v.position.w;
+    out.fold = 0.0;
+    // The whitewater the CPU deposited at this vertex - the readback's
+    // hull-waterline and submersion deposits (ADR 0057 addendum). It arrives as
+    // a coverage in the same units `instant` and the foam field use, so the
+    // fragment shader's `max` of the three needs no new branch.
+    out.foamHist = v.normal.w;
+    out.baseXZ = v.position.xz;
+    out.waveletSlope = float2(0.0, 0.0);
+    out.breakMu = 0.0;
+    out.breakDir = float2(1.0, 0.0);
+    out.nappe = float4(0.0, 0.0, 0.0, 0.0);
     return out;
 }
 

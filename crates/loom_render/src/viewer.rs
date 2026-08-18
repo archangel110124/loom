@@ -1812,6 +1812,13 @@ impl Viewer {
                             base_push,
                             water_pipeline,
                             water_verts,
+                            // **`loom run` does not draw the cinematic surface
+                            // yet.** The solver steps in the viewer's fixed
+                            // step, but nothing marches its density here — the
+                            // headless still is the only path that does (ADR
+                            // 0057). Passing zero is that fact, stated.
+                            vk::Pipeline::null(),
+                            0,
                             particle_pipeline,
                             particle_count,
                             particle_slot,
@@ -1910,6 +1917,13 @@ impl Viewer {
                             base_push,
                             water_pipeline,
                             water_verts,
+                            // **`loom run` does not draw the cinematic surface
+                            // yet.** The solver steps in the viewer's fixed
+                            // step, but nothing marches its density here — the
+                            // headless still is the only path that does (ADR
+                            // 0057). Passing zero is that fact, stated.
+                            vk::Pipeline::null(),
+                            0,
                             particle_pipeline,
                             particle_count,
                             particle_slot,

@@ -208,6 +208,7 @@ struct Consts {
     solid: vk::DeviceAddress,
     probes: vk::DeviceAddress,
     instances: vk::DeviceAddress,
+    density: vk::DeviceAddress,
 }
 
 /// Mirrors `FluidPush`. 32 bytes of the 128 guaranteed.
@@ -269,6 +270,8 @@ struct Pipelines {
     g2p: vk::Pipeline,
     probe: vk::Pipeline,
     instance: vk::Pipeline,
+    density_clear: vk::Pipeline,
+    density_splat: vk::Pipeline,
 }
 
 /// The solver, and the whole of `loom_cli`'s view of Vulkan.
@@ -280,6 +283,9 @@ pub struct FluidSolver {
     solid_alloc: Option<Allocation>,
     probes_alloc: Option<Allocation>,
     instances_alloc: Option<Allocation>,
+    density_alloc: Option<Allocation>,
+    /// The fluid fraction the last [`Self::density`] read back, one per cell.
+    density: Vec<f32>,
     pipelines: Pipelines,
     layout: vk::PipelineLayout,
     module: vk::ShaderModule,
@@ -426,6 +432,9 @@ impl FluidSolver {
         )?;
         let (cnb, cna, consts_addr) =
             make(size_of::<Consts>(), "loom.fluid.consts", MemoryLocation::CpuToGpu)?;
+        // Host-visible: the surface is marched on the CPU, one read per frame
+        // drawn rather than one per tick. See `FluidSolver::density`.
+        let (deb, dea, density) = make(cells * 4, "loom.fluid.density", MemoryLocation::GpuToCpu)?;
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let consts = Consts {
@@ -472,6 +481,7 @@ impl FluidSolver {
             solid,
             probes,
             instances,
+            density,
         };
 
         let range = vk::PushConstantRange::default()
@@ -526,6 +536,8 @@ impl FluidSolver {
             g2p: make_pipe(c"fluidG2PMain", "loom.fluid.g2p")?,
             probe: make_pipe(c"fluidProbeMain", "loom.fluid.probe")?,
             instance: make_pipe(c"fluidInstanceMain", "loom.fluid.instance")?,
+            density_clear: make_pipe(c"fluidDensityClearMain", "loom.fluid.density_clear")?,
+            density_splat: make_pipe(c"fluidDensitySplatMain", "loom.fluid.density_splat")?,
         };
 
         let pool_info = vk::CommandPoolCreateInfo::default()
@@ -559,11 +571,13 @@ impl FluidSolver {
             (inb, ina, instances),
             (cnb, cna, consts_addr),
             (rob, roa, reordered),
+            (deb, dea, density),
         ];
         let mut solid_alloc = None;
         let mut probes_alloc = None;
         let mut instances_alloc = None;
         let mut consts_alloc = None;
+        let mut density_alloc = None;
         for (index, (buffer, allocation, address)) in bufs_list.into_iter().enumerate() {
             // The four host-visible ones keep a second handle on their
             // allocation so the CPU can map them by name rather than by index.
@@ -572,6 +586,7 @@ impl FluidSolver {
                 14 => &mut probes_alloc,
                 15 => &mut instances_alloc,
                 16 => &mut consts_alloc,
+                18 => &mut density_alloc,
                 _ => {
                     bufs.push(Buf { buffer, allocation: Some(allocation), address });
                     continue;
@@ -587,6 +602,8 @@ impl FluidSolver {
             solid_alloc,
             probes_alloc,
             instances_alloc,
+            density_alloc,
+            density: vec![0.0; cells],
             pipelines,
             layout,
             module,
@@ -607,6 +624,12 @@ impl FluidSolver {
             out: FluidStepOutput::default(),
         };
         solver.write_consts()?;
+        // Zeroed once, so that `fluidInstanceMain`'s spray cull reads "no
+        // surface here" rather than whatever the allocator handed back, on any
+        // path that draws particles before ever marching a surface.
+        if let Some(alloc) = solver.density_alloc.as_ref() {
+            let _ = write_slice(alloc, &vec![0_u32; cells]);
+        }
         Ok(solver)
     }
 
@@ -818,6 +841,75 @@ impl FluidSolver {
             }
         }
         out
+    }
+
+    /// The fluid fraction in every cell, 1.0 at rest density.
+    ///
+    /// **Read back, and that is a divergence from ADR 0057's plan worth
+    /// stating.** The intended shape was marching cubes on the device with the
+    /// vertex buffer never leaving it. It cannot be: this solver holds a
+    /// **compute device of its own** (see the module header — `loom_cli` has no
+    /// renderer at all and `loom sim` has no window), and a buffer on that
+    /// device is not something the renderer's device can draw. So the surface
+    /// crosses as plain `f32` through the same narrow interface the probes do,
+    /// and the marching happens in [`crate::fluid_surface`] on the CPU.
+    ///
+    /// What that costs is one 128 KB copy per frame *drawn* — not per tick —
+    /// and a CPU march. What it buys is that the extraction has no atomic and
+    /// no scan in it at all: a loop over cells in index order emits triangles
+    /// in index order, which is a stronger reproducibility guarantee than the
+    /// scan-based compaction ADR 0057 was going to need, in a tenth of the
+    /// code.
+    ///
+    /// Two dispatches: clear, then splat. The count the solver already keeps
+    /// is not usable here — see `fluidDensitySplatMain`.
+    pub fn density(&mut self) -> &[f32] {
+        let cells = self.dims[0] * self.dims[1] * self.dims[2];
+        let push = Push { consts: self.consts_address(), pad: 0, args: [0; 4] };
+        #[allow(clippy::cast_possible_truncation)]
+        let cell_groups = (cells as u32).div_ceil(GROUP);
+        #[allow(clippy::cast_possible_truncation)]
+        let particle_groups = (self.particles as u32).div_ceil(GROUP);
+        let (clear, splat) = (self.pipelines.density_clear, self.pipelines.density_splat);
+        let layout = self.layout;
+        let particles = self.bufs[0].buffer;
+        let density = self.bufs[18].buffer;
+        let device = self.device.handle().clone();
+        let queue = self.device.queue();
+        let pool = self.pool;
+        let _ = crate::material::record(&device, crate::raytrace::Submit { pool, queue }, |cmd| {
+            let mut graph = RenderGraph::new();
+            let p = graph.import_buffer("loom.fluid.particles", particles);
+            let g = graph.import_buffer("loom.fluid.density", density);
+            graph.pass_with(
+                "fluid_density_clear",
+                &[],
+                &[(g, BufferAccess::ComputeReadWrite)],
+                move |d, cmd| record_dispatch(d, cmd, layout, clear, push, cell_groups),
+            );
+            graph.pass_with(
+                "fluid_density_splat",
+                &[],
+                &[(p, BufferAccess::ComputeRead), (g, BufferAccess::ComputeReadWrite)],
+                move |d, cmd| record_dispatch(d, cmd, layout, splat, push, particle_groups),
+            );
+            graph.execute(&device, cmd);
+        });
+
+        if let Some(ptr) = self.density_alloc.as_ref().and_then(Allocation::mapped_ptr) {
+            #[allow(clippy::cast_precision_loss)]
+            let scale = 1.0 / (4096.0 * FLUID_PER_CELL as f32);
+            for (slot, index) in self.density.iter_mut().zip(0..cells) {
+                // SAFETY: the buffer holds `cells` `u32`s and the dispatches
+                // above were fence-waited by `record`.
+                let raw = unsafe { ptr.as_ptr().cast::<u32>().add(index).read_unaligned() };
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    *slot = raw as f32 * scale;
+                }
+            }
+        }
+        &self.density
     }
 
     fn consts_address(&self) -> vk::DeviceAddress {
@@ -1067,6 +1159,8 @@ impl Drop for FluidSolver {
                 self.pipelines.g2p,
                 self.pipelines.probe,
                 self.pipelines.instance,
+                self.pipelines.density_clear,
+                self.pipelines.density_splat,
             ] {
                 device.destroy_pipeline(pipeline, None);
             }
@@ -1080,6 +1174,7 @@ impl Drop for FluidSolver {
                     self.probes_alloc.take(),
                     self.instances_alloc.take(),
                     self.consts_alloc.take(),
+                    self.density_alloc.take(),
                 ];
                 for allocation in named.into_iter().flatten() {
                     let _ = allocator.free(allocation);
@@ -1118,8 +1213,8 @@ mod tests {
     fn the_constant_block_is_the_shape_the_shader_reads() {
         // 5 vectors, 4 levels of 32 bytes, 16 device addresses.
         assert_eq!(size_of::<Level>(), 32);
-        // Five vectors, four levels of 32 bytes, seventeen device addresses.
-        assert_eq!(size_of::<Consts>(), 80 + 128 + 17 * 8);
+        // Five vectors, four levels of 32 bytes, eighteen device addresses.
+        assert_eq!(size_of::<Consts>(), 80 + 128 + 18 * 8);
         assert_eq!(size_of::<Push>(), 32);
         assert_eq!(std::mem::offset_of!(Push, args), 16, "see the note on `Push::pad`");
     }

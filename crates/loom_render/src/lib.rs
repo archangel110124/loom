@@ -35,6 +35,7 @@ mod cmaa2;
 mod debug_names;
 mod device;
 mod fluid;
+pub mod fluid_surface;
 mod gpu_particles;
 mod instance;
 mod material;
@@ -62,6 +63,7 @@ pub use fluid::{
     fluid_grid, FluidDomain, FluidInputs, FluidProbe, FluidProbeResult, FluidSolid, FluidSolver,
     FluidStepOutput, FLUID_GRID, FLUID_PER_CELL,
 };
+pub use fluid_surface::FluidVertex;
 pub use material::{FLAG_TRIPLANAR, MaterialData, NO_TEXTURE};
 pub use renderer::{PointLight, MAX_LIGHTS, 
     Camera, EnvironmentData, GrassBlade, MAX_WAVES, Object, ParticleInstance, RenderError,
@@ -245,7 +247,17 @@ mod tests {
         assert_eq!(at(std::ptr::from_ref(&base.cascade_a).cast()), 992, "cascadeA");
         assert_eq!(at(std::ptr::from_ref(&base.cascade_b).cast()), 1008, "cascadeB");
         assert_eq!(at(std::ptr::from_ref(&base.cascade_c).cast()), 1024, "cascadeC");
-        assert_eq!(size_of::<EnvironmentData>(), 1040, "the whole struct");
+        // **The cinematic free surface's vertex pointer, appended after the
+        // cascade block on the same rule** — ADR 0057 addendum. `cascadeC` ends
+        // at 1040, a pointer wants 8-byte alignment and gets it there with no
+        // padding, and two words behind it take the stride back to 16. Read out
+        // of the compiled module: members 35 and 36 sit at 1040 and 1048.
+        assert_eq!(
+            at(std::ptr::from_ref(&base.fluid_vertices).cast()),
+            1040,
+            "fluidVertices — the marched surface the cinematic tier draws"
+        );
+        assert_eq!(size_of::<EnvironmentData>(), 1056, "the whole struct");
     }
 
     /// **`ParticleInstance` is written by a shader as well as by the CPU**,
