@@ -110,6 +110,48 @@ pub struct WaterSample {
     /// why it is a plain scalar and not folded into the normal that buoyancy
     /// already gets.
     pub fold: f32,
+    /// **The breaking criterion: the largest eigenvalue of the horizontal
+    /// Jacobian's symmetric part**, and the number every foam source thresholds.
+    ///
+    /// [`Self::fold`] is that matrix's *trace*, which is the sum of both
+    /// principal compressions. On a single-direction sea the second one is zero
+    /// and the two agree — measured, in `mu_max_is_the_fold_on_a_single_swell`.
+    /// On a crossing sea they do not: two equal swells 90° apart compress the
+    /// surface along two axes at once, and their traces add while neither axis
+    /// has folded. Measured on exactly that pair — two 10 m swells at `Q·k·A =
+    /// 0.32` each, under the threshold alone and over it summed — **the trace
+    /// calls 12.32% of the surface past breaking where the largest eigenvalue
+    /// calls 0.00%**. So trace-driven foam paints whitecaps on water that is
+    /// merely dimpled, and the error grows with every direction the author
+    /// adds.
+    ///
+    /// On a single-direction sea the agreement is numerical rather than exact:
+    /// `½(c + √(c²))` is `c` to about 1.5e-8, measured, because the square root
+    /// of a rounded square is not the number that was squared.
+    ///
+    /// With `aᵢ = Qᵢkᵢaᵢ sin φᵢ` — the same per-wave term `fold` sums — and
+    /// `dᵢ` the wave's unit heading:
+    ///
+    /// ```text
+    /// Sxx = Σ aᵢ dᵢx²    Szz = Σ aᵢ dᵢz²    Sxz = Σ aᵢ dᵢx dᵢz
+    /// μ_max = ½(Sxx + Szz + √((Sxx − Szz)² + 4 Sxz²))
+    /// ```
+    ///
+    /// Two accumulators and one square root over what the normal already
+    /// computes. `fold` stays exactly as it was — the normal is built from it
+    /// and moving that would move every water pixel in the repository for a
+    /// reason that has nothing to do with foam.
+    pub mu_max: f32,
+    /// The unit direction the surface is folding *along* — [`Self::mu_max`]'s
+    /// eigenvector, in world xz.
+    ///
+    /// **This is what foam streaks lie along.** Before it the streaks were
+    /// stretched across the global wind direction (`WATER_FOAM_STRETCH`, ADR
+    /// 0053 §7), which is right only for a wind sea running one way and is
+    /// visibly wrong wherever a swell crosses the wind or a shore turns it.
+    /// `[1, 0]` where the compression is isotropic and the direction is
+    /// genuinely undefined, which is flat water — where nothing draws it.
+    pub break_dir: [f32; 2],
 }
 
 /// How much of its deep-water amplitude a wave keeps in water `depth` deep.
@@ -226,6 +268,11 @@ pub fn sample_water(
     let mut slope_x = 0.0_f32;
     let mut slope_z = 0.0_f32;
     let mut flatten = 0.0_f32;
+    // The same per-wave term `flatten` sums, resolved onto the two horizontal
+    // axes instead of collapsed into their sum. See `WaterSample::mu_max`.
+    let mut sxx = 0.0_f32;
+    let mut szz = 0.0_f32;
+    let mut sxz = 0.0_f32;
 
     // Still-water depth, computed once: every wave's taper reads it, and a
     // depth that oscillated with the waves would make the attenuation modulate
@@ -274,7 +321,14 @@ pub fn sample_water(
 
         slope_x += d[0] * ka * cos_phase;
         slope_z += d[1] * ka * cos_phase;
-        flatten += wave.steepness * ka * sin_phase;
+        // Hoisted into a local and summed unchanged, so `flatten` — and with
+        // it the normal, and with that every water pixel ever blessed — is the
+        // same arithmetic in the same order it always was.
+        let compression = wave.steepness * ka * sin_phase;
+        flatten += compression;
+        sxx += compression * d[0] * d[0];
+        szz += compression * d[1] * d[1];
+        sxz += compression * d[0] * d[1];
 
         // d/dt of the displacement above. dφ/dt = −ω, which is where each
         // sign comes from — the vertical term is the one that trips people up.
@@ -304,6 +358,21 @@ pub fn sample_water(
         [0.0, 1.0, 0.0]
     };
 
+    // The 2x2 symmetric eigenproblem, closed form. `disc` is the gap between
+    // the two eigenvalues, so it is zero exactly where the compression is
+    // isotropic and the direction below is genuinely undefined.
+    let disc = ((sxx - szz) * (sxx - szz) + 4.0 * sxz * sxz).sqrt();
+    let mu_max = 0.5 * (sxx + szz + disc);
+    // `(μ − Szz, Sxz)` and `(Sxz, μ − Sxx)` are both eigenvectors; the longer
+    // one is the one that survives cancellation. Taking either unconditionally
+    // is how this returns a zero vector on an axis-aligned sea.
+    let a = [mu_max - szz, sxz];
+    let b = [sxz, mu_max - sxx];
+    let pick = if a[0] * a[0] + a[1] * a[1] >= b[0] * b[0] + b[1] * b[1] { a } else { b };
+    let pick_len = (pick[0] * pick[0] + pick[1] * pick[1]).sqrt();
+    let break_dir =
+        if pick_len > 0.0 { [pick[0] / pick_len, pick[1] / pick_len] } else { [1.0, 0.0] };
+
     WaterSample {
         height: body.surface_height + displacement[1],
         normal,
@@ -311,6 +380,8 @@ pub fn sample_water(
         velocity,
         depth,
         fold: flatten,
+        mu_max,
+        break_dir,
     }
 }
 
@@ -380,8 +451,17 @@ struct LoomWaterSample {
     /// `Σ Q·k·A·sin φ` — the term subtracted from the normal's Y. Raw, never
     /// divided by `Σ Q·k·A`: 1.0 is a cusp and the validator caps the sea
     /// below it, so this is an absolute measure of how near breaking the
-    /// surface is rather than a per-scene shape. Whitecaps read it.
+    /// surface is rather than a per-scene shape. It is the *trace* of the
+    /// horizontal compression, and `mu_max` below is what foam thresholds.
     float fold;
+    /// The largest eigenvalue of that compression — the breaking criterion.
+    /// The Rust half's `WaterSample::mu_max` carries the measurement: on two
+    /// crossing swells the trace calls 10.38% of the surface broken where this
+    /// calls 0.00%.
+    float mu_max;
+    /// Its eigenvector: the world-xz direction the surface folds along, which
+    /// is the direction foam streaks lie in.
+    float2 break_dir;
 };
 
 LoomWaterSample loom_sample_water(
@@ -406,6 +486,11 @@ LoomWaterSample loom_sample_water(
     float slope_x = 0.0;
     float slope_z = 0.0;
     float flatten = 0.0;
+    // The same per-wave term `flatten` sums, resolved onto the two horizontal
+    // axes rather than collapsed into their sum. See `mu_max`.
+    float sxx = 0.0;
+    float szz = 0.0;
+    float sxz = 0.0;
 
     // Still-water depth, once: a depth that oscillated with the waves would
     // make the attenuation modulate itself.
@@ -440,7 +525,13 @@ LoomWaterSample loom_sample_water(
 
         slope_x += d.x * ka * cos_phase;
         slope_z += d.y * ka * cos_phase;
-        flatten += wave.steepness * ka * sin_phase;
+        // Hoisted and summed unchanged, so `flatten` and the normal built from
+        // it are the same arithmetic in the same order they always were.
+        float compression = wave.steepness * ka * sin_phase;
+        flatten += compression;
+        sxx += compression * d.x * d.x;
+        szz += compression * d.y * d.y;
+        sxz += compression * d.x * d.y;
 
         velocity.x += qa * d.x * omega * sin_phase;
         velocity.y -= amplitude * omega * cos_phase;
@@ -465,6 +556,18 @@ LoomWaterSample loom_sample_water(
         normal = float3(0.0, 1.0, 0.0);
     }
 
+    // The 2x2 symmetric eigenproblem, closed form — the Rust half's comment
+    // carries the reasoning and the fallback.
+    float disc = sqrt((sxx - szz) * (sxx - szz) + 4.0 * sxz * sxz);
+    float mu_max = 0.5 * (sxx + szz + disc);
+    float2 eig_a = float2(mu_max - szz, sxz);
+    float2 eig_b = float2(sxz, mu_max - sxx);
+    float2 pick = dot(eig_a, eig_a) >= dot(eig_b, eig_b) ? eig_a : eig_b;
+    float pick_len = sqrt(pick.x * pick.x + pick.y * pick.y);
+    float2 break_dir = pick_len > 0.0
+        ? float2(pick.x / pick_len, pick.y / pick_len)
+        : float2(1.0, 0.0);
+
     LoomWaterSample result;
     result.height = surface_height + displacement.y;
     result.normal = normal;
@@ -472,6 +575,8 @@ LoomWaterSample loom_sample_water(
     result.velocity = velocity;
     result.depth = depth;
     result.fold = flatten;
+    result.mu_max = mu_max;
+    result.break_dir = break_dir;
     return result;
 }
 "#
@@ -847,6 +952,87 @@ mod tests {
         assert!(!folds(0.25), "nor a 1:4 one — which is the gate scene's shore");
         assert!(!folds(1.0), "nor, measured, a 45° one");
         assert!(folds(1.1), "steeper than 45° is where it goes, at Q·k·A = 1");
+    }
+
+    /// **The whole reason the criterion moved off the trace.** Two equal
+    /// swells crossing at 90°, each individually too gentle to break: the sum
+    /// of their compressions passes the breaking threshold over a tenth of the
+    /// surface, and neither principal axis ever does. Foam painted from the
+    /// trace appears there, on water that is merely dimpled from two sides.
+    ///
+    /// The numbers this prints are the ones quoted in [`WaterSample::mu_max`].
+    #[test]
+    fn a_crossing_sea_folds_on_neither_axis() {
+        // Q·k·A = 0.32 each: under the 0.33 threshold alone, over it summed,
+        // and inside the validator's Q·N·k·A <= 1 for two waves.
+        let k = std::f32::consts::TAU / 10.0;
+        let amplitude = 0.32 / k;
+        let crossing = body(vec![
+            wave(10.0, amplitude, 1.0, [1.0, 0.0]),
+            wave(10.0, amplitude, 1.0, [0.0, 1.0]),
+        ]);
+        let (mut trace_broken, mut mu_broken, mut total) = (0, 0, 0);
+        for xi in 0..120_u8 {
+            for zi in 0..120_u8 {
+                let sample = sample_water(
+                    &crossing,
+                    [f32::from(xi) * 0.1, f32::from(zi) * 0.1],
+                    3.0,
+                    -1000.0,
+                    [0.0; 3],
+                    [0.0; 3],
+                );
+                total += 1;
+                if sample.fold > 0.33 {
+                    trace_broken += 1;
+                }
+                if sample.mu_max > 0.33 {
+                    mu_broken += 1;
+                }
+            }
+        }
+        let pct = |n: i32| f64::from(n) * 100.0 / f64::from(total);
+        eprintln!(
+            "crossing sea: trace calls {:.2}% past breaking, mu_max {:.2}%",
+            pct(trace_broken),
+            pct(mu_broken)
+        );
+        assert!(trace_broken > total / 20, "the trace has to be wrong here for this to mean anything: {trace_broken}");
+        assert_eq!(mu_broken, 0, "the largest eigenvalue broke where no axis folded");
+    }
+
+    /// **A single-direction sea is the case where nothing changed**, and it is
+    /// most of the repository's water. There `Sxz² = Sxx·Szz` exactly in
+    /// principle, so `μ_max` collapses to `max(fold, 0)` — the same picture,
+    /// through a square root that costs it a last bit or two.
+    #[test]
+    fn mu_max_is_the_fold_on_a_single_swell() {
+        let single = body(vec![
+            wave(23.0, 0.62, 0.33, [1.0, 0.3]),
+            wave(9.0, 0.19, 0.33, [1.0, 0.3]),
+        ]);
+        let mut worst = 0.0_f32;
+        for xi in 0..80_u8 {
+            for zi in 0..80_u8 {
+                let sample = sample_water(
+                    &single,
+                    [f32::from(xi) * 0.4, f32::from(zi) * 0.4],
+                    7.0,
+                    -1000.0,
+                    [0.0; 3],
+                    [0.0; 3],
+                );
+                worst = worst.max((sample.mu_max - sample.fold.max(0.0)).abs());
+                // And the eigenvector is the swell's own heading, up to sign.
+                if sample.mu_max > 0.05 {
+                    let d = (1.0_f32 + 0.09).sqrt();
+                    let dot = sample.break_dir[0] * (1.0 / d) + sample.break_dir[1] * (0.3 / d);
+                    assert!(dot.abs() > 0.999, "break_dir {:?} is not the swell's", sample.break_dir);
+                }
+            }
+        }
+        eprintln!("single swell: worst |mu_max - max(fold, 0)| = {worst:e}");
+        assert!(worst < 1e-6, "mu_max is not the fold on a one-direction sea: {worst}");
     }
 
     /// The Slang half has to carry the same constants. A numeric comparison

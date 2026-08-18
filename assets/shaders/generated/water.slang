@@ -201,8 +201,17 @@ struct LoomWaterSample {
     /// `Σ Q·k·A·sin φ` — the term subtracted from the normal's Y. Raw, never
     /// divided by `Σ Q·k·A`: 1.0 is a cusp and the validator caps the sea
     /// below it, so this is an absolute measure of how near breaking the
-    /// surface is rather than a per-scene shape. Whitecaps read it.
+    /// surface is rather than a per-scene shape. It is the *trace* of the
+    /// horizontal compression, and `mu_max` below is what foam thresholds.
     float fold;
+    /// The largest eigenvalue of that compression — the breaking criterion.
+    /// The Rust half's `WaterSample::mu_max` carries the measurement: on two
+    /// crossing swells the trace calls 10.38% of the surface broken where this
+    /// calls 0.00%.
+    float mu_max;
+    /// Its eigenvector: the world-xz direction the surface folds along, which
+    /// is the direction foam streaks lie in.
+    float2 break_dir;
 };
 
 LoomWaterSample loom_sample_water(
@@ -227,6 +236,11 @@ LoomWaterSample loom_sample_water(
     float slope_x = 0.0;
     float slope_z = 0.0;
     float flatten = 0.0;
+    // The same per-wave term `flatten` sums, resolved onto the two horizontal
+    // axes rather than collapsed into their sum. See `mu_max`.
+    float sxx = 0.0;
+    float szz = 0.0;
+    float sxz = 0.0;
 
     // Still-water depth, once: a depth that oscillated with the waves would
     // make the attenuation modulate itself.
@@ -261,7 +275,13 @@ LoomWaterSample loom_sample_water(
 
         slope_x += d.x * ka * cos_phase;
         slope_z += d.y * ka * cos_phase;
-        flatten += wave.steepness * ka * sin_phase;
+        // Hoisted and summed unchanged, so `flatten` and the normal built from
+        // it are the same arithmetic in the same order they always were.
+        float compression = wave.steepness * ka * sin_phase;
+        flatten += compression;
+        sxx += compression * d.x * d.x;
+        szz += compression * d.y * d.y;
+        sxz += compression * d.x * d.y;
 
         velocity.x += qa * d.x * omega * sin_phase;
         velocity.y -= amplitude * omega * cos_phase;
@@ -286,6 +306,18 @@ LoomWaterSample loom_sample_water(
         normal = float3(0.0, 1.0, 0.0);
     }
 
+    // The 2x2 symmetric eigenproblem, closed form — the Rust half's comment
+    // carries the reasoning and the fallback.
+    float disc = sqrt((sxx - szz) * (sxx - szz) + 4.0 * sxz * sxz);
+    float mu_max = 0.5 * (sxx + szz + disc);
+    float2 eig_a = float2(mu_max - szz, sxz);
+    float2 eig_b = float2(sxz, mu_max - sxx);
+    float2 pick = dot(eig_a, eig_a) >= dot(eig_b, eig_b) ? eig_a : eig_b;
+    float pick_len = sqrt(pick.x * pick.x + pick.y * pick.y);
+    float2 break_dir = pick_len > 0.0
+        ? float2(pick.x / pick_len, pick.y / pick_len)
+        : float2(1.0, 0.0);
+
     LoomWaterSample result;
     result.height = surface_height + displacement.y;
     result.normal = normal;
@@ -293,5 +325,7 @@ LoomWaterSample loom_sample_water(
     result.velocity = velocity;
     result.depth = depth;
     result.fold = flatten;
+    result.mu_max = mu_max;
+    result.break_dir = break_dir;
     return result;
 }

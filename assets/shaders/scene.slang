@@ -4769,6 +4769,22 @@ struct WaterOutput {
     /// by `loom_sample_water`; subtracting what the vertex knew and adding what
     /// the pixel knows recovers the resolution without counting the wake twice.
     float2 rippleSlope : TEXCOORD6;
+    /// **The breaking criterion** — `LoomWaterSample::mu_max`, the largest
+    /// eigenvalue of the horizontal compression rather than its trace.
+    ///
+    /// Every foam threshold reads this and not `fold`. They are the same number
+    /// on a sea running one way and they are not on a crossing one, where the
+    /// trace calls a twelfth of the surface broken that has folded on neither
+    /// axis — `loom_water::WaterSample::mu_max` carries the measurement.
+    ///
+    /// `fold` beside it is kept for `crest`, which asks about the surface's
+    /// *shape* (a trough sees less sky than a crest) and is signed. Breaking
+    /// and shape are two questions and the eigenvalue only answers one.
+    float breakMu : TEXCOORD7;
+    /// The direction the surface is folding along, world xz, unnormalised
+    /// across the triangle. Foam streaks lie along it — ADR 0053 §7 deleted the
+    /// global-wind frame this replaces.
+    float2 breakDir : TEXCOORD8;
 };
 
 [shader("vertex")]
@@ -4920,6 +4936,8 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     // past any use of the value and interpolates exactly.
     out.depth = min(surfaceAt.depth, WATER_DEPTH_SENTINEL);
     out.fold = surfaceAt.fold;
+    out.breakMu = surfaceAt.mu_max;
+    out.breakDir = surfaceAt.break_dir;
 
     // **Foam outlives the crest that made it, and that is what makes it foam.**
     //
@@ -4934,10 +4952,11 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     // is a texture that decays each frame, which is GPU state and takes ADR
     // 0045 clause 3's whole burden: seeding, one-dispatch catch-up to
     // `--sim N`, the `repeat` gate, a warm-up. None of that is needed, because
-    // `fold` is a pure function of `(x, t)`: the recurrence
+    // `mu_max` is a pure function of `(x, t)`: the recurrence
     // `F(x,t) = max(f(x,t), d·F(x - v·dt, t - dt))` unrolls into a maximum
-    // over a few past samples of a function we can simply evaluate. Three taps
-    // buy 3.3 s of trail. See ADR 0049.
+    // over a few past samples of a function we can simply evaluate. Ten taps
+    // buy the same 3.3 s of trail, sampled fine enough to be one trail rather
+    // than three whitecaps. See ADR 0049 and its amendment.
     //
     // Sampled at `xz - drift·tau` because a patch made `tau` ago was made
     // upwind of where it has drifted to. The ground height is this column's:
@@ -4960,7 +4979,7 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
             push.environment[0].weather.z - tau,
             float3(0.0, 0.0, 0.0),
             float3(0.0, 0.0, 0.0));
-        trail = max(trail, decay * smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, past.fold));
+        trail = max(trail, decay * smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, past.mu_max));
     }
     out.foamHist = trail;
     out.baseXZ = xz;
@@ -5116,48 +5135,82 @@ static const float WATER_FOAM_BREAK = 0.33;
 // ---------------------------------------------------------------------------
 // The foam trail (W2). Read `waterVertexMain` for why it is closed-form.
 // ---------------------------------------------------------------------------
-/// Seconds between history taps. Three taps at 1.1 s is a 3.3 s trail — long
-/// enough that a patch visibly lags the crest that made it and short enough
-/// that the samples are still correlated: past about two seconds a Gerstner
-/// crest has moved further than the patch is wide, and the taps stop being a
-/// trail and become three separate whitecaps.
-static const float FOAM_TRAIL_STEP = 1.1;
-static const int FOAM_TRAIL_TAPS = 3;
-/// What a patch is worth one tap later. 0.60 over three taps leaves 22%, which
-/// is under the noise erosion's floor — so the trail dissolves rather than
-/// ending.
+/// Seconds between history taps. **Ten taps at 0.33 s, over the three at 1.1 s
+/// this replaces — same 3.3 s of trail, sampled where it is still one thing.**
+///
+/// The step is bounded above by the tap correlation, and ADR 0049 set it by
+/// the argument that a crest travels further than a patch is wide in about two
+/// seconds. Measured on `whitecaps`' own wave set, the correlation between the
+/// coverage now and the coverage at the same drifting point `tau` earlier is
+/// 0.91 at 0.1 s, 0.20 at 0.5 s and **crosses zero at 0.70 s** — well inside
+/// the shipped 1.1 s step. So the three taps were three independent draws of
+/// the same field rather than a trail: against the recurrence they unroll,
+/// stepped one fixed tick at a time out to 3.3 s, **three taps recover 33.7%
+/// of the foam and miss it entirely on 45.2% of the points that have any**,
+/// where ten taps recover 78.6% and miss 8.5%.
+///
+/// The cost is nine more `loom_sample_water` calls per water vertex. Measured,
+/// water pass at 1920x1080 — see the ADR 0049 amendment.
+static const float FOAM_TRAIL_STEP = 0.33;
+static const int FOAM_TRAIL_TAPS = 10;
+/// What a patch is worth one tap later. **0.858 per 0.33 s is 0.60 per 1.1 s**,
+/// which is exactly the decay the three-tap trail had: the taps got finer, the
+/// half-life did not move, and no reference moves for that reason alone.
 ///
 /// **Zero reproduces the pre-W2 picture exactly**, which is the stub the
 /// golden gate is measured against: with no decay every tap is worth nothing
-/// and `wetc` falls back to the instantaneous fold.
-static const float FOAM_TRAIL_DECAY = 0.60;
+/// and `wetc` falls back to the instantaneous coverage.
+static const float FOAM_TRAIL_DECAY = 0.858;
 /// Fraction of the wind speed foam is carried at. Surface drift is a few
 /// percent of the wind over open water, and this is deliberately slower than
 /// the *pattern* drift the fragment shader applies to the noise: the noise
 /// slides so a patch is not nailed to the world, this moves where the patch
 /// was born.
 static const float FOAM_TRAIL_DRIFT = 0.02;
-/// Cross-wind stretch of the noise domain. **This is what makes streaks** —
-/// foam pulled out downwind rather than dropped in round blobs, which is the
-/// most recognisable thing about a real whitecap field.
-static const float WATER_FOAM_STRETCH = 6.0;
+/// Stretch of the noise domain **across the breaking direction**. This is what
+/// makes streaks — foam pulled out along the crest that made it rather than
+/// dropped in round blobs, which is the most recognisable thing about a real
+/// whitecap field.
+///
+/// **It used to lie across the global wind** (`WATER_FOAM_STRETCH`, deleted by
+/// ADR 0053 §7). One wind direction is right only for a pure wind sea: a swell
+/// crossing the wind, a shore turning it, or a wake had their foam combed the
+/// wrong way, and the error was invisible on `whitecaps` precisely because
+/// that scene authors every wave within 20° of the wind. `in.breakDir` is the
+/// eigenvector of the local compression, so a patch is streaked along the crest
+/// it came off.
+static const float WATER_FOAM_STREAK = 6.0;
 /// Not white. Foam is packed bubbles, and bubbles are dielectric films: the
 /// brightest sea foam in a photograph sits well under paper white, and pinning
 /// it at 1.0 is what makes rendered surf read as painted.
+///
+/// **Fresh foam.** Whitecap reflectance falls from about 55% to 3–10% over
+/// roughly ten seconds as the bubbles drain and burst (Koepke), so foam is two
+/// substances a few seconds apart and drawing both with this is why old foam
+/// used to read as paint that had not dried.
 static const float3 WATER_FOAM_ALBEDO = float3(0.72, 0.76, 0.78);
+/// Foam that has been sitting for the trail's whole length. Not grey paint: a
+/// thinning raft of bubbles over water, which is why the opacity below drops
+/// with it rather than only the albedo.
+static const float3 WATER_FOAM_OLD_ALBEDO = float3(0.28, 0.30, 0.32);
+/// How much of the surface the oldest foam still replaces. Under 1 because a
+/// dispersing raft is holes: the water's own reflection comes back through it,
+/// which is the difference between foam ageing and foam dimming.
+static const float WATER_FOAM_OLD_OPACITY = 0.55;
 /// Where the second octave stops.
 ///
-/// **Not taste — an aliasing bound.** Its cross-wind lattice period is
-/// `1/(WATER_FOAM_STRETCH · 2.3)` = 7.3 cm, and `loom_value_noise` is evaluated
+/// **Not taste — an aliasing bound.** Its cross-streak lattice period is
+/// `1/(WATER_FOAM_STREAK · 2.3)` = 7.3 cm, and `loom_value_noise` is evaluated
 /// analytically with no mip chain, so past ~30 m that octave is far under a
 /// pixel and becomes a twinkle generator. One `saturate` retires it.
 static const float WATER_FOAM_FINE_RANGE = 40.0;
 
-/// The foam's lace, in the downwind frame. Split out so the flow map can
-/// evaluate it twice; `wd` is the wind direction the streaks lie along and
-/// `fine` retires the second octave at range.
+/// The foam's lace, in the breaking frame. Split out so the flow map can
+/// evaluate it twice; `wd` is the **breaking direction** the streaks lie along
+/// (`in.breakDir`, not the wind — ADR 0053 §7) and `fine` retires the second
+/// octave at range.
 float waterFoamNoise(float2 wp, float2 wd, float fine) {
-    float2 fuv = float2(dot(wp, wd), dot(wp, float2(-wd.y, wd.x)) * WATER_FOAM_STRETCH);
+    float2 fuv = float2(dot(wp, wd), dot(wp, float2(-wd.y, wd.x)) * WATER_FOAM_STREAK);
     return loom_value_noise(float3(fuv * 0.55, 0.0)) * 0.65
          + loom_value_noise(float3(fuv * 2.3, 7.3)) * 0.35 * fine;
 }
@@ -5243,27 +5296,20 @@ static const float WATER_DETAIL_DRIFT = 0.03;
 // +0.140 m [measured]. An invisible physics change bought for a presentation
 // problem is the worst trade available here.
 
-/// Slope at which the wake's crest is fully white.
-///
-/// The reciprocal of a slope: a ring the grid honestly produces tilts the
-/// surface by 0.06–0.12, so 8.0 puts a strong ring's crest at full coverage and
-/// a decayed one at a fraction of it. **It is not a brightness dial** — the
-/// coverage it produces is then eroded by the same lace noise every other foam
-/// term goes through, so a weak wake dissolves rather than dimming.
-static const float RIPPLE_FOAM_SLOPE = 10.0;
-/// How white the wake's crest is allowed to get, as a coverage.
-///
-/// Under 1.0 because a wake is not a breaking crest: it entrains a streak of
-/// bubbles along its steepest line, not a solid cap. At 1.0 the ring reads as
-/// painted rather than as water.
-static const float RIPPLE_FOAM_MAX = 0.50;
+// **`RIPPLE_FOAM_SLOPE` and `RIPPLE_FOAM_MAX` are gone from this shader —
+// ADR 0053 §7.** They painted the wake's crest white from the ripple grid's
+// instantaneous slope, which is foam with no memory: it appeared and vanished
+// with the ring rather than being left behind by it. The two numbers survive as
+// *deposit* thresholds on the CPU foam field (`loom_water::foam`), where what
+// they produce persists and drifts, which is what a wake's foam does.
+//
 // **`RIPPLE_CALM` and `RIPPLE_CALM_SLOPE` are gone — ADR 0053 §7.** They were
 // a standing term: the wake's own slope suppressing the capillary detail
 // everywhere the CPU ripple grid reached, which is a mechanism (a wave passing
 // under water stretches the surface and calms it) applied at the one place the
 // engine happened to have a slope handy. The mechanism now lives inside
 // `rainRingsAt`'s envelope, where the ring that earns the calm is the ring
-// being calmed. The wake keeps its foam.
+// being calmed.
 /// Where the detail stops. `loom_value_noise` is analytic and has no mip chain,
 /// so past this the lattice is under a pixel and becomes a twinkle generator
 /// rather than detail — the same bound the foam's fine octaves take, for the
@@ -5842,19 +5888,16 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // already-normalised vector, which moves the last bit. Measured: `ocean`
     // and `water_crate` both came back byte-different from their references
     // with this unguarded, inside the image gate's tolerance and therefore
-    // exactly the kind of drift only `cargo xtask repeat` can see. Every term
-    // below multiplies by `ripSteep`, so the zero makes the rest exact.
+    // exactly the kind of drift only `cargo xtask repeat` can see.
+    //
+    // **The wake's foam term is gone from this block** (ADR 0053 §7) — the
+    // slope now shapes the normal and nothing else. See the foam mix below.
     LoomRippleGrid ripples = rippleField();
     float3 ripple = float3(0.0, 0.0, 0.0);
-    // How steep the wake is here, read twice with two different reciprocals:
-    // see `RIPPLE_FOAM_SLOPE` and `RIPPLE_CALM_SLOPE` for why they differ by
-    // more than a factor of two rather than being one number.
-    float ripSteep = 0.0;
     if (ripples.side > 0) {
         ripple = loom_ripple_at(ripples, in.baseXZ);
         float2 dRipple = ripple.yz - in.rippleSlope;
         normal = normalize(normal - float3(dRipple.x, 0.0, dRipple.y));
-        ripSteep = saturate(length(ripple.yz) * RIPPLE_FOAM_SLOPE);
     }
 
     // **The rain's own rings, and the gate is three per-position terms.** The
@@ -6075,11 +6118,22 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // gusting and turbulence to a *direction* that here only needs to say which
     // way the streaks lie.
     float4 windv = push.environment[0].wind;
-    float2 wd = normalize(windv.xy + float2(1e-4, 0.0));
+    // **The frame the streaks lie in is the local breaking direction now**, not
+    // the wind — ADR 0053 §7. The wind still carries the patch (below); what it
+    // no longer does is decide which way the lace is combed, which is a
+    // property of the crest that entrained the air.
+    //
+    // Renormalised because it is interpolated: two vertices whose crests differ
+    // in heading give a short vector in between, and a short vector here is a
+    // stretched lattice rather than a rotated one. The `1e-4` keeps flat water
+    // — where the eigenvector is genuinely undefined — off a zero-length
+    // normalize; nothing there draws foam anyway.
+    float2 wd = normalize(in.breakDir + float2(1e-4, 0.0));
+    float2 windDir = normalize(windv.xy + float2(1e-4, 0.0));
     // Foam drifts downwind. Sampling in a frame that slides with the wind is
     // what keeps a patch from sitting nailed to the world while the wave that
     // made it travels out from under it.
-    float2 wp = in.worldPos.xz - wd * windv.z * push.environment[0].weather.z * 0.05;
+    float2 wp = in.worldPos.xz - windDir * windv.z * push.environment[0].weather.z * 0.05;
     float fine = saturate(1.0 - length(toEye) / WATER_FOAM_FINE_RANGE);
     // **And downstream, where there is a stream — W8.** Foam floating on a
     // river goes where the river goes; the wind drift above is the open-sea
@@ -6101,24 +6155,26 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // lets the old foam persist behind it, which is what a `max` of a coverage
     // means. Adding them would make a crest passing over its own wake brighter
     // than paper.
-    // **The wake's own crest goes white — W10, and it is the one lever with
-    // enough contrast to matter.** Foam against navy is a hundred levels;
-    // tilting the specular of an already-shimmering surface is two or three,
-    // which is why the ring measured as 34–44% of pixels moving and read as
-    // nothing. A ring travelling out from an impact does entrain air along its
-    // crest, so this is the same physical claim `in.fold` makes about a swell,
-    // read off the grid's slope instead of off `Σ Q·k·A·sin φ`.
+    // **The wake's white crest is gone from here — ADR 0053 §7.** It was
+    // `ripSteep * RIPPLE_FOAM_MAX`: the CPU ripple grid's own slope, read as a
+    // coverage, painted every frame with no memory at all. A wake's foam is
+    // the one foam in this shader that genuinely cannot be evaluated backwards
+    // in time (ADR 0049's own "what would change this"), so painting it from
+    // the instantaneous slope made it a highlight welded to the ring — it
+    // appeared and vanished with the ring instead of being left behind by it.
+    // The mechanism moves to the foam field's hull and impact deposits, which
+    // remember. The ring's slope still shapes the normal above.
+    float instant = smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, in.breakMu);
+    float wetc = max(instant, in.foamHist);
+    // **How old this foam is, from the two numbers already in hand.** A point
+    // whose whiteness is entirely history is old; one the crest is making right
+    // now is fresh; in between it is the ratio. Free — no varying, no state.
     //
-    // **Here and nowhere else.** It is a term in the fragment shader's foam
-    // mix; it is never fed back into `WaterSample::fold`, which is the
-    // closed-form quantity ADR 0045 clause 1 and the CPU/GPU agreement test
-    // both rest on.
-    //
-    // A floor on the coverage, like the trail below it, not an addition: a
-    // wake crossing an already-white crest must not come out brighter than
-    // paper.
-    float wetc = max(smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, in.fold), in.foamHist);
-    wetc = max(wetc, ripSteep * RIPPLE_FOAM_MAX);
+    // Koepke: whitecap reflectance falls 55% -> 3–10% over about ten seconds as
+    // the raft drains. Fresh foam is bright and opaque, old foam is grey and
+    // full of holes, and painting both with one albedo is what made a trail
+    // read as a smear of paint rather than as foam that had been there a while.
+    float foamAge = wetc > 0.0 ? in.foamHist / max(instant, in.foamHist) : 0.0;
     // **Eroded by the noise rather than faded by it.** A multiply would dim
     // every foam pixel toward the water; thresholding the *coverage* against
     // the noise instead dissolves the patch from its edges inward, which is
@@ -6165,16 +6221,22 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // second term.
     foam = max(foam, shoreFoam * SWASH_OPACITY);
 
-    float broken = smoothstep(WATER_FOAM_BREAK, 0.50, in.fold);
+    float broken = smoothstep(WATER_FOAM_BREAK, 0.50, in.breakMu);
     foam = max(foam, broken * smoothstep(fnoise * 0.4, fnoise * 0.4 + 0.6, broken));
 
     // **A material swap, not white paint.** Foam is opaque packed bubbles: it
     // has no Fresnel and no specular lobe, and painting white *over* the sky
     // reflection would leave a mirror shining through the surf. Replacing the
     // shaded result is what makes it read as a different substance.
-    float3 foamLit = WATER_FOAM_ALBEDO
+    //
+    // **Two substances, a few seconds apart.** A fresh raft is bright and
+    // replaces the surface; an old one is grey and lets the water back through,
+    // which is `foamAge` on both the albedo and the substitution. Swash is
+    // exempt by construction — it takes `foamAge` from whatever the whitecap
+    // terms said, and on a beach that is zero, so the sheet stays fresh.
+    float3 foamLit = lerp(WATER_FOAM_ALBEDO, WATER_FOAM_OLD_ALBEDO, foamAge)
         * (hemisphereAmbient(normal) * ambientStrength() + sunColor() * sunStrength() * toSun);
-    lit = lerp(lit, foamLit, foam);
+    lit = lerp(lit, foamLit, foam * lerp(1.0, WATER_FOAM_OLD_OPACITY, foamAge));
 
     float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     return float4(lerp(lit, fogColor(-view), fog), 1.0);

@@ -269,6 +269,11 @@ fn the_rust_and_the_slang_compute_the_same_surface() {
             cpu.velocity[2],
             cpu.depth,
             cpu.fold,
+            // The breaking criterion and its axis. A divergence here is foam
+            // painted somewhere the CPU's `water@x,z.foam` does not see it.
+            cpu.mu_max,
+            cpu.break_dir[0],
+            cpu.break_dir[1],
             ground,
         ];
         assert_eq!(row.len(), expected.len(), "row {i} has {} values", row.len());
@@ -336,7 +341,7 @@ fn the_slang_half_compiles_for_the_gpu_too() {
          \x20   set.waves[0].speed_scale = 1.0;\n\
          \x20   LoomWaterSample s = loom_sample_water(set, 0.0, -4.0, float2(1.0, 2.0), 3.0, float3(0.4, 0.0, -0.2), float3(0.05, 0.02, -0.03));\n\
          \x20   loom_water_probe[0] = s.height + s.normal.y + s.displacement.x\n\
-         \x20       + s.velocity.z + s.depth + s.fold;\n}}\n",
+         \x20       + s.velocity.z + s.depth + s.fold + s.mu_max + s.break_dir.x;\n}}\n",
         loom_water::slang()
     );
     std::fs::write(&shader, source).expect("write shader");
@@ -427,10 +432,11 @@ fn kernel(body: &WaterBody, bed: &HeightField, samples: &[[f32; 3]]) -> String {
     let emit = "\nvoid emit(LoomWaveSet set, LoomHeightField bed, float surface_height, float2 xz, float t, float3 flow, float3 ripple)\n\
                 {\n    float ground_height = loom_ground_height(bed, xz);\n\
                 \x20   LoomWaterSample s = loom_sample_water(set, surface_height, ground_height, xz, t, flow, ripple);\n\
-                \x20   printf(\"%.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\\n\",\n\
+                \x20   printf(\"%.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\\n\",\n\
                 \x20       s.height, s.normal.x, s.normal.y, s.normal.z,\n\
                 \x20       s.displacement.x, s.displacement.y, s.displacement.z,\n\
-                \x20       s.velocity.x, s.velocity.y, s.velocity.z, s.depth, s.fold, ground_height);\n}\n";
+                \x20       s.velocity.x, s.velocity.y, s.velocity.z, s.depth, s.fold,\n\
+                \x20       s.mu_max, s.break_dir.x, s.break_dir.y, ground_height);\n}\n";
     let split = out.find("\n[shader(\"compute\")]").expect("the kernel was just written");
     out.insert_str(split, emit);
     out

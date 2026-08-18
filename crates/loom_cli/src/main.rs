@@ -3158,11 +3158,14 @@ fn assertion_value(
                     .sqrt(),
             ),
             // **The whitecap coverage the shader paints, 0 to 1** — the same
-            // `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, fold)` the water
+            // `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, mu_max)` the water
             // fragment shader applies (`assets/shaders/scene.slang`, the
             // constants are declared together there). Raw `fold` would be
-            // wrong to call foam: it is signed, so a trough reads -0.23 and an
-            // unbroken crest reads 0.1 while nothing at all is drawn.
+            // wrong to call foam twice over: it is signed, so a trough reads
+            // -0.23 and an unbroken crest reads 0.1 while nothing at all is
+            // drawn — and it is the compression's *trace*, which on a crossing
+            // sea calls water broken that has folded on neither axis. The
+            // shader thresholds `mu_max`; so does this.
             //
             // There is no advected foam field yet. When there is one this
             // reads it instead, and an assertion written against this number
@@ -3170,7 +3173,7 @@ fn assertion_value(
             // here rather than promoted to a shared constant nobody will
             // remember to delete.
             "foam" => {
-                let t = ((sample.fold - 0.22) / (0.33 - 0.22)).clamp(0.0, 1.0);
+                let t = ((sample.mu_max - 0.22) / (0.33 - 0.22)).clamp(0.0, 1.0);
                 Some(t * t * 2.0_f32.mul_add(-t, 3.0))
             }
             _ => None,
