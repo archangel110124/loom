@@ -152,6 +152,46 @@ float2 loom_flow_at(LoomFlowGrid grid, float2 xz) {
     return ((high - low) * fz + low) * plume;
 }
 
+// The advected foam field, sampled. The Rust half is
+// `loom_water::foam::FoamField::at`; they are one implementation written twice.
+// Never edit this by hand.
+
+struct LoomFoamField {
+    // World xz of sample (0, 0).
+    float2 origin;
+    // Metres between samples.
+    float cell;
+    // Samples per axis. Zero means this water has no foam field.
+    int side;
+    // How many cells the boundary fade covers.
+    float edge_cells;
+    // Row-major, `side * side` coverages in [0, 1].
+    float* coverage;
+};
+
+// Bilinear, faded out over the boundary band and zero outside it — the
+// closed-form trail carries on past the domain, and a coverage that stepped at
+// a straight line would draw the domain as a square on the sea.
+float loom_foam_at(LoomFoamField field, float2 xz) {
+    if (field.side <= 0) { return 0.0; }
+    float gx = (xz.x - field.origin.x) / field.cell;
+    float gz = (xz.y - field.origin.y) / field.cell;
+    float last = float(field.side - 1);
+    if (!(gx >= 0.0 && gz >= 0.0 && gx < last && gz < last)) { return 0.0; }
+    int x0 = int(gx);
+    int z0 = int(gz);
+    float fx = gx - float(x0);
+    float fz = gz - float(z0);
+    float c00 = field.coverage[z0 * field.side + x0];
+    float c10 = field.coverage[z0 * field.side + x0 + 1];
+    float c01 = field.coverage[(z0 + 1) * field.side + x0];
+    float c11 = field.coverage[(z0 + 1) * field.side + x0 + 1];
+    float top = c00 + (c10 - c00) * fx;
+    float bottom = c01 + (c11 - c01) * fx;
+    float fade = clamp(min(min(gx, gz), min(last - gx, last - gz)) / field.edge_cells, 0.0, 1.0);
+    return (top + (bottom - top) * fz) * fade;
+}
+
 // The water surface. The Rust half is `loom_water::sample_water`; they are one
 // implementation written twice, and `slang_agreement` compiles this and
 // compares the two numerically.

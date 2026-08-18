@@ -647,11 +647,15 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // dropped. A still of `--sim 300` has to show the surface the simulation
     // arrived at, not the flat one it started from (ADR 0046 §7).
     let mut ripples = None;
+    // And the foam field it left behind, on the same rule: a still of
+    // `--sim 300` shows the foam the run deposited and advected, not an empty
+    // field (ADR 0055).
+    let mut foam = None;
     // Kept alive for the fly-through, which continues this run rather than
     // starting a second one. See `simulate_physics`.
     let mut warmed = None;
     if let Some(ticks) = flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()) {
-        (fired, splashed, ripples, warmed) = simulate_physics(&mut world, base, ticks);
+        (fired, splashed, ripples, foam, warmed) = simulate_physics(&mut world, base, ticks);
     }
 
     let mut objects = world_to_objects(&world, &library, &material_library);
@@ -811,6 +815,15 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         if let Some((heights, origin, cell, side)) = ripples.as_ref() {
             renderer
                 .set_ripples(heights, *origin, *cell, *side)
+                .map_err(|e| e.to_string())?;
+        }
+        // **And the foam the run deposited** — ADR 0055, and the same rule as
+        // the wake above it: this is stepped CPU state, so what is uploaded is
+        // wherever `--sim N` left it. A scene with no water uploads nothing and
+        // every lookup in the shader returns zero.
+        if let Some((coverage, origin, cell, side)) = foam.as_ref() {
+            renderer
+                .set_foam(coverage, *origin, *cell, *side)
                 .map_err(|e| e.to_string())?;
         }
         renderer.set_rain(rain_drops);
@@ -1073,6 +1086,20 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     if let Some(grid) = runner.ripples() {
                         renderer
                             .set_ripples(grid.heights(), grid.origin(), grid.cell(), grid.side())
+                            .map_err(|e| e.to_string())?;
+                    }
+                    // And the foam field, re-read every frame for the same
+                    // reason: it is the other piece of stepped CPU state, and
+                    // a wake that does not drift across a sequence is the
+                    // exact artifact a still cannot show.
+                    if let Some(field) = runner.foam() {
+                        renderer
+                            .set_foam(
+                                field.coverage(),
+                                field.origin(),
+                                field.cell(),
+                                field.side(),
+                            )
                             .map_err(|e| e.to_string())?;
                     }
 
@@ -2865,7 +2892,7 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
         // **Built only when something asks about water**, the same bargain the
         // sky makes below and for the same reason: it bakes the bed.
         water: asked_about("water")
-            .then(|| weather::water_probe(&scene, &world, &wind, runner.ripples()))
+            .then(|| weather::water_probe(&scene, &world, &wind, runner.ripples(), runner.foam()))
             .flatten(),
         wind,
         rain: weather::rain_of(&scene),
@@ -2989,9 +3016,36 @@ type Happenings = Vec<(u64, [f32; 3])>;
 /// ADR 0045 clause 2 as it applies here: nothing comes back.
 type RippleUpload = (Vec<f32>, [f32; 2], f32, usize);
 
+/// The same four arguments again, for `Renderer::set_foam` — the advected foam
+/// field (ADR 0055). Same shape as [`RippleUpload`] and spelled separately
+/// because they are two different grids with two different lifetimes, and one
+/// alias for both is how a caller comes to pass the wrong one.
+type FoamUpload = (Vec<f32>, [f32; 2], f32, usize);
+
 /// The grid as an upload, or `None` for water that authors no ripples.
 fn ripple_upload(grid: Option<&loom_water::ripples::RippleGrid>) -> Option<RippleUpload> {
     grid.map(|g| (g.heights().to_vec(), g.origin(), g.cell(), g.side()))
+}
+
+/// The whitecap coverage a crest of this steepness is drawn with right now.
+///
+/// `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, mu)` — the water fragment
+/// shader's two constants, spelled once here for the two callers in this file
+/// rather than twice.
+fn instant_foam(mu_max: f32) -> f32 {
+    let t = ((mu_max - 0.22) / (0.33 - 0.22)).clamp(0.0, 1.0);
+    t * t * 2.0_f32.mul_add(-t, 3.0)
+}
+
+/// A runner's foam field, as a free function so `loom water --at` can pass it
+/// to `Option::and_then` without naming the type twice.
+fn loom_cli_foam(runner: &play::Runner) -> Option<&loom_water::foam::FoamField> {
+    runner.foam()
+}
+
+/// The foam field as an upload, or `None` for a scene with no water.
+fn foam_upload(field: Option<&loom_water::foam::FoamField>) -> Option<FoamUpload> {
+    field.map(|f| (f.coverage().to_vec(), f.origin(), f.cell(), f.side()))
 }
 
 /// **The runner comes back out**, and that is not tidiness.
@@ -3014,7 +3068,13 @@ fn simulate_physics(
     world: &mut World,
     base: &std::path::Path,
     ticks: u32,
-) -> (Happenings, Vec<play::Splash>, Option<RippleUpload>, Option<play::Runner>) {
+) -> (
+    Happenings,
+    Vec<play::Splash>,
+    Option<RippleUpload>,
+    Option<FoamUpload>,
+    Option<play::Runner>,
+) {
     let mut runner = match play::Runner::new(world, base) {
         Ok(r) => r,
         Err(json) => {
@@ -3022,8 +3082,9 @@ fn simulate_physics(
             let mut sim = play::Sim::new(world);
             sim.step(ticks);
             let ripples = ripple_upload(sim.ripples());
+            let foam = foam_upload(sim.foam());
             sim.write_back(world);
-            return (Vec::new(), Vec::new(), ripples, None);
+            return (Vec::new(), Vec::new(), ripples, foam, None);
         }
     };
     for tick in 1..=u64::from(ticks) {
@@ -3032,8 +3093,13 @@ fn simulate_physics(
             break;
         }
     }
-    let happened = (runner.fired(), runner.splashed(), ripple_upload(runner.ripples()));
-    (happened.0, happened.1, happened.2, Some(runner))
+    let happened = (
+        runner.fired(),
+        runner.splashed(),
+        ripple_upload(runner.ripples()),
+        foam_upload(runner.foam()),
+    );
+    (happened.0, happened.1, happened.2, happened.3, Some(runner))
 }
 
 /// Every value given for a repeated flag.
@@ -3167,15 +3233,11 @@ fn assertion_value(
             // sea calls water broken that has folded on neither axis. The
             // shader thresholds `mu_max`; so does this.
             //
-            // There is no advected foam field yet. When there is one this
-            // reads it instead, and an assertion written against this number
-            // may move — which is why the shader's two thresholds are copied
-            // here rather than promoted to a shared constant nobody will
-            // remember to delete.
-            "foam" => {
-                let t = ((sample.mu_max - 0.22) / (0.33 - 0.22)).clamp(0.0, 1.0);
-                Some(t * t * 2.0_f32.mul_add(-t, 3.0))
-            }
+            // **The advected field, floored by the instantaneous coverage** —
+            // one call, because `WaterProbe` is where the pieces are assembled
+            // and a second assembly here is how the assertion and the picture
+            // come to disagree.
+            "foam" => Some(weather.water.as_ref()?.foam_at(at, weather.seconds)),
             _ => None,
         };
     }
@@ -3732,16 +3794,26 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
     // The grid is state, so the only way to read it is to run the simulation —
     // on a copy of the world, because this command reports and does not write.
     // Free when `--sim` is absent, which is every existing caller.
-    let ripple = if ticks == 0 {
-        [0.0; 3]
+    //
+    // **The foam field comes out of the same run**, for the same reason and at
+    // the same cost: it is the other piece of stepped water state, and running
+    // the simulation twice to read two of its grids would be two answers about
+    // one tick.
+    let (ripple, deposited) = if ticks == 0 {
+        ([0.0; 3], 0.0)
     } else {
         let mut stepped = world.clone();
         let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
-        let (_, _, _, warmed) = simulate_physics(&mut stepped, base, ticks);
-        warmed
+        let (_, _, _, _, warmed) = simulate_physics(&mut stepped, base, ticks);
+        let ripple = warmed
             .as_ref()
             .and_then(|r| r.ripples())
-            .map_or([0.0; 3], |g| g.at(at[0], at[1]))
+            .map_or([0.0; 3], |g| g.at(at[0], at[1]));
+        let foam = warmed
+            .as_ref()
+            .and_then(loom_cli_foam)
+            .map_or(0.0, |f| f.at(at[0], at[1]));
+        (ripple, foam)
     };
     let sample = loom_water::sample_water(&body, at, seconds, ground, flow, ripple);
     // `sample_water` sums the orbital motion onto the current, so the wave half
@@ -3779,6 +3851,15 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
             "ripple": {
                 "height": ripple[0],
                 "slope": [ripple[1], ripple[2]],
+            },
+            // **Foam coverage, the same number `water@x,z.foam` answers and
+            // the same one the shader draws**: the advected field floored by
+            // the instantaneous whitecap coverage. `deposited` is the field's
+            // half and is zero at `--sim 0`, because a field starts empty.
+            "foam": {
+                "coverage": instant_foam(sample.mu_max).max(deposited),
+                "field": deposited,
+                "mu_max": sample.mu_max,
             },
             "bed": {
                 "height": grounded.then_some(ground),

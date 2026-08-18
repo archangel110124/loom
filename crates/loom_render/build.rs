@@ -108,6 +108,10 @@ fn generate_water(shader_dir: &Path) {
     // CPU's, and this is the half that reads the upload. Presentation only —
     // nothing on the GPU side of it reaches a force.
     text.push_str(loom_water::flow::slang());
+    // The advected foam field, on the same rule again: the field is stepped on
+    // the CPU inside the fixed step and this is the half that reads its upload
+    // (ADR 0055). Before the surface, because `scene.slang` needs both.
+    text.push_str(loom_water::foam::slang());
     text.push_str(loom_water::slang());
     write_generated(shader_dir, "water.slang", &text);
 }

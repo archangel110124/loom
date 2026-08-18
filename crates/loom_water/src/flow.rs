@@ -320,6 +320,24 @@ impl FlowGrid {
         [v[0] * plume, 0.0, v[1] * plume]
     }
 
+    /// A constant current everywhere, for the tests that need one.
+    ///
+    /// **Test-only on purpose.** A real current is derived from the bed by
+    /// [`Self::bake`] and no scene authors a uniform one; this exists so that
+    /// `foam`'s advection can be measured against a velocity that is exactly
+    /// known, which is the only way "the stripe widened by N cells" is a
+    /// statement about the advection rather than about the current.
+    #[cfg(test)]
+    #[must_use]
+    pub fn uniform(velocity: [f32; 2]) -> Self {
+        Self {
+            origin: [-1.0e6, -1.0e6],
+            spacing: 2.0e6,
+            side: 2,
+            velocity: vec![velocity; 4],
+        }
+    }
+
     /// The velocities themselves, row-major, `side²` of them.
     ///
     /// **For the upload and nothing else.** Every reader on the force path goes

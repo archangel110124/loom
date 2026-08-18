@@ -213,7 +213,22 @@ mod tests {
             944,
             "flowVelocity — the current the surface detail is advected by"
         );
-        assert_eq!(size_of::<EnvironmentData>(), 960, "the whole struct");
+        // **The foam field, appended after the current on the same rule** —
+        // ADR 0055. 960 is a multiple of 16, the `float4` lands flush, the
+        // pointer follows at 976, and the edge-cell count plus one word of
+        // padding takes the stride back to 16.
+        assert_eq!(at(std::ptr::from_ref(&base.foam).cast()), 960, "foam");
+        assert_eq!(
+            at(std::ptr::from_ref(&base.foam_coverage).cast()),
+            976,
+            "foamCoverage — the advected field the whitecaps are floored by"
+        );
+        assert_eq!(
+            at(std::ptr::from_ref(&base.foam_edge_cells).cast()),
+            984,
+            "foamEdgeCells"
+        );
+        assert_eq!(size_of::<EnvironmentData>(), 992, "the whole struct");
     }
 
     /// **`ParticleInstance` is written by a shader as well as by the CPU**,

@@ -100,9 +100,32 @@ pub(crate) struct WaterProbe {
     /// The interactive grid as it stood at the end of the run, cloned off the
     /// runner. State, so there is no way to recompute it here.
     ripples: Option<loom_water::ripples::RippleGrid>,
+    /// The advected foam field at the end of the run, cloned off the runner
+    /// for the same reason: it is stepped state and cannot be recomputed from
+    /// a position and a time. `water@x,z.foam` reads it.
+    foam: Option<loom_water::foam::FoamField>,
 }
 
 impl WaterProbe {
+    /// Foam coverage at a world XZ, `[0, 1]` — **the same number the shader
+    /// draws**: the advected field, floored by the instantaneous whitecap
+    /// coverage, exactly as the water fragment shader's `wetc` is.
+    ///
+    /// The trail is deliberately not in it. The trail is a ten-tap unroll of
+    /// the same closed form evaluated at ten past instants, and reproducing it
+    /// here would be a third implementation of one thing; what an assertion
+    /// wants to know is whether there is foam here, and between the field and
+    /// the instantaneous term that question is answered.
+    pub fn foam_at(&self, xz: [f32; 2], seconds: f32) -> f32 {
+        let mu = self.at(xz, seconds).mu_max;
+        // `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, mu)`, the shader's two
+        // constants spelled again next to the branch that uses them.
+        let t = ((mu - 0.22) / (0.33 - 0.22)).clamp(0.0, 1.0);
+        let instant = t * t * 2.0_f32.mul_add(-t, 3.0);
+        let field = self.foam.as_ref().map_or(0.0, |f| f.at(xz[0], xz[1]));
+        instant.max(field)
+    }
+
     /// The surface at a world XZ, at the tick the run ended on.
     pub fn at(&self, xz: [f32; 2], seconds: f32) -> loom_water::WaterSample {
         let ground = self
@@ -126,11 +149,12 @@ pub(crate) fn water_probe(
     world: &World,
     wind: &Wind,
     ripples: Option<&loom_water::ripples::RippleGrid>,
+    foam: Option<&loom_water::foam::FoamField>,
 ) -> Option<WaterProbe> {
     let body = water_of(world, wind)?;
     let bed = crate::scene_terrain_field(scene);
     let flow = bed.as_ref().and_then(|g| crate::river_flow(g, &body));
-    Some(WaterProbe { body, bed, flow, ripples: ripples.cloned() })
+    Some(WaterProbe { body, bed, flow, ripples: ripples.cloned(), foam: foam.cloned() })
 }
 
 /// The same query, for a caller that holds the pieces rather than a [`Weather`].

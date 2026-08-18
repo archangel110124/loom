@@ -136,6 +136,13 @@ pub struct Viewer {
     flow_address: vk::DeviceAddress,
     flow_params: [f32; 4],
     flow_velocities: vk::DeviceAddress,
+    /// The advected foam field — see [`Viewer::set_foam`]. Uploaded **per
+    /// tick**, like the ripple state above rather than the two bakes.
+    foam_buffer: vk::Buffer,
+    foam_alloc: Option<Allocation>,
+    foam_address: vk::DeviceAddress,
+    foam_params: [f32; 4],
+    foam_coverage: vk::DeviceAddress,
     grass_pipeline: vk::Pipeline,
     /// The water surface. Whether it draws at all is read from
     /// [`Viewer::environment`], which the caller sets every frame.
@@ -516,6 +523,14 @@ impl Viewer {
                 "loom.viewer_flow",
                 vk::BufferUsageFlags::empty(),
             )?;
+        let (foam_buffer, foam_alloc, foam_address) =
+            crate::renderer::create_address_buffer(
+                &raw,
+                &mut allocator,
+                (crate::renderer::MAX_FOAM_SAMPLES * size_of::<f32>()) as u64,
+                "loom.viewer_foam",
+                vk::BufferUsageFlags::empty(),
+            )?;
 
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -672,6 +687,11 @@ impl Viewer {
             flow_address,
             flow_params: [0.0, 0.0, 1.0, 0.0],
             flow_velocities: 0,
+            foam_buffer,
+            foam_alloc: Some(foam_alloc),
+            foam_address,
+            foam_params: [0.0, 0.0, 1.0, 0.0],
+            foam_coverage: 0,
             grass_pipeline,
             water_pipeline,
             grass_count: 0,
@@ -903,6 +923,44 @@ impl Viewer {
                 .as_ref()
                 .ok_or_else(|| RenderError::Allocator("ripple buffer is gone".into()))?,
             &heights[..side * side],
+        )
+    }
+
+    /// Hand the viewer this tick's foam field.
+    ///
+    /// Mirrors [`crate::Renderer::set_foam`] in every particular, including
+    /// that it is called **per tick**. The window has to make the same call
+    /// the headless path does or the two disagree about where the foam is —
+    /// the defect ADR 0046 §7 records against `set_ripples`, which is the
+    /// reason this function exists in the same commit as the other one.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the viewer is being torn down.
+    pub fn set_foam(
+        &mut self,
+        coverage: &[f32],
+        origin: [f32; 2],
+        cell: f32,
+        side: usize,
+    ) -> Result<(), RenderError> {
+        if coverage.is_empty()
+            || side * side > crate::renderer::MAX_FOAM_SAMPLES
+            || coverage.len() < side * side
+        {
+            self.foam_params = [0.0, 0.0, 1.0, 0.0];
+            self.foam_coverage = 0;
+            return Ok(());
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.foam_params = [origin[0], origin[1], cell, side as f32];
+        }
+        self.foam_coverage = self.foam_address;
+        write_slice(
+            self.foam_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("foam buffer is gone".into()))?,
+            &coverage[..side * side],
         )
     }
 
@@ -1373,6 +1431,9 @@ impl Viewer {
         self.environment.ripple_heights = self.ripple_heights;
         self.environment.flow = self.flow_params;
         self.environment.flow_velocities = self.flow_velocities;
+        self.environment.foam = self.foam_params;
+        self.environment.foam_coverage = self.foam_coverage;
+        self.environment.foam_edge_cells = crate::renderer::FOAM_EDGE_CELLS;
         self.environment.rain_drops = self.rain_sim.drops_address;
         self.environment.rain_splashes = self.rain_sim.splashes_address;
         write_slice(
@@ -2405,6 +2466,7 @@ impl Drop for Viewer {
             self.device.destroy_buffer(self.terrain_buffer, None);
             self.device.destroy_buffer(self.ripple_buffer, None);
             self.device.destroy_buffer(self.flow_buffer, None);
+            self.device.destroy_buffer(self.foam_buffer, None);
             if let (Some(allocation), Some(allocator)) =
                 (self.grass_alloc.take(), self.allocator.as_mut())
             {
@@ -2422,6 +2484,11 @@ impl Drop for Viewer {
             }
             if let (Some(allocation), Some(allocator)) =
                 (self.flow_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            if let (Some(allocation), Some(allocator)) =
+                (self.foam_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
             }

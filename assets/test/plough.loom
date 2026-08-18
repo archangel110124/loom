@@ -1,0 +1,196 @@
+# A body ploughing a pool, and the foam it leaves behind it.
+#
+# **This scene exists because no other one can see the foam field.** Every foam
+# source before ADR 0055 was a closed form in `(x, t)`: the instantaneous
+# whitecap coverage, and the trail, which is that same coverage evaluated at ten
+# past instants. Both can only remember what a *wave* did. A hull is the case
+# that cannot be evaluated backwards from a position — where it was two seconds
+# ago is a fact about the simulation, not about the water — so a field with
+# memory is the only thing that can draw it, and this is the scene that asks.
+#
+# The hull is a sphere rolling down a ramp into a dead-calm pool. Nothing here
+# scripts it: gravity, a slope and rapier are what give it the horizontal
+# velocity, and the entry is therefore an impact and a plough rather than a
+# body placed in the water already moving. That also makes the two acceptance
+# assertions honest — the foam behind it is where the drag carried the
+# deposits, not where they were dropped.
+#
+#     loom sim assets/test/plough.loom --ticks 200 \
+#       --assert "water@0.5,0.foam > 0.4" --assert "water@6.5,0.foam < 0.05"
+#
+# **Dead calm on purpose**, like `pool.loom`: `waves` is empty and `Wind` is
+# explicitly zero, so the crest deposit contributes exactly nothing and every
+# scrap of foam in the frame came from the hull, its wake ring or its impact.
+# A sea state here would be a second source and the assertions would stop
+# meaning what they say.
+#
+# The bed is a voxel volume for the reason `pool.loom` records: the water's
+# depth comes from the voxel height field and nowhere else, and a `MeshRenderer`
+# box leaves every depth-driven term in the water switched off.
+
+[scene]
+format = 1
+id = "5c1f8a24-91d3-4e07-b6a8-2f7c40e59d18"
+
+[[asset]]
+key = "sphere"
+path = "sphere"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[asset]]
+key = "tiles_albedo"
+id = "bbce2fd2-83d0-410b-87b8-9e4b62ea4a64"
+path = "../textures/tiles_albedo.png"
+
+[[asset]]
+key = "tiles_normal"
+id = "39180893-483f-46b7-b946-f252aca36f23"
+path = "../textures/tiles_normal.png"
+
+[[node]]
+name = "Plough"
+
+  [node.components.Environment]
+  # Low and behind the camera's shoulder, so the foam is lit from the front and
+  # reads white rather than as a grey texture — `whitecaps.loom`'s reasoning.
+  sun_direction = [0.24, 0.58, -0.78]
+  sun_strength = 1.30
+  sun_color = [1.0, 0.96, 0.88]
+  ambient = 0.55
+  sky_zenith = [0.14, 0.28, 0.52]
+  sky_horizon = [0.62, 0.70, 0.76]
+  fog_density = 0.002
+  fog_falloff = 0.04
+
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 0.0
+  gustiness = 0.0
+  turbulence = 0.0
+
+# The tiled bed, a metre under the surface — shallow, so the refraction has
+# something to bend and the plough's track is seen against a pattern.
+[[node]]
+name = "Bed"
+parent = "Plough"
+transform = { pos = [-16.0, -17.0, -16.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.5
+  chunks = [2, 1, 2]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 8.0, 16.0]
+  half_extents = [14.0, 8.0, 12.0]
+  mode = "union"
+
+  [node.components.Material]
+  albedo = [0.86, 0.85, 0.82]
+  roughness = 0.75
+  albedo_map = { asset = "tiles_albedo" }
+  normal_map = { asset = "tiles_normal" }
+  uv_scale = [2.0, 2.0]
+  triplanar = true
+
+[[node]]
+name = "Water"
+parent = "Plough"
+
+  [node.components.WaterBody]
+  kind = "lake"
+  surface_height = 0.0
+  density = 1000.0
+  drag = 0.6
+
+    # The wake ring, which is a foam *source* now rather than a shading term —
+    # ADR 0053 §7 moved `RIPPLE_FOAM_SLOPE`/`RIPPLE_FOAM_MAX` out of the
+    # fragment shader and into the field's deposit, so what the ring entrains
+    # outlives the ring.
+    [node.components.WaterBody.ripples]
+    extent = 16.0
+    cell = 0.5
+    speed = 2.4
+    damping = 0.997
+    strength = 0.9
+
+# The ramp. Static: a `BoxCollider` with no `RigidBody` is scenery that
+# collides, which is what `rain_gantry.loom`'s deck already is.
+#
+# **Forty degrees, and the number is physics rather than taste.**
+# `loom_physics` gives every collider a friction of 0.8, so a body only slides
+# once the slope passes `atan(0.8)` = 38.7°; at the 22° this was first authored
+# with, the crate sat on the ramp for the whole run and the scene rendered an
+# empty pool. Measured by asserting on its x at tick 200 — it had not moved a
+# millimetre.
+[[node]]
+name = "Ramp"
+parent = "Plough"
+transform = { pos = [1.6, 3.0, 0.0], rot_euler = [0.0, 0.0, 55.0], scale = [3.0, 0.15, 1.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.38, 0.34, 0.30]
+  roughness = 0.85
+
+  [node.components.BoxCollider]
+  half_extents = [1.0, 1.0, 1.0]
+
+# **The hull: a 0.7 m crate at 620 kg/m^3**, heavy enough to sit low and
+# shoulder the water aside rather than skate over it, light enough to float
+# rather than sink out of the shot.
+#
+# **A crate and not a sphere, because `BoxCollider` is the only collider a
+# scene can author.** A sphere with a box collider would be a lie the physics
+# tells about the picture, and a sphere with no collider at all falls straight
+# through the ramp — which is what the first version of this scene did.
+[[node]]
+name = "Hull"
+parent = "Plough"
+transform = { pos = [-0.54, 6.37, 0.0], rot_euler = [0.0, 0.0, 55.0], scale = [0.35, 0.35, 0.35] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.80, 0.26, 0.14]
+  roughness = 0.35
+
+  [node.components.RigidBody]
+  dynamic = true
+  # 0.7 m cubed is 0.343 m^3; at 620 kg/m^3 that is 213 kg.
+  mass = 213.0
+
+  [node.components.BoxCollider]
+  half_extents = [1.0, 1.0, 1.0]
+
+  [node.components.Buoyancy]
+
+# A post, for the reason `pool.loom` has one: a still of a moving thing needs
+# something that is not moving to be read against.
+[[node]]
+name = "Post"
+parent = "Plough"
+transform = { pos = [8.6, 0.4, -3.0], scale = [0.16, 1.4, 0.16] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.30, 0.26]
+  roughness = 0.9
+
+# Low, close and off the track's axis: a wake is a thing seen along its length,
+# and a camera on the axis sees the hull and nothing of what it left.
+[[node]]
+name = "Camera"
+parent = "Plough"
+transform = { pos = [-2.2, 3.2, 7.0], rot_euler = [-22.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 52.0

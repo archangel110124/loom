@@ -122,6 +122,10 @@ pub struct Sim {
     /// `Sim` cannot see a camera at all, which is the structural half of that
     /// guarantee.
     ripples: Option<loom_water::ripples::RippleGrid>,
+    /// The advected foam field — ADR 0055. Built for any water body, because
+    /// unlike the ripple grid it is not authored: a foam field is the near
+    /// field of whatever water is in shot.
+    foam: Option<loom_water::foam::FoamField>,
     /// Bodies that float, in scene order, with their pontoons already in body
     /// space. **Order is fixed at load and never sorted**: the forces are
     /// summed as floats, and a different visiting order is a different number
@@ -536,6 +540,19 @@ impl Sim {
             }
             grid
         });
+        // **The foam field, on the same anchor as the ripple grid and for the
+        // same clause** — the water node's own world position, never the
+        // camera and never the bodies (ADR 0045's trap clause, which binds
+        // harder here because an assertion can read this field).
+        let foam = water.as_ref().map(|body| {
+            let centre = world
+                .entities()
+                .iter()
+                .find(|e| world.is_water(**e))
+                .and_then(|e| world.global_transform(*e))
+                .map_or([0.0, 0.0], |g| [g.matrix[12], g.matrix[14]]);
+            loom_water::foam::FoamField::new(centre, body)
+        });
         if water.is_none() && !floating.is_empty() {
             crate::log::warn(
                 "the scene has Buoyancy but no WaterBody; nothing will float".to_owned(),
@@ -565,6 +582,7 @@ impl Sim {
             terrain,
             flow,
             ripples,
+            foam,
             floating,
             water_events: Vec::new(),
             tick: 0,
@@ -584,6 +602,10 @@ impl Sim {
         };
         #[allow(clippy::cast_precision_loss)]
         let t = self.tick as f32 * TICK_SECONDS;
+
+        // What the foam field is told about the bodies this tick, gathered in
+        // the same body order everything else here uses.
+        let mut hulls: Vec<loom_water::foam::Hull> = Vec::new();
 
         for floating in &mut self.floating {
             let (Some(position), Some(rotation), Some(centre)) = (
@@ -647,6 +669,23 @@ impl Sim {
             );
             self.physics
                 .apply_force_torque(floating.body, wrench.force, wrench.torque);
+
+            // **And what the foam field sees of this body: one hull, not one
+            // per pontoon.** Foam is made where the hull meets the water, and
+            // the waterplane radius is the same number the splash crown rises
+            // from — a per-pontoon version would lay the same foam three times
+            // and mean nothing different.
+            if self.foam.is_some() {
+                hulls.push(loom_water::foam::Hull {
+                    at: position,
+                    velocity: self
+                        .physics
+                        .velocity_at_point(floating.body, position)
+                        .unwrap_or([0.0; 3]),
+                    radius: waterplane_radius(floating, position),
+                    wetted: wrench.submerged,
+                });
+            }
 
             // **The other half of the coupling: the body pushes back.** In
             // pontoon order, like everything else here, and scaled by how much
@@ -742,6 +781,18 @@ impl Sim {
                 // reads as a crossing. It is also barely moving, which is
                 // exactly what tells the two apart.
                 if entered && speed >= loom_water::spray::SPLASH_MIN_SPEED {
+                    // **The impact deposit** — a ring of white out to one and
+                    // a half times the waterplane radius, which is where the
+                    // cavity rim throws it. Full strength: an impact is the
+                    // whitest foam a scene makes, and the field's decay is
+                    // what takes it away rather than a smaller number here.
+                    if let Some(field) = self.foam.as_mut() {
+                        field.deposit_disc(
+                            [at[0], at[2]],
+                            1.5 * waterplane_radius(floating, position),
+                            loom_water::foam::FOAM_IMPACT,
+                        );
+                    }
                     self.water_events.push(loom_script::Event {
                         tick: 0,
                         kind: SPLASH.to_owned(),
@@ -769,6 +820,22 @@ impl Sim {
         if let Some(grid) = self.ripples.as_mut() {
             grid.step();
         }
+
+        // **And the foam field last of all**, after the ring it reads has been
+        // stepped: the wake's crest deposits what the grid holds *now*, and
+        // then the whole field decays, advects and takes this tick's crests
+        // and hulls. One order, fixed, and the order the assertions are
+        // written against.
+        if let Some(field) = self.foam.as_mut() {
+            if let Some(grid) = self.ripples.as_ref() {
+                field.deposit_ripples(grid);
+            }
+            let terrain = self.terrain.as_ref();
+            let ground = move |x: f32, z: f32| {
+                terrain.map_or(loom_voxel::heightfield::NO_GROUND, |t| t.at(x, z))
+            };
+            field.step(water, t, self.flow.as_ref(), &hulls, &ground);
+        }
     }
 
     /// This tick's ripple grid, for whoever is drawing the surface.
@@ -782,6 +849,13 @@ impl Sim {
     #[must_use]
     pub fn ripples(&self) -> Option<&loom_water::ripples::RippleGrid> {
         self.ripples.as_ref()
+    }
+
+    /// This tick's foam field, for whoever is drawing the surface or asserting
+    /// on it. Read-only and one direction only, exactly as the ripple grid is.
+    #[must_use]
+    pub fn foam(&self) -> Option<&loom_water::foam::FoamField> {
+        self.foam.as_ref()
     }
 
     /// Water entries and exits since the last call, stamped with `tick`.
@@ -1420,6 +1494,13 @@ impl Runner {
         self.physics.ripples()
     }
 
+    /// Straight through to [`Sim::foam`] — the simulation owns the field and
+    /// the renderer is handed a copy of it.
+    #[must_use]
+    pub fn foam(&self) -> Option<&loom_water::foam::FoamField> {
+        self.physics.foam()
+    }
+
     /// A runner that steps physics and runs nothing, for when the scripts
     /// could not be loaded.
     #[must_use]
@@ -1744,6 +1825,12 @@ impl Play {
     #[must_use]
     pub fn ripples(&self) -> Option<&loom_water::ripples::RippleGrid> {
         self.runner.ripples()
+    }
+
+    /// The foam field this play session's simulation has reached.
+    #[must_use]
+    pub fn foam(&self) -> Option<&loom_water::foam::FoamField> {
+        self.runner.foam()
     }
 
     /// Whether a human can drive anything here.

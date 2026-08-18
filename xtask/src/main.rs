@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 56] = [
+const SCENES: [&str; 57] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -168,6 +168,10 @@ const SCENES: [&str; 56] = [
     // place a wrong `TEXCOORD` index or an overflowed output signature would
     // show up as a validation message rather than as a picture.
     "assets/test/whitecaps.loom",
+    // The advected foam field — ADR 0055. A crate ploughing a pool is the one
+    // foam source that cannot be evaluated backwards from a position, which is
+    // exactly what the field exists for. Also in `GOLDEN`.
+    "assets/test/plough.loom",
     // The only scene where a rigid body is driven by the water rather than
     // only drawn against it, so it is the only one whose `render --sim` runs
     // the buoyancy solver at all.
@@ -307,7 +311,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 43] = [
+const GOLDEN: [(&str, &str, &[&str]); 44] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -502,6 +506,15 @@ const GOLDEN: [(&str, &str, &[&str]); 43] = [
     // 0.1% tolerance — and reproduces every other water reference byte for
     // byte, which is the mutation proving the trail is what does the work.
     ("whitecaps", "assets/test/whitecaps.loom", &["--sim", "300"]),
+    // **The foam field, and nothing else in this list can see it** — ADR 0055.
+    // Every other water scene's foam is a closed form in `(x, t)`: the
+    // instantaneous whitecap coverage and the ten-tap trail that unrolls it.
+    // A hull's wake, an impact ring and what the current does to both are
+    // stepped CPU state with memory, and `plough.loom` is the only scene that
+    // deposits into it. At 240 ticks the crate has entered, ploughed, and the
+    // patch it left has begun to break up into lace — which is the half of the
+    // feature a fresh deposit cannot show.
+    ("plough", "assets/test/plough.loom", &["--sim", "240"]),
     // **Water against terrain**, which `ocean` cannot cover: it has no voxel
     // volume at all, so its depth is the sentinel everywhere and its waves are
     // never attenuated. Everything W6 added is visible here and nowhere else —

@@ -218,6 +218,18 @@ struct EnvironmentData {
     /// what it drives is texture rather than force.
     float2* flowVelocity;
     uint2 flowPad;
+    /// The advected foam field: xy world origin, z metres between samples,
+    /// w samples per axis. **Zero samples means this water has no field**, and
+    /// the foam is then the closed-form trail alone, bit for bit as it was.
+    float4 foam;
+    /// The coverages, `foam.w²` of them, in [0, 1]. A copy of the CPU field
+    /// (ADR 0055), which is the authoritative one — this side never writes it,
+    /// and `water@x,z.foam` reads the same numbers through the Rust half.
+    float* foamCoverage;
+    /// How many cells the boundary fade covers. Uploaded rather than compiled
+    /// in, so `loom_water::foam::FOAM_EDGE_CELLS` cannot drift away from it.
+    float foamEdgeCells;
+    uint foamPad;
 };
 
 struct GrassBlade {
@@ -1817,6 +1829,23 @@ LoomFlowGrid flowField() {
     grid.side = int(push.environment[0].flow.w);
     grid.velocity = push.environment[0].flowVelocity;
     return grid;
+}
+
+/// This tick's foam field, assembled from the environment fields that carry it.
+/// `side == 0` is water with no field, and every lookup returns zero — which
+/// leaves the closed-form trail as the only foam.
+///
+/// **The field is the CPU's** — ADR 0055. It is advected and deposited into
+/// inside the fixed step, `water@x,z.foam` reads the same numbers through the
+/// Rust half, and this is a copy uploaded for drawing. Nothing here writes it.
+LoomFoamField foamField() {
+    LoomFoamField field;
+    field.origin = push.environment[0].foam.xy;
+    field.cell = push.environment[0].foam.z;
+    field.side = int(push.environment[0].foam.w);
+    field.edge_cells = push.environment[0].foamEdgeCells;
+    field.coverage = push.environment[0].foamCoverage;
+    return field;
 }
 
 // ---------------------------------------------------------------------------
@@ -6165,7 +6194,15 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // The mechanism moves to the foam field's hull and impact deposits, which
     // remember. The ring's slope still shapes the normal above.
     float instant = smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, in.breakMu);
-    float wetc = max(instant, in.foamHist);
+    // **The advected field, and it is a third floor rather than a second
+    // opinion** — ADR 0055. The trail remembers what a *wave* did, because a
+    // wave is the only thing whose past is a closed form in `(x, t)`; this
+    // remembers what a hull, an impact and a wake ring did, none of which can
+    // be evaluated backwards from a position. `max` for the reason the trail
+    // is a max: foam is a coverage, and a crest crossing its own wake must not
+    // come out brighter than paper.
+    float field = loom_foam_at(foamField(), in.baseXZ);
+    float wetc = max(max(instant, in.foamHist), field);
     // **How old this foam is, from the two numbers already in hand.** A point
     // whose whiteness is entirely history is old; one the crest is making right
     // now is fresh; in between it is the ratio. Free — no varying, no state.
@@ -6174,7 +6211,18 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // the raft drains. Fresh foam is bright and opaque, old foam is grey and
     // full of holes, and painting both with one albedo is what made a trail
     // read as a smear of paint rather than as foam that had been there a while.
-    float foamAge = wetc > 0.0 ? in.foamHist / max(instant, in.foamHist) : 0.0;
+    // **The epsilon is not tidiness: without it this is 0/0 on every pixel the
+    // field alone made white**, and a NaN age lerps the whole shaded result to
+    // NaN, which resolves to black. Measured — `whitecaps` came back with the
+    // foam field's footprint punched out of it in solid black.
+    //
+    // **The field is deliberately not in the numerator.** Its foam is drawn
+    // fresh: a hull's churn and an impact's ring are white while they are being
+    // made, and what takes them away is the field's own decay eroding the
+    // coverage under the noise, which is how foam leaves in this shader
+    // everywhere else — in shrinking lace, not by dimming. The trail is the
+    // only term that describes foam that is *old*.
+    float foamAge = in.foamHist / max(max(instant, in.foamHist), 1.0e-5);
     // **Eroded by the noise rather than faded by it.** A multiply would dim
     // every foam pixel toward the water; thresholding the *coverage* against
     // the noise instead dissolves the patch from its edges inward, which is

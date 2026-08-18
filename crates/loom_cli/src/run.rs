@@ -1315,6 +1315,22 @@ impl ApplicationHandler for App {
                     {
                         crate::log::warn(format!("ripples: {e}"));
                     }
+                    // And the foam field, on exactly the same rule — the other
+                    // half of the CPU's stepped water state (ADR 0055). Wired
+                    // here in the same commit as the headless path, because a
+                    // water effect wired on one path only is the defect ADR
+                    // 0046 §7 records and nothing in the gate can photograph a
+                    // window.
+                    if let Some(field) = self.play.as_ref().and_then(crate::play::Play::foam)
+                        && let Err(e) = viewer.set_foam(
+                            field.coverage(),
+                            field.origin(),
+                            field.cell(),
+                            field.side(),
+                        )
+                    {
+                        crate::log::warn(format!("foam: {e}"));
+                    }
                 }
 
                 // Everything above is the frame's CPU work: input, the

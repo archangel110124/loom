@@ -368,6 +368,27 @@ pub struct EnvironmentData {
     pub flow_velocities: vk::DeviceAddress,
     /// Keeps the struct's stride 16-byte aligned, as `ripple_pad` does.
     pub flow_pad: [u32; 2],
+    /// The advected foam field: xy world origin, z metres between samples,
+    /// w samples per axis. **`w == 0` means this water has no foam field**,
+    /// which is every scene with no water at all, and is how the shader skips
+    /// the lookup without a second flag.
+    ///
+    /// Appended after the flow block for the reason that block was appended
+    /// after the ripple one: every offset above it is unmoved.
+    pub foam: [f32; 4],
+    /// The coverages, `foam.w²` of them, row-major, in `[0, 1]`.
+    ///
+    /// **The CPU field is authoritative and this is a copy of it** (ADR 0055).
+    /// Written every tick, like the ripple grid beside it and unlike the two
+    /// bakes, because it is stepped state; and never read back, because an
+    /// assertion can see this number and a GPU float on that path is what ADR
+    /// 0045 clause 2 forbids.
+    pub foam_coverage: vk::DeviceAddress,
+    /// How many cells the boundary fade covers, mirroring
+    /// `loom_water::foam::FOAM_EDGE_CELLS`.
+    pub foam_edge_cells: f32,
+    /// Keeps the struct's stride 16-byte aligned, as `flow_pad` does.
+    pub foam_pad: [u32; 1],
 }
 
 /// A point light, as the GPU reads it.
@@ -481,6 +502,10 @@ impl Default for EnvironmentData {
             flow: [0.0, 0.0, 1.0, 0.0],
             flow_velocities: 0,
             flow_pad: [0; 2],
+            foam: [0.0, 0.0, 1.0, 0.0],
+            foam_coverage: 0,
+            foam_edge_cells: 1.0,
+            foam_pad: [0; 1],
         }
     }
 }
@@ -514,6 +539,18 @@ pub const MAX_RIPPLE_SAMPLES: usize = 256 * 256;
 /// Velocities the flow buffer holds. Same geometry as the terrain grid it is
 /// derived from, so the same ceiling — `loom_voxel::heightfield::MAX_SIDE²`.
 pub const MAX_FLOW_SAMPLES: usize = 256 * 256;
+
+/// Coverages the foam buffer holds: `loom_water::foam::FOAM_SIDE²`, which is
+/// fixed rather than authored, so this is the exact size and not a ceiling.
+///
+/// Spelled here rather than imported, like the two above it — the renderer
+/// depends on neither `loom_scene` nor `loom_water`.
+pub const MAX_FOAM_SAMPLES: usize = 128 * 128;
+
+/// How many cells the foam field's boundary fade covers, mirroring
+/// `loom_water::foam::FOAM_EDGE_CELLS`. Uploaded rather than compiled into the
+/// shader so the two cannot drift apart silently.
+pub const FOAM_EDGE_CELLS: f32 = 6.0;
 
 /// Vertices in one water draw: `WATER_RES² × WATER_LEVELS × 6`.
 ///
@@ -940,6 +977,16 @@ pub struct Renderer {
     /// [`Renderer::set_flow`]. A bake off the bed, like the terrain grid, not
     /// state like the ripples between them.
     flow_buffer: vk::Buffer,
+    /// The foam field's device-local copy — see [`Renderer::set_foam`].
+    /// Host-visible for the reason the ripple buffer is: it is rewritten every
+    /// tick.
+    foam_buffer: vk::Buffer,
+    foam_alloc: Option<Allocation>,
+    foam_address: vk::DeviceAddress,
+    /// `origin.xy`, cell, side — what the shader needs to index the buffer.
+    foam_params: [f32; 4],
+    /// `foam_address`, or null when this scene has no foam field.
+    foam_coverage: vk::DeviceAddress,
     flow_alloc: Option<Allocation>,
     flow_address: vk::DeviceAddress,
     /// xy origin, z spacing, w nodes per axis; stamped at render time for the
@@ -1235,6 +1282,17 @@ impl Renderer {
             &mut allocator,
             (MAX_FLOW_SAMPLES * size_of::<[f32; 2]>()) as u64,
             "loom.flow",
+            vk::BufferUsageFlags::empty(),
+        )?;
+
+        // The foam field: 128² coverages, 64 KB, written every tick like the
+        // ripple grid above and for the same reason — it is stepped CPU state
+        // rather than a bake (ADR 0055).
+        let (foam_buffer, foam_alloc, foam_address) = create_address_buffer(
+            &raw,
+            &mut allocator,
+            (MAX_FOAM_SAMPLES * size_of::<f32>()) as u64,
+            "loom.foam",
             vk::BufferUsageFlags::empty(),
         )?;
 
@@ -1544,6 +1602,11 @@ impl Renderer {
             ripple_params: [0.0, 0.0, 1.0, 0.0],
             ripple_heights: 0,
             flow_buffer,
+            foam_buffer,
+            foam_alloc: Some(foam_alloc),
+            foam_address,
+            foam_params: [0.0, 0.0, 1.0, 0.0],
+            foam_coverage: 0,
             flow_alloc: Some(flow_alloc),
             flow_address,
             flow_params: [0.0, 0.0, 1.0, 0.0],
@@ -1821,6 +1884,46 @@ impl Renderer {
         )
     }
 
+    /// Hand the renderer this tick's foam field.
+    ///
+    /// **Per tick, like [`Self::set_ripples`]**, because it is stepped CPU
+    /// state and not a bake: the field is advected and deposited into inside
+    /// the fixed step and this is a copy of where it got to. Nothing is read
+    /// back — an assertion can read this same number through
+    /// `water@x,z.foam`, so a GPU float on that path is exactly what ADR 0045
+    /// clause 2 forbids, and `loom_water` cannot import `ash` at all.
+    ///
+    /// An empty slice is water with no field, and the shader's lookup then
+    /// returns zero — which leaves the closed-form trail as the only foam, bit
+    /// for bit as it was.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the renderer is being torn down.
+    pub fn set_foam(
+        &mut self,
+        coverage: &[f32],
+        origin: [f32; 2],
+        cell: f32,
+        side: usize,
+    ) -> Result<(), RenderError> {
+        if coverage.is_empty() || side * side > MAX_FOAM_SAMPLES || coverage.len() < side * side {
+            self.foam_params = [0.0, 0.0, 1.0, 0.0];
+            self.foam_coverage = 0;
+            return Ok(());
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.foam_params = [origin[0], origin[1], cell, side as f32];
+        }
+        self.foam_coverage = self.foam_address;
+        write_slice(
+            self.foam_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("foam buffer is gone".into()))?,
+            &coverage[..side * side],
+        )
+    }
+
     /// How many blades the buffer holds.
     #[must_use]
     pub fn grass_capacity(&self) -> usize {
@@ -2013,6 +2116,10 @@ impl Renderer {
         // And the current, for the third time by the same rule.
         self.environment.flow = self.flow_params;
         self.environment.flow_velocities = self.flow_velocities;
+        // And the foam field, for the fourth.
+        self.environment.foam = self.foam_params;
+        self.environment.foam_coverage = self.foam_coverage;
+        self.environment.foam_edge_cells = FOAM_EDGE_CELLS;
         // Same argument again: the drop and splash buffers are the renderer's
         // and no caller has any business knowing their addresses.
         self.environment.rain_drops = self.rain_sim.drops_address;
@@ -2969,6 +3076,7 @@ impl Drop for Renderer {
             self.device.destroy_buffer(self.terrain_buffer, None);
             self.device.destroy_buffer(self.ripple_buffer, None);
             self.device.destroy_buffer(self.flow_buffer, None);
+            self.device.destroy_buffer(self.foam_buffer, None);
             self.device.destroy_buffer(self.particle_buffer, None);
             if let (Some(allocation), Some(allocator)) =
                 (self.grass_alloc.take(), self.allocator.as_mut())
@@ -2987,6 +3095,11 @@ impl Drop for Renderer {
             }
             if let (Some(allocation), Some(allocator)) =
                 (self.flow_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            if let (Some(allocation), Some(allocator)) =
+                (self.foam_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
             }
