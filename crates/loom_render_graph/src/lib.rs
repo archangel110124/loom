@@ -57,6 +57,8 @@ pub enum BufferAccess {
     IndirectRead,
     /// Destination of a transfer — a staging copy or a `vkCmdFillBuffer`.
     TransferDst,
+    /// Source of a transfer — the device-local side of a readback copy.
+    TransferSrc,
 }
 
 impl BufferAccess {
@@ -65,7 +67,7 @@ impl BufferAccess {
             Self::ComputeReadWrite | Self::ComputeRead => vk::PipelineStageFlags2::COMPUTE_SHADER,
             Self::VertexRead => vk::PipelineStageFlags2::VERTEX_SHADER,
             Self::IndirectRead => vk::PipelineStageFlags2::DRAW_INDIRECT,
-            Self::TransferDst => vk::PipelineStageFlags2::ALL_TRANSFER,
+            Self::TransferDst | Self::TransferSrc => vk::PipelineStageFlags2::ALL_TRANSFER,
         }
     }
 
@@ -77,6 +79,7 @@ impl BufferAccess {
             Self::ComputeRead | Self::VertexRead => vk::AccessFlags2::SHADER_STORAGE_READ,
             Self::IndirectRead => vk::AccessFlags2::INDIRECT_COMMAND_READ,
             Self::TransferDst => vk::AccessFlags2::TRANSFER_WRITE,
+            Self::TransferSrc => vk::AccessFlags2::TRANSFER_READ,
         }
     }
 

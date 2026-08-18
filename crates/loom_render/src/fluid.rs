@@ -28,6 +28,23 @@
 //! and one fence wait per tick, so tick N reads the result of exactly N
 //! dispatches. What is read back is **probes, not the grid**: a few hundred
 //! bytes describing what the fluid is doing where a pontoon is.
+//!
+//! # Which side of the bus a buffer lives on
+//!
+//! **Every buffer a shader touches is device-local; the three the CPU also
+//! touches carry a host-visible twin and a `vkCmdCopyBuffer` between them.**
+//! Host-visible memory is addressable from a shader, which makes it look free
+//! and is the trap: a store or an atomic into it is a PCIe transaction per
+//! access, not a cached write. Measured on `plough_cinematic --sim 200`, with
+//! the whole 175-dispatch step at 34 ms a tick for comparison:
+//!
+//!     density()    two dispatches   8.04 ms -> 0.96 ms
+//!     instances()  one dispatch     8.34 ms -> 0.52 ms
+//!
+//! The readback loops either side of those numbers are 0.2 ms and were never
+//! the cost. `probes` and `consts` stay host-visible and are meant to: they are
+//! kilobytes touched once a tick, where the copy would cost more than the
+//! access.
 
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, Allocator, AllocatorCreateDesc};
@@ -273,6 +290,14 @@ impl Push {
     }
 }
 
+/// Where the three staged buffers' host-visible halves sit in `bufs`.
+///
+/// The device-local halves are 13, 15 and 18 — the indices the addresses in
+/// `Consts` come from, which is why those cannot move.
+const SOLID_STAGE: usize = 19;
+const INSTANCES_STAGE: usize = 20;
+const DENSITY_STAGE: usize = 21;
+
 /// A buffer the solver owns, kept together so teardown is one loop.
 struct Buf {
     buffer: vk::Buffer,
@@ -434,7 +459,9 @@ impl FluidSolver {
                 // `TRANSFER_DST` because the first submit zeroes every
                 // device-local buffer with `vkCmdFillBuffer` — see `fluid_zero`.
                 // The validation layers catch the omission, and did.
-                vk::BufferUsageFlags::TRANSFER_DST,
+                // `TRANSFER_SRC` because the three staged buffers below are
+                // copied in and out rather than written through the bus.
+                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC,
                 loc,
             )
             .map_err(|e| e.to_string())
@@ -459,9 +486,25 @@ impl FluidSolver {
         let (pab, paa, pressure_a) = make(level_cells * 4, "loom.fluid.pressure_a", gpu)?;
         let (pbb, pba, pressure_b) = make(level_cells * 4, "loom.fluid.pressure_b", gpu)?;
         let (rb, ra, rhs) = make(level_cells * 4, "loom.fluid.rhs", gpu)?;
-        // Host-visible: the CPU rewrites the solid mask every tick, and the
-        // fence wait before it means there is nothing to double-buffer.
-        let (sdb, sda, solid) = make(cells * 16, "loom.fluid.solid", MemoryLocation::CpuToGpu)?;
+        // **Device-local, with a host-visible twin copied into it — and the
+        // difference is the whole cost of this tier's presentation.**
+        //
+        // These three used to be `CpuToGpu`/`GpuToCpu`, which means the *shader*
+        // reached across PCIe for every access: `fluidG2PMain` gathered the
+        // solid mask out of system memory, `fluidDensitySplatMain` ran half a
+        // million `InterlockedAdd`s on it, and `fluidInstanceMain` wrote 3 MB of
+        // billboards as 196,608 scattered 16-byte stores. Measured on
+        // `plough_cinematic --sim 200`: `density()` 8.04 ms and `instances()`
+        // 8.34 ms, for two dispatches and one, against 34 ms for the whole
+        // 175-dispatch step. A DMA copy of the same bytes is bandwidth-bound
+        // rather than latency-bound and lands at 0.5-1.0 ms.
+        //
+        // The staging halves are indices 19-21 and carry the mappings the CPU
+        // touches; the names without `_stage` are the device-local ones the
+        // shader has the address of.
+        let (sdb, sda, solid) = make(cells * 16, "loom.fluid.solid", MemoryLocation::GpuOnly)?;
+        let (sgb, sga, _) =
+            make(cells * 16, "loom.fluid.solid_stage", MemoryLocation::CpuToGpu)?;
         let (prb, pra, probes) = make(
             (MAX_PROBES * 3) * 16,
             "loom.fluid.probes",
@@ -470,13 +513,21 @@ impl FluidSolver {
         let (inb, ina, instances) = make(
             MAX_INSTANCES * size_of::<ParticleInstance>(),
             "loom.fluid.instances",
+            MemoryLocation::GpuOnly,
+        )?;
+        let (igb, iga, _) = make(
+            MAX_INSTANCES * size_of::<ParticleInstance>(),
+            "loom.fluid.instances_stage",
             MemoryLocation::GpuToCpu,
         )?;
         let (cnb, cna, consts_addr) =
             make(size_of::<Consts>(), "loom.fluid.consts", MemoryLocation::CpuToGpu)?;
-        // Host-visible: the surface is marched on the CPU, one read per frame
-        // drawn rather than one per tick. See `FluidSolver::density`.
-        let (deb, dea, density) = make(cells * 4, "loom.fluid.density", MemoryLocation::GpuToCpu)?;
+        // See `FluidSolver::density`: the surface is marched on the CPU, one
+        // read per frame drawn rather than one per tick, out of the staging
+        // half below.
+        let (deb, dea, density) = make(cells * 4, "loom.fluid.density", MemoryLocation::GpuOnly)?;
+        let (dgb, dga, _) =
+            make(cells * 4, "loom.fluid.density_stage", MemoryLocation::GpuToCpu)?;
 
         let inflow = domain.inflow.unwrap_or(FluidInflow {
             lo: [0.0; 3],
@@ -625,6 +676,12 @@ impl FluidSolver {
             (cnb, cna, consts_addr),
             (rob, roa, reordered),
             (deb, dea, density),
+            // The staging halves. Nothing reads their addresses — they exist in
+            // `bufs` so that teardown is still one loop and so the graph can be
+            // told about the copies (never-do #4).
+            (sgb, sga, 0),
+            (igb, iga, 0),
+            (dgb, dga, 0),
         ];
         let mut solid_alloc = None;
         let mut probes_alloc = None;
@@ -635,14 +692,18 @@ impl FluidSolver {
             // **Which buffers the first submit zeroes, and the host-visible
             // ones are not among them.** `fluid_zero` runs inside the first
             // command buffer, after the CPU has already written the constants
-            // and the solid mask into their mappings — filling those would
-            // erase them.
+            // and the probes into their mappings — filling those would erase
+            // them. The three staged buffers *are* zeroed, on the device side:
+            // nothing has been written into them yet, the solid mask's upload
+            // copy is recorded after `fluid_zero` in the same submit, and the
+            // density field's zero is what `fluidInstanceMain`'s spray cull
+            // reads on a path that draws before it ever marches.
             let keep = match index {
-                13 => &mut solid_alloc,
                 14 => &mut probes_alloc,
-                15 => &mut instances_alloc,
                 16 => &mut consts_alloc,
-                18 => &mut density_alloc,
+                SOLID_STAGE => &mut solid_alloc,
+                INSTANCES_STAGE => &mut instances_alloc,
+                DENSITY_STAGE => &mut density_alloc,
                 _ => {
                     bufs.push(Buf { buffer, allocation: Some(allocation), address, zero: true });
                     continue;
@@ -681,12 +742,11 @@ impl FluidSolver {
             out: FluidStepOutput::default(),
         };
         solver.write_consts()?;
-        // Zeroed once, so that `fluidInstanceMain`'s spray cull reads "no
-        // surface here" rather than whatever the allocator handed back, on any
-        // path that draws particles before ever marching a surface.
-        if let Some(alloc) = solver.density_alloc.as_ref() {
-            let _ = write_slice(alloc, &vec![0_u32; cells]);
-        }
+        // The density field's "no surface here" default used to be written
+        // through the mapping here. It is device-local now, so `fluid_zero`
+        // does it — and `fluidInstanceMain` cannot read it before
+        // `fluidDensityClearMain` has run in any case, because `density()` is
+        // the only thing that calls `instances()` and it runs first.
         Ok(solver)
     }
 
@@ -862,6 +922,8 @@ impl FluidSolver {
         let groups = (count as u32).div_ceil(GROUP);
         let particles = self.bufs[0].buffer;
         let instances = self.bufs[15].buffer;
+        let stage = self.bufs[INSTANCES_STAGE].buffer;
+        let bytes = (count * size_of::<ParticleInstance>()) as u64;
         let device = self.device.handle().clone();
         let queue = self.device.queue();
         let pool = self.pool;
@@ -869,11 +931,18 @@ impl FluidSolver {
             let mut graph = RenderGraph::new();
             let p = graph.import_buffer("loom.fluid.particles", particles);
             let i = graph.import_buffer("loom.fluid.instances", instances);
+            let s = graph.import_buffer("loom.fluid.instances_stage", stage);
             graph.pass_with(
                 "fluid_instances",
                 &[],
                 &[(p, BufferAccess::ComputeRead), (i, BufferAccess::ComputeReadWrite)],
                 move |d, cmd| record_dispatch(d, cmd, layout, pipeline, push, groups),
+            );
+            graph.pass_with(
+                "fluid_instances_readback",
+                &[],
+                &[(i, BufferAccess::TransferSrc), (s, BufferAccess::TransferDst)],
+                move |d, cmd| copy_buffer(d, cmd, instances, stage, bytes),
             );
             graph.execute(&device, cmd);
         });
@@ -931,6 +1000,8 @@ impl FluidSolver {
         let layout = self.layout;
         let particles = self.bufs[0].buffer;
         let density = self.bufs[18].buffer;
+        let stage = self.bufs[DENSITY_STAGE].buffer;
+        let bytes = (cells * 4) as u64;
         let device = self.device.handle().clone();
         let queue = self.device.queue();
         let pool = self.pool;
@@ -938,6 +1009,7 @@ impl FluidSolver {
             let mut graph = RenderGraph::new();
             let p = graph.import_buffer("loom.fluid.particles", particles);
             let g = graph.import_buffer("loom.fluid.density", density);
+            let s = graph.import_buffer("loom.fluid.density_stage", stage);
             graph.pass_with(
                 "fluid_density_clear",
                 &[],
@@ -949,6 +1021,12 @@ impl FluidSolver {
                 &[],
                 &[(p, BufferAccess::ComputeRead), (g, BufferAccess::ComputeReadWrite)],
                 move |d, cmd| record_dispatch(d, cmd, layout, splat, push, particle_groups),
+            );
+            graph.pass_with(
+                "fluid_density_readback",
+                &[],
+                &[(g, BufferAccess::TransferSrc), (s, BufferAccess::TransferDst)],
+                move |d, cmd| copy_buffer(d, cmd, density, stage, bytes),
             );
             graph.execute(&device, cmd);
         });
@@ -1074,8 +1152,22 @@ impl FluidSolver {
                 // Through the graph, with the accesses declared, because a
                 // `vkCmdFillBuffer` outside it is a barrier written by hand
                 // (never-do #4).
-                let all: Vec<(BufferId, BufferAccess)> =
-                    ids.iter().map(|id| (*id, rw)).collect();
+                // **`TransferDst`, and it used to say `ComputeReadWrite`.**
+                // The pass records `vkCmdFillBuffer`, which is a transfer
+                // write at the clear stage; declaring a shader write made the
+                // graph emit the next barrier with a source mask that does not
+                // cover what actually happened. Invisible until something else
+                // wrote one of these buffers by transfer too — the solid mask's
+                // upload copy below — and then it is a plain
+                // `SYNC-HAZARD-WRITE-AFTER-WRITE` from the validation layers.
+                // Declared over the filled buffers only, because a pass that
+                // claims to touch what it does not is the same defect turned
+                // around.
+                let all: Vec<(BufferId, BufferAccess)> = ids
+                    .iter()
+                    .zip(zeroed.iter())
+                    .filter_map(|(id, zero)| zero.then_some((*id, BufferAccess::TransferDst)))
+                    .collect();
                 // **`WHOLE_SIZE`, not a length this code carries.** It used to
                 // carry `Allocation::size()`, which is gpu-allocator's
                 // *padded* size and not the buffer's: on ribbon's grid that is
@@ -1099,6 +1191,21 @@ impl FluidSolver {
                 });
                 go(&mut graph, "fluid_seed", p.seed, [0; 4], particle_groups, &[(bp, rw)]);
             }
+
+            // **The solid mask, uploaded rather than read across the bus.**
+            // `rasterise` above wrote it into the staging mapping; this is the
+            // DMA that puts it where `fluidG2PMain` and `fluidMarkerMain`
+            // gather from it. After `fluid_zero` deliberately — on the seed
+            // tick the fill would otherwise erase it.
+            let solid_src = handles[SOLID_STAGE];
+            let solid_dst = handles[13];
+            let solid_bytes = (self.dims[0] * self.dims[1] * self.dims[2] * 16) as u64;
+            graph.pass_with(
+                "fluid_solid_upload",
+                &[],
+                &[(ids[SOLID_STAGE], BufferAccess::TransferSrc), (bsd, BufferAccess::TransferDst)],
+                move |d, cmd| copy_buffer(d, cmd, solid_src, solid_dst, solid_bytes),
+            );
 
             // **The cascade, once per tick and before the substeps.** Once
             // rather than per substep because the rate is authored per second
@@ -1254,6 +1361,24 @@ fn record_dispatch(
         d.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::COMPUTE, 0, push.bytes());
         d.cmd_dispatch(cmd, groups, 1, 1);
     }
+}
+
+/// One `vkCmdCopyBuffer` of `bytes` from the front of `src` to the front of
+/// `dst`. The graph has ordered it (never-do #4); this only records it.
+fn copy_buffer(
+    d: &ash::Device,
+    cmd: vk::CommandBuffer,
+    src: vk::Buffer,
+    dst: vk::Buffer,
+    bytes: u64,
+) {
+    if bytes == 0 {
+        return;
+    }
+    let region = vk::BufferCopy::default().src_offset(0).dst_offset(0).size(bytes);
+    // SAFETY: both buffers are live, both carry the transfer usage bits, and
+    // `bytes` is the smaller of the two allocations' requested sizes.
+    unsafe { d.cmd_copy_buffer(cmd, src, dst, &[region]) };
 }
 
 impl Drop for FluidSolver {
