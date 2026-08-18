@@ -537,6 +537,17 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
     // GPU emitters seen so far. Scene-wide rather than per-node, because "one
     // per scene" is a property of the file and no single node can see it.
     let mut gpu_emitters = 0_usize;
+    // Whether this scene is a game, which decides whether cinematic water is
+    // allowed to be silent about what it costs (ADR 0053 §5). Scene-wide and
+    // read ahead of the loop, because the rules may be authored on a node
+    // after the water — a check that only looked backwards would pass or fail
+    // on node order.
+    let has_game_rules = entries.iter().any(|table| {
+        table
+            .get("components")
+            .and_then(Item::as_table_like)
+            .is_some_and(|c| c.get("GameRules").is_some())
+    });
     for (table, node) in entries.iter().zip(nodes) {
         // `transform` is sugar for the Transform component (§1.1), but it used
         // to be the one field that skipped this pass — it went straight through
@@ -578,7 +589,7 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
             // a number goes has nothing for the steepness limit to compute
             // against, and reporting both would be reporting one fault twice.
             if schema_errors.is_empty() && type_name == "WaterBody" {
-                errors.extend(check_water(item, &node.path));
+                errors.extend(check_water(item, &node.path, has_game_rules));
             }
             if schema_errors.is_empty() && type_name == "ParticleEmitter" {
                 let has_body = components.get("RigidBody").is_some();
@@ -710,6 +721,80 @@ fn check_emitter(
     errors
 }
 
+/// The three tier rules — ADR 0053 §5, as refusals rather than comments.
+///
+/// **Same S4 lesson the emitter rules are written from.** A constraint nobody
+/// enforces is a constraint the author meets as a symptom later, and each of
+/// these has a symptom that reads as an engine fault:
+///
+/// - a cinematic body with no domain has nowhere to solve, so it draws the
+///   analytic surface and the author concludes the tier does not work;
+/// - `extent` on a deterministic body reads as a bounded pool and silently
+///   is not one;
+/// - a game whose rules read cinematic water still says `ok: true`, still
+///   replays on this box, and disagrees with itself on any other.
+fn check_tier(
+    body: &components::WaterBody,
+    node: &str,
+    has_game_rules: bool,
+) -> Vec<SceneError> {
+    let cinematic = body.simulation == components::WaterSimTier::Cinematic;
+    let mut errors = Vec::new();
+    let mut refuse = |code: &str, field: &str, value: Value, constraint: &str, hint: &str| {
+        let mut err = SceneError::new(code, node);
+        err.field = format!("WaterBody.{field}");
+        err.value = value;
+        err.constraint = constraint.to_owned();
+        err.hint = Some(hint.to_owned());
+        errors.push(err);
+    };
+
+    if cinematic && body.extent.is_none() {
+        refuse(
+            "cinematic_water_needs_an_extent",
+            "extent",
+            Value::Null,
+            "extent = [x, y, z] in metres when simulation = \"cinematic\"",
+            "the solver is a bounded volume and has to be told how big it is; \
+             there is no default, because a guessed domain is either empty at \
+             the surface or a grid nobody can afford. It is centred on this \
+             node and anchored to it, never to the camera (ADR 0053 §5).",
+        );
+    }
+
+    if !cinematic && body.extent.is_some() {
+        refuse(
+            "extent_on_deterministic_water",
+            "extent",
+            Value::from(body.extent.map(Vec::from).unwrap_or_default()),
+            "extent only on simulation = \"cinematic\"",
+            "the analytic surface is an unbounded plane and bounding it is a \
+             separate, deferred decision — the trigger is two visible water \
+             levels on camera. Accepting the field here would implement it by \
+             accident and half-way. Set `simulation = \"cinematic\"`, or drop \
+             `extent`.",
+        );
+    }
+
+    if cinematic && has_game_rules && !body.acknowledge_nondeterminism {
+        refuse(
+            "cinematic_water_demotes_a_game",
+            "simulation",
+            Value::from("cinematic"),
+            "acknowledge_nondeterminism = true, or deterministic water",
+            "ADR 0053 §5: a deterministic body may never be forced by a \
+             cinematic one, and this scene has GameRules — which read \
+             `submersion`, which comes off this water. A replay, a save file \
+             or a networked session involving it is not guaranteed to agree \
+             between two computers. Silently demoting a game's determinism is \
+             the failure this clause exists to prevent, so say it out loud: \
+             `acknowledge_nondeterminism = true`.",
+        );
+    }
+
+    errors
+}
+
 /// The water rules a schema range cannot express, because each one relates
 /// several fields to each other.
 ///
@@ -720,7 +805,7 @@ fn check_emitter(
 /// steepness until exactly that happens, and the symptom reads as a rendering
 /// bug rather than as a parameter it chose — so the rejection carries the
 /// computed limit and the reason.
-fn check_water(item: &Item, node: &str) -> Vec<SceneError> {
+fn check_water(item: &Item, node: &str, has_game_rules: bool) -> Vec<SceneError> {
     // Through serde rather than off the raw TOML, so an omitted field is its
     // documented default here exactly as it will be at load. Reading the tables
     // directly would compute the limit against zeros the runtime never sees.
@@ -753,6 +838,7 @@ fn check_water(item: &Item, node: &str) -> Vec<SceneError> {
     };
 
     let mut errors = Vec::new();
+    errors.extend(check_tier(&body, node, has_game_rules));
     let count = body.waves.waves.len();
     if count > components::MAX_WAVES {
         let mut err = SceneError::new("too_many_waves", node);

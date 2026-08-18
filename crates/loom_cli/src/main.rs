@@ -2866,6 +2866,27 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
         seconds: ticks as f32 / 60.0,
         deck: weather::deck_of(&world),
     };
+    // **ADR 0053 §2, and it fails the run rather than the assertion.** A
+    // cinematic body is a GPU float this process cannot read without a
+    // readback the assertion path does not have, and a stale or approximate
+    // answer here is exactly the quiet wrong answer the tier's refusals exist
+    // to prevent — worse than no answer, because it looks like one.
+    if world.has_cinematic() && asked_about("water") {
+        return (1, json_line(&serde_json::json!({
+            "ok": false,
+            "error": "cinematic_water_is_not_assertable",
+            "path": path,
+            "constraint": "simulation = \"deterministic\" for any water@ assertion",
+            "hint": "ADR 0053 §2: a cinematic body is excluded from `loom sim \
+                     --assert` and from `rhai` by construction. It is \
+                     reproducible on this device, driver and dispatch order and \
+                     nowhere else, so a number read from it would not mean what \
+                     an assertion claims. Assert on a deterministic body, or \
+                     look at the picture — `cargo xtask repeat` is what checks \
+                     this tier.",
+        })));
+    }
+
     let mut failures = Vec::new();
     for spec in &specs {
         match check_assertion(&world, state, &log, &weather, &travel, spec) {
@@ -5160,6 +5181,7 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
     /// that moved it — the rule the 10k-tick wind hash already follows.
     #[test]
     fn the_water_scenes_hash_to_what_they_hashed() {
+        let mut pinned = 0;
         for (scene, expected) in [
             ("wake", "18f5ecce259831aa"),
             ("pool", "c01fa14e2ee6b7c9"),
@@ -5167,6 +5189,16 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
             ("water_crate", "9daa193336cc608f"),
         ] {
             let path = format!("../../assets/test/{scene}.loom");
+            // **Cinematic water is barred from a pinned hash** — ADR 0053 §3:
+            // a GPU dispatch is a deterministic function of its inputs on this
+            // device, driver and dispatch order alone, so a literal pinned on
+            // this box means nothing on another. The count below is what makes
+            // the exclusion loud: a scene that leaves the set fails here rather
+            // than passing silently.
+            if world_of(&path).has_cinematic() {
+                continue;
+            }
+            pinned += 1;
             let (code, out) = run(&args(&["sim", &path, "--ticks", "600"]));
             assert_eq!(code, 0, "{scene} did not run: {out}");
             assert!(
@@ -5175,6 +5207,117 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
                  that moved it, deliberately, and say why: {out}"
             );
         }
+        assert_eq!(
+            pinned, 4,
+            "a water scene moved into the cinematic tier and dropped out of \
+             the pinned set. That is legal (ADR 0053 §3) and it is not free: \
+             pin a replacement scene, or say here why there is none."
+        );
+    }
+
+    /// A scene loaded the way every command that reads one must load it —
+    /// through `prefab_load::for_reading`, because a `WaterBody` on an
+    /// unexpanded prefab instance is a component the reader never sees.
+    fn world_of(path: &str) -> World {
+        let src = std::fs::read_to_string(path).expect("the scene exists");
+        let scene = Scene::parse(&src).expect("it parses");
+        let scene = prefab_load::for_reading(&scene, std::path::Path::new(path))
+            .expect("it expands");
+        World::from_scene(&scene)
+    }
+
+    /// **The tier's plumbing, on a scratch scene, because no committed scene
+    /// is in it** — and the whole point of ADR 0053's default is that none is.
+    ///
+    /// Four claims: the flag is read, the refusals fire with their messages,
+    /// and `--assert` refuses a cinematic surface loudly rather than answering
+    /// approximately.
+    #[test]
+    fn the_cinematic_tier_is_read_and_refused_where_it_must_be() {
+        let water = |extra: &str| {
+            format!(
+                "[scene]\nformat = 1\n\n[[node]]\nname = \"Sea\"\n\n\
+                 [node.components.WaterBody]\nkind = \"lake\"\n\
+                 surface_height = 0.0\n{extra}"
+            )
+        };
+        let errors = |text: &str| {
+            Scene::parse(text).err().unwrap_or_default()
+        };
+
+        // The default is deterministic, and it is what every committed scene
+        // is: `ocean.loom` says nothing about a tier and must not start.
+        let plain = Scene::parse(&water("")).expect("valid");
+        assert!(!World::from_scene(&plain).has_cinematic());
+        assert!(!world_of("../../assets/test/ocean.loom").has_cinematic());
+
+        // A typo'd tier is a load error, not an ignored key — the S4 lesson —
+        // and the schema names both tiers back, so the fix is in the message.
+        let typo = errors(&water("simulation = \"cinimatic\"\n"));
+        assert_eq!(typo.first().map(|e| e.error.as_str()), Some("field_not_in_enum"), "{typo:?}");
+        assert!(typo[0].constraint.contains("cinematic"), "{typo:?}");
+
+        // Cinematic without a domain: refused, and the message says why there
+        // is no default.
+        let no_extent = errors(&water("simulation = \"cinematic\"\n"));
+        assert_eq!(
+            no_extent.first().map(|e| e.error.as_str()),
+            Some("cinematic_water_needs_an_extent"),
+            "{no_extent:?}"
+        );
+
+        // With one: it loads, and the flag reaches the world.
+        let cinematic = water("simulation = \"cinematic\"\nextent = [16.0, 6.0, 16.0]\n");
+        let scene = Scene::parse(&cinematic).expect("valid");
+        assert!(World::from_scene(&scene).has_cinematic(), "the tier did not reach the world");
+
+        // A domain on deterministic water is refused rather than ignored: a
+        // bounded analytic surface is a deferred decision, not this one.
+        let bounded = errors(&water("extent = [16.0, 6.0, 16.0]\n"));
+        assert_eq!(
+            bounded.first().map(|e| e.error.as_str()),
+            Some("extent_on_deterministic_water"),
+            "{bounded:?}"
+        );
+
+        // A game beside cinematic water: refused until the author says it out
+        // loud. GameRules is authored on a *later* node here on purpose — the
+        // check must not depend on node order.
+        let game = format!(
+            "{cinematic}\n[[node]]\nname = \"Rules\"\nparent = \"Sea\"\n\n\
+             [node.components.GameRules]\npath = \"rules.rhai\"\n"
+        );
+        let demoted = errors(&game);
+        assert_eq!(
+            demoted.first().map(|e| e.error.as_str()),
+            Some("cinematic_water_demotes_a_game"),
+            "{demoted:?}"
+        );
+        assert!(
+            Scene::parse(&game.replace(
+                "simulation = \"cinematic\"",
+                "simulation = \"cinematic\"\nacknowledge_nondeterminism = true",
+            ))
+            .is_ok(),
+            "acknowledging it should let the scene load"
+        );
+
+        // And an assertion against it fails the run, naming the ADR.
+        let path = std::env::temp_dir().join("loom_slice1_cinematic.loom");
+        std::fs::write(&path, &cinematic).expect("scratch scene");
+        let (code, out) = run(&args(&[
+            "sim", path.to_str().unwrap(), "--ticks", "60",
+            "--assert", "water@0,0.height > -100.0",
+        ]));
+        assert_eq!(code, 1, "a cinematic surface must not answer: {out}");
+        assert!(out.contains("cinematic_water_is_not_assertable"), "{out}");
+        assert!(out.contains("ADR 0053"), "the refusal must name the ADR: {out}");
+
+        // Without a water assertion the same scene still runs — the tier does
+        // not disable the command, only the reading of its surface.
+        let (code, out) = run(&args(&["sim", path.to_str().unwrap(), "--ticks", "60"]));
+        assert_eq!(code, 0, "{out}");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// **`water@` reads the surface `loom water --at` reports**, and that

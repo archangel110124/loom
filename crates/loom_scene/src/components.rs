@@ -1471,7 +1471,13 @@ pub struct WaveSet {
     pub max_height: f32,
 }
 
-/// A body of water: an analytic, stateless, deterministic surface.
+/// A body of water: an analytic, stateless, deterministic surface — unless
+/// [`Self::simulation`] says otherwise.
+///
+/// **Everything below describes the deterministic tier, which is the default
+/// and every scene in this repository.** [`WaterSimTier::Cinematic`] trades
+/// each of these properties for a volumetric solver; ADR 0053 §4 is where what
+/// it costs is written down.
 ///
 /// **No fluid simulation and no GPU readback.** The surface is a sum of
 /// travelling waves evaluated from position and time, so physics and rendering
@@ -1536,8 +1542,61 @@ pub struct WaterBody {
     /// is not breaking throws none at any multiplier.
     #[schemars(range(min = 0.0, max = 8.0))]
     pub spray: f32,
+    /// Which tier this body simulates in — ADR 0053. Default deterministic.
+    ///
+    /// **The one opt-in that trades reproducibility for look**, and it is in
+    /// the scene text rather than inferred so that the trade is one grep.
+    /// See [`WaterSimTier`].
+    pub simulation: WaterSimTier,
+    /// Full domain size in metres, centred on this node.
+    ///
+    /// **Read only by [`WaterSimTier::Cinematic`], which requires it**: a
+    /// volumetric solver needs a box to solve in, and the box is anchored to
+    /// the node rather than to the camera (ADR 0053 §5 — a camera-following
+    /// domain makes physics depend on where the viewer stands).
+    ///
+    /// A deterministic body is refused one. Bounding the analytic surface is a
+    /// separate, deferred decision — two visible water levels on camera is its
+    /// trigger — and accepting the field here would implement it by accident.
+    pub extent: Option<[f32; 3]>,
+    /// The author's signature that this scene's game is no longer reproducible
+    /// across machines — ADR 0053 §5.
+    ///
+    /// **Required only where the loss is real**: a scene that puts a
+    /// `GameRules` component beside cinematic water. Rules read `submersion`,
+    /// submersion comes off the water, and a win condition that depends on a
+    /// GPU float means replays and save-and-reload no longer agree between two
+    /// computers. Silently demoting a game's determinism is the failure the
+    /// clause exists to prevent, so the demotion is typed out by hand.
+    pub acknowledge_nondeterminism: bool,
     /// The surface material.
     pub material: AssetRef,
+}
+
+/// Which set of guarantees a [`WaterBody`] runs under — ADR 0053.
+///
+/// The project's third founding property — the runtime is deterministic, so
+/// the agent's assertions are trustworthy — stops being global here and
+/// becomes per-body. What is lost is written down in ADR 0053 §4 rather than
+/// softened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WaterSimTier {
+    /// A closed form in `(x, z, t)` plus CPU state stepped inside the fixed
+    /// step. Reproducible on any machine, readable by `loom sim --assert` and
+    /// by `rhai`, and the tier every scene in this repository is in.
+    #[default]
+    Deterministic,
+    /// GPU-stateful, read back synchronously inside the fixed step, and
+    /// allowed to push `rapier3d` bodies.
+    ///
+    /// **Reproducible on this device, driver and dispatch order, and nowhere
+    /// else.** So: `cargo xtask repeat` still applies and is the gate that
+    /// proves the solver has no float reduction in it; the pinned-hash tests
+    /// and `cargo xtask validate`'s debug/release check exclude it; and
+    /// `--assert` and `rhai` refuse it loudly rather than answering
+    /// approximately.
+    Cinematic,
 }
 
 /// A CPU-authoritative interactive ripple grid — ADR 0046.
@@ -1691,6 +1750,12 @@ impl Default for WaterBody {
             ripples: None,
             // No spray, so a sea authored before W5 throws none.
             spray: 0.0,
+            // ADR 0053 §1: default off, and that is not politeness. Every
+            // scene, every blessed reference and every pinned hash in this
+            // repository must be bit-identical after the tier landed.
+            simulation: WaterSimTier::Deterministic,
+            extent: None,
+            acknowledge_nondeterminism: false,
             material: AssetRef::default(),
         }
     }

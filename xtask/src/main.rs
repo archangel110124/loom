@@ -1419,6 +1419,24 @@ fn determinism_holds(root: &Path) -> Result<String, String> {
     if DETERMINISM_SCENES.iter().any(|s| !root.join(s).exists()) {
         return Ok("skipped, no scene".to_owned());
     }
+    // **This list may never gain a cinematic scene** — ADR 0053 §3. Debug and
+    // release disagreeing is the fault this check exists to find; a cinematic
+    // body is a GPU dispatch neither profile computes, so it would agree for a
+    // reason that has nothing to do with the property, and the check would go
+    // on printing a pass while measuring nothing. One grep, which is what the
+    // ADR says the containment costs.
+    for scene in DETERMINISM_SCENES {
+        let text = std::fs::read_to_string(root.join(scene)).unwrap_or_default();
+        if text.contains("simulation = \"cinematic\"") {
+            return Err(format!(
+                "determinism\n  {scene} is in the cinematic tier and is in \
+                 DETERMINISM_SCENES\n  ADR 0053 §3: it is reproducible on this \
+                 device alone, so debug and release agreeing about it proves \
+                 nothing. Remove it from the list, or take the scene back to \
+                 `simulation = \"deterministic\"`."
+            ));
+        }
+    }
     let release = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .args(["build", "--release", "-p", "loom_cli"])
         .current_dir(root)

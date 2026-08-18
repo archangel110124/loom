@@ -584,6 +584,28 @@ impl World {
         self.order.iter().find_map(|e| self.water.get(*e))
     }
 
+    /// Whether this scene's water is in the cinematic tier — ADR 0053.
+    ///
+    /// **The one question everything that trusts reproducibility has to ask.**
+    /// A cinematic body is reproducible on this device, driver and dispatch
+    /// order and nowhere else, so a hash pinned on this box means nothing on
+    /// another: the pinned-hash tests and `cargo xtask validate`'s
+    /// debug/release agreement check exclude a scene that answers yes, and
+    /// `loom sim --assert` refuses to read its surface at all.
+    ///
+    /// Read off the component rather than off a flag set at load, so there is
+    /// no second place for it to be true.
+    #[must_use]
+    pub fn has_cinematic(&self) -> bool {
+        self.water()
+            .and_then(|v| {
+                serde_json::from_value::<loom_scene::components::WaterBody>(v.clone()).ok()
+            })
+            .is_some_and(|b| {
+                b.simulation == loom_scene::components::WaterSimTier::Cinematic
+            })
+    }
+
     /// The scene's wind, if it authors any. The first, for the same reason
     /// `water` takes the first: one scene, one weather.
     #[must_use]
