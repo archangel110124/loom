@@ -408,8 +408,23 @@ fn drawn_at(position: [f32; 3], t: f32, scale: f32, visual: &Visual) -> Particle
     // scene.slang: a radius is never legitimately negative, so its sign
     // carries the flag and the instance stays 32 bytes.
     let radius = if visual.additive { -size * 0.5 } else { size * 0.5 };
+    // **A marched plume's node position is its BASE, not its centre.** Every
+    // other particle is a puff centred where it is, but a soot volume is a
+    // column of a known height whose bottom belongs to a fire — and the fire's
+    // node is the only place the author can name that is *derived* rather than
+    // typed. `plume.loom` used to hand-type the centre at y = 5.5 with the
+    // flame's tip at y = 1.3, and nothing tied the two together; the gap was
+    // authored, so no gate could see it.
+    //
+    // The instance still carries the CENTRE, so `origin.w`, the whole fragment
+    // path and the back-to-front sort key are untouched.
+    let centre_y = if visual.flame && !visual.additive {
+        position[1] + size * 0.5
+    } else {
+        position[1]
+    };
     ParticleInstance {
-        position: [position[0], position[1], position[2], radius],
+        position: [position[0], centre_y, position[2], radius],
         color: [
             // The SIGN of red selects the flame field in the shader. Free,
             // because the schema clamps authored colour to [0, 1] so the bit

@@ -2575,7 +2575,24 @@ ParticleOutput particleVertexMain(uint vertexID: SV_VertexID) {
     float sa = sin(angle), ca = cos(angle);
     float2 spun = float2(local.x * ca - local.y * sa, local.x * sa + local.y * ca);
 
-    float3 world = p.position.xyz + (right * spun.x + up * spun.y) * abs(p.position.w);
+    float quadHalf = abs(p.position.w);
+    // **The soot quad has to contain its hull's projection, and the hull leans.**
+    // The marched column reaches `bendMax + R * SMOKE_R_MAX` sideways and R
+    // vertically, so a quad of half-extent R clips the downwind flank clean off
+    // — which is a hard straight edge in exactly the place the chord fix exists
+    // to soften. The wind MUST be read from the same environment buffer the
+    // fragment shader reads it from, or the quad and the hull lean differently.
+    //
+    // The random roll is dropped for smoke: it spins a square that has to stay
+    // aligned with a bound computed in world axes, and a marched volume has no
+    // sprite texture for it to decorrelate anyway.
+    if (p.color.r < 0.0 && p.position.w >= 0.0) {
+        float lat = sootBendMax(quadHalf) + quadHalf * SMOKE_R_MAX;
+        quadHalf = sqrt(quadHalf * quadHalf + lat * lat) * SMOKE_QUAD_PAD;
+        spun = local;
+    }
+
+    float3 world = p.position.xyz + (right * spun.x + up * spun.y) * quadHalf;
 
     ParticleOutput out;
     // `mvp` of the reserved object slot is the view-projection — see the note
@@ -2918,9 +2935,21 @@ static const float SMOKE_LIGHT = 1.0;
 // **The selector is `flame && !additive`, and it costs no schema.** The sign of
 // the authored red already says "this quad is a marched field" and the sign of
 // the radius already says "this quad emits light". A marched field that does
-// not emit is a field that only absorbs, which is what soot is. No scene in the
-// repository authors that pair today — all three `flame = true` scenes are
-// additive — so every blessed particle reference is untouched by construction.
+// not emit is a field that only absorbs, which is what soot is. `plume.loom`,
+// `plume_gale.loom` and `plume_roof.loom` are the only scenes that author that
+// pair; every other `flame = true` scene is additive, so every blessed additive
+// reference is untouched by construction. (This block used to claim no scene
+// authored it at all, which stopped being true the day `plume.loom` landed.)
+//
+// **The marched region is DERIVED from the envelope's support, never the other
+// way round.** It used to be an upright ellipsoid while `sootEnvelope` described
+// a flaring, wind-bent column: at `plume.loom`'s 3.2 m/s the envelope escaped
+// the ellipsoid from h ~ 0.3 up, the pre-noise density at the marched boundary
+// ran 0.68-0.93 over h = 0.6-0.8, and ~89% of the authored lean was clipped. The
+// march stopped at near-full density, so the silhouette the eye saw was the
+// ellipsoid's analytic arc with noise visible inside it — the "balloon with hard
+// edges". `columnChord` is that support, bounded in closed form, so a future
+// change to the envelope cannot reintroduce the escape.
 //
 // **One quad per plume, and that is the overdraw answer.** The fire's comment
 // block above already made this argument for emission; it is stronger here. A
@@ -2960,23 +2989,64 @@ static const float SMOKE_LIGHT = 1.0;
 /// goes; it is 0.14 ms cheaper and reaches the same still.
 static const int SMOKE_STEPS = 20;
 /// Stop marching once this little light gets through. A plume is opaque in its
-/// middle long before the far side of the ellipsoid, and the samples past that
+/// middle long before the far side of the column, and the samples past that
 /// point are multiplied by a transmittance under 2%.
 static const float SMOKE_T_MIN = 0.02;
-/// Horizontal semi-axis of the marched ellipsoid, as a fraction of the
-/// vertical one. **The quad is square** — `ParticleEmitter.size` is one radius
-/// — so a column has to be carved out of it, and everything outside is rejected
-/// by the chord test before a single noise lookup.
+/// Width of the column, as a fraction of its own half-height. **The quad is
+/// square** — `ParticleEmitter.size` is one radius — so a column has to be
+/// carved out of it, and everything outside is rejected by the chord test
+/// before a single noise lookup.
+///
+/// **Not an aspect ratio any more.** It scaled the marched ellipsoid's
+/// horizontal semi-axes when this was an ellipsoid; now it is one factor in the
+/// cone's radius and in `SMOKE_R_MAX`, and nothing has semi-axes.
 static const float SMOKE_ASPECT = 0.55;
 /// The plume's radius at the source, and how much it flares by the top.
-static const float SMOKE_R0 = 0.34;
+///
+/// **0.16 rather than 0.34: the neck is about a fire's width, and the flare is
+/// what widens it.** At 0.34 the column left the fuel already 0.75 m across,
+/// which is what put a wide flat lid under the plume where a neck belonged.
+static const float SMOKE_R0 = 0.16;
 static const float SMOKE_FLARE = 0.95;
 static const float SMOKE_FLARE_P = 0.75;
 /// Height over which the column establishes itself above the source, and the
 /// height at which it starts dissipating. Without the first the plume begins as
 /// a flat disc sitting on the fire.
-static const float SMOKE_FOOT = 0.10;
-static const float SMOKE_TOP = 0.68;
+///
+/// **`SMOKE_FOOT` is a function of world height alone, so it draws a horizontal
+/// isoline** — and that isoline is the straight bottom edge the plume used to
+/// have. It cannot be removed (a plume with no foot is a disc), so it is made
+/// short instead: 0.06 establishes the neck over 0.24R, which at `plume.loom`'s
+/// R = 4 is under a metre and sits inside the flame rather than a metre above
+/// it. The rest of the cure is that the base is now the flame's position rather
+/// than a hand-typed centre, so the ramp happens where the fire is.
+static const float SMOKE_FOOT = 0.06;
+static const float SMOKE_TOP = 0.80;
+/// Widest the cone ever gets, in units of R — `SMOKE_ASPECT * (SMOKE_R0 +
+/// SMOKE_FLARE)`, the h = 1 value of the radius profile. Slang has no constexpr
+/// call, so it is written out; change it with the three above it.
+static const float SMOKE_R_MAX = SMOKE_ASPECT * (SMOKE_R0 + SMOKE_FLARE);
+/// How far the true `h^1.6` bend can stray from the LINEAR shear the marched
+/// cylinder is built on, in units of `bendMax`.
+///
+/// **Derived, not tuned: it is `max over h in [0,1] of (h - h^1.6)`, which is
+/// 0.1713 at h = 0.457**, rounded up to 0.18. That is the whole containment
+/// argument — the sheared cylinder's radius is `R * SMOKE_R_MAX +
+/// SMOKE_BEND_SLACK * bendMax`, and every point of the envelope's support is
+/// inside it because the radial term is bounded by the first summand and the
+/// bend's deviation from the shear by the second.
+///
+/// **It is a function of the 1.6 in `sootEnvelope`.** Retune that exponent and
+/// this number is wrong, containment fails, and the hard edge comes back — as a
+/// hard cylinder this time. Recompute them together.
+static const float SMOKE_BEND_SLACK = 0.18;
+/// How much the quad is grown past the hull's own bounding radius.
+///
+/// `ponytail: a fixed pad, sound while the hull's radius over its distance to
+/// the eye stays under about 0.5 — a perspective quad under-covers a sphere by
+/// roughly that ratio. Make it a function of distance if a scene ever has the
+/// camera inside a plume.`
+static const float SMOKE_QUAD_PAD = 1.15;
 /// How far the top of the plume is carried downwind, in plume radii per m/s.
 /// **P1's wind, from the environment buffer** — the same `wind` the grass bends
 /// to and the foam drifts on, so a scene's smoke and its grass lean together.
@@ -3037,6 +3107,18 @@ static const float SMOKE_EPS = 0.18;
 /// cone of fog.
 static const float SMOKE_T0 = 0.36;
 static const float SMOKE_W = 0.30;
+/// How much the threshold rises by the top of the column.
+///
+/// **The top has to break into wisps, not fade as a solid mass.** `SMOKE_TOP`
+/// alone scales the whole envelope down together, so the plume dissolves while
+/// keeping its outline — a ghost of the same shape. Raising the threshold with
+/// height instead means the field's low regions drop out first and the high
+/// ones survive, so the column comes apart into separate lumps of soot the way
+/// a real plume does. Same trick `FIRE_T1` plays on the flame's tip.
+///
+/// 0.36 + 0.25 = 0.61 stays under the fbm's supremum, so the top is thinned and
+/// not erased; the top fade still does the erasing.
+static const float SMOKE_T0_RISE = 0.25;
 /// Extinction per metre at full density.
 static const float SMOKE_SIGMA = 3.2;
 /// Henyey-Greenstein asymmetry. Positive is forward-scattering, which is what
@@ -3321,6 +3403,85 @@ float4 flameColor(ParticleOutput in, float3 toEye) {
 }
 
 
+/// How far downwind the top of the column is carried, in metres.
+///
+/// One function so `columnChord`, the quad and `sootEnvelope` cannot disagree
+/// about the lean — a quad sized from a different wind than the hull is drawn
+/// with is the exact bug class the chord fix exists to remove.
+float sootBendMax(float R) {
+    return abs(push.environment[0].wind.z) * SMOKE_DRIFT * R;
+}
+
+/// The chord of the marched region: a capped cylinder about the plume's axis,
+/// sheared LINEARLY with the wind.
+///
+/// **The primitive is derived from `sootEnvelope`'s support and nothing else.**
+/// The support is `|p.xz - wd * bendMax * h^1.6| <= R * ASPECT * (R0 + FLARE *
+/// h^FLARE_P)` for `h` in `[0, 1]`. Shear the space by `wd * bendMax * h` —
+/// affine in `(x, y, z)`, unit determinant, and *linear in the ray parameter*,
+/// so `t` comes out in world metres exactly as it did for the ellipsoid — and
+/// the support becomes `|q.xz| <= R_MAX * R + bendMax * (h - h^1.6)`. Both terms
+/// are bounded above independently, which is what makes containment a one-line
+/// inequality rather than a tuning exercise:
+///
+///     rc = R * SMOKE_R_MAX + SMOKE_BEND_SLACK * bendMax
+///
+/// Checked numerically at R = 4 and wind 0 / 3.2 / 9.0 / 20.0 m/s: the worst
+/// `bend deviation + radius` over 2001 samples of `h` is 2.47 against rc 3.04 at
+/// `plume`'s wind and 3.26 against 4.13 at `plume_gale`'s. It is a bound, not a
+/// fit, so a tighter one would only save marched length.
+///
+/// The caps at `y = +-R` cost nothing: the foot ramp is zero at `h = 0` and the
+/// top fade is zero at `h = 1`, so the density already vanishes on both planes.
+bool columnChord(float3 o, float3 d, float R, out float t0, out float t1) {
+    t0 = 0.0;
+    t1 = 0.0;
+    float bendMax = sootBendMax(R);
+    float2 wd = normalize(push.environment[0].wind.xy + float2(1e-4, 0.0));
+    float2 oc = o.xz - wd * (bendMax * (o.y + R) / (2.0 * R));
+    float2 dc = d.xz - wd * (bendMax * d.y / (2.0 * R));
+    float rc = R * SMOKE_R_MAX + SMOKE_BEND_SLACK * bendMax;
+
+    // The caps first, because they bound the ray even when it never leaves the
+    // cylinder (looking straight up the column).
+    float cap0 = -1e9;
+    float cap1 = 1e9;
+    if (abs(d.y) < 1e-6) {
+        if (abs(o.y) > R) {
+            return false;
+        }
+    } else {
+        float ta = (-R - o.y) / d.y;
+        float tb = (R - o.y) / d.y;
+        cap0 = min(ta, tb);
+        cap1 = max(ta, tb);
+    }
+
+    float A = dot(dc, dc);
+    float cyl0 = -1e9;
+    float cyl1 = 1e9;
+    if (A < 1e-9) {
+        // Along the (sheared) axis: in or out for the whole ray.
+        if (dot(oc, oc) > rc * rc) {
+            return false;
+        }
+    } else {
+        float B = dot(oc, dc);
+        float C = dot(oc, oc) - rc * rc;
+        float disc = B * B - A * C;
+        if (disc <= 0.0) {
+            return false;
+        }
+        float sq = sqrt(disc);
+        cyl0 = (-B - sq) / A;
+        cyl1 = (-B + sq) / A;
+    }
+
+    t0 = max(cap0, cyl0);
+    t1 = min(cap1, cyl1);
+    return t1 > t0;
+}
+
 /// The plume's envelope: how much of the column is at `p`, before any noise.
 ///
 /// One function so the density and the sun-shadow chord cannot disagree about
@@ -3331,7 +3492,9 @@ float sootEnvelope(float3 p, float R, out float h, out float2 rel) {
     float2 wd = normalize(push.environment[0].wind.xy + float2(1e-4, 0.0));
     // The bend is superlinear in height because drag on a rising parcel has had
     // longer to act on it; a linear lean is a tilted cylinder, not a plume.
-    rel = p.xz - wd * (push.environment[0].wind.z * SMOKE_DRIFT * R * pow(h, 1.6));
+    // **The 1.6 here is what `SMOKE_BEND_SLACK` is derived from.** Changing it
+    // without recomputing `max(h - h^1.6)` breaks `columnChord`'s containment.
+    rel = p.xz - wd * (sootBendMax(R) * pow(h, 1.6));
     float rMax = R * SMOKE_ASPECT * (SMOKE_R0 + SMOKE_FLARE * pow(h, SMOKE_FLARE_P));
     return saturate(1.0 - length(rel) / max(rMax, 1e-4))
          * smoothstep(0.0, SMOKE_FOOT, h)
@@ -3407,7 +3570,7 @@ float sootDensity(float3 p, float R, float t, float3 off, float dF, float dW, bo
         m += (rd * dpdy - float3(0.0, 1.0, 0.0) * dpdr) * SMOKE_WARP * (0.25 + h);
     }
     float d = fireFbm(m + off, 3, dF);
-    return saturate((d - SMOKE_T0) / SMOKE_W) * body;
+    return saturate((d - (SMOKE_T0 + SMOKE_T0_RISE * h)) / SMOKE_W) * body;
 }
 
 /// Henyey-Greenstein, scaled so isotropic is 1 rather than 1/4pi. Keeping the
@@ -3427,23 +3590,14 @@ float4 smokeColor(ParticleOutput in, float3 toEye) {
     // non-uniformly.
     float cyclesPerPixel = length(fwidth(w0)) * (SMOKE_HZ / R) * FIRE_OCTAVE_STEP;
 
-    // **The chord of an ELLIPSOID, solved in the space where it is a sphere.**
-    // Scaling the ray by the inverse semi-axes leaves `t` in world metres,
-    // because origin and direction are scaled by the same factor.
+    // **The chord of the envelope's own support** — see `columnChord`. This used
+    // to be an upright ellipsoid, and the mismatch with the flaring, leaning
+    // column was the hard silhouette.
     float3 dir = -normalize(toEye);
-    float3 inv = float3(1.0 / (R * SMOKE_ASPECT), 1.0 / R, 1.0 / (R * SMOKE_ASPECT));
-    float3 o = w0 * inv;
-    float3 e = dir * inv;
-    float A = dot(e, e);
-    float B = dot(o, e);
-    float C = dot(o, o) - 1.0;
-    float disc = B * B - A * C;
-    if (disc <= 0.0) {
+    float t0, t1;
+    if (!columnChord(w0, dir, R, t0, t1)) {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
-    float sq = sqrt(disc);
-    float t0 = (-B - sq) / A;
-    float t1 = (-B + sq) / A;
     float dt = (t1 - t0) / float(SMOKE_STEPS - 1);
 
     // Octave retirement, both bounds, exactly as `flameColor` derives them.
@@ -3491,23 +3645,22 @@ float4 smokeColor(ParticleOutput in, float3 toEye) {
 
         // **The self-shadow, and it is the whole reason this is a volume.** Two
         // taps along the analytic chord from this sample to where the sun
-        // leaves the ellipsoid. The chord is closed form, so the expensive part
-        // is two density evaluations rather than a second march — and the
-        // envelope is a good model of the column that does the occluding, which
-        // is what makes two taps enough. `ponytail: two fixed taps, raise to a
-        // short march if a deep plume's core reads flat.`
+        // leaves the column. The chord is closed form, so the expensive part is
+        // two density evaluations rather than a second march — and the envelope
+        // is a good model of the column that does the occluding, which is what
+        // makes two taps enough. `ponytail: two fixed taps, raise to a short
+        // march if a deep plume's core reads flat.`
+        //
+        // **`columnChord` again, not a second shape.** Same reason `sootEnvelope`
+        // is one function: a shadow chord that leaves a different volume than
+        // the march darkens material that is not there.
         float tauSun = 0.0;
         {
-            float3 so = p * inv;
-            float3 se = sunDir * inv;
-            float sA = dot(se, se);
-            float sB = dot(so, se);
-            float sdisc = sB * sB - sA * (dot(so, so) - 1.0);
-            if (sdisc > 0.0) {
-                float exit = (-sB + sqrt(sdisc)) / sA;
-                float s1 = sootDensity(p + sunDir * (exit * 0.22), R, t, off, dF, dW, false);
-                float s2 = sootDensity(p + sunDir * (exit * 0.58), R, t, off, dF, dW, false);
-                tauSun = (s1 + s2) * 0.5 * exit * in.color.a;
+            float s0, sExit;
+            if (columnChord(p, sunDir, R, s0, sExit) && sExit > 0.0) {
+                float s1 = sootDensity(p + sunDir * (sExit * 0.22), R, t, off, dF, dW, false);
+                float s2 = sootDensity(p + sunDir * (sExit * 0.58), R, t, off, dF, dW, false);
+                tauSun = (s1 + s2) * 0.5 * sExit * in.color.a;
             }
         }
 

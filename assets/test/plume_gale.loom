@@ -1,0 +1,153 @@
+# The same pyre in a gale, seen from across the wind.
+#
+# **This is the containment gate, and it exists because `plume.loom` could not
+# be one.** The marched region is derived from `sootEnvelope`'s support — a
+# capped cylinder sheared with the wind, `columnChord` in `scene.slang`. If that
+# derivation ever drifts from the envelope again, the envelope escapes the
+# marched region, the march stops at near-full density, and the silhouette
+# becomes the *primitive's* analytic curve instead of the noise's ragged one.
+#
+# `plume.loom` cannot see that failure loudly enough. At its 3.2 m/s the old
+# upright ellipsoid still contained the column's lower half, so the escape read
+# as a slightly hard right edge and about 89% of the authored lean quietly
+# clipped away — and every gate passed for as long as that shipped.
+#
+# Here the wind is 9.0 m/s along +X and the camera looks straight down -Z, so
+# the lean is ~2.3 plume radii and it is entirely LATERAL on screen. Containment
+# failing is then not a subtle edge: it is the top two thirds of the column
+# sliced off along a curve. The wall is a backdrop at z = -8, clear of the hull
+# (which reaches z = +-4.13), so this frame tests the silhouette and nothing
+# else — the geometry-versus-volume question is `plume_roof.loom`'s.
+
+[scene]
+format = 1
+id = "4c1b90d7-2f88-4a17-9c05-6ad3e2f70b13"
+
+[[node]]
+name = "Pyre"
+
+  [node.components.Environment]
+  sun_direction = [-0.82, 0.26, -0.51]
+  sun_strength = 1.6
+  sun_color = [1.0, 0.82, 0.62]
+  ambient = 0.30
+  sky_zenith = [0.10, 0.16, 0.30]
+  sky_horizon = [0.42, 0.40, 0.38]
+  fog_density = 0.010
+  fog_falloff = 0.05
+
+  # Along +X and hard. `SMOKE_DRIFT` is 0.26 plume radii per m/s, so at 9.0 the
+  # top of an R = 4 column is carried 9.36 m downwind — more than twice its own
+  # radius, which is the whole point of the scene.
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 9.0
+  gustiness = 0.6
+  turbulence = 0.8
+
+[[node]]
+name = "Ground"
+parent = "Pyre"
+transform = { pos = [4.0, -0.25, 0.0], scale = [30.0, 0.25, 30.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.27, 0.22]
+  roughness = 0.95
+
+# A pale backdrop behind the column, so the silhouette is read against
+# something instead of against sky at the top and haze at the bottom.
+[[node]]
+name = "Backdrop"
+parent = "Pyre"
+transform = { pos = [5.0, 3.0, -8.0], scale = [12.0, 3.0, 0.35] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.52, 0.49, 0.44]
+  roughness = 0.9
+
+[[node]]
+name = "Log"
+parent = "Pyre"
+transform = { pos = [0.0, 0.16, 0.0], rot_euler = [0.0, 32.0, 0.0], scale = [0.75, 0.16, 0.16] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.18, 0.12, 0.09]
+  roughness = 0.95
+
+[[node]]
+name = "Firelight"
+parent = "Pyre"
+transform = { pos = [0.0, 0.75, 0.0] }
+
+  [node.components.Light]
+  intensity = 5.0
+  color = [1.0, 0.50, 0.17]
+
+[[node]]
+name = "Flame"
+parent = "Pyre"
+transform = { pos = [0.0, 0.85, 0.0] }
+
+  [node.components.ParticleEmitter]
+  burst = 1
+  rate = 0.0
+  lifetime = 110.0
+  lifetime_jitter = 0.0
+  speed = 0.0
+  spread_degrees = 0.0
+  radius = 0.0
+  gravity = 0.0
+  drag = 0.0
+  turbulence = 0.0
+  wind_response = 0.0
+  size = [1.7, 1.7]
+  alpha = [1.0, 1.0]
+  color_start = [1.0, 1.0, 1.0]
+  color_end = [1.0, 1.0, 1.0]
+  additive = true
+  flame = true
+
+# Parented to the flame at the origin, exactly as `plume.loom` is: the node's
+# position is the plume's BASE and the hand-over happens where the fire is.
+[[node]]
+name = "Plume"
+parent = "Pyre/Flame"
+transform = { pos = [0.0, 0.0, 0.0] }
+
+  [node.components.ParticleEmitter]
+  burst = 1
+  rate = 0.0
+  lifetime = 110.0
+  lifetime_jitter = 0.0
+  speed = 0.0
+  spread_degrees = 0.0
+  radius = 0.0
+  gravity = 0.0
+  drag = 0.0
+  turbulence = 0.0
+  wind_response = 0.0
+  size = [8.0, 8.0]
+  alpha = [1.0, 1.0]
+  color_start = [0.30, 0.29, 0.28]
+  color_end = [0.30, 0.29, 0.28]
+  additive = false
+  flame = true
+
+# Straight down -Z, across the wind, and far enough back that the whole leaning
+# column is in frame at the gate's 320x200.
+[[node]]
+name = "Camera"
+parent = "Pyre"
+transform = { pos = [4.5, 4.5, 20.0], rot_euler = [0.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 52.0
