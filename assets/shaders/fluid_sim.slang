@@ -813,6 +813,12 @@ void fluidG2PMain(uint3 tid: SV_DispatchThreadID) {
 /// deterministic tier uses. One formula for "how wet is this pontoon", two
 /// sources for the surface.
 ///
+/// **A column only counts if its surface reaches the pontoon**, which is that
+/// same cap's precondition applied a column at a time. Without it the ring is
+/// a purely horizontal question and answers `wet` for a body in the air above
+/// the water — or, because the ring reaches 1.5 radii, for one outside a
+/// bounded domain altogether.
+///
 /// **Serial on purpose.** Eight columns of at most 64 cells is nothing to
 /// parallelise, and a serial loop is a summation order the buffer decides
 /// rather than the scheduler.
@@ -843,7 +849,26 @@ void fluidProbeMain(uint3 tid: SV_DispatchThreadID) {
             int here = cellIndex(d, int3(ix, j, iz));
             if (c->marker[here] != FLUID_FLUID) { continue; }
             if (c->cellCount[here] * 2u < FLUID_PER_CELL) { continue; }
-            surface += c->origin.y + float(j + 1) * h;
+            float top = c->origin.y + float(j + 1) * h;
+            // **And the vertical half of the question, which was missing.**
+            // A ring reaching 1.5 radii sideways finds water a pontoon is not
+            // in: on `plough_cinematic` the hull is on its ramp, 1.1 m clear
+            // of the tank and five metres up, and one of its eight columns
+            // still lands on the pool's edge cell. It read `wetness = 0.125`,
+            // which fired an entry splash and an impact foam ring twenty ticks
+            // before the crate touched anything — spray hanging in the air
+            // outside the tank and a white band along the near wall, with
+            // nothing on screen to have caused either.
+            //
+            // The test is `submerged_volume`'s own precondition — the surface
+            // must reach the sphere's lowest point — so the readback and the
+            // spherical cap the CPU then applies cannot disagree about whether
+            // this pontoon is in the water. Note what it deliberately does not
+            // do: a pontoon *below* a surface the hull has pushed aside still
+            // reads wet, because the columns beside it are, which is the dry
+            // hollow this tier exists to draw.
+            if (top < probe.y - probe.w) { break; }
+            surface += top;
             wetColumns += 1;
             break;
         }

@@ -180,8 +180,15 @@ pub struct FluidProbeResult {
     pub surface: f32,
     /// Mean fluid velocity over the wetted part, m/s.
     pub velocity: [f32; 3],
-    /// Fraction of the ring of columns that found water — 0 when the pontoon
-    /// is outside the domain or over dry ground.
+    /// Fraction of the ring of columns whose surface reaches this pontoon — 0
+    /// when it is outside the domain, over dry ground, or **clear of the water
+    /// in the air above it**.
+    ///
+    /// That last clause is the whole of the test: the ring reaches 1.5 radii
+    /// sideways, so a body a metre outside a bounded domain and five metres up
+    /// still has a column land on the pool's edge. Read as "is this pontoon in
+    /// the water" — which is what the splash event and the foam deposit both
+    /// read it as — that answered yes for a crate still on its ramp.
     pub wetness: f32,
 }
 
@@ -1359,16 +1366,30 @@ mod tests {
             return;
         };
 
-        // Just under the surface, and just over it.
+        // Just under the surface, just over it, and one held well clear of it
+        // in the air.
         let probes = [
             FluidProbe { at: [0.0, -0.2, 0.0], radius: 0.1 },
             FluidProbe { at: [0.0, 0.2, 0.0], radius: 0.1 },
+            FluidProbe { at: [0.0, 0.6, 0.0], radius: 0.1 },
         ];
         let mut out = (0.0, 0.0);
+        let mut airborne = 0.0;
         for _ in 0..120 {
             let step = solver.step(&FluidInputs { solids: &[], probes: &probes });
             out = (step.probes[0].surface, step.probes[0].wetness);
+            airborne = step.probes[2].wetness;
         }
+        // **The ring finds water the pontoon is not in.** It reaches 1.5 radii
+        // sideways and every column under it here is full, so before the
+        // vertical test in `fluidProbeMain` this read `wetness = 1.0` for a
+        // pontoon 0.6 m up in the air — which on `plough_cinematic` fired an
+        // entry splash and an impact foam ring while the hull was still on its
+        // ramp, outside the tank, with nothing on screen to have caused them.
+        assert_eq!(
+            airborne, 0.0,
+            "a pontoon 0.6 m above the surface read {airborne} wet"
+        );
         // The tank is 1.6 m tall centred on the origin and half full, so the
         // surface sits at y = 0 give or take a cell.
         assert!(out.1 > 0.9, "the tank drained: only {} of the ring found water", out.1);
