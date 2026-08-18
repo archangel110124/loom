@@ -123,6 +123,14 @@ pub struct Sim {
     /// allocate.
     fluid_solids: Vec<loom_render::FluidSolid>,
     fluid_probes: Vec<loom_render::FluidProbe>,
+    /// Last tick's wetness at each probe, in probe order.
+    ///
+    /// **The whole submersion detector, and it needs no threshold.** A probe
+    /// whose ring of columns found no water last tick and finds some this tick
+    /// is a body entering the water at that point; the deterministic tier gets
+    /// the same event out of the buoyancy solver's submerged fraction, and this
+    /// is the volumetric answer to the same question.
+    fluid_wetness: Vec<f32>,
     /// Milliseconds the device round trip cost, summed over the run, and the
     /// ticks that paid it — ADR 0053 §4 asks for this to be reported.
     fluid_cost: (f64, f64, u64),
@@ -659,6 +667,7 @@ impl Sim {
             fluid,
             fluid_solids: Vec::new(),
             fluid_probes: Vec::new(),
+            fluid_wetness: Vec::new(),
             fluid_cost: (0.0, 0.0, 0),
             water,
             terrain,
@@ -739,6 +748,17 @@ impl Sim {
         // be two seas at once.
         let mut flat = water.clone();
         flat.waves.waves.clear();
+        // **Whitewater, out of the readback and onto the CPU field the shader
+        // already reads** — ADR 0057 addendum, and it needs no new machinery at
+        // all. The probes come back as plain `f32` inside the fixed step, so
+        // they are CPU facts in a tier that has already opted out of
+        // portability; `loom_water::foam` advects and decays them exactly as it
+        // does a deterministic hull's, and `waterFragmentMain` already floors
+        // its coverage on `loom_foam_at`. What arrives is foam that *persists*
+        // and *drifts* rather than a highlight welded to the body — the
+        // distinction ADR 0055 was built around.
+        let mut hulls: Vec<loom_water::foam::Hull> = Vec::new();
+        self.fluid_wetness.resize(self.fluid_probes.len(), 0.0);
         let mut probe = 0;
         for floating in &mut self.floating {
             let Some(centre) = self.physics.centre_of_mass(floating.body) else {
@@ -746,6 +766,65 @@ impl Sim {
             };
             for state in &mut floating.states {
                 let Some(read) = out.probes.get(probe) else { break };
+                let was = self.fluid_wetness[probe];
+                self.fluid_wetness[probe] = read.wetness;
+                if let Some(field) = self.foam.as_mut() {
+                    if read.wetness > 0.0 {
+                        let v = read.velocity;
+                        let rel = [
+                            v[0] - state.velocity[0],
+                            v[1] - state.velocity[1],
+                            v[2] - state.velocity[2],
+                        ];
+                        // **Relative speed, not the water's own.** A hull
+                        // drifting with the flow entrains nothing; what makes
+                        // white water is shear between the body and what it is
+                        // in. Two metres a second is fully white, which is the
+                        // same scale `FOAM_HULL_SPEED` sets for the
+                        // deterministic tier's hull wake.
+                        let shear = rel[0].hypot(rel[1]).hypot(rel[2]);
+                        field.deposit_disc(
+                            [state.at[0], state.at[2]],
+                            state.radius,
+                            (shear * 0.5).clamp(0.0, 1.0),
+                        );
+                    }
+                    // The entry. Full strength for the reason the deterministic
+                    // impact deposit is full strength: an impact is the whitest
+                    // foam a scene makes, and the field's decay is what takes it
+                    // away rather than a smaller number here.
+                    if was <= 0.0 && read.wetness > 0.0 {
+                        field.deposit_disc(
+                            [state.at[0], state.at[2]],
+                            state.radius * 1.5,
+                            loom_water::foam::FOAM_IMPACT,
+                        );
+                    }
+                }
+                // **And the crown, through slice 3's own event path.** A
+                // submersion the *solver* resolved is a better trigger than the
+                // analytic one it replaces — it fires where the water actually
+                // is, including where the surface is heaped a hull's width above
+                // the still level.
+                if was <= 0.0 && read.wetness > 0.0 {
+                    let speed = state.velocity[0]
+                        .hypot(state.velocity[1])
+                        .hypot(state.velocity[2]);
+                    if speed > 0.5 {
+                        self.water_events.push(loom_script::Event {
+                            tick: 0,
+                            kind: SPLASH.to_owned(),
+                            at: [state.at[0], read.surface, state.at[2]],
+                            node: floating.path.clone(),
+                            values: [
+                                ("speed".to_owned(), f64::from(speed)),
+                                ("radius".to_owned(), f64::from(state.radius)),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        });
+                    }
+                }
                 probe += 1;
                 state.ground = loom_voxel::heightfield::NO_GROUND;
                 state.flow = read.velocity;
@@ -774,6 +853,30 @@ impl Sim {
                 floating.submersion.enter,
                 floating.submersion.exit,
             );
+            if self.foam.is_some() {
+                hulls.push(loom_water::foam::Hull {
+                    at: centre,
+                    velocity: self
+                        .physics
+                        .velocity_at_point(floating.body, centre)
+                        .unwrap_or([0.0; 3]),
+                    radius: waterplane_radius(floating, centre),
+                    wetted: wrench.submerged,
+                });
+            }
+        }
+
+        // **The field is stepped here rather than in `float`**, which returned
+        // before reaching it. Same call, same order, same one place: deposits
+        // first, advection last.
+        #[allow(clippy::cast_precision_loss)]
+        let t = self.tick as f32 * TICK_SECONDS;
+        if let Some(field) = self.foam.as_mut() {
+            let terrain = self.terrain.as_ref();
+            let ground = move |x: f32, z: f32| {
+                terrain.map_or(loom_voxel::heightfield::NO_GROUND, |t| t.at(x, z))
+            };
+            field.step(&flat, t, self.flow.as_ref(), &hulls, &ground);
         }
     }
 
