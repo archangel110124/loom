@@ -5257,12 +5257,13 @@ static const float RIPPLE_FOAM_SLOPE = 10.0;
 /// bubbles along its steepest line, not a solid cap. At 1.0 the ring reads as
 /// painted rather than as water.
 static const float RIPPLE_FOAM_MAX = 0.50;
-/// How much of the capillary detail the wake's own slope suppresses.
-///
-/// See the use site. Under 1.0 so the crest keeps *some* fine structure — a
-/// mirror-flat band would read as a hole rather than as a wave.
-static const float RIPPLE_CALM_SLOPE = 25.0;
-static const float RIPPLE_CALM = 1.0;
+// **`RIPPLE_CALM` and `RIPPLE_CALM_SLOPE` are gone — ADR 0053 §7.** They were
+// a standing term: the wake's own slope suppressing the capillary detail
+// everywhere the CPU ripple grid reached, which is a mechanism (a wave passing
+// under water stretches the surface and calms it) applied at the one place the
+// engine happened to have a slope handy. The mechanism now lives inside
+// `rainRingsAt`'s envelope, where the ring that earns the calm is the ring
+// being calmed. The wake keeps its foam.
 /// Where the detail stops. `loom_value_noise` is analytic and has no mip chain,
 /// so past this the lattice is under a pixel and becomes a twinkle generator
 /// rather than detail — the same bound the foam's fine octaves take, for the
@@ -5304,6 +5305,151 @@ float2 waterDetailSlope(float2 xz, float t, float2 drift, float2 flow) {
     LoomFlowPhase p = waterFlowPhase(xz, flow, t);
     return waterDetailSlopeAt(p.uvA, t, drift) * p.wA
          + waterDetailSlopeAt(p.uvB, t, drift) * (1.0 - p.wA);
+}
+
+// -- Rain rings on open water: the dispersive lattice ------------------------
+//
+// **A raindrop does not leave one ring, and that is the whole feature.** Every
+// ring lattice in this engine before now — `rippleNormal`, which does the same
+// job for wet *ground* — expands one crest at one speed, so an impact reads as
+// a single hoop and a pool full of them reads as a pattern. Reference image 59
+// is a photograph of the thing that is actually happening: several concentric
+// bands per impact, crests appearing at the centre and racing outward through
+// a slower-moving envelope.
+//
+// That is deep-water dispersion, and it costs one extra `sin`. Gravity waves
+// have `c_p = 2 c_g`: the packet's envelope travels at the group speed and the
+// individual crests travel through it at twice that, appearing at the trailing
+// edge and dying at the leading edge. So the height of one ring is
+//
+//     h(d) = exp(-((d - r)/W)^2) * sin((d - 2r) * K),    r = c_g * age
+//
+// — a Gaussian envelope centred at `r` and a carrier whose crests sit at
+// `d = 2r + const`. `K = π/W` puts two crests inside the envelope, which is
+// what a raindrop ring has.
+//
+// **Presentation only, and it must stay that way.** This reads the *CPU* rain
+// rate out of the environment block and the cloud cover the same shader
+// already evaluates — never the GPU drop buffer, which is ADR 0045 clause 2
+// and would be a device fact re-entering the picture. The CPU and the GPU
+// sample the same rate field independently and agree about the weather without
+// sharing a byte, which is exactly the two-plumes arrangement ADR 0047 shipped.
+//
+// **It is not `rippleNormal`.** That one perturbs wet ground in the main
+// fragment shader at a 0.35 m lattice tuned for tarmac; this one runs in the
+// water block, feeds the detail suppression below, and has a different scale.
+// Unifying them would move three references that cannot show the difference —
+// a ring on wet stone is a specular wobble, not a shape — for no visual gain.
+
+/// Metres per lattice cell. One impact per cell per [`RAIN_RING_PERIOD`].
+///
+/// **0.9, and not the 0.4-0.5 the brief for this slice asked for, because a
+/// 3x3 neighbourhood and a 0.45 m cell cannot hold this ring.** A point in cell
+/// C only sees centres in C +- 1, and the nearest point of cell C +- 2 is one
+/// full cell away - so a 3x3 search captures every feature whose reach is at
+/// most one cell, and clips everything beyond it against a straight lattice
+/// line. This packet reaches `RAIN_RING_GROUP_SPEED * RAIN_RING_LIFE` plus two
+/// envelope widths: 0.84 m. At 0.45 m the far half of every ring would be cut
+/// off on a grid; at 0.9 m nothing is. The alternatives were a 5x5 search (25
+/// hashes a pixel for the same picture) or a ring half the size, which is not
+/// what a raindrop leaves.
+static const float RAIN_RING_CELL = 0.9;
+/// Seconds between a cell's chances to be hit.
+static const float RAIN_RING_PERIOD = 1.6;
+/// How long one ring lives, in seconds.
+static const float RAIN_RING_LIFE = 1.2;
+/// The envelope's speed, m/s. The crests travel at twice this.
+///
+/// 0.5 takes the packet to 0.6 m in its 1.2 s life, which is a raindrop ring on
+/// still water at roughly life size.
+static const float RAIN_RING_GROUP_SPEED = 0.5;
+/// Half-width of the envelope, metres. `K = π/W` follows from it.
+static const float RAIN_RING_WIDTH = 0.12;
+/// How far a ring tilts the normal at its steepest.
+///
+/// **0.08, and the number is the point.** The honest tilt of a ring this size
+/// is 0.06–0.12; the unconditional capillary noise it competes with is 0.30,
+/// which is why the envelope also *suppresses* that noise below rather than
+/// merely adding to it. A ring that only adds is a change in the texture of a
+/// shimmering field rather than a shape — the same finding `RIPPLE_CALM` was
+/// written for, now applied where it is earned.
+static const float RAIN_RING_TILT = 0.08;
+
+/// Every ring passing through this point, as a radial slope, plus how deep
+/// inside an envelope the point is.
+///
+/// Returns the xz slope to subtract from the normal. `envelope` comes back in
+/// `[0, 1]` and is what the capillary detail is suppressed by.
+///
+/// `gate` is `rate x cover x shelter` already multiplied together by the
+/// caller — zero short-circuits the whole function, which is what makes a dry
+/// scene pay one compare.
+float2 rainRingsAt(float2 xz, float t, float gate, out float envelope) {
+    envelope = 0.0;
+    float2 slope = float2(0.0, 0.0);
+    if (gate <= 0.0) {
+        return slope;
+    }
+
+    const float SCALE = 1.0 / 16777216.0;
+    const float K = 3.14159265 / RAIN_RING_WIDTH;
+    float2 p = xz / RAIN_RING_CELL;
+    int2 base = int2(floor(p));
+
+    // 3x3, because a ring reaches further than its own cell. The bound is what
+    // keeps this to nine hashes rather than a search.
+    for (int j = -1; j <= 1; ++j) {
+        for (int i = -1; i <= 1; ++i) {
+            int2 cell = base + int2(i, j);
+            uint seed = loom_hash(loom_hash(uint(cell.x)) + uint(cell.y));
+            // Phased per cell, so neighbouring impacts are not simultaneous.
+            float phase = float(seed >> 8) * SCALE;
+            float s = t / RAIN_RING_PERIOD + phase;
+            float cycle = floor(s);
+            float age = (s - cycle) * RAIN_RING_PERIOD;
+            if (age >= RAIN_RING_LIFE) {
+                continue;
+            }
+            // **Rehashed per impact**, so the next drop in this cell lands
+            // somewhere else. Hashing the centre from the cell alone makes
+            // every cell a tap dripping on one spot and the lattice becomes
+            // visible in two seconds — `rippleNormal` learned that first.
+            uint h = loom_hash(seed + uint(int(cycle)));
+            uint h2 = loom_hash(h);
+            uint h3 = loom_hash(h2);
+            // Light rain rings in fewer places as well as more faintly, the
+            // same per-cell thinning the drops themselves take.
+            if (float(h3 >> 8) * SCALE >= gate) {
+                continue;
+            }
+
+            float2 centre = (float2(cell) + float2(float(h >> 8) * SCALE,
+                                                   float(h2 >> 8) * SCALE))
+                          * RAIN_RING_CELL;
+            float2 offset = xz - centre;
+            float d = length(offset);
+            if (d < 1e-4) {
+                continue;
+            }
+            float r = RAIN_RING_GROUP_SPEED * age;
+            float u = (d - r) / RAIN_RING_WIDTH;
+            if (abs(u) > 2.5) {
+                continue;
+            }
+            // The packet, and the derivative of it. `E' S + E S'`, exactly —
+            // the slope IS what a normal perturbation wants, and differencing
+            // a height would need two evaluations of the same nine cells.
+            float e = exp(-u * u);
+            float carrier = (d - 2.0 * r) * K;
+            float radial = e * (K * cos(carrier) - (2.0 * u / RAIN_RING_WIDTH) * sin(carrier));
+            // Fade the whole packet out over its life, so a ring dies rather
+            // than being cut off at `RAIN_RING_LIFE`.
+            float fade = 1.0 - age / RAIN_RING_LIFE;
+            slope += (offset / d) * (radial / K) * fade;
+            envelope = max(envelope, e * fade);
+        }
+    }
+    return slope * RAIN_RING_TILT;
 }
 
 /// Colour and depth of everything drawn BEFORE the water. Set 3.
@@ -5704,15 +5850,28 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // see `RIPPLE_FOAM_SLOPE` and `RIPPLE_CALM_SLOPE` for why they differ by
     // more than a factor of two rather than being one number.
     float ripSteep = 0.0;
-    float ripCalm = 0.0;
     if (ripples.side > 0) {
         ripple = loom_ripple_at(ripples, in.baseXZ);
         float2 dRipple = ripple.yz - in.rippleSlope;
         normal = normalize(normal - float3(dRipple.x, 0.0, dRipple.y));
-        float steep = length(ripple.yz);
-        ripSteep = saturate(steep * RIPPLE_FOAM_SLOPE);
-        ripCalm = saturate(steep * RIPPLE_CALM_SLOPE);
+        ripSteep = saturate(length(ripple.yz) * RIPPLE_FOAM_SLOPE);
     }
+
+    // **The rain's own rings, and the gate is three per-position terms.** The
+    // rate is the scene's unsheltered one; `cloudCoverAt` is where the shower
+    // actually is right now (not `cloudCoverRecent`, which is wetness — an
+    // integral — and would leave rings on water the shower left a minute ago);
+    // and the ground test is the only shelter this shader can see. A scene
+    // with no rain multiplies to zero and pays one compare.
+    float ringGate = saturate(push.environment[0].rain.w / RAIN_FULL_RATE);
+    if (ringGate > 0.0) {
+        float bed = loom_ground_height(terrainField(), in.worldPos.xz);
+        float open = in.worldPos.y > bed - WET_COVER_SLACK ? 1.0 : 0.0;
+        ringGate *= open * cloudCoverAt(in.worldPos);
+    }
+    float ringEnvelope = 0.0;
+    float2 ringSlope = rainRingsAt(
+        in.worldPos.xz, push.environment[0].weather.z, ringGate, ringEnvelope);
 
     float3 flatN = normal;
     {
@@ -5720,17 +5879,19 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         // Calmer over a beach than over the shelf, which is true of real water
         // and keeps the ripples off the very edge of the shoreline cut.
         detailFade *= saturate(in.depth * 0.7 + 0.2);
-        // **And calmer where the wake is, which is what makes the wake
-        // visible.** The contest is not close on its own terms: a ring the
-        // ripple grid can honestly produce tilts the normal by 0.06–0.12,
-        // against this unconditional 0.30 of capillary noise with a wind floor
-        // under it, so the ring arrives as a change in the *texture* of a
-        // shimmering field rather than as a shape. Water really does go glassy
-        // where a wave is passing under it, because the orbital motion
-        // stretches the surface — so the term that hides the wake is exactly
-        // the term the wake should suppress. Local, so nothing outside the
-        // domain moves at all.
-        detailFade *= 1.0 - RIPPLE_CALM * ripCalm;
+        // **And calmer inside a ring's envelope, which is what makes the ring
+        // a shape rather than a texture.** The contest is not close on its own
+        // terms: a ring tilts the normal by 0.06–0.12 against this
+        // unconditional 0.30 of capillary noise with a wind floor under it.
+        // Water really does go glassy where a wave passes under it, because the
+        // orbital motion stretches the surface — so the term that hides the
+        // ring is exactly the term the ring should suppress. 0.7 rather than
+        // 1.0 because a mirror-flat band reads as a hole.
+        //
+        // This is `RIPPLE_CALM`'s mechanism, relocated to where it is earned
+        // (ADR 0053 §7): it used to hang off the CPU wake grid's slope and
+        // applied wherever that grid reached.
+        detailFade *= 1.0 - 0.7 * ringEnvelope;
         // **The wind, read where this pixel is — W11.** `grassWind` is the
         // same generated `wind_at` the grass bends to and the particles drift
         // in, so a gust that runs across a meadow runs across the pond beside
@@ -5759,6 +5920,16 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         // this out of the "second opinion about the drawn surface" that the
         // rejected wave-set version would have been.
         normal = normalize(normal - float3(g.x, 0.0, g.y) * detailStrength * detailFade);
+        // **The rings, added after the detail they suppress.** Subtracted like
+        // every other slope in this block, so the surface stays exactly where
+        // the vertex shader put it and only the shading normal moves. Branched
+        // for the reason every other water branch here is branched: a scene
+        // with no rain must render bit for bit as it did, and
+        // `normalize(normal - 0)` is a second normalise of an already-unit
+        // vector, which moves the last bit.
+        if (ringGate > 0.0) {
+            normal = normalize(normal - float3(ringSlope.x, 0.0, ringSlope.y));
+        }
     }
 
     // Schlick against water's f0. This is the whole trick: face-on you see
