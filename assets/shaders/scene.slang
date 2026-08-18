@@ -3582,7 +3582,10 @@ float smokePhase(float c) {
 
 /// A soot volume at one fragment: march the plume and integrate scattered light
 /// against transmittance.
-float4 smokeColor(ParticleOutput in, float3 toEye) {
+///
+/// `entry` comes back as the world point where the ray enters the hull, which
+/// is what the fragment writes as its depth — see `particleFragmentMain`.
+float4 smokeColor(ParticleOutput in, float3 toEye, out float3 entry) {
     float3 w0 = in.worldPos - in.origin.xyz;
     float R = max(in.origin.w, 1e-3);
     // Same placement as `flameColor`'s, and for the same reason: a derivative
@@ -3595,9 +3598,11 @@ float4 smokeColor(ParticleOutput in, float3 toEye) {
     // column was the hard silhouette.
     float3 dir = -normalize(toEye);
     float t0, t1;
+    entry = in.worldPos;
     if (!columnChord(w0, dir, R, t0, t1)) {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
+    entry = in.worldPos + dir * t0;
     float dt = (t1 - t0) / float(SMOKE_STEPS - 1);
 
     // Octave retirement, both bounds, exactly as `flameColor` derives them.
@@ -3683,13 +3688,55 @@ float4 smokeColor(ParticleOutput in, float3 toEye) {
     return float4(acc, saturate(1.0 - T));
 }
 
+/// **A volume must not be depth-tested at a plane.**
+///
+/// The particle pipeline tests LESS against the billboard's own plane, which is
+/// the right question for a sprite and the wrong one for a marched hull: the
+/// plane runs through the hull's CENTRE, so any geometry nearer than that plane
+/// discards every fragment of the quad it covers — the smoke is cut dead
+/// straight along the geometry's silhouette with no haze in front of it at all,
+/// even where a metre of soot sits between the eye and the wall. `plume_roof`
+/// is that frame.
+///
+/// It was latent while a plume was a centre typed high in the air; anchoring the
+/// base at the flame puts the hull down among fuel, walls and ground, which is
+/// exactly where the plane cut fires.
+///
+/// **The smoke branch writes the depth of the hull's ENTRY point instead**, so
+/// the test asks "is this geometry in front of the smoke" rather than "in front
+/// of the smoke's midpoint". Every other branch writes `in.position.z`, the
+/// interpolated value the hardware would have used, so flames and sprites are
+/// bit-identical.
+///
+/// `SV_DepthLessEqual` rather than plain `SV_Depth`: the projection is
+/// `perspective_rh` with LESS, so nearer is smaller, and the entry point is
+/// never behind the plane — which lets the hardware keep conservative early-Z.
+/// The `min` is what makes that promise true rather than merely likely: at the
+/// corners of the grown quad a ray can enter the leaning hull *past* the plane,
+/// and a fragment that wrote a farther depth under a LessEqual mode is
+/// undefined, not just wrong.
+///
+/// **Known trade, and it is the honest one:** geometry crossing the hull
+/// mid-body now over-draws — the full chord is integrated in front of it —
+/// instead of hard-cutting. Clamping `t1` per ray to the scene's depth is the
+/// correct fix and is blocked here: this pass draws before the depth image it
+/// would have to sample. Deferred with the trigger "a wall that must cut a
+/// plume mid-body".
 [shader("fragment")]
-float4 particleFragmentMain(ParticleOutput in) : SV_Target {
+float4 particleFragmentMain(ParticleOutput in, out float depth : SV_DepthLessEqual) : SV_Target {
+    depth = in.position.z;
     float3 eyeVec = push.environment[0].eye.xyz - in.worldPos;
     if (in.flame > 0.5 && in.additive <= 0.5) {
-        float4 smoke = smokeColor(in, eyeVec);
+        float3 entry;
+        float4 smoke = smokeColor(in, eyeVec, entry);
         if (smoke.a <= 0.002) {
             discard;
+        }
+        // Same view-projection the vertex path used — `mvp` of the reserved
+        // object slot.
+        float4 clip = mul(push.objects[push.objectOffset].mvp, float4(entry, 1.0));
+        if (clip.w > 1e-6) {
+            depth = min(clip.z / clip.w, in.position.z);
         }
         float fogS = fogAmount(push.environment[0].eye.xyz, in.worldPos);
         // Premultiplied throughout, so the fog target is the fog colour times

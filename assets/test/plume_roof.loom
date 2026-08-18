@@ -1,0 +1,161 @@
+# A plume passing a gantry deck — the scene that can only pass with SV_Depth.
+#
+# **The particle pipeline depth-tests at the billboard's own plane**, which is
+# the right question for a sprite and the wrong one for a marched hull. The
+# plane runs through the hull's CENTRE, so any geometry nearer than that plane
+# discarded every fragment of the quad it covered: the smoke was cut dead
+# straight along the deck's silhouette, with no haze over its face at all, even
+# though a metre of soot sits between the eye and the deck.
+#
+# The deck here is at z = +2.0 and the quad plane at z = 0, so it is nearer than
+# the plane over its whole width; it spans y = 4..7, where the column has leaned
+# far enough downwind that its front surface is out past z = 2. That is the
+# configuration, and it is not exotic: `plume.loom` now anchors its base at the
+# flame, which puts every hull down among fuel, walls and ground.
+#
+# `plume` at its own camera has nothing crossing the quad plane and may not move
+# at all when the depth write lands, which is precisely why this row exists — a
+# fix whose only gate is a frame that cannot see it is not gated.
+#
+# The camera is level at [0, 3, 13]: the deck's top edge is the isoline the bug
+# drew, and it has to be read against the sky rather than from above.
+
+[scene]
+format = 1
+id = "b7e14a52-0c93-4f6d-8a11-3d5c9e260f47"
+
+[[node]]
+name = "Pyre"
+
+  [node.components.Environment]
+  sun_direction = [-0.82, 0.26, -0.51]
+  sun_strength = 1.6
+  sun_color = [1.0, 0.82, 0.62]
+  ambient = 0.30
+  sky_zenith = [0.10, 0.16, 0.30]
+  sky_horizon = [0.42, 0.40, 0.38]
+  fog_density = 0.010
+  fog_falloff = 0.05
+
+  [node.components.Wind]
+  direction_degrees = 65.0
+  speed = 3.2
+  gustiness = 0.6
+  turbulence = 0.8
+
+[[node]]
+name = "Ground"
+parent = "Pyre"
+transform = { pos = [0.0, -0.25, 0.0], scale = [30.0, 0.25, 30.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.27, 0.22]
+  roughness = 0.95
+
+# **The deck, and it is the whole scene.** In front of the plume's quad plane
+# (z = 0) and crossing the hull's front half at mid height. Pale, so smoke over
+# its face is legible; wide, so the cut is a long straight line rather than a
+# notch that could be mistaken for the noise.
+[[node]]
+name = "Deck"
+parent = "Pyre"
+transform = { pos = [0.0, 5.5, 2.0], scale = [3.2, 1.5, 0.22] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.58, 0.55, 0.50]
+  roughness = 0.9
+
+[[node]]
+name = "Leg"
+parent = "Pyre"
+transform = { pos = [2.9, 2.0, 2.0], scale = [0.22, 2.0, 0.22] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.42, 0.40, 0.36]
+  roughness = 0.9
+
+[[node]]
+name = "Log"
+parent = "Pyre"
+transform = { pos = [0.0, 0.16, 0.0], rot_euler = [0.0, 32.0, 0.0], scale = [0.75, 0.16, 0.16] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.18, 0.12, 0.09]
+  roughness = 0.95
+
+[[node]]
+name = "Firelight"
+parent = "Pyre"
+transform = { pos = [0.0, 0.75, 0.0] }
+
+  [node.components.Light]
+  intensity = 5.0
+  color = [1.0, 0.50, 0.17]
+
+[[node]]
+name = "Flame"
+parent = "Pyre"
+transform = { pos = [0.0, 0.85, 0.0] }
+
+  [node.components.ParticleEmitter]
+  burst = 1
+  rate = 0.0
+  lifetime = 110.0
+  lifetime_jitter = 0.0
+  speed = 0.0
+  spread_degrees = 0.0
+  radius = 0.0
+  gravity = 0.0
+  drag = 0.0
+  turbulence = 0.0
+  wind_response = 0.0
+  size = [1.7, 1.7]
+  alpha = [1.0, 1.0]
+  color_start = [1.0, 1.0, 1.0]
+  color_end = [1.0, 1.0, 1.0]
+  additive = true
+  flame = true
+
+[[node]]
+name = "Plume"
+parent = "Pyre/Flame"
+transform = { pos = [0.0, 0.0, 0.0] }
+
+  [node.components.ParticleEmitter]
+  burst = 1
+  rate = 0.0
+  lifetime = 110.0
+  lifetime_jitter = 0.0
+  speed = 0.0
+  spread_degrees = 0.0
+  radius = 0.0
+  gravity = 0.0
+  drag = 0.0
+  turbulence = 0.0
+  wind_response = 0.0
+  size = [8.0, 8.0]
+  alpha = [1.0, 1.0]
+  color_start = [0.30, 0.29, 0.28]
+  color_end = [0.30, 0.29, 0.28]
+  additive = false
+  flame = true
+
+[[node]]
+name = "Camera"
+parent = "Pyre"
+transform = { pos = [0.0, 3.0, 13.0], rot_euler = [0.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 52.0

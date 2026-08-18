@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 53] = [
+const SCENES: [&str; 54] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -109,6 +109,7 @@ const SCENES: [&str; 53] = [
     // two `GOLDEN` rows for why each is a path nothing else covers.
     "assets/test/plume.loom",
     "assets/test/plume_gale.loom",
+    "assets/test/plume_roof.loom",
     "assets/test/mirrorpool.loom",
     // **Here for the validation layers and for nothing else**, so it is in this
     // list and not in `GOLDEN`. Water with no mesh in the frame means an empty
@@ -300,7 +301,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 39] = [
+const GOLDEN: [(&str, &str, &[&str]); 40] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -386,6 +387,19 @@ const GOLDEN: [(&str, &str, &[&str]); 39] = [
     // of the column along a curve. That is the difference between a row that
     // catches the regression and a row that blesses it.
     ("plume_gale", "assets/test/plume_gale.loom", &["--sim", "200"]),
+    // **A volume must not be depth-tested at a plane, and this is the only
+    // frame in either gate that can tell.** The particle pipeline tests LESS
+    // against the billboard's own plane, which runs through the marched hull's
+    // centre; geometry nearer than that plane discarded every fragment of the
+    // quad it covered, cutting the smoke dead straight along the geometry's
+    // silhouette with no haze over its face at all.
+    //
+    // Every other GOLDEN row — `plume` and `plume_gale` included — renders
+    // byte-identical with and without the depth write, because none of them has
+    // anything crossing a plume's quad plane. A fix whose only gate cannot see
+    // it is not gated, so the deck here is authored in front of the plane on
+    // purpose.
+    ("plume_roof", "assets/test/plume_roof.loom", &["--sim", "200"]),
     // **A traced reflection of scene geometry in water** (W3). Every other
     // water reference here looks at open sea or at a shoreline with nothing
     // standing beside it, so the reflection term is the analytic sky in all of
