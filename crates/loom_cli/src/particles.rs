@@ -917,9 +917,7 @@ pub(crate) fn simulate(
     #[allow(clippy::cast_precision_loss)]
     let now = ticks.unwrap_or(0) as f32 * DT;
     let sites = drip_sites(world, physics);
-    eprintln!("DRIPSITES {} floors {:?}", sites.len(), sites.iter().map(|s| s.floor_y).collect::<Vec<_>>());
     drip_instances(&sites, &drip_visual(), now, &mut out);
-    eprintln!("DRIPINST {} at now={now}", out.len());
 
     for entity in world.entities() {
         let Some(component) = world.emitter(*entity) else {
