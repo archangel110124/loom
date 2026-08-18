@@ -135,35 +135,29 @@ static const uint FLUID_SOLID = 2;
 /// Threads per group for every per-element pass, and the scan's block width.
 static const uint FLUID_GROUP = 256;
 
-/// The most particles one cell's bucket is re-sorted by index.
-///
-/// **This is not a performance knob. It is the reproducibility ceiling, and
-/// 128 was measured to be too low.** The scatter above hands out slots in
-/// arrival order and the sort takes that decision back — but only for the
-/// first `FLUID_SORT_MAX` of a bucket. Past it the tail keeps arrival order,
-/// the gather sums those particles' floats in that order, and the whole
-/// float-atomic ban has been defeated with no atomic in sight.
-///
-/// Measured on `slosh.loom` at `--sim 150`, three fresh processes: at 128 the
-/// three PNGs had three different hashes, 7.2% of pixels apart with a worst
-/// channel of 153. At 1024 they are byte-identical. So a cell in that scene
-/// does hold more than 128 particles — sixteen times rest density — which is
-/// itself a finding about the solve rather than about the sort.
-///
-/// **1024 was still too low, and `ribbon.loom` is what found it** (ADR 0057
-/// addendum). A cascade landing in a shallow pool packs a cell to well over a
-/// thousand particles during the transient, and three fresh processes gave
-/// three pictures 37% apart. At 4096 `ribbon` is byte-identical at tick 180 and
-/// at tick 400, and `slosh` is byte-identical at 150 **and at 600** — the run
-/// ADR 0057 records as failing.
-///
-/// `ponytail:` an insertion sort is O(k²) in the bucket, so this ceiling is
-/// also a hang risk if a cell ever reaches it, and at 4096 that would be 8M
-/// comparisons in one thread. It is why `ribbon` costs 37 ms a tick against
-/// `slosh`'s 3. The upgrade is a block radix sort with scan-derived ranks; the
-/// real fix is upstream, in a projection that does not let a cell reach a
-/// hundred times rest density in the first place.
-static const uint FLUID_SORT_MAX = 4096;
+// **There is no `FLUID_SORT_MAX` any more, and its removal is the fix for
+// review defect 3.** The bucket re-sort used to stop after the first 4,096
+// particles of a cell; past that the tail kept the arrival order the scatter's
+// atomic handed out, the P2G gather summed those particles' floats in that
+// order, and the float-atomic ban was defeated with no atomic in sight. The
+// number went 128 -> 1024 -> 4096, each time because a scene reached the
+// previous one, and each time the ceiling read as a safety valve when it was
+// the hole. `slosh.loom --sim 600` reached 4096 as well: three fresh processes,
+// three hashes, the marched surface itself differing (20496 / 20530 / 20626
+// triangles). It is now byte-identical.
+//
+// It was a ceiling because raising it was quadratic — the sort was a plain
+// insertion sort, so 4,096 was already 8M comparisons in one thread, and it is
+// what made `ribbon` cost 50 ms a tick against `slosh`'s 3. Shell's sort with
+// Knuth's 3h+1 gaps is O(k^1.5), one line longer, and produces the same array;
+// with it the ceiling costs nothing to remove:
+//
+//     ribbon  --sim 180    50.40 -> 14.84 ms/tick, same PNG to the byte
+//     slosh   --sim 600   ~350   -> 34.41 ms/tick, and now reproducible
+//
+// The remaining cost is the volume compression ADR 0057 failure 3 records,
+// which is still open: a settled tank should not be packing cells at all. What
+// has changed is that the compression no longer takes reproducibility with it.
 
 /// Probe slots. The output block starts here, so the CPU knows where to read
 /// without the count it wrote being part of the address.
@@ -336,19 +330,35 @@ void fluidSortCellMain(uint3 tid: SV_DispatchThreadID) {
     FluidConsts* c = push.c;
     if (int(tid.x) >= c->sizes.x) { return; }
     uint start = c->cellStart[tid.x];
-    uint count = min(c->cellCount[tid.x], FLUID_SORT_MAX);
-    // **This is the pass that makes the whole solver reproducible.** The
-    // scatter above handed out slots in arrival order; an insertion sort by
-    // particle index replaces that with an order the buffer alone decides.
-    // Buckets hold about eight, so this is ~32 comparisons in the common case.
-    for (uint a = 1u; a < count; ++a) {
-        uint v = c->sorted[start + a];
-        uint b = a;
-        while (b > 0u && c->sorted[start + b - 1u] > v) {
-            c->sorted[start + b] = c->sorted[start + b - 1u];
-            --b;
+    uint count = c->cellCount[tid.x];
+    // **This is the pass that makes the whole solver reproducible, and it
+    // sorts the whole bucket.** The scatter above handed out slots in arrival
+    // order; a sort by particle index replaces that with an order the buffer
+    // alone decides. `count` is the cell's real occupancy and used to be
+    // `min(occupancy, FLUID_SORT_MAX)` — see the note where that constant was.
+    //
+    // **Shell's sort, and the gap sequence is why the ceiling could go.** It
+    // produces the same array a plain insertion sort does — a comparison sort
+    // on distinct keys has one answer, so no picture moves — but insertion is
+    // O(k²) and this is O(k^1.5). Knuth's 3h+1 gaps are fixed, so the sequence
+    // of comparisons is a function of `count` alone and of nothing else.
+    //
+    // Buckets hold about eight in a healthy scene, where `gap` starts at 1 and
+    // this is the same ~32 comparisons it always was.
+    uint gap = 1u;
+    while (gap < count / 3u) { gap = 3u * gap + 1u; }
+    while (true) {
+        for (uint a = gap; a < count; ++a) {
+            uint v = c->sorted[start + a];
+            uint b = a;
+            while (b >= gap && c->sorted[start + b - gap] > v) {
+                c->sorted[start + b] = c->sorted[start + b - gap];
+                b -= gap;
+            }
+            c->sorted[start + b] = v;
         }
-        c->sorted[start + b] = v;
+        if (gap == 1u) { break; }
+        gap /= 3u;
     }
 }
 

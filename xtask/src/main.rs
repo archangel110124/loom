@@ -772,8 +772,9 @@ const GOLDEN: [(&str, &str, &[&str]); 50] = [
     // exists for in it at once — water parted round the bow, a hollow behind it
     // with the tiled bed visible through the trough, and connected sheets
     // thrown off the entry. At 300 it is a still pool with foam on it, which
-    // `plough.loom` can already draw, and it costs 83 seconds to render because
-    // the projection has compressed by then (see `FLUID_SORT_MAX`).
+    // `plough.loom` can already draw, and it costs 13 seconds to render because
+    // the projection has compressed by then (ADR 0057 failure 3, still open —
+    // it was 83 seconds until the bucket sort stopped being O(k²)).
     //
     // **Neither may enter `DETERMINISM_SCENES` or the pinned-hash tests** — ADR
     // 0053 §3. `cargo xtask repeat` is the gate that applies, and both are

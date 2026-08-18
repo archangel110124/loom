@@ -97,6 +97,12 @@ avoid it was implemented, and it still fired — through a ceiling that looked
 like a safety valve and was actually the hole. Anything that leaves *any*
 particle's rank to arrival order is the same defect.
 
+> **The ceiling no longer exists — Addendum 2.** Everything above about why a
+> tail in arrival order is fatal stands. What does not stand is the belief that
+> some number is large enough: 128, 1,024 and 4,096 were each chosen as
+> unreachable and each reached, the last by `slosh --sim 600`. The whole bucket
+> is sorted now, and what made that affordable is in Addendum 2.
+
 The two integer atomics that remain — the histogram and that cursor — are
 licensed because integer addition **is** associative: the count and the set are
 order-independent, and the one thing arrival order would have decided is taken
@@ -372,7 +378,14 @@ Three fresh processes gave three pictures **37% of pixels apart**. At 4096:
 | `ribbon` | 400 | byte-identical |
 | `plough_cinematic` | 110 | byte-identical |
 | `slosh` | 150 | byte-identical |
-| `slosh` | 600 | byte-identical **(§3's failing run)** |
+| `slosh` | 600 | ~~byte-identical~~ **FALSE WHEN WRITTEN — see Addendum 2** |
+
+> **That last row was wrong, and the review panel measured it wrong.** Nine
+> renders across two judges on an idle GPU gave nine distinct hashes at
+> `--sim 600`, the marched surface itself differing. It is corrected rather
+> than deleted because the mistake is the instructive part: it was written
+> from a single run that happened to agree, and one agreeing run is not a
+> reproducibility measurement. Addendum 2 is the fix and the re-measurement.
 
 The cost is the O(k²) insertion sort: `ribbon` at 180 is 52 ms a tick against
 `slosh`'s 3, and `plough_cinematic` at 300 is 277 ms a tick, which is 83 seconds
@@ -417,3 +430,101 @@ is; the pair is the tier comparison.
 ordinal — the free-list-free arithmetic of ADR 0047, because a drain needs a
 free list, which needs a compaction, which needs an atomic append. The particle
 count never changes, so volume is exactly conserved.
+
+---
+
+# Addendum 2 — the ceiling was the bug, and a better sort is what let it go
+
+- **Date:** 2026-08-18
+- **Status:** **proposed** — needs human approval with the rest of this ADR.
+- **Answers:** review defect 3 (`docs/design/WATER-REBUILD-REVIEW.md`), which
+  found the first addendum's table row false by direct measurement.
+
+## What the panel measured, and it was right
+
+`slosh.loom --sim 600`, nine renders across two judges on a verified-idle GPU:
+**nine distinct hashes**, adjacent pairs 5–10% of pixels apart, worst channel
+94–154, the divergence bounded exactly by the water surface — and the marched
+surface itself differing, 20,496 against 20,530 against 20,626 triangles. Cost
+~350 ms/tick, against the 8.4 the slice reported.
+
+Reproduced here first, before anything was touched, on the same hardware:
+three fresh processes at the gate arguments gave `301fc02c`, `15e3721a`,
+`1fc14e09`.
+
+The first addendum's table said that run was byte-identical. It was written
+from a run at `FLUID_SORT_MAX = 4096` that happened to agree, and **one
+agreeing run is not a reproducibility measurement** — which is the whole reason
+`cargo xtask repeat` renders three.
+
+## The cause is the one §3 named, and the ceiling is not fixable by raising it
+
+§3 of this ADR is right about the mechanism and it named its own hole:
+`fluidSortCellMain` re-sorted only `min(occupancy, FLUID_SORT_MAX)` of a
+bucket, `fluidP2GMain` gathers over the **full** occupancy, and so the tail past
+the ceiling kept the arrival order the scatter's `InterlockedAdd` handed out and
+had its floats summed in that order. No atomic is visible at the point of
+failure, which is what makes it hard to find.
+
+The number went 128 → 1,024 → 4,096, and a scene reached each one. That is not
+three unlucky guesses; it is a design in which correctness depends on a
+capacity constant, and such a constant goes stale the first time a scene is
+authored that nobody had in mind. **The ceiling is now gone**: the sort takes
+the cell's real occupancy and there is no clamp.
+
+**What made it a ceiling was the sort, not the concept.** A plain insertion
+sort is O(k²), so 4,096 was already 8M comparisons in one thread and raising it
+further was a hang risk — which is exactly why the previous slices raised it in
+small steps instead of deleting it. Shell's sort with Knuth's 3h+1 gaps is
+O(k^1.5), is one line longer, needs no scratch buffer, and **produces the same
+array**: a comparison sort on distinct keys has one answer, so for every bucket
+that was under the old ceiling the output is bit-for-bit what it was. That is
+the property that makes this a safe change to the gate rows, and it is
+confirmed below rather than argued.
+
+The gap sequence is fixed and derived from `count` alone, so the sequence of
+comparisons is still a function of the buffer and of nothing else — the
+requirement §3 states.
+
+## Re-measured, three fresh processes each, this machine
+
+| scene | tick | three fresh processes | ms/tick before | after |
+| --- | --- | --- | --- | --- |
+| `ribbon` | 180 | byte-identical, **same hash as before** | 50.40 | 14.77 |
+| `ribbon` | 400 | byte-identical | — | 17.78 |
+| `plough_cinematic` | 110 | byte-identical, **same hash as before** | 3.68 | 3.45 |
+| `plough_cinematic` | 300 | byte-identical | 277 | 38.94 |
+| `slosh` | 150 | byte-identical, **same hash as before** | 3.28 | 3.21 |
+| `slosh` | 600 | **byte-identical** — the failing run | ~350 | 34.17 |
+
+"Same hash as before" is the three `GOLDEN` rows, compared against renders from
+a binary built at the parent commit: `1cda7461…`, `28b73934…`, `452251eb…`.
+**No reference moves.**
+
+Wall clock for a single still: `slosh --sim 600` 211 s → **21.5 s**;
+`plough_cinematic --sim 300` 83 s → **12.6 s**.
+
+## What this does *not* fix, stated plainly
+
+**The volume compression (failure 3 of this ADR) is still open and is still the
+reason the numbers above are 34 ms and not 3.** A settled tank should not be
+packing cells past rest density at all, and the cost at tick 600 is the gather
+paying for every particle in an over-full cell. The first addendum called the
+compression and the nondeterminism "the same defect seen twice"; they are
+better described as **one cause with two symptoms, and only one of the two is
+fixed here**. The tier is reproducible past tick 600 now; it is not yet
+*correct* past tick 600, and a scene that runs long enough will still look
+wrong before it looks nondeterministic.
+
+The named next step is unchanged and is upstream of both: a ghost-fluid
+free-surface pressure boundary rather than a hard Dirichlet zero at the air
+interface. What is no longer part of it is "a block radix sort with
+scan-derived ranks so that `FLUID_SORT_MAX` stops being a cost cliff" — there
+is no `FLUID_SORT_MAX`, and a radix sort would now buy performance rather than
+correctness. It should be judged on that alone.
+
+**A single cell holding every particle in the domain is still the worst case
+for one thread**, and at 131,072 particles that is roughly 47M compare-exchanges
+in one lane. It is bounded, it is not a hang, and it is a simulation that has
+already failed for other reasons — but it is the price of having no ceiling,
+and it is the honest one to pay: a stall is visible and a wrong picture is not.
