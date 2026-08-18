@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 54] = [
+const SCENES: [&str; 55] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -110,6 +110,7 @@ const SCENES: [&str; 54] = [
     "assets/test/plume.loom",
     "assets/test/plume_gale.loom",
     "assets/test/plume_roof.loom",
+    "assets/test/plume_close.loom",
     "assets/test/mirrorpool.loom",
     // **Here for the validation layers and for nothing else**, so it is in this
     // list and not in `GOLDEN`. Water with no mesh in the frame means an empty
@@ -301,7 +302,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 40] = [
+const GOLDEN: [(&str, &str, &[&str]); 41] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -400,6 +401,28 @@ const GOLDEN: [(&str, &str, &[&str]); 40] = [
     // it is not gated, so the deck here is authored in front of the plane on
     // purpose.
     ("plume_roof", "assets/test/plume_roof.loom", &["--sim", "200"]),
+    // **Which of the two draws the outline — the noise or the envelope?** No
+    // other plume row can answer it. All three frame the column from 13 m or
+    // more, where the rim that decides it is one or two pixels wide; here the
+    // camera is 5.5 m from a 4.9 m column and the rim is ~40 px.
+    //
+    // It has been the wrong answer twice. The march clipped against an upright
+    // ellipsoid until c335c2c, and after it the envelope still MULTIPLIED the
+    // density, so the support ended exactly on `sootEnvelope`'s analytic cone and
+    // the outer third of the radius was a uniform wash behind a dead-straight
+    // line. Both times every plume row here was blessed on the broken picture and
+    // the human found it by opening the viewer.
+    //
+    // Reverting `SMOKE_RIM` at the reference size, fraction of pixels moving more
+    // than 4 levels:
+    //
+    //     plume 3.70%   plume_gale 1.76%   plume_roof 6.53%   plume_close 15.21%
+    //
+    // All four would fail, so this row is not the only one that can see THIS
+    // change -- it is the only one where the rim is more than a pixel or two, so
+    // it is the only one where a future change to the rim has anywhere to hide.
+    // That is the same argument `plume_gale` makes about the lean.
+    ("plume_close", "assets/test/plume_close.loom", &["--sim", "200"]),
     // **A traced reflection of scene geometry in water** (W3). Every other
     // water reference here looks at open sea or at a shoreline with nothing
     // standing beside it, so the reflection term is the analytic sky in all of
