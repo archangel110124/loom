@@ -610,3 +610,102 @@ needs to see; and the condition that triggers it is a stress harness, not
 anything the engine does. Recorded so the next person who sees it knows it has
 been chased. If it ever fires in a gate, that is a different bug and this
 paragraph is the negative control.
+
+---
+
+# Addendum 4 — the presentation path was on the wrong side of the bus, and failure 3 is mostly at the wall
+
+Two findings, from chasing `loom run assets/test/plough_cinematic.loom` falling
+to one or two frames a second when the hull lands. They are unrelated to each
+other; the first is fixed and the second is not.
+
+## The three presentation stages, split — and the timer that hid them
+
+`cinematic surface: 27706 triangles, marched in 19.2 ms` timed `fluid_draw`,
+which is a density readback, the CPU march and a spray readback. **The word
+`marched` named the smallest of the three.** Split and measured quiet, release,
+`plough_cinematic`, per frame drawn:
+
+| | tick 95 (pre-impact) | tick 115 (post-impact) |
+| --- | --- | --- |
+| before, one number | 13.7 ms | 23.1 ms |
+| density | 0.5 ms | 0.5 ms |
+| march | 4.2 ms | 8.2 ms |
+| spray | 1.3 ms | 1.2 ms |
+
+**`spray` does not scale with the impact.** It is a fixed 65,536-thread dispatch
+and it cannot; a reading that showed it doubling was taken against a busy GPU.
+Two measurements of a fence wait taken under different GPU load are not
+comparable, which is the same shape of error as comparing two AA numbers across
+a change in lighting.
+
+## What was actually costing 8 ms a stage: `GpuToCpu` is not free to *write*
+
+`density` and `instances` were allocated `GpuToCpu` and `solid` `CpuToGpu`.
+Host-visible memory is addressable from a shader, which makes it look free and
+is the trap: every access is a PCIe transaction, not a cached one.
+`fluidDensitySplatMain` ran half a million `InterlockedAdd`s on host memory and
+`fluidInstanceMain` wrote 3 MB as 196,608 scattered 16-byte stores — 8.04 ms and
+8.34 ms, for two dispatches and one, against 34 ms for the whole 175-dispatch
+step. All three are device-local now with a host-visible twin and a
+`vkCmdCopyBuffer` between them; the same bytes as a DMA are 0.5-1.0 ms.
+
+`probes` and `consts` stay host-visible deliberately: kilobytes touched once a
+tick, where the copy would cost more than the access.
+
+**`fluid_zero` declared `ComputeReadWrite` and records `vkCmdFillBuffer`.** The
+graph therefore emitted the next barrier with a source mask that did not cover
+what happened — latent until a second transfer wrote one of those buffers, then
+a plain `SYNC-HAZARD-WRITE-AFTER-WRITE`. Fixed in the same commit.
+
+## The device split survives this, and the GPU march is still not worth building
+
+§"The surface is marched on the CPU" stands, and the numbers above sharpen it
+rather than overturning it. Moving the march onto the device would buy 4-8 ms of
+a frame whose *step* is 30-48 ms a tick after the impact. It would be optimising
+the second-smallest term while the largest sits next door as a known-open
+failure, and it would put a scan or an atomic on the one path in this tier whose
+reproducibility is currently free.
+
+## Failure 3, located: the compression is mostly at the domain boundary
+
+Peak cell occupancy on `plough_cinematic`, as a multiple of rest density, with
+where it sits:
+
+| tick | peak | cells over 4x | of those, on the boundary |
+| --- | --- | --- | --- |
+| 60 | 1.18 | 0 | 0 |
+| 120 | 60.3 | 982 | 270 |
+| 200 | 160.7 | 797 | 486 |
+| 400 | 415.8 | 759 | 536 |
+
+The peak at tick 400 is at cell `(53, 0, 31)` of `[64, 16, 32]` — the floor, at
+the far wall. **Two thirds of the over-dense cells are on the boundary layer and
+the fraction grows monotonically**, which is a different diagnosis from "the
+projection does not conserve volume": `fluidG2PMain` clamps a particle's
+position into `[origin + h/4, origin + (dims - 1/4)h]` while `escapeSolid` pushes
+it out of the solid boundary cells, and a particle caught between the two is in
+a cell the marker never labels `FLUID`, so no pressure is ever solved to move it
+out. It accumulates and never leaves.
+
+That is what presents as time: `fluidSortCellMain` is one thread per cell and
+`fluidP2GMain` gathers a cell's whole bucket, so a cell holding 3,300 particles
+costs a single thread thousands of comparisons while its group idles. Marginal
+cost per tick, measured at HEAD:
+
+    ticks   0-60   3.5 ms      120-180   28.0 ms      240-300   65.7 ms
+           60-90   3.0         180-240   34.5         300-400   48.0
+           90-120  4.3
+
+And it is what presents as the picture: at tick 115 the whole tank erupts into
+foam and at tick 200 it has not settled — the bed is visible across most of the
+pool because the water has collapsed into over-dense sheets against the walls.
+
+**A viewer cannot survive that whatever the presentation costs.** `Play::advance`
+clamps catch-up to `dt.min(0.25)`, which is fifteen ticks; at 40 ms a tick that
+is a 600 ms frame, and since a tick then costs more than the 16.7 ms it
+represents the accumulator can never drain. Measured: 611 ms a frame, which is
+the 1-2 fps that was reported. The clamp is in *seconds* and its own comment
+says it exists to stop exactly this spiral — expressing it as a tick count would
+turn the collapse into slow motion. That is a change to the fixed-step contract
+for every scene and it is left for the human to rule on.
