@@ -1552,6 +1552,14 @@ pub struct WaterBody {
     /// separate, deferred decision — two visible water levels on camera is its
     /// trigger — and accepting the field here would implement it by accident.
     pub extent: Option<[f32; 3]>,
+    /// How much of the domain starts full of water, as a fraction of its
+    /// height — ADR 0057. Read only by [`WaterSimTier::Cinematic`].
+    ///
+    /// The solver's whole initial condition, and there is deliberately nothing
+    /// else: a shape function would be a second authoring language for
+    /// something the first three ticks of gravity rearrange anyway.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub fill: f32,
     /// The author's signature that this scene's game is no longer reproducible
     /// across machines — ADR 0053 §5.
     ///
@@ -1625,6 +1633,7 @@ impl Default for WaterBody {
             // repository must be bit-identical after the tier landed.
             simulation: WaterSimTier::Deterministic,
             extent: None,
+            fill: 0.5,
             acknowledge_nondeterminism: false,
             material: AssetRef::default(),
         }

@@ -875,6 +875,29 @@ fn check_tier(
         );
     }
 
+    // The grid is 64 cells along the longest axis, always, so the cell size is
+    // not authored — it is `max_extent / 64`, and the extent is the only knob.
+    // Outside [0.05, 0.5] m the answer is useless in one of two ways and both
+    // read as an engine fault: below it the 64³ grid covers less than three
+    // metres and the water is a puddle in the corner of the shot; above it a
+    // cell is half a metre and a pontoon smaller than one cell can be entirely
+    // inside a cell the solver calls air.
+    if let Some(extent) = body.extent.filter(|_| cinematic) {
+        let longest = extent.iter().copied().fold(0.0_f32, f32::max);
+        let cell = longest / 64.0;
+        if !(0.05..=0.5).contains(&cell) {
+            refuse(
+                "cinematic_cell_out_of_range",
+                "extent",
+                Value::from(Vec::from(extent)),
+                "the longest extent between 3.2 m and 32.0 m",
+                &format!(
+                    "the grid is 64 cells along the longest axis, so the cell                      is {cell:.4} m and must be in [0.05, 0.5]. This extent's                      longest axis is {longest:.2} m; make it at least 3.2 and                      at most 32.0 (ADR 0057)."
+                ),
+            );
+        }
+    }
+
     if cinematic && has_game_rules && !body.acknowledge_nondeterminism {
         refuse(
             "cinematic_water_demotes_a_game",

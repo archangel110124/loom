@@ -34,6 +34,7 @@
 mod cmaa2;
 mod debug_names;
 mod device;
+mod fluid;
 mod gpu_particles;
 mod instance;
 mod material;
@@ -57,6 +58,10 @@ pub use glam;
 pub use debug_names::DebugNames;
 pub use gpu_particles::GpuEmitter;
 pub use device::{Device, DeviceError};
+pub use fluid::{
+    fluid_grid, FluidDomain, FluidInputs, FluidProbe, FluidProbeResult, FluidSolid, FluidSolver,
+    FluidStepOutput, FLUID_GRID, FLUID_PER_CELL,
+};
 pub use material::{FLAG_TRIPLANAR, MaterialData, NO_TEXTURE};
 pub use renderer::{PointLight, MAX_LIGHTS, 
     Camera, EnvironmentData, GrassBlade, MAX_WAVES, Object, ParticleInstance, RenderError,
@@ -110,6 +115,11 @@ pub const RAIN_SIM_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rain_s
 /// One compute entry point: `gpuParticleSimulateMain` advances every slot and
 /// writes the `ParticleInstance` the *existing* particle vertex shader draws.
 /// There is no second particle renderer.
+/// The cinematic tier's fluid solver — ADR 0057. Hand-written compute, on the
+/// `rain_sim.slang` precedent; it is not a `loom_field` field, and any noise it
+/// ever needs comes from there rather than from a second implementation.
+pub const FLUID_SIM_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fluid_sim.spv"));
+
 pub const GPU_PARTICLES_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/gpu_particles.spv"));
 
