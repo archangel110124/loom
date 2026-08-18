@@ -73,6 +73,17 @@ const SPRAY_GRAVITY: f32 = crate::GRAVITY;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Droplet {
     pub position: [f32; 3],
+    /// How fast it is going, m/s, right now.
+    ///
+    /// **The derivative of [`ballistic`] and not a second integration** — the
+    /// position is a closed form over `age`, so this is too, and the two cannot
+    /// drift apart. It is drawn with rather than simulated with: a droplet
+    /// moving at 6 m/s is smeared across a shutter's worth of frame, which is
+    /// what stops a crown reading as a string of beads.
+    ///
+    /// **Zero for the rising sheet.** A sheet is a surface, not a droplet, and
+    /// a surface that streaks is a surface with holes in it.
+    pub velocity: [f32; 3],
     /// How far through its life it is, in `[0, 1)`. Drives the fade.
     pub fraction: f32,
     /// How big this one is, as a multiple of what the visual says.
@@ -242,10 +253,19 @@ fn crown_in(
         ];
         out.push(Droplet {
             position: ballistic(base, v, age),
+            velocity: ballistic_velocity(v, age),
             fraction: age / SPRAY_LIFETIME,
             scale: 1.0,
         });
     }
+}
+
+/// How fast a droplet launched at `v` is going after `age` seconds.
+///
+/// The exact derivative of [`ballistic`] — one closed form differentiated,
+/// never a second integration that could drift away from the first.
+fn ballistic_velocity(v: [f32; 3], age: f32) -> [f32; 3] {
+    [v[0], SPRAY_GRAVITY.mul_add(-age, v[1]), v[2]]
 }
 
 /// Where a droplet launched at `v` from `base` is after `age` seconds.
@@ -394,6 +414,7 @@ pub fn crown(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec<
                 * (1.0 / 16_777_216.0);
             out.push(Droplet {
                 position: ballistic(base, v, age),
+                velocity: ballistic_velocity(v, age),
                 fraction: age / lifetime,
                 scale: SPLASH_SIZE_JITTER.mul_add(unit.mul_add(2.0, -1.0), 1.0),
             });
@@ -536,6 +557,10 @@ pub fn column(at: [f32; 3], speed: f32, radius: f32, age: f32, seed: u32) -> Vec
                 .mul_add((i as f32 + 0.5 * ring as f32) / COLUMN_RING as f32, spin);
             out.push(Droplet {
                 position: [angle.cos().mul_add(r, at[0]), at[1] + y, angle.sin().mul_add(r, at[2])],
+                // **Still, deliberately.** The sheet's quads have to overlap
+                // into a surface; smearing each one along its own motion tears
+                // holes between them. See [`Droplet::velocity`].
+                velocity: [0.0; 3],
                 fraction: age / lifetime,
                 // Never jittered: the sheet's quads have to overlap into a
                 // surface, and a small one is a hole in it.

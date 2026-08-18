@@ -2615,6 +2615,24 @@ float4 fragmentMain(VSOutput in) : SV_Target {
 // automatically, so things end up at the edge often.
 // ---------------------------------------------------------------------------
 
+/// Pixels a smeared droplet is never allowed to be narrower than.
+///
+/// **2.5, and the number is measured rather than chosen — see
+/// `RAIN_MIN_PIXELS`, whose table this is taken from.** "At least one pixel" is
+/// the conventional form of the trick and it is measurably the wrong setting: a
+/// one-pixel primitive still straddles pixel boundaries, so it produces *more*
+/// isolated pixels than no floor at all. On rain's own sky band, as a fraction
+/// of pixels disagreeing sharply with their neighbourhood:
+///
+///     floor  0.0  0.75%      1.0  0.95%      1.5  0.62%
+///            2.0  0.27%      2.5  0.10%      3.0  0.02%
+///
+/// **Only smeared particles pay it.** A plume's puffs are metres across and
+/// were never sub-pixel; a droplet stretched along its own motion is thin in
+/// the other axis by construction, which is exactly the primitive the floor
+/// exists for.
+static const float PARTICLE_MIN_PIXELS = 2.5;
+
 struct ParticleOutput {
     float4 position : SV_Position;
     float2 local : TEXCOORD0;   // -1..1 across the quad
@@ -2683,20 +2701,101 @@ ParticleOutput particleVertexMain(uint vertexID: SV_VertexID) {
     }
 
     float3 world = p.position.xyz + (right * spun.x + up * spun.y) * quadHalf;
+    float4 color = p.color;
+
+    // -- The shutter smear ---------------------------------------------------
+    //
+    // **A droplet is not a bead, and the reason it looks like one is that a
+    // camera has a shutter and this quad did not.** A crown thrown off an
+    // impact is a few hundred spheres travelling at 3-8 m/s; a photograph of
+    // one records each as a short streak along its own path, and every judge
+    // who has looked at `splash.loom` has called it a string of beads.
+    //
+    // **This is the rain streak's frame, lifted, not a second one.** Same
+    // velocity-relative-to-the-camera, same `cross` for the ribbon's side, same
+    // screen-space width floor at the same measured 2.5 px, same conservation
+    // of light by dividing the opacity by the widening. There is one particle
+    // renderer (ADR 0047) and the rain layer is the one place this frame was
+    // already solved; copying its *shape* rather than its code is what keeps
+    // them one idea, because rain is additive with a `strength` and a particle
+    // is blended with an alpha.
+    //
+    // **Guarded on the smear being longer than nothing, not just on the
+    // shutter.** The streak frame is oriented along the motion while the disc
+    // frame carries a per-particle random roll; a particle standing still would
+    // otherwise change its orientation for no visible gain, and the rising
+    // sheet of a splash column is exactly that particle.
+    float shutter = p.velocity.w;
+    if (shutter > 0.0) {
+        // Metres per `RAIN_TICK`, so the timestep is defined in one place —
+        // see `EnvironmentData::eyeStep`. A camera travelling with a droplet
+        // sees it stand still, which is what a shutter records.
+        float3 relative = p.velocity.xyz - push.environment[0].eyeStep.xyz / RAIN_TICK;
+        float speed = length(relative);
+        if (speed * shutter > 1e-4) {
+            float3 along = relative / speed;
+            float3 side = cross(along, push.environment[0].eye.xyz - p.position.xyz);
+            float sideLength = length(side);
+            // End-on, the cross product vanishes and the ribbon would collapse
+            // to a line. Any perpendicular does: the quad covers almost
+            // nothing there.
+            side = sideLength > 1e-4 ? side / sideLength : right;
+
+            // **The screen-space width floor, at 2.5 px because that is the
+            // measured number.** At 1 px a primitive still straddles pixel
+            // boundaries and produces MORE isolated salt pixels than no floor
+            // at all — 0.75% with none, 0.95% at 1 px, 0.27% at 2 px on the
+            // rain measurements this is lifted from. Read off the matrix
+            // rather than a field-of-view constant, so it is exact whatever
+            // the projection is.
+            float widen = 1.0;
+            if (PARTICLE_MIN_PIXELS > 0.0) {
+                float4x4 viewProj = push.objects[push.objectOffset].mvp;
+                float4 clipA = mul(viewProj, float4(p.position.xyz, 1.0));
+                float4 clipB = mul(viewProj, float4(p.position.xyz + side * quadHalf, 1.0));
+                float2 ndcA = clipA.xy / max(clipA.w, 1e-4);
+                float2 ndcB = clipB.xy / max(clipB.w, 1e-4);
+                // The offset is `quadHalf`, which is HALF the quad's width, and
+                // a unit of NDC is `viewport/2` pixels. The two halves cancel,
+                // so this is the full screen width in pixels with no factor —
+                // the rain version offsets by a full width and carries the 0.5.
+                float pixelsWide =
+                    length((ndcB - ndcA) * push.environment[0].viewport.xy);
+                if (pixelsWide > 1e-4) {
+                    widen = max(1.0, PARTICLE_MIN_PIXELS / pixelsWide);
+                }
+            }
+
+            // The radius is the head of the streak, the smear is its tail:
+            // half a shutter's travel each way about the centre, so a droplet
+            // standing still is exactly the disc it was.
+            float halfLength = quadHalf + 0.5 * speed * shutter;
+            float halfWidth = quadHalf * widen;
+            world = p.position.xyz
+                  + along * (local.y * halfLength)
+                  + side * (local.x * halfWidth);
+            // Area went up by `widen`, so opacity comes down by it. Without
+            // this a droplet gets *brighter* the further away it is, which is
+            // what makes a naive width clamp read as a field of glowing
+            // scratches — the rain layer's own lesson.
+            color.a /= widen;
+        }
+    }
 
     ParticleOutput out;
     // `mvp` of the reserved object slot is the view-projection — see the note
     // on `Push::object_offset` in the Rust mirror.
     out.position = mul(push.objects[push.objectOffset].mvp, float4(world, 1.0));
     out.local = local;
-    out.color = p.color;
     out.worldPos = world;
     out.seed = float(index);
     out.additive = p.position.w < 0.0 ? 1.0 : 0.0;
     // The sign of red selects the flame field. Free: the schema clamps colour
     // to [0, 1] so the bit was unused, and `abs` puts the colour back.
     out.flame = p.color.r < 0.0 ? 1.0 : 0.0;
-    out.color = float4(abs(p.color.r), p.color.g, p.color.b, p.color.a);
+    // `color`, not `p.color`: the width floor above pays for its widening in
+    // the alpha, and reading the instance again here would spend it and keep it.
+    out.color = float4(abs(color.r), color.g, color.b, color.a);
     // The emitter's own position and the flame's half-height, so the field is
     // evaluated in flame-local coordinates and does not swim when the sprite's
     // random roll changes.

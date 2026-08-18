@@ -82,6 +82,12 @@ fn parse(component: &serde_json::Value) -> (loom_particles::Emitter, Visual) {
                 .get("flame")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
+            // **Not authorable, and deliberately.** A shutter belongs to a
+            // substance, not to a knob: smoke and fire are not smeared by one
+            // and a droplet is. `splash_template` is what says "these are the
+            // water's droplets", which is a fact about where the emitter sits
+            // in the scene rather than a field an author has to know to set.
+            shutter: 0.0,
         },
     )
 }
@@ -161,6 +167,10 @@ struct Visual {
     additive: bool,
     /// Draw a flame field over the quad instead of a sprite.
     flame: bool,
+    /// Seconds of motion one quad stands for. **Zero is a disc**, which is
+    /// every emitter in the engine except the water's own splash — see
+    /// [`WATER_SHUTTER`].
+    shutter: f32,
 }
 
 /// One emitter, kept alive across frames.
@@ -385,11 +395,19 @@ fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
 /// multiplier, which is what stops a band of a crown reading as identical
 /// beads. See `loom_water::spray::Droplet::scale`.
 fn drawn_drop(d: &loom_water::spray::Droplet, visual: &Visual) -> ParticleInstance {
-    // **No velocity yet.** A `Droplet` is a closed form over its age and does
-    // not carry one; recovering it means differentiating `ballistic`, which is
-    // the slice that turns the shutter on and not this one.
-    drawn_at(d.position, [0.0; 3], d.fraction, d.scale, visual)
+    drawn_at(d.position, d.velocity, d.fraction, d.scale, visual)
 }
+
+/// Seconds one water droplet's smear stands for.
+///
+/// **1/120 s: a real 60 fps frame with a 180-degree shutter.** Rain takes
+/// double that (`RAIN_SHUTTER = 0.03`) because a streak is what makes a wall
+/// of falling water read as weather at all; a droplet thrown off a crown is a
+/// *thing*, and doubling its smear turns a crown into a starburst.
+///
+/// It is the whole switch. Zero here — which is every other particle in the
+/// engine — is a disc, bit for bit as before.
+const WATER_SHUTTER: f32 = 1.0 / 120.0;
 
 /// The same, for anything that knows where it is and how old it is without
 /// being a `loom_particles::Particle` — the water's spray, which is a closed
@@ -445,13 +463,11 @@ fn drawn_at(
             lerp(visual.color_start[2], visual.color_end[2]),
             lerp(visual.alpha[0], visual.alpha[1]) * fade,
         ],
-        // **Shutter zero: a disc, exactly as before.** The velocity rides
-        // along unread — nothing in any shader looks at this field yet, which
-        // is deliberate. Widening a struct the GPU also *writes*
-        // (`gpu_particles.slang`) is the packing question on its own, and if
-        // any reference moves with the shutter at zero the packing is wrong
-        // and the fix is the packing, never a re-bless.
-        velocity: [velocity[0], velocity[1], velocity[2], 0.0],
+        // **Zero shutter is a disc**, which is every emitter but the water's
+        // own droplets: a shutter open for no time records no smear, so the
+        // physical reading and the compatibility reading are one number and
+        // there is no second flag to fall out of step with it.
+        velocity: [velocity[0], velocity[1], velocity[2], visual.shutter],
     }
 }
 
@@ -615,6 +631,12 @@ fn splash_template(world: &World) -> Vec<(loom_particles::Emitter, Visual)> {
         .iter()
         .filter(|e| world.emitter(**e).is_some_and(|c| !is_gpu(c)) && in_water(world, **e))
         .filter_map(|e| world.emitter(*e).map(parse))
+        // **This is where a shutter is decided, and the test is structural.**
+        // An emitter parented under a `WaterBody` *is* that water's splash —
+        // the scene comment in `splash.loom` says so and `in_water` is what
+        // enforces it. So these particles are droplets, and droplets smear.
+        // A plume, a flame or an explosion reaches this function never.
+        .map(|(emitter, visual)| (emitter, Visual { shutter: WATER_SHUTTER, ..visual }))
         .collect()
 }
 
@@ -800,6 +822,11 @@ fn column_visual(radius: f32) -> Visual {
         alpha: [0.72, 0.0],
         additive: false,
         flame: false,
+        // **The sheet is not smeared.** Its quads have to overlap into a
+        // surface; stretching each one along its own motion tears holes
+        // between them. `spray::column` hands back a zero velocity for the
+        // same reason, so this is belt and braces on one decision.
+        shutter: 0.0,
     }
 }
 
@@ -813,6 +840,7 @@ fn default_droplet() -> Visual {
         alpha: [0.9, 0.0],
         additive: false,
         flame: false,
+        shutter: WATER_SHUTTER,
     }
 }
 
