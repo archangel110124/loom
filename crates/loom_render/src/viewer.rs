@@ -143,6 +143,20 @@ pub struct Viewer {
     foam_address: vk::DeviceAddress,
     foam_params: [f32; 4],
     foam_coverage: vk::DeviceAddress,
+    /// The cinematic tier's marched free surface — see
+    /// [`Viewer::set_fluid_surface`]. Uploaded **per frame drawn**, because the
+    /// marcher runs on whatever the solver holds now; the two bakes above are
+    /// uploaded on load and the two stepped fields per tick.
+    fluid_buffer: vk::Buffer,
+    fluid_alloc: Option<Allocation>,
+    fluid_address: vk::DeviceAddress,
+    /// Vertices in `fluid_buffer`. Zero on every scene outside the tier.
+    fluid_verts: u32,
+    /// `fluid_address`, or null when this scene has no cinematic water.
+    fluid_address_or_null: vk::DeviceAddress,
+    /// The cinematic free surface's pipeline — `fluidVertexMain` over the same
+    /// `waterFragmentMain` the analytic sea uses, exactly as offscreen.
+    fluid_pipeline: vk::Pipeline,
     grass_pipeline: vk::Pipeline,
     /// The water surface. Whether it draws at all is read from
     /// [`Viewer::environment`], which the caller sets every frame.
@@ -408,6 +422,21 @@ impl Viewer {
             c"waterVertexMain",
             c"waterFragmentMain",
         )?;
+        // **And the cinematic free surface, on the same argument.** The window
+        // stepped the solver and drew nothing of it for four slices — defect 5
+        // of the water rebuild review, and the third time this project has
+        // shipped a water effect wired into the headless path only (ADR 0046 §7
+        // is the first, the splash crown the second). Same pipeline, same
+        // fragment shader, same draw as `renderer.rs`.
+        let fluid_pipeline = crate::renderer::create_geometry_pipeline(
+            &raw,
+            pipeline_layout,
+            pipeline_cache,
+            crate::renderer::HDR_FORMAT,
+            samples,
+            c"fluidVertexMain",
+            c"waterFragmentMain",
+        )?;
         // **And the rain, in the window as well as offscreen**, for the reason
         // spelled out above the water pipeline — and at the scene's sample
         // count, because rain draws into the multisampled image before the
@@ -533,6 +562,16 @@ impl Viewer {
                 "loom.viewer_foam",
                 vk::BufferUsageFlags::empty(),
             )?;
+        // The marched free surface. Same ceiling as offscreen — 12 MB, of which
+        // `slosh.loom` uses a twentieth.
+        let (fluid_buffer, fluid_alloc, fluid_address) =
+            crate::renderer::create_address_buffer(
+                &raw,
+                &mut allocator,
+                (crate::fluid_surface::MAX_VERTICES * size_of::<crate::FluidVertex>()) as u64,
+                "loom.viewer_fluid_surface",
+                vk::BufferUsageFlags::empty(),
+            )?;
 
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -624,6 +663,7 @@ impl Viewer {
         names.set(terrain_buffer, "loom.viewer_terrain");
         names.set(ripple_buffer, "loom.viewer_wavelets");
         names.set(flow_buffer, "loom.viewer_flow");
+        names.set(fluid_buffer, "loom.viewer_fluid_surface");
         names.set(depth, "loom.viewer_depth");
         names.set(acquired, "loom.sem_image_acquired");
         for semaphore in &rendered {
@@ -694,6 +734,12 @@ impl Viewer {
             foam_address,
             foam_params: [0.0, 0.0, 1.0, 0.0],
             foam_coverage: 0,
+            fluid_buffer,
+            fluid_alloc: Some(fluid_alloc),
+            fluid_address,
+            fluid_verts: 0,
+            fluid_address_or_null: 0,
+            fluid_pipeline,
             grass_pipeline,
             water_pipeline,
             grass_count: 0,
@@ -958,6 +1004,36 @@ impl Viewer {
                 .as_ref()
                 .ok_or_else(|| RenderError::Allocator("foam buffer is gone".into()))?,
             &coverage[..side * side],
+        )
+    }
+
+    /// Hand the viewer the cinematic fluid's free surface — ADR 0057 addendum.
+    ///
+    /// Mirrors [`crate::Renderer::set_fluid_surface`] in every particular
+    /// except its clock: **per frame drawn**, not per tick. The marcher reads
+    /// whatever the solver holds at the moment it is asked, and the window asks
+    /// it once a frame while the solver has stepped several times.
+    ///
+    /// The window has to make this call or it steps a solver whose result is
+    /// invisible — which is what it did for four slices, and is defect 5 of the
+    /// water rebuild review.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the viewer is being torn down.
+    pub fn set_fluid_surface(&mut self, vertices: &[crate::FluidVertex]) -> Result<(), RenderError> {
+        let count = (vertices.len().min(crate::fluid_surface::MAX_VERTICES) / 3) * 3;
+        if count == 0 {
+            self.fluid_verts = 0;
+            self.fluid_address_or_null = 0;
+            return Ok(());
+        }
+        self.fluid_verts = u32::try_from(count).unwrap_or(0);
+        self.fluid_address_or_null = self.fluid_address;
+        write_slice(
+            self.fluid_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("fluid surface buffer is gone".into()))?,
+            &vertices[..count],
         )
     }
 
@@ -1431,6 +1507,7 @@ impl Viewer {
         self.environment.foam = self.foam_params;
         self.environment.foam_coverage = self.foam_coverage;
         self.environment.foam_edge_cells = crate::renderer::FOAM_EDGE_CELLS;
+        self.environment.fluid_vertices = self.fluid_address_or_null;
         self.environment.rain_drops = self.rain_sim.drops_address;
         self.environment.rain_splashes = self.rain_sim.splashes_address;
         write_slice(
@@ -1546,6 +1623,7 @@ impl Viewer {
         } else {
             0
         };
+        let (fluid_pipeline, fluid_verts) = (self.fluid_pipeline, self.fluid_verts);
         let index_buffer = self.indices;
         let draws: Vec<(MeshRange, u32, u32)> = batches
             .iter()
@@ -1616,7 +1694,7 @@ impl Viewer {
         // write the scene target at all** — the rain pass is what produces it.
         // See the same construction in `renderer.rs`.
         let rain_resolves = msaa_ids.is_some() && rain_buffers.is_some();
-        let split = water_verts > 0 && msaa_ids.is_some();
+        let split = (water_verts > 0 || fluid_verts > 0) && msaa_ids.is_some();
         let water_set = self.water_textures.descriptor_set();
         let mut forward_uses = Vec::new();
         if !rain_resolves && !split {
@@ -1812,13 +1890,8 @@ impl Viewer {
                             base_push,
                             water_pipeline,
                             water_verts,
-                            // **`loom run` does not draw the cinematic surface
-                            // yet.** The solver steps in the viewer's fixed
-                            // step, but nothing marches its density here — the
-                            // headless still is the only path that does (ADR
-                            // 0057). Passing zero is that fact, stated.
-                            vk::Pipeline::null(),
-                            0,
+                            fluid_pipeline,
+                            fluid_verts,
                             particle_pipeline,
                             particle_count,
                             particle_slot,
@@ -1917,13 +1990,8 @@ impl Viewer {
                             base_push,
                             water_pipeline,
                             water_verts,
-                            // **`loom run` does not draw the cinematic surface
-                            // yet.** The solver steps in the viewer's fixed
-                            // step, but nothing marches its density here — the
-                            // headless still is the only path that does (ADR
-                            // 0057). Passing zero is that fact, stated.
-                            vk::Pipeline::null(),
-                            0,
+                            fluid_pipeline,
+                            fluid_verts,
                             particle_pipeline,
                             particle_count,
                             particle_slot,
@@ -2467,6 +2535,7 @@ impl Drop for Viewer {
             }
             self.device.destroy_pipeline(self.grass_pipeline, None);
             self.device.destroy_pipeline(self.water_pipeline, None);
+            self.device.destroy_pipeline(self.fluid_pipeline, None);
             if let Some(timers) = self.timers.as_mut() {
                 timers.destroy(&self.device);
             }
@@ -2481,6 +2550,7 @@ impl Drop for Viewer {
             self.device.destroy_buffer(self.ripple_buffer, None);
             self.device.destroy_buffer(self.flow_buffer, None);
             self.device.destroy_buffer(self.foam_buffer, None);
+            self.device.destroy_buffer(self.fluid_buffer, None);
             if let (Some(allocation), Some(allocator)) =
                 (self.grass_alloc.take(), self.allocator.as_mut())
             {
@@ -2503,6 +2573,11 @@ impl Drop for Viewer {
             }
             if let (Some(allocation), Some(allocator)) =
                 (self.foam_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            if let (Some(allocation), Some(allocator)) =
+                (self.fluid_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
             }

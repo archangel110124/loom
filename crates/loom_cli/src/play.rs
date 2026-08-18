@@ -955,26 +955,30 @@ impl Sim {
         self.fluid_cost
     }
 
-    /// The cinematic fluid's particles, as draw instances.
+    /// Everything the cinematic tier draws this frame: the marched free
+    /// surface, then the spray.
     ///
-    /// Through the one particle renderer (ADR 0047's rule) — there is no
-    /// second particle path and no fluid draw path.
-    pub fn fluid_particles(&mut self) -> Vec<loom_render::ParticleInstance> {
-        self.fluid.as_mut().map_or_else(Vec::new, loom_render::FluidSolver::instances)
-    }
-
-    /// The cinematic fluid's free surface, marched — ADR 0057 addendum.
+    /// **One call rather than two, because the order is load-bearing.** The
+    /// march is what fills the density field the particle path culls its spray
+    /// against; asking for the particles first draws every one of them,
+    /// including the ones inside the mesh. That used to be a doc comment on two
+    /// public methods, which is a rule a caller can read and then not follow —
+    /// and `loom run` was about to become the second caller.
     ///
-    /// **Call this before [`Self::fluid_particles`].** It is what fills the
-    /// density field the particle path culls its spray against; the other way
-    /// round draws every particle, including the ones inside the mesh.
-    pub fn fluid_surface(&mut self) -> Vec<loom_render::FluidVertex> {
+    /// The spray goes through the one particle renderer (ADR 0047's rule):
+    /// there is no second particle path and no fluid draw path.
+    ///
+    /// Empty on both halves for every scene outside the tier.
+    pub fn fluid_draw(
+        &mut self,
+    ) -> (Vec<loom_render::FluidVertex>, Vec<loom_render::ParticleInstance>) {
         let Some(solver) = self.fluid.as_mut() else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let (dims, cell) = solver.grid();
         let (origin, _) = solver.bounds();
-        loom_render::fluid_surface::march(solver.density(), dims, cell, origin)
+        let surface = loom_render::fluid_surface::march(solver.density(), dims, cell, origin);
+        (surface, solver.instances())
     }
 
     /// Apply this tick's buoyancy, before the solver runs.
@@ -1951,18 +1955,13 @@ impl Runner {
         self.physics.world()
     }
 
-    /// The cinematic fluid's particles, as draw instances — ADR 0057.
+    /// The cinematic tier's free surface and spray — see [`Sim::fluid_draw`].
     ///
-    /// Empty for every scene that does not opt into the tier, which is every
-    /// scene in this repository.
-    pub fn fluid_particles(&mut self) -> Vec<loom_render::ParticleInstance> {
-        self.physics.fluid_particles()
-    }
-
-    /// The cinematic fluid's free surface — ADR 0057 addendum. Call it before
-    /// [`Self::fluid_particles`]; see [`Sim::fluid_surface`].
-    pub fn fluid_surface(&mut self) -> Vec<loom_render::FluidVertex> {
-        self.physics.fluid_surface()
+    /// Empty for every scene that does not opt into the tier.
+    pub fn fluid_draw(
+        &mut self,
+    ) -> (Vec<loom_render::FluidVertex>, Vec<loom_render::ParticleInstance>) {
+        self.physics.fluid_draw()
     }
 
     /// What the cinematic tier's device round trip cost: total ms, fence ms,
@@ -2304,6 +2303,25 @@ impl Play {
         self.runner.foam()
     }
 
+    /// The cinematic tier's free surface and spray — see [`Sim::fluid_draw`].
+    ///
+    /// **This is the window's half of it.** `loom render --sim N` has asked
+    /// since ADR 0057; `loom run` stepped the same solver and drew nothing of
+    /// the result, which is defect 5 of the water rebuild review and the third
+    /// time this project has shipped a water effect on one path only.
+    pub fn fluid_draw(
+        &mut self,
+    ) -> (Vec<loom_render::FluidVertex>, Vec<loom_render::ParticleInstance>) {
+        self.runner.fluid_draw()
+    }
+
+    /// What the cinematic tier's device round trip has cost this session: total
+    /// ms, fence ms, ticks. Zero when there is no solver.
+    #[must_use]
+    pub fn fluid_cost(&self) -> (f64, f64, u64) {
+        self.runner.fluid_cost()
+    }
+
     /// Whether a human can drive anything here.
     #[must_use]
     pub fn has_player(&self) -> bool {
@@ -2466,6 +2484,57 @@ impl Play {
 mod tests {
     use super::*;
     use loom_scene::Scene;
+
+    /// **The cinematic tier reaches BOTH draw paths.**
+    ///
+    /// The model is `particles.rs`'s
+    /// `the_jet_reaches_both_paths_and_arrives_after_the_crown`, and the debt
+    /// is the same: `set_ripples` shipped tested-and-uncalled (ADR 0046 §7),
+    /// the splash crown was correct headless and drawn nowhere on the window
+    /// path, and the cinematic free surface made it three — the solver stepped
+    /// inside `loom run`'s fixed step for four slices while nothing marched or
+    /// uploaded the result (defect 5 of the water rebuild review, found the way
+    /// the other two were: by a human opening the window).
+    ///
+    /// **It reads source text, and that is deliberate rather than lazy.** What
+    /// broke is *wiring*, and wiring is what a unit test cannot reach here:
+    /// stepping the solver needs a Vulkan device, and `Viewer` needs a
+    /// swapchain on top of that, so neither draw path can be constructed in
+    /// `cargo test` at all. What a judge did by hand — grep `run.rs` for a
+    /// fluid reference and find none — is therefore the strongest check
+    /// available, and it is precisely the check that would have failed. The
+    /// precedent for the technique is `loom_agent`'s
+    /// `every_tool_wraps_a_real_subcommand`.
+    ///
+    /// Two layers per path, because the defect was two layers deep: the CLI has
+    /// to *ask* the simulation for the surface, and the renderer it hands it to
+    /// has to *draw* it.
+    #[test]
+    fn the_cinematic_surface_reaches_both_draw_paths() {
+        let cli_headless = include_str!("main.rs");
+        let cli_window = include_str!("run.rs");
+        let offscreen = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../loom_render/src/renderer.rs"));
+        let window = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../loom_render/src/viewer.rs"));
+        let required = [
+            // The headless still and the fly-through.
+            (cli_headless, "loom render", "fluid_draw"),
+            (cli_headless, "loom render", "set_fluid_surface("),
+            // The window the human actually watches.
+            (cli_window, "loom run", "fluid_draw"),
+            (cli_window, "loom run", "set_fluid_surface("),
+            // And the renderer behind each: an upload feeding a draw nobody
+            // records is the same defect one floor down.
+            (offscreen, "the offscreen renderer", "fluid_verts"),
+            (window, "the window renderer", "fluid_verts"),
+        ];
+        for (source, path, needle) in required {
+            assert!(
+                source.contains(needle),
+                "{path} does not mention `{needle}` — the cinematic tier draws on one path only, \
+                 which is the defect this test exists to make impossible (ADR 0046 §7)"
+            );
+        }
+    }
 
     const FALLING: &str = r#"
 [scene]

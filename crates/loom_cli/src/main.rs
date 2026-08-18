@@ -688,7 +688,8 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     if let Some(runner) = warmed.as_mut() {
         #[allow(clippy::disallowed_methods)]
         let started = std::time::Instant::now();
-        fluid_surface = runner.fluid_surface();
+        let spray;
+        (fluid_surface, spray) = runner.fluid_draw();
         let marched = started.elapsed().as_secs_f64() * 1000.0;
         if !fluid_surface.is_empty() {
             log::info(format!(
@@ -696,7 +697,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                 fluid_surface.len() / 3
             ));
         }
-        particles.extend(runner.fluid_particles());
+        particles.extend(spray);
         let (total, fence, ticks) = runner.fluid_cost();
         if ticks > 0 {
             #[allow(clippy::cast_precision_loss)]
@@ -1149,8 +1150,9 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     // known gap the fly-through inherits from slice 7: the
                     // particle list is built once, before the loop. The surface
                     // is the picture; the spray is a garnish sitting one moment
-                    // behind it.)
-                    let surface = runner.fluid_surface();
+                    // behind it. It is now one binding away rather than one
+                    // call away — `fluid_draw` hands both back.)
+                    let (surface, _spray) = runner.fluid_draw();
                     renderer.set_fluid_surface(&surface).map_err(|e| e.to_string())?;
 
                     renderer

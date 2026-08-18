@@ -1183,6 +1183,31 @@ impl ApplicationHandler for App {
                 plumes.advance(stepped);
                 let particles: &[loom_render::ParticleInstance] = plumes.instances();
 
+                // **The cinematic tier, in the window at last** — ADR 0057,
+                // defect 5 of the water rebuild review. Play has been stepping
+                // the solver here since slice 5 and the window drew none of it:
+                // the surface march and the spray readback existed on the
+                // headless path only, which is the third time this project has
+                // shipped a water effect wired into one path (`set_ripples`,
+                // ADR 0046 §7, and the splash crown are the first two).
+                //
+                // **Per frame drawn, not per tick**, and that is the only thing
+                // about it that differs from headless. The readback that ADR
+                // 0053 §3 requires to be synchronous and inside the fixed step
+                // is `Sim::float_cinematic`'s, which the tick above already
+                // ran; marching the density it left is presentation and belongs
+                // where the picture is made. A tick with no frame marches
+                // nothing.
+                //
+                // Not gated on `stepped`: the human orbiting a paused scene
+                // still has to see the water. The march is idempotent — it
+                // reads the solver's density and changes nothing.
+                let (fluid_surface, fluid_spray) = self
+                    .play
+                    .as_mut()
+                    .map(crate::play::Play::fluid_draw)
+                    .unwrap_or_default();
+
                 // Resolved against the play world when one is running, so a
                 // HUD element parented to something that moved reads the same
                 // world the rules judged.
@@ -1279,8 +1304,12 @@ impl ApplicationHandler for App {
                 );
                 // Where the rain lands is the GPU's answer now: a splash is a
                 // collision `rain_sim.slang` resolved against the baked world,
-                // appended to a ring and drawn indirectly (ADR 0015).
-                let crowns: Vec<loom_render::ParticleInstance> = Vec::new();
+                // appended to a ring and drawn indirectly (ADR 0015). What does
+                // still arrive on the CPU is the cinematic tier's spray, read
+                // back inside the fixed step and appended here so it goes
+                // through the one particle renderer like everything else
+                // (ADR 0047's rule) — the same list the headless path builds.
+                let crowns: Vec<loom_render::ParticleInstance> = fluid_spray;
                 let combined;
                 let particles: &[loom_render::ParticleInstance] = if crowns.is_empty() {
                     particles
@@ -1331,6 +1360,13 @@ impl ApplicationHandler for App {
                         )
                     {
                         crate::log::warn(format!("foam: {e}"));
+                    }
+                    // **And the cinematic free surface**, marched above. Empty
+                    // outside the tier and in edit mode, where there is no
+                    // simulation and so no solver — the same rule the two
+                    // stepped fields above it follow.
+                    if let Err(e) = viewer.set_fluid_surface(&fluid_surface) {
+                        crate::log::warn(format!("cinematic surface: {e}"));
                     }
                 }
 
@@ -1763,6 +1799,24 @@ impl App {
             "cpu {mean:.3} ms/frame mean, {:.3} ms worst over {} frames",
             self.cpu_worst_ms, self.cpu_frames
         ));
+        // **And what the cinematic tier's device round trip cost**, in the same
+        // words the headless path prints — ADR 0053 §4 asks for it to be
+        // measured and reported rather than assumed tolerable, and the window
+        // is where it is worst: every tick's fence wait now queues behind a
+        // frame the same GPU is drawing. Silent above is a scene outside the
+        // tier, which is every scene but three.
+        if let Some((total, fence, ticks)) = self.play.as_ref().map(crate::play::Play::fluid_cost)
+            && ticks > 0
+        {
+            #[allow(clippy::cast_precision_loss)]
+            let n = ticks as f64;
+            crate::log::info(format!(
+                "cinematic water: {:.2} ms/tick, {:.2} ms of it the device round trip, over \
+                 {ticks} ticks",
+                total / n,
+                fence / n
+            ));
+        }
     }
 
     /// Re-derive draw calls from the simulated world.
