@@ -2410,18 +2410,41 @@ pub(crate) fn environment_with_wind(
 /// - **whether there is one at all.** A zero discharge is the flag the strip
 ///   collapses on, so a scene that authors no cascade renders unchanged.
 fn add_cascade(env: &mut loom_render::EnvironmentData, world: &World) {
-    let Some((entity, component)) = world.cascade() else {
+    let Some(c) = resolve_cascade(world, env.water[0]) else {
         return;
     };
-    let Ok(cascade) =
-        serde_json::from_value::<loom_scene::components::Cascade>(component.clone())
-    else {
-        return;
-    };
-    let Some(global) = world.global_transform(entity) else {
-        return;
-    };
-    let m = global.matrix;
+    env.cascade_a = [c.lip_a[0], c.lip_a[1], c.lip_a[2], c.authored.discharge];
+    env.cascade_b = [c.lip_b[0], c.lip_b[1], c.lip_b[2], c.authored.spread];
+    env.cascade_c = [c.fall[0], c.fall[1], c.authored.breakup, c.drop];
+}
+
+/// A cascade with its lip in world space and its geometry worked out.
+///
+/// **One resolution, three readers**: the environment buffer the vertex shader
+/// draws from, and the mist mound each of the two particle paths raises at the
+/// foot. Working the foot out twice is how the mist ends up somewhere other
+/// than where the water lands, and on a tall fall the throw is metres.
+pub(crate) struct ResolvedCascade {
+    pub(crate) authored: loom_scene::components::Cascade,
+    /// The lip's ends, world space.
+    pub(crate) lip_a: [f32; 3],
+    pub(crate) lip_b: [f32; 3],
+    /// Horizontal unit direction the water leaves along.
+    pub(crate) fall: [f32; 2],
+    /// Metres from the lip down to the still-water level.
+    pub(crate) drop: f32,
+    /// Where the water lands: the lip's midpoint plus the ballistic throw, at
+    /// the water line.
+    pub(crate) foot: [f32; 3],
+    /// Half the lip's length, in metres — the mound's natural radius.
+    pub(crate) half_span: f32,
+}
+
+pub(crate) fn resolve_cascade(world: &World, surface_height: f32) -> Option<ResolvedCascade> {
+    let (entity, component) = world.cascade()?;
+    let authored =
+        serde_json::from_value::<loom_scene::components::Cascade>(component.clone()).ok()?;
+    let m = world.global_transform(entity)?.matrix;
     // Column-major, the same convention `gather_lights` reads translations out
     // of. A point, so the translation column applies.
     let place = |p: [f32; 3]| {
@@ -2431,26 +2454,42 @@ fn add_cascade(env: &mut loom_render::EnvironmentData, world: &World) {
             m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
         ]
     };
-    let a = place(cascade.lip_a);
-    let b = place(cascade.lip_b);
+    let lip_a = place(authored.lip_a);
+    let lip_b = place(authored.lip_b);
 
     // `cross(lip, +Y)` in the horizontal plane is `(dz, -dx)`. The validator
     // has already refused a lip whose ends coincide, so this normalises.
-    let (dx, dz) = (b[0] - a[0], b[2] - a[2]);
+    let (dx, dz) = (lip_b[0] - lip_a[0], lip_b[2] - lip_a[2]);
     let length = dx.hypot(dz);
     if length < 1.0e-4 {
-        return;
+        return None;
     }
     let fall = [dz / length, -dx / length];
 
     // The lip's height above the pool. Clamped positive: a lip authored below
     // the water line is a mistake the scene can make, and a negative drop would
     // send the sheet upward rather than draw nothing.
-    let drop = (a[1].min(b[1]) - env.water[0]).max(0.0);
-
-    env.cascade_a = [a[0], a[1], a[2], cascade.discharge];
-    env.cascade_b = [b[0], b[1], b[2], cascade.spread];
-    env.cascade_c = [fall[0], fall[1], cascade.breakup, drop];
+    let drop = (lip_a[1].min(lip_b[1]) - surface_height).max(0.0);
+    // **Where the water lands, out of the same hydraulics the sheet is drawn
+    // from.** `X(drop)` is 0.89 m on `spout` and 4.17 m on `cascade`; a mound
+    // placed under the lip instead would be behind the fall on both.
+    let throw = loom_water::nappe::brink(authored.discharge, authored.spread, authored.breakup)
+        .at(drop)
+        .throw;
+    let foot = [
+        (lip_a[0] + lip_b[0]).mul_add(0.5, fall[0] * throw),
+        surface_height,
+        (lip_a[2] + lip_b[2]).mul_add(0.5, fall[1] * throw),
+    ];
+    Some(ResolvedCascade {
+        authored,
+        lip_a,
+        lip_b,
+        fall,
+        drop,
+        foot,
+        half_span: length * 0.5,
+    })
 }
 
 /// Put the scene's sea into the environment the shader reads.

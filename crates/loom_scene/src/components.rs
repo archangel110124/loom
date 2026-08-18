@@ -1854,6 +1854,21 @@ pub struct Cascade {
     /// for why this is authored rather than derived from turbulence intensity.
     #[schemars(range(min = 0.005, max = 0.01))]
     pub breakup: f32,
+    /// How high the mist mound at the foot stands, as a multiple of the height
+    /// the fall's own energy suggests. `0` is no mist at all.
+    ///
+    /// **The mound's position is not authorable and that is the point.** A
+    /// waterfall's mist stands where the sheet lands, which is
+    /// `lip + fall_direction · X(drop)` out of the hydraulics — several metres
+    /// forward on a tall fall. An author placing a separate emitter there would
+    /// be computing a ballistic throw by hand and would get it wrong the moment
+    /// the discharge changed.
+    ///
+    /// What is left to author is how much of it there is, which the free-fall
+    /// model genuinely does not answer: how much water becomes airborne at an
+    /// impact depends on what it lands on.
+    #[schemars(range(min = 0.0, max = 4.0))]
+    pub mist: f32,
 }
 
 impl Default for Cascade {
@@ -1869,6 +1884,11 @@ impl Default for Cascade {
             discharge: 0.1,
             spread: 0.03,
             breakup: 0.0075,
+            // **On by default, which nothing else in this schema is**, because
+            // a waterfall without mist at its foot is the thing that reads as
+            // fake. The usual compatibility argument does not apply: the
+            // component is new, so there is no scene this default can move.
+            mist: 1.0,
         }
     }
 }

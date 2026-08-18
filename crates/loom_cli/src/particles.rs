@@ -92,6 +92,100 @@ fn parse(component: &serde_json::Value) -> (loom_particles::Emitter, Visual) {
     )
 }
 
+/// The mist bank at the foot of the scene's cascade, if it has one — ADR 0054.
+///
+/// **What was measured first, because the design pass asked for it.** The plan
+/// was to reuse ADR 0020/0050's marched soot volume with a bright albedo, and
+/// the stated risk was cost: the march early-outs when transmittance falls
+/// below `SMOKE_T_MIN`, and a bright low-density medium was predicted to
+/// early-out later and therefore cost more.
+///
+/// **It cannot.** `T *= 1 − a` with `a = 1 − exp(−σ·dt)`, and `σ` is
+/// `SMOKE_SIGMA · density · alpha`. The albedo — `color_start`/`color_end`,
+/// which reaches the shader as `in.color.rgb` — appears only in `acc`, never in
+/// `T`. Measured anyway on `plume.loom` at 1920x1080, three runs at its
+/// authored soot albedo against three at mist-white: **0.747 / 0.752 /
+/// 0.804 ms** against **0.776 / 0.746 / 0.770 ms**. One number, inside
+/// run-to-run noise.
+///
+/// **The volume was then built, rendered, and rejected on its shape.**
+/// `sootEnvelope` is a chimney: height `2R`, greatest radius `0.61R`, and a
+/// foot radius of `0.09R` because `SMOKE_R0` is 0.16. Standing one at the
+/// impact draws a narrow wisp rising *over* the cliff — a column of steam, not
+/// a bank of mist. Widening it means changing the envelope every fire and plume
+/// in the engine shares, which is a much larger claim than this slice is
+/// making, and stacking several is N marches for N chimneys.
+///
+/// So the mist is **ordinary alpha sprites**, which is what the sprite path is
+/// for and what a broad soft haze actually is. The measurement above is kept
+/// because it is the useful half: a bright marched volume is free, and the
+/// reason to reach for one is shape, not cost.
+///
+/// **What is derived and what is authored.** The position is the fall's foot —
+/// `lip + fall_direction · X(drop)`, out of the same hydraulics the sheet is
+/// drawn from, which is 0.89 m forward on `spout` and 4.17 m on `cascade` and
+/// is not something an author can place by hand once the discharge changes. The
+/// spread is the lip's own; the rate and the puff size scale with the lip and
+/// the drop. What is left is `Cascade::mist`, a multiplier, because how much
+/// water an impact throws into the air depends on what it hits and a free-fall
+/// model does not know.
+fn cascade_mist(
+    world: &World,
+    wind: &loom_field::wind::Wind,
+) -> Option<(loom_particles::Emitter, Visual, [f32; 3])> {
+    // **The cheap question first.** Every scene in the repository reaches this
+    // function twice, and `water_of` derives a wave spectrum from the wind;
+    // paying for that in a scene with no waterfall would be a cost this feature
+    // charges to everything that does not use it.
+    world.cascade()?;
+    let surface = crate::weather::water_of(world, wind)?.surface_height;
+    let c = crate::resolve_cascade(world, surface)?;
+    if c.authored.mist <= 0.0 || c.drop <= 0.0 {
+        return None;
+    }
+    // Both terms matter and neither alone is enough: a wide low weir throws a
+    // broad shallow bank and a narrow tall fall throws a thin high one.
+    let scale = c.authored.mist * c.half_span.mul_add(0.35, 0.16 * c.drop);
+    let span = c.half_span.max(0.25);
+    // Through `parse` rather than by building an `Emitter` and a `Visual`
+    // directly, so the bank reads its defaults from exactly the same place an
+    // authored emitter does and cannot drift away from them.
+    let (emitter, visual) = parse(&serde_json::json!({
+        // Proportional to the lip: twice the weir, twice the water landing.
+        "rate": f64::from((c.authored.mist * 16.0 * span).min(200.0)),
+        "lifetime": 2.6,
+        "lifetime_jitter": 0.45,
+        // Thrown up out of the impact and stopped almost at once by drag, which
+        // is what makes a bank rather than a fountain.
+        "speed": 2.4,
+        "spread_degrees": 60.0,
+        "radius": f64::from(span),
+        "gravity": 0.5,
+        "drag": 1.5,
+        "turbulence": 0.9,
+        "turbulence_scale": 0.4,
+        // **Zero, and this is ADR 0045's trap clause in miniature.** The bank
+        // stands where the water lands. Letting the scene's wind carry it would
+        // walk it off the impact over a long run, and the impact is the only
+        // thing anchoring it.
+        "wind_response": 0.0,
+        "size": [f64::from(scale * 1.1), f64::from(scale * 3.4)],
+        // Thin, and many: a bank is an accumulation of nearly-transparent
+        // puffs. Opaque ones read as cotton wool.
+        "alpha": [0.22, 0.0],
+        // Mist is water, so it is nearly white — but not 1.0, or it clips
+        // against a bright sky and loses its own shading.
+        "color_start": [0.90, 0.92, 0.95],
+        "color_end": [0.86, 0.89, 0.93],
+        "additive": false,
+        "flame": false,
+        // Fixed rather than salted: there is one cascade per scene, so there is
+        // nothing for a salt to tell apart.
+        "seed": 0x_ca5c_ade5_u64,
+    }));
+    Some((emitter, visual, c.foot))
+}
+
 /// Whether this emitter is simulated on the device (ADR 0047).
 ///
 /// Read on its own as well as through [`parse`], because the *first* thing
@@ -265,6 +359,23 @@ impl Plumes {
                     let wind = &plumes.wind;
                     system.step_in_wind(DT, &emitter, origin, &|at| wind.at(at, t));
                 }
+            }
+            plumes.live.push(Live { system, emitter, visual, origin });
+        }
+        // The cascade's mist, which is not an entity — ADR 0054. **Both
+        // particle paths raise it**, this one and `simulate`; W9's rule, and
+        // the reason is that the last water effect wired on one path only left
+        // the window drawing flat water over a wake it was feeling.
+        if let Some((emitter, visual, origin)) = cascade_mist(world, &plumes.wind) {
+            let mut system = loom_particles::System::new(emitter.seed);
+            // Warmed to its settled population like any other steady emitter,
+            // or the window opens on a waterfall with one puff at its foot.
+            // **In still air, not the scene's wind**, matching `wind_response`
+            // of zero — see `cascade_mist`.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let warm = ((emitter.lifetime * 2.0) / DT).ceil() as u32;
+            for _ in 0..warm {
+                system.step_in_wind(DT, &emitter, origin, &|_| [0.0; 3]);
             }
             plumes.live.push(Live { system, emitter, visual, origin });
         }
@@ -679,6 +790,22 @@ pub(crate) fn simulate(
             system.step_in_wind(DT, &emitter, origin, &|at| wind.at(at, t));
         }
 
+        for p in system.particles() {
+            out.push(instance(p, &visual));
+        }
+    }
+
+    // The cascade's mist — ADR 0054. Not an entity, so it is raised here as
+    // well as in `Plumes::new`; see the note there.
+    if let Some((emitter, visual, origin)) = cascade_mist(world, wind) {
+        let mut system = loom_particles::System::new(emitter.seed);
+        // Same rule every emitter in this function follows: `--sim N` steps N,
+        // and a still with no `--sim` steps far enough to look settled.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let steps = ticks.unwrap_or_else(|| ((emitter.lifetime * 2.0) / DT).ceil() as u32);
+        for _ in 0..steps {
+            system.step_in_wind(DT, &emitter, origin, &|_| [0.0; 3]);
+        }
         for p in system.particles() {
             out.push(instance(p, &visual));
         }

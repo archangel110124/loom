@@ -537,6 +537,13 @@ const GOLDEN: [(&str, &str, &[&str]); 46] = [
     // `--sim 120` on both: the streaks are a function of the clock, so tick 0
     // is the one moment the noise field is unshifted, and a reference taken
     // there would agree with a broken scroll.
+    //
+    // **And they carry the mist bank**, which no other reference does either.
+    // Stubbing it — `Cascade.mist = 0` — moves **4.93% of `cascade`** at
+    // 1920x1080 against a 0.1% tolerance, checked rather than assumed on the
+    // puddles precedent. The bank costs at most **+0.099 ms** of the water pass
+    // over a dolly from 14 m in to inside it (14.3 m +0.030, 10.7 m +0.048,
+    // 7.1 m +0.099, 3.5 m +0.055, inside +0.002), against a 0.8 ms budget.
     ("spout", "assets/test/spout.loom", &["--sim", "120"]),
     ("cascade", "assets/test/cascade.loom", &["--sim", "120"]),
     // **Water against terrain**, which `ocean` cannot cover: it has no voxel
