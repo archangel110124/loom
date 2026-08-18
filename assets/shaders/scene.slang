@@ -3119,6 +3119,53 @@ static const float SMOKE_W = 0.30;
 /// 0.36 + 0.25 = 0.61 stays under the fbm's supremum, so the top is thinned and
 /// not erased; the top fade still does the erasing.
 static const float SMOKE_T0_RISE = 0.25;
+/// Where the rim erosion starts, as a fraction of the cone's own radius, and
+/// how much threshold it has added by the cone itself.
+///
+/// **The envelope was a pure multiplier, so the silhouette was the envelope's.**
+/// `saturate((d - thr) / W) * body` is nonzero wherever `body` is, so the support
+/// ended exactly on `sootEnvelope`'s cone. That boundary is faint, but it is
+/// analytic: it is a dead-straight line that the noise cannot move, and the outer
+/// third of the radius reads as a uniform wash inside it. At `plume_roof`'s
+/// camera pulled in to 5.5 m it is a straight edge 300 px long with a haze
+/// behind it, which is the reported "hard-edged silhouette".
+///
+/// **The marched cylinder is NOT that boundary, and this was measured before it
+/// was fixed.** Doubling `rc` moves the silhouette under 4 px; scaling `rMax` by
+/// 0.75 moves it in by exactly 0.75 (327/336/348 -> 369/372/378 at three rows).
+/// `columnChord`'s containment holds; the envelope is what was showing.
+///
+/// Raising the threshold across a band at the rim makes the support an
+/// ISO-CONTOUR of the field instead: soot survives out there only where the noise
+/// is high, so the boundary is torn at the fbm's own frequency and moves as the
+/// field moves. Inside `SMOKE_RIM` nothing changes at all, which is why the
+/// column keeps its body — a rise driven by `1 - body` was tried first and eats
+/// the core, because `body` is a linear cone and is already 0.7 a third of the
+/// way out. That version left a thin broken wisp.
+///
+/// **The bound is closed form, which is the point of a band rather than a fade.**
+/// `d < 1` by construction — `loom_lattice` is `(hash >> 8) / 2^24` in `[0, 1)`,
+/// `loom_value_noise` lerps those corners, and `fireFbm` normalises by its own
+/// amplitude sum — and the threshold is at least `SMOKE_T0 + SMOKE_T0_RISE * h`,
+/// so density is zero unless
+///
+///     rim < (1 - SMOKE_T0 - SMOKE_T0_RISE * h) / SMOKE_EDGE
+///
+/// i.e. the support lies inside
+///
+///     q < SMOKE_RIM + (1 - SMOKE_RIM) * (1 - SMOKE_T0 - SMOKE_T0_RISE * h)
+///                                     / SMOKE_EDGE
+///
+/// which at 0.55 / 1.0 is **q <= 0.838 at the foot, 0.782 at mid height and
+/// 0.726 at the top** — a guaranteed 0.40 m of clear air inside the cone at
+/// `plume.loom`'s R = 4 (rMax 2.44), on top of `columnChord`'s own margin. The
+/// worst case over 4,000,000 samples of the actual 3-octave `fireFbm` is 0.9472
+/// and its 99.9th percentile is 0.8356, so the boundary a frame actually draws
+/// sits near **q = 0.76 / 0.71 / 0.65**; the gap between those two rows is where
+/// the tearing lives. Lower `SMOKE_EDGE` past `1 - SMOKE_T0 = 0.64` and the
+/// guarantee is gone and the straight rim comes back.
+static const float SMOKE_RIM = 0.55;
+static const float SMOKE_EDGE = 1.0;
 /// Extinction per metre at full density.
 static const float SMOKE_SIGMA = 3.2;
 /// Henyey-Greenstein asymmetry. Positive is forward-scattering, which is what
@@ -3487,7 +3534,7 @@ bool columnChord(float3 o, float3 d, float R, out float t0, out float t1) {
 /// One function so the density and the sun-shadow chord cannot disagree about
 /// where the plume is, which is the same reason `fireField` computes soot and
 /// flame from one `d`.
-float sootEnvelope(float3 p, float R, out float h, out float2 rel) {
+float sootEnvelope(float3 p, float R, out float h, out float2 rel, out float q) {
     h = saturate((p.y + R) / (2.0 * R));
     float2 wd = normalize(push.environment[0].wind.xy + float2(1e-4, 0.0));
     // The bend is superlinear in height because drag on a rising parcel has had
@@ -3496,7 +3543,10 @@ float sootEnvelope(float3 p, float R, out float h, out float2 rel) {
     // without recomputing `max(h - h^1.6)` breaks `columnChord`'s containment.
     rel = p.xz - wd * (sootBendMax(R) * pow(h, 1.6));
     float rMax = R * SMOKE_ASPECT * (SMOKE_R0 + SMOKE_FLARE * pow(h, SMOKE_FLARE_P));
-    return saturate(1.0 - length(rel) / max(rMax, 1e-4))
+    // The radius as a fraction of the cone's own — what `SMOKE_RIM` bands and
+    // the only place the cone's width is known, so nothing recomputes it.
+    q = length(rel) / max(rMax, 1e-4);
+    return saturate(1.0 - q)
          * smoothstep(0.0, SMOKE_FOOT, h)
          * (1.0 - smoothstep(SMOKE_TOP, 1.0, h));
 }
@@ -3533,7 +3583,8 @@ float3 sootOffset(float seed) {
 float sootDensity(float3 p, float R, float t, float3 off, float dF, float dW, bool warp) {
     float h;
     float2 rel;
-    float body = sootEnvelope(p, R, h, rel);
+    float q;
+    float body = sootEnvelope(p, R, h, rel, q);
     if (body <= 0.0) {
         return 0.0;
     }
@@ -3570,7 +3621,12 @@ float sootDensity(float3 p, float R, float t, float3 off, float dF, float dW, bo
         m += (rd * dpdy - float3(0.0, 1.0, 0.0) * dpdr) * SMOKE_WARP * (0.25 + h);
     }
     float d = fireFbm(m + off, 3, dF);
-    return saturate((d - (SMOKE_T0 + SMOKE_T0_RISE * h)) / SMOKE_W) * body;
+    // **The envelope raises the threshold as well as scaling the result.** The
+    // scale alone put the support on the envelope's cone; see `SMOKE_EDGE` for
+    // the measurement and for the closed-form radius the support is bounded by.
+    float rim = saturate((q - SMOKE_RIM) / (1.0 - SMOKE_RIM));
+    float thr = SMOKE_T0 + SMOKE_T0_RISE * h + SMOKE_EDGE * rim;
+    return saturate((d - thr) / SMOKE_W) * body;
 }
 
 /// Henyey-Greenstein, scaled so isotropic is 1 rather than 1/4pi. Keeping the
@@ -3671,7 +3727,8 @@ float4 smokeColor(ParticleOutput in, float3 toEye, out float3 entry) {
 
         float hDummy;
         float2 relDummy;
-        float body = sootEnvelope(p, R, hDummy, relDummy);
+        float qDummy;
+        float body = sootEnvelope(p, R, hDummy, relDummy, qDummy);
         float3 light = sun * exp(-SMOKE_SIGMA * tauSun) * phase
                      + ambient * lerp(1.0, SMOKE_AMB_FLOOR, body)
                      + pointLights(in.worldPos + (p - w0), normalize(p + float3(0.0, R, 0.0)),
