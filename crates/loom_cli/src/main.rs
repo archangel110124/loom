@@ -669,6 +669,10 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()),
         &fired,
         &splashed,
+        // Drips cast one ray each against the collision world the run is
+        // holding — ADR 0054. A still with no `--sim` has no run, so it has no
+        // drips, which is the honest answer: at tick zero nothing has fallen.
+        warmed.as_ref().map(crate::play::Runner::collision_world),
     );
     // `--sim` as a tick count, which is what the rain simulation's clock is.
     let sim_ticks = flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
@@ -950,6 +954,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                         Some(elapsed as u32),
                         &runner.fired(),
                         &runner.splashed(),
+                        Some(runner.collision_world()),
                     );
 
                     // Orbit from wherever the still would have looked, so a

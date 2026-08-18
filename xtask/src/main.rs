@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 59] = [
+const SCENES: [&str; 60] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -178,6 +178,9 @@ const SCENES: [&str; 59] = [
     // nowhere near its own over 6 m. Both in `GOLDEN`.
     "assets/test/spout.loom",
     "assets/test/cascade.loom",
+    // Drips — ADR 0054 §8. The only scene with a `DripSource`, and the only
+    // one whose particles come from a raycast rather than from an emitter.
+    "assets/test/dripping.loom",
     // The only scene where a rigid body is driven by the water rather than
     // only drawn against it, so it is the only one whose `render --sim` runs
     // the buoyancy solver at all.
@@ -317,7 +320,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 46] = [
+const GOLDEN: [(&str, &str, &[&str]); 47] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -546,6 +549,15 @@ const GOLDEN: [(&str, &str, &[&str]); 46] = [
     // 7.1 m +0.099, 3.5 m +0.055, inside +0.002), against a 0.8 ms budget.
     ("spout", "assets/test/spout.loom", &["--sim", "120"]),
     ("cascade", "assets/test/cascade.loom", &["--sim", "120"]),
+    // **Drips, and no other reference has one** — ADR 0054 §8. Five sources at
+    // different rates over a 1.1 m fall, so one frame catches drops forming,
+    // falling and landing at once; a single source would make the row a lottery
+    // on which tick the reference was taken at.
+    //
+    // `--sim 180` is three seconds, which is past the slowest source's first
+    // drop and inside every source's steady cycle. There is nothing to warm up:
+    // `loom_water::drip` is a pure function of the clock.
+    ("dripping", "assets/test/dripping.loom", &["--sim", "180"]),
     // **Water against terrain**, which `ocean` cannot cover: it has no voxel
     // volume at all, so its depth is the sentinel everywhere and its waves are
     // never attenuated. Everything W6 added is visible here and nowhere else —

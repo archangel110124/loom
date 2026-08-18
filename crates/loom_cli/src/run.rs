@@ -1172,7 +1172,14 @@ impl ApplicationHandler for App {
                 let wind = crate::weather::wind_of(&self.view.scene);
                 let plumes = self
                     .plumes
-                    .get_or_insert_with(|| crate::particles::Plumes::new(world, wind));
+                    .get_or_insert_with(|| {
+                        // Drips need a collision world to find their floor —
+                        // ADR 0054 — and only a play session is holding one.
+                        // A scene merely being viewed shows no drips rather
+                        // than drips falling to a guessed floor.
+                        let physics = self.play.as_ref().map(crate::play::Play::physics);
+                        crate::particles::Plumes::new(world, wind, physics)
+                    });
                 plumes.advance(stepped);
                 let particles: &[loom_render::ParticleInstance] = plumes.instances();
 

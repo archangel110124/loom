@@ -150,6 +150,51 @@ own measurement. Do not do it speculatively.
 - **More than one cascade per scene.** The environment buffer carries one lip;
   a second is refused at load with the reason, rather than silently not drawn.
 
+### 8. Drips, on the same principle at the other end of the scale
+
+`DripSource` is the same decision applied to one drop at a time — reference
+image 63 — and it is in this ADR rather than its own because the argument is
+identical: the physics is closed-form, so nothing is stepped and nothing is
+stored.
+
+- **Drop size is Tate's law with the Harkins–Brown correction**,
+  `V = 2πrσψ/ρg` with `ψ = 0.6`, so a 2.5 mm lip gives a 5.1 mm drop. It is
+  **not exposed**: `d ∝ r^⅓`, so quadrupling the lip moves the drop by 58%, and
+  a diameter field would be a knob with a useful range of one cube root next to
+  a physical length that produces it for free.
+- **The fall is not ballistic.** `v(t) = v_t·tanh(gt/v_t)` with `v_t = 9.09 m/s`
+  (Gunn & Kinzer) puts a 2.5 m fall at **0.750 s / 6.08 m/s**, against 0.714 s
+  and 7.00 m/s without drag — tick 45 rather than tick 43, and the test asserts
+  both so that "about 0.7 seconds" cannot pass on the wrong physics.
+- **One ray, at load, cached.** The lip is a node and the floor is under it; a
+  ray per drop would ask the same static question sixty times a second. The ray
+  starts two centimetres below the lip and, if that is still inside a solid,
+  exits it first — a drip source is authored on the *underside* of a pipe, so
+  the naive cast reports an immediate hit at its own height and the scene draws
+  nothing at all, silently. That was found by rendering it.
+- **No splash gate.** Mundo–Cossali's `K > 57.7` is crossed by a 5 mm drop after
+  a 0.15 mm fall, so a threshold here would be a branch always taken.
+- **Pinch-off is two frames of authored shape, never a simulation.** The neck
+  survives 10.8 ms — 0.65 of a tick — and is drawn as a thinner droplet
+  stretched back toward the lip.
+
+**What is honestly weak.** The satellite is a third the diameter one diameter
+behind, which is Rayleigh's mode — and at 6 m/s the shutter smears the parent
+across *ten* diameters, so the satellite never separates: it brightens the tail
+of one streak. That is what a photograph of a real drip shows, and it means the
+acceptance's "satellite visible in consecutive frames" is not reachable with a
+1/120 s shutter and is not a defect.
+
+And the **micro-crown is right in the data and nearly invisible in the
+picture**: 24 droplets of one to four millimetres subtend under a pixel at any
+camera distance a scene would use, so a zoom into `dripping.loom`'s landing zone
+finds two or three specks. What would make a landing read is a **wet mark** — a
+large, low-contrast decal on the floor, decaying — and it is **not built**. It
+needs a small ring of landing points in the environment buffer and a term in
+`fragmentMain`, which is the one piece of this that is not closed-form
+presentation, and it deserves its own slice with the per-fragment scan measured
+rather than assumed.
+
 ## Consequences
 
 The engine gains a waterfall that is a pure function of `(scene, tick)`, is

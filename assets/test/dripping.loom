@@ -1,0 +1,173 @@
+# A row of pipes dripping onto a tiled floor — reference image 63.
+#
+# **Every number about a drip here is derived, and that is the point.** The
+# scene authors a lip radius and a rate. `loom_water::drip` turns the radius
+# into a drop by Tate's law with the Harkins–Brown correction (2.5 mm of lip
+# gives a 5.1 mm drop, which is what a drip is), and one downward raycast at
+# load turns the pipe's height into a fall time — 2.5 m is **tick 45**, not the
+# ballistic tick 43, because a 5 mm drop is at three quarters of terminal
+# velocity by the time it lands.
+#
+# **Five sources at three heights**, so one frame shows drops at every stage at
+# once: forming, mid-fall, and landing in a micro-crown. A single source would
+# make the scene a lottery on which tick the reference was taken at.
+#
+# The floor is tiled for the reason `pool.loom`'s bed is: a 5 mm drop is a few
+# pixels of highlight, and a flat floor gives its crown nothing to be seen
+# against.
+#
+# **There is no water in this scene at all** — no `WaterBody`, no pool. Drips
+# are entirely a particle effect and this is the one water scene that proves it.
+
+[scene]
+format = 1
+id = "8e2b5f47-16ac-4d93-b0e1-73c4a985d260"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[asset]]
+key = "tiles_albedo"
+id = "bbce2fd2-83d0-410b-87b8-9e4b62ea4a64"
+path = "../textures/tiles_albedo.png"
+
+[[asset]]
+key = "tiles_normal"
+id = "39180893-483f-46b7-b946-f252aca36f23"
+path = "../textures/tiles_normal.png"
+
+[[node]]
+name = "Room"
+
+  # A cold overhead light with a dark room around it, which is how the
+  # reference is shot: a drip is seen by its highlight, so what matters is that
+  # everything behind it is dim.
+  [node.components.Environment]
+  sun_direction = [0.18, 0.94, 0.28]
+  sun_strength = 0.85
+  sun_color = [0.86, 0.92, 1.0]
+  ambient = 0.30
+  sky_zenith = [0.10, 0.13, 0.18]
+  sky_horizon = [0.24, 0.28, 0.34]
+  fog_density = 0.004
+  fog_falloff = 0.02
+
+  # Still air. Drips are not wind-driven — `loom_water::drip` has no wind term
+  # at all — and a breeze here would only move the dust that is not in this
+  # scene either.
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 0.0
+  gustiness = 0.0
+  turbulence = 0.0
+
+# The floor. A `BoxCollider`, because what the drips land on is decided by one
+# raycast against the collision world and a `MeshRenderer` alone is invisible
+# to it — the ray would miss and the scene would draw no drips at all.
+[[node]]
+name = "Floor"
+parent = "Room"
+transform = { pos = [0.0, -0.15, 0.0], scale = [14.0, 0.3, 10.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.BoxCollider]
+  half_extents = [7.0, 0.15, 5.0]
+
+  [node.components.Material]
+  albedo = [0.30, 0.32, 0.34]
+  roughness = 0.35
+  albedo_map = { asset = "tiles_albedo" }
+  normal_map = { asset = "tiles_normal" }
+  uv_scale = [1.2, 1.2]
+  triplanar = true
+
+# The wall behind, so the falling drops have something dark to be seen against.
+[[node]]
+name = "Wall"
+parent = "Room"
+transform = { pos = [0.0, 1.2, -1.3], scale = [8.0, 3.0, 0.25] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.055, 0.062, 0.075]
+  roughness = 0.85
+
+# The pipe the near sources hang from.
+[[node]]
+name = "Pipe"
+parent = "Room"
+transform = { pos = [0.0, 1.22, -0.55], scale = [6.0, 0.12, 0.12] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.33, 0.31]
+  roughness = 0.6
+  metallic = 0.8
+
+# **Five lips, deliberately out of step.** The rates are coprime-ish so the row
+# never falls into lockstep, and the phase is salted by position inside
+# `drip_sites` as well, on the same argument the grass clump hash makes.
+[[node]]
+name = "DripA"
+parent = "Room"
+transform = { pos = [-0.46, 1.10, -0.55] }
+
+  [node.components.DripSource]
+  rate = 3.1
+  lip_radius = 0.0025
+
+[[node]]
+name = "DripB"
+parent = "Room"
+transform = { pos = [-0.14, 1.10, -0.55] }
+
+  [node.components.DripSource]
+  rate = 4.3
+  lip_radius = 0.0025
+
+# A fatter lip: the cube root means five times the radius is only 1.7x the
+# drop, which is exactly the point `loom_water::drip` makes about not exposing
+# a diameter.
+[[node]]
+name = "DripC"
+parent = "Room"
+transform = { pos = [0.20, 1.10, -0.55] }
+
+  [node.components.DripSource]
+  rate = 2.2
+  lip_radius = 0.0125
+
+[[node]]
+name = "DripD"
+parent = "Room"
+transform = { pos = [0.54, 1.10, -0.55] }
+
+  [node.components.DripSource]
+  rate = 5.1
+  lip_radius = 0.0025
+
+[[node]]
+name = "DripE"
+parent = "Room"
+transform = { pos = [0.88, 1.10, -0.55] }
+
+  [node.components.DripSource]
+  rate = 3.7
+  lip_radius = 0.004
+
+# Low and close to the row, so a 5 mm drop is more than one pixel and its
+# crown is a shape rather than a dot.
+[[node]]
+name = "Camera"
+parent = "Room"
+transform = { pos = [0.20, 0.60, 0.40], rot_euler = [-4.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 70.0

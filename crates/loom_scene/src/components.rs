@@ -1893,6 +1893,47 @@ impl Default for Cascade {
     }
 }
 
+/// Water leaving a lip one drop at a time — ADR 0054, reference image 63.
+///
+/// **A node's position is the lip; how far the drop falls is not authored.**
+/// One `rapier` ray straight down at load finds what is underneath, and the
+/// drip lands there. A `fall` field would be a number an author has to keep in
+/// step with the geometry, and the failure mode is drips that stop in mid-air
+/// or vanish through the floor — neither of which any gate can see.
+///
+/// **The drop's size is not authored either.** Tate's law with the
+/// Harkins–Brown correction turns [`Self::lip_radius`] into a volume and that
+/// into a diameter, so a 2.5 mm lip gives the 5 mm drop real drips are. See
+/// `loom_water::drip` for why exposing the diameter instead would be a knob
+/// with a useful range of one cube root.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct DripSource {
+    /// Drops per second. A tap left not quite closed is about 2; a soaked
+    /// ceiling is a tenth of that.
+    #[schemars(range(min = 0.0, max = 40.0))]
+    pub rate: f32,
+    /// Radius of the lip the drop hangs from, in metres.
+    ///
+    /// **This is the drop-size control and it is a physical length.** The
+    /// diameter goes as its cube root, so the whole range below moves the drop
+    /// by a factor of about three.
+    #[schemars(range(min = 0.0005, max = 0.05))]
+    pub lip_radius: f32,
+}
+
+impl Default for DripSource {
+    fn default() -> Self {
+        Self {
+            // Slow enough that each drop is a separate event the eye can
+            // follow, which is what reference image 63 shows.
+            rate: 1.6,
+            // 5.1 mm of water by Tate's law — a drip.
+            lip_radius: 0.0025,
+        }
+    }
+}
+
 /// The most pontoons one floating body may carry.
 ///
 /// Every pontoon is a full water sample plus a force accumulation, per body,
@@ -2164,6 +2205,7 @@ pub fn registry() -> TypeRegistry {
     // the registry exists to stop.
     reg.register::<WaterBody>("WaterBody");
     reg.register::<Cascade>("Cascade");
+    reg.register::<DripSource>("DripSource");
     reg.register::<Buoyancy>("Buoyancy");
     reg.register::<Submersion>("Submersion");
     reg.register::<Script>("Script");

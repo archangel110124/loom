@@ -1501,6 +1501,13 @@ impl Runner {
         self.physics.foam()
     }
 
+    /// The collision world this run is holding, for anything that has to cast a
+    /// ray against what is actually there — the drips, in practice (ADR 0054).
+    #[must_use]
+    pub fn collision_world(&self) -> &loom_physics::Physics {
+        self.physics.world()
+    }
+
     /// A runner that steps physics and runs nothing, for when the scripts
     /// could not be loaded.
     #[must_use]

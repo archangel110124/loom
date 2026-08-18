@@ -186,6 +186,144 @@ fn cascade_mist(
     Some((emitter, visual, c.foot))
 }
 
+/// A drip source with its floor already found — ADR 0054.
+///
+/// **The raycast happens once, here, and never again.** A drip's whole
+/// trajectory is a closed form in how far it has to fall, and how far it has to
+/// fall is a static fact about the scene: the lip does not move and neither
+/// does the floor under it. Casting per drop, or per frame, would be the same
+/// ray answered a hundred times a second for one number.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DripSite {
+    origin: [f32; 3],
+    floor_y: f32,
+    rate: f32,
+    lip_radius: f32,
+    seed: u32,
+}
+
+/// How far down a drip source looks for something to land on, in metres.
+///
+/// **A limit rather than infinity, and a miss is a miss.** A source with
+/// nothing under it inside this distance draws nothing at all, which is the
+/// honest answer: a drip falling forever is not a drip, and the alternative —
+/// landing at some default depth — puts a crown in mid-air where no gate can
+/// see it.
+const DRIP_REACH: f32 = 60.0;
+
+/// How far below the lip the ray starts, in metres.
+///
+/// **Not zero, and this cost a render.** A drip source is authored on the
+/// *underside* of something — a pipe, a beam, a ledge — so its node sits
+/// exactly on that collider's face, and `rapier` reports a ray beginning inside
+/// a solid as an immediate hit at distance zero. Every source in
+/// `dripping.loom` found its floor at its own height and drew nothing, with no
+/// error anywhere. Two centimetres clears any lip and is four drop diameters;
+/// it moves the ray's start and not the drop's, so the landing point is
+/// unchanged.
+const DRIP_RAY_BIAS: f32 = 0.02;
+
+/// Every `DripSource` in the scene, with the floor under it.
+///
+/// `physics` is the collision world the run is holding. **Without one there are
+/// no drips**, rather than drips falling to a guessed floor — see `DRIP_REACH`.
+pub(crate) fn drip_sites(
+    world: &World,
+    physics: Option<&loom_physics::Physics>,
+) -> Vec<DripSite> {
+    let Some(physics) = physics else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entity in world.entities() {
+        let (Some(component), Some(global)) =
+            (world.drip_source(*entity), world.global_transform(*entity))
+        else {
+            continue;
+        };
+        let Ok(source) =
+            serde_json::from_value::<loom_scene::components::DripSource>(component.clone())
+        else {
+            continue;
+        };
+        if source.rate <= 0.0 {
+            continue;
+        }
+        let origin = [global.matrix[12], global.matrix[13], global.matrix[14]];
+        let mut start = [origin[0], origin[1] - DRIP_RAY_BIAS, origin[2]];
+        let mut hit = physics.raycast(start, [0.0, -1.0, 0.0], DRIP_REACH);
+        // **A lip is on the UNDERSIDE of something, so the ray usually starts
+        // inside it.** `raycast` reports a ray beginning in a solid as an
+        // immediate hit at distance zero — right for a muzzle clipping a wall,
+        // wrong here — so leave the solid through `raycast_exit` and cast again
+        // from just past its far face. Every source in `dripping.loom` found
+        // its floor at its own height until this existed, and drew nothing,
+        // with no error anywhere.
+        if hit.as_ref().is_some_and(|h| h.distance < DRIP_RAY_BIAS) {
+            let Some(exit) = physics.raycast_exit(start, [0.0, -1.0, 0.0], DRIP_REACH) else {
+                continue;
+            };
+            start = [origin[0], exit.point[1] - DRIP_RAY_BIAS, origin[2]];
+            hit = physics.raycast(start, [0.0, -1.0, 0.0], DRIP_REACH);
+        }
+        let Some(hit) = hit else {
+            continue;
+        };
+        out.push(DripSite {
+            origin,
+            floor_y: hit.point[1],
+            rate: source.rate,
+            lip_radius: source.lip_radius,
+            // **Salted by where it is**, so a row of identical sources along a
+            // pipe does not drip in lockstep — the same argument the grass
+            // clump hash and the flicker phase both make.
+            seed: (origin[0].to_bits() ^ origin[2].to_bits().rotate_left(13))
+                ^ entity.index(),
+        });
+    }
+    out
+}
+
+/// What every drip source in the scene has in the air at `now` seconds.
+fn drip_instances(sites: &[DripSite], visual: &Visual, now: f32, out: &mut Vec<ParticleInstance>) {
+    for site in sites {
+        for d in &loom_water::drip::drops(
+            site.origin,
+            site.floor_y,
+            site.rate,
+            site.lip_radius,
+            now,
+            site.seed,
+        ) {
+            out.push(drawn_drop(d, visual));
+        }
+    }
+}
+
+/// How a drip is drawn.
+///
+/// **`scale` carries the drop's diameter in metres**, so the visual's own size
+/// is 1.0 and the physics is what decides how big a drip looks — Tate's law
+/// reaching the screen with nothing in between to override it. Every other user
+/// of `drawn_drop` uses `scale` as a multiplier on an authored size; this one
+/// authors no size, which is the point.
+fn drip_visual() -> Visual {
+    Visual {
+        size: [1.0, 1.0],
+        // Water, lit brightly enough to read against a dark wall. A drip is
+        // seen by its highlight, not its body.
+        color_start: [0.86, 0.90, 0.95],
+        color_end: [0.86, 0.90, 0.95],
+        alpha: [1.0, 1.0],
+        additive: false,
+        flame: false,
+        // **A drip is exactly the thing the shutter exists for.** At 6 m/s a
+        // 5 mm drop is smeared to five centimetres, which is the thin bright
+        // streak reference image 63 is made of; without it, a bead.
+        shutter: WATER_SHUTTER,
+    }
+}
+
 /// Whether this emitter is simulated on the device (ADR 0047).
 ///
 /// Read on its own as well as through [`parse`], because the *first* thing
@@ -301,6 +439,10 @@ pub(crate) struct Plumes {
     wind: loom_field::wind::Wind,
     /// Seconds simulated, from the tick count — never a clock (never-do #8).
     elapsed: f32,
+    /// Drip sources with their floors already found — ADR 0054. Resolved once
+    /// at construction, because the ray they need is a static fact about the
+    /// scene and its answer is a closed form away from every droplet.
+    drips: Vec<DripSite>,
     /// Impact crowns in the air, each with the `elapsed` it was thrown at.
     ///
     /// Not systems: a crown is a closed form, so there is nothing to step. They
@@ -310,12 +452,17 @@ pub(crate) struct Plumes {
 
 impl Plumes {
     /// Build from a world and warm every plume to its settled population.
-    pub(crate) fn new(world: &World, wind: loom_field::wind::Wind) -> Self {
+    pub(crate) fn new(
+        world: &World,
+        wind: loom_field::wind::Wind,
+        physics: Option<&loom_physics::Physics>,
+    ) -> Self {
         let mut plumes = Self {
             live: Vec::new(),
             instances: Vec::new(),
             wind,
             elapsed: 0.0,
+            drips: drip_sites(world, physics),
             crowns: Vec::new(),
         };
         for entity in world.entities() {
@@ -460,6 +607,10 @@ impl Plumes {
 
     fn rebuild_instances(&mut self) {
         self.instances.clear();
+        // Drips first, and re-evaluated rather than stepped: `loom_water::drip`
+        // is a pure function of the clock, so there is nothing to advance and
+        // nothing to retire.
+        drip_instances(&self.drips, &drip_visual(), self.elapsed, &mut self.instances);
         for live in &self.live {
             for p in live.system.particles() {
                 self.instances.push(instance(p, &live.visual));
@@ -756,8 +907,19 @@ pub(crate) fn simulate(
     ticks: Option<u32>,
     fired: &[(u64, [f32; 3])],
     splashed: &[crate::play::Splash],
+    physics: Option<&loom_physics::Physics>,
 ) -> Vec<ParticleInstance> {
     let mut out = Vec::new();
+
+    // Drips — ADR 0054. Evaluated rather than stepped: `loom_water::drip` is a
+    // pure function of the clock, so `--sim N` and a window that has been open
+    // for `N` ticks draw the same drops with nothing warmed up.
+    #[allow(clippy::cast_precision_loss)]
+    let now = ticks.unwrap_or(0) as f32 * DT;
+    let sites = drip_sites(world, physics);
+    eprintln!("DRIPSITES {} floors {:?}", sites.len(), sites.iter().map(|s| s.floor_y).collect::<Vec<_>>());
+    drip_instances(&sites, &drip_visual(), now, &mut out);
+    eprintln!("DRIPINST {} at now={now}", out.len());
 
     for entity in world.entities() {
         let Some(component) = world.emitter(*entity) else {
@@ -961,7 +1123,7 @@ mod tests {
     /// permanent fireball parked somewhere in it.
     #[test]
     fn a_dormant_explosion_does_not_play_where_it_sits() {
-        let quiet = simulate(&range(), &calm(), Some(60), &[], &[]);
+        let quiet = simulate(&range(), &calm(), Some(60), &[], &[], None);
 
         assert!(
             quiet.is_empty(),
@@ -978,7 +1140,7 @@ mod tests {
         let at = [2.0, 1.0, -7.0];
         let fired = [(10, at)];
 
-        let out = simulate(&world, &calm(), Some(30), &fired, &[]);
+        let out = simulate(&world, &calm(), Some(30), &fired, &[], None);
 
         assert!(!out.is_empty(), "the explosion produced nothing");
         // The prefab is parked at x = -14; every particle should be near the
@@ -1003,7 +1165,7 @@ mod tests {
     /// had been pressed.
     #[test]
     fn building_a_plume_does_not_fire_a_one_shot() {
-        let plumes = Plumes::new(&explosion(), calm());
+        let plumes = Plumes::new(&explosion(), calm(), None);
 
         assert!(
             plumes.instances().is_empty(),
@@ -1020,8 +1182,8 @@ mod tests {
     fn rebuilding_a_plume_from_the_same_scene_gives_the_same_thing() {
         let world = explosion();
 
-        let first = Plumes::new(&world, calm());
-        let second = Plumes::new(&world, calm());
+        let first = Plumes::new(&world, calm(), None);
+        let second = Plumes::new(&world, calm(), None);
 
         assert_eq!(
             first.instances().len(),
@@ -1038,7 +1200,7 @@ mod tests {
         let source = std::fs::read_to_string("../../assets/test/smoke.loom").expect("fixture");
         let world = World::from_scene(&loom_scene::Scene::parse(&source).expect("valid scene"));
 
-        let plumes = Plumes::new(&world, calm());
+        let plumes = Plumes::new(&world, calm(), None);
 
         assert!(!plumes.instances().is_empty(), "a chimney should preview");
     }
@@ -1054,7 +1216,7 @@ mod tests {
     /// the middle of the sea.
     #[test]
     fn the_water_s_splash_does_not_play_where_it_sits() {
-        let quiet = simulate(&sea(), &calm(), Some(60), &[], &[]);
+        let quiet = simulate(&sea(), &calm(), Some(60), &[], &[], None);
 
         assert!(
             quiet.is_empty(),
@@ -1062,7 +1224,7 @@ mod tests {
             quiet.len()
         );
         // And the same through the viewer's path, which builds its own state.
-        assert!(Plumes::new(&sea(), calm()).instances().is_empty());
+        assert!(Plumes::new(&sea(), calm(), None).instances().is_empty());
     }
 
     /// And the other half: it plays where the thing went in.
@@ -1070,7 +1232,7 @@ mod tests {
     fn a_splash_plays_where_something_entered_the_water() {
         let at = [3.0, 0.4, -6.0];
 
-        let out = simulate(&sea(), &calm(), Some(20), &[], &[entry(10, at)]);
+        let out = simulate(&sea(), &calm(), Some(20), &[], &[entry(10, at)], None);
 
         assert!(!out.is_empty(), "entering the water produced no splash");
         for p in &out {
@@ -1095,7 +1257,7 @@ mod tests {
         // world position — would separate the two splashes on its own, and the
         // test would pass with the seed ignored entirely.
         let spray = |at: [f32; 3]| {
-            simulate(&world, &calm(), Some(11), &[], &[entry(10, at)])
+            simulate(&world, &calm(), Some(11), &[], &[entry(10, at)], None)
                 .iter()
                 .map(|p| {
                     [
@@ -1209,8 +1371,8 @@ mod tests {
         let at = [0.0, 0.0, 0.0];
         let splash = entry(0, at);
         let top = |ticks: u32| {
-            let headless = simulate(&world, &calm(), Some(ticks), &[], &[splash]);
-            let mut plumes = Plumes::new(&world, calm());
+            let headless = simulate(&world, &calm(), Some(ticks), &[], &[splash], None);
+            let mut plumes = Plumes::new(&world, calm(), None);
             plumes.splash(&world, splash);
             plumes.advance(ticks);
             let window = plumes.instances().to_vec();
@@ -1256,13 +1418,14 @@ mod tests {
     fn no_shot_means_no_fireball() {
         let world = range();
 
-        let none = simulate(&world, &calm(), Some(30), &[], &[]);
+        let none = simulate(&world, &calm(), Some(30), &[], &[], None);
         let one = simulate(
             &world,
             &calm(),
             Some(30),
             &[(5, [0.0, 1.0, 0.0])],
             &[],
+            None,
         );
 
         assert!(none.len() < one.len(), "firing must add particles");

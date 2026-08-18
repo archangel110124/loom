@@ -146,6 +146,9 @@ pub struct World {
     /// Carried rather than resolved for the same reason as `water`: turning it
     /// into a sheet needs `loom_water::nappe`, which this crate cannot see.
     cascade: Storage<serde_json::Value>,
+    /// Every `DripSource`, verbatim. Turning one into droplets needs
+    /// `loom_water::drip` and a raycast, and this crate has neither.
+    drip: Storage<serde_json::Value>,
     /// The scene's `Wind`, verbatim. At most one is used, like `Environment`.
     /// Carried rather than resolved for the same reason as `water`: turning it
     /// into a field needs `loom_field`, which this crate does not depend on.
@@ -408,6 +411,9 @@ impl World {
             if let Some(cascade) = node.components.get("Cascade") {
                 world.cascade.insert(entity, cascade.clone());
             }
+            if let Some(drip) = node.components.get("DripSource") {
+                world.drip.insert(entity, drip.clone());
+            }
             if let Some(wind) = node.components.get("Wind") {
                 world.wind.insert(entity, wind.clone());
             }
@@ -600,6 +606,12 @@ impl World {
     #[must_use]
     pub fn cascade(&self) -> Option<(Entity, &serde_json::Value)> {
         self.order.iter().find_map(|e| self.cascade.get(*e).map(|c| (*e, c)))
+    }
+
+    /// The `DripSource` this entity declares, if any.
+    #[must_use]
+    pub fn drip_source(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.drip.get(entity)
     }
 
     /// Whether this scene's water is in the cinematic tier — ADR 0053.

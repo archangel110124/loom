@@ -49,6 +49,7 @@
 //! banning `HashMap` iteration in simulation code.
 
 pub mod buoyancy;
+pub mod drip;
 pub mod flow;
 pub mod foam;
 pub mod nappe;
