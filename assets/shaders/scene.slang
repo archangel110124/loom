@@ -4923,6 +4923,14 @@ WaterOutput nappeVertex(uint nappeID) {
 
     LoomNappe nappe = loom_nappe_brink(discharge, push.environment[0].cascadeB.w,
                                        push.environment[0].cascadeC.z);
+    // **`drop` is the lip's height above the still-water line, so the last row
+    // lands exactly ON the pool.** Carrying the strip further, so its free edge
+    // would be occluded by the surface in front of it, was built and measured
+    // and is a no-op: quarter of a metre of overshoot moves 162 pixels of
+    // `spout` and 0 of `cascade`, and two metres moves the same 105. The sheet
+    // is a *curve*, so extending `v`'s range only reparametrises where the rows
+    // sit on it. The straight line across the foot is the sheet meeting a
+    // glassy pool, not a free edge — see `NAPPE_TOE`.
     float z = drop * pow(v, NAPPE_BIAS);
     LoomNappeAt at = loom_nappe_at(nappe, z);
 
@@ -6062,6 +6070,119 @@ static const float NAPPE_BROKEN_END = 1.8;
 /// obvious tell of a card standing in for a waterfall.
 static const float NAPPE_DEPTH_FADE = 0.3;
 
+/// **Where the sheet's silhouette comes from — and it must not be the strip's
+/// own edge.** Third shipping of the quad-boundary class in this project, after
+/// the smoke plume's ellipsoid and its cone; `SMOKE_RIM`/`SMOKE_EDGE` carry the
+/// same reasoning and the same closed-form containment argument.
+///
+/// The old opacity chain was `aeration·NAPPE_OPACITY + boil` times
+/// `lerp(0.55 + 0.9·strings, smoothstep(0.30, 0.72, strings), broken)`. Both
+/// halves are *modulation*: the coherent branch is bounded below by 0.55 and
+/// never reaches zero anywhere, so every fragment of `u ∈ [0, 1]` was drawn and
+/// the visible boundary was exactly `lerp(lipA, lipB, u)` — a ruler-straight
+/// line the noise cannot move, at any distance, from any camera.
+///
+/// The fix is the smoke's: raise the noise **threshold** across a band at the
+/// rim, so out there water survives only where the ligament noise is high and
+/// the boundary is an ISO-CONTOUR of that field — torn at the string frequency,
+/// and moving down the fall because `strings` is read against departure time.
+/// A blur or a distance-to-edge fade was explicitly not taken: a soft rectangle
+/// is still a rectangle.
+///
+/// **The band's inner edge recedes with `aeration`, which is what keeps the lip
+/// attached.** At `Z = 0` aeration is zero by construction — the water has had
+/// no distance in which to entrain anything and a nappe leaving a chute is the
+/// chute's width — so `start` is 1 and nothing is eroded. As the sheet aerates
+/// the band opens to `NAPPE_RIM` and the edges fray. **The physics was already
+/// there and simply not reaching the silhouette**: `aeration(Z)`, the break
+/// length and the throw all drove *shading* and none of them drove *coverage*.
+/// It is the same discrimination `broken` makes — `spout` reaches aeration 0.92
+/// at its foot against `cascade`'s 0.80, and 0.60 against 0.42 near their lips,
+/// so the thin spout frays harder and sooner than the canyon fall.
+///
+/// **The bound is closed form, which is why this is a band and not a fade.**
+/// `strings` is `0.65·n₁ + 0.35·n₂` of `loom_value_noise`, which is a lerp of
+/// `loom_lattice` values and so lies in `[0, 1)`; the amplitudes sum to 1, so
+/// `strings < 1`. Coverage is `saturate((strings − thr) / NAPPE_W)` with
+/// `thr = NAPPE_EDGE·rim − NAPPE_W`, so it is identically zero once
+///
+///     rim >= (1 + NAPPE_W) / NAPPE_EDGE
+///
+/// which at 2.2 / 0.35 is `rim >= 0.6136`, i.e. the support lies inside
+///
+///     |2u − 1| + rag < start + (1 − start) * 0.6136
+///
+/// At full fraying (`start = NAPPE_RIM = 0.56`) that is **0.8300**, and `rag`
+/// is non-negative, so **no fragment is ever drawn outside |2u − 1| = 0.8300 —
+/// a guaranteed 8.5% of the lip's width of clear air inside each geometric
+/// edge**, 9.4 cm on `spout`'s 1.1 m lip and 34 cm on `cascade`'s 4 m one.
+///
+/// Measured over 4,000,000 samples of the actual two-octave `strings` on the
+/// manifold the shader reads — `u` across the lip against eight seconds of
+/// departure time — the max is **0.9376**, the 99.9th percentile **0.8360** and
+/// the median **0.4970**, which put the drawn edge at |2u − 1| = 0.8175 worst
+/// case, 0.7972 at the 99.9th and **0.7294 at the median**: 9.1%, 10.1% and
+/// **13.5%** of the lip inside the geometry, before `rag` takes its bite. The
+/// spread between those rows is the tearing, and it is why the guarantee is the
+/// floor of the effect rather than a description of it.
+///
+/// What breaks the guarantee is lowering `NAPPE_EDGE` below `1 + NAPPE_W`, at
+/// which point `thr` can no longer reach 1 and the straight edge comes back —
+/// or letting `rag` push `side` *outward*, which is why it never does.
+///
+/// **A symmetric lateral wander was built, measured and deleted.** Shifting the
+/// whole band's centreline off a low-frequency tap on departure time, so the
+/// fall snaked, is indistinguishable from this at ±0.07 of half-width — because
+/// `rag` is already sampled independently per side, so one edge biting while
+/// the other does not *is* a centreline shift. Two constants, a noise tap and
+/// 0.07 of the containment margin, for a picture nobody could tell apart.
+static const float NAPPE_RIM = 0.56;
+static const float NAPPE_EDGE = 2.2;
+static const float NAPPE_W = 0.35;
+
+/// How deep a bite the edge can take, in the same half-width units as
+/// `NAPPE_RIM`, from what fraction of the tap's range, and at what rate down
+/// the fall. See the use site: it only ever moves the edge *inward*, so the
+/// containment bound above is unaffected by it.
+static const float NAPPE_RAG = 0.34;
+static const float NAPPE_RAG_BIAS = 0.40;
+static const float NAPPE_RAG_HZ = 9.0;
+
+/// How fast the fraying opens with `aeration`.
+///
+/// Aeration is zero at the lip by construction and reaches 0.92 at `spout`'s
+/// foot and 0.80 at `cascade`'s, but it spends the first fifth of the fall
+/// under 0.5 — and a fall whose top third is a clean-sided rectangle is still
+/// a rectangle. Doubling it puts the sheet fully frayed by aeration 0.5, which
+/// is 20 cm below `spout`'s lip and 1.2 m below `cascade`'s, while still
+/// pinning the lip itself: `aeration(0) = 0` however this is scaled, so the
+/// water still leaves the chute at the chute's width.
+static const float NAPPE_FRAY = 2.0;
+
+/// Where the sheet starts coming apart into the plunge pool, as a fraction of
+/// the drop, and how much rim the foot is worth at the water line.
+///
+/// **The straight bottom edge is not a free edge and the obvious fix is a
+/// no-op.** The last row sits exactly on the still-water plane, so the line
+/// across the foot is the *intersection* of a continuous sheet with a flat
+/// pool — dead straight by geometry, and there is nothing to occlude: running
+/// the strip a quarter metre under the surface moves 162 pixels of `spout` and
+/// **zero** of `cascade`, and two metres moves no more, because the strip
+/// traces a curve and lengthening `v`'s range only redistributes rows along it.
+/// A soft fade at the foot would be the rejected soft-rectangle again.
+///
+/// The only thing that removes a straight intersection is for the sheet not to
+/// be continuous when it gets there, which is also what a real fall does — the
+/// last stretch above a plunge pool is ligaments and drops, not a pane. So the
+/// foot raises the same threshold, to `NAPPE_TOE_RIM` at the water line: with
+/// `thr = 2.2 · 0.42 − 0.35 = 0.574` against a field whose median is 0.50, a
+/// little over half the foot is gone and what lands is a row of separate
+/// ligaments. **Not to the zero-guaranteeing 0.6136** — the sheet has to reach
+/// the water, and a foot erased outright is a fall hanging in mid-air, which is
+/// the worse artifact of the two.
+static const float NAPPE_TOE = 0.72;
+static const float NAPPE_TOE_RIM = 0.42;
+
 float4 nappeColor(WaterOutput in) {
     float3 toEye = push.environment[0].eye.xyz - in.worldPos;
     float3 view = normalize(toEye);
@@ -6099,6 +6220,38 @@ float4 nappeColor(WaterOutput in) {
     // The strings modulate what is there; they do not invent whiteness in clear
     // water, which is why this multiplies rather than adds.
     opacity *= lerp(0.55 + 0.9 * strings, smoothstep(0.30, 0.72, strings), broken);
+
+    // **The silhouette** — see `NAPPE_EDGE`. Deliberately the SAME `strings`
+    // the sheet is textured with, so the fringe is the ligaments themselves
+    // running out rather than a second pattern cut over the top of them: a
+    // thick ligament survives further out than a thin one, which is what a
+    // fraying sheet does. A second noise here reads as an eroded stencil.
+    float fray = saturate(aeration * NAPPE_FRAY);
+    // **Each edge eats inward on its own, and only inward.** `strings` is 26
+    // cycles across the lip against 9 per second of departure time, which over
+    // half a second of fall is barely five — so the ligaments are near-vertical
+    // stripes, and an iso-contour of vertical stripes is a torn but still
+    // plumb-straight line. A second low-frequency tap, sampled independently on
+    // each side (the `sgn` shift), moves the boundary itself by up to
+    // `NAPPE_RAG` — three string pitches — so the sheet narrows and widens in
+    // patches as it falls. **Added to `side`, never subtracted**, so it can
+    // only bring the edge in: that is what leaves `NAPPE_EDGE`'s containment
+    // bound exactly as computed, the same rule the grass slope-wander follows.
+    float sgn = u < 0.5 ? 0.0 : 5.0;
+    // **Biased, so it bites rather than tapers.** Taking the tap raw makes the
+    // mean bite half the amplitude everywhere, which narrows the whole fall
+    // uniformly — a fall 40% thinner than its lip, evenly, which is a taper and
+    // not a ragged edge. Through a smoothstep the edge sits near the band most
+    // of the way down and takes a deep bite where the tap runs high.
+    float rag = smoothstep(NAPPE_RAG_BIAS, 1.0,
+                           loom_value_noise(float3(departure * NAPPE_RAG_HZ, sgn, 9.1)))
+              * NAPPE_RAG * fray;
+    float side = abs(2.0 * u - 1.0) + rag;
+    float start = lerp(1.0, NAPPE_RIM, fray);
+    float toe = saturate((z / max(push.environment[0].cascadeC.w, 1.0e-3) - NAPPE_TOE)
+                         / (1.0 - NAPPE_TOE)) * NAPPE_TOE_RIM;
+    float rim = max(saturate((side - start) / max(1.0 - start, 1.0e-3)), toe);
+    opacity *= saturate((strings - (NAPPE_EDGE * rim - NAPPE_W)) / NAPPE_W);
 
     float2 screenUv = in.clip.xy / push.environment[0].viewport.xy;
     // The refracted background, offset by the sheet's own thickness. Water a
