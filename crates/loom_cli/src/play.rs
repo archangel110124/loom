@@ -277,7 +277,12 @@ fn build_fluid(
     }
 
     match loom_render::FluidSolver::new(
-        loom_render::FluidDomain { centre, extent, fill: body.fill },
+        loom_render::FluidDomain {
+            centre,
+            extent,
+            fill: body.fill,
+            inflow: cascade_inflow(world, body, cell),
+        },
         &solid,
     ) {
         Ok(solver) => Some(solver),
@@ -288,6 +293,70 @@ fn build_fluid(
             None
         }
     }
+}
+
+/// The cascade pouring into a cinematic domain, as the solver wants it.
+///
+/// **The scene authors a `Cascade` and nothing else** — ADR 0057 addendum. The
+/// lip, the brink depth and the exit speed all come out of
+/// `loom_water::nappe::brink`, which is the same hydraulics slice 5's falling
+/// sheet is drawn from and the same `resolve_cascade` the environment buffer
+/// reads. There is deliberately no second place to author a flow rate: a
+/// discharge in m²/s over a lip of a known length is a volume per second, and a
+/// volume per second over a known particle volume is a particle count.
+///
+/// `None` when the scene has no cascade, which is a closed tank.
+fn cascade_inflow(
+    world: &World,
+    body: &loom_scene::components::WaterBody,
+    cell: f32,
+) -> Option<loom_render::FluidInflow> {
+    let c = crate::resolve_cascade(world, body.surface_height)?;
+    let n = loom_water::nappe::brink(c.authored.discharge, c.authored.spread, c.authored.breakup);
+    let length = (c.lip_b[0] - c.lip_a[0]).hypot(c.lip_b[2] - c.lip_a[2]);
+
+    // **The lip's box, as an axis-aligned one.**
+    //
+    // `ponytail:` exact for a lip that runs along an axis, which is every
+    // cascade in the repository; a diagonal lip gets a box wider than the sheet
+    // it stands for and pours a slightly broader ribbon. The upgrade is to
+    // place along the lip's own parameter and offset by its normal, which is
+    // three lines here and none of them earn their place until a scene needs a
+    // diagonal spout.
+    let brink = n.brink_depth;
+    let top = c.lip_a[1].max(c.lip_b[1]);
+    let lo = [
+        c.lip_a[0].min(c.lip_b[0]) - cell * 0.5 * c.fall[0].abs(),
+        top - brink,
+        c.lip_a[2].min(c.lip_b[2]) - cell * 0.5 * c.fall[1].abs(),
+    ];
+    let hi = [
+        c.lip_a[0].max(c.lip_b[0]) + cell * 0.5 * c.fall[0].abs(),
+        top,
+        c.lip_a[2].max(c.lip_b[2]) + cell * 0.5 * c.fall[1].abs(),
+    ];
+
+    // Discharge to particles: `q·L` m³/s over one tick, divided by the volume
+    // one particle stands for.
+    #[allow(clippy::cast_precision_loss)]
+    let particle_volume = cell * cell * cell / loom_render::FLUID_PER_CELL as f32;
+    let rate = c.authored.discharge * length * TICK_SECONDS / particle_volume;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let per_tick = rate.round().max(0.0) as u32;
+    if per_tick == 0 {
+        crate::log::warn(format!(
+            "the cascade over this cinematic water discharges {} m^2/s over {length:.2} m, \
+             which is under one particle a tick at a {cell:.3} m cell — nothing will pour",
+            c.authored.discharge
+        ));
+        return None;
+    }
+    Some(loom_render::FluidInflow {
+        lo,
+        hi,
+        velocity: [c.fall[0] * n.exit_speed, 0.0, c.fall[1] * n.exit_speed],
+        per_tick,
+    })
 }
 
 /// One character, its velocity, and its script's memory.

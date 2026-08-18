@@ -1,0 +1,237 @@
+# A spout pouring a volumetric ribbon into a bounded cinematic pool.
+#
+# **Reference image 61, and the read is one word: connected.** A Niagara Liquids
+# ribbon is a *volume* falling — a sheet with thickness, a leading edge that
+# curls, and a body you can see through — not a column of billboards. Nothing in
+# the deterministic tier can express it: a height field has no lip to leave and
+# no air to fall through, and slice 5's nappe (ADR 0054) is a closed-form sheet
+# that draws beautifully and cannot be interrupted, cannot pile up, and does not
+# know the pool is there.
+#
+# **The inflow is authored as a `Cascade` and nowhere else** — ADR 0057
+# addendum. `discharge` is m²/s over a lip of a known length, which is a volume
+# per second, which over the volume one particle stands for is a particle count
+# per tick. The brink depth and the exit speed come out of
+# `loom_water::nappe::brink`, the same hydraulics `spout.loom` and
+# `cascade.loom` draw their sheets from. There is deliberately no second place
+# to author a flow rate.
+#
+# **It is a closed loop, and that is why the pool does not drain.** `per_tick`
+# particles are teleported back to the lip every tick, chosen round-robin by
+# ordinal — the free-list-free allocator ADR 0047 uses for the GPU particle
+# pool, for the same reason: an atomic append on this path is what ADR 0053 §5
+# forbids. The particle count never changes, so volume is exactly conserved, and
+# the tenth of a percent leaving the pool each tick is spread uniformly over the
+# ordinals and therefore uniformly over the pool. Nothing reads as a hole.
+#
+# **The geometry behind the fall is straight lines on purpose**, which is
+# `spout.loom`'s own lesson: near-clear water over a flat colour refracts
+# invisibly. The tiled back wall is what makes the ribbon read as something you
+# look *through*.
+#
+# **Never in `DETERMINISM_SCENES` or the pinned-hash tests** — ADR 0053 §3.
+# `cargo xtask repeat` is the gate that applies.
+
+[scene]
+format = 1
+id = "1a4f77c2-3b9e-4d51-8c60-72ae05d1b843"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[asset]]
+key = "tiles_albedo"
+id = "9c3a1f04-52d7-4e18-a6b2-4f8d1e70c331"
+path = "../textures/tiles_albedo.png"
+
+[[asset]]
+key = "tiles_normal"
+id = "f70b2d59-8e41-4a63-b0d7-2c69a5138e4a"
+path = "../textures/tiles_normal.png"
+
+[[node]]
+name = "Ribbon"
+
+  [node.components.Environment]
+  sun_direction = [0.38, 0.62, 0.69]
+  sun_strength = 1.25
+  sun_color = [1.0, 0.97, 0.92]
+  ambient = 0.62
+  sky_zenith = [0.15, 0.27, 0.47]
+  sky_horizon = [0.62, 0.68, 0.72]
+  fog_density = 0.0015
+  fog_falloff = 0.05
+
+  # Still air. A ribbon is not wind-driven and a default breeze would only put a
+  # spectrum on a surface the solver already owns.
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 0.0
+  gustiness = 0.0
+  turbulence = 0.0
+
+# **The domain.** 4.0 x 2.4 x 0.8 gives 6.25 cm cells and 31,616 of them —
+# [64, 38, 13].
+#
+# **The cell count is a function of the domain's SHAPE, not its size**: the grid
+# is 64 along the longest axis whatever that axis measures, so the only way to
+# make a cinematic scene cheaper is to make it flatter. Cutting z from 1.6 m to
+# 0.8 halved the cells and took the step from 47 ms a tick to 37. It is thin
+# enough that the pool is a strip from a raised camera, which is the trade: this
+# scene is photographing the *ribbon*, and the pool is what it lands in.
+#
+# `fill = 0.18` is seven cell layers, 0.4375 m of standing water, which is where
+# `surface_height` below comes from — the two must agree or the buoyancy cap
+# reads a waterline the solver does not have.
+#
+# **The cell size is also the fall's speed limit.** The CFL guard clamps a
+# particle to 0.9 of a cell per substep, which is 6.75 m/s here; the fall is
+# 1.46 m and arrives at 5.9. Deepening the domain without widening it would put
+# the impact past the clamp and the sheet would stop accelerating.
+[[node]]
+name = "Water"
+parent = "Ribbon"
+transform = { pos = [0.0, 1.2, 0.0] }
+
+  [node.components.WaterBody]
+  kind = "lake"
+  simulation = "cinematic"
+  extent = [4.0, 2.4, 0.8]
+  fill = 0.18
+  surface_height = 0.4375
+  density = 1000.0
+  drag = 2.0
+
+# The basin. Every piece stands clear of a cell centre: the floor's top face is
+# on world y = 0 against a first cell centre at 0.031, the kerbs are at
+# |z| = 0.40 against a last centre at 0.369, and the end at x = 2.00 against
+# 1.969. Getting this wrong is not a validation error — it is a strip of water
+# quietly frozen along each wall.
+#
+# **The kerbs' tops are AT the water line, and that is deliberate.** A kerb
+# below it leaves the water hanging over a ledge; a kerb above it hides the pool
+# from every camera that is not looking straight down.
+[[node]]
+name = "Floor"
+parent = "Ribbon"
+transform = { pos = [0.0, -0.15, 0.0], scale = [2.3, 0.15, 0.75] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.55, 0.52, 0.47]
+  roughness = 0.75
+  albedo_map = { asset = "tiles_albedo" }
+  normal_map = { asset = "tiles_normal" }
+  uv_scale = [2.0, 2.0]
+  triplanar = true
+
+[[node]]
+name = "SideBack"
+parent = "Ribbon"
+transform = { pos = [0.0, 0.30, -0.46], scale = [2.3, 0.30, 0.06] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.36, 0.34, 0.31]
+  roughness = 0.85
+
+# Low, because it is what the camera looks over.
+[[node]]
+name = "SideFront"
+parent = "Ribbon"
+transform = { pos = [0.0, 0.22, 0.46], scale = [2.3, 0.22, 0.06] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.36, 0.34, 0.31]
+  roughness = 0.85
+
+[[node]]
+name = "EndRight"
+parent = "Ribbon"
+transform = { pos = [2.06, 0.30, 0.0], scale = [0.06, 0.30, 0.52] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.36, 0.34, 0.31]
+  roughness = 0.85
+
+# **The weir, and it is inside the domain on purpose.** Its top face is exactly
+# the lip's height, so the water leaves a stone edge rather than appearing in
+# mid-air. It is baked into the solid mask at load, which is what stops the pool
+# running back underneath it.
+[[node]]
+name = "Weir"
+parent = "Ribbon"
+transform = { pos = [-1.80, 0.95, 0.0], scale = [0.25, 0.95, 0.55] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.40, 0.37, 0.33]
+  roughness = 0.8
+
+# The wall behind the fall. Tiled, and that is the whole reason it is here: a
+# ribbon of nearly-clear water in front of a flat colour refracts invisibly.
+[[node]]
+name = "Backdrop"
+parent = "Ribbon"
+transform = { pos = [0.0, 1.05, -1.1], scale = [2.6, 1.2, 0.2] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.40, 0.43, 0.46]
+  roughness = 0.85
+  albedo_map = { asset = "tiles_albedo" }
+  normal_map = { asset = "tiles_normal" }
+  uv_scale = [1.5, 1.5]
+  triplanar = true
+
+# **The lip.** `lip_a` is at −Z and `lip_b` at +Z, so `cross(lip_b − lip_a, +Y)`
+# sends the water along +X — left to right across the frame, with four metres of
+# pool to run into.
+#
+# `discharge = 0.5` m²/s over a 0.5 m lip is 0.25 m³/s, which at this cell size
+# is 136 particles a tick and a ribbon about three cells thick. Halve it and the
+# stream goes under two cells and the isosurface starts to bead — the resolution
+# limit is the *stream's thickness in cells*, not its length.
+#
+# `mist = 0` deliberately: slice 5's mound is placed from `resolve_cascade`
+# against the *analytic* still-water level, and a cinematic body does not
+# publish one. Reinstating it means teaching the mist where a volumetric pool's
+# surface is, which is a readback question and not this slice's.
+[[node]]
+name = "Fall"
+parent = "Ribbon"
+transform = { pos = [-1.50, 1.90, 0.0] }
+
+  [node.components.Cascade]
+  lip_a = [0.0, 0.0, -0.25]
+  lip_b = [0.0, 0.0, 0.25]
+  discharge = 0.5
+  spread = 0.03
+  breakup = 0.0075
+  mist = 0.0
+
+# **Close, and authored, because the metric harnesses frame whole-scene bounds
+# and would photograph the basin from six metres.** The whole claim of the
+# cinematic tier is visible only near enough to see the sheet's thickness.
+[[node]]
+name = "Camera"
+parent = "Ribbon"
+transform = { pos = [-0.90, 1.40, 2.20], rot_euler = [-11.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 46.0

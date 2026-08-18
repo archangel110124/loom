@@ -119,6 +119,29 @@ pub struct FluidDomain {
     pub extent: [f32; 3],
     /// Fraction of the domain's height that starts full.
     pub fill: f32,
+    /// The cascade pouring into it, if the scene authors one over cinematic
+    /// water. `None` is a closed tank.
+    pub inflow: Option<FluidInflow>,
+}
+
+/// A cascade pouring into the domain — ADR 0057 addendum.
+///
+/// **A closed loop, not a source and a sink.** `per_tick` particles are
+/// recycled to the box every tick, chosen round-robin by ordinal, so the
+/// particle count is constant and the volume is exactly conserved. See
+/// `fluidInflowMain` for why an ordinal is the only free-list-free choice
+/// available under ADR 0053 §5.
+#[derive(Debug, Clone, Copy)]
+pub struct FluidInflow {
+    /// The lip box, world minimum corner.
+    pub lo: [f32; 3],
+    /// The lip box, world maximum corner.
+    pub hi: [f32; 3],
+    /// What the water leaves the brink at, m/s.
+    pub velocity: [f32; 3],
+    /// Particles recycled per fixed tick — the discharge, in the only units
+    /// this solver has. Zero is no cascade, and the pass is not recorded.
+    pub per_tick: u32,
 }
 
 /// One solid the fluid sees this tick: a box or a ball, and how fast it moves.
@@ -209,6 +232,9 @@ struct Consts {
     probes: vk::DeviceAddress,
     instances: vk::DeviceAddress,
     density: vk::DeviceAddress,
+    inflow_lo: [f32; 4],
+    inflow_hi: [f32; 4],
+    inflow_velocity: [f32; 4],
 }
 
 /// Mirrors `FluidPush`. 32 bytes of the 128 guaranteed.
@@ -245,6 +271,8 @@ struct Buf {
     buffer: vk::Buffer,
     allocation: Option<Allocation>,
     address: vk::DeviceAddress,
+    /// Bytes, so the first submit can zero it. See `fluid_zero`.
+    size: u64,
 }
 
 /// The twenty compute pipelines, one per entry point.
@@ -272,6 +300,7 @@ struct Pipelines {
     instance: vk::Pipeline,
     density_clear: vk::Pipeline,
     density_splat: vk::Pipeline,
+    inflow: vk::Pipeline,
 }
 
 /// The solver, and the whole of `loom_cli`'s view of Vulkan.
@@ -301,6 +330,9 @@ pub struct FluidSolver {
     levels: [Level; LEVELS],
     consts: Consts,
 
+    /// Particles the cascade recycles to its lip every tick. Zero is a closed
+    /// tank, and the inflow pass is then not recorded at all.
+    inflow_per_tick: u32,
     /// The static solid mask, rasterised once by the caller. The dynamic
     /// bodies are drawn over a copy of it every tick.
     static_solid: Vec<[f32; 4]>,
@@ -392,7 +424,10 @@ impl FluidSolver {
                 &mut allocator,
                 size as u64,
                 name,
-                vk::BufferUsageFlags::empty(),
+                // `TRANSFER_DST` because the first submit zeroes every
+                // device-local buffer with `vkCmdFillBuffer` — see `fluid_zero`.
+                // The validation layers catch the omission, and did.
+                vk::BufferUsageFlags::TRANSFER_DST,
                 loc,
             )
             .map_err(|e| e.to_string())
@@ -436,6 +471,13 @@ impl FluidSolver {
         // drawn rather than one per tick. See `FluidSolver::density`.
         let (deb, dea, density) = make(cells * 4, "loom.fluid.density", MemoryLocation::GpuToCpu)?;
 
+        let inflow = domain.inflow.unwrap_or(FluidInflow {
+            lo: [0.0; 3],
+            hi: [0.0; 3],
+            velocity: [0.0; 3],
+            per_tick: 0,
+        });
+        let (lo, hi, flux) = (inflow.lo, inflow.hi, inflow.velocity);
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let consts = Consts {
             origin: [
@@ -482,6 +524,9 @@ impl FluidSolver {
             probes,
             instances,
             density,
+            inflow_lo: [lo[0], lo[1], lo[2], 0.0],
+            inflow_hi: [hi[0], hi[1], hi[2], 0.0],
+            inflow_velocity: [flux[0], flux[1], flux[2], 0.0],
         };
 
         let range = vk::PushConstantRange::default()
@@ -536,6 +581,7 @@ impl FluidSolver {
             g2p: make_pipe(c"fluidG2PMain", "loom.fluid.g2p")?,
             probe: make_pipe(c"fluidProbeMain", "loom.fluid.probe")?,
             instance: make_pipe(c"fluidInstanceMain", "loom.fluid.instance")?,
+            inflow: make_pipe(c"fluidInflowMain", "loom.fluid.inflow")?,
             density_clear: make_pipe(c"fluidDensityClearMain", "loom.fluid.density_clear")?,
             density_splat: make_pipe(c"fluidDensitySplatMain", "loom.fluid.density_splat")?,
         };
@@ -579,8 +625,11 @@ impl FluidSolver {
         let mut consts_alloc = None;
         let mut density_alloc = None;
         for (index, (buffer, allocation, address)) in bufs_list.into_iter().enumerate() {
-            // The four host-visible ones keep a second handle on their
-            // allocation so the CPU can map them by name rather than by index.
+            // **The size the first submit zeroes, and the host-visible ones get
+            // zero.** `fluid_zero` runs inside the first command buffer, after
+            // the CPU has already written the constants and the solid mask into
+            // their mappings — filling those would erase them.
+            let size = allocation.size();
             let keep = match index {
                 13 => &mut solid_alloc,
                 14 => &mut probes_alloc,
@@ -588,12 +637,12 @@ impl FluidSolver {
                 16 => &mut consts_alloc,
                 18 => &mut density_alloc,
                 _ => {
-                    bufs.push(Buf { buffer, allocation: Some(allocation), address });
+                    bufs.push(Buf { buffer, allocation: Some(allocation), address, size });
                     continue;
                 }
             };
             *keep = Some(allocation);
-            bufs.push(Buf { buffer, allocation: None, address });
+            bufs.push(Buf { buffer, allocation: None, address, size: 0 });
         }
 
         let mut solver = Self {
@@ -617,6 +666,7 @@ impl FluidSolver {
             particles,
             levels,
             consts,
+            inflow_per_tick: inflow.per_tick,
             static_solid: solid_base.clone(),
             scratch_solid: solid_base,
             seeded: false,
@@ -958,6 +1008,7 @@ impl FluidSolver {
         let probe_groups = self.consts.counts[3].max(0) as u32;
 
         let handles: Vec<vk::Buffer> = self.bufs.iter().map(|b| b.buffer).collect();
+        let spans: Vec<u64> = self.bufs.iter().map(|b| b.size).collect();
 
         // **Not `material::record`**, which submits and waits in one call. The
         // fence wait is the number ADR 0053 §4 asks for by name, so it has to
@@ -1003,7 +1054,48 @@ impl FluidSolver {
             };
 
             if seed {
+                // **Every device-local buffer is zeroed before the first
+                // dispatch, and this is not belt and braces.** Vulkan does not
+                // define the contents of fresh device memory, and the coarse
+                // multigrid levels are only ever *partially* written — a level
+                // cell whose children are all air is skipped by the restriction
+                // — so on tick one the solve reads whatever the driver handed
+                // back. It is nondeterminism at the top of a chaotic system,
+                // which is the shape of bug that shows up as "three fresh
+                // processes, three pictures" and nowhere else.
+                //
+                // Through the graph, with the accesses declared, because a
+                // `vkCmdFillBuffer` outside it is a barrier written by hand
+                // (never-do #4).
+                let all: Vec<(BufferId, BufferAccess)> =
+                    ids.iter().map(|id| (*id, rw)).collect();
+                let sizes: Vec<(vk::Buffer, u64)> =
+                    handles.iter().copied().zip(spans.iter().copied()).collect();
+                graph.pass_with("fluid_zero", &[], &all, move |d, cmd| {
+                    for (buffer, size) in &sizes {
+                        if *size == 0 {
+                            continue;
+                        }
+                        // SAFETY: every buffer is live and the graph has
+                        // ordered this against whatever touches them next.
+                        unsafe { d.cmd_fill_buffer(cmd, *buffer, 0, *size, 0) };
+                    }
+                });
                 go(&mut graph, "fluid_seed", p.seed, [0; 4], particle_groups, &[(bp, rw)]);
+            }
+
+            // **The cascade, once per tick and before the substeps.** Once
+            // rather than per substep because the rate is authored per second
+            // and the substep count is an implementation detail of the solve;
+            // before, so this tick's arrivals are transferred to the grid by
+            // the P2G below rather than appearing after the projection with no
+            // pressure ever computed for them.
+            if self.inflow_per_tick > 0 {
+                #[allow(clippy::cast_possible_truncation)]
+                let start = (self.tick.wrapping_mul(u64::from(self.inflow_per_tick))
+                    % (self.particles as u64)) as u32;
+                go(&mut graph, "fluid_inflow", p.inflow, [start, self.inflow_per_tick, 0, 0],
+                   particle_groups, &[(bp, rw)]);
             }
 
             for _ in 0..SUBSTEPS {
@@ -1038,8 +1130,15 @@ impl FluidSolver {
                     go(&mut graph, "fluid_restrict_marker", p.restrict_marker,
                        [level as u32, 0, 0, 0], *groups, &[(bmk, rw)]);
                 }
+                // **`bcc` is declared because the divergence reads it** — the
+                // density correction in `fluidDivergenceMain` needs this
+                // substep's particle count, and a dependency the graph is not
+                // told about is a barrier that does not exist (never-do #4).
+                // It was reaching the right answer through the marker pass's
+                // chain, which is not a guarantee.
                 go(&mut graph, "fluid_divergence", p.divergence, [0; 4], cell_groups,
-                   &[(bu, ro), (bv, ro), (bw, ro), (bmk, ro), (brh, rw), (bpa, rw), (bpb, rw)]);
+                   &[(bcc, ro), (bu, ro), (bv, ro), (bw, ro), (bmk, ro), (brh, rw), (bpa, rw),
+                     (bpb, rw)]);
 
                 let jacobi = &[(bmk, ro), (brh, ro), (bpa, rw), (bpb, rw)];
                 for _ in 0..CYCLES {
@@ -1082,8 +1181,18 @@ impl FluidSolver {
             }
 
             if probe_groups > 0 {
+                // **`bcc` again, and this one has teeth.** `fluidProbeMain`
+                // decides where the free surface is with
+                // `cellCount[here] * 2 < FLUID_PER_CELL` — half rest density —
+                // and the pass never declared that it reads the counts. It is
+                // the *readback* pass, so an undeclared dependency here does
+                // not stay on the GPU: it goes through buoyancy into rapier and
+                // comes back next tick as the solid mask. Symptom: `slosh.loom`
+                // with its ball gave three fresh processes three pictures 37%
+                // apart, while the same scene with the ball deleted was
+                // byte-identical.
                 go(&mut graph, "fluid_probe", p.probe, [0; 4], probe_groups,
-                   &[(bpr, rw), (bmk, ro), (bu, ro), (bv, ro), (bw, ro), (bpa, ro)]);
+                   &[(bpr, rw), (bcc, ro), (bmk, ro), (bu, ro), (bv, ro), (bw, ro), (bpa, ro)]);
             }
 
             graph.execute(&device, cmd);
@@ -1161,6 +1270,7 @@ impl Drop for FluidSolver {
                 self.pipelines.instance,
                 self.pipelines.density_clear,
                 self.pipelines.density_splat,
+                self.pipelines.inflow,
             ] {
                 device.destroy_pipeline(pipeline, None);
             }
@@ -1213,8 +1323,9 @@ mod tests {
     fn the_constant_block_is_the_shape_the_shader_reads() {
         // 5 vectors, 4 levels of 32 bytes, 16 device addresses.
         assert_eq!(size_of::<Level>(), 32);
-        // Five vectors, four levels of 32 bytes, eighteen device addresses.
-        assert_eq!(size_of::<Consts>(), 80 + 128 + 18 * 8);
+        // Five vectors, four levels of 32 bytes, eighteen device addresses,
+        // three more vectors for the inflow box.
+        assert_eq!(size_of::<Consts>(), 80 + 128 + 18 * 8 + 48);
         assert_eq!(size_of::<Push>(), 32);
         assert_eq!(std::mem::offset_of!(Push, args), 16, "see the note on `Push::pad`");
     }
@@ -1232,7 +1343,7 @@ mod tests {
         let (dims, _) = fluid_grid(extent);
         let solid = vec![0_u8; dims[0] * dims[1] * dims[2]];
         let Ok(mut solver) = FluidSolver::new(
-            FluidDomain { centre: [0.0; 3], extent, fill: 0.5 },
+            FluidDomain { centre: [0.0; 3], extent, fill: 0.5, inflow: None },
             &solid,
         ) else {
             // No Vulkan device here is not this test's business.

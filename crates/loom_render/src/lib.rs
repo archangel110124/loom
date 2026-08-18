@@ -60,7 +60,8 @@ pub use debug_names::DebugNames;
 pub use gpu_particles::GpuEmitter;
 pub use device::{Device, DeviceError};
 pub use fluid::{
-    fluid_grid, FluidDomain, FluidInputs, FluidProbe, FluidProbeResult, FluidSolid, FluidSolver,
+    fluid_grid, FluidDomain, FluidInflow, FluidInputs, FluidProbe, FluidProbeResult, FluidSolid,
+    FluidSolver,
     FluidStepOutput, FLUID_GRID, FLUID_PER_CELL,
 };
 pub use fluid_surface::FluidVertex;

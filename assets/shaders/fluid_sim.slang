@@ -112,6 +112,12 @@ struct FluidConsts {
     /// addendum), because the solver holds a device of its own and the renderer
     /// holds another.
     uint* density;
+    /// The inflow box's minimum corner, xyz world; w unused.
+    float4 inflowLo;
+    /// Its maximum corner.
+    float4 inflowHi;
+    /// The velocity a particle leaves the lip with, xyz m/s; w unused.
+    float4 inflowVelocity;
 };
 
 struct FluidPush {
@@ -144,12 +150,20 @@ static const uint FLUID_GROUP = 256;
 /// does hold more than 128 particles — sixteen times rest density — which is
 /// itself a finding about the solve rather than about the sort.
 ///
+/// **1024 was still too low, and `ribbon.loom` is what found it** (ADR 0057
+/// addendum). A cascade landing in a shallow pool packs a cell to well over a
+/// thousand particles during the transient, and three fresh processes gave
+/// three pictures 37% apart. At 4096 `ribbon` is byte-identical at tick 180 and
+/// at tick 400, and `slosh` is byte-identical at 150 **and at 600** — the run
+/// ADR 0057 records as failing.
+///
 /// `ponytail:` an insertion sort is O(k²) in the bucket, so this ceiling is
-/// also a hang risk if a cell ever reaches it. The upgrade is a block radix
-/// sort with scan-derived ranks; the reason it is not here is that a bucket
-/// holds about eight particles and 1024 has never been approached except by a
-/// solve that has already failed.
-static const uint FLUID_SORT_MAX = 1024;
+/// also a hang risk if a cell ever reaches it, and at 4096 that would be 8M
+/// comparisons in one thread. It is why `ribbon` costs 37 ms a tick against
+/// `slosh`'s 3. The upgrade is a block radix sort with scan-derived ranks; the
+/// real fix is upstream, in a projection that does not let a cell reach a
+/// hundred times rest density in the first place.
+static const uint FLUID_SORT_MAX = 4096;
 
 /// Probe slots. The output block starts here, so the CPU knows where to read
 /// without the count it wrote being part of the address.
@@ -855,6 +869,53 @@ void fluidProbeMain(uint3 tid: SV_DispatchThreadID) {
     c->probes[out0] = float4(level, wet > 0 ? vel / float(wet) : float3(0.0));
     c->probes[out0 + 1] =
         float4(float(wetColumns) / float(RING), float(wet), 0.0, 0.0);
+}
+
+/// Recycle a block of particles back to the inflow box.
+///
+/// **A closed loop, and the choice of *which* particles is the whole design.**
+/// The obvious inflow — birth at the lip, death at a drain — needs a free list,
+/// which needs a compaction, which needs an atomic append, which is the exact
+/// thing ADR 0053 §5 forbids on this path. Recycling by *ordinal* instead needs
+/// none of it: at tick T the block `[start, start + n)` is teleported to the
+/// lip, `start` advancing by `n` a tick and wrapping. It is the same arithmetic
+/// ADR 0047 uses to give the GPU particle pool a free-list-free allocator, and
+/// it is a pure function of (ordinal, tick).
+///
+/// **The particle count never changes, so the volume is exactly conserved.** A
+/// particle leaving the pool for the lip is water pumped round; at the rates a
+/// cascade authors, `n` is a tenth of a percent of the pool a tick, spread
+/// uniformly over the ordinals and therefore uniformly over the pool, so
+/// nothing anywhere reads as a hole.
+///
+/// `push.args.x` is `start`, computed on the CPU where the tick is a `u64`;
+/// `push.args.y` is `n`. Both are zero on a domain with no cascade over it,
+/// and the pass is then not recorded at all.
+[numthreads(256, 1, 1)]
+void fluidInflowMain(uint3 tid: SV_DispatchThreadID) {
+    FluidConsts* c = push.c;
+    uint n = uint(c->dims.w);
+    if (tid.x >= n) { return; }
+    uint block = push.args.y;
+    if (block == 0u) { return; }
+    // Distance forward from this tick's first recycled ordinal, wrapping.
+    uint rel = (tid.x + n - (push.args.x % n)) % n;
+    if (rel >= block) { return; }
+
+    // Jittered by the ordinal, so the lip is a sheet of water rather than a
+    // lattice of points — and reproducibly, because `hash01` is arithmetic on
+    // the index and there is no `thread_rng` anywhere near this.
+    float3 f = float3(hash01(tid.x * 3u + 1u), hash01(tid.x * 3u + 2u), hash01(tid.x * 3u + 3u));
+    FluidParticle p;
+    p.position = float4(lerp(c->inflowLo.xyz, c->inflowHi.xyz, f), 0.0);
+    p.velocity = float4(c->inflowVelocity.xyz, 0.0);
+    // The affine state is reset with it: a parcel arriving at the brink carries
+    // no memory of the pool it was pumped out of, and keeping its old velocity
+    // gradient would spin it.
+    p.c0 = float4(0.0);
+    p.c1 = float4(0.0);
+    p.c2 = float4(0.0);
+    c->particles[tid.x] = p;
 }
 
 /// Fixed-point scale for the density splat below. See `fluidDensitySplatMain`.
