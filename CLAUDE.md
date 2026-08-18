@@ -199,8 +199,13 @@ change, so your edits appear live. Two consequences:
 >
 > **It writes `ParticleInstance`s, so there is no second particle renderer.** A GPU plume is
 > billboarded, blended and fogged by the same vertex shader as a CPU one; only the pointer
-> differs. A dead slot writes a degenerate quad. **No indirect draw** — rain has one because its
-> splash count is a GPU fact; the pool's slot count is a CPU fact. One arrives with a cull.
+> differs. A dead slot writes a degenerate quad. **No indirect draw** — rain has one; the pool's
+> slot count is a CPU fact. One arrives with a cull. (Rain's indirect draw was justified here by
+> "its splash count is a GPU fact". That stopped being true when a splash became its drop's own
+> slot rather than an entry in an atomically-appended ring — `rain_sim.slang:461` now writes all
+> of `RAIN_SPLASHES` or none, so the count is all-or-nothing and the buffer stays for the
+> *nothing has landed yet* case alone. Kept because it is free and correct, not because the
+> stated reason still holds.)
 >
 > **Four load-time refusals, not comments** (`loom_scene`): `gpu` needs `additive` (no GPU sort
 > exists or is planned); the pool must fit `burst + ceil(rate·lifetime·(1+jitter))` slots, with

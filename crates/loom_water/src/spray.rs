@@ -530,10 +530,10 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 ///
 /// **Anchored on the apex, not on the velocity**, and it is the coefficient
 /// `COLUMN_UP_FRAC` was measured at — reapplied to the event it belongs to.
-/// The apex is `(0.5U)²/2g = 0.0127·U²`: at `pool.loom`'s measured 7.1 m/s
-/// entry that is 0.64 m, against the crown's tallest band at 0.30 m. **The jet
-/// must exceed the crown**, or the anatomy is wrong and this constant is what
-/// says so.
+/// The apex is `(0.5U)²/2g = 0.0127·U²`: at the 7.01 m/s entry both
+/// `pool.loom` and `pool_jet.loom` produce, that is **0.625 m measured at tick
+/// 78**, against the crown's tallest band at 0.30 m. **The jet must exceed the
+/// crown**, or the anatomy is wrong and this constant is what says so.
 pub const JET_UP_FRAC: f32 = 0.50;
 
 /// The jet's radius at its base and at its tip, as fractions of the cavity.
@@ -569,9 +569,17 @@ const SATELLITE_SPREAD: f32 = 1.1;
 /// **`h_cavity` is not available at the event and the formula already says what
 /// to do about it.** The submersion event carries where, how hard and how wide,
 /// and nothing measures how deep the hole got; `max(h_cavity, R)` with an
-/// unknown `h_cavity` is `R`, so this is `sqrt(R/g)`. At `pool.loom`'s 0.5 m
-/// sphere that is 0.226 s — **13.6 ticks after the entry**, which is what puts
-/// the jet visibly *after* the crown in a `--sim` sweep rather than inside it.
+/// unknown `h_cavity` is `R`, so this is `sqrt(R/g)`. At a 0.5 m sphere that is
+/// 0.226 s — **13.6 ticks after the entry**, which is what puts the jet *after*
+/// the crown in a `--sim` sweep rather than inside it: measured on
+/// `pool_jet.loom`, entry 44, jet from 58, apex 78, gone by ~101.
+///
+/// **After is not the same as visible, and `pool.loom` is the counterexample.**
+/// A jet rises on the impact's own axis, so a body that floats stands in it:
+/// `pool.loom`'s sphere never gets a fifth of itself under and its crown is at
+/// 0.69 m while the tip is at 0.625, which hid this population inside the ball
+/// for a whole slice with a golden row pointed at it. `pool_jet.loom` exists
+/// because of that — same pool, a stone instead of a float.
 #[must_use]
 pub fn jet_delay(radius: f32) -> f32 {
     (radius.max(1e-3) / SPRAY_GRAVITY).sqrt()

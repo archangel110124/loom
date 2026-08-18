@@ -145,6 +145,18 @@ mod tests {
     /// Every test that creates an `Instance` or drains the collector takes
     /// this first. Poisoning is ignored deliberately: if one test panics, the
     /// rest should still run and report honestly rather than cascade.
+    ///
+    /// **It serialises this process and nothing else, and there is a known
+    /// flake on the other side of that boundary.** `Renderer::new` returns
+    /// `Vulkan(ERROR_UNKNOWN)` intermittently when many processes create
+    /// `VkDevice`s at once — measured at ~3% per process with 32 concurrent
+    /// devices and ~0.3% with 12, from three different call sites, with two
+    /// separate processes failing in the same wall-clock window. It is not
+    /// memory (peak 9.3 GB of 24.6) and it is not a race in this crate. **Do
+    /// not add a retry**: it would hide a real device-creation failure, which
+    /// is the error this project least wants swallowed. The gates create one
+    /// device at a time and are not exposed to it. Attribution, measurements
+    /// and the negative control are in ADR 0057, addendum 3.
     pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
         static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)

@@ -739,8 +739,16 @@ const GOLDEN: [(&str, &str, &[&str]); 50] = [
     // on this scene never fires at all.
     //
     // `--sim 50` is six ticks after the entry at 44, with all three bands up
-    // and the sphere at the waterline: 24 droplets, against 0 at tick 41 and 0
-    // by tick 80 [measured].
+    // and the sphere at the waterline: **224 droplets, against 0 at tick 41**
+    // [re-measured 2026-08-18 off the renderer's own `particles` count].
+    //
+    // The two numbers this line used to carry were both wrong. It said "24
+    // droplets", which is off by a factor of ten, and "0 by tick 80", which
+    // was true when it was written and stopped being true the moment the jet
+    // landed: the jet and its satellites are alive from tick 58 to ~101, so
+    // tick 80 is 124. The crown is what tick 50 photographs and it is gone by
+    // 76 — the population after that is the `pool_jet` row's subject, not this
+    // one's.
     ("pool", "assets/test/pool.loom", &["--sim", "50"]),
     // **The cinematic tier, and it is the only scene outside the deterministic
     // one** — ADR 0053, solver ADR 0057. Volumetric APIC water in a bounded

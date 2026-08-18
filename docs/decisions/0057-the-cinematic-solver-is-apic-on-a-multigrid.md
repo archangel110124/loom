@@ -528,3 +528,85 @@ for one thread**, and at 131,072 particles that is roughly 47M compare-exchanges
 in one lane. It is bounded, it is not a hang, and it is a simulation that has
 already failed for other reasons — but it is the price of having no ceiling,
 and it is the honest one to pay: a stall is visible and a wrong picture is not.
+
+---
+
+## Addendum 3 — the per-tick costs, re-measured at HEAD (review defect 10)
+
+- **Date:** 2026-08-18.
+- **Answers:** the last bullet of defect 10 in `docs/design/WATER-REBUILD-REVIEW.md`
+  — *"re-measure and re-record the per-tick costs that were reported from a
+  different machine state than they reproduce on."*
+
+This addendum records numbers only. It changes no code and no decision.
+
+### What the earlier tables said, and what they say now
+
+The body of this ADR reports `ribbon@180` at **52 ms/tick** and the panel
+measured **107**. Both were taken before the bucket sort was fixed and neither
+is current. Measured here on this machine, release, at the gate arguments and
+`GOLDEN_SIZE`, from the CLI's own `cinematic water:` line:
+
+| scene | ticks | ms/tick | of which the fence | wall |
+| --- | --- | --- | --- | --- |
+| `ribbon` | 180 | **14.78** | 13.91 | 2.66 s |
+| `slosh` | 150 | **3.15** | 2.37 | 0.47 s |
+
+The fence wait is **94%** of `ribbon`'s cost and 75% of `slosh`'s, which is the
+same split §"What this costs" reports and is still the thing not worth
+attacking.
+
+### The host-load sensitivity does not reproduce at the scale reported
+
+The panel found the same `slosh --sim 150` at **13.5 ms/tick standalone and
+222.6 while clippy loaded the CPU** — a 16× swing — and called the fence wait
+fragile under host load. Re-run here with **24 busy spinners on 24 cores**, the
+heaviest load this box can present:
+
+| scene | idle | 24 spinners | ratio |
+| --- | --- | --- | --- |
+| `ribbon@180` | 14.78 | 15.54 | **1.05×** |
+| `slosh@150` | 3.15 | 4.43 | **1.41×** |
+
+So the effect is real and it is small: the fence wait is a spin-then-block and
+a descheduled host thread pays for it, but the cost is tens of percent, not
+sixteen times. The panel's measurement was taken at `FLUID_SORT_MAX = 4096`,
+where a single tick's sort could be 8M comparisons in one lane; the 16× is
+better read as the O(k²) sort interacting with load than as fence fragility.
+**Nothing here is a reason to change the readback**, which ADR 0053 §3 requires
+to be synchronous and inside the fixed step.
+
+### The `Renderer::new` `ERROR_UNKNOWN` flake — attributed and bounded
+
+Slice 6 reported an intermittent `Renderer::new` failure under concurrent test
+binaries; three judges never saw it fire. It reproduces here, and what it is
+**not** matters more than what it is:
+
+- **Not out of memory.** Peak VRAM across the whole stress was 9.3 GB of 24.6,
+  sampled at 4 Hz. The error is `ERROR_UNKNOWN`, never `ERROR_OUT_OF_*`.
+- **Not one test, and not one call site.** It has fired from three different
+  `Renderer::new` calls in three different tests.
+- **Not per-process.** In one round **two separate processes failed in the same
+  wall-clock window on the same two tests**. That is the shape of a driver-level
+  transient across concurrent `vkCreateDevice`, not a race inside the crate.
+
+Measured rate, `target/debug/deps/loom_render-*` run directly:
+
+| shape | concurrent devices | process runs | failed |
+| --- | --- | --- | --- |
+| whole suite, 8 processes × 4 test threads | up to 32 | 96 | **3** |
+| one test, 12 processes | 12 | 288 | **1** |
+
+So it needs many simultaneous device creations and it is roughly 3% per process
+at 32 and a third of a percent at 12. `cargo test --workspace` runs far fewer
+than 32 at once, which is why it is rare there and why three judges' runs and
+this pass's runs were all clean. **`cargo xtask image`, `repeat` and `validate`
+spawn `loom render` one at a time and create one device at a time**, so the
+gates are not exposed to it.
+
+**Deliberately not fixed.** A retry in `Renderer::new` would hide a real
+device-creation failure, which is the one class of error this project most
+needs to see; and the condition that triggers it is a stress harness, not
+anything the engine does. Recorded so the next person who sees it knows it has
+been chased. If it ever fires in a gate, that is a different bug and this
+paragraph is the negative control.

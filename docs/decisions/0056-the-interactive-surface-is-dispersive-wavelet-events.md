@@ -305,6 +305,16 @@ re-pinned in the same commit, which is the rule the wind hash already follows.
 `splash`, `river`, `plough` — and 38 of 46 are byte-identical. Every scene that
 moves has a `Buoyancy` body in it, which is the whole of what changed.
 
+> **Correction, 2026-08-18 (review defect 4).** `pool_jet` is not a moved
+> reference. The row was `pool.loom --sim 70` and it contained no jet: a
+> Worthington jet rises on the impact's own axis and `pool.loom`'s sphere
+> floats there, so the jet's 0.625 m apex spends its whole life inside a 0.5 m
+> ball whose crown is at 0.69 m. Measured; the golden row's comment and
+> `assets/test/pool_jet.loom`'s header carry the numbers. The row now points at
+> `pool_jet.loom` — the same pool with a stone in it — at `--sim 74`, and its
+> reference is **new**, not moved. `GOLDEN` is 50 rows now, not 46, so the
+> "38 of 46" above is this ADR's own snapshot and not a current count.
+
 **Five authored numbers are gone from the schema and nothing replaces them.**
 `extent`, `cell`, `speed`, `damping`, `strength`. A file that still carries the
 table is refused at parse rather than ignored, which is the S4 lesson: a key the

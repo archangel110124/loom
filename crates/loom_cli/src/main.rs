@@ -703,7 +703,8 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
             #[allow(clippy::cast_precision_loss)]
             let n = ticks as f64;
             log::info(format!(
-                "cinematic water: {:.2} ms/tick, {:.2} ms of it the device round trip,                  over {ticks} ticks ({:.2} s)",
+                "cinematic water: {:.2} ms/tick, {:.2} ms of it the device round trip, over \
+                 {ticks} ticks ({:.2} s)",
                 total / n,
                 fence / n,
                 total / 1000.0
