@@ -686,15 +686,19 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // refracting water, and the surface exists to stop exactly that.
     let mut fluid_surface = Vec::new();
     if let Some(runner) = warmed.as_mut() {
-        #[allow(clippy::disallowed_methods)]
-        let started = std::time::Instant::now();
-        let spray;
-        (fluid_surface, spray) = runner.fluid_draw();
-        let marched = started.elapsed().as_secs_f64() * 1000.0;
+        let (spray, cost);
+        (fluid_surface, spray, cost) = runner.fluid_draw();
         if !fluid_surface.is_empty() {
+            // **Three numbers, not one.** See `Sim::fluid_draw`: the one number
+            // this used to print was labelled `marched` and the march was the
+            // smallest third of it.
             log::info(format!(
-                "cinematic surface: {} triangles, marched in {marched:.1} ms",
-                fluid_surface.len() / 3
+                "cinematic surface: {} triangles — density {:.1} ms, march {:.1} ms, \
+                 spray {:.1} ms",
+                fluid_surface.len() / 3,
+                cost.density_ms,
+                cost.march_ms,
+                cost.spray_ms
             ));
         }
         particles.extend(spray);
@@ -1153,7 +1157,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     // is the picture; the spray is a garnish sitting one moment
                     // behind it. It is now one binding away rather than one
                     // call away — `fluid_draw` hands both back.)
-                    let (surface, _spray) = runner.fluid_draw();
+                    let (surface, _spray, _cost) = runner.fluid_draw();
                     renderer.set_fluid_surface(&surface).map_err(|e| e.to_string())?;
 
                     renderer

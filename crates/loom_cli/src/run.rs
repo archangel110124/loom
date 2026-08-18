@@ -305,6 +305,9 @@ struct App {
     cpu_frames: u32,
     cpu_total_ms: f64,
     cpu_worst_ms: f32,
+    /// The cinematic tier's presentation cost, summed: density, march, spray.
+    fluid_draw_ms: (f64, f64, f64),
+    fluid_draw_frames: u32,
     title: String,
 }
 
@@ -428,6 +431,8 @@ impl App {
             cpu_frames: 0,
             cpu_total_ms: 0.0,
             cpu_worst_ms: 0.0,
+            fluid_draw_ms: (0.0, 0.0, 0.0),
+            fluid_draw_frames: 0,
             agent_changes: Vec::new(),
             title,
         }
@@ -1202,11 +1207,20 @@ impl ApplicationHandler for App {
                 // Not gated on `stepped`: the human orbiting a paused scene
                 // still has to see the water. The march is idempotent — it
                 // reads the solver's density and changes nothing.
-                let (fluid_surface, fluid_spray) = self
+                let (fluid_surface, fluid_spray, fluid_cost) = self
                     .play
                     .as_mut()
                     .map(crate::play::Play::fluid_draw)
                     .unwrap_or_default();
+                // Summed here and reported beside `cpu ms/frame`, because the
+                // window is the only place this is paid **per frame drawn**
+                // rather than once — see `Sim::fluid_draw`.
+                if !fluid_surface.is_empty() {
+                    self.fluid_draw_ms.0 += fluid_cost.density_ms;
+                    self.fluid_draw_ms.1 += fluid_cost.march_ms;
+                    self.fluid_draw_ms.2 += fluid_cost.spray_ms;
+                    self.fluid_draw_frames += 1;
+                }
 
                 // Resolved against the play world when one is running, so a
                 // HUD element parented to something that moved reads the same
@@ -1799,6 +1813,20 @@ impl App {
             "cpu {mean:.3} ms/frame mean, {:.3} ms worst over {} frames",
             self.cpu_worst_ms, self.cpu_frames
         ));
+        // **Per frame drawn, and labelled so**, which is the distinction the
+        // line below it does not make: `ms/tick` is a per-tick number and a
+        // frame runs several ticks. Quoting one as the other is what put
+        // cinematic water inside a 60 Hz budget on paper.
+        if self.fluid_draw_frames > 0 {
+            let n = f64::from(self.fluid_draw_frames);
+            crate::log::info(format!(
+                "cinematic surface: density {:.2} ms, march {:.2} ms, spray {:.2} ms                  per frame drawn, over {} frames",
+                self.fluid_draw_ms.0 / n,
+                self.fluid_draw_ms.1 / n,
+                self.fluid_draw_ms.2 / n,
+                self.fluid_draw_frames
+            ));
+        }
         // **And what the cinematic tier's device round trip cost**, in the same
         // words the headless path prints — ADR 0053 §4 asks for it to be
         // measured and reported rather than assumed tolerable, and the window

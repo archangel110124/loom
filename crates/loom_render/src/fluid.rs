@@ -38,8 +38,10 @@
 //! access, not a cached write. Measured on `plough_cinematic --sim 200`, with
 //! the whole 175-dispatch step at 34 ms a tick for comparison:
 //!
-//!     density()    two dispatches   8.04 ms -> 0.96 ms
-//!     instances()  one dispatch     8.34 ms -> 0.52 ms
+//! ```text
+//! density()    two dispatches   8.04 ms -> 0.96 ms
+//! instances()  one dispatch     8.34 ms -> 0.52 ms
+//! ```
 //!
 //! The readback loops either side of those numbers are 0.2 ms and were never
 //! the cost. `probes` and `consts` stay host-visible and are meant to: they are

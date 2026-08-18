@@ -969,16 +969,42 @@ impl Sim {
     /// there is no second particle path and no fluid draw path.
     ///
     /// Empty on both halves for every scene outside the tier.
+    ///
+    /// **It reports its three parts and not one total**, because one total is
+    /// what sent a night at the wrong suspect. The caller's line used to read
+    /// `27706 triangles, marched in 19.2 ms` over the whole call, and the word
+    /// `marched` named the smallest of the three: the density readback and the
+    /// instance readback were two thirds of it and were a shader waiting on
+    /// PCIe. A timer whose label names one of the things it covers will be read
+    /// as if it covered only that.
     pub fn fluid_draw(
         &mut self,
-    ) -> (Vec<loom_render::FluidVertex>, Vec<loom_render::ParticleInstance>) {
+    ) -> (Vec<loom_render::FluidVertex>, Vec<loom_render::ParticleInstance>, FluidDrawCost) {
         let Some(solver) = self.fluid.as_mut() else {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), FluidDrawCost::default());
         };
         let (dims, cell) = solver.grid();
         let (origin, _) = solver.bounds();
-        let surface = loom_render::fluid_surface::march(solver.density(), dims, cell, origin);
-        (surface, solver.instances())
+        // **Never-do #8 says simulation must not read the wall clock, and this
+        // does not.** Nothing here feeds the solve; this is the presentation
+        // half, and the clock is read for the same reason `FluidSolver::step`
+        // reads it (ADR 0053 §4).
+        #[allow(clippy::disallowed_methods)]
+        let t0 = std::time::Instant::now();
+        let density = solver.density();
+        #[allow(clippy::disallowed_methods)]
+        let t1 = std::time::Instant::now();
+        let surface = loom_render::fluid_surface::march(density, dims, cell, origin);
+        #[allow(clippy::disallowed_methods)]
+        let t2 = std::time::Instant::now();
+        let spray = solver.instances();
+        #[allow(clippy::disallowed_methods)]
+        let cost = FluidDrawCost {
+            density_ms: t1.duration_since(t0).as_secs_f64() * 1000.0,
+            march_ms: t2.duration_since(t1).as_secs_f64() * 1000.0,
+            spray_ms: t2.elapsed().as_secs_f64() * 1000.0,
+        };
+        (surface, spray, cost)
     }
 
     /// Apply this tick's buoyancy, before the solver runs.
@@ -1960,7 +1986,7 @@ impl Runner {
     /// Empty for every scene that does not opt into the tier.
     pub fn fluid_draw(
         &mut self,
-    ) -> (Vec<loom_render::FluidVertex>, Vec<loom_render::ParticleInstance>) {
+    ) -> (Vec<loom_render::FluidVertex>, Vec<loom_render::ParticleInstance>, FluidDrawCost) {
         self.physics.fluid_draw()
     }
 
@@ -2130,6 +2156,19 @@ impl Runner {
         }
         Ok(())
     }
+}
+
+/// What one call to [`Sim::fluid_draw`] cost, in milliseconds, by part.
+///
+/// Three numbers rather than one because the one was misread. See the method.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FluidDrawCost {
+    /// The density field: two dispatches, a submit, a fence and a readback.
+    pub density_ms: f64,
+    /// The CPU marching tetrahedra in `loom_render::fluid_surface`.
+    pub march_ms: f64,
+    /// The spray instances: one dispatch, a submit, a fence and a readback.
+    pub spray_ms: f64,
 }
 
 /// What the human is pressing this frame, sampled by the viewer.
@@ -2311,7 +2350,7 @@ impl Play {
     /// time this project has shipped a water effect on one path only.
     pub fn fluid_draw(
         &mut self,
-    ) -> (Vec<loom_render::FluidVertex>, Vec<loom_render::ParticleInstance>) {
+    ) -> (Vec<loom_render::FluidVertex>, Vec<loom_render::ParticleInstance>, FluidDrawCost) {
         self.runner.fluid_draw()
     }
 
