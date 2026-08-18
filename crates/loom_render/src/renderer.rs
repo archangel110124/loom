@@ -100,9 +100,17 @@ pub struct Object {
 
 /// One particle, as the GPU draws it.
 ///
-/// Mirrors `ParticleInstance` in `scene.slang`. Two `vec4`s and nothing else:
-/// a plume is thousands of these uploaded every frame, so every byte here is
-/// paid per particle per frame.
+/// Mirrors `ParticleInstance` in `scene.slang`. Three `vec4`s: a plume is
+/// thousands of these uploaded every frame, so every byte here is paid per
+/// particle per frame, and the third one was added only when there was
+/// something a picture needed that could not be squeezed into the first two.
+///
+/// **Every field is a `float4` and that is load-bearing.** std430 aligns a
+/// `vec3` to 16 bytes, so a three-float member here would leave a hole the
+/// Rust does not have and every particle after the first would read shifted —
+/// this project's named number-one buffer-corruption bug, and the reason
+/// `GrassBlade` and `PointLight` beside it are packed the same way. There is
+/// no `#[repr(align)]` doing it for us; the shapes simply match.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ParticleInstance {
@@ -110,6 +118,18 @@ pub struct ParticleInstance {
     pub position: [f32; 4],
     /// Linear RGB and opacity.
     pub color: [f32; 4],
+    /// xyz world velocity in m/s, w the shutter time in seconds.
+    ///
+    /// **`w == 0` means "draw me as a disc", and it is the default
+    /// everywhere.** A camera shutter open for zero seconds records no smear,
+    /// so the physical reading and the compatibility reading are the same
+    /// number — there is no separate flag to get out of step with it, and no
+    /// existing particle changes by one bit.
+    ///
+    /// The velocity is world-space, not view-space: the smear a shutter
+    /// records is motion relative to the *camera*, and only the shader holds
+    /// the view matrix.
+    pub velocity: [f32; 4],
 }
 
 /// Where one mesh lives inside the combined index buffer.

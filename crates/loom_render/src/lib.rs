@@ -216,6 +216,31 @@ mod tests {
         assert_eq!(size_of::<EnvironmentData>(), 960, "the whole struct");
     }
 
+    /// **`ParticleInstance` is written by a shader as well as by the CPU**,
+    /// which is what makes its packing the sharpest instance of this whole
+    /// class: `gpu_particles.slang` fills the buffer for `emberfall` and the
+    /// Rust fills it for every other scene, into the *same* vertex shader. A
+    /// hole on one side and not the other shifts every particle after the
+    /// first, silently, with no validation message.
+    ///
+    /// Three `float4`s, no padding, because std430 aligns a `vec3` to 16
+    /// anyway — so a three-float member would be the hole.
+    #[test]
+    fn a_particle_is_three_flush_float4s() {
+        use renderer::ParticleInstance;
+        let p = ParticleInstance {
+            position: [0.0; 4],
+            color: [0.0; 4],
+            velocity: [0.0; 4],
+        };
+        let at =
+            |field: *const u8| field as usize - std::ptr::from_ref(&p).cast::<u8>() as usize;
+        assert_eq!(at(std::ptr::from_ref(&p.position).cast()), 0, "position");
+        assert_eq!(at(std::ptr::from_ref(&p.color).cast()), 16, "color");
+        assert_eq!(at(std::ptr::from_ref(&p.velocity).cast()), 32, "velocity");
+        assert_eq!(size_of::<ParticleInstance>(), 48, "the whole instance");
+    }
+
     /// **`MaterialData` is one memory layout described twice too**, with the
     /// same failure mode as `EnvironmentData` above: a wrong offset is not a
     /// build error and not a validation message, it is the shader reading

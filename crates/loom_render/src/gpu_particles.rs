@@ -465,12 +465,13 @@ mod tests {
     /// be the shader's — an undersized pool is a device-address write past the
     /// end, which is a hang rather than a validation message.
     #[test]
-    fn the_slot_and_instance_records_are_two_float4s_each() {
+    fn the_slot_and_instance_records_are_the_shader_s() {
         assert_eq!(size_of::<Slot>(), 32, "GpuParticle is two float4s");
         assert_eq!(
             size_of::<crate::renderer::ParticleInstance>(),
-            32,
-            "the draw's instance is the CPU path's, unchanged"
+            48,
+            "the draw's instance is the CPU path's — three float4s, and this \
+             number is the pool buffer's stride as well as the CPU buffer's"
         );
     }
 }

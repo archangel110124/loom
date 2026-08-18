@@ -90,6 +90,10 @@ struct GpuParticleInstance {
     float4 position;
     /// rgb linear, a opacity. A negative red marks the flame field.
     float4 color;
+    /// xyz world velocity in m/s, w the shutter time in seconds. Zero shutter
+    /// is a disc, which is what the pool writes: an ember is a glow and not a
+    /// streak, and nothing here has asked to be one.
+    float4 velocity;
 };
 
 /// A slot holding nothing. `0xFFFFFFFF` is unreachable as an ordinal: the pool
@@ -347,6 +351,7 @@ void gpuParticleSimulateMain(uint3 tid: SV_DispatchThreadID) {
         // grow a case for this.
         instance.position = float4(0.0, 0.0, 0.0, 0.0);
         instance.color = float4(0.0, 0.0, 0.0, 0.0);
+        instance.velocity = float4(0.0, 0.0, 0.0, 0.0);
     } else {
         float size = lerp(p.sizeAlpha.x, p.sizeAlpha.y, f);
         float radius = gpuPush.ident.z != 0u ? -size * 0.5 : size * 0.5;
@@ -359,6 +364,11 @@ void gpuParticleSimulateMain(uint3 tid: SV_DispatchThreadID) {
         float red = max(rgb.r, 1e-3) * (gpuPush.ident.w != 0u ? -1.0 : 1.0);
         instance.position = float4(particle.position.xyz, radius);
         instance.color = float4(red, rgb.g, rgb.b, lerp(p.sizeAlpha.z, p.sizeAlpha.w, f) * fade);
+        // **`velocity.w` is the birth ordinal, not a component** — see the
+        // pool's `GpuParticle`. Only the xyz is a velocity, and the shutter is
+        // zero: an ember is a glow, and nothing has asked the pool for a
+        // streak.
+        instance.velocity = float4(particle.velocity.xyz, 0.0);
     }
     gpuPush.instances[slot] = instance;
 }

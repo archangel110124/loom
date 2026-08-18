@@ -378,20 +378,29 @@ impl Plumes {
 
 /// One particle's drawable form: size and colour interpolated over its life.
 fn instance(p: &loom_particles::Particle, visual: &Visual) -> ParticleInstance {
-    drawn_at(p.position, p.fraction(), 1.0, visual)
+    drawn_at(p.position, p.velocity, p.fraction(), 1.0, visual)
 }
 
 /// The same, for a droplet the water threw — those carry their own size
 /// multiplier, which is what stops a band of a crown reading as identical
 /// beads. See `loom_water::spray::Droplet::scale`.
 fn drawn_drop(d: &loom_water::spray::Droplet, visual: &Visual) -> ParticleInstance {
-    drawn_at(d.position, d.fraction, d.scale, visual)
+    // **No velocity yet.** A `Droplet` is a closed form over its age and does
+    // not carry one; recovering it means differentiating `ballistic`, which is
+    // the slice that turns the shutter on and not this one.
+    drawn_at(d.position, [0.0; 3], d.fraction, d.scale, visual)
 }
 
 /// The same, for anything that knows where it is and how old it is without
 /// being a `loom_particles::Particle` — the water's spray, which is a closed
 /// form and has no system behind it.
-fn drawn_at(position: [f32; 3], t: f32, scale: f32, visual: &Visual) -> ParticleInstance {
+fn drawn_at(
+    position: [f32; 3],
+    velocity: [f32; 3],
+    t: f32,
+    scale: f32,
+    visual: &Visual,
+) -> ParticleInstance {
     // Smoke expands and pales as it cools and mixes with air; a plume whose
     // particles keep their birth size and colour reads as a stream of blobs.
     let size = (visual.size[0] + (visual.size[1] - visual.size[0]) * t) * scale;
@@ -436,6 +445,13 @@ fn drawn_at(position: [f32; 3], t: f32, scale: f32, visual: &Visual) -> Particle
             lerp(visual.color_start[2], visual.color_end[2]),
             lerp(visual.alpha[0], visual.alpha[1]) * fade,
         ],
+        // **Shutter zero: a disc, exactly as before.** The velocity rides
+        // along unread — nothing in any shader looks at this field yet, which
+        // is deliberate. Widening a struct the GPU also *writes*
+        // (`gpu_particles.slang`) is the packing question on its own, and if
+        // any reference moves with the shutter at zero the packing is wrong
+        // and the fix is the packing, never a re-bless.
+        velocity: [velocity[0], velocity[1], velocity[2], 0.0],
     }
 }
 

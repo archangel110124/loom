@@ -106,9 +106,18 @@ struct ParticleInstance {
     // xyz world, w radius. A NEGATIVE radius marks an additive particle —
     // fire, a spark, anything that emits light rather than blocking it. A
     // radius is never legitimately negative, so the sign is free to carry one
-    // bit and the instance stays 32 bytes.
+    // bit and no third field was needed for it.
     float4 position;
     float4 color;      // rgb linear, a opacity
+    // xyz world velocity in m/s, w the shutter time in seconds. **Zero shutter
+    // is a disc**, which is every particle authored before this field existed:
+    // a shutter open for no time records no smear, so the physical reading and
+    // the compatibility reading are one number.
+    //
+    // Mirrors `loom_render::ParticleInstance`. All three are `float4` because
+    // std430 aligns a `vec3` to 16 anyway — a three-float member here would
+    // put a hole in one side of the layout and not the other.
+    float4 velocity;
 };
 
 // The sky, the sun and the haze, as the scene sets them. These were `static
