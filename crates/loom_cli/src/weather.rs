@@ -45,6 +45,10 @@ pub(crate) struct Weather {
     pub seconds: f32,
     /// The cloud deck, which decides *where* it rains. See [`deck_of`].
     pub deck: loom_rain::Deck,
+    /// The water surface, resolved, or `None` for a scene with none — and
+    /// `None` too when nothing asked, because the bed is a pass over every
+    /// voxel in the scene. See [`water_probe`].
+    pub water: Option<WaterProbe>,
 }
 
 impl Weather {
@@ -80,6 +84,53 @@ impl Weather {
             self.seconds,
         )
     }
+}
+
+/// The water surface, with everything it needs pre-sampled from, held together.
+///
+/// **The same four arguments `loom water --at` assembles**, and that is the
+/// point: an assertion has to read the surface the renderer draws and the
+/// buoyancy solver feels, which means the bed, the current and the wake grid,
+/// not the bare Gerstner sum. Two spellings of that assembly is how a
+/// `water@` assertion would come to disagree with the picture.
+pub(crate) struct WaterProbe {
+    body: WaterBody,
+    bed: Option<loom_voxel::heightfield::HeightField>,
+    flow: Option<loom_water::flow::FlowGrid>,
+    /// The interactive grid as it stood at the end of the run, cloned off the
+    /// runner. State, so there is no way to recompute it here.
+    ripples: Option<loom_water::ripples::RippleGrid>,
+}
+
+impl WaterProbe {
+    /// The surface at a world XZ, at the tick the run ended on.
+    pub fn at(&self, xz: [f32; 2], seconds: f32) -> loom_water::WaterSample {
+        let ground = self
+            .bed
+            .as_ref()
+            .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(xz[0], xz[1]));
+        let flow = self.flow.as_ref().map_or([0.0; 3], |g| g.at(xz[0], xz[1]));
+        let ripple = self.ripples.as_ref().map_or([0.0; 3], |g| g.at(xz[0], xz[1]));
+        loom_water::sample_water(&self.body, xz, seconds, ground, flow, ripple)
+    }
+}
+
+/// Resolve a scene's water into something a `water@` assertion can read.
+///
+/// **Built only when an assertion asks**, for the reason [`Weather::sky`] is:
+/// the bed is a march over every voxel in the scene, and a run that never
+/// mentions water must not pay for it.
+#[must_use]
+pub(crate) fn water_probe(
+    scene: &Scene,
+    world: &World,
+    wind: &Wind,
+    ripples: Option<&loom_water::ripples::RippleGrid>,
+) -> Option<WaterProbe> {
+    let body = water_of(world, wind)?;
+    let bed = crate::scene_terrain_field(scene);
+    let flow = bed.as_ref().and_then(|g| crate::river_flow(g, &body));
+    Some(WaterProbe { body, bed, flow, ripples: ripples.cloned() })
 }
 
 /// The same query, for a caller that holds the pieces rather than a [`Weather`].

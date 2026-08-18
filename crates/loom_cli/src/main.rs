@@ -71,7 +71,8 @@ USAGE:
         scene's own voxels have sheltered it (`.exposure` is that shelter alone,
         0 sealed to 1 open sky). `wetness@x,y,z.film` is how wet a surface there
         has become by that tick — `.film` the sheen, `.soak` the darkening, and
-        the two dry at different rates.
+        the two dry at different rates. `water@x,z.height` is the surface there,
+        wake included; `.speed` its velocity, `.foam` how hard the crest folds.
 
     loom scene <scene.loom> --tx <tx.json> [--dry-run]
         Apply a transaction. `expect_version` in the JSON makes the write
@@ -1085,6 +1086,9 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                         sky: scene_volume(&scene),
                         seconds: moment,
                         deck: weather::deck_of(&world),
+                        // Telemetry reports wind and rain; nothing in a CSV row
+                        // reads the surface, so nothing here pays to bake it.
+                        water: None,
                     };
                     rows.push(
                         &probes,
@@ -2834,21 +2838,28 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     let log = runner.events().clone();
     let state = runner.state();
     let specs = flags(args, "--assert");
+    let asked_about = |prefix: &str| {
+        specs.iter().any(|spec| spec.trim_start().starts_with(prefix))
+    };
+    // Hoisted out of the struct because the water resolution needs it too: a
+    // sea with no authored waves is derived from the wind, and the surface an
+    // assertion reads must be the surface the renderer drew.
+    let wind = weather::wind_of(&scene);
     // The scene's weather, sampled at the tick the run ended on — so a wind or
     // rain assertion is checked against the same clock the simulation used
     // rather than against a wall clock (never-do #8).
     let weather = weather::Weather {
-        wind: weather::wind_of(&scene),
+        // **Built only when something asks about water**, the same bargain the
+        // sky makes below and for the same reason: it bakes the bed.
+        water: asked_about("water")
+            .then(|| weather::water_probe(&scene, &world, &wind, runner.ripples()))
+            .flatten(),
+        wind,
         rain: weather::rain_of(&scene),
         // **Rebuilt only when something asks about rain.** The bake is a pass
         // over every voxel in the scene and `terrain_stress.loom` has 67
         // million of them; a run that never mentions rain must not pay for it.
-        sky: specs
-            .iter()
-            .any(|spec| {
-                let spec = spec.trim_start();
-                spec.starts_with("rain") || spec.starts_with("wetness")
-            })
+        sky: (asked_about("rain") || asked_about("wetness"))
             .then(|| scene_volume(&scene))
             .flatten(),
         #[allow(clippy::cast_precision_loss)]
@@ -2873,7 +2884,8 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
                              `wind@x,y,z.<x|y|z|speed>`, \
                              `rain@x,y,z.<rate|exposure>` and \
                              `wetness@x,y,z.<film|soak>` read the weather where \
-                             it is asked about.",
+                             it is asked about, and `water@x,z.<height|speed|foam>` \
+                             reads the surface there.",
                 }));
             }
         }
@@ -3083,6 +3095,50 @@ fn assertion_value(
         return match axis {
             "rate" => Some(sample.rate),
             "exposure" => Some(sample.exposure),
+            _ => None,
+        };
+    }
+
+    // `water@12,-4.height > 0.2` — the surface where it is asked about. The
+    // same three inputs `loom water --at` uses (bed, current, wake grid), so
+    // the number an assertion reads is the number the renderer drew and the
+    // buoyancy solver felt; see `weather::WaterProbe`.
+    //
+    // **A cinematic body never reaches here** — ADR 0053 §2 refuses the whole
+    // run in `sim` before the assertions are evaluated, because a stale or
+    // approximate answer would be worse than no answer.
+    if let Some(rest) = path.strip_prefix("water") {
+        let at = rest.strip_prefix('@').map_or(Some([0.0, 0.0]), |s| {
+            parse_at(s).map(|(xz, _)| xz)
+        })?;
+        let sample = weather.water.as_ref()?.at(at, weather.seconds);
+        return match axis {
+            "height" => Some(sample.height),
+            // The whole velocity, current and orbital motion together — a
+            // river's `speed` is its current, a swell's is the water going
+            // round in circles under a float, and both are real.
+            "speed" => Some(
+                (sample.velocity[0] * sample.velocity[0]
+                    + sample.velocity[1] * sample.velocity[1]
+                    + sample.velocity[2] * sample.velocity[2])
+                    .sqrt(),
+            ),
+            // **The whitecap coverage the shader paints, 0 to 1** — the same
+            // `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, fold)` the water
+            // fragment shader applies (`assets/shaders/scene.slang`, the
+            // constants are declared together there). Raw `fold` would be
+            // wrong to call foam: it is signed, so a trough reads -0.23 and an
+            // unbroken crest reads 0.1 while nothing at all is drawn.
+            //
+            // There is no advected foam field yet. When there is one this
+            // reads it instead, and an assertion written against this number
+            // may move — which is why the shader's two thresholds are copied
+            // here rather than promoted to a shared constant nobody will
+            // remember to delete.
+            "foam" => {
+                let t = ((sample.fold - 0.22) / (0.33 - 0.22)).clamp(0.0, 1.0);
+                Some(t * t * 2.0_f32.mul_add(-t, 3.0))
+            }
             _ => None,
         };
     }
@@ -5088,6 +5144,84 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
     /// floor never got either.** If the two dried at one rate the second of
     /// those would fail, and drying would be a crossfade back to the dry
     /// material rather than something that looks like drying.
+    /// **The four water scenes, pinned by hash at 600 ticks.**
+    ///
+    /// `cargo xtask validate` proves debug and release compute the *same*
+    /// number. Nothing until now proved it was the same number as yesterday —
+    /// a regression on the force path (buoyancy, drag, the wake grid) moves
+    /// both profiles equally and walks straight through that check, which then
+    /// reports agreement on a new wrong answer. These literals are the half of
+    /// the question the agreement check cannot ask.
+    ///
+    /// **Falsified before it was trusted**: perturbing `loom_water::GRAVITY`
+    /// by 1e-6 fails all four. Run once and reverted.
+    ///
+    /// Re-pinning is deliberate and belongs in the same commit as the change
+    /// that moved it — the rule the 10k-tick wind hash already follows.
+    #[test]
+    fn the_water_scenes_hash_to_what_they_hashed() {
+        for (scene, expected) in [
+            ("wake", "18f5ecce259831aa"),
+            ("pool", "c01fa14e2ee6b7c9"),
+            ("river", "e11d745faf641cdb"),
+            ("water_crate", "9daa193336cc608f"),
+        ] {
+            let path = format!("../../assets/test/{scene}.loom");
+            let (code, out) = run(&args(&["sim", &path, "--ticks", "600"]));
+            assert_eq!(code, 0, "{scene} did not run: {out}");
+            assert!(
+                out.contains(&format!("\"state_hash\": \"{expected}\"")),
+                "{scene} moved off its pinned hash. Re-pin it in the commit \
+                 that moved it, deliberately, and say why: {out}"
+            );
+        }
+    }
+
+    /// **`water@` reads the surface `loom water --at` reports**, and that
+    /// agreement is the whole of its correctness: an assertion that assembled
+    /// the surface its own way would drift from the one the renderer draws and
+    /// the buoyancy solver feels, which is the failure `weather::WaterProbe`
+    /// exists as one piece to prevent.
+    ///
+    /// `pool.loom` is the scene that can tell the difference. Its water is
+    /// dead flat with no waves at all, so every millimetre at the origin comes
+    /// from the wake grid — state, which cannot be recomputed from the tick.
+    #[test]
+    fn a_water_assertion_reads_the_surface_the_probe_reports() {
+        let pool = "../../assets/test/pool.loom";
+        let (code, probed) = run(&args(&["water", pool, "--at", "0,0", "--sim", "600"]));
+        assert_eq!(code, 0, "{probed}");
+        let probed: serde_json::Value = serde_json::from_str(&probed).expect("json");
+        #[allow(clippy::cast_possible_truncation)]
+        let height = probed["surface"]["height"].as_f64().expect("a height") as f32;
+        assert!(height.abs() > 1e-3, "the wake never reached the origin: {height}");
+
+        // `==` in the vocabulary is |a - b| < 1e-4.
+        let (code, out) = run(&args(&[
+            "sim", pool, "--ticks", "600",
+            "--assert", &format!("water@0,0.height == {height}"),
+        ]));
+        assert_eq!(code, 0, "the assertion and the probe disagree: {out}");
+
+        // **Foam is coverage, 0 to 1, not raw `fold`** — fold is signed and
+        // reads -0.23 in a trough, which is not a quantity anyone would assert
+        // on. It breaks over part of the whitecap sea and nowhere on a pool.
+        let (code, out) = run(&args(&[
+            "sim", "../../assets/test/whitecaps.loom", "--ticks", "600",
+            "--assert", "water@-8,5.foam > 0.0",
+            "--assert", "water@-8,5.foam <= 1.0",
+            "--assert", "water@3,3.foam == 0.0",
+        ]));
+        assert_eq!(code, 0, "{out}");
+
+        // A river's speed is its current, and `river.loom` has one.
+        let (code, out) = run(&args(&[
+            "sim", "../../assets/test/river.loom", "--ticks", "600",
+            "--assert", "water@24,24.speed > 0.1",
+        ]));
+        assert_eq!(code, 0, "{out}");
+    }
+
     #[test]
     fn wetness_accumulates_and_dries() {
         let scene = "../../assets/test/rain_overhang.loom";
