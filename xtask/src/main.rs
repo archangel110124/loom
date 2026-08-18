@@ -38,12 +38,15 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 63] = [
+const SCENES: [&str; 64] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
     // bakes and validates the whole water stack at once.
     "assets/test/pool.loom",
+    // The same pool with a stone in it, so the Worthington jet has somewhere to
+    // come out of. In `GOLDEN`, where the reasoning is.
+    "assets/test/pool_jet.loom",
     "assets/test/lanternhead.loom",
     // One building, composed. **In `SCENES` and not `GOLDEN`, on the stated
     // rule**: every path it draws is already covered — `ground` and
@@ -785,19 +788,30 @@ const GOLDEN: [(&str, &str, &[&str]); 50] = [
     //
     // A splash is a sequence and Loom used to fire all of it at t = 0; the jet
     // is driven by the *cavity closing*, so it launches `sqrt(R/g)` after the
-    // entry — 13.6 ticks at `pool.loom`'s 0.5 m sphere — and reaches its apex
-    // at 0.59 s, half a second after the rim. The row above photographs the
-    // crown at its widest; this one photographs the jet and the satellites
-    // pinched off its tip, and **neither frame contains the other population**.
+    // entry — 13.6 ticks at a 0.5 m sphere — and reaches its apex at 0.59 s,
+    // half a second after the rim. The `pool` row above photographs the crown
+    // at its widest; this one photographs the jet and the satellites pinched
+    // off its tip, and **neither frame contains the other population**.
     //
-    // The same scene twice is deliberate and is the lesson this repository
-    // keeps re-learning: grass shipped two slices with the gate reporting a
-    // full pass over an absent subject, and a rendering path that only exists
-    // in a window of ticks needs a reference inside that window or it is
-    // unverified. `--sim 70` is 26 ticks after the entry: the jet is 0.52 m up
-    // against the crown's 0.28 m ceiling, and the satellites are fanning off
-    // its tip [measured].
-    ("pool_jet", "assets/test/pool.loom", &["--sim", "70"]),
+    // **This row pointed at `pool.loom` for a slice and photographed nothing.**
+    // The tick window was right and the subject was never in it: `pool.loom`'s
+    // sphere floats, so it sits on the axis the jet comes up, and the jet's
+    // 0.625 m apex is *below* the top of the 0.5 m ball standing on it at every
+    // tick of the jet's life. Three judges swept 52-84 at up to 1920x1200 and
+    // found two satellites clearing the ball's crown. That is the same failure
+    // as grass — a gate reporting a full pass over an absent subject — and it
+    // is why the row now has a scene of its own: `pool_jet.loom` is `pool.loom`
+    // with a stone instead of a float, so the body is a metre down by the time
+    // the jet leaves and there is nothing standing where it comes out. The
+    // scene's header carries the measurements.
+    //
+    // `--sim 74` is 30 ticks after the entry at 44 and 16 after the jet
+    // launched: the tip is 0.59 m up against the crown's 0.28 m ceiling and
+    // 95% of its own apex, the crown has landed so the frame holds the jet
+    // alone, and the satellites are fanning off the tip. Later is taller — the
+    // apex is 78 — but by then the foam collar has gone hard-edged (defect 7)
+    // and takes over the frame [measured, at `GOLDEN_SIZE`].
+    ("pool_jet", "assets/test/pool_jet.loom", &["--sim", "74"]),
     // **The spray off a breaking crest — W5.** The population is a closed form
     // over `WaterSample::fold`, the same quantity the whitecaps are painted
     // from, so this reference is what would catch the two drifting apart:

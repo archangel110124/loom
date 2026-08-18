@@ -1,0 +1,175 @@
+# The Worthington jet, in a scene where there is something to see.
+#
+# **This scene exists because `pool.loom` cannot show the thing its second
+# golden row was blessed for, and no tick and no camera can make it.** That row
+# — `pool_jet`, `pool.loom --sim 70` — was added to photograph the jet inside
+# the window of ticks where it exists, on the stated and correct principle that
+# a rendering path which only lives in a window needs a reference inside it.
+# The window was found; the *subject* was never in frame. Measured at HEAD, on
+# `pool.loom`, with the jet's own numbers printed out of `loom_water::spray`:
+#
+#     entry              tick 44, 7.01 m/s, waterplane radius 0.50 m
+#     jet launches       tick 58   (jet_delay = sqrt(R/g) = 0.226 s)
+#     jet apex           tick 78-79, tip 0.625 m above the surface
+#     jet dies           tick ~101
+#     sphere centre y    -0.105 at its deepest (tick 52), +0.19 at tick 78
+#
+# The sphere's radius is 0.5 m and it never gets more than a fifth of itself
+# under. So for the jet's entire life its top — 0.625 m — is *below* the top of
+# the ball standing on the same axis, 0.69 m at the apex tick. The jet is a
+# 0.125 m thread rising out of the exact point the ball is sitting on. It is
+# inside the ball at every tick, from every camera, because a jet and the body
+# that caused it share an axis. Three judges swept ticks 52-84 at up to
+# 1920x1200 and found a foam collar and two sub-pixel specks; that is the two or
+# three satellites clearing the sphere's crown at tick 82, and it is all there
+# has ever been.
+#
+# **The physics is right and the staging was wrong.** A Worthington jet is
+# driven by the cavity *closing over* the body — it is what the collapse does
+# once the water has met above the thing that made the hole. A body still
+# sitting in its own crater has not made one, so a scene whose body floats is a
+# scene with nowhere for the jet to come out. `pool.loom` is that scene by
+# design and by its header: 260 kg/m^3, dropped three metres, in for the
+# rebound and the ring train, which is the sequence it was written to hold.
+#
+# So this is the same pool with a stone in it instead of a float. Everything
+# below is `pool.loom` unchanged — the same voxel bed, the same tiles, the same
+# dead-calm water, the same environment — except:
+#
+#   - **1800 kg/m^3, so it sinks.** Granite. Measured centre height: +0.35 at
+#     the entry (tick 44), -0.335 at 50, and **-0.500 from tick 58 onward** —
+#     it is on the bed before the jet launches and stays there. The pool is a
+#     metre deep and the stone is a metre across, so its crown comes to rest
+#     *exactly at the waterline*: the dark cap in the middle of the foam collar
+#     is the stone, and everything above the collar is jet. That is the whole
+#     difference from `pool.loom`, where the same ball is 0.69 m *above* the
+#     waterline with the jet inside it.
+#   - **The camera is closer and lower**: 2.8 m out at 0.85 m. At `pool.loom`'s
+#     6.5 m the jet is a 15 px smudge in a 320x200 reference and at 3.6 m it is
+#     a 40 px blur; at 2.8 m it is 55 px and the column, its taper and the
+#     satellites above it are all separately visible at the size the gate
+#     actually compares [measured, three cameras].
+#   - **No post.** It was `pool.loom`'s fixed reference for judging a ring in a
+#     still, and this still is judged on a thing standing in the middle of it.
+#
+# `--sim 74` and not the apex at 78. The tip is 0.59 m at 74 against 0.625 at
+# 78 — 95% of the height — and the trade is the collar: by 78 the foam field
+# under the jet has gone hard-edged and blocky (the panel's defect 7) and takes
+# over the frame, where at 74 it is still a round white ring. A reference wants
+# the largest unambiguous view of its subject, not the largest view of the thing
+# next to it. Re-judge this tick if the foam edges are ever fixed [measured, at
+# `GOLDEN_SIZE`, ticks 62/70/74/78/82 opened].
+#
+# The `pool` row at `--sim 50` holds the crown and no jet; neither frame
+# contains the other population, which is the reason there are two rows.
+
+[scene]
+format = 1
+id = "5f2a8d17-6c94-4b30-a1e7-8d05c2b91f4a"
+
+[[asset]]
+key = "sphere"
+path = "sphere"
+
+[[asset]]
+key = "tiles_albedo"
+id = "bbce2fd2-83d0-410b-87b8-9e4b62ea4a64"
+path = "../textures/tiles_albedo.png"
+
+[[asset]]
+key = "tiles_normal"
+id = "39180893-483f-46b7-b946-f252aca36f23"
+path = "../textures/tiles_normal.png"
+
+[[node]]
+name = "Pool"
+
+  [node.components.Environment]
+  sun_direction = [0.30, 0.62, -0.72]
+  sun_strength = 1.25
+  sun_color = [1.0, 0.97, 0.90]
+  ambient = 0.55
+  sky_zenith = [0.14, 0.28, 0.52]
+  sky_horizon = [0.62, 0.70, 0.76]
+  fog_density = 0.002
+  fog_falloff = 0.04
+
+  # Dead calm, for `pool.loom`'s reason: every millimetre of surface motion in
+  # the frame is the stone's doing.
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 0.0
+  gustiness = 0.0
+  turbulence = 0.0
+
+# The tiled bed, one metre under the surface — `pool.loom`'s, unchanged. The
+# stone lands on it, which is the other half of why it is here.
+[[node]]
+name = "Bed"
+parent = "Pool"
+transform = { pos = [-16.0, -17.0, -16.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 0.5
+  chunks = [2, 1, 2]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [16.0, 8.0, 16.0]
+  half_extents = [12.0, 8.0, 12.0]
+  mode = "union"
+
+  [node.components.Material]
+  albedo = [0.86, 0.85, 0.82]
+  roughness = 0.75
+  albedo_map = { asset = "tiles_albedo" }
+  normal_map = { asset = "tiles_normal" }
+  uv_scale = [2.0, 2.0]
+  triplanar = true
+
+[[node]]
+name = "Water"
+parent = "Pool"
+
+  [node.components.WaterBody]
+  kind = "lake"
+  surface_height = 0.0
+  density = 1000.0
+  drag = 2.0
+
+# **The stone.** Dropped from three metres like `pool.loom`'s float, so the
+# entry speed and therefore the jet's launch time and height are the same
+# numbers — this scene changes what happens to the body afterwards and nothing
+# about the event.
+#
+# 1800 kg/m^3 is granite: 0.524 m^3 of it is 943 kg, and it goes down and stays
+# down.
+[[node]]
+name = "Stone"
+parent = "Pool"
+transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.29, 0.27]
+  roughness = 0.85
+  metallic = 0.0
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 943.0
+
+  [node.components.Buoyancy]
+
+# Low and close. The jet is a 0.125 m thread 0.6 m tall and the whole question
+# this reference answers is whether it is there, so it has to be more than a
+# few pixels wide.
+[[node]]
+name = "Camera"
+parent = "Pool"
+transform = { pos = [0.0, 0.85, 2.8], rot_euler = [-5.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 50.0
