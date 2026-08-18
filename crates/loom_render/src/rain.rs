@@ -33,18 +33,22 @@ use crate::renderer::{
 /// buffer, and a mismatch is a device-address read past the end.
 pub const DROPS: u32 = 131_072;
 
-/// Entries in the splash ring. Mirrors `RAIN_SPLASH_RING`.
-pub const SPLASH_RING: u32 = 16_384;
+/// Entries in the splash table — **one per drop**. Mirrors `RAIN_SPLASHES`,
+/// whose doc comment carries the reasoning and the defect it closed.
+pub const SPLASHES: u32 = DROPS;
 
 /// Compute threads per workgroup, mirroring `[numthreads(64,1,1)]`.
 const GROUP: u32 = 64;
 
-/// Trailing ticks of a catch-up run that may append a splash.
+/// Trailing ticks of a catch-up run that may write a splash.
 ///
-/// **Thirty, which is `RAIN_SPLASH_RING` divided by a tick's landings** — the
-/// whole ring, and no more. Emitting on every tick of an 1,800-tick catch-up
-/// would lap the ring sixty times for a picture identical to emitting on the
-/// last thirty, and would make the surviving set depend on atomic ordering.
+/// **Thirty, which is twice `RAIN_SPLASH_LIFE` in ticks** — 0.25 s at 60 Hz is
+/// fifteen, and anything older than that is `age >= 1` and drawn as a point.
+/// Emitting on every tick of an 1,800-tick catch-up would write the same
+/// picture 1,770 times over.
+///
+/// It used to be sized against the splash ring's capacity instead, and that is
+/// the number that was wrong: see `RAIN_SPLASHES`.
 const SPLASH_STEPS: u32 = 30;
 
 /// One drop, mirroring `RainDrop` in `include/rain.slang`.
@@ -232,7 +236,7 @@ impl RainSim {
         let (splashes, splashes_alloc, splashes_address) = create_address_buffer_in(
             &raw,
             allocator,
-            u64::from(SPLASH_RING) * size_of::<Splash>() as u64,
+            u64::from(SPLASHES) * size_of::<Splash>() as u64,
             "loom.rain.splashes",
             vk::BufferUsageFlags::empty(),
             MemoryLocation::GpuOnly,
@@ -443,7 +447,11 @@ impl RainSim {
         terrain: [f32; 4],
         terrain_heights: vk::DeviceAddress,
         water: &Water,
-    ) -> (loom_render_graph::BufferId, loom_render_graph::BufferId) {
+    ) -> (
+        loom_render_graph::BufferId,
+        loom_render_graph::BufferId,
+        loom_render_graph::BufferId,
+    ) {
         use loom_render_graph::BufferAccess;
 
         // **Written here rather than through a setter**, because it is derived
@@ -544,7 +552,7 @@ impl RainSim {
             },
         );
 
-        (drops_id, args_id)
+        (drops_id, splashes_id, args_id)
     }
 
     /// The indirect buffer the splash draw reads its vertex count from.
@@ -869,23 +877,41 @@ mod tests {
         };
 
         assert_eq!(constant("RAIN_DROPS"), DROPS);
-        assert_eq!(constant("RAIN_SPLASH_RING"), SPLASH_RING);
+        // `RAIN_SPLASHES` is spelled `= RAIN_DROPS` on the shader side rather
+        // than as a literal, which is the point: the two cannot drift.
+        assert!(source.contains("static const uint RAIN_SPLASHES = RAIN_DROPS;"));
+        assert_eq!(SPLASHES, DROPS);
         assert_eq!(size_of::<Drop>(), 32, "RainDrop is two float4s");
         assert_eq!(size_of::<Splash>(), 32, "RainSplash is two float4s");
     }
 
-    /// **The ring must not lap within one tick**, or which splashes survive
-    /// depends on the order the atomics resolved in and the golden gate flakes.
+    /// **The emit window must outlast a splash**, or a catch-up render draws
+    /// fewer rings than a live viewer showing the same tick.
     ///
-    /// A drop crosses the 32 m block at about 8 m/s, so roughly one drop in 240
-    /// lands per tick.
+    /// This replaces `one_tick_of_landings_cannot_lap_the_splash_ring`, which
+    /// asserted a capacity bound derived from a guess at how far a drop falls
+    /// before it hits something — 550 landings a tick. `rain_pool.loom` stands
+    /// its water halfway up the block and lands roughly twice that, lapped the
+    /// ring inside the emit window, and rendered four different PNGs in five
+    /// runs. One slot per drop cannot lap, so the bound the table needs is no
+    /// longer a count at all.
     #[test]
-    fn one_tick_of_landings_cannot_lap_the_splash_ring() {
-        let per_tick = DROPS / 240;
+    fn the_emit_window_outlasts_a_splash() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/include/rain.slang"
+        ))
+        .expect("the shared rain header is beside the crate that compiles it");
+        let needle = "static const float RAIN_SPLASH_LIFE = ";
+        let start = source.find(needle).expect("RAIN_SPLASH_LIFE") + needle.len();
+        let rest = &source[start..];
+        let end = rest.find(';').expect("a number");
+        let life: f32 = rest[..end].parse().expect("a number");
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let ticks = (life * 60.0).ceil() as u32;
         assert!(
-            per_tick * SPLASH_STEPS <= SPLASH_RING,
-            "{SPLASH_STEPS} ticks of {per_tick} landings overruns a {SPLASH_RING}-entry ring"
+            SPLASH_STEPS >= ticks,
+            "a {life}s splash is {ticks} ticks and only {SPLASH_STEPS} of them may write one"
         );
-        assert!(per_tick < SPLASH_RING, "a single tick laps the ring");
     }
 }

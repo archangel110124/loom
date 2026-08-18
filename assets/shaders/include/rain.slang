@@ -206,15 +206,25 @@ static const float RAIN_TICK = 1.0 / 60.0;
 /// compute shader became the fourth.
 static const float RAIN_FULL_RATE = 20.0;
 
-/// Entries in the splash ring.
+/// Entries in the splash table: **one per drop, indexed by the drop**.
 ///
-/// **Sized so one tick's landings cannot lap it, and that is a correctness
-/// bound rather than a budget.** At one drop per cubic metre falling 8 m/s
-/// through a 32 m tall block, about 550 drops land per tick; 16,384 entries is
-/// thirty ticks of them, which is longer than [`RAIN_SPLASH_LIFE`]. If a tick
-/// could lap the ring the drawn set would depend on the order the atomics
-/// happened to resolve in, and the golden gate would flake.
-static const uint RAIN_SPLASH_RING = 16384u;
+/// **This is a correctness bound and it used to be an estimate.** It was a
+/// 16,384-entry ring, filled by an atomic cursor and sized by the sentence
+/// "about 550 drops land per tick, so thirty ticks fit". That number is a
+/// property of the *scene*, not of the engine — it assumes a drop falls the
+/// whole 32 m block before it hits anything. In `rain_pool.loom` the water is
+/// halfway up the block, drops land in half the time, and thirty ticks of
+/// landings lapped the ring: which splashes survived was then decided by the
+/// order `InterlockedAdd` happened to resolve in, and the same binary rendered
+/// four different PNGs in five runs (ADR 0045 check 5, review defect 2).
+///
+/// A drop can land at most once per step, so **one slot per drop cannot
+/// overflow whatever a scene does**. Slot `i` holds drop `i`'s most recent
+/// landing, which is arithmetic rather than arrival order — the same rule
+/// ADR 0047 gives the GPU particle pool. The whole table is drawn every frame;
+/// a slot with no live splash collapses to a degenerate quad in the vertex
+/// shader, which is what the ring's compaction was buying.
+static const uint RAIN_SPLASHES = RAIN_DROPS;
 
 /// Seconds a splash is visible for.
 ///

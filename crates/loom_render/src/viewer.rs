@@ -1948,7 +1948,7 @@ impl Viewer {
         let rain_splash_pipeline = self.rain_splash_pipeline;
         let rain_args_buffer = self.rain_sim.args_buffer();
         let rain_depth_set = self.scene_depth.descriptor_set();
-        if let Some((drops_id, args_id)) = rain_buffers {
+        if let Some((drops_id, splashes_id, args_id)) = rain_buffers {
             let drop_count = crate::rain::DROPS;
             let mut rain_uses =
                 vec![(scene_id, Access::ColorWrite), (depth_id, Access::DepthSample)];
@@ -1960,6 +1960,9 @@ impl Viewer {
                 &rain_uses,
                 &[
                     (drops_id, loom_render_graph::BufferAccess::VertexRead),
+                    // The splash table, read through a device address by
+                    // `rainSplashVertexMain` — see the offscreen path.
+                    (splashes_id, loom_render_graph::BufferAccess::VertexRead),
                     (args_id, loom_render_graph::BufferAccess::IndirectRead),
                 ],
                 move |d, cmd| {

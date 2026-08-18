@@ -350,6 +350,15 @@ void rainSimulateMain(uint3 tid: SV_DispatchThreadID) {
     RainDrop drop = rainPush.drops[index];
     if (rainPush.control.x != 0u) {
         drop = rainSeed(index, eye, wind);
+        // **The splash slot is seeded too, and it has to be.** The whole table
+        // is drawn every frame now, so a slot this drop has not landed in yet
+        // is read by the vertex shader — and device-local memory arrives
+        // undefined. A zeroed entry is an impact at time 0 with zero speed,
+        // which is `age >= 1` at any later clock and collapses to a point.
+        RainSplash blank;
+        blank.impact = float4(0.0, 0.0, 0.0, 0.0);
+        blank.surface = float4(0.0, 1.0, 0.0, 0.0);
+        rainPush.splashes[index] = blank;
     }
 
     // How many issues this drop has had. Rolled into the reissue hash so a drop
@@ -398,15 +407,24 @@ void rainSimulateMain(uint3 tid: SV_DispatchThreadID) {
             float3 hit = to - normal * distance;
 
             if (step + rainPush.control.y >= steps && rainPresent(seed, rainPush.wind.w)) {
-                // Append. The ring is sized so one tick's landings cannot lap
-                // it, which is what keeps the drawn set deterministic even
-                // though the order within it is not.
-                uint slot;
-                InterlockedAdd(rainPush.splashArgs[4], 1u, slot);
+                // **Slot `index`, not the next slot.** This used to be an
+                // `InterlockedAdd` cursor into a ring, and the ring lapped:
+                // see [`RAIN_SPLASHES`]. The drop's own index is a slot no
+                // other thread writes, so the drawn set is a function of the
+                // simulation and of nothing else. A drop that lands twice
+                // inside the emit window keeps its later landing, which is the
+                // one still alive — and this thread's loop is serial, so
+                // "later" is tick order, not a race.
                 RainSplash splash;
                 splash.impact = float4(hit, t);
                 splash.surface = float4(normal, length(drop.velocity.xyz));
-                rainPush.splashes[slot % RAIN_SPLASH_RING] = splash;
+                rainPush.splashes[index] = splash;
+                // The cursor survives only as "has anything landed at all",
+                // which the pass below turns into a vertex count. Integer
+                // addition is associative and nothing reads the returned slot,
+                // so no ordering escapes this line.
+                uint ignored;
+                InterlockedAdd(rainPush.splashArgs[4], 1u, ignored);
             }
 
             issue += 1u;
@@ -436,7 +454,11 @@ void rainSimulateMain(uint3 tid: SV_DispatchThreadID) {
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void rainSplashArgsMain() {
-    uint written = min(rainPush.splashArgs[4], RAIN_SPLASH_RING);
+    // **All of them, or none.** The table is indexed by drop, so there is no
+    // prefix of it to draw; the only fact the cursor still carries is whether
+    // anything has ever landed, which keeps a scene that has not started
+    // raining yet from issuing a draw at all.
+    uint written = rainPush.splashArgs[4] > 0u ? RAIN_SPLASHES : 0u;
     // vertexCount, instanceCount, firstVertex, firstInstance.
     rainPush.splashArgs[0] = written * 6u;
     rainPush.splashArgs[1] = 1u;

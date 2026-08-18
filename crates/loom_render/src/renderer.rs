@@ -2854,7 +2854,7 @@ impl Renderer {
         let rain_splash_pipeline = self.rain_splash_pipeline;
         let rain_args_buffer = self.rain_sim.args_buffer();
         let rain_depth_set = self.scene_depth.descriptor_set();
-        if let Some((drops_id, args_id)) = rain_buffers {
+        if let Some((drops_id, splashes_id, args_id)) = rain_buffers {
             let drop_count = crate::rain::DROPS;
             let mut rain_uses = vec![(color, Access::ColorWrite), (depth, Access::DepthSample)];
             if let Some((ms_color, _)) = msaa_ids {
@@ -2865,6 +2865,12 @@ impl Renderer {
                 &rain_uses,
                 &[
                     (drops_id, loom_render_graph::BufferAccess::VertexRead),
+                    // **The splash table is a vertex read too, and it was not
+                    // declared.** `rainSplashVertexMain` reads it through a
+                    // device address, so nothing in the type system says so;
+                    // the barrier it needs was arriving only as a side effect
+                    // of the drop buffer's. never-do #4 covers buffers.
+                    (splashes_id, loom_render_graph::BufferAccess::VertexRead),
                     (args_id, loom_render_graph::BufferAccess::IndirectRead),
                 ],
                 move |d, cmd| {
