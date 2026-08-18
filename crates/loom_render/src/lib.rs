@@ -63,6 +63,7 @@ pub use renderer::{PointLight, MAX_LIGHTS,
     Renderer, WaterWave,
 };
 pub use renderer::{MIN_VIEWPORT, ViewportPlacement};
+pub use renderer::{MAX_WAVELET_EVENTS, WAVELET_FLOATS};
 pub use ui::{Ui, UiFrame};
 pub use viewer::Viewer;
 
@@ -190,20 +191,20 @@ mod tests {
         assert_eq!(at(std::ptr::from_ref(&base.light_count).cast()), 880, "lightCount");
         assert_eq!(at(std::ptr::from_ref(&base.fire_flipbook).cast()), 884, "fireFlipbook");
         assert_eq!(size_of::<crate::PointLight>(), 32, "one light");
-        // **The ripple grid, appended after the light table for the same
+        // **The wavelet events, appended after the light table for the same
         // reason the light table was appended after the waves** — every offset
         // above it is unmoved, which is what keeps this test a one-line diff
         // per addition rather than a rewrite. 896 is a multiple of 16, so the
         // `float4` lands flush, the pointer follows it at 912, and two words of
         // padding take the stride back to 16-byte alignment. The stride
         // matters because `environment` is an array in the push block.
-        assert_eq!(at(std::ptr::from_ref(&base.ripple).cast()), 896, "ripple");
+        assert_eq!(at(std::ptr::from_ref(&base.wavelet).cast()), 896, "wavelet");
         assert_eq!(
-            at(std::ptr::from_ref(&base.ripple_heights).cast()),
+            at(std::ptr::from_ref(&base.wavelet_events).cast()),
             912,
-            "rippleHeights — the grid the water surface is displaced by"
+            "waveletEvents — the events the water surface is displaced by"
         );
-        // **The current, appended after the ripple block on the same rule**:
+        // **The current, appended after the wavelet block on the same rule**:
         // 928 is a multiple of 16, so the `float4` lands flush, the pointer
         // follows it at 944, and two words of padding take the stride back to
         // 16-byte alignment.

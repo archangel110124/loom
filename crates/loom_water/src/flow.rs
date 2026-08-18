@@ -362,7 +362,7 @@ impl FlowGrid {
 /// The Slang half of [`FlowGrid::at`], emitted into the generated shader.
 ///
 /// **This and the Rust are one thing written twice**, exactly as
-/// `loom_water::ripples::slang` is, and for the same reason: two bilinears over
+/// `loom_water::foam::slang` is, and for the same reason: two bilinears over
 /// one grid is a difference nobody would ever trace back. The Rust half is the
 /// authoritative one — it is what buoyancy integrates — and this side only ever
 /// reads the copy the renderer uploads.

@@ -10,8 +10,8 @@
 # It exercises four systems at once and is the first scene that does:
 #
 #   - `Buoyancy`, whose pontoons decide when the sphere is wet and by how much
-#   - the `[ripples]` grid (ADR 0046), which the entry dents and which then
-#     carries the ring outward at `speed`
+#   - the wavelet events (ADR 0056), which the entry emits and which then
+#     spread as a dispersive ring train
 #   - the submersion event, which puts a splash on the surface *above* the body
 #     rather than at its centre, and includes the wake in that height
 #   - refraction and absorption (W1), which is what makes the submerged half of
@@ -130,20 +130,14 @@ parent = "Pool"
   density = 1000.0
   drag = 2.0
 
-    # 16 m across at half-metre cells — 33x33 = 1,089 cells, well inside the
-    # cost ADR 0046 measured (7.2 us a tick at 2,401). The domain is anchored
-    # to this node, never the camera: ADR 0045's trap clause.
-    #
-    # `speed = 2.4` puts the ring at the pool's edge in about three seconds,
-    # which is slow enough to watch across a twenty-frame sequence and fast
-    # enough that it has visibly moved between consecutive frames.
-    # c*dt/h = 2.4/60/0.5 = 0.08 against the 0.7071 stability limit.
-    [node.components.WaterBody.ripples]
-    extent = 16.0
-    cell = 0.5
-    speed = 2.4
-    damping = 0.997
-    strength = 0.9
+    # **Nothing is authored for the rings, and that is ADR 0056.** The
+    # interactive surface used to be a `[ripples]` table here — a domain, a
+    # cell, a wave speed, a damping and a coupling strength, five numbers whose
+    # only correct values were the ones somebody tuned on this scene. It is now
+    # a pool of Cauchy-Poisson events: the sphere's own waterplane radius and
+    # the volume it swept on the way in are the whole parameterisation, and
+    # dispersion — the long waves outrunning the short ones — is what makes the
+    # ring a train rather than a hoop.
 
 # **The sphere.** Dropped from three metres, which is a 0.78 s fall and about
 # 7.7 m/s at the surface — fast enough that the entry is an impact rather than

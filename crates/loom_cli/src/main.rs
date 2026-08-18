@@ -646,7 +646,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // The ripple grid that run left behind, copied out before the runner is
     // dropped. A still of `--sim 300` has to show the surface the simulation
     // arrived at, not the flat one it started from (ADR 0046 §7).
-    let mut ripples = None;
+    let mut wavelets = WaveletUpload::new();
     // And the foam field it left behind, on the same rule: a still of
     // `--sim 300` shows the foam the run deposited and advected, not an empty
     // field (ADR 0055).
@@ -655,7 +655,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // starting a second one. See `simulate_physics`.
     let mut warmed = None;
     if let Some(ticks) = flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()) {
-        (fired, splashed, ripples, foam, warmed) = simulate_physics(&mut world, base, ticks);
+        (fired, splashed, wavelets, foam, warmed) = simulate_physics(&mut world, base, ticks);
     }
 
     let mut objects = world_to_objects(&world, &library, &material_library);
@@ -811,16 +811,12 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                 .set_flow(grid.velocities(), grid.origin, grid.spacing, grid.side)
                 .map_err(|e| e.to_string())?;
         }
-        // **The wake, now seen as well as felt** — ADR 0046 §7. Unlike the bed
+        // **The wake, now seen as well as felt** — ADR 0056. Unlike the bed
         // above this is simulation state, so it is whatever the `--sim` run
-        // left in the grid. A scene with no `[ripples]` table uploads nothing
-        // and the shader's every lookup returns zero, which is the plain
-        // Gerstner surface bit for bit.
-        if let Some((heights, origin, cell, side)) = ripples.as_ref() {
-            renderer
-                .set_ripples(heights, *origin, *cell, *side)
-                .map_err(|e| e.to_string())?;
-        }
+        // left in the pool. Water nothing touched uploads nothing and the
+        // shader's every lookup returns zero, which is the plain Gerstner
+        // surface bit for bit.
+        renderer.set_wavelets(&wavelets).map_err(|e| e.to_string())?;
         // **And the foam the run deposited** — ADR 0055, and the same rule as
         // the wake above it: this is stepped CPU state, so what is uploaded is
         // wherever `--sim N` left it. A scene with no water uploads nothing and
@@ -1082,17 +1078,15 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                         particles::gpu_emitter(&world),
                         elapsed,
                     );
-                    // **The ripple grid this runner has stepped to**, re-read
-                    // every frame because it is the one thing here that is
-                    // stepped state on the CPU. This is what makes a wake
-                    // *travel* across a sequence rather than sitting still —
-                    // the exact class of artifact a still cannot show, which is
-                    // why the fly-through exists.
-                    if let Some(grid) = runner.ripples() {
-                        renderer
-                            .set_ripples(grid.heights(), grid.origin(), grid.cell(), grid.side())
-                            .map_err(|e| e.to_string())?;
-                    }
+                    // **The wavelet events this runner has stepped to**,
+                    // re-read every frame because they are the one thing here
+                    // that is stepped state on the CPU. This is what makes a
+                    // wake *travel* across a sequence rather than sitting still
+                    // — the exact class of artifact a still cannot show, which
+                    // is why the fly-through exists.
+                    renderer
+                        .set_wavelets(&wavelet_upload(runner.wavelets()))
+                        .map_err(|e| e.to_string())?;
                     // And the foam field, re-read every frame for the same
                     // reason: it is the other piece of stepped CPU state, and
                     // a wake that does not drift across a sequence is the
@@ -3001,7 +2995,7 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
         // **Built only when something asks about water**, the same bargain the
         // sky makes below and for the same reason: it bakes the bed.
         water: asked_about("water")
-            .then(|| weather::water_probe(&scene, &world, &wind, runner.ripples(), runner.foam()))
+            .then(|| weather::water_probe(&scene, &world, &wind, runner.wavelets(), runner.foam()))
             .flatten(),
         wind,
         rain: weather::rain_of(&scene),
@@ -3117,23 +3111,26 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
 /// When and where something the particles have to replay happened.
 type Happenings = Vec<(u64, [f32; 3])>;
 
-/// A copy of the ripple grid in the four arguments `Renderer::set_ripples`
-/// takes: the heights, the world xz of the corner, the cell size, the side.
+/// A copy of the event pool in the packing `Renderer::set_wavelets` takes.
 ///
 /// Owned rather than borrowed because the simulation that made it is dropped
 /// before the frame is drawn — and one direction only, which is the whole of
 /// ADR 0045 clause 2 as it applies here: nothing comes back.
-type RippleUpload = (Vec<f32>, [f32; 2], f32, usize);
+type WaveletUpload = Vec<[f32; loom_render::WAVELET_FLOATS]>;
 
-/// The same four arguments again, for `Renderer::set_foam` — the advected foam
-/// field (ADR 0055). Same shape as [`RippleUpload`] and spelled separately
-/// because they are two different grids with two different lifetimes, and one
-/// alias for both is how a caller comes to pass the wrong one.
+/// The four arguments `Renderer::set_foam` takes — the advected foam field
+/// (ADR 0055): the coverages, the world xz of the corner, the cell, the side.
 type FoamUpload = (Vec<f32>, [f32; 2], f32, usize);
 
-/// The grid as an upload, or `None` for water that authors no ripples.
-fn ripple_upload(grid: Option<&loom_water::ripples::RippleGrid>) -> Option<RippleUpload> {
-    grid.map(|g| (g.heights().to_vec(), g.origin(), g.cell(), g.side()))
+/// The pool as an upload. **The packing lives here rather than in the renderer**
+/// because `loom_render` must not learn what a `loom_water::wavelet::Event` is;
+/// the two sides agree through a 32-byte record and two tests that pin it.
+fn wavelet_upload(field: &loom_water::wavelet::WaveletField) -> WaveletUpload {
+    field
+        .events()
+        .iter()
+        .map(|e| [e.at[0], e.at[1], e.t0, e.volume, e.sigma, 0.0, 0.0, 0.0])
+        .collect()
 }
 
 /// The whitecap coverage a crest of this steepness is drawn with right now.
@@ -3180,7 +3177,7 @@ fn simulate_physics(
 ) -> (
     Happenings,
     Vec<play::Splash>,
-    Option<RippleUpload>,
+    WaveletUpload,
     Option<FoamUpload>,
     Option<play::Runner>,
 ) {
@@ -3190,10 +3187,10 @@ fn simulate_physics(
             log::warn(format!("scripts did not load, running physics only: {json}"));
             let mut sim = play::Sim::new(world);
             sim.step(ticks);
-            let ripples = ripple_upload(sim.ripples());
+            let wavelets = wavelet_upload(sim.wavelets());
             let foam = foam_upload(sim.foam());
             sim.write_back(world);
-            return (Vec::new(), Vec::new(), ripples, foam, None);
+            return (Vec::new(), Vec::new(), wavelets, foam, None);
         }
     };
     for tick in 1..=u64::from(ticks) {
@@ -3205,7 +3202,7 @@ fn simulate_physics(
     let happened = (
         runner.fired(),
         runner.splashed(),
-        ripple_upload(runner.ripples()),
+        wavelet_upload(runner.wavelets()),
         foam_upload(runner.foam()),
     );
     (happened.0, happened.1, happened.2, happened.3, Some(runner))
@@ -3896,7 +3893,7 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
     // **The wake, stepped — and it used to be a hard-coded zero.** This is the
     // probe an agent reaches for to ask what the water is doing, and it was
     // blind to the only part of the water that has any history: on a scene with
-    // a live `[ripples]` grid, `loom water --at 0,0 --sim 150` reported a
+    // a live wake, `loom water --at 0,0 --sim 150` reported a
     // displacement of exactly [0, 0, 0] while the renderer drew a ring and
     // buoyancy felt it. `--sim` moved the wave clock and nothing else.
     //
@@ -3916,8 +3913,7 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
         let (_, _, _, _, warmed) = simulate_physics(&mut stepped, base, ticks);
         let ripple = warmed
             .as_ref()
-            .and_then(|r| r.ripples())
-            .map_or([0.0; 3], |g| g.at(at[0], at[1]));
+            .map_or([0.0; 3], |r| r.wavelets().at(at[0], at[1], seconds).surface());
         let foam = warmed
             .as_ref()
             .and_then(loom_cli_foam)
@@ -3953,11 +3949,12 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
                 "normal": sample.normal,
                 "displacement": sample.displacement,
             },
-            // The interactive grid's own contribution at this point, separately
-            // from the surface it has already been added to: metres, and the
-            // two slopes. All zero for water that authors no `[ripples]`, and
-            // at `--sim 0` for water that does — the grid starts flat.
-            "ripple": {
+            // The interactive events' own contribution at this point,
+            // separately from the surface they have already been added to:
+            // metres, and the two slopes. All zero for water nothing has
+            // touched, and at `--sim 0` for every scene — nothing has happened
+            // yet at tick zero.
+            "wavelet": {
                 "height": ripple[0],
                 "slope": [ripple[1], ripple[2]],
             },
@@ -5389,10 +5386,17 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
     fn the_water_scenes_hash_to_what_they_hashed() {
         let mut pinned = 0;
         for (scene, expected) in [
-            ("wake", "18f5ecce259831aa"),
-            ("pool", "c01fa14e2ee6b7c9"),
-            ("river", "e11d745faf641cdb"),
-            ("water_crate", "9daa193336cc608f"),
+            // **Re-pinned by ADR 0056, in the commit that moved them.** The
+            // interactive surface stopped being an authored wave-equation grid
+            // and became a pool of Cauchy–Poisson events, which every floating
+            // body now sheds into and reads back — so all four move, including
+            // the two that never authored a `[ripples]` table. Was:
+            // 18f5ecce259831aa, c01fa14e2ee6b7c9, e11d745faf641cdb,
+            // 9daa193336cc608f.
+            ("wake", "66c5b227a3ab6476"),
+            ("pool", "48ea499e33fae26c"),
+            ("river", "b083e86834285c9d"),
+            ("water_crate", "d23cecb158d2608e"),
         ] {
             let path = format!("../../assets/test/{scene}.loom");
             // **Cinematic water is barred from a pinned hash** — ADR 0053 §3:
@@ -5533,22 +5537,30 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
     /// exists as one piece to prevent.
     ///
     /// `pool.loom` is the scene that can tell the difference. Its water is
-    /// dead flat with no waves at all, so every millimetre at the origin comes
-    /// from the wake grid — state, which cannot be recomputed from the tick.
+    /// dead flat with no waves at all, so every millimetre two metres out comes
+    /// from the wavelet events — state, which cannot be recomputed from the
+    /// tick.
+    ///
+    /// **Two metres and three seconds, not the origin at ten.** The old grid
+    /// held a standing dent under the sphere and could be read at the origin at
+    /// any tick; an event's `r_min` (ADR 0056) excludes the point it happened
+    /// at, by construction, and by 600 ticks the packets are ten seconds dead.
+    /// So the probe is put where the ring train actually is — which is the same
+    /// reason the ring is worth having.
     #[test]
     fn a_water_assertion_reads_the_surface_the_probe_reports() {
         let pool = "../../assets/test/pool.loom";
-        let (code, probed) = run(&args(&["water", pool, "--at", "0,0", "--sim", "600"]));
+        let (code, probed) = run(&args(&["water", pool, "--at", "2,0", "--sim", "180"]));
         assert_eq!(code, 0, "{probed}");
         let probed: serde_json::Value = serde_json::from_str(&probed).expect("json");
         #[allow(clippy::cast_possible_truncation)]
         let height = probed["surface"]["height"].as_f64().expect("a height") as f32;
-        assert!(height.abs() > 1e-3, "the wake never reached the origin: {height}");
+        assert!(height.abs() > 1e-3, "the wake never reached two metres: {height}");
 
         // `==` in the vocabulary is |a - b| < 1e-4.
         let (code, out) = run(&args(&[
-            "sim", pool, "--ticks", "600",
-            "--assert", &format!("water@0,0.height == {height}"),
+            "sim", pool, "--ticks", "180",
+            "--assert", &format!("water@2,0.height == {height}"),
         ]));
         assert_eq!(code, 0, "the assertion and the probe disagree: {out}");
 

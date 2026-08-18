@@ -55,54 +55,92 @@ float loom_ground_height(LoomHeightField field, float2 xz) {
     return (b - a) * fz + a;
 }
 
-// The interactive ripple grid, sampled. The Rust half is
-// `loom_water::ripples::RippleGrid::at`; they are one implementation written
-// twice. Never edit this by hand.
+// Interactive water as events — the Slang half of `loom_water::wavelet`. Never
+// edit this by hand: it is emitted from the Rust, and editing it changes the
+// GPU alone, which is the divergence that puts a boat above its own water.
 
-struct LoomRippleGrid {
-    // World xz of sample (0, 0).
-    float2 origin;
-    // Metres between samples.
-    float cell;
-    // Samples per axis. Zero means this water has no ripples.
-    int side;
-    // Row-major, `side * side` of them.
-    float* height;
+static const float LOOM_WAVELET_CELL = 0.5;
+static const float LOOM_WAVELET_DECAY = 4.0;
+static const float LOOM_WAVELET_H_MIN = 0.001;
+
+struct LoomWaveletEvent {
+    float2 at;
+    float t0;
+    float volume;
+    float sigma;
+    // Three scalars rather than a `float3`: at offset 20 a `float3` is not
+    // 16-byte aligned, and the standard buffer layout rules refuse it — with a
+    // validation error naming the offset, which is how this was found.
+    float pad0;
+    float pad1;
+    float pad2;
 };
 
-// Bilinear, and zero outside the domain — a body that drifts off the grid
-// floats on the plain Gerstner sea, and the sponge band has already taken the
-// amplitude to nothing before the edge. The upper edge is excluded so the
-// `+1` taps are always in range, which is the Rust's `locate` rule.
-float loom_ripple_height(LoomRippleGrid grid, float2 xz) {
-    if (grid.side <= 0) { return 0.0; }
-    float gx = (xz.x - grid.origin.x) / grid.cell;
-    float gz = (xz.y - grid.origin.y) / grid.cell;
-    float last = float(grid.side - 1);
-    if (!(gx >= 0.0 && gz >= 0.0 && gx < last && gz < last)) { return 0.0; }
-    int x0 = int(gx);
-    int z0 = int(gz);
-    float fx = gx - float(x0);
-    float fz = gz - float(z0);
-    float h00 = grid.height[z0 * grid.side + x0];
-    float h10 = grid.height[z0 * grid.side + x0 + 1];
-    float h01 = grid.height[(z0 + 1) * grid.side + x0];
-    float h11 = grid.height[(z0 + 1) * grid.side + x0 + 1];
-    float top = h00 + (h10 - h00) * fx;
-    float bottom = h01 + (h11 - h01) * fx;
-    return top + (bottom - top) * fz;
+struct LoomWavelet {
+    float height;
+    float2 slope;
+    float2 velocity;
+};
+
+// The pool, as the environment buffer carries it: a pointer and a count.
+// `count == 0` is water nothing has touched, and every lookup returns zero.
+struct LoomWaveletPool {
+    LoomWaveletEvent* events;
+    int count;
+};
+
+LoomWavelet loom_wavelet_of(LoomWaveletEvent event, float x, float z, float t)
+{
+    LoomWavelet out;
+    out.height = 0.0;
+    out.slope = float2(0.0, 0.0);
+    out.velocity = float2(0.0, 0.0);
+
+    float tau = t - event.t0;
+    if (tau <= 0.0) { return out; }
+    float dx = x - event.at.x;
+    float dz = z - event.at.y;
+    float r2 = dx * dx + dz * dz;
+    if (16.0 * r2 < tau * tau * 9.81 * event.sigma) { return out; }
+    float r = sqrt(r2);
+    if (r <= 0.0) { return out; }
+    float k = 9.81 * tau * tau / (4.0 * r2);
+    float theta = 9.81 * tau * tau / (4.0 * r);
+    float a = event.volume * 9.81 * tau * tau
+        / (4.0 * 1.41421356 * 3.14159265 * r2 * r);
+    if (a < LOOM_WAVELET_H_MIN) { return out; }
+    float ws = exp(-k * k * event.sigma * event.sigma * 0.25);
+    float wn = smoothstep(2.0 * LOOM_WAVELET_CELL, 4.0 * LOOM_WAVELET_CELL,
+        6.28318531 / k);
+    float d = exp(-tau / LOOM_WAVELET_DECAY);
+    float amplitude = a * ws * wn * d;
+    float height = -amplitude * cos(theta);
+    float dh_dr = -amplitude * k * sin(theta);
+    float invR = 1.0 / r;
+    float ux = dx * invR;
+    float uz = dz * invR;
+    float omega = 9.81 * tau * 0.5 * invR;
+    out.height = height;
+    out.slope = float2(dh_dr * ux, dh_dr * uz);
+    out.velocity = float2(omega * height * ux, omega * height * uz);
+    return out;
 }
 
-// (height, dh/dx, dh/dz) — `loom_sample_water`'s `ripple` argument.
-float3 loom_ripple_at(LoomRippleGrid grid, float2 xz) {
-    if (grid.side <= 0) { return float3(0.0, 0.0, 0.0); }
-    float e = grid.cell;
-    float h = loom_ripple_height(grid, xz);
-    float dx = loom_ripple_height(grid, xz + float2(e, 0.0))
-             - loom_ripple_height(grid, xz - float2(e, 0.0));
-    float dz = loom_ripple_height(grid, xz + float2(0.0, e))
-             - loom_ripple_height(grid, xz - float2(0.0, e));
-    return float3(h, dx / (2.0 * e), dz / (2.0 * e));
+// The sum, in index order, which is arrival order — the same order the CPU
+// walks the same list in.
+LoomWavelet loom_wavelets_at(LoomWaveletPool pool, float2 xz, float t)
+{
+    LoomWavelet out;
+    out.height = 0.0;
+    out.slope = float2(0.0, 0.0);
+    out.velocity = float2(0.0, 0.0);
+    for (int i = 0; i < pool.count; ++i) {
+        LoomWavelet one = loom_wavelet_of(pool.events[i], xz.x, xz.y, t);
+        out.height += one.height;
+        out.slope += one.slope;
+        out.velocity += one.velocity;
+    }
+    return out;
 }
 
 // The river's current, sampled. The Rust half is `loom_water::flow::FlowGrid::at`;
@@ -314,10 +352,10 @@ LoomWaterSample loom_sample_water(
     // `float3(0, 0, 0)` for an ocean or a lake. Pre-sampled for the same reason
     // `ground_height` is: this function knows nothing about the terrain.
     float3 flow,
-    // The interactive ripple grid at this point: (height, dh/dx, dh/dz).
-    // `float3(0, 0, 0)` for water with no ripples. The CPU grid is
-    // authoritative and this is its upload — ADR 0046.
-    float3 ripple)
+    // The interactive wavelet events at this point: (height, dh/dx, dh/dz),
+    // summed by `loom_wavelets_at`. `float3(0, 0, 0)` for water nothing has
+    // touched. The CPU pool is authoritative and this is its upload — ADR 0056.
+    float3 wavelet)
 {
     float3 displacement = float3(0.0, 0.0, 0.0);
     // The current is what the orbital motion is summed onto, so the two are one
@@ -378,11 +416,11 @@ LoomWaterSample loom_sample_water(
         velocity.z += qa * d.y * omega * sin_phase;
     }
 
-    // The ripple grid, folded in last: its height rides on the swell and its
+    // The events, folded in last: their height rides on the swell and their
     // slopes add to the swell's, so a ring spreading across a wave is on it.
-    displacement.y += ripple.x;
-    slope_x += ripple.y;
-    slope_z += ripple.z;
+    displacement.y += wavelet.x;
+    slope_x += wavelet.y;
+    slope_z += wavelet.z;
 
     float3 normal = float3(-slope_x, 1.0 - flatten, -slope_z);
     float normal_length = sqrt(normal.x * normal.x

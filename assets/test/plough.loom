@@ -106,16 +106,10 @@ parent = "Plough"
   density = 1000.0
   drag = 0.6
 
-    # The wake ring, which is a foam *source* now rather than a shading term —
-    # ADR 0053 §7 moved `RIPPLE_FOAM_SLOPE`/`RIPPLE_FOAM_MAX` out of the
-    # fragment shader and into the field's deposit, so what the ring entrains
-    # outlives the ring.
-    [node.components.WaterBody.ripples]
-    extent = 16.0
-    cell = 0.5
-    speed = 2.4
-    damping = 0.997
-    strength = 0.9
+    # **The wake authors nothing** — ADR 0056. The crate's impact and the
+    # packets it sheds while it ploughs are what ring the pool, and the foam
+    # they leave comes from the hull and impact deposits rather than from a
+    # grid's slope: the deposit outlives the ring, which is what makes it foam.
 
 # The ramp. Static: a `BoxCollider` with no `RigidBody` is scenery that
 # collides, which is what `rain_gantry.loom`'s deck already is.

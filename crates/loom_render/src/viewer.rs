@@ -121,7 +121,7 @@ pub struct Viewer {
     terrain_address: vk::DeviceAddress,
     terrain_params: [f32; 4],
     terrain_heights: vk::DeviceAddress,
-    /// The interactive ripple grid — see [`Viewer::set_ripples`]. Uploaded
+    /// The interactive wavelet events — see [`Viewer::set_wavelets`]. Uploaded
     /// **per tick**, unlike the terrain bake above it, because it is
     /// simulation state rather than a bake of the scene (ADR 0046 §7).
     ripple_buffer: vk::Buffer,
@@ -511,8 +511,10 @@ impl Viewer {
             crate::renderer::create_address_buffer(
                 &raw,
                 &mut allocator,
-                (crate::renderer::MAX_RIPPLE_SAMPLES * size_of::<f32>()) as u64,
-                "loom.viewer_ripple",
+                (crate::renderer::MAX_WAVELET_EVENTS
+                    * crate::renderer::WAVELET_FLOATS
+                    * size_of::<f32>()) as u64,
+                "loom.viewer_wavelets",
                 vk::BufferUsageFlags::empty(),
             )?;
         let (flow_buffer, flow_alloc, flow_address) =
@@ -620,7 +622,7 @@ impl Viewer {
         names.set(grass_pipeline, "loom.viewer_grass_pipeline");
         names.set(grass_buffer, "loom.viewer_grass");
         names.set(terrain_buffer, "loom.viewer_terrain");
-        names.set(ripple_buffer, "loom.viewer_ripple");
+        names.set(ripple_buffer, "loom.viewer_wavelets");
         names.set(flow_buffer, "loom.viewer_flow");
         names.set(depth, "loom.viewer_depth");
         names.set(acquired, "loom.sem_image_acquired");
@@ -680,7 +682,7 @@ impl Viewer {
             ripple_buffer,
             ripple_alloc: Some(ripple_alloc),
             ripple_address,
-            ripple_params: [0.0, 0.0, 1.0, 0.0],
+            ripple_params: [0.0; 4],
             ripple_heights: 0,
             flow_buffer,
             flow_alloc: Some(flow_alloc),
@@ -887,42 +889,37 @@ impl Viewer {
         )
     }
 
-    /// Hand the viewer this tick's ripple grid.
+    /// Hand the viewer this tick's wavelet events.
     ///
-    /// Mirrors [`crate::Renderer::set_ripples`] in every particular, including
-    /// that it is called **per tick** and that an empty slice means water with
-    /// no ripples. The window has to make the same call the headless path does
+    /// Mirrors [`crate::Renderer::set_wavelets`] in every particular, including
+    /// that it is called **per tick** and that an empty slice is water nothing
+    /// has touched. The window has to make the same call the headless path does
     /// or the two disagree about where the water is — and the disagreement is
     /// silent, because a wake the surface does not draw is still felt by the
     /// buoyancy solver.
     ///
     /// # Errors
     /// If the buffer is gone, which means the viewer is being torn down.
-    pub fn set_ripples(
+    pub fn set_wavelets(
         &mut self,
-        heights: &[f32],
-        origin: [f32; 2],
-        cell: f32,
-        side: usize,
+        events: &[[f32; crate::renderer::WAVELET_FLOATS]],
     ) -> Result<(), RenderError> {
-        if heights.is_empty()
-            || side * side > crate::renderer::MAX_RIPPLE_SAMPLES
-            || heights.len() < side * side
-        {
-            self.ripple_params = [0.0, 0.0, 1.0, 0.0];
+        let count = events.len().min(crate::renderer::MAX_WAVELET_EVENTS);
+        if count == 0 {
+            self.ripple_params = [0.0; 4];
             self.ripple_heights = 0;
             return Ok(());
         }
         #[allow(clippy::cast_precision_loss)]
         {
-            self.ripple_params = [origin[0], origin[1], cell, side as f32];
+            self.ripple_params = [count as f32, 0.0, 0.0, 0.0];
         }
         self.ripple_heights = self.ripple_address;
         write_slice(
             self.ripple_alloc
                 .as_ref()
-                .ok_or_else(|| RenderError::Allocator("ripple buffer is gone".into()))?,
-            &heights[..side * side],
+                .ok_or_else(|| RenderError::Allocator("wavelet buffer is gone".into()))?,
+            &events[..count],
         )
     }
 
@@ -1427,8 +1424,8 @@ impl Viewer {
         // rebuilds cheaply.
         self.environment.terrain = self.terrain_params;
         self.environment.terrain_heights = self.terrain_heights;
-        self.environment.ripple = self.ripple_params;
-        self.environment.ripple_heights = self.ripple_heights;
+        self.environment.wavelet = self.ripple_params;
+        self.environment.wavelet_events = self.ripple_heights;
         self.environment.flow = self.flow_params;
         self.environment.flow_velocities = self.flow_velocities;
         self.environment.foam = self.foam_params;

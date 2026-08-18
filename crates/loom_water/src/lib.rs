@@ -53,9 +53,9 @@ pub mod drip;
 pub mod flow;
 pub mod foam;
 pub mod nappe;
-pub mod ripples;
 pub mod spectrum;
 pub mod spray;
+pub mod wavelet;
 
 use loom_scene::components::{MAX_WAVES, WaterBody};
 
@@ -238,19 +238,23 @@ pub fn shoal(k: f32, depth: f32, attenuation_depth: f32) -> f32 {
 /// form costs nothing extra, because it reuses the `sin`/`cos` pair the
 /// position evaluation already computed.
 ///
-/// # Ripples
+/// # Wavelets
 ///
-/// `ripple` is `(height, ∂h/∂x, ∂h/∂z)` from the interactive grid at this
-/// point — [`ripples::RippleGrid::at`] — and `[0.0; 3]` is a body with no
-/// ripples, which is every scene authored before ADR 0046. It is **pre-sampled
-/// by the caller for exactly the reason `ground_height` and `flow` are**: the
-/// grid is stepped state living beside the physics, and this function must stay
-/// a function of its arguments or the Slang half cannot be the same function.
+/// `wavelet` is `(height, ∂h/∂x, ∂h/∂z)` from the interactive events at this
+/// point — [`wavelet::WaveletField::at`] — and `[0.0; 3]` is water nothing has
+/// touched. It is **pre-sampled by the caller for exactly the reason
+/// `ground_height` and `flow` are**: the pool is state living beside the
+/// physics, and this function must stay a function of its arguments or the
+/// Slang half cannot be the same function.
 ///
 /// It is added to the height and to the two slopes rather than replacing
-/// anything, so a ripple tilts the surface it raises. **A height with no slope
+/// anything, so a ring tilts the surface it raises. **A height with no slope
 /// would displace the geometry without lighting it** — a bulge you can only see
 /// against the horizon, which is how this goes wrong.
+///
+/// The events' *orbital velocity* does not arrive here: the caller sums it into
+/// `flow`, which is this function's one water-velocity argument. See
+/// [`wavelet::Wavelet`] and this crate's one-velocity rule.
 #[must_use]
 pub fn sample_water(
     body: &WaterBody,
@@ -258,7 +262,7 @@ pub fn sample_water(
     t: f32,
     ground_height: f32,
     flow: [f32; 3],
-    ripple: [f32; 3],
+    wavelet: [f32; 3],
 ) -> WaterSample {
     let mut displacement = [0.0_f32; 3];
     // **The current is the base the orbital motion is summed onto**, rather
@@ -340,12 +344,12 @@ pub fn sample_water(
         velocity[2] += qa * d[1] * omega * sin_phase;
     }
 
-    // The ripple grid, folded in last. Its height rides on top of the swell and
-    // its slopes add to the swell's, which is what makes a ring spreading
-    // across a wave read as being *on* the wave.
-    displacement[1] += ripple[0];
-    let slope_x = slope_x + ripple[1];
-    let slope_z = slope_z + ripple[2];
+    // The interactive events, folded in last. Their height rides on top of the
+    // swell and their slopes add to the swell's, which is what makes a ring
+    // spreading across a wave read as being *on* the wave.
+    displacement[1] += wavelet[0];
+    let slope_x = slope_x + wavelet[1];
+    let slope_z = slope_z + wavelet[2];
 
     let normal = [-slope_x, 1.0 - flatten, -slope_z];
     let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
@@ -477,10 +481,10 @@ LoomWaterSample loom_sample_water(
     // `float3(0, 0, 0)` for an ocean or a lake. Pre-sampled for the same reason
     // `ground_height` is: this function knows nothing about the terrain.
     float3 flow,
-    // The interactive ripple grid at this point: (height, dh/dx, dh/dz).
-    // `float3(0, 0, 0)` for water with no ripples. The CPU grid is
-    // authoritative and this is its upload — ADR 0046.
-    float3 ripple)
+    // The interactive wavelet events at this point: (height, dh/dx, dh/dz),
+    // summed by `loom_wavelets_at`. `float3(0, 0, 0)` for water nothing has
+    // touched. The CPU pool is authoritative and this is its upload — ADR 0056.
+    float3 wavelet)
 {
     float3 displacement = float3(0.0, 0.0, 0.0);
     // The current is what the orbital motion is summed onto, so the two are one
@@ -541,11 +545,11 @@ LoomWaterSample loom_sample_water(
         velocity.z += qa * d.y * omega * sin_phase;
     }
 
-    // The ripple grid, folded in last: its height rides on the swell and its
+    // The events, folded in last: their height rides on the swell and their
     // slopes add to the swell's, so a ring spreading across a wave is on it.
-    displacement.y += ripple.x;
-    slope_x += ripple.y;
-    slope_z += ripple.z;
+    displacement.y += wavelet.x;
+    slope_x += wavelet.y;
+    slope_z += wavelet.z;
 
     float3 normal = float3(-slope_x, 1.0 - flatten, -slope_z);
     float normal_length = sqrt(normal.x * normal.x

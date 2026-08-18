@@ -718,7 +718,7 @@ fn jet_state(speed: f32, radius: f32, age: f32) -> Option<(f32, f32)> {
 /// call sites in `loom_cli::particles` — the headless replay and the window's
 /// live plumes — have to draw the same population. Wiring a water effect into
 /// one path only is a mistake this repository has made three times
-/// (`set_ripples`, ADR 0046 §7), and a single entry point is what makes it
+/// (`set_ripples`, ADR 0046 §7 — since deleted), and one entry point is what makes it
 /// impossible rather than merely tested.
 ///
 /// Ordered crown, jet, satellites: that is the blend order, and the jet stands

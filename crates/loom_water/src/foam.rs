@@ -102,21 +102,6 @@ pub const FOAM_CREST_BREAK: f32 = 0.45;
 /// deposits along a contour, and a contour reads as drawn.
 pub const FOAM_CREST_FULL: f32 = 0.62;
 
-/// The wake's own crest, as the reciprocal of the slope at which it deposits
-/// fully.
-///
-/// **`RIPPLE_FOAM_SLOPE`, relocated** — ADR 0053 §7. It used to paint the
-/// ripple grid's instantaneous slope white in the fragment shader, which is
-/// foam with no memory: it appeared and vanished with the ring instead of being
-/// left behind by it. Here the same number decides what a ring *deposits*, and
-/// the deposit outlives the ring by [`FOAM_HALF_LIFE`].
-pub const FOAM_RIPPLE_SLOPE: f32 = 10.0;
-
-/// How much foam a wake's crest may deposit. **`RIPPLE_FOAM_MAX`, relocated**,
-/// and under 1 for the reason it always was: a wake entrains a streak of
-/// bubbles along its steepest line, not a solid cap.
-pub const FOAM_RIPPLE_MAX: f32 = 0.50;
-
 /// Speed at which a hull's waterline deposits full foam, m/s.
 ///
 /// **Six, not the two the design asked for, and the difference is what a
@@ -456,34 +441,21 @@ impl FoamField {
         }
     }
 
-    /// Lay the wake's own crest into the field, off the ripple grid's slope.
-    ///
-    /// **`RIPPLE_FOAM_SLOPE`/`RIPPLE_FOAM_MAX`'s new home** (ADR 0053 §7).
-    /// Walked over the *ripple* grid's cells rather than this field's: the ring
-    /// is what carries the detail, and it is the smaller grid.
-    pub fn deposit_ripples(&mut self, grid: &crate::ripples::RippleGrid) {
-        let side = grid.side();
-        for iz in 0..side {
-            for ix in 0..side {
-                #[allow(clippy::cast_precision_loss)]
-                let p = [
-                    grid.origin()[0] + ix as f32 * grid.cell(),
-                    grid.origin()[1] + iz as f32 * grid.cell(),
-                ];
-                let slope = grid.at(p[0], p[1]);
-                let steep = (slope[1] * slope[1] + slope[2] * slope[2]).sqrt();
-                let amount = (steep * FOAM_RIPPLE_SLOPE).clamp(0.0, 1.0) * FOAM_RIPPLE_MAX;
-                if amount <= 0.0 {
-                    continue;
-                }
-                let Some((x0, z0, _, _)) = self.locate(p[0], p[1]) else {
-                    continue;
-                };
-                let i = z0 * self.side + x0;
-                self.now[i] = self.now[i].max(amount);
-            }
-        }
-    }
+    // **`deposit_ripples` is gone with the grid it walked** — ADR 0056. It laid
+    // foam wherever the ripple field was steep, which needed a *grid* to walk;
+    // wavelet events have no cells. Its two constants went with it, and the
+    // mechanism did not go unreplaced: an impact deposits its ring through
+    // `deposit_disc` at the splash event and a moving hull deposits its own
+    // through `Hull` below, which are the two places foam is actually made.
+    //
+    // **The events' orbital velocity is deliberately *not* summed into
+    // `velocity_at`.** Two reasons, and the second is the one that decides it.
+    // It costs `side²` event sums a tick — 16,384 cells against a pool of up to
+    // 128 events is two million evaluations inside the fixed step, against a
+    // whole-tick budget of a quarter of a millisecond. And an orbital velocity
+    // is a *circle*: its mean over a cycle is zero, so what it would buy is
+    // foam trembling in place, while the transport foam actually rides is the
+    // Stokes drift already in `self.stokes`.
 
     /// Coverage at a world point, bilinear, faded to nothing at the boundary
     /// and zero outside it.

@@ -197,18 +197,18 @@ struct EnvironmentData {
     /// and this side calls padding is how that agreement stops being checkable.
     float exposure;
     uint lightPad1;
-    /// The interactive ripple grid: xy world origin, z metres between samples,
-    /// w samples per axis. **Zero samples means this water has no ripples**,
-    /// which is every scene authored before ADR 0046.
-    float4 ripple;
-    /// The heights, `ripple.w²` of them. **A copy of the CPU grid, which is
-    /// the authoritative one** — nothing here ever writes back, because a GPU
+    /// The interactive wavelet events: x how many there are, y unused, zw
+    /// unused. **Zero events is water nothing has touched**, and every lookup
+    /// then returns zero — the plain Gerstner surface, bit for bit.
+    float4 wavelet;
+    /// The events, `wavelet.x` of them. **A copy of the CPU pool, which is the
+    /// authoritative one** — nothing here ever writes back, because a GPU
     /// float reaching a force is what ADR 0045 clause 2 forbids.
-    float* rippleHeights;
+    LoomWaveletEvent* waveletEvents;
     /// Keeps the struct's stride 16-byte aligned on both sides. `environment`
     /// is an array in the push block, so the stride has to match even though
     /// only element zero is read.
-    uint2 ripplePad;
+    uint2 waveletPad;
     /// The river's current: xy world origin, z metres between nodes, w nodes
     /// per axis. **Under two nodes means this water has no current**, which is
     /// every scene that does not author `WaterBody.flow`.
@@ -1806,20 +1806,18 @@ LoomHeightField terrainField() {
     return field;
 }
 
-/// This tick's ripple grid, assembled from the two environment fields that
-/// carry it. `side == 0` is water with no ripples: every lookup returns zero,
-/// which is the plain Gerstner surface bit for bit.
+/// This tick's wavelet events, assembled from the two environment fields that
+/// carry them. `count == 0` is water nothing has touched: every lookup returns
+/// zero, which is the plain Gerstner surface bit for bit.
 ///
-/// **The grid is the CPU's** — ADR 0046. It is stepped inside the fixed step
+/// **The pool is the CPU's** — ADR 0056. It is stepped inside the fixed step
 /// beside `rapier`, it is what buoyancy reads through `sample_water`, and this
 /// is a copy uploaded for drawing. Nothing here writes it.
-LoomRippleGrid rippleField() {
-    LoomRippleGrid grid;
-    grid.origin = push.environment[0].ripple.xy;
-    grid.cell = push.environment[0].ripple.z;
-    grid.side = int(push.environment[0].ripple.w);
-    grid.height = push.environment[0].rippleHeights;
-    return grid;
+LoomWaveletPool waveletPool() {
+    LoomWaveletPool pool;
+    pool.events = push.environment[0].waveletEvents;
+    pool.count = int(push.environment[0].wavelet.x);
+    return pool;
 }
 
 /// This scene's river current, assembled from the two environment fields that
@@ -4795,19 +4793,19 @@ struct WaterOutput {
     float foamHist : TEXCOORD4;
     /// The **undisplaced** xz this vertex was evaluated at.
     ///
-    /// Carried so the fragment shader can sample the ripple grid itself. Not
+    /// Carried so the fragment shader can sum the wavelet events itself. Not
     /// `worldPos.xz`: the Gerstner pinch moves the vertex sideways after the
-    /// sum, and asking the grid where the vertex ended up is the circular
-    /// definition the vertex shader already refuses. The base point is linear
-    /// across a triangle, so interpolating it is exact.
+    /// sum, and asking where the vertex ended up is the circular definition the
+    /// vertex shader already refuses. The base point is linear across a
+    /// triangle, so interpolating it is exact.
     float2 baseXZ : TEXCOORD5;
-    /// The ripple slope this vertex used, `(∂h/∂x, ∂h/∂z)`.
+    /// The wavelet slope this vertex used, `(∂h/∂x, ∂h/∂z)`.
     ///
     /// **Carried so the per-pixel slope can be added as a difference rather
     /// than as a second copy.** `normal` already has this term baked into it
     /// by `loom_sample_water`; subtracting what the vertex knew and adding what
     /// the pixel knows recovers the resolution without counting the wake twice.
-    float2 rippleSlope : TEXCOORD6;
+    float2 waveletSlope : TEXCOORD6;
     /// **The breaking criterion** — `LoomWaterSample::mu_max`, the largest
     /// eigenvalue of the horizontal compression rather than its trace.
     ///
@@ -4901,7 +4899,7 @@ WaterOutput nappeVertex(uint nappeID) {
         out.fold = 0.0;
         out.foamHist = 0.0;
         out.baseXZ = lipA.xz;
-        out.rippleSlope = float2(0.0, 0.0);
+        out.waveletSlope = float2(0.0, 0.0);
         out.breakMu = 0.0;
         out.breakDir = float2(0.0, 0.0);
         out.nappe = float4(0.0, 0.0, 0.0, 0.0);
@@ -4933,9 +4931,9 @@ WaterOutput nappeVertex(uint nappeID) {
     out.fold = 0.0;
     out.foamHist = 0.0;
     // The lip parameter, so the fragment can put strings across the sheet. It
-    // rides in `baseXZ` because a nappe fragment never samples the ripple grid.
+    // rides in `baseXZ` because a nappe fragment never sums the events.
     out.baseXZ = float2(u, 0.0);
-    out.rippleSlope = float2(0.0, 0.0);
+    out.waveletSlope = float2(0.0, 0.0);
     out.breakMu = 0.0;
     out.breakDir = float2(0.0, 0.0);
     // **Departure time, from the jet velocity rather than from a clock.** Free
@@ -5038,12 +5036,14 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
             WATER_FADE_GONE, WATER_FADE_WHOLE, faded.waves[w].wavelength / sampleCell);
     }
 
-    // **The ripple grid, sampled at the base point rather than at the
-    // displaced one.** The Gerstner pinch moves this vertex sideways *after*
-    // the sum, so asking the grid where the vertex ends up would be a circular
-    // definition — and it would disagree with the CPU, which asks at the
-    // pontoon's own xz. One base point, one lookup, both sides.
-    float3 rippleAt = loom_ripple_at(rippleField(), xz);
+    // **The events, summed at the base point rather than at the displaced
+    // one.** The Gerstner pinch moves this vertex sideways *after* the sum, so
+    // asking where the vertex ends up would be a circular definition — and it
+    // would disagree with the CPU, which asks at the pontoon's own xz. One base
+    // point, one sum, both sides.
+    LoomWavelet waveletAt = loom_wavelets_at(
+        waveletPool(), xz, push.environment[0].weather.z);
+    float3 waveletSurface = float3(waveletAt.height, waveletAt.slope.x, waveletAt.slope.y);
 
     LoomWaterSample surfaceAt = loom_sample_water(
         faded,
@@ -5059,7 +5059,7 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
         // A flow-map material — a river whose *texture* scrolls downstream —
         // is what would need it, and that is river mesh shaping, not W8.
         float3(0.0, 0.0, 0.0),
-        rippleAt);
+        waveletSurface);
 
     // The horizontal displacement is half of what makes a Gerstner wave read
     // as water rather than as a sine: crests pinch toward each other. It is
@@ -5136,10 +5136,12 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     for (int tap = 1; tap <= FOAM_TRAIL_TAPS; ++tap) {
         float tau = float(tap) * FOAM_TRAIL_STEP;
         decay *= FOAM_TRAIL_DECAY;
-        // **No ripple on the trail taps.** The foam trail asks what the *swell*
-        // was doing a second ago; the ripple grid has no history to ask — it is
-        // a snapshot of this tick, so feeding it into a past sample would paint
-        // foam from a wake that had not happened yet.
+        // **No wavelets on the trail taps, and this is now a cost decision
+        // rather than an impossibility.** The grid this replaced was a snapshot
+        // of one tick and had no past to ask about; an event pool does — every
+        // packet is a closed form in `(r, tau)` and `t - tau` is exactly as
+        // cheap as `t`. It is skipped because it is FOAM_TRAIL_TAPS more pool
+        // sums per vertex for foam the hull and impact deposits already lay.
         LoomWaterSample past = loom_sample_water(
             faded, surface, ground, xz - trailWind * tau,
             push.environment[0].weather.z - tau,
@@ -5149,7 +5151,7 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     }
     out.foamHist = trail;
     out.baseXZ = xz;
-    out.rippleSlope = rippleAt.yz;
+    out.waveletSlope = waveletAt.slope;
     // Not a falling sheet. The fragment shader branches on this and every
     // surface vertex has to say so.
     out.nappe = float4(0.0, 0.0, 0.0, 0.0);
@@ -5419,8 +5421,10 @@ static const float WATER_DETAIL_SCALE = 1.6;
 // second ripple system growing beside it.
 //
 // **Presentation only.** Nothing here reaches a force, a script or `loom sim
-// --assert` — the force-path ripple grid (ADR 0046) is untouched and its
-// hashes do not move. See ADR 0052 for why wind forcing was kept off the grid.
+// --assert` — the force-path interactive surface (ADR 0056's events) is
+// untouched by it. See ADR 0052 for why wind forcing was kept off the force
+// path; the grid that ADR argued about is now gone, and the argument that wind
+// chop is presentation survives it.
 
 /// Cox & Munk (1954), from sun-glitter photographs of the Pacific: the
 /// mean-square slope of a wind-roughened surface is `0.003 + 5.12e-3 · U`, with
@@ -5510,7 +5514,7 @@ float2 waterDetailSlopeAt(float2 xz, float t, float2 drift) {
 /// as it did, and `wA·g + (1-wA)·g` is not `g` in floats — it is a rounding
 /// difference in every water pixel of every scene in the repository, which is
 /// exactly the drift only `cargo xtask repeat` can see. The wake's own
-/// `ripples.side > 0` guard is here for the same reason and was measured.
+/// `pool.count > 0` guard is here for the same reason and was measured.
 ///
 /// A gradient is linear, so blending the two phases' slopes is the same thing
 /// as blending the two phases' surfaces and differencing — no approximation is
@@ -6200,25 +6204,26 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // segments and its slope as a staircase. The base point is a linear
     // varying, so sampling here is the exact value at this pixel.
     //
-    // `dRipple` is the *difference* from what the vertex already folded into
+    // `dWavelet` is the *difference* from what the vertex already folded into
     // `normal`. Adding the whole slope again would draw the wake twice.
     //
-    // **Branched on `side > 0`, and that is not an optimisation.** Water with
-    // no `[ripples]` table must render bit for bit as it did, and
+    // **Branched on `count > 0`, and that is not an optimisation.** Water
+    // nothing has touched must render bit for bit as it did, and
     // `normalize(normal - 0)` is not a no-op — it is a second normalise of an
     // already-normalised vector, which moves the last bit. Measured: `ocean`
     // and `water_crate` both came back byte-different from their references
     // with this unguarded, inside the image gate's tolerance and therefore
     // exactly the kind of drift only `cargo xtask repeat` can see.
     //
-    // **The wake's foam term is gone from this block** (ADR 0053 §7) — the
-    // slope now shapes the normal and nothing else. See the foam mix below.
-    LoomRippleGrid ripples = rippleField();
-    float3 ripple = float3(0.0, 0.0, 0.0);
-    if (ripples.side > 0) {
-        ripple = loom_ripple_at(ripples, in.baseXZ);
-        float2 dRipple = ripple.yz - in.rippleSlope;
-        normal = normalize(normal - float3(dRipple.x, 0.0, dRipple.y));
+    // **This is a per-pixel sum over the pool** rather than a texture lookup,
+    // and it is the same loop the vertex shader runs: a ring's slope across one
+    // mesh cell is not linear, and interpolating it draws the crest as a facet.
+    LoomWaveletPool pool = waveletPool();
+    if (pool.count > 0) {
+        LoomWavelet wavelet = loom_wavelets_at(
+            pool, in.baseXZ, push.environment[0].weather.z);
+        float2 dWavelet = wavelet.slope - in.waveletSlope;
+        normal = normalize(normal - float3(dWavelet.x, 0.0, dWavelet.y));
     }
 
     // **The rain's own rings, and the gate is three per-position terms.** The

@@ -329,34 +329,33 @@ pub struct EnvironmentData {
     /// scene with nothing bright renders bit for bit as it did.
     pub exposure: f32,
     pub light_pad: [u32; 1],
-    /// The interactive ripple grid: xy world origin, z metres between samples,
-    /// w samples per axis. **`w == 0` means this water has no ripples**, which
-    /// is every scene authored before ADR 0046 and is how the shader skips the
-    /// whole lookup without a second flag.
+    /// The interactive wavelet events: x how many, yzw unused. **`x == 0` is
+    /// water nothing has touched**, and is how the shader skips the whole sum
+    /// without a second flag.
     ///
-    /// Same four-float shape as [`Self::terrain`] and for the same reason: a
-    /// `LoomRippleGrid` puts its pointer last, and a `float4` has to stay
-    /// 16-byte aligned.
-    pub ripple: [f32; 4],
-    /// The heights, `ripple.w²` of them, row-major, in metres of displacement.
+    /// Same four-float shape as [`Self::terrain`] and for the same reason: the
+    /// pointer beside it has to stay 16-byte aligned, and three unused floats
+    /// here are cheaper than moving every offset below.
+    pub wavelet: [f32; 4],
+    /// The events, `wavelet.x` of them, 32 bytes each.
     ///
-    /// **The CPU grid is authoritative and this is a copy of it** (ADR 0046).
-    /// It is written every tick rather than once per scene — the grid is
+    /// **The CPU pool is authoritative and this is a copy of it** (ADR 0056).
+    /// It is written every tick rather than once per scene — the pool is
     /// stepped state, unlike the terrain bake beside it — and it is never read
     /// back, because a GPU float reaching a force is what ADR 0045 clause 2
     /// forbids. `loom_water` cannot import `ash` at all, which is what makes
     /// that structural rather than a convention.
-    pub ripple_heights: vk::DeviceAddress,
+    pub wavelet_events: vk::DeviceAddress,
     /// Keeps the struct 16-byte aligned, as `light_pad` above does. The array
     /// is indexed in the shader (`push.environment[0]`), so its stride has to
     /// match on both sides even though only element zero is ever read.
-    pub ripple_pad: [u32; 2],
+    pub wavelet_pad: [u32; 2],
     /// The river's current: xy world origin, z metres between nodes, w nodes
     /// per axis. **`w < 2` means this water has no current**, which is every
     /// scene that does not author `WaterBody.flow` — and every one of them then
     /// takes the branch that leaves its picture bit for bit unchanged.
     ///
-    /// Appended after the ripple block for the reason that block was appended
+    /// Appended after the wavelet block for the reason that block was appended
     /// after the lights: every offset above it is unmoved.
     pub flow: [f32; 4],
     /// The velocities, `flow.w²` of them, row-major, `(x, z)` in m/s.
@@ -366,7 +365,7 @@ pub struct EnvironmentData {
     /// only: the current the buoyancy solver integrates is `FlowGrid::at` on
     /// the CPU, and this is the copy the shader advects its noise with.
     pub flow_velocities: vk::DeviceAddress,
-    /// Keeps the struct's stride 16-byte aligned, as `ripple_pad` does.
+    /// Keeps the struct's stride 16-byte aligned, as `wavelet_pad` does.
     pub flow_pad: [u32; 2],
     /// The advected foam field: xy world origin, z metres between samples,
     /// w samples per axis. **`w == 0` means this water has no foam field**,
@@ -515,9 +514,9 @@ impl Default for EnvironmentData {
             // identity leg of the shoulder and renders unchanged.
             exposure: crate::tonemap::DEFAULT_EXPOSURE,
             light_pad: [0; 1],
-            ripple: [0.0, 0.0, 1.0, 0.0],
-            ripple_heights: 0,
-            ripple_pad: [0; 2],
+            wavelet: [0.0; 4],
+            wavelet_events: 0,
+            wavelet_pad: [0; 2],
             flow: [0.0, 0.0, 1.0, 0.0],
             flow_velocities: 0,
             flow_pad: [0; 2],
@@ -553,13 +552,20 @@ pub(crate) const MSAA_SAMPLES: vk::SampleCountFlags = vk::SampleCountFlags::TYPE
 /// coarsens its grid rather than exceeding it.
 pub const MAX_TERRAIN_SAMPLES: usize = 256 * 256;
 
-/// Heights the ripple buffer holds: `loom_scene::components::MAX_RIPPLE_CELLS`.
+/// Events the wavelet buffer holds: `loom_water::wavelet::MAX_EVENTS`.
 ///
 /// Spelled here rather than imported for the same reason the line above is —
-/// the renderer depends on neither `loom_scene` nor `loom_water`. The scene
-/// validator refuses a grid larger than this at load, so this is the ceiling
-/// that refusal quotes rather than a second policy.
-pub const MAX_RIPPLE_SAMPLES: usize = 256 * 256;
+/// the renderer depends on neither `loom_scene` nor `loom_water` at run time.
+/// The pool is a ring of exactly this size on the CPU, so this is a copy of
+/// that number rather than a second policy, and `set_wavelets` drops anything
+/// past it rather than trusting the caller.
+pub const MAX_WAVELET_EVENTS: usize = 128;
+
+/// Floats in one uploaded event: `at.xy`, `t0`, `volume`, `sigma`, three of
+/// padding. **32 bytes, which is what the shader's `LoomWaveletEvent` is** —
+/// `loom_water::wavelet::the_event_record_is_thirty_two_bytes` pins the other
+/// side of the same agreement.
+pub const WAVELET_FLOATS: usize = 8;
 
 /// Velocities the flow buffer holds. Same geometry as the terrain grid it is
 /// derived from, so the same ceiling — `loom_voxel::heightfield::MAX_SIDE²`.
@@ -1002,7 +1008,7 @@ pub struct Renderer {
     /// scene has no terrain.
     terrain_heights: vk::DeviceAddress,
     /// The interactive ripple grid, uploaded **every tick** — see
-    /// [`Renderer::set_ripples`]. Host-visible for exactly that reason: the
+    /// [`Renderer::set_wavelets`]. Host-visible for exactly that reason: the
     /// terrain bake beside it changes when the terrain does, this changes
     /// sixty times a second because it is simulation state.
     ripple_buffer: vk::Buffer,
@@ -1012,7 +1018,7 @@ pub struct Renderer {
     /// environment at render time so a caller replacing the environment
     /// wholesale cannot lose it, exactly as `terrain_params` is.
     ripple_params: [f32; 4],
-    /// `ripple_address`, or null when this scene's water has no ripples.
+    /// `ripple_address`, or null when nothing has touched this scene's water.
     ripple_heights: vk::DeviceAddress,
     /// The river's current, uploaded **once per scene** — see
     /// [`Renderer::set_flow`]. A bake off the bed, like the terrain grid, not
@@ -1304,15 +1310,15 @@ impl Renderer {
             "loom.terrain",
             vk::BufferUsageFlags::empty(),
         )?;
-        // The ripple grid: `loom_scene::components::MAX_RIPPLE_CELLS` floats,
-        // which the validator refuses to exceed at load. 256 KB, written every
+        // The wavelet events: 128 records of 32 bytes, 4 KB, written every
         // tick — the one buffer here whose contents are simulation state rather
-        // than a bake.
+        // than a bake. It replaced a 256 KB ripple grid, which is most of what
+        // "closed form instead of a field" costs in memory.
         let (ripple_buffer, ripple_alloc, ripple_address) = create_address_buffer(
             &raw,
             &mut allocator,
-            (MAX_RIPPLE_SAMPLES * size_of::<f32>()) as u64,
-            "loom.ripples",
+            (MAX_WAVELET_EVENTS * WAVELET_FLOATS * size_of::<f32>()) as u64,
+            "loom.wavelets",
             vk::BufferUsageFlags::empty(),
         )?;
         // The river's current, over the same grid geometry as the bed above it
@@ -1327,7 +1333,7 @@ impl Renderer {
         )?;
 
         // The foam field: 128² coverages, 64 KB, written every tick like the
-        // ripple grid above and for the same reason — it is stepped CPU state
+        // event pool above and for the same reason — it is stepped CPU state
         // rather than a bake (ADR 0055).
         let (foam_buffer, foam_alloc, foam_address) = create_address_buffer(
             &raw,
@@ -1837,45 +1843,42 @@ impl Renderer {
         )
     }
 
-    /// Hand the renderer this tick's ripple grid.
+    /// Hand the renderer this tick's wavelet events.
     ///
     /// **Per tick, unlike [`Self::set_terrain`] beside it**, because this is
-    /// simulation state rather than a bake: the CPU grid is stepped inside the
+    /// simulation state rather than a bake: the CPU pool is stepped inside the
     /// fixed step and this is a copy of where it got to. Nothing is ever read
     /// back — a GPU float reaching a force is what ADR 0045 clause 2 forbids,
     /// and `loom_water` cannot import `ash` at all, which makes that structural.
     ///
-    /// An empty slice is water with no ripples, and every lookup in the shader
-    /// then returns zero — which is the plain Gerstner surface, bit for bit.
+    /// Each event is [`WAVELET_FLOATS`] floats, packed by the caller because
+    /// this crate must not learn what a `loom_water::wavelet::Event` is.
+    ///
+    /// An empty slice is water nothing has touched, and every lookup in the
+    /// shader then returns zero — the plain Gerstner surface, bit for bit.
     ///
     /// # Errors
     /// If the buffer is gone, which means the renderer is being torn down.
-    pub fn set_ripples(
-        &mut self,
-        heights: &[f32],
-        origin: [f32; 2],
-        cell: f32,
-        side: usize,
-    ) -> Result<(), RenderError> {
-        // Dropped whole rather than in part, like the terrain grid: half a
-        // ripple field is a discontinuity down the middle of the water, which
-        // is a far worse artifact than no ripples at all. The validator refuses
-        // anything over the cap at load, so this is a guard and not a path.
-        if heights.is_empty() || side * side > MAX_RIPPLE_SAMPLES || heights.len() < side * side {
-            self.ripple_params = [0.0, 0.0, 1.0, 0.0];
+    pub fn set_wavelets(&mut self, events: &[[f32; WAVELET_FLOATS]]) -> Result<(), RenderError> {
+        // Truncated rather than refused: the CPU ring is the same size, so a
+        // longer slice is a mismatch between two copies of one constant and the
+        // right answer is to draw the events that fit rather than none.
+        let count = events.len().min(MAX_WAVELET_EVENTS);
+        if count == 0 {
+            self.ripple_params = [0.0, 0.0, 0.0, 0.0];
             self.ripple_heights = 0;
             return Ok(());
         }
         #[allow(clippy::cast_precision_loss)]
         {
-            self.ripple_params = [origin[0], origin[1], cell, side as f32];
+            self.ripple_params = [count as f32, 0.0, 0.0, 0.0];
         }
         self.ripple_heights = self.ripple_address;
         write_slice(
             self.ripple_alloc
                 .as_ref()
-                .ok_or_else(|| RenderError::Allocator("ripple buffer is gone".into()))?,
-            &heights[..side * side],
+                .ok_or_else(|| RenderError::Allocator("wavelet buffer is gone".into()))?,
+            &events[..count],
         )
     }
 
@@ -1927,7 +1930,7 @@ impl Renderer {
 
     /// Hand the renderer this tick's foam field.
     ///
-    /// **Per tick, like [`Self::set_ripples`]**, because it is stepped CPU
+    /// **Per tick, like [`Self::set_wavelets`]**, because it is stepped CPU
     /// state and not a bake: the field is advected and deposited into inside
     /// the fixed step and this is a copy of where it got to. Nothing is read
     /// back — an assertion can read this same number through
@@ -2152,8 +2155,8 @@ impl Renderer {
         self.environment.terrain = self.terrain_params;
         self.environment.terrain_heights = self.terrain_heights;
         // And the ripple grid, for the same reason and by the same rule.
-        self.environment.ripple = self.ripple_params;
-        self.environment.ripple_heights = self.ripple_heights;
+        self.environment.wavelet = self.ripple_params;
+        self.environment.wavelet_events = self.ripple_heights;
         // And the current, for the third time by the same rule.
         self.environment.flow = self.flow_params;
         self.environment.flow_velocities = self.flow_velocities;

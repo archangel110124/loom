@@ -97,9 +97,9 @@ pub(crate) struct WaterProbe {
     body: WaterBody,
     bed: Option<loom_voxel::heightfield::HeightField>,
     flow: Option<loom_water::flow::FlowGrid>,
-    /// The interactive grid as it stood at the end of the run, cloned off the
-    /// runner. State, so there is no way to recompute it here.
-    ripples: Option<loom_water::ripples::RippleGrid>,
+    /// The interactive events as they stood at the end of the run, cloned off
+    /// the runner. State, so there is no way to recompute them here.
+    wavelets: loom_water::wavelet::WaveletField,
     /// The advected foam field at the end of the run, cloned off the runner
     /// for the same reason: it is stepped state and cannot be recomputed from
     /// a position and a time. `water@x,z.foam` reads it.
@@ -133,8 +133,12 @@ impl WaterProbe {
             .as_ref()
             .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(xz[0], xz[1]));
         let flow = self.flow.as_ref().map_or([0.0; 3], |g| g.at(xz[0], xz[1]));
-        let ripple = self.ripples.as_ref().map_or([0.0; 3], |g| g.at(xz[0], xz[1]));
-        loom_water::sample_water(&self.body, xz, seconds, ground, flow, ripple)
+        let wavelet = self.wavelets.at(xz[0], xz[1], seconds);
+        // **The orbital velocity is summed into the current, not reported
+        // beside it** — `sample_water` has one water-velocity argument, so
+        // `water@x,z.speed` reads what a floating body there would feel.
+        let flow = [flow[0] + wavelet.velocity[0], flow[1], flow[2] + wavelet.velocity[1]];
+        loom_water::sample_water(&self.body, xz, seconds, ground, flow, wavelet.surface())
     }
 }
 
@@ -148,13 +152,13 @@ pub(crate) fn water_probe(
     scene: &Scene,
     world: &World,
     wind: &Wind,
-    ripples: Option<&loom_water::ripples::RippleGrid>,
+    wavelets: &loom_water::wavelet::WaveletField,
     foam: Option<&loom_water::foam::FoamField>,
 ) -> Option<WaterProbe> {
     let body = water_of(world, wind)?;
     let bed = crate::scene_terrain_field(scene);
     let flow = bed.as_ref().and_then(|g| crate::river_flow(g, &body));
-    Some(WaterProbe { body, bed, flow, ripples: ripples.cloned(), foam: foam.cloned() })
+    Some(WaterProbe { body, bed, flow, wavelets: wavelets.clone(), foam: foam.cloned() })
 }
 
 /// The same query, for a caller that holds the pieces rather than a [`Weather`].

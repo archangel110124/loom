@@ -109,22 +109,19 @@ pub struct Sim {
     /// is and with the same consequence: blow the bank out mid-run and the
     /// current is the one the old bank made. Reloading picks it up.
     flow: Option<loom_water::flow::FlowGrid>,
-    /// The interactive ripple grid, when the body authors one — ADR 0046.
+    /// The interactive wavelet events — ADR 0056.
     ///
     /// **The one piece of stepped state this simulation owns besides `rapier`,
-    /// and it is on the force path.** It is `None` for every scene authored
-    /// before ADR 0046, which is what keeps both determinism hashes unmoved.
+    /// and it is on the force path.** Present for every scene with water,
+    /// because unlike the grid it replaced there is nothing to author: an
+    /// event is a point, a time, a volume and a radius.
     ///
-    /// **Anchored to the water node's world position, never to the camera.**
-    /// ADR 0045's trap clause: a domain that followed the eye would make the
-    /// buoyant force on a crate a function of where the viewer was standing,
-    /// so `loom render --sim N` and `loom run` would disagree about physics.
-    /// `Sim` cannot see a camera at all, which is the structural half of that
-    /// guarantee.
-    ripples: Option<loom_water::ripples::RippleGrid>,
-    /// The advected foam field — ADR 0055. Built for any water body, because
-    /// unlike the ripple grid it is not authored: a foam field is the near
-    /// field of whatever water is in shot.
+    /// **There is no domain, so there is nothing to anchor** — ADR 0045's trap
+    /// clause is about a grid that could follow the camera, and this has no
+    /// grid. `Sim` cannot see a camera at all either way.
+    wavelets: loom_water::wavelet::WaveletField,
+    /// The advected foam field — ADR 0055. Built for any water body: a foam
+    /// field is the near field of whatever water is in shot.
     foam: Option<loom_water::foam::FoamField>,
     /// Bodies that float, in scene order, with their pontoons already in body
     /// space. **Order is fixed at load and never sorted**: the forces are
@@ -481,7 +478,7 @@ impl Sim {
                                 velocity: [0.0; 3],
                                 ground: loom_voxel::heightfield::NO_GROUND,
                                 flow: [0.0; 3],
-                                ripple: [0.0; 3],
+                                wavelet: [0.0; 3],
                             };
                             buoyancy.pontoons.len()
                         ],
@@ -518,32 +515,9 @@ impl Sim {
                     .to_owned(),
             );
         }
-        // **Centred on the water node, which is the anchor ADR 0045 demands.**
-        // The node's own world position rather than the scene's origin or the
-        // bounds of what floats: it is a thing the author placed and can move,
-        // it is in the file, and it does not depend on what happens during the
-        // run — a domain that tracked the bodies would move when one sank.
-        let ripples = water.as_ref().and_then(|body| body.ripples).and_then(|params| {
-            let centre = world
-                .entities()
-                .iter()
-                .find(|e| world.is_water(**e))
-                .and_then(|e| world.global_transform(*e))
-                .map_or([0.0, 0.0], |g| [g.matrix[12], g.matrix[14]]);
-            let grid = loom_water::ripples::RippleGrid::new(centre, &params);
-            if grid.is_none() {
-                crate::log::warn(
-                    "the WaterBody authors ripples the grid could not be built from; \
-                     the surface is the plain Gerstner one"
-                        .to_owned(),
-                );
-            }
-            grid
-        });
-        // **The foam field, on the same anchor as the ripple grid and for the
-        // same clause** — the water node's own world position, never the
-        // camera and never the bodies (ADR 0045's trap clause, which binds
-        // harder here because an assertion can read this field).
+        // **The foam field, anchored to the water node's own world position,
+        // never the camera and never the bodies** (ADR 0045's trap clause,
+        // which binds harder here because an assertion can read this field).
         let foam = water.as_ref().map(|body| {
             let centre = world
                 .entities()
@@ -581,7 +555,7 @@ impl Sim {
             water,
             terrain,
             flow,
-            ripples,
+            wavelets: loom_water::wavelet::WaveletField::new(),
             foam,
             floating,
             water_events: Vec::new(),
@@ -602,6 +576,11 @@ impl Sim {
         };
         #[allow(clippy::cast_precision_loss)]
         let t = self.tick as f32 * TICK_SECONDS;
+
+        // **Asked once, before any body is walked**, so every hull in the
+        // scene sheds on the same ticks and the pool's contents do not depend
+        // on load order.
+        let shedding = self.wavelets.shedding();
 
         // What the foam field is told about the bodies this tick, gathered in
         // the same body order everything else here uses.
@@ -650,14 +629,23 @@ impl Sim {
                     .as_ref()
                     .map_or([0.0; 3], |f| f.at(state.at[0], state.at[2]));
                 // **The wake, read here and applied by the solver.** This is
-                // W6's whole selling point in one line: the height a *previous*
-                // tick's disturbance left in the grid is added to the Gerstner
+                // W6's whole selling point in one line: what a *previous*
+                // tick's disturbance left in the water is added to the Gerstner
                 // surface inside `sample_water`, so a barrel rocks in a crate's
                 // wake and `loom sim --assert` can see it happen.
-                state.ripple = self
-                    .ripples
-                    .as_ref()
-                    .map_or([0.0; 3], |r| r.at(state.at[0], state.at[2]));
+                //
+                // **The orbital velocity goes into `flow`, not beside it.**
+                // `sample_water` has one water-velocity argument by design (see
+                // `WaterSample::velocity`): a second would be a second force
+                // path with its own coefficient, free to disagree with the
+                // first about what the water is doing. Horizontal only, because
+                // that is what a wave's orbital motion contributes to drag on a
+                // floating body; the vertical half is already in the surface it
+                // rides.
+                let wavelet = self.wavelets.at(state.at[0], state.at[2], t);
+                state.wavelet = wavelet.surface();
+                state.flow[0] += wavelet.velocity[0];
+                state.flow[2] += wavelet.velocity[1];
             }
 
             let wrench = loom_water::buoyancy::solve(
@@ -687,13 +675,49 @@ impl Sim {
                 });
             }
 
-            // **The other half of the coupling: the body pushes back.** In
-            // pontoon order, like everything else here, and scaled by how much
-            // of the body the water actually had hold of — a pontoon waving
-            // about in the air must not stir the surface under it.
-            if let Some(grid) = self.ripples.as_mut() {
-                for state in &floating.states {
-                    grid.push(state.at, state.velocity[1], wrench.submerged);
+            // **The other half of the coupling: the body pushes back.** One
+            // packet per hull per shedding tick — Havelock's construction, from
+            // which the Kelvin wedge emerges rather than being drawn.
+            //
+            // Per *body* rather than per pontoon, unlike the read above: the
+            // waterplane is one waterline, and three pontoons shedding three
+            // packets at three points would be three wakes behind one crate.
+            //
+            // **Gated on speed as well as on wetness.** The swept volume of a
+            // body drifting under 5 cm/s is under a cubic decimetre, whose
+            // envelope never reaches a millimetre at any radius — so it would
+            // evict a real packet from a 128-slot ring for a wave nothing can
+            // see. A body out of the water sheds nothing at all.
+            if shedding && wrench.submerged > 0.0 {
+                let velocity = self
+                    .physics
+                    .velocity_at_point(floating.body, position)
+                    .unwrap_or([0.0; 3]);
+                // **Horizontal speed, and this was found the hard way.** A
+                // body floating at rest reports 0.103 m/s from
+                // `velocity_at_point`: the fixed step applies gravity before
+                // the buoyancy force cancels it, so `g·dt = 0.16 m/s` of
+                // vertical jitter is what equilibrium *looks* like from here.
+                // Gating a shed on the full speed therefore never closes — the
+                // pool stays full of a body that is not moving, and
+                // `wake.loom`'s decay measurement floors at 1e-5 m instead of
+                // reaching zero. Measured: with the full speed the buoy's bob
+                // is 9.6e-6 m at 30 s and 1.0e-5 m at 120 s, rising; with the
+                // horizontal speed it is 0.0.
+                //
+                // It is also the right construction. Havelock's shed volume is
+                // a *waterplane sweeping sideways*; a heaving body radiates
+                // too, but that source is second order and the entry impact
+                // above already carries the large vertical event.
+                let speed = (velocity[0] * velocity[0] + velocity[2] * velocity[2]).sqrt();
+                let radius = waterplane_radius(floating, position);
+                if speed >= loom_water::wavelet::SHED_MIN_SPEED {
+                    self.wavelets.emit(
+                        [position[0], position[2]],
+                        t,
+                        loom_water::wavelet::swept_volume(radius, speed) * wrench.submerged,
+                        radius,
+                    );
                 }
             }
 
@@ -706,12 +730,11 @@ impl Sim {
             // for a splash: the splash happens when the surface parts, which is
             // the first instant any of the body is wet. On `pool.loom` the two
             // are not even the same event — a sphere dropped from three metres
-            // fires no `submerged` at all, because **the ripple grid's own dent
-            // tracks the body down and holds the local fraction under the
-            // threshold**. Measured: `events.submerged` is 0 with the `[ripples]`
-            // table, >= 1 with it stripped, and >= 1 again at `strength = 0`.
-            // So the hysteresis flag can never be the splash trigger, and no
-            // amount of tuning either number would have made it one.
+            // fired no `submerged` at all under the grid this replaced, because
+            // its own dent tracked the body down and held the local fraction
+            // under the threshold. So the hysteresis flag can never be the
+            // splash trigger, and no amount of tuning either number would have
+            // made it one.
             let entered = floating.fraction <= 0.0 && wrench.submerged > 0.0;
             // **The same number that scaled the force is the gameplay state.**
             // Not a second query: a body cannot be pushed up by water it is not
@@ -748,9 +771,7 @@ impl Sim {
                     [0.0; 3],
                     // The wake included, so the splash lands on the surface
                     // the body actually broke rather than on the one under it.
-                    self.ripples
-                        .as_ref()
-                        .map_or([0.0; 3], |r| r.at(position[0], position[2])),
+                    self.wavelets.at(position[0], position[2], t).surface(),
                 );
                 let velocity = self
                     .physics
@@ -781,6 +802,19 @@ impl Sim {
                 // reads as a crossing. It is also barely moving, which is
                 // exactly what tells the two apart.
                 if entered && speed >= loom_water::spray::SPLASH_MIN_SPEED {
+                    // **The impact rings the water** — ADR 0056. The same
+                    // swept-volume construction the shed packets use, with the
+                    // impact speed and the waterplane radius the crown already
+                    // rises from: one rule for "water pushed aside", not two.
+                    self.wavelets.emit(
+                        [at[0], at[2]],
+                        t,
+                        loom_water::wavelet::swept_volume(
+                            waterplane_radius(floating, position),
+                            speed,
+                        ),
+                        waterplane_radius(floating, position),
+                    );
                     // **The impact deposit** — a ring of white out to one and
                     // a half times the waterplane radius, which is where the
                     // cavity rim throws it. Full strength: an impact is the
@@ -812,24 +846,16 @@ impl Sim {
             }
         }
 
-        // **The grid advances last, after every body has read it and pushed
-        // into it.** One place, one order: read → force → inject → step. Any
-        // fixed order is deterministic; this one is the one that makes a wake
-        // a tick old rather than a tick early, and it is the order the hash is
-        // pinned against.
-        if let Some(grid) = self.ripples.as_mut() {
-            grid.step();
-        }
+        // **The pool is swept last, after every body has read it and shed into
+        // it.** One place, one order: read -> force -> shed -> expire. Any fixed
+        // order is deterministic; this one is the one that makes a wake a tick
+        // old rather than a tick early, and it is the order the hash is pinned
+        // against.
+        self.wavelets.step(t);
 
-        // **And the foam field last of all**, after the ring it reads has been
-        // stepped: the wake's crest deposits what the grid holds *now*, and
-        // then the whole field decays, advects and takes this tick's crests
-        // and hulls. One order, fixed, and the order the assertions are
-        // written against.
+        // **And the foam field last of all.** One order, fixed, and the order
+        // the assertions are written against.
         if let Some(field) = self.foam.as_mut() {
-            if let Some(grid) = self.ripples.as_ref() {
-                field.deposit_ripples(grid);
-            }
             let terrain = self.terrain.as_ref();
             let ground = move |x: f32, z: f32| {
                 terrain.map_or(loom_voxel::heightfield::NO_GROUND, |t| t.at(x, z))
@@ -838,21 +864,20 @@ impl Sim {
         }
     }
 
-    /// This tick's ripple grid, for whoever is drawing the surface.
+    /// This tick's wavelet events, for whoever is drawing the surface.
     ///
-    /// **Read-only, and one direction only.** The CPU grid is authoritative;
-    /// the renderer is handed a copy of where it got to and never writes one
-    /// back (ADR 0045 clause 2, ADR 0046 §4). `None` is water with no ripples,
-    /// which is every scene authored before ADR 0046, and the shader then
-    /// returns zero from every lookup — the plain Gerstner surface, bit for
-    /// bit.
+    /// **Read-only, and one direction only.** The CPU pool is authoritative;
+    /// the renderer is handed a copy of it and never writes one back (ADR 0045
+    /// clause 2). An empty pool is water nothing has touched, and the shader
+    /// then returns zero from every lookup — the plain Gerstner surface, bit
+    /// for bit.
     #[must_use]
-    pub fn ripples(&self) -> Option<&loom_water::ripples::RippleGrid> {
-        self.ripples.as_ref()
+    pub fn wavelets(&self) -> &loom_water::wavelet::WaveletField {
+        &self.wavelets
     }
 
     /// This tick's foam field, for whoever is drawing the surface or asserting
-    /// on it. Read-only and one direction only, exactly as the ripple grid is.
+    /// on it. Read-only and one direction only, exactly as the event pool is.
     #[must_use]
     pub fn foam(&self) -> Option<&loom_water::foam::FoamField> {
         self.foam.as_ref()
@@ -900,8 +925,8 @@ impl Sim {
             .terrain
             .as_ref()
             .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(at[0], at[2]));
-        let ripple = self.ripples.as_ref().map_or([0.0; 3], |r| r.at(at[0], at[2]));
-        loom_water::buoyancy::submersion_at(water, at, 0.0, t, ground, ripple) > 0.5
+        let wavelet = self.wavelets.at(at[0], at[2], t).surface();
+        loom_water::buoyancy::submersion_at(water, at, 0.0, t, ground, wavelet) > 0.5
     }
 
     /// Advance whole ticks.
@@ -1485,13 +1510,13 @@ impl Runner {
             .collect()
     }
 
-    /// This tick's ripple grid, for whoever is drawing the surface.
+    /// This tick's wavelet events, for whoever is drawing the surface.
     ///
-    /// Straight through to [`Sim::ripples`] — the simulation owns the grid and
+    /// Straight through to [`Sim::wavelets`] — the simulation owns them and
     /// the renderer is only shown it.
     #[must_use]
-    pub fn ripples(&self) -> Option<&loom_water::ripples::RippleGrid> {
-        self.physics.ripples()
+    pub fn wavelets(&self) -> &loom_water::wavelet::WaveletField {
+        self.physics.wavelets()
     }
 
     /// Straight through to [`Sim::foam`] — the simulation owns the field and
@@ -1824,14 +1849,14 @@ impl Play {
         self.runner.physics.submerged_at(at)
     }
 
-    /// This tick's ripple grid, for the window to displace the surface with.
+    /// This tick's wavelet events, for the window to displace the surface with.
     ///
-    /// `None` in edit mode as well as for water with no ripples, because there
+    /// Empty in edit mode as well as for untouched water, because there
     /// is no simulation then and so nothing has stepped a grid — which is the
     /// same flat surface every scene had before ADR 0046.
     #[must_use]
-    pub fn ripples(&self) -> Option<&loom_water::ripples::RippleGrid> {
-        self.runner.ripples()
+    pub fn wavelets(&self) -> &loom_water::wavelet::WaveletField {
+        self.runner.wavelets()
     }
 
     /// The foam field this play session's simulation has reached.

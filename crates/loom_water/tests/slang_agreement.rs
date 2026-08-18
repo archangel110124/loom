@@ -67,7 +67,7 @@ const EPSILON: f32 = 1e-6;
 /// differ so a swap shows as a failure rather than as luck.
 const FLOW: [f32; 3] = [0.7, 0.0, -0.4];
 
-/// The interactive ripple handed to both halves at every sample —
+/// The interactive wavelet handed to both halves at every sample —
 /// `(height, dh/dx, dh/dz)`.
 ///
 /// **Non-zero for exactly the reason `FLOW` is**, and it matters more here:
@@ -75,7 +75,7 @@ const FLOW: [f32; 3] = [0.7, 0.0, -0.4];
 /// All three components differ so a swapped slope shows as a failure rather
 /// than as luck, and the height is the size of a real wake rather than a
 /// token.
-const RIPPLE: [f32; 3] = [0.07, 0.031, -0.052];
+const WAVELET: [f32; 3] = [0.07, 0.031, -0.052];
 
 /// How many `(x, z, t)` points both sides evaluate.
 const SAMPLES: usize = 512;
@@ -255,7 +255,7 @@ fn the_rust_and_the_slang_compute_the_same_surface() {
             inside += 1;
         }
         let cpu =
-            loom_water::sample_water(&body, [sample[0], sample[1]], sample[2], ground, FLOW, RIPPLE);
+            loom_water::sample_water(&body, [sample[0], sample[1]], sample[2], ground, FLOW, WAVELET);
         let expected = [
             cpu.height,
             cpu.normal[0],
@@ -512,6 +512,154 @@ fn the_rust_and_the_slang_compute_the_same_nappe() {
     );
 }
 
+/// **The event pool is on the force path, so its twin is measured too.**
+///
+/// A wavelet raises the surface a pontoon reads (`loom_water::sample_water`'s
+/// sixth argument) *and* the surface the water mesh is drawn at. If the two
+/// halves disagree, a barrel floats visibly above the ring it is riding — the
+/// exact failure this file exists to prevent, one layer further in.
+///
+/// Five values a sample, because the orbital velocity is what reaches drag and
+/// a side that dropped it would otherwise agree for free.
+#[test]
+fn the_rust_and_the_slang_compute_the_same_wavelets() {
+    let Some(slangc) = tool("slangc") else {
+        eprintln!("skipping: slangc is not on PATH");
+        return;
+    };
+    let Some(cxx) = tool("c++").or_else(|| tool("g++")).or_else(|| tool("clang++")) else {
+        eprintln!("skipping: no C++ compiler");
+        return;
+    };
+
+    // Four events with different volumes, radii and birth times, so both the
+    // source cutoff and the Nyquist fade are exercised at both ends — and one
+    // in the future, whose `tau <= 0` branch is a branch the two halves have to
+    // agree about.
+    let events = [
+        loom_water::wavelet::Event::new([0.0, 0.0], 0.0, 0.40, 0.50),
+        loom_water::wavelet::Event::new([3.5, -1.25], 0.5, 0.02, 0.15),
+        loom_water::wavelet::Event::new([-6.0, 4.0], 1.75, 2.60, 1.20),
+        loom_water::wavelet::Event::new([1.0, 1.0], 40.0, 0.30, 0.40),
+    ];
+    // The same integer hash the surface's sample set uses, over a patch wide
+    // enough to reach past every packet's `r_max` and close enough to fall
+    // inside every `r_min`.
+    let samples: Vec<[f32; 3]> = (0..SAMPLES)
+        .map(|i| {
+            let h = |k: u32| {
+                let mut x = (i as u32).wrapping_mul(0x9E37_79B9).wrapping_add(k);
+                x ^= x >> 16;
+                x = x.wrapping_mul(0x7FEB_352D);
+                x ^= x >> 15;
+                f32::from(x as u16) / f32::from(u16::MAX)
+            };
+            [h(1).mul_add(40.0, -20.0), h(2).mul_add(40.0, -20.0), h(3) * 12.0]
+        })
+        .collect();
+
+    let dir = std::env::temp_dir().join(format!("loom_wavelet_agree_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let shader = dir.join("wavelet.slang");
+
+    let mut source = String::from(loom_water::wavelet::slang());
+    source.push_str(
+        "\nvoid emit(LoomWaveletPool pool, float x, float z, float t)\n{\n\
+         \x20   LoomWavelet w = loom_wavelets_at(pool, float2(x, z), t);\n\
+         \x20   printf(\"%.9g %.9g %.9g %.9g %.9g\\n\", w.height, w.slope.x, w.slope.y,\n\
+         \x20       w.velocity.x, w.velocity.y);\n}\n\n\
+         [shader(\"compute\")]\n[numthreads(1,1,1)]\n\
+         void computeMain(uint3 tid : SV_DispatchThreadID)\n{\n",
+    );
+    // The events as a local array the pool points at — the same shape the
+    // environment buffer hands the shader, so the struct's field order is under
+    // test as well as its arithmetic.
+    source.push_str(&format!("    LoomWaveletEvent evs[{}];\n", events.len()));
+    for (i, e) in events.iter().enumerate() {
+        source.push_str(&format!(
+            "    evs[{i}].at = float2({:?}, {:?});\n\
+             \x20   evs[{i}].t0 = {:?};\n    evs[{i}].volume = {:?};\n\
+             \x20   evs[{i}].sigma = {:?};\n    evs[{i}].pad0 = 0.0;\n\
+             \x20   evs[{i}].pad1 = 0.0;\n    evs[{i}].pad2 = 0.0;\n",
+            e.at[0], e.at[1], e.t0, e.volume, e.sigma,
+        ));
+    }
+    source.push_str(&format!(
+        "    LoomWaveletPool pool;\n    pool.events = &evs[0];\n    pool.count = {};\n",
+        events.len()
+    ));
+    for [x, z, t] in &samples {
+        source.push_str(&format!("    emit(pool, {x:?}, {z:?}, {t:?});\n"));
+    }
+    source.push_str("}\n");
+    std::fs::write(&shader, source).expect("write shader");
+    std::fs::write(dir.join("harness.cpp"), HARNESS).expect("write harness");
+
+    let kernel_cpp = dir.join("kernel.cpp");
+    run(
+        Command::new(slangc)
+            .arg(&shader)
+            .args(["-target", "cpp", "-entry", "computeMain", "-stage", "compute"])
+            .arg("-o")
+            .arg(&kernel_cpp),
+        "slangc",
+    );
+    let binary = dir.join("harness");
+    run(
+        Command::new(cxx)
+            .args(["-O0", "-w", "-std=c++17"])
+            .arg(format!("-I{}", dir.display()))
+            .arg(dir.join("harness.cpp"))
+            .arg("-o")
+            .arg(&binary),
+        "c++",
+    );
+    let output = Command::new(&binary).output().expect("run the compiled kernel");
+    assert!(output.status.success(), "the kernel exited {}", output.status);
+    let text = String::from_utf8(output.stdout).expect("kernel output is utf-8");
+    let rows: Vec<Vec<f32>> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.split_whitespace().map(|n| n.parse().expect("a number")).collect())
+        .collect();
+    assert_eq!(rows.len(), samples.len(), "the kernel printed {} rows", rows.len());
+
+    let mut field = loom_water::wavelet::WaveletField::new();
+    for e in &events {
+        field.emit(e.at, e.t0, e.volume, e.sigma);
+    }
+    // Otherwise both sides could agree on zero everywhere, which is what a
+    // sample set entirely outside every packet would prove.
+    let live = samples
+        .iter()
+        .filter(|[x, z, t]| field.at(*x, *z, *t).height.abs() > 1e-4)
+        .count();
+    assert!(live > SAMPLES / 20, "only {live} of {SAMPLES} samples are inside a packet");
+
+    let mut worst = 0.0_f32;
+    for (i, ([x, z, t], row)) in samples.iter().zip(&rows).enumerate() {
+        let w = field.at(*x, *z, *t);
+        let expected = [w.height, w.slope[0], w.slope[1], w.velocity[0], w.velocity[1]];
+        assert_eq!(row.len(), expected.len(), "row {i} has {} values", row.len());
+        for (field_index, (rust, slang)) in expected.iter().zip(row).enumerate() {
+            let delta = (rust - slang).abs();
+            assert!(delta.is_finite(), "sample {i} field {field_index}: {rust} vs {slang}");
+            worst = worst.max(delta);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    eprintln!(
+        "wavelet agreement: worst absolute difference {worst:e} over {} samples \
+         (5 values each, {live} inside a packet)",
+        samples.len()
+    );
+    assert!(
+        worst < EPSILON,
+        "the Rust and the Slang disagree by {worst} — the two halves of \
+         `loom_water::wavelet` have diverged"
+    );
+}
+
 /// The Slang source: both twins, plus a kernel that prints the sample set.
 fn kernel(body: &WaterBody, bed: &HeightField, samples: &[[f32; 3]]) -> String {
     // The height field first: the water half does not use it, but the kernel
@@ -569,18 +717,18 @@ fn kernel(body: &WaterBody, bed: &HeightField, samples: &[[f32; 3]]) -> String {
             FLOW[0],
             FLOW[1],
             FLOW[2],
-            RIPPLE[0],
-            RIPPLE[1],
-            RIPPLE[2],
+            WAVELET[0],
+            WAVELET[1],
+            WAVELET[2],
         ));
     }
     out.push_str("}\n");
 
     // Declared above `computeMain` in the emitted text, since Slang wants it
     // before use.
-    let emit = "\nvoid emit(LoomWaveSet set, LoomHeightField bed, float surface_height, float2 xz, float t, float3 flow, float3 ripple)\n\
+    let emit = "\nvoid emit(LoomWaveSet set, LoomHeightField bed, float surface_height, float2 xz, float t, float3 flow, float3 wavelet)\n\
                 {\n    float ground_height = loom_ground_height(bed, xz);\n\
-                \x20   LoomWaterSample s = loom_sample_water(set, surface_height, ground_height, xz, t, flow, ripple);\n\
+                \x20   LoomWaterSample s = loom_sample_water(set, surface_height, ground_height, xz, t, flow, wavelet);\n\
                 \x20   printf(\"%.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\\n\",\n\
                 \x20       s.height, s.normal.x, s.normal.y, s.normal.z,\n\
                 \x20       s.displacement.x, s.displacement.y, s.displacement.z,\n\
