@@ -81,6 +81,15 @@ const NORMAL_PASSES: usize = 6;
 /// A ceiling rather than a budget: `slosh.loom` comes in at a twentieth of it.
 /// It exists so that a domain authored at 64³ with the water shattered into
 /// spray cannot silently ask for a gigabyte.
+///
+/// **It is loud now, and it degrades rather than truncating.** It used to stop
+/// the march mid-loop and return what it had, which drops whole slabs of the
+/// lattice in `k` order — the far half of the tank simply missing, with nothing
+/// printed. It was being hit: `plough_cinematic` at tick 2800 came back with
+/// exactly 131,072 triangles, which is this constant over three and therefore
+/// not a number a fluid produces. On overflow the field is halved and marched
+/// again, which trades resolution only in a state that currently renders a
+/// hole.
 pub const MAX_VERTICES: usize = 393_216;
 
 /// The lattice the isosurface is marched on: cell centres, padded by one.
@@ -173,6 +182,21 @@ impl Marcher {
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn march(density: &[f32], dims: [usize; 3], cell: f32, origin: [f32; 3]) -> Vec<FluidVertex> {
+    let slabs = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    march_in(density, dims, cell, origin, slabs)
+}
+
+/// [`march`], with the slab count named — one is the serial loop.
+///
+/// **Only the test passes anything but `available_parallelism`**, and what it
+/// asserts is that the two agree to the byte.
+fn march_in(
+    density: &[f32],
+    dims: [usize; 3],
+    cell: f32,
+    origin: [f32; 3],
+    slabs: usize,
+) -> Vec<FluidVertex> {
     let n = [dims[0] + 2, dims[1] + 2, dims[2] + 2];
     let samples = n[0] * n[1] * n[2];
     if density.len() != dims[0] * dims[1] * dims[2] || samples == 0 {
@@ -280,9 +304,22 @@ pub fn march(density: &[f32], dims: [usize; 3], cell: f32, origin: [f32; 3]) -> 
         [0, 7, 5, 1],
     ];
 
-    let mut out: Vec<FluidVertex> = Vec::new();
-    let mut corners = [0_usize; 8];
-    for k in 0..n[2] - 1 {
+    // **One slab of `k` per thread, concatenated in `k` order.** Byte-identical
+    // to the serial loop by construction: a vertex is a function of two lattice
+    // values (see [`Marcher::edge`]), nothing is summed across cubes, and the
+    // concatenation restores exactly the order the serial `for k` produced.
+    // There is a test asserting the equality.
+    //
+    // `std::thread::scope` rather than rayon: the work is one flat range with
+    // no nesting and no stealing to gain from, and rayon is a dependency this
+    // crate does not have. `prepare` above stays serial — it was measured
+    // *slower* threaded, being three passes over 300 KB that are memory-bound
+    // and cheap.
+    let slabs = slabs.max(1).min(n[2] - 1);
+    let march_slab = |k0: usize, k1: usize| -> Vec<FluidVertex> {
+        let mut out: Vec<FluidVertex> = Vec::new();
+        let mut corners = [0_usize; 8];
+        for k in k0..k1 {
         for j in 0..n[1] - 1 {
             for i in 0..n[0] - 1 {
                 for (c, slot) in corners.iter_mut().enumerate() {
@@ -341,10 +378,79 @@ pub fn march(density: &[f32], dims: [usize; 3], cell: f32, origin: [f32; 3]) -> 
                         _ => {}
                     }
                 }
-                if out.len() >= MAX_VERTICES {
-                    out.truncate(MAX_VERTICES - MAX_VERTICES % 3);
-                    return out;
+            }
+        }
+        }
+        out
+    };
+
+    let spans: Vec<(usize, usize)> = (0..slabs)
+        .map(|s| {
+            let lo = (n[2] - 1) * s / slabs;
+            let hi = (n[2] - 1) * (s + 1) / slabs;
+            (lo, hi)
+        })
+        .collect();
+    let mut out: Vec<FluidVertex> = if slabs <= 1 {
+        march_slab(0, n[2] - 1)
+    } else {
+        let parts: Vec<Vec<FluidVertex>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = spans
+                .iter()
+                .map(|(lo, hi)| scope.spawn(|| march_slab(*lo, *hi)))
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+        parts.concat()
+    };
+
+    // **Loud, and it halves the field rather than dropping slabs.** See
+    // [`MAX_VERTICES`]. The recursion is one deep at most on any grid this
+    // engine can author: halving a 64³ lattice quarters the isosurface's area,
+    // and the guard below stops it regardless.
+    if out.len() > MAX_VERTICES {
+        let wanted = out.len();
+        if dims.iter().all(|d| *d >= 4) {
+            let coarse = halve(density, dims);
+            let half = [dims[0] / 2, dims[1] / 2, dims[2] / 2];
+            out = march_in(&coarse, half, cell * 2.0, origin, slabs);
+            eprintln!(
+                "loom: fluid surface wanted {} vertices against a cap of {MAX_VERTICES} — \
+                 re-marched at half resolution, {} drawn",
+                wanted,
+                out.len()
+            );
+        } else {
+            out.truncate(MAX_VERTICES - MAX_VERTICES % 3);
+            eprintln!(
+                "loom: fluid surface wanted {wanted} vertices against a cap of \
+                 {MAX_VERTICES} and the field is too small to halve — truncated"
+            );
+        }
+    }
+    out
+}
+
+/// Average a fraction field down by two on every axis.
+///
+/// Only reached from the vertex-cap fallback above. Fixed summation order —
+/// eight reads in index order — so it is as reproducible as the march it feeds.
+fn halve(density: &[f32], dims: [usize; 3]) -> Vec<f32> {
+    let half = [dims[0] / 2, dims[1] / 2, dims[2] / 2];
+    let mut out = vec![0.0_f32; half[0] * half[1] * half[2]];
+    for k in 0..half[2] {
+        for j in 0..half[1] {
+            for i in 0..half[0] {
+                let mut sum = 0.0_f32;
+                for dk in 0..2 {
+                    for dj in 0..2 {
+                        for di in 0..2 {
+                            let (a, b, c) = (i * 2 + di, j * 2 + dj, k * 2 + dk);
+                            sum += density[a + dims[0] * (b + dims[1] * c)];
+                        }
+                    }
                 }
+                out[i + half[0] * (j + half[1] * k)] = sum * 0.125;
             }
         }
     }
@@ -392,6 +498,32 @@ mod tests {
                 v.position
             );
             assert!(v.normal[1] > 0.99, "the normal points {:?}, not up", v.normal);
+        }
+    }
+
+    /// The threaded march is the serial one, to the byte.
+    ///
+    /// **The falsifier is comparing the sequence, not the set.** A split that
+    /// concatenated in completion order rather than in `k` order would produce
+    /// the same triangles and the same count, and any assertion on a sorted or
+    /// summed form would pass. The field is deliberately noisy, so the surface
+    /// crosses every slab boundary.
+    #[test]
+    fn slabs_concatenate_into_the_serial_order() {
+        let dims = [16, 12, 20];
+        let mut density = vec![0.0_f32; dims[0] * dims[1] * dims[2]];
+        for (index, slot) in density.iter_mut().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                *slot = ((index * 2_654_435_761) % 1000) as f32 / 1000.0;
+            }
+        }
+        let serial = march_in(&density, dims, 0.1, [0.0; 3], 1);
+        assert!(!serial.is_empty(), "the reference march produced no surface");
+        for slabs in [2, 3, 7, 19] {
+            let threaded = march_in(&density, dims, 0.1, [0.0; 3], slabs);
+            assert_eq!(threaded.len(), serial.len(), "{slabs} slabs: different counts");
+            assert_eq!(threaded, serial, "{slabs} slabs: not concatenated in k order");
         }
     }
 

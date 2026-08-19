@@ -134,6 +134,14 @@ pub struct Sim {
     /// Milliseconds the device round trip cost, summed over the run, and the
     /// ticks that paid it — ADR 0053 §4 asks for this to be reported.
     fluid_cost: (f64, f64, u64),
+    /// The tick [`Self::fluid_draw`] last marched, and what it produced.
+    ///
+    /// **The surface is a function of the tick and nothing else**, which is the
+    /// whole tier's licence (ADR 0053 §6) and is therefore also permission to
+    /// not compute it twice. At 140 fps the fixed step runs about every other
+    /// frame, so half of all frames were re-reading a 128 KB density field and
+    /// re-marching an unchanged lattice for a byte-identical answer.
+    fluid_drawn: Option<(u64, Vec<loom_render::FluidVertex>, Vec<loom_render::ParticleInstance>)>,
     /// The interactive wavelet events — ADR 0056.
     ///
     /// **The one piece of stepped state this simulation owns besides `rapier`,
@@ -763,6 +771,7 @@ impl Sim {
             fluid_probes: Vec::new(),
             fluid_wetness: Vec::new(),
             fluid_cost: (0.0, 0.0, 0),
+            fluid_drawn: None,
             water,
             terrain,
             flow,
@@ -1008,6 +1017,14 @@ impl Sim {
         let Some(solver) = self.fluid.as_mut() else {
             return (Vec::new(), Vec::new(), FluidDrawCost::default());
         };
+        // Same tick, same answer — see `fluid_drawn`. The cost is reported as
+        // zero rather than as last tick's, because a mean over frames drawn is
+        // what the caller prints and repeating a number would inflate it.
+        if let Some((tick, surface, spray)) = self.fluid_drawn.as_ref()
+            && *tick == self.tick
+        {
+            return (surface.clone(), spray.clone(), FluidDrawCost::default());
+        }
         let (dims, cell) = solver.grid();
         let (origin, _) = solver.bounds();
         // **Never-do #8 says simulation must not read the wall clock, and this
@@ -1029,6 +1046,7 @@ impl Sim {
             march_ms: t2.duration_since(t1).as_secs_f64() * 1000.0,
             spray_ms: t2.elapsed().as_secs_f64() * 1000.0,
         };
+        self.fluid_drawn = Some((self.tick, surface.clone(), spray.clone()));
         (surface, spray, cost)
     }
 
