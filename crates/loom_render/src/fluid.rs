@@ -556,7 +556,10 @@ impl FluidSolver {
                 // substep, or the P2G stencil it lands in has no relation to
                 // the one it left.
                 0.9 * cell * 60.0 * f32::from(u8::try_from(SUBSTEPS).unwrap_or(2)),
-                0.0,
+                // **The isovalue the surface is drawn at, so the spray cull is
+                // the same number.** One source of truth, carried across rather
+                // than transcribed — see `fluid_surface::ISO`.
+                crate::fluid_surface::ISO,
             ],
             sizes: [cells as i32, u as i32, v as i32, w as i32],
             counts: [

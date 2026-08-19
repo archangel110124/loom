@@ -50,7 +50,13 @@ pub struct FluidVertex {
     pub normal: [f32; 4],
 }
 
-/// The fraction the surface is drawn at: half rest density.
+/// The fraction the surface is drawn at.
+///
+/// **Public, and read by `FluidSolver::new` into the constant block**, because
+/// the spray cull has to be the same number. It was typed independently in
+/// `fluidInstanceMain` as 0.5 while this said 0.35, so every particle in a cell
+/// between the two was drawn as a blue billboard *on top of* the refracting
+/// water it was already inside — the exact artifact the cull exists to prevent.
 ///
 /// **Not "any particle at all".** A cell holding one particle is a fleck of
 /// spray, and an isosurface at an arbitrarily small fraction wraps every fleck
@@ -58,7 +64,7 @@ pub struct FluidVertex {
 /// module exists to replace. Half is the same threshold `fluidProbeMain`
 /// already uses to decide where the free surface is, so the mesh and the
 /// buoyancy readback agree about where the water stops.
-const ISO: f32 = 0.35;
+pub const ISO: f32 = 0.35;
 
 /// Smoothing sweeps over the fraction field before marching.
 ///

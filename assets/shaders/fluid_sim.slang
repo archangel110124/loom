@@ -67,7 +67,7 @@ struct FluidConsts {
     /// xyz cells per axis at level 0, w live particles.
     int4 dims;
     /// x substep seconds, y gravity (negative), z the CFL speed clamp,
-    /// w unused.
+    /// w the isovalue the free surface is drawn at.
     float4 timing;
     /// x cells at level 0, y u faces, z v faces, w w faces.
     int4 sizes;
@@ -1195,17 +1195,23 @@ void fluidInstanceMain(uint3 tid: SV_DispatchThreadID) {
         // the field reads as water rather than as freckles.
         radius = c->origin.w * 0.42;
         // **Spray only, once there is a surface.** A particle in a cell at or
-        // above half rest density is *inside* the marched mesh (ADR 0057
-        // addendum: that fraction is the isovalue), so drawing it puts a blue
-        // billboard over refracting water — which is what the whole surface
-        // exists to stop. What is left is the thrown droplets, which is the
-        // half of reference image 65 a mesh cannot express.
+        // above the isovalue is *inside* the marched mesh, so drawing it puts a
+        // blue billboard over refracting water — which is what the whole
+        // surface exists to stop. What is left is the thrown droplets, which is
+        // the half of reference image 65 a mesh cannot express.
+        //
+        // **The isovalue arrives in the constant block rather than being typed
+        // here**, and that is the fix for a real artifact: this said `/ 2u`,
+        // half rest density, while `fluid_surface::ISO` said 0.35, so every
+        // particle in a cell between the two drew confetti over water it was
+        // already inside.
         //
         // Zero radius rather than a skipped slot: the instance stride is a CPU
         // fact and a degenerate quad is discarded before rasterisation, the
         // same trick the grass fade and the covered water rings use.
         int cell = particleCell(c, x);
-        if (c->density[cell] >= FLUID_DENSITY_SCALE * FLUID_PER_CELL / 2u) {
+        uint iso = uint(c->timing.w * float(FLUID_DENSITY_SCALE * FLUID_PER_CELL));
+        if (c->density[cell] >= iso) {
             radius = 0.0;
         }
     }
