@@ -647,6 +647,27 @@ void fluidRestrictMain(uint3 tid: SV_DispatchThreadID) {
 }
 
 /// Trilinear prolongation of the coarse correction onto the fine level.
+///
+/// The masked corners' weight is **dropped, not renormalised**. Every other
+/// kernel that reads `marker` treats an air cell as a Dirichlet zero that still
+/// counts in the diagonal — `fluidJacobiMain` and `fluidRestrictMain` do
+/// `diag += 1.0` and contribute nothing, `fluidProjectMain` uses `pa = 0.0`.
+/// This one used to divide `acc` by the surviving weight, which extrapolates
+/// the coarse pressure *across* the boundary condition the other three enforce:
+/// the trilinear weights are a partition of unity and the smallest nonzero
+/// corner weight is 1/64, so `1/wsum` reached 64x and the V-cycle stopped being
+/// a contraction. Measured on `plough_cinematic`, relative residual after a
+/// cycle (`||r|| / ||rhs||`), at tick 0 and tick 399:
+///
+///     with `/ wsum`     0.355 / 1.31    <- leaves the system worse than zero
+///     without           0.154 / 0.18
+///
+/// Downstream: peak occupancy 415x rest density -> 3x, 33 ms a tick -> 3.6.
+///
+/// The rule this leaves behind: **every kernel that reads `marker` must agree
+/// that an air cell is a Dirichlet zero counting in the diagonal.** Four read
+/// it and one disagreed, and no gate in the project could see it — the picture
+/// was wrong and the frame rate was the symptom. ADR 0057 addendum 5.
 [numthreads(256, 1, 1)]
 void fluidProlongMain(uint3 tid: SV_DispatchThreadID) {
     FluidConsts* c = push.c;
@@ -664,7 +685,6 @@ void fluidProlongMain(uint3 tid: SV_DispatchThreadID) {
     float3 t = cp - float3(c0);
 
     float acc = 0.0;
-    float wsum = 0.0;
     for (int k = 0; k < 2; ++k) {
         for (int j = 0; j < 2; ++j) {
             for (int i = 0; i < 2; ++i) {
@@ -676,11 +696,10 @@ void fluidProlongMain(uint3 tid: SV_DispatchThreadID) {
                         * (j == 0 ? 1.0 - t.y : t.y)
                         * (k == 0 ? 1.0 - t.z : t.z);
                 acc += w * c->pressureA[qi];
-                wsum += w;
             }
         }
     }
-    if (wsum > 1e-6) { c->pressureA[base + int(tid.x)] += acc / wsum; }
+    c->pressureA[base + int(tid.x)] += acc;
 }
 
 /// `u -= ∇φ`, on every face between two non-solid cells at least one of which
