@@ -130,39 +130,39 @@ id = "3d7f81a2-95c4-4e60-b1a8-6c2f0e9d4471"
 
 [[asset]]
 key = "hull_white"
-path = "../meshes/jib_vi_parts.obj#hull_white"
+path = "../meshes/jib_vi_hull_white.obj"
 
 [[asset]]
 key = "navy"
-path = "../meshes/jib_vi_parts.obj#navy"
+path = "../meshes/jib_vi_navy.obj"
 
 [[asset]]
 key = "deck_grey"
-path = "../meshes/jib_vi_parts.obj#deck_grey"
+path = "../meshes/jib_vi_deck_grey.obj"
 
 [[asset]]
 key = "wood_trim"
-path = "../meshes/jib_vi_parts.obj#wood_trim"
+path = "../meshes/jib_vi_wood_trim.obj"
 
 [[asset]]
 key = "glass"
-path = "../meshes/jib_vi_parts.obj#glass"
+path = "../meshes/jib_vi_glass.obj"
 
 [[asset]]
 key = "metal"
-path = "../meshes/jib_vi_parts.obj#metal"
+path = "../meshes/jib_vi_metal.obj"
 
 [[asset]]
 key = "gold"
-path = "../meshes/jib_vi_parts.obj#gold"
+path = "../meshes/jib_vi_gold.obj"
 
 [[asset]]
 key = "orange"
-path = "../meshes/jib_vi_parts.obj#orange"
+path = "../meshes/jib_vi_orange.obj"
 
 [[asset]]
 key = "red"
-path = "../meshes/jib_vi_parts.obj#red"
+path = "../meshes/jib_vi_red.obj"
 
 [[asset]]
 key = "box"
