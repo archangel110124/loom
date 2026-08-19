@@ -1154,17 +1154,23 @@ void fluidDensitySplatMain(uint3 tid: SV_DispatchThreadID) {
     for (int k = 0; k < 2; ++k) {
         for (int j = 0; j < 2; ++j) {
             for (int i = 0; i < 2; ++i) {
-                // **Clipped weight is dropped, and clamping it in was measured
-                // worse.** The eight weights sum to one, so skipping the ones
-                // whose cell is outside the domain throws away a quarter of a
-                // particle's mass per clipped axis. Folding it into the edge
-                // cell instead is what conservation says, and it takes peak
-                // density on `plough_cinematic --sim 5000` from 4.6x to 34.7x:
-                // a correct, denser boundary cell is a cell the marker calls
-                // fluid and the ratchet then feeds. Recorded rather than
-                // shipped — the leak it exposes has to be found first.
-                int3 p = base + int3(i, j, k);
-                if (!inside(d, p)) { continue; }
+                // **Clamped, never skipped, and the order this was measured in
+                // is the whole story.** The eight weights sum to one, so
+                // dropping the ones whose cell is outside the domain throws
+                // away a quarter of a particle's mass per clipped axis and 58%
+                // at a corner: every boundary cell read low, `mass` drifted
+                // 1.7% over ten thousand ticks, and the spray cull — which
+                // reads this field — did not fire against the walls, so the
+                // tank was rimmed with blue beads.
+                //
+                // Measured *before* `gatherAxis` stopped dropping its own
+                // boundary nodes, this same clamp took peak density at tick
+                // 5,000 from 4.6x to 34.7x and was written off. It was the
+                // project's own trap, mirrored: a fix landed before the leak it
+                // interacts with reads as the cause. On top of the gather fix
+                // it holds `mass` at exactly 16,368 for ten thousand ticks and
+                // costs 0.3x of peak density.
+                int3 p = clamp(base + int3(i, j, k), int3(0), d - int3(1));
                 float w = (i == 0 ? 1.0 - f.x : f.x)
                         * (j == 0 ? 1.0 - f.y : f.y)
                         * (k == 0 ? 1.0 - f.z : f.z);

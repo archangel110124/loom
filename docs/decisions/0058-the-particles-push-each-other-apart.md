@@ -128,17 +128,59 @@ This is the single largest of the three: with the separation pass and the marker
 already in, it takes peak density at tick 10,000 from 50.6x to 3.4x and takes
 `over4` — cells past four times rest — to exactly zero for the whole run.
 
-### 6. What was measured and NOT shipped
+### 6. The density splat clamps its clipped boundary weight too — and the order it was measured in is the lesson
 
-**Clamping the density splat's clipped boundary weight.** The eight trilinear
-weights sum to one, so skipping the ones whose cell is outside the domain throws
-away a quarter of a particle's mass per clipped axis and 58% at a corner.
-Folding it into the edge cell instead is what conservation says — and it takes
-peak density on `plough_cinematic --sim 5000` from 4.6x to 34.7x. A correct,
-denser boundary cell is a cell the marker calls fluid and the ratchet then
-feeds. The measurement is recorded at the line in the shader. **It should be
-revisited once the residual settling in §7 is understood**, because it is
-correct and the code is currently relying on it being wrong.
+The eight trilinear weights sum to one, so skipping the ones whose cell is
+outside the domain throws away a quarter of a particle's mass per clipped axis
+and 58% at a corner. Every boundary cell read low; `mass` drifted 1.7% over ten
+thousand ticks; and the spray cull, which reads this field, did not fire against
+the walls, so the top-down render was rimmed with blue beads a centimetre inside
+every kerb.
+
+**Measured before §5 landed, this exact change took peak density at tick 5,000
+from 4.6x to 34.7x, and it was written off on that number.** It is this
+project's own trap — "a fix that removes accidental damping before the leak is
+removed makes the picture worse" — arriving mirrored: a correct fix landing
+*before* the leak it interacts with reads as the cause of the leak. Re-measured
+on top of the gather fix:
+
+```text
+   plough_cinematic         peak    wet     mass     ycom
+     splat clipped, t=10000  1.6x  15567    15657     2.76
+     splat clamped, t=10000  1.9x  15348    16368     2.66
+```
+
+`mass` is now **exactly 16,368 at every tick sampled**, which is what
+conservation looks like, and the rim of beads is gone. The 0.3x of peak density
+it costs is well inside the gate.
+
+The rule this leaves: **re-measure every shelved change after the next
+structural fix lands.** A shelf is not a verdict.
+
+### 6b. What was measured and NOT shipped
+
+**Fusing the coarse multigrid levels into LDS-resident dispatches.** The
+falsifier the review asked for — replace the whole V-cycle with nothing, and
+require the tick to drop about 2 ms — **cannot be run**, and finding that out is
+the result. Removing the solve changes the *state*: the fluid compresses
+immediately, buckets deepen, and P2G and the per-cell sort get more expensive
+than the 252 dispatches that were removed. Min-of-3 on `plough_cinematic --sim
+60`, quiet, wall clock minus the `--sim 0` baseline: with the solve 0.20 s,
+without it 0.28 s. The ablation runs *slower*. Under the review's own stopping
+rule the fusion is not justified by evidence, and it is not built.
+
+**A dirty-region solid mask.** The whole CPU side of a tick — `rasterise`,
+`write_probes`, `write_consts`, `read_probes` — is 0.79 ms (3.32 ms/tick minus
+2.53 ms of fence wait), so the ceiling on this optimisation is below the 0.8–1.0
+ms it was estimated to save.
+
+**Raising `CYCLES`.** Not tried and not wanted: ADR 0057's own 10k soak shows
+nonzero drift at every count, which is what a rate knob does to a structural
+leak.
+
+**Moving the post-projection CFL clamp.** Left where it is. Its comment
+documents rapier-probe protection, and with the separation pass landed, clamp
+saturation is unreachable — `vmax` no longer pins.
 
 **Raising `CYCLES`.** Not tried here and not wanted: ADR 0057's own 10k soak
 shows nonzero drift at every count, which is what a rate knob does to a
@@ -176,21 +218,20 @@ number showed it.
 
 ```text
 plough_cinematic            peak     wet     mass    ycom
-  tick   400                1.4x   16673    15928    3.38
-  tick  2400                1.5x   15991    15818    3.06
-  tick  6000                1.5x   15734    15712    2.84
-  tick 10000                1.6x   15567    15657    2.76
+  tick   400                1.4x   16465    16368    3.30
+  tick  2400                1.6x   16033    16368    3.00
+  tick  5000                1.7x   15621    16368    2.79
+  tick 10000                1.9x   15348    16368    2.66
 
 slosh (a still tank)
-  tick   150                1.3x   16177    15936    3.43
-  tick 10000                1.5x   15610    15717    2.87
+  tick 10000                1.8x   15597    16368    2.80
 ```
 
-Mass is conserved to 1.4%, which is the splat clipping at the boundary and not a
-physical loss. Peak is flat. `ycom` settles 16% below the authored fill and
-**converges** — 3.05 at 2,400, 2.91 at 6,000, 2.87 at 10,000, so the last 4,000
-ticks move it 1.4%. That is a settling, not a ratchet, and §7 records it as
-open.
+Mass is exactly conserved. Peak is flat. `ycom` settles about 19% below the
+authored fill and **converges**: on `plough_cinematic` it is 3.00 at tick 2,400,
+2.79 at 5,000 and 2.66 at 10,000, so the last 5,000 ticks move it 4.7% and the
+5,000 before them moved it 7%. That is a settling, not a ratchet, and §7 records
+it as open.
 
 Three fresh processes, `sha256` of the PNG, by hand, per cinematic scene: one
 distinct hash each for `plough_cinematic --sim 110`, `slosh --sim 150` and
@@ -201,7 +242,7 @@ distinct hash each for `plough_cinematic --sim 110`, `slosh --sim 150` and
 **A 16% one-time settling.** A still tank ends about a sixth below its authored
 fill height and then holds. It is consistent with the rest packing the hash
 seeder produces being slightly looser than the packing the separation pass
-relaxes into, and with the 1.4% mass clipped at the boundary. It is not the
+relaxes into. Mass is exactly conserved now, so it is not a leak. It is not the
 ratchet — the ratchet does not converge — but it means `fill = 0.5` does not
 draw a surface at exactly `surface_height` after a minute.
 
