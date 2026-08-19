@@ -497,6 +497,25 @@ impl Sim {
             //
             // Half-extents follow the *world* scale for the same reason: a
             // unit box scaled by an ancestor is drawn at the ancestor's size.
+            //
+            // **And they did not, which is the bug this line fixes.** The comment
+            // above has said "world scale" since the component was wired, the
+            // fallback arm below multiplies by it, and
+            // `main.rs::rain_collision_field` — the *other* reader of the same
+            // component — has always written `half[a] * scale[a]`. Only this arm
+            // returned the authored numbers raw, so a collider was in local space
+            // here and in world space everywhere else. `plough_cinematic`'s hull
+            // is a 0.7 m crate authored as `scale 0.35` with `half_extents 1`: it
+            // collided, and rasterised into the fluid's solid mask, as a 2 m box
+            // — 23x the volume. The ramp under it was a 4 m cube instead of a
+            // 6 x 0.3 x 2 slab.
+            //
+            // `half_extents` is therefore **local**, like every other authored
+            // geometric field under a transform, and the unit box mesh has a
+            // local half-extent of 1 — which is why `[1, 1, 1]` is the value that
+            // makes a collider match its mesh. Three scenes had compensated by
+            // authoring world numbers (`blockout`, `tower`, `dripping`); they are
+            // re-authored in this commit so their *world* collider is unchanged.
             let half = world.collider_half_extents(*entity).map_or_else(
                 || {
                     [
@@ -505,7 +524,13 @@ impl Sim {
                         world_scale.z.abs().max(1e-3),
                     ]
                 },
-                |h| [h[0].abs().max(1e-3), h[1].abs().max(1e-3), h[2].abs().max(1e-3)],
+                |h| {
+                    [
+                        (h[0] * world_scale.x).abs().max(1e-3),
+                        (h[1] * world_scale.y).abs().max(1e-3),
+                        (h[2] * world_scale.z).abs().max(1e-3),
+                    ]
+                },
             );
 
             // **The collider follows the mesh.** Everything used to get a

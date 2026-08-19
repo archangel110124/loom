@@ -25,7 +25,11 @@ transform = { pos = [0.0, -0.6, 0.0], scale = [6.0, 0.2, 4.0] }
   mesh = { asset = "box" }
 
   [node.components.BoxCollider]
-  half_extents = [6.0, 0.2, 4.0]
+  # **Local half-extents, times the node's scale.** The unit box mesh has a
+  # local half-extent of 1, so `[1, 1, 1]` is the collider that matches the
+  # mesh. This used to read `[6.0, 0.2, 4.0]` — the *world* size — because
+  # `play.rs` dropped the scale; the world collider is unchanged.
+  half_extents = [1.0, 1.0, 1.0]
 
 # Two desks in a row, monitors on top.
 [[node]]

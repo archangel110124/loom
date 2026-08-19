@@ -74,7 +74,10 @@ transform = { pos = [0.0, -0.15, 0.0], scale = [14.0, 0.3, 10.0] }
   mesh = { asset = "box" }
 
   [node.components.BoxCollider]
-  half_extents = [7.0, 0.15, 5.0]
+  # Local, times the node's scale — see `blockout.loom`. Was `[7.0, 0.15, 5.0]`
+  # while `play.rs` dropped the scale, which is half the floor the mesh draws;
+  # `[0.5, 0.5, 0.5]` keeps exactly that world box, so no drip moves.
+  half_extents = [0.5, 0.5, 0.5]
 
   [node.components.Material]
   albedo = [0.30, 0.32, 0.34]
