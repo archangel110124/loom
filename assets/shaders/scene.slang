@@ -4837,10 +4837,13 @@ struct WaterOutput {
     /// across the triangle. Foam streaks lie along it — ADR 0053 §7 deleted the
     /// global-wind frame this replaces.
     float2 breakDir : TEXCOORD8;
-    /// **The falling sheet, and zero on every surface vertex** — ADR 0054.
+    /// **The falling sheet, and zero on every analytic surface vertex** — ADR
+    /// 0054.
     ///
-    /// `x` is the flag the fragment shader branches on; `y` the aeration at
-    /// this depth; `z` how far below the lip it is, in metres; `w` the
+    /// `x` is the flag the fragment shader branches on — **`> 0.5` a falling
+    /// sheet, `< -0.5` the cinematic tier's marched free surface, `0.0` the
+    /// analytic sea** (see `WATER_CINEMATIC_REFLECT_ROUGH`); `y` the aeration
+    /// at this depth; `z` how far below the lip it is, in metres; `w` the
     /// **departure time** of the water here — the clock reading when this
     /// parcel left the brink.
     ///
@@ -5009,7 +5012,13 @@ WaterOutput fluidVertexMain(uint vertexID: SV_VertexID) {
     out.waveletSlope = float2(0.0, 0.0);
     out.breakMu = 0.0;
     out.breakDir = float2(1.0, 0.0);
-    out.nappe = float4(0.0, 0.0, 0.0, 0.0);
+    // **`x` is negative here, which says "cinematic free surface"** — see
+    // `WATER_CINEMATIC_REFLECT_ROUGH`. It stays in the lane that already
+    // answers "what kind of water is this": `> 0.5` a falling sheet, `< -0.5`
+    // a marched volume, `0.0` the analytic sea. Putting the flag in `y` would
+    // have been a lane documented as *aeration* carrying a boolean, which is
+    // the kind of reuse that reads correctly and breaks later.
+    out.nappe = float4(-1.0, 0.0, 0.0, 0.0);
     return out;
 }
 
@@ -5285,6 +5294,59 @@ static const float WATER_IOR = 1.333;
 /// capillary ripples perturbing the normal per pixel, which is geometry rather
 /// than a blend, so paying for it twice would wash the reflection out.
 static const float WATER_REFLECT_ROUGH = 0.06;
+
+/// The same, for the cinematic tier's marched free surface.
+///
+/// **Nine times rougher, and it is the roughness the extraction removed rather
+/// than a taste knob.** `fluid_surface::march` samples a 10 cm lattice and then
+/// runs `SMOOTH_PASSES` Jacobi sweeps over the fraction field and
+/// `NORMAL_PASSES` more over the copy the normal is differentiated from — so
+/// the mesh that reaches this shader is, by construction, smooth below about
+/// 30 cm. Real water is never smooth at that scale, and the reflection is the
+/// one term that notices: neighbouring pixels send their single mirror ray to
+/// the *same* triangle of the *same* box, so a whole region agrees on one
+/// flat-shaded colour bounded by that box's silhouette. On `plough_cinematic`,
+/// from a low camera, that draws the ramp, the back kerb, the end kerb, the
+/// hull and the bed as **hard-edged dark polygons lying over the pool** —
+/// which is what a human reported as "a reflection at a weird angle", and it
+/// is geometrically correct. What is wrong is that a single ray is a good
+/// sample of a mirror and this surface is not one.
+///
+/// The analytic sea never showed it because its Gerstner sum plus the
+/// capillary detail decorrelates neighbouring rays; the marched surface has
+/// neither, and the wind-driven capillary term is measured at 19/255 of normal
+/// perturbation here — far too little to break the agreement.
+///
+/// Swept at a low camera on `plough_cinematic --sim 3000` and `--sim 6000`,
+/// which is where the human found it — from above, `fresnel` is about 0.1 and
+/// the term is invisible whatever it says:
+///
+///     0.06 (the analytic sea's value)   hard-edged dark polygons, unmistakable
+///     0.25                              softened, the straight edges still read
+///     0.40 / 0.55 / 0.70                gone; a coherent hazy sheet
+///
+/// **The top three differ by at most 17/255 in the worst channel**, so this is
+/// a plateau rather than a knee and 0.55 sits in the middle of it. What
+/// remains at every value is a *soft* dark region where the pool genuinely
+/// reflects the ramp — that is the reflection working, and deleting it would
+/// be the sky-only term ADR 0019 replaced.
+///
+/// `tracedEnvironment` blends its traced answer toward the miss colour by
+/// exactly this number, so what this buys is **dilution with sky, not a lobe
+/// width**. It costs nothing: the same one ray, a different blend weight. The
+/// honest fix is a wider lobe — more rays (ADR 0019's occupancy cliff says no)
+/// or a screen-locked jitter of the ray inside the lobe, which is the trick
+/// AO and the soft shadows already use here and which would break the
+/// *coherence* rather than paint over it. That is the upgrade path, and it
+/// wants a salt measurement before it lands.
+///
+/// **Scoped by `WaterOutput::nappe.x`**, which `fluidVertexMain` sets to -1.0
+/// and every other water vertex leaves at 0.0 — the same lane, and the same
+/// trick, the falling sheet already uses at `+1.0`. Nothing outside the
+/// cinematic tier moves: `ocean`, `shore`, `river`, `whitecaps` and
+/// `lanternhead` render bit for bit as before.
+static const float WATER_CINEMATIC_REFLECT_ROUGH = 0.55;
+
 /// Ray origin offset above the surface, in metres.
 ///
 /// Two centimetres rather than the millimetre the opaque path uses: the water
@@ -6641,7 +6703,9 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // broadening geometrically, per pixel, which is the honest version of it.
     float3 mirror = reflect(-view, normal);
     mirror = normalize(mirror - flatN * min(dot(mirror, flatN), 0.0));
-    float reflectRough = saturate(WATER_REFLECT_ROUGH
+    float baseRough = (in.nappe.x < -0.5) ? WATER_CINEMATIC_REFLECT_ROUGH
+                                          : WATER_REFLECT_ROUGH;
+    float reflectRough = saturate(baseRough
                                 + length(toEye) / WATER_REFLECT_RANGE);
     float3 env = tracedEnvironment(in.worldPos, flatN, mirror,
                                    reflectRough, WATER_REFLECT_BIAS,
