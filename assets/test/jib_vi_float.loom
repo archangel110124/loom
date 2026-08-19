@@ -1,16 +1,16 @@
 # A nineteen-metre charter boat, floating.
 #
 # **This scene exists to answer one question: does it sit upright and stay
-# there.** Not whether it looks right — `assets/meshes/jib_vi.obj` was judged
-# on that separately — but whether the buoyancy model this engine has can hold
-# a hull-shaped object level for minutes without capsizing, and whether it
-# rights itself when pushed.
+# there.** Not whether it looks right — `assets/meshes/jib_vi_wide.obj` was
+# judged on that separately — but whether the buoyancy model this engine has
+# can hold a hull-shaped object level for minutes without capsizing, and
+# whether it rights itself when pushed.
 #
 # **The pontoons are hand-placed and that is the whole point of the scene.**
 # `Buoyancy`'s default is four pontoons derived from the node's own size, at
 # its horizontal corners, with radii summing to the body's volume. For a crate
 # that is exactly right. For a boat it is badly wrong, because the node's
-# bounding box is 19.1 x 9.96 x 5.75 m and **most of that box is superstructure
+# bounding box is 19.07 x 9.96 x 6.60 m and **most of that box is superstructure
 # and air** — the hull is the bottom 1.66 m of it. Four corner spheres sized to
 # the whole box would displace several times what the hull does and the boat
 # would ride on the surface like a cork, which is the failure the component's
@@ -73,23 +73,41 @@
 # carries force, the sim hash and `--assert` (ADR 0059 §1). A cinematic volume
 # around a nineteen-metre hull is a separate experiment and a separate scene.
 #
-# **What this hull is measured to do.** Dropped from 0.4 m it settles at
-# y = +0.034 — 3.4 cm above the designed line — and is still there at tick
-# 36000, ten minutes in, having drifted 14 mm and bobbing 3.5 cm peak to peak
-# on the wave texture. Total tilt off vertical at rest is under 0.4°, so it is
-# level in trim as well as in heel. Heeled and released it **rights itself from
-# 80° and inverts from 81°**; on the pontoons this scene first shipped with,
-# the same test rights from 40° and inverts from 42°.
+# **What this hull is measured to do.** Dropped from 0.4 m it settles at a
+# mean of y = +0.024 — 2.4 cm above the designed line — and is still there at
+# tick 36000, ten minutes in, having drifted 11 mm and bobbing 3.2–4.1 cm peak
+# to peak on the wave texture. The 2.4 cm is not this scene's arithmetic: it is
+# a 2.5% buoyancy excess the engine adds whenever `damp_linear` is nonzero
+# (the fixed step applies gravity before buoyancy, and the displacement-scaled
+# damping rectifies that jitter into net lift — measured at the same 2.5% on an
+# independent four-sphere calibration body, and extrapolating damp_linear -> 0
+# lands on y = 0 exactly). Do not tune `mass` to cancel it; the tune would go
+# wrong the moment the integrator is fixed. Total tilt off vertical at rest is
+# under 0.7°, so it is level in trim as well as in heel. Heeled and released
+# **from the level settle height** it rights itself from 80° and inverts from
+# 82° — but that release condition flatters it: released at each angle's own
+# heeled equilibrium the vanishing angle is **~75°**, and a static GZ curve
+# computed outside the physics engine from the same spherical-cap formula
+# agrees at 74.9° (GZ peaks at 0.70 m at 21°, GM = 2.7 m). Quote 75°, and say
+# which release you mean if this line ever becomes an assertion. On the
+# pontoons this scene first shipped with, the same test rights from 40° and
+# inverts from 42°. Once over, it floats hull-up indefinitely — the inverted
+# state is stable, which is correct for an enclosed superstructure.
 #
 # **Having an angle of vanishing stability is not the bug — every real boat has
 # one.** Coming back from 30° and not from 60° would be correct behaviour. The
 # defect was having it at 40°, which is inside the range an ordinary sea
 # reaches, and it came entirely from the two numbers above.
 #
-# The wind sweep says the same thing from the other side: raising `speed` from
-# the authored 3.5 to 35 m/s — the schema refuses anything over 40 — drops the
-# hull 17 m into a trough and still never puts it over. Roll stays under 8°.
-# On this tier there is no wind speed a scene can author that capsizes it.
+# The wind sweep says the same thing from the other side, re-measured on this
+# hull: at `speed = 40` — the schema takes 40 and refuses 41 — the sea it
+# builds swings the boat through 35 m peak to peak and rolls it 10.8° at
+# worst, and it still never goes over; at 35 m/s that is 27 m and 6.1°. (The
+# 17 m and "under 8°" this paragraph used to quote were the narrow hull's and
+# are void.) On this tier there is no wind speed a scene can author that
+# capsizes it — and part of the reason is that `loom_physics` has no windage
+# term at all: wind reaches the hull only as wave slope, so there is no
+# beam-on heeling force here at any speed.
 #
 # Reproducing that costs a workaround worth knowing: `loom sim --assert` reads
 # x, y and z on a node and has **no orientation axis at all**. Roll is read by
@@ -165,7 +183,7 @@ transform = { pos = [0.0, 0.40, 0.0] }
 
   [node.components.RigidBody]
   dynamic = true
-  # 38 tonnes, set to the pontoons' displacement at the designed waterline
+  # 43.8 tonnes, set to the pontoons' displacement at the designed waterline
   # rather than guessed — see the header's arithmetic.
   mass = 43776.0
 
@@ -174,7 +192,7 @@ transform = { pos = [0.0, 0.40, 0.0] }
   # nineteen-metre hull with a crate's rotational inertia rolls like a barrel,
   # which would fail this scene for a reason that has nothing to do with
   # buoyancy. `BoxCollider` is the only collider a scene can author and it is
-  # centred on the node, so this is the hull's own box: 19.06 x 3.32 x 5.74.
+  # centred on the node, so this is the hull's own box: 19.06 x 3.32 x 6.60.
   [node.components.BoxCollider]
   half_extents = [9.53, 1.66, 3.30]
 
