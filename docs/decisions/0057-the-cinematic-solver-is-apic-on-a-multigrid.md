@@ -709,3 +709,143 @@ the 1-2 fps that was reported. The clamp is in *seconds* and its own comment
 says it exists to stop exactly this spiral — expressing it as a tick count would
 turn the collapse into slow motion. That is a change to the fixed-step contract
 for every scene and it is left for the human to rule on.
+
+---
+
+# Addendum 5 — failure 3 was one kernel disagreeing about the boundary condition
+
+**Addendum 4's mechanism for failure 3 is retracted.** It read the aftermath as
+the cause. The pile-up against the walls was real and its measurement was
+sound; the explanation was not, and the fix is three deleted lines in
+`fluidProlongMain`.
+
+## The bug
+
+Four kernels read `marker`. Three of them agree that an air cell is a Dirichlet
+zero which still counts in the diagonal — `fluidJacobiMain` and
+`fluidRestrictMain` do `diag += 1.0` and contribute nothing, `fluidProjectMain`
+uses `pa = 0.0`. `fluidProlongMain` instead accumulated the surviving corners'
+weight and divided by it, so the coarse correction was *renormalised* rather
+than masked. The trilinear weights are a partition of unity and the smallest
+nonzero corner weight is 1/64, so `1/wsum` reached 64x: the prolongation
+extrapolated the coarse pressure across the boundary condition the other three
+enforce, and the V-cycle stopped being a contraction.
+
+Relative residual after a cycle, `||r|| / ||rhs||`, on `plough_cinematic`:
+
+| | tick 0 | tick 399 |
+| --- | --- | --- |
+| with `/ wsum` | 0.355 | **1.31** — worse than the zero guess |
+| without | 0.154 | 0.18 |
+
+So the projection never removed the divergence at the impact. Particles piled up
+because nothing was solved to move them, and both `fluidSortCellMain` (one
+thread per cell) and `fluidP2GMain` (a whole bucket gathered) scale with the
+worst bucket. **The frame rate was the symptom; the wrong picture was the bug.**
+
+## What is retracted
+
+1. **The `escapeSolid` / `fluidG2PMain`-clamp mechanism.** No particle was ever
+   stuck in a solid cell: `psolid = 0` at every tick of a 400-tick run, before
+   the fix as well as after. The two never fought.
+2. **The boundary reading.** 536 of 759 over-dense cells were on the boundary
+   because water driven by a divergent pressure field piles against whatever
+   stops it, and the walls are what stop it. It is where the failure lands, not
+   where it comes from. It is now 2 cells of 17,191 occupied.
+3. **Failure 2's prescription.** More smoothing helped because it partly
+   compensated a cycle that was not converging. `CYCLES`, `SMOOTHS`,
+   `COARSE_SMOOTHS` and `LEVELS` are unchanged in this commit *deliberately* —
+   they were tuned against a divergent solver and re-tuning them is a separate,
+   single-variable experiment that moves the pixels a second time. Do it after
+   the references are blessed, not with them.
+4. **The tick-count clamp on `Play::advance`.** Not needed and not shipped. At
+   3.0–3.6 ms a tick with 4x headroom in a 16.7 ms budget the accumulator drains
+   on its own, and the spiral is structurally unreachable. The fixed-step
+   contract is untouched. The question addendum 4 left for the human is closed
+   by not needing an answer.
+
+The density correction stays rejected — but for its stated reason (it looked
+worse), not for anything about the divergence, and the comment claiming
+`fluidDivergenceMain` performs one has been corrected: that kernel reads the
+three velocity components and the marker, and nothing else.
+
+## The rule this leaves
+
+**Every kernel that reads `marker` must agree that an air cell is a Dirichlet
+zero counting in the diagonal.** Four read it and one disagreed. That is a
+whole-solver invariant which no single kernel can be read to check, and it is
+the reason a per-kernel review missed it three times.
+
+## Measured, on a quiet machine (load 1.8, no compute clients, GPU 39% desktop)
+
+    plough_cinematic, GPU ms/tick    before   after
+      ticks   0-120                    3.7      3.4
+      ticks 120-180                   28.8      2.9
+      ticks 180-240                   34.5      2.9
+      ticks 240-300                   66.5      3.0
+      ticks 300-400                   46.6      3.2
+      wall clock, whole run           33.03     3.58
+      peak occupancy, tick 399         415x      3x
+      occupied cells (16,384 seeded)  3,162    17,191
+      over-dense cells on boundary      530        2
+      fluid_p2g / fluid_sort, ms   19.9/25.3  1.0/0.07
+
+`ribbon` 16.54 -> 5.49 ms/tick at 180 ticks, `slosh` 3.59 -> 3.33 at 150. A
+1200-tick soak on `plough_cinematic` is flat at 3.0–3.3 ms/tick and ends with
+97.7% of the seeded volume still in the domain, peak 3x, residual ratio 0.13.
+
+Byte identity, three fresh processes each, by hand: `slosh --sim 150`
+`cb7e1884`, `ribbon --sim 180` `a395724d`, `plough_cinematic --sim 110`
+`385b62ab`.
+
+## `ribbon` still accumulates, and it is the scene that bounds any future cap
+
+A continuous inflow is a genuine sustained pile-up at its plunge point, and the
+fix does not remove it:
+
+    ribbon, GPU ms/tick   0-49  3.14   150-199  5.78   300-349  11.29
+                        50-99  5.13   200-249  5.53   350-399  14.57
+                       100-149 5.45   250-299  7.18
+
+Peak occupancy climbs 16 -> 202 -> 522 -> 1036 over 400 ticks, and the residual
+ratio spikes above 1 transiently (0.20 at tick 350, 1.72 at 399) without
+trending. It crosses the 16.7 ms budget somewhere around tick 450. **This is
+open**, and it is the reason the P2G bucket cap below is recorded rather than
+built: a cap sized on `plough`'s post-fix peak of 3x would bind on `ribbon`
+every tick and move its pixels.
+
+## Deferred: the P2G bucket cap `FLUID_P2G_MAX`
+
+A hard bound `K` on the particles a cell's P2G gather reads makes the worst tick
+a bounded multiple of the average — the gather's cost is `p2gmax <= 54·K`
+exactly, since the stencil touches 54 cells. It is not built, because:
+
+- Its motivation was a 33 ms tick that is now 3.6 ms.
+- It must be pixel-neutral or it is a deliberate re-bless, and `ribbon` reaching
+  1036 particles in a cell means `K` would have to be around 640+ to avoid
+  binding — at which point it bounds nothing interesting.
+
+**Triggers to build it:** any cinematic scene measured over ~12 ms/tick
+sustained on the convergent solver (`ribbon` past ~tick 350 already qualifies),
+or a peak occupancy in the thousands. **And if it is built:** the sort bound and
+the gather bound must be one shared expression. `FLUID_SORT_MAX` was too low
+twice, and both times the failure was a bucket's tail read past what the sort
+had ordered.
+
+## Instrumentation
+
+`LOOM_FLUID_DEBUG=1` prints peak occupancy in units of rest density, the peak
+cell, the occupied-cell count, and the over-dense counts including the boundary
+subset. It sits in `FluidSolver::density`, which all three readback paths go
+through. Fault-injected to prove it is falsifiable: restoring the `/ wsum` takes
+`plough_cinematic` from `peak=3.0x over4b=0` to `peak=192x over4b=576` and 23
+ms/tick. **This is what makes the triggers above checkable** — none of the five
+green checks could see a solver at 415x rest density, and all five were passing
+while it was.
+
+## Not done here
+
+`CYCLES`/`SMOOTHS` re-tuning; a level set; reseeding; a separating boundary
+condition; the sort rework; the `ribbon` accumulation above. Each was evaluated
+against a solver whose projection was diverging, which means each was evaluated
+against the wrong problem.
