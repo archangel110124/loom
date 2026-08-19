@@ -6300,7 +6300,6 @@ float4 nappeColor(WaterOutput in) {
     return float4(lerp(lit, fogColor(-view), fog), 1.0);
 }
 
-static const int LOOM_WDBG = 1;
 [shader("fragment")]
 float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // The falling sheet, which shares this pipeline and nothing else — ADR
@@ -6562,15 +6561,6 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     float column;
     float3 T = waterBehind(screenUv, in.worldPos, push.environment[0].eye.xyz,
                            in.depth, refracted, behind, column);
-
-    // TEMP DEBUG - remove before commit.
-    if (LOOM_WDBG == 1) { return float4(normal * 0.5 + 0.5, 1.0); }
-    if (LOOM_WDBG == 2) { return float4(T, 1.0); }
-    if (LOOM_WDBG == 3) { return float4(behind, 1.0); }
-    if (LOOM_WDBG == 4) { return float4(fresnel, fresnel, fresnel, 1.0); }
-    if (LOOM_WDBG == 5) { return float4(saturate(column / 4.0).xxx, 1.0); }
-    if (LOOM_WDBG == 6) { return float4(saturate(-refracted.y).xxx, 1.0); }
-    if (LOOM_WDBG == 7) { return float4(saturate(in.depth / 1.6).xxx, 1.0); }
 
     // **Backlit scatter, gated on how THIN the water is — not on view angle
     // and, as of this commit, not on crest either.**
