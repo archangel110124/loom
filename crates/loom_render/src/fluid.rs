@@ -1046,7 +1046,54 @@ impl FluidSolver {
                 }
             }
         }
+        self.report_occupancy();
         &self.density
+    }
+
+    /// `LOOM_FLUID_DEBUG=1` prints this tick's occupancy, in units of rest
+    /// density, to stderr.
+    ///
+    /// It lives here rather than at a caller because all three readback paths
+    /// (`loom render`, `loom run`, the viewer) go through [`Self::density`],
+    /// and because the numbers ADR 0057's addendum sets triggers on — peak
+    /// occupancy and the count of over-dense cells on the domain boundary —
+    /// were not observable from any of the five green checks. The prolongation
+    /// bug reached 415x rest density and 33 ms a tick while every gate passed.
+    ///
+    /// Deliberately reads `self.density`, which the caller wanted anyway, and
+    /// not the solver's own buffers: an instrument that needs its own copy of
+    /// the grid can dump the wrong buffer after an index moves and has already
+    /// cost this project two wrong diagnoses.
+    fn report_occupancy(&self) {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !ON.get_or_init(|| std::env::var_os("LOOM_FLUID_DEBUG").is_some()) {
+            return;
+        }
+        let [nx, ny, nz] = self.dims;
+        let (mut peak, mut at, mut occupied, mut over4, mut over4_boundary) =
+            (0.0_f32, 0_usize, 0_usize, 0_usize, 0_usize);
+        for (index, d) in self.density.iter().copied().enumerate() {
+            if d > peak {
+                peak = d;
+                at = index;
+            }
+            if d > 0.0 {
+                occupied += 1;
+            }
+            if d > 4.0 {
+                over4 += 1;
+                let (i, j, k) = (index % nx, (index / nx) % ny, index / (nx * ny));
+                if i == 0 || j == 0 || k == 0 || i + 1 == nx || j + 1 == ny || k + 1 == nz {
+                    over4_boundary += 1;
+                }
+            }
+        }
+        let (i, j, k) = (at % nx, (at / nx) % ny, at / (nx * ny));
+        eprintln!(
+            "[fluid] tick={} peak={peak:.1}x at=({i},{j},{k}) occ={occupied} \
+             over4={over4} over4b={over4_boundary}",
+            self.tick,
+        );
     }
 
     fn consts_address(&self) -> vk::DeviceAddress {
@@ -1255,12 +1302,15 @@ impl FluidSolver {
                     go(&mut graph, "fluid_restrict_marker", p.restrict_marker,
                        [level as u32, 0, 0, 0], *groups, &[(bmk, rw)]);
                 }
-                // **`bcc` is declared because the divergence reads it** — the
-                // density correction in `fluidDivergenceMain` needs this
-                // substep's particle count, and a dependency the graph is not
-                // told about is a barrier that does not exist (never-do #4).
-                // It was reaching the right answer through the marker pass's
-                // chain, which is not a guarantee.
+                // **`bcc` is declared conservatively, and the reason that
+                // used to be written here was false.** It claimed "the density
+                // correction in `fluidDivergenceMain` needs this substep's
+                // particle count". `fluidDivergenceMain` reads the three
+                // velocity components and the marker; it does not read the
+                // cell counts and there is no density correction in it. The
+                // declaration is kept because it costs nothing and an unread
+                // `ro` is the safe direction, but it is not load-bearing —
+                // do not reason from it about what that kernel does.
                 go(&mut graph, "fluid_divergence", p.divergence, [0; 4], cell_groups,
                    &[(bcc, ro), (bu, ro), (bv, ro), (bw, ro), (bmk, ro), (brh, rw), (bpa, rw),
                      (bpb, rw)]);
