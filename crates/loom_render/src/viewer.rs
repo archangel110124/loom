@@ -1414,30 +1414,11 @@ impl Viewer {
         let particle_slot = u32::try_from(object_data.len()).unwrap_or(0);
         object_data.push(crate::renderer::view_projection_slot(view_proj));
 
-        // Sorted back to front, tiebroken by original index so the order is
-        // total. Identical to the offscreen path, and for the same reason:
-        // these blend, so what is drawn depends on the order it is drawn in.
-        let mut ordered: Vec<(usize, crate::renderer::ParticleInstance)> =
-            particles.iter().copied().enumerate().collect();
-        let eye = camera.eye;
-        ordered.sort_by(|(ai, a), (bi, b)| {
-            let d = |p: &crate::renderer::ParticleInstance| {
-                let (dx, dy, dz) = (
-                    p.position[0] - eye.x,
-                    p.position[1] - eye.y,
-                    p.position[2] - eye.z,
-                );
-                dz.mul_add(dz, dx.mul_add(dx, dy * dy))
-            };
-            d(b).partial_cmp(&d(a))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(ai.cmp(bi))
-        });
-        let drawn: Vec<crate::renderer::ParticleInstance> = ordered
-            .into_iter()
-            .take(self.max_particles)
-            .map(|(_, p)| p)
-            .collect();
+        // Back to front — see `renderer::sort_particles`, which is the one
+        // copy of this. It used to be transcribed here under a comment claiming
+        // it was identical to the offscreen path, which is exactly how a fix
+        // lands on one of two identical things.
+        let drawn = crate::renderer::sort_particles(particles, camera.eye, self.max_particles);
         let particle_count = u32::try_from(drawn.len()).unwrap_or(0);
         if !drawn.is_empty() {
             crate::renderer::write_slice(

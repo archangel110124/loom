@@ -2191,29 +2191,7 @@ impl Renderer {
         let particle_slot = u32::try_from(object_data.len()).unwrap_or(0);
         object_data.push(view_projection_slot(view_proj));
 
-        // **Sorted back to front, and that is not optional.** These blend, so
-        // the result depends on the order they are drawn in: nearest-first
-        // would have each particle blend under the ones behind it. Sorted on
-        // the CPU because the count is thousands, not millions.
-        //
-        // The comparison falls back to the original index when two particles
-        // are the same distance away, so the order is total and the same scene
-        // sorts the same way every run.
-        let mut ordered: Vec<(usize, ParticleInstance)> =
-            particles.iter().copied().enumerate().collect();
-        let eye = camera.eye;
-        ordered.sort_by(|(ai, a), (bi, b)| {
-            let d = |p: &ParticleInstance| {
-                let (dx, dy, dz) = (p.position[0] - eye.x, p.position[1] - eye.y, p.position[2] - eye.z);
-                dz.mul_add(dz, dx.mul_add(dx, dy * dy))
-            };
-            d(b).partial_cmp(&d(a)).unwrap_or(std::cmp::Ordering::Equal).then(ai.cmp(bi))
-        });
-        let drawn: Vec<ParticleInstance> = ordered
-            .into_iter()
-            .take(self.max_particles)
-            .map(|(_, p)| p)
-            .collect();
+        let drawn = sort_particles(particles, camera.eye, self.max_particles);
         let particle_count = u32::try_from(drawn.len()).unwrap_or(0);
         if !drawn.is_empty() {
             write_slice(
@@ -3861,6 +3839,60 @@ pub(crate) fn combine(
 
 /// Runs of consecutive objects sharing a mesh: `(mesh, first_instance, count)`.
 ///
+/// The blended particle stream, back to front, ready to upload.
+///
+/// **One copy, called by the window and by the offscreen path.** It was two —
+/// `viewer.rs` carried a comment saying "identical to the offscreen path" over
+/// its own transcription, and the filter below was added to the offscreen copy
+/// alone. A window measured 36.6 fps while the gate it was supposed to match
+/// measured the fix.
+///
+/// **Sorted because these blend**, so the result depends on the order they are
+/// drawn in: nearest-first would have each particle blend under the ones behind
+/// it. On the CPU because the count is thousands, not millions. The tiebreak is
+/// the original index, so the order is total and the same scene sorts the same
+/// way every run.
+///
+/// **A radius of zero is not a particle, and skipping those before the sort is
+/// the largest single frame cost in the cinematic tier.** The spray path hands
+/// over a fixed 65,536 instances because the stride is a CPU fact and a dead
+/// slot writes a degenerate quad (ADR 0047's rule, and `fluidInstanceMain`'s
+/// spray cull uses it too) — so on `plough_cinematic` most of what arrives here
+/// has already been decided not to rasterise, and was being sorted anyway.
+///
+/// The distance is computed **once per particle** rather than twice per
+/// comparison: `sort_by` called the closure 2·n·log n times on a 48-byte struct
+/// read from a cold buffer, and the keys sorted here are eight bytes.
+///
+/// Pixel-identical, with one stated edge: a degenerate quad is discarded before
+/// rasterisation, so removing it changes nothing, and the filter preserves the
+/// survivors' relative order and their original indices as the tiebreak. The
+/// edge is `max`: the drawn set is now the first `max` *live* particles rather
+/// than the live ones among the first `max` of anything, which is a superset.
+/// It can only differ in a frame that was already silently dropping live
+/// particles.
+pub(crate) fn sort_particles(
+    particles: &[ParticleInstance],
+    eye: Vec3,
+    max: usize,
+) -> Vec<ParticleInstance> {
+    let mut keys: Vec<(f32, u32)> = particles
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.position[3] != 0.0)
+        .map(|(index, p)| {
+            let (dx, dy, dz) =
+                (p.position[0] - eye.x, p.position[1] - eye.y, p.position[2] - eye.z);
+            #[allow(clippy::cast_possible_truncation)]
+            (dz.mul_add(dz, dx.mul_add(dx, dy * dy)), index as u32)
+        })
+        .collect();
+    keys.sort_unstable_by(|(da, ia), (db, ib)| {
+        db.partial_cmp(da).unwrap_or(std::cmp::Ordering::Equal).then(ia.cmp(ib))
+    });
+    keys.iter().take(max).map(|(_, index)| particles[*index as usize]).collect()
+}
+
 /// Assumes `objects` is already sorted by mesh, which [`Renderer::render`]
 /// guarantees.
 /// Split a mesh-sorted slice into the opaque batches and the transparent draws.

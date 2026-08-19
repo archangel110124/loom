@@ -305,6 +305,20 @@ struct App {
     cpu_frames: u32,
     cpu_total_ms: f64,
     cpu_worst_ms: f32,
+    /// The draw call itself: the sort, the uploads, the record, the submit and
+    /// whatever the presentation engine makes the thread wait for.
+    ///
+    /// **`cpu` above is not the frame and never claimed to be.** With the GPU
+    /// graph at 0.56 ms on `plough_cinematic` and `cpu` at 10.6, the frame was
+    /// still 24.8 ms, and there was no instrument anywhere that could say what
+    /// the other fourteen were. Splitting the frame in two at the draw call is
+    /// the smallest thing that answers it, and `wall` below is the only number
+    /// in this project that is the frame rate the human sees.
+    draw_total_ms: f64,
+    /// Wall time between consecutive redraws — the actual frame rate.
+    wall_total_ms: f64,
+    wall_worst_ms: f32,
+    wall_last: Option<std::time::Instant>,
     /// The cinematic tier's presentation cost, summed: density, march, spray.
     fluid_draw_ms: (f64, f64, f64),
     fluid_draw_frames: u32,
@@ -431,6 +445,10 @@ impl App {
             cpu_frames: 0,
             cpu_total_ms: 0.0,
             cpu_worst_ms: 0.0,
+            draw_total_ms: 0.0,
+            wall_total_ms: 0.0,
+            wall_worst_ms: 0.0,
+            wall_last: None,
             fluid_draw_ms: (0.0, 0.0, 0.0),
             fluid_draw_frames: 0,
             agent_changes: Vec::new(),
@@ -1399,6 +1417,10 @@ impl ApplicationHandler for App {
 
                 // Bound out of `self` before the match so the borrow checker
                 // sees three disjoint fields rather than one `&mut self`.
+                // Instrumentation only — never-do #8 is about the simulation,
+                // and nothing below is read by one.
+                #[allow(clippy::disallowed_methods)]
+                let draw_started = std::time::Instant::now();
                 let mut dock = self.dock.as_mut();
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
                     (Some(viewer), Some(ui), Some(window)) => viewer.draw_with_ui(
@@ -1425,6 +1447,17 @@ impl ApplicationHandler for App {
                     (Some(viewer), _, _) => viewer.draw(drawn, &camera),
                     _ => Ok(()),
                 };
+                self.draw_total_ms += draw_started.elapsed().as_secs_f64() * 1000.0;
+                #[allow(clippy::disallowed_methods)]
+                let ended = std::time::Instant::now();
+                if let Some(previous) = self.wall_last.replace(ended) {
+                    let wall = ended.duration_since(previous).as_secs_f64() * 1000.0;
+                    self.wall_total_ms += wall;
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        self.wall_worst_ms = self.wall_worst_ms.max(wall as f32);
+                    }
+                }
                 if let Err(e) = result {
                     eprintln!("loom: draw failed: {e}");
                     event_loop.exit();
@@ -1809,10 +1842,21 @@ impl App {
             return;
         }
         let mean = self.cpu_total_ms / f64::from(self.cpu_frames);
+        let draw = self.draw_total_ms / f64::from(self.cpu_frames);
         crate::log::info(format!(
             "cpu {mean:.3} ms/frame mean, {:.3} ms worst over {} frames",
             self.cpu_worst_ms, self.cpu_frames
         ));
+        // The frame the human sees, and the split that says which half to fix.
+        if self.wall_total_ms > 0.0 && self.cpu_frames > 1 {
+            let wall = self.wall_total_ms / f64::from(self.cpu_frames - 1);
+            crate::log::info(format!(
+                "frame {wall:.3} ms mean ({:.1} fps), {:.3} ms worst — cpu {mean:.3}, \
+                 draw {draw:.3}",
+                1000.0 / wall,
+                self.wall_worst_ms,
+            ));
+        }
         // **Per frame drawn, and labelled so**, which is the distinction the
         // line below it does not make: `ms/tick` is a per-tick number and a
         // frame runs several ticks. Quoting one as the other is what put
