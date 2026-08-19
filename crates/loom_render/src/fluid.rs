@@ -18,7 +18,7 @@
 //! # Barriers
 //!
 //! All of them belong to the render graph (never-do #4), exactly as `rain.rs`
-//! does it. The solver records ~175 compute passes per tick into a
+//! does it. The solver records a few hundred compute passes per tick into a
 //! [`loom_render_graph::RenderGraph`] and submits them as **its own submit**,
 //! separate from any frame — the precedent the TLAS rebuild sets.
 //!
@@ -320,6 +320,7 @@ struct Pipelines {
     scatter: vk::Pipeline,
     sort_cell: vk::Pipeline,
     reorder: vk::Pipeline,
+    separate: vk::Pipeline,
     p2g: vk::Pipeline,
     forces: vk::Pipeline,
     marker: vk::Pipeline,
@@ -629,6 +630,7 @@ impl FluidSolver {
             scatter: make_pipe(c"fluidScatterMain", "loom.fluid.scatter")?,
             sort_cell: make_pipe(c"fluidSortCellMain", "loom.fluid.sort_cell")?,
             reorder: make_pipe(c"fluidReorderMain", "loom.fluid.reorder")?,
+            separate: make_pipe(c"fluidSeparateMain", "loom.fluid.separate")?,
             p2g: make_pipe(c"fluidP2GMain", "loom.fluid.p2g")?,
             forces: make_pipe(c"fluidForcesMain", "loom.fluid.forces")?,
             marker: make_pipe(c"fluidMarkerMain", "loom.fluid.marker")?,
@@ -1072,6 +1074,15 @@ impl FluidSolver {
         let [nx, ny, nz] = self.dims;
         let (mut peak, mut at, mut occupied, mut over4, mut over4_boundary) =
             (0.0_f32, 0_usize, 0_usize, 0_usize, 0_usize);
+        // **Volume and the height of its centre, which peak density cannot
+        // see.** A ratchet that compresses the whole tank uniformly instead of
+        // spiking one cell moves `peak` hardly at all: `plough_cinematic` sat
+        // at 3.4x from tick 400 to tick 10,000 while `wet` — cells at or above
+        // the isovalue the surface is drawn at — halved under it. That is the
+        // tank quietly emptying, and it is what the picture shows. `mass` is
+        // conserved by construction (the splat is every particle) so a drop in
+        // it is a splat clipping at the boundary, not a physical loss.
+        let (mut mass, mut wet, mut column, mut wet_mass) = (0.0_f64, 0_usize, 0.0_f64, 0.0_f64);
         for (index, d) in self.density.iter().copied().enumerate() {
             if d > peak {
                 peak = d;
@@ -1079,6 +1090,15 @@ impl FluidSolver {
             }
             if d > 0.0 {
                 occupied += 1;
+            }
+            mass += f64::from(d);
+            if d >= 0.35 {
+                wet += 1;
+                wet_mass += f64::from(d);
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    column += f64::from(d) * ((index / nx) % ny) as f64;
+                }
             }
             if d > 4.0 {
                 over4 += 1;
@@ -1088,10 +1108,11 @@ impl FluidSolver {
                 }
             }
         }
+        let centre = if wet_mass > 0.0 { column / wet_mass } else { 0.0 };
         let (i, j, k) = (at % nx, (at / nx) % ny, at / (nx * ny));
         eprintln!(
-            "[fluid] tick={} peak={peak:.1}x at=({i},{j},{k}) occ={occupied} \
-             over4={over4} over4b={over4_boundary}",
+            "[fluid] tick={} peak={peak:.1}x at=({i},{j},{k}) occ={occupied} wet={wet} \
+             mass={mass:.0} ycom={centre:.2} over4={over4} over4b={over4_boundary}",
             self.tick,
         );
     }
@@ -1146,7 +1167,7 @@ impl FluidSolver {
 
         // **Not `material::record`**, which submits and waits in one call. The
         // fence wait is the number ADR 0053 §4 asks for by name, so it has to
-        // be separable from recording the 175 dispatches around it.
+        // be separable from recording the dispatches around it.
         let allocate = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.pool)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -1167,9 +1188,9 @@ impl FluidSolver {
                 .iter()
                 .map(|b| graph.import_buffer("loom.fluid", *b))
                 .collect();
-            let (bp, bcc, bcs, bcu, bso, bbs, bu, bv, bw, bmk, bpa, bpb, brh, bsd, bpr, bro) = (
+            let (bp, bcc, bcs, bcu, bso, bbs, bu, bv, bw, bmk, bpa, bpb, brh, bsd, bpr, bro, bde) = (
                 ids[0], ids[1], ids[2], ids[3], ids[4], ids[5], ids[6], ids[7], ids[8], ids[9],
-                ids[10], ids[11], ids[12], ids[13], ids[14], ids[17],
+                ids[10], ids[11], ids[12], ids[13], ids[14], ids[17], ids[18],
             );
             let faces = [bu, bv, bw];
             let rw = BufferAccess::ComputeReadWrite;
@@ -1287,6 +1308,22 @@ impl FluidSolver {
                 go(&mut graph, "fluid_reorder", p.reorder, [0; 4], particle_groups,
                    &[(bp, ro), (bso, ro), (bro, rw)]);
 
+                // **Particle separation — ADR 0058, and it is the fix for
+                // ADR 0057 failure 3.** Out of place by construction: it reads
+                // `bro` (the bucket-ordered copy) and writes `bp`, which it
+                // never reads, so the answer cannot depend on which thread ran
+                // first. Every tick, on a fixed schedule, because the schedule
+                // has to be a function of the tick and never of a residual
+                // (ADR 0053 §6).
+                //
+                // Here rather than after the advection because this is the
+                // only point in the substep where the bucket structure
+                // describes exactly the positions being read. The correction
+                // therefore lands before `fluid_g2p` advects from it, and
+                // reaches the pressure solve on the next substep's rebuild.
+                go(&mut graph, "fluid_separate", p.separate, [0; 4], particle_groups,
+                   &[(bro, ro), (bso, ro), (bcs, ro), (bcc, ro), (bsd, ro), (bp, rw)]);
+
                 go(&mut graph, "fluid_p2g", p.p2g, [0; 4], extended_groups,
                    &[(bro, ro), (bcs, ro), (bcc, ro), (bu, rw), (bv, rw), (bw, rw)]);
                 for axis in 0..3_u32 {
@@ -1295,8 +1332,17 @@ impl FluidSolver {
                        &[(faces[axis as usize], rw), (bsd, ro)]);
                 }
 
+                // **The density field, inside the step.** It existed only on
+                // the readback path, where it is marched into a surface; the
+                // marker below now reads it, so it has to be current for *this*
+                // substep. Two dispatches, and they are what let the free
+                // surface the solve sees be the same one the picture draws.
+                go(&mut graph, "fluid_density_clear", p.density_clear, [0; 4], cell_groups,
+                   &[(bde, rw)]);
+                go(&mut graph, "fluid_density_splat", p.density_splat, [0; 4], particle_groups,
+                   &[(bp, ro), (bde, rw)]);
                 go(&mut graph, "fluid_marker", p.marker, [0; 4], cell_groups,
-                   &[(bcc, ro), (bsd, ro), (bmk, rw)]);
+                   &[(bde, ro), (bsd, ro), (bmk, rw)]);
                 for (level, groups) in level_groups.iter().enumerate().skip(1) {
                     #[allow(clippy::cast_possible_truncation)]
                     go(&mut graph, "fluid_restrict_marker", p.restrict_marker,
@@ -1449,6 +1495,7 @@ impl Drop for FluidSolver {
                 self.pipelines.scatter,
                 self.pipelines.sort_cell,
                 self.pipelines.reorder,
+                self.pipelines.separate,
                 self.pipelines.p2g,
                 self.pipelines.forces,
                 self.pipelines.marker,

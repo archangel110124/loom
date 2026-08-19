@@ -2868,6 +2868,15 @@ transform = { pos = [0.0, 4.0, 0.0], rot_euler = [0.0, 0.0, 45.0], scale = [0.7,
     /// ignored it — collider size always came from the node's scale. A scene
     /// could declare a collider twice the size of its mesh and collide as the
     /// mesh, with nothing reporting the discrepancy.
+    ///
+    /// **The half-extents are LOCAL and are multiplied by the node's world
+    /// scale**, which is what the comment at the call site has always said and
+    /// what `rain_collision_field` — the other reader of the same component —
+    /// has always done. This test used to assert the opposite by accident: at
+    /// `scale 0.5` with `half_extents [0.5, 2.0, 0.5]` it expected the crate to
+    /// rest at 2.0, which is only true if the scale is dropped. The world half
+    /// height is `2.0 × 0.5 = 1.0`, so it rests at 1.0, and the number is the
+    /// falsifier — the old behaviour lands at 2.0 and fails here.
     #[test]
     fn an_authored_box_collider_beats_the_mesh_scale() {
         let scene = |collider: &str| {
@@ -2912,13 +2921,14 @@ transform = {{ pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }}
 
         let from_scale = rest(&scene(""));
         let declared = rest(&scene(
-            "\n  [node.components.BoxCollider]\n  half_extents = [0.5, 2.0, 0.5]\n",
+            "\n  [node.components.BoxCollider]\n  half_extents = [1.0, 2.0, 1.0]\n",
         ));
 
         assert!((from_scale - 0.5).abs() < 0.05, "scale-sized: {from_scale}");
         assert!(
-            (declared - 2.0).abs() < 0.05,
-            "the declared collider is 2.0 tall, so it rests at 2.0, not {declared}"
+            (declared - 1.0).abs() < 0.05,
+            "the declared collider is 2.0 half-tall in local space under a scale \
+             of 0.5, so it rests at 1.0, not {declared}"
         );
     }
 

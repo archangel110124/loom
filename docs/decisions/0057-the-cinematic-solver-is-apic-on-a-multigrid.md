@@ -849,3 +849,60 @@ while it was.
 condition; the sort rework; the `ribbon` accumulation above. Each was evaluated
 against a solver whose projection was diverging, which means each was evaluated
 against the wrong problem.
+
+---
+
+# Addendum 6 — the density-correction rejection was about velocity space, and failure 3 is closed
+
+**Filed alongside ADR 0058, which is the fix.**
+
+"A density correction was built, measured, and rejected on the pictures" reads,
+as written, like a rejection of ever letting the solver look at particle
+density. It is not, and ADR 0058 needs the narrower reading, so it is stated
+here rather than left to be inferred.
+
+Every one of the three forms in that table steers the **target divergence** —
+the right-hand side the pressure solve is asked to satisfy — by how over-full a
+cell is. That is a *velocity-space* correction: it reaches particle positions
+only through the projection and then through the advection, and it puts energy
+into a tank that was not moving. Which is exactly what the table records. The
+one-sided form had no restoring force because half the cells are over-full at
+any instant when eight is a mean with σ = 2.8; the symmetric form pulled surface
+cells toward eight, which is the original compression under a new name.
+
+**ADR 0058 corrects positions directly and symmetrically, and never touches a
+velocity.** A settled tank whose particles already sit further apart than the
+separation radius is a fixed point of it: the push is not small, it is exactly
+zero. That is the property whose absence killed all three forms above, and it is
+the property a velocity-space correction cannot have.
+
+So the rejection stands, scoped to what it measured. What it does not license is
+the sentence that follows it — *"the compression is real and the fix is not
+this"* — being read as "the fix is a ghost-fluid boundary condition and nothing
+else". A ghost-fluid pressure is still the right thing for the *free surface*;
+it is not what closes failure 3, because failure 3 is a particle-density
+integral and the projection has no particle density in it at any boundary
+condition.
+
+## Failure 3 is closed
+
+`plough_cinematic` and `slosh` both hold peak density between 1.3x and 1.6x
+rest, with zero cells past four times rest, for ten thousand ticks. The per-tick
+cost is flat over the same run — 3.6 ms at tick 400, 3.21 ms at tick 10,000 —
+where at HEAD it doubled. The 45-second explosion the human photographed does
+not happen.
+
+`ribbon`'s accumulation, which Addendum 5 left open as the scene that bounds any
+future cap, is covered by the same pass and is byte-reproducible across three
+fresh processes.
+
+What remains is a **16% one-time settling** of a still tank below its authored
+fill, which converges rather than ratcheting. ADR 0058 §7 owns it.
+
+## The instrumentation grew, because peak density is blind to a uniform ratchet
+
+`LOOM_FLUID_DEBUG=1` now also prints `wet` — cells at or above the isovalue the
+surface is drawn at — plus total `mass` and the height of the wet centre of
+mass. It is not decoration: with the separation pass at its first radius the
+tank sat at 3.4x peak from tick 400 to tick 10,000, `over4` was zero the whole
+way, and the water under it halved. The picture showed it and no counter did.

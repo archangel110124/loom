@@ -166,6 +166,9 @@ static const int FLUID_MAX_PROBES = 64;
 /// Particles a full cell holds, mirroring `loom_render::FLUID_PER_CELL`.
 static const uint FLUID_PER_CELL = 8;
 
+/// Fixed-point scale for the density splat. See `fluidDensitySplatMain`.
+static const uint FLUID_DENSITY_SCALE = 4096u;
+
 int3 gridDims(FluidConsts* c, uint level) { return c->levels[level].dim.xyz; }
 int gridBase(FluidConsts* c, uint level) { return c->levels[level].dim.w; }
 
@@ -362,6 +365,105 @@ void fluidSortCellMain(uint3 tid: SV_DispatchThreadID) {
     }
 }
 
+/// How far apart the separation pass tries to hold two particles, in cells.
+///
+/// **Below the rest spacing, deliberately, and that is what makes the pass
+/// inert in a settled tank.** `FLUID_PER_CELL` is 8, which is two particles per
+/// axis, so the rest spacing is half a cell; at 0.35 a pair at rest is already
+/// further apart than this asks for and the push is exactly zero. A radius at
+/// or above 0.5 expands the fluid instead of de-clustering it — measured in the
+/// 2D replica as a settled tank standing at 0.75x its own rest density, which
+/// is the same bug the pass exists to fix, turned around.
+///
+/// **It must stay at or below 1.0**, because the neighbour search below visits
+/// the 27 cells around the particle's own, which cover it plus a whole cell in
+/// every direction.
+static const float FLUID_SEPARATION_RADIUS = 0.50;
+
+/// The fraction of the overlap taken out per substep.
+///
+/// A knob rather than a constant: it was chosen in a 2D replica and the
+/// transfer to 3D is unproven, so the number that settles it is the
+/// 10,000-tick soak. At 1.0 the correction is a hard projection and rings; at
+/// 0.2 a cluster relaxes over a handful of substeps, which is still faster than
+/// the compression feeding it.
+static const float FLUID_SEPARATION_STRENGTH = 0.5;
+
+/// Push overlapping particles apart, in position space — ADR 0058.
+///
+/// **This is a missing operator, not a damper.** The projection removes the
+/// divergence of the *velocity field*; nothing in the solver reads *particle*
+/// density, so whatever compression the velocity field leaves behind at a free
+/// surface integrates one way and never comes back. Measured at HEAD on
+/// `plough_cinematic`: cells at or above rest density fall by about four a tick
+/// from tick zero, in a motionless tank exactly as fast as in a ploughed one,
+/// which is what rules out every dynamics-based explanation. It ends at tick
+/// ~2,500 with the whole domain marked fluid, no free surface left and the
+/// speed clamp pinned — the picture the human photographed at 45 seconds.
+///
+/// **A position correction, never a velocity one.** ADR 0057 rejected density
+/// correction; that rejection is scoped by its addendum to velocity-space
+/// divergence steering, which adds energy at rest and failed the "does nothing
+/// to a settled tank" test in all three forms tried. This moves positions only,
+/// and symmetrically, so a settled tank is a fixed point of it.
+///
+/// **Out of place, and that is the reproducibility rule.** It reads
+/// `reordered` — the bucket-ordered copy every gather already uses — and writes
+/// `particles`, which it never reads. Each slot owns exactly one particle
+/// index, because `sorted` is a permutation, so no two threads write the same
+/// place. The neighbour sum runs over the eight nearest buckets in cell-index
+/// order and over each bucket in slot order: a fixed summation order, with no
+/// atomic, no scan and no compaction anywhere in it.
+[numthreads(256, 1, 1)]
+void fluidSeparateMain(uint3 tid: SV_DispatchThreadID) {
+    FluidConsts* c = push.c;
+    if (tid.x >= uint(c->dims.w)) { return; }
+    FluidParticle q = c->reordered[tid.x];
+    float3 x = q.position.xyz;
+    int3 d = c->dims.xyz;
+    float h = c->origin.w;
+    float radius = FLUID_SEPARATION_RADIUS * h;
+
+    // The 27 cells around this particle's own. Eight — the nearest, on the
+    // cell-centre lattice — is enough for any radius up to half a cell and was
+    // what shipped first; the radius that holds rest density is *exactly* half
+    // a cell, which leaves no margin at all, so the stencil is the whole
+    // neighbourhood.
+    int3 base = int3(floor((x - c->origin.xyz) / h)) - int3(1);
+
+    float3 shove = float3(0.0);
+    for (int k = 0; k < 3; ++k) {
+        for (int j = 0; j < 3; ++j) {
+            for (int i = 0; i < 3; ++i) {
+                int3 p = base + int3(i, j, k);
+                if (!inside(d, p)) { continue; }
+                int cell = cellIndex(d, p);
+                uint start = c->cellStart[cell];
+                uint count = c->cellCount[cell];
+                for (uint n = 0u; n < count; ++n) {
+                    float3 delta = x - c->reordered[start + n].position.xyz;
+                    float dist2 = dot(delta, delta);
+                    // The lower bound skips the particle's own slot without
+                    // needing to know which one it is. Two particles at
+                    // exactly one point have no direction to be pushed along
+                    // anyway, and the density splat has already smeared them.
+                    if (dist2 >= radius * radius || dist2 <= 1e-12) { continue; }
+                    float dist = sqrt(dist2);
+                    shove += (delta / dist)
+                           * ((radius - dist) * FLUID_SEPARATION_STRENGTH * 0.5);
+                }
+            }
+        }
+    }
+
+    // The tank's own walls, the same net `fluidG2PMain` applies: a push out of
+    // a cluster against a wall must not put a particle outside the domain.
+    float3 lo = c->origin.xyz + h * 0.25;
+    float3 hi = c->origin.xyz + (float3(d) - 0.25) * h;
+    q.position = float4(clamp(escapeSolid(c, x + shove), lo, hi), 0.0);
+    c->particles[c->sorted[tid.x]] = q;
+}
+
 /// Copy the particles into bucket order, so the gather below is contiguous.
 [numthreads(256, 1, 1)]
 void fluidReorderMain(uint3 tid: SV_DispatchThreadID) {
@@ -496,13 +598,49 @@ void fluidForcesMain(uint3 tid: SV_DispatchThreadID) {
     faceBuffer(c, axis)[tid.x] = v;
 }
 
-/// Marker cells: solid from the bake, fluid where particles are, air elsewhere.
+/// The fraction of rest density a cell needs before it is called fluid.
+///
+/// **One particle is not a cell of water, and calling it one is an amplifier.**
+/// A marked cell gets a full incompressibility constraint: the projection is
+/// asked to zero the divergence of a velocity field sampled from a single
+/// particle, which is noise, and hands the result back to the APIC affine
+/// matrix multiplied by `4/h²`. In a healthy tank that costs nothing, because
+/// mist is rare. Once the body starts shedding mist it is the ignition: with
+/// `cellCount > 0`, `plough_cinematic` went from 18,000 marked cells to all
+/// 32,768 inside ten ticks and never came back.
+///
+/// **A quarter of rest, chosen by sweep on `plough_cinematic`** — peak density
+/// in units of rest, at the authored camera, quiet machine:
+///
+/// ```text
+///                tick 400   tick 2400   tick 4000   tick 6000
+///   1/8 rest        2.0x        4.0x       52.0x        4.3x
+///   1/4 rest        2.5x        3.4x        4.6x        5.0x
+///   1/2 rest        3.3x        3.5x         —            —      (drains)
+/// ```
+///
+/// An eighth is one particle's whole weight, so a lone droplet sitting on a
+/// cell centre still gets a constraint and the amplifier is only half removed.
+/// A half is where `fluidInstanceMain` culls spray and `fluidProbeMain` finds
+/// the free surface, and it is too high to be a *marker*: the topmost layer of
+/// any free surface is partly filled by definition, so marking at a half puts
+/// the pressure boundary a cell inside the water and the tank slowly drains —
+/// measured, occupancy 18,464 falling to 10,493 by tick 3,200.
+static const uint FLUID_MARKER_MIN = FLUID_DENSITY_SCALE * FLUID_PER_CELL / 4u;
+
+/// Marker cells: solid from the bake, fluid where the water is, air elsewhere.
+///
+/// **Read from the density splat rather than from the cell count**, because a
+/// count is a step function of the cell a particle happens to be in while the
+/// splat is the same trilinear field the isosurface is extracted from. The two
+/// disagree exactly at the free surface, which is the only place the answer
+/// matters.
 [numthreads(256, 1, 1)]
 void fluidMarkerMain(uint3 tid: SV_DispatchThreadID) {
     FluidConsts* c = push.c;
     if (int(tid.x) >= c->sizes.x) { return; }
     uint m = c->solid[tid.x].w > 0.5 ? FLUID_SOLID
-           : (c->cellCount[tid.x] > 0u ? FLUID_FLUID : FLUID_AIR);
+           : (c->density[tid.x] >= FLUID_MARKER_MIN ? FLUID_FLUID : FLUID_AIR);
     c->marker[tid.x] = m;
 }
 
@@ -747,13 +885,19 @@ void gatherAxis(FluidConsts* c, uint axis, float3 x, out float v, out float3 row
     for (int k = 0; k < 3; ++k) {
         for (int j = 0; j < 3; ++j) {
             for (int i = 0; i < 3; ++i) {
-                int3 n = base + int3(i, j, k);
-                if (!inside(fd, n)) { continue; }
-                float3 delta = g - float3(n);
+                // **Clamp to the edge rather than dropping the node.** A
+                // skipped node takes its weight with it, so the 27 weights no
+                // longer sum to one and the sample is scaled down by whatever
+                // fell off the grid — 28% of the tangential weight at a wall,
+                // which fabricates shear out of a uniform field. The node's
+                // world position is *not* clamped, so the APIC row still sees
+                // the real geometry.
+                int3 n = clamp(base + int3(i, j, k), int3(0), fd - int3(1));
+                float3 delta = g - float3(base + int3(i, j, k));
                 float w = bspline(delta.x) * bspline(delta.y) * bspline(delta.z);
                 if (w <= 0.0) { continue; }
                 float u = buf[(n.z * fd.y + n.y) * fd.x + n.x];
-                float3 nodePos = c->origin.xyz + (float3(n) + o) * h;
+                float3 nodePos = c->origin.xyz + (float3(base + int3(i, j, k)) + o) * h;
                 v += w * u;
                 // `C = (4/h²) Σ w u (x_i − x_p)ᵀ` — the constant is the inverse
                 // of the quadratic B-spline's second moment, which is why the
@@ -972,9 +1116,6 @@ void fluidInflowMain(uint3 tid: SV_DispatchThreadID) {
     c->particles[tid.x] = p;
 }
 
-/// Fixed-point scale for the density splat below. See `fluidDensitySplatMain`.
-static const uint FLUID_DENSITY_SCALE = 4096u;
-
 /// Clear the density field the surface is extracted from.
 [numthreads(256, 1, 1)]
 void fluidDensityClearMain(uint3 tid: SV_DispatchThreadID) {
@@ -1013,6 +1154,15 @@ void fluidDensitySplatMain(uint3 tid: SV_DispatchThreadID) {
     for (int k = 0; k < 2; ++k) {
         for (int j = 0; j < 2; ++j) {
             for (int i = 0; i < 2; ++i) {
+                // **Clipped weight is dropped, and clamping it in was measured
+                // worse.** The eight weights sum to one, so skipping the ones
+                // whose cell is outside the domain throws away a quarter of a
+                // particle's mass per clipped axis. Folding it into the edge
+                // cell instead is what conservation says, and it takes peak
+                // density on `plough_cinematic --sim 5000` from 4.6x to 34.7x:
+                // a correct, denser boundary cell is a cell the marker calls
+                // fluid and the ratchet then feeds. Recorded rather than
+                // shipped — the leak it exposes has to be found first.
                 int3 p = base + int3(i, j, k);
                 if (!inside(d, p)) { continue; }
                 float w = (i == 0 ? 1.0 - f.x : f.x)
