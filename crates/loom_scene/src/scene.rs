@@ -559,6 +559,10 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
     });
     // Cascades seen so far. Scene-wide, exactly as `gpu_emitters` is.
     let mut cascades = 0_usize;
+    // Cinematic water bodies seen so far — ADR 0059's budget, and scene-wide
+    // for the same reason the emitter count is: "one per scene" is a property
+    // of the file that no single node can see.
+    let mut cinematic_bodies = 0_usize;
     for (table, node) in entries.iter().zip(nodes) {
         // `transform` is sugar for the Transform component (§1.1), but it used
         // to be the one field that skipped this pass — it went straight through
@@ -600,7 +604,12 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
             // a number goes has nothing for the steepness limit to compute
             // against, and reporting both would be reporting one fault twice.
             if schema_errors.is_empty() && type_name == "WaterBody" {
-                errors.extend(check_water(item, &node.path, has_game_rules));
+                errors.extend(check_water(
+                    item,
+                    &node.path,
+                    has_game_rules,
+                    &mut cinematic_bodies,
+                ));
             }
             if schema_errors.is_empty() && type_name == "Cascade" {
                 errors.extend(check_cascade(item, &node.path, has_water, &mut cascades));
@@ -820,7 +829,43 @@ fn check_emitter(
     errors
 }
 
-/// The three tier rules — ADR 0053 §5, as refusals rather than comments.
+/// The cells a cinematic domain of this extent gets.
+///
+/// Mirrors `loom_render::fluid_grid`, which this crate cannot call: `loom_scene`
+/// depends on nothing else in the workspace, which is a CI-enforced rule. The
+/// arithmetic is two lines and the test below pins the two together by the
+/// numbers a real scene produces.
+fn fluid_cells(extent: [f32; 3]) -> usize {
+    let longest = extent.iter().copied().fold(0.0_f32, f32::max);
+    if longest <= 0.0 {
+        return 0;
+    }
+    let cell = longest / 64.0;
+    extent
+        .iter()
+        .map(|e| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = (e / cell).round().max(1.0) as usize;
+            n
+        })
+        .product()
+}
+
+/// The cells one cinematic domain may hold — ADR 0059.
+///
+/// **A budget stated in cells because cost is measured flat in domain size.**
+/// The solver's per-tick cost is dominated by dispatch count, which is a
+/// function of the multigrid level count and not of the cells in them, so a
+/// small domain does not buy back much; what the budget is really bounding is
+/// the particle count, the P2G gather and the CPU marching cubes, all of which
+/// are linear in cells.
+///
+/// 65,536 is twice `plough_cinematic`'s 32,768, which measures 3.2 ms a tick on
+/// an RTX 4090 — 19% of a 60 Hz frame before anything is drawn. Anything that
+/// wants more is asking for the whole frame.
+pub const MAX_CINEMATIC_CELLS: usize = 65_536;
+
+/// The tier rules — ADR 0053 §5 and ADR 0059, as refusals rather than comments.
 ///
 /// **Same S4 lesson the emitter rules are written from.** A constraint nobody
 /// enforces is a constraint the author meets as a symptom later, and each of
@@ -836,8 +881,12 @@ fn check_tier(
     body: &components::WaterBody,
     node: &str,
     has_game_rules: bool,
+    cinematic_bodies: &mut usize,
 ) -> Vec<SceneError> {
     let cinematic = body.simulation == components::WaterSimTier::Cinematic;
+    if cinematic {
+        *cinematic_bodies += 1;
+    }
     let mut errors = Vec::new();
     let mut refuse = |code: &str, field: &str, value: Value, constraint: &str, hint: &str| {
         let mut err = SceneError::new(code, node);
@@ -898,6 +947,49 @@ fn check_tier(
         }
     }
 
+    // **The tier is a hero volume with a budget, not the water system** —
+    // ADR 0059. The same authored event measures 141 fps on `plough.loom` and
+    // 37 on `plough_cinematic.loom`, and the deterministic height-field tier is
+    // what carries a scene. Both refusals below are the ADR 0047 pattern: the
+    // number the author needs is in the message, because a budget nobody can
+    // read is a budget nobody meets.
+    if *cinematic_bodies > 1 {
+        refuse(
+            "second_cinematic_water_body",
+            "simulation",
+            Value::from("cinematic"),
+            "at most one cinematic WaterBody per scene",
+            "the engine builds one solver, with its own Vulkan device, its own \
+             particle buffer and its own synchronous readback inside the fixed \
+             step. A second would silently not solve — the shape of failure \
+             this refusal exists to replace. Everything outside the hero volume \
+             belongs on `simulation = \"deterministic\"`, which is the water \
+             system and runs at 140 fps in the same scene.",
+        );
+    }
+
+    if let Some(extent) = body.extent.filter(|_| cinematic) {
+        let cells = fluid_cells(extent);
+        if cells > MAX_CINEMATIC_CELLS {
+            refuse(
+                "cinematic_domain_over_budget",
+                "extent",
+                Value::from(Vec::from(extent)),
+                "at most 65,536 cells, so the two shorter axes must be small",
+                &format!(
+                    "the grid is 64 cells along the longest axis, so this \
+                     extent is {cells} cells and the budget is \
+                     {MAX_CINEMATIC_CELLS}. Measured on this machine, an RTX \
+                     4090: 32,768 cells is 3.2 ms a tick, which at 60 Hz is \
+                     19% of a 60 fps frame's whole budget before anything is \
+                     drawn. Reshape the volume — a long shallow tank is the \
+                     shape a hero effect reads in, and a cube of the same \
+                     length is eight times the cost (ADR 0059)."
+                ),
+            );
+        }
+    }
+
     if cinematic && has_game_rules && !body.acknowledge_nondeterminism {
         refuse(
             "cinematic_water_demotes_a_game",
@@ -927,7 +1019,12 @@ fn check_tier(
 /// steepness until exactly that happens, and the symptom reads as a rendering
 /// bug rather than as a parameter it chose — so the rejection carries the
 /// computed limit and the reason.
-fn check_water(item: &Item, node: &str, has_game_rules: bool) -> Vec<SceneError> {
+fn check_water(
+    item: &Item,
+    node: &str,
+    has_game_rules: bool,
+    cinematic_bodies: &mut usize,
+) -> Vec<SceneError> {
     // Through serde rather than off the raw TOML, so an omitted field is its
     // documented default here exactly as it will be at load. Reading the tables
     // directly would compute the limit against zeros the runtime never sees.
@@ -960,7 +1057,7 @@ fn check_water(item: &Item, node: &str, has_game_rules: bool) -> Vec<SceneError>
     };
 
     let mut errors = Vec::new();
-    errors.extend(check_tier(&body, node, has_game_rules));
+    errors.extend(check_tier(&body, node, has_game_rules, cinematic_bodies));
     let count = body.waves.waves.len();
     if count > components::MAX_WAVES {
         let mut err = SceneError::new("too_many_waves", node);

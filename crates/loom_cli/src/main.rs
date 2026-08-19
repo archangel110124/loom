@@ -5545,7 +5545,10 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         );
 
         // With one: it loads, and the flag reaches the world.
-        let cinematic = water("simulation = \"cinematic\"\nextent = [16.0, 6.0, 16.0]\n");
+        // 16 x 4 x 8 is 64 x 16 x 32 = 32,768 cells, inside ADR 0059's budget.
+        // It used to read 16 x 6 x 16, which is 98,304 and is now refused —
+        // a cube-ish domain is what the budget exists to stop.
+        let cinematic = water("simulation = \"cinematic\"\nextent = [16.0, 4.0, 8.0]\n");
         let scene = Scene::parse(&cinematic).expect("valid");
         assert!(World::from_scene(&scene).has_cinematic(), "the tier did not reach the world");
 

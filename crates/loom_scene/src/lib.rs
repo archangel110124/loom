@@ -752,6 +752,49 @@ name = \"Hill\"
         .expect("54,000 slots fit");
     }
 
+    /// The cinematic tier is one hero volume with a budget — ADR 0059.
+    ///
+    /// **Both halves matter and the second is the falsifier.** A cell budget
+    /// that refuses everything is not a budget, so the scene that has to pass
+    /// is `plough_cinematic`'s own 6.4 x 1.6 x 3.2 — the shape the ADR calls
+    /// the right one — and the scene that has to fail is the cube of the same
+    /// length, which is eight times the cells for the same hero.
+    #[test]
+    fn the_cinematic_tier_is_one_volume_with_a_cell_budget() {
+        let head = "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e52\"\n";
+        let body = |name: &str, parent: &str, extent: &str| {
+            format!(
+                "\n[[node]]\nname = \"{name}\"\n{parent}\n\
+                 [node.components.WaterBody]\nkind = \"lake\"\n\
+                 simulation = \"cinematic\"\nextent = {extent}\n"
+            )
+        };
+        let tank = body("A", "", "[6.4, 1.6, 3.2]");
+
+        Scene::parse(&format!("{head}{tank}")).expect("one tank is the tier");
+
+        // A cube of the same longest axis: 64^3 = 262,144 cells.
+        let errors = Scene::parse(&format!("{head}{}", body("A", "", "[6.4, 6.4, 6.4]")))
+            .expect_err("a 64-cubed domain is eight times the budget");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "cinematic_domain_over_budget");
+        assert!(
+            errors[0].hint.as_deref().is_some_and(|h| h.contains("262144"))
+                && errors[0]
+                    .hint
+                    .as_deref()
+                    .is_some_and(|h| h.contains(&scene::MAX_CINEMATIC_CELLS.to_string())),
+            "both numbers, or the author cannot tell how far over they are: {errors:?}"
+        );
+
+        let second = body("B", "parent = \"A\"", "[6.4, 1.6, 3.2]");
+        let errors =
+            Scene::parse(&format!("{head}{tank}{second}")).expect_err("there is one solver");
+        assert_eq!(errors.len(), 1, "the SECOND is named, not both: {errors:?}");
+        assert_eq!(errors[0].error, "second_cinematic_water_body");
+        assert_eq!(errors[0].node, "A/B");
+    }
+
     /// One pool, so a second GPU emitter would silently not draw. Refusing is
     /// the whole point: an absent feature is the one thing no gate here can
     /// see.
