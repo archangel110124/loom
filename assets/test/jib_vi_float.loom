@@ -1,0 +1,248 @@
+# A nineteen-metre charter boat, floating.
+#
+# **This scene exists to answer one question: does it sit upright and stay
+# there.** Not whether it looks right — `assets/meshes/jib_vi.obj` was judged
+# on that separately — but whether the buoyancy model this engine has can hold
+# a hull-shaped object level for minutes without capsizing, and whether it
+# rights itself when pushed.
+#
+# **The pontoons are hand-placed and that is the whole point of the scene.**
+# `Buoyancy`'s default is four pontoons derived from the node's own size, at
+# its horizontal corners, with radii summing to the body's volume. For a crate
+# that is exactly right. For a boat it is badly wrong, because the node's
+# bounding box is 19.1 x 9.96 x 5.75 m and **most of that box is superstructure
+# and air** — the hull is the bottom 1.66 m of it. Four corner spheres sized to
+# the whole box would displace several times what the hull does and the boat
+# would ride on the surface like a cork, which is the failure the component's
+# own documentation warns about in the neighbouring case.
+#
+# So twelve pontoons, along the hull, tapering with the waterlines:
+#
+#   - **Twelve, not four**, because righting torque comes from the forces
+#     landing at *different places*. Four give a boat almost no roll stiffness
+#     at the beam, and a hull with no roll stiffness lies down at the first
+#     asymmetry and never gets up — which is exactly the "capsizes for no
+#     reason" this scene is built to catch.
+#   - **z = ±1.7 amidships narrowing to ±0.8 at the bow**, because the hull
+#     narrows. Pontoons wider than the hull would generate a righting moment
+#     the boat does not have, which is the same lie as the cork, told the other
+#     way round.
+#   - **Centred at y = -0.236 with radius 1.043**, so each sits exactly two
+#     thirds submerged at rest. That is deliberate: a sphere fully under
+#     displaces a constant volume no matter how the boat moves, and contributes
+#     **nothing** to stability. A sphere crossing the surface gains and loses
+#     displacement as it rises and falls, and that change is the restoring
+#     force. Pontoons buried below the waterline are a common way to build a
+#     boat that floats and still capsizes.
+#
+# Both numbers are solved for, not chosen. `mass = 38000` on 1000 kg/m^3 water
+# needs 38.0 m^3 displaced at the designed waterline, so each of the twelve
+# carries 3.167 m^3; asking that to be two thirds of a sphere gives a whole
+# sphere of 4.75 m^3 and therefore r = 1.0428. The offset then follows from the
+# spherical cap: a centre 0.236 m below the surface leaves a submerged depth of
+# h = r + 0.236 = 1.279, and pi*h^2*(3r - h)/3 = 3.167 m^3 — two thirds again,
+# which is the point. Total 12 x 3.167 = 38.0 m^3 puts the waterline at y = 0,
+# where the model's origin already is, because it was exported that way.
+#
+# **The scene first shipped with r = 0.945 at y = -0.6, and that is the failure
+# the bullet above describes, written into the file it warns in.** Those
+# displace the same 38.7 m^3 — the flotation arithmetic was right — but the
+# spheres are **91% submerged**, leaving 11.6% reserve buoyancy, so they
+# saturate almost immediately and stop generating any restoring force. The
+# difference is not subtle and is measured below.
+#
+# **The wind is light on purpose.** A real sea would make a capsize ambiguous:
+# a boat knocked over by a wave is a boat, a boat that lies down on flat water
+# is a bug. `speed = 3.5` gives a surface with enough texture to see the hull
+# respond without ever being the cause. The harder wave case belongs in its own
+# scene once this one holds.
+#
+# The water is `simulation = "deterministic"` — the height-field tier, which
+# carries force, the sim hash and `--assert` (ADR 0059 §1). A cinematic volume
+# around a nineteen-metre hull is a separate experiment and a separate scene.
+#
+# **What this hull is measured to do.** Dropped from 0.4 m it settles at
+# y = +0.034 — 3.4 cm above the designed line — and is still there at tick
+# 36000, ten minutes in, having drifted 14 mm and bobbing 3.5 cm peak to peak
+# on the wave texture. Total tilt off vertical at rest is under 0.4°, so it is
+# level in trim as well as in heel. Heeled and released it **rights itself from
+# 80° and inverts from 81°**; on the pontoons this scene first shipped with,
+# the same test rights from 40° and inverts from 42°.
+#
+# **Having an angle of vanishing stability is not the bug — every real boat has
+# one.** Coming back from 30° and not from 60° would be correct behaviour. The
+# defect was having it at 40°, which is inside the range an ordinary sea
+# reaches, and it came entirely from the two numbers above.
+#
+# The wind sweep says the same thing from the other side: raising `speed` from
+# the authored 3.5 to 35 m/s — the schema refuses anything over 40 — drops the
+# hull 17 m into a trough and still never puts it over. Roll stays under 8°.
+# On this tier there is no wind speed a scene can author that capsizes it.
+#
+# Reproducing that costs a workaround worth knowing: `loom sim --assert` reads
+# x, y and z on a node and has **no orientation axis at all**. Roll is read by
+# parenting a marker to the Boat at local (0, 0, 5) — under a rotation phi
+# about X it lands at (0, -5 sin phi, 5 cos phi), so `atan2(-dy, dz)` recovers
+# a signed angle over the full ±180° and can tell "righted" from "inverted",
+# which a mast's tilt from vertical cannot. The markers belong in a throwaway
+# copy, not in here.
+#
+# One reading that surprises: `events.submerged` fires **once**, in the drop
+# transient around tick 20, and never clears. That pair is hysteretic — 0.6 of
+# the *collider* under to go in, 0.3 to come out — and the collider is the
+# hull's box, which is a little over half under at the designed waterline. So
+# the boat is permanently latched "submerged" and it is telling the truth about
+# the box. Do not write a game rule against it here.
+
+[scene]
+format = 1
+id = "b2b39560-6e8b-4157-bbea-64d58d3323e5"
+
+[[asset]]
+key = "boat"
+id = "7c1a0d84-3f52-4a1e-9d6b-2e5c8f1a44b7"
+path = "../meshes/jib_vi.obj"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[node]]
+name = "Sea"
+
+  [node.components.Environment]
+  sun_direction = [0.34, 0.58, -0.74]
+  sun_strength = 1.3
+  sun_color = [1.0, 0.97, 0.90]
+  ambient = 0.55
+  sky_zenith = [0.16, 0.31, 0.55]
+  sky_horizon = [0.66, 0.74, 0.80]
+  fog_density = 0.0016
+  fog_falloff = 0.05
+
+  # Light air. Enough to give the surface texture and a little motion; far too
+  # little to knock over nineteen metres of boat. If this hull capsizes here,
+  # the water did not do it.
+  [node.components.Wind]
+  direction_degrees = 20.0
+  speed = 3.5
+  gustiness = 0.25
+  turbulence = 0.15
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+  density = 1000.0
+  drag = 2.0
+
+# **JIB VI.** Bow is +X, up is +Y, origin on the waterline and centred
+# fore-aft — the exporter was told to do that so the scene needs no offset to
+# float it. Dropped from 0.4 m so the settle is visible as a settle rather
+# than being true at tick zero; the entry is gentle enough not to be an impact.
+[[node]]
+name = "Boat"
+parent = "Sea"
+transform = { pos = [0.0, 0.40, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "boat" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  # 38 tonnes, set to the pontoons' displacement at the designed waterline
+  # rather than guessed — see the header's arithmetic.
+  mass = 38000.0
+
+  # **The collider is here for the inertia, not for the collisions.** Without
+  # one the body defaults to a 2 x 2 x 2 box — eight cubic metres — and a
+  # nineteen-metre hull with a crate's rotational inertia rolls like a barrel,
+  # which would fail this scene for a reason that has nothing to do with
+  # buoyancy. `BoxCollider` is the only collider a scene can author and it is
+  # centred on the node, so this is the hull's own box: 19.06 x 3.32 x 5.74.
+  [node.components.BoxCollider]
+  half_extents = [9.53, 1.66, 2.87]
+
+  [node.components.Buoyancy]
+  coefficient = 1.0
+  # Defaults, stated rather than inherited, because this scene is about
+  # stability and the damping is half of that: an analytic wave field has no
+  # dissipation of its own, so an undamped pontoon gains amplitude every wave
+  # until the boat launches.
+  damp_linear = 4.0
+  damp_quadratic = 1.0
+
+  # Stern, wide — a charter transom carries its beam right aft.
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-7.5, -0.236, -1.6]
+  radius = 1.043
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-7.5, -0.236, 1.6]
+  radius = 1.043
+
+  # Amidships, the widest part of the hull and the source of most of the roll
+  # stiffness.
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-4.5, -0.236, -1.7]
+  radius = 1.043
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-4.5, -0.236, 1.7]
+  radius = 1.043
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-1.5, -0.236, -1.7]
+  radius = 1.043
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-1.5, -0.236, 1.7]
+  radius = 1.043
+  [[node.components.Buoyancy.pontoons]]
+  offset = [1.5, -0.236, -1.7]
+  radius = 1.043
+  [[node.components.Buoyancy.pontoons]]
+  offset = [1.5, -0.236, 1.7]
+  radius = 1.043
+
+  # Forward, narrowing.
+  [[node.components.Buoyancy.pontoons]]
+  offset = [4.5, -0.236, -1.4]
+  radius = 1.043
+  [[node.components.Buoyancy.pontoons]]
+  offset = [4.5, -0.236, 1.4]
+  radius = 1.043
+
+  # The bow. Narrow, because the hull is — a pontoon wider than the boat
+  # invents a righting moment the boat does not have.
+  [[node.components.Buoyancy.pontoons]]
+  offset = [7.5, -0.236, -0.8]
+  radius = 1.043
+  [[node.components.Buoyancy.pontoons]]
+  offset = [7.5, -0.236, 0.8]
+  radius = 1.043
+
+# A fixed mark to read heel and trim against. Without something vertical that
+# does not move, a still of a boat leaning two degrees is indistinguishable
+# from a still of a level boat on a sloped wave.
+[[node]]
+name = "Post"
+parent = "Sea"
+transform = { pos = [14.0, 2.5, -6.0], scale = [0.25, 5.0, 0.25] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.26, 0.24, 0.22]
+  roughness = 0.9
+
+# Broadside and low, because heel is what this scene is for and a bow-on
+# camera cannot see it. High enough to see the deck, low enough that the
+# waterline is a line rather than an ellipse.
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [2.0, 6.5, 34.0], rot_euler = [-8.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 42.0
