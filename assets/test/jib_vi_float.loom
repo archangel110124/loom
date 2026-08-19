@@ -23,11 +23,11 @@
 #     at the beam, and a hull with no roll stiffness lies down at the first
 #     asymmetry and never gets up — which is exactly the "capsizes for no
 #     reason" this scene is built to catch.
-#   - **z = ±1.7 amidships narrowing to ±0.8 at the bow**, because the hull
+#   - **z = ±1.951 amidships narrowing to ±0.918 at the bow**, because the hull
 #     narrows. Pontoons wider than the hull would generate a righting moment
 #     the boat does not have, which is the same lie as the cork, told the other
 #     way round.
-#   - **Centred at y = -0.236 with radius 1.043**, so each sits exactly two
+#   - **Centred at y = -0.247 with radius 1.093**, so each sits exactly two
 #     thirds submerged at rest. That is deliberate: a sphere fully under
 #     displaces a constant volume no matter how the boat moves, and contributes
 #     **nothing** to stability. A sphere crossing the surface gains and loses
@@ -35,14 +35,26 @@
 #     force. Pontoons buried below the waterline are a common way to build a
 #     boat that floats and still capsizes.
 #
-# Both numbers are solved for, not chosen. `mass = 38000` on 1000 kg/m^3 water
-# needs 38.0 m^3 displaced at the designed waterline, so each of the twelve
-# carries 3.167 m^3; asking that to be two thirds of a sphere gives a whole
-# sphere of 4.75 m^3 and therefore r = 1.0428. The offset then follows from the
-# spherical cap: a centre 0.236 m below the surface leaves a submerged depth of
-# h = r + 0.236 = 1.279, and pi*h^2*(3r - h)/3 = 3.167 m^3 — two thirds again,
-# which is the point. Total 12 x 3.167 = 38.0 m^3 puts the waterline at y = 0,
-# where the model's origin already is, because it was exported that way.
+# **The hull is `jib_vi_wide.obj`, and the beam is why every number here moved.**
+# The first hull had a cabin ±2.52 m standing on a deck ±2.41 m — wider than the
+# deck it sat on — so a player could stand on the aft deck or the foredeck and
+# could not walk between them. Beam went 5.75 -> 6.60 m and the cabin half-width
+# 2.52 -> 1.47, which buys a continuous side deck of 1.250 m clear at its
+# narrowest, both sides, bow to stern. That is a gameplay requirement, but it is
+# also the more faithful boat: a party boat sells rail space, and the reference
+# photograph has anglers lined along the sides.
+#
+# Both pontoon numbers are solved for, not chosen. The wide hull displaces
+# 57.64 m^3 below the waterline against the narrow one's 50.0, a ratio of 1.152,
+# so `mass` scales 38000 -> **43776** and each of the twelve carries 3.648 m^3.
+# Asking that to be two thirds of a sphere gives a whole sphere of 5.472 m^3 and
+# therefore r = 1.0932. The offset follows from the spherical cap: a centre
+# 0.247 m below the surface leaves a submerged depth of h = r + 0.247 = 1.340,
+# and pi*h^2*(3r - h)/3 = 3.648 m^3 — two thirds again, which is the point.
+# Total 12 x 3.648 = 43.78 m^3 puts the waterline at y = 0, where the model's
+# origin already is, because it was exported that way. The z offsets scale with
+# the beam by the same 6.60/5.75 = 1.1478, and the collider's half-beam with
+# them, 2.87 -> 3.30.
 #
 # **The scene first shipped with r = 0.945 at y = -0.6, and that is the failure
 # the bullet above describes, written into the file it warns in.** Those
@@ -101,7 +113,7 @@ id = "b2b39560-6e8b-4157-bbea-64d58d3323e5"
 [[asset]]
 key = "boat"
 id = "7c1a0d84-3f52-4a1e-9d6b-2e5c8f1a44b7"
-path = "../meshes/jib_vi.obj"
+path = "../meshes/jib_vi_wide.obj"
 
 [[asset]]
 key = "box"
@@ -155,7 +167,7 @@ transform = { pos = [0.0, 0.40, 0.0] }
   dynamic = true
   # 38 tonnes, set to the pontoons' displacement at the designed waterline
   # rather than guessed — see the header's arithmetic.
-  mass = 38000.0
+  mass = 43776.0
 
   # **The collider is here for the inertia, not for the collisions.** Without
   # one the body defaults to a 2 x 2 x 2 box — eight cubic metres — and a
@@ -164,7 +176,7 @@ transform = { pos = [0.0, 0.40, 0.0] }
   # buoyancy. `BoxCollider` is the only collider a scene can author and it is
   # centred on the node, so this is the hull's own box: 19.06 x 3.32 x 5.74.
   [node.components.BoxCollider]
-  half_extents = [9.53, 1.66, 2.87]
+  half_extents = [9.53, 1.66, 3.30]
 
   [node.components.Buoyancy]
   coefficient = 1.0
@@ -177,49 +189,49 @@ transform = { pos = [0.0, 0.40, 0.0] }
 
   # Stern, wide — a charter transom carries its beam right aft.
   [[node.components.Buoyancy.pontoons]]
-  offset = [-7.5, -0.236, -1.6]
-  radius = 1.043
+  offset = [-7.5, -0.247, -1.836]
+  radius = 1.093
   [[node.components.Buoyancy.pontoons]]
-  offset = [-7.5, -0.236, 1.6]
-  radius = 1.043
+  offset = [-7.5, -0.247, 1.836]
+  radius = 1.093
 
   # Amidships, the widest part of the hull and the source of most of the roll
   # stiffness.
   [[node.components.Buoyancy.pontoons]]
-  offset = [-4.5, -0.236, -1.7]
-  radius = 1.043
+  offset = [-4.5, -0.247, -1.951]
+  radius = 1.093
   [[node.components.Buoyancy.pontoons]]
-  offset = [-4.5, -0.236, 1.7]
-  radius = 1.043
+  offset = [-4.5, -0.247, 1.951]
+  radius = 1.093
   [[node.components.Buoyancy.pontoons]]
-  offset = [-1.5, -0.236, -1.7]
-  radius = 1.043
+  offset = [-1.5, -0.247, -1.951]
+  radius = 1.093
   [[node.components.Buoyancy.pontoons]]
-  offset = [-1.5, -0.236, 1.7]
-  radius = 1.043
+  offset = [-1.5, -0.247, 1.951]
+  radius = 1.093
   [[node.components.Buoyancy.pontoons]]
-  offset = [1.5, -0.236, -1.7]
-  radius = 1.043
+  offset = [1.5, -0.247, -1.951]
+  radius = 1.093
   [[node.components.Buoyancy.pontoons]]
-  offset = [1.5, -0.236, 1.7]
-  radius = 1.043
+  offset = [1.5, -0.247, 1.951]
+  radius = 1.093
 
   # Forward, narrowing.
   [[node.components.Buoyancy.pontoons]]
-  offset = [4.5, -0.236, -1.4]
-  radius = 1.043
+  offset = [4.5, -0.247, -1.607]
+  radius = 1.093
   [[node.components.Buoyancy.pontoons]]
-  offset = [4.5, -0.236, 1.4]
-  radius = 1.043
+  offset = [4.5, -0.247, 1.607]
+  radius = 1.093
 
   # The bow. Narrow, because the hull is — a pontoon wider than the boat
   # invents a righting moment the boat does not have.
   [[node.components.Buoyancy.pontoons]]
-  offset = [7.5, -0.236, -0.8]
-  radius = 1.043
+  offset = [7.5, -0.247, -0.918]
+  radius = 1.093
   [[node.components.Buoyancy.pontoons]]
-  offset = [7.5, -0.236, 0.8]
-  radius = 1.043
+  offset = [7.5, -0.247, 0.918]
+  radius = 1.093
 
 # A fixed mark to read heel and trim against. Without something vertical that
 # does not move, a still of a boat leaning two degrees is indistinguishable
