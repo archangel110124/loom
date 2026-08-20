@@ -81,8 +81,36 @@ inserted with `ColliderMassProps::Mass(0.0)`, which rapier resolves to
 `MassProperties::default()` — exact zero mass, zero inertia, no centre-of-mass
 shift. That is load-bearing rather than tidy: `jib_vi_painted` authors
 `mass = 43776` and every stability number in its header (rights from 75°, GZ
-0.70 m at 21°, GM 2.7 m) was measured with the hull box's inertia alone. The
-three pinned boat hashes are the tripwire, not this paragraph.
+0.70 m at 21°, GM 2.7 m) was measured with the hull box's inertia alone.
+
+**Two things about proving that turned out to be false, and both were going to
+be quoted as gates.**
+
+*The printed `state_hash` is not a physics hash.* `loom sim` prints
+`World::state_hash`, which eats every entity's index, generation, **name** and
+global matrix. Adding twenty-three nodes to a scene moves it whatever they
+weigh — and an empty node with no components at all moves it too, which is how
+this was found. "The three boat hashes are byte-identical with the deck
+attached" is not a statement that can be true, and a gate written that way
+fails on every asset addition while saying nothing about mass. The physics-only
+`Physics::state_hash` exists one layer down and is not what the CLI reports.
+
+*The hull's trajectory is not bit-identical either, and it is still not a
+leak.* Read off the body: `inv_mass` is unchanged exactly, `local_com` is
+unchanged exactly. What moves is `inv_principal_inertia` and
+`principal_inertia_local_frame` — attaching colliders re-runs the symmetric
+eigendecomposition, and with more terms in the sum it lands on a different,
+equally valid ordering of the *same* axes, permuted with a 90° frame
+compensating. Same tensor, about one ULP apart in representation. Over 1800
+ticks on a 44-tonne hull that comes out as **2.6e-8 m** of position difference.
+Thirty nanometres, against a header that quotes centimetres.
+
+So the tripwire is the test, not a hash: mass and centre of mass compared
+**exactly**, the world-space inverse inertia compared to a relative 1e-5, and
+the hull's own rigid transform — position plus three markers parented at
+(5,0,0), (0,5,0), (0,0,5), which is the full 4x4 — compared with and without
+the deck at ticks 300, 600 and 1800. A real leak moves `inv_mass` by orders of
+magnitude and cannot hide under either threshold.
 
 The arm is deliberately narrow — an **explicitly authored** `BoxCollider` under
 a dynamic ancestor, never `is_renderable` — so it is a provable no-op on every

@@ -219,8 +219,12 @@ transform = { pos = [0.0, 0.40, 0.0] }
   # one the body defaults to a 2 x 2 x 2 box — eight cubic metres — and a
   # nineteen-metre hull with a crate's rotational inertia rolls like a barrel,
   # which would fail this scene for a reason that has nothing to do with
-  # buoyancy. `BoxCollider` is the only collider a scene can author and it is
-  # centred on the node, so this is the hull's own box: 19.06 x 3.32 x 6.60.
+  # buoyancy. This is the hull's own box: 19.06 x 3.32 x 6.60.
+  #
+  # **It is the only box with any mass in it.** The deck a player walks on is
+  # twenty-three more, further down this file, all built with zero mass so that
+  # every stability number in the header above is still measured against this
+  # one alone. Do not delete it and do not give the others weight.
   [node.components.BoxCollider]
   half_extents = [9.53, 1.66, 3.30]
 
@@ -405,6 +409,306 @@ parent = "Sea/Boat"
   albedo = [0.45, 0.05, 0.07]
   roughness = 0.5
   metallic = 0.0
+
+
+# ===========================================================================
+# THE DECK A PLAYER STANDS ON — twenty-three hand-authored boxes.
+#
+# **These are collision only and none of them is drawn.** The one above is the
+# hull's inertia and is *not* what anyone walks on: its top face is at y = 1.66
+# and the deck is at 0.60, so a capsule aboard this boat used to stand on an
+# invisible lid a metre in the air with the deckhouse, bulwarks and rails all
+# passable. A `BoxCollider` on a child of a dynamic node is now a collider on
+# that body (ADR 0060), which is what makes a set like this expressible at all.
+#
+# **Every box weighs nothing** — `attach_box` builds them with
+# `ColliderMassProps::Mass(0.0)`, which rapier resolves to exactly zero mass,
+# zero angular inertia and no centre-of-mass shift. That is the whole reason
+# the header's stability numbers above are still true, and the three pinned
+# hashes are its tripwire: if any of them moves, mass leaked and the righting
+# curve is void.
+#
+# **Boxes rather than a mesh-derived hull, deliberately.** A `voxelized_mesh`
+# or a convex decomposition makes the sim hash a function of the art file, and
+# the art file is being detailed further in a parallel effort — an enterable
+# wheelhouse, moving controls. Boxes track *architecture*: the sheer, the
+# bulwark line, the deckhouse footprint, the flybridge. Those are the numbers
+# the header's buoyancy arithmetic already pins, and they survive the mesh
+# changing under them. The twelve `local_y` standing stations in
+# `jib_vi_walk.loom` are the detector for when they stop matching.
+#
+# Every number below was measured off `jib_vi_wide.obj` by marching columns
+# through it, not read off the header:
+#
+#   deck at the centreline   0.66 aft, 0.60 amidships, 0.74 at x=4, 1.65 at x=8
+#   walkable half-beam       2.55 aft, 2.80 amidships, 2.30 at x=4, 0.65 at x=8
+#   bulwark cap              1.52 amidships rising to 2.45 at the stem
+#   deckhouse footprint      x -6.2..3.9, |z| <= 1.50 (1.05 forward of x=2.2)
+#   flybridge deck           3.08, x -6.5..4.2, |z| <= 2.60; helm console 3.45
+#
+# **The deckhouse is solid because nobody can get inside it.** Headroom under
+# its canopy is 1.49 m and the capsule is 1.90 m, so the drawn floor in there
+# is unreachable whatever the collider says. The wheelhouse the mesh effort is
+# building needs the superstructure stack lifted about 0.5 m before a person
+# fits under it, and that is the message to send them.
+#
+# `ponytail:` deck plates are rectangles and the bow is a wedge, so the two
+# forward plates overhang the drawn hull by up to a metre of nothing. It is
+# invisible and unreachable — the tapered bulwark boxes are what bound the
+# walk, and they stop the capsule 0.1-0.2 m inboard of the drawn edge. Give the
+# plates a yaw each if that margin ever has to be tighter.
+# ===========================================================================
+
+# --- the deck, following the sheer -----------------------------------------
+# Four flat plates and one ramped one. Adjacent tops differ by at most 0.07 m
+# against a 0.35 m step height, so there is no lip anywhere along the walk.
+
+[[node]]
+name = "col_deck_aft"
+parent = "Sea/Boat"
+transform = { pos = [-7.80, 0.505, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.75, 0.15, 2.62]
+
+[[node]]
+name = "col_deck_mid"
+parent = "Sea/Boat"
+transform = { pos = [-3.05, 0.465, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [3.10, 0.15, 2.82]
+
+[[node]]
+name = "col_deck_fwd"
+parent = "Sea/Boat"
+transform = { pos = [1.30, 0.515, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.35, 0.15, 2.82]
+
+[[node]]
+name = "col_deck_shoulder"
+parent = "Sea/Boat"
+transform = { pos = [3.50, 0.585, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.00, 0.15, 2.55]
+
+# **The foredeck is one tilted slab, not four steps.** It climbs 0.76 -> 1.64
+# over 3.6 m, and cutting that into flat plates puts a 0.37 m riser at the
+# forward end — over the step height, so the bow would be unreachable — and
+# three seams for a camera to pop across. 13.9 degrees is well under the 50 the
+# controller walks.
+[[node]]
+name = "col_foredeck"
+parent = "Sea/Boat"
+transform = { pos = [6.25, 1.055, 0.0], rot_euler = [0.0, 0.0, 13.9] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.83, 0.15, 2.30]
+
+# --- bulwarks, following the taper -----------------------------------------
+# Inner faces 0.1-0.2 m inboard of the drawn deck edge, so the capsule stops
+# just short of the edge and never over it. The two forward pairs are yawed
+# because the hull narrows from a 2.45 m half-beam to 0.50 m over six metres,
+# and a straight box would either fence off the side deck or hang over the sea.
+# Tops sit at the drawn cap height, not above it: a collider taller than the
+# rail it represents is an invisible wall, which is the same lie as a missing
+# one told the other way.
+
+[[node]]
+name = "col_bulwark_aft_port"
+parent = "Sea/Boat"
+transform = { pos = [-8.00, 0.96, -2.86] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.60, 0.66, 0.30]
+
+[[node]]
+name = "col_bulwark_aft_stbd"
+parent = "Sea/Boat"
+transform = { pos = [-8.00, 0.96, 2.86] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.60, 0.66, 0.30]
+
+[[node]]
+name = "col_bulwark_mid_port"
+parent = "Sea/Boat"
+transform = { pos = [-2.10, 0.96, -3.00] }
+
+  [node.components.BoxCollider]
+  half_extents = [4.30, 0.66, 0.30]
+
+[[node]]
+name = "col_bulwark_mid_stbd"
+parent = "Sea/Boat"
+transform = { pos = [-2.10, 0.96, 3.00] }
+
+  [node.components.BoxCollider]
+  half_extents = [4.30, 0.66, 0.30]
+
+[[node]]
+name = "col_bulwark_fwd_port"
+parent = "Sea/Boat"
+transform = { pos = [3.819, 1.125, -2.377], rot_euler = [0.0, -13.25, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.5925, 0.725, 0.30]
+
+[[node]]
+name = "col_bulwark_fwd_stbd"
+parent = "Sea/Boat"
+transform = { pos = [3.819, 1.125, 2.377], rot_euler = [0.0, 13.25, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.5925, 0.725, 0.30]
+
+[[node]]
+name = "col_bulwark_bow_port"
+parent = "Sea/Boat"
+transform = { pos = [6.863, 1.675, -1.368], rot_euler = [0.0, -22.15, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.5655, 0.875, 0.30]
+
+[[node]]
+name = "col_bulwark_bow_stbd"
+parent = "Sea/Boat"
+transform = { pos = [6.863, 1.675, 1.368], rot_euler = [0.0, 22.15, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.5655, 0.875, 0.30]
+
+# The two ends. Without them a player walks off the stern or off the stem, both
+# of which are drawn as solid.
+[[node]]
+name = "col_transom"
+parent = "Sea/Boat"
+transform = { pos = [-9.62, 1.00, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.12, 0.70, 2.90]
+
+[[node]]
+name = "col_stem"
+parent = "Sea/Boat"
+transform = { pos = [8.55, 1.90, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.45, 1.00, 0.70]
+
+# --- what stands on the deck -----------------------------------------------
+
+# The bait box in the cockpit: 0.48 m proud of the deck, which is over the
+# 0.35 m step height and therefore a wall rather than a kerb. It is drawn, so
+# it collides.
+[[node]]
+name = "col_engine_box"
+parent = "Sea/Boat"
+transform = { pos = [-7.80, 0.90, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.60, 0.24, 0.78]
+
+# The deckhouse, solid. See the note above: 1.49 m of headroom under its canopy
+# against a 1.90 m capsule, so its drawn floor is unreachable either way, and a
+# solid block is the honest collider until the mesh effort raises the roof.
+# What it leaves is the side deck — 1.20 m clear between this and the bulwark,
+# both sides, bow to stern, which is the header's gameplay requirement.
+[[node]]
+name = "col_house"
+parent = "Sea/Boat"
+transform = { pos = [-2.00, 1.72, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [4.20, 1.33, 1.50]
+
+[[node]]
+name = "col_house_fwd"
+parent = "Sea/Boat"
+transform = { pos = [3.03, 1.72, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.83, 1.33, 1.05]
+
+# --- the flybridge ---------------------------------------------------------
+
+[[node]]
+name = "col_fly_deck"
+parent = "Sea/Boat"
+transform = { pos = [-1.15, 2.93, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [5.35, 0.15, 2.60]
+
+# The helm console. 0.38 m proud of the flybridge deck — just over the step
+# height, so it is walked *around* rather than onto, which is what a console is.
+[[node]]
+name = "col_fly_console"
+parent = "Sea/Boat"
+transform = { pos = [-5.50, 3.27, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.60, 0.19, 1.05]
+
+[[node]]
+name = "col_fly_rail_port"
+parent = "Sea/Boat"
+transform = { pos = [-1.15, 3.60, -2.70] }
+
+  [node.components.BoxCollider]
+  half_extents = [5.35, 0.52, 0.10]
+
+[[node]]
+name = "col_fly_rail_stbd"
+parent = "Sea/Boat"
+transform = { pos = [-1.15, 3.60, 2.70] }
+
+  [node.components.BoxCollider]
+  half_extents = [5.35, 0.52, 0.10]
+
+[[node]]
+name = "col_fly_rail_fwd"
+parent = "Sea/Boat"
+transform = { pos = [4.30, 3.60, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.10, 0.52, 2.60]
+
+# --- the way up ------------------------------------------------------------
+#
+# **Drawn, not invisible.** The mesh's ladder is unclimbable by construction:
+# 0.75 m between rungs against a 0.35 m step height, an 0.08 m tread against a
+# 0.35 m capsule radius, and 68 degrees against a 50 degree slope limit. Raising
+# `step_height` to clear the rungs does not clear the tread and walks the
+# character up walls everywhere else in the repository.
+#
+# So a plank, in the aft cockpit, port side, 2.42 m of rise at 42.4 degrees,
+# and it is a `MeshRenderer` as well as a collider. An invisible ramp is the
+# "simulation self-consistent, picture a lie" failure this project keeps
+# paying for; a grey plank leaning against the flybridge is at least a thing
+# that is there.
+#
+# `ponytail:` a plank standing in for a companionway. Ask the mesh effort for
+# eight steps of 0.30 rise on a 0.28 tread in the same place, and delete this.
+[[node]]
+name = "Companionway"
+parent = "Sea/Boat"
+transform = { pos = [-7.7576, 1.7962, -2.00], rot_euler = [0.0, 0.0, 42.41], scale = [1.7944, 0.10, 0.55] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.44, 0.44, 0.42]
+  roughness = 0.85
+
+  # `[1, 1, 1]` against the unit box mesh, so the collider is exactly the shape
+  # that is drawn — the transform's scale is doing the sizing for both.
+  [node.components.BoxCollider]
+  half_extents = [1.0, 1.0, 1.0]
 
 # A fixed mark to read heel and trim against. Without something vertical that
 # does not move, a still of a boat leaning two degrees is indistinguishable

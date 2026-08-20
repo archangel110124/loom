@@ -1138,39 +1138,64 @@ mod tests {
     /// **The mass-leak tripwire.** `attach_box` exists so a hull can be one box
     /// for its inertia and two dozen for the deck a player stands on, and that
     /// is only true if the extra boxes weigh nothing. `jib_vi_painted` authors
-    /// `mass = 43776` and its whole righting curve was measured against the
-    /// hull box alone; a collider that contributed mass, inertia or a
-    /// centre-of-mass shift would void the header and the failure would look
-    /// like a buoyancy bug rather than like this.
+    /// `mass = 43776` and its whole righting curve — rights from 75°, GZ 0.70 m
+    /// at 21°, GM 2.7 m — was measured against the hull box alone. A collider
+    /// that contributed mass, inertia or a centre-of-mass shift would void that
+    /// header, and the failure would look like a buoyancy bug rather than
+    /// like this.
     ///
     /// Read off the body rather than trusted from rapier's docs: `Mass(0.0)`
     /// resolving to `MassProperties::default()` is an implementation detail of
     /// the vendored version, which is exactly the kind of thing that changes.
+    ///
+    /// **Mass and centre of mass are checked exactly; the inertia tensor is
+    /// checked to a relative 1e-5, and that gap is not slack.** Attaching a
+    /// collider makes rapier re-run the symmetric eigendecomposition that
+    /// splits the tensor into principal axes, and with more colliders in the
+    /// sum it can land on a different — equally valid — ordering of the same
+    /// axes, with the components permuted and a 90° `principal_inertia_local_frame`
+    /// compensating. The physical tensor is identical to about one ULP; its
+    /// *representation* is not. Comparing the world-space inverse inertia
+    /// asks the physical question instead of the representational one.
+    ///
+    /// The visible consequence, measured on `jib_vi_painted` at 1800 ticks
+    /// with the whole deck attached: the hull's position moves by 2.6e-8 m.
+    /// Thirty nanometres, against a scene header that quotes centimetres.
     #[test]
     fn an_attached_box_weighs_nothing_and_does_not_move_the_centre_of_mass() {
         let mut physics = Physics::new(1.0 / 60.0);
         let body = physics.add_box_body(
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
-            [1.0, 1.0, 1.0],
-            1000.0,
+            [9.53, 1.66, 3.30],
+            43776.0,
         );
-        let before = physics.centre_of_mass(body).expect("a body just inserted");
-        let mass_before = physics.bodies.get(body).expect("the body").mass();
+        let before = physics.bodies.get(body).expect("a body just inserted");
+        let mass_before = before.mass();
+        let com_before = before.center_of_mass();
+        let inertia_before = before.mass_properties().effective_world_inv_inertia;
 
         // Far off-axis and lopsided, so a leak of any of the three shows up.
         physics.attach_box(body, [8.0, 3.0, -2.0], [0.0, 0.0, 0.0, 1.0], [2.0, 0.5, 1.5]);
+        physics.attach_box(body, [-7.8, 0.5, 0.0], [0.0, 0.0, 0.0, 1.0], [1.75, 0.15, 2.62]);
 
-        let after = physics.centre_of_mass(body).expect("the body");
-        let mass_after = physics.bodies.get(body).expect("the body").mass();
-        assert!(
-            (mass_after - mass_before).abs() < 1e-6,
-            "mass moved {mass_before} -> {mass_after}"
-        );
-        for axis in 0..3 {
+        let after = physics.bodies.get(body).expect("the body");
+        assert_eq!(after.mass(), mass_before, "mass leaked");
+        assert_eq!(after.center_of_mass(), com_before, "the centre of mass moved");
+
+        let inertia_after = after.mass_properties().effective_world_inv_inertia;
+        let scale = inertia_before.m11.abs().max(1e-30);
+        for (name, a, b) in [
+            ("m11", inertia_before.m11, inertia_after.m11),
+            ("m12", inertia_before.m12, inertia_after.m12),
+            ("m13", inertia_before.m13, inertia_after.m13),
+            ("m22", inertia_before.m22, inertia_after.m22),
+            ("m23", inertia_before.m23, inertia_after.m23),
+            ("m33", inertia_before.m33, inertia_after.m33),
+        ] {
             assert!(
-                (after[axis] - before[axis]).abs() < 1e-6,
-                "centre of mass moved {before:?} -> {after:?}"
+                (a - b).abs() <= scale * 1e-5,
+                "inertia {name} moved {a} -> {b}"
             );
         }
     }
