@@ -102,6 +102,35 @@ array. If a character outgrows a formula, the next rung is **morph targets** —
 another `.obj` with the same vertex order, which `import_obj` already parses —
 not skinning.
 
+## One consequence worth recording: amplitude is a body fraction
+
+`Deform.amplitude` is authored as a **fraction of body length**, not in metres,
+and that is not a units preference. The rule that stops an author folding the
+surface is a ceiling on peak *slope* — because shortening `wavelength` steepens
+the shear exactly as much as raising `amplitude` does, and an amplitude-only
+limit cannot see it. In metres that ceiling needs the body's length, which means
+the mesh; the only function in this project holding a mesh library is
+`loom_cli::world_to_objects`, which runs every frame and has no way to refuse
+anything and no error to return. As a fraction the whole rule is arithmetic and
+lives in `loom_scene` with the other six refusals.
+
+It buys two more things. `0.10` reads as "a tenth of the animal" in a diff
+without the reader knowing what the animal is, so a ten-fold units typo is
+visible in the file. And one `Deform` is correct on a 16 cm fish and a 16 m eel.
+
+Measured on `gleamsprat_coral.obj`, worst normal deviation against amplitude at
+`wavelength = 0.50, span_start = 0.58`:
+
+    A/L    worst normal dev   true peak slope
+    0.04       20.8 deg           0.524
+    0.10       49.8 deg           1.311   <- what gleamsprat.loom authors
+    0.15       78.3 deg           1.967
+    0.20       99.1 deg           2.622   <- the normal has inverted
+    0.30      117.8 deg           3.933
+
+The closed-form estimator over-reads the true worst gradient by about 30%, which
+is the safe direction, so `DEFORM_MAX_SLOPE` is 3.0 rather than 2.6.
+
 ## The asymmetry, stated rather than discovered
 
 `weather.z` is `--sim N / 60` headless and a free-running clamped wall clock in
