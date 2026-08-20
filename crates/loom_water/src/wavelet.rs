@@ -362,19 +362,129 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// The displaced volume a hull carries per shed packet — Havelock.
+/// The displaced volume an **impact** carries, from its waterplane radius.
 ///
-/// `A_wl · |v| · Δt`: the water a waterplane of radius `σ` moving at `|v|`
-/// pushes aside in one shed interval. **The same construction is used for an
-/// impact**, with the impact speed, which is where this file departs from its
-/// brief: the design asked for "the displaced spherical-cap volume from
-/// `buoyancy.rs`", and at the tick a splash event fires the body has just
-/// broken the surface, so that cap volume is *zero* by construction. Swept
-/// volume is not zero there, and it scales the ring with how hard the thing
-/// hit — which is what a splash ring should scale with.
+/// `pi*r^2*|v|*dt`: the water a disc of radius `r` moving at `|v|` pushes
+/// aside in one shed interval. It scales a splash ring with how hard the thing
+/// hit, which is what a splash ring should scale with — the design asked for
+/// "the displaced spherical-cap volume from `buoyancy.rs`", and at the tick a
+/// splash event fires the body has just broken the surface, so that cap volume
+/// is *zero* by construction.
+///
+/// **This is the vertical case only, and the docstring here used to say
+/// otherwise.** It claimed to be "a waterplane sweeping sideways", and a hull
+/// *under way* used it on that authority — which is how a nineteen-metre boat
+/// came to shed 97.63 m^3 a packet against a total displacement of 43.78 m^3.
+/// A body moving horizontally sheds its immersed *section*, not its waterplane:
+/// see [`shed_source`], which is the only caller that matters and does not use
+/// this. A body entering the water vertically really does present its
+/// waterplane to the water it is displacing, so for an impact the construction
+/// is right.
 #[must_use]
 pub fn swept_volume(radius: f32, speed: f32) -> f32 {
     std::f32::consts::PI * radius * radius * speed.abs() * SHED_SECONDS
+}
+
+/// What a hull moving through the water sheds this tick: a displaced volume
+/// and the radius of the source that displaced it.
+///
+/// **Havelock's source is a *section* sweeping forward, not a waterplane
+/// sweeping sideways**, and the difference is the whole of this function. A
+/// hull under way pushes aside its mean immersed cross-section, `V_disp /
+/// L_wl`, once per length it travels. The waterplane area belongs to a body
+/// heaving *vertically*; using it for a hull moving *horizontally* scales the
+/// source by the hull's length rather than by its draught. Measured on the
+/// nineteen-metre `jib_vi_float.loom` at 6 m/s: `pi*r^2*|v|*dt` with the
+/// waterplane radius is **97.63 m^3 per packet against a boat that displaces
+/// 43.78 m^3 in total**, and it puts metres of trench under the boat's own
+/// pontoons. This construction gives 1.02 m^3. See
+/// `a_hull_does_not_dig_a_hole_under_itself`.
+///
+/// Three quantities, all read off the pontoons the buoyancy solver already
+/// filled in — nothing new is authored and nothing is passed twice:
+///
+/// - **`sigma` is the half-beam across travel, not the reach along it.**
+///   `W_s = exp(-k*^2 sigma^2/4)` means a source cannot radiate waves much
+///   shorter than itself, so `lambda_min ~ pi*sigma`. For this hull the
+///   waterplane radius gives sigma = 8.81 m and lambda_min = 27.7 m, while its
+///   transverse wake at 6 m/s is `2*pi*U^2/g` = 23 m and its diverging waves
+///   are far shorter — the shipped sigma deleted the wake band by
+///   construction. The beam gives sigma = 3.04 m and lambda_min = 9.6 m.
+/// - **The speed is through the *water*, not over the ground.** `flow` is
+///   already on every pontoon and was thrown away on this path, so a crate
+///   drifting perfectly with a river shed a full wake.
+/// - **Horizontal only.** A body floating at rest reports 0.10 m/s from
+///   `velocity_at_point` — the fixed step applies gravity before buoyancy
+///   cancels it — so a gate on the full speed never closes. The large vertical
+///   event is the entry impact, which is a separate emit.
+///
+/// `None` when there are no pontoons, when the body is out of the water, or
+/// when it is moving through the water slower than [`SHED_MIN_SPEED`].
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn shed_source(states: &[crate::buoyancy::PontoonState], submerged: f32) -> Option<Shed> {
+    if states.is_empty() || submerged <= 0.0 || !submerged.is_finite() {
+        return None;
+    }
+    let n = states.len() as f32;
+
+    // The body's translation through the water, averaged over the pontoons in
+    // authored order. Averaged rather than taken from one, because
+    // `velocity_at_point` includes `omega x r`: a rolling hull's pontoons move
+    // in opposite directions and only the mean is the body going somewhere.
+    let mut vx = 0.0_f32;
+    let mut vz = 0.0_f32;
+    for state in states {
+        vx += state.velocity[0] - state.flow[0];
+        vz += state.velocity[2] - state.flow[2];
+    }
+    let (vx, vz) = (vx / n, vz / n);
+    let speed = vx.hypot(vz);
+    if !speed.is_finite() || speed < SHED_MIN_SPEED {
+        return None;
+    }
+    let (dx, dz) = (vx / speed, vz / speed);
+
+    let mut cx = 0.0_f32;
+    let mut cz = 0.0_f32;
+    for state in states {
+        cx += state.at[0];
+        cz += state.at[2];
+    }
+    let (cx, cz) = (cx / n, cz / n);
+
+    // Waterline length along travel, half-beam across it, and the volume the
+    // spheres actually displace — one pass, in index order.
+    let mut fore = f32::NEG_INFINITY;
+    let mut aft = f32::INFINITY;
+    let mut half_beam = 0.0_f32;
+    let mut displaced = 0.0_f32;
+    for state in states {
+        let (px, pz) = (state.at[0] - cx, state.at[2] - cz);
+        let along = px * dx + pz * dz;
+        let across = pz * dx - px * dz;
+        fore = fore.max(along + state.radius);
+        aft = aft.min(along - state.radius);
+        half_beam = half_beam.max(across.abs() + state.radius);
+        displaced += (4.0 / 3.0) * std::f32::consts::PI * state.radius.powi(3);
+    }
+    let length = fore - aft;
+    if length <= 0.0 || !length.is_finite() || half_beam <= 0.0 {
+        return None;
+    }
+
+    // The mean immersed section, swept forward for one shed interval.
+    let section = displaced * submerged / length;
+    Some(Shed { volume: section * speed * SHED_SECONDS, sigma: half_beam })
+}
+
+/// The source term one hull contributes to [`WaveletField::emit`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shed {
+    /// Displaced volume, m^3.
+    pub volume: f32,
+    /// Source radius, m — the hull's half-beam across its travel.
+    pub sigma: f32,
 }
 
 /// The Slang half, emitted verbatim into the generated shader.
@@ -718,5 +828,103 @@ mod tests {
         assert_eq!(at(std::ptr::from_ref(&e.t0).cast()), 8);
         assert_eq!(at(std::ptr::from_ref(&e.volume).cast()), 12);
         assert_eq!(at(std::ptr::from_ref(&e.sigma).cast()), 16);
+    }
+
+    /// The twelve pontoons of `jib_vi_float.loom`, in the file's own order.
+    fn jib_vi() -> Vec<crate::buoyancy::PontoonState> {
+        [
+            [-7.5, -1.836], [-7.5, 1.836],
+            [-4.5, -1.951], [-4.5, 1.951],
+            [-1.5, -1.951], [-1.5, 1.951],
+            [1.5, -1.951], [1.5, 1.951],
+            [4.5, -1.607], [4.5, 1.607],
+            [7.5, -0.918], [7.5, 0.918],
+        ]
+        .into_iter()
+        .map(|[x, z]| crate::buoyancy::PontoonState {
+            at: [x, -0.247, z],
+            radius: 1.093,
+            velocity: [0.0; 3],
+            ground: -1000.0,
+            flow: [0.0; 3],
+            wavelet: [0.0; 3],
+        })
+        .collect()
+    }
+
+    /// **A body drifting with the current sheds nothing.**
+    ///
+    /// The wake is made by moving *through* the water, not over the ground.
+    /// `flow` is on every pontoon already — the shed path used to read
+    /// `velocity` alone, so a crate sitting perfectly still relative to the
+    /// river it was floating down radiated a full wake, and the faster the
+    /// river the bigger the wake it made by doing nothing.
+    #[test]
+    fn a_body_drifting_with_the_current_sheds_nothing() {
+        let drift = [2.5_f32, 0.0, 0.8];
+        let mut states = jib_vi();
+        for state in &mut states {
+            state.velocity = drift;
+            state.flow = drift;
+        }
+        assert_eq!(
+            shed_source(&states, 1.0),
+            None,
+            "a hull moving exactly with the water sheds a wake"
+        );
+
+        // And the same hull held still against that current does shed: the
+        // relative speed is what matters, not which of the two is moving.
+        for state in &mut states {
+            state.velocity = [0.0; 3];
+        }
+        let shed = shed_source(&states, 1.0).expect("held against the current, it sheds");
+        assert!(shed.volume > 0.0);
+    }
+
+    /// **A hull must not dig a hole under itself.**
+    ///
+    /// The nineteen-metre boat under way, driving +x, sampled at its own
+    /// twelve pontoons — the exact points [`crate::buoyancy::solve`] reads to
+    /// decide which way is up. Whatever a hull radiates, it cannot radiate a
+    /// trench beneath its own waterline, because that trench is a force on the
+    /// body that emitted it.
+    ///
+    /// **The shipped construction reads −11.55 m at 8 m/s.** It sheds
+    /// `π·r²·|v|·Δt` with `r` the *waterplane* radius, 8.8145 m for this hull:
+    /// 97.63 m³ per packet against a boat that displaces 43.78 m³ in total.
+    /// Nothing in this repository had ever driven a floating body, so nothing
+    /// had ever fired it.
+    #[test]
+    fn a_hull_does_not_dig_a_hole_under_itself() {
+        for speed in [3.0_f32, 6.0, 8.0] {
+            let mut field = WaveletField::new();
+            let mut states = jib_vi();
+            let ticks = 600_u32;
+            let mut worst = 0.0_f32;
+            for tick in 0..ticks {
+                let t = f32::from(u16::try_from(tick).unwrap()) * TICK_SECONDS;
+                let x = speed * t;
+                for (state, base) in states.iter_mut().zip(jib_vi()) {
+                    state.at[0] = base.at[0] + x;
+                    state.velocity = [speed, 0.0, 0.0];
+                }
+                if tick.is_multiple_of(SHED_TICKS) {
+                    if let Some(shed) = shed_source(&states, 0.667) {
+                        // The body origin, which is where the hull is.
+                        field.emit([x, 0.0], t, shed.volume, shed.sigma);
+                    }
+                }
+                field.step(t);
+                for state in &states {
+                    worst = worst.max(field.at(state.at[0], state.at[2], t).height.abs());
+                }
+            }
+            assert!(
+                worst < 0.25,
+                "at {speed} m/s the hull put {worst:.3} m of wavelet under its own \
+                 pontoons — it is floating on water it displaced itself"
+            );
+        }
     }
 }

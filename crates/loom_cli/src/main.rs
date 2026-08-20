@@ -5665,10 +5665,23 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
             // the two that never authored a `[ripples]` table. Was:
             // 18f5ecce259831aa, c01fa14e2ee6b7c9, e11d745faf641cdb,
             // 9daa193336cc608f.
+            // **Two of the four moved when the shed source became a section
+            // rather than a waterplane** (ADR 0063). `river` was
+            // b083e86834285c9d and `water_crate` d23cecb158d2608e.
+            //
+            // **`wake` and `pool` did not move, and that is the check on the
+            // change rather than a lucky escape.** Both drop a body vertically
+            // into still water, so neither ever reaches `SHED_MIN_SPEED`
+            // *horizontally* and neither has ever shed a packet — their hashes
+            // come from the entry impact, which this did not touch. Since the
+            // shed volume moved by two orders of magnitude, an unchanged hash
+            // proves the path never fired. `river` has a current and
+            // `water_crate` a sea whose orbital velocity walks the crate
+            // about, so both shed and both move.
             ("wake", "66c5b227a3ab6476"),
             ("pool", "48ea499e33fae26c"),
-            ("river", "b083e86834285c9d"),
-            ("water_crate", "d23cecb158d2608e"),
+            ("river", "8bcea14bbb3c76cd"),
+            ("water_crate", "44c2b37b20042c65"),
         ] {
             let path = format!("../../assets/test/{scene}.loom");
             // **Cinematic water is barred from a pinned hash** — ADR 0053 §3:

@@ -1276,44 +1276,30 @@ impl Sim {
             // packet per hull per shedding tick — Havelock's construction, from
             // which the Kelvin wedge emerges rather than being drawn.
             //
-            // Per *body* rather than per pontoon, unlike the read above: the
-            // waterplane is one waterline, and three pontoons shedding three
-            // packets at three points would be three wakes behind one crate.
-            //
-            // **Gated on speed as well as on wetness.** The swept volume of a
-            // body drifting under 5 cm/s is under a cubic decimetre, whose
-            // envelope never reaches a millimetre at any radius — so it would
-            // evict a real packet from a 128-slot ring for a wave nothing can
-            // see. A body out of the water sheds nothing at all.
-            if shedding && wrench.submerged > 0.0 {
-                let velocity = self
-                    .physics
-                    .velocity_at_point(floating.body, position)
-                    .unwrap_or([0.0; 3]);
-                // **Horizontal speed, and this was found the hard way.** A
-                // body floating at rest reports 0.103 m/s from
-                // `velocity_at_point`: the fixed step applies gravity before
-                // the buoyancy force cancels it, so `g·dt = 0.16 m/s` of
-                // vertical jitter is what equilibrium *looks* like from here.
-                // Gating a shed on the full speed therefore never closes — the
-                // pool stays full of a body that is not moving, and
-                // `wake.loom`'s decay measurement floors at 1e-5 m instead of
-                // reaching zero. Measured: with the full speed the buoy's bob
-                // is 9.6e-6 m at 30 s and 1.0e-5 m at 120 s, rising; with the
-                // horizontal speed it is 0.0.
+            // The construction itself is `loom_water::wavelet::shed_source`,
+            // which is where its arithmetic is documented and where the test
+            // that a hull does not dig a hole under itself lives.
+            if shedding {
+                // **The source is read off the pontoons, in `loom_water`.**
+                // Everything it needs — where each sphere is, how fast it is
+                // moving, and what the water under it is doing — was filled in
+                // by the loop above, so this path passes nothing twice and
+                // authors nothing new. `None` is a body out of the water, with
+                // no pontoons, or drifting slower than `SHED_MIN_SPEED`
+                // *through the water*.
                 //
-                // It is also the right construction. Havelock's shed volume is
-                // a *waterplane sweeping sideways*; a heaving body radiates
-                // too, but that source is second order and the entry impact
-                // above already carries the large vertical event.
-                let speed = (velocity[0] * velocity[0] + velocity[2] * velocity[2]).sqrt();
-                let radius = waterplane_radius(floating, position);
-                if speed >= loom_water::wavelet::SHED_MIN_SPEED {
+                // Per *body* rather than per pontoon: the waterline is one
+                // waterline, and twelve pontoons shedding twelve packets at
+                // twelve points would be twelve wakes behind one boat — and
+                // would evict the whole 128-slot ring in ten ticks.
+                if let Some(shed) =
+                    loom_water::wavelet::shed_source(&floating.states, wrench.submerged)
+                {
                     self.wavelets.emit(
                         [position[0], position[2]],
                         t,
-                        loom_water::wavelet::swept_volume(radius, speed) * wrench.submerged,
-                        radius,
+                        shed.volume,
+                        shed.sigma,
                     );
                 }
             }
