@@ -5671,11 +5671,22 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
     /// a transform directly, which is a different branch of `Sim::tick` and had
     /// no scene covering it.
     ///
-    /// The numbers are the script's closed form and not a tolerance: at tick 65
-    /// the swimmer is at `-0.30 + 0.24 * 65/60` = **-0.04** exactly, and its
-    /// bob `0.13 + 0.008 * sin(2*pi*3*65/60)` is at its maximum of **0.138**
+    /// The numbers are the script's closed form and not a tolerance. At tick 65
+    /// the cruise term is `-0.30 + 0.24 * 65/60` = -0.040 and the surge term
+    /// `-0.002 * cos(2 * 2*pi*3 * 65/60)` is at its **positive** extreme of
+    /// +0.002, so the swimmer is at **-0.038**. The bob
+    /// `0.13 + 0.008 * sin(2*pi*3*65/60)` is at its maximum of **0.138**
     /// because 3.25 cycles lands the sine on +1. A tick chosen where the sine
     /// is zero would assert nothing about the vertical term at all.
+    ///
+    /// **The two x windows are 2 mm wide, and that is what pins the surge.**
+    /// A fish moving at a constant 0.24 m/s is at -0.040 at tick 65 and -0.060
+    /// at tick 60; the surge puts it at -0.038 and -0.062. Each window excludes
+    /// the constant-velocity value, and they exclude it in *opposite*
+    /// directions, so together they say the term oscillates rather than that it
+    /// is an offset. The surge is the one cue that makes a swimmer read as
+    /// propelled rather than towed, and nothing else in the repository would
+    /// notice it going away.
     ///
     /// **It is also the half that is in a gated hash**, unlike the vertex wave
     /// on the same node: `World::state_hash` eats every node's
@@ -5690,13 +5701,27 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
             "--ticks",
             "65",
             "--assert",
-            "Lagoon/Swimmer.x > -0.045",
+            "Lagoon/Swimmer.x > -0.0385",
             "--assert",
-            "Lagoon/Swimmer.x < -0.035",
+            "Lagoon/Swimmer.x < -0.0375",
             "--assert",
             "Lagoon/Swimmer.y > 0.137",
         ]));
         assert_eq!(code, 0, "the swimmer should have travelled: {out}");
+
+        // The other end of the surge, half a surge-cycle earlier: a constant
+        // 0.24 m/s would be at -0.060 and this must be *past* it.
+        let (code, out) = run(&args(&[
+            "sim",
+            scene,
+            "--ticks",
+            "60",
+            "--assert",
+            "Lagoon/Swimmer.x < -0.0615",
+            "--assert",
+            "Lagoon/Swimmer.x > -0.0625",
+        ]));
+        assert_eq!(code, 0, "the surge should have held it back: {out}");
 
         // **Falsifiable, which is the point.** If the node script branch stops
         // running, the swimmer stays at its authored -0.30 and this passes.

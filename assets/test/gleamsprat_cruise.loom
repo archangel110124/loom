@@ -25,6 +25,17 @@
 # number changes here, the other one has to change with it — in the `.rhai` and
 # in the `Deform` below.
 #
+# **And the two terms that make it read as an animal rather than as a moving
+# object, both of them in the script and neither of them in the engine.** The
+# speed *surges* at twice the beat — 0.165 to 0.315 m/s about the same 0.24
+# mean — because a swimmer gains on the stroke and coasts between, and a body
+# translating at a constant rate beside a waving fringe has nothing connecting
+# the two. And the path *weaves*, one lazy S at 0.22 Hz across the run, with the
+# heading differentiated from it so the nose points along the velocity instead
+# of being authored beside it. Neither costs a line of Rust, which is the whole
+# argument of ADR 0062 arriving as a picture: the shape is a wave in a shader
+# and everything about how the animal behaves is text a human can edit.
+#
 # The camera is pulled back and offset from `gleamsprat.loom`'s so that the
 # whole 133-tick run stays in frame; the golden row photographs tick 60, half
 # way along it.
@@ -93,13 +104,26 @@ parent = "Lagoon"
   surface_height = 0.0
   density = 1025.0
 
-# Two posts, spaced along the swim. They are the only fixed marks in the frame,
-# which is what makes the travel legible at all — against open water a moving
-# animal and a moving camera look the same.
+# Two posts, one at each end of the swim. They are the only fixed marks in the
+# frame, which is what makes the travel legible at all — against open water a
+# moving animal and a moving camera look the same.
+#
+# **Outside the corridor the animal swims down, and that is why the numbers are
+# what they are.** They used to stand at x -0.34 and 0.16, which is inside it:
+# the swimmer's nose runs -0.30 to +0.23 and its body trails 0.16 m behind, so
+# from tick 90 on the near post crossed the animal at almost exactly its own
+# apparent size and the frame read as a fish on a skewer. Depth was correct —
+# the posts are 0.4 m further back and the fish occludes them properly — and it
+# did not help, because two objects of the same screen size overlapping read as
+# one object whatever the depth buffer says. The gated tick 60 was clear, so
+# only a frame sheet could see it.
+#
+# Now the animal swims *between* them, which is also the better shot: it starts
+# beside one mark and finishes beside the other.
 [[node]]
 name = "PostStart"
 parent = "Lagoon"
-transform = { pos = [-0.34, 0.07, -0.55], scale = [0.012, 0.07, 0.012] }
+transform = { pos = [-0.62, 0.07, -0.55], scale = [0.012, 0.07, 0.012] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -111,7 +135,7 @@ transform = { pos = [-0.34, 0.07, -0.55], scale = [0.012, 0.07, 0.012] }
 [[node]]
 name = "PostEnd"
 parent = "Lagoon"
-transform = { pos = [0.16, 0.08, -0.62], scale = [0.012, 0.08, 0.012] }
+transform = { pos = [0.50, 0.08, -0.62], scale = [0.012, 0.08, 0.012] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
