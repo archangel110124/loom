@@ -59,6 +59,15 @@ if abs(delta) <= step { vx = target; } else if delta > 0.0 { vx += step; } else 
 
 let vy = velocity[1] - GRAVITY * dt;
 
+// **The player's own two water lines, copied for the same reason the jump
+// constants are.** `deeper_player.rhai` floats a capsule that goes over the
+// side and stops accumulating gravity while grounded; a pilot without either
+// falls forever and cannot certify the guarantee the rig actually makes, which
+// is not "you never get out" but "you always get back". These three lines and
+// the four above are one set, and they move together.
+if grounded { vy = velocity[1]; }
+if !grounded && position[1] < 0.25 { vy = (-0.70 - position[1]) * 3.0; }
+
 // Grounded only, and no coyote grace: a pilot that can jump off a ledge it has
 // already left is measuring the grace period rather than the deck.
 if grounded && airborne_for == 0 && tick % JUMP_EVERY == 0 && tick > 0 {

@@ -1,0 +1,66 @@
+# **Overboard, and back.** The demo hub with the player already in the sea.
+#
+# `extends`, not a copy, and **one field is different** — where the Player
+# starts. The movement script is the shipped `deeper_player.rhai`, and the
+# input comes from `loom sim --hold`, so what is under test is the model a
+# human drives and not a pilot written to pass.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS SCENE EXISTS
+# ---------------------------------------------------------------------------
+#
+# Round 1 sealed the rig on four sides and the seal leaked. Walk into any rail
+# at plain walking speed, keep pressing, and hop: the capsule's rounded foot
+# catches the cap bar's inner edge at exactly the jump apex and climbs over it.
+# Traced on the east rail — tick 315 pressed against the rail at y 2.318, tick
+# 335 at the ballistic apex 3.617 with its feet at 2.717 inside `CapEast`'s
+# 2.68-to-2.92 band, tick 345 at 3.839 standing *on* the cap, tick 350 outboard,
+# tick 600 at y = -202.17 and still falling.
+#
+# **A taller rail cannot fix that** — the height a solid wall would need is the
+# jump apex plus the step height, which is above the player's own eye, and the
+# arms race had already been lost twice. And the berth has to open anyway, or
+# the boat cannot be boarded. So the railing stops being the safety device: the
+# sea becomes survivable instead. That is two things, and this file measures
+# the pair of them.
+#
+#   # 1. the sea holds you up
+#   loom sim assets/test/rig_overboard.loom --ticks 240 \
+#     --assert "Rig/Player.y > -1.0" --assert "Rig/Player.y < 0.0"
+#
+#   # 2. and the slipway lets you out of it
+#   loom sim assets/test/rig_overboard.loom --ticks 900 --hold move_x=-1 \
+#     --assert "Rig/Player.y > 2.2" --assert "Rig/Player.x < 11.5"
+#
+# **`y > 2.2` is the same number `rig_walk.loom` uses for "on the deck"**, and
+# it is the whole claim: a player who went over the side is standing on the rig
+# again, under their own movement, with no teleport and nothing respawned.
+#
+# Run 1 is the control that makes run 2 mean something. Without it, a run that
+# ended on the deck could have ended there because the character never sank in
+# the first place: `-1.0 < y < 0.0` is "floating, not standing, not drowning".
+#
+# The spawn is at x = 18.0, z = +3.40 — in the water off the slipway's foot,
+# two metres beyond the end of it, so the swim is a swim and not a step. Facing
+# is the default -Z, so `right` is +X and `--hold move_x=-1` is "swim toward
+# the rig", which is the one thing a person in the water would do.
+
+[scene]
+format = 1
+id = "7ae13d05-6c92-4b81-a37f-2d509fbe1863"
+
+[[prefab]]
+key = "demo"
+id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
+path = "../games/deeper_demo.loom"
+
+[[node]]
+name = "Rig"
+extends = "demo"
+
+[[node]]
+name = "Player"
+parent = "Rig"
+
+  # The one field this file changes.
+  transform = { pos = [18.0, 0.60, 3.40] }

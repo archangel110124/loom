@@ -104,28 +104,90 @@ fi
 "$LOOM" sim assets/games/proving_ground.loom --ticks 600 \
   --assert "status == lost" --assert "events.damage >= 1" >/dev/null
 
-# **The demo hub, and its two claims.** `assets/games/deeper_demo.loom` is where
-# the fishing game is being built; `rig_walk` is that same file with one field
-# changed — a reference pilot in place of the human — because `loom sim` never
-# calls `set_input`.
+# **The demo hub, and what a stranger can do in it.** `deeper_demo.loom` is
+# where the fishing game is being built. `rig_walk`, `rig_drive` and
+# `rig_overboard` are that same file with one or two fields changed — never a
+# copy — because a test that is a copy of a level is worthless by the second
+# week.
 #
-# Run 1: the pilot crosses 21 m of deck and the four inventory slots fill on the
-# way, which is `deeper_demo.rhai`'s proximity rule and the only detector there
-# is for it — the hold lives in `GameRules` state and `state_hash` is
-# physics-only, so nothing else in this file can see it.
-#
-# Run 2 is the one that has already failed twice. The pilot paces rail to rail
-# hopping every ninety ticks with the player's own jump constants; at a 1.0 m
-# rail it went over, and at 1.4 m the character controller *stepped it up onto
-# the cap* and it walked off the outside. `Player.y > 2.2` is "still on the
-# deck", and nothing catches a character in water, so the alternative is an
-# unrecoverable fall.
-"$LOOM" sim assets/test/rig_walk.loom --ticks 330 \
-  --assert "Rig/Player.x > 10.0" --assert "Rig/Player.y > 2.2" \
-  --assert "state.carried >= 4" --assert "events.pickup >= 4" >/dev/null
+# **Two ways of driving a character appear below and the difference matters.**
+# `rig_walk` swaps the movement model for a pilot script, which is right when
+# the thing under test is *downstream* of a keypress. Everything else uses
+# `loom sim --hold`, which writes `Runner::input` — the field `loom run` writes
+# when a human holds W — and is the only shape that works when the thing under
+# test **is the mapping from the press**. The helm reads `move_x` and `move_z`
+# directly, so a pilot fabricating the thrust would test the pilot.
 
+# The hub is crossable, and a lap of it fills the four inventory slots.
+"$LOOM" sim assets/test/rig_walk.loom --ticks 220 \
+  --assert "Rig/Player.x > 10.0" --assert "Rig/Player.y > 2.2" >/dev/null
+"$LOOM" sim assets/test/rig_walk.loom --ticks 500 \
+  --assert "state.carried >= 4" --assert "events.pickup >= 4" \
+  --assert "Rig/Player.y > 2.2" >/dev/null
+
+# **Thirty seconds of hopping into railings, and it is never lost.** This used
+# to assert `y > 2.2` — "the railing held" — and passed by timing coincidence:
+# the pilot turns away from a wall before a hop can coincide with being pressed
+# against it, so it could not produce the failure it was written to detect.
+# Pressed continuously, the capsule is over any rail in about thirty-five ticks.
+# The rig's guarantee is no longer "you cannot get out", because the berth had
+# to open for the boat to be boardable and no rail can beat the jump anyway. It
+# is **"you always get back"**, and `y > -1.0` is a claim this pilot can fail.
 "$LOOM" sim assets/test/rig_walk.loom --ticks 1800 \
-  --assert "Rig/Player.y > 2.2" --assert "state.carried >= 4" >/dev/null
+  --assert "Rig/Player.y > -1.0" --assert "state.carried >= 4" >/dev/null
+
+# **The demo in one key.** From the spawn, holding W: past a supply, through the
+# gap in the berth railing, over the bulwark, onto the cockpit deck, onto the
+# helm mat, and away. `z < -11.0` is inboard of her port side deck; the y band
+# is "standing on the deck" against 2.55 on the bulwark cap and -0.70 in the sea.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 240 --hold move_z=1 \
+  --assert "Rig/Player.z < -11.0" --assert "Rig/Player.y > 1.2" \
+  --assert "Rig/Player.y < 1.9" --assert "state.carried >= 1" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
+  --assert "Rig/Boat.x > 30.0" --assert "Rig/Player.y > 1.2" \
+  --assert "Rig/Boat.y > -0.4" >/dev/null
+
+# **Ahead, astern, and both ways round, with the rider still aboard.**
+#
+# `Player.y > 1.2` on every run is the claim that failed first, and the note
+# beside `if grounded { vy = velocity[1]; }` in `deeper_player.rhai` says why:
+# a grounded character that keeps accumulating gravity requests a downward move
+# every tick, and on a deck that is *also translating* rapier accepts it about
+# one tick in seven, so the capsule ratchets into the deck at about 2 cm per
+# metre the hull travels and eventually falls out of the bottom of the boat.
+#
+# `Boat.y > -0.4` is ADR 0063's seven-knot wall, watched rather than assumed:
+# thrust is body-frame, so past the ceiling the bow digs in and drives itself
+# under. The helm's 1.1 MN measures 2.96 m/s with the trim inside 4 cm.
+#
+# **Runs 4 and 5 are a mirrored pair on purpose.** One turn assertion passes on
+# a hull that always swings the same way; the mirror is what makes it a claim
+# about the wheel.
+"$LOOM" sim assets/test/rig_drive.loom --ticks 900 \
+  --assert "Rig/Boat.x < 3.1" --assert "Rig/Boat.x > 2.9" \
+  --assert "Rig/Boat.z < -39.9" --assert "Rig/Boat.z > -40.1" \
+  --assert "Rig/Player.y > 1.2" >/dev/null
+"$LOOM" sim assets/test/rig_drive.loom --ticks 900 --hold move_z=1 \
+  --assert "Rig/Boat.x > 40.0" --assert "Rig/Boat.y > -0.4" \
+  --assert "Rig/Player.y > 1.2" >/dev/null
+"$LOOM" sim assets/test/rig_drive.loom --ticks 900 --hold move_z=-1 \
+  --assert "Rig/Boat.x < -20.0" --assert "Rig/Boat.y > -0.4" \
+  --assert "Rig/Player.y > 1.2" >/dev/null
+"$LOOM" sim assets/test/rig_drive.loom --ticks 900 --hold "move_z=1,move_x=1" \
+  --assert "Rig/Boat.z > -20.0" --assert "Rig/Boat.x > 20.0" \
+  --assert "Rig/Player.y > 1.2" >/dev/null
+"$LOOM" sim assets/test/rig_drive.loom --ticks 900 --hold "move_z=1,move_x=-1" \
+  --assert "Rig/Boat.z < -60.0" --assert "Rig/Boat.x > 20.0" \
+  --assert "Rig/Player.y > 1.2" >/dev/null
+
+# **Overboard, and back — the demo's promise that it contains no unrecoverable
+# state.** Run 1 is the control that makes run 2 mean anything: without it, a
+# run that ended on the deck could have ended there because the character never
+# sank at all. `-1.0 < y < 0.0` is floating, not standing, not drowning.
+"$LOOM" sim assets/test/rig_overboard.loom --ticks 240 \
+  --assert "Rig/Player.y > -1.0" --assert "Rig/Player.y < 0.0" >/dev/null
+"$LOOM" sim assets/test/rig_overboard.loom --ticks 900 --hold move_x=-1 \
+  --assert "Rig/Player.y > 2.2" --assert "Rig/Player.x < 11.5" >/dev/null
 
 # **The sim's answer to `xtask repeat`.** `state_hash` covers physics, so
 # nothing above would notice a fight that replayed differently — a float hash,
@@ -137,7 +199,7 @@ fi
 cmp /tmp/loom-fight-1.json /tmp/loom-fight-2.json
 cmp /tmp/loom-fight-2.json /tmp/loom-fight-3.json
 rm -f /tmp/loom-fight-1.json /tmp/loom-fight-2.json /tmp/loom-fight-3.json
-echo "gameplay: 7 scenes asserted, fight byte-identical across 3 processes"
+echo "gameplay: 9 scenes asserted, fight byte-identical across 3 processes"
 
 # ---------------------------------------------------------------------------
 # 7. Work per frame. **Nothing above this line can see a frame get slower.**

@@ -1,8 +1,9 @@
-# **DEEPER — the demo. Round 1: the Rig, and a player standing on it.**
+# **DEEPER — the demo. Round 2: the Rig, and a boat you drive off it.**
 #
 #   loom run assets/games/deeper_demo.loom
 #   loom render assets/games/deeper_demo.loom --out /tmp/rig.png
-#   loom sim assets/games/deeper_demo.loom --ticks 900 --assert "Rig/Player.y > 2.2"
+#   loom sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
+#     --assert "Rig/Boat.x > 30.0"      # walk forward. That is the whole demo.
 #
 # The hub of the GDD's §7 — a rusted floating platform lashed to the surface
 # above the trench, part oil rig, part fishing wharf. Early game it is meant to
@@ -10,8 +11,29 @@
 # the rest of the game is measured against. Nothing here curdles yet.
 #
 # There are four things in this demo and no fifth: **a hub, a boat you can
-# drive, fishing you can do, and four slots to carry things in.** This round
-# builds the first and stands the player on it.
+# drive, fishing you can do, and four slots to carry things in.** Round 1 built
+# the hub and stood the player on it. Round 2 makes the boat boardable and
+# drivable, and makes going into the water something you come back from.
+#
+# ---------------------------------------------------------------------------
+# THE CONTROLS, IN FULL
+# ---------------------------------------------------------------------------
+#
+#   on the rig      W A S D walk, Shift sprint, Space jump
+#   on `HelmMat`    W ahead, S astern, A wheel to port, D wheel to starboard,
+#                   nothing pressed is neutral and she coasts to a stop
+#   in the water    W A S D swim, at under half walking pace
+#
+# **The helm is a place, not a keybinding**, and the whole scene is laid out so
+# that one fact does not have to be explained. The player spawns at x = -3.70
+# facing the gap in the berth railing; the gap is where the boat's cockpit is;
+# the cockpit is where `HelmMat` is drawn. **Walk forward and you board her,
+# arrive at the wheel and get under way, on one key.** Measured: aboard by
+# tick 180, on the mat and moving by tick 240, 34 m clear by tick 900.
+#
+# That mapping spends none of the engine's five digital channels — `jump` is
+# still jump and `fire` is still unspent, for fishing — and there is no fifth
+# channel to spend on a "take the helm" button.
 #
 # ---------------------------------------------------------------------------
 # DECISION 1 — WHAT THE PLAYER IS
@@ -62,27 +84,56 @@
 # detector. Same bargain the fight makes.
 #
 # ---------------------------------------------------------------------------
+# DECISION 3 — THE SEA IS THE SAFETY DEVICE, NOT THE RAILING
+# ---------------------------------------------------------------------------
+#
+# Round 1 sealed the rig on four sides and the seal leaked anyway. Walk into any
+# rail at plain walking speed, keep pressing, and hop: the capsule's rounded
+# foot catches the cap bar's inner edge at exactly the jump apex and is climbed
+# over it. Traced, on the east rail — tick 315 pressed against it at y 2.318,
+# tick 335 at the ballistic apex 3.617 with its feet at 2.717 inside `CapEast`'s
+# 2.68-to-2.92 band, tick 345 at 3.839 standing *on* the cap, tick 350 outboard,
+# tick 600 at y = -202.17 and still falling.
+#
+# **A taller rail cannot fix that**: the height a solid wall would need is the
+# jump apex plus the step height, which is above the player's own eye, and a
+# 1.5 m parapet was already rejected in round 1 for hiding the boat. The berth
+# has to open anyway or nobody can board. So the railing stops being what keeps
+# the player safe:
+#
+#   * `deeper_player.rhai` **floats** a capsule that goes under, at the surface;
+#   * the **slipway** at the east end lets it walk back out;
+#   * and `assets/test/rig_overboard.loom` asserts both, with the real player
+#     model and no teleport.
+#
+# The rails are still rails — they stop a walk — and they are now set dressing
+# rather than the thing a life depends on.
+#
+# ---------------------------------------------------------------------------
 # WHAT IS THIN, AND KNOWN
 # ---------------------------------------------------------------------------
 #
-# * **The boat is moored, not drivable.** `Propulsion.force` is read once at
-#   load and no script can write it, so steering needs an engine seam that does
-#   not exist yet. The hull, its twelve pontoons and its seven-knot ceiling
-#   (ADR 0063) are all here and correct; nothing pushes them.
-# * **The boat cannot be boarded or walked.** The thirty-odd deck, bulwark and
-#   companionway colliders that make `jib_vi` walkable live in
-#   `assets/test/jib_vi_walk.loom`, not in the prefab — so aboard this instance
-#   there is one 9.53 x 1.66 x 3.30 inertia brick and no deck. Moving them into
-#   the prefab would move the sim hash of every `jib_vi_*` scene, which is a
-#   deliberate act for its own commit.
+# * **The wheel, the throttle and the shifter do not move.** All four movable
+#   parts in `jib_vi.loom` are separate meshes with **no transform of their
+#   own**, so each one's pivot is the hull's origin up to nineteen metres away
+#   and rotating the node swings the part across the boat. Animating them is a
+#   mesh-authoring job — each part wants its geometry re-centred on its own
+#   pivot — and no scene edit can substitute. Beyond that, a node `Script` is a
+#   pure function of `tick` and cannot see the throttle setting, so even with
+#   pivots there is no seam yet from "the helm is open" to "the lever leans".
+# * **Releasing the throttle is not directly asserted.** `loom sim --hold` is
+#   one constant for a run, so "hold W then let go" needs a schedule that does
+#   not exist. What is asserted is the pair either side of it: zero thrust
+#   leaves her exactly where she is (`rig_drive` run 1), and stepping off the
+#   mat writes zero thrust every tick (`deeper_player.rhai`'s `else if aboard`).
+# * **A player who jumps off the boat while she is under way leaves her
+#   running.** The helm only writes thrust while somebody is standing on the
+#   body, so there is nobody to write the zero. In life that is correct and in a
+#   demo it is a way to lose your boat. The fix is a rules-script dead man's
+#   handle, which is a fifth thing.
 # * **No fishing yet.** `assets/games/fishing.loom` has the loop; it is not
-#   wired in here.
-# * **The wharf deck is at y = 1.40 and the boat's bulwark tops at 1.62 above a
-#   side deck at 0.62**, so the step aboard is a 0.22 m rise over the rail and
-#   a 1.00 m drop inboard. That geometry is deliberate and is what the boarding
-#   round inherits — but it will need the character's `step_height` raised from
-#   the 0.10 this round set it to, and raising it means re-checking the rail
-#   against the same sum. Both numbers are one decision.
+#   wired in here, and `deeper_demo.rhai` currently holds the scene's one
+#   `GameRules` slot that `fishing_fight.rhai` will also want.
 # * **The four slots fill and nothing empties them.** Walking up to a supply
 #   puts it in the hold; there is no way to put it back and no reason to want
 #   one until there is a fish to make room for. Selling is not built.
@@ -90,6 +141,8 @@
 #   and a headless render cannot show it, so what is checked is the string the
 #   rules script produces (`game.message` in `loom sim`'s output), not the
 #   overlay. Those are different claims and only the first one is tested.
+# * **The deck is still beige and the hub still reads pale.** It was called out
+#   after round 1 and it is a palette pass, not a boat.
 
 [scene]
 format = 1
@@ -100,6 +153,14 @@ id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
 key = "jib_vi"
 id = "3c7a5e12-8b64-4f09-a2d3-6e1b90c47f58"
 path = "../prefabs/jib_vi.loom"
+
+# The deck a person stands on. See that file's header: the hull's own collider
+# is its inertia and its lid is a metre above the deck, so without this the
+# boat is a brick you stand on top of.
+[[prefab]]
+key = "jib_vi_decks"
+id = "3c7a5e12-8b64-4f09-a2d3-6e1b90c47f59"
+path = "../prefabs/jib_vi_decks.loom"
 
 [[asset]]
 key = "box"
@@ -165,7 +226,7 @@ parent = "Rig"
 [[node]]
 name = "Player"
 parent = "Rig"
-transform = { pos = [-9.5, 2.40, 0.90] }
+transform = { pos = [-3.70, 2.40, 0.90] }
 
   [node.components.CharacterController]
   height = 1.8
@@ -183,7 +244,7 @@ transform = { pos = [-9.5, 2.40, 0.90] }
   # rise from the wharf — and when it raises this number it has to re-check
   # the rail against the same sum: rail top must exceed the jump apex's foot
   # height plus this. Today that is 2.733 + 0.10 against a cap at 2.90.
-  step_height = 0.10
+  step_height = 0.25
 
   [node.components.Script]
   path = "../scripts/deeper_player.rhai"
@@ -343,10 +404,19 @@ transform = { pos = [-11.90, 1.90, 0.0], scale = [0.10, 0.50, 7.0] }
   albedo = [0.30, 0.21, 0.16]
   roughness = 0.85
 
+# **Split for the slipway: 2.8 m of gap at z = +2.0 to +4.8.**
+#
+# Off-centre, and that is not arbitrary. `assets/test/rig_walk.loom`'s pilot
+# crosses the deck along z = +0.90 with its lateral velocity pinned to zero, so
+# a gap on the centreline is a gap it walks straight out of — and its
+# `Player.y > 2.2` assertion, which means "still on the deck", would then be
+# failed by the pilot doing something perfectly correct. The gap is a pace
+# south of that lane instead.
+
 [[node]]
-name = "RailEast"
+name = "RailEastNorth"
 parent = "Rig"
-transform = { pos = [11.90, 1.90, 0.0], scale = [0.10, 0.50, 7.0] }
+transform = { pos = [11.90, 1.90, -2.50], scale = [0.10, 0.50, 4.50] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -356,9 +426,39 @@ transform = { pos = [11.90, 1.90, 0.0], scale = [0.10, 0.50, 7.0] }
   roughness = 0.85
 
 [[node]]
-name = "RailNorth"
+name = "RailEastSouth"
 parent = "Rig"
-transform = { pos = [0.0, 1.90, -6.90], scale = [12.0, 0.50, 0.10] }
+transform = { pos = [11.90, 1.90, 5.90], scale = [0.10, 0.50, 1.10] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.21, 0.16]
+  roughness = 0.85
+
+# **The berth side is open between the bollards, and that is the way aboard.**
+# 3.8 m of gap at x -6.9..-3.1, which is the two bollards' own span plus a pace
+# either side. Round 1 closed it because a hole in the railing was an
+# unrecoverable fall; the slipway at the east end is what makes falling in
+# recoverable, and it had to exist before this could be opened.
+
+[[node]]
+name = "RailNorthWest"
+parent = "Rig"
+transform = { pos = [-9.45, 1.90, -6.90], scale = [2.55, 0.50, 0.10] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.21, 0.16]
+  roughness = 0.85
+
+[[node]]
+name = "RailNorthEast"
+parent = "Rig"
+transform = { pos = [4.45, 1.90, -6.90], scale = [7.55, 0.50, 0.10] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -381,9 +481,22 @@ transform = { pos = [0.0, 2.80, 6.90], scale = [12.0, 0.12, 0.06] }
   metallic = 0.4
 
 [[node]]
-name = "CapNorth"
+name = "CapNorthWest"
 parent = "Rig"
-transform = { pos = [0.0, 2.80, -6.90], scale = [12.0, 0.12, 0.06] }
+transform = { pos = [-9.45, 2.80, -6.90], scale = [2.55, 0.12, 0.06] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "CapNorthEast"
+parent = "Rig"
+transform = { pos = [4.45, 2.80, -6.90], scale = [7.55, 0.12, 0.06] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -407,9 +520,22 @@ transform = { pos = [-11.90, 2.80, 0.0], scale = [0.06, 0.12, 7.0] }
   metallic = 0.4
 
 [[node]]
-name = "CapEast"
+name = "CapEastNorth"
 parent = "Rig"
-transform = { pos = [11.90, 2.80, 0.0], scale = [0.06, 0.12, 7.0] }
+transform = { pos = [11.90, 2.80, -2.50], scale = [0.06, 0.12, 4.50] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "CapEastSouth"
+parent = "Rig"
+transform = { pos = [11.90, 2.80, 5.90], scale = [0.06, 0.12, 1.10] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -510,7 +636,7 @@ transform = { pos = [8.0, 5.60, 3.0] }
 [[node]]
 name = "CrateTall"
 parent = "Rig"
-transform = { pos = [-3.2, 1.85, -4.80], scale = [0.55, 0.45, 0.55] }
+transform = { pos = [-6.90, 1.85, -4.80], scale = [0.55, 0.45, 0.55] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -522,7 +648,7 @@ transform = { pos = [-3.2, 1.85, -4.80], scale = [0.55, 0.45, 0.55] }
 [[node]]
 name = "CrateLow"
 parent = "Rig"
-transform = { pos = [-2.2, 1.72, -4.10], scale = [0.45, 0.32, 0.45] }
+transform = { pos = [-1.40, 1.72, -4.30], scale = [0.45, 0.32, 0.45] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -559,7 +685,7 @@ transform = { pos = [-1.0, 1.70, 2.30], scale = [2.60, 0.30, 0.45] }
 [[node]]
 name = "BaitBarrel"
 parent = "Rig"
-transform = { pos = [-7.5, 1.85, 2.20], scale = [0.45, 0.45, 0.45] }
+transform = { pos = [-2.40, 1.85, -0.40], scale = [0.45, 0.45, 0.45] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "cylinder" }
@@ -620,7 +746,7 @@ transform = { pos = [0.0, 2.25, 2.30], scale = [0.13, 0.25, 0.13] }
 name = "Boat"
 parent = "Rig"
 prefab = "jib_vi"
-transform = { pos = [-5.0, 0.0, -11.2] }
+transform = { pos = [3.0, 0.0, -10.45] }
 
 # ---------------------------------------------------------------------------
 # THE HOLD, DRAWN
@@ -642,3 +768,117 @@ parent = "Rig"
   size = 22.0
   color = [0.95, 0.93, 0.86]
   only_in_play = true
+
+[[node]]
+name = "Decks"
+parent = "Rig/Boat"
+prefab = "jib_vi_decks"
+
+# ---------------------------------------------------------------------------
+# THE SLIPWAY — the way out of the water, and the reason the railings can open
+#
+# **A demo must not contain an unrecoverable state.** Round 1 sealed the rig on
+# all four sides and still leaked: walk into any rail, keep pressing, and hop —
+# the capsule's bottom cap catches the cap bar's inner edge at exactly the jump
+# apex and is climbed over it. Traced on the east rail, at plain walking speed:
+#
+#   tick 315  y 2.318  x 11.417   pressed against the rail, on the deck
+#   tick 335  y 3.617  x 11.502   jump apex, exactly ballistic (2.318 + 1.172
+#                                 plus a half-step of Euler bias). Feet at
+#                                 2.717, and `CapEast` spans 2.68 to 2.92.
+#   tick 345  y 3.839  x 11.776   no longer ballistic: standing on the cap
+#   tick 350  y 3.799  x 12.126   outboard, and falling
+#   tick 600  y -202.17           still falling
+#
+# **The rail is not the fix and a taller one is not either.** That arms race
+# was already lost twice — a 1.0 m rail is hopped, a 1.4 m one is *stepped
+# onto* — and the height a solid wall would need is the jump apex plus the step
+# height, which is above the player's own eye. So the wall stops being the
+# safety device and this ramp becomes it. Fall in anywhere, swim to it, walk
+# up: that is `deeper_player.rhai`'s swim clause and this slab, together.
+#
+# 4.6 m of run and 3.2 m of fall — 34.8 degrees against the controller's 50
+# degree limit. It reaches y = -1.80 because a swimmer floats with its capsule
+# centre at -0.70 and its feet at -1.60, so the ramp has to pass under the feet
+# of someone already in the water: a slipway that stops at the waterline is a
+# wall to anybody below it. It also fills the east end, which was 12 m of bare
+# deck with nothing in it.
+
+[[node]]
+name = "Slipway"
+parent = "Rig"
+transform = { pos = [14.10, -0.20, 3.40], rot_euler = [0.0, 0.0, -34.8], scale = [2.80, 0.09, 1.20] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.26, 0.25, 0.23]
+  roughness = 0.95
+
+# Two stringers down its sides. They are not railings — they stand 0.24 m
+# proud, which is under the step height, so they are walked over rather than
+# stopping anyone. They are here because a bare grey slab at 35 degrees reads
+# as a fault in the geometry, and a slipway with kerbs reads as a slipway.
+
+[[node]]
+name = "SlipwayKerbNorth"
+parent = "Rig"
+transform = { pos = [14.10, -0.05, 2.12], rot_euler = [0.0, 0.0, -34.8], scale = [2.80, 0.12, 0.08] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.8
+  metallic = 0.4
+
+[[node]]
+name = "SlipwayKerbSouth"
+parent = "Rig"
+transform = { pos = [14.10, -0.05, 4.68], rot_euler = [0.0, 0.0, -34.8], scale = [2.80, 0.12, 0.08] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.8
+  metallic = 0.4
+
+# ---------------------------------------------------------------------------
+# THE HELM
+#
+# **A place, not a keybinding.** Stand on the mat and W/S/A/D drive the boat;
+# step off it and they drive your legs again. That mapping needs no modifier,
+# spends none of the five digital channels the engine has, leaves `fire` for
+# fishing, and is the one control in this scene a player who was told nothing
+# can still find: you walk onto the marked patch of deck and the boat answers.
+#
+# **It is a mat and not a wheel because the wheel is on the flybridge**, which
+# is up a 42 degree plank at the far end of the boat under 1.72 m of headroom.
+# The wheel, the throttle and the shifter are all authored as separate movable
+# parts in `jib_vi.loom` — and not one of them carries a transform, so each
+# one's pivot is the hull's origin, up to nineteen metres away. Turning the
+# drawn wheel is a mesh-authoring job rather than a scene one; it is written up
+# in this round's report instead of being faked here.
+#
+# Drawn only. A renderable node under a dynamic ancestor is not given a static
+# collider, and this carries no `BoxCollider`, so it is paint on the deck and
+# the capsule stands on `col_deck_aft` underneath it exactly as it would with
+# no mat there at all. `deeper_player.rhai`'s `HELM_*` bounds and this
+# transform are one decision: change either and change both.
+
+[[node]]
+name = "HelmMat"
+parent = "Rig/Boat"
+transform = { pos = [-7.30, 0.63, -1.775], scale = [1.30, 0.02, 0.875] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.62, 0.44, 0.12]
+  roughness = 0.7
+  metallic = 0.2

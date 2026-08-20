@@ -1,0 +1,115 @@
+# **Driving the JIB VI.** The demo hub, with the boat out in open water and the
+# player already standing on the helm mat.
+#
+# `extends`, not a copy: the rig, the rails, the supplies, the boat and her
+# decks all come from `assets/games/deeper_demo.loom`. **Two fields differ** —
+# where the boat is and where the player is — and the movement script is the
+# shipped `deeper_player.rhai`, unmodified. That last part is the entire point
+# of this file.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS SCENE HAS NO PILOT SCRIPT
+# ---------------------------------------------------------------------------
+#
+# Every other input-driven test in this repository swaps the movement model for
+# a pilot that fabricates the press — the five fight benches, `rig_walk.loom`.
+# That is the right shape when the thing under test is *downstream* of the
+# press (the fight, the rails), and the wrong shape when the thing under test
+# **is the mapping from the press**. The helm reads `move_x` and `move_z`
+# straight off the input, so a pilot writing `helm_force` itself would be a
+# test of the pilot: exactly the "test that cannot fail" this branch has
+# already shipped once.
+#
+# So `loom sim --hold` exists instead. It writes `Runner::input`, the same
+# field `loom run` writes when a human holds W. Two runs with different holds
+# answer every question here, which is why it is a constant and not a schedule.
+#
+# ---------------------------------------------------------------------------
+# WHY SHE IS OUT IN OPEN WATER AND NOT IN HER BERTH
+# ---------------------------------------------------------------------------
+#
+# Because a berth is a wall on one side. Berthed at z = -10.45 her starboard
+# bulwark is 0.15 m off the quay, so a turn *to starboard* swings her bow into
+# it and she stalls — the first version of this file asserted a starboard turn
+# from the berth and failed, correctly, on a boat behaving like a boat. Leaving
+# the berth is its own manoeuvre and is tested where it belongs, on the demo
+# scene itself: walk aboard holding W and she is 34 m clear inside fifteen
+# seconds.
+#
+# Thirty metres further out (z = -40) is far enough that nothing static is
+# inside a full-lock turning circle, which is about 28 m of radius. The player
+# sits at boat-local (-7.00, -, -1.80), the port side of the aft cockpit and
+# the middle of `HelmMat`.
+#
+# ---------------------------------------------------------------------------
+# WHAT IT MEASURES — five runs, because they are five claims
+# ---------------------------------------------------------------------------
+#
+#   # 1. hands off the keys: she stays exactly where she is
+#   loom sim assets/test/rig_drive.loom --ticks 900 \
+#     --assert "Rig/Boat.x < 3.1" --assert "Rig/Boat.x > 2.9" \
+#     --assert "Rig/Boat.z < -39.9" --assert "Rig/Boat.z > -40.1" \
+#     --assert "Rig/Player.y > 1.2"
+#
+#   # 2. W is ahead, and she stays a boat while she does it
+#   loom sim assets/test/rig_drive.loom --ticks 900 --hold move_z=1 \
+#     --assert "Rig/Boat.x > 40.0" --assert "Rig/Boat.y > -0.4" \
+#     --assert "Rig/Player.y > 1.2"
+#
+#   # 3. S is astern
+#   loom sim assets/test/rig_drive.loom --ticks 900 --hold move_z=-1 \
+#     --assert "Rig/Boat.x < -20.0" --assert "Rig/Boat.y > -0.4" \
+#     --assert "Rig/Player.y > 1.2"
+#
+#   # 4. D puts the wheel to starboard, which on this hull is +Z
+#   loom sim assets/test/rig_drive.loom --ticks 900 --hold "move_z=1,move_x=1" \
+#     --assert "Rig/Boat.z > -20.0" --assert "Rig/Boat.x > 20.0" \
+#     --assert "Rig/Player.y > 1.2"
+#
+#   # 5. and A is the mirror of it
+#   loom sim assets/test/rig_drive.loom --ticks 900 --hold "move_z=1,move_x=-1" \
+#     --assert "Rig/Boat.z < -60.0" --assert "Rig/Boat.x > 20.0" \
+#     --assert "Rig/Player.y > 1.2"
+#
+# **Runs 4 and 5 are a pair on purpose.** A single turn assertion passes on a
+# hull that always swings the same way — a sign error in the torque, a list, a
+# wake pushing her over — and the mirror is what makes it a claim about the
+# wheel. Measured, at 900 ticks: +26.5 x and +28.4 z one way, +26.4 x and
+# -28.5 z the other. Symmetric to within four centimetres over thirty metres.
+#
+# **`Rig/Player.y > 1.2` on every run is the rider still being aboard**, and it
+# is on every run because it is the claim that failed first. The deck stands a
+# capsule's centre at about 1.60 and the sea holds a swimmer at -0.70, so the
+# band cannot be satisfied by the wrong one. See the long note in
+# `deeper_player.rhai` beside `if grounded { vy = velocity[1]; }` for what was
+# happening and why the fix is in a script rather than in `loom_physics`.
+#
+# **`Rig/Boat.y > -0.4` is the seven-knot wall, watched rather than assumed.**
+# ADR 0063 swept this hull: 1.6 MN settles at 3.586 m/s and holds her trim,
+# 2.0 MN walks it, and 2.63 MN submarines her to y = -14.34 because thrust is
+# body-frame and a bow that digs in turns the vector downward. The helm's
+# 1.1 MN measures 2.96 m/s — 5.8 knots — with her trim inside 4 cm, and this
+# assertion is what says so on every run rather than once in a header.
+
+[scene]
+format = 1
+id = "0c6e4b19-52a7-4d38-b1f6-9e73a5c8d240"
+
+[[prefab]]
+key = "demo"
+id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
+path = "../games/deeper_demo.loom"
+
+[[node]]
+name = "Rig"
+extends = "demo"
+
+[[node]]
+name = "Boat"
+parent = "Rig"
+transform = { pos = [3.0, 0.0, -40.0] }
+
+[[node]]
+name = "Player"
+parent = "Rig"
+transform = { pos = [-4.00, 1.62, -41.80] }

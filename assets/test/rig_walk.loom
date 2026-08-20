@@ -1,48 +1,72 @@
 # **Walking the Rig.** The demo hub with a pilot at the controls instead of a
-# human, because `loom sim` never calls `set_input` and headless input is zeros
-# forever — a headless run of `assets/games/deeper_demo.loom` is a man standing
-# on a wharf with nobody's hands on him.
+# human — a pilot that paces the deck end to end, hops constantly, and never
+# looks where it is going.
 #
-# This is `extends`, not a copy. The deck, the rails, the shed, the supplies and
-# the boat all come from the demo, and **one field is different**: the Player's
-# movement script. Change the hub and this scene changes with it, which is the
-# whole reason a test that is a copy of a level is worthless by the second week.
+# This is `extends`, not a copy. The deck, the rails, the shed, the supplies,
+# the slipway and the boat all come from the demo, and **one field is
+# different**: the Player's movement script. Change the hub and this scene
+# changes with it, which is the whole reason a test that is a copy of a level
+# is worthless by the second week.
 #
 # The pilot is `../scripts/rig_patrol.rhai`, and its header says why it is not
 # `patrol.rhai`: it hops with `deeper_player.rhai`'s own constants, so what it
-# proves about the rail is a claim about the player rather than about a test
-# script that happens to jump 11 cm higher.
+# proves is a claim about the player rather than about a test script that
+# happens to jump 11 cm higher.
 #
-# The spawn is at x = -9.5, z = +0.90, and that lane is load-bearing: the
-# supplies sit at z ~= +2.2, so a walk down it passes within 1.3 m of each and
-# `deeper_demo.rhai` takes them at 1.7 m. The spawn itself is 2.4 m clear of the
-# nearest one, so a scene that picks something up on tick 1 has moved a crate.
+# It walks along z = +0.90 with its lateral velocity pinned to zero, and that
+# lane is load-bearing twice over. The supplies sit within 1.4 m of it, so a
+# lap collects all four. And the slipway's gap in the east railing is
+# deliberately **off** it, at z = +2.0 to +4.8 — a gap on this lane is a gap the
+# pilot walks straight down, and its "still on the deck" assertion would then be
+# failed by the pilot doing something perfectly correct.
 #
-# What it measures — **two runs, because they are two claims**:
+# ---------------------------------------------------------------------------
+# WHAT IT MEASURES — three runs, because they are three claims
+# ---------------------------------------------------------------------------
 #
-#   # 1. the hub is crossable and the hold fills on the way
-#   loom sim assets/test/rig_walk.loom --ticks 330 \
-#     --assert "Rig/Player.x > 10.0" \
-#     --assert "Rig/Player.y > 2.2" \
-#     --assert "state.carried >= 4" \
-#     --assert "events.pickup >= 4"
+#   # 1. the hub is crossable: 15 m of deck, still standing on it
+#   loom sim assets/test/rig_walk.loom --ticks 220 \
+#     --assert "Rig/Player.x > 10.0" --assert "Rig/Player.y > 2.2"
 #
-#   # 2. the deck holds him, hop after hop, for half a minute
+#   # 2. and a lap fills the hold
+#   loom sim assets/test/rig_walk.loom --ticks 500 \
+#     --assert "state.carried >= 4" --assert "events.pickup >= 4" \
+#     --assert "Rig/Player.y > 2.2"
+#
+#   # 3. thirty seconds of hopping into railings, and it is never lost
 #   loom sim assets/test/rig_walk.loom --ticks 1800 \
-#     --assert "Rig/Player.y > 2.2" \
-#     --assert "state.carried >= 4"
+#     --assert "Rig/Player.y > -1.0" --assert "state.carried >= 4"
 #
-# `Player.y > 2.2` is "never fell through and never got out" — the deck stands
-# the capsule's centre at 2.318, and there is nothing else in this scene at that
-# height to be standing on, so anything else reads as a fall. It is the whole
-# point of run 2: the pilot paces from rail to rail hopping every ninety ticks,
-# and the first two versions of the rail let it out. `Player.x > 10.0` at tick
-# 330 is "crossed 21 m of deck, past every supply".
+# `Player.y > 2.2` is "on the deck": the deck stands the capsule's centre at
+# 2.318 and there is nothing else in this scene at that height.
 #
-# **Not measured here, and known:** nothing catches a character in water, so a
-# player who does get over a rail falls without limit. The rail and the
-# character's 0.10 m step are what stop that, and this file is the only thing
-# that checks them.
+# ---------------------------------------------------------------------------
+# RUN 3 USED TO CLAIM SOMETHING ELSE, AND THE CHANGE IS THE POINT
+# ---------------------------------------------------------------------------
+#
+# It used to assert `Player.y > 2.2` at 1800 ticks — "the railing held" — and
+# it passed for a reason that had nothing to do with the railing. The pilot
+# reverses after ten blocked ticks and hops on `tick % 90`, so it walks *away*
+# from a wall before a hop can coincide with being pressed against it: it is
+# structurally incapable of producing the failure it was written to detect.
+# Pressed continuously into the same rail while hopping, the capsule goes over
+# in about thirty-five ticks, at plain walking speed, on the rail this pilot
+# already visits. **A test that cannot fail is worse than no test**, and this
+# one carried a header claiming it had caught two prior bugs.
+#
+# The design changed with it, and that is why the assertion is not simply
+# tightened. The berth had to open so the boat could be boarded, and the height
+# a solid rail would need to beat the jump is above the player's own eye. So
+# the rig's guarantee is no longer "you cannot get out" — it is **"you always
+# get back"**: `deeper_player.rhai` floats a capsule that goes under and the
+# slipway walks it out. `y > -1.0` is that guarantee, and it is a claim this
+# pilot can actually fail. `assets/test/rig_overboard.loom` proves the other
+# half — that the way back is walkable — with the shipped player model.
+#
+# Run 3 does go over a rail somewhere between tick 900 and tick 1800, and ends
+# the run swimming east at y = -0.6999. That is now expected behaviour rather
+# than a defect, which is exactly the sort of sentence a test file has to say
+# out loud or the next reader will "fix" it.
 
 [scene]
 format = 1

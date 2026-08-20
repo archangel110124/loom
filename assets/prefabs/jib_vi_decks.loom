@@ -1,0 +1,367 @@
+# **The deck of the JIB VI, as the boxes a person stands on.**
+#
+# Twenty-six collision boxes and the instance node they hang off, in the
+# boat's own frame. Nothing here is drawn.
+# Instance this **as a child of a `jib_vi` instance** and the hull becomes
+# walkable:
+#
+#   [[prefab]]
+#   key = "jib_vi_decks"
+#   path = "../prefabs/jib_vi_decks.loom"
+#
+#   [[node]]
+#   name = "Decks"
+#   parent = "<wherever the boat is>"
+#   prefab = "jib_vi_decks"
+#
+# ---------------------------------------------------------------------------
+# WHY THIS FILE EXISTS
+# ---------------------------------------------------------------------------
+#
+# `assets/test/jib_vi_walk.loom` carried this block, and so did three other
+# files, under a `ponytail:` note that said: *make it a `[[prefab]]` the first
+# time a fifth wants it.* `assets/games/deeper_demo.loom` is the fifth, and it
+# is the one that would hurt — a demo whose boat is boardable is not a test
+# whose numbers can be re-derived from a header, and a hand-kept copy that
+# drifted would put the player through the deck.
+#
+# **This file is now the original.** The four copies in `assets/test/` are not
+# converted, deliberately: they carry three pinned determinism hashes between
+# them, and a node-order change is exactly what would move one. Converting them
+# is a commit whose whole content is "the hashes did not move", and it should
+# be that and nothing else.
+#
+# ---------------------------------------------------------------------------
+# WHAT A READER NEEDS TO KNOW BEFORE CHANGING A NUMBER
+# ---------------------------------------------------------------------------
+#
+# **These are collision only and only the plank is drawn.** The hull's own
+# `BoxCollider` in `jib_vi.loom` is its *inertia*: its top face is at y = 1.66
+# and the deck is at 0.60, so a capsule aboard used to stand on an invisible
+# lid a metre in the air with the deckhouse, bulwarks and rails all passable.
+# A `BoxCollider` on a descendant of a dynamic node is a collider on that body
+# (ADR 0060) — and the moment one exists, `Sim::new` demotes the hull box to
+# mass-only, which is what opens the deck up.
+#
+# **Every box weighs nothing** — `attach_box` builds them with
+# `ColliderMassProps::Mass(0.0)`, resolving to exactly zero mass, zero angular
+# inertia and no centre-of-mass shift. That is why `jib_vi.loom`'s stability
+# arithmetic survives instancing this, and the three pinned hashes in
+# `assets/test/` are its tripwire.
+#
+# **Boxes rather than a mesh-derived hull, deliberately.** A `voxelized_mesh`
+# or a convex decomposition makes the sim hash a function of the art file, and
+# the art file is still being detailed. Boxes track *architecture* — the sheer,
+# the bulwark line, the deckhouse footprint, the flybridge — and those survive
+# the mesh changing under them. The twelve `local_y` standing stations in
+# `assets/test/jib_vi_stations.loom` are the detector for when they stop
+# matching.
+#
+# Every number below was measured off `jib_vi_wide.obj` by marching columns
+# through it:
+#
+#   deck at the centreline   0.66 aft, 0.60 amidships, 0.74 at x=4, 1.65 at x=8
+#   walkable half-beam       2.55 aft, 2.80 amidships, 2.30 at x=4, 0.65 at x=8
+#   bulwark cap              1.52 amidships rising to 2.45 at the stem
+#   deckhouse footprint      x -6.2..3.9, |z| <= 1.50 (1.05 forward of x=2.2)
+#   flybridge deck           3.08, x -6.5..4.2, |z| <= 2.60; helm console 3.45
+#
+# **The deckhouse is solid because nobody can get inside it.** Headroom under
+# its canopy is 1.49 m and a capsule is 1.90 m, so the drawn floor in there is
+# unreachable whatever the collider says.
+#
+# `ponytail:` deck plates are rectangles and the bow is a wedge, so the two
+# forward plates overhang the drawn hull by up to a metre of nothing. It is
+# invisible and unreachable — the tapered bulwark boxes bound the walk and stop
+# a capsule 0.1-0.2 m inboard of the drawn edge. Give the plates a yaw each if
+# that margin ever has to be tighter.
+
+[scene]
+format = 1
+id = "5f2c9a04-7b31-4e68-9d55-2a1e63b8c470"
+
+# The instance node. It carries nothing itself: everything below hangs off it,
+# and its transform is the identity so a collider's numbers in this file are
+# the boat's own frame, exactly as they were measured.
+[[node]]
+name = "Decks"
+
+[[node]]
+name = "col_deck_aft"
+parent = "Decks"
+transform = { pos = [-7.8017, 0.49, 0.0], rot_euler = [0.0, 0.0, -0.655] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.7501, 0.15, 2.62]
+
+[[node]]
+name = "col_deck_mid"
+parent = "Decks"
+transform = { pos = [-3.05, 0.465, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [3.10, 0.15, 2.82]
+
+[[node]]
+name = "col_deck_fwd"
+parent = "Decks"
+transform = { pos = [1.3025, 0.5125, 0.0], rot_euler = [0.0, 0.0, 0.955] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.3502, 0.15, 2.82]
+
+[[node]]
+name = "col_deck_shoulder"
+parent = "Decks"
+transform = { pos = [3.506, 0.5751, 0.0], rot_euler = [0.0, 0.0, 2.291] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.0008, 0.15, 2.55]
+
+# **The foredeck is tilted slabs, not steps.** It climbs 0.765 -> 1.66 over
+# 3.65 m, and cutting that into flat plates puts a 0.37 m riser at the forward
+# end — over the step height, so the bow would be unreachable — and three seams
+# for a camera to pop across.
+#
+# **Two slabs and not one, because the sheer is convex and a chord is not a
+# curve.** A single 13.9 degree slab matched both ends to 5 mm and stood 0.29 m
+# above the drawn deck in the middle, which is a person walking on air over the
+# thing they appear to be standing on. Measured against the mesh, the drawn deck
+# is 0.77 at x=4.5, 0.80 at 5.0, 0.84 at 5.5, 0.89 at 6.0, 0.98 at 6.5, 1.15 at
+# 7.0, 1.37 at 7.5 and 1.65 at 8.0 — nearly flat aft and steep at the stem. Two
+# chords hold it to under 5 cm everywhere and meet at the same height at x=6.4,
+# so there is no step between them either.
+[[node]]
+name = "col_foredeck_aft"
+parent = "Decks"
+transform = { pos = [5.412, 0.6955, 0.0], rot_euler = [0.0, 0.0, 4.574] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.0032, 0.15, 2.30]
+
+[[node]]
+name = "col_foredeck_fwd"
+parent = "Decks"
+transform = { pos = [7.286, 1.1555, 0.0], rot_euler = [0.0, 0.0, 24.019] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.9032, 0.15, 1.30]
+
+# --- bulwarks, following the taper -----------------------------------------
+# Inner faces 0.1-0.2 m inboard of the drawn deck edge, so the capsule stops
+# just short of the edge and never over it. The two forward pairs are yawed
+# because the hull narrows from a 2.45 m half-beam to 0.50 m over six metres,
+# and a straight box would either fence off the side deck or hang over the sea.
+# Tops sit at the drawn cap height, not above it: a collider taller than the
+# rail it represents is an invisible wall, which is the same lie as a missing
+# one told the other way.
+
+[[node]]
+name = "col_bulwark_aft_port"
+parent = "Decks"
+transform = { pos = [-8.00, 0.96, -2.86] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.60, 0.66, 0.30]
+
+[[node]]
+name = "col_bulwark_aft_stbd"
+parent = "Decks"
+transform = { pos = [-8.00, 0.96, 2.86] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.60, 0.66, 0.30]
+
+[[node]]
+name = "col_bulwark_mid_port"
+parent = "Decks"
+transform = { pos = [-2.10, 0.96, -3.00] }
+
+  [node.components.BoxCollider]
+  half_extents = [4.30, 0.66, 0.30]
+
+[[node]]
+name = "col_bulwark_mid_stbd"
+parent = "Decks"
+transform = { pos = [-2.10, 0.96, 3.00] }
+
+  [node.components.BoxCollider]
+  half_extents = [4.30, 0.66, 0.30]
+
+[[node]]
+name = "col_bulwark_fwd_port"
+parent = "Decks"
+transform = { pos = [3.819, 1.125, -2.377], rot_euler = [0.0, -13.25, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.5925, 0.725, 0.30]
+
+[[node]]
+name = "col_bulwark_fwd_stbd"
+parent = "Decks"
+transform = { pos = [3.819, 1.125, 2.377], rot_euler = [0.0, 13.25, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.5925, 0.725, 0.30]
+
+[[node]]
+name = "col_bulwark_bow_port"
+parent = "Decks"
+transform = { pos = [6.863, 1.675, -1.368], rot_euler = [0.0, -22.15, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.5655, 0.875, 0.30]
+
+[[node]]
+name = "col_bulwark_bow_stbd"
+parent = "Decks"
+transform = { pos = [6.863, 1.675, 1.368], rot_euler = [0.0, 22.15, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.5655, 0.875, 0.30]
+
+# The two ends. Without them a player walks off the stern or off the stem, both
+# of which are drawn as solid.
+[[node]]
+name = "col_transom"
+parent = "Decks"
+transform = { pos = [-9.62, 1.00, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.12, 0.70, 2.90]
+
+[[node]]
+name = "col_stem"
+parent = "Decks"
+transform = { pos = [8.55, 1.90, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.45, 1.00, 0.70]
+
+# --- what stands on the deck -----------------------------------------------
+
+# The bait box in the cockpit: 0.48 m proud of the deck, which is over the
+# 0.35 m step height and therefore a wall rather than a kerb. It is drawn, so
+# it collides.
+[[node]]
+name = "col_engine_box"
+parent = "Decks"
+transform = { pos = [-7.80, 0.90, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.60, 0.24, 0.78]
+
+# The deckhouse, solid. See the note above: 1.49 m of headroom under its canopy
+# against a 1.90 m capsule, so its drawn floor is unreachable either way, and a
+# solid block is the honest collider until the mesh effort raises the roof.
+# What it leaves is the side deck — 1.20 m clear between this and the bulwark,
+# both sides, bow to stern, which is the header's gameplay requirement.
+[[node]]
+name = "col_house"
+parent = "Decks"
+transform = { pos = [-2.00, 1.72, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [4.20, 1.33, 1.50]
+
+[[node]]
+name = "col_house_fwd"
+parent = "Decks"
+transform = { pos = [3.03, 1.72, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.83, 1.33, 1.05]
+
+# --- the flybridge ---------------------------------------------------------
+
+[[node]]
+name = "col_fly_deck"
+parent = "Decks"
+transform = { pos = [-1.15, 2.93, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [5.35, 0.15, 2.60]
+
+# The helm console. 0.38 m proud of the flybridge deck — just over the step
+# height, so it is walked *around* rather than onto, which is what a console is.
+[[node]]
+name = "col_fly_console"
+parent = "Decks"
+transform = { pos = [-5.50, 3.27, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.60, 0.19, 1.40]
+
+# The helm block behind it, 0.59 m proud of the bridge deck — over the step
+# height, so it is walked round rather than onto, which is what a helm is.
+[[node]]
+name = "col_fly_helm"
+parent = "Decks"
+transform = { pos = [-3.70, 3.375, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.05, 0.295, 1.40]
+
+# **The hardtop, as a ceiling, and it is the one box here that takes space
+# away.** Its underside is at 4.80 over a bridge deck at 3.08: 1.72 m of
+# headroom against a 1.90 m capsule. Without it a walker stands with its head
+# 0.22 m inside the roof and the render says nothing — the same "simulation
+# self-consistent, picture a lie" this file's deck boxes exist to end, just
+# upside down. With it the bridge deck is walkable round its perimeter, which
+# is where a person actually fits: the two side strips at |z| 1.6 to 2.6, and
+# the open ends forward of x = 3.2 and aft of x = -2.2.
+#
+# Message for the mesh effort, and it is the same one the deckhouse sends: the
+# superstructure stack wants lifting about 0.5 m. Nothing on this boat clears a
+# person standing up.
+[[node]]
+name = "col_fly_hardtop"
+parent = "Decks"
+transform = { pos = [0.50, 5.00, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [2.70, 0.20, 1.55]
+
+[[node]]
+name = "col_fly_rail_port"
+parent = "Decks"
+transform = { pos = [-1.15, 3.60, -2.70] }
+
+  [node.components.BoxCollider]
+  half_extents = [5.35, 0.52, 0.10]
+
+[[node]]
+name = "col_fly_rail_stbd"
+parent = "Decks"
+transform = { pos = [-1.15, 3.60, 2.70] }
+
+  [node.components.BoxCollider]
+  half_extents = [5.35, 0.52, 0.10]
+
+[[node]]
+name = "col_fly_rail_fwd"
+parent = "Decks"
+transform = { pos = [4.30, 3.60, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.10, 0.52, 2.60]
+
+# --- the way up is NOT here ------------------------------------------------
+#
+# `jib_vi_walk.loom` leans a drawn 42 degree plank against the flybridge,
+# because the mesh's own ladder is unclimbable by construction: 0.75 m between
+# rungs against a 0.35 m step height, an 0.08 m tread against a 0.35 m capsule
+# radius, and 68 degrees against a 50 degree slope limit.
+#
+# It is **not** in this prefab, and the reason is small and worth stating: the
+# plank is the one piece that is *drawn*, so it needs a `box` asset, and a
+# prefab's asset key is renamed on merge when the consuming scene already
+# declares one by that name — `box` becomes `box_2`, which resolves to no
+# built-in and draws a unit cube with a warning. Every other node here is
+# collision only and declares nothing.
+#
+# So the flybridge is reachable in `jib_vi_walk.loom` and not from this prefab.
+# A scene that wants it up there authors its own plank as a child of the boat;
+# `assets/test/jib_vi_walk.loom` has the transform. Nothing in
+# `assets/games/deeper_demo.loom` goes up there — its helm is a mat on the aft
+# deck — which is why this is a note rather than a blocker.

@@ -9,20 +9,45 @@
 // here unspent.
 //
 // What it is told:      tick, dt, position, velocity, grounded,
-//                       move_x, move_z, forward, right, jump, sprint, fire
-// What it answers with: velocity, and events on `emit`
+//                       move_x, move_z, forward, right, jump, sprint, fire,
+//                       stand_node, stand_local
+// What it answers with: velocity, helm_force, helm_torque, events on `emit`
 // What it may keep:     memory, a map that survives to the next tick
 //
 // **A node `Script` is the only thing in this engine that sees a key press.**
 // `GameRules` sees positions and events and no input at all. So anything the
 // player *presses* has to enter the game here and leave as an event, which the
 // rules script reads on the same tick — the motion pass runs before the rules
-// pass, so nothing is a frame stale. Nothing presses anything yet; the hold is
-// filled by walking up to a supply, which needs no binding.
+// pass, so nothing is a frame stale. The hold still needs no binding — it is
+// filled by walking up to a supply — and `fire` is still unspent, for fishing.
 //
 // **`velocity` decelerates toward zero in the frame of what the character is
 // standing on** (ADR 0060), which is why this file is correct on the rig's
 // static deck and on the boat's heaving one without knowing which it is on.
+//
+// ---------------------------------------------------------------------------
+// THE TWO THINGS THIS FILE DOES BESIDES WALK
+// ---------------------------------------------------------------------------
+//
+// **1. It drives the boat.** `stand_node` names the rigid body under the
+// character's feet and `stand_local` says where on it — the same frame
+// `--assert Node.local_y` reads, and the only frame a station on something
+// that moves is fixed in. Standing inside the helm bounds hands W/S/A/D to
+// `helm_force` and `helm_torque`, which the host applies to that body through
+// the same `propel` step an authored `Propulsion` goes through.
+//
+// **The helm is a place, so there is no key to learn and no key to spend.**
+// The engine has five digital channels; `jump` is jump and `fire` belongs to
+// fishing. Position was the only budget left, and it is also the only control
+// scheme a player who was told nothing can find on their own.
+//
+// **2. It swims.** Nothing in this engine catches a character in water: fall
+// off the rig and you fall forever, and round 1 shipped a rail that leaked at
+// walking speed. Below the surface this floats the capsule instead, and the
+// slipway at the rig's east end is what it swims to. Together those are the
+// answer to "a demo must not contain an unrecoverable state" — the railing is
+// not, and a taller railing could not be, because the height a wall would need
+// is the jump apex plus the step height, which is above the player's own eye.
 
 // ---------------------------------------------------------------------------
 // Tuning. The whole feel of the character is these seven numbers.
@@ -40,6 +65,63 @@ let JUMP_SPEED = 7.5;    // about a 1.2 m hop at the gravity above — enough to
                          // to hop the rail and swim
 let COYOTE_TICKS = 6;    // jump grace after walking off a ledge, ~0.1 s
 let BUFFER_TICKS = 8;    // jump pressed just before landing still counts
+
+// ---------------------------------------------------------------------------
+// In the water. Three numbers, and the first one is the only one that matters.
+// ---------------------------------------------------------------------------
+
+let SWIM_LINE = 0.25;    // capsule centre below this, and not standing on
+                         // anything, means in the sea. The rig's own deck is
+                         // at 1.40 and the boat's at 0.64, so nothing walkable
+                         // in this scene is anywhere near it.
+let FLOAT_Y = -0.70;     // where a swimmer settles. The eye rides 0.75 above
+                         // the capsule centre, so this puts it at +0.05 —
+                         // eye-level with the surface, which is what swimming
+                         // looks like. Feet at -1.60, which is the depth the
+                         // slipway had to reach past.
+let FLOAT_RATE = 3.0;    // how hard buoyancy pulls toward it, per second.
+                         // Higher bobs; lower lets a fall from the cap bar
+                         // punch three metres under before it recovers.
+let SWIM = 1.9;          // metres per second. Under half the walk, because a
+                         // swimmer who moves at walking pace makes the slipway
+                         // pointless and the sea safe.
+
+// ---------------------------------------------------------------------------
+// The helm, as a box in the boat's own frame.
+//
+// The aft cockpit, hard against the deckhouse's after face — `col_house` ends
+// at local x = -6.20 and `col_engine_box` (the bait box) starts at -8.40, so
+// this 1.0 x 3.0 m patch is the clear deck between them. `HelmMat` in
+// `deeper_demo.loom` is drawn at exactly these bounds; the two are one
+// decision and neither is meaningful without the other.
+// ---------------------------------------------------------------------------
+
+let HELM_NODE = "Rig/Boat";
+let HELM_X_MIN = -8.60;
+let HELM_X_MAX = -6.00;
+let HELM_Z_MIN = -2.65;
+let HELM_Z_MAX = -0.90;
+
+// **Thrust, inside ADR 0063's wall and well inside it.** That ADR swept this
+// hull: 1.6 MN settles at 3.586 m/s (seven knots) and holds trim; 2.0 MN
+// reaches 3.74 and the trim walks; 2.63 MN submarines to y = -14.34. Thrust is
+// in the body frame and `Buoyancy` damps all three axes, so past the wall the
+// bow digs in and the vector acquires a downward component that digs it in
+// further — pushing harder makes the boat go *down*, not faster.
+//
+// 1.1 MN is deliberately short of the ceiling. A harbour is not a passage, the
+// rig is 24 m across, and a boat that answers the wheel at three knots is a
+// better demo than one that porpoises at seven. Measured, in this scene: see
+// the round's report.
+let AHEAD = 1100000.0;
+let ASTERN = 500000.0;   // less than half. A screw astern is inefficient in
+                         // life and a stern that digs in is the same failure
+                         // as a bow that does, so this end of the range gets
+                         // the wider margin.
+let WHEEL = 1300000.0;   // newton-metres of yaw. The hull's yaw inertia is
+                         // about 1.5e6 kg m^2 and the pontoons damp the
+                         // rotation, so this is a terminal rate, not an
+                         // acceleration — measured in the report.
 
 // ---------------------------------------------------------------------------
 // Carried between ticks. Neither is derivable from a single instant, and both
@@ -68,7 +150,42 @@ if wish_len > 1.0 {
     wish_z /= wish_len;
 }
 
-let speed = if sprint { SPRINT } else { WALK };
+// ---------------------------------------------------------------------------
+// At the helm? Then W/S/A/D are the throttle and the wheel, and your legs are
+// not going anywhere: you are holding on to something.
+// ---------------------------------------------------------------------------
+
+let aboard = stand_node == HELM_NODE;
+let at_helm = aboard
+    && stand_local[0] > HELM_X_MIN
+    && stand_local[0] < HELM_X_MAX
+    && stand_local[2] > HELM_Z_MIN
+    && stand_local[2] < HELM_Z_MAX;
+
+if at_helm {
+    // The bow is the hull's own +X, so ahead is +X in the body frame and the
+    // host rotates it. Nothing here knows or needs to know which way she is
+    // pointing.
+    let throttle = if move_z >= 0.0 { move_z * AHEAD } else { move_z * ASTERN };
+    helm_force = [throttle, 0.0, 0.0];
+    // **Negative Y for a turn to starboard.** A rotation about +Y takes +X
+    // toward -Z, and this hull's starboard side is +Z, so pressing D — the
+    // wheel to the right — is a torque about -Y. Verified by driving her.
+    helm_torque = [0.0, -move_x * WHEEL, 0.0];
+} else if aboard {
+    // **Aboard and not at the wheel means all stop, every tick.** The thrust
+    // table is live: a body keeps the last force written to it, so a helm that
+    // only ever wrote while someone was standing on the mat would leave the
+    // boat running away the moment they stepped off it. Walking away from the
+    // wheel is the second way to stop her, and it is the one a player finds by
+    // accident.
+    helm_force = [0.0, 0.0, 0.0];
+    helm_torque = [0.0, 0.0, 0.0];
+}
+
+let swimming = !grounded && position[1] < SWIM_LINE;
+
+let speed = if at_helm { 0.0 } else if swimming { SWIM } else if sprint { SPRINT } else { WALK };
 let target_x = wish_x * speed;
 let target_z = wish_z * speed;
 
@@ -97,7 +214,54 @@ if gap <= accel || gap < 1e-6 {
 
 let vy = velocity[1] - GRAVITY * dt;
 
-if airborne_for <= COYOTE_TICKS && jump_buffered <= BUFFER_TICKS {
+// **Standing on something means asking for no downward motion, and on a deck
+// under way that is the difference between riding and drowning.**
+//
+// `velocity[1]` comes back as zero minus the deck's own rise while grounded
+// (ADR 0060), so `- GRAVITY * dt` makes every grounded tick request 0.4 m/s
+// downward and rely on the contact to refuse it. A *static* floor refuses it
+// every time. A floor that is also translating does not: rapier's `move_shape`
+// ignores a shape it already penetrates, and at speed the sweep starts inside
+// the deck often enough that the request is accepted about one tick in seven.
+// The capsule ratchets down into the plate and eventually falls out of the
+// bottom of the boat.
+//
+// Measured on `assets/test/rig_drive.loom`, at the helm, hull at 3.0 m/s —
+// two characters, mirrored port and starboard on the same flat plate, one on
+// this script and one on `idle.rhai`:
+//
+//   tick    5   both 1.536
+//   tick  300   both 1.279      <- 2 cm of sink per metre the hull travels
+//   tick  600   both 0.973
+//   tick  900   over the side
+//
+// **Identical to four decimal places, so it is not the movement model** — it
+// is every movement model in this repository, all of which write this same
+// line. It has never shown before because no scene had ever driven a floating
+// body with anybody standing on it (ADR 0063's own opening sentence).
+//
+// **The fix belongs in `loom_physics::move_character` and is not being put
+// there in a demo round.** Clamping the grounded downward request in the
+// engine would fix `idle`, `fps`, `patrol`, `boat_patrol`, `rig_patrol` and
+// `enemy` in one place — and it would also change what happens on a slope
+// steep enough to slide down, so it moves the determinism hash of every
+// character scene in the repository. That is an ADR and a re-pinning pass,
+// exactly like ADR 0063's seven-knot wall. This line is the local fix, and it
+// is here rather than in the engine so it can be deleted in one edit when the
+// real one lands.
+if grounded { vy = velocity[1]; }
+
+// **In the sea, buoyancy replaces gravity outright rather than opposing it.**
+// A drag term against a 24 m/s/s pull is a tuning problem with two knobs and a
+// terminal velocity that depends on how far you fell; a straight approach to
+// `FLOAT_Y` is one knob and always ends in the same place. Nothing else in the
+// engine is doing this for the character — `Buoyancy` is a rigid-body
+// component and a `CharacterController` is not a rigid body.
+if swimming {
+    vy = (FLOAT_Y - position[1]) * FLOAT_RATE;
+}
+
+if !swimming && airborne_for <= COYOTE_TICKS && jump_buffered <= BUFFER_TICKS {
     vy = JUMP_SPEED;
     // Spend both, or the grace period fires again next tick and the character
     // climbs the air.
