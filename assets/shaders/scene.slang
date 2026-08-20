@@ -841,17 +841,21 @@ struct VSOutput {
     // object, because it is set by that mesh's quantisation step.
     nointerpolation float shadowBias : SHADOWBIAS;
     // **Where a ray must start, which is not where the pixel is.** The
-    // acceleration structure holds the mesh as it was authored; `bodyWave`
-    // moves the drawn surface away from it by up to a tenth of a body length.
-    // A ray fired from the drawn position starts *inside* the rest-pose
-    // geometry and every visibility query comes back occluded — which is what
-    // put hard black gashes down the gleamsprat's fringe. Firing from the
-    // undeformed position instead makes the query consistent with the thing it
-    // queries: a deformed body's shadows, AO and reflections are its rest
-    // pose's, which is the bargain ADR 0062 already struck for its reflection.
+    // acceleration structure holds the mesh as it was authored; two things in
+    // this shader move the drawn surface away from it — `windBend`, by as much
+    // as **1.6 m** on a swaying `forest.loom` tree, and `bodyWave`, by a tenth
+    // of a body length. A ray fired from the drawn position starts wherever
+    // that displacement happened to put it, which is very often *inside* the
+    // rest-pose geometry, and then every visibility query comes back occluded:
+    // hard black gashes down the gleamsprat's fringe, and black sides on every
+    // tree in the forest.
     //
-    // Equal to `worldPos` bit for bit on every object that does not deform,
-    // because it is the same expression applied to the same vector.
+    // Firing from the undisplaced position makes the query consistent with the
+    // thing it queries: a displaced body's shadows, AO and reflections are its
+    // rest pose's, which is the bargain ADR 0062 already struck for its
+    // reflection and ADR 0064 makes general. Equal to `worldPos` bit for bit on
+    // every object that neither sways nor deforms, because it is then the same
+    // expression applied to the same vector.
     float3 rayOrigin : RAYORIGIN;
 };
 
@@ -1065,6 +1069,13 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
     // instance's world origin is the model matrix's last column, which is what
     // the wind is sampled at and what phases the sway.
     float3 modelPos = unpackPosition(v.packedPosition, o.unpack);
+    // **The vertex as the acceleration structure holds it**, kept before
+    // anything displaces it — ADR 0064. Every ray this pixel fires starts here
+    // and not where the vertex is drawn, because the TLAS is built from a
+    // separate never-touched copy of the mesh and a ray from the drawn position
+    // starts wherever the displacement happened to put it: outside the surface,
+    // or a metre and a half inside it. See `out.rayOrigin`.
+    float3 restPos = modelPos;
     float3 origin = float3(o.model[0][3], o.model[1][3], o.model[2][3]);
     float3x3 m3 = float3x3(o.model[0].xyz, o.model[1].xyz, o.model[2].xyz);
     modelPos = windBend(modelPos, m3, origin, o.color.a);
@@ -1074,13 +1085,6 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
     // the world normal matrix first would leave nothing to index.
     float3 n = unpackNormal(v.packedNormal);
     float shear;
-    // **Kept, because it is where the rays have to start.** `windBend`'s own
-    // displacement is deliberately *not* backed out here: the trees have drawn
-    // bent and traced straight since ADR 0009 and every forest reference is
-    // blessed that way, so undoing it here would be a silent re-lighting of
-    // scenes this change has nothing to do with. It is the same defect one
-    // amplitude smaller, and it is pre-existing — see ADR 0064.
-    float3 restPos = modelPos;
     modelPos = bodyWave(modelPos, o, shear);
     uint deformCode = uint(o.deformFrame.w + 0.5);
     n[deformCode / 4u] -= shear * n[deformCode % 4u];

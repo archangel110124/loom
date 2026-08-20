@@ -6,7 +6,15 @@
   work" trigger, which named the wrong surface and the wrong symptom.
 - **Applies to:** every secondary ray in `scene.slang` — soft shadows, RTAO and
   traced reflections (ADR 0019, ADR 0061) — on any object whose vertices are
-  moved in the vertex shader.
+  moved in the vertex shader. Today that is `windBend` (ADR 0009) and
+  `bodyWave` (ADR 0062); the rule is written for whatever is third.
+
+**One sentence, if that is all you read: a ray must start where the
+acceleration structure thinks the surface is, not where the rasteriser drew
+it.** Two things in `vertexMain` move a vertex away from its mesh, and both
+were firing their shadow, AO and reflection rays from the moved position into
+geometry that had not moved. It rendered as pure black — down a fish's fringe,
+and on the side of every tree in `forest.loom`.
 
 ## The defect this exists to name
 
@@ -45,11 +53,26 @@ prominent at the authored 16.1 mm.
 
 **Ray queries use the pose the acceleration structure holds, not the pose the
 rasteriser draws.** `VSOutput` gains one interpolated `float3 rayOrigin`: the
-world position of the vertex *before* `bodyWave` displaced it. The three call
-sites in `scene.slang` — `ambientVisibility`, `sunVisibility` and
-`tracedEnvironment` — take it in place of `worldPos`. Everything else keeps the
-drawn position: lighting, fog, the wetness gate, the view vector and the
-geometric normal are all still the shape you can see.
+world position of the vertex as it came out of `unpackPosition`, before
+anything in `vertexMain` displaced it. The three call sites in `scene.slang` —
+`ambientVisibility`, `sunVisibility` and `tracedEnvironment` — take it in place
+of `worldPos`. Everything else keeps the drawn position: lighting, fog, the
+wetness gate, the view vector and the geometric normal are all still the shape
+you can see.
+
+**One rule with no exception, and the exception is what got measured.** The
+first version of this ADR took `rayOrigin` *after* `windBend`, on the argument
+that the trees have drawn bent and traced straight since ADR 0009 and that
+undoing it would silently re-light scenes this change has nothing to do with.
+That argument was wrong on the facts. `forest.loom` authors `sway = 0.9`, and
+`windBend`'s displacement is `sway · gust · h² · 0.02 · min(speed, 12)` — on a
+four-metre trunk in the default breeze, **about 1.6 metres**. Every tree in
+that scene rendered with its sides at pure black, from the same mechanism and
+an order of magnitude more of it, and `tests/references/forest.png` was blessed
+that way. Taking the origin before the sway as well changes exactly one row:
+`forest`, fraction 0.0988 at worst channel 138. Measured on all 54 `GOLDEN`
+rows — every other row is byte-identical, including the fourteen water rows
+already failing for unrelated reasons, whose numbers do not move by a digit.
 
 This is not a bias hack and deliberately not one. Padding `shadowBias` by the
 displacement was built and rendered too, and it works by pushing the origin far
@@ -71,17 +94,23 @@ deform `rayOrigin` is the same expression applied to the same vector as
 
 ## What this deliberately does not fix, and why
 
-**`windBend` has the same defect one amplitude smaller and keeps it.** A tree
-has been drawn bent and traced straight since ADR 0009, and every forest
-reference in `tests/references/` is blessed that way. Backing the sway out of
-`rayOrigin` as well would silently re-light scenes this change has nothing to
-do with, and it is not what put gashes on a fish. `rayOrigin` is therefore the
-position *after* `windBend` and *before* `bodyWave` — stated here rather than
-left to be read off two lines of shader.
+**Nothing else in the frame is in the acceleration structure to begin with.**
+Grass, water, rain, fire and smoke are generated from `SV_VertexID` with no
+vertex buffer, so they are not in the TLAS, cannot be hit, and have no rest
+pose to fire from. `meadow` does not move by a pixel across this change, which
+is the check rather than the claim.
 
-*Trigger:* a wind-bent tree self-shadows visibly, or someone raises `sway` far
-enough to matter. The fix is one line — move `restPos` above the `windBend`
-call — plus re-blessing every scene with a `Wind`.
+**A displaced body still casts its rest pose's shadow, and that is not fixed
+here.** `rayOrigin` corrects the point a ray *starts from*; it cannot correct
+what the ray *hits*, because the geometry it hits is the only geometry there
+is. A gleamsprat's fringe throws a shadow 16 mm from where the fringe is, and
+a leaning tree throws an upright tree's shadow. Both were already true and
+neither is visible at these amplitudes.
+
+*Trigger:* a deformed or swayed mesh's cast shadow or reflected silhouette is
+the subject of a shot. The answer then is a moving acceleration structure —
+`ALLOW_UPDATE`, one BLAS per instance, a device stall per build — which is what
+ADR 0062 refuses and this does not reopen.
 
 ## ADR 0062's trigger, restated
 
