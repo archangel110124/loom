@@ -1,0 +1,64 @@
+# The cinematic tank from the water's own level — `extends`, not a copy.
+#
+# **This exists because the authored camera cannot see either of the two
+# defects the human reported.** `plough_cinematic.loom` is shot from 3.6 m up
+# and looking down, for a good reason it states in full: a hollow in a volume
+# is only a hollow from above. But the same choice hides everything that lives
+# *at grazing incidence*, and the two things a human standing beside the tank
+# complains about both do:
+#
+#   - the spray beads, which from above are a scatter of dots on a wide sheet
+#     and from here are a carpet stacked along the line of sight — measured at
+#     roughly 85x the pixel coverage
+#   - the traced reflection's flat, straight-edged patches, which Fresnel makes
+#     invisible from above and obvious from here
+#
+# That is the same failure the shimmer harness had: an instrument that frames
+# the composite instead of the subject reports a pass having never looked at
+# the thing under test. Two rendering defects shipped through five green gates
+# because every gate was standing on the roof.
+#
+# **Everything else is deliberately identical.** This is one node's transform;
+# the physics, the domain, the hull, the ramp and the light all come from the
+# base file, so the pair differs in the camera and in nothing else and the two
+# references can be read against each other.
+[scene]
+format = 1
+id = "0c8f14ad-6b73-4ef2-95d0-1a4e2c7f8b36"
+
+# `extends` merges nodes, not the asset table, so the aliases the base's own
+# materials name have to be declared here as well — same ids, same files.
+[[asset]]
+key = "box"
+path = "box"
+
+[[asset]]
+key = "tiles_albedo"
+id = "bbce2fd2-83d0-410b-87b8-9e4b62ea4a64"
+path = "../textures/tiles_albedo.png"
+
+[[asset]]
+key = "tiles_normal"
+id = "39180893-483f-46b7-b946-f252aca36f23"
+path = "../textures/tiles_normal.png"
+
+[[prefab]]
+key = "cinematic"
+id = "6b2d90fe-4a17-4c83-95e2-08d3fb761a45"
+path = "plough_cinematic.loom"
+
+[[node]]
+name = "PloughLow"
+extends = "cinematic"
+
+# 1.05 m up — 0.25 m over the still water line at 0.8 — on the ramp side,
+# looking down the long axis of the tank. The 4 degrees of pitch is what keeps
+# it grazing: at anything steeper Fresnel drops and the reflection patches fade
+# out again, which is exactly how they survived this long.
+[[node]]
+name = "Camera"
+parent = "PloughLow"
+transform = { pos = [-3.60, 1.05, 2.20], rot_euler = [-4.0, -50.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

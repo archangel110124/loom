@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 64] = [
+const SCENES: [&str; 65] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -182,6 +182,15 @@ const SCENES: [&str; 64] = [
     // opens a hollow in a volume. Both in `GOLDEN`, where the reasoning is.
     "assets/test/ribbon.loom",
     "assets/test/plough_cinematic.loom",
+    // The same tank from the water's own level. **Not a duplicate scene** — it
+    // `extends` the one above and changes one node's transform, so the physics
+    // cannot drift between the pair. It is here because the authored camera is
+    // shot from 3.6 m up looking down, and neither of the two defects reported
+    // against this tier is visible from there: the spray beads stack along a
+    // grazing line of sight (6x the blob count, measured) and the traced
+    // reflection's flat patches are Fresnel-gated and simply fade out from
+    // above. Also in `GOLDEN`.
+    "assets/test/plough_cinematic_low.loom",
     // The falling sheet — ADR 0054. Two of them, because the whole claim is
     // that one authored discharge moves the picture between them: `spout` is
     // past its break length for the last third of a 2 m drop and `cascade` is
@@ -330,7 +339,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 50] = [
+const GOLDEN: [(&str, &str, &[&str]); 51] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -792,6 +801,18 @@ const GOLDEN: [(&str, &str, &[&str]); 50] = [
     // byte-identical across three fresh processes at these ticks.
     ("ribbon", "assets/test/ribbon.loom", &["--sim", "180"]),
     ("plough_cinematic", "assets/test/plough_cinematic.loom", &["--sim", "110"]),
+    // **The low camera, and it is the one row in this list watching the water
+    // from where a human stands.** Both of the defects the tier shipped with —
+    // a carpet of pale blue beads and a flat straight-edged reflection patch —
+    // are visible here and effectively invisible from the row above it, which
+    // is why they survived five green gates. That is the shimmer harness's
+    // failure a third time: an instrument framing the composite rather than the
+    // subject reports a pass having never looked.
+    //
+    // At 250 rather than 110: the beads are what this row is for, and their
+    // population *grows as the water calms*, so the settled frame is the
+    // stress case rather than the impact.
+    ("plough_cinematic_low", "assets/test/plough_cinematic_low.loom", &["--sim", "250"]),
     // **The Worthington jet, which does not exist at tick 50 and never could.**
     //
     // A splash is a sequence and Loom used to fire all of it at t = 0; the jet
