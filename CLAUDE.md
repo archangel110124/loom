@@ -150,6 +150,14 @@ that doesn't work is nearly undebuggable.
 Violating these makes the project unbuildable by month four and destroys `cargo check` times, which
 is the agent's iteration loop.
 
+Also on that loop: **`loom_render`'s `build.rs` skips `slangc` when no shader input is newer than
+the `.spv` it already emitted.** Its build-dependencies are `loom_field`, `loom_water` and
+`loom_voxel` — and so, transitively, `loom_scene` and `loom_reflect` — none of which is a shader
+input, so editing the base of the graph used to recompile nine shaders for nothing: `cargo check`
+after `touch crates/loom_reflect/src/lib.rs` is **1.24 s where it was 14.1 s**. The inputs it dates
+are every file under `assets/shaders/**` *recursively*, `build.rs`, and `slangc` itself. If a shader
+edit ever appears not to reach the GPU, that skip is the first place to look.
+
 ---
 
 ## Working alongside a human
