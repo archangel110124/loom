@@ -988,7 +988,6 @@ impl Sim {
         // its coverage on `loom_foam_at`. What arrives is foam that *persists*
         // and *drifts* rather than a highlight welded to the body — the
         // distinction ADR 0055 was built around.
-        let mut hulls: Vec<loom_water::foam::Hull> = Vec::new();
         self.fluid_wetness.resize(self.fluid_probes.len(), 0.0);
         let mut probe = 0;
         for floating in &mut self.floating {
@@ -1084,27 +1083,15 @@ impl Sim {
                 floating.submersion.enter,
                 floating.submersion.exit,
             );
-            if self.foam.is_some() {
-                // **Left as one whole-body hull, deliberately.** This tier
-                // already deposits per station, a few dozen lines above, with a
-                // strength taken from the solver's own shear — so it does not
-                // have the defect the deterministic tier had, and giving it
-                // stations here would deposit twice. What this entry is for is
-                // the advection drag in `foam::velocity_at`, which wants one
-                // body-scale reach. `opening` reproduces exactly what the
-                // deposit did before it was a separate field.
-                let velocity = self
-                    .physics
-                    .velocity_at_point(floating.body, centre)
-                    .unwrap_or([0.0; 3]);
-                hulls.push(loom_water::foam::Hull {
-                    at: centre,
-                    velocity,
-                    opening: velocity[0].hypot(velocity[1]).hypot(velocity[2]),
-                    radius: waterplane_radius(floating, centre),
-                    wetted: wrench.submerged,
-                });
-            }
+            // **This tier contributes no `Hull` at all, and that is the whole
+            // of it.** It deposits per station a few dozen lines above, from
+            // the solver's own shear, which is a better source than any
+            // whole-body estimate. The entry that used to be here existed for
+            // the advection drag in `foam::velocity_at`; that term is deleted,
+            // so all it did afterwards was lay a second, body-scale disc — the
+            // 244 m^2 pancake the deterministic tier stopped laying when it
+            // grew stations. Removing it moves not one pixel of
+            // `plough_cinematic`, `jib_vi_painted`, `slosh` or `fishing`.
         }
 
         // **The field is stepped here rather than in `float`**, which returned
@@ -1117,7 +1104,7 @@ impl Sim {
             let ground = move |x: f32, z: f32| {
                 terrain.map_or(loom_voxel::heightfield::NO_GROUND, |t| t.at(x, z))
             };
-            field.step(&flat, t, self.flow.as_ref(), &hulls, &ground);
+            field.step(&flat, t, self.flow.as_ref(), &[], &ground);
         }
     }
 
