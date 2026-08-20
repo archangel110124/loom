@@ -1,0 +1,30 @@
+# **The fight bench, lazy pilot — and this is Pillar 4 as a regression test.**
+#
+# Holds the reel down and reads nothing: no tell, no window, no let-go. It
+# must **lose**, and it must lose by snapping the line. Paired with
+# `fight_skilled.loom`, which lands the same fish on the same schedule, that
+# is the GDD's "a catch is a decision, not a slot pull" stated as two
+# assertions a machine can check unattended. **If both of them win, the fight
+# has no skill in it and the gate says so.**
+#
+# See `fight_skilled.loom` for how the pilot is selected. One word differs.
+#
+#   loom sim assets/test/fight_lazy.loom --ticks 1800 \
+#     --assert "status == lost" --assert "events.snap >= 1"
+[scene]
+format = 1
+id = "9b1c4f20-7a83-4e15-9d62-0c4a71e8b3d2"
+
+[[node]]
+name = "Root"
+
+  [node.components.GameRules]
+  path = "../scripts/fishing_fight.rhai"
+
+[[node]]
+name = "Pilot"
+parent = "Root"
+
+[[node]]
+name = "lazy"
+parent = "Root/Pilot"

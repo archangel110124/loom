@@ -1,0 +1,39 @@
+# **The fight bench: a fish, a rod, and nobody's boat.**
+#
+# Five sibling scenes — `fight_skilled`, `fight_lazy`, `fight_masher`,
+# `fight_idle`, `fight_sloppy` — differ by exactly one word: the name of the
+# `Pilot` node. `assets/scripts/fishing_fight.rhai` reads that name out of
+# `positions` and drives itself with the matching reference policy, because
+# `loom sim` never calls `set_input` and headless input is zeros forever.
+# **The pilot is swapped; the model never is.**
+#
+# There is no water, no boat, no ground and nothing to draw. The fight is a
+# state machine over `state`, and giving it scenery here would only mean five
+# copies of scenery. `assets/games/fishing.loom` is where it gets a boat.
+#
+# This one is the skilled pilot: reads the tell, drops the rod before each
+# run, and takes the windows that open on a calm line. It must land the fish.
+#
+#   loom sim assets/test/fight_skilled.loom --ticks 1800 \
+#     --assert "status == won" --assert "events.snap == 0" \
+#     --assert "state.hits >= 2"
+[scene]
+format = 1
+id = "9b1c4f20-7a83-4e15-9d62-0c4a71e8b3d1"
+
+[[node]]
+name = "Root"
+
+  [node.components.GameRules]
+  path = "../scripts/fishing_fight.rhai"
+
+# The whole pilot. An empty node whose *name* is the parameter, because
+# `Script` has a `path` and no `params` field — and a name is diffable text
+# where a fifth two-line script file would not be.
+[[node]]
+name = "Pilot"
+parent = "Root"
+
+[[node]]
+name = "skilled"
+parent = "Root/Pilot"

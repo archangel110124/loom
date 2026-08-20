@@ -1,0 +1,30 @@
+# **The fight bench, sloppy pilot — the scene that proves there is a gradient.**
+#
+# Does everything the skilled pilot does, twelve ticks (200 ms) late. It still
+# wins, because a fight nobody can survive badly is a wall rather than a skill
+# check — but it wins **slower**, spends most of the fight with the line hot,
+# and earns **zero** rhythm windows. That last number is `WINDOW_CALM`, the
+# clause that says a window only opens on a line you kept calm, and it is the
+# whole reason a machine can read skill off this fight without a human
+# watching: `hits == 0` here against `hits >= 2` on the skilled bench.
+#
+#   loom sim assets/test/fight_sloppy.loom --ticks 2400 \
+#     --assert "status == won" --assert "state.hits == 0" \
+#     --assert "state.hot > 600"
+[scene]
+format = 1
+id = "9b1c4f20-7a83-4e15-9d62-0c4a71e8b3d5"
+
+[[node]]
+name = "Root"
+
+  [node.components.GameRules]
+  path = "../scripts/fishing_fight.rhai"
+
+[[node]]
+name = "Pilot"
+parent = "Root"
+
+[[node]]
+name = "sloppy"
+parent = "Root/Pilot"

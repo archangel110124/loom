@@ -1,0 +1,29 @@
+# **The fight bench, masher pilot: reeling flat out and hammering the button.**
+#
+# The scene that keeps the mispress honest. A window press is a *decision*,
+# so a press outside one has to cost — and the cost has to be edge-detected,
+# because a pilot holding the button reads as sixty presses a second and
+# would snap a line in a quarter of a second regardless of the model. This
+# pilot presses about seven times a second on purpose and must still lose
+# **faster than the idle pilot does**: mashing is worse than doing nothing.
+#
+#   loom sim assets/test/fight_masher.loom --ticks 1800 \
+#     --assert "status == lost" --assert "events.snap >= 1" \
+#     --assert "state.fight_ticks < 150"
+[scene]
+format = 1
+id = "9b1c4f20-7a83-4e15-9d62-0c4a71e8b3d3"
+
+[[node]]
+name = "Root"
+
+  [node.components.GameRules]
+  path = "../scripts/fishing_fight.rhai"
+
+[[node]]
+name = "Pilot"
+parent = "Root"
+
+[[node]]
+name = "masher"
+parent = "Root/Pilot"

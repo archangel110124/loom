@@ -1,0 +1,29 @@
+# **The fight bench, nobody at the rod.**
+#
+# Casts, sets the hook, and then never touches the reel again. **It must lose
+# the fish and it must never snap the line** — an unattended rod that snaps is
+# a model where doing nothing is punished like doing the wrong thing, and a
+# fight that sits at "playing" forever is one where the idle case asserts
+# nothing at all. Five seconds of slack throws the hook; that is what this
+# scene exists to pin.
+#
+#   loom sim assets/test/fight_idle.loom --ticks 1800 \
+#     --assert "status == lost" --assert "events.escaped >= 1" \
+#     --assert "events.snap == 0"
+[scene]
+format = 1
+id = "9b1c4f20-7a83-4e15-9d62-0c4a71e8b3d4"
+
+[[node]]
+name = "Root"
+
+  [node.components.GameRules]
+  path = "../scripts/fishing_fight.rhai"
+
+[[node]]
+name = "Pilot"
+parent = "Root"
+
+[[node]]
+name = "idle"
+parent = "Root/Pilot"
