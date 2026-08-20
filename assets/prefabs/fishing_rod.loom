@@ -7,7 +7,11 @@
 # ANGLE (rod_spec._angles), so the fight script is one identical line
 # on all 24 of them: pitch = 0.2917 + 4.2917 * stress / 100.
 # loom_ecs composes world = parent_world x local to any depth, so the
-# 24 rotations make one curve. NEVER put a scale other than [1,1,1]
+# 24 rotations make one curve. **That line is now real**: every S node
+# carries `../scripts/rod_bend.rhai`, which reads `state.stress` off the
+# rules script and writes the joint. A scene with no fight reads no
+# stress and the script reproduces the baked rest pose exactly, so this
+# prefab still renders identically wherever it already appeared. NEVER put a scale other than [1,1,1]
 # on a chain node: compose()
 # scales the local matrix's COLUMNS, so a parent's scale is applied after
 # a child's rotation and shears it.
@@ -340,6 +344,9 @@ name = "S1"
 parent = "Rod/Butt"
 transform = { pos = [0.0000, 0.3700, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 1
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_1" }
   [node.components.Material]
@@ -353,6 +360,9 @@ name = "S2"
 parent = "Rod/Butt/S1"
 transform = { pos = [0.0000, 0.4960, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 2
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_2" }
   [node.components.Material]
@@ -366,6 +376,9 @@ name = "S3"
 parent = "Rod/Butt/S1/S2"
 transform = { pos = [0.0000, 0.2470, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 3
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_3" }
   [node.components.Material]
@@ -379,6 +392,9 @@ name = "S4"
 parent = "Rod/Butt/S1/S2/S3"
 transform = { pos = [0.0000, 0.1612, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 4
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_4" }
   [node.components.Material]
@@ -392,6 +408,9 @@ name = "S5"
 parent = "Rod/Butt/S1/S2/S3/S4"
 transform = { pos = [0.0000, 0.1148, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 5
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_5" }
   [node.components.Material]
@@ -405,6 +424,9 @@ name = "S6"
 parent = "Rod/Butt/S1/S2/S3/S4/S5"
 transform = { pos = [0.0000, 0.0965, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 6
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_6" }
   [node.components.Material]
@@ -418,6 +440,9 @@ name = "S7"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6"
 transform = { pos = [0.0000, 0.0763, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 7
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_7" }
   [node.components.Material]
@@ -431,6 +456,9 @@ name = "S8"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7"
 transform = { pos = [0.0000, 0.0656, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 8
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_8" }
   [node.components.Material]
@@ -444,6 +472,9 @@ name = "S9"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8"
 transform = { pos = [0.0000, 0.0560, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 9
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_9" }
   [node.components.Material]
@@ -457,6 +488,9 @@ name = "S10"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9"
 transform = { pos = [0.0000, 0.0501, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 10
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_10" }
   [node.components.Material]
@@ -470,6 +504,9 @@ name = "S11"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10"
 transform = { pos = [0.0000, 0.0454, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 11
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_11" }
   [node.components.Material]
@@ -483,6 +520,9 @@ name = "S12"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11"
 transform = { pos = [0.0000, 0.0415, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 12
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_12" }
   [node.components.Material]
@@ -496,6 +536,9 @@ name = "S13"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11/S12"
 transform = { pos = [0.0000, 0.0376, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 13
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_13" }
   [node.components.Material]
@@ -509,6 +552,9 @@ name = "S14"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11/S12/S13"
 transform = { pos = [0.0000, 0.0270, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 14
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_14" }
   [node.components.Material]
@@ -522,6 +568,9 @@ name = "S15"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11/S12/S13/S14"
 transform = { pos = [0.0000, 0.0425, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 15
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_15" }
   [node.components.Material]
@@ -535,6 +584,9 @@ name = "S16"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11/S12/S13/S14/S15"
 transform = { pos = [0.0000, 0.0328, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 16
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_16" }
   [node.components.Material]
@@ -548,6 +600,9 @@ name = "S17"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11/S12/S13/S14/S15/S16"
 transform = { pos = [0.0000, 0.0309, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 17
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_17" }
   [node.components.Material]
@@ -561,6 +616,9 @@ name = "S18"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11/S12/S13/S14/S15/S16/S17"
 transform = { pos = [0.0000, 0.0299, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 18
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_18" }
   [node.components.Material]
@@ -574,6 +632,9 @@ name = "S19"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11/S12/S13/S14/S15/S16/S17/S18"
 transform = { pos = [0.0000, 0.0342, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 19
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_19" }
   [node.components.Material]
@@ -587,6 +648,9 @@ name = "S20"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11/S12/S13/S14/S15/S16/S17/S18/S19"
 transform = { pos = [0.0000, 0.0247, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 20
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_20" }
   [node.components.Material]
@@ -600,6 +664,9 @@ name = "S21"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11/S12/S13/S14/S15/S16/S17/S18/S19/S20"
 transform = { pos = [0.0000, 0.0299, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 21
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_21" }
   [node.components.Material]
@@ -613,6 +680,9 @@ name = "S22"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11/S12/S13/S14/S15/S16/S17/S18/S19/S20/S21"
 transform = { pos = [0.0000, 0.0318, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 22
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_22" }
   [node.components.Material]
@@ -626,6 +696,9 @@ name = "S23"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11/S12/S13/S14/S15/S16/S17/S18/S19/S20/S21/S22"
 transform = { pos = [0.0000, 0.0426, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 23
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_23" }
   [node.components.Material]
@@ -639,6 +712,9 @@ name = "S24"
 parent = "Rod/Butt/S1/S2/S3/S4/S5/S6/S7/S8/S9/S10/S11/S12/S13/S14/S15/S16/S17/S18/S19/S20/S21/S22/S23"
 transform = { pos = [0.0000, 0.0308, 0.0000], rot_euler = [0.292, 0.0, 0.0] }
 # bend joint 24
+  [node.components.Script]
+  path = "../scripts/rod_bend.rhai"
+
   [node.components.MeshRenderer]
   mesh = { asset = "blank_24" }
   [node.components.Material]

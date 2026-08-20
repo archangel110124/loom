@@ -18,7 +18,7 @@ id = "9b1c4f20-7a83-4e15-9d62-0c4a71e8b3d3"
 name = "Root"
 
   [node.components.GameRules]
-  path = "../scripts/fishing_fight.rhai"
+  path = "../scripts/deeper_rules.rhai"
 
 [[node]]
 name = "Pilot"

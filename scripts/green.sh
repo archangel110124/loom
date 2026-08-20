@@ -143,10 +143,15 @@ fi
 #
 # **`state.at_helm` is the claim `Rig/Player.z < -11.0` was standing in for.**
 # A position band is satisfied by a player standing anywhere in a strip of
-# cockpit, and by a boat that drifted under one; `deeper_demo.rhai` computes it
-# from the *drawn* mat's world position, so it follows her when she turns and
-# it is the same fact the HUD line prints. Run 1 pairs it with tick 60, where
-# the answer is still no.
+# cockpit, and by a boat that drifted under one.
+#
+# **It changed meaning in round 4 and got better.** It used to be the rules
+# script's own rectangle around the drawn mat — a *position*, which a player
+# who has pressed SPACE and let go of the wheel still satisfies. It is now the
+# fact `deeper_player.rhai` computes to decide whether W is the throttle,
+# crossing to the rules as an event on change: **the wheel is answering you**.
+# The fishing block below pairs it with the same hold plus SPACE, where the
+# answer is no. Run 1 pairs it with tick 60, where it is also still no.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 60 --hold move_z=1 \
   --assert "state.at_helm == 0" >/dev/null
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 240 --hold move_z=1 \
@@ -256,6 +261,85 @@ fi
 "$LOOM" sim assets/test/rig_overboard.loom --ticks 900 --hold move_x=-1 \
   --assert "Rig/Player.y > 2.2" --assert "Rig/Player.x < 11.5" >/dev/null
 
+# ---------------------------------------------------------------------------
+# **FISHING, FROM THE BOAT.** The third of the demo's four things, and the
+# first round in which the loop and the hub are the same game.
+#
+# `deeper_demo.rhai` is a dead stub now: the demo's rules **are** `deeper_rules.rhai`, the
+# fight's own file, which grew a hub block that is a no-op in any scene without
+# a `Rig/Player`. A scene has one `GameRules` and `play.rs` refuses a second, so
+# the alternative was a second copy of two hundred lines of tuned fight
+# constants that the five benches above pin and the demo would not — green on
+# both sides while the two drift apart.
+#
+# **Six runs, and they are six different claims.** Two of them are controls and
+# neither is decoration: without them a fight that ran unconditionally, or a
+# rod that could be cast from the wharf, would pass every row that is left.
+
+# 1. **A keypress reaches the rod.** Walk aboard holding W and the button: the
+#    rod casts, a fish bites. It is a *held* button, so `deeper_player.rhai`
+#    hands the fight exactly one press and the hook is never set — `spooked` is
+#    that same sentence's second half, and it is why this row does not assert a
+#    landing. A landing needs taps, and `--hold` is one constant for a run.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold "move_z=1,fire=1" \
+  --assert "events.bite >= 1" --assert "events.spooked >= 1" \
+  --assert "state.aboard == 1" >/dev/null
+
+# 2. **The control: the rod is aboard-only.** Same button, no walk. He never
+#    boards, so no `angler` event is ever emitted and nothing casts. Without
+#    this row an emit with the `aboard` guard deleted passes row 1 unchanged.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold "fire=1" \
+  --assert "events.bite == 0" --assert "state.aboard == 0" >/dev/null
+
+# 3. **SPACE now changes what is on the screen, in both directions.** Round 3
+#    shipped a hands-off latch whose only observable consequence was that the
+#    boat stopped, while the caption went on saying "W ahead" — because the
+#    rules script computed its own `at_helm` from a rectangle and
+#    `deeper_player.rhai` computed a different one from the wheel, and the two
+#    were pronounced the same. There is one now, it is stated by the script
+#    that sees the key, and it crosses as an event on change. Same hold as the
+#    `rig_drive` pair above, plus Space: aboard, and *not* driving.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold "move_z=1,jump=1" \
+  --assert "state.aboard == 1" --assert "state.at_helm == 0" >/dev/null
+
+# 4. **A fish is hooked, played and landed, in the demo's own rules.** The
+#    fight cannot be driven by `--hold` — it wants correctly-timed taps for
+#    twenty seconds — so `rig_fish.loom` names a reference angler the way the
+#    five benches do. See that file's header for why a pilot is right here and
+#    refused in `rig_drive.loom`.
+"$LOOM" sim assets/test/rig_fish.loom --ticks 1500 \
+  --assert "events.hooked >= 1" --assert "events.landed >= 1" \
+  --assert "state.fish >= 1" >/dev/null
+
+# 5. **A hub is not a bench.** `Play::run` returns the instant `status` is won
+#    or lost — the whole simulation stops — which is right for the benches and
+#    would make catching a fish the end of the demo. In a hub the fight never
+#    latches a terminal status and the terminal phases time out back to the
+#    cast. By 1800 the pilot is playing his second fish.
+"$LOOM" sim assets/test/rig_fish.loom --ticks 1800 \
+  --assert "status == playing" --assert "state.fish >= 1" \
+  --assert "events.hooked >= 2" >/dev/null
+
+# 6. **"Am I moving?" as a number, because the picture will not say.** From the
+#    helm at the opening yaw a frame after forty-five metres of travel differs
+#    from a moored frame by less than two frames of the same moving boat eleven
+#    seconds apart: the mat faces her beam and nothing fixed is ever in shot.
+#    The picture fix is to berth her bow-out and it moves every pinned number
+#    above. `state.knots` is the readout in the meantime — and the pair is what
+#    makes it a claim rather than a display, because a smoother that had jammed
+#    at a constant would pass either row alone.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
+  --assert "state.knots > 5.0" >/dev/null
+"$LOOM" sim assets/test/rig_drive.loom --ticks 900 \
+  --assert "state.knots < 0.5" >/dev/null
+
+# 7. **The stall limiter says so now.** It shut the throttle in round 3 and the
+#    caption went on reading "W ahead", so a player pushing a bow into a quay
+#    got a boat that had silently stopped obeying him. Same run as the
+#    `rig_bump` row above; this is the half of it the player can see.
+"$LOOM" sim assets/test/rig_bump.loom --ticks 2400 --hold move_z=1 \
+  --assert "state.jammed == 1" >/dev/null
+
 # **The sim's answer to `xtask repeat`.** `state_hash` covers physics, so
 # nothing above would notice a fight that replayed differently — a float hash,
 # a map iterated in host order, a wall clock. Three fresh processes, compared
@@ -266,7 +350,7 @@ fi
 cmp /tmp/loom-fight-1.json /tmp/loom-fight-2.json
 cmp /tmp/loom-fight-2.json /tmp/loom-fight-3.json
 rm -f /tmp/loom-fight-1.json /tmp/loom-fight-2.json /tmp/loom-fight-3.json
-echo "gameplay: 11 scenes asserted, fight byte-identical across 3 processes"
+echo "gameplay: 12 scenes asserted, fight byte-identical across 3 processes"
 
 # ---------------------------------------------------------------------------
 # 7. Work per frame. **Nothing above this line can see a frame get slower.**

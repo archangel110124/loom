@@ -3,13 +3,19 @@
 #   loom run assets/games/fishing.loom --edit      (then Play, and capture)
 #   loom render assets/games/fishing.loom --sim 600 --out /tmp/fishing.png
 #
+# **The rules script is `deeper_rules.rhai` now, not `fishing_fight.rhai`.** It
+# is the same fight, in a file that also carries the demo hub's rules — a scene
+# has one `GameRules` and the demo needs both. Every branch of the hub half is
+# behind `"Rig/Player" in positions`, which this scene does not have, so nothing
+# below is affected.
+#
 # Hold **W** to reel: it drains the fish and loads the line. Let go to bleed
 # the line off. When the fish runs — you get 400 ms of warning — let go. Press
 # **fire** to cast, to set the hook, and to take a rhythm window when one
 # opens. Windows only open on a line you kept calm, which is the whole lesson.
 #
 # **The fight itself is not in this scene and cannot be tested from it.**
-# It lives in `../scripts/fishing_fight.rhai`, and the five `fight_*.loom`
+# It lives in `../scripts/deeper_rules.rhai`, and the five `fight_*.loom`
 # benches are what assert it — they carry a reference pilot because `loom sim`
 # never calls `set_input`, so a headless run of *this* file is an angler
 # standing at the rail with nobody's hands on him. What this file is for is
@@ -53,7 +59,7 @@ path = "sphere"
 name = "Sea"
 
   [node.components.GameRules]
-  path = "../scripts/fishing_fight.rhai"
+  path = "../scripts/deeper_rules.rhai"
 
   # Low sun, long light, and enough fog to lose the horizon in. The horror is
   # not layered on yet; this is the serenity the GDD asks the loop to open on,
@@ -116,13 +122,14 @@ transform = { pos = [1.20, 2.30, 2.60] }
 # capsule centre, feet 0.90 below it on a deck at 1.40, so y = +0.16 is a
 # butt at world 2.46 — hand height on a 1.8 m man.
 #
-# The instance is the **rest** prefab. `fishing_rod_bent.loom` is the same
-# chain at a fighting load, and swapping the key here is the whole change —
-# because a component override cannot reach a `transform` (`Transform` is
-# node syntax, not a component), so a bend has to come either from a second
-# prefab or from a per-tick `Script`. A node script can write `rotation`
-# today but cannot read `state`; when it can, one identical line on S1..S24
-# drives this off `state.stress` and neither file changes.
+# The instance is the **rest** prefab, and it no longer stays at rest. A node
+# script could always write `rotation` and could not read `state`; it can now
+# (`ScriptHost::tick` takes the rules script's numbers, read-only and one tick
+# stale), so `fishing_rod.loom` carries one identical line on S1..S24 —
+# `../scripts/rod_bend.rhai` — and the blank loads up with `state.stress`.
+# Exactly as this comment predicted, and neither this file nor the prefab's
+# geometry changed. `fishing_rod_bent.loom` is still the same chain baked at a
+# fighting load, and is now only wanted for a still.
 [[node]]
 name = "Rod"
 parent = "Sea/Boat/Angler"
@@ -143,9 +150,12 @@ transform = { pos = [0.28, 0.16, 0.10], rot_euler = [-38.0, 0.0, -18.0] }
 # **The lure, and it is the cheapest good moment in the build.** Authored two
 # metres up, it falls, hits the water and splashes — buoyancy, submersion and
 # the water surface all doing their existing jobs, with no new code, and the
-# GDD's first pillar arriving for free. It is not yet tied to the fight: the
-# fight is `state`, and a node `Script` cannot read `state` today. That is the
-# one engine binding this design asks for, and it is asked for later.
+# GDD's first pillar arriving for free. **It is still not tied to the fight**,
+# and the binding is no longer what is missing: a node `Script` reads `state`
+# now, and the rod uses it. What a lure needs is different — a `RigidBody`
+# parented to `Sea` is world-space, so a hull under way leaves it astern within
+# a second, and where a lure *is* while a fish is on is a design question this
+# file does not answer.
 [[node]]
 name = "Lure"
 parent = "Sea"

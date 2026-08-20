@@ -1,7 +1,7 @@
 // **The Rig's reference pilot.** It walks the hub end to end so that a headless
 // run can assert the hub is walkable, because `loom sim` never calls
 // `set_input` and headless input is zeros forever — the same reason
-// `fishing_fight.rhai` carries five reference policies.
+// `deeper_rules.rhai` carries five reference policies.
 //
 // It is a new file rather than `patrol.rhai` for one measured reason.
 // `patrol.rhai` hops at 7.5 m/s against a gravity of 22, and

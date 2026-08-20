@@ -2178,10 +2178,14 @@ impl Runner {
         // are half absent. It is the exact failure class the gameplay block in
         // `scripts/green.sh` exists to catch and it is invisible to it.
         //
-        // The demo is about to walk into it: `deeper_demo.rhai` holds the hub's
-        // slot and `fishing_fight.rhai` wants the same one. This makes that
-        // collision arrive as a named error on the first run instead of as a
-        // fishing loop that quietly is not there.
+        // The demo walked into it in round 4 and this is what it hit: the hub's
+        // rules held the slot and the fishing fight wanted the same one. The
+        // refusal did its job — it arrived as a named error on the first run
+        // rather than as a fishing loop that quietly was not there — and the
+        // answer was to merge them into `deeper_rules.rhai`, whose hub half is
+        // behind `"Rig/Player" in positions` and unreachable from the five
+        // fight benches. That is the outcome this message asks for, in the
+        // order it asks for it.
         let mut rules: Option<String> = None;
         for entity in world.entities() {
             let Some(path) = world.rules_path(*entity) else {

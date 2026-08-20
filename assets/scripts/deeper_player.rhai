@@ -370,3 +370,80 @@ memory.airborne_for = airborne_for;
 memory.jump_buffered = jump_buffered;
 
 velocity = [vx, vy, vz];
+
+// ---------------------------------------------------------------------------
+// **THE ROD, and the two channels that were being kept for it.**
+// ---------------------------------------------------------------------------
+//
+// A node `Script` is the only thing in this engine that sees a key press, and
+// the fight in `deeper_rules.rhai` is a `GameRules` script, which sees none. So
+// the two verbs cross the gap as an event, read on the same tick — the motion
+// pass runs before the rules pass, so nothing is a frame stale. This is the
+// same seam `fishing_angler.rhai` opened for `fishing.loom`; only the bindings
+// differ, and they differ for one reason.
+//
+// **Reel is SHIFT here and `move_z` there.** In `fishing.loom` the angler is a
+// post: his movement model writes `velocity = [0,0,0]` and W is free. Here W is
+// the throttle at the wheel and his legs everywhere else, so binding reel to it
+// would mean either walking off the boat while playing a fish or a third stance
+// with its own way in and its own way out. `sprint` was unspent, it is a hold
+// rather than a tap, and "hold to reel" survives the change intact.
+//
+// The cost, stated: on the boat SHIFT is now reel **and** still sprint. A
+// player sprinting round the cockpit with a fish on loads the line. That is a
+// dozen ticks of stress on a 100-point meter and it is not worth a stance to
+// close.
+//
+// **Fishing is aboard-only, and it is enforced here rather than in the rules.**
+// No event means no reel and no press, so a rod cast from the wharf is not a
+// refusal the fight has to carry — it is a thing that never reaches it.
+//
+// Emitted only on a tick where something is actually pressed, and `fire` only
+// on its **edge**. The fight reads absence as "not reeling, not pressing",
+// which is exactly right, and the log stays a log rather than a per-tick trace:
+// `loom sim --hold fire=1` holds the button for the whole run and produced 708
+// `angler` events before the edge went in, for one cast.
+//
+// The fight edge-detects the press itself (`edge = press && held == 0`) and
+// still must: it also drives five reference pilots, which do not come through
+// here at all.
+// **The edge is measured aboard, not everywhere.** Walking up the boarding
+// steps with the button already down should cast when you arrive, and an edge
+// tracked ashore is spent before you get there — which is exactly what
+// `--hold fire=1` does, and it silently produced a run with no cast in it.
+let fire_now = aboard && fire;
+let fire_edge = fire_now && !(if "fire_held" in memory { memory.fire_held } else { false });
+memory.fire_held = fire_now;
+if aboard && (sprint || fire_edge) {
+    emit.push(#{
+        kind: "angler",
+        reel: if sprint { 1.0 } else { 0.0 },
+        press: if fire_edge { 1.0 } else { 0.0 },
+    });
+}
+
+// ---------------------------------------------------------------------------
+// **WHERE HE IS STANDING, on change only.**
+// ---------------------------------------------------------------------------
+//
+// Round 3 shipped a caption keyed on a rectangle in the rules script while the
+// fact it claimed to state — whether the wheel is answering — lived here, under
+// the same name. Pressing SPACE changed nothing on screen in either direction
+// because the rules script could not see that it had been pressed.
+//
+// Three booleans, packed into one integer so the comparison is one comparison,
+// and emitted only when the integer moves: a boarding is two events, not two
+// thousand. `jump` is still not a fishing binding and `fire` is still not a
+// helm one; nothing here spends a channel.
+let station = (if aboard { 1 } else { 0 })
+            + (if at_helm { 2 } else { 0 })
+            + (if stalled > STALL_TICKS { 4 } else { 0 });
+if station != (if "station" in memory { memory.station } else { -1 }) {
+    emit.push(#{
+        kind: "station",
+        aboard: if aboard { 1.0 } else { 0.0 },
+        helm: if at_helm { 1.0 } else { 0.0 },
+        stalled: if stalled > STALL_TICKS { 1.0 } else { 0.0 },
+    });
+    memory.station = station;
+}

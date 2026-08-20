@@ -2,7 +2,7 @@
 #
 # Five sibling scenes — `fight_skilled`, `fight_lazy`, `fight_masher`,
 # `fight_idle`, `fight_sloppy` — differ by exactly one word: the name of the
-# `Pilot` node. `assets/scripts/fishing_fight.rhai` reads that name out of
+# `Pilot` node. `assets/scripts/deeper_rules.rhai` reads that name out of
 # `positions` and drives itself with the matching reference policy, because
 # `loom sim` never calls `set_input` and headless input is zeros forever.
 # **The pilot is swapped; the model never is.**
@@ -25,7 +25,7 @@ id = "9b1c4f20-7a83-4e15-9d62-0c4a71e8b3d1"
 name = "Root"
 
   [node.components.GameRules]
-  path = "../scripts/fishing_fight.rhai"
+  path = "../scripts/deeper_rules.rhai"
 
 # The whole pilot. An empty node whose *name* is the parameter, because
 # `Script` has a `path` and no `params` field — and a name is diffable text
