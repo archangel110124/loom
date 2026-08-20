@@ -104,6 +104,29 @@ fi
 "$LOOM" sim assets/games/proving_ground.loom --ticks 600 \
   --assert "status == lost" --assert "events.damage >= 1" >/dev/null
 
+# **The demo hub, and its two claims.** `assets/games/deeper_demo.loom` is where
+# the fishing game is being built; `rig_walk` is that same file with one field
+# changed — a reference pilot in place of the human — because `loom sim` never
+# calls `set_input`.
+#
+# Run 1: the pilot crosses 21 m of deck and the four inventory slots fill on the
+# way, which is `deeper_demo.rhai`'s proximity rule and the only detector there
+# is for it — the hold lives in `GameRules` state and `state_hash` is
+# physics-only, so nothing else in this file can see it.
+#
+# Run 2 is the one that has already failed twice. The pilot paces rail to rail
+# hopping every ninety ticks with the player's own jump constants; at a 1.0 m
+# rail it went over, and at 1.4 m the character controller *stepped it up onto
+# the cap* and it walked off the outside. `Player.y > 2.2` is "still on the
+# deck", and nothing catches a character in water, so the alternative is an
+# unrecoverable fall.
+"$LOOM" sim assets/test/rig_walk.loom --ticks 330 \
+  --assert "Rig/Player.x > 10.0" --assert "Rig/Player.y > 2.2" \
+  --assert "state.carried >= 4" --assert "events.pickup >= 4" >/dev/null
+
+"$LOOM" sim assets/test/rig_walk.loom --ticks 1800 \
+  --assert "Rig/Player.y > 2.2" --assert "state.carried >= 4" >/dev/null
+
 # **The sim's answer to `xtask repeat`.** `state_hash` covers physics, so
 # nothing above would notice a fight that replayed differently — a float hash,
 # a map iterated in host order, a wall clock. Three fresh processes, compared
@@ -114,7 +137,7 @@ fi
 cmp /tmp/loom-fight-1.json /tmp/loom-fight-2.json
 cmp /tmp/loom-fight-2.json /tmp/loom-fight-3.json
 rm -f /tmp/loom-fight-1.json /tmp/loom-fight-2.json /tmp/loom-fight-3.json
-echo "gameplay: 6 scenes asserted, fight byte-identical across 3 processes"
+echo "gameplay: 7 scenes asserted, fight byte-identical across 3 processes"
 
 # ---------------------------------------------------------------------------
 # 7. Work per frame. **Nothing above this line can see a frame get slower.**

@@ -1,0 +1,644 @@
+# **DEEPER — the demo. Round 1: the Rig, and a player standing on it.**
+#
+#   loom run assets/games/deeper_demo.loom
+#   loom render assets/games/deeper_demo.loom --out /tmp/rig.png
+#   loom sim assets/games/deeper_demo.loom --ticks 900 --assert "Rig/Player.y > 2.2"
+#
+# The hub of the GDD's §7 — a rusted floating platform lashed to the surface
+# above the trench, part oil rig, part fishing wharf. Early game it is meant to
+# be the cozy tonal baseline, so it is bright, warm and low-fog: the "before"
+# the rest of the game is measured against. Nothing here curdles yet.
+#
+# There are four things in this demo and no fifth: **a hub, a boat you can
+# drive, fishing you can do, and four slots to carry things in.** This round
+# builds the first and stands the player on it.
+#
+# ---------------------------------------------------------------------------
+# DECISION 1 — WHAT THE PLAYER IS
+# ---------------------------------------------------------------------------
+#
+# **`Rig/Player`**: a `CharacterController` 1.8 m tall and 0.35 m in radius,
+# driven by `../scripts/deeper_player.rhai`, with `Rig/Player/Eye` carrying the
+# `Camera` as its child.
+#
+# That last part is not decoration. `World::player_character` walks *up* from
+# the active camera to the nearest ancestor with a `CharacterController`, so
+# **parenting the camera to the character is what makes it the player** — and
+# it is also what makes the rig first person, because `Play::apply_look` puts
+# yaw on the character and pitch on the eye. There is no `Player` flag
+# component to set and there must not be one; the hierarchy already says it.
+#
+# The movement script is `deeper_player.rhai` and not `fps.rhai` for one
+# reason, written at the top of that file: `fps.rhai` detonates a 5 m blast
+# where the view ray lands when `fire` is pressed, and the centrepiece of this
+# scene is a 43,776 kg dynamic rigid body. `fire` is also the binding fishing
+# spends. It arrives here unspent.
+#
+# **The player faces the boat at yaw 0, and the whole rig is laid out around
+# that.** `Play::start` takes its opening yaw from the *eye node's* authored
+# rotation and then writes yaw onto the *character*, leaving the eye's own yaw
+# in place underneath — so an authored eye yaw is counted twice the moment play
+# begins, and an authored character yaw is overwritten by it. Neither can
+# express "start facing this way". So the scene is turned instead of the
+# camera: the berth is on −Z, which is where yaw 0 looks, and `loom render` and
+# `loom run` therefore agree about the opening shot. (The double-count is a
+# real engine wrinkle and worth an issue; it is not worth an engine change
+# inside a demo round.)
+#
+# ---------------------------------------------------------------------------
+# DECISION 2 — WHERE THE FOUR INVENTORY SLOTS LIVE
+# ---------------------------------------------------------------------------
+#
+# **In `GameRules` state**, as `state.hold` (the list) and `state.carried` (its
+# length), owned by `../scripts/deeper_demo.rhai`. The alternatives — a
+# movement script's `memory`, and the event log — are weighed and rejected in
+# that file's header, which is where the decision belongs because that is where
+# a reader arrives when the hold misbehaves. The short version: `memory` is
+# invisible to both `loom sim --assert` and the `Hud`, and the event log is a
+# record rather than a container.
+#
+# The one cost, stated: `state` is not in `state_hash`, so `cargo test` and
+# `cargo xtask repeat` are blind to the hold and `--assert` is its only
+# detector. Same bargain the fight makes.
+#
+# ---------------------------------------------------------------------------
+# WHAT IS THIN, AND KNOWN
+# ---------------------------------------------------------------------------
+#
+# * **The boat is moored, not drivable.** `Propulsion.force` is read once at
+#   load and no script can write it, so steering needs an engine seam that does
+#   not exist yet. The hull, its twelve pontoons and its seven-knot ceiling
+#   (ADR 0063) are all here and correct; nothing pushes them.
+# * **The boat cannot be boarded or walked.** The thirty-odd deck, bulwark and
+#   companionway colliders that make `jib_vi` walkable live in
+#   `assets/test/jib_vi_walk.loom`, not in the prefab — so aboard this instance
+#   there is one 9.53 x 1.66 x 3.30 inertia brick and no deck. Moving them into
+#   the prefab would move the sim hash of every `jib_vi_*` scene, which is a
+#   deliberate act for its own commit.
+# * **No fishing yet.** `assets/games/fishing.loom` has the loop; it is not
+#   wired in here.
+# * **The wharf deck is at y = 1.40 and the boat's bulwark tops at 1.62 above a
+#   side deck at 0.62**, so the step aboard is a 0.22 m rise over the rail and
+#   a 1.00 m drop inboard. That geometry is deliberate and is what the boarding
+#   round inherits — but it will need the character's `step_height` raised from
+#   the 0.10 this round set it to, and raising it means re-checking the rail
+#   against the same sum. Both numbers are one decision.
+# * **The four slots fill and nothing empties them.** Walking up to a supply
+#   puts it in the hold; there is no way to put it back and no reason to want
+#   one until there is a fish to make room for. Selling is not built.
+# * **The `Hud` line is unverified as pixels.** `Hud` draws only in `loom run`
+#   and a headless render cannot show it, so what is checked is the string the
+#   rules script produces (`game.message` in `loom sim`'s output), not the
+#   overlay. Those are different claims and only the first one is tested.
+
+[scene]
+format = 1
+id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
+
+# The hull, its paint and its twelve pontoons, from the file that owns them.
+[[prefab]]
+key = "jib_vi"
+id = "3c7a5e12-8b64-4f09-a2d3-6e1b90c47f58"
+path = "../prefabs/jib_vi.loom"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[asset]]
+key = "cylinder"
+path = "cylinder"
+
+# ---------------------------------------------------------------------------
+# THE WORLD
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Rig"
+
+  [node.components.GameRules]
+  path = "../scripts/deeper_demo.rhai"
+
+  # Bright, warm, low sun. The GDD asks the hub to be the cozy baseline, and
+  # every later escalation is a change to these seven numbers rather than to
+  # the geometry.
+  [node.components.Environment]
+  sun_direction = [0.42, 0.46, -0.78]
+  sun_strength = 1.25
+  sun_color = [1.0, 0.93, 0.80]
+  ambient = 0.45
+  sky_zenith = [0.16, 0.30, 0.52]
+  sky_horizon = [0.74, 0.72, 0.66]
+  fog_density = 0.0028
+  fog_falloff = 0.05
+
+  # Light air. Enough to move the surface; far too little to trouble the boat.
+  [node.components.Wind]
+  direction_degrees = 20.0
+  speed = 3.0
+  gustiness = 0.25
+  turbulence = 0.15
+
+# **`deterministic`, not `cinematic`.** ADR 0053's cinematic tier is read back
+# off the GPU and `loom sim` refuses the whole run rather than answer a `water@`
+# assertion approximately. A scene the demo's tests are run against gets the
+# height-field tier; the beauty shot can have its own file.
+[[node]]
+name = "Water"
+parent = "Rig"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  simulation = "deterministic"
+  surface_height = 0.0
+  density = 1000.0
+  drag = 2.0
+
+# ---------------------------------------------------------------------------
+# YOU
+# ---------------------------------------------------------------------------
+
+# Deck top is 1.40 and the capsule's origin is its centre, 0.90 above its feet,
+# so 2.30 is standing. 2.40 is a 10 cm drop onto the deck on the first tick,
+# which is how every character scene in this repository starts: it proves the
+# floor is there rather than assuming it.
+[[node]]
+name = "Player"
+parent = "Rig"
+transform = { pos = [-9.5, 2.40, 0.90] }
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+  # **0.10, not the default 0.35, and this is the other half of the rail.**
+  # `step_height` is what the controller will silently lift the capsule onto,
+  # and it applies in mid-air: at the top of a hop the capsule's feet are
+  # within a step of the rail cap, so the controller mounts it, walks the
+  # 0.2 m cap and drops off the far side into the sea. Measured, on
+  # `rig_walk` — the pilot crossed x = 11.50 at y = 3.61, rose to 3.75 over
+  # the next eight ticks, and was at y = -970 by tick 900.
+  #
+  # Nothing on this rig is a stair, so the step buys nothing here and costs
+  # that. **The boarding round will want it back** — the bulwark is a 0.22 m
+  # rise from the wharf — and when it raises this number it has to re-check
+  # the rail against the same sum: rail top must exceed the jump apex's foot
+  # height plus this. Today that is 2.733 + 0.10 against a cap at 2.90.
+  step_height = 0.10
+
+  [node.components.Script]
+  path = "../scripts/deeper_player.rhai"
+
+[[node]]
+name = "Eye"
+parent = "Rig/Player"
+transform = { pos = [0.0, 0.75, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 75.0
+
+# ---------------------------------------------------------------------------
+# THE RIG
+#
+# A 24 x 14 m deck on six pilings, railed the whole way round. Every
+# piece here is a `box` or a `cylinder` with a `MeshRenderer` and no collider:
+# a renderable node with no dynamic ancestor becomes a static collider from its
+# own drawn bounds, so what is walked on is exactly what is seen. That
+# equivalence is the whole reason nothing here is an invisible ramp.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Deck"
+parent = "Rig"
+transform = { pos = [0.0, 1.20, 0.0], scale = [12.0, 0.20, 7.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.19, 0.17, 0.15]
+  roughness = 0.92
+
+[[node]]
+name = "PilingNW"
+parent = "Rig"
+transform = { pos = [-10.5, -0.20, -5.5], scale = [0.35, 1.20, 0.35] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.24, 0.17, 0.13]
+  roughness = 0.95
+
+[[node]]
+name = "PilingNC"
+parent = "Rig"
+transform = { pos = [0.0, -0.20, -5.5], scale = [0.35, 1.20, 0.35] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.24, 0.17, 0.13]
+  roughness = 0.95
+
+[[node]]
+name = "PilingNE"
+parent = "Rig"
+transform = { pos = [10.5, -0.20, -5.5], scale = [0.35, 1.20, 0.35] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.24, 0.17, 0.13]
+  roughness = 0.95
+
+[[node]]
+name = "PilingSW"
+parent = "Rig"
+transform = { pos = [-10.5, -0.20, 5.5], scale = [0.35, 1.20, 0.35] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.24, 0.17, 0.13]
+  roughness = 0.95
+
+[[node]]
+name = "PilingSC"
+parent = "Rig"
+transform = { pos = [0.0, -0.20, 5.5], scale = [0.35, 1.20, 0.35] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.24, 0.17, 0.13]
+  roughness = 0.95
+
+[[node]]
+name = "PilingSE"
+parent = "Rig"
+transform = { pos = [10.5, -0.20, 5.5], scale = [0.35, 1.20, 0.35] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.24, 0.17, 0.13]
+  roughness = 0.95
+
+# **The rails, in two parts, and both heights were measured rather than picked.**
+#
+# A metre of solid bulwark (1.40 to 2.40) and a thin cap bar floating above it
+# (2.68 to 2.92), with a 0.28 m gap between. It began as one solid metre and
+# `assets/test/rig_walk.loom` walked its pilot straight over the east one: a hop
+# at `deeper_player.rhai`'s numbers puts the capsule's feet at 2.733, so a 1.0 m
+# rail is something you clear. The run ended at y = -974 and still falling,
+# because nothing in this engine catches a character in water.
+#
+# Raising it to one solid 1.4 m wall did **not** fix it, and that is the
+# interesting half: feet at 2.733 against a cap at 2.80 is clear by seven
+# centimetres, and the controller stepped the capsule up onto the cap anyway,
+# because `step_height` applies in the air as readily as on a stair. Both
+# numbers had to move — the cap out of reach, and the character's step down to
+# 0.10.
+#
+# It is a bar rather than a taller wall because a 1.5 m wall **hid the boat**.
+# The player's eye is at 3.05 and the thing this hub exists to point at is a
+# hull floating 0.9 m off the edge; a parapet the height of a man turns that
+# into a superstructure behind a fence. The gap sees the water, the bar stops
+# the jump, and a capsule 1.8 m tall always spans the bar's band whatever part
+# of a hop it is in — that last clause is why the gap is safe rather than a
+# second hole.
+#
+# **Closed on the berth side too, for now.** The way aboard is the round that
+# builds a gangway; until then a gap in this railing is a hole a player falls
+# through into an unrecoverable state, and a demo must not have one. The two
+# bollards in front of it are what say "berth" instead.
+
+[[node]]
+name = "RailSouth"
+parent = "Rig"
+transform = { pos = [0.0, 1.90, 6.90], scale = [12.0, 0.50, 0.10] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.21, 0.16]
+  roughness = 0.85
+
+[[node]]
+name = "RailWest"
+parent = "Rig"
+transform = { pos = [-11.90, 1.90, 0.0], scale = [0.10, 0.50, 7.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.21, 0.16]
+  roughness = 0.85
+
+[[node]]
+name = "RailEast"
+parent = "Rig"
+transform = { pos = [11.90, 1.90, 0.0], scale = [0.10, 0.50, 7.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.21, 0.16]
+  roughness = 0.85
+
+[[node]]
+name = "RailNorth"
+parent = "Rig"
+transform = { pos = [0.0, 1.90, -6.90], scale = [12.0, 0.50, 0.10] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.21, 0.16]
+  roughness = 0.85
+
+[[node]]
+name = "CapSouth"
+parent = "Rig"
+transform = { pos = [0.0, 2.80, 6.90], scale = [12.0, 0.12, 0.06] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "CapNorth"
+parent = "Rig"
+transform = { pos = [0.0, 2.80, -6.90], scale = [12.0, 0.12, 0.06] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "CapWest"
+parent = "Rig"
+transform = { pos = [-11.90, 2.80, 0.0], scale = [0.06, 0.12, 7.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "CapEast"
+parent = "Rig"
+transform = { pos = [11.90, 2.80, 0.0], scale = [0.06, 0.12, 7.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+# Two bollards inboard of the berth. They are the reason the boat is here — and they are
+# the only thing in the scene that says the berth is a berth rather than a hole
+# in the railing.
+
+[[node]]
+name = "BollardWest"
+parent = "Rig"
+transform = { pos = [-6.60, 1.70, -6.40], scale = [0.22, 0.30, 0.22] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.26, 0.24]
+  roughness = 0.7
+  metallic = 0.6
+
+[[node]]
+name = "BollardEast"
+parent = "Rig"
+transform = { pos = [-3.40, 1.70, -6.40], scale = [0.22, 0.30, 0.22] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.26, 0.24]
+  roughness = 0.7
+  metallic = 0.6
+
+# The shed — fishmonger, galley and shop in one blockout, and the landmark that
+# makes the deck a place rather than a platform. It stands on the south side so
+# it never comes between the player and the boat.
+
+[[node]]
+name = "Shed"
+parent = "Rig"
+transform = { pos = [-4.0, 2.60, 4.60], scale = [4.5, 1.20, 2.00] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.46, 0.30, 0.22]
+  roughness = 0.88
+
+[[node]]
+name = "ShedRoof"
+parent = "Rig"
+transform = { pos = [-4.0, 3.95, 4.60], scale = [4.9, 0.15, 2.40] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.22, 0.24, 0.25]
+  roughness = 0.75
+  metallic = 0.4
+
+# The mast and its lamp. One warm point light, because the GDD's hub is warm
+# and the sun alone reads as an empty deck at noon.
+
+[[node]]
+name = "Mast"
+parent = "Rig"
+transform = { pos = [8.0, 3.60, 3.0], scale = [0.18, 2.20, 0.18] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.35, 0.30, 0.27]
+  roughness = 0.8
+  metallic = 0.5
+
+[[node]]
+name = "MastLamp"
+parent = "Rig"
+transform = { pos = [8.0, 5.60, 3.0] }
+
+  [node.components.Light]
+  intensity = 220.0
+  color = [1.0, 0.82, 0.55]
+
+# Set dressing by the berth. It is here rather than at the far end because the
+# opening shot at yaw 0 is otherwise bare deck between the player and the boat,
+# and a foreground the eye can land on is what turns a flat plate into a wharf.
+
+[[node]]
+name = "CrateTall"
+parent = "Rig"
+transform = { pos = [-3.2, 1.85, -4.80], scale = [0.55, 0.45, 0.55] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.40, 0.34, 0.24]
+  roughness = 0.9
+
+[[node]]
+name = "CrateLow"
+parent = "Rig"
+transform = { pos = [-2.2, 1.72, -4.10], scale = [0.45, 0.32, 0.45] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.38, 0.31, 0.22]
+  roughness = 0.9
+
+# ---------------------------------------------------------------------------
+# THE FOUR SLOTS' WORTH OF SUPPLIES
+#
+# `../scripts/deeper_demo.rhai` names these four paths and puts each into the
+# hold when the player comes within 1.7 m horizontally. They are stations, not
+# objects: you take a handful of bait from a barrel and the barrel is still a
+# barrel, which is what lets the picture stay honest in an engine that cannot
+# remove a node at runtime.
+#
+# They stand in a line along z ~= +2.2, a pace clear of the shed's north face
+# at z = +2.6, so the walk from the west ladder to the berth passes all four.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Bench"
+parent = "Rig"
+transform = { pos = [-1.0, 1.70, 2.30], scale = [2.60, 0.30, 0.45] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.44, 0.35, 0.24]
+  roughness = 0.9
+
+[[node]]
+name = "BaitBarrel"
+parent = "Rig"
+transform = { pos = [-7.5, 1.85, 2.20], scale = [0.45, 0.45, 0.45] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.20, 0.34, 0.30]
+  roughness = 0.85
+
+[[node]]
+name = "LineSpool"
+parent = "Rig"
+transform = { pos = [-4.8, 1.70, 2.20], scale = [0.40, 0.30, 0.40] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.72, 0.68, 0.58]
+  roughness = 0.6
+
+[[node]]
+name = "Lantern"
+parent = "Rig"
+transform = { pos = [-1.8, 2.28, 2.30], scale = [0.16, 0.28, 0.16] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.72, 0.24]
+  roughness = 0.35
+  metallic = 0.7
+
+[[node]]
+name = "Thermos"
+parent = "Rig"
+transform = { pos = [0.0, 2.25, 2.30], scale = [0.13, 0.25, 0.13] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.72, 0.24, 0.18]
+  roughness = 0.45
+
+# ---------------------------------------------------------------------------
+# THE BOAT
+#
+# Alongside, in the berth, bow to +X. Her mass brick reaches |z| = 3.30 from
+# her centre, so at z = -11.2 the hull's inboard side sits 0.90 m off the
+# wharf's edge at z = -7.0 — close enough to step across and far enough that
+# forty-three tonnes on a light chop is not leaning on the pilings. She is at
+# x = -5 rather than amidships because that is where the player's opening view
+# at yaw 0 puts her: the shot the demo opens on is a boat, not an empty sea.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Boat"
+parent = "Rig"
+prefab = "jib_vi"
+transform = { pos = [-5.0, 0.0, -11.2] }
+
+# ---------------------------------------------------------------------------
+# THE HOLD, DRAWN
+#
+# One line of text, because `Hud` has no list widget and a list widget cannot
+# change what the demo teaches. `{message}` is whatever the rules script last
+# assembled. **It is drawn only in `loom run`** — a headless render will not
+# show it, so this is not something a PNG can verify.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Hold"
+parent = "Rig"
+
+  [node.components.Hud]
+  anchor = "bottom_center"
+  offset = [0.0, 56.0]
+  text = "{message}"
+  size = 22.0
+  color = [0.95, 0.93, 0.86]
+  only_in_play = true

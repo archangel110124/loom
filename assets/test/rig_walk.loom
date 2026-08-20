@@ -1,0 +1,66 @@
+# **Walking the Rig.** The demo hub with a pilot at the controls instead of a
+# human, because `loom sim` never calls `set_input` and headless input is zeros
+# forever — a headless run of `assets/games/deeper_demo.loom` is a man standing
+# on a wharf with nobody's hands on him.
+#
+# This is `extends`, not a copy. The deck, the rails, the shed, the supplies and
+# the boat all come from the demo, and **one field is different**: the Player's
+# movement script. Change the hub and this scene changes with it, which is the
+# whole reason a test that is a copy of a level is worthless by the second week.
+#
+# The pilot is `../scripts/rig_patrol.rhai`, and its header says why it is not
+# `patrol.rhai`: it hops with `deeper_player.rhai`'s own constants, so what it
+# proves about the rail is a claim about the player rather than about a test
+# script that happens to jump 11 cm higher.
+#
+# The spawn is at x = -9.5, z = +0.90, and that lane is load-bearing: the
+# supplies sit at z ~= +2.2, so a walk down it passes within 1.3 m of each and
+# `deeper_demo.rhai` takes them at 1.7 m. The spawn itself is 2.4 m clear of the
+# nearest one, so a scene that picks something up on tick 1 has moved a crate.
+#
+# What it measures — **two runs, because they are two claims**:
+#
+#   # 1. the hub is crossable and the hold fills on the way
+#   loom sim assets/test/rig_walk.loom --ticks 330 \
+#     --assert "Rig/Player.x > 10.0" \
+#     --assert "Rig/Player.y > 2.2" \
+#     --assert "state.carried >= 4" \
+#     --assert "events.pickup >= 4"
+#
+#   # 2. the deck holds him, hop after hop, for half a minute
+#   loom sim assets/test/rig_walk.loom --ticks 1800 \
+#     --assert "Rig/Player.y > 2.2" \
+#     --assert "state.carried >= 4"
+#
+# `Player.y > 2.2` is "never fell through and never got out" — the deck stands
+# the capsule's centre at 2.318, and there is nothing else in this scene at that
+# height to be standing on, so anything else reads as a fall. It is the whole
+# point of run 2: the pilot paces from rail to rail hopping every ninety ticks,
+# and the first two versions of the rail let it out. `Player.x > 10.0` at tick
+# 330 is "crossed 21 m of deck, past every supply".
+#
+# **Not measured here, and known:** nothing catches a character in water, so a
+# player who does get over a rail falls without limit. The rail and the
+# character's 0.10 m step are what stop that, and this file is the only thing
+# that checks them.
+
+[scene]
+format = 1
+id = "f32eb6a2-8707-4ec9-8c21-b680b06f0644"
+
+[[prefab]]
+key = "demo"
+id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
+path = "../games/deeper_demo.loom"
+
+[[node]]
+name = "Rig"
+extends = "demo"
+
+[[node]]
+name = "Player"
+parent = "Rig"
+
+  # The one field this file changes.
+  [node.components.Script]
+  path = "../scripts/rig_patrol.rhai"
