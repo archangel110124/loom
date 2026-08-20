@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 65] = [
+const SCENES: [&str; 67] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -285,6 +285,17 @@ const SCENES: [&str; 65] = [
     // rain with wetness and shelter, additive and alpha particles, wind and an
     // authored environment, in one frame. Everything above it isolates one
     // path; this is the one that catches two paths interfering.
+    // The chrome creature. **The only scene in either list with a deformed
+    // mesh** (ADR 0062): its vertices are moved by a travelling wave in
+    // `vertexMain`, which nothing else here exercises. It is also the only
+    // mirror-metal subject in the repository, so it is what would catch a
+    // reflection or a normal going wrong on a specular surface.
+    "assets/test/gleamsprat.loom",
+    // The same wave on an animal that is *going somewhere*: a plain node with
+    // a `Script` writing its own transform, no `CharacterController` and no
+    // rigid body. Shape and place are separate systems (ADR 0062) and this is
+    // the only scene where both run on one node.
+    "assets/test/gleamsprat_cruise.loom",
     "assets/test/homestead.loom",
 ];
 
@@ -339,7 +350,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 51] = [
+const GOLDEN: [(&str, &str, &[&str]); 54] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -862,6 +873,32 @@ const GOLDEN: [(&str, &str, &[&str]); 51] = [
     // and thirty seconds in is the first frame where the film has reached its
     // ceiling and the soak is half way. It also puts the waves and both
     // plumes well past their opening transient.
+    // **The only deformed mesh in either gate** — ADR 0062. `Deform` moves
+    // vertices in `vertexMain` and nothing else in this list does, so with this
+    // row absent the whole animation path renders unwatched, which is exactly
+    // how grass shipped two slices before anyone noticed.
+    //
+    // **Two rows, 126 ticks apart, and the gap is the whole design.** A single
+    // reference pins the *shape* of the wave and says nothing at all about its
+    // *rate*: `weather.z` is `--sim N / 60` here and a free-running wall clock
+    // in the viewer, so a frequency that drifts is invisible to the human's
+    // window and invisible to any one still. 1% off 3 Hz is 1.3 degrees of
+    // phase at tick 7 and 24 degrees at tick 133. Measured, at this size and
+    // this tolerance: a 1% rate error moves 1.27% of the frame at tick 133 and
+    // would not be caught near the anchor.
+    //
+    // Neither row is at tick 0, which is deliberate for the reason `ocean` and
+    // `rain_overhang` give: t = 0 is the one instant where every phase term is
+    // exactly zero and the wave is flat, which is the least representative
+    // frame the effect has.
+    ("gleamsprat", "assets/test/gleamsprat.loom", &["--sim", "7"]),
+    ("gleamsprat_beat", "assets/test/gleamsprat.loom", &["--sim", "133"]),
+    // **A deform on a node that is moving**, which the two rows above cannot
+    // cover: the wave is authored in the node's own frame and the node's frame
+    // is being rewritten every tick by a `rhai` script. It is also the only
+    // frame in either gate carrying a plain-node transform script — every other
+    // `Script` in the repository sits on a `CharacterController`.
+    ("gleamsprat_cruise", "assets/test/gleamsprat_cruise.loom", &["--sim", "60"]),
     ("homestead", "assets/test/homestead.loom", &["--sim", "1800"]),
 ];
 
