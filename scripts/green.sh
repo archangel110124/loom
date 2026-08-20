@@ -947,11 +947,20 @@ fi
 # to them before adding another pinned tick to a tape that already passes.
 
 # 8a. **The whole trip, on the shipped file, from the keyboard.** Every
-#     `delivered` assertion in this gate was on `rig_trip.loom` — a 1,900-line
-#     *fork* of the demo with a `Pilot` node — so the demo's headline claim, you
-#     can complete a trip, was a claim about a different file. This is the 5i
-#     tape carried on: astern at 2200, throttle shut at 2600, SPACE at 2660,
-#     over the boarding steps, west along the wharf. 3,800 ticks, 4.6 s.
+#     `delivered` assertion in this gate used to be on `rig_trip.loom`, so the
+#     demo's headline claim — you can complete a trip — was asserted about a
+#     scene one node away from the shipped one rather than about the shipped one
+#     itself. This is the 5i tape carried on: astern at 2200, throttle shut at
+#     2600, SPACE at 2660, over the boarding steps, west along the wharf.
+#     3,800 ticks, 4.6 s.
+#
+#     **`rig_trip.loom` is not a fork and the note that called it one was
+#     wrong.** It is 103 lines of which 16 are not comment: an `extends` of
+#     `deeper_demo.loom` plus a `Pilot` node. It cannot drift from the demo,
+#     because it *is* the demo. That correction removes the case for retiring
+#     it — what remains is that a claim should be asserted about the file people
+#     run, which is what this row does, and `rig_trip` keeps its own row below
+#     because a pilot-driven fight and a keyboard-driven one are two paths.
 #
 #     **And it is where the two arrival sentences are asserted**, because they
 #     only exist on a run that actually arrives. `ALONGSIDE — press SPACE`
@@ -1052,6 +1061,23 @@ DEMO_HOME="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
   --assert "state.stuck == 1" \
   | grep -q '"message": "BLOCKED   something has you — she is 19 m ahead on your left"'
 
+# **WHAT NO ROW ABOVE CAN SEE: the overlay.** Every caption above is pinned
+# with `grep -q` on `loom sim`'s JSON, which proves the rules script *produced*
+# a string. It cannot prove the string was legible, fitted, or was drawn at all
+# — `Hud` draws only in `loom run`, and a headless render shows neither row.
+# One row of this demo's HUD passed every gate in this project while being
+# invisible on screen (cream glyphs on a near-white stone), and it was found by
+# a human taking a screenshot.
+#
+# The one instrument that now exists is a unit test, not a row here:
+# `loom_cli::hud::the_longest_demo_caption_fits_the_narrowest_documented_window`
+# lays the two longest strings out through egui and measures them — 840 px for
+# the caption, 621 px for the inventory row, against a documented 960 px minimum
+# window. It runs under `cargo test`, which is check 3. **It measures width and
+# nothing else**: contrast, occlusion and whether the line is drawn at all are
+# still unmeasured, and the drop shadow that fixed the invisible row is asserted
+# only as an offset.
+#
 # **The sim's answer to `xtask repeat`.** `state_hash` covers physics, so
 # nothing above would notice a fight that replayed differently — a float hash,
 # a map iterated in host order, a wall clock. Three fresh processes, compared

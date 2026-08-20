@@ -562,4 +562,106 @@ mod tests {
         assert_eq!(to_color([1.0, 1.0, 1.0]).r(), 255);
         assert_eq!(to_color([0.0, 0.0, 0.0]).r(), 0);
     }
+
+    /// Lay one line out at its authored size and give back how wide egui
+    /// actually made it.
+    fn laid_out_width(text: &str, size: f32) -> f32 {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(4000.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let element = Element {
+            anchor: egui::Align2::CENTER_BOTTOM,
+            offset: egui::vec2(0.0, 56.0),
+            text: text.to_owned(),
+            size,
+            color: egui::Color32::WHITE,
+        };
+        let mut width = 0.0_f32;
+        // Two passes: egui has no fonts loaded on the first.
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |root| {
+                let _ = draw(root, std::slice::from_ref(&element));
+            });
+            width = out
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(t) => Some(t.galley.rect.width()),
+                    _ => None,
+                })
+                .fold(0.0, f32::max);
+        }
+        width
+    }
+
+    /// **The longest line the demo can say has to fit the window it is played
+    /// in**, and until this existed nothing could tell.
+    ///
+    /// `scripts/green.sh` pins caption strings with `grep -q` on `loom sim`'s
+    /// JSON, which proves a string was *produced* and cannot prove it was
+    /// drawable. Both `Hud` rows in `deeper_demo.loom` are `bottom_center`, so
+    /// an over-long line is clipped at *both* ends — it loses the verb as well
+    /// as the object, which is the worst way for an instruction to fail.
+    ///
+    /// The two strings below are the worst cases of the two longest branches:
+    /// `deeper_rules.rhai:1244`'s idle helm caption carrying a three-digit
+    /// range, and the `Hold` row with every slot spent and a fish below.
+    /// Neither is hypothetical — both assemble from parts reachable in one run,
+    /// and 282 m is a measured position, not a guess.
+    ///
+    /// **Measured, and the measurement overturned the estimate that prompted
+    /// it.** The caption lays out at **840 px** and the inventory row at
+    /// **621 px**. The round that budgeted for this worked from a per-character
+    /// average read off a screenshot — 12.9 px/char, which puts the caption at
+    /// 1135 px and predicts an overflow that does not happen. The real figure
+    /// is 9.5 px/char, because the average was taken on a short all-caps
+    /// string and the long branches are mostly lower case. A proportional font
+    /// has no per-character width; laying the line out is the only way to ask.
+    ///
+    /// The instrument is cross-checked against the one photograph anyone has
+    /// taken of this overlay: the inventory row measured **619 px** on screen
+    /// with a ruler, against **621 px** here. That agreement is what makes the
+    /// number above worth trusting.
+    ///
+    /// `MIN_VIEWPORT` is the narrowest window this demo is documented to work
+    /// in, not the narrowest egui will open. 960 px leaves the caption 120 px
+    /// of margin — about twelve more characters — so this bites well before a
+    /// player loses anything. Widening a caption past it is allowed; it is
+    /// then a decision about the minimum window, made here and written into
+    /// the scene header, rather than a line whose ends a player silently
+    /// loses.
+    #[test]
+    fn the_longest_demo_caption_fits_the_narrowest_documented_window() {
+        const MIN_VIEWPORT: f32 = 960.0;
+
+        let caption = "THE HELM   W ahead  S astern  A/D wheel  SPACE lets go   \
+5 kn   HOME 282 m \u{2014} hold S";
+        let inventory =
+            "HOLD 4/4   bait 0  line 1  lantern 1  thermos 1  fish 1      BELOW 1   CRATE 1";
+
+        for (what, text, size) in [
+            ("caption", caption, 22.0_f32),
+            ("inventory", inventory, 19.0_f32),
+        ] {
+            let width = laid_out_width(text, size);
+            // A line measuring zero never reached the painter, which would
+            // make the bound below vacuously true.
+            assert!(
+                width > 100.0,
+                "the {what} row laid out {width:.0} px, which is not a line"
+            );
+            assert!(
+                width <= MIN_VIEWPORT,
+                "the {what} row lays out {width:.0} px at size {size}, wider than the \
+                 {MIN_VIEWPORT:.0} px window this demo documents. It is centre-anchored, so it \
+                 loses both ends. Shorten the branch in deeper_rules.rhai, or raise \
+                 MIN_VIEWPORT here and say so in the scene header."
+            );
+        }
+    }
 }

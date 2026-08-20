@@ -1,527 +1,246 @@
-# **DEEPER — the demo. Round 6: the four features became one trip.**
+# =============================================================================
+# DEEPER — the demo
+# =============================================================================
 #
-#   loom run assets/games/deeper_demo.loom --play     <- THE DEMO. `--play` is
-#                                                        not optional: without
-#                                                        it `run` opens the
-#                                                        read-only editor,
-#                                                        paused, and every
-#                                                        `Hud` in this file is
-#                                                        `only_in_play`, so a
-#                                                        stranger who types the
-#                                                        line at the top of the
-#                                                        file gets a frozen
-#                                                        diorama with no
-#                                                        instructions on it.
-#                                                        This line used to be
-#                                                        the version without
-#                                                        the flag. **It also
-#                                                        used to open the
-#                                                        Hierarchy, Inspector
-#                                                        and Console around a
-#                                                        game in 39% of the
-#                                                        window**; `--play`
-#                                                        without `--edit` now
-#                                                        builds no panels.
-#   loom render assets/games/deeper_demo.loom --out /tmp/rig.png
-#   loom sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
-#     --assert "Rig/Boat.x > 29.0"      # walk forward. That is the whole demo.
-#   loom sim assets/games/deeper_demo.loom --ticks 900 --hold "move_z=1,fire=1" \
-#     --assert "events.bite >= 1"       # ...and click. That is the other half.
+#     loom run assets/games/deeper_demo.loom --play
 #
-# **Both of those lines are gate rows in `scripts/green.sh`, and until round 9
-# neither was.** The first one shipped as `> 30.0` against an actual 29.888 and
-# exited 1 with a wall of hint text — the only documentation this demo has,
-# with its headline command failing. Two of the three numbers in "Measured:"
-# below were stale by the same amount. A documented command that is not in a
-# gate is a claim, not a fact.
+# That is the whole thing. `--play` is not optional: without it `run` opens the
+# read-only viewer, paused, and every `Hud` here is `only_in_play`, so you get a
+# frozen diorama with no instructions on it. `--play` alone builds no editor
+# panels; add `--edit` if you want them.
 #
-# The hub of the GDD's §7 — a rusted floating platform lashed to the surface
-# above the trench, part oil rig, part fishing wharf. Early game it is meant to
-# be the cozy tonal baseline, so it is bright, warm and low-fog: the "before"
-# the rest of the game is measured against. Nothing here curdles yet.
+# **Play it in a window at least 960 px wide.** Both HUD rows are centre-
+# anchored, so a narrower window clips them at both ends. The longest line the
+# game can say lays out at 840 px, and
+# `loom_cli::hud::the_longest_demo_caption_fits_the_narrowest_documented_window`
+# is the test that keeps it that way.
 #
-# There are four things in this demo and no fifth: **a hub, a boat you can
-# drive, fishing you can do, and four slots to carry things in.** Round 1 built
-# the hub and stood the player on it. Round 2 made the boat boardable and
-# drivable, and going into the water something you come back from. Round 3 was
-# the seam in both directions — off her on foot, off the wheel on foot, and
-# arriving at a quay without driving your own hull under it. Round 4 put a rod
-# on the boat that bends.
+# There are **four things in this demo and no fifth**: a hub, a boat you can
+# drive, fishing you can do, and four slots to carry things in. It is a demo. It
+# is playable end to end and it is not a game.
 #
-# **Round 5 is the three things that stopped a stranger playing it.**
+# The hub is the GDD's §7 — a rusted floating platform lashed to the surface
+# above the trench, part oil rig, part fishing wharf. Early game it is the cozy
+# tonal baseline, so it is bright, warm and low-fog: the "before" the rest of
+# the game is measured against.
 #
-#   * **The boarding lane was six degrees wide** and the one gesture the demo
-#     teaches sat on its right-hand edge: `move_x = 0.05` — three degrees of
-#     aim — boarded nothing. The spawn is 0.9 m further west, the boarding
-#     treads are 3.0 m instead of 2.2 and the helm mat 3.4 m instead of 2.6.
-#     Measured at 600 ticks, the wheel is reached from **-0.21 to +0.21**,
-#     which is 24 degrees, symmetric. (Round 5 wrote "-0.18 to +0.25" here off
-#     a coarser sweep; re-swept at 0.01 steps in round 6, both edges are 0.21.
-#     The width claim survives and got better on the left.)
-#   * **Outside that lane the HUD used to lie.** Both failures — pressed into
-#     her topsides, and swimming — printed "WALK FORWARD TO THE BOAT" for ever.
-#     `deeper_player.rhai` now states both facts and the caption has a branch
-#     for each.
-#   * **You could not see that you were moving.** A line of channel marks lies
-#     nine and a half metres off her track, on the beam the helmsman faces. See
-#     "THE MARKS", below, for the measurement and for the fix that is not this
-#     one.
 #
-# And the fourth thing became an inventory rather than a checklist: bait is
-# **spent** and changes a number, a landed fish **takes a slot**, four slots
-# are reached by playing, and the fish box in the cockpit is what empties
-# them. `assets/scripts/deeper_rules.rhai` has the four rules and why.
+# -----------------------------------------------------------------------------
+# THE CONTROLS
+# -----------------------------------------------------------------------------
 #
-# **Round 6 is the loop closing, which is three things.**
+#   on the rig       W A S D walk, SHIFT sprint, SPACE jump
 #
-#   * **There is a reason to come back, and it is one node.** `FishCrate` on
-#     the wharf takes what is in her hold, `state.delivered` counts it, and the
-#     HUD's top row prints it. It refuses unless she is alongside — the catch
-#     is in a hull, and a hull thirty metres out is not a delivery. The thing
-#     that makes it a *loop* rather than a reward is that the **bait is on the
-#     rig**: the fish eats yours at the take and there is none at sea.
-#   * **Nothing you do is unrecoverable any more.** `Ladder` is a second ramp,
-#     on the berth side, in a 2.0 m gap cut in `RailNorthWest` — because the
-#     one gesture the demo teaches, missed by twelve degrees to port, put a
-#     player 26 m from the only way out and the caption sent him the other way.
-#     See its own block below for the measurement.
-#   * **And the caption stopped strobing and stopped lying.** `aboard` latches
-#     across airborne frames (it flipped six times in forty ticks climbing over
-#     the bait box, telling the player to walk to a boat he was standing on and
-#     silently eating his `fire` presses); the landing sentence can actually be
-#     drawn, which it could not; and the swim bearing is computed from where
-#     the swimmer is rather than written down once.
+#   on `HelmMat`     W ahead, S astern, A wheel to port, D wheel to starboard.
+#                    **SPACE is hands off the wheel** and gives you your legs
+#                    back. Nothing pressed is neutral; she coasts to a stop.
 #
-# `assets/test/rig_trip.loom` is the whole thing in one process — out, a fish,
-# stowed, home, ashore, in the crate — and `assets/test/rig_adrift.loom` is the
-# control that says the crate needs the boat.
+#   anywhere aboard  **CLICK casts, and clicks again to set the hook. SHIFT
+#                    reels.** Both are refused ashore — by never being sent,
+#                    rather than by a rule that says no.
 #
-# **Round 8 is telling the player what is happening, and every defect it found
-# was a feedback defect rather than a missing feature.**
+#   in the water     W A S D swim, at under half walking pace. The caption
+#                    names the nearer of the two ramps and the compass word for
+#                    where it lies, computed from where you are.
 #
-#   * **The one instruction the demo gave after its climax pointed the wrong
-#     way.** `LANDED   the fish box is to starboard` is true about the *boat*
-#     and useless to a man standing in his own frame with his back to it —
-#     measured, the box is 3.4 m behind him — and the target it named had no
-#     pixels at all. Both halves are fixed: `deeper_rules.rhai::toward` states
-#     the bearing and the distance in the player's frame, off a `heading` the
-#     movement script emits, and the box is a yellow box on the sole instead of
-#     a dark hatch flush with it.
-#   * **The fight is twenty-two of a round's twenty-three seconds and it had no
-#     picture.** `float_bob.rhai`'s load term dragged the float *under* — at
-#     stress 59, 72 and 82 the only object in the shot was not in the shot. The
-#     load now sets a rate and an amplitude instead of a depth, so the float
-#     bucks harder the harder the fish pulls.
-#   * **`BLOCKED` could not fire where a player actually gets blocked.** It was
-#     gated ashore-only, measured as a per-tick rate that contact jitter defeats,
-#     and it sat *below* `aboard` in the caption ladder. All three.
-#   * **The line at the top of this file did not start the demo** — without
-#     `--play`, `run` opens the paused editor and every `Hud` here is
-#     `only_in_play`.
-#   * **Four pickups in 1.3 seconds, in silence**, and a helm that listed its
-#     bindings without ever saying what the two controls were set to.
+#   at the fish box  the catch goes below. **A place, not a key.**
+#   at the crate     what is below goes ashore and `CRATE` goes up — but only
+#                    with the boat alongside. Also a place.
 #
-# The whole demo, in the order a stranger meets it:
+# **Three of those are places rather than buttons because the engine has five
+# digital channels and all five are spent.** `move_x`, `move_z`, `jump`, `sprint`
+# and `fire` — there is no sixth to bind "take the helm" to, so the helm is a mat
+# you stand on, the fish box is a spot you walk to, and so is the crate. That
+# constraint shaped the whole layout and it is the single most useful thing to
+# know before reading anything below.
 #
-#   1. spawn on the rig facing a boat. Walk forward — past four supplies laid
-#      along the way, which is the whole hold filled by the taught gesture.
-#   2. you are aboard, at the wheel, and channel marks stream past to port.
-#      The caption still carries `state.knots`, because a mark every 2.7 s is a
-#      sense of speed and not a number.
-#   3. press SPACE. You have let go of the wheel — and the caption *changes*,
-#      which in round 3 it did not.
-#   4. click. The rod on the port bulwark casts. Wait, and a fish takes it.
-#   5. click again inside 300 ms to set the hook, then hold SHIFT to reel and
-#      let go when it runs. The blank bends with the load, because all
-#      twenty-four joints of it read `state.stress`.
-#   6. land it and it takes a slot — which the bait it ate has just left free.
-#      Land a second without stowing the first and the hold is full and says
-#      so. **SPACE, then follow the caption**: it names the yellow fish box, in
-#      metres, in your own frame — `3 m dead behind you` — and keeps saying so
-#      for as long as the fish is in your hands. The box is on the starboard
-#      side of the cockpit and the bait box is between you and it, so the walk
-#      is a dogleg; press into the bait box for four seconds and the caption
-#      says that too. It is 2.32 m from the wheel against a `RANGE` of 2.0,
-#      which is the difference between a walk and a number that changes itself.
-#   7. take her home — **you left ahead, so astern is how you come back**, and
-#      the helm caption carries `CRATE nn m` for as long as there is a fish
-#      below so the number tells you which. (This line said the opposite for
-#      three rounds. Measured: W at the wheel takes `Rig/Boat.x` from 3.00 to
-#      29.89.) Step off over the boarding steps, and walk west along
-#      the wharf to the crate. `CRATE` on the HUD goes up. Then take bait, and
-#      go again.
+# **Reel is SHIFT, not W** — W is the throttle at the wheel and your legs
+# everywhere else. The cost, stated: aboard, SHIFT is reel *and* still sprint,
+# so sprinting round the cockpit with a fish on loads the line. That is a dozen
+# ticks of stress on a hundred-point meter.
 #
-# ---------------------------------------------------------------------------
-# THE CONTROLS, IN FULL
-# ---------------------------------------------------------------------------
+# **SPACE on the mat is the only control here that is not a place**, and it
+# exists because the alternative was worse: with no legs on the mat, the only
+# way off was jump-plus-a-direction, and that direction was simultaneously the
+# wheel — so leaving the helm put you in the sea twelve metres astern of a boat
+# you had just spun.
 #
-#   on the rig      W A S D walk, Shift sprint, Space jump
-#   on `HelmMat`    W ahead, S astern, A wheel to port, D wheel to starboard,
-#                   **Space is hands off the wheel** and gives you your legs
-#                   back; nothing pressed is neutral and she coasts to a stop
-#   anywhere aboard **CLICK casts, sets the hook and takes a rhythm window;
-#                   SHIFT reels.** Both are refused ashore, and refused by
-#                   never being sent rather than by a rule that says no.
-#   in the water    W A S D swim, at under half walking pace. The caption names
-#                   the **nearer of the two ramps** and the compass word for the
-#                   direction it lies in, computed from where the swimmer is —
-#                   round 5's named one bearing, which was right from one corner
-#                   of the sea and 114 m wrong from the other.
-#   at the fish box the catch goes below. **A place, not a key** — the same
-#                   decision the helm mat is, and for the same reason: there is
-#                   no sixth digital channel.
-#   at the crate    what is below goes ashore and `CRATE` goes up, but only with
-#                   the boat alongside. Same decision again, and it is the only
-#                   rule in the demo that needs you to have been somewhere and
-#                   come back.
 #
-# **Reel is SHIFT and not W, and that is a change from `fishing.loom`.** There
-# the angler is a post whose movement model pins him to the deck, so W is free.
-# Here W is the throttle at the wheel and his legs everywhere else, and binding
-# reel to it would mean either walking off the boat while playing a fish or a
-# third stance with its own way in and its own way out. `sprint` was unspent and
-# "hold to reel" survives the move intact. The cost: aboard, SHIFT is reel *and*
-# still sprint, so sprinting round the cockpit with a fish on loads the line.
-# That is a dozen ticks of stress on a hundred-point meter.
+# -----------------------------------------------------------------------------
+# THE LOOP, IN THE ORDER YOU MEET IT
+# -----------------------------------------------------------------------------
 #
-# **Space is the only control in this scene that is not a place**, and it is
-# here because the alternative was worse rather than because a fifth binding
-# was wanted. Round 2 made `speed` zero on the mat, so your legs did not exist
-# and the only exit was jump-plus-a-direction — a direction that was
-# simultaneously the wheel, which put the player in the sea twelve metres
-# astern of a boat he had just spun. It spends nothing: `fire` is still
-# untouched and belongs to fishing, and `jump` still jumps everywhere in the
-# scene except on this one 1.3 x 0.9 m patch of deck.
+#   1. You spawn on the rig facing a boat, and **hold W**. Four supplies lie
+#      along the walk, alternating sides of the lane, so the taught gesture
+#      fills the whole hold on the way. Aboard by tick 180, at the wheel by 356.
+#   2. You are at the wheel and under way; channel marks stream past to port
+#      about one every 2.7 s, which is how you can see that you are moving.
+#      `Rig/Boat.x` reaches 29.89 by tick 900.
+#   3. **SPACE.** You have let go of the wheel and the caption changes.
+#   4. **CLICK.** The rod on the port bulwark casts. Wait, and a fish takes it —
+#      the float goes clean under for the 600 ms the take is answerable in.
+#   5. **CLICK again inside that window** to set the hook, then hold SHIFT to
+#      reel and let go when she runs. The blank bends with the load: all
+#      twenty-four joints read `state.stress`. **Off beats on** — every cadence
+#      that lands a fish has more release than pull, which is the skill.
+#   6. Land it and it takes a slot — the one the bait it ate has just freed.
+#      SPACE, then follow the caption: it names the yellow fish box in metres in
+#      *your* frame, and the bait box is between you and it, so the walk is a
+#      dogleg.
+#   7. Take her home. **You left ahead, so astern is how you come back**, and
+#      the helm caption carries `HOME nn m — hold S`. Step off over the boarding
+#      steps and walk west along the wharf to the crate. `CRATE` goes up. Then
+#      take bait and go again.
 #
-# **Fishing is a state, not a place, and that is deliberate asymmetry.** The
-# helm has to be a place because W/S/A/D mean something different there and a
-# player must be able to stop meaning it; the rod spends two channels that mean
-# nothing else anywhere, so it needs no station to step off. Aboard is the only
-# condition, and it is enforced in `deeper_player.rhai` by not emitting the
-# event at all — a rod cast from the wharf is a thing that never reaches the
-# fight rather than a refusal the fight has to carry.
+# The bait is what makes it a loop rather than a checklist: the fish eats yours
+# at the take, and there is none at sea.
 #
-# **The helm is a place, not a keybinding**, and the whole scene is laid out so
-# that one fact does not have to be explained. The player spawns at x = -3.70
-# facing the gap in the berth railing; the gap is where the boat's cockpit is;
-# the cockpit is where `HelmMat` is drawn. **Walk forward and you board her,
-# arrive at the wheel and get under way, on one key.** Measured: aboard by
-# tick 180, at the wheel at tick **356**, and `Rig/Boat.x` at **29.89** by tick
-# 900 — 26.9 m of travel from her berth at 3.00. (Round 5 wrote "on the mat and
-# moving by tick 240, 34 m clear"; re-measured tick by tick in round 9, helm
-# first latches at 356 and `knots` there is 0.06. Both rows are now in
-# `scripts/green.sh`, which is why they will not go stale again.)
 #
-# That mapping spends none of the engine's five digital channels — `jump` is
-# still jump and `fire` is still unspent, for fishing — and there is no fifth
-# channel to spend on a "take the helm" button.
+# -----------------------------------------------------------------------------
+# FOUR DECISIONS WORTH KNOWING BEFORE YOU CHANGE ANYTHING
+# -----------------------------------------------------------------------------
 #
-# ---------------------------------------------------------------------------
-# DECISION 1 — WHAT THE PLAYER IS
-# ---------------------------------------------------------------------------
-#
-# **`Rig/Player`**: a `CharacterController` 1.8 m tall and 0.35 m in radius,
+# **1. What the player is.** `Rig/Player` is a `CharacterController` 1.8 m tall,
 # driven by `../scripts/deeper_player.rhai`, with `Rig/Player/Eye` carrying the
-# `Camera` as its child.
+# `Camera` as its child. That parenting is not decoration:
+# `World::player_character` walks *up* from the active camera to the nearest
+# ancestor with a `CharacterController`, so **parenting the camera to the
+# character is what makes it the player**, and it is also what makes the rig
+# first person. There is no `Player` flag component and there must not be one.
 #
-# That last part is not decoration. `World::player_character` walks *up* from
-# the active camera to the nearest ancestor with a `CharacterController`, so
-# **parenting the camera to the character is what makes it the player** — and
-# it is also what makes the rig first person, because `Play::apply_look` puts
-# yaw on the character and pitch on the eye. There is no `Player` flag
-# component to set and there must not be one; the hierarchy already says it.
+# The movement script is not `fps.rhai` because that one detonates a 5 m blast
+# where the view ray lands on `fire`, and the centrepiece of this scene is a
+# 43,776 kg dynamic rigid body. `fire` arrives here unspent, for fishing.
 #
-# The movement script is `deeper_player.rhai` and not `fps.rhai` for one
-# reason, written at the top of that file: `fps.rhai` detonates a 5 m blast
-# where the view ray lands when `fire` is pressed, and the centrepiece of this
-# scene is a 43,776 kg dynamic rigid body. `fire` is also the binding fishing
-# spends. It arrives here unspent.
-#
-# **The player faces the boat at yaw 0, and the whole rig is laid out around
-# that.** `Play::start` takes its opening yaw from the *eye node's* authored
-# rotation and then writes yaw onto the *character*, leaving the eye's own yaw
-# in place underneath — so an authored eye yaw is counted twice the moment play
-# begins, and an authored character yaw is overwritten by it. Neither can
-# express "start facing this way". So the scene is turned instead of the
-# camera: the berth is on −Z, which is where yaw 0 looks, and `loom render` and
-# `loom run` therefore agree about the opening shot. (The double-count is a
-# real engine wrinkle and worth an issue; it is not worth an engine change
+# **The scene is turned, not the camera.** `Play::start` takes its opening yaw
+# from the eye node's authored rotation and then writes yaw onto the character,
+# leaving the eye's own yaw underneath — so an authored eye yaw is counted twice
+# and an authored character yaw is overwritten. Neither can express "start
+# facing this way". So the berth is on −Z, which is where yaw 0 looks, and
+# `loom render` and `loom run` agree about the opening shot. (That double-count
+# is a real engine wrinkle and worth an issue; it was not worth an engine change
 # inside a demo round.)
 #
-# ---------------------------------------------------------------------------
-# DECISION 2 — WHERE THE FOUR INVENTORY SLOTS LIVE
-# ---------------------------------------------------------------------------
+# **2. Where the four slots live.** In `GameRules` state, as `state.hold` and
+# `state.carried`, owned by `../scripts/deeper_rules.rhai` — the alternatives
+# (a movement script's `memory`, the event log) are weighed and rejected in that
+# file's header. Short version: `memory` is invisible to both `loom sim --assert`
+# and the `Hud`, and the event log is a record rather than a container.
 #
-# **In `GameRules` state**, as `state.hold` (the list) and `state.carried` (its
-# length), owned by `../scripts/deeper_rules.rhai`. The alternatives — a
-# movement script's `memory`, and the event log — are weighed and rejected in
-# that file's header, which is where the decision belongs because that is where
-# a reader arrives when the hold misbehaves. The short version: `memory` is
-# invisible to both `loom sim --assert` and the `Hud`, and the event log is a
-# record rather than a container.
+# The slots are also four named numbers — `bait`, `line`, `lantern`, `thermos` —
+# beside `infish`, `stowed` and `full`, with the events `pickup`, `spend`,
+# `stow`, `refused` and `deliver`. **The cost, stated:** `state` is not in
+# `state_hash`, so `cargo test` and `cargo xtask repeat` are blind to the hold
+# and `--assert` is its only detector. Same bargain the fight makes.
 #
-# **The four slots are also four numbers** — `state.bait`, `state.line`,
-# `state.lantern`, `state.thermos` — because the `Hud` can draw a number and
-# could always draw several. Round 5 adds `state.infish` (fish in the slots),
-# `state.stowed` (fish put below) and `state.full`, and the events `spend`,
-# `stow` and `refused` beside `pickup`. **Eight of those are asserted in
-# `scripts/green.sh`**, which is the requirement an inventory nobody can read
-# from outside the game fails.
+# **3. The sea is the safety device, not the railing.** The rig was sealed on
+# four sides in round 1 and the seal leaked anyway: walk into any rail at
+# walking pace, keep pressing, and hop — the capsule's rounded foot catches the
+# cap bar's inner edge at the jump apex and climbs over. A taller rail cannot
+# fix it (the height a solid wall would need is above the player's own eye) and
+# the berth has to open anyway or nobody can board. So instead:
+# `deeper_player.rhai` **floats** a capsule that goes under, the slipway at the
+# east end lets it walk back out, and `assets/test/rig_overboard.loom` asserts
+# both with the real player model and no teleport. The rails are set dressing.
 #
-# The one cost, stated: `state` is not in `state_hash`, so `cargo test` and
-# `cargo xtask repeat` are blind to the hold and `--assert` is its only
-# detector. Same bargain the fight makes.
+# **4. The helm is a place, and the layout exists so nobody has to be told.**
+# The player spawns at x = −3.70 facing the gap in the berth railing; the gap is
+# where the boat's cockpit is; the cockpit is where `HelmMat` is drawn. Walk
+# forward and you board her, arrive at the wheel and get under way, on one key.
+# The boarding lane is **24 degrees wide** — `move_x` from −0.21 to +0.21 all
+# reach the wheel by tick 600 — and the whole hold fills across −0.15 to +0.15.
 #
-# ---------------------------------------------------------------------------
-# DECISION 3 — THE SEA IS THE SAFETY DEVICE, NOT THE RAILING
-# ---------------------------------------------------------------------------
 #
-# Round 1 sealed the rig on four sides and the seal leaked anyway. Walk into any
-# rail at plain walking speed, keep pressing, and hop: the capsule's rounded
-# foot catches the cap bar's inner edge at exactly the jump apex and is climbed
-# over it. Traced, on the east rail — tick 315 pressed against it at y 2.318,
-# tick 335 at the ballistic apex 3.617 with its feet at 2.717 inside `CapEast`'s
-# 2.68-to-2.92 band, tick 345 at 3.839 standing *on* the cap, tick 350 outboard,
-# tick 600 at y = -202.17 and still falling.
+# -----------------------------------------------------------------------------
+# DELIBERATELY ABSENT
+# -----------------------------------------------------------------------------
 #
-# **A taller rail cannot fix that**: the height a solid wall would need is the
-# jump apex plus the step height, which is above the player's own eye, and a
-# 1.5 m parapet was already rejected in round 1 for hiding the boat. The berth
-# has to open anyway or nobody can board. So the railing stops being what keeps
-# the player safe:
+# * **Selling, money, progression, quests, NPCs, day/night.** Out of scope. This
+#   is four features and no fifth.
+# * **A second fishing spot, a second boat, a second fish species.** The demo
+#   proves the loop, not its variety.
+# * **A line from the rod tip to the float.** It is a second node whose length
+#   is a scale, and it is the obvious next thing. At six metres a real one is
+#   thinner than a pixel.
+# * **A dead man's handle.** Not needed: leaving the mat makes `at_helm` false
+#   while `aboard` stays true, so `deeper_player.rhai` writes zero thrust on the
+#   next tick. Measured on `rig_drive` with `--hold "jump=1,move_z=1"`: x = 3.0002
+#   at tick 300, 2.9998 at 900, 3.0004 at 1800, from a berth at 3.0.
+# * **Moving wheel, throttle and shifter.** All four movable parts in
+#   `jib_vi.loom` are separate meshes with no transform of their own, so each
+#   one's pivot is the hull's origin up to nineteen metres away and rotating the
+#   node swings the part across the boat. The *scripting* half is solved — a node
+#   `Script` reads the rules script's numbers, which is what bends the rod — so
+#   what is missing is mesh work and only mesh work.
 #
-#   * `deeper_player.rhai` **floats** a capsule that goes under, at the surface;
-#   * the **slipway** at the east end lets it walk back out;
-#   * and `assets/test/rig_overboard.loom` asserts both, with the real player
-#     model and no teleport.
 #
-# The rails are still rails — they stop a walk — and they are now set dressing
-# rather than the thing a life depends on.
-#
-# ---------------------------------------------------------------------------
-# WHAT IS THIN, AND KNOWN
-# ---------------------------------------------------------------------------
-#
-# * **The wheel, the throttle and the shifter do not move.** All four movable
-#   parts in `jib_vi.loom` are separate meshes with **no transform of their
-#   own**, so each one's pivot is the hull's origin up to nineteen metres away
-#   and rotating the node swings the part across the boat. Animating them is a
-#   mesh-authoring job — each part wants its geometry re-centred on its own
-#   pivot — and no scene edit can substitute. **The second half of that bullet
-#   has stopped being true**: a node `Script` now reads the rules script's
-#   numbers (that is what bends the rod), so `state.knots` or a throttle
-#   setting could drive a lever the moment the pivots exist. What is missing is
-#   the mesh work, and only the mesh work.
-# * **Releasing the throttle is not directly asserted.** `loom sim --hold` is
-#   one constant for a run, so "hold W then let go" needs a schedule that does
-#   not exist. What is asserted is the pair either side of it: zero thrust
-#   leaves her exactly where she is (`rig_drive` run 1), and stepping off the
-#   mat writes zero thrust every tick (`deeper_player.rhai`'s `else if aboard`).
-# * ~~A player who jumps off the boat while she is under way leaves her
-#   running.~~ **Not reproducible, and this bullet was wrong.** Leaving the mat
-#   makes `at_helm` false while `aboard` stays true, so `else if aboard` in
-#   `deeper_player.rhai` writes the zero on the very next tick — it was already
-#   correct when this was written. Measured on `rig_drive` with
-#   `--hold "jump=1,move_z=1"`: x = 3.0002 at tick 300, 2.9998 at 900, 3.0004
-#   at 1800, from a berth at 3.0. **No dead man's handle is needed and none is
-#   being built.**
-# * **YOU CAN SEE THAT YOU ARE MOVING NOW, AND ONLY BECAUSE SOMETHING WAS PUT
-#   IN THE FRAME.** The geometry is unchanged and still wrong: the mat faces
-#   her beam, the bow is ninety degrees to starboard, the wake trails astern
-#   and `water@` reads **0.000 of foam abeam** against 0.103 three metres
-#   behind her, so the boat itself still contributes nothing to the picture.
-#   What changed is that a line of channel marks passes nine and a half metres
-#   to port. Measured on the settled helm view at 480x300, `loom compare`
-#   against the tick-600 frame:
-#
-#       0.5 s apart (the ripple floor)   mean  6.41
-#       3.0 s apart                      mean  8.68
-#       4.0 s apart                      mean 11.68
-#       6.0 s apart                      mean 11.34
-#
-#   **Read that honestly: it is a weak instrument here.** The mean is dominated
-#   by water ripple, and the same four rows with the marks shoved 400 m away
-#   read 5.19 / 7.15 / 10.68 / 8.48 — so the marks are worth about 13% of a
-#   number that was never mostly about them. The evidence is the picture: at
-#   tick 600 one mark is abeam, at 690 two are, at 900 two different ones are.
-#   A player watching sees them stream past.
-#
-#   **And measure the frame at more than one heading before deciding any of
-#   this.** Every render of this demo through round 6 was taken at yaw 0,
-#   because `--yaw` abandons the scene's camera and orbits the whole-scene
-#   bounds instead of turning the player's head, and `--hold` has no look
-#   channel. That is one bearing out of a circle a mouse sweeps in half a
-#   second, and it is the bearing that produced "the helmsman's frame contains
-#   no boat".
-#
-#   It does not need a new flag. `loom render --frames 8 --spin 45 --step 0
-#   --sim <t> --hold "<keys>"` **pans an authored camera about its own eye** —
-#   eight frames is the player's eye at eight headings, at one instant of one
-#   run, and it has worked since the fly-through learned not to orbit
-#   first-person cameras. Rendered that way at the helm the frame contains the
-#   side decks, the wheelhouse, the name board, the flag, the transom and the
-#   channel marks streaming past. `--help` now says so.
-#
-#   **The real fix is still to berth her stern-to**, bow at -Z, so the bow is
-#   dead ahead from the wheel. It remains a round rather than a bullet: she
-#   moves from alongside at z = -10.45 to a hull lying along Z, the boarding
-#   steps move from her starboard side to her transom, **every pinned drive
-#   number in `scripts/green.sh` becomes a Z number instead of an X one** — and
-#   it lands the helmsman looking at the after face of the deckhouse a metre
-#   away, because `col_house` ends at local x = -6.20 and the mat is at -7.80.
-#   The wheel would have to move to the flybridge or the foredeck with it.
-#
-#   `state.knots` stays in the caption and `scripts/green.sh` still asserts it
-#   both ways. "(bow is to starboard)" also stays, and it is still a workaround
-#   shipped as player-facing text: it is *true*, and on a boat whose bow you
-#   cannot see it is the one sentence that orients you. It comes out with the
-#   berth.
-# * **The rod is in a holder, not in your hands.** A renderable node with no
-#   *dynamic* ancestor becomes a static collider from its drawn bounds, and a
-#   `CharacterController` is not a dynamic body — so a rod parented to the eye
-#   would bake twenty-four boxes of scenery at the spawn and the player would
-#   walk into his own tackle. Under the hull it is geometry with no physics,
-#   which is what a rod should be. Held gear wants an engine exemption for
-#   descendants of a character, and that is an ADR.
-# * ~~There is no line and no lure.~~ **Half fixed in round 7: there is a
-#   float, and there is a fish.** `Float` and `Catch` below are two nodes with
-#   node scripts, and between them the four states of the fishing loop are four
-#   different pictures instead of four different strings — the float sits and
-#   bobs while the bait waits, goes clean under for the six hundred
-#   milliseconds the take is answerable in, is dragged deep and wide by the
-#   load during the fight, and the fish hangs in the cockpit from the tick it
-#   comes over the rail to the tick it goes in the box.
-#
-#   **There is still no line.** A line from the rod tip to the float is a
-#   second node whose length is a scale, and it is the obvious next thing; at
-#   six metres a real one is thinner than a pixel anyway. `fishing.loom`'s
-#   `Lure` is a world-space `RigidBody` and is still the wrong shape here — a
-#   hull at three metres a second leaves it astern inside a second, which is
-#   exactly why the float is boat-local instead.
-# * ~~The four slots fill and nothing empties them.~~ **Fixed in round 5.**
-#   Bait is spent at the take, a landed fish takes a slot, and the fish box
-#   empties them. Selling is still not built and is not wanted here.
-# * ~~Three of the four supplies are behind the spawn.~~ **Fixed in round 5.**
-#   They are strung along the walk to the berth, alternating sides 1.25 m off
-#   the lane, and `state.carried == 4` is now asserted on the shipped scene
-#   under `--hold move_z=1` rather than on `rig_walk.loom`'s pilot, which knew
-#   a route the demo never teaches. `carried == 4` holds across the whole
-#   `move_x` band -0.15 .. +0.15.
-# * **The bait box is in the middle of the boarding lane and you shoulder past
-#   it.** `col_engine_box` is amidships in the cockpit; the lane now runs at it
-#   rather than threading the 1.0 m gap between it and the deckhouse, because
-#   that gap is the narrowest thing on the route and aiming the demo down it is
-#   what made the old lane three degrees wide. Traced at `move_x = 0`: aboard
-#   at tick 180, grinding on the box's after face from 180 to 300, at the wheel
-#   by 360. A player with a mouse steps round it; a dead-straight headless walk
-#   does not. **The trade bought the lane its other twenty-one degrees.**
-# * **The `Hud` rows are unverified as pixels.** ~~`Hud` draws only in `loom
-#   run` and a headless render cannot show either row.~~ **Photographed in round
-#   10 and one of the two rows was invisible**: `HOLD n/4 …` is authored cream
-#   (`[0.86, 0.89, 0.82]`) and at the spawn heading it lands on a near-white
-#   stone cylinder, so the row naming one of this demo's four features was ghost
-#   glyphs. `hud.rs` now paints every line twice — a near-black copy two pixels
-#   down-right, then the authored colour on top — which is the only fix
-#   available, because `Hud` has `color`, `size`, `offset`, `anchor` and no
-#   shadow or scrim field, and no authored colour survives a background that is
-#   sky one second and pale deck the next. It draws only in `loom run`, so no
-#   reference PNG moved. **What is still untested is everything else about the
-#   overlay**: a `grep` on `game.message` proves a string exists and cannot
-#   prove it is legible, fits, or is drawn at all.
-# * **The deck is still beige and the hub still reads pale.** It was called out
-#   after round 1 and it is a palette pass, not a boat.
-#
-# ---------------------------------------------------------------------------
-# ROUND 10 — THE FIRST TWO MINUTES, AND THE EDGES
-# ---------------------------------------------------------------------------
-#
-# Four fixes and an adversarial gate block. Every one of them came from
-# somebody running the thing rather than from reading it.
-#
-#   1. **The one command in this file's header opened an editor.** `loom run
-#      --play` drew the Hierarchy, the Inspector, the Console and a toolbar with
-#      Delete on it, unconditionally, and left the game 876x576 of a 1440x900
-#      window — 39%. `--play` without `--edit` now builds no dock at all and the
-#      scene fills the window. `--edit` is unchanged, a bare `loom run` is
-#      unchanged (that is M5.5's read-only viewer), and `cargo xtask validate`
-#      passes `--edit` on both its windowed rows, so no gate moved.
-#   2. **The inventory row was unreadable.** See the bullet above.
-#   3. **The helm had no way home on it, and now it names a key.** `CRATE nn m`
-#      appeared only with a fish below, so a first-timer — who has caught
-#      nothing — held W, the one gesture this demo teaches, and 100 seconds
-#      later was at x = 282 in an empty ocean with no number and no landmark.
-#      The helm line now carries `HOME nn m — hold S` past sixty metres or with
-#      a catch aboard. **The range is the hull's and so is the key**: at the
-#      wheel the helmsman faces her beam, so "behind you" is ninety degrees off
-#      "astern" and only one of the two is a throttle setting.
-#   4. **At the moment the demo pays off it told you to do what you had just
-#      done.** Inside `ALONGSIDE` — 14.0 m — the caption said `take her
-#      alongside` at six metres and again at two, and no branch anywhere said to
-#      get off the boat. It now reads `ALONGSIDE — press SPACE` at the wheel and
-#      `SHE IS ALONGSIDE — step off, the crate is 2 m dead behind you` on your
-#      feet.
-#   5. **A hard turn to port stops the boat dead and nothing said so.** The
-#      channel marks are static colliders nine and a half metres to port, so the
-#      same input mirrored has two outcomes — starboard is open sea — and port
-#      is the side the demo teaches a player to watch. **The existing stall
-#      limiter could not see it**: `deeper_player.rhai` measures the helmsman's
-#      own speed, and a hull pinned on a buoy pivots on it, so a man standing
-#      seven metres off her centre keeps moving at a third of a metre a second
-#      while she makes good nothing. `state.pinned` in `deeper_rules.rhai` is
-#      the second detector, off her own speed, and it feeds the sentence the
-#      first one already had. Measured: 0.89 kn at tick 1250, 0.58 at 2000, at
-#      full ahead throughout.
-#   6. **`BLOCKED` told a man walking backwards to back up.** The ashore arm was
-#      a fixed string — `back up — aboard is the gap between the bollards` — and
-#      it fires on any wall from any heading; the aboard arm has been computed
-#      since round 9. That asymmetry was the bug. It now names where she is, in
-#      his frame, off `Rig/Boat/StepHigh`.
-#
-# **And `scripts/green.sh` grew section 8: seven blocks of deliberately wrong
-# input.** Every row before it is a tape somebody wrote after watching the thing
-# work, and a gate assembled that way cannot find the state its author never
-# entered — eleven lines of stupidity found three of the six defects above in
-# one pass. It also contains **the first `delivered == 1` row on this file**:
-# every delivery assertion in the project was on `rig_trip.loom`, a fork, so the
-# demo's headline claim was a claim about a different file.
-#
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # KNOWN ISSUES — what a player will hit that is NOT fixed
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 #
-# Ranked by how likely a first-timer is to meet it. None of these is a stopper;
-# all of them are seams.
+# Ranked by how likely a first-timer is to meet it. None is a stopper; all are
+# seams.
 #
 # 1. **You drive home stern-first at a wharf you cannot see.** The berth faces
 #    the way it faces, so the leg the demo teaches leaves ahead and returns
 #    astern with the destination behind the camera. Photographed at the arrival
-#    beat: the frame is sea, sky and a rod, and the rig is 180 degrees behind.
-#    Round 10 answered it with a *caption* — the range and the key — which is
-#    the cheap half. The real fix is geometric (berth her bow-in, or give the
-#    helm a stern view) and it moves every pinned number in `scripts/green.sh`.
-# 2. **The landed fish still reads as a mitten.** It tracks the player's hands
-#    correctly now; the silhouette is a grey-green body with five splayed rays
-#    and it hangs in mid-air attached to nothing. Mesh work, not a scene edit.
+#    beat: sea, sky and a rod, with the rig 180 degrees behind. The caption
+#    answers it with a range and a key, which is the cheap half. The real fix is
+#    geometric — berth her bow-in, or give the helm a stern view — and it turns
+#    every pinned drive number in `scripts/green.sh` from an X into a Z, and
+#    lands the helmsman a metre from the after face of the deckhouse. That is a
+#    round, not a bullet.
+# 2. **The landed fish reads as a mitten.** It tracks your hands correctly; the
+#    silhouette is a grey-green body with five splayed rays, hanging in mid-air
+#    attached to nothing. Mesh work, not a scene edit.
 # 3. **Every close render is dense salt-and-pepper.** That is ADR 0019's
 #    eight-ray AO dither. Two sweeps found no scene-level knob that reaches it —
 #    ambient is flat across 2.4x, the sun about a ninth of it — and the cure is
 #    the quad-wide sample share in that ADR, which moves all 54 references.
-# 4. **`state.aboard` is stale by about eighty ticks** after you step ashore, so
-#    the arrival caption uses the aboard branch while you are standing on the
-#    wharf. Round 10 made both branches say the same useful thing, so it is now
-#    cosmetic rather than wrong.
-# 5. **The helmsman can be bounced off the mat by a hard turn.** `at_helm`
-#    flickers for about seventy-five ticks and the caption drops back to the
-#    teaching line. He is never in danger and steps back on by himself.
-# 6. **Hold W and SPACE together from the spawn and you wedge for ever.** SPACE
+# 4. **A hard turn to port stops the boat.** The channel marks are static
+#    colliders nine and a half metres to port — the side the demo teaches you to
+#    watch — so the same input mirrored has two outcomes. `state.pinned` says so
+#    in the caption (`PUSHING ON SOMETHING   S to back off`) but does **not** cut
+#    the throttle: she grinds on the buoy until you press S. Cutting it is a
+#    force-path change and wants its own ADR.
+# 5. **`state.aboard` is stale by about eighty ticks** after you step ashore, so
+#    the arrival caption uses the aboard branch while you stand on the wharf.
+#    Both branches now say the same useful thing, so it is cosmetic.
+# 6. **A hard turn can bounce the helmsman off the mat.** `at_helm` flickers for
+#    about seventy-five ticks and the caption drops back to the teaching line —
+#    which also resets `state.pinned`, so issue 4's warning can flicker mid-jam.
+#    He is never in danger and steps back on by himself.
+# 7. **Hold W and SPACE together from the spawn and you wedge for ever.** SPACE
 #    on the mat is hands-off, so the throttle never opens and the pair pushes
-#    into the cockpit geometry. Releasing either key clears it, and no human
-#    holds jump for thirty seconds.
-# 7. **`rig_trip.loom` and `rig_adrift.loom` are 1,900-line forks of this file**
-#    and they drift every time it changes. `--hold "<tick>:<keys>"` has made
-#    them unnecessary since round 5. Round 10 put the first keyboard delivery
-#    row on the shipped scene; retiring the forks is the follow-up.
-
+#    into the cockpit geometry. Releasing either key clears it.
+# 8. **Wedged aboard with an empty hold, `BLOCKED` still says `go round it`**
+#    without naming what has you. There are nine colliders on that deck and
+#    nobody has worked out which.
+# 9. **The deck is beige and the hub reads pale.** A palette pass, not a boat.
+#
+#
+# -----------------------------------------------------------------------------
+# HOW THIS IS TESTED
+# -----------------------------------------------------------------------------
+#
+# Section 6 of `scripts/green.sh` — 14 scenes and 7 blocks of deliberately wrong
+# input, about two minutes. It runs the whole trip on **this file** from a
+# keyboard tape (`--hold "<tick>:<keys>"`, the same field `loom run` writes when
+# a human holds a key) and asserts `state.delivered == 1` at the end of it.
+#
+# `assets/test/rig_*.loom` are **not forks.** Each is an `extends` of this file —
+# `rig_trip.loom` is 16 non-comment lines, `rig_adrift.loom` is 24 — adding one
+# node and inheriting everything else, so they cannot drift from it. An earlier
+# note here called them "1,900-line forks" and that was simply wrong.
+# `rig_trip.loom` adds a `Pilot` so the fight plays itself while a tape sails the
+# boat; `rig_adrift.loom` leaves her 21 m off the crate and swims the player home,
+# which is the control that proves the crate refuses a hull that is not alongside.
+#
+# **What no gate can see:** the overlay. `Hud` draws only in `loom run`, so a
+# headless render shows neither row, and a `grep` on `game.message` proves a
+# string was produced — never that it was legible or drawn. The one measurement
+# that exists is the width test named at the top of this file.
+#
 [scene]
 format = 1
 id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
