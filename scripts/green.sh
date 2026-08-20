@@ -115,3 +115,41 @@ cmp /tmp/loom-fight-1.json /tmp/loom-fight-2.json
 cmp /tmp/loom-fight-2.json /tmp/loom-fight-3.json
 rm -f /tmp/loom-fight-1.json /tmp/loom-fight-2.json /tmp/loom-fight-3.json
 echo "gameplay: 6 scenes asserted, fight byte-identical across 3 processes"
+
+# ---------------------------------------------------------------------------
+# 7. Work per frame. **Nothing above this line can see a frame get slower.**
+#
+# `loom render --frames N` used to re-bake the scene's entire voxel volume once
+# per telemetry row — 4.6 s a frame on `moraine`, 119 ms on `lanternhead` — and
+# no gate in this project could have told you: the pixels are identical, the
+# hashes are identical, the CSV is identical. Only the clock moves, and the
+# clock is the one thing a shared box makes untrustworthy.
+#
+# So the invariant is stated as a count instead. `loom_voxel::bakes()` counts
+# `Volume::bake` calls in the process and `loom render` reports it; a scene's
+# bake count must not grow with its frame count. Exact, load-invariant, and a
+# stale binary cannot fake it.
+#
+# `cave` is the cheapest scene carrying a `VoxelVolume`: the pair below costs
+# 1.3 s. Into `target/`, and into a subdirectory of it, because `--frames`
+# writes `telemetry.csv` beside the frame directory rather than inside it.
+#
+# **No skip branch.** A render that will not run here fails this script with
+# `loom`'s own error, the way the gameplay block above does. The first draft
+# reported "no GPU" on a box with a 4090, because the render was in fact failing
+# on a write permission — a check that skips when it cannot tell why is worth
+# less than no check.
+bakes_of() {
+  "$LOOM" render assets/test/cave.loom --out target/gate-bakes/frames/cave.png \
+    --size 64x64 --frames "$1" --spin 0 --step 0 |
+    sed -n 's/.*"bakes": *\([0-9]*\).*/\1/p'
+}
+mkdir -p target/gate-bakes/frames
+one=$(bakes_of 1)
+five=$(bakes_of 5)
+rm -rf target/gate-bakes
+if [ "$one" != "$five" ]; then
+  echo "FAIL: cave bakes $one volumes for 1 frame and $five for 5 — the render loop grew per-frame work"
+  exit 1
+fi
+echo "per-frame work: cave bakes $one volumes at 1 frame and at 5"
