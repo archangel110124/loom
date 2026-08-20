@@ -2168,16 +2168,36 @@ impl Runner {
         // The rules script, compiled like any other. At most one: a game has
         // one set of rules, and two scripts both deciding whether it is over
         // is a race with no winner.
-        let mut rules = None;
+        //
+        // **A refusal, not a warning, and the change is deliberate.** This used
+        // to log "ignoring {path}" and carry on, which is the worst available
+        // behaviour: the second script's win condition, its HUD line and its
+        // whole `state` silently do nothing, and *every gate stays green* —
+        // `validate` never loads a script, `sim --assert` reads the surviving
+        // rules and passes, and the image gate photographs a scene whose rules
+        // are half absent. It is the exact failure class the gameplay block in
+        // `scripts/green.sh` exists to catch and it is invisible to it.
+        //
+        // The demo is about to walk into it: `deeper_demo.rhai` holds the hub's
+        // slot and `fishing_fight.rhai` wants the same one. This makes that
+        // collision arrive as a named error on the first run instead of as a
+        // fishing loop that quietly is not there.
+        let mut rules: Option<String> = None;
         for entity in world.entities() {
             let Some(path) = world.rules_path(*entity) else {
                 continue;
             };
-            if rules.is_some() {
-                crate::log::warn(format!(
-                    "more than one GameRules in this scene; ignoring {path}"
-                ));
-                continue;
+            if let Some(first) = &rules {
+                return Err(crate::json_line(&serde_json::json!({
+                    "error": "duplicate_game_rules",
+                    "script": path,
+                    "constraint": format!(
+                        "a scene has one GameRules; `{first}` already holds it. \
+                         Merge the two rules scripts, or move one of them into a \
+                         node `Script` — which is also the only kind that sees \
+                         input."
+                    ),
+                })));
             }
             let source = std::fs::read_to_string(base.join(path)).map_err(|e| {
                 crate::json_line(&serde_json::json!({

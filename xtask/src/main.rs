@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 68] = [
+const SCENES: [&str; 69] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -293,6 +293,21 @@ const SCENES: [&str; 68] = [
     "assets/test/range.loom",
     "assets/test/turret_range.loom",
     "assets/games/proving_ground.loom",
+    // **The fishing demo's hub, and it was in no render gate at all.** It is
+    // where the game is being built — a rig, a 43-tonne boat you board and
+    // drive, a `WaterBody`, four supplies and a `Hud` — and until this line
+    // `grep deeper_demo xtask/src/main.rs` returned nothing. Its load failures
+    // were caught by the gameplay block in `scripts/green.sh`; a scene that had
+    // stopped *drawing* was caught by nobody.
+    //
+    // **Here and not in `GOLDEN`, on the stated rule**: every rendering path it
+    // uses already has a reference — `pool` and `wake` the water, `props` the
+    // per-model atlases, `materials` the bindless maps, `lanternhead` the
+    // secondary rays. What this line guards is that it still loads, bakes,
+    // renders and validates clean, static and after 120 ticks of physics with a
+    // dynamic hull floating on a water body, which is the combination nothing
+    // else in this list has.
+    "assets/games/deeper_demo.loom",
     // The only scene that runs several systems *at once*: voxel terrain, one
     // water body serving both a current and open ocean, three grass fields,
     // rain with wetness and shelter, additive and alpha particles, wind and an

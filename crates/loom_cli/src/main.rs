@@ -45,9 +45,11 @@ USAGE:
         Print a component's JSON Schema. No argument lists the known types.
 
     loom render <scene.loom> [--out <f.png>] [--size <WxH>] [--sim <ticks>]
-                             [--yaw <deg>] [--pitch <deg>]
+                             [--yaw <deg>] [--pitch <deg>] [--hold <k=v,..>]
         Render the scene headless to a PNG. Uses the scene's `Camera` node if
         it has one; --yaw/--pitch overrides it and orbits the bounds instead.
+        --hold is `loom sim`'s, below: the frame is what the scene looks like
+        after `--sim` ticks of somebody pressing those keys.
 
     loom render <scene.loom> --frames <n> [--spin <deg>] [--step <ticks>]
                              [--dolly <m>]
@@ -67,8 +69,14 @@ USAGE:
         which is the question a hue acceptance test asks and the diff cannot
         answer: whether the water in a named band is turquoise or grey.
 
-    loom sim <scene.loom> [--ticks <n>] [--assert <expr>]
-        Step physics deterministically and print the state hash. --assert also
+    loom sim <scene.loom> [--ticks <n>] [--assert <expr>] [--hold <k=v,..>]
+        Step physics deterministically and print the state hash. --hold writes
+        `Runner::input` — the field `loom run` writes when a human holds a key
+        — for every tick of the run, so it is the only way to test a mapping
+        *from* a press rather than something downstream of one:
+        `--hold move_z=1,move_x=-1`, channels `move_x`, `move_z`, `jump`,
+        `sprint`, `fire`. It is one constant for the whole run; there is no
+        schedule, so `hold W then let go` needs two runs. --assert also
         reads the weather where it is asked about: `wind@x,y,z.speed >= 3`, and
         `rain@x,y,z.rate < 0.05` for the rain reaching a point in mm/h after the
         scene's own voxels have sheltered it (`.exposure` is that shelter alone,
