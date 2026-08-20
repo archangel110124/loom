@@ -733,6 +733,27 @@ impl Sim {
         // indices stay a deterministic function of the file: the loop above
         // inserts in `world.entities()` order and this inserts in the order it
         // collected, which is the same order.
+        // **A body that authored a deck keeps its own box for mass alone.**
+        // Done before any attachment so it can only ever demote the box the
+        // scene authored on the body itself, never one of these. See
+        // `Physics::demote_to_mass_only`: without it the hull's inertia brick
+        // is still a solid lid a metre above the deck, and everything below is
+        // unreachable — which is the bug the deck boxes exist to fix, still
+        // there.
+        let mut demoted: Vec<loom_ecs::Entity> = Vec::new();
+        for (entity, ..) in &pending {
+            let Some(ancestor) = dynamic_ancestor(world, *entity) else {
+                continue;
+            };
+            if demoted.contains(&ancestor) {
+                continue;
+            }
+            demoted.push(ancestor);
+            if let Some((_, handle)) = dynamic.iter().find(|(e, _)| *e == ancestor) {
+                physics.demote_to_mass_only(*handle);
+            }
+        }
+
         for (entity, matrix, half) in pending {
             let Some(ancestor) = dynamic_ancestor(world, entity) else {
                 continue;

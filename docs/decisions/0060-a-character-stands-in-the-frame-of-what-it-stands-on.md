@@ -57,6 +57,56 @@ launch-shaped edge case.
 centimetres a tick can start the next sweep inside the bulwark. Folding it in
 gets collide-and-slide on the boat's motion for free.
 
+**Why the vertical half is taken only upwards, which is the part that had to be
+measured rather than reasoned.** Horizontally the carry is used in full.
+Vertically it is `max(v_y, 0)`, and both halves earned that separately:
+
+- *Upwards is load-bearing.* A deck rising into a capsule has to take it along,
+  and with the penetration stub above, a capsule the deck has swallowed falls
+  out through the bottom of the boat. Dropping this half sends every rider on
+  `jib_vi_drift` to y = −16,000 m at wind 12.
+- *Downwards is what slides.* `move_shape` slides whatever it cannot satisfy
+  along the contact, so on a tilted plate a downward request comes back as
+  motion **down the slope**; the upward half never does the reverse, because it
+  lifts the capsule clear instead. Rectified, it accumulates in one direction
+  all run. The controller's ground snap already reaches 0.38 m against a deck
+  falling about 17 mm a tick, so leaving the descent to it costs nothing.
+
+Worst net boat-frame drift of five stations over 3600 ticks, full vertical carry
+against this:
+
+    wind 0      159 mm  ->  0 mm  (exactly, at every station)
+    wind 3.5    227 mm  ->  5 mm
+    wind 12     780 mm  ->  760 mm
+
+The wind 0 and 3.5 rows are the foredeck — the only station standing on a sloped
+plate. The four on flat plates were already at millimetres, and *that* is what
+identified the mechanism: a flat plate clips a vertical request to nothing
+horizontal, a tilted one does not.
+
+**Two sharper corrections were built, measured and thrown away.** Recorded so
+they are not paid for twice:
+
+- *Remove the whole into-surface component of the carry* (`v − n(v·n)` when
+  `v·n < 0`). It takes the contact-holding part with it: riders bounce clear of
+  the deck, go un-grounded, lose the carry entirely and drift 3+ m at wind 12.
+- *Pre-compensate only the horizontal residue sliding will produce*
+  (`v ± n_xz(v·n)`). One sign is worse than doing nothing (580 mm at wind 0);
+  the other is excellent at wind 0 and 3.5 (2 mm and 34 mm) and **reverses** the
+  wind 12 drift to +1.6 m forward. A correction that is first-order right and
+  changes sign with sea state is a fudge, not a fix.
+
+**Wind 12 is not solved and the scene says so.** 0.26 m to 1.08 m over a minute,
+nobody lost overboard. At that sea the hull heaves through 2.3 m while its
+horizontal position moves 5 cm, and riders are genuinely thrown clear of the deck
+and land again — visible as a 0.23 m swing in a standing capsule's height. That
+is a boat in a bad sea, not a coordinate error, and the fix for it is not in this
+mechanism. Wind 3.5 — the sea this hull's entire header was characterised on — is
+where the numbers above are claimed.
+
+The cost of the asymmetry is about 19 mm of extra hover, because a bobbing deck
+lifts on the up phase and is snapped back on the way down.
+
 Rapier's own moving-platform path is not used: it filters `rb.is_kinematic()`
 and the hull is dynamic, so it is dead code here.
 

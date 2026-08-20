@@ -495,18 +495,34 @@ transform = { pos = [3.50, 0.585, 0.0] }
   [node.components.BoxCollider]
   half_extents = [1.00, 0.15, 2.55]
 
-# **The foredeck is one tilted slab, not four steps.** It climbs 0.76 -> 1.64
-# over 3.6 m, and cutting that into flat plates puts a 0.37 m riser at the
-# forward end — over the step height, so the bow would be unreachable — and
-# three seams for a camera to pop across. 13.9 degrees is well under the 50 the
-# controller walks.
+# **The foredeck is tilted slabs, not steps.** It climbs 0.765 -> 1.66 over
+# 3.65 m, and cutting that into flat plates puts a 0.37 m riser at the forward
+# end — over the step height, so the bow would be unreachable — and three seams
+# for a camera to pop across.
+#
+# **Two slabs and not one, because the sheer is convex and a chord is not a
+# curve.** A single 13.9 degree slab matched both ends to 5 mm and stood 0.29 m
+# above the drawn deck in the middle, which is a person walking on air over the
+# thing they appear to be standing on. Measured against the mesh, the drawn deck
+# is 0.77 at x=4.5, 0.80 at 5.0, 0.84 at 5.5, 0.89 at 6.0, 0.98 at 6.5, 1.15 at
+# 7.0, 1.37 at 7.5 and 1.65 at 8.0 — nearly flat aft and steep at the stem. Two
+# chords hold it to under 5 cm everywhere and meet at the same height at x=6.4,
+# so there is no step between them either.
 [[node]]
-name = "col_foredeck"
+name = "col_foredeck_aft"
 parent = "Sea/Boat"
-transform = { pos = [6.25, 1.055, 0.0], rot_euler = [0.0, 0.0, 13.9] }
+transform = { pos = [5.412, 0.6955, 0.0], rot_euler = [0.0, 0.0, 4.574] }
 
   [node.components.BoxCollider]
-  half_extents = [1.83, 0.15, 2.30]
+  half_extents = [1.0032, 0.15, 2.30]
+
+[[node]]
+name = "col_foredeck_fwd"
+parent = "Sea/Boat"
+transform = { pos = [7.286, 1.1555, 0.0], rot_euler = [0.0, 0.0, 24.019] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.9032, 0.15, 1.30]
 
 # --- bulwarks, following the taper -----------------------------------------
 # Inner faces 0.1-0.2 m inboard of the drawn deck edge, so the capsule stops

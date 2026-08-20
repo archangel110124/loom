@@ -38,6 +38,22 @@ pub struct RayHit {
     pub normal: [f32; 3],
 }
 
+/// How far past the capsule's foot the ground probe reaches, in metres.
+///
+/// **Bounded on both sides by rapier's own numbers, which come from the *full*
+/// AABB extent rather than the half — `compute_dims` in
+/// `control/character_controller.rs`.** For the 1.9 m capsule that is
+/// `up_extent = 1.90`, a skin `offset` of `0.01 * 1.90 = 0.019`, a grounded
+/// reach of `offset + 0.05 = 0.069` and a ground-snap reach of
+/// `0.2 * 1.90 = 0.38`.
+///
+/// The probe must be **longer** than 0.069, or it misses on a tick the
+/// controller still calls grounded and the carry blinks to zero for one step;
+/// and **shorter** than 0.38, or it reads a platform velocity off a surface the
+/// controller has not decided is the ground. 0.25 is 3.6x the first and 66% of
+/// the second.
+const GROUND_PROBE: f32 = 0.25;
+
 /// The capsule a character occupies, and what it is able to climb.
 ///
 /// Shape and mobility together because they are not separable: the step a
@@ -289,6 +305,38 @@ impl Physics {
             .build();
         self.colliders
             .insert_with_parent(collider, body, &mut self.bodies)
+    }
+
+    /// Keep a body's own colliders for their mass and take them out of contact.
+    ///
+    /// **The hull-envelope case, and it is the reason a boat has a deck.** A
+    /// `BoxCollider` on a dynamic node does two jobs at once: it gives the body
+    /// a believable inertia tensor, and it is the shape the world collides
+    /// with. For a crate those are the same box. For a nineteen-metre hull they
+    /// are not remotely: `jib_vi_painted`'s box is a 19 x 3.32 x 6.60 brick
+    /// whose lid sits at y = 1.66, a metre above the deck people walk on and
+    /// just over the bulwark cap. Its own comment has always said it is "here
+    /// for the inertia, not for the collisions" — this is that sentence made
+    /// true.
+    ///
+    /// A sensor is the mechanism because rapier's
+    /// `recompute_mass_properties_from_colliders` sums every **enabled**
+    /// collider without asking whether it is a sensor, so the mass, the inertia
+    /// and the centre of mass all survive untouched. `set_enabled(false)` is
+    /// the trap next door: it is checked, and it would silently throw the
+    /// body's whole mass away.
+    ///
+    /// Only ever called on a body that authored child colliders of its own, so
+    /// it can never leave a body with no collision at all.
+    pub fn demote_to_mass_only(&mut self, body: RigidBodyHandle) {
+        let Some(handles) = self.bodies.get(body).map(|b| b.colliders().to_vec()) else {
+            return;
+        };
+        for handle in handles {
+            if let Some(collider) = self.colliders.get_mut(handle) {
+                collider.set_sensor(true);
+            }
+        }
     }
 
     /// A dynamic capsule — the character shape.
@@ -620,7 +668,14 @@ impl Physics {
             self.narrow_phase.query_dispatcher(),
             &self.bodies,
             &self.colliders,
-            filter,
+            // **A sensor is not there, to every query in this engine.** The
+            // only sensors it makes are mass-only hull envelopes
+            // (`demote_to_mass_only`), and a shape that a character walks
+            // through must not stop a bullet, shelter rain or block line of
+            // sight — "rain stops where a body would stop" is one rule or it is
+            // nothing. Applied here rather than at each call site so there is
+            // one answer.
+            filter.exclude_sensors(),
         );
         // `solid: true` — a ray starting inside a shape hits immediately at
         // distance zero rather than passing through and striking the far wall
@@ -814,6 +869,12 @@ impl Physics {
 
     /// Move a character by `velocity` for one step, colliding and sliding.
     ///
+    /// **The velocity is in the frame of whatever the character is standing
+    /// on** — ADR 0060. On static scenery that is the world and nothing here
+    /// is visible; on a boat it is the deck, which is the only frame in which
+    /// "stand still" is a thing a movement model can ask for. See the carry
+    /// below.
+    ///
     /// **The velocity is the caller's business and the collision is this
     /// function's.** Nothing here applies gravity, friction, acceleration or a
     /// speed limit — those are the movement model, and the movement model is
@@ -859,6 +920,91 @@ impl Physics {
             character.shape.radius.max(1e-3),
         );
 
+        // **The carry: how fast the ground itself is moving, here.**
+        //
+        // Gated on *last* tick's `grounded`, and that gate is what makes a jump
+        // work. The tick a character jumps is still grounded, so it departs
+        // with the deck's motion — which is what jumping off a moving boat
+        // does — and then the sweep leaves the ground, so nothing is subtracted
+        // and the impart happens exactly once. Ungated, the second tick of a
+        // jump would add the carry again while the probe still reached the
+        // deck, and hand out a free horizontal kick.
+        //
+        // From the *hit point*, not the character's centre: `velocity_at_point`
+        // is `linvel + omega x r`, and on a rolling hull `r` is the whole
+        // question — a rider at the rail moves several times faster than one on
+        // the centreline. Reading it at the foot contact is reading it where
+        // the friction would be.
+        //
+        // `parent()` is `None` for every static collider in the engine —
+        // `add_static_box` inserts them parentless — so this is structurally
+        // zero on every scene that has no moving platform in it, rather than
+        // numerically small.
+        let carry = if character.grounded {
+            self.cast(
+                [
+                    character.position[0],
+                    character.position[1] - character.shape.half_height,
+                    character.position[2],
+                ],
+                [0.0, -1.0, 0.0],
+                character.shape.radius + GROUND_PROBE,
+                QueryFilter::default().exclude_rigid_body(character.body),
+            )
+            .and_then(|hit| {
+                let body = self.colliders.get(hit.collider)?.parent()?;
+                let v = self.velocity_at_point(body, hit.point)?;
+                // **The horizontal carry in full; the vertical one only
+                // upwards.** Both halves were measured, in three seas, and the
+                // asymmetry is the whole difference between standing on a deck
+                // and creeping down it.
+                //
+                // *Upwards is needed.* A deck rising into a capsule has to take
+                // it along, and rapier's `check_and_fix_penetrations` is an
+                // empty stub while `move_shape` ignores a shape it already
+                // penetrates — so a capsule the deck has swallowed falls out
+                // through the bottom of the boat. Dropping this half sends
+                // every rider to y = -16,000 m at wind 12.
+                //
+                // *Downwards is not, and it is what slides.* `move_shape`
+                // slides whatever it cannot satisfy along the contact, so on a
+                // tilted plate a downward request comes back as motion down the
+                // slope; the upward half never does the reverse, because it
+                // lifts the capsule clear instead. Rectified, it adds up all
+                // run. The controller's ground snap already reaches 0.38 m
+                // against a deck that falls about 17 mm in a tick at wind 12, so
+                // nothing is lost by leaving the descent to it.
+                //
+                // Net boat-frame drift over 3600 ticks, `jib_vi_drift`, worst
+                // of five stations — with the full vertical carry against this:
+                //
+                //     wind 0      159 mm  ->  0 mm  (exactly, at every station)
+                //     wind 3.5    227 mm  ->  5 mm
+                //     wind 12     780 mm  ->  760 mm
+                //
+                // The wind 0 and 3.5 rows are the foredeck, the only station on
+                // a sloped plate; the four on flat plates were already at
+                // millimetres, which is what identified the mechanism. Wind 12
+                // is unchanged and is not solved — see the scene's header.
+                //
+                // `ponytail:` the cost is about 19 mm of extra hover, because a
+                // bobbing deck lifts on the up phase and is snapped down on the
+                // way back. Two sharper corrections were tried and are recorded
+                // as failures in ADR 0060 so nobody pays for them twice.
+                Some([v[0], v[1].max(0.0), v[2]])
+            })
+            .unwrap_or([0.0; 3])
+        } else {
+            [0.0; 3]
+        };
+        // **Folded into the request, never written to the position.**
+        // `check_and_fix_penetrations` is an empty stub in vendored rapier and
+        // `move_shape` ignores a shape it already penetrates, so a position
+        // write of a few centimetres a tick can start the next sweep inside a
+        // bulwark and stick there. Going through the sweep gets
+        // collide-and-slide on the platform's motion for free.
+        let requested = requested + Vector::new(carry[0], carry[1], carry[2]);
+
         let movement = {
             let query = self.broad_phase.as_query_pipeline(
                 self.narrow_phase.query_dispatcher(),
@@ -871,7 +1017,16 @@ impl Physics {
                 // failure if it ever changes is a character that cannot move
                 // or is permanently grounded on itself. Neither reports an
                 // error; both look like broken input.
-                QueryFilter::default().exclude_rigid_body(character.body),
+                // Sensors excluded for the same reason every other query
+                // here excludes them: a mass-only hull envelope is not a floor.
+                // It is the whole reason a deck at y = 0.60 is reachable at all
+                // — the hull box that gives `jib_vi_painted` its inertia is a
+                // solid brick up to y = 1.66, a metre above the deck and just
+                // over the bulwark cap, and a capsule dropped aboard used to
+                // land on its lid.
+                QueryFilter::default()
+                    .exclude_rigid_body(character.body)
+                    .exclude_sensors(),
             );
             character
                 .controller
@@ -893,8 +1048,15 @@ impl Physics {
         // the fall that earned it — stepping off a curb would report tens of
         // metres per second downward. Standing on something means no vertical
         // speed, whatever the sweep had to do to get there.
-        if movement.grounded && survived.y <= 0.0 {
-            survived.y = 0.0;
+        if movement.grounded {
+            if survived.y <= 0.0 {
+                survived.y = 0.0;
+            }
+            // And back out of the ground's frame, so a movement model that
+            // decelerates toward zero is asking to stand on the deck rather
+            // than to stand still relative to the sea. Subtracted only while
+            // grounded, which is the same condition the addition used.
+            survived -= Vector::new(carry[0], carry[1], carry[2]);
         }
 
         CharacterMove {

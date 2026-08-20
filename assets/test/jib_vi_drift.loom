@@ -47,6 +47,22 @@
 # wind at 3.5. The harder sea is a copy of this file with `speed` raised; it is
 # not authored here because a scene that measures a bound should measure one
 # sea, and 3.5 is the one the hull's whole header was characterised on.
+#
+# **What it currently measures**, net boat-frame drift over 3600 ticks:
+#
+#   wind 0     every station exactly 0 mm
+#   wind 3.5   3 to 5 mm, worst at the bridge deck
+#   wind 12    0.26 to 1.08 m, worst at the bridge deck, nobody overboard
+#
+# **The wind 12 row is not a pass and is not a coordinate error.** At that sea
+# this hull heaves through 2.3 m while its horizontal position moves 5 cm, and
+# a standing capsule's height swings 0.23 m — riders are genuinely thrown clear
+# of the deck and land again, and a rider in the air is a rider not being
+# carried. Raising `speed` here reproduces it. The fix is not in the carry;
+# see ADR 0060.
+#
+# Before any of this, the same run at wind 3.5 put two of these five riders
+# 13 km away.
 
 [scene]
 format = 1
@@ -320,12 +336,20 @@ transform = { pos = [3.50, 0.585, 0.0] }
   half_extents = [1.00, 0.15, 2.55]
 
 [[node]]
-name = "col_foredeck"
+name = "col_foredeck_aft"
 parent = "Sea/Boat"
-transform = { pos = [6.25, 1.055, 0.0], rot_euler = [0.0, 0.0, 13.9] }
+transform = { pos = [5.412, 0.6955, 0.0], rot_euler = [0.0, 0.0, 4.574] }
 
   [node.components.BoxCollider]
-  half_extents = [1.83, 0.15, 2.30]
+  half_extents = [1.0032, 0.15, 2.30]
+
+[[node]]
+name = "col_foredeck_fwd"
+parent = "Sea/Boat"
+transform = { pos = [7.286, 1.1555, 0.0], rot_euler = [0.0, 0.0, 24.019] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.9032, 0.15, 1.30]
 
 [[node]]
 name = "col_bulwark_aft_port"
