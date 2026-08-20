@@ -5624,6 +5624,53 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         assert_eq!(code, 0, "the ball should have fallen: {out}");
     }
 
+    /// **A plain node moved by its own script — ADR 0062's "place" half.**
+    ///
+    /// Every other `Script` in this repository sits on a `CharacterController`,
+    /// whose script is a movement model the physics integrates. This one writes
+    /// a transform directly, which is a different branch of `Sim::tick` and had
+    /// no scene covering it.
+    ///
+    /// The numbers are the script's closed form and not a tolerance: at tick 65
+    /// the swimmer is at `-0.30 + 0.24 * 65/60` = **-0.04** exactly, and its
+    /// bob `0.13 + 0.008 * sin(2*pi*3*65/60)` is at its maximum of **0.138**
+    /// because 3.25 cycles lands the sine on +1. A tick chosen where the sine
+    /// is zero would assert nothing about the vertical term at all.
+    ///
+    /// **It is also the half that is in a gated hash**, unlike the vertex wave
+    /// on the same node: `World::state_hash` eats every node's
+    /// `GlobalTransform` whether or not it has a rigid body, and this one has
+    /// none.
+    #[test]
+    fn a_plain_node_script_moves_its_own_transform() {
+        let scene = "../../assets/test/gleamsprat_cruise.loom";
+        let (code, out) = run(&args(&[
+            "sim",
+            scene,
+            "--ticks",
+            "65",
+            "--assert",
+            "Lagoon/Swimmer.x > -0.045",
+            "--assert",
+            "Lagoon/Swimmer.x < -0.035",
+            "--assert",
+            "Lagoon/Swimmer.y > 0.137",
+        ]));
+        assert_eq!(code, 0, "the swimmer should have travelled: {out}");
+
+        // **Falsifiable, which is the point.** If the node script branch stops
+        // running, the swimmer stays at its authored -0.30 and this passes.
+        let (code, out) = run(&args(&[
+            "sim",
+            scene,
+            "--ticks",
+            "65",
+            "--assert",
+            "Lagoon/Swimmer.x < -0.29",
+        ]));
+        assert_eq!(code, 1, "a stationary swimmer must fail this: {out}");
+    }
+
     /// **W5's exit criterion, run as the implementation order writes it.**
     ///
     ///     loom sim water_crate.loom --ticks 1800

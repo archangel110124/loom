@@ -1,0 +1,174 @@
+# The gleamsprat going somewhere.
+#
+# `gleamsprat.loom` proves the wave has the right *shape*; this proves it is
+# caused motion rather than decoration. The animal's **place** is a rhai script
+# on a plain node and its **shape** is a wave in the vertex shader, and ADR 0062
+# is why those are two systems rather than one:
+#
+#   place   CPU, fixed step, and IN a gated hash — `World::state_hash` eats
+#           every node's `GlobalTransform`, rigid body or not, and
+#           `cargo xtask validate` compares it across build profiles
+#   shape   GPU, vertex shader, in NO hash at all, because vertices are not
+#           entities. Same exemption grass, rain and `windBend` hold.
+#
+# **This is the first plain-node transform script in the repository.** All the
+# others — `walker`, `range`, `turret_range`, `camera`, `jib_vi_walk`,
+# `proving_ground`, `fishing` — sit on a `CharacterController`, whose script is
+# a *movement model* the physics integrates. A script on a node with no
+# controller writes the transform directly, which is the path this scene is the
+# only cover for.
+#
+# **Speed and frequency are one decision.** 0.24 m/s at the Deform's 3.0
+# beats/s on a 0.161171 m body is 0.50 body lengths per beat. Beat it faster
+# without moving faster and it reads as swimming against a current; move it
+# faster without beating faster and it glides like a thrown object. If either
+# number changes here, the other one has to change with it — in the `.rhai` and
+# in the `Deform` below.
+#
+# The camera is pulled back and offset from `gleamsprat.loom`'s so that the
+# whole 133-tick run stays in frame; the golden row photographs tick 60, half
+# way along it.
+[scene]
+format = 1
+id = "3b7f21ac-5d19-4e0c-9a44-7c1e8f2b60d1"
+
+[[asset]]
+key = "gleamsprat_chrome"
+id = "64281021-45d8-4f8c-ad11-796a1b05a0d3"
+path = "../meshes/gleamsprat_chrome.obj"
+
+[[asset]]
+key = "gleamsprat_coral"
+id = "d5e35506-95ac-420c-b5bf-36e5b831f1f7"
+path = "../meshes/gleamsprat_coral.obj"
+
+[[node]]
+name = "Lagoon"
+
+  # The same environment as `gleamsprat.loom`, for the same reason: a mirror is
+  # lit by what surrounds it, and a dim sky renders chrome as flat grey.
+  [node.components.Environment]
+  sun_direction = [0.35, 0.55, 0.75]
+  sun_strength = 1.4
+  sun_color = [1.0, 0.96, 0.88]
+  ambient = 0.55
+  sky_zenith = [0.16, 0.34, 0.58]
+  sky_horizon = [0.66, 0.74, 0.78]
+  fog_density = 0.004
+  fog_falloff = 0.05
+
+  # **A lagoon is sheltered, and without this one it was an open sea.** A
+  # `WaterBody` that lists no waves gets sixteen derived from the wind
+  # spectrum, and a scene that authors no `Wind` gets the default 5.5 m/s
+  # breeze — which on this body means a swell running from -0.66 m to +0.30 m.
+  # The animal is 0.16 m long and floats at 0.13, and the camera sits at 0.20,
+  # so for most of any run longer than a second or so the camera was INSIDE the
+  # water and the whole frame was the green underwater medium.
+  #
+  # Nobody had seen it because this scene was in no gate and had never been
+  # rendered at a tick other than zero. Measured with
+  # `loom sim --assert "water@0.0,0.50.height"` over 400 ticks at the eye:
+  #
+  #     wind 5.5 m/s (the default)   -0.664 .. +0.297
+  #     wind 2.5                     -0.105 .. +0.062
+  #     wind 2.0  <- authored        -0.049 .. +0.041
+  #     wind 1.0                     -0.005 .. +0.005
+  #
+  # 2.0 m/s keeps a visible ripple on the surface — which the chrome needs,
+  # because a mirror on dead-flat water reflects one flat band — while leaving
+  # the lowest fish in the school 4 cm of clearance. Fetch is what builds a
+  # wave and a lagoon has none, so this is the physical story as well as the
+  # framing fix.
+  [node.components.Wind]
+  speed = 2.0
+  gustiness = 0.2
+  turbulence = 0.1
+
+[[node]]
+name = "Water"
+parent = "Lagoon"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+  density = 1025.0
+
+# Two posts, spaced along the swim. They are the only fixed marks in the frame,
+# which is what makes the travel legible at all — against open water a moving
+# animal and a moving camera look the same.
+[[node]]
+name = "PostStart"
+parent = "Lagoon"
+transform = { pos = [-0.34, 0.07, -0.55], scale = [0.012, 0.07, 0.012] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.28, 0.22, 0.18]
+  roughness = 0.85
+
+[[node]]
+name = "PostEnd"
+parent = "Lagoon"
+transform = { pos = [0.16, 0.08, -0.62], scale = [0.012, 0.08, 0.012] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.24, 0.19]
+  roughness = 0.85
+
+[[node]]
+name = "Swimmer"
+parent = "Lagoon"
+transform = { pos = [-0.30, 0.13, -0.20], rot_euler = [0.0, 90.0, 0.0] }
+
+  # Place. Overwritten every tick from `tick` alone, so `--sim N` is one jump.
+  [node.components.Script]
+  path = "../scripts/gleamsprat_cruise.rhai"
+
+  # Shape. Identical to `gleamsprat.loom`'s hero, deliberately: the only thing
+  # this scene changes is that the node underneath it is moving, and the wave is
+  # authored in the node's own frame so it should not care.
+  [node.components.Deform]
+  nose = "+z"
+  beat = "y"
+  amplitude = 0.10
+  wavelength = 0.50
+  frequency = 3.0
+  phase = 0.0
+  span_start = 0.58
+
+  [[node]]
+  name = "SwimmerBody"
+  parent = "Lagoon/Swimmer"
+
+    [node.components.MeshRenderer]
+    mesh = { asset = "gleamsprat_chrome" }
+
+    [node.components.Material]
+    albedo = [0.92, 0.94, 0.96]
+    metallic = 1.0
+    roughness = 0.15
+
+  [[node]]
+  name = "SwimmerTrim"
+  parent = "Lagoon/Swimmer"
+
+    [node.components.MeshRenderer]
+    mesh = { asset = "gleamsprat_coral" }
+
+    [node.components.Material]
+    albedo = [0.97, 0.55, 0.48]
+    metallic = 0.0
+    roughness = 0.85
+
+[[node]]
+name = "Camera"
+parent = "Lagoon"
+transform = { pos = [-0.10, 0.22, 0.62], rot_euler = [-9.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 46.0

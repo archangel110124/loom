@@ -66,6 +66,33 @@ name = "Lagoon"
   fog_density = 0.004
   fog_falloff = 0.05
 
+  # **A lagoon is sheltered, and without this one it was an open sea.** A
+  # `WaterBody` that lists no waves gets sixteen derived from the wind
+  # spectrum, and a scene that authors no `Wind` gets the default 5.5 m/s
+  # breeze — which on this body means a swell running from -0.66 m to +0.30 m.
+  # The animal is 0.16 m long and floats at 0.13, and the camera sits at 0.20,
+  # so for most of any run longer than a second or so the camera was INSIDE the
+  # water and the whole frame was the green underwater medium.
+  #
+  # Nobody had seen it because this scene was in no gate and had never been
+  # rendered at a tick other than zero. Measured with
+  # `loom sim --assert "water@0.0,0.50.height"` over 400 ticks at the eye:
+  #
+  #     wind 5.5 m/s (the default)   -0.664 .. +0.297
+  #     wind 2.5                     -0.105 .. +0.062
+  #     wind 2.0  <- authored        -0.049 .. +0.041
+  #     wind 1.0                     -0.005 .. +0.005
+  #
+  # 2.0 m/s keeps a visible ripple on the surface — which the chrome needs,
+  # because a mirror on dead-flat water reflects one flat band — while leaving
+  # the lowest fish in the school 4 cm of clearance. Fetch is what builds a
+  # wave and a lagoon has none, so this is the physical story as well as the
+  # framing fix.
+  [node.components.Wind]
+  speed = 2.0
+  gustiness = 0.2
+  turbulence = 0.1
+
 [[node]]
 name = "Water"
 parent = "Lagoon"
