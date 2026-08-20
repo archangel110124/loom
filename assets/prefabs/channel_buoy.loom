@@ -1,0 +1,82 @@
+# A channel mark: a float, a band, a pole and a topmark. Its whole job is to
+# **move across the frame**.
+#
+# From the helm of `jib_vi` the eye looks over her port beam — the bow is
+# ninety degrees to starboard and nothing on the boat forward of the wheel is
+# in shot — so a helmsman under way sees open sea that looks exactly like open
+# sea at rest. Measured before this existed: a frame 285 m from the berth
+# differed from one half a second old by less than the ripple noise between two
+# consecutive frames. A line of these, laid to port of her track, is what a
+# player reads speed off.
+#
+# **It is a static collider**, like everything else drawn with no dynamic
+# ancestor, so a boat that runs one down stops on it. That is correct for a
+# navigation mark and it is why the line is laid nine metres off her track
+# rather than on it.
+
+[scene]
+format = 1
+id = "1a6f42d7-58b0-4e93-9c21-7d4b6e0f3a85"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[asset]]
+key = "cylinder"
+path = "cylinder"
+
+[[node]]
+name = "Buoy"
+
+# The float, half out of the water. Its own origin is the waterline, so an
+# instance is placed at y = 0 and needs no arithmetic.
+[[node]]
+name = "Float"
+parent = "Buoy"
+transform = { pos = [0.0, 0.10, 0.0], scale = [0.62, 0.55, 0.62] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.82, 0.14, 0.09]
+  roughness = 0.55
+
+[[node]]
+name = "Band"
+parent = "Buoy"
+transform = { pos = [0.0, 0.52, 0.0], scale = [0.64, 0.10, 0.64] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.93, 0.91, 0.86]
+  roughness = 0.6
+
+[[node]]
+name = "Pole"
+parent = "Buoy"
+transform = { pos = [0.0, 1.35, 0.0], scale = [0.075, 0.85, 0.075] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.20, 0.19, 0.18]
+  roughness = 0.8
+
+# The topmark is what carries at range: a flat plate is far more legible at
+# eighty metres than the pole under it.
+[[node]]
+name = "Topmark"
+parent = "Buoy"
+transform = { pos = [0.0, 2.28, 0.0], scale = [0.42, 0.42, 0.06] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.86, 0.16, 0.10]
+  roughness = 0.5

@@ -113,3 +113,15 @@ transform = { pos = [3.0, 0.0, -40.0] }
 name = "Player"
 parent = "Rig"
 transform = { pos = [-4.00, 1.62, -41.80] }
+
+# **The channel marks, shoved forty metres clear.** The hub lays a line of
+# buoys nine and a half metres off the boat's track so the helmsman can see he
+# is moving; they are static colliders, and this scene exists to turn her hard
+# both ways in open water. Measured with them where the hub puts them: the
+# starboard-turn run walked into one at z = -27.3 and put the rider in the sea.
+# A boat that stops on a navigation mark is correct; a turning-circle bench
+# that measures one is not.
+[[node]]
+name = "Marks"
+parent = "Rig"
+transform = { pos = [0.0, 0.0, 60.0] }

@@ -118,11 +118,19 @@ fi
 # test **is the mapping from the press**. The helm reads `move_x` and `move_z`
 # directly, so a pilot fabricating the thrust would test the pilot.
 
-# The hub is crossable, and a lap of it fills the four inventory slots.
+# The hub is crossable.
+#
+# **The four-slot claim used to live here and has moved**, to the shipped scene
+# with real input, three rows down. It was proved by this pilot — which walks a
+# lane it knows and picks things up along it — while the one gesture the demo
+# actually teaches arrived at the boat carrying one of four. The supplies are
+# now strung along that gesture instead, so `carried == 4` is a claim about a
+# player rather than about a route the test wrote for itself. What is left here
+# is the pickup path existing at all.
 "$LOOM" sim assets/test/rig_walk.loom --ticks 220 \
   --assert "Rig/Player.x > 10.0" --assert "Rig/Player.y > 2.2" >/dev/null
 "$LOOM" sim assets/test/rig_walk.loom --ticks 500 \
-  --assert "state.carried >= 4" --assert "events.pickup >= 4" \
+  --assert "state.carried >= 1" --assert "events.pickup >= 1" \
   --assert "Rig/Player.y > 2.2" >/dev/null
 
 # **Thirty seconds of hopping into railings, and it is never lost.** This used
@@ -134,7 +142,7 @@ fi
 # to open for the boat to be boardable and no rail can beat the jump anyway. It
 # is **"you always get back"**, and `y > -1.0` is a claim this pilot can fail.
 "$LOOM" sim assets/test/rig_walk.loom --ticks 1800 \
-  --assert "Rig/Player.y > -1.0" --assert "state.carried >= 4" >/dev/null
+  --assert "Rig/Player.y > -1.0" >/dev/null
 
 # **The demo in one key.** From the spawn, holding W: past a supply, through the
 # gap in the berth railing, over the bulwark, onto the cockpit deck, onto the
@@ -154,13 +162,73 @@ fi
 # answer is no. Run 1 pairs it with tick 60, where it is also still no.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 60 --hold move_z=1 \
   --assert "state.at_helm == 0" >/dev/null
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 240 --hold move_z=1 \
+#
+# **420 and not the 240 it was, and the two seconds are the bait box.**
+# `col_engine_box` sits amidships in the cockpit — boat-local x -8.40..-7.20 —
+# and the boarding lane now runs at it rather than threading the 1.0 m gap
+# between it and the deckhouse, because that gap is the narrowest thing on the
+# whole route and aiming the demo down it is what made round 4's lane three
+# degrees wide. Traced at `move_x = 0`: aboard at tick 180, shouldering the
+# box's after face from 180 to 300, on the mat by 360. A player with a mouse
+# steps round it without noticing; a dead-straight headless walk grinds.
+# **That trade bought the lane its other twenty-one degrees** and it is the
+# right way round.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 420 --hold move_z=1 \
   --assert "Rig/Player.z < -11.0" --assert "Rig/Player.y > 1.2" \
-  --assert "Rig/Player.y < 1.9" --assert "state.carried >= 1" \
-  --assert "state.at_helm == 1" >/dev/null
+  --assert "Rig/Player.y < 1.9" --assert "state.at_helm == 1" >/dev/null
+
+# **The four slots, filled by the one gesture the demo teaches.** Nothing else
+# is held and nothing is aimed: W, from the spawn, past four supplies laid
+# along the way to the berth. `full == 1` is the same fact from the other side
+# — the capacity is a number this scene reaches by being played, which is what
+# round 4's four-supplies-four-slots could never do.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 240 --hold move_z=1 \
+  --assert "state.carried == 4" --assert "events.pickup >= 4" \
+  --assert "state.bait == 1" --assert "state.thermos == 1" \
+  --assert "state.full == 1" >/dev/null
+
+# **28.0 and not the 30.0 it was.** The berth is a metre further west and the
+# helm mat is 0.5 m further aft, so the walk aboard is longer and she is under
+# way later; she measured 29.93 at this tick. The claim is "well clear of the
+# berth", not the decimal.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
-  --assert "Rig/Boat.x > 30.0" --assert "Rig/Player.y > 1.2" \
+  --assert "Rig/Boat.x > 28.0" --assert "Rig/Player.y > 1.2" \
   --assert "Rig/Boat.y > -0.4" >/dev/null
+
+# **THE BOARDING LANE, BOTH EDGES.** Round 4 shipped a lane about six degrees
+# wide whose taught aim sat on its right-hand edge: `move_x = 0.05` — three
+# degrees — boarded nothing, and the two failures were a wall of blue hull and
+# a swim, both with "WALK FORWARD TO THE BOAT" still on the HUD. The spawn is
+# 0.9 m further west, the boarding treads are 3.0 m wide instead of 2.2, and
+# the helm mat is 3.4 m instead of 2.6. Measured at 600 ticks: the wheel is
+# reached from anywhere in **-0.18 .. +0.25**, which is -10.2 to +14.0 degrees.
+# These two rows sit one step inside both of those edges.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 600 --hold "move_z=1,move_x=0.20" \
+  --assert "state.at_helm == 1" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 600 --hold "move_z=1,move_x=-0.15" \
+  --assert "state.at_helm == 1" >/dev/null
+
+# **And outside it the caption stops lying.** Both of these used to print the
+# walk-forward line for ever. `deeper_player.rhai` states the two facts — it is
+# the only script that can, being the only one that sees a key — and packs them
+# into the same `station` event the helm already crosses on.
+#
+# Drift right and you press into her topsides: `along_wish`, not plain speed,
+# is what catches that, because a diagonal press keeps 1.6 m/s of sideways
+# slide while making no progress at all toward the boat.
+#
+# **Known limit, stated rather than hidden.** Past about +0.30 the drift is
+# shallow enough that he genuinely walks east along the berth railing at more
+# than `STUCK_SPEED` and this stays 0. The caption is then unhelpful rather
+# than false — the boat is behind his left shoulder and in frame — and the
+# threshold that would catch it (1.6 m/s) was measured to make the latch
+# flicker, which is worse for a thing an `--assert` reads.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 600 --hold "move_z=1,move_x=0.26" \
+  --assert "state.stuck == 1" --assert "state.aboard == 0" >/dev/null
+# Drift left and you walk past her stern into the sea. The slipway is the way
+# back and the caption now names it.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 600 --hold "move_z=1,move_x=-0.22" \
+  --assert "state.swimming == 1" --assert "Rig/Player.y < 0.0" >/dev/null
 
 # **Ahead, astern, and both ways round, with the rider still aboard.**
 #
@@ -265,7 +333,7 @@ fi
 # **FISHING, FROM THE BOAT.** The third of the demo's four things, and the
 # first round in which the loop and the hub are the same game.
 #
-# `deeper_demo.rhai` is a dead stub now: the demo's rules **are** `deeper_rules.rhai`, the
+# The demo's rules **are** `deeper_rules.rhai`, the
 # fight's own file, which grew a hub block that is a no-op in any scene without
 # a `Rig/Player`. A scene has one `GameRules` and `play.rs` refuses a second, so
 # the alternative was a second copy of two hundred lines of tuned fight
@@ -319,6 +387,31 @@ fi
 "$LOOM" sim assets/test/rig_fish.loom --ticks 1800 \
   --assert "status == playing" --assert "state.fish >= 1" \
   --assert "events.hooked >= 2" >/dev/null
+
+# 5b. **THE FOUR SLOTS, ALL FOUR RULES, IN ONE RUN.** Round 4's hold was four
+#     supplies in four slots that nothing ever spent, so `hold.len() < SLOTS`
+#     could not be false and no item changed a number — a checklist, and a
+#     fifth checkbox would not have converted it. `rig_fish` carries three
+#     supplies within reach of the angler (see its header for why not four) and
+#     this row is the whole loop: he takes them (`pickup`), **the fish eats the
+#     bait at the take** (`spend`), the catch takes a slot (`stow` is only
+#     reachable if it did), and the fish box beside him takes it below
+#     (`stowed`). `carried <= 4` is the invariant a deleted capacity guard
+#     breaks.
+"$LOOM" sim assets/test/rig_fish.loom --ticks 1800 \
+  --assert "events.pickup >= 3" --assert "events.spend >= 1" \
+  --assert "events.stow >= 1" --assert "state.stowed >= 1" \
+  --assert "state.carried <= 4" >/dev/null
+
+# 5c. **And bait is the reason it is an inventory and not a checklist.** The
+#     control is the same scene with nothing in the hold: `fight_skilled.loom`
+#     is not a hub, so `state.bait` never exists there and the unbaited
+#     `BITE_MIN`/`BITE_SPAN` the five benches pin are untouched by any of this.
+#     Here the demo is walked aboard holding the button: it picks up the bait
+#     on the way, casts, and the take spends it.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold "move_z=1,fire=1" \
+  --assert "events.spend >= 1" --assert "state.bait == 0" \
+  --assert "state.carried == 3" >/dev/null
 
 # 6. **"Am I moving?" as a number, because the picture will not say.** From the
 #    helm at the opening yaw a frame after forty-five metres of travel differs

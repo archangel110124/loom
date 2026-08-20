@@ -2,10 +2,11 @@
 # out in open water, the player standing on the helm mat, and a reference angler
 # at the rod instead of a human.
 #
-# `extends`, not a copy: the rig, the rails, the supplies, the boat, her decks
-# and the rod in its holder all come from `assets/games/deeper_demo.loom`.
-# **Three things differ** — where the boat is, where the player is, and the
-# presence of a `Pilot` node.
+# `extends`, not a copy: the rig, the rails, the boat, her decks and the rod in
+# its holder all come from `assets/games/deeper_demo.loom`. **Four things
+# differ** — where the boat is, where the player is, the presence of a `Pilot`
+# node, and the four supplies, which are moved to within arm's reach of the
+# angler so that this is the **inventory** bench as well as the fight one.
 #
 # ---------------------------------------------------------------------------
 # WHY THIS SCENE HAS A PILOT AND `rig_drive.loom` REFUSES ONE
@@ -53,6 +54,16 @@
 #   loom sim assets/test/rig_fish.loom --ticks 1800 \
 #     --assert "status == playing" --assert "state.fish >= 1"
 #
+#   # 4. **every rule the four slots have, in one run.** The angler starts on
+#   #    four supplies, so: the fish eats the bait at the take (`spend`), the
+#   #    catch takes the slot the bait left (`infish`), the hold is full at
+#   #    four, and the fish box he is standing beside takes the catch below
+#   #    (`stow`). `carried <= 4` is the invariant a missing guard would break.
+#   loom sim assets/test/rig_fish.loom --ticks 1800 \
+#     --assert "events.pickup >= 3" --assert "events.spend >= 1" \
+#     --assert "events.stow >= 1"   --assert "state.stowed >= 1" \
+#     --assert "state.carried <= 4"
+#
 # The bench pins (`landed_tick == 1345`) are **not** repeated here. They belong
 # to `fight_skilled.loom`, which is the fight with nothing else in the frame;
 # this scene runs a whole hub around it and a number pinned in two places is a
@@ -92,6 +103,50 @@ transform = { pos = [3.0, 0.0, -40.0] }
 name = "Player"
 parent = "Rig"
 transform = { pos = [-4.00, 1.62, -41.80] }
+
+# ---------------------------------------------------------------------------
+# THE FOUR SUPPLIES, MOVED UNDER HIS FEET
+# ---------------------------------------------------------------------------
+#
+# In the shipped hub they are strung along the wharf between the spawn and the
+# berth. Here the boat is thirty metres out, so an unmoved supply is a supply
+# this bench can never test.
+#
+# **Six metres below him, and the pickup rule is why that works.** `RANGE` is
+# horizontal only — the crates sit on a deck and the player's origin is his
+# capsule's centre 0.9 m up, so a spherical range would spend most of itself on
+# a height difference that is the same at every crate. Underwater is therefore
+# in reach and cannot be touched: each of these is a static collider like
+# everything else drawn with no dynamic ancestor, and at y = -6 the hull's
+# 1.5 m draft never meets one.
+#
+# Spread half a metre apart so they are three bodies and not one pile, all
+# inside 0.9 m of him horizontally against a `RANGE` of 2.0.
+#
+# **Three and not four, and the fourth is the interesting one.** With all four
+# in reach the hold is permanently at 4/4: the bait he spends at the take is
+# back in the slot on the very next tick, so a landed fish has nowhere to go
+# and is turned down — which is the capacity rule working exactly as written
+# and leaves this bench unable to say anything about stowing. The `Thermos`
+# stays where the hub put it, thirty metres away, so the angler runs at three
+# supplies and the catch has a slot to land in. What that costs is
+# `events.refused`, which is reachable in play — land a fish and then walk back
+# to the bait barrel — and is covered by `state.carried <= 4` instead: the
+# invariant a missing guard would break.
+[[node]]
+name = "BaitBarrel"
+parent = "Rig"
+transform = { pos = [-4.00, -6.00, -41.80], scale = [0.45, 0.45, 0.45] }
+
+[[node]]
+name = "LineSpool"
+parent = "Rig"
+transform = { pos = [-4.60, -6.00, -41.80], scale = [0.40, 0.30, 0.40] }
+
+[[node]]
+name = "Lantern"
+parent = "Rig"
+transform = { pos = [-4.00, -6.00, -42.40], scale = [0.16, 0.28, 0.16] }
 
 # The angler at the rod. One word — see the header. Under `Rig` rather than
 # under a second root, because a scene has exactly one root (`multiple_roots`)

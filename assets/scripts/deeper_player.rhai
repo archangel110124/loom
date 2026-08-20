@@ -97,8 +97,8 @@ let SWIM = 1.9;          // metres per second. Under half the walk, because a
 // ---------------------------------------------------------------------------
 
 let HELM_NODE = "Rig/Boat";
-let HELM_X_MIN = -8.60;
-let HELM_X_MAX = -6.00;
+let HELM_X_MIN = -9.50;
+let HELM_X_MAX = -6.10;
 let HELM_Z_MIN = -2.65;
 let HELM_Z_MAX = -0.90;
 
@@ -157,6 +157,18 @@ let ASTERN = 500000.0;   // less than half. A screw astern is inefficient in
 let STALL_SPEED = 0.35;  // m/s. She passes this within a handful of ticks from
                          // rest at 25 m/s/s of unopposed acceleration, so a
                          // standing start never trips it.
+// Ashore, the same shape and the same reason: a wish to move and no travel is
+// something to say out loud — but measured **along the direction he asked
+// for**, because the failure this exists for is a diagonal press into her
+// topsides, where he keeps 1.6 m/s of sideways slide and makes no progress at
+// all toward the boat.
+let STUCK_SPEED = 1.0;   // m/s along the wish, against a 4.2 m/s walk.
+                         // **1.6 was tried and is worse**: at that threshold a
+                         // shallow slide sits on the boundary, the flag
+                         // flickers, and `--assert` reads whatever the last
+                         // tick happened to be. A latch that is going to be
+                         // asserted on has to be stable, not sensitive.
+let STUCK_TICKS = 45;
 let STALL_TICKS = 45;    // three quarters of a second below that speed with
                          // the throttle open. Long enough that a wave or a
                          // hard turn cannot close the throttle; short enough
@@ -239,10 +251,20 @@ let at_helm = on_mat && !hands_off;
 // the wheel, so the delta never spans a gap; read only when he is, which is
 // the only time it is his boat's speed rather than his legs'.
 let deck_speed = 0.0;
+// **How fast he is going *the way he asked to go*, which is a different
+// question and the one that catches a slide.** Pressed diagonally into her
+// topsides he keeps a metre and a half a second of sideways travel, so a plain
+// speed reads him as walking normally while the screen is a wall of blue hull.
+// This is his travel projected onto the direction he is asking for.
+let along_wish = 99.0;
 if "helm_px" in memory {
     let dpx = position[0] - memory.helm_px;
     let dpz = position[2] - memory.helm_pz;
     deck_speed = (dpx * dpx + dpz * dpz).sqrt() / dt;
+    let wl = (wish_x * wish_x + wish_z * wish_z).sqrt();
+    if wl > 0.01 {
+        along_wish = (dpx * wish_x / wl + dpz * wish_z / wl) / dt;
+    }
 }
 memory.helm_px = position[0];
 memory.helm_pz = position[2];
@@ -435,15 +457,40 @@ if aboard && (sprint || fire_edge) {
 // and emitted only when the integer moves: a boarding is two events, not two
 // thousand. `jump` is still not a fishing binding and `fire` is still not a
 // helm one; nothing here spends a channel.
+//
+// **Two more facts, and both are captions the demo used to get wrong.** Three
+// degrees right of the taught aim walks you into her topsides — a wall of blue
+// hull filling the screen — and three degrees left puts you in the sea with
+// nothing in frame at all, and in both cases the HUD went on reading "WALK
+// FORWARD TO THE BOAT". `swimming` is already computed above; `ashore_stuck`
+// is the same shape as the helm's own stall limiter, measured off his own
+// world position, because a character pressed against geometry has a wish and
+// no travel.
+//
+// **Ashore only.** Aboard, walking into the deckhouse is normal and the boat
+// captions have more useful things to say.
+let ashore_stuck = if "ashore_stuck" in memory { memory.ashore_stuck } else { 0 };
+if !aboard && !swimming && grounded && wish_len > 0.01 && along_wish < STUCK_SPEED {
+    ashore_stuck += 1;
+} else {
+    ashore_stuck = 0;
+}
+memory.ashore_stuck = ashore_stuck;
+let stuck = ashore_stuck > STUCK_TICKS;
+
 let station = (if aboard { 1 } else { 0 })
             + (if at_helm { 2 } else { 0 })
-            + (if stalled > STALL_TICKS { 4 } else { 0 });
+            + (if stalled > STALL_TICKS { 4 } else { 0 })
+            + (if swimming { 8 } else { 0 })
+            + (if stuck { 16 } else { 0 });
 if station != (if "station" in memory { memory.station } else { -1 }) {
     emit.push(#{
         kind: "station",
         aboard: if aboard { 1.0 } else { 0.0 },
         helm: if at_helm { 1.0 } else { 0.0 },
         stalled: if stalled > STALL_TICKS { 1.0 } else { 0.0 },
+        swim: if swimming { 1.0 } else { 0.0 },
+        stuck: if stuck { 1.0 } else { 0.0 },
     });
     memory.station = station;
 }

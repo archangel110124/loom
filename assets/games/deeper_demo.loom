@@ -1,4 +1,5 @@
-# **DEEPER — the demo. Round 4: fishing, from the boat.**
+# **DEEPER — the demo. Round 5: the way aboard, the way you can tell you are
+# moving, and four slots that are an inventory.**
 #
 #   loom run assets/games/deeper_demo.loom
 #   loom render assets/games/deeper_demo.loom --out /tmp/rig.png
@@ -17,23 +18,48 @@
 # the hub and stood the player on it. Round 2 made the boat boardable and
 # drivable, and going into the water something you come back from. Round 3 was
 # the seam in both directions — off her on foot, off the wheel on foot, and
-# arriving at a quay without driving your own hull under it. **Round 4 is the
-# third thing: there is a rod on this boat and you can fish with it**, and the
-# hub and the fishing loop are one game rather than two files.
+# arriving at a quay without driving your own hull under it. Round 4 put a rod
+# on the boat that bends.
+#
+# **Round 5 is the three things that stopped a stranger playing it.**
+#
+#   * **The boarding lane was six degrees wide** and the one gesture the demo
+#     teaches sat on its right-hand edge: `move_x = 0.05` — three degrees of
+#     aim — boarded nothing. The spawn is 0.9 m further west, the boarding
+#     treads are 3.0 m instead of 2.2 and the helm mat 3.4 m instead of 2.6.
+#     Measured at 600 ticks, the wheel is now reached from **-0.18 to +0.25**,
+#     which is -10.2 to +14.0 degrees.
+#   * **Outside that lane the HUD used to lie.** Both failures — pressed into
+#     her topsides, and swimming — printed "WALK FORWARD TO THE BOAT" for ever.
+#     `deeper_player.rhai` now states both facts and the caption has a branch
+#     for each.
+#   * **You could not see that you were moving.** A line of channel marks lies
+#     nine and a half metres off her track, on the beam the helmsman faces. See
+#     "THE MARKS", below, for the measurement and for the fix that is not this
+#     one.
+#
+# And the fourth thing became an inventory rather than a checklist: bait is
+# **spent** and changes a number, a landed fish **takes a slot**, four slots
+# are reached by playing, and the fish box in the cockpit is what empties
+# them. `assets/scripts/deeper_rules.rhai` has the four rules and why.
 #
 # The whole demo, in the order a stranger meets it:
 #
-#   1. spawn on the rig facing a boat. Walk forward.
-#   2. you are aboard, at the wheel, and the caption tells you how fast you are
-#      going because the picture will not (see the last section).
+#   1. spawn on the rig facing a boat. Walk forward — past four supplies laid
+#      along the way, which is the whole hold filled by the taught gesture.
+#   2. you are aboard, at the wheel, and channel marks stream past to port.
+#      The caption still carries `state.knots`, because a mark every 2.7 s is a
+#      sense of speed and not a number.
 #   3. press SPACE. You have let go of the wheel — and the caption *changes*,
 #      which in round 3 it did not.
 #   4. click. The rod on the port bulwark casts. Wait, and a fish takes it.
 #   5. click again inside 300 ms to set the hook, then hold SHIFT to reel and
 #      let go when it runs. The blank bends with the load, because all
 #      twenty-four joints of it read `state.stress`.
-#   6. land it and it is in the hold, on the top row of the HUD, beside
-#      whatever supplies you picked up on the way.
+#   6. land it and it takes a slot — which the bait it ate has just left free.
+#      Land a second without stowing the first and the hold is full and says
+#      so. The dark hatch on the bait box beside you is the fish hold; stand by
+#      it and the catch goes below.
 #
 # ---------------------------------------------------------------------------
 # THE CONTROLS, IN FULL
@@ -46,7 +72,11 @@
 #   anywhere aboard **CLICK casts, sets the hook and takes a rhythm window;
 #                   SHIFT reels.** Both are refused ashore, and refused by
 #                   never being sent rather than by a rule that says no.
-#   in the water    W A S D swim, at under half walking pace
+#   in the water    W A S D swim, at under half walking pace. The caption says
+#                   so and names the slipway, which round 4's did not.
+#   at the fish box the catch goes below. **A place, not a key** — the same
+#                   decision the helm mat is, and for the same reason: there is
+#                   no sixth digital channel.
 #
 # **Reel is SHIFT and not W, and that is a change from `fishing.loom`.** There
 # the angler is a post whose movement model pins him to the deck, so W is free.
@@ -129,11 +159,13 @@
 # invisible to both `loom sim --assert` and the `Hud`, and the event log is a
 # record rather than a container.
 #
-# **The four slots are also four numbers now** — `state.bait`, `state.line`,
+# **The four slots are also four numbers** — `state.bait`, `state.line`,
 # `state.lantern`, `state.thermos` — because the `Hud` can draw a number and
-# could always draw several. A fifth, `state.fish`, is what a landed fish goes
-# into, which is the first thing in this demo that puts something in the hold
-# rather than taking it off a crate.
+# could always draw several. Round 5 adds `state.infish` (fish in the slots),
+# `state.stowed` (fish put below) and `state.full`, and the events `spend`,
+# `stow` and `refused` beside `pickup`. **Eight of those are asserted in
+# `scripts/green.sh`**, which is the requirement an inventory nobody can read
+# from outside the game fails.
 #
 # The one cost, stated: `state` is not in `state_hash`, so `cargo test` and
 # `cargo xtask repeat` are blind to the hold and `--assert` is its only
@@ -192,29 +224,41 @@
 #   `--hold "jump=1,move_z=1"`: x = 3.0002 at tick 300, 2.9998 at 900, 3.0004
 #   at 1800, from a berth at 3.0. **No dead man's handle is needed and none is
 #   being built.**
-# * **YOU STILL CANNOT SEE THAT YOU ARE MOVING, and this is the largest known
-#   defect in the demo.** Measured, from the player's own eye: a frame after
-#   forty-five metres of travel differs from a moored frame by *less* than two
-#   frames of the same moving boat eleven seconds apart. The mat faces her beam,
-#   the bow is ninety degrees to starboard, nothing fixed is ever in shot, and
-#   the only signal left is ripple noise and a sun glint.
+# * **YOU CAN SEE THAT YOU ARE MOVING NOW, AND ONLY BECAUSE SOMETHING WAS PUT
+#   IN THE FRAME.** The geometry is unchanged and still wrong: the mat faces
+#   her beam, the bow is ninety degrees to starboard, the wake trails astern
+#   and `water@` reads **0.000 of foam abeam** against 0.103 three metres
+#   behind her, so the boat itself still contributes nothing to the picture.
+#   What changed is that a line of channel marks passes nine and a half metres
+#   to port. Measured on the settled helm view at 480x300, `loom compare`
+#   against the tick-600 frame:
 #
-#   It cannot be fixed by moving the mat — nothing on this boat is at -Z of the
-#   cockpit except the port bulwark — because the player's opening yaw looks
-#   down -Z and the hull's long axis is world X. **The fix is to berth her
-#   stern-to**, bow at -Z, so that walking forward off the quay steps over her
-#   transom and the bow is dead ahead from the wheel. That is a real level
-#   change: she moves from alongside at z = -10.45 to a hull lying along Z with
-#   her transom about 0.9 m off the wharf edge (origin near z = -17.4, bow near
-#   -26.9), the boarding steps move from her starboard side to her transom past
-#   `col_engine_box`, and **every pinned drive number in `scripts/green.sh`
-#   becomes a Z number instead of an X one**. It is a round, not a bullet.
+#       0.5 s apart (the ripple floor)   mean  6.41
+#       3.0 s apart                      mean  8.68
+#       4.0 s apart                      mean 11.68
+#       6.0 s apart                      mean 11.34
 #
-#   What round 4 does instead is state the fact the picture cannot: the helm
-#   caption carries `state.knots`, which is the hull's own speed smoothed over
-#   the chop, and `scripts/green.sh` asserts it *both ways* — over 5 knots under
-#   way, under 0.5 moored. A readout is not a wake. It is honest and it is not
-#   the fix.
+#   **Read that honestly: it is a weak instrument here.** The mean is dominated
+#   by water ripple, and the same four rows with the marks shoved 400 m away
+#   read 5.19 / 7.15 / 10.68 / 8.48 — so the marks are worth about 13% of a
+#   number that was never mostly about them. The evidence is the picture: at
+#   tick 600 one mark is abeam, at 690 two are, at 900 two different ones are.
+#   A player watching sees them stream past.
+#
+#   **The real fix is still to berth her stern-to**, bow at -Z, so the bow is
+#   dead ahead from the wheel. It remains a round rather than a bullet: she
+#   moves from alongside at z = -10.45 to a hull lying along Z, the boarding
+#   steps move from her starboard side to her transom, **every pinned drive
+#   number in `scripts/green.sh` becomes a Z number instead of an X one** — and
+#   it lands the helmsman looking at the after face of the deckhouse a metre
+#   away, because `col_house` ends at local x = -6.20 and the mat is at -7.80.
+#   The wheel would have to move to the flybridge or the foredeck with it.
+#
+#   `state.knots` stays in the caption and `scripts/green.sh` still asserts it
+#   both ways. "(bow is to starboard)" also stays, and it is still a workaround
+#   shipped as player-facing text: it is *true*, and on a boat whose bow you
+#   cannot see it is the one sentence that orients you. It comes out with the
+#   berth.
 # * **The rod is in a holder, not in your hands.** A renderable node with no
 #   *dynamic* ancestor becomes a static collider from its drawn bounds, and a
 #   `CharacterController` is not a dynamic body — so a rod parented to the eye
@@ -227,17 +271,23 @@
 #   world-space `RigidBody`, so a hull at three metres a second leaves it astern
 #   inside a second, and where a lure *is* while a fish is on is a design
 #   question rather than a missing binding.
-# * **The four slots fill and nothing empties them.** Walking up to a supply
-#   puts it in the hold; a landed fish adds to `state.fish` beside them. There
-#   is no way to put anything back and no reason to want one until something
-#   costs a slot. Selling is not built.
-# * **Three of the four supplies are behind the spawn**, in the one direction
-#   the demo tells you not to walk, so following the taught gesture arrives at
-#   the boat carrying exactly one. That is now *visible* — the top HUD row
-#   draws all four slots and the empty ones read `0` — but it is not solved:
-#   the count on the taught route is still one of four, and the gate that says
-#   `state.carried >= 4` still gets there on `rig_walk.loom`'s pilot rather than
-#   on anything a human does.
+# * ~~The four slots fill and nothing empties them.~~ **Fixed in round 5.**
+#   Bait is spent at the take, a landed fish takes a slot, and the fish box
+#   empties them. Selling is still not built and is not wanted here.
+# * ~~Three of the four supplies are behind the spawn.~~ **Fixed in round 5.**
+#   They are strung along the walk to the berth, alternating sides 1.25 m off
+#   the lane, and `state.carried == 4` is now asserted on the shipped scene
+#   under `--hold move_z=1` rather than on `rig_walk.loom`'s pilot, which knew
+#   a route the demo never teaches. `carried == 4` holds across the whole
+#   `move_x` band -0.15 .. +0.15.
+# * **The bait box is in the middle of the boarding lane and you shoulder past
+#   it.** `col_engine_box` is amidships in the cockpit; the lane now runs at it
+#   rather than threading the 1.0 m gap between it and the deckhouse, because
+#   that gap is the narrowest thing on the route and aiming the demo down it is
+#   what made the old lane three degrees wide. Traced at `move_x = 0`: aboard
+#   at tick 180, grinding on the box's after face from 180 to 300, at the wheel
+#   by 360. A player with a mouse steps round it; a dead-straight headless walk
+#   does not. **The trade bought the lane its other twenty-one degrees.**
 # * **The `Hud` rows are unverified as pixels.** `Hud` draws only in `loom run`
 #   and a headless render cannot show either row, so what is checked is the
 #   string the rules script produces (`game.message` in `loom sim`'s output) and
@@ -270,6 +320,12 @@ path = "../prefabs/jib_vi_decks.loom"
 key = "rod"
 id = "7f2c14a9-63d8-4e51-b0a7-2d9e5c81f430"
 path = "../prefabs/fishing_rod.loom"
+
+# The channel marks. See "THE MARKS", below.
+[[prefab]]
+key = "buoy"
+id = "1a6f42d7-58b0-4e93-9c21-7d4b6e0f3a85"
+path = "../prefabs/channel_buoy.loom"
 
 [[asset]]
 key = "box"
@@ -335,7 +391,7 @@ parent = "Rig"
 [[node]]
 name = "Player"
 parent = "Rig"
-transform = { pos = [-3.70, 2.40, 0.90] }
+transform = { pos = [-4.30, 2.40, 0.90] }
 
   [node.components.CharacterController]
   height = 1.8
@@ -745,7 +801,7 @@ transform = { pos = [8.0, 5.60, 3.0] }
 [[node]]
 name = "CrateTall"
 parent = "Rig"
-transform = { pos = [-6.90, 1.85, -4.80], scale = [0.55, 0.45, 0.55] }
+transform = { pos = [-8.60, 1.85, -4.80], scale = [0.55, 0.45, 0.55] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -794,7 +850,7 @@ transform = { pos = [-1.0, 1.70, 2.30], scale = [2.60, 0.30, 0.45] }
 [[node]]
 name = "BaitBarrel"
 parent = "Rig"
-transform = { pos = [-2.40, 1.85, -0.40], scale = [0.45, 0.45, 0.45] }
+transform = { pos = [-5.85, 1.85, -1.60], scale = [0.45, 0.45, 0.45] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "cylinder" }
@@ -806,7 +862,7 @@ transform = { pos = [-2.40, 1.85, -0.40], scale = [0.45, 0.45, 0.45] }
 [[node]]
 name = "LineSpool"
 parent = "Rig"
-transform = { pos = [-4.8, 1.70, 2.20], scale = [0.40, 0.30, 0.40] }
+transform = { pos = [-3.35, 1.70, -3.50], scale = [0.40, 0.30, 0.40] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "cylinder" }
@@ -818,7 +874,7 @@ transform = { pos = [-4.8, 1.70, 2.20], scale = [0.40, 0.30, 0.40] }
 [[node]]
 name = "Lantern"
 parent = "Rig"
-transform = { pos = [-1.8, 2.28, 2.30], scale = [0.16, 0.28, 0.16] }
+transform = { pos = [-5.85, 1.68, -5.40], scale = [0.16, 0.28, 0.16] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -831,7 +887,7 @@ transform = { pos = [-1.8, 2.28, 2.30], scale = [0.16, 0.28, 0.16] }
 [[node]]
 name = "Thermos"
 parent = "Rig"
-transform = { pos = [0.0, 2.25, 2.30], scale = [0.13, 0.25, 0.13] }
+transform = { pos = [-3.35, 1.65, 0.30], scale = [0.13, 0.25, 0.13] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "cylinder" }
@@ -890,7 +946,7 @@ parent = "Rig"
   [node.components.Hud]
   anchor = "bottom_center"
   offset = [0.0, 88.0]
-  text = "HOLD {carried}/4    bait {bait}   line {line}   lantern {lantern}   thermos {thermos}    FISH {fish}"
+  text = "HOLD {carried}/4   bait {bait}  line {line}  lantern {lantern}  thermos {thermos}  fish {infish}      BELOW {stowed}"
   size = 19.0
   color = [0.86, 0.89, 0.82]
   only_in_play = true
@@ -1025,32 +1081,159 @@ transform = { pos = [14.10, -0.05, 4.68], rot_euler = [0.0, 0.0, -34.8], scale =
   metallic = 0.4
 
 # ---------------------------------------------------------------------------
-# THE HELM
+# THE MARKS — eight buoys, and they are the answer to "am I moving?"
 #
-# **A place, not a keybinding.** Stand on the mat and W/S/A/D drive the boat;
-# step off it and they drive your legs again. That mapping needs no modifier,
-# spends none of the five digital channels the engine has, leaves `fire` for
-# fishing, and is the one control in this scene a player who was told nothing
-# can still find: you walk onto the marked patch of deck and the boat answers.
+# **The measured defect they exist for.** From the helm the eye looks over her
+# port beam: the bow is ninety degrees to starboard, nothing on the boat
+# forward of the wheel is in shot, and the wake trails astern — `water@` reads
+# 0.103 of foam three metres behind her and **0.000 abeam**, so even the foam
+# the hull is making is outside the frame. Round 4 measured a frame 285 m from
+# the berth against one half a second old and the two differed *less* than two
+# consecutive frames of the same moving boat. The picture carried no position
+# information at all, and round 4's honest answer was to print `state.knots` in
+# the caption, which is a readout and not a view.
 #
-# **It is a mat and not a wheel because the wheel is on the flybridge**, which
-# is up a 42 degree plank at the far end of the boat under 1.72 m of headroom.
-# The wheel, the throttle and the shifter are all authored as separate movable
-# parts in `jib_vi.loom` — and not one of them carries a transform, so each
-# one's pivot is the hull's origin, up to nineteen metres away. Turning the
-# drawn wheel is a mesh-authoring job rather than a scene one; it is written up
-# in this round's report instead of being faked here.
+# **The fix that is not this one is to berth her stern-to**, so that the bow is
+# dead ahead from the wheel. That moves every pinned drive number in
+# `scripts/green.sh` from an X to a Z, moves the boarding steps from her
+# starboard side to her transom — and lands the player looking at the after
+# face of the deckhouse a metre away, because `col_house` ends at local x =
+# -6.20 and the mat is at -7.80. It is a round with a mesh question in it.
 #
-# Drawn only. A renderable node under a dynamic ancestor is not given a static
-# collider, and this carries no `BoxCollider`, so it is paint on the deck and
-# the capsule stands on `col_deck_aft` underneath it exactly as it would with
-# no mat there at all. `deeper_player.rhai`'s `HELM_*` bounds and this
-# transform are one decision: change either and change both.
+# **What a line of marks does instead is put something in the frame he already
+# has.** They are laid nine and a half metres off her track, on the side he is
+# facing, sixteen metres apart. At three knots one sweeps out of shot about
+# every five seconds, and a fresh one is already on the horizon ahead. It is
+# the oldest speed cue there is and it costs one prefab.
+#
+# Nine and a half metres, not five: they are **static colliders** like
+# everything else drawn without a dynamic ancestor, so a boat that runs one
+# down stops on it. That is right for a navigation mark and wrong for the demo
+# to walk into by accident on the taught gesture, which is dead straight.
+#
+# **They hang off one `Marks` node** so a test scene can shove the whole line
+# out of the way with a single override — `rig_drive.loom` turns hard both ways
+# and was measuring a buoy: its starboard-turn run stopped on one at z = -27.3
+# and put the rider in the sea.
+#
+# **Ten of them, and the length is a bounds decision.** The line reaches x = 84
+# — 24 s of driving, a mark passing every 2.7 s — and stops there because
+# anything that frames a scene from its *bounds* rather than from its camera
+# (`cargo xtask shimmer`, `cargo xtask flythrough`, `loom render --yaw`) pulls
+# back to hold the whole line, and that is the exact trap the grass phase spent
+# a night on: a metric that frames automatically silently stops containing the
+# subject.
+#
+# **Checked, and it is not this line's doing.** `loom render --yaw 30
+# --pitch -25` on this scene renders from *under water* — and so does the same
+# command on `assets/games/fishing.loom`, which nothing here touches. An
+# `ocean` `WaterBody`'s own bounds already dominate any of these scenes, so
+# bounds-framing was broken for the whole family before there were any marks.
+# The length is still kept short, because the trap is real even where it has
+# already sprung.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Marks"
+parent = "Rig"
+
+[[node]]
+name = "Mark1"
+parent = "Rig/Marks"
+prefab = "buoy"
+transform = { pos = [12.0, 0.0, -20.0] }
+
+[[node]]
+name = "Mark2"
+parent = "Rig/Marks"
+prefab = "buoy"
+transform = { pos = [20.0, 0.0, -20.0] }
+
+[[node]]
+name = "Mark3"
+parent = "Rig/Marks"
+prefab = "buoy"
+transform = { pos = [28.0, 0.0, -20.0] }
+
+[[node]]
+name = "Mark4"
+parent = "Rig/Marks"
+prefab = "buoy"
+transform = { pos = [36.0, 0.0, -20.0] }
+
+[[node]]
+name = "Mark5"
+parent = "Rig/Marks"
+prefab = "buoy"
+transform = { pos = [44.0, 0.0, -20.0] }
+
+[[node]]
+name = "Mark6"
+parent = "Rig/Marks"
+prefab = "buoy"
+transform = { pos = [52.0, 0.0, -20.0] }
+
+[[node]]
+name = "Mark7"
+parent = "Rig/Marks"
+prefab = "buoy"
+transform = { pos = [60.0, 0.0, -20.0] }
+
+[[node]]
+name = "Mark8"
+parent = "Rig/Marks"
+prefab = "buoy"
+transform = { pos = [68.0, 0.0, -20.0] }
+
+[[node]]
+name = "Mark9"
+parent = "Rig/Marks"
+prefab = "buoy"
+transform = { pos = [76.0, 0.0, -20.0] }
+
+[[node]]
+name = "Mark10"
+parent = "Rig/Marks"
+prefab = "buoy"
+transform = { pos = [84.0, 0.0, -20.0] }
+
+# ---------------------------------------------------------------------------
+# THE FISH BOX — where the catch goes, and the only way anything leaves the
+# hold
+#
+# **A place, not a key**, exactly like the helm mat and for the same reason:
+# the engine has five digital channels, `jump` is the helm release, `fire` and
+# `sprint` are the rod, and there is no sixth. Walk up to the hatch and
+# everything in the hold that is a fish goes below.
+#
+# It is drawn on top of `col_engine_box` — the bait box in the cockpit, local
+# x -8.40..-7.20, z +/-0.78, top at 1.14 — which is 0.50 m proud of the sole
+# and therefore a wall rather than a kerb. So you stand *beside* it, which is
+# 1.2 m from this hatch's centre and inside `RANGE`. From the helm mat's centre
+# it is 1.84 m away, which is outside it: **stowing is a walk, not something
+# that happens while you steer.**
+#
+# Drawn only. Under a dynamic ancestor, so no static collider is baked from it
+# and the box underneath is what the capsule meets — the same rule as
+# `HelmMat`, stated twice in this file because it is the likeliest thing to get
+# wrong when a third one is wanted.
+[[node]]
+name = "FishHold"
+parent = "Rig/Boat"
+transform = { pos = [-7.80, 1.16, 0.0], scale = [0.46, 0.03, 0.60] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.14, 0.20, 0.22]
+  roughness = 0.55
+  metallic = 0.3
 
 [[node]]
 name = "HelmMat"
 parent = "Rig/Boat"
-transform = { pos = [-7.30, 0.63, -1.775], scale = [1.30, 0.02, 0.875] }
+transform = { pos = [-7.80, 0.63, -1.775], scale = [1.70, 0.02, 0.875] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -1121,13 +1304,13 @@ transform = { pos = [-7.30, 0.63, -1.775], scale = [1.30, 0.02, 0.875] }
 [[node]]
 name = "StepLow"
 parent = "Rig/Boat"
-transform = { pos = [-7.60, 0.76, 1.81], scale = [1.10, 0.12, 0.15] }
+transform = { pos = [-8.00, 0.76, 1.81], scale = [1.50, 0.12, 0.15] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
 
   [node.components.BoxCollider]
-  half_extents = [1.10, 0.12, 0.15]
+  half_extents = [1.50, 0.12, 0.15]
 
   [node.components.Material]
   albedo = [0.31, 0.27, 0.22]
@@ -1136,13 +1319,13 @@ transform = { pos = [-7.60, 0.76, 1.81], scale = [1.10, 0.12, 0.15] }
 [[node]]
 name = "StepMid"
 parent = "Rig/Boat"
-transform = { pos = [-7.60, 0.885, 2.11], scale = [1.10, 0.245, 0.15] }
+transform = { pos = [-8.00, 0.885, 2.11], scale = [1.50, 0.245, 0.15] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
 
   [node.components.BoxCollider]
-  half_extents = [1.10, 0.245, 0.15]
+  half_extents = [1.50, 0.245, 0.15]
 
   [node.components.Material]
   albedo = [0.31, 0.27, 0.22]
@@ -1151,13 +1334,13 @@ transform = { pos = [-7.60, 0.885, 2.11], scale = [1.10, 0.245, 0.15] }
 [[node]]
 name = "StepHigh"
 parent = "Rig/Boat"
-transform = { pos = [-7.60, 1.01, 2.41], scale = [1.10, 0.37, 0.15] }
+transform = { pos = [-8.00, 1.01, 2.41], scale = [1.50, 0.37, 0.15] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
 
   [node.components.BoxCollider]
-  half_extents = [1.10, 0.37, 0.15]
+  half_extents = [1.50, 0.37, 0.15]
 
   [node.components.Material]
   albedo = [0.31, 0.27, 0.22]
