@@ -1278,7 +1278,18 @@ void fluidInstanceMain(uint3 tid: SV_DispatchThreadID) {
         radius *= 1.0 - smoothstep(FLUID_SPRAY_GONE, FLUID_SPRAY_FULL, fluidFractionAt(c, x));
     }
     c->instances[tid.x * 3u] = float4(x, radius);
-    c->instances[tid.x * 3u + 1u] = float4(0.20, 0.40, 0.56, 1.0);
+    // **White, because the air in thrown water is what you are looking at.**
+    // Aerated water scatters achromatically off many air/water interfaces: a
+    // whitecap's albedo is around 0.22 against 0.05-0.10 for the calm sea
+    // beside it, and the blue of deep water is absorption over metres of path
+    // length, which a 4 cm droplet does not have. A mid-blue droplet is a gel
+    // bead, which is exactly what it was reported as.
+    //
+    // Verbatim `loom_cli::particles::default_droplet().color_start`, which
+    // carries the same argument: the CPU crown and the solver's own droplets
+    // are the same substance and drawing them two colours in one frame is the
+    // tell.
+    c->instances[tid.x * 3u + 1u] = float4(0.92, 0.96, 1.00, 1.0);
     // The shutter is slice 2's: a droplet moving fast is a smear, which is
     // what turns a bead field into thrown water.
     c->instances[tid.x * 3u + 2u] = float4(v, 1.0 / 120.0);
