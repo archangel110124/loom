@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+
 [[bin]]
 name = "loom"
 path = "src/main.rs"
@@ -41,3 +42,6 @@ loom_water = { version = "0.0.0", path = "../loom_water" }
 serde = "=1.0.229"
 serde_json = "=1.0.151"
 winit = "=0.30.13"
+
+[lints]
+workspace = true

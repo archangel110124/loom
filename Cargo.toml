@@ -13,6 +13,28 @@ members = [
 # else in the workspace; loom_agent is depended on by nothing; nothing outside
 # loom_render* imports ash.
 
+# **The unsafe quarantine, as a compiler rule rather than a habit.**
+#
+# 18 of the 21 crates plus xtask contain no `unsafe` at all and pass this today
+# with no source change; all 282 occurrences live in `loom_render` (273),
+# `loom_render_graph` (8) and one block in `loom_cli`. That distribution is the
+# project's actual safety architecture, and until now nothing enforced it — an
+# agent adding `unsafe` to `loom_voxel` would have produced a diff nobody read
+# rather than a build failure.
+#
+# `deny`, never `forbid`: `forbid` cannot be lifted by an inner `allow`, so a
+# future proc-macro expansion or a single justified exception would wedge the
+# build with no way out short of editing this file.
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+# Every `unsafe {}` names its invariant, and no safe block claims to have one.
+# The discipline already exists — 261 blocks carry 261 `// SAFETY:` comments and
+# `unnecessary_safety_comment` was already at zero. This stops it eroding.
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "deny"
+
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"

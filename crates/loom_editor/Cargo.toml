@@ -13,6 +13,7 @@ publish.workspace = true
 #
 # `egui_dock` and any icon or font crate land *here* when they land, never in
 # `loom_cli` or `loom_render`.
+
 [dependencies]
 # **0.20.1, not the latest.** `egui_dock` 0.21.x moved to egui 0.36 while this
 # workspace is pinned to 0.35, and `cargo add egui_dock` takes the latest — which
@@ -33,3 +34,6 @@ loom_reflect = { version = "0.0.0", path = "../loom_reflect" }
 loom_render = { version = "0.0.0", path = "../loom_render" }
 loom_scene = { version = "0.0.0", path = "../loom_scene" }
 serde_json = "=1.0.151"
+
+[lints]
+workspace = true

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+
 [dependencies]
 ash = "=0.38.0"
 ash-window = "=0.13.0"
@@ -38,3 +39,15 @@ loom_voxel = { version = "0.0.0", path = "../loom_voxel" }
 # renderer evaluates a field on the CPU.
 [dev-dependencies]
 loom_field = { version = "0.0.0", path = "../loom_field" }
+
+
+# **The quarantine's inside.** 273 of the workspace's 282 `unsafe` operations
+# are here, every one of them an ash call. Not `lints.workspace = true`, because
+# cargo forbids inheriting and overriding in one manifest — so the two clippy
+# lints are repeated verbatim rather than inherited, and they still apply.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "deny"

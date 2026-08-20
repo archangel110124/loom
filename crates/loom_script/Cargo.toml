@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+
 [dependencies]
 loom_scene = { version = "0.0.0", path = "../loom_scene" }
 # `no_time` removes rhai's `timestamp()`/`elapsed`. Not disabled at runtime —
@@ -13,3 +14,6 @@ loom_scene = { version = "0.0.0", path = "../loom_scene" }
 # the machine is, which is never-do #8 and would quietly break every `--assert`.
 rhai = { version = "=1.25.1", features = ["no_time"] }
 serde = { version = "=1.0.229", features = ["derive"] }
+
+[lints]
+workspace = true

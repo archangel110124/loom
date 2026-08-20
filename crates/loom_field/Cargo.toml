@@ -8,4 +8,8 @@ publish.workspace = true
 # No dependencies. This is the single source of truth for every analytic field
 # both the CPU and the GPU evaluate, and it is consumed by a build script —
 # anything it pulls in becomes a build-time dependency of the renderer.
+
 [dependencies]
+
+[lints]
+workspace = true

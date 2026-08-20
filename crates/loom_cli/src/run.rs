@@ -2574,10 +2574,18 @@ fn build_viewer(
         .map_err(|e| format!("surface extensions unavailable: {e}"))?;
     let instance = Instance::with_extensions(c"loom", required).map_err(|e| e.to_string())?;
 
+    // **The one `unsafe` outside `loom_render*`, opened by name rather than by
+    // opening the crate.** `loom_cli` denies `unsafe_code` at the workspace
+    // level; this block is the documented exception, and it exists because
+    // `ash_window::create_surface` needs the raw window handle and there is no
+    // safe wrapper for it. Allowing it here rather than in `Cargo.toml` is the
+    // difference between an exception and a hole.
+    //
     // SAFETY: the window outlives the surface. `App`'s `Drop` destroys the
     // viewer — and with it this surface — before releasing the window. That is
     // written out explicitly there rather than left to field order, because
     // field order is what got this wrong the first time.
+    #[allow(unsafe_code)]
     let surface = unsafe {
         ash_window::create_surface(
             instance.entry(),

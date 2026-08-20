@@ -3703,6 +3703,9 @@ pub(crate) unsafe fn begin_rendering(
         .layer_count(1)
         .color_attachments(&color_attachments)
         .depth_attachment(&depth_attachment);
+    // SAFETY: the enclosing `unsafe fn`'s `# Safety` section is the contract —
+    // `cmd` is recording and every view in `rendering` outlives the pass. This
+    // call adds no obligation of its own.
     unsafe { d.cmd_begin_rendering(cmd, &rendering) };
 }
 
@@ -3727,6 +3730,9 @@ pub(crate) unsafe fn set_viewport(
         offset: vk::Offset2D { x: 0, y: 0 },
         extent: vk::Extent2D { width, height },
     };
+    // SAFETY: the enclosing `unsafe fn`'s `# Safety` section is the contract —
+    // `cmd` is recording with a dynamic-state pipeline bound. Both slices are
+    // locals that outlive the call.
     unsafe {
         d.cmd_set_viewport(cmd, 0, &[viewport]);
         d.cmd_set_scissor(cmd, 0, &[scissor]);

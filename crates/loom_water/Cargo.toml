@@ -9,6 +9,7 @@ publish.workspace = true
 # the one place the wave surface is defined, and the Slang half is emitted from
 # the same file — anything pulled in here becomes a build-time dependency of
 # whatever generates the shader.
+
 [dependencies]
 loom_scene = { version = "0.0.0", path = "../loom_scene" }
 # The frozen integer hash, for the spray's cell and slot jitter. ADR 0006: noise
@@ -24,3 +25,6 @@ loom_field = { version = "0.0.0", path = "../loom_field" }
 # from, which is what keeps the generated shader free of the terrain system.
 [dev-dependencies]
 loom_voxel = { version = "0.0.0", path = "../loom_voxel" }
+
+[lints]
+workspace = true
