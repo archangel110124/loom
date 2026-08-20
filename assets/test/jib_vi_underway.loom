@@ -67,9 +67,16 @@
 # is what shipped until `FOAM_HULL_DRAG` was deleted; this pair is the scene
 # half of `loom_water::foam::a_twelve_station_hull_still_leaves_a_wake`.
 #
-#   loom render assets/test/jib_vi_underway.loom --frames 16 --step 12
+#   loom render assets/test/jib_vi_underway.loom --frames 16 --spin 0 --step 40
 #
-# is the wake in motion, and no still shows the whole of it.
+# is the wake in motion, and no still shows the whole of it. **`--spin 0` and
+# `--step 40` are both load-bearing.** `--spin` defaults to 6 deg a frame, which
+# swings the camera off the track while the subject is trying to drive across
+# it; and sixteen frames of the default step cover 180 ticks, three seconds, in
+# which this hull has not yet reached the frame. Forty ticks a frame walks the
+# whole 600 the header measures, so the trail grows behind her frame by frame
+# with the camera held still — which is the only way to tell a wake that is
+# being laid from a texture that is being scrolled.
 #
 # **The camera is a high oblique from off the starboard quarter, not from
 # astern.** Astern is the natural place to stand and the wrong one: it puts the
