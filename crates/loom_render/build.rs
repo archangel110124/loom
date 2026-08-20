@@ -27,14 +27,19 @@ fn main() {
     generate_fields(&shader_dir);
     generate_water(&shader_dir);
 
-    // Newest mtime under `assets/shaders/**`, RECURSIVELY, plus this file.
-    // Recursion is not optional: `scene.slang` includes `generated/fields.slang`,
-    // `generated/water.slang` and `include/rain.slang`, and a check that only
-    // looked at the top level would ship a stale shader after a `loom_field`
-    // change -- the exact CPU/GPU divergence S2 and ADR 0006 exist to prevent.
-    //
+    // **`slangc` is a shader input like any other.** First name match on PATH,
+    // which is close enough to what `Command::new` below will execute. The
+    // `rerun-if-changed` is what makes a toolchain upgrade re-run this script
+    // at all; the mtime comparison in `compile` only helps once it does.
+    let slangc = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("slangc"))
+        .find(|p| p.is_file());
+    if let Some(path) = &slangc {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+
     // Taken *after* the two generators have run, so a field edit moves it.
-    let newest_input = newest_mtime(&shader_dir).max(mtime(&manifest.join("build.rs")));
+    let newest_input = newest_input(&shader_dir, &manifest.join("build.rs"), slangc.as_deref());
 
     let Ok(entries) = std::fs::read_dir(&shader_dir) else {
         // No shader directory yet is fine — an empty one is not an error.
@@ -154,10 +159,34 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
+/// Newest modification time across everything a compiled `.spv` depends on:
+/// every file under `shader_dir` recursively, this build script, and `slangc`
+/// itself.
+///
+/// **Recursion is not optional**: `scene.slang` includes
+/// `generated/fields.slang`, `generated/water.slang` and `include/rain.slang`,
+/// and a check that looked only at the top level would ship a stale shader
+/// after a `loom_field` change — the exact CPU/GPU divergence S2 and ADR 0006
+/// exist to prevent.
+///
+/// **`slangc` is an input like any other.** Upgrade the toolchain and every
+/// `.spv` in an existing `OUT_DIR` is newer than every shader, so a check that
+/// ignored the compiler would keep serving SPIR-V emitted by the old one.
+///
+/// `None` means *this build cannot date its inputs* — an unreadable tree, or a
+/// `slangc` it cannot find — and [`compile`] then recompiles unconditionally.
+/// Every `?` below is that fail-open path, which is the safe direction.
+fn newest_input(shader_dir: &Path, build_rs: &Path, slangc: Option<&Path>) -> Option<SystemTime> {
+    Some(
+        newest_mtime(shader_dir)?
+            .max(mtime(build_rs)?)
+            .max(mtime(slangc?)?),
+    )
+}
+
 /// Newest modification time anywhere under `dir`, recursively.
 ///
-/// `None` for an unreadable or empty tree, which makes the staleness check in
-/// [`compile`] fail open and recompile -- the safe direction.
+/// `None` for an unreadable or empty tree.
 fn newest_mtime(dir: &Path) -> Option<SystemTime> {
     let mut newest = None;
     for entry in std::fs::read_dir(dir).ok()?.filter_map(Result::ok) {
@@ -191,7 +220,11 @@ fn compile(shader: &Path, out_dir: &Path, newest_input: Option<SystemTime>) {
     // that actually *runs* still panics on failure (never-do #9). Sound because
     // `write_generated` is content-gated, so a generated fragment's mtime moves
     // only when the emitted Slang really changed.
-    if mtime(&spv).is_some_and(|built| Some(built) > newest_input) {
+    //
+    // `newest_input` of `None` recompiles: `Some(built) > None` is `true`, so
+    // writing the comparison the other way round skipped the compile exactly
+    // when the inputs could not be dated.
+    if newest_input.is_some_and(|newest| mtime(&spv).is_some_and(|built| built > newest)) {
         return;
     }
 
