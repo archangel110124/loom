@@ -3180,6 +3180,21 @@ impl Renderer {
         let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), self.width, self.height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
+        // **`Balanced` is `png`'s default and it was three quarters of every
+        // headless frame.** Measured end to end on `lanternhead` at 1920x1080,
+        // quiet box, min of 3, with the per-frame voxel bake already hoisted:
+        // the marginal frame was 530 ms, of which the encoder is the bulk.
+        //
+        // `Fast` over `Fastest`: `Fastest` does no buffering and can emit
+        // *larger* files than no compression at all on incompressible data
+        // (png 0.18.1, `common.rs:329`). `Fast` runs fdeflate and still beats
+        // libpng's fastest mode on ratio.
+        //
+        // PNG is lossless at every level, so no reference moves and nothing
+        // needs re-blessing: `loom compare` decodes pixels, and `xtask repeat`'s
+        // three fresh renders all come from this same encoder at this same
+        // level. The file gets bigger; the image does not change.
+        encoder.set_compression(png::Compression::Fast);
         let mut writer = encoder.write_header().map_err(|e| {
             RenderError::Io(std::io::Error::other(e.to_string()))
         })?;

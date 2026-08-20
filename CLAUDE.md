@@ -368,9 +368,20 @@ change, so your edits appear live. Two consequences:
 > The printed field is labelled `graph`, not `total`, because it is the sum of graph passes and
 > about **2% of a frame** — the TLAS rebuild is a separate submit and the PNG encode is CPU.
 >
-> **The offscreen harness's ~30 ms/frame is the PNG encoder**, not the engine: ~10 ms fixed plus
-> ~11 ms per megapixel, with GPU readback only 0.61 ms of it. It never measured the engine in either
-> direction.
+> **The offscreen harness's per-frame cost is the PNG encoder**, not the engine, and GPU readback is
+> only 0.61 ms of it. It never measured the engine in either direction. The old model here — "~10 ms
+> fixed plus ~11 ms per megapixel" — is **wrong and was never a per-megapixel constant**: deflate
+> cost is a function of image entropy, not area. Measured end to end on `lanternhead` at 1920x1080,
+> `--frames 11 --spin 0 --step 0`, quiet box, min of 3, marginal frame:
+>
+>     Balanced (png's default, what shipped)   385 ms/frame   2.28 MB
+>     Fast (what ships now)                     19 ms/frame   2.90 MB
+>     Fastest                                   16 ms/frame   3.90 MB
+>
+> So `Fast` is 20x the default for 27% more bytes, and `Fastest` buys a further 3 ms for another
+> megabyte — which is why the encoder is set to `Fast` in `renderer.rs`. PNG is lossless at every
+> level, so none of this moves a pixel: `loom compare --channel 0 --fraction 0 --worst 0` reports
+> 0 differing pixels of 2,073,600 between a `Balanced` and a `Fast` render of the same frame.
 >
 > **Adding a rendering path means adding a scene to `SCENES` and `GOLDEN`.** `meadow` was missing for
 > two slices and `grass_slope` for one, and in both cases the gate reported a full pass without ever
