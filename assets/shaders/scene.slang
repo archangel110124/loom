@@ -5589,6 +5589,15 @@ static const float WATER_CONTACT_BAND = 0.35;
 /// is — and because both write through `max`, so the thinner one must not be
 /// able to hide the thicker.
 static const float WATER_CONTACT_OPACITY = 0.55;
+/// How far up the water column a solid has to reach before the band draws on
+/// it, as a fraction of the still-water depth there.
+///
+/// **The discriminator between a hull and the seabed.** Both are "the opaque
+/// thing behind this water pixel"; only one of them is a waterline. Half the
+/// column is the loosest rule that keeps a bed out — the failure it guards is
+/// a gentle shelf, where the bed is within `WATER_CONTACT_BAND` of the surface
+/// for tens of metres in a row.
+static const float WATER_CONTACT_INTRUDE = 0.5;
 
 static const float WATER_FOAM_WET = 0.22;
 static const float WATER_FOAM_BREAK = 0.33;
@@ -6191,7 +6200,20 @@ float3 waterBehind(
     // actually crosses — the same air-path mistake the probe above refuses to
     // make, in the other direction.
     float drop = max(surfacePos.y - bg.y, 0.0);
-    gap = drop;
+    // **The seabed is not a waterline, and this is the line that says so.**
+    // The band wants the solid that comes THROUGH the surface. On a beach the
+    // nearest solid is the bed itself, over the whole shallow apron — so
+    // ungated it washed `beach.loom`'s wet sand milky across 15.3% of the
+    // frame, a second opinion about water `shoreFoam` already owns.
+    //
+    // A hull, a post or a crate sits in the UPPER part of the column; a bed is
+    // the bottom of it. Comparing the two is scale-free, which a second depth
+    // threshold beside `SHORE_FOAM_DEPTH` would not be: it says the same thing
+    // in a 30 cm rock pool and in an ocean, and it needs no number to be kept
+    // in step with the swash.
+    gap = drop < min(bedDepth, WATER_DEPTH_SENTINEL) * WATER_CONTACT_INTRUDE
+        ? drop
+        : WATER_NO_BED;
     float viewLeg = drop / max(-refracted.y, 0.05);
     float downLeg = min(bedDepth, WATER_DEPTH_SENTINEL) * loomWaterSecant(sunDirection().y);
     // **Only a bed the height grid actually knows about reports a column.** At
