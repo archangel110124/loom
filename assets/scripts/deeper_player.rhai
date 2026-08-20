@@ -157,17 +157,11 @@ let ASTERN = 500000.0;   // less than half. A screw astern is inefficient in
 let STALL_SPEED = 0.35;  // m/s. She passes this within a handful of ticks from
                          // rest at 25 m/s/s of unopposed acceleration, so a
                          // standing start never trips it.
-// Ashore, the same shape and the same reason: a wish to move and no travel is
-// something to say out loud — but measured **along the direction he asked
-// for**, because the failure this exists for is a diagonal press into her
-// topsides, where he keeps 1.6 m/s of sideways slide and makes no progress at
-// all toward the boat.
-let STUCK_SPEED = 1.0;   // m/s along the wish, against a 4.2 m/s walk.
-                         // **1.6 was tried and is worse**: at that threshold a
-                         // shallow slide sits on the boundary, the flag
-                         // flickers, and `--assert` reads whatever the last
-                         // tick happened to be. A latch that is going to be
-                         // asserted on has to be stable, not sensitive.
+// Walking into something is the same shape and the same reason: a wish to move
+// and no travel is something to say out loud. `STUCK_SPEED` used to live here —
+// one metre a second along the wish, from one tick's delta — and it is gone,
+// because a rate cannot tell a wedge from a ripple. See `STUCK_NET`, at the
+// measurement itself.
 let STUCK_TICKS = 45;
 let STALL_TICKS = 45;    // three quarters of a second below that speed with
                          // the throttle open. Long enough that a wave or a
@@ -302,20 +296,10 @@ let at_helm = on_mat && !hands_off;
 // the wheel, so the delta never spans a gap; read only when he is, which is
 // the only time it is his boat's speed rather than his legs'.
 let deck_speed = 0.0;
-// **How fast he is going *the way he asked to go*, which is a different
-// question and the one that catches a slide.** Pressed diagonally into her
-// topsides he keeps a metre and a half a second of sideways travel, so a plain
-// speed reads him as walking normally while the screen is a wall of blue hull.
-// This is his travel projected onto the direction he is asking for.
-let along_wish = 99.0;
 if "helm_px" in memory {
     let dpx = position[0] - memory.helm_px;
     let dpz = position[2] - memory.helm_pz;
     deck_speed = (dpx * dpx + dpz * dpz).sqrt() / dt;
-    let wl = (wish_x * wish_x + wish_z * wish_z).sqrt();
-    if wl > 0.01 {
-        along_wish = (dpx * wish_x / wl + dpz * wish_z / wl) / dt;
-    }
 }
 memory.helm_px = position[0];
 memory.helm_pz = position[2];
@@ -373,6 +357,26 @@ if at_helm {
         move_x
     };
     helm_torque = [0.0, -wheel * WHEEL, 0.0];
+
+    // **WHAT THE TWO CONTROLS ARE SET TO, because the frame will not say.**
+    //
+    // The boat's drawn wheel and throttle lever are prefab nodes, and they are
+    // at boat-local (2.38, 4.24, -0.52) and (2.45, 4.18, -1.00): up on the
+    // flybridge, ten metres forward of this mat and three and a half metres
+    // above it. The helmsman cannot see either one. So "show it in the world"
+    // has nothing to show here — measured off the meshes' own vertex bounds —
+    // and the confirmation that a press registered has to be text.
+    //
+    // Both are three-valued (`Input::axis` is exactly -1, 0 or +1, and the
+    // wheel is then clamped), so this changes only when the player changes it:
+    // the same on-change discipline as `station` and `heading`.
+    let drive = if stalled > STALL_TICKS { 0 } else if move_z > 0.0 { 1 } else if move_z < 0.0 { -1 } else { 0 };
+    let rudder = if wheel > 0.01 { 1 } else if wheel < -0.01 { -1 } else { 0 };
+    let set = drive * 4 + rudder;
+    if set != (if "helmset" in memory { memory.helmset } else { 99 }) {
+        emit.push(#{ kind: "helmset", drive: drive.to_float(), rudder: rudder.to_float() });
+        memory.helmset = set;
+    }
 } else if aboard {
     // **Aboard and not at the wheel means all stop, every tick.** The thrust
     // table is live: a body keeps the last force written to it, so a helm that
@@ -550,21 +554,162 @@ if aboard && (sprint || fire_edge) {
 // degrees right of the taught aim walks you into her topsides — a wall of blue
 // hull filling the screen — and three degrees left puts you in the sea with
 // nothing in frame at all, and in both cases the HUD went on reading "WALK
-// FORWARD TO THE BOAT". `swimming` is already computed above; `ashore_stuck`
-// is the same shape as the helm's own stall limiter, measured off his own
-// world position, because a character pressed against geometry has a wish and
-// no travel.
+// FORWARD TO THE BOAT". `swimming` is already computed above; `stuck` is below,
+// because a character pressed against geometry has a wish and no travel.
 //
-// **Ashore only.** Aboard, walking into the deckhouse is normal and the boat
-// captions have more useful things to say.
-let ashore_stuck = if "ashore_stuck" in memory { memory.ashore_stuck } else { 0 };
-if !aboard && !swimming && grounded && wish_len > 0.01 && along_wish < STUCK_SPEED {
-    ashore_stuck += 1;
-} else {
-    ashore_stuck = 0;
+// **It used to be ashore only, and that was measured wrong rather than argued
+// wrong.** The note here read "aboard, walking into the deckhouse is normal and
+// the boat captions have more useful things to say". The boat captions do not:
+// held against `col_engine_box` with a fish in his hands, a player made no
+// progress for four hundred and fifty ticks while `state.stuck` read 0.0 and
+// the HUD read `ABOARD   CLICK to cast`. The one place in this demo where being
+// blocked is *confusing* rather than obvious was the one place this could not
+// fire. Traced with the round-8 tape plus `1900:move_z=-1`: z went -12.304 to
+// -11.605 in the first fifty ticks and did not move again.
+//
+// **NET TRAVEL FROM A MARK, NOT A PER-TICK RATE, and this is the half that had
+// to be rebuilt rather than ungated.** The first version of this measured
+// metres per second along the wish from one tick's delta. Wedged in a corner
+// the contact solver pushes the capsule out a centimetre and he walks straight
+// back in, and at 60 Hz a 1.7 cm ripple *is* one metre per second — so the
+// counter reset every few ticks and the genuine four-hundred-tick wedge never
+// reported. A mark he has to get a metre away from cannot be fooled by a
+// ripple, because a ripple has no mean.
+//
+// **Along the wish, because that is what catches a slide.** Pressed diagonally
+// into her topsides he keeps a metre and a half a second of sideways travel, so
+// plain distance from the mark reads him as walking normally while the screen
+// is a wall of blue hull. Projected onto the direction he asked for, it is zero.
+//
+// **In the deck's frame when he is on the deck**, and that is not a refinement:
+// a world-space mark on a hull making five knots is left behind at five knots
+// whether he moves his feet or not. `stand_local` is his position on the body
+// under him (ADR 0060), which is the only frame in which "am I getting across
+// this deck" has an answer. Ashore `stand_node` is empty — the rig is static
+// and reports nothing — so world position is that frame and the two cases share
+// one piece of code.
+//
+// **Still never at the helm**: there `speed = 0.0` by design, so a wish with no
+// travel is what holding the wheel *is*.
+let STUCK_NET = 1.0;     // metres along the wish. A walk covers this in 15
+                         // ticks at 4.2 m/s, so a man who is walking re-marks
+                         // three times before the counter is a third full.
+
+let px = if on_boat { stand_local[0] } else { position[0] };
+let pz = if on_boat { stand_local[2] } else { position[2] };
+let trying = !at_helm && !swimming && grounded && wish_len > 0.01;
+
+// **A tick this measurement cannot read, and skipping it is the whole reason
+// the second version of this still did not fire.** `on_boat` is the raw
+// per-tick ground cast, and the note two hundred lines above says in so many
+// words that it flickers: every frame of a scramble, and every heave that puts
+// the deck out from under the cast, reads as *not on the boat*. Latched
+// `aboard` and raw `on_boat` therefore disagree a few ticks in every second —
+// and each disagreement was throwing away `stand_local` for a world position,
+// re-marking, and resetting the counter to zero. Three hundred ticks pressed
+// against the bait box still read `stuck = 0`.
+//
+// So a tick where he is aboard and the cast has lost the deck is **held**: not
+// counted, not reset, nothing written. The counter is a stopwatch and this is
+// a pause, which is the correct thing to do with an unreadable sample.
+//
+// **`grounded` is the same story and had to be measured to find.** With only
+// `on_boat` held, the longest run at the wedge was 60-90 ticks against the 450
+// the player actually spends there — bisected by moving the threshold, which is
+// how a counter with no readout gets debugged. `grounded` is `move_character`'s
+// contact and `on_boat` is a separate shape cast (the note above says they
+// disagree for a tick at a time), and on a hull that heaves *both* drop out.
+// Ashore `!grounded` means airborne under his own legs and must reset; aboard
+// it means the deck fell away for a tick, so it is held with the rest.
+let blind = aboard && (!on_boat || !grounded);
+if !blind {
+    // The mark is dropped afresh whenever the frame changes under him, because
+    // a mark in the rig's frame compared against a position in the boat's is a
+    // twelve-metre jump and reads as a sprint.
+    let framed = if "stuck_frame" in memory { memory.stuck_frame == on_boat } else { false };
+    let ashore_stuck = if "ashore_stuck" in memory { memory.ashore_stuck } else { 0 };
+    let mark_x = if "mark_x" in memory { memory.mark_x } else { px };
+    let mark_z = if "mark_z" in memory { memory.mark_z } else { pz };
+    if trying && framed {
+        // Recomputed rather than reusing `wish_len`: that was measured *before*
+        // the normalisation above, so it is the divisor only for a wish shorter
+        // than one. This is the length of the vector actually being projected
+        // onto.
+        let wl = (wish_x * wish_x + wish_z * wish_z).sqrt();
+        let gone = ((px - mark_x) * wish_x + (pz - mark_z) * wish_z) / wl;
+        if gone > STUCK_NET {
+            mark_x = px;
+            mark_z = pz;
+            ashore_stuck = 0;
+        } else {
+            ashore_stuck += 1;
+        }
+    } else {
+        mark_x = px;
+        mark_z = pz;
+        ashore_stuck = 0;
+    }
+    memory.ashore_stuck = ashore_stuck;
+    memory.mark_x = mark_x;
+    memory.mark_z = mark_z;
+    memory.stuck_frame = on_boat;
 }
-memory.ashore_stuck = ashore_stuck;
-let stuck = ashore_stuck > STUCK_TICKS;
+let ashore_stuck = if "ashore_stuck" in memory { memory.ashore_stuck } else { 0 };
+
+// **Aboard it waits longer, and the number is a measurement.** Boarding at the
+// taught aim, the capsule stands at (-4.30, -9.30) from tick 230 to 310 while
+// its y creeps 1.604 to 1.750 — it is climbing the boarding treads with the
+// deck heaving under it, and it makes no horizontal ground at all for eighty
+// ticks. At the ashore threshold that printed `BLOCKED  go round it` across
+// ticks 275-315 of the one gesture this demo teaches, where the correct
+// instruction is *keep holding W*: a caption lying in the opposite direction
+// from the one being fixed. Gating on "is he rising" was tried first and does
+// not separate them — the first forty of those eighty ticks are flat.
+//
+// **Swept, both cases, at eight thresholds**, because with the blind ticks held
+// the boarding run got longer too and the first guess of 150 no longer split
+// them:
+//
+//     ticks    boarding hits    wedge
+//        60          4            1
+//       120          3            1
+//       150          1            1
+//       200          0            1
+//       400          0            1
+//
+// The genuine wedge is unbounded — it never clears — so any threshold above the
+// boarding run works and none below it does. **240**, four seconds, is 200 with
+// the margin the sweep's own resolution asks for. What it costs is four seconds
+// of a caption that is still correct (`the YELLOW FISH BOX is 3 m dead behind
+// you`) before a second one arrives to say why he is not getting there.
+let ABOARD_STUCK_TICKS = 240;
+
+let stuck = ashore_stuck > (if aboard { ABOARD_STUCK_TICKS } else { STUCK_TICKS });
+
+// ---------------------------------------------------------------------------
+// **WHICH WAY HE IS LOOKING, which is the one fact `GameRules` cannot get.**
+// ---------------------------------------------------------------------------
+//
+// A rules script sees `positions` and nothing else, so every direction it could
+// name was a *world* direction: "the fish box is to starboard" is true about the
+// boat and useless to a man standing in his own frame with his back to it, and
+// `way_out`'s compass words have the same defect one deck down — there is no
+// compass on this screen. `forward` is already here, flat and normalised, so the
+// fix is to hand it over and let the caption say "behind you".
+//
+// **Quantised to quarters and emitted on change**, the same discipline as
+// `station` above and for the same reason: a mouse-look turn is a per-tick
+// event source and a caption is not worth a log flood. A quarter of a unit
+// component is about thirteen degrees near the axes, which is four times finer
+// than the ahead/left/right/behind words it feeds.
+let qfx = (forward[0] * 4.0).round() / 4.0;
+let qfz = (forward[2] * 4.0).round() / 4.0;
+if qfx != (if "qfx" in memory { memory.qfx } else { 99.0 })
+    || qfz != (if "qfz" in memory { memory.qfz } else { 99.0 }) {
+    emit.push(#{ kind: "heading", fx: qfx, fz: qfz });
+    memory.qfx = qfx;
+    memory.qfz = qfz;
+}
 
 let station = (if aboard { 1 } else { 0 })
             + (if at_helm { 2 } else { 0 })

@@ -86,6 +86,29 @@ if phase < 0.5 || phase > 4.5 {
     // The fight: the harder the blank is loaded, the deeper and wider it goes.
     let load = if phase > 3.5 { stress / 100.0 } else { 0.0 };
 
+    // **THE FIGHT IS 95% OF A FISHING ROUND AND IT HAD NO PICTURE.** The first
+    // draft of this file wrote `y -= load * 0.30` and `z += load * 2.10`, so
+    // the harder the fish pulled the deeper and further off-axis the only
+    // object in the shot went. Rendered at eight ticks across a 1324-tick
+    // fight: at stress 59, 72 and 82 the float is **not in the frame at all**,
+    // and at 9, 28 and 51 it is a few pixels. Four of eight sampled frames were
+    // two rods and an empty horizon — the exact picture this whole file exists
+    // to replace. The term that was supposed to say "he is pulling hard" was
+    // the term that deleted the subject.
+    //
+    // So the load no longer sets a depth; it sets a **rate and an amplitude**.
+    // The float bucks — under, up, under — on a period that shortens with the
+    // stress on the line, which is what a float with a fish on it does and is
+    // legible in a still at any tick. At load 0 this is the phase-1 bob
+    // untouched; at load 0.82 the ball's top sweeps from 0.20 m proud to 0.20 m
+    // under about twice a second.
+    //
+    // **The mean is what moved, not the extreme.** `0.16` of steady pull keeps
+    // it sitting low — a loaded float rides deep — and `0.30` of buck is what
+    // breaks the surface. The old constant put the *whole* 0.30 into the mean
+    // and left nothing to see.
+    let buck = (t * (0.030 + load * 0.075)).sin();
+
     position = [
         -7.60 + swing * (0.25 + load * 2.20),
         // **-0.08, not 0, and the difference is a third of the ball.** The
@@ -94,7 +117,7 @@ if phase < 0.5 || phase > 4.5 {
         // a beach toy. Rendered both: at -0.08 about 0.18 m shows, which is a
         // float, and the take then takes it completely under rather than
         // merely lower.
-        -0.08 + bob * 0.055 - taken * 0.34 - load * 0.30,
+        -0.08 + bob * 0.055 - taken * 0.34 - load * (0.16 + 0.30 * buck),
         -8.60 + bob * 0.10 + load * 2.10,
     ];
     scale = [0.26, 0.26, 0.26];

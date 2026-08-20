@@ -1,6 +1,20 @@
 # **DEEPER — the demo. Round 6: the four features became one trip.**
 #
-#   loom run assets/games/deeper_demo.loom
+#   loom run assets/games/deeper_demo.loom --play     <- THE DEMO. `--play` is
+#                                                        not optional: without
+#                                                        it `run` opens the
+#                                                        read-only editor,
+#                                                        paused, and every
+#                                                        `Hud` in this file is
+#                                                        `only_in_play`, so a
+#                                                        stranger who types the
+#                                                        line at the top of the
+#                                                        file gets a frozen
+#                                                        diorama with no
+#                                                        instructions on it.
+#                                                        This line used to be
+#                                                        the version without
+#                                                        the flag.
 #   loom render assets/games/deeper_demo.loom --out /tmp/rig.png
 #   loom sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
 #     --assert "Rig/Boat.x > 30.0"      # walk forward. That is the whole demo.
@@ -68,6 +82,31 @@
 # stowed, home, ashore, in the crate — and `assets/test/rig_adrift.loom` is the
 # control that says the crate needs the boat.
 #
+# **Round 8 is telling the player what is happening, and every defect it found
+# was a feedback defect rather than a missing feature.**
+#
+#   * **The one instruction the demo gave after its climax pointed the wrong
+#     way.** `LANDED   the fish box is to starboard` is true about the *boat*
+#     and useless to a man standing in his own frame with his back to it —
+#     measured, the box is 3.4 m behind him — and the target it named had no
+#     pixels at all. Both halves are fixed: `deeper_rules.rhai::toward` states
+#     the bearing and the distance in the player's frame, off a `heading` the
+#     movement script emits, and the box is a yellow box on the sole instead of
+#     a dark hatch flush with it.
+#   * **The fight is twenty-two of a round's twenty-three seconds and it had no
+#     picture.** `float_bob.rhai`'s load term dragged the float *under* — at
+#     stress 59, 72 and 82 the only object in the shot was not in the shot. The
+#     load now sets a rate and an amplitude instead of a depth, so the float
+#     bucks harder the harder the fish pulls.
+#   * **`BLOCKED` could not fire where a player actually gets blocked.** It was
+#     gated ashore-only, measured as a per-tick rate that contact jitter defeats,
+#     and it sat *below* `aboard` in the caption ladder. All three.
+#   * **The line at the top of this file did not start the demo** — without
+#     `--play`, `run` opens the paused editor and every `Hud` here is
+#     `only_in_play`.
+#   * **Four pickups in 1.3 seconds, in silence**, and a helm that listed its
+#     bindings without ever saying what the two controls were set to.
+#
 # The whole demo, in the order a stranger meets it:
 #
 #   1. spawn on the rig facing a boat. Walk forward — past four supplies laid
@@ -83,10 +122,13 @@
 #      twenty-four joints of it read `state.stress`.
 #   6. land it and it takes a slot — which the bait it ate has just left free.
 #      Land a second without stowing the first and the hold is full and says
-#      so. **SPACE, and walk to starboard**: the dark hatch on the deck by the
-#      boarding steps is the fish hold, and standing by it puts the catch
-#      below. It is 2.32 m from the wheel against a `RANGE` of 2.0, which is
-#      the difference between a walk and a number that changes itself.
+#      so. **SPACE, then follow the caption**: it names the yellow fish box, in
+#      metres, in your own frame — `3 m dead behind you` — and keeps saying so
+#      for as long as the fish is in your hands. The box is on the starboard
+#      side of the cockpit and the bait box is between you and it, so the walk
+#      is a dogleg; press into the bait box for four seconds and the caption
+#      says that too. It is 2.32 m from the wheel against a `RANGE` of 2.0,
+#      which is the difference between a walk and a number that changes itself.
 #   7. take her home — astern out of the berth is how you left, so ahead is how
 #      you come back — step off over the boarding steps, and walk west along
 #      the wharf to the crate. `CRATE` on the HUD goes up. Then take bait, and
@@ -1540,22 +1582,110 @@ transform = { pos = [84.0, 0.0, -20.0] }
 # go of the wheel, cross the cockpit and put the fish below, which is three
 # seconds of doing something rather than a number that changes itself.
 #
-# Drawn only. Under a dynamic ancestor, so no static collider is baked from it
-# and the box underneath is what the capsule meets — the same rule as
-# `HelmMat`, stated twice in this file because it is the likeliest thing to get
-# wrong when a third one is wanted.
+# **ROUND 8: IT HAD NO PIXELS, AND THAT IS WHY THE INSTRUCTION FAILED.**
+#
+# It was a 0.55 x 0.30 m plate, eight centimetres thick, in albedo
+# [0.14, 0.20, 0.22] — dark slate on a dim sole. Rendered from the player's own
+# eye at the landing tick at eight headings 45 degrees apart, **nothing in any
+# of the eight frames reads as a fish box**: the aft view is boarding treads, a
+# hose coil, a lifebuoy and dark deck where the hatch is. So the caption after
+# the demo's climax named a target the player could not see, in a frame he was
+# not standing in ("to starboard" is true of the *boat*), and the one gesture it
+# implied walked him into `col_engine_box`.
+#
+# It is now a **fish box rather than a hatch**: the same 1.10 x 0.60 m footprint
+# it always had, but half a metre tall instead of sixteen centimetres, in a
+# worked yellow, with a pale lid overhanging it. The caption names the colour
+# and `deeper_rules.rhai::toward` names the bearing in *his* frame with the
+# distance in metres, so the two halves — see it, and be told where it is —
+# arrive together.
+#
+# **`scale` on a `box` is the HALF-extent**, which cost a render to find out:
+# `primitives.rs::box_mesh` puts its vertices at ±1 on every axis, so a scale of
+# 0.90 is 1.80 m of box. The first draft of this node read 0.90 x 0.40 x 0.60 as
+# metres, drew a 1.8 x 0.8 x 1.2 m chest across the cockpit, and swallowed the
+# lid whole — the lid node loaded, `--assert` found it at local_y 1.06, and it
+# was invisible because it was *inside*. Found by painting each node a flat
+# primary and re-rendering: the body turned cyan, the lid changed nothing.
+# `HelmMat` two nodes down states the same convention from the other side —
+# scale 1.70 for a mat the file calls 3.4 m.
+#
+# So: body x -8.85..-7.75, z 1.12..1.72, y 0.64..1.14 — standing on the sole,
+# not sunk into it. Lid x -8.88..-7.72, z 1.09..1.75, y 1.14..1.22.
+#
+# **Its footprint clears the bait box it stands behind.** `col_engine_box` is
+# x -8.40..-7.20, z ±0.78, so the nearest approach is 0.31 m in z, and the
+# starboard bulwark's inner face is at z = 2.56.
+#
+# **Deliberately not moved.** The stow `RANGE` is 2.0 m from the *helm
+# rectangle's* nearest point, and that rectangle is 3.4 x 1.75 m centred at
+# (-7.80, -1.775) — so everything within 2 m of it is excluded, and on this deck
+# (x -9.55..-6.05, z ±2.62) the only remaining ground is the starboard strip at
+# z > 1.10. The placement is forced by the geometry, not chosen; what was wrong
+# was that you could not see it.
+#
+# Drawn only. Under a dynamic ancestor, so no *collider* is baked from it and
+# the box underneath is what the capsule meets — the same rule as `HelmMat`,
+# stated twice in this file because it is the likeliest thing to get wrong when
+# a third one is wanted. Its height is therefore free of collision: half a metre
+# of yellow is a landmark and not a kerb to trip on.
+#
+# **But it is NOT free of the simulation, and this file used to say it was.**
+# Moving this node one millimetre changes `deeper_demo.loom`'s physics hash —
+# with no input at all, the hull moored and the player standing on the rig
+# thirty metres away. So does moving `HelmMat` one millimetre. Repainting either
+# does not, so it is the transform and not the material. That is measured and
+# the mechanism is not found: `loom_ecs` sets `collider_half_extents` only from
+# an authored `BoxCollider` (neither node has one), and `play.rs`'s three arms
+# then give a drawn node under a dynamic body no rigid-body collider at all, so
+# the path it takes into the solver is somewhere else — the water body's ground
+# or obstacle bake are the untested suspects.
+#
+# **What that costs, and what it does not.** Nothing pins this scene's hash, the
+# observable paths are identical to four decimal places at ticks 100, 300 and
+# 600, every pinned number in `scripts/green.sh` holds, and three fresh
+# processes are byte-identical — there is a row for that now. What it means is
+# that **authoring a drawn prop on this hull is a simulation change**, so the
+# gameplay block has to be re-run for a decoration, and "it is only a mesh" is
+# not a reason to skip it. Worth an engine round; it is not a demo round's
+# to fix.
 [[node]]
 name = "FishHold"
 parent = "Rig/Boat"
-transform = { pos = [-8.30, 0.72, 1.42], scale = [0.55, 0.08, 0.30] }
+transform = { pos = [-8.30, 0.89, 1.42], scale = [0.55, 0.25, 0.30] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
 
   [node.components.Material]
-  albedo = [0.14, 0.20, 0.22]
+  albedo = [0.52, 0.38, 0.05]
   roughness = 0.55
-  metallic = 0.3
+  metallic = 0.0
+
+# The lid, and it is a second node because one flat slab reads as a crate
+# rather than as a box you put something *in*. Proud by eight centimetres and
+# overhanging by three, which is what makes it read as a lid rather than as a
+# painted line.
+#
+# **The lid carries the yellow and the body is the darker tone, which is the
+# way round it had to be.** The first version was a bright body with a pale
+# lid, and from the player's own eye at the landing — standing, looking down at
+# a box whose top is 0.50 m off the deck — the lid is nearly all of what he can
+# see and the yellow was a sliver on one side. The caption says YELLOW FISH BOX,
+# so the face he actually looks at is the face that has to be yellow. Rendered
+# both ways before choosing.
+[[node]]
+name = "FishHoldLid"
+parent = "Rig/Boat"
+transform = { pos = [-8.30, 1.18, 1.42], scale = [0.58, 0.04, 0.33] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.90, 0.72, 0.10]
+  roughness = 0.65
+  metallic = 0.0
 
 [[node]]
 name = "HelmMat"

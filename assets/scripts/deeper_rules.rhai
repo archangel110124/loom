@@ -503,6 +503,56 @@ fn way_out(me, ramps) {
     if a > b * 2.5 { ew } else if b > a * 2.5 { ns } else { ns + "-" + ew }
 }
 
+// **WHERE A THING IS, IN THE FRAME OF THE MAN LOOKING FOR IT.**
+//
+// This is the round-8 fix and it is a reference-frame bug, not a wording one.
+// The caption after a landing read `the fish box is to starboard`, which is
+// *true about the boat* — the box is at boat-local z = +1.42 and starboard is
+// +Z — and unusable by a player, who is standing in his own frame with his back
+// to it. Measured: at the landing tick he is at world (-0.746, -12.304) facing
+// -Z and the box is at (-1.725, -9.036), so it is 3.4 m **behind** him. Holding
+// the key the sentence implies walks him away from it until he wedges.
+//
+// `way_out`'s compass words below have the same shape of defect one deck down —
+// there is no compass on this screen either. They are **deliberately left
+// alone**: a swimmer's target is a lit rig fifteen metres off that he can see,
+// the crossing takes half a minute, and a world word stays put while a
+// body-frame word flips every time he turns his head. A hatch flush with a dim
+// deck three metres away is the opposite case in both respects.
+//
+// `fx`/`fz` is his flat forward, quantised and latched off `deeper_player.rhai`
+// — the only script in the engine that can see which way he is looking.
+// Starboard of *him* is `(-fz, fx)`: `cross(forward, up)` with up = +Y.
+//
+// The distance is rounded to whole metres and printed. It is what makes this a
+// homing indicator rather than a hint: a player walking the wrong way round the
+// bait box watches the number fail to fall, which is the one piece of feedback
+// no caption can be written to give.
+fn toward(me, fx, fz, tx, tz) {
+    let dx = tx - me[0];
+    let dz = tz - me[2];
+    let ahead = dx * fx + dz * fz;
+    let right = dx * -fz + dz * fx;
+    let a = if ahead < 0.0 { -ahead } else { ahead };
+    let r = if right < 0.0 { -right } else { right };
+    let d = (dx * dx + dz * dz).sqrt();
+    // 2.0 is a 27-degree band each side of dead ahead and dead astern. Inside
+    // it the sideways word is noise; outside it, naming only the fore-and-aft
+    // half sends a man past his target.
+    let word = if ahead > 0.0 && a > r * 2.0 {
+        "straight ahead"
+    } else if ahead < 0.0 && a > r * 2.0 {
+        "dead behind you"
+    } else if ahead >= 0.0 {
+        if right > 0.0 { "ahead on your right" } else { "ahead on your left" }
+    } else {
+        if right > 0.0 { "behind you, on your right" } else { "behind you, on your left" }
+    };
+    // `+ 0.5` then truncate: rhai's `to_int` truncates, and a box 2.9 m off
+    // reading `2 m` is the rounding a player notices.
+    (d + 0.5).to_int() + " m " + word
+}
+
 let PLAYER = "Rig/Player";
 let BOAT = "Rig/Boat";
 let RANGE = 2.0;   // metres, horizontal. An arm and a lean.
@@ -560,6 +610,10 @@ if hub {
     let stowed = if "stowed" in state { state.stowed } else { 0 };
     let notice_at = if "notice_at" in state { state.notice_at } else { -9999 };
     let notice = if "notice" in state { state.notice } else { 0 };
+    // The word a pickup notice prints. A string in `state`, which the hold
+    // array already proves round-trips; the `Hud` interpolates numbers only, so
+    // this is read here and never drawn directly.
+    let got = if "got" in state { state.got } else { "" };
 
     // `me`, not `at`: `at` is the fight's phase-change tick stamp, and the
     // hub used to shadow it with a position. Spending the bait needs both in
@@ -589,6 +643,15 @@ if hub {
                 if hold.len() < SLOTS {
                     hold.push(name);
                     emit.push(#{ kind: "pickup", item: name });
+                    // **A pickup used to be silent, and it is one of the four
+                    // things this demo is.** Traced: `state.carried` goes 0 to
+                    // 4 between ticks 20 and 80 — one and a third seconds —
+                    // with the caption reading `WALK FORWARD TO THE BOAT`
+                    // throughout. The numbers row does change, but nothing on
+                    // screen tells a player to look at it, so he acquires an
+                    // inventory before he has understood he has one.
+                    notice = 8; notice_at = tick;
+                    got = name;
                 } else {
                     // **A refusal that says so.** Silence here is how round 4
                     // could ship a capacity that was never once reached.
@@ -676,6 +739,17 @@ if hub {
     // script that can see them.
     let swimming = if "swimming" in state { state.swimming } else { 0 };
     let stuck = if "stuck" in state { state.stuck } else { 0 };
+    // **And which way he is looking**, latched the same way and for the same
+    // reason: `positions` cannot say, and every direction this file names is
+    // wrong without it. Default is -Z, the spawn heading, so the very first
+    // tick has a usable frame rather than a zero vector.
+    let fx = if "fx" in state { state.fx } else { 0.0 };
+    let fz = if "fz" in state { state.fz } else { -1.0 };
+    // And what the throttle and the wheel are set to. Both are three-valued and
+    // the drawn levers are on the flybridge where the helmsman cannot see them,
+    // so the caption is the only place a press can be confirmed.
+    let drive = if "drive" in state { state.drive } else { 0.0 };
+    let rudder = if "rudder" in state { state.rudder } else { 0.0 };
     for e in events {
         if e.kind == "station" {
             aboard = e.aboard;
@@ -684,12 +758,18 @@ if hub {
             swimming = e.swim;
             stuck = e.stuck;
         }
+        if e.kind == "heading" { fx = e.fx; fz = e.fz; }
+        if e.kind == "helmset" { drive = e.drive; rudder = e.rudder; }
     }
     state.aboard = aboard;
     state.at_helm = at_helm;
     state.jammed = jammed;
     state.swimming = swimming;
     state.stuck = stuck;
+    state.fx = fx;
+    state.fz = fz;
+    state.drive = drive;
+    state.rudder = rudder;
 
     // -----------------------------------------------------------------------
     // **HOW FAST SHE IS GOING, because the picture will not say.**
@@ -793,8 +873,10 @@ if hub {
     // landed fish was invisible until the next tick.
     state.hold = hold;
     state.stowed = stowed;
+    state.got = got;
     state.carried = hold.len();
-    state.infish = has_count(hold, "fish");
+    let infish = has_count(hold, "fish");
+    state.infish = infish;
     state.full = if hold.len() >= SLOTS { 1 } else { 0 };
 
     // **One number per slot, because the hold has its own `Hud`.**
@@ -807,6 +889,17 @@ if hub {
     state.line = has(hold, "line");
     state.lantern = has(hold, "lantern");
     state.thermos = has(hold, "thermos");
+
+    // **Where the fish box is, from where he is standing and facing.**
+    // Computed every tick rather than stamped on the landing, because it is
+    // steered by: the number falls as he closes and does not as he wedges.
+    // The box is a boat child, so this is right under way as well as alongside.
+    let box_at = if FISH_HOLD in positions {
+        let h = positions[FISH_HOLD];
+        toward(me, fx, fz, h[0], h[2])
+    } else {
+        "aft, in the cockpit"
+    };
 
     // -----------------------------------------------------------------------
     // THE ONE LINE OF TEXT, and what wins it.
@@ -835,9 +928,13 @@ if hub {
         // own feet a moment earlier, so telling him the outcome is the more
         // useful of the two lines.
         message = if notice == 1 {
-            "HOLD FULL 4/4   stow the catch in the fish box first"
+            "HOLD FULL 4/4   stow the catch in the yellow fish box"
         } else if notice == 2 {
-            "LANDED   it is in your hands — the fish box is to starboard"
+            // **The one instruction the demo gives after its climax, and it
+            // pointed the wrong way.** See `toward` for the measurement. It is
+            // now his own frame, it carries the distance, and it names a colour
+            // he can pick out of the cockpit.
+            "LANDED   put her in the YELLOW FISH BOX — " + box_at
         } else if notice == 3 {
             "STOWED   the catch is below. Take her home when you are done"
         } else if notice == 4 {
@@ -846,6 +943,8 @@ if hub {
             "IN THE CRATE   that is a trip. Take bait and go again"
         } else if notice == 7 {
             "THE CATCH IS IN HER HOLD   bring her alongside first"
+        } else if notice == 8 {
+            "PICKED UP " + got.to_upper() + "   " + hold.len() + "/4 slots — the row above is what you are carrying"
         } else {
             // The same sentence as the two above it: the bait went at the
             // bite, and the barrel it came from is back on the rig.
@@ -859,25 +958,68 @@ if hub {
         // gets told he is pressed on a quay.
         message = "PUSHING ON SOMETHING   S to back off";
     } else if at_helm > 0 {
-        message = "THE HELM   W ahead  S astern  A/D wheel  SPACE lets go   "
-                + knots.to_int() + " kn   (bow is to starboard)";
+        // **Two lines, and which one you get depends on whether you have
+        // touched anything.** The old single line listed four bindings and a
+        // speed — 84 characters at size 22, which is longer than the numbers
+        // row above it — and never once said what the controls were *set to*.
+        // A player holding A had no confirmation the wheel was over except the
+        // channel marks going past, and holding W into a quay had none at all
+        // until the stall limiter fired three quarters of a second later.
+        //
+        // Hands off, it teaches the keys. Hands on, it states the two settings
+        // and drops the teaching, which is both more useful and shorter — the
+        // player pressing A does not need to be told that A is the wheel.
+        if drive == 0.0 && rudder == 0.0 {
+            message = "THE HELM   W ahead  S astern  A/D wheel  SPACE lets go   "
+                    + knots.to_int() + " kn";
+        } else {
+            message = "THE HELM   "
+                    + (if drive > 0.0 { "AHEAD" } else if drive < 0.0 { "ASTERN" } else { "stopped" })
+                    + "   "
+                    + (if rudder > 0.0 { "wheel to starboard" }
+                       else if rudder < 0.0 { "wheel to port" }
+                       else { "wheel amidships" })
+                    + "   " + knots.to_int() + " kn   SPACE lets go";
+        }
+    } else if stuck > 0 {
+        // **Above `aboard`, and that is round 5's defect recurring one deck
+        // higher.** "Outside the lane the HUD used to lie" was that round's
+        // headline; aboard it still did, because this branch sat *below*
+        // `aboard` and `stuck` could not fire there in the first place. Both
+        // halves are fixed: `deeper_player.rhai` measures no-progress in the
+        // deck's frame, and the two situations get different sentences because
+        // they are different problems.
+        message = if aboard > 0 {
+            "BLOCKED   something is in the way — go round it"
+        } else {
+            "BLOCKED   back up — aboard is the gap between the bollards"
+        };
     } else if aboard > 0 {
-        // **The one signpost the return leg needs.** With fish below, the thing
-        // to do is not cast again — it is to go home — and nothing else on the
-        // screen says so.
-        message = if stowed > 0 {
+        // **The signposts the return leg needs.** A landed fish used to vanish
+        // from the text two seconds after it was caught: `notice` cleared and
+        // the caption went back to `CLICK to cast` while `state.infish` read 1
+        // and the fish was still hanging in front of him. Now the fish outranks
+        // the invitation to catch another one, and it keeps the live bearing —
+        // so a player who walked the wrong way round the bait box can watch the
+        // metres fail to fall.
+        message = if infish > 0 {
+            "FISH IN HAND   the YELLOW FISH BOX is " + box_at
+        } else if stowed > 0 {
             stowed + " BELOW   take her alongside and step ashore"
         } else {
             "ABOARD   CLICK to cast   SHIFT to reel   stand on the mat to steer"
         };
-    } else if stuck > 0 {
-        // Walking into something ashore, for three quarters of a second. In
-        // this scene that is nearly always her topsides or the berth railing,
-        // and the frame is a wall of blue hull with no horizon in it.
-        message = "BLOCKED   back up — aboard is the gap between the bollards";
     } else if stowed > 0 {
-        // Ashore, with a catch still in her. The other half of the signpost.
-        message = stowed + " IN HER HOLD   the crate is by the west rail";
+        // Ashore, with a catch still in her. The other half of the signpost —
+        // and "by the west rail" was the same defect as "to starboard", so it
+        // is the same fix. He has just stepped off a boat and could be facing
+        // any way at all.
+        message = stowed + " IN HER HOLD   the crate is " + (if FISH_CRATE in positions {
+            let c = positions[FISH_CRATE];
+            toward(me, fx, fz, c[0], c[2])
+        } else {
+            "by the west rail"
+        });
     } else {
         message = "WALK FORWARD TO THE BOAT";
     }
