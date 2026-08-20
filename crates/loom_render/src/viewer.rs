@@ -1584,6 +1584,7 @@ impl Viewer {
             .map(crate::raytrace::Raytracer::descriptor_set);
         let material_set = self.materials.descriptor_set();
         let base_push = crate::renderer::Push {
+            _pad: 0,
             vertices: self.vertex_address,
             objects: self.object_address,
             environment: self.environment_address,

@@ -798,7 +798,7 @@ pub struct Camera {
 /// Keeping only pointers here means per-object fields can grow without ever
 /// running into the 128-byte push-constant limit.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct Push {
     /// NDC to world, for the sky's per-pixel ray.
     ///
@@ -838,16 +838,29 @@ pub(crate) struct Push {
     /// fields are unused. The buffer is already bound; the matrix rides along
     /// for free.
     pub(crate) object_offset: u32,
+    /// **Explicit tail padding, because the alternative was undefined
+    /// behaviour.** The fields above sum to 116 (64 + 6x8 + 4) in a struct
+    /// `#[repr(C)]` rounds to 120 for its eight-byte alignment, and
+    /// [`Push::bytes`] hands all 120 to `vkCmdPushConstants`. Four of them were
+    /// never written by anyone, so the call read uninitialised memory. Naming
+    /// the pad makes those four bytes zero.
+    ///
+    /// The size is unchanged at 120 and no implicit padding remains, which is
+    /// what lets `#[derive(Pod)]` above compile at all — and *that* is the
+    /// point of this field rather than the zeroing. A future field that
+    /// reintroduces a gap now fails to compile. Before, a Slang-side field
+    /// added without a Rust-side one failed at a runtime `assert_eq!` if it
+    /// failed anywhere.
+    ///
+    /// The shader reads 116 of the 120 either way; `scene.slang`'s `Push` has
+    /// no member here.
+    pub(crate) _pad: u32,
 }
 
 impl Push {
     /// The bytes to push, as Vulkan wants them.
     pub(crate) fn bytes(&self) -> &[u8] {
-        // SAFETY: `#[repr(C)]`, all fields are plain data, and the slice
-        // borrows from `self`.
-        unsafe {
-            std::slice::from_raw_parts(std::ptr::from_ref(self).cast::<u8>(), size_of::<Self>())
-        }
+        bytemuck::bytes_of(self)
     }
 }
 
@@ -2398,6 +2411,7 @@ impl Renderer {
             .map(crate::raytrace::Raytracer::descriptor_set);
         let material_set = self.materials.descriptor_set();
         let base_push = Push {
+            _pad: 0,
             vertices: self.vertex_address,
             objects: self.object_address,
             environment: self.environment_address,
