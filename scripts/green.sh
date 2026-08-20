@@ -277,12 +277,34 @@ fi
 "$LOOM" sim assets/test/rig_drive.loom --ticks 900 --hold move_z=-1 \
   --assert "Rig/Boat.x < -20.0" --assert "Rig/Boat.y > -0.4" \
   --assert "Rig/Player.y > 1.2" >/dev/null
+#
+# **`state.at_helm == 1` at the end of a turn is the property these two rows
+# were missing, and it was false.** They passed on a hull that had already
+# acquired its yaw and then coasted: `Input::axis` returns exactly -1, 0 or +1,
+# so every A or D a keyboard can press was the full 1.3 MN.m, the hull heeled,
+# and the helmsman *slid off the mat* — boat-local x -7.31 to +2.21 in about
+# 120 ticks, the length of the aft deck. The throttle then shut and the caption
+# read "stand on the mat to steer" at a player who was. `deeper_player.rhai`
+# clamps the wheel to 0.3 for it; the numbers that chose 0.3 are in that file.
+#
+# Straight ahead on the same tape is z = -40.02, so these two are +10.8 and
+# -10.8 from it — mirrored to two decimal places, which is what makes the pair
+# a claim about the wheel rather than about this hull's handedness.
 "$LOOM" sim assets/test/rig_drive.loom --ticks 900 --hold "move_z=1,move_x=1" \
-  --assert "Rig/Boat.z > -20.0" --assert "Rig/Boat.x > 20.0" \
-  --assert "Rig/Player.y > 1.2" >/dev/null
+  --assert "Rig/Boat.z > -32.0" --assert "Rig/Boat.z < -26.0" \
+  --assert "Rig/Boat.x > 20.0" \
+  --assert "Rig/Player.y > 1.2" --assert "state.at_helm == 1" >/dev/null
 "$LOOM" sim assets/test/rig_drive.loom --ticks 900 --hold "move_z=1,move_x=-1" \
-  --assert "Rig/Boat.z < -60.0" --assert "Rig/Boat.x > 20.0" \
-  --assert "Rig/Player.y > 1.2" >/dev/null
+  --assert "Rig/Boat.z < -48.0" --assert "Rig/Boat.z > -54.0" \
+  --assert "Rig/Boat.x > 20.0" \
+  --assert "Rig/Player.y > 1.2" --assert "state.at_helm == 1" >/dev/null
+# **The long turn, which is the row that actually fails without the clamp.**
+# 3,200 ticks of full starboard wheel from the demo's own berth: still at the
+# wheel, still making way. Before the clamp this read `at_helm 0` and
+# `knots 0.00` from tick 600 onward, and stayed there for ever.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 3200 \
+  --hold "0:move_z=1; 400:move_z=1,move_x=1" \
+  --assert "state.at_helm == 1" --assert "state.knots > 4.0" >/dev/null
 
 # **Space is hands off the wheel, and run 3 above is its control.**
 #
@@ -464,6 +486,106 @@ fi
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold "move_z=1,fire=1" \
   --assert "events.spend >= 1" --assert "state.bait == 0" \
   --assert "state.carried == 3" >/dev/null
+
+# 5d. **THE PLAYER FISHES, WITH HIS OWN HANDS, AND NOTHING HERE HAD EVER DONE
+#     THAT.** Every landing in this file until now was `Rig/Pilot/skilled` —
+#     `rig_fish` and `rig_trip` both hand the rod to a pilot script and drive
+#     only the walking with `--hold`. The `rig_trip` header says so honestly,
+#     and the justification it gives ("a landing needs taps, and `--hold` is one
+#     constant for a run") **stopped being true in the commit that wrote it**:
+#     `--hold` became a schedule that round. So the tool to close this existed
+#     and was not pointed at the gap, and the demo's headline claim — you can
+#     fish — was a claim about a robot.
+#
+#     The tape, in the order a player would press it: W aboard, SPACE off the
+#     mat at 420 so his legs come back, CLICK at 460 to cast, CLICK again at
+#     525 inside the take window, then SHIFT in a **40-on / 50-off** cadence to
+#     the landing at 1880.
+#
+#     **`off > on` is the whole skill, and the two controls below are what make
+#     that a claim.** Forty-nine duty cycles were swept: ten land the fish and
+#     every single winner has more release than pull. A cadence is a decision a
+#     player learns by feel; if either control ever stops failing, the fight has
+#     become a slot pull and this says so unattended.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1900 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
+540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
+850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
+1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
+1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
+1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1" \
+  --assert "events.hooked >= 1" --assert "events.landed >= 1" \
+  --assert "state.infish >= 1" --assert "state.carried == 4" >/dev/null
+
+# 5e. **The two endings a first-timer actually gets, and they used to be
+#     lowercase bench strings.** `the line snapped` and `it threw the hook`
+#     came from `fishing.loom`, a bench whose reader was an assertion; on a HUD
+#     they read as debug prints, and neither said that the bait — spent at the
+#     bite — was gone. Every *other* ending in `deeper_rules.rhai` goes through
+#     `notice` and comes out in caps with a next step.
+#
+#     **Asserted with `grep`, because `--assert` has no `message` axis** — it
+#     reads `status`, `state.<name>` and `events.<kind>` and nothing else. The
+#     leading capital is the assertion: it is what separates a sentence written
+#     for a player from one written for a test harness, and it is exactly what
+#     regressed last time.
+#
+#     Same tape as 5d up to the hook, then: hold SHIFT flat out (the thing the
+#     screen offers, so the thing a stranger does) and never touch it at all.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; 540:sprint=1" \
+  --assert "events.snap >= 1" --assert "state.bait == 0" \
+  | grep -q '"message": "THE LINE SNAPPED'
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1400 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:" \
+  --assert "events.escaped >= 1" --assert "state.bait == 0" \
+  | grep -q '"message": "IT THREW THE HOOK'
+
+# 5f. **The float and the fish, which are the only things in the player's own
+#     frame that say any of the above is happening.** Rendered from
+#     `Rig/Player/Eye` at eight headings, the whole fishing loop used to be one
+#     unchanging picture of two rods and a horizon: the cast, the take, the run
+#     and the landing were four different *strings* over the same frame. Round
+#     7 gave them geometry — `float_bob.rhai` and `fish_hang.rhai`, two node
+#     scripts writing their own transforms off `state`.
+#
+#     **Asserted as positions, not as pixels, and that is the cheap half being
+#     the right half.** `local_y` is the node's own transform in the boat's
+#     frame, which is exactly what the script wrote, so these rows cost nothing
+#     and fail on a deleted node, a renamed node, a thrown script and a drifted
+#     phase number alike. What they cannot see is whether the thing is *visible*
+#     — that was checked by rendering it and looking, and the renders are named
+#     in the round's report.
+#
+#     The float's three states, on the same tape: stowed at the rod at 1.500,
+#     on the water at -0.057, and under it at -0.461 during the six hundred
+#     milliseconds the take is answerable in. The dunk **is** the tell; before
+#     it, `BITE!  CLICK NOW` was the entire signal and it was text.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 440 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:" \
+  --assert "state.phase == 0" --assert "Rig/Boat/Float.local_y > 1.4" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 500 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:" \
+  --assert "state.phase == 1" --assert "Rig/Boat/Float.local_y < 0.0" \
+  --assert "Rig/Boat/Float.local_y > -0.2" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 530 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:" \
+  --assert "state.phase == 3" --assert "Rig/Boat/Float.local_y < -0.3" >/dev/null
+#     And the catch: 1.560 clipped to the rod when there is none, 1.846 hanging
+#     in the cockpit when there is one. `state.infish` is the condition rather
+#     than the phase, so it appears the tick it is landed and goes the tick it
+#     is stowed — the two moments the player needs shown.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 500 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:" \
+  --assert "state.infish == 0" --assert "Rig/Boat/Catch.local_y < 1.6" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1900 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
+540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
+850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
+1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
+1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
+1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1" \
+  --assert "state.infish == 1" --assert "Rig/Boat/Catch.local_y > 1.7" >/dev/null
 
 # 6. **"Am I moving?" as a number, because the picture will not say.** From the
 #    helm at the opening yaw a frame after forty-five metres of travel differs

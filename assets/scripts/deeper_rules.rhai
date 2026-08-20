@@ -300,12 +300,31 @@ if phase == 0 {
             // reels.
             + "   SHIFT reels";
 
+    // **The two outcomes a first-timer actually gets, and they were lowercase
+    // bench strings.** Every *other* ending in this file goes through `notice`
+    // and comes out in caps with a next step; these two were inherited from
+    // `fishing.loom`, a bench whose reader was a `--assert` expression. A
+    // player who holds SHIFT flat out snaps the line at tick 660 and is told
+    // `the line snapped` — which on a HUD reads as a debug print — and a player
+    // who never touches SHIFT is told `it threw the hook` at 790. Those are the
+    // first and second things a stranger sees.
+    //
+    // **And both silently spend the bait**, which is the one item the whole
+    // loop is built on: it goes at the *bite* (`spend`, above), so by the time
+    // the line parts it is already gone and the hold reads 3. The caption says
+    // so, because the next cast's own warning — "no bait, so this will be a
+    // while" — arrives seconds after he has committed to it.
+    //
+    // `hub` scenes are the demo; the benches keep `status` as their assertion
+    // and never draw this string, so no bench row moves.
     if stress >= SNAP {
-        phase = 6; if !hub { status = "lost"; } message = "the line snapped";
+        phase = 6; if !hub { status = "lost"; }
+        message = "THE LINE SNAPPED   ease the reel next time   your bait is gone";
         state.fight_ticks = tick - at;
         emit.push(#{ kind: "snap" });
     } else if slack >= THROW_TICKS {
-        phase = 6; if !hub { status = "lost"; } message = "it threw the hook";
+        phase = 6; if !hub { status = "lost"; }
+        message = "IT THREW THE HOOK   keep the line loaded   your bait is gone";
         state.fight_ticks = tick - at;
         emit.push(#{ kind: "escaped" });
     } else if stam <= 0.0 {
@@ -828,7 +847,9 @@ if hub {
         } else if notice == 7 {
             "THE CATCH IS IN HER HOLD   bring her alongside first"
         } else {
-            "IT SPAT THE BAIT   CLICK to cast again"
+            // The same sentence as the two above it: the bait went at the
+            // bite, and the barrel it came from is back on the rig.
+            "IT SPAT THE BAIT   your bait is gone   CLICK to cast again"
         };
     } else if phase >= 1 {
         // The fight owns the line: it is already in `message`.

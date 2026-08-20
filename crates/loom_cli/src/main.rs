@@ -61,6 +61,15 @@ USAGE:
         --spin defaults to 6 deg/frame, so sixteen frames sweep 96 deg and a
         small subject leaves the shot: a 16 cm fish is gone by frame 8. Pass
         --spin 0 to watch a thing move rather than the camera move around it.
+        This is also how you look at a first-person scene from a heading other
+        than the one it was authored at, which --yaw cannot do: --yaw abandons
+        the scene's camera and orbits the whole-scene bounds instead of turning
+        the player's head. An authored camera PANS about its own eye here, so
+            --frames 8 --spin 45 --step 0 --sim <t> --hold <keys>
+        is the player's own eye at eight headings 45 deg apart, at one instant
+        of one run. A game judged only at the heading it happens to spawn
+        facing has been judged along the one bearing that cannot answer whether
+        the player can see what he is doing.
 
     loom compare <a.png> <b.png> [--channel <0-255>] [--fraction <0-1>] [--worst <0-255>]
                                  [--rect <x,y,w,h>]

@@ -283,6 +283,22 @@
 #   tick 600 one mark is abeam, at 690 two are, at 900 two different ones are.
 #   A player watching sees them stream past.
 #
+#   **And measure the frame at more than one heading before deciding any of
+#   this.** Every render of this demo through round 6 was taken at yaw 0,
+#   because `--yaw` abandons the scene's camera and orbits the whole-scene
+#   bounds instead of turning the player's head, and `--hold` has no look
+#   channel. That is one bearing out of a circle a mouse sweeps in half a
+#   second, and it is the bearing that produced "the helmsman's frame contains
+#   no boat".
+#
+#   It does not need a new flag. `loom render --frames 8 --spin 45 --step 0
+#   --sim <t> --hold "<keys>"` **pans an authored camera about its own eye** —
+#   eight frames is the player's eye at eight headings, at one instant of one
+#   run, and it has worked since the fly-through learned not to orbit
+#   first-person cameras. Rendered that way at the helm the frame contains the
+#   side decks, the wheelhouse, the name board, the flag, the transom and the
+#   channel marks streaming past. `--help` now says so.
+#
 #   **The real fix is still to berth her stern-to**, bow at -Z, so the bow is
 #   dead ahead from the wheel. It remains a round rather than a bullet: she
 #   moves from alongside at z = -10.45 to a hull lying along Z, the boarding
@@ -304,11 +320,21 @@
 #   walk into his own tackle. Under the hull it is geometry with no physics,
 #   which is what a rod should be. Held gear wants an engine exemption for
 #   descendants of a character, and that is an ADR.
-# * **There is no line and no lure.** The fight is a meter and a bending blank;
-#   nothing is drawn going into the water. `fishing.loom`'s `Lure` is a
-#   world-space `RigidBody`, so a hull at three metres a second leaves it astern
-#   inside a second, and where a lure *is* while a fish is on is a design
-#   question rather than a missing binding.
+# * ~~There is no line and no lure.~~ **Half fixed in round 7: there is a
+#   float, and there is a fish.** `Float` and `Catch` below are two nodes with
+#   node scripts, and between them the four states of the fishing loop are four
+#   different pictures instead of four different strings — the float sits and
+#   bobs while the bait waits, goes clean under for the six hundred
+#   milliseconds the take is answerable in, is dragged deep and wide by the
+#   load during the fight, and the fish hangs in the cockpit from the tick it
+#   comes over the rail to the tick it goes in the box.
+#
+#   **There is still no line.** A line from the rod tip to the float is a
+#   second node whose length is a scale, and it is the obvious next thing; at
+#   six metres a real one is thinner than a pixel anyway. `fishing.loom`'s
+#   `Lure` is a world-space `RigidBody` and is still the wrong shape here — a
+#   hull at three metres a second leaves it astern inside a second, which is
+#   exactly why the float is boat-local instead.
 # * ~~The four slots fill and nothing empties them.~~ **Fixed in round 5.**
 #   Bait is spent at the take, a landed fish takes a slot, and the fish box
 #   empties them. Selling is still not built and is not wanted here.
@@ -364,6 +390,20 @@ path = "../prefabs/fishing_rod.loom"
 key = "buoy"
 id = "1a6f42d7-58b0-4e93-9c21-7d4b6e0f3a85"
 path = "../prefabs/channel_buoy.loom"
+
+# The catch, in the two meshes it ships as: `_chrome` is the body and
+# `_coral` is every fin and the tail. Rendering only the body gives a pale
+# featureless lozenge, which is what the first attempt looked like.
+# 0.10 m nose to tail as it ships, so `fish_hang.rhai` scales it.
+[[asset]]
+key = "gleamsprat"
+id = "6537b1f4-2257-44de-9ba2-a4b0b56d7085"
+path = "../meshes/gleamsprat_chrome.obj"
+
+[[asset]]
+key = "gleamsprat_fins"
+id = "b3a90c47-1f52-4d68-9e04-5c7218ab3d61"
+path = "../meshes/gleamsprat_coral.obj"
 
 [[asset]]
 key = "box"
@@ -1119,6 +1159,92 @@ name = "Rod"
 parent = "Rig/Boat"
 prefab = "rod"
 transform = { pos = [-7.60, 1.62, -2.90], rot_euler = [-45.0, 0.0, 0.0] }
+
+# ---------------------------------------------------------------------------
+# THE FLOAT — the only thing in the player's own frame that says he is fishing
+# ---------------------------------------------------------------------------
+#
+# **Measured, and it is the finding this round is built on.** Rendered from
+# `Rig/Player/Eye` at the tick the HUD reads `LINE OUT, BAITED`, at eight
+# headings 45 degrees apart, the frame is: two rods standing in their holders,
+# a strip of red-and-white bulwark, open sea. It is the *same frame* as before
+# the cast and the same frame a fish runs in. The rod does bend — 0.44 of full
+# travel at stress 100 — but at this distance the blank is a dark line among
+# three identical rods, and the two things the loop turns on, the take and the
+# run, are text and nothing else.
+#
+# So: a mark on the water, at the one place the player already looks. It sits
+# and bobs while the bait waits, it **dunks for the six hundred milliseconds
+# the take is answerable in**, and it goes under and swings wide with the load
+# while the fish runs. `float_bob.rhai` is the whole of it and the geometry is
+# worked out in its header.
+#
+# Under `Rig/Boat` for two reasons: she carries it to sea, and a renderable
+# node with a dynamic ancestor bakes no static collider — the same rule that
+# lets the rod exist without the player walking into his own tackle. A float
+# you can stand on would be worse than no float.
+#
+# **`sphere`, not `box`.** A 0.4 m cube at 8.7 m reads as a crate; the round
+# silhouette is what makes it a float rather than flotsam, and orange is the
+# only colour in this scene that is not hull, sea, deck or sky.
+[[node]]
+name = "Float"
+parent = "Rig/Boat"
+transform = { pos = [-7.60, 1.50, -3.05], scale = [0.045, 0.045, 0.045] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.94, 0.35, 0.04]
+  roughness = 0.55
+  metallic = 0.0
+
+  [node.components.Script]
+  path = "../scripts/float_bob.rhai"
+
+# ---------------------------------------------------------------------------
+# THE CATCH — the payoff, which until now was a sentence
+# ---------------------------------------------------------------------------
+#
+# `LANDED   it is in your hands` and `IN THE CRATE   that is a trip` were both
+# a string over a frame identical to the one before it. Rendered from the
+# player's own eye at those two ticks, there is no fish anywhere in the shot,
+# because there was no fish anywhere in the scene.
+#
+# It hangs in the cockpit from the tick it comes over the rail to the tick it
+# goes in the box — `state.infish`, which is exactly that interval — and the
+# geometry is in `fish_hang.rhai`. Under `Rig/Boat` so she carries it home, and
+# so no static collider is baked from it.
+[[node]]
+name = "Catch"
+parent = "Rig/Boat"
+transform = { pos = [-7.62, 1.56, -2.98], scale = [0.09, 0.09, 0.09] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "gleamsprat" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.37, 0.42]
+  roughness = 0.38
+  metallic = 0.18
+
+  [node.components.Script]
+  path = "../scripts/fish_hang.rhai"
+
+# The fins and tail, which are a second mesh in the same model. No script: it
+# is a child, so `fish_hang.rhai` moves both by moving the parent.
+[[node]]
+name = "Fins"
+parent = "Rig/Boat/Catch"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "gleamsprat_fins" }
+
+  [node.components.Material]
+  albedo = [0.70, 0.34, 0.18]
+  roughness = 0.5
+  metallic = 0.0
 
 # ---------------------------------------------------------------------------
 # THE SLIPWAY — the way out of the water, and the reason the railings can open

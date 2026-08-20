@@ -335,7 +335,44 @@ if at_helm {
     // **Negative Y for a turn to starboard.** A rotation about +Y takes +X
     // toward -Z, and this hull's starboard side is +Z, so pressing D — the
     // wheel to the right — is a torque about -Y. Verified by driving her.
-    helm_torque = [0.0, -move_x * WHEEL, 0.0];
+    //
+    // **Clamped, because full wheel throws the helmsman off the wheel — and a
+    // keyboard has no other setting.** `Input::axis` returns exactly -1, 0 or
+    // +1, so every A or D a player can press was the full 1.3 MN.m. Measured
+    // on this scene, `--hold "0:move_z=1; 400:move_z=1,move_x=<w>"`, watching
+    // `state.at_helm`:
+    //
+    //   w 0.2   helm 1 at every sample out to tick 3200, 5.8 kn throughout
+    //   w 0.3   helm 1 at every sample out to tick 3200, 5.8 kn throughout
+    //   w 0.4   helm 0 by tick  600, knots 0.06 and then 0.00 for ever
+    //   w 1.0   helm 0 by tick  480, and he never gets back on
+    //
+    // At 1.0 he leaves the mat two seconds after the first press and the boat
+    // stops dead with the caption "stand on the mat to steer" — the mat he
+    // believed he was standing on. Traced: he does not fall in, he *slides*,
+    // from boat-local x = -7.31 to +2.21 in about 120 ticks, the length of the
+    // aft deck onto the foredeck. Under way with the wheel over she heels and
+    // trims, and ADR 0060's carry is `linvel + omega x r` at the foot contact
+    // with **no friction on a tilted plate** — the ADR says so itself and
+    // measures 780 mm of drift at wind 12 on the one sloped station it has. A
+    // hard turn is a much bigger tilt than wind 12.
+    //
+    // So the clamp is a **yaw-rate limit expressed as the only knob the helm
+    // has**, and 0.3 is the measured wall with a margin, not a feel choice.
+    //
+    // `ponytail:` the ceiling is a turning circle of roughly 84 m — big for a
+    // 19 m hull, and the reason the demo's return leg is astern rather than a
+    // turn. Lifting it needs friction on a moving slope in `move_character`,
+    // which re-pins five character scenes and is ADR work, not a demo round.
+    let WHEEL_MAX = 0.30;
+    let wheel = if move_x > WHEEL_MAX {
+        WHEEL_MAX
+    } else if move_x < -WHEEL_MAX {
+        -WHEEL_MAX
+    } else {
+        move_x
+    };
+    helm_torque = [0.0, -wheel * WHEEL, 0.0];
 } else if aboard {
     // **Aboard and not at the wheel means all stop, every tick.** The thrust
     // table is live: a body keeps the last force written to it, so a helm that
