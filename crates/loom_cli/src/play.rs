@@ -469,6 +469,8 @@ impl Sim {
         let mut characters = Vec::new();
         let mut floating: Vec<Floating> = Vec::new();
         let mut obstacles: Vec<loom_render::FluidSolid> = Vec::new();
+        // Colliders that belong to a body built later in this same loop.
+        let mut pending: Vec<(loom_ecs::Entity, Mat4, [f32; 3])> = Vec::new();
         // Whether anything will ask about the bed. Read before the loop so the
         // voxel branch can decide to bake without a second pass over the world.
         let floats = world.water().is_some();
@@ -683,7 +685,29 @@ impl Sim {
                         buoyancy,
                     });
                 }
-            } else if world.is_renderable(*entity) && !has_dynamic_ancestor(world, *entity) {
+            } else if world.collider_half_extents(*entity).is_some()
+                && dynamic_ancestor(world, *entity).is_some()
+            {
+                // **An authored collider under a dynamic body is a part of
+                // that body**, not scenery and not a second body. A hull is
+                // one box for its inertia and two dozen for the deck a player
+                // walks on, and those are not the same shape.
+                //
+                // Keyed on an *explicitly authored* `BoxCollider` rather than
+                // on `is_renderable`, so this arm is a guaranteed no-op on
+                // every scene that predates it: the only mesh-less
+                // `BoxCollider` in the repository is the one on this hull.
+                // Relaxing it would also change what the cinematic solver
+                // bakes as obstacles, and that is its own decision.
+                //
+                // Deferred rather than attached here, because the body it
+                // belongs to may not have been built yet. `world.entities()`
+                // is documented parents-first and this does not lean on it —
+                // the failure if that ever stopped being true is a deck that
+                // silently is not there, which is the whole class of fault
+                // this arm exists to fix.
+                pending.push((*entity, matrix, half));
+            } else if world.is_renderable(*entity) && dynamic_ancestor(world, *entity).is_none() {
                 if ball {
                     physics.add_static_ball(pos, radius);
                 } else if round {
@@ -703,6 +727,48 @@ impl Sim {
                     velocity: [0.0; 3],
                 });
             }
+        }
+
+        // **The deferred attachments, in scene order.** Collider handle
+        // indices stay a deterministic function of the file: the loop above
+        // inserts in `world.entities()` order and this inserts in the order it
+        // collected, which is the same order.
+        for (entity, matrix, half) in pending {
+            let Some(ancestor) = dynamic_ancestor(world, entity) else {
+                continue;
+            };
+            let Some((_, handle)) = dynamic.iter().find(|(e, _)| *e == ancestor) else {
+                crate::log::warn(format!(
+                    "{}: its dynamic ancestor has no body, so this collider is not there",
+                    world.path(entity).unwrap_or("?")
+                ));
+                continue;
+            };
+            let Some(global) = world.global_transform(ancestor) else {
+                continue;
+            };
+            // **The ancestor's rotation and translation, with its scale
+            // dropped.** A rapier body has no scale, so a collider on it is
+            // posed in world units; inverting the full matrix would divide the
+            // offset by a scaled parent's scale and put the deck somewhere
+            // else. The half-extents already carry world scale, from the same
+            // place every other arm reads it.
+            let (_, rotation, translation) =
+                Mat4::from_cols_array(&global.matrix).to_scale_rotation_translation();
+            let local =
+                invertible_parent(Mat4::from_rotation_translation(rotation, translation)) * matrix;
+            let (_, local_rotation, local_position) = local.to_scale_rotation_translation();
+            physics.attach_box(
+                *handle,
+                local_position.to_array(),
+                [
+                    local_rotation.x,
+                    local_rotation.y,
+                    local_rotation.z,
+                    local_rotation.w,
+                ],
+                half,
+            );
         }
 
         let player = world.player_character().and_then(|entity| {
@@ -1783,25 +1849,33 @@ pub(crate) fn invertible_parent(matrix: Mat4) -> Mat4 {
     }
 }
 
-/// Whether any ancestor of this node is a dynamic body.
+/// Which ancestor of this node is a dynamic body, if any.
 ///
 /// A renderable child of a moving body used to get its own *static* collider,
 /// frozen at the position it spawned in — an invisible wall left behind
 /// wherever the parent started, that other bodies then collided with. The
 /// child moves because its parent does; it is not scenery.
-fn has_dynamic_ancestor(world: &World, entity: loom_ecs::Entity) -> bool {
+///
+/// **Which one it is now matters as well as whether there is one.** An
+/// explicitly authored `BoxCollider` under a dynamic node is a *part* of that
+/// body — a deck plate on a hull — so the answer has to name the body the
+/// collider gets attached to.
+pub(crate) fn dynamic_ancestor(
+    world: &World,
+    entity: loom_ecs::Entity,
+) -> Option<loom_ecs::Entity> {
     let mut current = world.parent(entity);
     // Bounded rather than `while let`: a malformed hierarchy with a cycle
     // would otherwise hang the editor on load, and the scene layer's cycle
     // check is one layer away from here.
     for _ in 0..64 {
-        let Some(node) = current else { return false };
+        let node = current?;
         if world.is_dynamic(node) {
-            return true;
+            return Some(node);
         }
         current = world.parent(node);
     }
-    false
+    None
 }
 
 /// Gravity, and nothing else — what a character with no script does.

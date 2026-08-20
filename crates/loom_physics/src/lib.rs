@@ -256,6 +256,41 @@ impl Physics {
         self.colliders.insert(collider)
     }
 
+    /// Another cuboid on a body that already exists, posed in the body's own
+    /// frame — what a `BoxCollider` on a child of a dynamic node becomes.
+    ///
+    /// **Zero mass, and that is load-bearing.** `jib_vi_painted` authors
+    /// `mass = 43776` and every stability number in its header — rights from
+    /// 75°, GZ 0.70 m at 21°, GM 2.7 m — was measured against the hull box's
+    /// inertia alone. rapier resolves `ColliderMassProps::Mass(0.0)` to
+    /// `MassProperties::default()`, which is exactly zero mass, zero angular
+    /// inertia and no centre-of-mass shift, so twenty-odd deck plates change
+    /// what the hull *collides* with and nothing about how it floats. The
+    /// proof of that is the scene's three pinned hashes, not this comment.
+    ///
+    /// A boat's deck is the case: a hull is one box for its inertia and a
+    /// couple of dozen for the geometry a player stands on, and those are not
+    /// the same shape.
+    pub fn attach_box(
+        &mut self,
+        body: RigidBodyHandle,
+        local_position: [f32; 3],
+        local_rotation: [f32; 4],
+        half_extents: [f32; 3],
+    ) -> ColliderHandle {
+        let collider = ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2])
+            .translation(Vector::new(
+                local_position[0],
+                local_position[1],
+                local_position[2],
+            ))
+            .rotation(scaled_axis_from_quat(local_rotation))
+            .mass(0.0)
+            .build();
+        self.colliders
+            .insert_with_parent(collider, body, &mut self.bodies)
+    }
+
     /// A dynamic capsule — the character shape.
     ///
     /// A capsule, not a box: it does not catch on the seams between floor
@@ -1099,6 +1134,68 @@ impl Physics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The mass-leak tripwire.** `attach_box` exists so a hull can be one box
+    /// for its inertia and two dozen for the deck a player stands on, and that
+    /// is only true if the extra boxes weigh nothing. `jib_vi_painted` authors
+    /// `mass = 43776` and its whole righting curve was measured against the
+    /// hull box alone; a collider that contributed mass, inertia or a
+    /// centre-of-mass shift would void the header and the failure would look
+    /// like a buoyancy bug rather than like this.
+    ///
+    /// Read off the body rather than trusted from rapier's docs: `Mass(0.0)`
+    /// resolving to `MassProperties::default()` is an implementation detail of
+    /// the vendored version, which is exactly the kind of thing that changes.
+    #[test]
+    fn an_attached_box_weighs_nothing_and_does_not_move_the_centre_of_mass() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        let body = physics.add_box_body(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            1000.0,
+        );
+        let before = physics.centre_of_mass(body).expect("a body just inserted");
+        let mass_before = physics.bodies.get(body).expect("the body").mass();
+
+        // Far off-axis and lopsided, so a leak of any of the three shows up.
+        physics.attach_box(body, [8.0, 3.0, -2.0], [0.0, 0.0, 0.0, 1.0], [2.0, 0.5, 1.5]);
+
+        let after = physics.centre_of_mass(body).expect("the body");
+        let mass_after = physics.bodies.get(body).expect("the body").mass();
+        assert!(
+            (mass_after - mass_before).abs() < 1e-6,
+            "mass moved {mass_before} -> {mass_after}"
+        );
+        for axis in 0..3 {
+            assert!(
+                (after[axis] - before[axis]).abs() < 1e-6,
+                "centre of mass moved {before:?} -> {after:?}"
+            );
+        }
+    }
+
+    /// And it is a real collider even so — a ray must find it where it was
+    /// posed, in the body's frame. Zero mass must not mean zero geometry.
+    #[test]
+    fn an_attached_box_is_still_something_a_ray_can_hit() {
+        let mut physics = Physics::new(1.0 / 60.0);
+        let body = physics.add_box_body(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            1000.0,
+        );
+        // Top face at y = 4.5, four metres out along +x — nowhere near the
+        // body's own box, so a hit can only be the attachment.
+        physics.attach_box(body, [4.0, 4.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 0.5, 1.0]);
+        physics.step();
+
+        let hit = physics
+            .raycast([4.0, 9.0, 0.0], [0.0, -1.0, 0.0], 100.0)
+            .expect("the attached box should be in the world");
+        assert!((hit.point[1] - 4.5).abs() < 1e-2, "point was {:?}", hit.point);
+    }
 
     /// A shot straight down at a floor must land on the floor, at the distance
     /// the geometry says — not somewhere near it.

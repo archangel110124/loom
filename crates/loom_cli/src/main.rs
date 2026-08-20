@@ -1619,6 +1619,22 @@ pub(crate) fn rain_collision_field(
         .iter()
         .filter_map(|entity| {
             let half = world.collider_half_extents(*entity)?;
+            // **A collider that belongs to a moving body is not a roof.** The
+            // bake freezes every box at its load pose, so a boat's two dozen
+            // deck plates would become rain-blocking slabs standing in the sea
+            // wherever the hull happened to start, and would go on sheltering
+            // that patch of water after the boat had left it.
+            //
+            // Recorded consequence, because it is the price and not an
+            // oversight: **rain falls through a boat's deck.** ADR 0015's
+            // bridge is a static block of `i8` handed to the renderer once;
+            // moving geometry needs a different mechanism than a different
+            // filter here. It also keeps the `ponytail:` note below true —
+            // every collider that reaches this bake is axis-aligned, because
+            // the oriented ones are all on hulls.
+            if crate::play::dynamic_ancestor(world, *entity).is_some() {
+                return None;
+            }
             let global = world.global_transform(*entity)?;
             let matrix = Mat4::from_cols_array(&global.matrix);
             let (scale, _, translation) = matrix.to_scale_rotation_translation();
