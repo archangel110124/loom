@@ -5333,12 +5333,14 @@ static const float WATER_REFLECT_ROUGH = 0.06;
 ///
 /// `tracedEnvironment` blends its traced answer toward the miss colour by
 /// exactly this number, so what this buys is **dilution with sky, not a lobe
-/// width**. It costs nothing: the same one ray, a different blend weight. The
-/// honest fix is a wider lobe — more rays (ADR 0019's occupancy cliff says no)
-/// or a screen-locked jitter of the ray inside the lobe, which is the trick
-/// AO and the soft shadows already use here and which would break the
-/// *coherence* rather than paint over it. That is the upgrade path, and it
-/// wants a salt measurement before it lands.
+/// width**. It costs nothing: the same one ray, a different blend weight.
+///
+/// **The lobe width it is not now exists beside it** — `WATER_CINEMATIC_LOBE`
+/// jitters the ray per pixel and a quad share averages four of them. The two
+/// are not alternatives: measured with the jitter in place, dropping this back
+/// toward the analytic sea's 0.06 brings the flat patches back *and* costs an
+/// order of magnitude in added salt. The dilution is the variance reduction
+/// the jitter is affordable on top of, so it stays at 0.55.
 ///
 /// **Scoped by `WaterOutput::nappe.x`**, which `fluidVertexMain` sets to -1.0
 /// and every other water vertex leaves at 0.0 — the same lane, and the same
@@ -5346,6 +5348,29 @@ static const float WATER_REFLECT_ROUGH = 0.06;
 /// cinematic tier moves: `ocean`, `shore`, `river`, `whitecaps` and
 /// `lanternhead` render bit for bit as before.
 static const float WATER_CINEMATIC_REFLECT_ROUGH = 0.55;
+
+/// The half-angle of the cinematic surface's reflection lobe, as a tangent.
+///
+/// **This is the wider lobe the constant above says it is not.** That one
+/// dilutes the traced answer toward the sky, which softens the *colour* of a
+/// flat patch and leaves its shape exactly where it was: neighbouring pixels
+/// still fire one ray each at the same triangle of the same box, so the region
+/// still agrees and its boundary is still that box's silhouette. This
+/// perturbs the ray itself, per pixel, from a screen-locked dither — the
+/// construction ADR 0019 licensed for AO and the soft shadows and for the same
+/// reason: the pattern is a function of the pixel's integer coordinate, so it
+/// sits still while the world moves under it and a re-render of the same tick
+/// is the same bits.
+///
+/// 4 degrees, measured. Below about 2 the patch interiors are still flat and
+/// the straight edges read; above about 8 nothing further happens except haze.
+/// Salt is nearly flat across that range once the quad share is in, so the
+/// picture picks the number rather than the metric.
+///
+/// It is also roughly right physically, which is a check rather than the
+/// derivation: Cox-Munk gives a calm sea about 2.2 degrees of per-axis RMS
+/// slope, so this sits a little under real water.
+static const float WATER_CINEMATIC_LOBE = 0.0699;  // tan(4 degrees)
 
 /// Ray origin offset above the surface, in metres.
 ///
@@ -6703,6 +6728,28 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // broadening geometrically, per pixel, which is the honest version of it.
     float3 mirror = reflect(-view, normal);
     mirror = normalize(mirror - flatN * min(dot(mirror, flatN), 0.0));
+    if (in.nappe.x < -0.5) {
+        // **One ray, jittered inside the lobe — the marched surface only.**
+        // See `WATER_CINEMATIC_LOBE`. More rays is what ADR 0019's occupancy
+        // cliff refuses (0.024 ms each to eight, 0.101 ms each after), so the
+        // sample count does not move; what moves is that two neighbouring
+        // pixels no longer ask the same question, which is what a flat
+        // straight-edged patch *is*.
+        //
+        // `+ float2(19.0, 7.0)` for the reason `ambientVisibility` offsets by
+        // `(37, 11)`: two consumers of `rayDither` sharing one pattern
+        // correlate, and ADR 0019 paid for that lesson once.
+        float3 u, v;
+        rayBasis(mirror, u, v);
+        float2 xi = raySample(rayDither(in.clip.xy + float2(19.0, 7.0)), 0u);
+        float radius = WATER_CINEMATIC_LOBE * sqrt(xi.x);
+        float angle = 6.2831853 * xi.y;
+        mirror = normalize(mirror + u * (radius * cos(angle))
+                                  + v * (radius * sin(angle)));
+        // Back into the surface's own hemisphere, exactly as above: a sample
+        // rotated below the water cannot reflect anything.
+        mirror = normalize(mirror - flatN * min(dot(mirror, flatN), 0.0));
+    }
     float baseRough = (in.nappe.x < -0.5) ? WATER_CINEMATIC_REFLECT_ROUGH
                                           : WATER_REFLECT_ROUGH;
     float reflectRough = saturate(baseRough
@@ -6710,6 +6757,22 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     float3 env = tracedEnvironment(in.worldPos, flatN, mirror,
                                    reflectRough, WATER_REFLECT_BIAS,
                                    skyColor(mirror));
+    if (in.nappe.x < -0.5) {
+        // **Four rays' worth of answer at one ray's price.** The quad is
+        // already resident and already shading; sharing across it turns four
+        // independent jittered samples into one averaged reflection, which is
+        // what stops the jitter from trading a coherent polygon for per-pixel
+        // stipple. Unshared it is measured at fifty times the added salt —
+        // that number is what chose this design, not the cost.
+        //
+        // **Quad-uniform by construction.** `nappe.x` is a per-vertex constant
+        // of -1.0 across the whole fluid mesh, so every lane of a quad on this
+        // surface takes this branch, helper lanes included. It reads lanes of a
+        // 2x2 fixed by the pixel grid rather than by scheduling, so it carries
+        // no more nondeterminism than the dither does.
+        env = (env + QuadReadAcrossX(env) + QuadReadAcrossY(env)
+                   + QuadReadAcrossDiagonal(env)) * 0.25;
+    }
     float3 lit = lerp(through, env, fresnel);
     lit += specular(normal, view, sunDirection(), WATER_ROUGHNESS, float3(0.02))
          * sunColor() * sunStrength() * toSun;

@@ -341,6 +341,42 @@ fn select_physical_device(
         if features12.shader_sampled_image_array_non_uniform_indexing == vk::FALSE {
             missing.push("shaderSampledImageArrayNonUniformIndexing");
         }
+
+        // **Quad subgroup operations in the fragment stage**, which the
+        // cinematic water's reflection shares its jittered ray across —
+        // `WATER_CINEMATIC_LOBE` in `scene.slang`. Nothing else in the engine
+        // uses a subgroup operation, so this is a genuinely new hardware
+        // requirement and it is checked here rather than discovered as a
+        // `vkCreateShaderModule` failure with a capability number in it.
+        //
+        // Both halves matter: `QUAD` says the operations exist, and
+        // `supported_stages` says they exist *in the stage that uses them* —
+        // some drivers advertise subgroup ops for compute alone, and reading
+        // only the first flag would pass such a device and then miscompile.
+        // (`quad_operations_in_all_stages` is a stronger claim than this needs
+        // and is deliberately not the one asked: it covers every stage, and
+        // this wants fragment.)
+        let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+        let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut subgroup);
+        // SAFETY: the chain above outlives this call, and `physical` came from
+        // this instance.
+        unsafe {
+            instance
+                .handle()
+                .get_physical_device_properties2(physical, &mut properties2);
+        }
+        if !subgroup
+            .supported_operations
+            .contains(vk::SubgroupFeatureFlags::QUAD)
+        {
+            missing.push("subgroup QUAD operations");
+        }
+        if !subgroup
+            .supported_stages
+            .contains(vk::ShaderStageFlags::FRAGMENT)
+        {
+            missing.push("subgroup operations in the fragment stage");
+        }
         if !missing.is_empty() {
             rejections.push(format!("{name}: missing {}", missing.join(", ")));
             continue;
