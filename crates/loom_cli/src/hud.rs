@@ -16,6 +16,14 @@
 use loom_render::egui;
 use loom_script::GameState;
 
+/// How far the drop shadow sits below and right of the glyphs it backs.
+///
+/// Two pixels, flat rather than scaled with `size`: every `Hud` in this project
+/// is between 19 and 26 points, the outline a shadow reads as is about a pixel
+/// wide at any of them, and a scaled offset would drift into a second visible
+/// line on a large one.
+const SHADOW: egui::Vec2 = egui::vec2(2.0, 2.0);
+
 /// One resolved line, ready to draw.
 pub(crate) struct Element {
     anchor: egui::Align2,
@@ -147,13 +155,28 @@ pub(crate) fn draw(
         .iter()
         .map(|element| {
             let at = element.anchor.pos_in_rect(&viewport) + element.offset;
+            let font = egui::FontId::proportional(element.size);
+            // **A shadow under every line, because a HUD has no control over
+            // what is behind it.** The demo's inventory row is authored cream
+            // (`[0.86, 0.89, 0.82]`) and at the opening heading it lands on a
+            // near-white stone cylinder: the row naming one of that demo's four
+            // features was, photographed at 4x, ghost glyphs. `Hud` has
+            // `color`, `size`, `offset` and `anchor` and no shadow or scrim
+            // field, so no authored colour can fix it — the same text is over
+            // sky one second and over pale deck the next.
+            //
+            // Two pixels down-right, painted first so the bright glyphs sit on
+            // top. Cheap: the overlay is a few hundred vertices and this
+            // doubles it. Drawn only in `loom run`, so no reference PNG can
+            // move.
             painter.text(
-                at,
+                at + SHADOW,
                 element.anchor,
                 &element.text,
-                egui::FontId::proportional(element.size),
-                element.color,
-            )
+                font.clone(),
+                egui::Color32::from_black_alpha(190),
+            );
+            painter.text(at, element.anchor, &element.text, font, element.color)
         })
         .collect();
 
@@ -326,6 +349,52 @@ mod tests {
             claimed = ctx.is_pointer_over_egui();
         }
         claimed
+    }
+
+    /// **Every line is drawn twice, and the first one is dark.** The demo's
+    /// cream inventory row over a near-white stone was unreadable and no
+    /// authored colour could fix it — the background is whatever the player is
+    /// looking at. Counted rather than eyeballed, because "is it legible" is
+    /// the one thing this project has never had an instrument for.
+    #[test]
+    fn every_line_is_backed_by_a_dark_copy_of_itself() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let element = Element {
+            anchor: egui::Align2::LEFT_TOP,
+            offset: egui::vec2(16.0, 14.0),
+            text: "HOLD 2/4".to_owned(),
+            size: 19.0,
+            color: egui::Color32::from_rgb(219, 227, 209),
+        };
+
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |root| {
+                let _ = draw(root, std::slice::from_ref(&element));
+            });
+            texts = out
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(t) => Some(t.pos),
+                    _ => None,
+                })
+                .collect();
+        }
+
+        assert_eq!(texts.len(), 2, "one line should paint a shadow and a face");
+        let (shadow, face) = (texts[0], texts[1]);
+        assert!(
+            (shadow - face - SHADOW).length() < 0.01,
+            "shadow at {shadow:?} is not {SHADOW:?} from the face at {face:?}"
+        );
     }
 
     /// **The overlay must not eat the trigger.** Fixing the anchoring with a

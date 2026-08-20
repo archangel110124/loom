@@ -594,6 +594,11 @@ let SUPPLY = [
 // alongside.
 let FISH_HOLD = "Rig/Boat/FishHold";
 
+// The top boarding tread, on her port quarter — the one thing on this boat a
+// player ashore is ever trying to reach. A boat child, so the bearing follows
+// her: drive her off and it points at where she went.
+let BOARD_STEP = "Rig/Boat/StepHigh";
+
 // How long a notice — a refusal, a stow, a landing, a fish that spat the bait —
 // holds the caption line. Two seconds.
 //
@@ -817,6 +822,43 @@ if hub {
     state.knots = knots;
 
     // -----------------------------------------------------------------------
+    // **PINNED — she is at full ahead and going nowhere.**
+    // -----------------------------------------------------------------------
+    //
+    // There is already a stall limiter in `deeper_player.rhai` and it cannot
+    // see this one. It measures `deck_speed` — the *player's* world position,
+    // one tick to the next — and a hull pinned on a navigation mark does not
+    // stop, it pivots on it: the helmsman stands seven metres off her centre,
+    // so he keeps moving at a third of a metre a second while she makes good
+    // nothing at all. Measured on the tape `0:move_z=1; 500:move_z=1,move_x=-1`
+    // (board, then hard port): she runs into `Mark5` at (44, -20), and from
+    // tick 1250 to 2000 she reads 0.89 down to 0.58 knots with `jammed` never
+    // once latching and the caption still reading `AHEAD   wheel to port`.
+    //
+    // **The asymmetry that found it is the scene, not the physics.** The marks
+    // are a wall nine and a half metres to port and open sea is to starboard,
+    // so the same input mirrored has two outcomes — and port is the side the
+    // demo teaches a player to look at. A first-timer turning toward the pretty
+    // things stops dead and is told nothing.
+    //
+    // This is the boat's own speed, which is the fact the caption needed, and
+    // it is measured *here* because `positions` is the only place it exists.
+    // One knot, because she is over that within ten ticks of the throttle going
+    // ahead (0.06 kn at tick 356, 3.79 at 374) and never under it again while
+    // she is swimming. Ninety ticks — a second and a half — because contact
+    // with a buoy jitters and a caption that flickers is worse than none.
+    let PINNED_TICKS = 90;
+    let pinned = if "pinned" in state { state.pinned } else { 0 };
+    // Clamped one past the threshold rather than counted forever: the number is
+    // a latch, and an unbounded one reads like a distance in `--assert` output.
+    if at_helm > 0 && drive > 0.0 && knots < 1.0 {
+        if pinned <= PINNED_TICKS { pinned += 1; }
+    } else {
+        pinned = 0;
+    }
+    state.pinned = pinned;
+
+    // -----------------------------------------------------------------------
     // A LANDED FISH GOES IN THE HOLD, and the rod comes back.
     // -----------------------------------------------------------------------
     //
@@ -937,6 +979,14 @@ if hub {
     let plz = 0.0;
     let bfx = 0.0;   // and which way he is facing, in her frame
     let bfz = -1.0;
+    // **And which way SHE is pointing, in the world.** The rotation recovered
+    // below takes a world vector into her frame; its first row is therefore her
+    // own bow, in world XZ. Kept because the return leg needs to name a *key*,
+    // and a key is a fact about the hull rather than about the man at the
+    // wheel: at the helm he faces her beam, so "behind you" and "astern" are
+    // ninety degrees apart and only one of them is a throttle setting.
+    let bowx = 1.0;
+    let bowz = 0.0;
     if BOAT in positions && FISH_HOLD in positions {
         let b = positions[BOAT];
         let h = positions[FISH_HOLD];
@@ -952,6 +1002,8 @@ if hub {
         ply = me[1] - b[1];
         bfx = c * fx + s * fz;
         bfz = -s * fx + c * fz;
+        bowx = c;
+        bowz = s;
         aboard_frame = true;
     }
     state.plx = plx;
@@ -999,6 +1051,26 @@ if hub {
         "aft, in the cockpit"
     };
 
+    // **AND WHERE SHE IS, for a man ashore who has walked into something.**
+    //
+    // The ashore arm of `BLOCKED` was a fixed string — `back up — aboard is the
+    // gap between the bollards` — and it fires on any wall in the scene from
+    // any heading. Reproduced two ways in one pass: hold **S** and walk
+    // backwards into the north rail, and hold **D** and strafe into the shed.
+    // Both print it. Telling a man who is already walking backwards to back up
+    // drives him harder into the thing that has him, and the gap he is being
+    // sent to may be behind him.
+    //
+    // The aboard arm of the same sentence has been computed since round 9
+    // (`step LEFT and go round it`); this is the asymmetry, and it is the
+    // asymmetry that was the bug.
+    let board_at = if BOARD_STEP in positions {
+        let b = positions[BOARD_STEP];
+        toward(me, fx, fz, b[0], b[2])
+    } else {
+        "the gap between the bollards"
+    };
+
     // **AND WHERE HOME IS, which was the one leg of the trip with no bearing.**
     //
     // `toward` was called twice — for the fish box and for the crate once he
@@ -1026,6 +1098,32 @@ if hub {
     } else {
         0
     };
+
+    // **HOW FAR SHE IS FROM HOME, AND WHICH KEY CLOSES IT.**
+    //
+    // The two facts the return leg was missing, and they are facts about the
+    // *hull*: `crate_at` is in the player's frame, and at the wheel he faces
+    // her beam, so "behind you, on your left" and "astern" are ninety degrees
+    // apart and only one of them names a throttle setting. Measured on the leg
+    // the demo teaches, the helm caption carried `CRATE 12 m` and then `17`
+    // and then `26` while the player held the one key he had been taught — the
+    // number counting *up* was the entire signal that W was wrong.
+    //
+    // `boat_d` is also the distance the crate rule itself uses (`ALONGSIDE`),
+    // which is what lets the caption stop saying "take her alongside" at the
+    // moment she is.
+    let boat_d = 999.0;
+    let boat_m = 999;
+    let home_key = "S";
+    if FISH_CRATE in positions && BOAT in positions {
+        let c = positions[FISH_CRATE];
+        let b = positions[BOAT];
+        let dx = c[0] - b[0];
+        let dz = c[2] - b[2];
+        boat_d = (dx * dx + dz * dz).sqrt();
+        boat_m = (boat_d + 0.5).to_int();
+        home_key = if dx * bowx + dz * bowz > 0.0 { "W" } else { "S" };
+    }
 
     // -----------------------------------------------------------------------
     // THE ONE LINE OF TEXT, and what wins it.
@@ -1088,10 +1186,16 @@ if hub {
         };
     } else if phase >= 1 {
         // The fight owns the line: it is already in `message`.
-    } else if jammed > 0 {
+    } else if jammed > 0 || pinned > PINNED_TICKS {
         // The stall limiter shut the throttle three quarters of a second ago
         // and the caption still said "W ahead". A skipper pressed on a quay
         // gets told he is pressed on a quay.
+        //
+        // **Two detectors, one sentence, and the second one is why.** `jammed`
+        // is the movement script's, off the helmsman's own speed, and it cannot
+        // see a hull pivoting on a buoy — see `PINNED_TICKS`. `pinned` is this
+        // file's, off the boat's, and it only ever fires at the wheel with the
+        // throttle ahead.
         message = "PUSHING ON SOMETHING   S to back off";
     } else if at_helm > 0 {
         // **Two lines, and which one you get depends on whether you have
@@ -1112,7 +1216,30 @@ if hub {
         // The distance rather than the bearing because these are already the
         // two longest strings on the screen, and because at the wheel the
         // useful question is not "which way is it" but "am I closing".
-        let home = if stowed > 0 { "   CRATE " + crate_m + " m" } else { "" };
+        // **And it is shown with an empty hold too, which is the way a
+        // stranger is actually lost.** The one gesture this demo teaches is W,
+        // and W at the wheel is out to sea: held for six thousand ticks it
+        // reaches x = 282 with the rig invisible astern and nothing in any
+        // direction but water. `stowed > 0` gated the only number that could
+        // have said so, so the player who had not yet caught anything — which
+        // is every first-timer — got nothing. Sixty metres is past the far end
+        // of the mark line's useful half and well outside anything the demo
+        // asks for.
+        //
+        // **Both halves are short on purpose.** This line is already the
+        // longest thing on the screen — the hands-off form is 61 characters at
+        // size 22, and measured off a window screenshot that font runs about
+        // 12.9 px a character, so 61 is 790 px. `HOME 122 m — hold S` adds 22
+        // and `ALONGSIDE — press SPACE` 26; `— S closes it` and `— SPACE and
+        // step ashore` were both written first and both push the worst case
+        // past 1,200 px, which is a caption that runs off a 1280-wide window.
+        let home = if stowed > 0 && boat_d <= ALONGSIDE {
+            "   ALONGSIDE — press SPACE"
+        } else if stowed > 0 || boat_m > 60 {
+            "   HOME " + boat_m + " m — hold " + home_key
+        } else {
+            ""
+        };
         if drive == 0.0 && rudder == 0.0 {
             message = "THE HELM   W ahead  S astern  A/D wheel  SPACE lets go   "
                     + knots.to_int() + " kn" + home;
@@ -1138,10 +1265,18 @@ if hub {
             // neither, and the two inputs that work are the only two a wedged
             // player is not already pressing.
             "BLOCKED   the bait box — step " + round_it + " and go round it"
+        } else if aboard > 0 && infish > 0 {
+            // Wedged aboard, somewhere other than the bait box, with a fish in
+            // his hands. `stuck` outranks `aboard`, so this used to *replace*
+            // the one bearing he needed with a sentence naming nothing —
+            // reproduced coming home wedged aft. The obstruction is unnamed
+            // because it could be any of nine colliders on this deck; the
+            // destination is not.
+            "BLOCKED   go round it — the YELLOW FISH BOX is " + box_at
         } else if aboard > 0 {
             "BLOCKED   something is in the way — go round it"
         } else {
-            "BLOCKED   back up — aboard is the gap between the bollards"
+            "BLOCKED   something has you — she is " + board_at
         };
     } else if aboard > 0 {
         // **The signposts the return leg needs.** A landed fish used to vanish
@@ -1155,6 +1290,14 @@ if hub {
             "FISH IN HAND   go " + round_it + " round the bait box — the YELLOW FISH BOX is aft"
         } else if infish > 0 {
             "FISH IN HAND   the YELLOW FISH BOX is " + box_at
+        } else if stowed > 0 && boat_d <= ALONGSIDE {
+            // **The sentence at the moment the demo pays off.** Traced on the
+            // delivery tape, at the crate's own range: `the crate is 6 m dead
+            // behind you — take her alongside` at tick 2470 and the same at 2 m
+            // at 2560. She *was* alongside; `ALONGSIDE` is 14.0 m. The player
+            // was already walking to the crate on foot and was still being told
+            // to bring the boat in, and no branch anywhere said "step ashore".
+            stowed + " BELOW   SHE IS ALONGSIDE — step off, the crate is " + crate_at
         } else if stowed > 0 {
             stowed + " BELOW   the crate is " + crate_at + " — take her alongside"
         } else {

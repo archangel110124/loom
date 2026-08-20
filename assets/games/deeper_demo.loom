@@ -14,7 +14,14 @@
 #                                                        instructions on it.
 #                                                        This line used to be
 #                                                        the version without
-#                                                        the flag.
+#                                                        the flag. **It also
+#                                                        used to open the
+#                                                        Hierarchy, Inspector
+#                                                        and Console around a
+#                                                        game in 39% of the
+#                                                        window**; `--play`
+#                                                        without `--edit` now
+#                                                        builds no panels.
 #   loom render assets/games/deeper_demo.loom --out /tmp/rig.png
 #   loom sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
 #     --assert "Rig/Boat.x > 29.0"      # walk forward. That is the whole demo.
@@ -408,13 +415,112 @@
 #   at tick 180, grinding on the box's after face from 180 to 300, at the wheel
 #   by 360. A player with a mouse steps round it; a dead-straight headless walk
 #   does not. **The trade bought the lane its other twenty-one degrees.**
-# * **The `Hud` rows are unverified as pixels.** `Hud` draws only in `loom run`
-#   and a headless render cannot show either row, so what is checked is the
-#   string the rules script produces (`game.message` in `loom sim`'s output) and
-#   the numbers behind it, never the overlay. Those are different claims and
-#   only the first is tested.
+# * **The `Hud` rows are unverified as pixels.** ~~`Hud` draws only in `loom
+#   run` and a headless render cannot show either row.~~ **Photographed in round
+#   10 and one of the two rows was invisible**: `HOLD n/4 …` is authored cream
+#   (`[0.86, 0.89, 0.82]`) and at the spawn heading it lands on a near-white
+#   stone cylinder, so the row naming one of this demo's four features was ghost
+#   glyphs. `hud.rs` now paints every line twice — a near-black copy two pixels
+#   down-right, then the authored colour on top — which is the only fix
+#   available, because `Hud` has `color`, `size`, `offset`, `anchor` and no
+#   shadow or scrim field, and no authored colour survives a background that is
+#   sky one second and pale deck the next. It draws only in `loom run`, so no
+#   reference PNG moved. **What is still untested is everything else about the
+#   overlay**: a `grep` on `game.message` proves a string exists and cannot
+#   prove it is legible, fits, or is drawn at all.
 # * **The deck is still beige and the hub still reads pale.** It was called out
 #   after round 1 and it is a palette pass, not a boat.
+#
+# ---------------------------------------------------------------------------
+# ROUND 10 — THE FIRST TWO MINUTES, AND THE EDGES
+# ---------------------------------------------------------------------------
+#
+# Four fixes and an adversarial gate block. Every one of them came from
+# somebody running the thing rather than from reading it.
+#
+#   1. **The one command in this file's header opened an editor.** `loom run
+#      --play` drew the Hierarchy, the Inspector, the Console and a toolbar with
+#      Delete on it, unconditionally, and left the game 876x576 of a 1440x900
+#      window — 39%. `--play` without `--edit` now builds no dock at all and the
+#      scene fills the window. `--edit` is unchanged, a bare `loom run` is
+#      unchanged (that is M5.5's read-only viewer), and `cargo xtask validate`
+#      passes `--edit` on both its windowed rows, so no gate moved.
+#   2. **The inventory row was unreadable.** See the bullet above.
+#   3. **The helm had no way home on it, and now it names a key.** `CRATE nn m`
+#      appeared only with a fish below, so a first-timer — who has caught
+#      nothing — held W, the one gesture this demo teaches, and 100 seconds
+#      later was at x = 282 in an empty ocean with no number and no landmark.
+#      The helm line now carries `HOME nn m — hold S` past sixty metres or with
+#      a catch aboard. **The range is the hull's and so is the key**: at the
+#      wheel the helmsman faces her beam, so "behind you" is ninety degrees off
+#      "astern" and only one of the two is a throttle setting.
+#   4. **At the moment the demo pays off it told you to do what you had just
+#      done.** Inside `ALONGSIDE` — 14.0 m — the caption said `take her
+#      alongside` at six metres and again at two, and no branch anywhere said to
+#      get off the boat. It now reads `ALONGSIDE — press SPACE` at the wheel and
+#      `SHE IS ALONGSIDE — step off, the crate is 2 m dead behind you` on your
+#      feet.
+#   5. **A hard turn to port stops the boat dead and nothing said so.** The
+#      channel marks are static colliders nine and a half metres to port, so the
+#      same input mirrored has two outcomes — starboard is open sea — and port
+#      is the side the demo teaches a player to watch. **The existing stall
+#      limiter could not see it**: `deeper_player.rhai` measures the helmsman's
+#      own speed, and a hull pinned on a buoy pivots on it, so a man standing
+#      seven metres off her centre keeps moving at a third of a metre a second
+#      while she makes good nothing. `state.pinned` in `deeper_rules.rhai` is
+#      the second detector, off her own speed, and it feeds the sentence the
+#      first one already had. Measured: 0.89 kn at tick 1250, 0.58 at 2000, at
+#      full ahead throughout.
+#   6. **`BLOCKED` told a man walking backwards to back up.** The ashore arm was
+#      a fixed string — `back up — aboard is the gap between the bollards` — and
+#      it fires on any wall from any heading; the aboard arm has been computed
+#      since round 9. That asymmetry was the bug. It now names where she is, in
+#      his frame, off `Rig/Boat/StepHigh`.
+#
+# **And `scripts/green.sh` grew section 8: seven blocks of deliberately wrong
+# input.** Every row before it is a tape somebody wrote after watching the thing
+# work, and a gate assembled that way cannot find the state its author never
+# entered — eleven lines of stupidity found three of the six defects above in
+# one pass. It also contains **the first `delivered == 1` row on this file**:
+# every delivery assertion in the project was on `rig_trip.loom`, a fork, so the
+# demo's headline claim was a claim about a different file.
+#
+# ---------------------------------------------------------------------------
+# KNOWN ISSUES — what a player will hit that is NOT fixed
+# ---------------------------------------------------------------------------
+#
+# Ranked by how likely a first-timer is to meet it. None of these is a stopper;
+# all of them are seams.
+#
+# 1. **You drive home stern-first at a wharf you cannot see.** The berth faces
+#    the way it faces, so the leg the demo teaches leaves ahead and returns
+#    astern with the destination behind the camera. Photographed at the arrival
+#    beat: the frame is sea, sky and a rod, and the rig is 180 degrees behind.
+#    Round 10 answered it with a *caption* — the range and the key — which is
+#    the cheap half. The real fix is geometric (berth her bow-in, or give the
+#    helm a stern view) and it moves every pinned number in `scripts/green.sh`.
+# 2. **The landed fish still reads as a mitten.** It tracks the player's hands
+#    correctly now; the silhouette is a grey-green body with five splayed rays
+#    and it hangs in mid-air attached to nothing. Mesh work, not a scene edit.
+# 3. **Every close render is dense salt-and-pepper.** That is ADR 0019's
+#    eight-ray AO dither. Two sweeps found no scene-level knob that reaches it —
+#    ambient is flat across 2.4x, the sun about a ninth of it — and the cure is
+#    the quad-wide sample share in that ADR, which moves all 54 references.
+# 4. **`state.aboard` is stale by about eighty ticks** after you step ashore, so
+#    the arrival caption uses the aboard branch while you are standing on the
+#    wharf. Round 10 made both branches say the same useful thing, so it is now
+#    cosmetic rather than wrong.
+# 5. **The helmsman can be bounced off the mat by a hard turn.** `at_helm`
+#    flickers for about seventy-five ticks and the caption drops back to the
+#    teaching line. He is never in danger and steps back on by himself.
+# 6. **Hold W and SPACE together from the spawn and you wedge for ever.** SPACE
+#    on the mat is hands-off, so the throttle never opens and the pair pushes
+#    into the cockpit geometry. Releasing either key clears it, and no human
+#    holds jump for thirty seconds.
+# 7. **`rig_trip.loom` and `rig_adrift.loom` are 1,900-line forks of this file**
+#    and they drift every time it changes. `--hold "<tick>:<keys>"` has made
+#    them unnecessary since round 5. Round 10 put the first keyboard delivery
+#    row on the shipped scene; retiring the forks is the follow-up.
 
 [scene]
 format = 1

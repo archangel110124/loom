@@ -699,8 +699,18 @@ fi
 #     for the whole of the drive home the line said nothing about home while the
 #     one key the demo teaches drove him further out. Same tape as 5h, then the
 #     reverse dogleg back to the wheel: forward up the port side, starboard onto
-#     the mat, then ahead. Both sentences are asserted, and the number is what
-#     tells him W was the wrong key — it counts *up*.
+#     the mat, then ahead. Both sentences are asserted.
+#
+#     **The second one used to read `CRATE 12 m` and the comment here used to
+#     say "the number is what tells him W was the wrong key — it counts up".**
+#     That is a gate row pinned on the player doing the wrong thing, and it is
+#     the wrong instrument: the whole return leg is driven stern-first at a
+#     wharf the helmsman cannot see, and asking him to notice a rising number is
+#     asking him to run the experiment. The line names the key now. It is
+#     `HOME 19 m` rather than `CRATE 12 m` because the range is measured from
+#     the **hull** — the same distance `ALONGSIDE` judges the delivery by —
+#     rather than from a man standing seven metres forward of her origin, and
+#     because the key it names is a fact about which way *she* points.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2120 \
   --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
 540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
@@ -721,7 +731,7 @@ fi
 1900:move_x=-1; 1950:move_z=-1; 2000:move_z=1; 2035:move_x=1; 2060:; \
 2100:move_z=1" \
   --assert "state.stowed == 1" --assert "state.at_helm == 1" \
-  | grep -q '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   CRATE 12 m"'
+  | grep -q '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   HOME 19 m — hold S"'
 
 # 5i. **AND THE TWO SENTENCES THAT GET HIM THERE, ASSERTED AS SENTENCES.**
 #     `--assert` has no `message` axis, so the same `grep` the two fight endings
@@ -921,6 +931,127 @@ fi
 "$LOOM" sim assets/test/rig_bump.loom --ticks 2400 --hold move_z=1 \
   --assert "state.jammed == 1" >/dev/null
 
+# ---------------------------------------------------------------------------
+# 8. **THE EDGES — inputs nobody would write a tape for.**
+#
+# Every row above this line is a tape somebody wrote *after* watching the thing
+# work, which is the shape of test this block exists to break. Fourteen scenes
+# asserted and not one wrong keypress among them: a gate assembled out of the
+# author's own successful runs cannot find the state the author never entered.
+# Eleven lines of deliberately stupid input found three defects in one pass, and
+# all three are fixed above — the buoy stall, the ashore `BLOCKED` sentence that
+# told a man walking backwards to back up, and a helm caption with no way home
+# on it.
+#
+# **These are cheap and they are the only rows here that are adversarial.** Add
+# to them before adding another pinned tick to a tape that already passes.
+
+# 8a. **The whole trip, on the shipped file, from the keyboard.** Every
+#     `delivered` assertion in this gate was on `rig_trip.loom` — a 1,900-line
+#     *fork* of the demo with a `Pilot` node — so the demo's headline claim, you
+#     can complete a trip, was a claim about a different file. This is the 5i
+#     tape carried on: astern at 2200, throttle shut at 2600, SPACE at 2660,
+#     over the boarding steps, west along the wharf. 3,800 ticks, 4.6 s.
+#
+#     **And it is where the two arrival sentences are asserted**, because they
+#     only exist on a run that actually arrives. `ALONGSIDE — press SPACE`
+#     replaces `HOME nn m — hold S` at 2500 (she is 2.73, -10.48; the crate is
+#     inside `ALONGSIDE`'s 14.0 m), and the aboard line says `step off` instead
+#     of `take her alongside`. Traced before the fix: at 6 m and again at 2 m
+#     the demo was still telling the player to bring the boat in, at the exact
+#     beat it pays off, and no branch anywhere said to get out of her.
+DEMO_HOME="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
+540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
+850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
+1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
+1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
+1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; \
+1900:move_x=-1; 1950:move_z=-1; 2000:move_z=1; 2035:move_x=1; 2060:; \
+2100:move_z=1; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
+2750:move_x=-1,move_z=-0.15; 3550:move_z=-1,move_x=-0.3"
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2500 --hold "$DEMO_HOME" \
+  --assert "state.stowed == 1" --assert "state.at_helm == 1" \
+  | grep -q '"message": "THE HELM   ASTERN   wheel amidships   3 kn   SPACE lets go   ALONGSIDE — press SPACE"'
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2800 --hold "$DEMO_HOME" \
+  --assert "state.stowed == 1" --assert "state.at_helm == 0" \
+  | grep -q '"message": "1 BELOW   SHE IS ALONGSIDE — step off, the crate is 5 m dead behind you"'
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 3800 --hold "$DEMO_HOME" \
+  --assert "events.landed >= 1" --assert "events.deliver >= 1" \
+  --assert "state.delivered == 1" --assert "state.stowed == 0" \
+  | grep -q '"message": "IN THE CRATE   that is a trip. Take bait and go again"'
+
+# 8b. **Press nothing for twenty seconds.** The one thing a stranger who has
+#     read nothing will do first. He keeps the supply he spawned on top of and
+#     the instruction does not decay into anything else.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1200 --hold "0:" \
+  --assert "Rig/Player.y > 2.2" --assert "state.carried == 1" \
+  | grep -q '"message": "WALK FORWARD TO THE BOAT"'
+
+# 8c. **Press everything at once.** W, D, SPACE, SHIFT and the trigger, held for
+#     thirty seconds. He sprints diagonally off the rig into the sea — and the
+#     claim is not that he stays dry, it is that the sea is the safety device:
+#     he floats rather than falling forever (`y > -1.0`, against -202 for the
+#     capsule that fell through in round 1) and the caption computes a compass
+#     word from where he is. `rig_overboard.loom` above is the row that proves
+#     a swimmer walks back out; this is the row that proves the masher gets
+#     there.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1800 \
+  --hold "0:move_z=1,move_x=1,jump=1,sprint=1,fire=1" \
+  --assert "Rig/Player.y > -1.0" --assert "state.swimming == 1" \
+  | grep -q '"message": "IN THE WATER   swim south-west to the ramp"'
+
+# 8d. **Hard over, both ways, and they are not the same.** Board on W, then hold
+#     the wheel hard across. To starboard is open sea and she keeps making way.
+#     To **port** — the side the demo teaches a player to watch, because the
+#     channel marks stream past there — she runs into `Mark5` at (44, -20) and
+#     stops: 0.89 knots at tick 1250, 0.58 at 2000, still at full ahead.
+#
+#     **The stall limiter could not see it and this is why the second detector
+#     exists.** `deeper_player.rhai` measures the *helmsman's* speed, and a hull
+#     pinned on a buoy pivots on it — he stands seven metres off her centre and
+#     keeps moving. `state.pinned` is the rules script's, off her own.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2000 \
+  --hold "0:move_z=1; 500:move_z=1,move_x=1" \
+  --assert "state.pinned == 0" --assert "state.knots > 4.0" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2000 \
+  --hold "0:move_z=1; 500:move_z=1,move_x=-1" \
+  --assert "state.pinned > 90" --assert "state.knots < 1.0" \
+  | grep -q '"message": "PUSHING ON SOMETHING   S to back off"'
+
+# 8e. **And the advice works**, which is the half a caption gate cannot claim.
+#     Same tape, S from 1500: she backs off the mark and is 27 m clear of it by
+#     2600, with the latch released.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2600 \
+  --hold "0:move_z=1; 500:move_z=1,move_x=-1; 1500:move_z=-1" \
+  --assert "state.pinned == 0" --assert "Rig/Boat.z > 0.0" >/dev/null
+
+# 8f. **Hold W until the rig is out of sight.** The one gesture this demo
+#     teaches, at the wheel, is out to sea: 6,000 ticks of it reaches x = 282
+#     with nothing in any direction but water, and the range home was gated on
+#     `stowed > 0` — so the player who had not yet caught anything, which is
+#     every first-timer, got no number at all. The bearing is the hull's, not
+#     the helmsman's: at the wheel he faces her beam, so "behind you" and
+#     "astern" are ninety degrees apart and only one of them is a throttle
+#     setting.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1600 --hold move_z=1 \
+  | grep -q '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   HOME 72 m — hold S"'
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2600 --hold move_z=1 \
+  --assert "Rig/Boat.x > 110.0" \
+  | grep -q '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   HOME 122 m — hold S"'
+
+# 8g. **Walk into a wall ashore, two ways.** Hold S from the spawn and back into
+#     the north rail; hold D and strafe into the shed. Both used to print
+#     `BLOCKED   back up — aboard is the gap between the bollards` — a fixed
+#     string that tells a man already walking backwards to back up, and names a
+#     gap that may be behind him. The aboard arm of the same sentence has been
+#     computed since round 9; that asymmetry was the bug.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=-1 \
+  --assert "state.stuck == 1" \
+  | grep -q '"message": "BLOCKED   something has you — she is 10 m straight ahead"'
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_x=1 \
+  --assert "state.stuck == 1" \
+  | grep -q '"message": "BLOCKED   something has you — she is 19 m ahead on your left"'
+
 # **The sim's answer to `xtask repeat`.** `state_hash` covers physics, so
 # nothing above would notice a fight that replayed differently — a float hash,
 # a map iterated in host order, a wall clock. Three fresh processes, compared
@@ -947,7 +1078,7 @@ rm -f /tmp/loom-fight-1.json /tmp/loom-fight-2.json /tmp/loom-fight-3.json
 cmp /tmp/loom-demo-1.json /tmp/loom-demo-2.json
 cmp /tmp/loom-demo-2.json /tmp/loom-demo-3.json
 rm -f /tmp/loom-demo-1.json /tmp/loom-demo-2.json /tmp/loom-demo-3.json
-echo "gameplay: 14 scenes asserted, fight and demo byte-identical across 3 processes"
+echo "gameplay: 14 scenes asserted, 7 blocks of deliberately wrong input, fight and demo byte-identical across 3 processes"
 
 # ---------------------------------------------------------------------------
 # 7. Work per frame. **Nothing above this line can see a frame get slower.**

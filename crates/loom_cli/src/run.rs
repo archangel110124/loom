@@ -897,8 +897,23 @@ impl ApplicationHandler for App {
                             .inner_size()
                             .to_logical::<f32>(window.scale_factor())
                             .height;
-                        self.dock =
-                            Some(loom_editor::Dock::new(self.frames_left.is_none(), height));
+                        // **`--play` without `--edit` is the game, not a tool
+                        // around the game.** The panels used to be
+                        // unconditional, so the one command a demo's own header
+                        // documents opened a Hierarchy, an Inspector, a Console
+                        // and a toolbar with Delete on it, and left the game
+                        // 876x576 of a 1440x900 window — 39%. A stranger's
+                        // first frame should be the scene.
+                        //
+                        // `--edit` still gets everything, and so does a plain
+                        // `loom run` with no flags, which is the read-only
+                        // viewer M5.5 asked for. `cargo xtask validate` passes
+                        // `--edit` on both its windowed rows, so the gate is
+                        // untouched.
+                        if self.session.is_some() || !self.autoplay {
+                            self.dock =
+                                Some(loom_editor::Dock::new(self.frames_left.is_none(), height));
+                        }
                     }
                     Err(e) => crate::log::error(format!("no editor UI ({e}); continuing bare")),
                 }
