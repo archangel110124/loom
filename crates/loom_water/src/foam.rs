@@ -121,13 +121,6 @@ pub const FOAM_HULL_SPEED: f32 = 6.0;
 /// white disc.
 pub const FOAM_IMPACT: f32 = 0.92;
 
-/// How far past its own radius a body drags foam with it, as a multiple.
-///
-/// This is the term that makes the field's answer depend on *advection* rather
-/// than on where the deposits landed, and it is what the acceptance test stubs
-/// to zero.
-pub const FOAM_HULL_DRAG: f32 = 2.0;
-
 /// Stokes drift's ceiling as a multiple of `√Hs`, empirical.
 ///
 /// Second-order Stokes drift `Σ k A² ω d` is a small-amplitude expansion, and
@@ -301,7 +294,7 @@ impl FoamField {
         // floats and the pass it skips is three interpolations a cell.
         let quiet = !self.now.iter().any(|c| *c > 0.0);
         if !quiet {
-            self.advect(decay, flow, hulls);
+            self.advect(decay, flow);
         }
 
         // **A sea that cannot break deposits nothing, and the skip is most of
@@ -323,12 +316,15 @@ impl FoamField {
             // there.
             //
             // **Keyed on how fast the station is opening water, not on how
-            // fast it is going.** See `Hull::opening`. The trail astern is not
-            // deposited by the stern — it is what the drag in `velocity_at`
-            // carried back from the bow, which is why
-            // `a_moving_hull_leaves_foam_behind_it` measures the wake four
-            // metres behind a hull that only ever deposits at its own
-            // waterline.
+            // fast it is going.** See `Hull::opening`. A bow opens water, a
+            // parallel midships flank slides along it, and a stern closes it
+            // again; with the speed alone the three are identical and a hull
+            // lays a uniform stripe the width of its beam.
+            //
+            // Nothing deposits astern, and nothing needs to: the deposit is at
+            // the waterline and the hull moves on, which is what leaves it in
+            // the track. See `velocity_at` for the term that used to drag it
+            // back out again.
             let amount =
                 (hull.opening / FOAM_HULL_SPEED).clamp(0.0, 1.0) * hull.wetted.clamp(0.0, 1.0);
             self.deposit_disc([hull.at[0], hull.at[2]], hull.radius, amount);
@@ -336,7 +332,7 @@ impl FoamField {
     }
 
     /// Decay and carry the field one tick, MacCormack with a limiter.
-    fn advect(&mut self, decay: f32, flow: Option<&FlowGrid>, hulls: &[Hull]) {
+    fn advect(&mut self, decay: f32, flow: Option<&FlowGrid>) {
         let side = self.side;
         // **MacCormack, because plain semi-Lagrangian failed its own test.**
         // One backward trace per tick interpolates, and interpolation
@@ -349,7 +345,7 @@ impl FoamField {
         for iz in 0..side {
             for ix in 0..side {
                 let p = self.world_of(ix, iz);
-                let u = self.velocity_at(p, flow, hulls);
+                let u = self.velocity_at(p, flow);
                 let i = iz * side + ix;
                 // The velocity is kept rather than recomputed: the forward
                 // pass below traces from the same point with the same `u`, so
@@ -518,25 +514,24 @@ impl FoamField {
         top + (bottom - top) * fz
     }
 
-    /// The water's own velocity here: the current, the Stokes drift, and
-    /// whatever a body is dragging along with it.
-    fn velocity_at(&self, p: [f32; 2], flow: Option<&FlowGrid>, hulls: &[Hull]) -> [f32; 2] {
+    /// The water's own velocity here: the current and the Stokes drift.
+    ///
+    /// **A hull used to be in this sum and must never be again.** The term
+    /// added `hull.velocity` to every cell within twice a station's radius, on
+    /// the theory that a moving body carries the water near it. What decides it
+    /// is not the reach but how long a point on the track spends inside one:
+    /// a 19 m hull is twelve stations, so a cell it passes over is dragged
+    /// FORWARD at up to hull speed for the whole six seconds the hull takes to
+    /// go by, and is interpolated 390 times while it happens. The deposit ends
+    /// up ahead of where it was laid and smeared to nothing. Measured fifteen
+    /// metres astern by `a_twelve_station_hull_still_leaves_a_wake`: **0.000
+    /// with the drag, 0.236 without it.**
+    ///
+    /// A wake is water the hull left behind. The deposit is at the waterline
+    /// and the hull moving on is the whole of what puts it astern.
+    fn velocity_at(&self, p: [f32; 2], flow: Option<&FlowGrid>) -> [f32; 2] {
         let current = flow.map_or([0.0; 3], |g| g.at(p[0], p[1]));
-        let mut u = [current[0] + self.stokes[0], current[2] + self.stokes[1]];
-        for hull in hulls {
-            let reach = hull.radius * FOAM_HULL_DRAG;
-            if reach <= 0.0 {
-                continue;
-            }
-            let d = [p[0] - hull.at[0], p[1] - hull.at[2]];
-            let falloff = 1.0 - (d[0] * d[0] + d[1] * d[1]) / (reach * reach);
-            if falloff <= 0.0 {
-                continue;
-            }
-            u[0] += hull.velocity[0] * falloff;
-            u[1] += hull.velocity[2] * falloff;
-        }
-        u
+        [current[0] + self.stokes[0], current[2] + self.stokes[1]]
     }
 
     /// One minus how far into the boundary band this point is, in `[0, 1]`.
@@ -893,9 +888,12 @@ mod tests {
     }
 
     /// **A hull lays foam behind it and not in front of it**, which is what the
-    /// `plough.loom` assertions read. The deposit alone cannot produce this —
-    /// the hull deposits *at* its waterline, so what is behind it is what the
-    /// drag carried there.
+    /// `plough.loom` assertions read. The deposit at the waterline is the whole
+    /// mechanism: the hull moves on and leaves it. This used to be attributed
+    /// to a hull-drag term in `velocity_at` — wrongly, and **this test could
+    /// never have caught that**: one 0.8 m station drags a cell for a quarter
+    /// of a second, so deleting the term moved `behind` from 0.761 to 0.764.
+    /// `a_twelve_station_hull_still_leaves_a_wake` is the one that can.
     #[test]
     fn a_moving_hull_leaves_foam_behind_it() {
         let body = WaterBody::default();
@@ -922,6 +920,51 @@ mod tests {
         eprintln!("hull at {x:.2}: behind {behind:.3}, ahead {ahead:.3}");
         assert!(behind > 0.4, "no wake behind the hull: {behind}");
         assert!(ahead < 0.05, "foam ahead of the hull: {ahead}");
+    }
+
+    /// **A nineteen-metre hull leaves a wake as long as itself**, which the
+    /// single-station test above cannot see.
+    ///
+    /// Twelve stations in two rows, laid out like `jib_vi`'s pontoons, driving
+    /// at the speed `jib_vi_underway.loom` settles at. The defect this pins is
+    /// a hull dragging its own deposits along with it: a cell on the track sits
+    /// inside the union of twelve drag reaches for the whole six seconds the
+    /// hull takes to pass, which carried it forward and interpolated it away.
+    /// With that term present this reads 0.000 fifteen metres astern.
+    #[test]
+    fn a_twelve_station_hull_still_leaves_a_wake() {
+        let body = WaterBody::default();
+        let mut field = FoamField::new([0.0, 0.0], &body);
+        let speed = 3.58_f32;
+        let mut x = -26.0_f32;
+        for tick in 0..600 {
+            #[allow(clippy::cast_precision_loss)]
+            let t = tick as f32 * TICK_SECONDS;
+            let hulls: Vec<Hull> = (0..12)
+                .map(|i| {
+                    #[allow(clippy::cast_precision_loss)]
+                    let along = (i / 2) as f32 * 3.0 - 7.5;
+                    let across = if i % 2 == 0 { -1.836 } else { 1.836 };
+                    Hull {
+                        at: [x + along, 0.0, across],
+                        velocity: [speed, 0.0, 0.0],
+                        // The outward waterline normal of a station this far
+                        // forward of the centroid, dotted with the travel —
+                        // the bow opens water and the midships flanks do not.
+                        opening: speed * along / along.hypot(across),
+                        radius: 1.093,
+                        wetted: 0.667,
+                    }
+                })
+                .collect();
+            field.step(&body, t, None, &hulls, &deep);
+            x += speed * TICK_SECONDS;
+        }
+        let astern = field.at(x - 15.0, 1.836);
+        let abeam = field.at(x - 15.0, 14.0);
+        eprintln!("hull at {x:.2}: 15 m astern {astern:.3}, 14 m abeam of that {abeam:.3}");
+        assert!(astern > 0.2, "the wake did not survive fifteen metres: {astern}");
+        assert!(abeam < 0.02, "foam where the hull has never been: {abeam}");
     }
 
     /// Two runs of the same deposits in the same order are the same bits —
