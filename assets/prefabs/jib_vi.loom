@@ -88,6 +88,17 @@ transform = { pos = [0.0, 0.40, 0.0] }
   [node.components.BoxCollider]
   half_extents = [9.53, 1.66, 3.30]
 
+  # **Inert, and here so an instance can drive her.** A prefab instance takes
+  # its components from the prefab and may only deviate through
+  # `[node.overrides]` (ADR 0008), so a scene that wants this hull under way
+  # needs the component to exist here first. Zero thrust is free by value as
+  # well as by absence: `Sim::new` drops a zero `Propulsion` rather than
+  # applying it, because applying one would wake a sleeping body and move the
+  # determinism hash. Every scene that floats this boat stationary — and that
+  # is all of them but `jib_vi_underway.loom` — is untouched.
+  [node.components.Propulsion]
+  force = [0.0, 0.0, 0.0]
+
   [node.components.Buoyancy]
   coefficient = 1.0
   # Defaults, stated rather than inherited, because this scene is about

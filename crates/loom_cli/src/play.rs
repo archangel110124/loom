@@ -161,6 +161,16 @@ pub struct Sim {
     /// summed as floats, and a different visiting order is a different number
     /// in the determinism hash.
     floating: Vec<Floating>,
+    /// Bodies under thrust, in load order, with the force in their OWN frame.
+    ///
+    /// Separate from `floating` rather than a field on it, because a
+    /// `Propulsion` is not about water: a body can be driven whether or not it
+    /// floats, and folding it into `Floating` would make the component a
+    /// silent no-op on anything that does not — which is the failure mode the
+    /// component registry's own comments warn about.
+    ///
+    /// **Never sorted**, for the same reason `floating` is not.
+    propelled: Vec<(RigidBodyHandle, [f32; 3])>,
     /// Water events raised this step and not yet collected: entries and exits.
     ///
     /// Held rather than pushed straight into the log because the log belongs to
@@ -468,6 +478,7 @@ impl Sim {
         let mut dynamic = Vec::new();
         let mut characters = Vec::new();
         let mut floating: Vec<Floating> = Vec::new();
+        let mut propelled: Vec<(RigidBodyHandle, [f32; 3])> = Vec::new();
         let mut obstacles: Vec<loom_render::FluidSolid> = Vec::new();
         // Colliders that belong to a body built later in this same loop.
         let mut pending: Vec<(loom_ecs::Entity, Mat4, [f32; 3])> = Vec::new();
@@ -651,6 +662,35 @@ impl Sim {
                     physics.add_box_body(pos, quat, half, mass)
                 };
                 dynamic.push((*entity, handle));
+                // Any dynamic body, not only a floating one.
+                //
+                // **A zero thrust is dropped here rather than applied as
+                // zero**, so an inert `Propulsion` costs nothing per tick.
+                // The default has to be free by *value* as well as by
+                // absence, because `assets/prefabs/jib_vi.loom` carries an
+                // inert one purely so an instance has something to override —
+                // a prefab instance may only deviate through
+                // `[node.overrides]`, and an override needs a target.
+                //
+                // **The stronger claim would be that this is required for
+                // determinism, and it is not — measured.**
+                // `apply_force_torque` ends in `apply_impulse(.., wake_up =
+                // true)`, so it looked as though a zero vector could wake a
+                // sleeping body and change the hash. Removing this guard
+                // leaves `a_zero_thrust_is_free_by_value_and_not_only_by
+                // _absence` passing, because a buoyant body is receiving a
+                // force every tick and never sleeps. Kept for the cost and
+                // because a `Propulsion` on a crate sitting on land is not
+                // covered by that argument.
+                if let Some(p) = world
+                    .propulsion(*entity)
+                    .and_then(|v| {
+                        serde_json::from_value::<loom_scene::components::Propulsion>(v.clone()).ok()
+                    })
+                    .filter(|p| p.force != [0.0; 3])
+                {
+                    propelled.push((handle, p.force));
+                }
                 if let Some(buoyancy) = buoyancy_of(world, *entity, half, ball) {
                     floating.push(Floating {
                         body: handle,
@@ -865,6 +905,7 @@ impl Sim {
             wavelets: loom_water::wavelet::WaveletField::new(),
             foam,
             floating,
+            propelled,
             water_events: Vec::new(),
             tick: 0,
         }
@@ -1512,12 +1553,35 @@ impl Sim {
         loom_water::buoyancy::submersion_at(water, at, 0.0, t, ground, wavelet) > 0.5
     }
 
+    /// Apply every authored thrust, in load order, once per fixed step.
+    ///
+    /// The force is authored in the body's own frame and rotated by the body's
+    /// current orientation, so a hull that yaws pushes the way its bow now
+    /// points rather than the way it was pointing when the scene was written.
+    /// No torque: a `Propulsion` is a shove, and steering is a script writing
+    /// the vector rather than a second authored field.
+    fn propel(&mut self) {
+        for (body, force) in &self.propelled {
+            let Some(r) = self.physics.rotation_quat(*body) else {
+                continue;
+            };
+            let world = Quat::from_xyzw(r[0], r[1], r[2], r[3]) * Vec3::from_array(*force);
+            self.physics
+                .apply_force_torque(*body, world.to_array(), [0.0; 3]);
+        }
+    }
+
     /// Advance whole ticks.
     pub fn step(&mut self, ticks: u32) {
         for _ in 0..ticks {
             // Forces first, inside the same fixed step, before the solver runs
             // — a force applied after `step` would take effect a tick late and
             // the buoyancy would visibly lag the surface.
+            //
+            // **Thrust before buoyancy**, and outside `float`: `float` returns
+            // early on a scene with no water and on the cinematic tier, and a
+            // body under power must be driven on both.
+            self.propel();
             self.float();
             self.physics.step();
             self.tick += 1;

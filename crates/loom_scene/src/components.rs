@@ -1923,6 +1923,46 @@ impl Default for Buoyancy {
     }
 }
 
+/// A thrust, in newtons, in the body's own frame.
+///
+/// **One field, because the second one is always wrong.** The obvious
+/// companion is a `max_speed`, and it would be a second opinion about a number
+/// the scene already sets: terminal speed falls out of the thrust against
+/// `Buoyancy::damp_quadratic`, which every floating hull in this repository
+/// authors. Two knobs for one speed means one of them is a lie at any given
+/// moment. A `heading` is the same mistake in the other direction — steering
+/// is a script writing this field, not a second field beside it.
+///
+/// **On the force path, and deliberately so.** It is applied once per fixed
+/// step, rotated by the body's own transform, as a pure function of (scene,
+/// tick) — so it is deterministic, it is in the sim hash through the motion it
+/// produces, and `loom sim --assert "Sea/Boat.x > 30"` can read the
+/// consequence like any other force. ADR 0045 is satisfied by construction:
+/// there is no GPU float anywhere near it.
+///
+/// The body frame is what makes it useful: `[26000, 0, 0]` is 26 kN forward on
+/// a hull whose bow is +X, and it stays forward when the hull turns. A world
+/// frame would make a boat that yaws into a wave keep pushing the way it used
+/// to be pointing.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Propulsion {
+    /// Newtons along the body's own X, Y and Z.
+    ///
+    /// **Zero by default, which is the whole compatibility story**: no scene in
+    /// the repository authors this component, and one that authored it empty
+    /// would apply no force either. Every pinned hash and every reference PNG
+    /// is untouched by its existence.
+    #[schemars(range(min = -1_000_000.0, max = 1_000_000.0))]
+    pub force: [f32; 3],
+}
+
+impl Default for Propulsion {
+    fn default() -> Self {
+        Self { force: [0.0; 3] }
+    }
+}
+
 /// Tunes when a floating body counts as being *in* the water.
 ///
 /// **Underwater is a gameplay state, not a shader effect** (water doc §5.7).
@@ -2276,6 +2316,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<Cascade>("Cascade");
     reg.register::<DripSource>("DripSource");
     reg.register::<Buoyancy>("Buoyancy");
+    reg.register::<Propulsion>("Propulsion");
     reg.register::<Submersion>("Submersion");
     reg.register::<Script>("Script");
     reg

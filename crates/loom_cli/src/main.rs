@@ -5757,6 +5757,95 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
     /// by 1e-6 fails all four. Run once and reverted.
     ///
     /// Re-pinning is deliberate and belongs in the same commit as the change
+
+    /// **A `Propulsion` of zero must be free, by value and not only by
+    /// absence** — the same hash, to the digit, as a scene with no component
+    /// at all.
+    ///
+    /// `Sim::new` drops a zero thrust at load rather than applying it every
+    /// tick, and this pins the consequence.
+    ///
+    /// The claim has to be free by value because `assets/prefabs/jib_vi.loom`
+    /// carries an inert `Propulsion` so that an instance can override it: a
+    /// prefab instance may only deviate through `[node.overrides]`, and an
+    /// override needs a component to target. Every scene floating that hull
+    /// stationary — `fishing.loom` among them — depends on this being exact.
+    ///
+    /// **This is not a mutation test for that guard, and saying so is the
+    /// point.** Dropping the guard leaves this test passing: the suspicion was
+    /// that `apply_force_torque`'s `apply_impulse(.., wake_up = true)` would
+    /// wake a sleeping body, and a buoyant body takes a force every tick and
+    /// never sleeps. What this pins is the *property* — an inert component
+    /// changes nothing — which has to hold however it is implemented. The
+    /// second half, that a real thrust does move the hash, is what stops it
+    /// passing for the trivial reason.
+    #[test]
+    fn a_zero_thrust_is_free_by_value_and_not_only_by_absence() {
+        let base = r#"
+[scene]
+format = 1
+id = "9d1f60c4-52ba-4e37-8a71-0f3c86d2e451"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[node]]
+name = "Sea"
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+
+[[node]]
+name = "Crate"
+parent = "Sea"
+transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 200.0
+
+  [node.components.Buoyancy]
+"#;
+        let hash_of = |body: &str, name: &str| {
+            let path = std::env::temp_dir().join(name);
+            std::fs::write(&path, body).expect("scratch scene");
+            let (code, out) =
+                run(&args(&["sim", path.to_str().unwrap(), "--ticks", "600"]));
+            let _ = std::fs::remove_file(&path);
+            assert_eq!(code, 0, "{out}");
+            let key = "\"state_hash\": \"";
+            let at = out.find(key).expect("no state_hash") + key.len();
+            out[at..at + 16].to_owned()
+        };
+
+        let absent = hash_of(base, "loom_propulsion_absent.loom");
+        let zero = hash_of(
+            &format!("{base}\n  [node.components.Propulsion]\n  force = [0.0, 0.0, 0.0]\n"),
+            "loom_propulsion_zero.loom",
+        );
+        assert_eq!(
+            absent, zero,
+            "an inert Propulsion moved the hash — a component authored to do \
+             nothing did something"
+        );
+
+        // And the guard is not vacuous: a real thrust does move it.
+        let driven = hash_of(
+            &format!("{base}\n  [node.components.Propulsion]\n  force = [4000.0, 0.0, 0.0]\n"),
+            "loom_propulsion_driven.loom",
+        );
+        assert_ne!(driven, absent, "a 4 kN thrust changed nothing");
+    }
+
     /// that moved it — the rule the 10k-tick wind hash already follows.
     #[test]
     fn the_water_scenes_hash_to_what_they_hashed() {

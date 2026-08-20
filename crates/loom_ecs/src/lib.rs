@@ -161,6 +161,9 @@ pub struct World {
     /// The `Buoyancy` component, verbatim. Floating a body needs `loom_water`
     /// and `loom_physics`, and this crate depends on neither.
     buoyancy: Storage<serde_json::Value>,
+    /// The `Propulsion` component, verbatim. Applying it needs a rigid-body
+    /// handle, which lives in `loom_physics`.
+    propulsion: Storage<serde_json::Value>,
     /// The `Submersion` component, verbatim — the two thresholds at which a
     /// floating body counts as being in the water. Carried for the same reason
     /// as `buoyancy`: the fraction it thresholds comes out of the water solver.
@@ -425,6 +428,9 @@ impl World {
             if let Some(buoyancy) = node.components.get("Buoyancy") {
                 world.buoyancy.insert(entity, buoyancy.clone());
             }
+            if let Some(propulsion) = node.components.get("Propulsion") {
+                world.propulsion.insert(entity, propulsion.clone());
+            }
             if let Some(submersion) = node.components.get("Submersion") {
                 world.submersion.insert(entity, submersion.clone());
             }
@@ -665,6 +671,12 @@ impl World {
     #[must_use]
     pub fn buoyancy(&self, entity: Entity) -> Option<&serde_json::Value> {
         self.buoyancy.get(entity)
+    }
+
+    /// The `Propulsion` a node declares, if any.
+    #[must_use]
+    pub fn propulsion(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.propulsion.get(entity)
     }
 
     /// The `Submersion` thresholds a node declares, if any.

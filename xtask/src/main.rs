@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 67] = [
+const SCENES: [&str; 68] = [
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -218,6 +218,19 @@ const SCENES: [&str; 67] = [
     // draws its plain Gerstner surface — the null branch, which the `GOLDEN`
     // row at `--sim 200` never takes.
     "assets/test/wake.loom",
+    // **The only scene in this repository that drives a floating hull**, and
+    // the only one that can fire the shed path with a body large enough for
+    // the source construction to matter — ADR 0063. A boat under power is the
+    // one case where `wavelet::shed_source` is asked for a real answer rather
+    // than for `None`, and until this file existed nothing had ever asked it.
+    //
+    // **Not in `GOLDEN` yet, and that is a deliberate gap with an owner.** It
+    // earns a reference — a hull-shaped foam trail and a waterline band are
+    // both rendering paths nothing else covers — but a `GOLDEN` row without a
+    // blessed PNG makes an already-failing image gate fail differently, and
+    // blessing one needs `cargo xtask image --bless`. Add the row and bless it
+    // in the same commit, deliberately, reading the `MANIFEST.txt` diff.
+    "assets/test/jib_vi_underway.loom",
     // The only scene where water meets land: a depth grid uploaded over buffer
     // device address, a shoreline discard, and waves attenuating in the
     // shallows — none of which `ocean` draws a pixel of.
