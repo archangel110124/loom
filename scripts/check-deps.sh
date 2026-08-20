@@ -96,5 +96,27 @@ while IFS= read -r f; do
   fi
 done < <(find crates -name '*.rs' 2>/dev/null)
 
+# Lint-table coverage: every member manifest is inside the unsafe quarantine.
+#
+# `[workspace.lints]` in the root manifest reaches only crates that opt in, and
+# the opt-in is two lines a new crate is free to omit. Omit them and the crate
+# gets no `unsafe_code = "deny"`, no `undocumented_unsafe_blocks`, and nothing
+# anywhere says so — which is exactly the "an agent adds `unsafe` where nobody
+# looks" case the table was added to prevent. A silent hole in a guardrail is
+# worse than no guardrail, so the structural rule lives here beside the others.
+#
+# Two legal shapes. `[lints]` + `workspace = true` inherits the root table;
+# `[lints.rust]` overrides it locally, which is what `loom_render` and
+# `loom_render_graph` do, because cargo forbids inheriting and overriding in one
+# manifest.
+while IFS= read -r m; do
+  if grep -q '^\[lints\]' "$m"; then
+    grep -q '^workspace = true' "$m" ||
+      { echo "FAIL: $m has [lints] but does not inherit the workspace table"; fail=1; }
+  elif ! grep -q '^\[lints\.rust\]' "$m"; then
+    echo "FAIL: $m has no [lints] table — the crate is outside the unsafe quarantine"; fail=1
+  fi
+done < <(find crates xtask -maxdepth 2 -name Cargo.toml 2>/dev/null)
+
 [ $fail -eq 0 ] && echo "dependency rules: ok"
 exit $fail
