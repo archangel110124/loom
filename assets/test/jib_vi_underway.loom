@@ -8,35 +8,45 @@
 #
 # **This is the scene the shed bug was invisible without.** `swept_volume` took
 # a *waterplane* radius — 8.8145 m for this hull — and squared it, so the first
-# tick this boat moved it emitted 97.63 m^3 of displaced water per packet
-# against a hull that displaces 43.78 m^3 in total, putting eight metres of
-# trench under its own pontoons. Nothing had ever moved a floating body, so
-# nothing had ever fired it. See ADR 0063 and
+# tick this boat moved it emitted `pi r^2 U dt` = 97.63 m^3 of displaced water
+# per packet at 6 m/s, scaled by the submerged fraction to **65.12 m^3**,
+# against a hull that displaces 43.78 m^3 in total. Sampled at its own twelve
+# pontoons that is 5.56 m of trench at 6 m/s and 7.70 m at 8 m/s. Nothing had
+# ever moved a floating body, so nothing had ever fired it. See ADR 0063 and
 # `loom_water::wavelet::a_hull_does_not_dig_a_hole_under_itself`.
 #
-# **500 kN is not a boat engine and the number is honest about why.** Damping
+# **1.6 MN is not a boat engine and the number is honest about why.** Damping
 # in `loom_water::buoyancy` is `displaced * (damp_quadratic * v|v| +
 # damp_linear * v)`, applied to all three axes with one coefficient. On this
-# hull `displaced` is 43,776 kg and `damp_linear` is 4.0 per second, so at
-# 1 m/s the water resists with 219 kN — as much fore-and-aft as it does in
-# heave. That is right for heave, which is what those numbers were chosen for
-# (`jib_vi_float.loom`'s header: an analytic wave field has no dissipation of
-# its own, so an undamped pontoon gains amplitude every wave until the boat
-# launches), and wrong for surge, where a real hull of this size slips through
-# the water an order of magnitude more easily. A hull whose resistance knew
-# which way it was pointing is a change to the force path and a separate ADR;
-# this scene pays the honest price instead of hiding it, and the thrust is
-# large because the model says it has to be.
+# hull `displaced` is 43,776 kg with `damp_linear` 4.0 per second and
+# `damp_quadratic` 1.0, so the water resists surge as hard as it resists
+# heave — 43,776 * (v^2 + 4v) newtons, which is **219 kN at one metre a
+# second**, as much resistance fore-and-aft as in heave. That is right for
+# heave, which is what those numbers were chosen for (`jib_vi_float.loom`'s
+# header: an analytic wave field has no dissipation of its own, so an undamped
+# pontoon gains amplitude every wave until the boat launches), and wrong for
+# surge, where a real hull of this size slips through the water an order of
+# magnitude more easily. A pontoon model has no hull
+# form, so its resistance is a sphere's; a hull whose resistance knew which way
+# it was pointing is a change to the force path and its own ADR. This scene
+# pays the honest price instead of hiding it.
 #
-# **Measured, this build**, from a standing start at x = -30:
+# **Measured, this build**, from a standing start at x = -34:
 #
-#   tick  300 (5 s)    x = -21.34     8.66 m travelled
-#   tick 1200 (20 s)   x =  +5.37    35.37 m travelled, y = -0.012
+#   tick  300 ( 5 s)   x = -15.66   y = -0.099
+#   tick  600 (10 s)   x =  +2.35   y = -0.130
+#   tick  900 (15 s)   x = +20.28   y = -0.115
+#   tick 1200 (20 s)   x = +38.19   y = -0.139
 #
-# so she settles at about **1.8 m/s** — three and a half knots, a boat idling
-# out of a harbour rather than a boat at speed. `y = -0.012` against the static
-# hull's +0.024 is the whole of her trim change under power: she is not
-# submarining and she is not porpoising.
+# so she settles at **3.586 m/s** — seven knots, a working boat's cruise — and
+# holds her trim to within 4 cm of it for the rest of the run.
+#
+# **There is a ceiling above this and it is worth knowing about.** Thrust is in
+# the body frame, so as the bow digs in the vector acquires a downward
+# component and drives it in further. Swept: 2.0 MN reaches 3.74 m/s but the
+# trim walks (y -0.31 at tick 600, -0.44 at 900), and 2.63 MN — the figure the
+# damping above says would buy 6 m/s — submarines outright, y = -14.34 by tick
+# 1200. **1.6 MN is the fastest this hull goes and stays a boat.**
 #
 # **There is no `max_speed` on `Propulsion` and there must not be.** The
 # terminal speed above is already set by this force against the hull's authored
@@ -44,20 +54,31 @@
 #
 # What it measures:
 #
-#   loom sim assets/test/jib_vi_underway.loom --ticks 1200 \
-#     --assert "Sea/Boat.x > 0"
+#   loom sim assets/test/jib_vi_underway.loom --ticks 600 \
+#     --assert "Sea/Boat.x > 0" \
+#     --assert "water@-20,1.8.foam > 0.15" \
+#     --assert "water@-10,14.foam < 0.02"
 #
-# A hull with no thrust sits at -30 for ever — the static one drifts 11 mm in
-# ten minutes — so nothing passes this by accident.
+# A hull with no thrust sits at -34 for ever — the static one drifts 11 mm in
+# ten minutes — so nothing passes the first by accident. The second and third
+# are the wake: 22 m astern of the hull at tick 600 the water is still marked
+# (0.251), and 14 m abeam of the track it has never been touched (0.000).
+# **A hull that drags its own foam along with it reads 0.000 at both**, which
+# is what shipped until `FOAM_HULL_DRAG` was deleted; this pair is the scene
+# half of `loom_water::foam::a_twelve_station_hull_still_leaves_a_wake`.
 #
 #   loom render assets/test/jib_vi_underway.loom --frames 16 --step 12
 #
-# is the wake, and no still shows it.
+# is the wake in motion, and no still shows the whole of it.
 #
-# **The camera is aft and to port of the track, not broadside.** Broadside is
-# the right view of a *waterline* and the wrong one of a *wake*: it compresses
-# the trail to nothing. The `Post` is on the run so a still can tell a moving
-# boat from a parked one.
+# **The camera is a high oblique from off the starboard quarter, not from
+# astern.** Astern is the natural place to stand and the wrong one: it puts the
+# trail directly behind the hull, where the hull hides it, and it foreshortens
+# the 30 m that are the point of the scene into a few pixels. From above and to
+# one side the bow moustache, the waterline and the full length of the trail
+# are all in frame at once, which is the shot every reference photograph of a
+# boat wake is. The `Post` is on the run so a still can tell a moving boat from
+# a parked one.
 #
 # **The wind is light on purpose**, copied from `jib_vi_float.loom` for the
 # same reason: a real sea would make the wake ambiguous. At 3.5 m/s the surface
@@ -106,24 +127,28 @@ parent = "Sea"
   density = 1000.0
   drag = 2.0
 
-# Started well aft of the origin so the run crosses it, and so the trail at
-# (-20, 0) is water the hull has actually been through by tick 1200 rather
-# than water it started on.
+# Started well aft of the origin so the run crosses it, and so the trail the
+# assertions read is water the hull has actually been through by tick 600
+# rather than water it started on. The foam field is 63.5 m square and anchored
+# to the water node — ADR 0045's trap clause: sim state, never the camera — so
+# a longer run would simply drive off the end of its own instrument.
 [[node]]
 name = "Boat"
 parent = "Sea"
 prefab = "jib_vi"
-transform = { pos = [-30.0, 0.0, 0.0] }
+transform = { pos = [-34.0, 0.0, 0.0] }
 
-  # 26 kN along the body's own +X, which is the bow. In the body frame, so a
-  # hull that yaws on a wave keeps pushing the way her bow now points.
+  # 1.6 MN along the body's own +X, which is the bow — see the header for why
+  # a 44-tonne boat needs 163 tonnes-force to make seven knots, and for the
+  # measured ceiling just above it. In the body frame, so a hull that yaws on a
+  # wave keeps pushing the way her bow now points.
   #
   # An override rather than a component, because the node is a prefab instance
   # and the parser refuses components on one — ADR 0008. The prefab does not
   # carry a `Propulsion` at all, which is correct: a hull is not a hull under
   # power, and every other scene that floats this boat wants it stationary.
   [node.overrides]
-  "Propulsion.force" = [500000.0, 0.0, 0.0]
+  "Propulsion.force" = [1600000.0, 0.0, 0.0]
 
 # A fixed mark on the run, so a still can tell a moving boat from a parked one
 # and so the wake has something to be measured against.
@@ -139,12 +164,13 @@ transform = { pos = [6.0, 2.5, -14.0], scale = [0.25, 5.0, 0.25] }
   albedo = [0.26, 0.24, 0.22]
   roughness = 0.9
 
-# Aft and to port, looking along the track — the only camera that sees a wake.
-# A broadside view shows the waterline and none of the trail.
+# High off the starboard quarter, looking down the track — see the header. The
+# boat is at x = +2.35 at tick 600, so this frames her with the whole 30 m of
+# trail running away to the left.
 [[node]]
 name = "Camera"
 parent = "Sea"
-transform = { pos = [-50.0, 14.0, 16.0], rot_euler = [-17.5, -72.0, 0.0] }
+transform = { pos = [0.0, 22.0, 26.0], rot_euler = [-40.0, -4.4, 0.0] }
 
   [node.components.Camera]
   fov_y_degrees = 50.0
