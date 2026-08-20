@@ -1,0 +1,160 @@
+# **DEEPER — the first playable slice.** A boat, a sea, a lure and one fish.
+#
+#   loom run assets/games/fishing.loom --edit      (then Play, and capture)
+#   loom render assets/games/fishing.loom --sim 600 --out /tmp/fishing.png
+#
+# Hold **W** to reel: it drains the fish and loads the line. Let go to bleed
+# the line off. When the fish runs — you get 400 ms of warning — let go. Press
+# **fire** to cast, to set the hook, and to take a rhythm window when one
+# opens. Windows only open on a line you kept calm, which is the whole lesson.
+#
+# **The fight itself is not in this scene and cannot be tested from it.**
+# It lives in `../scripts/fishing_fight.rhai`, and the five `fight_*.loom`
+# benches are what assert it — they carry a reference pilot because `loom sim`
+# never calls `set_input`, so a headless run of *this* file is an angler
+# standing at the rail with nobody's hands on him. What this file is for is
+# the half no assertion reaches: whether it is any fun. That question is
+# answered by a human in `loom run` and nowhere else.
+#
+# **The water is `deterministic` on purpose.** ADR 0053's `cinematic` tier is
+# read back off the GPU, and `loom sim` refuses the whole run rather than
+# answer a `water@` assertion approximately — so a scene meant to be asserted
+# against gets the height-field tier, and the beauty shot gets its own file.
+#
+# The camera is authored, and that is not decoration. `xtask shimmer` and
+# `xtask flythrough` frame whole-scene bounds and ignore an authored eye; a
+# metric that frames a scene automatically stops containing the subject and
+# then rewards whatever removes it fastest. Every judgement about how this
+# scene looks is made through `loom render`, at this camera.
+[scene]
+format = 1
+id = "b41d8e07-32f5-4c6a-9e18-7d05a2b3f6c9"
+
+# The hull, its paint and its twelve pontoons, from the file that owns them.
+# Nothing about the boat is authored here — an instance plus a transform.
+[[prefab]]
+key = "jib_vi"
+id = "3c7a5e12-8b64-4f09-a2d3-6e1b90c47f58"
+path = "../prefabs/jib_vi.loom"
+
+[[asset]]
+key = "sphere"
+id = "c92b4a68-1e30-47d5-8f6c-2a5091db7e34"
+path = "sphere"
+
+[[node]]
+name = "Sea"
+
+  [node.components.GameRules]
+  path = "../scripts/fishing_fight.rhai"
+
+  # Low sun, long light, and enough fog to lose the horizon in. The horror is
+  # not layered on yet; this is the serenity the GDD asks the loop to open on,
+  # and it is the state the rest of the game will be measured against.
+  [node.components.Environment]
+  sun_direction = [0.28, 0.22, -0.93]
+  sun_strength = 1.15
+  sun_color = [1.0, 0.88, 0.72]
+  ambient = 0.45
+  sky_zenith = [0.13, 0.22, 0.40]
+  sky_horizon = [0.72, 0.66, 0.58]
+  fog_density = 0.0035
+  fog_falloff = 0.06
+
+  # Light air. Enough to move the surface under the hull; far too little to
+  # trouble forty-three tonnes of boat.
+  [node.components.Wind]
+  direction_degrees = 20.0
+  speed = 3.5
+  gustiness = 0.25
+  turbulence = 0.15
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  simulation = "deterministic"
+  surface_height = 0.0
+  density = 1000.0
+  drag = 2.0
+
+[[node]]
+name = "Boat"
+parent = "Sea"
+prefab = "jib_vi"
+transform = { pos = [0.0, 0.0, 0.0] }
+
+# The angler, at the starboard rail amidships. Boat-local y = 2.40 is rail
+# height on a deck whose top is 1.40, and z = +2.90 is inside the deck edge at
+# 2.84 — a station further forward would hang over the hull flare. Parented to
+# the boat, so the 6 degrees of roll come free and he leans with her.
+[[node]]
+name = "Angler"
+parent = "Sea/Boat"
+transform = { pos = [1.20, 2.30, 2.60] }
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+
+  # The only entry point in this scene that sees a key press.
+  [node.components.Script]
+  path = "../scripts/fishing_angler.rhai"
+
+# **The lure, and it is the cheapest good moment in the build.** Authored two
+# metres up, it falls, hits the water and splashes — buoyancy, submersion and
+# the water surface all doing their existing jobs, with no new code, and the
+# GDD's first pillar arriving for free. It is not yet tied to the fight: the
+# fight is `state`, and a node `Script` cannot read `state` today. That is the
+# one engine binding this design asks for, and it is asked for later.
+[[node]]
+name = "Lure"
+parent = "Sea"
+transform = { pos = [7.0, 2.0, 11.0], scale = [0.07, 0.07, 0.07] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.72, 0.20]
+  roughness = 0.25
+  metallic = 0.8
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 0.02
+
+  [node.components.Buoyancy]
+  coefficient = 1.0
+
+  [node.components.Submersion]
+  enter = 0.6
+  exit = 0.3
+
+# The meter. One line, and the bar inside it is ASCII assembled by the rules
+# script — `Hud` has no bar and does not need one, because a bar cannot change
+# the tuning and so must not be allowed to delay it.
+[[node]]
+name = "Meter"
+parent = "Sea"
+
+  [node.components.Hud]
+  anchor = "bottom_center"
+  offset = [0.0, 64.0]
+  text = "{message}"
+  size = 22.0
+  color = [0.95, 0.93, 0.86]
+  only_in_play = true
+
+# Over the angler's shoulder, looking out along the line. Low enough that the
+# sea is a surface rather than a plan, and turned so the boat frames the left
+# of the shot and the water carries the right.
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [7.2, 3.1, 19.0], rot_euler = [-6.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 50.0

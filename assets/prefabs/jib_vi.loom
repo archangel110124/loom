@@ -1,0 +1,271 @@
+# **JIB VI as a prefab** — a nineteen-metre charter boat any scene can float.
+#
+# Every number here is copied verbatim out of `assets/test/jib_vi_painted.loom`,
+# which is where they were derived and where the reasoning for them lives: the
+# twelve hand-placed pontoons, the 43,776 kg solved from their displacement,
+# the 1.093 m radius that sits each sphere exactly two thirds submerged, and
+# the beam that moved from 5.75 to 6.60 m so a player can walk between the aft
+# deck and the foredeck. **Read that file's header before changing anything in
+# this one.** A pontoon buried below the waterline contributes nothing to
+# stability, and this is the file where somebody would quietly do that.
+#
+# It exists because a fishing scene needs the boat and must not own it: the
+# hull, its paint and its wheelhouse are three other efforts' work, and a
+# second copy of the hull would drift from theirs within a week. This is the
+# copy that is *meant* to be shared, and `jib_vi_painted.loom` can be collapsed
+# onto it whenever the effort that owns it wants to.
+#
+# Bow is +X, up is +Y, origin on the waterline and centred fore-aft, so an
+# instance needs no offset to float. Deck top is y = 1.40; the hull's halfbeam
+# is 3.30 but the deck edge is 2.84, so anything mounted at the rail belongs
+# amidships — a station out at the bow clips the flare.
+[scene]
+format = 1
+id = "3c7a5e12-8b64-4f09-a2d3-6e1b90c47f58"
+
+[[asset]]
+key = "hull_white"
+id = "a10f5c31-6d82-4e07-9b45-1c8e30a7f6d1"
+path = "../meshes/jib_vi_hull_white.obj"
+
+[[asset]]
+key = "navy"
+id = "a10f5c31-6d82-4e07-9b45-1c8e30a7f6d2"
+path = "../meshes/jib_vi_navy.obj"
+
+[[asset]]
+key = "deck_grey"
+id = "a10f5c31-6d82-4e07-9b45-1c8e30a7f6d3"
+path = "../meshes/jib_vi_deck_grey.obj"
+
+[[asset]]
+key = "wood_trim"
+id = "a10f5c31-6d82-4e07-9b45-1c8e30a7f6d4"
+path = "../meshes/jib_vi_wood_trim.obj"
+
+[[asset]]
+key = "glass"
+id = "a10f5c31-6d82-4e07-9b45-1c8e30a7f6d5"
+path = "../meshes/jib_vi_glass.obj"
+
+[[asset]]
+key = "metal"
+id = "a10f5c31-6d82-4e07-9b45-1c8e30a7f6d6"
+path = "../meshes/jib_vi_metal.obj"
+
+[[asset]]
+key = "gold"
+id = "a10f5c31-6d82-4e07-9b45-1c8e30a7f6d7"
+path = "../meshes/jib_vi_gold.obj"
+
+[[asset]]
+key = "orange"
+id = "a10f5c31-6d82-4e07-9b45-1c8e30a7f6d8"
+path = "../meshes/jib_vi_orange.obj"
+
+[[asset]]
+key = "red"
+id = "a10f5c31-6d82-4e07-9b45-1c8e30a7f6d9"
+path = "../meshes/jib_vi_red.obj"
+
+[[node]]
+name = "Boat"
+
+transform = { pos = [0.0, 0.40, 0.0] }
+
+  [node.components.RigidBody]
+  dynamic = true
+  # 43.8 tonnes, set to the pontoons' displacement at the designed waterline
+  # rather than guessed — see the header's arithmetic.
+  mass = 43776.0
+
+  # **The collider is here for the inertia, not for the collisions.** Without
+  # one the body defaults to a 2 x 2 x 2 box — eight cubic metres — and a
+  # nineteen-metre hull with a crate's rotational inertia rolls like a barrel,
+  # which would fail this scene for a reason that has nothing to do with
+  # buoyancy. `BoxCollider` is the only collider a scene can author and it is
+  # centred on the node, so this is the hull's own box: 19.06 x 3.32 x 6.60.
+  [node.components.BoxCollider]
+  half_extents = [9.53, 1.66, 3.30]
+
+  [node.components.Buoyancy]
+  coefficient = 1.0
+  # Defaults, stated rather than inherited, because this scene is about
+  # stability and the damping is half of that: an analytic wave field has no
+  # dissipation of its own, so an undamped pontoon gains amplitude every wave
+  # until the boat launches.
+  damp_linear = 4.0
+  damp_quadratic = 1.0
+
+  # Stern, wide — a charter transom carries its beam right aft.
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-7.5, -0.247, -1.836]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-7.5, -0.247, 1.836]
+  radius = 1.093
+
+  # Amidships, the widest part of the hull and the source of most of the roll
+  # stiffness.
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-4.5, -0.247, -1.951]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-4.5, -0.247, 1.951]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-1.5, -0.247, -1.951]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-1.5, -0.247, 1.951]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [1.5, -0.247, -1.951]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [1.5, -0.247, 1.951]
+  radius = 1.093
+
+  # Forward, narrowing.
+  [[node.components.Buoyancy.pontoons]]
+  offset = [4.5, -0.247, -1.607]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [4.5, -0.247, 1.607]
+  radius = 1.093
+
+  # The bow. Narrow, because the hull is — a pontoon wider than the boat
+  # invents a righting moment the boat does not have.
+  [[node.components.Buoyancy.pontoons]]
+  offset = [7.5, -0.247, -0.918]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [7.5, -0.247, 0.918]
+  radius = 1.093
+
+
+# hull_white — albedo is the exporter's own Kd, restated here because the
+# engine never reads the .mtl.
+[[node]]
+name = "hull_white"
+parent = "Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "hull_white" }
+
+  [node.components.Material]
+  albedo = [0.9, 0.9, 0.88]
+  roughness = 0.42
+  metallic = 0.0
+
+# navy — albedo is the exporter's own Kd, restated here because the
+# engine never reads the .mtl.
+[[node]]
+name = "navy"
+parent = "Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "navy" }
+
+  [node.components.Material]
+  albedo = [0.05, 0.11, 0.32]
+  roughness = 0.38
+  metallic = 0.0
+
+# deck_grey — albedo is the exporter's own Kd, restated here because the
+# engine never reads the .mtl.
+[[node]]
+name = "deck_grey"
+parent = "Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "deck_grey" }
+
+  [node.components.Material]
+  albedo = [0.55, 0.55, 0.53]
+  roughness = 0.85
+  metallic = 0.0
+
+# wood_trim — albedo is the exporter's own Kd, restated here because the
+# engine never reads the .mtl.
+[[node]]
+name = "wood_trim"
+parent = "Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "wood_trim" }
+
+  [node.components.Material]
+  albedo = [0.22, 0.055, 0.045]
+  roughness = 0.3
+  metallic = 0.0
+
+# glass — albedo is the exporter's own Kd, restated here because the
+# engine never reads the .mtl.
+[[node]]
+name = "glass"
+parent = "Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "glass" }
+
+  [node.components.Material]
+  albedo = [0.1, 0.13, 0.16]
+  roughness = 0.12
+  metallic = 0.0
+
+# metal — albedo is the exporter's own Kd, restated here because the
+# engine never reads the .mtl.
+[[node]]
+name = "metal"
+parent = "Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "metal" }
+
+  [node.components.Material]
+  albedo = [0.62, 0.63, 0.65]
+  roughness = 0.35
+  metallic = 0.85
+
+# gold — albedo is the exporter's own Kd, restated here because the
+# engine never reads the .mtl.
+[[node]]
+name = "gold"
+parent = "Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "gold" }
+
+  [node.components.Material]
+  albedo = [0.66, 0.5, 0.13]
+  roughness = 0.28
+  metallic = 0.9
+
+# orange — albedo is the exporter's own Kd, restated here because the
+# engine never reads the .mtl.
+[[node]]
+name = "orange"
+parent = "Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "orange" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.28, 0.05]
+  roughness = 0.55
+  metallic = 0.0
+
+# red — albedo is the exporter's own Kd, restated here because the
+# engine never reads the .mtl.
+[[node]]
+name = "red"
+parent = "Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "red" }
+
+  [node.components.Material]
+  albedo = [0.45, 0.05, 0.07]
+  roughness = 0.5
+  metallic = 0.0

@@ -1039,7 +1039,26 @@ impl Sim {
         let surface = loom_render::fluid_surface::march(density, dims, cell, origin);
         #[allow(clippy::disallowed_methods)]
         let t2 = std::time::Instant::now();
-        let spray = solver.instances();
+        // **The scene asks for none, so it gets none.** `WaterBody::spray`
+        // defaults to 0.0 and documents "`0` is none", and this tier never
+        // read it: every cinematic scene in the repository authors nothing and
+        // was handed 65,536 instance slots and a 3.15 MB blocking readback per
+        // frame drawn. The human's complaint about the tank being covered in
+        // pale blue beads is a feature the file switched off.
+        //
+        // Skipping the call skips the dispatch, the copy and its fence, which
+        // is where most of `fluid_draw`'s cost lived on a settled pool.
+        //
+        // **`spray` means something narrower here than it does on the
+        // deterministic tier, and that drift is deliberate rather than
+        // hidden**: there it is a multiplier on how many droplets a crest
+        // throws, and here the count is a property of the solve, so this is an
+        // on/off. See the field's own doc comment, which now says so.
+        let spray = if self.water.as_ref().is_some_and(|w| w.spray > 0.0) {
+            solver.instances()
+        } else {
+            Vec::new()
+        };
         #[allow(clippy::disallowed_methods)]
         let cost = FluidDrawCost {
             density_ms: t1.duration_since(t0).as_secs_f64() * 1000.0,

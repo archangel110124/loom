@@ -1533,6 +1533,14 @@ pub struct WaterBody {
     ///
     /// It scales how many droplets a crest throws, not how high. A crest that
     /// is not breaking throws none at any multiplier.
+    ///
+    /// **On the `cinematic` tier this is an on/off, not a multiplier**, and
+    /// that is a deliberate drift rather than an oversight. There is no closed
+    /// form to scale: a drawn droplet is a fluid particle the solve already
+    /// owns, so how many exist is a property of the solve and the only
+    /// question a scene gets to answer is whether they are drawn at all.
+    /// Anything above zero draws the thrown ones; zero draws none, and skips
+    /// the dispatch and the readback with them.
     #[schemars(range(min = 0.0, max = 8.0))]
     pub spray: f32,
     /// Which tier this body simulates in — ADR 0053. Default deterministic.
