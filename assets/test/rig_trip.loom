@@ -1,0 +1,103 @@
+# **THE ROUND TRIP — the demo's four features as one thing you do.**
+#
+# `extends`, not a copy. **Two things differ** from `assets/games/deeper_demo.loom`:
+# a `Pilot` node, and nothing else. The rig, the boat, her berth, the supplies,
+# the crate, the ladder and the movement script are all the shipped ones, and
+# the player is driven by `loom sim --hold` — the same field `loom run` writes
+# when a human holds a key.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS SCENE EXISTS
+# ---------------------------------------------------------------------------
+#
+# Five rounds built four features in one level: a hub, a boat you can drive,
+# fishing you can do, and four slots. Every one of them was asserted, and none
+# of the assertions crossed from one to the next. Nothing in `scripts/green.sh`
+# had ever taken the boat out and brought it back, so "you can leave" and "you
+# can return" were two claims about a scene rather than one claim about a trip —
+# and the return leg had, in fact, never been run at all.
+#
+# **The loop, in one process:**
+#
+#   1. hold W from the spawn. Four supplies, aboard, at the wheel.
+#   2. astern out of the berth, because the fight is already running: the
+#      reference angler casts on tick 1 and the bait in the hold makes the take
+#      quick. About twenty seconds later there is a fish in the hold.
+#   3. SPACE, walk to starboard, and the fish goes below. It is a *walk* —
+#      the fish box is 2.32 m from the nearest point of the helm rectangle
+#      against a `RANGE` of 2.0, which round 5's was not.
+#   4. back on the mat, ahead, and home. `state.stowed` is still 1 and the
+#      caption now says to take her alongside rather than to cast again.
+#   5. off her over the boarding steps, west along the wharf to the crate.
+#      `state.delivered` goes to 1 and `state.stowed` back to 0.
+#
+# ---------------------------------------------------------------------------
+# WHY A `--hold` SCHEDULE AND NOT A PILOT SCRIPT
+# ---------------------------------------------------------------------------
+#
+# The rule `scripts/green.sh` states: swap the pilot when the thing under test
+# is *downstream* of a press, and hold keys when the thing under test **is the
+# mapping from the press**. Every step above is a mapping — W is the throttle
+# only on the mat, SPACE is the helm release only on the mat, the stow and the
+# delivery are both places you walk to — so a pilot fabricating velocity would
+# test the pilot.
+#
+# `--hold` was one constant for a whole run, which cannot express this, and the
+# deferral note on it in `crates/loom_cli/src/main.rs` said so honestly: "two
+# runs with different holds have answered every question asked of it so far".
+# A loop is the first question two runs cannot answer, because the fish, the
+# boat's position and the hold have to survive the gap between them. So `--hold`
+# now takes `<tick>:<keys>` segments separated by `;`.
+#
+# **The fight is the exception and keeps its pilot.** It wants correctly-timed
+# taps for twenty seconds against an LCG-scheduled run; a tape cannot react and
+# would rot the moment a constant moved. `Rig/Pilot/skilled` is the same
+# mechanism the five `fight_*.loom` benches use. The two drive different halves
+# and never meet: the policy lives in the rules script and fabricates `reel` and
+# `press`, the tape drives `deeper_player.rhai`'s legs and the helm.
+#
+# ---------------------------------------------------------------------------
+# WHY SHE GOES ASTERN AND NOT AHEAD
+# ---------------------------------------------------------------------------
+#
+# Because a turn is the one manoeuvre a fixed tape cannot do reliably. Full
+# lock is a 28 m radius and the yaw rate depends on her speed when the wheel
+# goes over, so "turn until she is pointing home" is a closed loop and a tape is
+# open. Astern out and ahead back needs no turn at all: her bow stays on +X the
+# whole trip, she leaves the berth going west and comes back east into it.
+#
+# It costs the one thing a turn would have proved — that you can come home from
+# a bearing you did not leave on — and that is `rig_drive.loom`'s pair of
+# mirrored full-lock runs, which is where it belongs.
+#
+# ---------------------------------------------------------------------------
+# WHAT IT MEASURES — the runs are in `scripts/green.sh`
+# ---------------------------------------------------------------------------
+#
+# The tape is written there rather than here because it is the *input*, and a
+# scene file that carried its own inputs would be two files to keep in step.
+
+[scene]
+format = 1
+id = "3b7c2e91-6a04-4f8d-9e15-b8d2c7a4f603"
+
+[[prefab]]
+key = "demo"
+id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
+path = "../games/deeper_demo.loom"
+
+[[node]]
+name = "Rig"
+extends = "demo"
+
+# The angler at the rod, so the fight plays itself while the tape sails the
+# boat. One word — see the header. Under `Rig` rather than under a second root,
+# because a scene has exactly one root (`multiple_roots`) and this one's is the
+# hub's; `deeper_rules.rhai` looks under both prefixes.
+[[node]]
+name = "Pilot"
+parent = "Rig"
+
+[[node]]
+name = "skilled"
+parent = "Rig/Pilot"

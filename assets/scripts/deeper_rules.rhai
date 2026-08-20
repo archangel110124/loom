@@ -449,10 +449,61 @@ fn without(hold, name) {
     kept
 }
 
+// **The nearer way out of the water, as a compass word.**
+//
+// Round 5's swim caption named one bearing — "swim east, to the ramp at the end
+// of the rig" — and there is no bearing that is right from the whole sea. From
+// where the taught gesture's port miss actually drops a player, (-9.70, -0.70,
+// -26.17), east is 114 m of open water: measured, sixty simulated seconds, same
+// sentence on screen the whole way.
+//
+// So the caption is computed. Two ramp feet, whichever is nearer, and the
+// eight-point word for the direction it lies in. North is -Z and east is +X,
+// which is the frame the rig's slipway was described in and the frame the
+// scene's own comments use.
+//
+// Feet, not tops: the number that matters to a swimmer is where the ramp
+// enters the water, and both of these reach y = -1.80 to be under his feet.
+fn way_out(me, ramps) {
+    let best = 1.0e9;
+    let dx = 0.0;
+    let dz = 0.0;
+    for r in ramps {
+        let ax = r[0] - me[0];
+        let az = r[1] - me[2];
+        let d = ax * ax + az * az;
+        if d < best { best = d; dx = ax; dz = az; }
+    }
+    let ns = if dz < 0.0 { "north" } else { "south" };
+    let ew = if dx > 0.0 { "east" } else { "west" };
+    let a = if dx < 0.0 { -dx } else { dx };
+    let b = if dz < 0.0 { -dz } else { dz };
+    // 2.5 is a 22-degree band each side of a cardinal. Wider and "north" is
+    // pointed at a ramp you can miss; narrower and almost everything is a
+    // hyphenated word.
+    if a > b * 2.5 { ew } else if b > a * 2.5 { ns } else { ns + "-" + ew }
+}
+
 let PLAYER = "Rig/Player";
 let BOAT = "Rig/Boat";
 let RANGE = 2.0;   // metres, horizontal. An arm and a lean.
 let SLOTS = 4;
+
+// The two ramp feet, at the waterline, in world XZ. `Rig/Slipway` descends east
+// off the east end; `Rig/Ladder` descends north off the west end of the berth.
+// Written here rather than read from `positions` because a node's position is
+// its *centre* and what a swimmer needs is the wet end.
+let RAMPS = [[16.40, 3.40], [-9.30, -11.20]];
+
+// The crate on the wharf, and how close the boat has to be for the catch in her
+// hold to count as landed. 14.0 m from the crate to the hull's origin: she
+// measures 11.5 in her berth and 35.7 where `rig_drive.loom` leaves her, so the
+// number is two and a half metres of slop on a berth rather than a fine
+// judgement. Measured to `Rig/Boat` and not to her fish box because the box is
+// eight metres off her centre and would make the answer depend on which way she
+// happened to be pointing.
+let FISH_CRATE = "Rig/FishCrate";
+let ALONGSIDE = 14.0;
 
 // Node path, and the word the HUD prints. The paths are the contract with the
 // scene: rename a crate and it stops being takeable, which a `--assert` catches
@@ -469,10 +520,16 @@ let SUPPLY = [
 // alongside.
 let FISH_HOLD = "Rig/Boat/FishHold";
 
-// How long a notice — a refusal, a stow, a fish that spat the bait — holds the
-// caption line. Three seconds: long enough to read at a glance, short enough
-// that the helm caption is never gone when you need it.
-let NOTICE_TICKS = 180;
+// How long a notice — a refusal, a stow, a landing, a fish that spat the bait —
+// holds the caption line. Two seconds.
+//
+// **It must be shorter than `OVER_TICKS`, and it was equal to it.** A landing
+// stamps `notice_at` and `over_at` on the same tick; at 180 against 180 the
+// notice window closed at delta 180 and the phase reset at delta 181, so the
+// caption handed back to the *finished fight* for one tick rather than to the
+// situation. Off by one, in the wrong direction, and invisible because the
+// notice could not be drawn at all — see the caption block for that half.
+let NOTICE_TICKS = 120;
 
 // How long the hub leaves a finished fight on screen before the rod is yours
 // again. The benches never reach this: they have no `Rig/Player`, so for them
@@ -539,6 +596,42 @@ if hub {
             emit.push(#{ kind: "stow", count: n });
         }
     }
+
+    // **ASHORE AGAIN: the crate, and the close of the whole loop.**
+    //
+    // Everything above this line is things you can do in one place. This is the
+    // only rule in the demo that needs you to have *been* somewhere and come
+    // back: the catch is in a hull, the crate is on a wharf, and the two have
+    // to be in the same place at the same time.
+    //
+    // A place again, and the same 2.0 m. The second test is the boat's own
+    // distance to the crate, which is what makes this "bring her back" and not
+    // "walk over here" — swim ashore with the catch still in a hull thirty
+    // metres out and it says so instead.
+    let delivered = if "delivered" in state { state.delivered } else { 0 };
+    if FISH_CRATE in positions && stowed > 0 {
+        let c = positions[FISH_CRATE];
+        let dx = me[0] - c[0];
+        let dz = me[2] - c[2];
+        if dx * dx + dz * dz <= RANGE * RANGE {
+            let near = false;
+            if BOAT in positions {
+                let b = positions[BOAT];
+                let bx = b[0] - c[0];
+                let bz = b[2] - c[2];
+                near = bx * bx + bz * bz <= ALONGSIDE * ALONGSIDE;
+            }
+            if near {
+                delivered += stowed;
+                emit.push(#{ kind: "deliver", count: stowed });
+                stowed = 0;
+                notice = 6; notice_at = tick;
+            } else {
+                notice = 7; notice_at = tick;
+            }
+        }
+    }
+    state.delivered = delivered;
 
     // -----------------------------------------------------------------------
     // WHERE HE IS — read off the player script, not guessed from a box.
@@ -704,28 +797,41 @@ if hub {
     // Priority, most urgent first: a fish on the line, a boat that has stopped
     // answering, the wheel, the rod, the walk.
     if swimming > 0 {
-        // **The state the demo had no sentence for.** Three degrees left of
-        // the taught aim puts you in the sea with the rig out of frame, and
-        // the HUD went on saying "walk forward to the boat" for ever. The
-        // slipway is at x = +14.1, which is east, which is the way the rig's
-        // own mast is.
-        message = "IN THE WATER   swim east, to the ramp at the end of the rig";
-    } else if phase >= 1 {
-        // The fight owns the line: it is already in `message`.
+        // **The state the demo had no sentence for, and then had the wrong
+        // one.** Round 4 printed "walk forward to the boat" at a swimmer for
+        // ever; round 5 replaced it with a fixed bearing that is right from one
+        // corner of the sea and 114 m wrong from where the taught gesture's own
+        // port miss lands. `way_out` computes it.
+        message = "IN THE WATER   swim " + way_out(me, RAMPS) + " to the ramp";
     } else if noticing {
-        // A refusal, a stow, a landing or a fish that got off. Three seconds,
-        // then the situation gets its line back.
+        // **Above the fight, and that is the fix rather than the ordering.**
+        // This branch sat *below* `phase >= 1`, and a landing sets `phase = 5`
+        // — so notices 2, 3 and 4, the three sentences that say what happened
+        // to a fish you just caught, could not be drawn at all. What a player
+        // saw for the three seconds after landing one was the fight's own
+        // bench string: the lowercase word `landed`.
+        //
+        // The cost, stated: a stow or a refusal during a fight now covers the
+        // stress meter for two seconds. Both are things the player did with his
+        // own feet a moment earlier, so telling him the outcome is the more
+        // useful of the two lines.
         message = if notice == 1 {
             "HOLD FULL 4/4   stow the catch in the fish box first"
         } else if notice == 2 {
-            "LANDED   it is in the hold — the fish box is by the transom"
+            "LANDED   it is in your hands — the fish box is to starboard"
         } else if notice == 3 {
-            "STOWED   the catch is below"
+            "STOWED   the catch is below. Take her home when you are done"
         } else if notice == 4 {
             "HOLD FULL 4/4   she went back over the side"
+        } else if notice == 6 {
+            "IN THE CRATE   that is a trip. Take bait and go again"
+        } else if notice == 7 {
+            "THE CATCH IS IN HER HOLD   bring her alongside first"
         } else {
             "IT SPAT THE BAIT   CLICK to cast again"
         };
+    } else if phase >= 1 {
+        // The fight owns the line: it is already in `message`.
     } else if jammed > 0 {
         // The stall limiter shut the throttle three quarters of a second ago
         // and the caption still said "W ahead". A skipper pressed on a quay
@@ -735,12 +841,22 @@ if hub {
         message = "THE HELM   W ahead  S astern  A/D wheel  SPACE lets go   "
                 + knots.to_int() + " kn   (bow is to starboard)";
     } else if aboard > 0 {
-        message = "ABOARD   CLICK to cast   SHIFT to reel   stand on the mat to steer";
+        // **The one signpost the return leg needs.** With fish below, the thing
+        // to do is not cast again — it is to go home — and nothing else on the
+        // screen says so.
+        message = if stowed > 0 {
+            stowed + " BELOW   take her alongside and step ashore"
+        } else {
+            "ABOARD   CLICK to cast   SHIFT to reel   stand on the mat to steer"
+        };
     } else if stuck > 0 {
         // Walking into something ashore, for three quarters of a second. In
         // this scene that is nearly always her topsides or the berth railing,
         // and the frame is a wall of blue hull with no horizon in it.
         message = "BLOCKED   back up — aboard is the gap between the bollards";
+    } else if stowed > 0 {
+        // Ashore, with a catch still in her. The other half of the signpost.
+        message = stowed + " IN HER HOLD   the crate is by the west rail";
     } else {
         message = "WALK FORWARD TO THE BOAT";
     }

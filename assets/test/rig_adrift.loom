@@ -1,0 +1,73 @@
+# **THE CONTROL FOR THE ROUND TRIP: a catch you cannot land because she is not
+# alongside — and the swim home that says the demo has no unrecoverable state.**
+#
+# `extends assets/games/deeper_demo.loom`. **Three things differ** — where the
+# boat is, where the player is, and a `Pilot` node — and the movement script,
+# the rules and the crate are the shipped ones.
+#
+# ---------------------------------------------------------------------------
+# WHY IT EXISTS: two claims, and both of them are things that can fail
+# ---------------------------------------------------------------------------
+#
+# **1. Delivering requires the boat.** `deeper_rules.rhai` will not empty the
+# fish hold into the crate unless `Rig/Boat` is within `ALONGSIDE` — 14.0 m — of
+# it. Without this scene that check is dead code: `rig_trip.loom` brings her
+# home, so deleting the check leaves every row in `scripts/green.sh` passing.
+# Here she is left at (3.0, -24.0), which is 21.0 m from the crate, and the
+# player swims ashore with the catch still in her. He reaches the crate, he is
+# refused, and the caption says why.
+#
+# **2. The ladder is the way out of the water on the berth side.** Round 5's
+# only ramp was at the *east* end, twenty-six metres from where the taught
+# gesture's own port miss drops a player, and descended eastward so it was
+# climbable from one bearing. This run swims a real distance to the new one and
+# then walks up it, which is the same claim `rig_overboard.loom` makes from a
+# harder start.
+#
+# ---------------------------------------------------------------------------
+# WHY SHE IS AT z = -24 AND NOT FURTHER
+# ---------------------------------------------------------------------------
+#
+# Far enough that `ALONGSIDE` refuses her by a clear seven metres, and near
+# enough that the swim is fourteen metres rather than thirty. The number under
+# test is 14.0, not the swimmer's stamina, and a hundred extra ticks of holding
+# one key proves nothing the first fourteen metres did not.
+#
+# She has no supplies within reach, so the hook is unbaited and the take is on
+# the five benches' own `BITE_MIN`/`BITE_SPAN` — which is the right schedule
+# here, because nothing in this scene is about bait.
+#
+# The tape is in `scripts/green.sh`, with the run it belongs to.
+
+[scene]
+format = 1
+id = "8e41b7d2-3c65-4a09-b7f3-2d908ec156b4"
+
+[[prefab]]
+key = "demo"
+id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
+path = "../games/deeper_demo.loom"
+
+[[node]]
+name = "Rig"
+extends = "demo"
+
+[[node]]
+name = "Boat"
+parent = "Rig"
+transform = { pos = [3.0, 0.0, -24.0] }
+
+# Boat-local (-7.00, -, -1.80): the port side of the aft cockpit and the middle
+# of `HelmMat`, which is `rig_drive.loom`'s station exactly.
+[[node]]
+name = "Player"
+parent = "Rig"
+transform = { pos = [-4.00, 1.62, -25.80] }
+
+[[node]]
+name = "Pilot"
+parent = "Rig"
+
+[[node]]
+name = "skilled"
+parent = "Rig/Pilot"

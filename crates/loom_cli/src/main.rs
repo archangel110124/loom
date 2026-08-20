@@ -75,8 +75,10 @@ USAGE:
         — for every tick of the run, so it is the only way to test a mapping
         *from* a press rather than something downstream of one:
         `--hold move_z=1,move_x=-1`, channels `move_x`, `move_z`, `jump`,
-        `sprint`, `fire`. It is one constant for the whole run; there is no
-        schedule, so `hold W then let go` needs two runs. --assert also
+        `sprint`, `fire`. Semicolons make it a SCHEDULE — each segment prefixed
+        `<tick>:` and holding until the next one, so a whole voyage is one run:
+        `--hold 0:move_z=1; 900:move_z=-1; 1500:` (quoted). An empty segment is hands
+        off the keys. --assert also
         reads the weather where it is asked about: `wind@x,y,z.speed >= 3`, and
         `rain@x,y,z.rate < 0.05` for the rain reaching a point in mm/h after the
         scene's own voxels have sheltered it (`.exposure` is that shelter alone,
@@ -965,9 +967,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     Some(r) => r,
                     None => play::Runner::new(&world, base)?,
                 };
-                if let Some(held) = held.clone() {
-                    runner.input = held;
-                }
+                let tape = held.clone().unwrap_or_default();
                 // One clock, counted from where the warm run left off, so an
                 // event's tick means the same thing to the runner, the rain
                 // simulation and the particles.
@@ -1035,6 +1035,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     if index > 0 {
                         for _ in 0..step {
                             elapsed += 1;
+                            runner.input = input_at(&tape, elapsed);
                             if let Err(e) = runner.tick(&mut world, elapsed) {
                                 return Err(format!("{}: {}", e.script, e.message));
                             }
@@ -3304,39 +3305,87 @@ fn frame_scene(
 /// directly, so a pilot writing the thrust would be the "test that cannot
 /// fail" this branch has already shipped once.
 ///
-/// **Held, not scheduled.** One constant for the run, because a schedule is a
-/// second little language and two runs with different holds have answered
-/// every question asked of it so far. `forward` and `right` keep their
-/// defaults (-Z and +X), so a walk under `--hold move_z=1` goes the way an
-/// unturned character faces.
+/// **Scheduled, and it was one constant until round 6 asked a question one
+/// constant cannot answer.** The deferral here read "a schedule is a second
+/// little language and two runs with different holds have answered every
+/// question asked of it so far", and that stopped being true the moment the
+/// demo had a *loop*: go out, catch something, come back, and the coming back
+/// only means anything in the same run as the going out. Two runs cannot carry
+/// a hold, a boat's position and a fish across the gap between them.
 ///
-/// `Ok(None)` when no `--hold` was given, which is every existing invocation.
-fn held_input(args: &[String]) -> Result<Option<loom_script::Motion>, String> {
+/// Semicolons separate segments, each `<tick>:<k=v,..>`, each holding until the
+/// next one begins. An empty segment is hands off the keys, which is how a run
+/// stops. A spec with no `;` and no `:` is the old form and parses to a single
+/// segment starting at tick 0 — every existing invocation is untouched.
+///
+/// `forward` and `right` keep their defaults (-Z and +X), so a walk under
+/// `--hold move_z=1` goes the way an unturned character faces.
+///
+/// `Ok(None)` when no `--hold` was given.
+fn held_input(args: &[String]) -> Result<Option<Vec<(u64, loom_script::Motion)>>, String> {
     let Some(spec) = flag(args, "--hold") else {
         return Ok(None);
     };
-    let mut held = loom_script::Motion::default();
-    for part in spec.split(',') {
-        let part = part.trim();
-        let (name, value) = part.split_once('=').unwrap_or((part, "1"));
-        let number: f32 = value.trim().parse().unwrap_or(1.0);
-        match name.trim() {
-            "move_x" => held.move_axis[0] = number,
-            "move_z" => held.move_axis[1] = number,
-            "jump" => held.jump = number != 0.0,
-            "sprint" => held.sprint = number != 0.0,
-            "fire" => held.fire = number != 0.0,
-            other => {
-                return Err(json_line(&serde_json::json!({
-                    "error": "unknown_hold",
-                    "value": other,
-                    "hint": "--hold takes move_x, move_z, jump, sprint and fire, comma \
-                             separated, each optionally `=value`",
-                })));
+    let mut tape: Vec<(u64, loom_script::Motion)> = Vec::new();
+    for segment in spec.split(';') {
+        let segment = segment.trim();
+        // `900:move_z=1`. A bare `move_z=1` is the old one-constant form, and
+        // `1500:` is hands off from there on.
+        let (at, keys) = match segment.split_once(':') {
+            Some((at, keys)) => match at.trim().parse::<u64>() {
+                Ok(at) => (at, keys),
+                Err(_) => {
+                    return Err(json_line(&serde_json::json!({
+                        "error": "unknown_hold",
+                        "value": segment,
+                        "hint": "a scheduled --hold segment is `<tick>:<k=v,..>`",
+                    })));
+                }
+            },
+            None => (0, segment),
+        };
+        let mut held = loom_script::Motion::default();
+        for part in keys.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let (name, value) = part.split_once('=').unwrap_or((part, "1"));
+            let number: f32 = value.trim().parse().unwrap_or(1.0);
+            match name.trim() {
+                "move_x" => held.move_axis[0] = number,
+                "move_z" => held.move_axis[1] = number,
+                "jump" => held.jump = number != 0.0,
+                "sprint" => held.sprint = number != 0.0,
+                "fire" => held.fire = number != 0.0,
+                other => {
+                    return Err(json_line(&serde_json::json!({
+                        "error": "unknown_hold",
+                        "value": other,
+                        "hint": "--hold takes move_x, move_z, jump, sprint and fire, comma \
+                                 separated, each optionally `=value`; segments are \
+                                 `<tick>:<k=v,..>` separated by `;`",
+                    })));
+                }
             }
         }
+        tape.push((at, held));
     }
-    Ok(Some(held))
+    // Written out of order is a typo, not an intention, and sorting is one
+    // line against a lookup that would otherwise silently pick the wrong one.
+    tape.sort_by_key(|(at, _)| *at);
+    Ok(Some(tape))
+}
+
+/// What is held on `tick`: the last segment that has started.
+///
+/// Ticks before the first segment are hands off, which is the honest answer
+/// for `--hold "600:move_z=1"` — nobody is pressing anything yet.
+fn input_at(tape: &[(u64, loom_script::Motion)], tick: u64) -> loom_script::Motion {
+    tape.iter()
+        .rev()
+        .find(|(at, _)| *at <= tick)
+        .map_or_else(loom_script::Motion::default, |(_, held)| held.clone())
 }
 
 fn sim(path: &str, args: &[String]) -> (u8, String) {
@@ -3392,11 +3441,10 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     // every question asked of it so far. `forward` and `right` keep their
     // defaults (-Z and +X), so a walk under `--hold move_z=1` goes the way an
     // unturned character faces.
-    match held_input(args) {
-        Ok(Some(held)) => runner.input = held,
-        Ok(None) => {}
+    let tape = match held_input(args) {
+        Ok(tape) => tape.unwrap_or_default(),
         Err(json) => return (2, json),
-    }
+    };
 
     // How far each node moved vertically over the closing stretch of the run,
     // for the `.bob` assertion. Recorded rather than derived afterwards
@@ -3410,6 +3458,9 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     // `advance` takes the delta as an argument.
     for _ in 0..ticks {
         clock.advance(clock.step_seconds());
+        // Written before the tick it applies to, so segment `900:` is the
+        // first tick the new keys are down on rather than the one after.
+        runner.input = input_at(&tape, clock.tick);
         if let Err(e) = runner.tick(&mut world, clock.tick) {
             return (1, json_line(&e));
         }
@@ -3679,7 +3730,7 @@ fn simulate_physics(
     world: &mut World,
     base: &std::path::Path,
     ticks: u32,
-    held: Option<loom_script::Motion>,
+    held: Option<Vec<(u64, loom_script::Motion)>>,
 ) -> (
     Happenings,
     Vec<play::Splash>,
@@ -3699,10 +3750,9 @@ fn simulate_physics(
             return (Vec::new(), Vec::new(), wavelets, foam, None);
         }
     };
-    if let Some(held) = held {
-        runner.input = held;
-    }
+    let tape = held.unwrap_or_default();
     for tick in 1..=u64::from(ticks) {
+        runner.input = input_at(&tape, tick);
         if let Err(e) = runner.tick(world, tick) {
             log::warn(format!("{}: {}", e.script, e.message));
             break;
@@ -5372,6 +5422,64 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// **A scheduled `--hold` is a tape, and the old one-constant form is one
+    /// segment of it.**
+    ///
+    /// The backward-compatibility half is the load-bearing one: every existing
+    /// invocation in `scripts/green.sh` and in a dozen scene headers writes
+    /// `--hold move_z=1` with no colon and no semicolon, and each must still be
+    /// that key held for the whole run. The scheduled half is what
+    /// `rig_trip.loom` needs — a whole voyage in one process, because the fish,
+    /// the boat's position and the hold cannot survive being split across two.
+    #[test]
+    fn a_hold_schedule_is_read_segment_by_segment() {
+        // The old form: one constant, from tick zero, for ever.
+        let tape = held_input(&args(&["--hold", "move_z=1"]))
+            .expect("parses")
+            .expect("some");
+        assert_eq!(tape.len(), 1);
+        for tick in [0, 1, 900, 100_000] {
+            assert!((input_at(&tape, tick).move_axis[1] - 1.0).abs() < 1e-6);
+        }
+
+        // The new one. Note the empty segment: hands off the keys, which is how
+        // a run stops without a second process.
+        let tape = held_input(&args(&[
+            "--hold",
+            "0:move_z=1; 900:move_z=-1,move_x=0.5; 1500:; 1200:jump=1",
+        ]))
+        .expect("parses")
+        .expect("some");
+        assert_eq!(tape.len(), 4, "out-of-order segments are kept, and sorted");
+
+        assert!((input_at(&tape, 0).move_axis[1] - 1.0).abs() < 1e-6);
+        assert!((input_at(&tape, 899).move_axis[1] - 1.0).abs() < 1e-6);
+        // A segment starts ON its tick, not after it: `900:` is the first tick
+        // the new keys are down on.
+        assert!((input_at(&tape, 900).move_axis[1] + 1.0).abs() < 1e-6);
+        assert!((input_at(&tape, 900).move_axis[0] - 0.5).abs() < 1e-6);
+        // Sorted, so the 1200 segment written last still wins over the 900 one.
+        assert!(input_at(&tape, 1200).jump);
+        assert!(!input_at(&tape, 1199).jump);
+        // And empty is genuinely empty, not "keep the last thing".
+        let idle = input_at(&tape, 1500);
+        assert!(!idle.jump);
+        assert!(idle.move_axis[0].abs() < 1e-6);
+        assert!(idle.move_axis[1].abs() < 1e-6);
+
+        // Before the first segment is hands off, which is the honest answer.
+        let tape = held_input(&args(&["--hold", "600:move_z=1"]))
+            .expect("parses")
+            .expect("some");
+        assert!(input_at(&tape, 0).move_axis[1].abs() < 1e-6);
+        assert!((input_at(&tape, 600).move_axis[1] - 1.0).abs() < 1e-6);
+
+        // No `--hold` at all is None, and a bad channel is still refused.
+        assert!(held_input(&args(&["--ticks", "60"])).expect("parses").is_none());
+        assert!(held_input(&args(&["--hold", "0:crouch=1"])).is_err());
+        assert!(held_input(&args(&["--hold", "later:move_z=1"])).is_err());
     }
 
     /// The environment a scene's text produces, wind and water and all.

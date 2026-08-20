@@ -163,6 +163,20 @@ fi
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 60 --hold move_z=1 \
   --assert "state.at_helm == 0" >/dev/null
 #
+# **And the caption does not strobe on the way, which it did.** `aboard` was a
+# raw per-tick ground test, so every airborne frame of the scramble over the
+# bait box read as *not on the boat*: six caption flips in forty ticks on a
+# dead-straight walk, the biggest text on the screen telling the player to walk
+# forward to a boat he was standing on. It also silently dropped `fire` presses,
+# because the same flag gates the cast.
+#
+# `events.station` is the whole count of station changes in the run — aboard,
+# at the wheel, stalled, swimming, blocked. A clean walk-forward is **two**
+# (aboard, then the helm) and this was **10**. It is 3, because the run starts
+# by emitting the state it is already in.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 600 --hold move_z=1 \
+  --assert "events.station <= 4" --assert "state.at_helm == 1" >/dev/null
+#
 # **420 and not the 240 it was, and the two seconds are the bait box.**
 # `col_engine_box` sits amidships in the cockpit — boat-local x -8.40..-7.20 —
 # and the boarding lane now runs at it rather than threading the 1.0 m gap
@@ -200,12 +214,19 @@ fi
 # degrees — boarded nothing, and the two failures were a wall of blue hull and
 # a swim, both with "WALK FORWARD TO THE BOAT" still on the HUD. The spawn is
 # 0.9 m further west, the boarding treads are 3.0 m wide instead of 2.2, and
-# the helm mat is 3.4 m instead of 2.6. Measured at 600 ticks: the wheel is
-# reached from anywhere in **-0.18 .. +0.25**, which is -10.2 to +14.0 degrees.
-# These two rows sit one step inside both of those edges.
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 600 --hold "move_z=1,move_x=0.20" \
+# the helm mat is 3.4 m instead of 2.6.
+#
+# **The committed edges were wrong and one of these rows was sitting on one.**
+# Round 5 wrote "-0.18 .. +0.25" here and in the scene, and asserted at +0.20.
+# Swept again at 0.01 steps: the wheel is reached from **-0.21 to +0.21** — a
+# symmetric **24 degrees**, which is the round's real win and a wider one than
+# it claimed on the left. +0.22 does not board, so +0.20 had a hundredth of
+# margin and the next scene edit was going to flake it. Both rows are now
+# +/-0.18, three hundredths inside a measured edge, and symmetric because the
+# lane is.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 600 --hold "move_z=1,move_x=0.18" \
   --assert "state.at_helm == 1" >/dev/null
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 600 --hold "move_z=1,move_x=-0.15" \
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 600 --hold "move_z=1,move_x=-0.18" \
   --assert "state.at_helm == 1" >/dev/null
 
 # **And outside it the caption stops lying.** Both of these used to print the
@@ -323,11 +344,33 @@ fi
 # **Overboard, and back — the demo's promise that it contains no unrecoverable
 # state.** Run 1 is the control that makes run 2 mean anything: without it, a
 # run that ended on the deck could have ended there because the character never
-# sank at all. `-1.0 < y < 0.0` is floating, not standing, not drowning.
+# sank at all. `-1.0 < y < 0.0` is floating, not standing, not drowning. This
+# pair covers the *east* slipway, which is the only thing it ever covered: it
+# starts the swimmer four metres from its foot on the one bearing that works.
 "$LOOM" sim assets/test/rig_overboard.loom --ticks 240 \
   --assert "Rig/Player.y > -1.0" --assert "Rig/Player.y < 0.0" >/dev/null
 "$LOOM" sim assets/test/rig_overboard.loom --ticks 900 --hold move_x=-1 \
   --assert "Rig/Player.y > 2.2" --assert "Rig/Player.x < 11.5" >/dev/null
+
+# **Miss the boarding lane to port and get back on the rig, and this row is the
+# one that can fail.** The row above starts a swimmer four metres from a ramp;
+# this one *produces the miss* on the shipped scene with the demo's own taught
+# gesture plus twelve degrees of port aim, and then swims from wherever that
+# leaves him — measured, (-9.70, -0.70, -26.17), nineteen metres north of the
+# deck's own edge.
+#
+# **Round 5 had no way out of there.** The only ramp was at the east end,
+# twenty-six metres away and climbable only heading west; the caption said
+# "swim east", and holding east from that point for sixty simulated seconds
+# travelled 114 m into open ocean with the same sentence on the screen. A
+# stranger who missed by twelve degrees had wedged the demo and would not know
+# it. `Rig/Ladder` and the computed bearing in `deeper_rules.rhai` are the fix,
+# and this is what says so: one hold, one turn, standing on the deck by 1200.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 600 --hold "move_z=1,move_x=-0.22" \
+  --assert "state.swimming == 1" --assert "Rig/Player.y < 0.0" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1200 \
+  --hold "0:move_z=1,move_x=-0.22; 600:move_z=-1" \
+  --assert "Rig/Player.y > 2.2" --assert "state.swimming == 0" >/dev/null
 
 # ---------------------------------------------------------------------------
 # **FISHING, FROM THE BOAT.** The third of the demo's four things, and the
@@ -394,14 +437,23 @@ fi
 #     fifth checkbox would not have converted it. `rig_fish` carries three
 #     supplies within reach of the angler (see its header for why not four) and
 #     this row is the whole loop: he takes them (`pickup`), **the fish eats the
-#     bait at the take** (`spend`), the catch takes a slot (`stow` is only
-#     reachable if it did), and the fish box beside him takes it below
-#     (`stowed`). `carried <= 4` is the invariant a deleted capacity guard
-#     breaks.
+#     bait at the take** (`spend`), and the catch **takes the slot the bait left
+#     free** — which is what `state.infish` says and `state.carried == 4` makes
+#     a full hold rather than a coincidence.
+#
+#     **It used to assert `events.stow` and that row could not fail.** The fish
+#     box was drawn on the bait box at boat-local (-7.80, 0.0), 0.90 m from the
+#     nearest point of the helm rectangle against a `RANGE` of 2.0 — so a landed
+#     fish was stowed on the tick it was landed, `notice` went 2 -> 3 in one
+#     tick, and `state.infish` was 0 at every sample anyone took. The capacity
+#     rule the whole of round 5 was built around held a slot for a single frame.
+#     The box has moved to starboard, 2.32 m from the wheel, and stowing is now
+#     a walk — which is asserted where a walk can happen, in `rig_trip.loom`
+#     below. What is left here is the half this scene can see: that the fish is
+#     **carried**, for 455 ticks and counting.
 "$LOOM" sim assets/test/rig_fish.loom --ticks 1800 \
   --assert "events.pickup >= 3" --assert "events.spend >= 1" \
-  --assert "events.stow >= 1" --assert "state.stowed >= 1" \
-  --assert "state.carried <= 4" >/dev/null
+  --assert "state.infish >= 1" --assert "state.carried == 4" >/dev/null
 
 # 5c. **And bait is the reason it is an inventory and not a checklist.** The
 #     control is the same scene with nothing in the hold: `fight_skilled.loom`
@@ -426,6 +478,63 @@ fi
 "$LOOM" sim assets/test/rig_drive.loom --ticks 900 \
   --assert "state.knots < 0.5" >/dev/null
 
+# **THE LOOP, END TO END, IN ONE PROCESS.** Five rounds built four features and
+# nothing had ever crossed from one to the next: no run in this file had taken
+# the boat out and brought it back, so "you can leave" and "you can return" were
+# two claims about a scene rather than one claim about a trip.
+#
+# `rig_trip.loom` is the demo plus a `Pilot` node. Everything else is the
+# shipped scene, and the player is driven by a **scheduled** `--hold` — the same
+# `Runner::input` a human writes, now taking `<tick>:<keys>` segments. See that
+# file's header for why a tape is right here and a movement pilot is not, and
+# `crates/loom_cli/src/main.rs` for why the one-constant form stopped being
+# enough (a loop is the first question two separate runs cannot answer: the
+# fish, the boat's position and the hold have to survive the gap).
+#
+# The tape, in the order a player would press it:
+#
+#   0     W          walk aboard, four supplies, on the mat by 356, ahead
+#   900   S          astern for home; the fish lands at 1147 on the way
+#   1250  SPACE      hands off the wheel
+#   1260  S + D      across the cockpit to the fish box -> STOWED at 1310
+#   1320  W + A      back to the mat, which takes the helm again
+#   1380  S          astern the rest of the way; alongside by 2000
+#   2000  -          throttle shut, she settles
+#   2060  SPACE      hands off
+#   2070  S          over the boarding steps and onto the rig
+#   2150  A + S      west along the wharf to the crate -> DELIVERED at 2200
+#
+# **Four assertions, and each is a different link in the chain.** `stow` says
+# the catch went below on a walk; `deliver` says the trip closed; `stowed == 0`
+# says the hold was emptied by it and not merely counted twice; `delivered == 1`
+# is the number the HUD prints and the only thing in this demo that persists
+# across a trip.
+"$LOOM" sim assets/test/rig_trip.loom --ticks 2210 \
+  --hold "0:move_z=1; 900:move_z=-1; 1250:jump=1; 1260:move_z=-1,move_x=1; \
+1320:move_z=1,move_x=-1; 1380:move_z=-1; 2000:; 2060:jump=1; 2070:move_z=-1; \
+2150:move_x=-1,move_z=-0.15" \
+  --assert "events.landed >= 1" --assert "events.stow >= 1" \
+  --assert "events.deliver >= 1" --assert "state.delivered == 1" \
+  --assert "state.stowed == 0" >/dev/null
+
+# **The control, and without it the "bring her back" half is dead code.**
+# `deeper_rules.rhai` refuses the crate unless `Rig/Boat` is within `ALONGSIDE`
+# — 14.0 m — of it. `rig_trip` brings her home, so deleting that check leaves
+# every row above passing unchanged. `rig_adrift.loom` leaves her at (3.0, -24),
+# 21.0 m off, and swims the player home instead: he lands a fish, stows it,
+# steps off her into the sea, swims fourteen metres to `Rig/Ladder`, walks up
+# it, reaches the crate — and is refused, with `state.stowed` still 1.
+#
+# **It is also the ladder's own row.** The swim is a real distance to the new
+# ramp on the berth side, and `Rig/Player.y > 2.2` at the end is a capsule
+# standing on the rig deck under its own movement, with no teleport.
+"$LOOM" sim assets/test/rig_adrift.loom --ticks 2000 \
+  --hold "0:; 1450:jump=1; 1460:move_z=-1,move_x=1; 1520:move_z=-1; \
+1650:move_z=-1,move_x=-1; 1880:move_z=-1" \
+  --assert "events.stow >= 1" --assert "state.stowed == 1" \
+  --assert "events.deliver == 0" --assert "state.delivered == 0" \
+  --assert "Rig/Player.y > 2.2" >/dev/null
+
 # 7. **The stall limiter says so now.** It shut the throttle in round 3 and the
 #    caption went on reading "W ahead", so a player pushing a bow into a quay
 #    got a boat that had silently stopped obeying him. Same run as the
@@ -443,7 +552,7 @@ fi
 cmp /tmp/loom-fight-1.json /tmp/loom-fight-2.json
 cmp /tmp/loom-fight-2.json /tmp/loom-fight-3.json
 rm -f /tmp/loom-fight-1.json /tmp/loom-fight-2.json /tmp/loom-fight-3.json
-echo "gameplay: 12 scenes asserted, fight byte-identical across 3 processes"
+echo "gameplay: 14 scenes asserted, fight byte-identical across 3 processes"
 
 # ---------------------------------------------------------------------------
 # 7. Work per frame. **Nothing above this line can see a frame get slower.**

@@ -210,12 +210,63 @@ if wish_len > 1.0 {
 // not going anywhere: you are holding on to something.
 // ---------------------------------------------------------------------------
 
-let aboard = stand_node == HELM_NODE;
-let on_mat = aboard
+// **Latched across short airborne gaps, and that is not polish.** `stand_node`
+// is a raw per-tick ground test, so every frame of a scramble over the bait box
+// reads as *not on the boat*. Traced on the taught walk before this existed —
+// four-tick samples, `--hold move_z=1`:
+//
+//   t 316  aboard 0   t 320  aboard 0   t 324  aboard 1   t 328  aboard 0
+//   t 336  aboard 1   t 344  aboard 0   t 356  aboard 1
+//
+// Six flips in forty ticks on a dead-straight walk, which the HUD printed as
+// "WALK FORWARD TO THE BOAT" over a player standing on it — the biggest text
+// on the screen strobing at second three of the demo. `events.station` was 10
+// where it should be about 4. **And it dropped keypresses**: `aboard` gates
+// the cast emit below, so every `fire` in one of those windows went nowhere.
+//
+// Landing on anything else clears it on the same tick, so stepping ashore is
+// still instant — the latch only ever spans *air*. Going under clears it too,
+// because a swimmer is not aboard however recently he was.
+//
+// `on_mat` is latched with it and off the same counter. `stand_local` is not
+// meaningful while airborne, so re-testing the rectangle against a stale
+// reading would drop the helm for a tick every time she heaved; the last
+// on-deck answer is the truthful one to hold.
+let ABOARD_LATCH = 30;   // half a second. Long enough for a hop with the deck
+                         // rising under it, far too short to cover a fall.
+
+let on_boat = stand_node == HELM_NODE;
+let on_mat_now = on_boat
     && stand_local[0] > HELM_X_MIN
     && stand_local[0] < HELM_X_MAX
     && stand_local[2] > HELM_Z_MIN
     && stand_local[2] < HELM_Z_MAX;
+
+let off_boat_for = if "off_boat_for" in memory { memory.off_boat_for } else { 999 };
+let mat_was = if "mat_was" in memory { memory.mat_was } else { false };
+// **`stand_node`, not `grounded`, and the difference is the whole bug.**
+// `grounded` comes out of `move_character`'s contact and `stand_node` out of a
+// separate shape cast (`play.rs`, `Sim::support`), and the two disagree for a
+// tick at a time while a capsule scrambles: the contact says yes, the cast
+// finds nothing. A latch cleared on `grounded` therefore cleared itself on
+// exactly the ticks it existed to cover, and the strobe survived the first
+// version of this code. An empty `stand_node` means *no dynamic body under
+// me* — air, or the rig, which is static and reports nothing — so it is the
+// answer that cannot flicker.
+if on_boat {
+    off_boat_for = 0;
+    mat_was = on_mat_now;
+} else if stand_node != "" {
+    off_boat_for = 999;   // some other moving thing. Not this boat, not later.
+} else {
+    off_boat_for += 1;
+}
+memory.off_boat_for = off_boat_for;
+memory.mat_was = mat_was;
+
+let latched = off_boat_for <= ABOARD_LATCH && position[1] > SWIM_LINE;
+let aboard = on_boat || latched;
+let on_mat = if on_boat { on_mat_now } else { latched && mat_was };
 
 // ---------------------------------------------------------------------------
 // **Space is hands off the wheel**, and it is the only way off the mat that is

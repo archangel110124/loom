@@ -1,5 +1,4 @@
-# **DEEPER — the demo. Round 5: the way aboard, the way you can tell you are
-# moving, and four slots that are an inventory.**
+# **DEEPER — the demo. Round 6: the four features became one trip.**
 #
 #   loom run assets/games/deeper_demo.loom
 #   loom render assets/games/deeper_demo.loom --out /tmp/rig.png
@@ -27,8 +26,10 @@
 #     teaches sat on its right-hand edge: `move_x = 0.05` — three degrees of
 #     aim — boarded nothing. The spawn is 0.9 m further west, the boarding
 #     treads are 3.0 m instead of 2.2 and the helm mat 3.4 m instead of 2.6.
-#     Measured at 600 ticks, the wheel is now reached from **-0.18 to +0.25**,
-#     which is -10.2 to +14.0 degrees.
+#     Measured at 600 ticks, the wheel is reached from **-0.21 to +0.21**,
+#     which is 24 degrees, symmetric. (Round 5 wrote "-0.18 to +0.25" here off
+#     a coarser sweep; re-swept at 0.01 steps in round 6, both edges are 0.21.
+#     The width claim survives and got better on the left.)
 #   * **Outside that lane the HUD used to lie.** Both failures — pressed into
 #     her topsides, and swimming — printed "WALK FORWARD TO THE BOAT" for ever.
 #     `deeper_player.rhai` now states both facts and the caption has a branch
@@ -42,6 +43,30 @@
 # **spent** and changes a number, a landed fish **takes a slot**, four slots
 # are reached by playing, and the fish box in the cockpit is what empties
 # them. `assets/scripts/deeper_rules.rhai` has the four rules and why.
+#
+# **Round 6 is the loop closing, which is three things.**
+#
+#   * **There is a reason to come back, and it is one node.** `FishCrate` on
+#     the wharf takes what is in her hold, `state.delivered` counts it, and the
+#     HUD's top row prints it. It refuses unless she is alongside — the catch
+#     is in a hull, and a hull thirty metres out is not a delivery. The thing
+#     that makes it a *loop* rather than a reward is that the **bait is on the
+#     rig**: the fish eats yours at the take and there is none at sea.
+#   * **Nothing you do is unrecoverable any more.** `Ladder` is a second ramp,
+#     on the berth side, in a 2.0 m gap cut in `RailNorthWest` — because the
+#     one gesture the demo teaches, missed by twelve degrees to port, put a
+#     player 26 m from the only way out and the caption sent him the other way.
+#     See its own block below for the measurement.
+#   * **And the caption stopped strobing and stopped lying.** `aboard` latches
+#     across airborne frames (it flipped six times in forty ticks climbing over
+#     the bait box, telling the player to walk to a boat he was standing on and
+#     silently eating his `fire` presses); the landing sentence can actually be
+#     drawn, which it could not; and the swim bearing is computed from where
+#     the swimmer is rather than written down once.
+#
+# `assets/test/rig_trip.loom` is the whole thing in one process — out, a fish,
+# stowed, home, ashore, in the crate — and `assets/test/rig_adrift.loom` is the
+# control that says the crate needs the boat.
 #
 # The whole demo, in the order a stranger meets it:
 #
@@ -58,8 +83,14 @@
 #      twenty-four joints of it read `state.stress`.
 #   6. land it and it takes a slot — which the bait it ate has just left free.
 #      Land a second without stowing the first and the hold is full and says
-#      so. The dark hatch on the bait box beside you is the fish hold; stand by
-#      it and the catch goes below.
+#      so. **SPACE, and walk to starboard**: the dark hatch on the deck by the
+#      boarding steps is the fish hold, and standing by it puts the catch
+#      below. It is 2.32 m from the wheel against a `RANGE` of 2.0, which is
+#      the difference between a walk and a number that changes itself.
+#   7. take her home — astern out of the berth is how you left, so ahead is how
+#      you come back — step off over the boarding steps, and walk west along
+#      the wharf to the crate. `CRATE` on the HUD goes up. Then take bait, and
+#      go again.
 #
 # ---------------------------------------------------------------------------
 # THE CONTROLS, IN FULL
@@ -72,11 +103,18 @@
 #   anywhere aboard **CLICK casts, sets the hook and takes a rhythm window;
 #                   SHIFT reels.** Both are refused ashore, and refused by
 #                   never being sent rather than by a rule that says no.
-#   in the water    W A S D swim, at under half walking pace. The caption says
-#                   so and names the slipway, which round 4's did not.
+#   in the water    W A S D swim, at under half walking pace. The caption names
+#                   the **nearer of the two ramps** and the compass word for the
+#                   direction it lies in, computed from where the swimmer is —
+#                   round 5's named one bearing, which was right from one corner
+#                   of the sea and 114 m wrong from the other.
 #   at the fish box the catch goes below. **A place, not a key** — the same
 #                   decision the helm mat is, and for the same reason: there is
 #                   no sixth digital channel.
+#   at the crate    what is below goes ashore and `CRATE` goes up, but only with
+#                   the boat alongside. Same decision again, and it is the only
+#                   rule in the demo that needs you to have been somewhere and
+#                   come back.
 #
 # **Reel is SHIFT and not W, and that is a change from `fishing.loom`.** There
 # the angler is a post whose movement model pins him to the deck, so W is free.
@@ -608,10 +646,28 @@ transform = { pos = [11.90, 1.90, 5.90], scale = [0.10, 0.50, 1.10] }
 # unrecoverable fall; the slipway at the east end is what makes falling in
 # recoverable, and it had to exist before this could be opened.
 
+# **And split again in round 6, for the ladder.** 2.0 m of gap at x -10.30 to
+# -8.30 — the far west of the berth side, clear of the boat's own transom at
+# x = -6.5. See `Ladder` below for the measured reason it had to exist: the
+# slipway at the east end is the only way out of the water and it is twenty-six
+# metres from where the taught gesture drops a player who misses to port.
+
 [[node]]
 name = "RailNorthWest"
 parent = "Rig"
-transform = { pos = [-9.45, 1.90, -6.90], scale = [2.55, 0.50, 0.10] }
+transform = { pos = [-11.15, 1.90, -6.90], scale = [0.85, 0.50, 0.10] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.21, 0.16]
+  roughness = 0.85
+
+[[node]]
+name = "RailNorthMid"
+parent = "Rig"
+transform = { pos = [-7.60, 1.90, -6.90], scale = [0.70, 0.50, 0.10] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -648,7 +704,20 @@ transform = { pos = [0.0, 2.80, 6.90], scale = [12.0, 0.12, 0.06] }
 [[node]]
 name = "CapNorthWest"
 parent = "Rig"
-transform = { pos = [-9.45, 2.80, -6.90], scale = [2.55, 0.12, 0.06] }
+transform = { pos = [-11.15, 2.80, -6.90], scale = [0.85, 0.12, 0.06] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "CapNorthMid"
+parent = "Rig"
+transform = { pos = [-7.60, 2.80, -6.90], scale = [0.70, 0.12, 0.06] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -897,6 +966,50 @@ transform = { pos = [-3.35, 1.65, 0.30], scale = [0.13, 0.25, 0.13] }
   roughness = 0.45
 
 # ---------------------------------------------------------------------------
+# THE CRATE — where a trip ends, and the only thing in this demo that counts
+#
+# **Four features in one scene is not a loop.** You could board, drive, fish and
+# fill four slots, and none of it added up to anything: the boat went out and
+# there was no reason to come back, and a demo with no reason to come back is a
+# sandbox with a boat in it.
+#
+# So: land a fish, stow it in the cockpit, bring her alongside, step ashore, and
+# walk to this crate. `state.delivered` goes up and the HUD's top row says so.
+# That is the whole close, deliberately — a counter and a line of text. The
+# thing that makes it a loop is not the reward, it is that the **bait is on the
+# rig**: `BaitBarrel` is eight metres from here, the fish eats your bait at the
+# take, and there is no bait at sea. Going out again means coming back first.
+#
+# **Both halves are checked, and the second is what makes it "bring her back"
+# rather than "walk over here".** `deeper_rules.rhai` refuses unless `Rig/Boat`
+# is within `ALONGSIDE` of this crate — 14.0 m, against 11.5 m for a boat in
+# her berth and 35.7 m for one left where `rig_drive.loom` puts her. Swimming
+# ashore with the catch still in a hull thirty metres out gets a caption saying
+# so, not a delivery.
+#
+# **Where, and why not on the taught path.** x = -7.60 is three and a quarter
+# metres west of the walk-forward lane, so a player following the one gesture
+# the demo teaches never comes within `RANGE` of it on the way out and never
+# walks into it — everything here is drawn without a dynamic ancestor and is
+# therefore a static collider, and a crate in the middle of the berth gap would
+# have broken the demo's only gesture. It sits between the ladder's landing and
+# the west bollard, which is the ground you cross coming *off* the boat.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "FishCrate"
+parent = "Rig"
+transform = { pos = [-7.60, 1.70, -5.90], scale = [0.55, 0.30, 0.45] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.18, 0.29, 0.31]
+  roughness = 0.7
+  metallic = 0.25
+
+# ---------------------------------------------------------------------------
 # THE BOAT
 #
 # Alongside, in the berth, bow to +X. Her mass brick reaches |z| = 3.30 from
@@ -946,7 +1059,7 @@ parent = "Rig"
   [node.components.Hud]
   anchor = "bottom_center"
   offset = [0.0, 88.0]
-  text = "HOLD {carried}/4   bait {bait}  line {line}  lantern {lantern}  thermos {thermos}  fish {infish}      BELOW {stowed}"
+  text = "HOLD {carried}/4   bait {bait}  line {line}  lantern {lantern}  thermos {thermos}  fish {infish}      BELOW {stowed}   CRATE {delivered}"
   size = 19.0
   color = [0.86, 0.89, 0.82]
   only_in_play = true
@@ -1071,6 +1184,84 @@ transform = { pos = [14.10, -0.05, 2.12], rot_euler = [0.0, 0.0, -34.8], scale =
 name = "SlipwayKerbSouth"
 parent = "Rig"
 transform = { pos = [14.10, -0.05, 4.68], rot_euler = [0.0, 0.0, -34.8], scale = [2.80, 0.12, 0.08] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.8
+  metallic = 0.4
+
+# ---------------------------------------------------------------------------
+# THE LADDER — the way out of the water on the side you actually fall in on
+#
+# **The measured defect.** The taught gesture is one key, and twelve degrees of
+# aim to port of it walks you past the boat's transom into open water. Round 5
+# gave that state a caption — "IN THE WATER   swim east, to the ramp at the end
+# of the rig" — and the caption was a second lie. The miss leaves the player at
+# **(-9.70, -0.70, -26.17)**: nineteen metres north of the deck's own edge and
+# twenty-six from the slipway, which is at the *east* end and descends toward
+# +X, so it is climbable only heading west from about x = +17. Holding east
+# from the miss point for sixty simulated seconds travels 114 m into empty sea
+# with the same sentence on the screen the whole way. There was no bearing that
+# worked, and the one named did not.
+#
+# The old `rig_overboard.loom` could not see it: it started the swimmer at
+# (18.0, 0.60, 3.40), four metres from the ramp's foot on the only workable
+# bearing, and asserted a four-metre swim. It is now started where the miss
+# leaves him, and that row is the one that can fail.
+#
+# So the berth side gets its own way up, at the far west end of it — 2.0 m of
+# gap cut in `RailNorthWest`, clear of the boat's transom at x = -6.5 by nearly
+# two metres. Same slope as the slipway (34.8 degrees against the controller's
+# 50) and the same reach below the surface: it ends at y = -1.80 because a
+# swimmer floats with his feet at -1.60, and a ramp that stops at the waterline
+# is a wall to anyone under it.
+#
+# **Rotated about X rather than Z**, because this one runs athwart the rig: the
+# +Z end is 2.30 m south and 1.60 m up, landing at (z = -6.60, y = 1.40) — the
+# deck's own top, with 0.40 m of overlap so there is no gap to step across.
+#
+# **And the caption stopped naming a bearing at all.** `deeper_rules.rhai` now
+# takes the nearer of the two ramps and prints the compass word for the
+# direction it lies in, from wherever the swimmer actually is. A hard-coded
+# bearing is right from one place and wrong from the rest of the sea.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Ladder"
+parent = "Rig"
+transform = { pos = [-9.30, -0.20, -8.90], rot_euler = [-34.8, 0.0, 0.0], scale = [0.85, 0.09, 2.80] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.26, 0.25, 0.23]
+  roughness = 0.95
+
+# Two stringers, 0.24 m proud and therefore under `step_height` — walked over,
+# not a rail. Same reason the slipway has them: a bare slab at 35 degrees reads
+# as a fault in the geometry and a ramp with edges reads as a ramp.
+
+[[node]]
+name = "LadderKerbWest"
+parent = "Rig"
+transform = { pos = [-10.07, -0.05, -8.90], rot_euler = [-34.8, 0.0, 0.0], scale = [0.08, 0.12, 2.80] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.8
+  metallic = 0.4
+
+[[node]]
+name = "LadderKerbEast"
+parent = "Rig"
+transform = { pos = [-8.53, -0.05, -8.90], rot_euler = [-34.8, 0.0, 0.0], scale = [0.08, 0.12, 2.80] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -1206,12 +1397,22 @@ transform = { pos = [84.0, 0.0, -20.0] }
 # `sprint` are the rod, and there is no sixth. Walk up to the hatch and
 # everything in the hold that is a fish goes below.
 #
-# It is drawn on top of `col_engine_box` — the bait box in the cockpit, local
-# x -8.40..-7.20, z +/-0.78, top at 1.14 — which is 0.50 m proud of the sole
-# and therefore a wall rather than a kerb. So you stand *beside* it, which is
-# 1.2 m from this hatch's centre and inside `RANGE`. From the helm mat's centre
-# it is 1.84 m away, which is outside it: **stowing is a walk, not something
-# that happens while you steer.**
+# **It was not a walk, and the arithmetic said so.** Round 5 drew it on top of
+# `col_engine_box` at local (-7.80, 0.0) and claimed 1.84 m from the helm mat's
+# *centre* against a `RANGE` of 2.0. The mat is not a point: `at_helm` is a
+# 3.4 x 1.75 m rectangle, its starboard edge is at z = -0.90, and the closest
+# helm position to that hatch was **0.90 m** away. So a landed fish was stowed
+# on the tick it was landed — traced on `rig_fish.loom`, `notice` went 2 -> 3 in
+# one tick and `state.infish` was 0 at every sample. The capacity rule the whole
+# round was built around held a slot for a single frame, and no assertion in
+# `scripts/green.sh` could ever see it occupied.
+#
+# It is now on the starboard side of the aft cockpit, at local (-8.30, 1.42),
+# on `col_deck_aft` (x -9.55..-6.05, z +/-2.62, top 0.64) and just forward of
+# `StepLow`. The nearest point of the helm rectangle is 2.32 m away against a
+# `RANGE` of 2.0 — **0.32 m of margin, and the margin is the feature**: you let
+# go of the wheel, cross the cockpit and put the fish below, which is three
+# seconds of doing something rather than a number that changes itself.
 #
 # Drawn only. Under a dynamic ancestor, so no static collider is baked from it
 # and the box underneath is what the capsule meets — the same rule as
@@ -1220,7 +1421,7 @@ transform = { pos = [84.0, 0.0, -20.0] }
 [[node]]
 name = "FishHold"
 parent = "Rig/Boat"
-transform = { pos = [-7.80, 1.16, 0.0], scale = [0.46, 0.03, 0.60] }
+transform = { pos = [-8.30, 0.72, 1.42], scale = [0.55, 0.08, 0.30] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
