@@ -37,6 +37,13 @@ key = "jib_vi"
 id = "3c7a5e12-8b64-4f09-a2d3-6e1b90c47f58"
 path = "../prefabs/jib_vi.loom"
 
+# The rod and its reel, from the file that owns them. `fishing_rod_bent.loom`
+# is the same chain baked at a fighting load, for a set piece.
+[[prefab]]
+key = "rod"
+id = "7f2c14a9-63d8-4e51-b0a7-2d9e5c81f430"
+path = "../prefabs/fishing_rod.loom"
+
 [[asset]]
 key = "sphere"
 id = "c92b4a68-1e30-47d5-8f6c-2a5091db7e34"
@@ -102,6 +109,36 @@ transform = { pos = [1.20, 2.30, 2.60] }
   # The only entry point in this scene that sees a key press.
   [node.components.Script]
   path = "../scripts/fishing_angler.rhai"
+
+# **The rod, in his hands.** A 26-node chain — butt, reel, S1..S24, Tip —
+# parented to the Angler, so it inherits the boat's roll and the mouse yaw
+# `apply_look` writes onto him. `pos` is angler-local: his node origin is the
+# capsule centre, feet 0.90 below it on a deck at 1.40, so y = +0.16 is a
+# butt at world 2.46 — hand height on a 1.8 m man.
+#
+# The instance is the **rest** prefab. `fishing_rod_bent.loom` is the same
+# chain at a fighting load, and swapping the key here is the whole change —
+# because a component override cannot reach a `transform` (`Transform` is
+# node syntax, not a component), so a bend has to come either from a second
+# prefab or from a per-tick `Script`. A node script can write `rotation`
+# today but cannot read `state`; when it can, one identical line on S1..S24
+# drives this off `state.stress` and neither file changes.
+[[node]]
+name = "Rod"
+parent = "Sea/Boat/Angler"
+prefab = "rod"
+transform = { pos = [0.28, 0.16, 0.10], rot_euler = [-38.0, 0.0, -18.0] }
+
+# **This scene's authored camera cannot see it, and that is a camera problem,
+# not a rod problem.** The eye is 16.4 m astern with the deckhouse between it
+# and the angler, so the rod contributes nothing to this frame. Measured at
+# 1.8 m the reel, seat rings and grips all read clearly. Making the fix means
+# either parenting the camera to the Angler — `apply_look` puts yaw on the
+# character and pitch on the eye, so that alone is a first-person rig — or
+# moving it alongside him; and either one also needs the angler turned to
+# face the sea, because at yaw 0 a character's forward is -Z, which at this
+# station points inboard at the wheelhouse. That is a decision about the
+# shot, so it is left to whoever owns the loop rather than made here.
 
 # **The lure, and it is the cheapest good moment in the build.** Authored two
 # metres up, it falls, hits the water and splashes — buoyancy, submersion and
