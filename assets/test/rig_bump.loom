@@ -1,0 +1,97 @@
+# **Coming home, and holding W into the rig anyway.**
+#
+# The demo hub with the boat twenty metres west of it, bow on, and the player
+# at the wheel. `extends`, not a copy: **two fields differ** — where the boat
+# is and where the player is — and the movement script is the shipped
+# `deeper_player.rhai`, driven by `loom sim --hold`.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS FILE EXISTS
+# ---------------------------------------------------------------------------
+#
+# `rig_drive.loom` measures her in thirty metres of open water, where nothing
+# is in the way and her trim stays inside four centimetres. Arriving is the
+# other half of every journey and it is the half with a wall in it, and that
+# half was in no gate at all. Traced here, `--hold move_z=1`, before
+# `STALL_TICKS` existed:
+#
+#   tick  120   boat y  -0.001   player y  1.681    still making way
+#   tick  300   boat y  -0.333   player y  1.194    bow on the rig
+#   tick  900   boat y  -0.691   player y  0.899
+#   tick 2400   boat y  -1.463   player y  0.111    forty seconds, still going
+#   tick 3000                    player y -0.696    swimming
+#
+# That is ADR 0063's submarining, reached at a thrust the helm calls
+# *deliberately short of the ceiling*, by holding one key against something
+# solid: the bow cannot move, the contact pitches her, body-frame thrust
+# follows the bow down, and the two feed each other.
+#
+# **The rider is not falling through the deck.** His separation from the hull's
+# origin over that whole descent is 1.601, 1.527, 1.590, 1.573 — inside seven
+# centimetres, and the aft cockpit actually *rises* as the bow buries. He is
+# riding a boat that is sinking, which is one defect and not two, and the
+# `if grounded { vy = velocity[1]; }` line in `deeper_player.rhai` is not
+# implicated.
+#
+# **It matters because it is not recoverable the way the sea is.** Let go and
+# she floats back up (y = 0.031 by tick 3600) — twenty metres from her berth,
+# against a closed rail, and nothing in this scene lets a swimmer climb aboard.
+# The rig has a slipway for the player and nothing for the boat.
+#
+# ---------------------------------------------------------------------------
+# WHAT IT MEASURES — three runs
+# ---------------------------------------------------------------------------
+#
+#   # 1. hold W into the rig for forty seconds: she stays a boat, you stay on
+#   #    her
+#   loom sim assets/test/rig_bump.loom --ticks 2400 --hold move_z=1 \
+#     --assert "Rig/Boat.y > -0.4" --assert "Rig/Player.y > 1.2"
+#
+#   # 2. and she is still there a minute later, not creeping through it
+#   loom sim assets/test/rig_bump.loom --ticks 3600 --hold move_z=1 \
+#     --assert "Rig/Boat.y > -0.4" --assert "Rig/Boat.x < -20.0" \
+#     --assert "Rig/Player.y > 1.2"
+#
+#   # 3. the limiter is a stall detector and not a speed limit: from the same
+#   #    start, in clear water astern, she makes way and keeps it
+#   loom sim assets/test/rig_bump.loom --ticks 900 --hold move_z=-1 \
+#     --assert "Rig/Boat.x < -48.0" --assert "Rig/Player.y > 1.2"
+#
+# **Run 3 is the control.** A limiter that simply closed the throttle whenever
+# `move_z` was held would pass runs 1 and 2 and would have deleted the boat.
+# Astern is also the escape from run 1's stall and is deliberately unclamped:
+# your speed is zero at the moment you first press S, so a symmetric limiter
+# would hold the throttle shut exactly when you need it.
+#
+# Measured with the limiter in: she noses on at tick 300 with a 0.33 m dip,
+# recovers to y = +0.030 by tick 600 and holds it to tick 3600, and the player
+# stands at y = 1.60 for the whole minute.
+#
+# The boat is at x = -34 on the berth's own heading, so her bow (hull +X, about
+# 9.5 m out) meets the rig's west face at x = -12 after thirteen metres — long
+# enough to be at full speed when she gets there. The player sits at boat-local
+# (-7.00, -, -1.80), the middle of `HelmMat`, the same spot `rig_drive.loom`
+# uses.
+
+[scene]
+format = 1
+id = "3d81c7b2-64a5-4f19-8e07-b21d95fa6c30"
+
+[[prefab]]
+key = "demo"
+id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
+path = "../games/deeper_demo.loom"
+
+[[node]]
+name = "Rig"
+extends = "demo"
+
+[[node]]
+name = "Boat"
+parent = "Rig"
+transform = { pos = [-34.0, 0.0, 0.0] }
+
+[[node]]
+name = "Player"
+parent = "Rig"
+transform = { pos = [-41.00, 1.62, -1.80] }

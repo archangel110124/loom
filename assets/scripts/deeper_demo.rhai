@@ -60,6 +60,32 @@ let SUPPLY = [
 
 let PLAYER = "Rig/Player";
 
+// **The one prompt in the game, and it is a place rather than a state.**
+//
+// The helm has no key to learn — you stand on the mat and W/S/A/D are the
+// boat — but a stranger at the wheel could not tell they were driving:
+// standing there at the opening yaw the whole frame is a rod holder and open
+// sea, because the mat faces her beam and the bow is ninety degrees to the
+// right. The layout answer is to berth her bow-out, which moves every pinned
+// drive number in the gate and belongs to the round that re-berths her. A line
+// of text is what a demo does in the meantime, and it also carries the one
+// thing nothing else can teach: **Space lets go of the wheel.**
+//
+// It is keyed on the drawn mat's *world* position out of `positions`, so it
+// follows her when she turns and when she pitches, and there is no second copy
+// of the helm's bounds to drift out of step with `deeper_player.rhai`'s.
+//
+// **Worded as a station and not as a readout**, deliberately: `GameRules` sees
+// no input, so it cannot know whether the player has pressed Space, and a line
+// that claimed "at the wheel" after they had let go would be lying. "THE HELM"
+// is true either way. Emitting the release as an event to close that gap would
+// mean an event every tick, which is a log flood for a caption.
+let MAT = "Rig/Boat/HelmMat";
+let MAT_RANGE = 1.35;   // horizontal. The mat is 2.6 x 1.75 m and this is a
+                        // little inside its half-diagonal, so it fires where
+                        // `deeper_player.rhai`'s box does and not before.
+let HELM_LINE = "THE HELM   W ahead  S astern  A/D wheel  SPACE hands off";
+
 let hold = if "hold" in state { state.hold } else { [] };
 
 // Nothing to do before the player exists in the position map.
@@ -106,3 +132,28 @@ for held in hold {
 if line == "" { line = "empty"; }
 
 message = "HOLD " + hold.len() + "/" + SLOTS + "   " + line;
+
+// Standing on the mat replaces the line rather than adding to it. `Hud` is one
+// string and one row; two claims sharing it would be a scrolling caption, and
+// the hold is the one thing you can check by pressing nothing at all.
+let at_the_helm = false;
+if PLAYER in positions && MAT in positions {
+    let at = positions[PLAYER];
+    let mat = positions[MAT];
+    let mdx = at[0] - mat[0];
+    let mdz = at[2] - mat[2];
+    let mdy = at[1] - mat[1];
+    // The vertical band is what stops it firing on a swimmer under her hull or
+    // on someone up on the flybridge: standing on the mat puts the capsule's
+    // centre 0.90 above it.
+    at_the_helm = mdx * mdx + mdz * mdz <= MAT_RANGE * MAT_RANGE
+        && mdy > 0.35
+        && mdy < 1.55;
+}
+if at_the_helm { message = HELM_LINE; }
+
+// **Assertable, because the caption is not.** `--assert` reads numbers, and
+// `state.at_helm` is the only way a gate can say "the player reached the
+// wheel" rather than "the player is somewhere inside a position band a
+// drifting boat could also satisfy".
+state.at_helm = if at_the_helm { 1 } else { 0 };

@@ -140,9 +140,19 @@ fi
 # gap in the berth railing, over the bulwark, onto the cockpit deck, onto the
 # helm mat, and away. `z < -11.0` is inboard of her port side deck; the y band
 # is "standing on the deck" against 2.55 on the bulwark cap and -0.70 in the sea.
+#
+# **`state.at_helm` is the claim `Rig/Player.z < -11.0` was standing in for.**
+# A position band is satisfied by a player standing anywhere in a strip of
+# cockpit, and by a boat that drifted under one; `deeper_demo.rhai` computes it
+# from the *drawn* mat's world position, so it follows her when she turns and
+# it is the same fact the HUD line prints. Run 1 pairs it with tick 60, where
+# the answer is still no.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 60 --hold move_z=1 \
+  --assert "state.at_helm == 0" >/dev/null
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 240 --hold move_z=1 \
   --assert "Rig/Player.z < -11.0" --assert "Rig/Player.y > 1.2" \
-  --assert "Rig/Player.y < 1.9" --assert "state.carried >= 1" >/dev/null
+  --assert "Rig/Player.y < 1.9" --assert "state.carried >= 1" \
+  --assert "state.at_helm == 1" >/dev/null
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
   --assert "Rig/Boat.x > 30.0" --assert "Rig/Player.y > 1.2" \
   --assert "Rig/Boat.y > -0.4" >/dev/null
@@ -180,6 +190,63 @@ fi
   --assert "Rig/Boat.z < -60.0" --assert "Rig/Boat.x > 20.0" \
   --assert "Rig/Player.y > 1.2" >/dev/null
 
+# **Space is hands off the wheel, and run 3 above is its control.**
+#
+# Standing on the mat used to make `speed` zero unconditionally: all four
+# direction keys were the boat and your legs did not exist, so the only exit
+# was jump-plus-a-direction and that direction was *simultaneously the wheel*.
+# `--hold "jump=1,move_x=1"` used to put the player at y = -0.66 by tick 400
+# and -0.700 by tick 600, twelve metres astern of a boat he had just spun.
+#
+# `hands_off` in `deeper_player.rhai` makes `jump` on the mat let go instead of
+# hop. Same key as run 3, plus Space: **-37.66 pinned forever before, -28.56
+# after** — he walks off the wheel, across the cockpit, up the boarding steps
+# and over her side. (`rig_drive` is thirty metres of open water with no quay
+# alongside, so "over her side" ends in the sea, which is what the swim clause
+# and the slipway are for. `rig_ashore` below is the same gesture with
+# somewhere to land.)
+#
+# **Run 3 is what says the wheel still exists**: identical `move_z=-1`, no
+# Space, twenty-three metres astern. Without that pair, a `hands_off` that
+# latched unconditionally would pass this and would have deleted the helm.
+"$LOOM" sim assets/test/rig_drive.loom --ticks 300 --hold "jump=1,move_z=-1" \
+  --assert "Rig/Player.z > -34.0" >/dev/null
+
+# **Getting off her on foot, with no jump — the seam round 2 left one-way.**
+#
+# The cockpit sole is 0.64 and the bulwark cap is 1.62, so walking *aboard* is
+# a 0.22 m rise the controller steps for free and walking *off* was a 0.98 m
+# climb nothing in the game mentioned. `StepLow`/`StepMid`/`StepHigh` make it
+# four risers of a quarter of a metre. **No `jump` in run 2**: the defect was
+# that leaving required a keypress nothing taught, so a gate that holds `jump`
+# cannot fail the way the game failed.
+"$LOOM" sim assets/test/rig_ashore.loom --ticks 600 \
+  --assert "Rig/Player.y > 1.2" --assert "Rig/Player.y < 1.9" \
+  --assert "Rig/Player.z < -8.0" >/dev/null
+"$LOOM" sim assets/test/rig_ashore.loom --ticks 120 --hold move_z=-1 \
+  --assert "Rig/Player.y > 2.2" --assert "Rig/Player.z > -7.0" >/dev/null
+
+# **Arriving, which is the half of every journey with a wall in it.**
+#
+# `rig_drive` measures her in open water where nothing is in the way. Hold W
+# into the rig and 1.1 MN — a thrust ADR 0063 calls comfortably short of the
+# ceiling — submarines her anyway: the bow cannot move, the contact pitches
+# her, body-frame thrust follows the bow down. She reached y = -1.46 at tick
+# 2400 and was still going, and the player was swimming by 3000, twenty metres
+# from a berth with nothing that lets a swimmer climb aboard.
+#
+# `STALL_TICKS` in `deeper_player.rhai` closes the throttle after three
+# quarters of a second of pushing without making way. Run 3 is the control a
+# blanket throttle kill would fail; `rig_drive` run 2 is the same control for
+# ahead in clear water.
+"$LOOM" sim assets/test/rig_bump.loom --ticks 2400 --hold move_z=1 \
+  --assert "Rig/Boat.y > -0.4" --assert "Rig/Player.y > 1.2" >/dev/null
+"$LOOM" sim assets/test/rig_bump.loom --ticks 3600 --hold move_z=1 \
+  --assert "Rig/Boat.y > -0.4" --assert "Rig/Boat.x < -20.0" \
+  --assert "Rig/Player.y > 1.2" >/dev/null
+"$LOOM" sim assets/test/rig_bump.loom --ticks 900 --hold move_z=-1 \
+  --assert "Rig/Boat.x < -48.0" --assert "Rig/Player.y > 1.2" >/dev/null
+
 # **Overboard, and back — the demo's promise that it contains no unrecoverable
 # state.** Run 1 is the control that makes run 2 mean anything: without it, a
 # run that ended on the deck could have ended there because the character never
@@ -199,7 +266,7 @@ fi
 cmp /tmp/loom-fight-1.json /tmp/loom-fight-2.json
 cmp /tmp/loom-fight-2.json /tmp/loom-fight-3.json
 rm -f /tmp/loom-fight-1.json /tmp/loom-fight-2.json /tmp/loom-fight-3.json
-echo "gameplay: 9 scenes asserted, fight byte-identical across 3 processes"
+echo "gameplay: 11 scenes asserted, fight byte-identical across 3 processes"
 
 # ---------------------------------------------------------------------------
 # 7. Work per frame. **Nothing above this line can see a frame get slower.**

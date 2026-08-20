@@ -1,4 +1,4 @@
-# **DEEPER — the demo. Round 2: the Rig, and a boat you drive off it.**
+# **DEEPER — the demo. Round 3: a boat you can also get off.**
 #
 #   loom run assets/games/deeper_demo.loom
 #   loom render assets/games/deeper_demo.loom --out /tmp/rig.png
@@ -12,8 +12,10 @@
 #
 # There are four things in this demo and no fifth: **a hub, a boat you can
 # drive, fishing you can do, and four slots to carry things in.** Round 1 built
-# the hub and stood the player on it. Round 2 makes the boat boardable and
-# drivable, and makes going into the water something you come back from.
+# the hub and stood the player on it. Round 2 made the boat boardable and
+# drivable, and going into the water something you come back from. **Round 3 is
+# the seam in both directions** — off her on foot, off the wheel on foot, and
+# arriving at a quay without driving your own hull under it.
 #
 # ---------------------------------------------------------------------------
 # THE CONTROLS, IN FULL
@@ -21,8 +23,18 @@
 #
 #   on the rig      W A S D walk, Shift sprint, Space jump
 #   on `HelmMat`    W ahead, S astern, A wheel to port, D wheel to starboard,
-#                   nothing pressed is neutral and she coasts to a stop
+#                   **Space is hands off the wheel** and gives you your legs
+#                   back; nothing pressed is neutral and she coasts to a stop
 #   in the water    W A S D swim, at under half walking pace
+#
+# **Space is the only control in this scene that is not a place**, and it is
+# here because the alternative was worse rather than because a fifth binding
+# was wanted. Round 2 made `speed` zero on the mat, so your legs did not exist
+# and the only exit was jump-plus-a-direction — a direction that was
+# simultaneously the wheel, which put the player in the sea twelve metres
+# astern of a boat he had just spun. It spends nothing: `fire` is still
+# untouched and belongs to fishing, and `jump` still jumps everywhere in the
+# scene except on this one 1.3 x 0.9 m patch of deck.
 #
 # **The helm is a place, not a keybinding**, and the whole scene is laid out so
 # that one fact does not have to be explained. The player spawns at x = -3.70
@@ -126,14 +138,31 @@
 #   not exist. What is asserted is the pair either side of it: zero thrust
 #   leaves her exactly where she is (`rig_drive` run 1), and stepping off the
 #   mat writes zero thrust every tick (`deeper_player.rhai`'s `else if aboard`).
-# * **A player who jumps off the boat while she is under way leaves her
-#   running.** The helm only writes thrust while somebody is standing on the
-#   body, so there is nobody to write the zero. In life that is correct and in a
-#   demo it is a way to lose your boat. The fix is a rules-script dead man's
-#   handle, which is a fifth thing.
+# * ~~A player who jumps off the boat while she is under way leaves her
+#   running.~~ **Not reproducible, and this bullet was wrong.** Leaving the mat
+#   makes `at_helm` false while `aboard` stays true, so `else if aboard` in
+#   `deeper_player.rhai` writes the zero on the very next tick — it was already
+#   correct when this was written. Measured on `rig_drive` with
+#   `--hold "jump=1,move_z=1"`: x = 3.0002 at tick 300, 2.9998 at 900, 3.0004
+#   at 1800, from a berth at 3.0. **No dead man's handle is needed and none is
+#   being built.**
+# * **You cannot see where you are going from the helm.** Standing on the mat
+#   at the opening yaw the frame is a rod holder and open sea: the mat faces
+#   her beam and the bow is ninety degrees to the right, because she is berthed
+#   alongside and her long axis is world X while yaw 0 looks down -Z. It cannot
+#   be fixed by moving the mat — nothing on this boat is at -Z of the cockpit
+#   except the port bulwark — only by berthing her bow-out, which moves every
+#   pinned drive number in `scripts/green.sh` and is the round that re-berths
+#   her. What round 3 does instead is a caption: `deeper_demo.rhai` swaps the
+#   `Hud` line for `THE HELM  W ahead  S astern  A/D wheel  SPACE hands off`
+#   whenever the player is standing on the drawn mat, which also carries the
+#   one control in the game that a place cannot teach.
 # * **No fishing yet.** `assets/games/fishing.loom` has the loop; it is not
-#   wired in here, and `deeper_demo.rhai` currently holds the scene's one
-#   `GameRules` slot that `fishing_fight.rhai` will also want.
+#   wired in here, and `deeper_demo.rhai` holds the scene's one `GameRules`
+#   slot that `fishing_fight.rhai` will also want. **That collision is now a
+#   load-time refusal** (`duplicate_game_rules`) rather than a warning line and
+#   a silently absent script — see `play.rs`. It does not merge them; it makes
+#   the day they collide loud instead of green.
 # * **The four slots fill and nothing empties them.** Walking up to a supply
 #   puts it in the hold; there is no way to put it back and no reason to want
 #   one until there is a fish to make room for. Selling is not built.
@@ -882,3 +911,106 @@ transform = { pos = [-7.30, 0.63, -1.775], scale = [1.30, 0.02, 0.875] }
   albedo = [0.62, 0.44, 0.12]
   roughness = 0.7
   metallic = 0.2
+
+# ---------------------------------------------------------------------------
+# THE BOARDING STEPS — the way *off* her, and the hole round 2 left
+#
+# Round 2 shipped a boat you could walk onto and could not walk off. The
+# geometry was one-way and the three numbers say exactly why:
+#
+#   rig deck top          1.40      world, hull at rest
+#   bulwark cap top       1.62      `col_bulwark_aft_stbd`, y 0.96 +/- 0.66
+#   cockpit sole top      0.64      `col_deck_aft`, y 0.49 +/- 0.15
+#
+# Rig -> boat is a 0.22 m rise against `step_height = 0.25`, so you walk it
+# without noticing it happened. Boat -> rig is a **0.98 m** climb, four times
+# the step, so you cannot — traced before these treads existed, holding "toward
+# the rig" from the cockpit: 0.70 m of travel and then a dead stop at
+# z = -8.25 held for fourteen seconds, the capsule pressed against the inside
+# of the bulwark. With `jump` held the same run reaches the rig in 240 ticks,
+# and nothing anywhere says so. **A door you have to guess is not a door.**
+#
+# **Three treads, each riser one the controller will step.** 0.64 -> 0.88 ->
+# 1.13 -> 1.38 -> 1.62 is four rises of 0.24 / 0.25 / 0.25 / 0.24, every one
+# inside `step_height`. Boxes rather than a ramp because a ramp is one
+# `rot_euler` whose sign convention has to be right, and a tread is a number
+# you can subtract from its neighbour and check by reading.
+#
+# **They sit in the boarding lane** — boat-local x -8.70 to -6.50, hard against
+# the starboard bulwark's inner face at z = 2.56. `col_engine_box` (the bait
+# box) spans x -8.40..-7.20 and z -0.78..0.78, so it shares x with these and
+# never z, and `HelmMat` is at z -2.65..-0.90, four metres further forward.
+#
+# **2.2 m wide rather than the 1.2 m the walk actually uses**, because the lane
+# is narrow and this is the cheapest metre of forgiveness in the scene. Held
+# from the spawn with a lateral drift, walking forward the whole way:
+#
+#   move_x    +0.5  +0.3  +0.2  +0.1  +0.05    0   -0.05  -0.1  -0.2  -0.3
+#   boards?     no    no    no    no     no  yes     yes   yes   part    no
+#
+# **Both edges of that band fail softly and differently.** Drift east and
+# `RailNorthEast` stops you *on the rig*, which is why that rail is staying
+# where it is even though it is only 0.25 m off the player's shoulder: a rail
+# you bump into is a better boundary than a hole you fall through, and moving
+# it east would replace one with the other. Drift west and you walk past her
+# aft end into the sea, which is what the swim clause and the slipway are for.
+# Neither is a lost game; both are a second try. Widening the treads does not
+# change that band — it is set by the cockpit's own x extent — but it does mean
+# a player who is *nearly* in the lane still lands on a stair rather than on
+# the bulwark cap.
+#
+# **Each carries its own `BoxCollider`, and that is not decoration.** A
+# renderable node under a *dynamic* ancestor is not given a static collider
+# from its drawn bounds — that is exactly what makes `HelmMat` paint instead of
+# a kerb — so a tread that is only drawn is a tread you fall through. Same rule
+# stated twice in this file, and the likeliest thing to get wrong when a fourth
+# one is wanted.
+#
+# They improve boarding as a side effect: you used to drop a metre into the
+# cockpit and now you walk down.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "StepLow"
+parent = "Rig/Boat"
+transform = { pos = [-7.60, 0.76, 1.81], scale = [1.10, 0.12, 0.15] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.BoxCollider]
+  half_extents = [1.10, 0.12, 0.15]
+
+  [node.components.Material]
+  albedo = [0.31, 0.27, 0.22]
+  roughness = 0.85
+
+[[node]]
+name = "StepMid"
+parent = "Rig/Boat"
+transform = { pos = [-7.60, 0.885, 2.11], scale = [1.10, 0.245, 0.15] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.BoxCollider]
+  half_extents = [1.10, 0.245, 0.15]
+
+  [node.components.Material]
+  albedo = [0.31, 0.27, 0.22]
+  roughness = 0.85
+
+[[node]]
+name = "StepHigh"
+parent = "Rig/Boat"
+transform = { pos = [-7.60, 1.01, 2.41], scale = [1.10, 0.37, 0.15] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.BoxCollider]
+  half_extents = [1.10, 0.37, 0.15]
+
+  [node.components.Material]
+  albedo = [0.31, 0.27, 0.22]
+  roughness = 0.85

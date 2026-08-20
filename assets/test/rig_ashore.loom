@@ -1,0 +1,93 @@
+# **Getting off her, on foot, with nothing held but a direction.**
+#
+# The demo hub with the boat in her berth and the player standing in the aft
+# cockpit at the foot of the boarding steps. `extends`, not a copy: the rig,
+# the rails, the supplies, the boat, her decks, the helm mat and the steps all
+# come from `assets/games/deeper_demo.loom`. **One field differs** — where the
+# Player starts — and the movement script is the shipped `deeper_player.rhai`,
+# unmodified, driven by `loom sim --hold`, which writes the same
+# `Runner::input` a human's keyboard writes.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS FILE EXISTS
+# ---------------------------------------------------------------------------
+#
+# Round 2 shipped a boat that could be boarded and could not be left, and every
+# assertion in the gate agreed the player was aboard — because every one of
+# them asked `Rig/Player.y > 1.2` at a moment when the answer was yes. **"Still
+# on the boat" and "able to get off the boat" are different claims and only the
+# first one was being made.**
+#
+# The geometry was one-way, and three numbers say why:
+#
+#   rig deck top          1.40
+#   bulwark cap top       1.62      `col_bulwark_aft_stbd`, y 0.96 +/- 0.66
+#   cockpit sole top      0.64      `col_deck_aft`, y 0.49 +/- 0.15
+#
+# Rig -> boat is a 0.22 m rise against `step_height = 0.25`, so walking aboard
+# is free and nobody notices it happened. Cockpit -> cap is a 0.98 m climb,
+# four times the step. Traced from this spawn before `StepLow`/`StepMid`/
+# `StepHigh` existed, holding this same key:
+#
+#   tick   60   z = -8.259
+#   tick  120   z = -8.253
+#   tick  240   z = -8.249
+#   tick  900   z = -8.253      <- 0.70 m of travel, then fourteen seconds of
+#                                  nothing, pressed against the inside of the
+#                                  bulwark
+#
+# With `jump` also held the same run reached the rig deck in 240 ticks. **An
+# exit you have to guess is not an exit**, and it was three metres from a
+# transom gate that is drawn and walled shut.
+#
+# ---------------------------------------------------------------------------
+# WHAT IT MEASURES — two runs, and the first is what makes the second mean
+# something
+# ---------------------------------------------------------------------------
+#
+#   # 1. standing in the cockpit, hands off: you stay in the cockpit
+#   loom sim assets/test/rig_ashore.loom --ticks 600 \
+#     --assert "Rig/Player.y > 1.2" --assert "Rig/Player.y < 1.9" \
+#     --assert "Rig/Player.z < -8.0"
+#
+#   # 2. walk toward the rig, **no jump**: up the steps and ashore
+#   loom sim assets/test/rig_ashore.loom --ticks 120 --hold move_z=-1 \
+#     --assert "Rig/Player.y > 2.2" --assert "Rig/Player.z > -7.0"
+#
+# Without run 1, a run that ended on the rig deck could have ended there
+# because the player was never on the boat to begin with. `1.2 < y < 1.9` is
+# the cockpit sole; `y > 2.2` is `rig_walk.loom`'s own number for the rig deck
+# and cannot be reached from the sole without climbing.
+#
+# **No `jump` in run 2, deliberately.** The whole defect was that leaving
+# required a keypress nothing taught, so a gate that holds `jump` cannot fail
+# the way the game failed. Measured with the steps in: on the rig deck by tick
+# 60 (y = 2.340, z = -5.461), across the hub and stopped at the bench by tick
+# 180.
+#
+# The spawn is boat-local (-7.30, -, 1.50) — the boarding lane, a pace inboard
+# of `StepLow`, four metres aft of nothing and clear of `col_engine_box`. The
+# berth puts that at world (-4.30, -, -8.95), and 1.70 is a 6 cm drop onto the
+# sole on the first tick, which is how every character scene here starts: it
+# proves the floor is there rather than assuming it. Facing is the default -Z,
+# so `move_z=-1` is "walk toward the rig", which is +Z and starboard.
+
+[scene]
+format = 1
+id = "5f2c81a4-7b39-4e60-9d18-c3a70e6b5142"
+
+[[prefab]]
+key = "demo"
+id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
+path = "../games/deeper_demo.loom"
+
+[[node]]
+name = "Rig"
+extends = "demo"
+
+[[node]]
+name = "Player"
+parent = "Rig"
+
+  # The one field this file changes.
+  transform = { pos = [-4.30, 1.70, -8.95] }

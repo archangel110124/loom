@@ -118,6 +118,49 @@ let ASTERN = 500000.0;   // less than half. A screw astern is inefficient in
                          // life and a stern that digs in is the same failure
                          // as a bow that does, so this end of the range gets
                          // the wider margin.
+// **The bollard-pull limiter, and it is the only thing standing between the
+// demo and a lost boat.**
+//
+// 1.1 MN is under ADR 0063's wall *in open water*. Against an obstacle it is
+// not: the bow cannot move, the contact pitches her, body-frame thrust follows
+// the bow down, and the two feed each other. Traced with her bow on the rig's
+// west end, `--hold move_z=1`, before this existed:
+//
+//   tick  120   boat y  -0.001   player y  1.681
+//   tick  300   boat y  -0.333   player y  1.194
+//   tick  900   boat y  -0.691   player y  0.899
+//   tick 2400   boat y  -1.463   player y  0.111
+//   tick 3000   player y -0.696                     <- swimming
+//
+// **The rider is not sinking through the deck** — his separation from the
+// hull's origin stays inside 7 cm the whole way down (1.601, 1.527, 1.590,
+// 1.573) and the aft cockpit even rises as the bow digs in. He rides a boat
+// that submarines, which is one bug and not two.
+//
+// It is worth fixing because it is not recoverable in the way the sea is. She
+// pops back up when you let go (y = 0.031 at tick 3600) — twenty metres west
+// of her berth, against a closed rail, with nothing in this scene that lets a
+// swimmer climb aboard. The rig has a slipway for the player and nothing for
+// the boat.
+//
+// So: **if she is commanded ahead and is not making way, the throttle goes to
+// zero.** A skipper pressed on a quay does not hold full ahead, and neither
+// does this. It is measured from the rider's own world position, because at
+// the helm his legs are dead (`speed = 0.0`) and his motion *is* hers — no new
+// engine reading, no readback, and the one place in the script that already
+// knows the answer.
+//
+// **Ahead only.** Clamping astern as well deadlocks the escape: your speed is
+// zero when you first press S to back off, so the counter would still be
+// running and the throttle would stay shut. Astern is 500 kN, less than half,
+// and it is the way out of this rather than a second way into it.
+let STALL_SPEED = 0.35;  // m/s. She passes this within a handful of ticks from
+                         // rest at 25 m/s/s of unopposed acceleration, so a
+                         // standing start never trips it.
+let STALL_TICKS = 45;    // three quarters of a second below that speed with
+                         // the throttle open. Long enough that a wave or a
+                         // hard turn cannot close the throttle; short enough
+                         // that the bow has not yet buried itself.
 let WHEEL = 1300000.0;   // newton-metres of yaw. The hull's yaw inertia is
                          // about 1.5e6 kg m^2 and the pontoons damp the
                          // rotation, so this is a terminal rate, not an
@@ -156,17 +199,65 @@ if wish_len > 1.0 {
 // ---------------------------------------------------------------------------
 
 let aboard = stand_node == HELM_NODE;
-let at_helm = aboard
+let on_mat = aboard
     && stand_local[0] > HELM_X_MIN
     && stand_local[0] < HELM_X_MAX
     && stand_local[2] > HELM_Z_MIN
     && stand_local[2] < HELM_Z_MAX;
+
+// ---------------------------------------------------------------------------
+// **Space is hands off the wheel**, and it is the only way off the mat that is
+// not a way into the sea.
+//
+// Standing on the mat used to make `speed` zero unconditionally, so all four
+// direction keys were the boat and your legs did not exist. The one gesture
+// left for leaving was jump-plus-a-direction — and that direction was
+// *simultaneously the wheel*. Traced on `rig_drive.loom` with
+// `--hold "jump=1,move_x=1"`: airborne at tick 60, y = -0.66 by tick 400,
+// y = -0.700 and 12 m astern by tick 600. **The only exit threw you overboard
+// while spinning your boat.** Astern instead (`jump=1,move_z=-1`) merely
+// stranded you against the bulwark.
+//
+// So the mat gets a release. `jump` on the mat does not jump — it lets go, and
+// your legs come back on the same tick. Walk off and the latch clears, so
+// stepping back on takes the helm again. No timer: leaving the box *is* the
+// reset, which means the state cannot be stuck on and cannot expire under you.
+//
+// It costs nothing that was spent. `fire` is still untouched and belongs to
+// fishing; `jump` still jumps everywhere in the scene except on this 1.3 x
+// 0.9 m patch of deck, where holding on to something is the truthful thing for
+// a person at a wheel to be doing anyway.
+let hands_off = if "hands_off" in memory { memory.hands_off } else { false };
+if !on_mat { hands_off = false; }
+if on_mat && jump { hands_off = true; }
+memory.hands_off = hands_off;
+
+let at_helm = on_mat && !hands_off;
+
+// How fast the deck under his feet is actually travelling, from his own world
+// position one tick to the next. Written every tick whether or not he is at
+// the wheel, so the delta never spans a gap; read only when he is, which is
+// the only time it is his boat's speed rather than his legs'.
+let deck_speed = 0.0;
+if "helm_px" in memory {
+    let dpx = position[0] - memory.helm_px;
+    let dpz = position[2] - memory.helm_pz;
+    deck_speed = (dpx * dpx + dpz * dpz).sqrt() / dt;
+}
+memory.helm_px = position[0];
+memory.helm_pz = position[2];
+
+let stalled = if "stalled" in memory { memory.stalled } else { 0 };
+if at_helm && move_z > 0.0 && deck_speed < STALL_SPEED { stalled += 1; } else { stalled = 0; }
+memory.stalled = stalled;
 
 if at_helm {
     // The bow is the hull's own +X, so ahead is +X in the body frame and the
     // host rotates it. Nothing here knows or needs to know which way she is
     // pointing.
     let throttle = if move_z >= 0.0 { move_z * AHEAD } else { move_z * ASTERN };
+    // Pressed against something and still pushing. See `STALL_TICKS`.
+    if stalled > STALL_TICKS { throttle = 0.0; }
     helm_force = [throttle, 0.0, 0.0];
     // **Negative Y for a turn to starboard.** A rotation about +Y takes +X
     // toward -Z, and this hull's starboard side is +Z, so pressing D — the
@@ -261,7 +352,13 @@ if swimming {
     vy = (FLOAT_Y - position[1]) * FLOAT_RATE;
 }
 
-if !swimming && airborne_for <= COYOTE_TICKS && jump_buffered <= BUFFER_TICKS {
+// **`!on_mat`, not `!at_helm`.** On the mat `jump` is the helm release and
+// must not also be a hop: a hop off a deck moving at 3 m/s lands you a metre
+// aft of where you left, which on this boat is the transom. Once released you
+// are still standing in the box with your legs live, and pressing Space again
+// re-latches a flag that is already set rather than launching you — so the one
+// patch of deck where a jump is dangerous is the one patch that has none.
+if !on_mat && !swimming && airborne_for <= COYOTE_TICKS && jump_buffered <= BUFFER_TICKS {
     vy = JUMP_SPEED;
     // Spend both, or the grace period fires again next tick and the character
     // climbs the air.
