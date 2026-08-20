@@ -1,0 +1,62 @@
+# The coral part alone — the rig that found the inverted normals, kept as the
+# regression for them.
+#
+# The gleamsprat shipped from Blender with the winding and `vn` of its coral
+# part pointing *inward* over most of its surface, and Loom drew it pure black.
+# That is worth knowing as a shape of bug, because black is not what an
+# inside-out mesh usually looks like: diffuse goes to zero because N·L flips
+# sign, and **ambient goes to zero as well**, because `ambientVisibility`
+# traces its eight rays around the shading normal — point that into the body
+# and every one of them hits the body. Losing both light sources at once reads
+# as a material that was never applied, which is where two hours could go.
+#
+# The winding was also *mixed* — the intake ring was correct while the frill
+# was not — so a blanket flip fixed the frill and broke the ring, and the
+# modeller's whole-mesh signed-volume check passed the whole time. One large
+# inverted shell plus one small correct one still sums positive.
+# `normals_make_consistent(inside=False)` decides per shell and is the fix.
+#
+# Kept as a scene because the failure is invisible in Blender, invisible in
+# `loom validate`, and invisible in any still that does not contain this part.
+[scene]
+format = 1
+id = "3a1cbe57-2d94-4f80-9e63-70b8a4c9f512"
+
+[[asset]]
+key = "gleamsprat_coral"
+id = "d5e35506-95ac-420c-b5bf-36e5b831f1f7"
+path = "../meshes/gleamsprat_coral.obj"
+
+[[node]]
+name = "Rig"
+
+  [node.components.Environment]
+  sun_direction = [0.35, 0.55, 0.75]
+  sun_strength = 1.4
+  sun_color = [1.0, 1.0, 1.0]
+  ambient = 0.55
+  sky_zenith = [0.16, 0.34, 0.58]
+  sky_horizon = [0.66, 0.74, 0.78]
+  fog_density = 0.004
+  fog_falloff = 0.05
+
+[[node]]
+name = "Coral"
+parent = "Rig"
+transform = { pos = [0.0, 0.0, 0.0], rot_euler = [0.0, 90.0, 0.0], scale = [10.0, 10.0, 10.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "gleamsprat_coral" }
+
+  [node.components.Material]
+  albedo = [0.97, 0.55, 0.48]
+  metallic = 0.0
+  roughness = 0.85
+
+[[node]]
+name = "Camera"
+parent = "Rig"
+transform = { pos = [0.0, 0.0, 2.6], rot_euler = [0.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 45.0

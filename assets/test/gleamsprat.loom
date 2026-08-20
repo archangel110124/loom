@@ -1,0 +1,264 @@
+# The gleamsprat, in the engine that has to draw it.
+#
+# The creature's whole identity is specular: a chrome shell with one small
+# matte coral part. That is a claim about *rendering*, so a Blender turntable
+# cannot settle it — Cycles gives a mirror a full studio to reflect and Loom
+# does not. Loom's TLAS holds meshes only (ADR 0019), so a gleamsprat reflects
+# the sky, the posts and its neighbours, and **it does not reflect the water it
+# is swimming in**. This scene is built to show exactly that difference: the
+# posts exist so the mirror has something to be a mirror *of*, and the water is
+# here so the absence of it in the reflection is visible rather than theoretical.
+#
+# Two meshes rather than one because Loom colours per node and never reads the
+# `.mtl`. Neither file carries a `g`/`o` tag, so `file.obj#Group` cannot be
+# typed against them and `loom_asset`'s recentring branch can never fire — the
+# defect that took the boat apart. They share an origin at the nose tip, so the
+# two children sit at identity and only the parent ever moves.
+[scene]
+format = 1
+id = "2e253013-8b70-4ccd-a562-9f1d6b00301a"
+
+[[asset]]
+key = "gleamsprat_chrome"
+id = "64281021-45d8-4f8c-ad11-796a1b05a0d3"
+path = "../meshes/gleamsprat_chrome.obj"
+
+[[asset]]
+key = "gleamsprat_coral"
+id = "d5e35506-95ac-420c-b5bf-36e5b831f1f7"
+path = "../meshes/gleamsprat_coral.obj"
+
+[[node]]
+name = "Lagoon"
+
+  # Bright and high, because a mirror is lit by what surrounds it rather than
+  # by its own albedo. A dim sky renders chrome as flat grey and says nothing
+  # about the model.
+  [node.components.Environment]
+  sun_direction = [0.35, 0.55, 0.75]
+  sun_strength = 1.4
+  sun_color = [1.0, 0.96, 0.88]
+  ambient = 0.55
+  sky_zenith = [0.16, 0.34, 0.58]
+  sky_horizon = [0.66, 0.74, 0.78]
+  fog_density = 0.004
+  fog_falloff = 0.05
+
+[[node]]
+name = "Water"
+parent = "Lagoon"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+  density = 1025.0
+
+# Three posts. They are not scenery: they are the only thing in the scene
+# with a silhouette the chrome can pick up, and without them the "is it a
+# mirror or is it grey plastic" question has no evidence either way.
+[[node]]
+name = "PostNear"
+parent = "Lagoon"
+transform = { pos = [-0.30, 0.07, -0.62], scale = [0.012, 0.07, 0.012] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.28, 0.22, 0.18]
+  roughness = 0.85
+
+[[node]]
+name = "PostFar"
+parent = "Lagoon"
+transform = { pos = [0.34, 0.08, -0.78], scale = [0.012, 0.08, 0.012] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.24, 0.19]
+  roughness = 0.85
+
+[[node]]
+name = "PostBack"
+parent = "Lagoon"
+transform = { pos = [0.02, 0.06, -1.20], scale = [0.012, 0.06, 0.012] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.26, 0.21, 0.17]
+  roughness = 0.85
+
+# ---------------------------------------------------------------- hero fish
+#
+# Rotated 90° about Y so the nose (authored at +Z) points +X and the animal is
+# broadside to a camera sitting on +Z. Turning the fish rather than the camera
+# keeps the camera on the same simple axis every other test scene uses.
+[[node]]
+name = "Hero"
+parent = "Lagoon"
+transform = { pos = [0.0, 0.13, 0.0], rot_euler = [0.0, 90.0, 0.0] }
+
+  [[node]]
+  name = "HeroBody"
+  parent = "Lagoon/Hero"
+
+    [node.components.MeshRenderer]
+    mesh = { asset = "gleamsprat_chrome" }
+
+    # roughness 0.15, and it is the load-bearing number in the whole asset.
+    # Below 0.10 a mirror reads as a bathroom fitting; this is *wet* chrome.
+    [node.components.Material]
+    albedo = [0.92, 0.94, 0.96]
+    metallic = 1.0
+    roughness = 0.15
+
+  [[node]]
+  name = "HeroTrim"
+  parent = "Lagoon/Hero"
+
+    # Coral-pink and matte is a shell's siphon. Red, dark or glossy is a
+    # wound, which is a different creature in a different zone entirely.
+    [node.components.MeshRenderer]
+    mesh = { asset = "gleamsprat_coral" }
+
+    [node.components.Material]
+    albedo = [0.97, 0.55, 0.48]
+    metallic = 0.0
+    roughness = 0.85
+
+# ------------------------------------------------------------------- school
+#
+# Four more at increasing range, so one frame carries the distance ramp the
+# Blender contact sheet had to fake with a montage. The yaw of each is
+# different because a school that agrees about its heading is the unison-sway
+# failure grass already paid for once.
+[[node]]
+name = "FishA"
+parent = "Lagoon"
+transform = { pos = [-0.44, 0.11, -0.42], rot_euler = [0.0, 104.0, -3.0] }
+
+  [[node]]
+  name = "FishABody"
+  parent = "Lagoon/FishA"
+
+    [node.components.MeshRenderer]
+    mesh = { asset = "gleamsprat_chrome" }
+
+    [node.components.Material]
+    albedo = [0.92, 0.94, 0.96]
+    metallic = 1.0
+    roughness = 0.15
+
+  [[node]]
+  name = "FishATrim"
+  parent = "Lagoon/FishA"
+
+    [node.components.MeshRenderer]
+    mesh = { asset = "gleamsprat_coral" }
+
+    [node.components.Material]
+    albedo = [0.97, 0.55, 0.48]
+    metallic = 0.0
+    roughness = 0.85
+
+[[node]]
+name = "FishB"
+parent = "Lagoon"
+transform = { pos = [0.52, 0.10, -0.70], rot_euler = [0.0, 72.0, 2.0] }
+
+  [[node]]
+  name = "FishBBody"
+  parent = "Lagoon/FishB"
+
+    [node.components.MeshRenderer]
+    mesh = { asset = "gleamsprat_chrome" }
+
+    [node.components.Material]
+    albedo = [0.92, 0.94, 0.96]
+    metallic = 1.0
+    roughness = 0.15
+
+  [[node]]
+  name = "FishBTrim"
+  parent = "Lagoon/FishB"
+
+    [node.components.MeshRenderer]
+    mesh = { asset = "gleamsprat_coral" }
+
+    [node.components.Material]
+    albedo = [0.97, 0.55, 0.48]
+    metallic = 0.0
+    roughness = 0.85
+
+[[node]]
+name = "FishC"
+parent = "Lagoon"
+transform = { pos = [-0.18, 0.09, -1.05], rot_euler = [0.0, 96.0, 0.0] }
+
+  [[node]]
+  name = "FishCBody"
+  parent = "Lagoon/FishC"
+
+    [node.components.MeshRenderer]
+    mesh = { asset = "gleamsprat_chrome" }
+
+    [node.components.Material]
+    albedo = [0.92, 0.94, 0.96]
+    metallic = 1.0
+    roughness = 0.15
+
+  [[node]]
+  name = "FishCTrim"
+  parent = "Lagoon/FishC"
+
+    [node.components.MeshRenderer]
+    mesh = { asset = "gleamsprat_coral" }
+
+    [node.components.Material]
+    albedo = [0.97, 0.55, 0.48]
+    metallic = 0.0
+    roughness = 0.85
+
+[[node]]
+name = "FishD"
+parent = "Lagoon"
+transform = { pos = [0.30, 0.08, -1.55], rot_euler = [0.0, 84.0, 0.0] }
+
+  [[node]]
+  name = "FishDBody"
+  parent = "Lagoon/FishD"
+
+    [node.components.MeshRenderer]
+    mesh = { asset = "gleamsprat_chrome" }
+
+    [node.components.Material]
+    albedo = [0.92, 0.94, 0.96]
+    metallic = 1.0
+    roughness = 0.15
+
+  [[node]]
+  name = "FishDTrim"
+  parent = "Lagoon/FishD"
+
+    [node.components.MeshRenderer]
+    mesh = { asset = "gleamsprat_coral" }
+
+    [node.components.Material]
+    albedo = [0.97, 0.55, 0.48]
+    metallic = 0.0
+    roughness = 0.85
+
+# The fish is 0.16 m long, so the camera is 0.5 m away and everything about
+# this framing is small. `fov_y` is narrow for the same reason: a wide lens at
+# half a metre distorts a 16 cm animal into a caricature of itself.
+[[node]]
+name = "Camera"
+parent = "Lagoon"
+transform = { pos = [0.0, 0.20, 0.50], rot_euler = [-8.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 40.0
