@@ -68,7 +68,11 @@ express. Every GPU-stateful path in the engine (the raindrop buffer, the
 particle pool) is licensed by that property, and until this existed it had been
 checked by hand once, on one GPU.
 
-`scripts/green.sh` runs all five. Check 4 is S1 of the implementation order and
+`scripts/green.sh` runs all five, **and two CLI blocks the five do not cover**: §6 asserts six
+gameplay scenes with `loom sim --assert` (nothing above it has ever run a game) and §7 asserts that
+`cave`'s `Volume::bake` count does not grow with its frame count (nothing above it can see a frame
+get slower — that regression moves no pixel and no hash, only the clock). Both use the release
+binary and together cost under two seconds. Check 4 is S1 of the implementation order and
 is new: until it existed, "golden images" was aspirational and every render in
 this project was verified by a human opening the PNG. It renders eight scenes
 chosen for coverage of *rendering paths* — mesh, bindless textures, voxels,
@@ -371,17 +375,23 @@ change, so your edits appear live. Two consequences:
 > **The offscreen harness's per-frame cost is the PNG encoder**, not the engine, and GPU readback is
 > only 0.61 ms of it. It never measured the engine in either direction. The old model here — "~10 ms
 > fixed plus ~11 ms per megapixel" — is **wrong and was never a per-megapixel constant**: deflate
-> cost is a function of image entropy, not area. Measured end to end on `lanternhead` at 1920x1080,
-> `--frames 11 --spin 0 --step 0`, quiet box, min of 3, marginal frame:
+> cost is a function of image entropy, not area. Measured on `lanternhead` at 1920x1080, quiet box
+> (load 0.6–1.2), min of 3, as `(t(--frames 41) − t(--frames 1)) / 40` with `--spin 0 --step 0`:
 >
->     Balanced (png's default, what shipped)   385 ms/frame   2.28 MB
->     Fast (what ships now)                     19 ms/frame   2.90 MB
->     Fastest                                   16 ms/frame   3.90 MB
+>     Balanced (png's default, what shipped)   402 ms/frame   2,279,868 B
+>     Fast (what ships now)                     13.6 ms/frame  2,903,003 B
+>     Fastest                                   11.6 ms/frame  3,903,850 B
 >
-> So `Fast` is 20x the default for 27% more bytes, and `Fastest` buys a further 3 ms for another
-> megabyte — which is why the encoder is set to `Fast` in `renderer.rs`. PNG is lossless at every
-> level, so none of this moves a pixel: `loom compare --channel 0 --fraction 0 --worst 0` reports
-> 0 differing pixels of 2,073,600 between a `Balanced` and a `Fast` render of the same frame.
+> So `Fast` is **30x** the default for 27% more bytes, and `Fastest` buys a further 2 ms/frame for
+> another megabyte — which is why the encoder is set to `Fast` in `renderer.rs`. PNG is lossless at
+> every level, so none of this moves a pixel: `loom compare --channel 0 --fraction 0 --worst 0`
+> reports 0 differing pixels of 2,073,600 between a `Balanced` and a `Fast` render of the same frame.
+>
+> **Forty frames rather than ten, and that is the instrument, not the result.** The ten-frame form
+> divides one binary's run-to-run spread by ten, and at ~14 ms/frame the spread *is* most of the
+> answer: three honest attempts at it produced 8.4, 15.4 and 19 ms/frame for the same binary. Byte
+> counts are exact at any frame count — they are the half of this table to quote. Milliseconds this
+> small need the longer lever.
 >
 > **Adding a rendering path means adding a scene to `SCENES` and `GOLDEN`.** `meadow` was missing for
 > two slices and `grass_slope` for one, and in both cases the gate reported a full pass without ever

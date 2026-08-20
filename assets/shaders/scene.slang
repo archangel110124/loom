@@ -301,8 +301,12 @@ struct Push {
     // ground turns black and a stray quad covers a third of the screen, with
     // no validation message anywhere.
     ParticleInstance* particles;
-    // This frame's grass blades. The block is at 124 of its 128 bytes with
-    // this, which is why the wind parameters live in the environment buffer.
+    // This frame's grass blades. The block is at 116 of its 128 bytes with
+    // this — 64 + 48 + 4, padded to 120 — which is why the wind parameters live
+    // in the environment buffer. It is *not* full: one more pointer fits, at
+    // 124 padded to exactly 128. This line used to say 124 and ADR 0021
+    // deferred a whole feature on it; the Rust half was corrected and this half
+    // was not, which is the hazard of a layout described twice.
     GrassBlade* grass;
     // Index of this draw's first object.
     //

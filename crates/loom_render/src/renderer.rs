@@ -3194,15 +3194,23 @@ impl Renderer {
         let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), self.width, self.height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
-        // **`Balanced` is `png`'s default and it was three quarters of every
-        // headless frame.** Measured end to end on `lanternhead` at 1920x1080,
-        // quiet box, min of 3, with the per-frame voxel bake already hoisted:
-        // the marginal frame was 530 ms, of which the encoder is the bulk.
+        // **`Balanced` is `png`'s default and it was almost the whole marginal
+        // headless frame.** Measured on `lanternhead` at 1920x1080, quiet box,
+        // min of 3, as `(t(--frames 41) - t(--frames 1)) / 40` — forty frames
+        // rather than ten because at ~14 ms/frame the ten-frame form is mostly
+        // measuring one binary's run-to-run spread:
         //
-        // `Fast` over `Fastest`: `Fastest` does no buffering and can emit
-        // *larger* files than no compression at all on incompressible data
-        // (png 0.18.1, `common.rs:329`). `Fast` runs fdeflate and still beats
-        // libpng's fastest mode on ratio.
+        //     Balanced  402 ms/frame, 2,279,868 B
+        //     Fast       13.6         2,903,003
+        //     Fastest    11.6         3,903,850
+        //
+        // `Fast` over `Fastest`: 2 ms a frame is a poor trade for a megabyte a
+        // frame, and `Fastest` does no output buffering, so on incompressible
+        // data it can emit files *larger* than no compression at all
+        // (png 0.18.1, `common.rs:330-333`). `Fast` runs fdeflate, which beats
+        // libpng's fastest mode on ratio — though its own doc note says it can
+        // do the same thing in streaming mode, so the guard is the byte count
+        // in the table above, not the level's name.
         //
         // PNG is lossless at every level, so no reference moves and nothing
         // needs re-blessing: `loom compare` decodes pixels, and `xtask repeat`'s
