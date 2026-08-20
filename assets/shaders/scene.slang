@@ -5467,6 +5467,24 @@ static const float SWASH_RATE = 0.55;
 /// How opaque the swash sheet gets. Well under 1: the sand must show through.
 static const float SWASH_OPACITY = 0.62;
 
+/// How thin the water in front of a solid has to get before a waterline band
+/// of foam is drawn on it, in metres.
+///
+/// **This is the one foam term that is not about the sea.** Every other one
+/// keys on the water — its fold, its depth over a bed, its wetness. This keys
+/// on how little water there is between the surface and *whatever is behind
+/// it*, which is the definition of a waterline: the place a solid comes
+/// through. `waterBehind` already reconstructs that gap for the refraction
+/// offset, so the band costs no new sampling, and it works on a hull, a post,
+/// a crate, a wading character and a floating corpse without any of them
+/// knowing it exists.
+static const float WATER_CONTACT_BAND = 0.35;
+/// Its cap. Below `SWASH_OPACITY` because a hull's band is a rim of disturbed
+/// water and bubbles, not the couple of centimetres of aerated sheet a swash
+/// is — and because both write through `max`, so the thinner one must not be
+/// able to hide the thicker.
+static const float WATER_CONTACT_OPACITY = 0.55;
+
 static const float WATER_FOAM_WET = 0.22;
 static const float WATER_FOAM_BREAK = 0.33;
 
@@ -5983,10 +6001,28 @@ float3 waterBehind(
     /// Metres of water the light crossed, both legs — `WATER_NO_BED` when
     /// there is nothing behind the surface. The wrap lobe reads it, so that
     /// how thin the water is is measured once rather than authored twice.
-    out float column)
+    out float column,
+    /// Metres of water between the surface and whatever OPAQUE thing is behind
+    /// it — `WATER_NO_BED` when there is nothing behind it at all.
+    ///
+    /// **Not `column`, and the difference is the whole of the waterline band.**
+    /// `column` is an optical path through *a bed the height grid knows about*,
+    /// and is deliberately left at the sentinel on every scene with no voxel
+    /// volume so that `ocean`'s submerged posts do not tell the wrap lobe they
+    /// are standing in a hundred metres of water. That is the right rule for an
+    /// absorption path and the wrong one for a waterline: it makes `column`
+    /// unusable on the open sea, which is where every boat is. This is a
+    /// geometric gap to the depth buffer, so it answers there.
+    out float gap)
 {
     behind = float3(0.0, 0.0, 0.0);
     column = WATER_NO_BED;
+    // Only ever written past the `d >= 1.0` early-out below, so a pixel with
+    // nothing opaque behind it keeps the sentinel and draws no band. That
+    // matters most at the horizon, where the view ray is nearly level and the
+    // far plane sits at about eye height: the gap there would be zero and the
+    // band would be a white line across the skyline.
+    gap = WATER_NO_BED;
     float d = opaqueDepth.SampleLevel(uv, 0).r;
     if (d >= 1.0) {
         return float3(0.0, 0.0, 0.0);
@@ -6050,6 +6086,7 @@ float3 waterBehind(
     // actually crosses — the same air-path mistake the probe above refuses to
     // make, in the other direction.
     float drop = max(surfacePos.y - bg.y, 0.0);
+    gap = drop;
     float viewLeg = drop / max(-refracted.y, 0.05);
     float downLeg = min(bedDepth, WATER_DEPTH_SENTINEL) * loomWaterSecant(sunDirection().y);
     // **Only a bed the height grid actually knows about reports a column.** At
@@ -6657,8 +6694,9 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // not exist.
     float3 refracted = refract(-view, normal, 1.0 / WATER_IOR);
     float column;
+    float gap;
     float3 T = waterBehind(screenUv, in.worldPos, push.environment[0].eye.xyz,
-                           in.depth, refracted, behind, column);
+                           in.depth, refracted, behind, column, gap);
 
     // **Backlit scatter, gated on how THIN the water is — not on view angle
     // and, as of this commit, not on crest either.**
@@ -6916,6 +6954,24 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // actually entrained, and thinning back toward the water — which is the
     // opposite of what a depth ramp does on its own, so it is worth the
     // second term.
+    // **The waterline band: foam wherever a solid comes through the surface.**
+    //
+    // `gap` is the metres between this water pixel and the opaque thing behind
+    // it, already reconstructed above for the refraction offset. Where a hull
+    // sits just under the surface the gap goes to zero along the exact curve
+    // where the boat meets the sea — which is the line a wake is drawn *from*,
+    // and the one thing every water scene in this repository was missing.
+    //
+    // Squared before the smoothstep so the band is thin and hugs the hull
+    // rather than fogging out from it, and eroded by the same `fnoise`
+    // `shoreFoam` uses for the same stated reason: a clean curve is the
+    // synthetic tell.
+    if (gap < WATER_NO_BED) {
+        float contact = saturate(1.0 - gap / WATER_CONTACT_BAND);
+        contact = smoothstep(fnoise * 0.5, fnoise * 0.5 + 0.5, contact * contact);
+        foam = max(foam, contact * WATER_CONTACT_OPACITY);
+    }
+
     foam = max(foam, shoreFoam * SWASH_OPACITY);
 
     float broken = smoothstep(WATER_FOAM_BREAK, 0.50, in.breakMu);
