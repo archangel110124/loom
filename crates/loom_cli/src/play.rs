@@ -2473,6 +2473,9 @@ impl Runner {
             }
         }
 
+        // Built once, not per node: `emberfall` has one node script and the
+        // rod has twenty-four, and this is the same map for all of them.
+        let rules_numbers = self.state.numbers();
         for (entity, script) in &self.node_scripts {
             let Some(transform) = world.transform(*entity).cloned() else {
                 continue;
@@ -2482,7 +2485,7 @@ impl Runner {
                 rotation: transform.rot_euler,
                 scale: transform.scale,
             };
-            let next = self.host.tick(script, tick, &state)?;
+            let next = self.host.tick(script, tick, &state, &rules_numbers)?;
             if let Some(t) = world.transform_mut(*entity) {
                 t.pos = next.position;
                 t.rot_euler = next.rotation;

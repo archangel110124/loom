@@ -552,7 +552,13 @@ impl ScriptHost {
     ///
     /// # Errors
     /// [`ScriptError`] if the script is unknown, traps a limit, or throws.
-    pub fn tick(&self, name: &str, tick: u64, state: &NodeState) -> Result<NodeState, ScriptError> {
+    pub fn tick(
+        &self,
+        name: &str,
+        tick: u64,
+        state: &NodeState,
+        game: &[(String, f64)],
+    ) -> Result<NodeState, ScriptError> {
         let Some(ast) = self.compiled.get(name) else {
             return Err(ScriptError {
                 error: "unknown_script".to_owned(),
@@ -568,6 +574,19 @@ impl ScriptHost {
         scope.push("position", to_dynamic_vec(state.position));
         scope.push("rotation", to_dynamic_vec(state.rotation));
         scope.push("scale", to_dynamic_vec(state.scale));
+        // **The rules script's numbers, read-only, one tick stale.**
+        //
+        // Node scripts run *before* the rules (`play.rs`), so this is last
+        // tick's `state` — which is what a rod bending to a fight's stress
+        // wants and is not worth reordering the two passes for. Numbers only,
+        // and nothing written back: a node script that could edit `state`
+        // would be a second set of rules, which the one-`GameRules` refusal
+        // exists to prevent.
+        let mut values = rhai::Map::new();
+        for (key, value) in game {
+            values.insert(key.as_str().into(), Dynamic::from_float(*value));
+        }
+        scope.push("state", values);
 
         self.engine
             .run_ast_with_scope(&mut scope, ast)
@@ -980,7 +999,7 @@ mod tests {
         // rhai's `println!` default is replaced. If this ever regresses, the
         // agent's JSON parse breaks in the field rather than here — so the
         // check is that the script runs and the host stays usable.
-        host.tick("chatty", 0, &super::NodeState::default()).expect("runs");
+        host.tick("chatty", 0, &super::NodeState::default(), &[]).expect("runs");
     }
 
 
@@ -1000,7 +1019,7 @@ mod tests {
         let compiled = host.compile("clock", "let t = timestamp();");
         let reachable = match compiled {
             Err(_) => false,
-            Ok(()) => host.tick("clock", 0, &NodeState::default()).is_ok(),
+            Ok(()) => host.tick("clock", 0, &NodeState::default(), &[]).is_ok(),
         };
         assert!(!reachable, "timestamp() must not be callable from a script");
     }
@@ -1341,6 +1360,71 @@ mod tests {
         assert!(!reachable, "a movement script must not reach the wall clock");
     }
 
+    /// **A node script bends to the rules script's numbers.** This is the whole
+    /// binding the fishing rod's twenty-four joints stand on: `state.stress`
+    /// comes from `GameRules`, and each joint writes it into its own pitch.
+    ///
+    /// The pair matters. A scene with no fight hands over no `stress` at all,
+    /// and the rod must then reproduce its baked rest pose *exactly* — that is
+    /// what keeps every blessed reference PNG containing a rod byte-identical,
+    /// and an implementation that defaulted the missing key to anything else
+    /// would move them all.
+    #[test]
+    fn a_node_script_reads_the_rules_scripts_numbers() {
+        let mut host = host();
+        host.compile(
+            "bend",
+            r#"let stress = if "stress" in state { state.stress } else { 0.0 };
+               rotation = [0.292 + 0.042917 * stress, 0.0, 0.0];"#,
+        )
+        .expect("valid script");
+
+        let rest = host
+            .tick("bend", 0, &NodeState::default(), &[])
+            .expect("script runs");
+        assert!(
+            (rest.rotation[0] - 0.292).abs() < 1e-6,
+            "no fight means the rest pose, exactly: {rest:?}"
+        );
+
+        let loaded = host
+            .tick(
+                "bend",
+                0,
+                &NodeState::default(),
+                &[("stress".to_owned(), 100.0)],
+            )
+            .expect("script runs");
+        assert!(
+            (loaded.rotation[0] - 4.5837).abs() < 1e-3,
+            "a joint at full load carries 110/24 degrees: {loaded:?}"
+        );
+    }
+
+    /// A node script may read `state` and may not write it back: it is not a
+    /// second set of rules. The host hands over a copy of the numbers, so an
+    /// assignment inside the script cannot reach the game.
+    #[test]
+    fn a_node_script_cannot_write_the_rules_scripts_numbers() {
+        let mut host = host();
+        host.compile("greedy", "state.stress = 99.0; position[0] = state.stress;")
+            .expect("valid script");
+
+        let after = host
+            .tick(
+                "greedy",
+                0,
+                &NodeState::default(),
+                &[("stress".to_owned(), 7.0)],
+            )
+            .expect("script runs");
+
+        // It saw its own write inside its own scope, which is unavoidable and
+        // harmless. What matters is that nothing leaves: `tick` returns a
+        // `NodeState` and there is no path from here back into `GameState`.
+        assert!((after.position[0] - 99.0).abs() < 1e-6, "{after:?}");
+    }
+
     /// **The M8 exit criterion.** A script rotates a cube.
     #[test]
     fn a_script_rotates_a_node_over_time() {
@@ -1352,7 +1436,7 @@ mod tests {
             scale: [1.0; 3],
             ..NodeState::default()
         };
-        let after = host.tick("spin", 60, &state).expect("script runs");
+        let after = host.tick("spin", 60, &state, &[]).expect("script runs");
 
         assert!((after.rotation[1] - 90.0).abs() < 1e-3, "{after:?}");
         assert_eq!(after.position, state.position, "untouched fields survive");
@@ -1375,7 +1459,7 @@ mod tests {
         // Either it fails to compile or it fails to run — both are containment.
         let failed = result.is_err()
             || host
-                .tick("evil", 0, &NodeState::default())
+                .tick("evil", 0, &NodeState::default(), &[])
                 .is_err();
         assert!(failed, "file access must not be reachable");
     }
@@ -1386,7 +1470,7 @@ mod tests {
         let _ = host.compile("evil", r#"system("rm -rf /");"#);
 
         assert!(
-            host.tick("evil", 0, &NodeState::default()).is_err(),
+            host.tick("evil", 0, &NodeState::default(), &[]).is_err(),
             "process spawning must not be reachable"
         );
     }
@@ -1397,7 +1481,7 @@ mod tests {
         let _ = host.compile("evil", r#"http_get("http://example.com");"#);
 
         assert!(
-            host.tick("evil", 0, &NodeState::default()).is_err(),
+            host.tick("evil", 0, &NodeState::default(), &[]).is_err(),
             "network access must not be reachable"
         );
     }
@@ -1411,7 +1495,7 @@ mod tests {
             .expect("it compiles — that is the point");
 
         let err = host
-            .tick("hang", 0, &NodeState::default())
+            .tick("hang", 0, &NodeState::default(), &[])
             .expect_err("must trap, not hang");
 
         assert_eq!(err.error, "script_op_limit");
@@ -1428,7 +1512,7 @@ mod tests {
             .expect("it compiles");
 
         let err = host
-            .tick("deep", 0, &NodeState::default())
+            .tick("deep", 0, &NodeState::default(), &[])
             .expect_err("must trap");
 
         assert!(
@@ -1447,7 +1531,7 @@ mod tests {
             .expect("it compiles");
 
         assert!(
-            host.tick("fat", 0, &NodeState::default()).is_err(),
+            host.tick("fat", 0, &NodeState::default(), &[]).is_err(),
             "memory exhaustion must be refused"
         );
     }
@@ -1458,7 +1542,7 @@ mod tests {
     fn an_unknown_function_explains_the_sandbox() {
         let mut host = host();
         let _ = host.compile("oops", "read_file(\"x\");");
-        let err = host.tick("oops", 0, &NodeState::default()).unwrap_err();
+        let err = host.tick("oops", 0, &NodeState::default(), &[]).unwrap_err();
 
         assert_eq!(err.error, "script_unknown_function");
         assert!(err.hint.unwrap().contains("no filesystem"));
