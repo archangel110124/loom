@@ -284,6 +284,71 @@ transform = { pos = [0.0, 0.40, 0.0] }
   radius = 1.093
 
 
+# The twelve materials the refined hull brought with it — weathering,
+# the interior now visible through the glass, the navigation lights, and
+# the four parts a script can move. The nine above are unchanged.
+
+[[asset]]
+key = "antifoul"
+id = "efe138c4-2207-4365-9024-d8dd5a59d775"
+path = "../meshes/jib_vi_antifoul.obj"
+
+[[asset]]
+key = "dark"
+id = "e472791a-6630-47bc-8f73-e248206b237d"
+path = "../meshes/jib_vi_dark.obj"
+
+[[asset]]
+key = "grime"
+id = "d513de97-787a-4266-a55a-75e513ad690b"
+path = "../meshes/jib_vi_grime.obj"
+
+[[asset]]
+key = "rust"
+id = "9b919c1d-9af9-49e7-9721-bfa7457f546d"
+path = "../meshes/jib_vi_rust.obj"
+
+[[asset]]
+key = "scuff"
+id = "d2e8d883-a093-4f34-8b28-4cd755a9fa28"
+path = "../meshes/jib_vi_scuff.obj"
+
+[[asset]]
+key = "wash"
+id = "50807d96-b104-43a6-9758-8149a5e587c3"
+path = "../meshes/jib_vi_wash.obj"
+
+[[asset]]
+key = "gate"
+id = "7a2725a6-f522-4d1c-852d-05f860e0e42c"
+path = "../meshes/jib_vi_gate.obj"
+
+[[asset]]
+key = "wheel"
+id = "56bd70c6-97c8-4b21-bdf4-1ab05f2ced24"
+path = "../meshes/jib_vi_wheel.obj"
+
+[[asset]]
+key = "throttle"
+id = "c8e071ce-6922-416b-9973-da0000590df9"
+path = "../meshes/jib_vi_throttle.obj"
+
+[[asset]]
+key = "shifter"
+id = "ea940842-8a3d-449c-a204-04cbc2a99705"
+path = "../meshes/jib_vi_shifter.obj"
+
+[[asset]]
+key = "chest_lid"
+id = "02b18705-5e8c-405e-b728-b168fdcf3c27"
+path = "../meshes/jib_vi_chest_lid.obj"
+
+[[asset]]
+key = "green"
+id = "13d044ba-4472-47ee-9fba-2de71aa4c6d3"
+path = "../meshes/jib_vi_green.obj"
+
+
 # hull_white — albedo is the exporter's own Kd, restated here because the
 # engine never reads the .mtl.
 [[node]]
@@ -796,3 +861,159 @@ transform = { pos = [2.0, 6.5, 34.0], rot_euler = [-8.0, 0.0, 0.0] }
 
   [node.components.Camera]
   fov_y_degrees = 42.0
+
+# antifoul — bottom paint below the boot top — matte, and never polished by anything
+[[node]]
+name = "antifoul"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "antifoul" }
+
+  [node.components.Material]
+  albedo = [0.21, 0.075, 0.065]
+  roughness = 0.78
+  metallic = 0.0
+
+# dark — shadowed recesses, window rubbers and the interior it is now possible to see
+[[node]]
+name = "dark"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "dark" }
+
+  [node.components.Material]
+  albedo = [0.07, 0.07, 0.08]
+  roughness = 0.52
+  metallic = 0.0
+
+# grime — the dirt a working boat carries; the roughest surface on the hull
+[[node]]
+name = "grime"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "grime" }
+
+  [node.components.Material]
+  albedo = [0.44, 0.45, 0.4]
+  roughness = 0.92
+  metallic = 0.0
+
+# rust — weeping from fastenings — rougher than the grime it runs over
+[[node]]
+name = "rust"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "rust" }
+
+  [node.components.Material]
+  albedo = [0.27, 0.115, 0.055]
+  roughness = 0.95
+  metallic = 0.0
+
+# scuff — abrasion where fenders and gear rub; a value step off the white
+[[node]]
+name = "scuff"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "scuff" }
+
+  [node.components.Material]
+  albedo = [0.488, 0.488, 0.462]
+  roughness = 0.8
+  metallic = 0.0
+
+# wash — salt bloom and streaking below the scuppers
+[[node]]
+name = "wash"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "wash" }
+
+  [node.components.Material]
+  albedo = [0.8, 0.79, 0.75]
+  roughness = 0.88
+  metallic = 0.0
+
+# gate — the stern gate, one of the five parts authored to move
+[[node]]
+name = "gate"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "gate" }
+
+  [node.components.Material]
+  albedo = [0.86, 0.86, 0.84]
+  roughness = 0.45
+  metallic = 0.0
+
+# wheel — the wheel, on its own pivot at the helm
+[[node]]
+name = "wheel"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "wheel" }
+
+  [node.components.Material]
+  albedo = [0.16, 0.08, 0.05]
+  roughness = 0.45
+  metallic = 0.0
+
+# throttle — throttle lever — red, and it moves
+[[node]]
+name = "throttle"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "throttle" }
+
+  [node.components.Material]
+  albedo = [0.72, 0.1, 0.06]
+  roughness = 0.4
+  metallic = 0.0
+
+# shifter — gear shifter, beside the throttle and on the same axis
+[[node]]
+name = "shifter"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "shifter" }
+
+  [node.components.Material]
+  albedo = [0.09, 0.09, 0.11]
+  roughness = 0.4
+  metallic = 0.0
+
+# chest_lid — the lid of the deck chest, hinged along its forward edge
+[[node]]
+name = "chest_lid"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "chest_lid" }
+
+  [node.components.Material]
+  albedo = [0.62, 0.62, 0.6]
+  roughness = 0.6
+  metallic = 0.0
+
+# green — the starboard sidelight lens; the port one is in `red`
+[[node]]
+name = "green"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "green" }
+
+  [node.components.Material]
+  albedo = [0.05, 0.42, 0.14]
+  roughness = 0.3
+  metallic = 0.0
