@@ -713,11 +713,12 @@ fn check_deforms(nodes: &[Node]) -> Vec<SceneError> {
                 "deform_has_no_amplitude",
                 "amplitude",
                 Value::from(f64::from(deform.amplitude)),
-                "greater than 0 metres".to_owned(),
+                "greater than 0 body lengths".to_owned(),
                 "the shader early-outs at `amplitude <= 0`, so this node draws \
                  exactly as it would with no Deform at all and every other \
-                 field here is dead text. There is no sane default: this \
-                 component cannot see how long the body is."
+                 field here is dead text. There is no sane default, and there \
+                 is no unit to guess one in: this is a fraction of the body, \
+                 so 0.1 is a tenth of the animal whatever size the animal is."
                     .to_owned(),
             );
         }
@@ -771,11 +772,18 @@ fn check_deforms(nodes: &[Node]) -> Vec<SceneError> {
                 "amplitude",
                 Value::from(f64::from(deform.amplitude)),
                 format!(
-                    "a peak surface slope of at most {}, which these other                      settings put at amplitude {ceiling:.3}",
+                    "a peak surface slope of at most {}, which these other \
+                     settings put at amplitude {ceiling:.3}",
                     components::DEFORM_MAX_SLOPE
                 ),
                 format!(
-                    "this authors {slope:.2}. Past about 2.6 the shaded normal                      has turned more than 90 degrees from its rest direction                      and the surface has folded as far as lighting is                      concerned — the body reads as torn rather than as                      swimming. Lower `amplitude`, lengthen `wavelength`, or                      lower `span_start` to spread the same displacement over                      more of the body."
+                    "this authors {slope:.2}. Past about 2.6 the shaded normal \
+                     has turned more than 90 degrees from its rest direction \
+                     and the surface has folded as far as lighting is \
+                     concerned — the body reads as torn rather than as \
+                     swimming. Lower `amplitude`, lengthen `wavelength`, or \
+                     lower `span_start` to spread the same displacement over \
+                     more of the body."
                 ),
             );
         }
@@ -1189,7 +1197,10 @@ fn check_tier(
                 Value::from(Vec::from(extent)),
                 "the longest extent between 3.2 m and 32.0 m",
                 &format!(
-                    "the grid is 64 cells along the longest axis, so the cell                      is {cell:.4} m and must be in [0.05, 0.5]. This extent's                      longest axis is {longest:.2} m; make it at least 3.2 and                      at most 32.0 (ADR 0057)."
+                    "the grid is 64 cells along the longest axis, so the cell \
+                     is {cell:.4} m and must be in [0.05, 0.5]. This extent's \
+                     longest axis is {longest:.2} m; make it at least 3.2 and \
+                     at most 32.0 (ADR 0057)."
                 ),
             );
         }
