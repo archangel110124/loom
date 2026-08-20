@@ -1281,6 +1281,10 @@ pub(crate) fn world_to_objects(
                 material: materials.index_for(index),
                 // Scenery does not sway. Only a scatter field asks for it.
                 sway: 0.0,
+                // Rigid. Resolving a `Deform` needs the union bounds of every
+                // mesh under the deform node, which is the next commit.
+                deform: [0.0; 4],
+                deform_frame: [0.0; 4],
             })
         })
         .collect()
@@ -2195,6 +2199,10 @@ pub(crate) fn scatter_objects(scene: &Scene, library: &MeshLibrary) -> Vec<Objec
                 // carries the field's authored albedo instead.
                 material: u32::MAX,
                 sway: field.sway,
+                // A scattered instance is placed by a field, not authored as a
+                // node, so there is no node above it to carry a `Deform`.
+                deform: [0.0; 4],
+                deform_frame: [0.0; 4],
             });
         }
     }
@@ -4451,6 +4459,8 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
             mesh: 0,
             material: loom_render::NO_TEXTURE,
             sway: 0.0,
+            deform: [0.0; 4],
+            deform_frame: [0.0; 4],
         }];
         for handle in &debris {
             let (Some(p), Some(r)) = (physics.position(*handle), physics.rotation_euler(*handle))
@@ -4480,6 +4490,8 @@ fn explode(path: &str, args: &[String]) -> (u8, String) {
                 mesh: 1,
                 material: loom_render::NO_TEXTURE,
             sway: 0.0,
+            deform: [0.0; 4],
+            deform_frame: [0.0; 4],
             });
         }
 

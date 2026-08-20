@@ -340,15 +340,25 @@ mod tests {
     /// before and nothing above moved. Rust's own alignment rose from 4 to 8
     /// with the pointer; 240 is a multiple of 8, so the stride did not.
     ///
+    /// **240 became 272 when the body wave landed** (ADR 0062): two adjacent
+    /// `float4`s appended after `indices`. Four free lanes already existed —
+    /// `uv_unpack.w` and the `w` of all three normal rows — and eight were
+    /// needed, so the growth was unavoidable; scattering half a feature across
+    /// two structs to save sixteen bytes on at most a few dozen objects a frame
+    /// is the worse diff, not the lazier one.
+    ///
     /// The numbers are Slang's, read out of the compiled module with
     /// `spirv-dis target/debug/build/loom_render-*/out/scene.spv |
-    /// grep 'ObjectData_natural'` — `ArrayStride 240`, members at 224 and 232.
+    /// grep 'ObjectData_natural'` — `ArrayStride 272`, members at 224, 232,
+    /// 240 and 256.
     #[test]
     fn the_object_record_is_laid_out_as_the_shader_reads_it() {
-        let (material, indices, size) = renderer::object_data_layout();
+        let (material, indices, deform, frame, size) = renderer::object_data_layout();
         assert_eq!(material, 224, "material — index in x, mesh first index in y");
         assert_eq!(indices, 232, "indices — the shared index buffer, by address");
-        assert_eq!(size, 240, "the whole record; Slang says ArrayStride 240");
+        assert_eq!(deform, 240, "deform — amplitude, wavenumber, frequency, phase");
+        assert_eq!(frame, 256, "deformFrame — lead, signed 1/length, span, axes");
+        assert_eq!(size, 272, "the whole record; Slang says ArrayStride 272");
     }
 
     /// **The scene push block has one free slot, and believing otherwise cost
@@ -552,6 +562,8 @@ mod tests {
                 mesh: 0,
                 material: crate::NO_TEXTURE,
             sway: 0.0,
+            deform: [0.0; 4],
+            deform_frame: [0.0; 4],
             },
             Object {
                 model: glam::Mat4::from_scale(glam::Vec3::splat(0.8)),
@@ -559,6 +571,8 @@ mod tests {
                 mesh: 1,
                 material: crate::NO_TEXTURE,
             sway: 0.0,
+            deform: [0.0; 4],
+            deform_frame: [0.0; 4],
             },
         ];
         let camera = Camera {
@@ -718,6 +732,8 @@ mod tests {
             mesh: 0,
             material: crate::NO_TEXTURE,
             sway: 0.0,
+            deform: [0.0; 4],
+            deform_frame: [0.0; 4],
         }];
         let camera = Camera {
             eye: glam::Vec3::new(3.0, 3.0, 6.0),

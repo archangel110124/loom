@@ -96,6 +96,17 @@ pub struct Object {
     /// Reaches the GPU in `color.a`, which was a constant 1.0 and unread. Named
     /// here rather than left as a packing trick at the call sites.
     pub sway: f32,
+    /// The travelling body wave, resolved: amplitude (m), wavenumber (waves per
+    /// body length), frequency (Hz), phase (turns). All zero is rigid.
+    ///
+    /// **Resolved by the caller, not here.** Turning a `Deform` component into
+    /// this pair needs the union bounds of every mesh under the deform node,
+    /// which is a scene-graph walk and a mesh library — neither of which this
+    /// crate has or should have. `loom_cli::world_to_objects` does it.
+    pub deform: [f32; 4],
+    /// Nose coordinate, signed 1/length, envelope start, axis code. See
+    /// `ObjectData::deform_frame`, whose lanes these are.
+    pub deform_frame: [f32; 4],
 }
 
 /// One particle, as the GPU draws it.
@@ -877,12 +888,33 @@ pub(crate) struct ObjectData {
     /// need its trailing scalars declared purely to keep an offset. A hit
     /// object is already being fetched here; the pointer rides along.
     indices: vk::DeviceAddress,
+    /// The travelling body wave: amplitude in metres, wavenumber in waves per
+    /// body length, frequency in Hz, phase in turns.
+    ///
+    /// **`x <= 0` is the rigid early-out**, the same shape `windBend` uses for
+    /// `sway <= 0`, and it is what keeps every scene authored before `Deform`
+    /// rendering byte-identically rather than merely within tolerance.
+    deform: [f32; 4],
+    /// The frame the wave is measured in: the model-space coordinate of the
+    /// nose, the **signed** reciprocal of the body's length along the nose
+    /// axis, the body fraction the envelope starts at, and an axis code.
+    ///
+    /// The code is `nose_axis * 4 + beat_axis`, each 0 = x, 1 = y, 2 = z. Two
+    /// small integers in one float because the alternative is a fifth lane for
+    /// a pair of values that are never read apart.
+    ///
+    /// **Signed, and that is the whole of "which way does the head point".**
+    /// `+1/extent` when the nose is at the `+` end of its axis, `-1/extent`
+    /// when it is at the `-` end; the body coordinate is then
+    /// `(lead - p[nose]) * inv_len` in both cases with no branch.
+    deform_frame: [f32; 4],
 }
 
-/// `(material offset, indices offset, size)` of [`ObjectData`], for the layout
-/// test in `lib.rs`. The fields are private to this module and should stay so.
+/// `(material, indices, deform, deform_frame, size)` offsets of
+/// [`ObjectData`], for the layout test in `lib.rs`. The fields are private to
+/// this module and should stay so.
 #[cfg(test)]
-pub(crate) fn object_data_layout() -> (usize, usize, usize) {
+pub(crate) fn object_data_layout() -> (usize, usize, usize, usize, usize) {
     let base = ObjectData {
         mvp: [0.0; 16],
         model: [0.0; 16],
@@ -892,11 +924,15 @@ pub(crate) fn object_data_layout() -> (usize, usize, usize) {
         color: [0.0; 4],
         material: [0, 0],
         indices: 0,
+        deform: [0.0; 4],
+        deform_frame: [0.0; 4],
     };
     let at = |field: *const u8| field as usize - std::ptr::from_ref(&base).cast::<u8>() as usize;
     (
         at(std::ptr::from_ref(&base.material).cast()),
         at(std::ptr::from_ref(&base.indices).cast()),
+        at(std::ptr::from_ref(&base.deform).cast()),
+        at(std::ptr::from_ref(&base.deform_frame).cast()),
         size_of::<ObjectData>(),
     )
 }
@@ -4053,6 +4089,8 @@ pub(crate) fn pack_objects(
                         .map_or(0, |r| r.first_index()),
                 ],
                 indices: index_address,
+                deform: object.deform,
+                deform_frame: object.deform_frame,
             }
         })
         .collect()
@@ -4557,6 +4595,11 @@ pub(crate) fn view_projection_slot(view_proj: Mat4) -> ObjectData {
         color: [1.0; 4],
         material: [crate::material::NO_TEXTURE, 0],
         indices: 0,
+        // Rigid: this slot carries a matrix for the particle and grass shaders
+        // and is never drawn as geometry, but `bodyWave` early-outs on it
+        // anyway rather than relying on nobody ever calling it.
+        deform: [0.0; 4],
+        deform_frame: [0.0; 4],
     }
 }
 

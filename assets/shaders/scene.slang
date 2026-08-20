@@ -63,6 +63,17 @@ struct ObjectData {
     // `tracedEnvironment`; the draw itself binds the same buffer as an index
     // buffer, because index fetch is fixed-function and cannot go by pointer.
     uint* indices;
+    // The travelling body wave — ADR 0062. x amplitude (m), y wavenumber
+    // (waves per body length), z frequency (Hz), w phase (turns). **x <= 0 is
+    // the rigid early-out**, the same shape `windBend` uses for `sway <= 0`,
+    // and it is what keeps every scene authored before `Deform` rendering
+    // byte-identically rather than merely within tolerance.
+    float4 deform;
+    // The frame that wave is measured in: x the model-space nose coordinate,
+    // y the SIGNED reciprocal of the body length along the nose axis, z the
+    // body fraction the envelope starts at, w an axis code
+    // `nose_axis * 4 + beat_axis` with 0 = x, 1 = y, 2 = z.
+    float4 deformFrame;
 };
 
 static const uint NO_TEXTURE = 0xFFFFFFFF;
