@@ -2057,6 +2057,175 @@ pub struct Script {
     pub path: String,
 }
 
+/// Which model-space axis something runs along, and which way its head points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub enum SignedAxis {
+    #[serde(rename = "+x")]
+    XPos,
+    #[serde(rename = "-x")]
+    XNeg,
+    #[serde(rename = "+y")]
+    YPos,
+    #[serde(rename = "-y")]
+    YNeg,
+    #[default]
+    #[serde(rename = "+z")]
+    ZPos,
+    #[serde(rename = "-z")]
+    ZNeg,
+}
+
+impl SignedAxis {
+    /// 0 = x, 1 = y, 2 = z.
+    #[must_use]
+    pub fn axis(self) -> usize {
+        match self {
+            Self::XPos | Self::XNeg => 0,
+            Self::YPos | Self::YNeg => 1,
+            Self::ZPos | Self::ZNeg => 2,
+        }
+    }
+
+    /// Whether the head is at the `+` end of that axis.
+    #[must_use]
+    pub fn positive(self) -> bool {
+        matches!(self, Self::XPos | Self::YPos | Self::ZPos)
+    }
+}
+
+/// An unsigned model-space axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Axis {
+    X,
+    #[default]
+    Y,
+    Z,
+}
+
+impl Axis {
+    /// 0 = x, 1 = y, 2 = z.
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
+}
+
+/// The largest peak surface slope a [`Deform`] may author.
+///
+/// The gradient of the displacement along the body, in body-length units. Past
+/// about 2.6 the shaded normal has passed 90 degrees from its rest direction on
+/// the real gleamsprat mesh — the surface has folded as far as lighting is
+/// concerned, and the fringe reads as torn rather than as swimming. Measured
+/// worst normal deviation against amplitude at `wavelength = 0.50,
+/// span_start = 0.58` on `gleamsprat_coral.obj`:
+///
+/// ```text
+///  A/L    A(mm)   worst normal dev   true peak slope
+///  0.04    6.45        20.8 deg          0.524
+///  0.10   16.12        49.8 deg          1.311   <- what gleamsprat.loom authors
+///  0.15   24.18        78.3 deg          1.967
+///  0.20   32.23        99.1 deg          2.622   <- the normal has inverted
+///  0.30   48.35       117.8 deg          3.933
+/// ```
+///
+/// The closed-form estimator this is compared against over-reads the true worst
+/// gradient by roughly 30%, which is the safe direction, so the ceiling sits at
+/// 3.0 rather than at 2.6.
+///
+/// **A slope ceiling rather than an amplitude ceiling**, because shortening
+/// `wavelength` steepens the shear exactly as much as raising `amplitude` does,
+/// and a refusal that only looked at amplitude could not see it.
+pub const DEFORM_MAX_SLOPE: f32 = 3.0;
+
+/// One travelling wave down a body, applied to every mesh beneath this node.
+///
+/// **Rendering only.** It displaces vertices in the vertex shader and never
+/// touches a `Transform`, a rapier body, `loom sim --assert` or a rhai script.
+/// A node's *motion through the world* is a [`Script`]; this is only its
+/// *shape*. The two are deliberately separate, and ADR 0062 is where the line
+/// is drawn: motion is in a gated hash — `World::state_hash` eats every node's
+/// `GlobalTransform`, rigid body or not — and shape is in no hash at all,
+/// because vertices are not entities. That is the same exemption grass, rain
+/// and `windBend` hold, and it is "not an entity" rather than "not physics".
+///
+/// **There is no `kind` field.** The generality is in the numbers: a long
+/// `wavelength` is a sway, a short one with a small `amplitude` is a shiver,
+/// and one formula covers an eel, a tentacle, a flag and kelp. A `kind` enum
+/// with one variant is never-do #12 wearing a hat.
+///
+/// The body coordinate `s` runs 0 at the nose to 1 at the tail, derived from
+/// the **union** bounds of every mesh in this node's subtree — never per mesh.
+/// Measured on the gleamsprat: the chrome shell spans z [-0.10000, +0.00160]
+/// and the coral trim z [-0.15957, -0.04065], so the trim's own front edge is
+/// 26% down the animal. Per-mesh normalisation would tear the trim off the body
+/// at exactly the seam it is meant to hide.
+///
+/// **Every ray sees the rest pose.** The TLAS is built from a separate,
+/// never-touched vertex copy, so reflections, shadows and RTAO of a deformed
+/// mesh are wrong by however far its surface moved. Bounded rather than argued:
+/// `gleamsprat.loom` moves its chrome shell 0.23 mm on a 161 mm animal, because
+/// the envelope does not start until 58% down the body and the shell ends at
+/// 63%. ADR 0062 carries the trigger that reopens it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Deform {
+    /// The axis the body runs along, signed toward the head.
+    pub nose: SignedAxis,
+    /// The axis the body displaces along. Must differ from [`Self::nose`].
+    ///
+    /// **This is the field most likely to be authored wrong, and it is
+    /// invisible in a still.** A displacement pointed along the camera's view
+    /// axis is edge-on: it reads as foreshortening rather than as motion, and
+    /// the golden references barely move. Choose it by rendering, not by
+    /// anatomy.
+    pub beat: Axis,
+    /// Peak displacement at the tail, in metres. Must be > 0.
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub amplitude: f32,
+    /// Body lengths per wave. `0.5` puts two waves on the animal, `2.0` half of
+    /// one. Must be > 0.
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub wavelength: f32,
+    /// Beats per second. `0` freezes the wave in place — bent, but not moving.
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub frequency: f32,
+    /// Phase offset in turns. **Authored, never hashed from position.**
+    ///
+    /// `windBend` hashes a tree's world origin to de-sync neighbours, and that
+    /// is right because trees do not move. A fish does: a phase derived from a
+    /// live transform re-hashes every tick, and the animal vibrates instead of
+    /// swimming.
+    #[schemars(range(min = -100.0, max = 100.0))]
+    pub phase: f32,
+    /// Body fraction before which nothing moves at all. `0` deforms the whole
+    /// body; anything up to 0.99 leaves a rigid front section.
+    #[schemars(range(min = 0.0, max = 0.99))]
+    pub span_start: f32,
+}
+
+impl Default for Deform {
+    fn default() -> Self {
+        Self {
+            nose: SignedAxis::ZPos,
+            beat: Axis::Y,
+            // Refused at load. There is no sane default displacement for an
+            // animal whose length this component cannot see, and a silent zero
+            // is the S4 defect exactly: a key the loader accepts, a node that
+            // draws unchanged, and `loom validate` reporting clean.
+            amplitude: 0.0,
+            wavelength: 0.5,
+            frequency: 0.0,
+            phase: 0.0,
+            span_start: 0.0,
+        }
+    }
+}
+
 /// A registry with the engine's component types registered.
 ///
 /// `ponytail:` hand-maintained list. Six entries is not a drift risk; roughly
@@ -2085,6 +2254,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<Rain>("Rain");
     reg.register::<Grass>("Grass");
     reg.register::<Scatter>("Scatter");
+    reg.register::<Deform>("Deform");
     // `WaveSet`, `GerstnerWave` and `Pontoon` are deliberately absent: they are
     // fields of a `WaterBody` or a `Buoyancy`, not things a node can carry.
     // Registering them would make `components.WaveSet = { ... }` validate

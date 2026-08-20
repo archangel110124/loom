@@ -700,6 +700,156 @@ name = \"Hill\"
         );
     }
 
+    /// A scene with one deformed body: a parent carrying the `Deform` whose
+    /// fields the test supplies, and a child mesh under it at identity.
+    fn deform_scene(body: &str, child: &str) -> String {
+        format!(
+            "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e52\"\n\n\
+             [[node]]\nname = \"Lagoon\"\n\n\
+             [[node]]\nname = \"Hero\"\nparent = \"Lagoon\"\n\n\
+             [node.components.Deform]\n{body}\n\
+             [[node]]\nname = \"HeroBody\"\nparent = \"Lagoon/Hero\"\n{child}\n\
+             [node.components.MeshRenderer]\nmesh = {{ asset = \"box\" }}\n"
+        )
+    }
+
+    /// What `gleamsprat.loom` authors, as the control every rule below is one
+    /// edit away from.
+    const GOOD_DEFORM: &str = "nose = \"+z\"\nbeat = \"y\"\namplitude = 0.016\n\
+                               wavelength = 0.5\nfrequency = 3.0\nphase = 0.0\n\
+                               span_start = 0.58\n";
+
+    #[test]
+    fn the_authored_deform_validates() {
+        Scene::parse(&deform_scene(GOOD_DEFORM, ""))
+            .expect("this is what gleamsprat.loom carries");
+    }
+
+    /// **A knob wired to nothing is the S4 defect.** The shader early-outs at
+    /// `amplitude <= 0`, so without this the node draws unchanged, every other
+    /// field is dead text and `loom validate` reports clean.
+    #[test]
+    fn a_deform_with_no_amplitude_is_refused() {
+        let errors = Scene::parse(&deform_scene(
+            &GOOD_DEFORM.replace("amplitude = 0.016", "amplitude = 0.0"),
+            "",
+        ))
+        .expect_err("zero amplitude displaces nothing");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "deform_has_no_amplitude");
+        assert_eq!(errors[0].field, "Deform.amplitude");
+    }
+
+    /// **The rank-1 Jacobian is the whole reason the normal is three ops**, and
+    /// it holds only while the displacement points somewhere other than the
+    /// coordinate it is a function of. A wrong normal is invisible in a still
+    /// diff and obvious in motion, which is the worst combination there is.
+    #[test]
+    fn a_deform_that_beats_along_its_own_axis_is_refused() {
+        let errors =
+            Scene::parse(&deform_scene(&GOOD_DEFORM.replace("beat = \"y\"", "beat = \"z\""), ""))
+                .expect_err("beat must differ from nose");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "deform_beats_along_its_own_axis");
+        assert!(
+            errors[0].constraint.contains("+z"),
+            "the rejection names the authored spelling, not the Rust variant: {errors:?}"
+        );
+
+        // The same beat is fine on a body that runs along a different axis —
+        // the rule is about the pair, not about `z`.
+        Scene::parse(&deform_scene(
+            &GOOD_DEFORM.replace("nose = \"+z\"", "nose = \"+x\"").replace("beat = \"y\"", "beat = \"z\""),
+            "",
+        ))
+        .expect("+x nose with a z beat is a perfectly good pair");
+    }
+
+    /// Zero wavelength is a divide by zero in a vertex shader: every vertex
+    /// NaNs and the mesh simply vanishes, with nothing to breakpoint.
+    #[test]
+    fn a_deform_with_no_wavelength_is_refused() {
+        let errors = Scene::parse(&deform_scene(
+            &GOOD_DEFORM.replace("wavelength = 0.5", "wavelength = 0.0"),
+            "",
+        ))
+        .expect_err("the wavenumber is 1/wavelength");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "deform_wavelength_is_not_positive");
+    }
+
+    /// **Refused by the schema range rather than by a rule**, deliberately, so
+    /// the fault is reported once. This pins that it is still reported at all.
+    #[test]
+    fn a_span_start_past_the_tail_is_refused_by_the_schema() {
+        let errors = Scene::parse(&deform_scene(
+            &GOOD_DEFORM.replace("span_start = 0.58", "span_start = 1.0"),
+            "",
+        ))
+        .expect_err("1.0 leaves nothing to move");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "field_out_of_range");
+        assert_eq!(errors[0].field, "Deform.span_start");
+    }
+
+    /// A `Deform` displaces vertices and nothing else. With no mesh in the
+    /// subtree it validates, loads, and cannot possibly have an effect.
+    #[test]
+    fn a_deform_with_no_mesh_under_it_is_refused() {
+        let scene = "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e53\"\n\n\
+                     [[node]]\nname = \"Hero\"\n\n[node.components.Deform]\n"
+            .to_owned()
+            + GOOD_DEFORM;
+        let errors = Scene::parse(&scene).expect_err("nothing to deform");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "deform_has_no_mesh");
+    }
+
+    /// The inner wave would read rest positions the outer one has already
+    /// moved, so the two disagree about where the body is. One wave per body.
+    #[test]
+    fn a_deform_under_a_deform_is_refused() {
+        let child = format!("\n[node.components.Deform]\n{GOOD_DEFORM}");
+        let errors =
+            Scene::parse(&deform_scene(GOOD_DEFORM, &child)).expect_err("two body coordinates");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "deform_inside_a_deform");
+        assert_eq!(errors[0].node, "Lagoon/Hero/HeroBody");
+    }
+
+    /// **One shared `(lead, inv_len)` is only correct while the subtree shares
+    /// the deform node's frame.** This refusal has a known expiry date — the
+    /// arithmetic that lifts it is written out where the rule lives.
+    #[test]
+    fn a_deformed_child_moved_out_of_its_parents_frame_is_refused() {
+        let errors =
+            Scene::parse(&deform_scene(GOOD_DEFORM, "transform = { pos = [0.0, 0.05, 0.0] }\n"))
+                .expect_err("the child would be deformed against the parent's body");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "deform_child_is_not_at_identity");
+        assert_eq!(errors[0].node, "Lagoon/Hero/HeroBody");
+
+        // A scale of exactly 1 and a rotation of exactly 0 written out longhand
+        // is still identity, which is what `gleamsprat.loom`'s children are.
+        Scene::parse(&deform_scene(
+            GOOD_DEFORM,
+            "transform = { pos = [0.0, 0.0, 0.0], scale = [1.0, 1.0, 1.0] }\n",
+        ))
+        .expect("written-out identity is identity");
+    }
+
+    /// A node with no `Deform` is untouched by every rule above, which is what
+    /// keeps every scene authored before this component byte-identical.
+    #[test]
+    fn a_scene_with_no_deform_is_unaffected() {
+        Scene::parse(
+            "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e54\"\n\n\
+             [[node]]\nname = \"Hero\"\ntransform = { pos = [1.0, 2.0, 3.0] }\n\n\
+             [node.components.MeshRenderer]\nmesh = { asset = \"box\" }\n",
+        )
+        .expect("an offset mesh with no Deform above it is ordinary");
+    }
+
     /// The CPU path is untouched by any of the GPU rules, which is what makes
     /// `gpu = false` a safe default for the eight blessed particle scenes.
     #[test]

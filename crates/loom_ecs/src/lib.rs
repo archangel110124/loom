@@ -129,6 +129,11 @@ pub struct World {
     collider: Storage<[f32; 3]>,
     /// The asset alias a node's `MeshRenderer` names.
     mesh_asset: Storage<String>,
+    /// The `Deform` component, verbatim. Carried rather than resolved for the
+    /// same reason as `material`: turning it into the shader's `(lead,
+    /// inv_len)` pair needs the union bounds of every mesh in the subtree,
+    /// which means `loom_asset`, which this crate does not depend on.
+    deform: Storage<serde_json::Value>,
     /// The `ParticleEmitter` component, verbatim. Carried for the same reason
     /// as `material`: resolving it needs crates this one must not depend on.
     emitter: Storage<serde_json::Value>,
@@ -435,6 +440,9 @@ impl World {
             if let Some(emitter) = node.components.get("ParticleEmitter") {
                 world.emitter.insert(entity, emitter.clone());
             }
+            if let Some(deform) = node.components.get("Deform") {
+                world.deform.insert(entity, deform.clone());
+            }
             if let Some(light) = node.components.get("Light") {
                 world.light.insert(entity, light.clone());
             }
@@ -697,6 +705,16 @@ impl World {
     #[must_use]
     pub fn emitter(&self, entity: Entity) -> Option<&serde_json::Value> {
         self.emitter.get(entity)
+    }
+
+    /// The `Deform` a node declares, if any.
+    ///
+    /// **Rendering only, and it is on no other path.** Nothing in `state_hash`
+    /// reads it, physics never sees it, and `--assert` and `rhai` address
+    /// nodes rather than vertices — ADR 0062.
+    #[must_use]
+    pub fn deform(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.deform.get(entity)
     }
 
     /// The `Material` component a node declares, if any.

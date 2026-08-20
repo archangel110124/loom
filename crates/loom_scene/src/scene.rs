@@ -631,7 +631,206 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
             errors.extend(schema_errors);
         }
     }
+    // Scene-wide and after the loop, because every Deform rule but the field
+    // ranges is about a *subtree*: whether there is a mesh under it, whether
+    // there is another Deform under it, whether a child has been moved out of
+    // its frame. `nodes` already carries the parsed paths and transforms, so
+    // this needs neither the TOML document nor a tree.
+    errors.extend(check_deforms(nodes));
     errors
+}
+
+/// The `Deform` rules — ADR 0062, and refusals rather than comments.
+///
+/// **The S4 lesson again.** Each of these has a symptom that reads as a bug in
+/// the engine rather than as a mistake in the file, and four of them produce a
+/// scene that renders and validates cleanly while doing nothing:
+///
+/// - `amplitude = 0` is a knob wired to nothing: the node draws unchanged and
+///   `loom validate` says `ok: true`;
+/// - a beat along its own travel axis makes the displacement a function of the
+///   coordinate it moves, so the Jacobian is no longer rank-1 and the analytic
+///   normal is silently wrong — invisible in a diff, obvious in motion;
+/// - `wavelength = 0` divides by zero and NaNs every vertex of the mesh, in a
+///   shader nobody can put a breakpoint in;
+///
+/// `span_start` outside [0, 0.99] is refused too, by `#[schemars(range)]` on
+/// the field rather than here — the schema names the bound and prints the
+/// value, and duplicating it below would report one fault twice;
+/// - a `Deform` with no mesh under it, or nested inside another, or over a
+///   child that has been moved away from its parent, each render as one of
+///   "nothing happened" or "the animal came apart" with no message anywhere.
+///
+/// **Structure only.** This crate depends on nothing else in the workspace and
+/// cannot see a mesh, so the eighth rule — the peak-slope ceiling, which needs
+/// the body's real length — lives in `loom_cli::world_to_objects`, where the
+/// mesh library is in hand. Moving it here would mean importing `loom_asset`,
+/// which the CI-enforced dependency rules forbid.
+fn check_deforms(nodes: &[Node]) -> Vec<SceneError> {
+    let mut errors = Vec::new();
+    // A node is "under" another when its path is that path plus a `/`. Paths
+    // are already slash-separated and unique, so this is the whole of the
+    // subtree question and needs no tree to be built.
+    let under = |ancestor: &str, path: &str| path.len() > ancestor.len()
+        && path.starts_with(ancestor)
+        && path.as_bytes()[ancestor.len()] == b'/';
+
+    for node in nodes {
+        let Some(value) = node.components.get("Deform") else {
+            continue;
+        };
+        // Through serde for the reason `check_water` gives at length: an
+        // omitted field must be its documented default here exactly as it will
+        // be at load.
+        let deform = match serde_json::from_value::<components::Deform>(value.clone()) {
+            Ok(deform) => deform,
+            Err(why) => {
+                let mut err = SceneError::new("component_unreadable", &node.path);
+                err.field = "Deform".to_owned();
+                err.constraint = "a readable Deform".to_owned();
+                err.hint = Some(format!(
+                    "{why}. The schema check passed, so this is a field the \
+                     schema does not reach. None of the deform rules could run \
+                     until it is fixed."
+                ));
+                errors.push(err);
+                continue;
+            }
+        };
+
+        let mut refuse = |code: &str, field: &str, value: Value, constraint: String, hint: String| {
+            let mut err = SceneError::new(code, &node.path);
+            err.field = format!("Deform.{field}");
+            err.value = value;
+            err.constraint = constraint;
+            err.hint = Some(hint);
+            errors.push(err);
+        };
+
+        if deform.amplitude <= 0.0 {
+            refuse(
+                "deform_has_no_amplitude",
+                "amplitude",
+                Value::from(f64::from(deform.amplitude)),
+                "greater than 0 metres".to_owned(),
+                "the shader early-outs at `amplitude <= 0`, so this node draws \
+                 exactly as it would with no Deform at all and every other \
+                 field here is dead text. There is no sane default: this \
+                 component cannot see how long the body is."
+                    .to_owned(),
+            );
+        }
+        if deform.beat.index() == deform.nose.axis() {
+            refuse(
+                "deform_beats_along_its_own_axis",
+                "beat",
+                serde_json::to_value(deform.beat).unwrap_or(Value::Null),
+                format!(
+                    "an axis other than nose's ({})",
+                    serde_json::to_value(deform.nose)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_default()
+                ),
+                "the displacement is a function of the body coordinate and \
+                 points along a different axis, which is what makes its \
+                 Jacobian rank-1 and the corrected normal three operations. \
+                 Beating along the travel axis breaks that, and the wrong \
+                 normal is invisible in a diff and obvious in motion."
+                    .to_owned(),
+            );
+        }
+        if deform.wavelength <= 0.0 {
+            refuse(
+                "deform_wavelength_is_not_positive",
+                "wavelength",
+                Value::from(f64::from(deform.wavelength)),
+                "greater than 0 body lengths".to_owned(),
+                "the wavenumber is 1/wavelength, so zero divides by zero and \
+                 NaNs every vertex of every mesh under this node — in a vertex \
+                 shader, where there is nothing to breakpoint and the mesh \
+                 simply vanishes."
+                    .to_owned(),
+            );
+        }
+
+        let mut has_mesh = node.components.contains_key("MeshRenderer");
+        for other in nodes {
+            if !under(&node.path, &other.path) {
+                continue;
+            }
+            if other.components.contains_key("MeshRenderer") {
+                has_mesh = true;
+                // Every mesh under the deform shares one body coordinate, and
+                // that is only correct while it shares the deform node's frame.
+                //
+                // **This refusal has a known expiry date** — the next creature
+                // with an offset fin hits it on day one. The arithmetic that
+                // lifts it, written down so it is not rediscovered: for a child
+                // at translation `t` with uniform scale `k` along the nose
+                // axis, `lead' = (lead - t) / k`, `inv_len' = inv_len * k` and
+                // `amplitude' = amplitude / k`. A *rotated* child additionally
+                // needs both axis codes rotated, which the two-code encoding
+                // cannot express at all. Do not build any of it speculatively.
+                if !is_identity(&other.transform) {
+                    let mut err = SceneError::new("deform_child_is_not_at_identity", &other.path);
+                    err.field = "transform".to_owned();
+                    err.value = Value::from(format!(
+                        "pos {:?} rot {:?} scale {:?}",
+                        other.transform.pos, other.transform.rot_euler, other.transform.scale
+                    ));
+                    err.constraint = format!(
+                        "identity, because {} carries a Deform above it",
+                        node.path
+                    );
+                    err.hint = Some(
+                        "the wave is one body coordinate shared by every mesh \
+                         in the subtree — that is what keeps the shell and the \
+                         trim agreeing about where the tail is. A child moved \
+                         away from that frame would be deformed against the \
+                         parent's body and slide off it. Put the offset on the \
+                         deform node itself, or give the child its own Deform."
+                            .to_owned(),
+                    );
+                    errors.push(err);
+                }
+            }
+            if other.components.contains_key("Deform") {
+                let mut err = SceneError::new("deform_inside_a_deform", &other.path);
+                err.field = "Deform".to_owned();
+                err.constraint = format!("no Deform under {}, which already has one", node.path);
+                err.hint = Some(
+                    "the inner one would have to compose two body coordinates \
+                     and does not: the outer wave moves the vertices and the \
+                     inner one reads their rest positions, so the two disagree \
+                     about where the body is. One wave per body."
+                        .to_owned(),
+                );
+                errors.push(err);
+            }
+        }
+        if !has_mesh {
+            let mut err = SceneError::new("deform_has_no_mesh", &node.path);
+            err.field = "Deform".to_owned();
+            err.constraint = "a MeshRenderer on this node or under it".to_owned();
+            err.hint = Some(
+                "a Deform displaces vertices and nothing else — no transform, \
+                 no collider, no rigid body. With no mesh in the subtree it is \
+                 a component that validates, loads, and cannot possibly have \
+                 an effect."
+                    .to_owned(),
+            );
+            errors.push(err);
+        }
+    }
+    errors
+}
+
+/// Whether a local transform is the one the deform arithmetic assumes.
+fn is_identity(t: &components::Transform) -> bool {
+    t.pos.iter().all(|v| v.abs() < 1.0e-6)
+        && t.rot_euler.iter().all(|v| v.abs() < 1.0e-6)
+        && t.scale.iter().all(|v| (v - 1.0).abs() < 1.0e-6)
 }
 
 /// The GPU-emitter rules, which are refusals rather than comments.
