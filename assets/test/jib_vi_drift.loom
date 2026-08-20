@@ -1,0 +1,601 @@
+# Five people standing still on a boat, for an hour of ticks.
+#
+# **This scene asks one question and it is not "can you walk here".** It is:
+# does someone who is doing nothing stay where they were put, while the deck
+# under them heaves, rolls and pitches on the sea. Walking is
+# `jib_vi_walk.loom`, deliberately a different file — drift and traverse
+# measured in one scene would be two tools measured as one, and the boat is
+# already a place where a legitimate motion and a defect look alike.
+#
+# **Every rider is scriptless on purpose.** A movement model that re-derives a
+# target velocity every tick crushes a slow drift and hides it; `fall_only` is
+# gravity and nothing else, so whatever the deck does to a passive capsule is
+# what this measures. It is the worst case and it is the honest one.
+#
+# **Every rider is parented to the Boat, which is the whole trick.** A
+# character's world position on this hull swings tens of centimetres a second
+# with the waves, so no global axis can express "it stayed put".
+# `drive_characters` writes each character's position back into its node in the
+# *parent's* frame every tick, so a rider parented here reads its boat-frame
+# position directly, and `--assert Sea/Boat/<name>.local_x` is drift with the
+# boat's own motion already subtracted (ADR 0060).
+#
+# The five stations are chosen for lever arm, because the carry a rider needs
+# is `linvel + omega x r` and `r` is what varies:
+#
+#   AftCockpit   (-8.9, 0)     8.9 m aft of the roll/pitch axes
+#   Centre       ( 0.0, +2.1)  amidships, the smallest lever there is
+#   PortRail     ( 0.0, -2.3)  the beam, where roll is fastest
+#   Foredeck     ( 5.5,  0)    5.5 m forward, where pitch is fastest
+#   BridgeDeck   (-3.0, +1.5)  3 m *above* both axes, and the only station a
+#                              translation-only fix fails — the horizontal
+#                              component of omega x r is five times the
+#                              centreline's there
+#
+# **Do not accept a build measured at the centreline alone.** That station
+# passes almost anything.
+#
+# Read it with, per rider and per axis:
+#
+#   loom sim assets/test/jib_vi_drift.loom --ticks 3600 \
+#     --assert "Sea/Boat/PortRail.local_x > 9999"
+#
+# and take `actual` off the failure — that is the boat-frame position at the
+# end. Sweep the tick count for the peak-to-peak excursion.
+#
+# Everything except the riders is `jib_vi_painted.loom` unchanged, including the
+# wind at 3.5. The harder sea is a copy of this file with `speed` raised; it is
+# not authored here because a scene that measures a bound should measure one
+# sea, and 3.5 is the one the hull's whole header was characterised on.
+
+[scene]
+format = 1
+id = "b41d7c92-6ae0-4f13-9c85-2e7d05a1f3b6"
+
+[[asset]]
+key = "hull_white"
+path = "../meshes/jib_vi_hull_white.obj"
+
+[[asset]]
+key = "navy"
+path = "../meshes/jib_vi_navy.obj"
+
+[[asset]]
+key = "deck_grey"
+path = "../meshes/jib_vi_deck_grey.obj"
+
+[[asset]]
+key = "wood_trim"
+path = "../meshes/jib_vi_wood_trim.obj"
+
+[[asset]]
+key = "glass"
+path = "../meshes/jib_vi_glass.obj"
+
+[[asset]]
+key = "metal"
+path = "../meshes/jib_vi_metal.obj"
+
+[[asset]]
+key = "gold"
+path = "../meshes/jib_vi_gold.obj"
+
+[[asset]]
+key = "orange"
+path = "../meshes/jib_vi_orange.obj"
+
+[[asset]]
+key = "red"
+path = "../meshes/jib_vi_red.obj"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[asset]]
+key = "capsule"
+path = "capsule"
+
+[[node]]
+name = "Sea"
+
+  [node.components.Environment]
+  sun_direction = [0.34, 0.58, -0.74]
+  sun_strength = 1.3
+  sun_color = [1.0, 0.97, 0.90]
+  ambient = 0.55
+  sky_zenith = [0.16, 0.31, 0.55]
+  sky_horizon = [0.66, 0.74, 0.80]
+  fog_density = 0.0016
+  fog_falloff = 0.05
+
+  [node.components.Wind]
+  direction_degrees = 20.0
+  speed = 3.5
+  gustiness = 0.25
+  turbulence = 0.15
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+  density = 1000.0
+  drag = 2.0
+
+[[node]]
+name = "Boat"
+parent = "Sea"
+transform = { pos = [0.0, 0.40, 0.0] }
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 43776.0
+
+  [node.components.BoxCollider]
+  half_extents = [9.53, 1.66, 3.30]
+
+  [node.components.Buoyancy]
+  coefficient = 1.0
+  damp_linear = 4.0
+  damp_quadratic = 1.0
+
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-7.5, -0.247, -1.836]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-7.5, -0.247, 1.836]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-4.5, -0.247, -1.951]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-4.5, -0.247, 1.951]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-1.5, -0.247, -1.951]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [-1.5, -0.247, 1.951]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [1.5, -0.247, -1.951]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [1.5, -0.247, 1.951]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [4.5, -0.247, -1.607]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [4.5, -0.247, 1.607]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [7.5, -0.247, -0.918]
+  radius = 1.093
+  [[node.components.Buoyancy.pontoons]]
+  offset = [7.5, -0.247, 0.918]
+  radius = 1.093
+
+# --- the hull's parts, drawn ------------------------------------------------
+
+[[node]]
+name = "hull_white"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "hull_white" }
+
+  [node.components.Material]
+  albedo = [0.9, 0.9, 0.88]
+  roughness = 0.42
+
+[[node]]
+name = "navy"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "navy" }
+
+  [node.components.Material]
+  albedo = [0.05, 0.11, 0.32]
+  roughness = 0.38
+
+[[node]]
+name = "deck_grey"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "deck_grey" }
+
+  [node.components.Material]
+  albedo = [0.55, 0.55, 0.53]
+  roughness = 0.85
+
+[[node]]
+name = "wood_trim"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "wood_trim" }
+
+  [node.components.Material]
+  albedo = [0.22, 0.055, 0.045]
+  roughness = 0.3
+
+[[node]]
+name = "glass"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "glass" }
+
+  [node.components.Material]
+  albedo = [0.1, 0.13, 0.16]
+  roughness = 0.12
+
+[[node]]
+name = "metal"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "metal" }
+
+  [node.components.Material]
+  albedo = [0.62, 0.63, 0.65]
+  roughness = 0.35
+  metallic = 0.85
+
+[[node]]
+name = "gold"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "gold" }
+
+  [node.components.Material]
+  albedo = [0.66, 0.5, 0.13]
+  roughness = 0.28
+  metallic = 0.9
+
+[[node]]
+name = "orange"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "orange" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.28, 0.05]
+  roughness = 0.55
+
+[[node]]
+name = "red"
+parent = "Sea/Boat"
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "red" }
+
+  [node.components.Material]
+  albedo = [0.45, 0.05, 0.07]
+  roughness = 0.5
+
+# --- the deck, identical to jib_vi_painted.loom -----------------------------
+# Kept in sync by hand. If these ever disagree with that file, that file is the
+# original and this is the copy; the twelve `local_y` stations in
+# `jib_vi_walk.loom` are what notices.
+
+[[node]]
+name = "col_deck_aft"
+parent = "Sea/Boat"
+transform = { pos = [-7.80, 0.505, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.75, 0.15, 2.62]
+
+[[node]]
+name = "col_deck_mid"
+parent = "Sea/Boat"
+transform = { pos = [-3.05, 0.465, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [3.10, 0.15, 2.82]
+
+[[node]]
+name = "col_deck_fwd"
+parent = "Sea/Boat"
+transform = { pos = [1.30, 0.515, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.35, 0.15, 2.82]
+
+[[node]]
+name = "col_deck_shoulder"
+parent = "Sea/Boat"
+transform = { pos = [3.50, 0.585, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.00, 0.15, 2.55]
+
+[[node]]
+name = "col_foredeck"
+parent = "Sea/Boat"
+transform = { pos = [6.25, 1.055, 0.0], rot_euler = [0.0, 0.0, 13.9] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.83, 0.15, 2.30]
+
+[[node]]
+name = "col_bulwark_aft_port"
+parent = "Sea/Boat"
+transform = { pos = [-8.00, 0.96, -2.86] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.60, 0.66, 0.30]
+
+[[node]]
+name = "col_bulwark_aft_stbd"
+parent = "Sea/Boat"
+transform = { pos = [-8.00, 0.96, 2.86] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.60, 0.66, 0.30]
+
+[[node]]
+name = "col_bulwark_mid_port"
+parent = "Sea/Boat"
+transform = { pos = [-2.10, 0.96, -3.00] }
+
+  [node.components.BoxCollider]
+  half_extents = [4.30, 0.66, 0.30]
+
+[[node]]
+name = "col_bulwark_mid_stbd"
+parent = "Sea/Boat"
+transform = { pos = [-2.10, 0.96, 3.00] }
+
+  [node.components.BoxCollider]
+  half_extents = [4.30, 0.66, 0.30]
+
+[[node]]
+name = "col_bulwark_fwd_port"
+parent = "Sea/Boat"
+transform = { pos = [3.819, 1.125, -2.377], rot_euler = [0.0, -13.25, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.5925, 0.725, 0.30]
+
+[[node]]
+name = "col_bulwark_fwd_stbd"
+parent = "Sea/Boat"
+transform = { pos = [3.819, 1.125, 2.377], rot_euler = [0.0, 13.25, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.5925, 0.725, 0.30]
+
+[[node]]
+name = "col_bulwark_bow_port"
+parent = "Sea/Boat"
+transform = { pos = [6.863, 1.675, -1.368], rot_euler = [0.0, -22.15, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.5655, 0.875, 0.30]
+
+[[node]]
+name = "col_bulwark_bow_stbd"
+parent = "Sea/Boat"
+transform = { pos = [6.863, 1.675, 1.368], rot_euler = [0.0, 22.15, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.5655, 0.875, 0.30]
+
+[[node]]
+name = "col_transom"
+parent = "Sea/Boat"
+transform = { pos = [-9.62, 1.00, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.12, 0.70, 2.90]
+
+[[node]]
+name = "col_stem"
+parent = "Sea/Boat"
+transform = { pos = [8.55, 1.90, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.45, 1.00, 0.70]
+
+[[node]]
+name = "col_engine_box"
+parent = "Sea/Boat"
+transform = { pos = [-7.80, 0.90, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.60, 0.24, 0.78]
+
+[[node]]
+name = "col_house"
+parent = "Sea/Boat"
+transform = { pos = [-2.00, 1.72, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [4.20, 1.33, 1.50]
+
+[[node]]
+name = "col_house_fwd"
+parent = "Sea/Boat"
+transform = { pos = [3.03, 1.72, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.83, 1.33, 1.05]
+
+[[node]]
+name = "col_fly_deck"
+parent = "Sea/Boat"
+transform = { pos = [-1.15, 2.93, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [5.35, 0.15, 2.60]
+
+[[node]]
+name = "col_fly_console"
+parent = "Sea/Boat"
+transform = { pos = [-5.50, 3.27, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.60, 0.19, 1.05]
+
+[[node]]
+name = "col_fly_rail_port"
+parent = "Sea/Boat"
+transform = { pos = [-1.15, 3.60, -2.70] }
+
+  [node.components.BoxCollider]
+  half_extents = [5.35, 0.52, 0.10]
+
+[[node]]
+name = "col_fly_rail_stbd"
+parent = "Sea/Boat"
+transform = { pos = [-1.15, 3.60, 2.70] }
+
+  [node.components.BoxCollider]
+  half_extents = [5.35, 0.52, 0.10]
+
+[[node]]
+name = "col_fly_rail_fwd"
+parent = "Sea/Boat"
+transform = { pos = [4.30, 3.60, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.10, 0.52, 2.60]
+
+[[node]]
+name = "Companionway"
+parent = "Sea/Boat"
+transform = { pos = [-7.7576, 1.7962, -2.00], rot_euler = [0.0, 0.0, 42.41], scale = [1.7944, 0.10, 0.55] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.44, 0.44, 0.42]
+  roughness = 0.85
+
+  [node.components.BoxCollider]
+  half_extents = [1.0, 1.0, 1.0]
+
+# --- the riders -------------------------------------------------------------
+# No `Script` on any of them. Each starts about a metre above its deck so the
+# settle is visible as a settle; a capsule's centre sits 0.95 m above its feet.
+
+[[node]]
+name = "AftCockpit"
+parent = "Sea/Boat"
+transform = { pos = [-8.90, 1.75, 0.0] }
+
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.85, 0.30, 0.10]
+  roughness = 0.6
+
+[[node]]
+name = "Centre"
+parent = "Sea/Boat"
+transform = { pos = [0.0, 1.75, 2.10] }
+
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.20, 0.55, 0.85]
+  roughness = 0.6
+
+[[node]]
+name = "PortRail"
+parent = "Sea/Boat"
+transform = { pos = [0.0, 1.75, -2.30] }
+
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.90, 0.80, 0.20]
+  roughness = 0.6
+
+[[node]]
+name = "Foredeck"
+parent = "Sea/Boat"
+transform = { pos = [5.50, 1.95, 0.0] }
+
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.25, 0.75, 0.35]
+  roughness = 0.6
+
+[[node]]
+name = "BridgeDeck"
+parent = "Sea/Boat"
+transform = { pos = [-3.00, 4.15, 1.50] }
+
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.80, 0.35, 0.75]
+  roughness = 0.6
+
+# A vertical mark 5 m off the roll axis. Under a heel phi it lands at
+# (0, -5 sin phi, 5 cos phi), so atan2(-dy, dz) recovers a signed angle over the
+# full range and can tell "righted" from "inverted" — which a mast's tilt from
+# vertical cannot. `--assert` has no orientation axis; this is the workaround
+# the hull's own header documents.
+[[node]]
+name = "Heel"
+parent = "Sea/Boat"
+transform = { pos = [0.0, 0.0, 5.0] }
+
+[[node]]
+name = "Post"
+parent = "Sea"
+transform = { pos = [14.0, 2.5, -6.0], scale = [0.25, 5.0, 0.25] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.26, 0.24, 0.22]
+  roughness = 0.9
+
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [2.0, 6.5, 34.0], rot_euler = [-8.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 42.0

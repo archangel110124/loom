@@ -760,7 +760,27 @@ impl Physics {
             .build();
         let body = self.bodies.insert(body);
         let collider =
-            ColliderBuilder::capsule_y(shape.half_height.max(1e-3), shape.radius.max(1e-3)).build();
+            ColliderBuilder::capsule_y(shape.half_height.max(1e-3), shape.radius.max(1e-3))
+                // **A character does not push things, and that is a fix rather
+                // than a limitation.** A kinematic body is infinite-mass to the
+                // solver, so an 80 kg player standing still on a 44-tonne hull
+                // wins every argument with it: five riders heel a dead-calm
+                // `jib_vi_drift` by 17.8 degrees, and at wind 12 the hull that
+                // rolls 3.6 degrees empty rolls 14.5 with them aboard.
+                //
+                // `solver_groups` removes contact *forces* only. Queries,
+                // blasts, shots, navigation and the controller's own sweep all
+                // still see this capsule — `collision_groups` is untouched — so
+                // nothing that asks "where is the player" changes answer.
+                //
+                // `ponytail:` what is lost is that walking into a crate used to
+                // nudge it. Nothing in the repository depended on that
+                // (`proving_ground`'s hash is unchanged). Give a script an
+                // explicit impulse when something actually needs shoving; that
+                // is a movement-model decision and it does not belong in the
+                // solver's mass ratios.
+                .solver_groups(InteractionGroups::none())
+                .build();
         self.colliders
             .insert_with_parent(collider, body, &mut self.bodies);
 
