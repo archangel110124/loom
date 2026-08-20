@@ -1186,6 +1186,34 @@ impl Physics {
         Some([c.x, c.y, c.z])
     }
 
+    /// The rigid body a character is standing on.
+    ///
+    /// **The same probe the carry uses**, deliberately — see the `carry` block
+    /// in [`Self::move_character`]. If those two ever disagreed, a character
+    /// would be told it was aboard something it was not being carried by, and
+    /// a helm would answer to a boat it was not standing on.
+    ///
+    /// `None` on static ground and in mid-air. Static colliders are inserted
+    /// parentless (`add_static_box`), so a wharf is structurally not a body
+    /// rather than a body that happens not to move.
+    ///
+    /// The handle alone: turning it into a node path or a local position needs
+    /// the world, and the world is the caller's.
+    #[must_use]
+    pub fn support(&self, character: &Character) -> Option<RigidBodyHandle> {
+        let hit = self.cast(
+            [
+                character.position[0],
+                character.position[1] - character.shape.half_height,
+                character.position[2],
+            ],
+            [0.0, -1.0, 0.0],
+            character.shape.radius + GROUND_PROBE,
+            QueryFilter::default().exclude_rigid_body(character.body),
+        )?;
+        self.colliders.get(hit.collider)?.parent()
+    }
+
     /// How fast one world-space point *on* a body is moving.
     ///
     /// `linvel + angvel × r`, which for anything rotating is not the body's

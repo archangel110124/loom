@@ -170,7 +170,15 @@ pub struct Sim {
     /// component registry's own comments warn about.
     ///
     /// **Never sorted**, for the same reason `floating` is not.
-    propelled: Vec<(RigidBodyHandle, [f32; 3])>,
+    ///
+    /// **Live, not authored-once.** A body's row is its thrust *now*: the
+    /// authored `Propulsion` seeds it, and a helm script standing on that body
+    /// overwrites it (`loom_script::Helm`). A body nobody drives keeps the row
+    /// it loaded with, so every scene written before the helm existed behaves
+    /// exactly as it did. A row appears the first time something asks for
+    /// thrust, which is why a boat with no authored `Propulsion` can still be
+    /// driven.
+    propelled: Vec<(RigidBodyHandle, [f32; 3], [f32; 3])>,
     /// Water events raised this step and not yet collected: entries and exits.
     ///
     /// Held rather than pushed straight into the log because the log belongs to
@@ -478,7 +486,7 @@ impl Sim {
         let mut dynamic = Vec::new();
         let mut characters = Vec::new();
         let mut floating: Vec<Floating> = Vec::new();
-        let mut propelled: Vec<(RigidBodyHandle, [f32; 3])> = Vec::new();
+        let mut propelled: Vec<(RigidBodyHandle, [f32; 3], [f32; 3])> = Vec::new();
         let mut obstacles: Vec<loom_render::FluidSolid> = Vec::new();
         // Colliders that belong to a body built later in this same loop.
         let mut pending: Vec<(loom_ecs::Entity, Mat4, [f32; 3])> = Vec::new();
@@ -689,7 +697,7 @@ impl Sim {
                     })
                     .filter(|p| p.force != [0.0; 3])
                 {
-                    propelled.push((handle, p.force));
+                    propelled.push((handle, p.force, [0.0; 3]));
                 }
                 if let Some(buoyancy) = buoyancy_of(world, *entity, half, ball) {
                     floating.push(Floating {
@@ -1601,21 +1609,45 @@ impl Sim {
         loom_water::buoyancy::submersion_at(water, at, 0.0, t, ground, wavelet) > 0.5
     }
 
-    /// Apply every authored thrust, in load order, once per fixed step.
+    /// Apply every live thrust, in load order, once per fixed step.
     ///
-    /// The force is authored in the body's own frame and rotated by the body's
+    /// Both vectors are in the body's own frame and are rotated by the body's
     /// current orientation, so a hull that yaws pushes the way its bow now
     /// points rather than the way it was pointing when the scene was written.
-    /// No torque: a `Propulsion` is a shove, and steering is a script writing
-    /// the vector rather than a second authored field.
+    ///
+    /// **The torque is how a boat steers**, and it is the second half of the
+    /// sentence this comment used to end on: "steering is a script writing the
+    /// vector rather than a second authored field". `Propulsion` still authors
+    /// no torque — a shove is a shove — and the only thing that can put one
+    /// here is [`loom_script::Helm`], from a script standing on the body.
     fn propel(&mut self) {
-        for (body, force) in &self.propelled {
+        for (body, force, torque) in &self.propelled {
             let Some(r) = self.physics.rotation_quat(*body) else {
                 continue;
             };
-            let world = Quat::from_xyzw(r[0], r[1], r[2], r[3]) * Vec3::from_array(*force);
+            let rotation = Quat::from_xyzw(r[0], r[1], r[2], r[3]);
+            let push = rotation * Vec3::from_array(*force);
+            let twist = rotation * Vec3::from_array(*torque);
             self.physics
-                .apply_force_torque(*body, world.to_array(), [0.0; 3]);
+                .apply_force_torque(*body, push.to_array(), twist.to_array());
+        }
+    }
+
+    /// Set a body's live thrust, replacing whatever it had.
+    ///
+    /// Appends a row for a body that had none, so a hull with no authored
+    /// `Propulsion` — which is every `jib_vi` but `jib_vi_underway` — becomes
+    /// drivable without the scene declaring an inert component first.
+    fn set_thrust(
+        propelled: &mut Vec<(RigidBodyHandle, [f32; 3], [f32; 3])>,
+        body: RigidBodyHandle,
+        helm: loom_script::Helm,
+    ) {
+        if let Some(row) = propelled.iter_mut().find(|(b, ..)| *b == body) {
+            row.1 = helm.force;
+            row.2 = helm.torque;
+        } else {
+            propelled.push((body, helm.force, helm.torque));
         }
     }
 
@@ -1754,7 +1786,30 @@ impl Sim {
                 d.iter().map(|c| c * c).sum::<f32>().sqrt()
             });
 
+            // What is under the feet. One extra shape cast per character per
+            // tick, and it is the same probe the carry uses — reading it here
+            // rather than threading it out of `move_character` keeps the two
+            // answers to "am I aboard" from being two pieces of code.
+            let stand = self.physics.support(&walker.character);
+            let stand_node = stand
+                .and_then(|body| self.dynamic.iter().find(|(_, h)| *h == body))
+                .map(|(entity, _)| path_of(world, *entity))
+                .unwrap_or_default();
+            // Into the body's frame, by hand out of its pose, because that is
+            // the frame a station on something that moves is fixed in. Same
+            // quantity `--assert Node.local_y` reports.
+            let stand_local = stand
+                .and_then(|body| {
+                    let r = self.physics.rotation_quat(body)?;
+                    let t = self.physics.position(body)?;
+                    let at = Vec3::from_array(motion.position) - Vec3::from_array(t);
+                    Some((Quat::from_xyzw(r[0], r[1], r[2], r[3]).inverse() * at).to_array())
+                })
+                .unwrap_or([0.0; 3]);
+
             let motion = loom_script::Motion {
+                stand_node,
+                stand_local,
                 can_see_target,
                 target_at,
                 target_distance,
@@ -1809,6 +1864,16 @@ impl Sim {
             }
             if let Some(detonation) = motive.detonate {
                 detonations.push(detonation);
+            }
+            // **The helm, and it can only reach the deck underfoot.** Applied
+            // to `propelled` rather than to the body directly, so the thrust
+            // goes through `propel` inside the next fixed step with everything
+            // else — one place that turns a body-frame force into an impulse,
+            // one visiting order in the determinism hash. The cost is that a
+            // helm command takes effect on the following tick, which is 16 ms
+            // and is below what a hull of 43.8 tonnes can express.
+            if let (Some(helm), Some(body)) = (motive.helm, stand) {
+                Self::set_thrust(&mut self.propelled, body, helm);
             }
             // Whatever the character's own script raised. Stamped with the
             // node it came from so a rule can tell which character shouted.
@@ -2340,6 +2405,7 @@ impl Runner {
                                 detonate: None,
                                 emitted: Vec::new(),
                                 goal: None,
+                                helm: None,
                             }),
                         }
                     })?;

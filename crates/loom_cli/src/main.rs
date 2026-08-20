@@ -162,14 +162,14 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
         &[
             ("--out", true), ("--size", true), ("--sim", true), ("--yaw", true),
             ("--pitch", true), ("--frames", true), ("--spin", true), ("--step", true),
-            ("--dolly", true), ("--viewport", true),
+            ("--dolly", true), ("--viewport", true), ("--hold", true),
         ],
     ),
     (
         "compare",
         &[("--channel", true), ("--fraction", true), ("--worst", true), ("--rect", true)],
     ),
-    ("sim", &[("--ticks", true), ("--assert", true)]),
+    ("sim", &[("--ticks", true), ("--assert", true), ("--hold", true)]),
     ("scene", &[("--tx", true), ("--dry-run", false)]),
     ("place", &[("--op", true), ("--dry-run", false), ("--expect-version", true)]),
     ("measure", &[("--node", true), ("--shape", false)]),
@@ -667,8 +667,17 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // Kept alive for the fly-through, which continues this run rather than
     // starting a second one. See `simulate_physics`.
     let mut warmed: Option<play::Runner> = None;
+    // What the player is holding, for both the warm run and the fly-through.
+    // A still of a boat under way is a still of a boat somebody is driving:
+    // the helm is a movement script reading `move_z`, so without this the
+    // render is always of a scene with nobody's hands on it.
+    let held = match held_input(args) {
+        Ok(h) => h,
+        Err(json) => return (2, json),
+    };
     if let Some(ticks) = flag(args, "--sim").and_then(|v| v.parse::<u32>().ok()) {
-        (fired, splashed, wavelets, foam, warmed) = simulate_physics(&mut world, base, ticks);
+        (fired, splashed, wavelets, foam, warmed) =
+            simulate_physics(&mut world, base, ticks, held.clone());
     }
 
     let mut objects = world_to_objects(&world, &library, &material_library);
@@ -948,6 +957,9 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     Some(r) => r,
                     None => play::Runner::new(&world, base)?,
                 };
+                if let Some(held) = held.clone() {
+                    runner.input = held;
+                }
                 // One clock, counted from where the warm run left off, so an
                 // event's tick means the same thing to the runner, the rain
                 // simulation and the particles.
@@ -3272,6 +3284,53 @@ fn frame_scene(
 /// The second of the agent's two verification channels (brief §5). A render
 /// tells you a script *looks* fine while it leaks entities on frame 900; only
 /// simulation catches that.
+/// What the player is holding down for a whole run, from `--hold`.
+///
+/// **`Runner::input` is folded into every character's `Motion`, and until this
+/// existed only `loom run` ever wrote it** — so headless, every character in
+/// this engine was played by somebody with their hands off the keyboard.
+/// Anything the player *presses* was testable only by replacing the movement
+/// model with a pilot that fabricates the press, which tests the pilot and not
+/// the model. `assets/test/rig_drive.loom` is the first scene that needs the
+/// model itself under input: the helm reads `move_x` and `move_z` off it
+/// directly, so a pilot writing the thrust would be the "test that cannot
+/// fail" this branch has already shipped once.
+///
+/// **Held, not scheduled.** One constant for the run, because a schedule is a
+/// second little language and two runs with different holds have answered
+/// every question asked of it so far. `forward` and `right` keep their
+/// defaults (-Z and +X), so a walk under `--hold move_z=1` goes the way an
+/// unturned character faces.
+///
+/// `Ok(None)` when no `--hold` was given, which is every existing invocation.
+fn held_input(args: &[String]) -> Result<Option<loom_script::Motion>, String> {
+    let Some(spec) = flag(args, "--hold") else {
+        return Ok(None);
+    };
+    let mut held = loom_script::Motion::default();
+    for part in spec.split(',') {
+        let part = part.trim();
+        let (name, value) = part.split_once('=').unwrap_or((part, "1"));
+        let number: f32 = value.trim().parse().unwrap_or(1.0);
+        match name.trim() {
+            "move_x" => held.move_axis[0] = number,
+            "move_z" => held.move_axis[1] = number,
+            "jump" => held.jump = number != 0.0,
+            "sprint" => held.sprint = number != 0.0,
+            "fire" => held.fire = number != 0.0,
+            other => {
+                return Err(json_line(&serde_json::json!({
+                    "error": "unknown_hold",
+                    "value": other,
+                    "hint": "--hold takes move_x, move_z, jump, sprint and fire, comma \
+                             separated, each optionally `=value`",
+                })));
+            }
+        }
+    }
+    Ok(Some(held))
+}
+
 fn sim(path: &str, args: &[String]) -> (u8, String) {
     let ticks: u64 = flag(args, "--ticks")
         .and_then(|v| v.parse().ok())
@@ -3308,6 +3367,28 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
         Ok(r) => r,
         Err(json) => return (1, json),
     };
+
+    // **What the player is holding down, for the whole run.**
+    //
+    // `Runner::input` is folded into every character's `Motion`, and until now
+    // only `loom run` ever wrote it — so headless, every character in this
+    // engine was played by somebody with their hands off the keyboard. That
+    // made anything the player *presses* testable only by replacing the
+    // movement model with a pilot that fabricates the press, which tests the
+    // pilot and not the model. `assets/test/rig_drive.loom` is the first scene
+    // that needs the model itself under input: the helm reads `move_x` and
+    // `move_z` directly off it.
+    //
+    // **Held, not scheduled.** One constant for the run, because a schedule is
+    // a second little language and two runs with different holds have answered
+    // every question asked of it so far. `forward` and `right` keep their
+    // defaults (-Z and +X), so a walk under `--hold move_z=1` goes the way an
+    // unturned character faces.
+    match held_input(args) {
+        Ok(Some(held)) => runner.input = held,
+        Ok(None) => {}
+        Err(json) => return (2, json),
+    }
 
     // How far each node moved vertically over the closing stretch of the run,
     // for the `.bob` assertion. Recorded rather than derived afterwards
@@ -3590,6 +3671,7 @@ fn simulate_physics(
     world: &mut World,
     base: &std::path::Path,
     ticks: u32,
+    held: Option<loom_script::Motion>,
 ) -> (
     Happenings,
     Vec<play::Splash>,
@@ -3609,6 +3691,9 @@ fn simulate_physics(
             return (Vec::new(), Vec::new(), wavelets, foam, None);
         }
     };
+    if let Some(held) = held {
+        runner.input = held;
+    }
     for tick in 1..=u64::from(ticks) {
         if let Err(e) = runner.tick(world, tick) {
             log::warn(format!("{}: {}", e.script, e.message));
@@ -4347,7 +4432,7 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
     } else {
         let mut stepped = world.clone();
         let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
-        let (_, _, _, _, warmed) = simulate_physics(&mut stepped, base, ticks);
+        let (_, _, _, _, warmed) = simulate_physics(&mut stepped, base, ticks, None);
         let ripple = warmed
             .as_ref()
             .map_or([0.0; 3], |r| r.wavelets().at(at[0], at[1], seconds).surface());

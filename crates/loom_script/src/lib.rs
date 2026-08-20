@@ -165,6 +165,40 @@ pub struct Motion {
     /// that cannot tell "arrived" from "unreachable" will walk into a wall
     /// forever.
     pub path_found: bool,
+
+    /// The node this character is standing **on**, when that is a rigid body —
+    /// a boat's deck, a lift, a raft. Empty on static ground and in mid-air.
+    ///
+    /// ADR 0060 already moves a character in the frame of what it stands on;
+    /// this is the same fact made visible to the script, and it is the only way
+    /// a sandboxed script can tell "I am aboard" from "I am on the wharf"
+    /// without being handed a borrow of the transform hierarchy.
+    pub stand_node: String,
+    /// Where the character is standing, **in that body's own frame**.
+    ///
+    /// World position is useless for a station on something that moves: the
+    /// wheel is at the same place on the boat all day and nowhere in particular
+    /// in the sea. This is the same quantity `--assert Node.local_y` reads.
+    /// All zero when `stand_node` is empty.
+    pub stand_local: [f32; 3],
+}
+
+/// Thrust a script asked for, on the body its character is standing on.
+///
+/// **The helm.** `Propulsion` is authored once and read at load, and the
+/// comment on `Sim::propel` has said since it was written that "steering is a
+/// script writing the vector rather than a second authored field". This is
+/// that write. Both vectors are in the **body's own frame**, exactly as an
+/// authored `Propulsion.force` is, so a hull that yaws pushes the way her bow
+/// now points.
+///
+/// A request rather than a call, for the same reason a [`Detonation`] is: the
+/// script names a force, the host decides whose body it lands on — and it can
+/// only ever be the one under the character's feet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Helm {
+    pub force: [f32; 3],
+    pub torque: [f32; 3],
 }
 
 /// An explosion a script asked for this tick.
@@ -191,6 +225,12 @@ pub struct Motive {
     /// Somewhere the script wants to walk to, if it named one. The host finds
     /// the route; the script never sees a graph.
     pub goal: Option<[f32; 3]>,
+    /// Thrust for whatever the character is standing on, if it asked for any.
+    ///
+    /// `None` — the untouched case, which is every script written before this
+    /// existed — leaves the body's authored `Propulsion` exactly as it was.
+    /// `Some` with a zero force is a real request and means *stop*.
+    pub helm: Option<Helm>,
 }
 
 impl Default for Motion {
@@ -217,6 +257,8 @@ impl Default for Motion {
             target_node: String::new(),
             path_next: [0.0; 3],
             path_found: false,
+            stand_node: String::new(),
+            stand_local: [0.0; 3],
         }
     }
 }
@@ -596,6 +638,15 @@ impl ScriptHost {
         scope.push("target_node", motion.target_node.clone());
         scope.push("path_next", to_dynamic_vec(motion.path_next));
         scope.push("path_found", motion.path_found);
+        // What is under the feet, and where on it. Read-only.
+        scope.push("stand_node", motion.stand_node.clone());
+        scope.push("stand_local", to_dynamic_vec(motion.stand_local));
+        // The helm's two request slots. Empty means "I am not driving", which
+        // is every tick of every script but one — so the default has to be the
+        // hands-off one, and a script that sets only the force gets no torque
+        // rather than last tick's.
+        scope.push("helm_force", Dynamic::from_array(Vec::new()));
+        scope.push("helm_torque", Dynamic::from_array(Vec::new()));
         // Where the character wants to go. The host routes to it and reports
         // the next step back next tick.
         scope.push("goal", Dynamic::from_array(Vec::new()));
@@ -633,6 +684,16 @@ impl ScriptHost {
                     .filter(|i| *i > 0.0)
                     .unwrap_or(300.0),
             }),
+            // Either slot engages the helm; the one left empty is zero, not
+            // held. A boat whose torque persisted because the script only
+            // wrote a force would keep turning after the wheel was let go.
+            helm: match (from_scope(&scope, "helm_force"), from_scope(&scope, "helm_torque")) {
+                (None, None) => None,
+                (force, torque) => Some(Helm {
+                    force: force.unwrap_or([0.0; 3]),
+                    torque: torque.unwrap_or([0.0; 3]),
+                }),
+            },
         })
     }
 
