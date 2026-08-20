@@ -661,11 +661,12 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
 ///   child that has been moved away from its parent, each render as one of
 ///   "nothing happened" or "the animal came apart" with no message anywhere.
 ///
-/// **Structure only.** This crate depends on nothing else in the workspace and
-/// cannot see a mesh, so the eighth rule — the peak-slope ceiling, which needs
-/// the body's real length — lives in `loom_cli::world_to_objects`, where the
-/// mesh library is in hand. Moving it here would mean importing `loom_asset`,
-/// which the CI-enforced dependency rules forbid.
+/// **All of it here, and that is why `amplitude` is a body fraction rather than
+/// metres.** The peak-slope ceiling is the one rule that would otherwise need
+/// the mesh, and the only function in this project holding a mesh library is
+/// `loom_cli::world_to_objects` — called every frame, with no way to refuse
+/// anything and no error to return. Authoring the amplitude as a fraction makes
+/// that rule arithmetic, so it runs at load with everything else.
 fn check_deforms(nodes: &[Node]) -> Vec<SceneError> {
     let mut errors = Vec::new();
     // A node is "under" another when its path is that path plus a `/`. Paths
@@ -738,6 +739,44 @@ fn check_deforms(nodes: &[Node]) -> Vec<SceneError> {
                  Beating along the travel axis breaks that, and the wrong \
                  normal is invisible in a diff and obvious in motion."
                     .to_owned(),
+            );
+        }
+        // **A slope ceiling rather than an amplitude ceiling**, because
+        // shortening `wavelength` steepens the shear exactly as much as raising
+        // `amplitude` does, and a refusal that only looked at amplitude could
+        // not see it. Closed form, and it over-reads the true worst gradient by
+        // roughly 30%, which is the safe direction; the measured calibration
+        // table is on `DEFORM_MAX_SLOPE`.
+        //
+        // This is arithmetic rather than geometry only because `amplitude` is a
+        // body fraction. In metres it would need the mesh, and the only place
+        // in this project holding a mesh library is a function called every
+        // frame with no way to refuse anything.
+        //
+        // Only on a component whose other fields are already in range: a
+        // `span_start` of 1.0 makes this arbitrarily large, and reporting that
+        // as "too steep" on top of the schema's own range error would be
+        // reporting one fault twice with the second message misleading.
+        let sane = deform.wavelength > 0.0 && (0.0..1.0).contains(&deform.span_start);
+        let slope = if sane {
+            deform.amplitude
+                * (std::f32::consts::TAU / deform.wavelength + 2.0 / (1.0 - deform.span_start))
+        } else {
+            0.0
+        };
+        if sane && slope > components::DEFORM_MAX_SLOPE {
+            let ceiling = deform.amplitude * components::DEFORM_MAX_SLOPE / slope;
+            refuse(
+                "deform_surface_is_too_steep",
+                "amplitude",
+                Value::from(f64::from(deform.amplitude)),
+                format!(
+                    "a peak surface slope of at most {}, which these other                      settings put at amplitude {ceiling:.3}",
+                    components::DEFORM_MAX_SLOPE
+                ),
+                format!(
+                    "this authors {slope:.2}. Past about 2.6 the shaded normal                      has turned more than 90 degrees from its rest direction                      and the surface has folded as far as lighting is                      concerned — the body reads as torn rather than as                      swimming. Lower `amplitude`, lengthen `wavelength`, or                      lower `span_start` to spread the same displacement over                      more of the body."
+                ),
             );
         }
         if deform.wavelength <= 0.0 {

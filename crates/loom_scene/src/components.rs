@@ -2184,8 +2184,21 @@ pub struct Deform {
     /// the golden references barely move. Choose it by rendering, not by
     /// anatomy.
     pub beat: Axis,
-    /// Peak displacement at the tail, in metres. Must be > 0.
-    #[schemars(range(min = 0.0, max = 100.0))]
+    /// Peak displacement at the tail, **as a fraction of body length**. Must
+    /// be > 0.
+    ///
+    /// **Not metres, deliberately, and it is what keeps this component
+    /// mesh-free.** In metres the only interesting question — is this a lot? —
+    /// cannot be answered without the body's length, so the check that catches
+    /// a ten-fold units typo would need the mesh library, and the only place
+    /// that has one is a function called every frame with no way to refuse. As
+    /// a fraction the same check is arithmetic, it runs here, and `0.10` reads
+    /// as "a tenth of the animal" in the file without knowing what the animal
+    /// is. It also makes one `Deform` correct on a 16 cm fish and a 16 m eel.
+    ///
+    /// See [`DEFORM_MAX_SLOPE`] for what large means: past about 0.18 at the
+    /// gleamsprat's other settings the shaded surface has folded.
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub amplitude: f32,
     /// Body lengths per wave. `0.5` puts two waves on the animal, `2.0` half of
     /// one. Must be > 0.
@@ -2213,10 +2226,9 @@ impl Default for Deform {
         Self {
             nose: SignedAxis::ZPos,
             beat: Axis::Y,
-            // Refused at load. There is no sane default displacement for an
-            // animal whose length this component cannot see, and a silent zero
-            // is the S4 defect exactly: a key the loader accepts, a node that
-            // draws unchanged, and `loom validate` reporting clean.
+            // Refused at load. A silent zero is the S4 defect exactly: a key
+            // the loader accepts, a node that draws unchanged, and
+            // `loom validate` reporting clean.
             amplitude: 0.0,
             wavelength: 0.5,
             frequency: 0.0,

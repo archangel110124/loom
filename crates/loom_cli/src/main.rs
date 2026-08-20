@@ -1262,11 +1262,103 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
 /// Transform propagation lives in `loom_ecs` as of M3; this only reads the
 /// resolved `GlobalTransform`. The parent-chain walk that used to live here
 /// was a stand-in until the ECS existed, and is gone.
+/// The body frames every `Deform` in the scene is measured in.
+///
+/// Keyed by the deform node's own entity, because every mesh in its subtree
+/// shares one body coordinate — that is what keeps a shell and a trim agreeing
+/// about where the tail is, and `loom_scene` refuses a subtree that has been
+/// moved out of the frame that makes it true.
+///
+/// **Built once per call and only when a `Deform` exists.** `Mesh::bounds()` is
+/// O(vertices), and `world_to_objects` runs every frame in the editor; a scene
+/// with no deformed body pays one `Option` check per entity and nothing else.
+fn deform_frames(
+    world: &World,
+    library: &MeshLibrary,
+) -> std::collections::BTreeMap<loom_ecs::Entity, ([f32; 4], [f32; 4])> {
+    let mut frames = std::collections::BTreeMap::new();
+    for entity in world.entities() {
+        let Some(value) = world.deform(*entity) else {
+            continue;
+        };
+        let Ok(deform) = serde_json::from_value::<loom_scene::components::Deform>(value.clone())
+        else {
+            // Refused at load by `loom_scene`, so this is unreachable from a
+            // scene that parsed. Rigid rather than a panic: a render should
+            // degrade, not crash (design doc §2.6).
+            continue;
+        };
+        let Some(root) = world.path(*entity).map(str::to_owned) else {
+            continue;
+        };
+        let axis = deform.nose.axis();
+
+        // The union bounds of every mesh under this node, along the nose axis.
+        // **Never per mesh**: the gleamsprat's coral trim spans only the back
+        // three quarters of the animal, and normalising it against its own
+        // extent would start its wave at the seam and tear it off the body.
+        let mut min = f32::MAX;
+        let mut max = f32::MIN;
+        for other in world.entities() {
+            let Some(path) = world.path(*other) else {
+                continue;
+            };
+            let under = path == root
+                || (path.len() > root.len()
+                    && path.starts_with(&root)
+                    && path.as_bytes()[root.len()] == b'/');
+            if !under || !world.is_renderable(*other) {
+                continue;
+            }
+            let index = mesh_index_for(world, library, *other) as usize;
+            let Some(mesh) = library.meshes.get(index) else {
+                continue;
+            };
+            let (lo, hi) = mesh.bounds();
+            min = min.min(lo[axis]);
+            max = max.max(hi[axis]);
+        }
+        let extent = max - min;
+        if !extent.is_finite() || extent <= 1.0e-6 {
+            // A body with no length along its own nose axis. Refused as "no
+            // mesh under it" when there is none at all; this is the degenerate
+            // remainder, and a zero amplitude is the rigid early-out.
+            continue;
+        }
+
+        // Signed, so a nose at either end of its axis is one expression with no
+        // branch in the shader: `s = (lead - p[nose]) * inv_len`.
+        let (lead, inv_len) = if deform.nose.positive() {
+            (max, 1.0 / extent)
+        } else {
+            (min, -1.0 / extent)
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let code = (deform.nose.axis() * 4 + deform.beat.index()) as f32;
+        frames.insert(
+            *entity,
+            (
+                [
+                    // Authored as a body fraction and sent as model units,
+                    // which is the one place the two meet.
+                    deform.amplitude * extent,
+                    1.0 / deform.wavelength,
+                    deform.frequency,
+                    deform.phase,
+                ],
+                [lead, inv_len, deform.span_start, code],
+            ),
+        );
+    }
+    frames
+}
+
 pub(crate) fn world_to_objects(
     world: &World,
     library: &MeshLibrary,
     materials: &materials::MaterialLibrary,
 ) -> Vec<Object> {
+    let frames = deform_frames(world, library);
     world
         .entities()
         .iter()
@@ -1274,6 +1366,20 @@ pub(crate) fn world_to_objects(
         .filter(|(_, e)| world.is_renderable(**e))
         .filter_map(|(index, entity)| {
             let global = world.global_transform(*entity)?;
+            // The nearest ancestor carrying a `Deform`, this node included. One
+            // walk up rather than a push down: a deform node is rare and a
+            // renderable is not, so this is a couple of map lookups on the
+            // scenes that have one and one lookup on every scene that does not.
+            let mut carrier = Some(*entity);
+            let deform = loop {
+                match carrier {
+                    Some(node) => match frames.get(&node) {
+                        Some(pair) => break *pair,
+                        None => carrier = world.parent(node),
+                    },
+                    None => break ([0.0; 4], [0.0; 4]),
+                }
+            };
             Some(Object {
                 model: Mat4::from_cols_array(&global.matrix),
                 color: palette(index),
@@ -1281,10 +1387,8 @@ pub(crate) fn world_to_objects(
                 material: materials.index_for(index),
                 // Scenery does not sway. Only a scatter field asks for it.
                 sway: 0.0,
-                // Rigid. Resolving a `Deform` needs the union bounds of every
-                // mesh under the deform node, which is the next commit.
-                deform: [0.0; 4],
-                deform_frame: [0.0; 4],
+                deform: deform.0,
+                deform_frame: deform.1,
             })
         })
         .collect()

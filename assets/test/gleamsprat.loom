@@ -14,6 +14,28 @@
 # typed against them and `loom_asset`'s recentring branch can never fire — the
 # defect that took the boat apart. They share an origin at the nose tip, so the
 # two children sit at identity and only the parent ever moves.
+# **The swim is a vertex deform and the acceleration structure does not know
+# about it.** Every ray — reflection, shadow, RTAO — sees the rest pose. That
+# is a real cost and it is bounded here rather than argued about: the wave's
+# envelope does not start until 58% of the way down the body and the chrome
+# shell ends at 63%, so the mirror moves 0.23 mm while the fringe moves 16 mm.
+# A neighbour's reflection is wrong by a quarter of a millimetre on a 161 mm
+# animal. Refitting the BLAS would cost `ALLOW_UPDATE`, one BLAS per instance
+# and a device stall per build, to fix that. It is not worth it, it is not
+# built, and ADR 0062 carries the trigger that would reopen it.
+#
+# **The beat is dorsoventral (model Y) and that is a rendering decision, not
+# an anatomical one.** `rot_euler = [0, 90, 0]` maps model +X onto world -Z,
+# which is this camera's own view axis, so a lateral beat is edge-on and reads
+# as foreshortening rather than as motion. If this scene's camera ever moves,
+# re-render sixteen frames before trusting `beat`.
+#
+# **The two golden rows are 126 ticks apart, and a rate error is why.** A still
+# pins the shape of the wave and says nothing about its speed; `weather.z` is
+# `--sim N / 60` headless and a free-running wall clock in `loom run`, so a
+# frequency that drifts is invisible in the viewer AND in any one reference.
+# 1% off 3 Hz is 1.3 degrees of phase at tick 7 and 24 degrees at tick 133.
+#
 [scene]
 format = 1
 id = "2e253013-8b70-4ccd-a562-9f1d6b00301a"
@@ -102,6 +124,43 @@ name = "Hero"
 parent = "Lagoon"
 transform = { pos = [0.0, 0.13, 0.0], rot_euler = [0.0, 90.0, 0.0] }
 
+  # The swim. One travelling wave down the body, in this node's own frame,
+  # shared by every mesh beneath it — the chrome shell and the coral fringe are
+  # one animal and must agree about where the tail is.
+  #
+  # **`span_start = 0.58` is the whole shape of this creature.** The chrome
+  # shell runs s 0.000-0.630 and the coral fringe s 0.544-1.000, measured off
+  # the two OBJ files against the union body length 0.161171 m. Below 0.58 the
+  # shell visibly squashes, which is wrong for a rigid metal pod. Above it the
+  # shell moves 0.23 mm and the fringe moves 16 mm, which is the animal.
+  #
+  # It also means the two paired flank fins do not move at all. They are
+  # free-floating pieces of the coral mesh — 121 vertices each, at s 0.267 to
+  # 0.407 — and a shared one-dimensional shear would have slid them sideways in
+  # lockstep as rigid slabs, which is the clearest "this is a shader" tell
+  # there is. The envelope removes it rather than deferring it. The coral file
+  # welds into five components, not one: the fringe, both fins and two ventral
+  # bits, and only the fringe is behind 0.58.
+  #
+  # `amplitude` is a fraction of body length, not metres, so 0.10 is a tenth of
+  # the animal and reads as large without knowing how big the animal is. The
+  # load-time refusal is on peak surface *slope* rather than on amplitude,
+  # because shortening `wavelength` steepens the shear just as much: these
+  # settings author 1.73 against a ceiling of 3.0.
+  #
+  # `phase` is authored rather than hashed off the world origin. A hash is how
+  # `windBend` de-syncs trees, and trees do not move; the moment this fish
+  # travels, a hashed phase would re-hash every tick and the animal would
+  # vibrate instead of swim.
+  [node.components.Deform]
+  nose = "+z"
+  beat = "y"
+  amplitude = 0.10
+  wavelength = 0.50
+  frequency = 3.0
+  phase = 0.0
+  span_start = 0.58
+
   [[node]]
   name = "HeroBody"
   parent = "Lagoon/Hero"
@@ -141,6 +200,22 @@ name = "FishA"
 parent = "Lagoon"
 transform = { pos = [-0.44, 0.11, -0.42], rot_euler = [0.0, 104.0, -3.0] }
 
+
+  # **The frequencies differ, not only the phases, and that is the load-bearing
+  # half.** A fixed phase offset is choreography: five animals beating at one
+  # rate hold their relative pose forever and the eye locks onto the pattern in
+  # about four seconds. Detuned oscillators drift apart and never repeat, which
+  # is what a school does. Measured: forcing this school into unison moves 0.43%
+  # of the gate frame at worst channel 176, so a still catches it.
+  [node.components.Deform]
+  nose = "+z"
+  beat = "y"
+  amplitude = 0.094
+  wavelength = 0.52
+  frequency = 2.7
+  phase = 0.37
+  span_start = 0.58
+
   [[node]]
   name = "FishABody"
   parent = "Lagoon/FishA"
@@ -169,6 +244,15 @@ transform = { pos = [-0.44, 0.11, -0.42], rot_euler = [0.0, 104.0, -3.0] }
 name = "FishB"
 parent = "Lagoon"
 transform = { pos = [0.52, 0.10, -0.70], rot_euler = [0.0, 72.0, 2.0] }
+
+  [node.components.Deform]
+  nose = "+z"
+  beat = "y"
+  amplitude = 0.106
+  wavelength = 0.48
+  frequency = 3.2
+  phase = 0.61
+  span_start = 0.58
 
   [[node]]
   name = "FishBBody"
@@ -199,6 +283,15 @@ name = "FishC"
 parent = "Lagoon"
 transform = { pos = [-0.18, 0.09, -1.05], rot_euler = [0.0, 96.0, 0.0] }
 
+  [node.components.Deform]
+  nose = "+z"
+  beat = "y"
+  amplitude = 0.087
+  wavelength = 0.51
+  frequency = 2.9
+  phase = 0.19
+  span_start = 0.58
+
   [[node]]
   name = "FishCBody"
   parent = "Lagoon/FishC"
@@ -227,6 +320,15 @@ transform = { pos = [-0.18, 0.09, -1.05], rot_euler = [0.0, 96.0, 0.0] }
 name = "FishD"
 parent = "Lagoon"
 transform = { pos = [0.30, 0.08, -1.55], rot_euler = [0.0, 84.0, 0.0] }
+
+  [node.components.Deform]
+  nose = "+z"
+  beat = "y"
+  amplitude = 0.100
+  wavelength = 0.49
+  frequency = 3.4
+  phase = 0.83
+  span_start = 0.58
 
   [[node]]
   name = "FishDBody"

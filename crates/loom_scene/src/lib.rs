@@ -715,7 +715,7 @@ name = \"Hill\"
 
     /// What `gleamsprat.loom` authors, as the control every rule below is one
     /// edit away from.
-    const GOOD_DEFORM: &str = "nose = \"+z\"\nbeat = \"y\"\namplitude = 0.016\n\
+    const GOOD_DEFORM: &str = "nose = \"+z\"\nbeat = \"y\"\namplitude = 0.10\n\
                                wavelength = 0.5\nfrequency = 3.0\nphase = 0.0\n\
                                span_start = 0.58\n";
 
@@ -731,7 +731,7 @@ name = \"Hill\"
     #[test]
     fn a_deform_with_no_amplitude_is_refused() {
         let errors = Scene::parse(&deform_scene(
-            &GOOD_DEFORM.replace("amplitude = 0.016", "amplitude = 0.0"),
+            &GOOD_DEFORM.replace("amplitude = 0.10", "amplitude = 0.0"),
             "",
         ))
         .expect_err("zero amplitude displaces nothing");
@@ -836,6 +836,42 @@ name = \"Hill\"
             "transform = { pos = [0.0, 0.0, 0.0], scale = [1.0, 1.0, 1.0] }\n",
         ))
         .expect("written-out identity is identity");
+    }
+
+    /// **A slope ceiling rather than an amplitude ceiling**, and this is the
+    /// test that says why: the same amplitude passes at one wavelength and is
+    /// refused at another, because shortening the wave steepens the shear
+    /// exactly as much as raising the amplitude does.
+    ///
+    /// It is arithmetic only because `amplitude` is a body fraction. In metres
+    /// it would need the mesh, and this crate depends on nothing.
+    #[test]
+    fn a_deform_steep_enough_to_fold_the_surface_is_refused() {
+        // What gleamsprat.loom authors: 0.10 * (TAU/0.5 + 2/0.42) = 1.73.
+        Scene::parse(&deform_scene(GOOD_DEFORM, "")).expect("1.73 is under the ceiling of 3.0");
+
+        // Three times the amplitude, everything else the same.
+        let errors = Scene::parse(&deform_scene(
+            &GOOD_DEFORM.replace("amplitude = 0.10", "amplitude = 0.30"),
+            "",
+        ))
+        .expect_err("0.30 puts the peak slope at 5.2");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].error, "deform_surface_is_too_steep");
+        assert!(
+            errors[0].constraint.contains("0.17"),
+            "the rejection has to carry the amplitude that WOULD pass: {errors:?}"
+        );
+
+        // The same amplitude at four times the wavelength is fine, which an
+        // amplitude-only ceiling could not express.
+        Scene::parse(&deform_scene(
+            &GOOD_DEFORM
+                .replace("amplitude = 0.10", "amplitude = 0.30")
+                .replace("wavelength = 0.5", "wavelength = 2.0"),
+            "",
+        ))
+        .expect("a long wave at a large amplitude is a gentle surface");
     }
 
     /// A node with no `Deform` is untouched by every rule above, which is what

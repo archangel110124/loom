@@ -964,6 +964,76 @@ float3 windBend(float3 modelPos, float3x3 m3, float3 origin, float sway) {
     return bent;
 }
 
+/// One travelling sinusoid down a body's long axis — ADR 0062.
+///
+/// `s` is the body coordinate, 0 at the nose and 1 at the tail, from the union
+/// bounds of every mesh under the deform node. `inv_len` is **signed**, so the
+/// same expression serves a nose at either end of its axis with no branch.
+///
+/// The envelope is `r * r` over the span past `span_start`: quadratic for the
+/// same reason `windBend`'s is, and starting late so a rigid front section
+/// stays rigid. On the gleamsprat that is what leaves the chrome pod alone —
+/// it ends at 63% of the body and the envelope starts at 58%, so the mirror
+/// moves 0.23 mm while the fringe moves 16 mm.
+///
+/// **`shear` comes back out because the normal has to be corrected in the same
+/// breath.** The displacement is a function of exactly one coordinate and
+/// points along a different one, so its Jacobian is `I + shear * e_beat (x)
+/// e_nose` — rank-1, and its inverse-transpose is `I - shear * e_nose (x)
+/// e_beat` exactly. That is three operations on the normal with no tangent
+/// attribute, no second texture and no finite difference. On the coral fringe
+/// at the authored amplitude the uncorrected normal is wrong by 50 degrees,
+/// which on a `roughness 0.85` surface is visible diffuse banding rather than
+/// a subtle shading error.
+static const float DEFORM_TAU = 6.2831853;
+
+float3 bodyWave(float3 modelPos, ObjectData o, out float shear) {
+    shear = 0.0;
+    // The same shape `windBend` uses for `sway <= 0`, and it is what keeps
+    // every scene authored before `Deform` rendering byte-identically rather
+    // than merely within tolerance.
+    if (o.deform.x <= 0.0) {
+        return modelPos;
+    }
+
+    float amplitude = o.deform.x;
+    float wavenumber = o.deform.y;
+    float frequency = o.deform.z;
+    float phase = o.deform.w;
+
+    float lead = o.deformFrame.x;
+    float invLen = o.deformFrame.y;
+    float spanStart = o.deformFrame.z;
+    uint code = uint(o.deformFrame.w + 0.5);
+    uint noseAxis = code / 4u;
+    uint beatAxis = code % 4u;
+
+    float raw = (lead - modelPos[noseAxis]) * invLen;
+    float s = saturate(raw);
+
+    float span = max(1.0 - spanStart, 1.0e-4);
+    float rawR = (s - spanStart) / span;
+    float r = saturate(rawR);
+    float env = r * r;
+
+    // `weather.z` is the simulation's clock, never a wall clock (never-do #8):
+    // `--sim N / 60` headless, and a clamped accumulator in the viewer, which
+    // is the same deal grass and every tree already have.
+    float t = push.environment[0].weather.z;
+    float theta = DEFORM_TAU * (s * wavenumber - frequency * t + phase);
+
+    modelPos[beatAxis] += amplitude * env * sin(theta);
+
+    // Zero wherever the body coordinate or the envelope is clamped, because a
+    // clamped coordinate has no gradient — this is the flat rest region, and a
+    // non-zero shear there would tilt the normals of a part that never moves.
+    if (raw > 0.0 && raw < 1.0 && rawR > 0.0) {
+        shear = -invLen * amplitude
+            * (2.0 * r / span * sin(theta) + env * cos(theta) * DEFORM_TAU * wavenumber);
+    }
+    return modelPos;
+}
+
 [shader("vertex")]
 VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) {
     Vertex v = push.vertices[vertexID];
@@ -980,8 +1050,17 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
     float3 origin = float3(o.model[0][3], o.model[1][3], o.model[2][3]);
     float3x3 m3 = float3x3(o.model[0].xyz, o.model[1].xyz, o.model[2].xyz);
     modelPos = windBend(modelPos, m3, origin, o.color.a);
+    // The body wave, and its normal correction in the same breath — ADR 0062.
+    // **Corrected before `normalMatrix` is applied**, because the shear is a
+    // model-space quantity: the two axis codes name model axes, and applying
+    // the world normal matrix first would leave nothing to index.
+    float3 n = unpackNormal(v.packedNormal);
+    float shear;
+    modelPos = bodyWave(modelPos, o, shear);
+    uint deformCode = uint(o.deformFrame.w + 0.5);
+    n[deformCode / 4u] -= shear * n[deformCode % 4u];
     out.position = mul(o.mvp, float4(modelPos, 1.0));
-    out.normal = normalize(mul(normalMatrix, unpackNormal(v.packedNormal)));
+    out.normal = normalize(mul(normalMatrix, n));
     out.color = o.color.rgb;
     out.material = o.material.x;
     // **Why this is not a constant.** The raster path reconstructs worldPos
