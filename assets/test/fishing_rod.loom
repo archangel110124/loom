@@ -1,0 +1,76 @@
+# The 2.3 m fishing rod and its 5000-size spinning reel, in profile.
+#
+# Two instances of the same 26-node chain: `fishing_rod` at its rest pose
+# (0.29 deg per joint) and `fishing_rod_bent` at a fighting load (3.30 deg
+# per joint, 79 deg of tip deflection). The bend is nothing but a rotation
+# on each of S1..S24 composing down the chain -- there is no rig, no
+# skeleton and no deform.  Both are laid horizontally so the taper, the
+# guide train and the curve all read across the frame.
+#
+# The line is deliberately absent. Monofilament is 0.3 mm; the measured
+# pixel table says 1.5 mm does not reach its own colour at 2.75 m. The
+# `Tip` node (no mesh, at the tip-top ring centre) is the anchor a
+# screen-space line strip would be drawn from.
+
+[scene]
+format = 1
+id = "0b4d7e21-56ca-4f39-a1d8-9e2b640c7a35"
+
+[[prefab]]
+key = "rod"
+id = "7f2c14a9-63d8-4e51-b0a7-2d9e5c81f430"
+path = "../prefabs/fishing_rod.loom"
+
+[[prefab]]
+key = "rod_bent"
+id = "5a83e6c1-47b2-4d09-9f36-8c15e072ab94"
+path = "../prefabs/fishing_rod_bent.loom"
+
+[[asset]]
+key = "box"
+id = "e4a71f20-5c93-4b8e-a067-31d8be5947c2"
+path = "cube"
+
+[[node]]
+name = "World"
+
+  [node.components.Environment]
+  sun_direction = [0.28, 0.22, -0.93]
+  sun_strength = 1.15
+  sun_color = [1.0, 0.88, 0.72]
+  ambient = 0.45
+  sky_zenith = [0.13, 0.22, 0.40]
+  sky_horizon = [0.72, 0.66, 0.58]
+
+[[node]]
+name = "Ground"
+parent = "World"
+# well below the loaded tip: at 3.3 deg/joint the tip falls ~1.1 m, and a
+# rod buried in the ground box stipples with RTAO along the intersection.
+transform = { pos = [0.0, -1.60, 0.0], scale = [9.0, 0.1, 9.0] }
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+  [node.components.Material]
+  albedo = [0.10, 0.13, 0.15]
+  roughness = 0.75
+
+# rest pose. pitch 90 lays the rod's +Y down a world horizontal axis.
+[[node]]
+name = "Rest"
+parent = "World"
+prefab = "rod"
+transform = { pos = [0.0, 1.05, -1.15], rot_euler = [90.0, 0.0, 0.0] }
+
+# the same chain under load.
+[[node]]
+name = "Loaded"
+parent = "World"
+prefab = "rod_bent"
+transform = { pos = [0.0, 0.30, -1.15], rot_euler = [90.0, 0.0, 0.0] }
+
+[[node]]
+name = "Camera"
+parent = "World"
+transform = { pos = [3.40, 0.70, 0.0], rot_euler = [0.0, 90.0, 0.0] }
+  [node.components.Camera]
+  fov_y_degrees = 50.0
