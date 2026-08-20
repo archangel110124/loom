@@ -1883,7 +1883,24 @@ pub(crate) fn dynamic_ancestor(
 /// Deliberately not a walk. The movement model belongs in a script, and
 /// inventing a default one in Rust would mean every character in every scene
 /// silently inherits this file's opinion about acceleration and top speed.
+///
+/// **Grounded means stationary, not "coasting with no friction".** The
+/// horizontal components used to be carried forward untouched, which is right
+/// in the air and wrong on the floor: `move_character` returns the velocity
+/// that *survived* the sweep, so a capsule standing on ground half a degree off
+/// level keeps whatever `g·sin(theta)` it picked up and creeps along it
+/// forever. On flat ground that term is identically zero and nothing changes;
+/// on a boat it is the difference between standing on the deck and sliding off
+/// it. The component's own doc says a scriptless character "falls, and does
+/// nothing else", and creeping is something else.
+///
+/// `ponytail:` no friction model, because a character that is meant to slide
+/// wants a script anyway — and a script is where the coefficient would have to
+/// be authored. Add one the first time a scene needs ice.
 fn fall_only(motion: &loom_script::Motion) -> [f32; 3] {
+    if motion.grounded {
+        return [0.0, 0.0, 0.0];
+    }
     [
         motion.velocity[0],
         motion.velocity[1] - 9.81 * motion.dt,
