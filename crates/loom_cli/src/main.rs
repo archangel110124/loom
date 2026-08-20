@@ -5844,32 +5844,6 @@ transform = { pos = [0.0, 9.0, 0.0], scale = [0.3, 0.3, 0.3] }
         assert_eq!(code, 0, "{out}");
     }
 
-    /// **Phase 4's third exit criterion: wetness accumulates and dries.**
-    ///
-    /// Temporal, so it is a simulation assertion and not a screenshot — a still
-    /// of a dried surface and a still of one that was never wet are the same
-    /// picture. `rain_overhang` rains for sixty seconds and then stops, which is
-    /// what makes "afterwards" a moment there is a tick number for.
-    ///
-    /// The three readings at 150 s are the whole model in one line: **the sheen
-    /// is gone, the darkening is still more than half there, and the sheltered
-    /// floor never got either.** If the two dried at one rate the second of
-    /// those would fail, and drying would be a crossfade back to the dry
-    /// material rather than something that looks like drying.
-    /// **The four water scenes, pinned by hash at 600 ticks.**
-    ///
-    /// `cargo xtask validate` proves debug and release compute the *same*
-    /// number. Nothing until now proved it was the same number as yesterday —
-    /// a regression on the force path (buoyancy, drag, the wake grid) moves
-    /// both profiles equally and walks straight through that check, which then
-    /// reports agreement on a new wrong answer. These literals are the half of
-    /// the question the agreement check cannot ask.
-    ///
-    /// **Falsified before it was trusted**: perturbing `loom_water::GRAVITY`
-    /// by 1e-6 fails all four. Run once and reverted.
-    ///
-    /// Re-pinning is deliberate and belongs in the same commit as the change
-
     /// **A `Propulsion` of zero must be free, by value and not only by
     /// absence** — the same hash, to the digit, as a scene with no component
     /// at all.
@@ -5958,6 +5932,19 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         assert_ne!(driven, absent, "a 4 kN thrust changed nothing");
     }
 
+    /// **The four water scenes, pinned by hash at 600 ticks.**
+    ///
+    /// `cargo xtask validate` proves debug and release compute the *same*
+    /// number. Nothing until now proved it was the same number as yesterday —
+    /// a regression on the force path (buoyancy, drag, the wake grid) moves
+    /// both profiles equally and walks straight through that check, which then
+    /// reports agreement on a new wrong answer. These literals are the half of
+    /// the question the agreement check cannot ask.
+    ///
+    /// **Falsified before it was trusted**: perturbing `loom_water::GRAVITY`
+    /// by 1e-6 fails all four. Run once and reverted.
+    ///
+    /// Re-pinning is deliberate and belongs in the same commit as the change
     /// that moved it — the rule the 10k-tick wind hash already follows.
     #[test]
     fn the_water_scenes_hash_to_what_they_hashed() {
@@ -6176,6 +6163,18 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         assert_eq!(code, 0, "{out}");
     }
 
+    /// **Phase 4's third exit criterion: wetness accumulates and dries.**
+    ///
+    /// Temporal, so it is a simulation assertion and not a screenshot — a still
+    /// of a dried surface and a still of one that was never wet are the same
+    /// picture. `rain_overhang` rains for sixty seconds and then stops, which is
+    /// what makes "afterwards" a moment there is a tick number for.
+    ///
+    /// The three readings at 150 s are the whole model in one line: **the sheen
+    /// is gone, the darkening is still more than half there, and the sheltered
+    /// floor never got either.** If the two dried at one rate the second of
+    /// those would fail, and drying would be a crossfade back to the dry
+    /// material rather than something that looks like drying.
     #[test]
     fn wetness_accumulates_and_dries() {
         let scene = "../../assets/test/rain_overhang.loom";

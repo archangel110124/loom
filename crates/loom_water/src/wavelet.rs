@@ -909,11 +909,11 @@ mod tests {
                     state.at[0] = base.at[0] + x;
                     state.velocity = [speed, 0.0, 0.0];
                 }
-                if tick.is_multiple_of(SHED_TICKS) {
-                    if let Some(shed) = shed_source(&states, 0.667) {
-                        // The body origin, which is where the hull is.
-                        field.emit([x, 0.0], t, shed.volume, shed.sigma);
-                    }
+                if tick.is_multiple_of(SHED_TICKS)
+                    && let Some(shed) = shed_source(&states, 0.667)
+                {
+                    // The body origin, which is where the hull is.
+                    field.emit([x, 0.0], t, shed.volume, shed.sigma);
                 }
                 field.step(t);
                 for state in &states {
