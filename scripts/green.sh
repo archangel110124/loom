@@ -209,6 +209,24 @@ fi
   --assert "Rig/Boat.x > 28.0" --assert "Rig/Player.y > 1.2" \
   --assert "Rig/Boat.y > -0.4" >/dev/null
 
+# **THE TWO COMMANDS THE SCENE FILE ITSELF DOCUMENTS, RUN VERBATIM.** They are
+# the only documentation this demo has, they are the first thing a stranger
+# types, and neither was in any gate: the headline one shipped as `> 30.0`
+# against an actual **29.888** and exited 1 with a wall of hint text. These two
+# rows are that file's lines 20 and 26, character for character, so the file
+# and the gate cannot drift apart again. The row above asserts the *claim*
+# ("well clear of the berth", 28.0 with margin); these assert the *document*.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
+  --assert "Rig/Boat.x > 29.0" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold "move_z=1,fire=1" \
+  --assert "events.bite >= 1" >/dev/null
+# And the third number in the same block: the wheel is answering at tick 356,
+# and it is not at 350. The file said 240 for three rounds.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 356 --hold move_z=1 \
+  --assert "state.at_helm == 1" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 350 --hold move_z=1 \
+  --assert "state.at_helm == 0" >/dev/null
+
 # **THE BOARDING LANE, BOTH EDGES.** Round 4 shipped a lane about six degrees
 # wide whose taught aim sat on its right-hand edge: `move_x = 0.05` — three
 # degrees — boarded nothing, and the two failures were a wall of blue hull and
@@ -596,6 +614,25 @@ fi
 1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
 1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1" \
   --assert "state.infish == 1" --assert "Rig/Boat/Catch.local_y > 1.7" >/dev/null
+#     **And it is in his hands, which for eight rounds it was not.** The hang was
+#     a fixed boat-local `(-7.40, 1.85, -3.60)`: he walked to the fish box and it
+#     stayed exactly where it was, over open water, with the caption reading
+#     `FISH IN HAND`. Measured at tick 1910 — `Catch` at world (-0.800, 1.878,
+#     -14.056), `Player` at (-0.746, 1.607, -12.305), and the gap grows for the
+#     whole walk. It now rides `state.plx/ply/plz`, which `deeper_rules.rhai`
+#     solves in her frame from two of her own nodes. Ten ticks after the A of
+#     the stow walk he is at boat local x -9.13 and the fish is at **-9.03**;
+#     the old fixed value is -7.40, so this row is the whole difference.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1960 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
+540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
+850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
+1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
+1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
+1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; \
+1900:move_x=-1; 1950:move_z=-1" \
+  --assert "state.infish == 1" --assert "Rig/Boat/Catch.local_x < -8.5" \
+  --assert "state.plx < -8.9" >/dev/null
 
 # 5g. **PHASE 4 — 95% OF A FISHING ROUND, AND IT HAD NO ROW.** 5f above asserts
 #     phases 0, 1 and 3, which are exactly the three states the round that wrote
@@ -655,6 +692,37 @@ fi
   --assert "events.stow >= 1" --assert "state.stowed == 1" \
   --assert "state.infish == 0" --assert "state.carried == 3" >/dev/null
 
+#     **AND THE LEG AFTER IT, WHICH WAS THE ONLY ONE WITH NO BEARING AT ALL.**
+#     `toward` was called for the fish box and for the crate once he was already
+#     ashore; the leg between them read `N BELOW   take her alongside and step
+#     ashore` — no direction, no distance — and `at_helm` outranks `aboard`, so
+#     for the whole of the drive home the line said nothing about home while the
+#     one key the demo teaches drove him further out. Same tape as 5h, then the
+#     reverse dogleg back to the wheel: forward up the port side, starboard onto
+#     the mat, then ahead. Both sentences are asserted, and the number is what
+#     tells him W was the wrong key — it counts *up*.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2120 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
+540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
+850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
+1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
+1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
+1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; \
+1900:move_x=-1; 1950:move_z=-1" \
+  --assert "state.stowed == 1" --assert "state.aboard == 1" \
+  | grep -q '"message": "1 BELOW   the crate is 5 m behind you, on your left'
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2200 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
+540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
+850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
+1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
+1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
+1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; \
+1900:move_x=-1; 1950:move_z=-1; 2000:move_z=1; 2035:move_x=1; 2060:; \
+2100:move_z=1" \
+  --assert "state.stowed == 1" --assert "state.at_helm == 1" \
+  | grep -q '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   CRATE 12 m"'
+
 # 5i. **AND THE TWO SENTENCES THAT GET HIM THERE, ASSERTED AS SENTENCES.**
 #     `--assert` has no `message` axis, so the same `grep` the two fight endings
 #     use is what can read these. Both are round-8 regressions waiting to
@@ -665,8 +733,16 @@ fi
 #     CLICK to cast` while `state.infish` still read 1 and the fish was hanging
 #     in front of him. This reads the caption two hundred ticks *after* the
 #     notice window has closed, so it fails if either the persistence or the
-#     frame regresses. The `3 m` is the distance falling out of `toward` — it is
-#     what makes the line steerable rather than a hint.
+#     frame regresses.
+#
+#     **Round 9: what it says at the wheel is the ROUTE, not the bearing, and
+#     that is the fix rather than a wording change.** The bearing was correct
+#     and the walk it implied was not: `col_engine_box` stands 0.50 m proud
+#     between the wheel and the box, ten tapes from the landing say S alone, A
+#     alone and D alone all wedge for five hundred ticks, and the sentence went
+#     on saying `3 m dead behind you` while he was pressed into it. The route
+#     line is drawn only while he is forward of the box and inside its x band —
+#     so this row and the next are one measurement in two halves.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2100 \
   --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
 540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
@@ -675,7 +751,22 @@ fi
 1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
 1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; 1900:" \
   --assert "state.infish == 1" \
-  | grep -q '"message": "FISH IN HAND   the YELLOW FISH BOX is 3 m dead behind you"'
+  | grep -q '"message": "FISH IN HAND   go LEFT round the bait box'
+
+#     **And the other half: once he is round it, the steerable bearing is back.**
+#     Ten ticks after the A the route hint is gone and the metres are counting
+#     down. Without this row the route line could be latched on for ever and
+#     nothing would notice; with it, both branches are pinned.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1960 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
+540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
+850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
+1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
+1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
+1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; \
+1900:move_x=-1; 1950:move_z=-1" \
+  --assert "state.infish == 1" \
+  | grep -q '"message": "LANDED   put her in the YELLOW FISH BOX — 3 m dead behind you"'
 
 #     **Two: a player wedged aboard is told he is wedged.** `deeper_player.rhai`
 #     could not fire `stuck` aboard at all — the flag existed and the one place
@@ -684,6 +775,12 @@ fi
 #     `col_engine_box` and he stops dead: z goes -12.304 to -11.601 and never
 #     moves again. `state.stuck` is the numeric half and the sentence is the
 #     half a player reads.
+#
+#     **And it names the thing and the hand now.** `something is in the way — go
+#     round it` told a wedged player neither which object nor which of the two
+#     directions clears it, and those two are the only inputs he is not already
+#     pressing. This row is the reason the wedge is worth keeping: it is the
+#     recovery, and a recovery with no instruction is a lost demo.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2400 \
   --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
 540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
@@ -692,7 +789,7 @@ fi
 1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
 1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; 1900:move_z=-1" \
   --assert "state.stuck == 1" --assert "state.aboard == 1" \
-  | grep -q '"message": "BLOCKED   something is in the way'
+  | grep -q '"message": "BLOCKED   the bait box — step LEFT and go round it"'
 
 #     **And the control that keeps that honest**: the one gesture this demo
 #     teaches must *not* trip it. Boarding, the capsule stands still for eighty
@@ -744,6 +841,21 @@ fi
   --assert "state.knots > 5.0" >/dev/null
 "$LOOM" sim assets/test/rig_drive.loom --ticks 900 \
   --assert "state.knots < 0.5" >/dev/null
+
+# 7. **THE ONE THING ABOUT THE SOUND THAT CAN BE ASSERTED.** `loom audio` mixes
+#    the weather bed and does not touch `AudioSource` — it reports `rms 0.0` on
+#    `proving_ground.loom`, which has one — so there is no headless path to a
+#    mixed frame and no gate can hear this demo. What *is* checkable is the
+#    mechanism: `sound.rs` starts a voice only for an `autoplay` source and a
+#    node script may write only a transform, so the engine note is a source that
+#    **moves**, and `--assert` reads transforms. Moored she is 12 m under the
+#    keel against a 14 m range, which is silence; at 5.8 kn she is under the
+#    cockpit sole. If `engine_note.rhai` or `state.knots` breaks, these two
+#    numbers collapse together and this is the only thing that would notice.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 300 \
+  --assert "Rig/Boat/Engine.local_y < -11.0" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
+  --assert "Rig/Boat/Engine.local_y > -1.0" --assert "state.knots > 5.0" >/dev/null
 
 # **THE LOOP, END TO END, IN ONE PROCESS.** Five rounds built four features and
 # nothing had ever crossed from one to the next: no run in this file had taken

@@ -226,7 +226,12 @@ held = if press { 1 } else { 0 };
 press = edge;
 
 if phase == 0 {
-    message = "press to cast";
+    // **Styled, because it leaks.** This is the fight's own idle string and the
+    // hub is supposed to overwrite it, but on the tick a finished fight resets
+    // to phase 0 it reached the HUD verbatim — lowercase, unspaced, in the
+    // middle of a screen of small-caps. Nothing greps it; it costs nothing to
+    // make it presentable in the one frame it escapes into.
+    message = "CLICK TO CAST";
     if press { phase = 1; at = tick; seed = roll(seed + tick); }
 } else if phase == 1 {
     let wait = if baited { BAIT_MIN + seed % BAIT_SPAN }
@@ -623,10 +628,21 @@ if hub {
     // **The fish eats the bait, on the tick it takes the hook.** `at == tick`
     // in phase 3 is the bite instant and nothing else is: `at` is stamped on
     // every phase change and phase 3 is only entered once per take.
+    //
+    // **`ate` is the memory of that, and it exists because the caption lied
+    // without it.** A take that spits the hook printed `your bait is gone` at a
+    // player who had had no bait to lose — seen with `state.bait` already 0 and
+    // two fish spooked. `baited` cannot answer it: the bait is spent at the
+    // bite, so by the time the fish spits, both cases read zero. Reset on the
+    // cast, set at the spend, read by notice 5.
+    let ate = if "ate" in state { state.ate } else { 0 };
+    if phase == 1 && at == tick { ate = 0; }
     if phase == 3 && at == tick && has(hold, "bait") == 1 {
         hold = without(hold, "bait");
         emit.push(#{ kind: "spend", item: "bait" });
+        ate = 1;
     }
+    state.ate = ate;
 
     for entry in SUPPLY {
         let path = entry[0];
@@ -890,6 +906,88 @@ if hub {
     state.lantern = has(hold, "lantern");
     state.thermos = has(hold, "thermos");
 
+    // -----------------------------------------------------------------------
+    // **HER OWN FRAME, SOLVED FROM TWO OF HER NODES.**
+    // -----------------------------------------------------------------------
+    //
+    // A rules script sees world positions and nothing else — no rotations — and
+    // three separate things in this demo need the player's position *on the
+    // deck*: the fish he is carrying (which hung at a fixed spot on the sole
+    // while he walked away from it), the sentence that gets him round the bait
+    // box, and any future prop that has to be placed relative to him aboard.
+    //
+    // Two nodes of one rigid body are enough. `FishHold` is authored at boat
+    // local (-8.30, 1.42); its world offset from `Rig/Boat` is that vector
+    // turned by her yaw, and a 2-D rotation is recovered from one known pair:
+    //
+    //     c = (L . D) / |L|^2        s = (L.x*D.z - L.z*D.x) / |L|^2
+    //
+    // with the inverse being the transpose. No trig, no normalisation, no
+    // ambiguity of sign — and it degrades to the identity if she is bow-on,
+    // which is the case every pinned number in `scripts/green.sh` was taken in.
+    //
+    // **The one constant here has to match the scene file**, so it is named
+    // rather than inlined, and moving `FishHold` means changing it. That is the
+    // price of not having rotations in the view; it is two numbers.
+    let HOLD_LOCAL_X = -8.30;
+    let HOLD_LOCAL_Z = 1.42;
+    let aboard_frame = false;
+    let plx = 0.0;   // the player, on her deck, in her frame
+    let ply = 0.0;
+    let plz = 0.0;
+    let bfx = 0.0;   // and which way he is facing, in her frame
+    let bfz = -1.0;
+    if BOAT in positions && FISH_HOLD in positions {
+        let b = positions[BOAT];
+        let h = positions[FISH_HOLD];
+        let n = HOLD_LOCAL_X * HOLD_LOCAL_X + HOLD_LOCAL_Z * HOLD_LOCAL_Z;
+        let dx = h[0] - b[0];
+        let dz = h[2] - b[2];
+        let c = (HOLD_LOCAL_X * dx + HOLD_LOCAL_Z * dz) / n;
+        let s = (HOLD_LOCAL_X * dz - HOLD_LOCAL_Z * dx) / n;
+        let wx = me[0] - b[0];
+        let wz = me[2] - b[2];
+        plx = c * wx + s * wz;
+        plz = -s * wx + c * wz;
+        ply = me[1] - b[1];
+        bfx = c * fx + s * fz;
+        bfz = -s * fx + c * fz;
+        aboard_frame = true;
+    }
+    state.plx = plx;
+    state.ply = ply;
+    state.plz = plz;
+
+    // **THE BAIT BOX, WHICH IS THE ONLY REASON THE WALK TO THE FISH BOX IS NOT
+    // A WALK.**
+    //
+    // `col_engine_box` (`jib_vi_decks.loom`) spans boat local x -8.40..-7.20,
+    // z +/-0.78, and stands 0.50 m proud of the sole against a `step_height` of
+    // 0.25 — so it is a wall, not a kerb. Measured, the taught gesture leaves a
+    // player standing at local (-7.32, -1.86) at the wheel, and the fish box is
+    // at (-8.30, 1.42): the bearing is dead astern and the straight line goes
+    // through the box. Ten tapes from the landing: S alone, A alone and D alone
+    // all wedge for five hundred ticks; A+S and D+S both stow.
+    //
+    // **Moving the obstruction was the first choice and it is refused.** That
+    // collider mirrors hull geometry drawn in a shared prefab, four other
+    // scenes stand on it, and the player's x at the wheel is set by the lane he
+    // boarded in rather than by the mat — so there is no legal stow position
+    // (everything within 2.0 m of the helm rectangle is excluded, which on this
+    // deck leaves only z > 1.10) that lies on a clear straight line from where
+    // he stands. Treads over the box were costed too: three of them, at 0.17 m
+    // each, because two would be 0.25 against a 0.25 limit.
+    //
+    // So the level keeps its dogleg and **the sentence stops pretending it does
+    // not exist** — said *before* he walks into it rather than four seconds
+    // after. `+/- 0.40` on the x band is a hair over the capsule's 0.35 radius.
+    let baffled = aboard_frame && plz < -0.78 && plx > -8.80 && plx < -6.80;
+    // Which hand that is. Her port side is -x; the right-hand axis of a man
+    // facing (bfx, bfz) is (-bfz, bfx), so the sign of `bfz` is the whole
+    // answer. Facing her bow — the heading the demo teaches, and the only one
+    // it ever reaches without a mouse — port is his left.
+    let round_it = if bfz < 0.0 { "LEFT" } else { "RIGHT" };
+
     // **Where the fish box is, from where he is standing and facing.**
     // Computed every tick rather than stamped on the landing, because it is
     // steered by: the number falls as he closes and does not as he wedges.
@@ -899,6 +997,34 @@ if hub {
         toward(me, fx, fz, h[0], h[2])
     } else {
         "aft, in the cockpit"
+    };
+
+    // **AND WHERE HOME IS, which was the one leg of the trip with no bearing.**
+    //
+    // `toward` was called twice — for the fish box and for the crate once he
+    // was already ashore — and the leg *between* them got
+    // `"N BELOW   take her alongside and step ashore"`: no direction and no
+    // distance, on the one leg where the player cannot see where he is going.
+    // Worse, `at_helm` outranks `aboard` in the ladder, so for the whole of the
+    // drive home the line said nothing about home at all, while the one key he
+    // has been taught — W — drives him further out.
+    //
+    // Both get it now, and the helm gets the bare distance because its line is
+    // already the longest on the screen. The number falling is the confirmation
+    // that W was the wrong key.
+    let crate_at = if FISH_CRATE in positions {
+        let c = positions[FISH_CRATE];
+        toward(me, fx, fz, c[0], c[2])
+    } else {
+        "west along the wharf"
+    };
+    let crate_m = if FISH_CRATE in positions {
+        let c = positions[FISH_CRATE];
+        let dx = c[0] - me[0];
+        let dz = c[2] - me[2];
+        ((dx * dx + dz * dz).sqrt() + 0.5).to_int()
+    } else {
+        0
     };
 
     // -----------------------------------------------------------------------
@@ -934,7 +1060,11 @@ if hub {
             // pointed the wrong way.** See `toward` for the measurement. It is
             // now his own frame, it carries the distance, and it names a colour
             // he can pick out of the cockpit.
-            "LANDED   put her in the YELLOW FISH BOX — " + box_at
+            if baffled {
+                "LANDED   go " + round_it + " round the bait box — the YELLOW FISH BOX is aft"
+            } else {
+                "LANDED   put her in the YELLOW FISH BOX — " + box_at
+            }
         } else if notice == 3 {
             "STOWED   the catch is below. Take her home when you are done"
         } else if notice == 4 {
@@ -947,8 +1077,14 @@ if hub {
             "PICKED UP " + got.to_upper() + "   " + hold.len() + "/4 slots — the row above is what you are carrying"
         } else {
             // The same sentence as the two above it: the bait went at the
-            // bite, and the barrel it came from is back on the rig.
-            "IT SPAT THE BAIT   your bait is gone   CLICK to cast again"
+            // bite, and the barrel it came from is back on the rig. **Only if
+            // there was one** — `ate` remembers, because with the hold empty
+            // this printed `your bait is gone` at a man who never had any.
+            if ate > 0 {
+                "IT SPAT THE BAIT   your bait is gone   CLICK to cast again"
+            } else {
+                "IT SPAT THE HOOK   bait is on the rig   CLICK to cast again"
+            }
         };
     } else if phase >= 1 {
         // The fight owns the line: it is already in `message`.
@@ -969,9 +1105,17 @@ if hub {
         // Hands off, it teaches the keys. Hands on, it states the two settings
         // and drops the teaching, which is both more useful and shorter — the
         // player pressing A does not need to be told that A is the wheel.
+        //
+        // **And with a fish below, the distance home**, appended to both. This
+        // branch outranks `aboard`, so without it the whole drive home was
+        // captioned by a line that said nothing about home — see `crate_at`.
+        // The distance rather than the bearing because these are already the
+        // two longest strings on the screen, and because at the wheel the
+        // useful question is not "which way is it" but "am I closing".
+        let home = if stowed > 0 { "   CRATE " + crate_m + " m" } else { "" };
         if drive == 0.0 && rudder == 0.0 {
             message = "THE HELM   W ahead  S astern  A/D wheel  SPACE lets go   "
-                    + knots.to_int() + " kn";
+                    + knots.to_int() + " kn" + home;
         } else {
             message = "THE HELM   "
                     + (if drive > 0.0 { "AHEAD" } else if drive < 0.0 { "ASTERN" } else { "stopped" })
@@ -979,7 +1123,7 @@ if hub {
                     + (if rudder > 0.0 { "wheel to starboard" }
                        else if rudder < 0.0 { "wheel to port" }
                        else { "wheel amidships" })
-                    + "   " + knots.to_int() + " kn   SPACE lets go";
+                    + "   " + knots.to_int() + " kn   SPACE lets go" + home;
         }
     } else if stuck > 0 {
         // **Above `aboard`, and that is round 5's defect recurring one deck
@@ -989,7 +1133,12 @@ if hub {
         // halves are fixed: `deeper_player.rhai` measures no-progress in the
         // deck's frame, and the two situations get different sentences because
         // they are different problems.
-        message = if aboard > 0 {
+        message = if aboard > 0 && baffled {
+            // **It knows which thing and which way now.** `go round it` named
+            // neither, and the two inputs that work are the only two a wedged
+            // player is not already pressing.
+            "BLOCKED   the bait box — step " + round_it + " and go round it"
+        } else if aboard > 0 {
             "BLOCKED   something is in the way — go round it"
         } else {
             "BLOCKED   back up — aboard is the gap between the bollards"
@@ -1002,10 +1151,12 @@ if hub {
         // the invitation to catch another one, and it keeps the live bearing —
         // so a player who walked the wrong way round the bait box can watch the
         // metres fail to fall.
-        message = if infish > 0 {
+        message = if infish > 0 && baffled {
+            "FISH IN HAND   go " + round_it + " round the bait box — the YELLOW FISH BOX is aft"
+        } else if infish > 0 {
             "FISH IN HAND   the YELLOW FISH BOX is " + box_at
         } else if stowed > 0 {
-            stowed + " BELOW   take her alongside and step ashore"
+            stowed + " BELOW   the crate is " + crate_at + " — take her alongside"
         } else {
             "ABOARD   CLICK to cast   SHIFT to reel   stand on the mat to steer"
         };
@@ -1014,12 +1165,7 @@ if hub {
         // and "by the west rail" was the same defect as "to starboard", so it
         // is the same fix. He has just stepped off a boat and could be facing
         // any way at all.
-        message = stowed + " IN HER HOLD   the crate is " + (if FISH_CRATE in positions {
-            let c = positions[FISH_CRATE];
-            toward(me, fx, fz, c[0], c[2])
-        } else {
-            "by the west rail"
-        });
+        message = stowed + " IN HER HOLD   the crate is " + crate_at;
     } else {
         message = "WALK FORWARD TO THE BOAT";
     }

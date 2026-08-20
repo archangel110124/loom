@@ -17,9 +17,16 @@
 #                                                        the flag.
 #   loom render assets/games/deeper_demo.loom --out /tmp/rig.png
 #   loom sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
-#     --assert "Rig/Boat.x > 30.0"      # walk forward. That is the whole demo.
+#     --assert "Rig/Boat.x > 29.0"      # walk forward. That is the whole demo.
 #   loom sim assets/games/deeper_demo.loom --ticks 900 --hold "move_z=1,fire=1" \
 #     --assert "events.bite >= 1"       # ...and click. That is the other half.
+#
+# **Both of those lines are gate rows in `scripts/green.sh`, and until round 9
+# neither was.** The first one shipped as `> 30.0` against an actual 29.888 and
+# exited 1 with a wall of hint text — the only documentation this demo has,
+# with its headline command failing. Two of the three numbers in "Measured:"
+# below were stale by the same amount. A documented command that is not in a
+# gate is a claim, not a fact.
 #
 # The hub of the GDD's §7 — a rusted floating platform lashed to the surface
 # above the trench, part oil rig, part fishing wharf. Early game it is meant to
@@ -129,8 +136,11 @@
 #      is a dogleg; press into the bait box for four seconds and the caption
 #      says that too. It is 2.32 m from the wheel against a `RANGE` of 2.0,
 #      which is the difference between a walk and a number that changes itself.
-#   7. take her home — astern out of the berth is how you left, so ahead is how
-#      you come back — step off over the boarding steps, and walk west along
+#   7. take her home — **you left ahead, so astern is how you come back**, and
+#      the helm caption carries `CRATE nn m` for as long as there is a fish
+#      below so the number tells you which. (This line said the opposite for
+#      three rounds. Measured: W at the wheel takes `Rig/Boat.x` from 3.00 to
+#      29.89.) Step off over the boarding steps, and walk west along
 #      the wharf to the crate. `CRATE` on the HUD goes up. Then take bait, and
 #      go again.
 #
@@ -189,7 +199,11 @@
 # facing the gap in the berth railing; the gap is where the boat's cockpit is;
 # the cockpit is where `HelmMat` is drawn. **Walk forward and you board her,
 # arrive at the wheel and get under way, on one key.** Measured: aboard by
-# tick 180, on the mat and moving by tick 240, 34 m clear by tick 900.
+# tick 180, at the wheel at tick **356**, and `Rig/Boat.x` at **29.89** by tick
+# 900 — 26.9 m of travel from her berth at 3.00. (Round 5 wrote "on the mat and
+# moving by tick 240, 34 m clear"; re-measured tick by tick in round 9, helm
+# first latches at 356 and `knots` there is 0.06. Both rows are now in
+# `scripts/green.sh`, which is why they will not go stale again.)
 #
 # That mapping spends none of the engine's five digital channels — `jump` is
 # still jump and `fire` is still unspent, for fishing — and there is no fifth
@@ -1283,8 +1297,16 @@ parent = "Rig/Boat/Catch"
   [node.components.MeshRenderer]
   mesh = { asset = "gleamsprat_fins" }
 
+  # **Not orange, and that is a bug report rather than a preference.**
+  # `gleamsprat_fins` is a splayed, forked shape, and at flesh-orange
+  # ([0.70, 0.34, 0.18], what it shipped as) it reads as a human fist at every
+  # scale — `tests/references/gleamsprat.png` is a blessed reference showing a
+  # sea full of them, and here it arrives at eye level, half a metre from the
+  # camera, holding a pale grey teardrop. The mesh is the real defect and is
+  # not this round's to fix; taking the skin tone out of it is one line and
+  # stops the read.
   [node.components.Material]
-  albedo = [0.70, 0.34, 0.18]
+  albedo = [0.15, 0.19, 0.21]
   roughness = 0.5
   metallic = 0.0
 
@@ -1695,10 +1717,16 @@ transform = { pos = [-7.80, 0.63, -1.775], scale = [1.70, 0.02, 0.875] }
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
 
+  # **Grey rubber, because there were two olive-yellow slabs on one deck and the
+  # caption names a colour.** The mat was [0.62, 0.44, 0.12] at 3.4 x 1.75 m —
+  # five times the fish box's area and the same hue family one stop down. A
+  # stranger told to find "the YELLOW FISH BOX" was looking at the thing he
+  # steers from. Repainting does not move this scene's physics hash; moving
+  # either node does. See the fish box's note.
   [node.components.Material]
-  albedo = [0.62, 0.44, 0.12]
-  roughness = 0.7
-  metallic = 0.2
+  albedo = [0.20, 0.22, 0.24]
+  roughness = 0.9
+  metallic = 0.0
 
 # ---------------------------------------------------------------------------
 # THE BOARDING STEPS — the way *off* her, and the hole round 2 left
@@ -1802,3 +1830,112 @@ transform = { pos = [-8.00, 1.01, 2.41], scale = [1.50, 0.37, 0.15] }
   [node.components.Material]
   albedo = [0.31, 0.27, 0.22]
   roughness = 0.85
+
+# ---------------------------------------------------------------------------
+# ROUND 9 — SOUND, INSIDE WHAT THE ENGINE ACTUALLY HAS
+# ---------------------------------------------------------------------------
+#
+# **The demo was silent.** No `AudioSource` anywhere, `loom audio` reporting
+# `rms 0.0`, and a hub whose whole tonal job in the GDD is to be the cozy
+# baseline the rest of the game is measured against.
+#
+# **What the engine has is autoplay loops and nothing else, and that is a hard
+# limit rather than a gap to route around.** `sound.rs:131` builds a `Voice`
+# only inside `if flag("autoplay", ..)`; a source with `autoplay = false` is
+# registered for occlusion solving and never gets a voice, and no other call
+# site starts one. Node scripts may write `position`, `rotation` and `scale`
+# and nothing else. So **nothing in the fishing loop can make a noise** — not
+# the cast, not the bite, not the hookset, not the landing, not the lid of the
+# box — and the one moment that most wants one, the 300 ms `BITE!  CLICK NOW`
+# window, is exactly the moment audio provably cannot reach. That is an engine
+# round with an ADR in it, and it is not this one.
+#
+# **So the state a loop follows is its DISTANCE**, which is the one thing a
+# script can write. `AudioSource.range` is linear (the schema says why), so a
+# node that moves is a volume fader with occlusion attached — and the fade is
+# measured through the actual level rather than authored, which is the whole
+# point of this engine's audio.
+#
+# Three sources, and the third is the only one that moves:
+#
+#   * `SeaWash` — the hub's bed, at the waterline in the berth. 55 m of range
+#     covers the rig and the near sea.
+#   * `Boat/Wash` — the same clip on the hull, so the sea does not fade out
+#     when you leave. Quieter and shorter-ranged; alongside they sum, which is
+#     what water between a hull and a rig leg actually does.
+#   * `Boat/Engine` — `hum` under the cockpit sole, driven by `engine_note.rhai`
+#     off `state.knots`. **Moored, she is silent, and that is correct rather
+#     than a limitation**: the engine is not running. It swells as she gathers
+#     way and dies as she coasts, which is a loop following a state.
+#
+# **`sea.wav` is synthesised and `scripts/make-sea-wav.py` is how.** There is no
+# sea recording in this repository — there are two clips in it, a hum and a
+# rain — and passing the rain bed off as a sea would be a lie in a scene file
+# that nobody could hear was one. It is eight seconds of pink-weighted noise
+# built in the frequency domain over exactly the loop length, so every partial
+# is an integer harmonic and the loop has no seam, under a three-harmonic
+# swell so it breathes instead of hissing.
+#
+# **None of this is in any gate and that is stated rather than hidden.**
+# `loom audio` measures the weather bed and does not mix `AudioSource` at all
+# (checked: `loom audio assets/games/proving_ground.loom` reports `rms 0.0`
+# on a scene that has one). There is no headless path to a mixed frame, so
+# what is verified here is that the scene loads, that the clip decodes, and
+# that `Engine`'s transform tracks `knots` — `--assert` can read the last of
+# those, and there is a row for it. How it *sounds* is one human with
+# headphones, and no round should pretend otherwise.
+
+[[asset]]
+key = "sea"
+id = "a51c7d92-3e64-4f08-b7a1-2d96c40e8b73"
+path = "../audio/sea.wav"
+
+[[asset]]
+key = "hum"
+id = "e70c4b18-25a9-4f36-8d51-3b6e9a0c7f42"
+path = "../audio/hum.wav"
+
+# The berth's waterline, between the rig legs and the hull. Not on the player:
+# an ambient bed parented to the listener is a constant, and a constant is the
+# one thing this engine's audio is not for.
+[[node]]
+name = "SeaWash"
+parent = "Rig"
+transform = { pos = [0.0, -0.25, -5.20] }
+
+  [node.components.AudioSource]
+  clip = { asset = "sea" }
+  volume = 0.70
+  range = 55.0
+  looping = true
+
+# The same wash on the hull, so thirty metres out is not silence. Boat local,
+# amidships, just under the waterline.
+[[node]]
+name = "Wash"
+parent = "Rig/Boat"
+transform = { pos = [0.0, -0.35, 0.0] }
+
+  [node.components.AudioSource]
+  clip = { asset = "sea" }
+  volume = 0.50
+  range = 35.0
+  looping = true
+
+# **The engine, and the only thing in this demo whose loudness answers to
+# gameplay.** It travels straight down, so it is always *below* her rather than
+# swinging round her — the hull stays between it and the helmsman at every
+# setting and only the distance changes. See `engine_note.rhai`.
+[[node]]
+name = "Engine"
+parent = "Rig/Boat"
+transform = { pos = [-7.80, -12.0, 0.0] }
+
+  [node.components.AudioSource]
+  clip = { asset = "hum" }
+  volume = 0.85
+  range = 14.0
+  looping = true
+
+  [node.components.Script]
+  path = "../scripts/engine_note.rhai"

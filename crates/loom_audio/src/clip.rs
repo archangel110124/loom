@@ -300,6 +300,31 @@ mod tests {
         assert!((clip.seconds() - 0.5).abs() < 1e-4, "{}", clip.seconds());
     }
 
+    /// **The two clips this repository ships decode, and one of them is
+    /// generated.** `sea.wav` is written by `scripts/make-sea-wav.py` — a
+    /// synthesised ambient bed, because there is no sea recording here and
+    /// passing the rain bed off as one would be a lie in a scene file. It is
+    /// the only asset in the project whose correctness nothing else can see:
+    /// `loom audio` mixes the weather bed and never touches an `AudioSource`,
+    /// no gate renders a mixed frame, and a WAV that fails to decode is
+    /// silence rather than an error a player would report. So this row is the
+    /// whole of `deeper_demo.loom`'s audio that any gate can reach.
+    #[test]
+    fn the_shipped_clips_decode() {
+        for (name, seconds) in [("sea.wav", 8.0_f32), ("hum.wav", 2.0)] {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/audio/");
+            let clip = Clip::load(std::path::Path::new(&format!("{path}{name}")))
+                .unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+            assert!(
+                (clip.seconds() - seconds).abs() < 0.05,
+                "{name} is {} s, not {seconds}",
+                clip.seconds()
+            );
+            let peak = clip.samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+            assert!(peak > 0.1, "{name} decoded to near-silence: peak {peak}");
+        }
+    }
+
     #[test]
     fn something_that_is_not_a_wav_is_refused() {
         assert!(Clip::decode(b"this is not audio").is_err());
