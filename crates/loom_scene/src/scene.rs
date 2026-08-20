@@ -537,16 +537,26 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
     // GPU emitters seen so far. Scene-wide rather than per-node, because "one
     // per scene" is a property of the file and no single node can see it.
     let mut gpu_emitters = 0_usize;
-    // Whether this scene is a game, which decides whether cinematic water is
-    // allowed to be silent about what it costs (ADR 0053 §5). Scene-wide and
-    // read ahead of the loop, because the rules may be authored on a node
-    // after the water — a check that only looked backwards would pass or fail
-    // on node order.
-    let has_game_rules = entries.iter().any(|table| {
+    // Whether this scene has state a nondeterministic surface would quietly
+    // demote, which decides whether cinematic water is allowed to be silent
+    // about what it costs (ADR 0053 §5). Scene-wide and read ahead of the loop,
+    // because the rules may be authored on a node after the water — a check
+    // that only looked backwards would pass or fail on node order.
+    //
+    // **`CharacterController` counts, and not by analogy.** A character
+    // standing on a hull that a cinematic body is holding up has a position
+    // that is this GPU's answer and no other machine's, and a script reads that
+    // position every tick to decide where to walk next. That is the same
+    // demotion `GameRules` gets refused for, arriving through the floor instead
+    // of through the rules. It became reachable when a capsule could ride a
+    // floating body; before that nothing did.
+    let has_gameplay = entries.iter().any(|table| {
         table
             .get("components")
             .and_then(Item::as_table_like)
-            .is_some_and(|c| c.get("GameRules").is_some())
+            .is_some_and(|c| {
+                c.get("GameRules").is_some() || c.get("CharacterController").is_some()
+            })
     });
     // Same shape, same reason: a cascade's fall ends at the scene's still-water
     // level, and the `WaterBody` that supplies it may be authored on a later
@@ -607,7 +617,7 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
                 errors.extend(check_water(
                     item,
                     &node.path,
-                    has_game_rules,
+                    has_gameplay,
                     &mut cinematic_bodies,
                 ));
             }
@@ -880,7 +890,7 @@ pub const MAX_CINEMATIC_CELLS: usize = 65_536;
 fn check_tier(
     body: &components::WaterBody,
     node: &str,
-    has_game_rules: bool,
+    has_gameplay: bool,
     cinematic_bodies: &mut usize,
 ) -> Vec<SceneError> {
     let cinematic = body.simulation == components::WaterSimTier::Cinematic;
@@ -990,16 +1000,18 @@ fn check_tier(
         }
     }
 
-    if cinematic && has_game_rules && !body.acknowledge_nondeterminism {
+    if cinematic && has_gameplay && !body.acknowledge_nondeterminism {
         refuse(
             "cinematic_water_demotes_a_game",
             "simulation",
             Value::from("cinematic"),
             "acknowledge_nondeterminism = true, or deterministic water",
             "ADR 0053 §5: a deterministic body may never be forced by a \
-             cinematic one, and this scene has GameRules — which read \
-             `submersion`, which comes off this water. A replay, a save file \
-             or a networked session involving it is not guaranteed to agree \
+             cinematic one, and this scene has GameRules or a \
+             CharacterController. Rules read `submersion`, which comes off this \
+             water; a character rides a hull this water holds up, and its \
+             script reads that position every tick. A replay, a save file or a \
+             networked session involving either is not guaranteed to agree \
              between two computers. Silently demoting a game's determinism is \
              the failure this clause exists to prevent, so say it out loud: \
              `acknowledge_nondeterminism = true`.",
@@ -1022,7 +1034,7 @@ fn check_tier(
 fn check_water(
     item: &Item,
     node: &str,
-    has_game_rules: bool,
+    has_gameplay: bool,
     cinematic_bodies: &mut usize,
 ) -> Vec<SceneError> {
     // Through serde rather than off the raw TOML, so an omitted field is its
@@ -1057,7 +1069,7 @@ fn check_water(
     };
 
     let mut errors = Vec::new();
-    errors.extend(check_tier(&body, node, has_game_rules, cinematic_bodies));
+    errors.extend(check_tier(&body, node, has_gameplay, cinematic_bodies));
     let count = body.waves.waves.len();
     if count > components::MAX_WAVES {
         let mut err = SceneError::new("too_many_waves", node);

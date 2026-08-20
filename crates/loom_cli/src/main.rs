@@ -3259,7 +3259,10 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
                 failures.push(serde_json::json!({
                     "assert": spec,
                     "actual": actual,
-                    "hint": "Format is `Node/Path.axis OP value`, axis one of x/y/z \
+                    "hint": "Format is `Node/Path.axis OP value`, axis one of x/y/z, \
+                             `local_x`/`local_y`/`local_z` (the same position in \
+                             the parent's frame — which is the only frame a claim \
+                             about standing on a moving body can be made in) \
                              or `bob` (peak-to-peak vertical travel over the last \
                              300 ticks), OP one of > >= < <= == ~=. \
                              `status == won|lost|playing`, \
