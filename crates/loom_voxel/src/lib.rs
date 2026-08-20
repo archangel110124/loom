@@ -32,9 +32,27 @@ pub mod mesh;
 pub use mesh::{Mesher, SurfaceNets};
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+
+static BAKES: AtomicU64 = AtomicU64::new(0);
+
+/// How many times [`Volume::bake`] has run in this process.
+///
+/// **A count, not a clock.** A bake is 4.6 s on `moraine` and 0.12 s on
+/// `lanternhead`, so "did that loop stop re-baking?" is a question wall clock
+/// could answer — but this project has published one set of timings 20x wrong
+/// from machine contention and another taken against a stale binary. A count
+/// is immune to both, and it fails loudly rather than quietly when a change is
+/// stubbed: `loom render --frames N` must report the same `bakes` for every N.
+///
+/// Sim code never reads it, so `Relaxed` is the whole ordering requirement.
+#[must_use]
+pub fn bakes() -> u64 {
+    BAKES.load(Ordering::Relaxed)
+}
 
 /// Chunk edge length. 32³ is the voxel doc's sweet spot for destructible
 /// terrain: small enough to remesh cheaply on edit, large enough that
@@ -1103,6 +1121,7 @@ impl Volume {
             "a `terrain` op reached bake unresolved — call `loom_voxel::resolve(ops, base)` \
              after parsing a scene's op list",
         );
+        BAKES.fetch_add(1, Ordering::Relaxed);
         #[allow(clippy::cast_precision_loss)]
         // Half-diagonal of a chunk in world units — the furthest any voxel in
         // it can be from its centre.

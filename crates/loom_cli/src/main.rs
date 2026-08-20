@@ -988,6 +988,27 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                 let probes = telemetry::probes(&scene, &world);
                 let mut rows = telemetry::Telemetry::default();
 
+                // **Hoisted out of the frame loop, where it was a full
+                // `Volume::bake` per CSV row.** `scene` is bound once and never
+                // rebound or mutated, so the volume is loop-invariant and the
+                // loop was re-deriving it from scratch every frame. Measured on
+                // a quiet box, `--size 64x64 --spin 0 --step 0`, min of 3:
+                //
+                //     moraine       f1 21.82 s   f3 31.01 s   => 4595 ms/frame
+                //     lanternhead   f1  1.64 s  f11  2.87 s   =>  119 ms/frame
+                //     ocean (none)  f1  0.40 s  f11  0.43 s   =>    2 ms/frame
+                //
+                // Perfect separation on whether the scene has a `VoxelVolume`.
+                // `loom render`'s `bakes` field is the gate: it must not grow
+                // with `--frames`.
+                //
+                // ponytail: cloned per frame rather than borrowed, because
+                // `Weather` owns its `sky` and giving it a lifetime ripples
+                // through `telemetry::Frame` and three signatures. The clone is
+                // a memcpy of the `Chunk::Detailed` boxes; if it ever shows up,
+                // make `Weather::sky` a `&`.
+                let frame_sky = scene_volume(&scene);
+
                 for index in 0..count {
                     #[allow(clippy::disallowed_methods)]
                     let frame_started = std::time::Instant::now();
@@ -1210,7 +1231,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     let frame_weather = weather::Weather {
                         wind: weather::wind_of(&scene),
                         rain,
-                        sky: scene_volume(&scene),
+                        sky: frame_sky.clone(),
                         seconds: moment,
                         deck: weather::deck_of(&world),
                         // Telemetry reports wind and rain; nothing in a CSV row
@@ -1257,6 +1278,10 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                 "ok": true, "out": out, "frames": frames.unwrap_or(1),
                 "objects": objects.len(), "particles": particles.len(),
                 "size": [width, height], "gpu": gpu,
+                // A count, not a clock: `--frames N` must report the same
+                // `bakes` for every N, or something in the loop is re-deriving
+                // the voxel volume. That is what this number is here to catch.
+                "bakes": loom_voxel::bakes(),
                 // Reported so the agent can tell a scene rendered without
                 // shadows from a scene that has none.
                 "raytracing": raytracing,

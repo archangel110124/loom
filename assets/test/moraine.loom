@@ -104,13 +104,29 @@
 # scene for the research's "mesh is the default" rule, and it is a cost
 # argument rather than a fidelity one.
 #
-# **The grass field's 4.3 s is not the blades.** Measured: density 90 -> 40
-# changes nothing (11.43 -> 11.26 s) and half_extent 24 -> 20 changes nothing.
-# It is `GroundGrid`'s march of the SDF, which is per field and scales with
-# the *volume* it is marching, not with the field over it. Nothing in the
-# scene tunes it; a smaller volume would.
+# **The grass field's cost is not the blades, and it is not the march either.**
+# Measured: density 90 -> 40 changes nothing (11.43 -> 11.26 s) and
+# half_extent 24 -> 20 changes nothing. This file used to attribute the rest to
+# `GroundGrid`'s march of the SDF. It is not that. `grass_blades`
+# (`loom_cli/src/main.rs`) opens by calling `scene_volume(scene)` — so a `Grass`
+# field costs a whole **second `Volume::bake`**, on top of the one the terrain
+# already paid for. Counted, not inferred, with `loom render`'s `bakes` field:
 #
-# All of it is load-time. `LOOM_GPU_TIMING=1` puts grass at 0.054 ms a frame.
+#     loom render assets/test/moraine.loom --size 64x64 --frames 1 --spin 0 --step 0
+#         with the Grass field      "bakes": 4     21.78 / 21.80 / 21.98 s
+#         with it deleted           "bakes": 3     17.17 / 17.25 s
+#
+# One bake, 4.6 s. A smaller volume would help; so would passing the terrain
+# the caller already has into `grass_blades` instead of re-deriving it.
+#
+# **All of it is load-time — as of the commit that added this paragraph, and
+# not before it.** The frame loop used to build a fresh `Weather` per telemetry
+# row with `sky: scene_volume(&scene)` in it, so `--frames N` paid a *third*
+# full bake per frame: `--frames 3` was 31.01 s against `--frames 1`'s 21.82 s,
+# 4595 ms of re-baking per additional frame. It is hoisted now, and `bakes` is
+# the check — it must not grow with `--frames`. `LOOM_GPU_TIMING=1` puts grass
+# at 0.054 ms a frame.
+#
 # This is nonetheless the most expensive scene in `SCENES` — `terrain_stress`
 # is 2.1 s with twice the chunks — and the reason it is worth that is in the
 # `SCENES` entry.
