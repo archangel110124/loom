@@ -88,7 +88,15 @@ Bounded rather than argued: at `gleamsprat.loom`'s authored settings the chrome
 shell displaces by **0.23 mm** on a 161 mm animal.
 
 *Trigger:* a deformed mesh's reflection or shadow becomes the subject of a
-shot, or a scene displaces a specular surface by more than about 2 mm.
+shot, or a scene displaces **any** surface by more than about 2 mm.
+
+> **Amended by ADR 0064.** This trigger originally said *specular* surface, and
+> that qualifier was wrong in the one way that mattered: the first symptom of a
+> stale acceleration structure is a deformed surface **self-shadowing**, which
+> happens on a matte surface as readily as on a mirror, and it shipped on this
+> scene's `roughness 0.85` fringe at 16 mm. ADR 0064 makes every ray query fire
+> from the rest position so that crossing 2 mm is an approximation rather than
+> an artifact; what stays refused is moving the acceleration structure itself.
 
 **No `kind` enum, no layer stack, no clip, no keyframe track, no skeleton.**
 One animation exists in this repository. A `kind` field with one variant is

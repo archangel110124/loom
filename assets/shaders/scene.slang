@@ -840,6 +840,19 @@ struct VSOutput {
     // How far a shadow ray must start from this surface to clear it. Per
     // object, because it is set by that mesh's quantisation step.
     nointerpolation float shadowBias : SHADOWBIAS;
+    // **Where a ray must start, which is not where the pixel is.** The
+    // acceleration structure holds the mesh as it was authored; `bodyWave`
+    // moves the drawn surface away from it by up to a tenth of a body length.
+    // A ray fired from the drawn position starts *inside* the rest-pose
+    // geometry and every visibility query comes back occluded — which is what
+    // put hard black gashes down the gleamsprat's fringe. Firing from the
+    // undeformed position instead makes the query consistent with the thing it
+    // queries: a deformed body's shadows, AO and reflections are its rest
+    // pose's, which is the bargain ADR 0062 already struck for its reflection.
+    //
+    // Equal to `worldPos` bit for bit on every object that does not deform,
+    // because it is the same expression applied to the same vector.
+    float3 rayOrigin : RAYORIGIN;
 };
 
 // Mirrors `loom_asset::packed::unpack`. Kept in step by a Rust-side test that
@@ -982,9 +995,14 @@ float3 windBend(float3 modelPos, float3x3 m3, float3 origin, float sway) {
 /// e_nose` — rank-1, and its inverse-transpose is `I - shear * e_nose (x)
 /// e_beat` exactly. That is three operations on the normal with no tangent
 /// attribute, no second texture and no finite difference. On the coral fringe
-/// at the authored amplitude the uncorrected normal is wrong by 50 degrees,
-/// which on a `roughness 0.85` surface is visible diffuse banding rather than
-/// a subtle shading error.
+/// at the authored amplitude the uncorrected normal is wrong by 50 degrees.
+///
+/// **What that is worth, measured rather than asserted.** Removing the
+/// correction and re-rendering `gleamsprat.loom` at tick 104 moves fraction
+/// 0.0116, worst channel 92 at 640x400 — real, cheap, and kept. It is *not*
+/// what stops the fringe going black: that was the ray origin, and the commit
+/// that shipped this term claimed the gashes as its own. See ADR 0064. Do not
+/// re-attribute a picture to the term you happened to be writing.
 static const float DEFORM_TAU = 6.2831853;
 
 float3 bodyWave(float3 modelPos, ObjectData o, out float shear) {
@@ -1056,6 +1074,13 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
     // the world normal matrix first would leave nothing to index.
     float3 n = unpackNormal(v.packedNormal);
     float shear;
+    // **Kept, because it is where the rays have to start.** `windBend`'s own
+    // displacement is deliberately *not* backed out here: the trees have drawn
+    // bent and traced straight since ADR 0009 and every forest reference is
+    // blessed that way, so undoing it here would be a silent re-lighting of
+    // scenes this change has nothing to do with. It is the same defect one
+    // amplitude smaller, and it is pre-existing — see ADR 0064.
+    float3 restPos = modelPos;
     modelPos = bodyWave(modelPos, o, shear);
     uint deformCode = uint(o.deformFrame.w + 0.5);
     n[deformCode / 4u] -= shear * n[deformCode % 4u];
@@ -1086,6 +1111,7 @@ VSOutput vertexMain(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID) 
     // vertex where it actually is. Recomputing the unbent one here would light
     // a tree as though it were standing still.
     out.worldPos = mul(o.model, float4(modelPos, 1.0)).xyz;
+    out.rayOrigin = mul(o.model, float4(restPos, 1.0)).xyz;
     out.uv = unpackUv(v.packedUv, o.uvUnpack);
     return out;
 }
@@ -2649,7 +2675,7 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // a normal map can tilt the hemisphere far enough to put half its rays
     // under the real surface, which reads as blotches of pure occlusion.
     float3 ambient = hemisphereAmbient(normal) * ambientStrength()
-                   * ambientVisibility(in.worldPos, geometric, in.shadowBias, in.position.xy);
+                   * ambientVisibility(in.rayOrigin, geometric, in.shadowBias, in.position.xy);
     // **Point lights, added to the ambient term.** They are unshadowed: a
     // shadowed point light needs a cube map or a ray per light per pixel, and
     // the ray tracer here is aimed at the sun. For a fire in the dark that is
@@ -2663,7 +2689,7 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // can tilt a surface far enough to push the ray origin below the real
     // surface, and the ray then starts inside its own geometry.
     float sun = diffuse > 0.0
-        ? sunVisibility(in.worldPos, geometric, in.shadowBias, in.position.xy)
+        ? sunVisibility(in.rayOrigin, geometric, in.shadowBias, in.position.xy)
         : 0.0;
 
     // Metals have no diffuse response — their albedo is the reflectance of the
@@ -2694,7 +2720,7 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // analytic sky and nothing else, so a mirror in a room reflected the
     // weather through the ceiling. At roughness 1 it still is, bit for bit,
     // which is what keeps a fully matte surface unchanged.
-    float3 environment = tracedEnvironment(in.worldPos, geometric, lobe, roughness,
+    float3 environment = tracedEnvironment(in.rayOrigin, geometric, lobe, roughness,
                                            in.shadowBias, skyGradient(lobe));
     lit += environment * f0 * (1.0 - roughness * 0.7);
 
