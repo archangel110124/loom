@@ -162,6 +162,68 @@ pub(crate) fn flicker(a: &Image, b: &Image, c: &Image) -> Result<f64, String> {
     Ok(total / b.pixels.len() as f64)
 }
 
+/// Isolated pixels: how many sit far from the median of their eight neighbours.
+///
+/// **The measurement three doc comments in this project already argue from and
+/// no code computed.** `REFLECT_MAX_RADIANCE`, ADR 0019 and ADR 0050 each cite
+/// a salt count to justify a constant, and each of them re-derived it from
+/// prose in a private script. Neither `compare` nor `flicker` can see it:
+/// `compare` prices a whole region moving and a firefly is one pixel, and
+/// `flicker` needs three frames and cannot tell "wider" from "less stable" —
+/// rain's 2.5 px floor was chosen against `flicker`'s objection on exactly
+/// this ground.
+///
+/// A firefly, a stipple and a lone sub-pixel bead all share one shape: a pixel
+/// whose neighbourhood does not agree with it. The median of the eight is
+/// robust to an edge running through the window, which a mean is not, so a
+/// silhouette does not read as salt.
+///
+/// Per channel, counted where the distance exceeds `threshold` in 0-255 units;
+/// the worst channel is what a caller compares. The border row and column are
+/// skipped because they have no eight.
+pub(crate) fn salt(image: &Image, threshold: u8, rect: Option<(u32, u32, u32, u32)>) -> [u64; 3] {
+    let mut counts = [0_u64; 3];
+    if image.width < 3 || image.height < 3 {
+        return counts;
+    }
+    // Clamped and inset by one, for `rect_means`' reason: a crop is a region
+    // of interest, not an index, and the border has no eight neighbours.
+    let (x, y, w, h) = rect.unwrap_or((0, 0, image.width, image.height));
+    let first_column = (x.max(1)) as usize;
+    let first_row = (y.max(1)) as usize;
+    let last_column = x.saturating_add(w).min(image.width - 1) as usize;
+    let last_row = y.saturating_add(h).min(image.height - 1) as usize;
+    let stride = image.width as usize * 4;
+    for row in first_row..last_row {
+        for column in first_column..last_column {
+            let base = row * stride + column * 4;
+            for (channel, count) in counts.iter_mut().enumerate() {
+                let mut ring = [0_u8; 8];
+                let mut n = 0;
+                for dy in [-1_isize, 0, 1] {
+                    for dx in [-1_isize, 0, 1] {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let at = (row as isize + dy) as usize * stride
+                            + (column as isize + dx) as usize * 4
+                            + channel;
+                        ring[n] = image.pixels[at];
+                        n += 1;
+                    }
+                }
+                ring.sort_unstable();
+                let median = (u16::from(ring[3]) + u16::from(ring[4])) / 2;
+                let here = u16::from(image.pixels[base + channel]);
+                if here.abs_diff(median) > u16::from(threshold) {
+                    *count += 1;
+                }
+            }
+        }
+    }
+    counts
+}
+
 /// Compare two images of the same size.
 ///
 /// # Errors
@@ -416,6 +478,36 @@ mod tests {
     /// origin or a mean taken over everything is the failure that matters. The
     /// surround here is deliberately the complement of the patch in every
     /// channel: averaging any of it in moves the answer immediately.
+    #[test]
+    /// The self-check the metric is worthless without: a spike above the
+    /// threshold is counted and one below it is not. Every number this project
+    /// quotes as "salt" is this function, so a silent off-by-one in it would
+    /// re-price two ADRs.
+    #[test]
+    fn a_spike_over_the_threshold_is_salt_and_one_under_it_is_not() {
+        let mut image = flat(16, 16, [10, 10, 10, 255]);
+        let at = (8 * 16 + 8) * 4;
+        image.pixels[at] = 50; // +40, over a threshold of 24
+        assert_eq!(salt(&image, 24, None), [1, 0, 0]);
+        image.pixels[at] = 30; // +20, under it
+        assert_eq!(salt(&image, 24, None), [0, 0, 0]);
+    }
+
+    /// An edge is not salt. The median of eight is what buys this — half the
+    /// window agreeing is enough — and a mean would report every silhouette in
+    /// the frame, which would make the metric useless for the reflection work
+    /// it was written for.
+    #[test]
+    fn a_straight_edge_is_not_salt() {
+        let mut image = flat(16, 16, [10, 10, 10, 255]);
+        for row in 0..16 {
+            for column in 8..16 {
+                image.pixels[(row * 16 + column) * 4] = 200;
+            }
+        }
+        assert_eq!(salt(&image, 24, None), [0, 0, 0]);
+    }
+
     #[test]
     fn rect_means_read_the_rectangle_and_nothing_around_it() {
         let mut image = flat(16, 16, [200, 0, 200, 255]);

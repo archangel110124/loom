@@ -83,6 +83,12 @@ USAGE:
         smooth over three frames and cancels; a pixel that twinkles does not.
         This is the anti-aliasing measurement — `compare` cannot make it.
 
+    loom salt <cand.png> [--base <stub.png>] [--rect x,y,w,h] [--thresh 24]
+        Isolated pixels: how many sit more than --thresh (0-255, default 24)
+        from the median of their eight neighbours. Fireflies, stipple and lone
+        sub-pixel beads all have that shape; an edge does not. --base reports
+        the salt *added* over another render. Worst channel is the number.
+
     loom audio <scene.loom> [--seconds <n>] [--openness <0-1>] [--out <x.wav>]
         Render the scene's weather bed offline and measure it: rms, peak, and
         tilt (high-band over low-band energy — the number that says `darker`).
@@ -276,6 +282,10 @@ fn run(args: &[String]) -> (u8, String) {
         },
         Some("scene") => match args.get(1) {
             Some(path) => scene_tx(path, args),
+            None => (2, USAGE.to_owned()),
+        },
+        Some("salt") => match args.get(1) {
+            Some(candidate) => salt(candidate, &args[2..]),
             None => (2, USAGE.to_owned()),
         },
         Some("flicker") => match (args.get(1), args.get(2), args.get(3)) {
@@ -2288,6 +2298,88 @@ fn frame_path(out: &str, index: u32) -> String {
 }
 
 /// Pixel-compare two renders.
+/// Isolated pixels — the measurement three doc comments already argue from.
+///
+/// `REFLECT_MAX_RADIANCE`, ADR 0019 and ADR 0050 each pick a constant by
+/// citing a salt count, and until now no code in this repository computed one:
+/// each was re-derived from prose in a private script, which is the definition
+/// of a number nobody else can reproduce. `compare` prices a region moving and
+/// a firefly is one pixel; `flicker` needs three frames and cannot tell wider
+/// from steadier. This is the third question.
+///
+/// `--base` reports the salt *added* over another render, which is the form
+/// every one of those ADRs actually quotes: a stipple is only a regression
+/// against what the frame cost before it.
+///
+/// **Not comparable across a colour or lighting change** — ADR 0010's rule,
+/// for the same reason it binds flicker: the count is absolute, so a brighter
+/// subject scores higher without being worse.
+fn salt(candidate: &str, args: &[String]) -> (u8, String) {
+    let mut threshold = 24_u8;
+    let mut base: Option<String> = None;
+    let mut rect: Option<(u32, u32, u32, u32)> = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--thresh" => {
+                threshold = args.get(index + 1).and_then(|v| v.parse().ok()).unwrap_or(24);
+                index += 2;
+            }
+            "--base" => {
+                base = args.get(index + 1).cloned();
+                index += 2;
+            }
+            "--rect" => {
+                rect = args.get(index + 1).and_then(|v| {
+                    let parts: Vec<u32> = v.split(',').filter_map(|p| p.parse().ok()).collect();
+                    match parts[..] {
+                        [x, y, w, h] => Some((x, y, w, h)),
+                        _ => None,
+                    }
+                });
+                index += 2;
+            }
+            _ => index += 1,
+        }
+    }
+
+    let count = |path: &str| -> Result<[u64; 3], String> {
+        let image = imagediff::load(std::path::Path::new(path))?;
+        Ok(imagediff::salt(&image, threshold, rect))
+    };
+
+    let here = match count(candidate) {
+        Ok(counts) => counts,
+        Err(e) => return (2, json_line(&serde_json::json!({ "error": "io_error", "constraint": e }))),
+    };
+    let worst = here.iter().copied().max().unwrap_or(0);
+    let mut report = serde_json::json!({
+        "ok": true,
+        "salt": worst,
+        "channels": here,
+        "thresh": threshold,
+        "image": candidate,
+    });
+    if let Some(base) = base {
+        match count(&base) {
+            Ok(before) => {
+                let added: Vec<i64> = here
+                    .iter()
+                    .zip(&before)
+                    .map(|(a, b)| i64::try_from(*a).unwrap_or(0) - i64::try_from(*b).unwrap_or(0))
+                    .collect();
+                report["added"] = serde_json::json!(added.iter().copied().max().unwrap_or(0));
+                report["added_channels"] = serde_json::json!(added);
+                report["base"] = serde_json::json!(base);
+            }
+            Err(e) => {
+                return (2, json_line(&serde_json::json!({ "error": "io_error", "constraint": e })));
+            }
+        }
+    }
+    (0, json_line(&report))
+}
+
 /// How much of the middle frame is temporal noise rather than motion.
 ///
 /// **The measurement `compare` cannot make.** Counting changed pixels
