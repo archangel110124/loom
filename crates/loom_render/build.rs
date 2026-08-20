@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
@@ -25,6 +26,15 @@ fn main() {
     // internally correct and silently disagree.
     generate_fields(&shader_dir);
     generate_water(&shader_dir);
+
+    // Newest mtime under `assets/shaders/**`, RECURSIVELY, plus this file.
+    // Recursion is not optional: `scene.slang` includes `generated/fields.slang`,
+    // `generated/water.slang` and `include/rain.slang`, and a check that only
+    // looked at the top level would ship a stale shader after a `loom_field`
+    // change -- the exact CPU/GPU divergence S2 and ADR 0006 exist to prevent.
+    //
+    // Taken *after* the two generators have run, so a field edit moves it.
+    let newest_input = newest_mtime(&shader_dir).max(mtime(&manifest.join("build.rs")));
 
     let Ok(entries) = std::fs::read_dir(&shader_dir) else {
         // No shader directory yet is fine — an empty one is not an error.
@@ -46,7 +56,7 @@ fn main() {
 
     for shader in &shaders {
         println!("cargo:rerun-if-changed={}", shader.display());
-        compile(shader, &out_dir);
+        compile(shader, &out_dir, newest_input);
     }
 }
 
@@ -139,12 +149,51 @@ fn write_generated(shader_dir: &Path, name: &str, text: &str) {
         .unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
 }
 
-fn compile(shader: &Path, out_dir: &Path) {
+/// Modification time of `path`, or `None` if it cannot be read.
+fn mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
+/// Newest modification time anywhere under `dir`, recursively.
+///
+/// `None` for an unreadable or empty tree, which makes the staleness check in
+/// [`compile`] fail open and recompile -- the safe direction.
+fn newest_mtime(dir: &Path) -> Option<SystemTime> {
+    let mut newest = None;
+    for entry in std::fs::read_dir(dir).ok()?.filter_map(Result::ok) {
+        let path = entry.path();
+        let seen = if path.is_dir() {
+            newest_mtime(&path)
+        } else {
+            mtime(&path)
+        };
+        newest = newest.max(seen);
+    }
+    newest
+}
+
+fn compile(shader: &Path, out_dir: &Path, newest_input: Option<SystemTime>) {
     let stem = shader
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or_else(|| panic!("shader path is not valid UTF-8: {}", shader.display()));
     let spv = out_dir.join(format!("{stem}.spv"));
+
+    // **The build script re-runs whenever any of its build-dependencies
+    // changes** -- `loom_field`, `loom_water`, `loom_voxel`, and transitively
+    // `loom_scene` and `loom_reflect`. None of those is a shader input, and
+    // `slangc` was being re-run nine times regardless. Measured: `cargo check`
+    // after `touch crates/loom_reflect/src/lib.rs` was 14.05 s, of which
+    // `slangc scene.slang -g2` alone is 9.6 s.
+    //
+    // This is an intra-run skip, not a change to cargo's invalidation: every
+    // `rerun-if-changed` below is untouched, `-g2` is untouched, and a `slangc`
+    // that actually *runs* still panics on failure (never-do #9). Sound because
+    // `write_generated` is content-gated, so a generated fragment's mtime moves
+    // only when the emitted Slang really changed.
+    if mtime(&spv).is_some_and(|built| Some(built) > newest_input) {
+        return;
+    }
 
     let output = Command::new("slangc")
         .arg(shader)
