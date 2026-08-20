@@ -5932,6 +5932,103 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         assert_ne!(driven, absent, "a 4 kN thrust changed nothing");
     }
 
+    /// **The school's idle, and the two things about it a picture cannot check.**
+    ///
+    /// `gleamsprat.loom`'s five fish carry one shared `gleamsprat_hover.rhai`
+    /// that trims each animal's pitch. It is `place` in ADR 0062's division, so
+    /// unlike the `Deform` on the same nodes it *is* in `World::state_hash` —
+    /// which is the only instrument that can see it, because a node's pitch
+    /// moves no child position (`HeroBody` and `HeroTrim` sit at identity) and
+    /// `loom sim --assert` has no vocabulary for rotation at all.
+    ///
+    /// Three claims, and the second and third are what stop the first passing
+    /// for a trivial reason:
+    ///
+    ///   1. the 300-tick hash is what it was. Re-pinning belongs in the commit
+    ///      that moved it, the rule the 10k-tick wind hash already follows.
+    ///   2. deleting the five `Script` blocks moves it — the idle is doing
+    ///      something rather than writing back what it read.
+    ///   3. **collapsing the per-node seed to a constant moves it too.** That
+    ///      is the detuning: five animals nodding on one phase is choreography
+    ///      the eye locks onto, and it is the unison failure grass paid for
+    ///      once. The seed is `position[2]`, which nothing writes, and a
+    ///      refactor that "simplified" it away would look harmless and read as
+    ///      five clockwork fish.
+    ///
+    /// The scratch copies live in `temp_dir` with their two relative paths
+    /// rewritten absolute, because a scene copied elsewhere resolves its assets
+    /// against its own directory (ADR 0024) and a script that silently failed
+    /// to load would make claims 2 and 3 pass by accident.
+    #[test]
+    fn the_school_pitches_and_every_fish_pitches_differently() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("workspace root");
+        let scene_src = std::fs::read_to_string(root.join("assets/test/gleamsprat.loom"))
+            .expect("the scene");
+        let script_src =
+            std::fs::read_to_string(root.join("assets/scripts/gleamsprat_hover.rhai"))
+                .expect("the idle");
+        let hover = format!("{}/assets/scripts/gleamsprat_hover.rhai", root.display());
+
+        let hash_of = |body: &str, name: &str| {
+            let path = std::env::temp_dir().join(name);
+            std::fs::write(&path, body).expect("scratch scene");
+            let (code, out) = run(&args(&["sim", path.to_str().unwrap(), "--ticks", "300"]));
+            let _ = std::fs::remove_file(&path);
+            assert_eq!(code, 0, "{out}");
+            let key = "\"state_hash\": \"";
+            let at = out.find(key).expect("no state_hash") + key.len();
+            out[at..at + 16].to_owned()
+        };
+
+        let (code, out) = run(&args(&[
+            "sim",
+            "../../assets/test/gleamsprat.loom",
+            "--ticks",
+            "300",
+        ]));
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains("\"state_hash\": \"84a8305563f6e99b\""),
+            "the school's 300-tick hash moved; re-pin it here in the same \
+             commit that moved it, deliberately: {out}"
+        );
+
+        // Both scratch scenes need absolute asset and script paths.
+        let absolute = |body: &str| {
+            body.replace("../meshes/", &format!("{}/assets/meshes/", root.display()))
+                .replace("../scripts/", &format!("{}/assets/scripts/", root.display()))
+        };
+        let idling = hash_of(&absolute(&scene_src), "loom_gleamsprat_idling.loom");
+
+        let block = format!("  [node.components.Script]\n  path = \"{hover}\"\n");
+        let stripped = absolute(&scene_src).replace(&block, "");
+        assert!(!stripped.contains("gleamsprat_hover"), "the strip missed a block");
+        let still = hash_of(&stripped, "loom_gleamsprat_still.loom");
+        assert_ne!(idling, still, "removing the idle changed nothing — it is inert");
+
+        // And the detuning: one shared phase instead of a per-node one.
+        let unison_script = std::env::temp_dir().join("loom_gleamsprat_unison.rhai");
+        std::fs::write(
+            &unison_script,
+            script_src.replace("let seed = position[2] * 7.31;", "let seed = 0.0;"),
+        )
+        .expect("scratch script");
+        let unison = hash_of(
+            &absolute(&scene_src).replace(&hover, unison_script.to_str().unwrap()),
+            "loom_gleamsprat_unison.loom",
+        );
+        let _ = std::fs::remove_file(&unison_script);
+        assert_ne!(
+            idling, unison,
+            "a constant phase hashed the same as a per-node one — the school \
+             is swimming in unison and nothing else would say so"
+        );
+    }
+
     /// **The four water scenes, pinned by hash at 600 ticks.**
     ///
     /// `cargo xtask validate` proves debug and release compute the *same*

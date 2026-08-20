@@ -30,6 +30,15 @@
 # as foreshortening rather than as motion. If this scene's camera ever moves,
 # re-render sixteen frames before trusting `beat`.
 #
+# **Two systems move this school and they are deliberately unrelated.** The
+# fringe is a `Deform` — a wave in the vertex shader, in no hash, invisible to
+# `--assert` and to scripts. The pitch is a `Script` — CPU, fixed step, in
+# `World::state_hash`, and one shared file phased off each node's own z. That is
+# ADR 0062's division arriving as a picture: shape on the GPU, place on the CPU,
+# and the only thing the animal needed that the wave could not give it was a
+# body that is not perfectly still. Without the second one this reads as five
+# rigid pods with waving tails, which is the spec's own risk 5.
+#
 # **The two golden rows are 126 ticks apart, and a rate error is why.** A still
 # pins the shape of the wave and says nothing about its speed; `weather.z` is
 # `--sim N / 60` headless and a free-running wall clock in `loom run`, so a
@@ -179,6 +188,11 @@ transform = { pos = [0.0, 0.13, 0.0], rot_euler = [0.0, 90.0, 0.0] }
   # `windBend` de-syncs trees, and trees do not move; the moment this fish
   # travels, a hashed phase would re-hash every tick and the animal would
   # vibrate instead of swim.
+  # The idle. One file for all five — see the script for why the phase comes
+  # out of `position[2]` and why pitch is the only channel it can write.
+  [node.components.Script]
+  path = "../scripts/gleamsprat_hover.rhai"
+
   [node.components.Deform]
   nose = "+z"
   beat = "y"
@@ -234,6 +248,11 @@ transform = { pos = [-0.44, 0.11, -0.42], rot_euler = [0.0, 104.0, -3.0] }
   # about four seconds. Detuned oscillators drift apart and never repeat, which
   # is what a school does. Measured: forcing this school into unison moves 0.43%
   # of the gate frame at worst channel 176, so a still catches it.
+  # The idle. One file for all five — see the script for why the phase comes
+  # out of `position[2]` and why pitch is the only channel it can write.
+  [node.components.Script]
+  path = "../scripts/gleamsprat_hover.rhai"
+
   [node.components.Deform]
   nose = "+z"
   beat = "y"
@@ -271,6 +290,11 @@ transform = { pos = [-0.44, 0.11, -0.42], rot_euler = [0.0, 104.0, -3.0] }
 name = "FishB"
 parent = "Lagoon"
 transform = { pos = [0.52, 0.10, -0.70], rot_euler = [0.0, 72.0, 2.0] }
+
+  # The idle. One file for all five — see the script for why the phase comes
+  # out of `position[2]` and why pitch is the only channel it can write.
+  [node.components.Script]
+  path = "../scripts/gleamsprat_hover.rhai"
 
   [node.components.Deform]
   nose = "+z"
@@ -310,6 +334,11 @@ name = "FishC"
 parent = "Lagoon"
 transform = { pos = [-0.18, 0.09, -1.05], rot_euler = [0.0, 96.0, 0.0] }
 
+  # The idle. One file for all five — see the script for why the phase comes
+  # out of `position[2]` and why pitch is the only channel it can write.
+  [node.components.Script]
+  path = "../scripts/gleamsprat_hover.rhai"
+
   [node.components.Deform]
   nose = "+z"
   beat = "y"
@@ -347,6 +376,11 @@ transform = { pos = [-0.18, 0.09, -1.05], rot_euler = [0.0, 96.0, 0.0] }
 name = "FishD"
 parent = "Lagoon"
 transform = { pos = [0.30, 0.08, -1.55], rot_euler = [0.0, 84.0, 0.0] }
+
+  # The idle. One file for all five — see the script for why the phase comes
+  # out of `position[2]` and why pitch is the only channel it can write.
+  [node.components.Script]
+  path = "../scripts/gleamsprat_hover.rhai"
 
   [node.components.Deform]
   nose = "+z"
