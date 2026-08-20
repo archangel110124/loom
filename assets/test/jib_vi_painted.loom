@@ -222,7 +222,7 @@ transform = { pos = [0.0, 0.40, 0.0] }
   # buoyancy. This is the hull's own box: 19.06 x 3.32 x 6.60.
   #
   # **It is the only box with any mass in it.** The deck a player walks on is
-  # twenty-three more, further down this file, all built with zero mass so that
+  # twenty-six more, further down this file, all built with zero mass so that
   # every stability number in the header above is still measured against this
   # one alone. Do not delete it and do not give the others weight.
   [node.components.BoxCollider]
@@ -412,7 +412,7 @@ parent = "Sea/Boat"
 
 
 # ===========================================================================
-# THE DECK A PLAYER STANDS ON — twenty-three hand-authored boxes.
+# THE DECK A PLAYER STANDS ON — twenty-six hand-authored boxes.
 #
 # **These are collision only and none of them is drawn.** The one above is the
 # hull's inertia and is *not* what anyone walks on: its top face is at y = 1.66
@@ -460,16 +460,31 @@ parent = "Sea/Boat"
 # ===========================================================================
 
 # --- the deck, following the sheer -----------------------------------------
-# Four flat plates and one ramped one. Adjacent tops differ by at most 0.07 m
-# against a 0.35 m step height, so there is no lip anywhere along the walk.
+#
+# **Tilted, not stepped, and that was measured rather than assumed.** With four
+# flat plates the walker's eye rose 0.045, 0.064 and 0.070 m as it crossed the
+# three seams — autostep takes each over about six ticks, so it reads as a
+# doorsill rather than a teleport, but there is no doorsill drawn there. Three
+# of these plates sit on a rising sheer, so giving each the slope its own span
+# has takes the seams to 0.005, 0.025, 0.000 and 0.000 m for one `rot_euler`
+# apiece. The only remaining step is where the flat amidships plate meets the
+# forward one, and 25 mm is under the skin thickness of the contact.
+#
+# `col_deck_mid` stays flat because its span is not a slope: the deck is 0.62 at
+# both ends and cambers down to 0.60 in the middle, so a chord across it is
+# already the best a single box can do.
+#
+# Seam-popping is the dominant failure mode of a hand-authored deck and no still
+# render can see it, so it is measured here in the file rather than left to the
+# fly-through.
 
 [[node]]
 name = "col_deck_aft"
 parent = "Sea/Boat"
-transform = { pos = [-7.80, 0.505, 0.0] }
+transform = { pos = [-7.8017, 0.49, 0.0], rot_euler = [0.0, 0.0, -0.655] }
 
   [node.components.BoxCollider]
-  half_extents = [1.75, 0.15, 2.62]
+  half_extents = [1.7501, 0.15, 2.62]
 
 [[node]]
 name = "col_deck_mid"
@@ -482,18 +497,18 @@ transform = { pos = [-3.05, 0.465, 0.0] }
 [[node]]
 name = "col_deck_fwd"
 parent = "Sea/Boat"
-transform = { pos = [1.30, 0.515, 0.0] }
+transform = { pos = [1.3025, 0.5125, 0.0], rot_euler = [0.0, 0.0, 0.955] }
 
   [node.components.BoxCollider]
-  half_extents = [1.35, 0.15, 2.82]
+  half_extents = [1.3502, 0.15, 2.82]
 
 [[node]]
 name = "col_deck_shoulder"
 parent = "Sea/Boat"
-transform = { pos = [3.50, 0.585, 0.0] }
+transform = { pos = [3.506, 0.5751, 0.0], rot_euler = [0.0, 0.0, 2.291] }
 
   [node.components.BoxCollider]
-  half_extents = [1.00, 0.15, 2.55]
+  half_extents = [1.0008, 0.15, 2.55]
 
 # **The foredeck is tilted slabs, not steps.** It climbs 0.765 -> 1.66 over
 # 3.65 m, and cutting that into flat plates puts a 0.37 m riser at the forward
@@ -667,7 +682,37 @@ parent = "Sea/Boat"
 transform = { pos = [-5.50, 3.27, 0.0] }
 
   [node.components.BoxCollider]
-  half_extents = [0.60, 0.19, 1.05]
+  half_extents = [0.60, 0.19, 1.40]
+
+# The helm block behind it, 0.59 m proud of the bridge deck — over the step
+# height, so it is walked round rather than onto, which is what a helm is.
+[[node]]
+name = "col_fly_helm"
+parent = "Sea/Boat"
+transform = { pos = [-3.70, 3.375, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.05, 0.295, 1.40]
+
+# **The hardtop, as a ceiling, and it is the one box here that takes space
+# away.** Its underside is at 4.80 over a bridge deck at 3.08: 1.72 m of
+# headroom against a 1.90 m capsule. Without it a walker stands with its head
+# 0.22 m inside the roof and the render says nothing — the same "simulation
+# self-consistent, picture a lie" this file's deck boxes exist to end, just
+# upside down. With it the bridge deck is walkable round its perimeter, which
+# is where a person actually fits: the two side strips at |z| 1.6 to 2.6, and
+# the open ends forward of x = 3.2 and aft of x = -2.2.
+#
+# Message for the mesh effort, and it is the same one the deckhouse sends: the
+# superstructure stack wants lifting about 0.5 m. Nothing on this boat clears a
+# person standing up.
+[[node]]
+name = "col_fly_hardtop"
+parent = "Sea/Boat"
+transform = { pos = [0.50, 5.00, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [2.70, 0.20, 1.55]
 
 [[node]]
 name = "col_fly_rail_port"

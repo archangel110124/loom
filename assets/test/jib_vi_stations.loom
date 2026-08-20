@@ -1,86 +1,56 @@
-# Five people standing still on a boat, for an hour of ticks.
+# Twelve people standing on twelve named pieces of deck.
 #
-# **This scene asks one question and it is not "can you walk here".** It is:
-# does someone who is doing nothing stay where they were put, while the deck
-# under them heaves, rolls and pitches on the sea. Walking is
-# `jib_vi_walk.loom`, deliberately a different file — drift and traverse
-# measured in one scene would be two tools measured as one, and the boat is
-# already a place where a legitimate motion and a defect look alike.
+# **This is the collider-rot detector, and it exists because the mesh is being
+# detailed further while these boxes are not.** Every box in `jib_vi_painted`
+# was measured off `jib_vi_wide.obj` by marching columns through it. Nothing
+# stops the mesh moving under them: a wheelhouse gets raised, a deck gets
+# recambered, and the collision quietly stops matching the picture with no gate
+# noticing. A still render cannot see it — a capsule 8 cm above a deck looks
+# like a capsule on a deck — and a walk test fails vaguely, at the wrong place,
+# for no stated reason.
 #
-# **Every rider is scriptless on purpose.** A movement model that re-derives a
-# target velocity every tick crushes a slow drift and hides it; `fall_only` is
-# gravity and nothing else, so whatever the deck does to a passive capsule is
-# what this measures. It is the worst case and it is the honest one.
+# So: a scriptless capsule dropped a metre above each named surface, asserting
+# the height it comes to rest at. A capsule's centre sits 0.95 m above its feet,
+# so the number is the drawn deck height there plus 0.95, plus about 0.04 m of
+# skin and hover that the controller adds and that ADR 0060 explains.
 #
-# **Every rider is parented to the Boat, which is the whole trick.** A
-# character's world position on this hull swings tens of centimetres a second
-# with the waves, so no global axis can express "it stayed put".
-# `drive_characters` writes each character's position back into its node in the
-# *parent's* frame every tick, so a rider parented here reads its boat-frame
-# position directly, and `--assert Sea/Boat/<name>.local_x` is drift with the
-# boat's own motion already subtracted (ADR 0060).
+# **The numbers are the *measured* rest heights, not the arithmetic ones**, so
+# the assertion is a regression check rather than a re-derivation of the model.
+# The gate is +/- 0.06 m, which is well inside the 0.35 m step height — a
+# collider that has parted company with its mesh enough to matter moves further
+# than that.
 #
-# The five stations are chosen for lever arm, because the carry a rider needs
-# is `linvel + omega x r` and `r` is what varies:
+# **Separate from `jib_vi_walk.loom` on purpose.** These twelve are furniture,
+# and furniture standing on the route is a wall: the first version of the walk
+# scene contained both and the walker stopped dead against `SideDeckStbdAft`
+# after two seconds. A side deck 1.20 m clear does not fit two people abreast.
 #
-#   AftCockpit   (-8.9, 0)     8.9 m aft of the roll/pitch axes
-#   Centre       ( 0.0, +2.1)  amidships, the smallest lever there is
-#   PortRail     ( 0.0, -2.3)  the beam, where roll is fastest
-#   Foredeck     ( 5.5,  0)    5.5 m forward, where pitch is fastest
-#   BridgeDeck   (-3.0, -2.1)  3 m *above* both axes, and the only station a
-#                              translation-only fix fails — the horizontal
-#                              component of omega x r is five times the
-#                              centreline's there. Outboard at z = -2.1
-#                              because the hardtop comes down to 4.80 over a
-#                              deck at 3.08 and a 1.9 m capsule does not fit
-#                              under it — the bridge deck is walkable round its
-#                              perimeter, not across it.
+# Measured rest heights, `--ticks 600`, each steady from about tick 120 on:
 #
-# **Do not accept a build measured at the centreline alone.** That station
-# passes almost anything.
+#   AftCockpitPort    1.640
+#   AftCockpitStbd    1.640
+#   BaitBox           2.127
+#   SideDeckStbdAft   1.613
+#   SideDeckStbdMid   1.630
+#   SideDeckStbdFwd   1.692
+#   SideDeckPortMid   1.630
+#   SideDeckPortAft   1.613
+#   ForedeckAft       1.801
+#   ForedeckFwd       2.310
+#   BridgeDeckAft     4.068
+#   BridgeDeckFwd     4.068
 #
-# Read it with, per rider and per axis:
+# Run the lot with a pair of assertions per station, +/- 0.06:
 #
-#   loom sim assets/test/jib_vi_drift.loom --ticks 3600 \
-#     --assert "Sea/Boat/PortRail.local_x > 9999"
+#   loom sim assets/test/jib_vi_stations.loom --ticks 600 \
+#     --assert "Sea/Boat/SideDeckStbdMid.local_y >= 1.594" \
+#     --assert "Sea/Boat/SideDeckStbdMid.local_y <= 1.714" ...
 #
-# and take `actual` off the failure — that is the boat-frame position at the
-# end. Sweep the tick count for the peak-to-peak excursion.
-#
-# Everything except the riders is `jib_vi_painted.loom` unchanged, including the
-# wind at 3.5. The harder sea is a copy of this file with `speed` raised; it is
-# not authored here because a scene that measures a bound should measure one
-# sea, and 3.5 is the one the hull's whole header was characterised on.
-#
-# **What it currently measures**, boat-frame, ticks 60 to 3600:
-#
-#              net drift      peak-to-peak
-#   wind 0     0 mm exactly   0 mm exactly, every station
-#   wind 3.5   0.1 to 4 mm    7 mm in x, 18 mm in z, every station
-#   wind 12    0.47 to 1.00 m
-#
-# Per station at wind 3.5, net: AftCockpit 3 mm, Centre 4 mm, PortRail 3 mm,
-# Foredeck 3 mm, BridgeDeck 0.1 mm. Against the acceptance bounds of 50 mm net
-# and 30 mm peak-to-peak, that is an order of magnitude of margin, and the
-# bridge deck — three metres above both axes, where the horizontal part of
-# omega x r is five times the centreline's — is the best of the five rather
-# than the worst.
-#
-# **The wind 12 row is not a pass, is not claimed as one, and is not a
-# coordinate error.** At that sea
-# this hull heaves through 2.3 m while its horizontal position moves 5 cm, and
-# a standing capsule's height swings 0.23 m — riders are genuinely thrown clear
-# of the deck and land again, and a rider in the air is a rider not being
-# carried. Raising `speed` here reproduces it. The fix is not in the carry;
-# see ADR 0060.
-#
-# Before any of this, the same run at wind 3.5 put two of these five riders
-# **13 km away** and a third 7.5 m off, and the same run at wind 12 put all five
-# about 900 m astern.
+# Wind is zero so the only thing being measured is where the deck is.
 
 [scene]
 format = 1
-id = "b41d7c92-6ae0-4f13-9c85-2e7d05a1f3b6"
+id = "f2947c61-8b3d-4e05-96a1-70c8fd41b2e9"
 
 [[asset]]
 key = "hull_white"
@@ -141,7 +111,7 @@ name = "Sea"
 
   [node.components.Wind]
   direction_degrees = 20.0
-  speed = 3.5
+  speed = 0.0
   gustiness = 0.25
   turbulence = 0.15
 
@@ -682,14 +652,13 @@ transform = { pos = [-7.7576, 1.7962, -2.00], rot_euler = [0.0, 0.0, 42.41], sca
   [node.components.BoxCollider]
   half_extents = [1.0, 1.0, 1.0]
 
-# --- the riders -------------------------------------------------------------
-# No `Script` on any of them. Each starts about a metre above its deck so the
-# settle is visible as a settle; a capsule's centre sits 0.95 m above its feet.
+# --- the twelve stations ----------------------------------------------------
 
+# aft cockpit, port of the bait box and clear of the companionway
 [[node]]
-name = "AftCockpit"
+name = "AftCockpitPort"   # rests at local_y 1.640
 parent = "Sea/Boat"
-transform = { pos = [-8.90, 1.75, 0.0] }
+transform = { pos = [-8.90, 1.90, -0.95], scale = [0.35, 0.6, 0.35] }
 
   [node.components.CharacterController]
   height = 1.9
@@ -699,13 +668,14 @@ transform = { pos = [-8.90, 1.75, 0.0] }
   mesh = { asset = "capsule" }
 
   [node.components.Material]
-  albedo = [0.85, 0.30, 0.10]
+  albedo = [0.30, 0.60, 0.85]
   roughness = 0.6
 
+# aft cockpit, starboard
 [[node]]
-name = "Centre"
+name = "AftCockpitStbd"   # rests at local_y 1.640
 parent = "Sea/Boat"
-transform = { pos = [0.0, 1.75, 2.10] }
+transform = { pos = [-8.90, 1.90, 1.20], scale = [0.35, 0.6, 0.35] }
 
   [node.components.CharacterController]
   height = 1.9
@@ -715,13 +685,14 @@ transform = { pos = [0.0, 1.75, 2.10] }
   mesh = { asset = "capsule" }
 
   [node.components.Material]
-  albedo = [0.20, 0.55, 0.85]
+  albedo = [0.30, 0.60, 0.85]
   roughness = 0.6
 
+# on top of the bait box, 0.48 m proud of the deck
 [[node]]
-name = "PortRail"
+name = "BaitBox"   # rests at local_y 2.127
 parent = "Sea/Boat"
-transform = { pos = [0.0, 1.75, -2.30] }
+transform = { pos = [-7.80, 2.40, 0.00], scale = [0.35, 0.6, 0.35] }
 
   [node.components.CharacterController]
   height = 1.9
@@ -731,13 +702,14 @@ transform = { pos = [0.0, 1.75, -2.30] }
   mesh = { asset = "capsule" }
 
   [node.components.Material]
-  albedo = [0.90, 0.80, 0.20]
+  albedo = [0.30, 0.60, 0.85]
   roughness = 0.6
 
+# starboard side deck, aft end
 [[node]]
-name = "Foredeck"
+name = "SideDeckStbdAft"   # rests at local_y 1.613
 parent = "Sea/Boat"
-transform = { pos = [5.50, 1.95, 0.0] }
+transform = { pos = [-6.60, 1.90, 2.10], scale = [0.35, 0.6, 0.35] }
 
   [node.components.CharacterController]
   height = 1.9
@@ -747,13 +719,14 @@ transform = { pos = [5.50, 1.95, 0.0] }
   mesh = { asset = "capsule" }
 
   [node.components.Material]
-  albedo = [0.25, 0.75, 0.35]
+  albedo = [0.30, 0.60, 0.85]
   roughness = 0.6
 
+# starboard side deck, amidships
 [[node]]
-name = "BridgeDeck"
+name = "SideDeckStbdMid"   # rests at local_y 1.630
 parent = "Sea/Boat"
-transform = { pos = [-3.00, 4.15, -2.10] }
+transform = { pos = [0.00, 1.90, 2.10], scale = [0.35, 0.6, 0.35] }
 
   [node.components.CharacterController]
   height = 1.9
@@ -763,30 +736,127 @@ transform = { pos = [-3.00, 4.15, -2.10] }
   mesh = { asset = "capsule" }
 
   [node.components.Material]
-  albedo = [0.80, 0.35, 0.75]
+  albedo = [0.30, 0.60, 0.85]
   roughness = 0.6
 
-# A vertical mark 5 m off the roll axis. Under a heel phi it lands at
-# (0, -5 sin phi, 5 cos phi), so atan2(-dy, dz) recovers a signed angle over the
-# full range and can tell "righted" from "inverted" — which a mast's tilt from
-# vertical cannot. `--assert` has no orientation axis; this is the workaround
-# the hull's own header documents.
+# starboard side deck, forward
 [[node]]
-name = "Heel"
+name = "SideDeckStbdFwd"   # rests at local_y 1.692
 parent = "Sea/Boat"
-transform = { pos = [0.0, 0.0, 5.0] }
+transform = { pos = [3.00, 1.90, 2.10], scale = [0.35, 0.6, 0.35] }
 
-[[node]]
-name = "Post"
-parent = "Sea"
-transform = { pos = [14.0, 2.5, -6.0], scale = [0.25, 5.0, 0.25] }
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
 
   [node.components.MeshRenderer]
-  mesh = { asset = "box" }
+  mesh = { asset = "capsule" }
 
   [node.components.Material]
-  albedo = [0.26, 0.24, 0.22]
-  roughness = 0.9
+  albedo = [0.30, 0.60, 0.85]
+  roughness = 0.6
+
+# port side deck, amidships
+[[node]]
+name = "SideDeckPortMid"   # rests at local_y 1.630
+parent = "Sea/Boat"
+transform = { pos = [0.00, 1.90, -2.10], scale = [0.35, 0.6, 0.35] }
+
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.60, 0.85]
+  roughness = 0.6
+
+# port side deck, aft end
+[[node]]
+name = "SideDeckPortAft"   # rests at local_y 1.613
+parent = "Sea/Boat"
+transform = { pos = [-6.60, 1.90, -2.10], scale = [0.35, 0.6, 0.35] }
+
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.60, 0.85]
+  roughness = 0.6
+
+# foredeck, aft chord
+[[node]]
+name = "ForedeckAft"   # rests at local_y 1.801
+parent = "Sea/Boat"
+transform = { pos = [5.00, 2.20, 0.00], scale = [0.35, 0.6, 0.35] }
+
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.60, 0.85]
+  roughness = 0.6
+
+# foredeck, forward chord
+[[node]]
+name = "ForedeckFwd"   # rests at local_y 2.310
+parent = "Sea/Boat"
+transform = { pos = [7.20, 2.60, 0.00], scale = [0.35, 0.6, 0.35] }
+
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.60, 0.85]
+  roughness = 0.6
+
+# bridge deck, port side, outboard of the hardtop
+[[node]]
+name = "BridgeDeckAft"   # rests at local_y 4.068
+parent = "Sea/Boat"
+transform = { pos = [-4.00, 4.30, -2.10], scale = [0.35, 0.6, 0.35] }
+
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.60, 0.85]
+  roughness = 0.6
+
+# bridge deck, starboard side, outboard of the hardtop
+[[node]]
+name = "BridgeDeckFwd"   # rests at local_y 4.068
+parent = "Sea/Boat"
+transform = { pos = [2.00, 4.30, 2.10], scale = [0.35, 0.6, 0.35] }
+
+  [node.components.CharacterController]
+  height = 1.9
+  radius = 0.35
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "capsule" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.60, 0.85]
+  roughness = 0.6
 
 [[node]]
 name = "Camera"

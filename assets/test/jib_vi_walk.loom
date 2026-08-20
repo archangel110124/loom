@@ -1,86 +1,50 @@
-# Five people standing still on a boat, for an hour of ticks.
+# Walking the whole boat.
 #
-# **This scene asks one question and it is not "can you walk here".** It is:
-# does someone who is doing nothing stay where they were put, while the deck
-# under them heaves, rolls and pitches on the sea. Walking is
-# `jib_vi_walk.loom`, deliberately a different file — drift and traverse
-# measured in one scene would be two tools measured as one, and the boat is
-# already a place where a legitimate motion and a defect look alike.
+# **One capsule and nothing else aboard, which took two goes to get right.** The
+# first version of this file also carried the twelve standing stations that are
+# now in `jib_vi_stations.loom`, and one of them was parked on the route: two
+# 0.35 m capsules stop 0.70 m apart, and the walker halted there and stayed for
+# three thousand ticks. A side deck 1.20 m clear does not fit two people abreast,
+# so a scene that measures a traverse must not also contain furniture. Same rule
+# as drift and traverse being separate — two tools measured as one is not a
+# measurement.
 #
-# **Every rider is scriptless on purpose.** A movement model that re-derives a
-# target velocity every tick crushes a slow drift and hides it; `fall_only` is
-# gravity and nothing else, so whatever the deck does to a passive capsule is
-# what this measures. It is the worst case and it is the honest one.
+# **Wind is zero, deliberately.** The route is a list of world-space waypoints,
+# because a script is handed its world position and cannot see the boat's frame
+# (giving it one would mean handing sandboxed code a borrow of the transform
+# hierarchy). On flat water this hull sits within millimetres of where it
+# started, so world and boat frame are the same thing to a waypoint. Every
+# assertion still reads `local_*`, which is exact either way.
 #
-# **Every rider is parented to the Boat, which is the whole trick.** A
-# character's world position on this hull swings tens of centimetres a second
-# with the waves, so no global axis can express "it stayed put".
-# `drive_characters` writes each character's position back into its node in the
-# *parent's* frame every tick, so a rider parented here reads its boat-frame
-# position directly, and `--assert Sea/Boat/<name>.local_x` is drift with the
-# boat's own motion already subtracted (ADR 0060).
+# The route, in `boat_patrol.rhai`: aft cockpit, up the starboard side deck,
+# round the foredeck to the stem, back down the port side, round the forward end
+# of the companionway, aft to its foot, and up it to the bridge deck. It is a
+# route a person could not take on the mesh alone — the drawn ladder is 68
+# degrees with an 0.08 m tread — which is why there is a plank there.
 #
-# The five stations are chosen for lever arm, because the carry a rider needs
-# is `linvel + omega x r` and `r` is what varies:
+#   loom sim assets/test/jib_vi_walk.loom --ticks 440 \
+#     --assert "Sea/Boat/Walker.local_x >= 6.0" \
+#     --assert "Sea/Boat/Walker.local_y > 0.45" \
+#     --assert "Sea/Boat/Walker.local_z < 3.10"      # at the stem
 #
-#   AftCockpit   (-8.9, 0)     8.9 m aft of the roll/pitch axes
-#   Centre       ( 0.0, +2.1)  amidships, the smallest lever there is
-#   PortRail     ( 0.0, -2.3)  the beam, where roll is fastest
-#   Foredeck     ( 5.5,  0)    5.5 m forward, where pitch is fastest
-#   BridgeDeck   (-3.0, -2.1)  3 m *above* both axes, and the only station a
-#                              translation-only fix fails — the horizontal
-#                              component of omega x r is five times the
-#                              centreline's there. Outboard at z = -2.1
-#                              because the hardtop comes down to 4.80 over a
-#                              deck at 3.08 and a 1.9 m capsule does not fit
-#                              under it — the bridge deck is walkable round its
-#                              perimeter, not across it.
+#   loom sim assets/test/jib_vi_walk.loom --ticks 1700 \
+#     --assert "Sea/Boat/Walker.local_y >= 3.9" \
+#     --assert "Sea/Boat/Walker.local_x >= 3.0" \
+#     --assert "Sea/Boat/Walker.local_z < 3.10"      # on the bridge deck
 #
-# **Do not accept a build measured at the centreline alone.** That station
-# passes almost anything.
+# `local_y > 0.45` at every milestone is "never fell through", and it is there
+# because a swimmer must not be able to satisfy the endpoint. `local_z < 3.10`
+# is "never went outboard"; the walk's own maximum is 2.10.
 #
-# Read it with, per rider and per axis:
-#
-#   loom sim assets/test/jib_vi_drift.loom --ticks 3600 \
-#     --assert "Sea/Boat/PortRail.local_x > 9999"
-#
-# and take `actual` off the failure — that is the boat-frame position at the
-# end. Sweep the tick count for the peak-to-peak excursion.
-#
-# Everything except the riders is `jib_vi_painted.loom` unchanged, including the
-# wind at 3.5. The harder sea is a copy of this file with `speed` raised; it is
-# not authored here because a scene that measures a bound should measure one
-# sea, and 3.5 is the one the hull's whole header was characterised on.
-#
-# **What it currently measures**, boat-frame, ticks 60 to 3600:
-#
-#              net drift      peak-to-peak
-#   wind 0     0 mm exactly   0 mm exactly, every station
-#   wind 3.5   0.1 to 4 mm    7 mm in x, 18 mm in z, every station
-#   wind 12    0.47 to 1.00 m
-#
-# Per station at wind 3.5, net: AftCockpit 3 mm, Centre 4 mm, PortRail 3 mm,
-# Foredeck 3 mm, BridgeDeck 0.1 mm. Against the acceptance bounds of 50 mm net
-# and 30 mm peak-to-peak, that is an order of magnitude of margin, and the
-# bridge deck — three metres above both axes, where the horizontal part of
-# omega x r is five times the centreline's — is the best of the five rather
-# than the worst.
-#
-# **The wind 12 row is not a pass, is not claimed as one, and is not a
-# coordinate error.** At that sea
-# this hull heaves through 2.3 m while its horizontal position moves 5 cm, and
-# a standing capsule's height swings 0.23 m — riders are genuinely thrown clear
-# of the deck and land again, and a rider in the air is a rider not being
-# carried. Raising `speed` here reproduces it. The fix is not in the carry;
-# see ADR 0060.
-#
-# Before any of this, the same run at wind 3.5 put two of these five riders
-# **13 km away** and a third 7.5 m off, and the same run at wind 12 put all five
-# about 900 m astern.
+# **Where it gets to, measured.** Peak `local_x` is 6.717 at tick 440, which is
+# the stem — the stem block stops the capsule at 7.75 and the waypoint is 7.30.
+# It is on the companionway at tick 1100 (`local_y` 2.413, mid-climb), on the
+# bridge deck by 1300 (4.049 = the 3.08 deck plus the capsule's 0.95 plus 0.02
+# of skin), and settled at its last waypoint from about 1650 on.
 
 [scene]
 format = 1
-id = "b41d7c92-6ae0-4f13-9c85-2e7d05a1f3b6"
+id = "d80fe5a3-1c47-4b62-a9f0-51e6c7d29a84"
 
 [[asset]]
 key = "hull_white"
@@ -141,7 +105,7 @@ name = "Sea"
 
   [node.components.Wind]
   direction_degrees = 20.0
-  speed = 3.5
+  speed = 0.0
   gustiness = 0.25
   turbulence = 0.15
 
@@ -682,111 +646,28 @@ transform = { pos = [-7.7576, 1.7962, -2.00], rot_euler = [0.0, 0.0, 42.41], sca
   [node.components.BoxCollider]
   half_extents = [1.0, 1.0, 1.0]
 
-# --- the riders -------------------------------------------------------------
-# No `Script` on any of them. Each starts about a metre above its deck so the
-# settle is visible as a settle; a capsule's centre sits 0.95 m above its feet.
+# --- the walker -------------------------------------------------------------
 
 [[node]]
-name = "AftCockpit"
+name = "Walker"
 parent = "Sea/Boat"
-transform = { pos = [-8.90, 1.75, 0.0] }
+transform = { pos = [-8.60, 1.75, 1.20], scale = [0.35, 0.6, 0.35] }
 
   [node.components.CharacterController]
   height = 1.9
   radius = 0.35
+  step_height = 0.35
+  max_slope_degrees = 50.0
+
+  [node.components.Script]
+  path = "../scripts/boat_patrol.rhai"
 
   [node.components.MeshRenderer]
   mesh = { asset = "capsule" }
 
   [node.components.Material]
-  albedo = [0.85, 0.30, 0.10]
+  albedo = [0.90, 0.35, 0.10]
   roughness = 0.6
-
-[[node]]
-name = "Centre"
-parent = "Sea/Boat"
-transform = { pos = [0.0, 1.75, 2.10] }
-
-  [node.components.CharacterController]
-  height = 1.9
-  radius = 0.35
-
-  [node.components.MeshRenderer]
-  mesh = { asset = "capsule" }
-
-  [node.components.Material]
-  albedo = [0.20, 0.55, 0.85]
-  roughness = 0.6
-
-[[node]]
-name = "PortRail"
-parent = "Sea/Boat"
-transform = { pos = [0.0, 1.75, -2.30] }
-
-  [node.components.CharacterController]
-  height = 1.9
-  radius = 0.35
-
-  [node.components.MeshRenderer]
-  mesh = { asset = "capsule" }
-
-  [node.components.Material]
-  albedo = [0.90, 0.80, 0.20]
-  roughness = 0.6
-
-[[node]]
-name = "Foredeck"
-parent = "Sea/Boat"
-transform = { pos = [5.50, 1.95, 0.0] }
-
-  [node.components.CharacterController]
-  height = 1.9
-  radius = 0.35
-
-  [node.components.MeshRenderer]
-  mesh = { asset = "capsule" }
-
-  [node.components.Material]
-  albedo = [0.25, 0.75, 0.35]
-  roughness = 0.6
-
-[[node]]
-name = "BridgeDeck"
-parent = "Sea/Boat"
-transform = { pos = [-3.00, 4.15, -2.10] }
-
-  [node.components.CharacterController]
-  height = 1.9
-  radius = 0.35
-
-  [node.components.MeshRenderer]
-  mesh = { asset = "capsule" }
-
-  [node.components.Material]
-  albedo = [0.80, 0.35, 0.75]
-  roughness = 0.6
-
-# A vertical mark 5 m off the roll axis. Under a heel phi it lands at
-# (0, -5 sin phi, 5 cos phi), so atan2(-dy, dz) recovers a signed angle over the
-# full range and can tell "righted" from "inverted" — which a mast's tilt from
-# vertical cannot. `--assert` has no orientation axis; this is the workaround
-# the hull's own header documents.
-[[node]]
-name = "Heel"
-parent = "Sea/Boat"
-transform = { pos = [0.0, 0.0, 5.0] }
-
-[[node]]
-name = "Post"
-parent = "Sea"
-transform = { pos = [14.0, 2.5, -6.0], scale = [0.25, 5.0, 0.25] }
-
-  [node.components.MeshRenderer]
-  mesh = { asset = "box" }
-
-  [node.components.Material]
-  albedo = [0.26, 0.24, 0.22]
-  roughness = 0.9
 
 [[node]]
 name = "Camera"
