@@ -1269,9 +1269,12 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
 /// about where the tail is, and `loom_scene` refuses a subtree that has been
 /// moved out of the frame that makes it true.
 ///
-/// **Built once per call and only when a `Deform` exists.** `Mesh::bounds()` is
-/// O(vertices), and `world_to_objects` runs every frame in the editor; a scene
-/// with no deformed body pays one `Option` check per entity and nothing else.
+/// **Built once per call and only when a `Deform` exists.** A scene with no
+/// deformed body pays one `Option` check per entity and nothing else, and the
+/// per-mesh bounds this unions are `MeshLibrary`'s cached ones — the naive
+/// version re-scanned every vertex of every mesh under every deform node,
+/// every frame, from the function whose own comment records that re-placing
+/// here is what took Play to 9 fps.
 fn deform_frames(
     world: &World,
     library: &MeshLibrary,
@@ -1311,10 +1314,10 @@ fn deform_frames(
                 continue;
             }
             let index = mesh_index_for(world, library, *other) as usize;
-            let Some(mesh) = library.meshes.get(index) else {
+            if index >= library.meshes.len() {
                 continue;
-            };
-            let (lo, hi) = mesh.bounds();
+            }
+            let (lo, hi) = library.bounds_of(index);
             min = min.min(lo[axis]);
             max = max.max(hi[axis]);
         }
@@ -1423,6 +1426,17 @@ pub(crate) type TextureCache =
 pub(crate) struct MeshLibrary {
     meshes: Vec<loom_asset::Mesh>,
     by_name: std::collections::BTreeMap<String, u32>,
+    /// Each mesh's local AABB, computed once when the library is built.
+    ///
+    /// **`Mesh::bounds()` is an O(vertices) scan and all three callers are in
+    /// per-frame code**: `key()` hashes every mesh's bounds to decide whether
+    /// the viewer's GPU buffers are stale, `world_bounds` measures every
+    /// renderable, and `deform_frames` unions the bounds of every mesh under a
+    /// deformed body. On the gleamsprat that is a few thousand vertex reads a
+    /// frame; on a deformed terrain-sized mesh it is unbounded. The library is
+    /// already rebuilt whenever a mesh can change, so caching here is correct
+    /// by construction rather than by invalidation.
+    bounds: Vec<([f32; 3], [f32; 3])>,
 }
 
 impl MeshLibrary {
@@ -1565,7 +1579,21 @@ impl MeshLibrary {
             }
         }
 
-        Self { meshes, by_name }
+        let bounds = meshes.iter().map(loom_asset::Mesh::bounds).collect();
+        Self {
+            meshes,
+            by_name,
+            bounds,
+        }
+    }
+
+    /// The cached local AABB of a mesh by index, or the origin for an index no
+    /// mesh occupies — the same answer `Mesh::bounds()` gives an empty mesh.
+    pub(crate) fn bounds_of(&self, index: usize) -> ([f32; 3], [f32; 3]) {
+        self.bounds
+            .get(index)
+            .copied()
+            .unwrap_or(([0.0; 3], [0.0; 3]))
     }
 
     /// The mesh data, for a renderer to upload.
@@ -1585,10 +1613,10 @@ impl MeshLibrary {
             h = fnv(h, name.as_bytes());
             h = fnv(h, &index.to_le_bytes());
         }
-        for mesh in &self.meshes {
+        for (index, mesh) in self.meshes.iter().enumerate() {
             h = fnv(h, &mesh.vertices.len().to_le_bytes());
             h = fnv(h, &mesh.indices.len().to_le_bytes());
-            let (lo, hi) = mesh.bounds();
+            let (lo, hi) = self.bounds_of(index);
             for f in lo.iter().chain(hi.iter()) {
                 // Bit patterns, not values — the determinism rule from §7.5
                 // applies to any hash the engine compares across runs.
@@ -5149,10 +5177,10 @@ pub(crate) fn node_bounds(
             continue;
         };
         let index = mesh_index_for(world, library, *entity) as usize;
-        let Some(mesh) = library.meshes.get(index) else {
+        if index >= library.meshes.len() {
             continue;
-        };
-        let (lo, hi) = mesh.bounds();
+        }
+        let (lo, hi) = library.bounds_of(index);
         let model = Mat4::from_cols_array(&global.matrix);
 
         // Transform all eight corners: a rotated box's world AABB is not its
