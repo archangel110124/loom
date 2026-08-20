@@ -1,0 +1,115 @@
+# STRESS TEST — not a shipping scene. Deliberately probes ADR 0059's hero-volume
+# budget by making an *ocean patch* cinematic rather than a tank.
+#
+# One rung of a ladder: the plan is fixed at the largest extent ADR 0057 allows
+# (32 m, so cell = 0.5 m) and the **depth** is the knob, because the grid is 64
+# cells along the longest axis whatever that axis measures — so widening the
+# ocean buys area for free and costs nothing, and only depth buys cells.
+#
+#   extent [32, 24, 32]  ->  cell 0.5 m  ->  196,608 cells, 786,432 particles
+#
+# ADR 0059's budget is 65,536 cells. Rungs above that are expected to be refused
+# at load; that refusal is part of the measurement.
+[scene]
+format = 1
+id = "d8e3f7a1-9c02-4b16-8d45-6f102b3c4d57"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[node]]
+name = "Ocean"
+
+  [node.components.Environment]
+  sun_direction = [0.24, 0.58, -0.78]
+  sun_strength = 1.30
+  sun_color = [1.0, 0.96, 0.88]
+  ambient = 0.55
+  sky_zenith = [0.14, 0.28, 0.52]
+  sky_horizon = [0.62, 0.70, 0.76]
+  fog_density = 0.002
+  fog_falloff = 0.04
+
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 0.0
+  gustiness = 0.0
+  turbulence = 0.0
+
+# The hero volume, as an ocean patch. Domain floor on world y = 0, fill 0.5, so
+# the still surface is at y = 8.0.
+[[node]]
+name = "Water"
+parent = "Ocean"
+transform = { pos = [0.0, 12.0, 0.0] }
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  simulation = "cinematic"
+  extent = [32.0, 24.0, 32.0]
+  fill = 0.5
+  surface_height = 12.0
+  density = 1000.0
+  drag = 0.6
+
+# The bed, under the domain rather than in it — anything inside is baked into
+# the static solid mask.
+[[node]]
+name = "Bed"
+parent = "Ocean"
+transform = { pos = [0.0, -0.3, 0.0], scale = [17.0, 0.2, 17.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.34, 0.32]
+  roughness = 0.85
+
+# Something for the water to do, and something for the readback to probe: a
+# 1.4 m crate at 620 kg/m3 dropped into the middle of the patch.
+[[node]]
+name = "Hull"
+parent = "Ocean"
+transform = { pos = [0.0, 19.0, 0.0], scale = [0.7, 0.7, 0.7] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.80, 0.26, 0.14]
+  roughness = 0.35
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 1700.0
+
+  [node.components.BoxCollider]
+  half_extents = [1.0, 1.0, 1.0]
+
+  [node.components.Buoyancy]
+
+# A post outside the domain, so a still of moving water has something still in
+# it to be read against.
+[[node]]
+name = "Post"
+parent = "Ocean"
+transform = { pos = [17.5, 1.2, -8.0], scale = [0.2, 1.6, 0.2] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.30, 0.26]
+  roughness = 0.9
+
+# Authored, because the metric harnesses frame whole-scene bounds. Raised and
+# looking down: a volume's hollow is only a hollow from above.
+[[node]]
+name = "Camera"
+parent = "Ocean"
+transform = { pos = [-2.0, 25.0, 30.0], rot_euler = [-24.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 50.0
