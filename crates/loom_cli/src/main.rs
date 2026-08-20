@@ -56,6 +56,9 @@ USAGE:
         unison sway — are invisible in a still. --spin turns the camera in
         place; --dolly walks it forward, which is the only one of the two that
         produces parallax.
+        --spin defaults to 6 deg/frame, so sixteen frames sweep 96 deg and a
+        small subject leaves the shot: a 16 cm fish is gone by frame 8. Pass
+        --spin 0 to watch a thing move rather than the camera move around it.
 
     loom compare <a.png> <b.png> [--channel <0-255>] [--fraction <0-1>] [--worst <0-255>]
                                  [--rect <x,y,w,h>]
@@ -741,6 +744,15 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // Degrees of orbit per frame, and simulation ticks between them. Defaults
     // chosen so a dozen frames sweep a visible arc and advance a fifth of a
     // second each — enough for a shimmer or a pop to show up between two.
+    //
+    // **6 deg/frame is right for judging a scene and wrong for judging a
+    // subject in it.** Sixteen frames is 96 degrees of orbit, which walks a
+    // small object clean out of the shot: `gleamsprat.loom` at the default
+    // loses its school by frame 8 and the last half of the sheet is empty sea.
+    // `--spin 0` holds the camera and lets the thing move, which is the whole
+    // question for an animation. Named here and in `--help` because the
+    // default's failure is silent — the frames render, they just do not
+    // contain the animal.
     let spin = flag(args, "--spin").and_then(|v| v.parse::<f32>().ok()).unwrap_or(6.0);
     let step = flag(args, "--step").and_then(|v| v.parse::<u32>().ok()).unwrap_or(12);
     // Metres the camera WALKS forward between frames, along its own heading and

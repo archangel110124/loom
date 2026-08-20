@@ -896,9 +896,20 @@ const GOLDEN: [(&str, &str, &[&str]); 54] = [
     // *rate*: `weather.z` is `--sim N / 60` here and a free-running wall clock
     // in the viewer, so a frequency that drifts is invisible to the human's
     // window and invisible to any one still. 1% off 3 Hz is 1.3 degrees of
-    // phase at tick 7 and 24 degrees at tick 133. Measured, at this size and
-    // this tolerance: a 1% rate error moves 1.27% of the frame at tick 133 and
-    // would not be caught near the anchor.
+    // phase at tick 7 and 24 degrees at tick 133.
+    //
+    // Measured, at this size and against this tolerance — every frequency in
+    // the scene multiplied by 1.01:
+    //
+    //     tick   7    fraction 0.0045   worst  85     (tolerance 0.001 / 72)
+    //     tick 133    fraction 0.0105   worst 171
+    //
+    // So the far row is worth having and the near one is **not** blind: it
+    // catches a 1% error four times over. This comment used to claim the
+    // anchor "would not be caught", which was asserted rather than measured
+    // and is wrong. The honest statement is that the far row is about twice as
+    // sensitive to a rate error, and that a *smaller* drift than 1% is where
+    // the gap starts to matter.
     //
     // Neither row is at tick 0, which is deliberate for the reason `ocean` and
     // `rain_overhang` give: t = 0 is the one instant where every phase term is
