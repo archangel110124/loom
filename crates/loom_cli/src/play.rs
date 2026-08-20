@@ -1085,12 +1085,22 @@ impl Sim {
                 floating.submersion.exit,
             );
             if self.foam.is_some() {
+                // **Left as one whole-body hull, deliberately.** This tier
+                // already deposits per station, a few dozen lines above, with a
+                // strength taken from the solver's own shear — so it does not
+                // have the defect the deterministic tier had, and giving it
+                // stations here would deposit twice. What this entry is for is
+                // the advection drag in `foam::velocity_at`, which wants one
+                // body-scale reach. `opening` reproduces exactly what the
+                // deposit did before it was a separate field.
+                let velocity = self
+                    .physics
+                    .velocity_at_point(floating.body, centre)
+                    .unwrap_or([0.0; 3]);
                 hulls.push(loom_water::foam::Hull {
                     at: centre,
-                    velocity: self
-                        .physics
-                        .velocity_at_point(floating.body, centre)
-                        .unwrap_or([0.0; 3]),
+                    velocity,
+                    opening: velocity[0].hypot(velocity[1]).hypot(velocity[2]),
                     radius: waterplane_radius(floating, centre),
                     wetted: wrench.submerged,
                 });
@@ -1296,21 +1306,72 @@ impl Sim {
             self.physics
                 .apply_force_torque(floating.body, wrench.force, wrench.torque);
 
-            // **And what the foam field sees of this body: one hull, not one
-            // per pontoon.** Foam is made where the hull meets the water, and
-            // the waterplane radius is the same number the splash crown rises
-            // from — a per-pontoon version would lay the same foam three times
-            // and mean nothing different.
+            // **And what the foam field sees of this body: one station per
+            // pontoon.** It used to be one hull at the body origin with the
+            // *waterplane* radius, and the comment here argued that per-pontoon
+            // "would lay the same foam three times and mean nothing
+            // different". That is true of a 0.7 m crate, whose pontoons are
+            // closer together than one foam cell, and false of a nineteen-metre
+            // boat: the single disc was 8.81 m in radius, 244 m^2, and on
+            // `jib_vi_float.loom` it read 0.01881403848528862 at (0,0), (0,3)
+            // and (8,0) — identical to sixteen digits, eight metres apart. A
+            // hull-shaped thing laid a circle.
+            //
+            // Twelve stations of 1.093 m are 45 m^2, so this deposits *less*,
+            // not more, and it deposits it where the hull actually is.
+            //
+            // **In authored pontoon order, never sorted** — same rule as
+            // `floating` itself. A sort on a float key would be stable within a
+            // run, so `cargo xtask repeat` would pass while the order silently
+            // depended on geometry.
             if self.foam.is_some() {
-                hulls.push(loom_water::foam::Hull {
-                    at: position,
-                    velocity: self
-                        .physics
-                        .velocity_at_point(floating.body, position)
-                        .unwrap_or([0.0; 3]),
-                    radius: waterplane_radius(floating, position),
-                    wetted: wrench.submerged,
-                });
+                // The waterline centroid, which is what "outward" is measured
+                // from. Cheaper and steadier than the body origin: it does not
+                // move when a pontoon lifts clear of the water.
+                #[allow(clippy::cast_precision_loss)]
+                let n = floating.states.len() as f32;
+                let (mut cx, mut cz) = (0.0_f32, 0.0_f32);
+                for state in &floating.states {
+                    cx += state.at[0];
+                    cz += state.at[2];
+                }
+                let (cx, cz) = (cx / n, cz / n);
+                for state in &floating.states {
+                    // Outward waterline normal at this station.
+                    let (dx, dz) = (state.at[0] - cx, state.at[2] - cz);
+                    let reach = dx.hypot(dz);
+                    // Through the water, not over the ground — a hull drifting
+                    // with a current opens nothing.
+                    let (ux, uz) = (
+                        state.velocity[0] - state.flow[0],
+                        state.velocity[2] - state.flow[2],
+                    );
+                    // **The dot product is the bow moustache, the dark flank
+                    // and the trailing wake, all three.** A bow station's
+                    // normal points into the direction of travel, so it opens
+                    // water and foams; an amidships flank's normal is
+                    // perpendicular to it and scores nearly zero; a stern
+                    // station's is opposed and clamps to zero, because a stern
+                    // closes water rather than opening it. What appears astern
+                    // is what `foam::velocity_at` dragged back from the bow.
+                    //
+                    // A single centred pontoon has no outward direction at all
+                    // — a sphere is its own waterline — so it falls back to
+                    // plain speed, which is what this line did for every body
+                    // before stations existed.
+                    let opening = if reach > 1.0e-4 {
+                        (ux * dx + uz * dz) / reach
+                    } else {
+                        ux.hypot(uz)
+                    };
+                    hulls.push(loom_water::foam::Hull {
+                        at: state.at,
+                        velocity: state.velocity,
+                        opening: opening.max(0.0),
+                        radius: state.radius,
+                        wetted: wrench.submerged,
+                    });
+                }
             }
 
             // **The other half of the coupling: the body pushes back.** One

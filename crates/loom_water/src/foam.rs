@@ -160,8 +160,19 @@ pub struct Hull {
     pub at: [f32; 3],
     /// World velocity there, m/s.
     pub velocity: [f32; 3],
-    /// Waterplane radius, metres.
+    /// Radius of this station's disc, metres.
     pub radius: f32,
+    /// How fast this part of the hull is opening water, m/s — the component of
+    /// its velocity along the outward waterline normal, never negative.
+    ///
+    /// **Separate from `velocity` because they answer different questions.**
+    /// `velocity` is what the hull drags the surface along with, and a wake
+    /// needs the whole vector. This is what *makes* foam, and only the part of
+    /// the motion that pushes water aside does: a bow opens water, a parallel
+    /// midships flank slides along it, and a stern closes it again. With the
+    /// speed alone the three are identical and a hull lays a uniform stripe of
+    /// foam the width of its beam.
+    pub opening: f32,
     /// How much of the body the water has hold of, `[0, 1]` — the buoyancy
     /// solver's submerged fraction. A pontoon waving about in the air must not
     /// lay foam.
@@ -308,13 +319,18 @@ impl FoamField {
 
         for hull in hulls {
             // The waterline, not the body: foam is made where the hull meets
-            // the surface, and `at` is the pontoon the solver already put
+            // the surface, and `at` is the station the solver already put
             // there.
-            let speed = (hull.velocity[0] * hull.velocity[0]
-                + hull.velocity[1] * hull.velocity[1]
-                + hull.velocity[2] * hull.velocity[2])
-                .sqrt();
-            let amount = (speed / FOAM_HULL_SPEED).clamp(0.0, 1.0) * hull.wetted.clamp(0.0, 1.0);
+            //
+            // **Keyed on how fast the station is opening water, not on how
+            // fast it is going.** See `Hull::opening`. The trail astern is not
+            // deposited by the stern — it is what the drag in `velocity_at`
+            // carried back from the bow, which is why
+            // `a_moving_hull_leaves_foam_behind_it` measures the wake four
+            // metres behind a hull that only ever deposits at its own
+            // waterline.
+            let amount =
+                (hull.opening / FOAM_HULL_SPEED).clamp(0.0, 1.0) * hull.wetted.clamp(0.0, 1.0);
             self.deposit_disc([hull.at[0], hull.at[2]], hull.radius, amount);
         }
     }
@@ -891,6 +907,10 @@ mod tests {
             let hull = Hull {
                 at: [x, 0.0, 0.0],
                 velocity: [6.0, 0.0, 0.0],
+                // One station standing for a whole small hull: all of its
+                // motion opens water, because there is no other station for it
+                // to be sliding past.
+                opening: 6.0,
                 radius: 0.8,
                 wetted: 0.8,
             };

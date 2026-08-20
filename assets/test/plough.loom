@@ -16,7 +16,20 @@
 # deposits, not where they were dropped.
 #
 #     loom sim assets/test/plough.loom --ticks 200 \
-#       --assert "water@0.5,0.foam > 0.4" --assert "water@6.5,0.foam < 0.05"
+#       --assert "water@0,0.foam > 0.3" --assert "water@6.5,0.foam < 0.05"
+#
+# **Both coordinates were stale and the first one had been failing.** The pair
+# used to read 0.5 and 6.5, and 0.5 reported 0.0 — not because the foam was
+# missing but because the hull no longer stops where it used to. It enters from
+# +x, ploughs, and comes to rest at **x = -1.17** (already there by tick 100),
+# so the sampled point had ended up ahead of the whole trail. Measured now:
+# 0.747 at the hull, 0.369 at the origin behind it, and 0.0 at both x = 2 and
+# x = 6.5. The intent is unchanged — foam in its track, none outside it — and
+# only the place it is read has moved.
+#
+# This is a scene whose acceptance can go stale without any gate noticing,
+# because the numbers live in a comment. If the hull's resting place moves
+# again, re-measure both points rather than widening the bound.
 #
 # **Dead calm on purpose**, like `pool.loom`: `waves` is empty and `Wind` is
 # explicitly zero, so the crest deposit contributes exactly nothing and every
