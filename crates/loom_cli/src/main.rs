@@ -702,9 +702,17 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
             // **Three numbers, not one.** See `Sim::fluid_draw`: the one number
             // this used to print was labelled `marched` and the march was the
             // smallest third of it.
+            // **The droplet count is here because its absence is why the
+            // spray defect shipped.** A slot whose particle is inside the
+            // marched mesh is written with a zero radius and discarded before
+            // rasterisation, so the number of slots says nothing about how
+            // many beads are on the screen. Counting the ones that survive is
+            // one line and it is the number to watch: it should fall as a
+            // tank settles, and the bug was that it rose.
+            let drawn = spray.iter().filter(|d| d.position[3] > 0.0).count();
             log::info(format!(
-                "cinematic surface: {} triangles — density {:.1} ms, march {:.1} ms, \
-                 spray {:.1} ms",
+                "cinematic surface: {} triangles, {drawn} droplets — density {:.1} ms, \
+                 march {:.1} ms, spray {:.1} ms",
                 fluid_surface.len() / 3,
                 cost.density_ms,
                 cost.march_ms,
@@ -3190,6 +3198,58 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
         })));
     }
 
+    // **The same refusal, one step downstream: a node that a cinematic body is
+    // holding up.** ADR 0053 §5 says a deterministic body may never be forced
+    // by a cinematic one, and the guard above only closes the direct read —
+    // `water@x,y,z.height`. A hull floating in a cinematic tank, and anything
+    // parented to that hull, has a *position* that came from the same
+    // unreadable GPU floats by way of buoyancy, so `Boat/Player.local_y` is
+    // exactly as machine-local as the surface height it was computed from and
+    // says so nowhere. It became reachable when a character could stand on a
+    // floating body; before that nothing rode one.
+    //
+    // Self-or-ancestor by hierarchy, which is the part that is statically
+    // checkable. A character *standing* on an unrelated floating hull is not
+    // caught and cannot be — where a capsule's feet are is a runtime fact.
+    // Parenting the rider to the hull is what the walk scenes do and what the
+    // local-frame axes above are for, so this covers the case that exists.
+    if world.has_cinematic() {
+        let floating_node = specs.iter().find_map(|spec| {
+            let (node, ..) = parse_assertion(spec)?;
+            let mut current = world
+                .entities()
+                .iter()
+                .find(|e| world.path(**e) == Some(node.as_str()))
+                .copied();
+            // Bounded for the same reason `has_dynamic_ancestor` is: a
+            // malformed hierarchy must not hang the run.
+            for _ in 0..64 {
+                let entity = current?;
+                if world.buoyancy(entity).is_some() {
+                    return Some(node);
+                }
+                current = world.parent(entity);
+            }
+            None
+        });
+        if let Some(node) = floating_node {
+            return (1, json_line(&serde_json::json!({
+                "ok": false,
+                "error": "a_float_in_cinematic_water_is_not_assertable",
+                "path": path,
+                "node": node,
+                "constraint": "simulation = \"deterministic\" to assert on a floating body or its children",
+                "hint": "ADR 0053 §5: this node's position is buoyancy's answer \
+                         to a cinematic surface, so it is reproducible on this \
+                         device, driver and dispatch order and nowhere else. An \
+                         assertion on it would read as a claim about the \
+                         simulation and be a claim about this GPU. Float the \
+                         hull on a deterministic body, or look at the picture — \
+                         `cargo xtask repeat` is what checks this tier.",
+            })));
+        }
+    }
+
     let mut failures = Vec::new();
     for spec in &specs {
         match check_assertion(&world, state, &log, &weather, &travel, spec) {
@@ -3540,6 +3600,27 @@ fn assertion_value(
         .entities()
         .iter()
         .find(|e| world.path(**e) == Some(path))?;
+
+    // `Player.local_y >= 3.9` — **the node's own transform, in its parent's
+    // frame.** A character standing on a boat is at a world position that
+    // heaves, rolls and pitches with the sea, so `y` says nothing about which
+    // deck it is on and `z` says nothing about whether it is still inboard.
+    // Parented to the hull, the *local* transform is the boat's own frame, and
+    // that is the frame every claim about walking a deck is made in.
+    //
+    // Free, because `drive_characters` and `write_back` already do the world
+    // -> local conversion every tick — this reads what they wrote rather than
+    // inverting the parent again here.
+    if let Some(component) = axis.strip_prefix("local_") {
+        let local = world.transform(*entity)?;
+        return match component {
+            "x" => Some(local.pos[0]),
+            "y" => Some(local.pos[1]),
+            "z" => Some(local.pos[2]),
+            _ => None,
+        };
+    }
+
     let global = world.global_transform(*entity)?;
     // Translation is the last column of a column-major matrix.
     let index = match axis {

@@ -243,6 +243,58 @@ int particleCell(FluidConsts* c, float3 x) {
     return cellIndex(d, p);
 }
 
+/// How much fluid is around a point, as a fraction of a full cell.
+///
+/// **The same interpolation `fluidDensitySplatMain` writes with**, which is
+/// the whole point of it existing. `particleCell` answers with the nearest
+/// cell, and a nearest-cell read of a trilinearly-splatted field is a
+/// different field: at the free surface it steps a whole cell at a time while
+/// the marched mesh — which reads this one, padded and smoothed — moves
+/// continuously. Comparing a particle against the wrong one of those is why
+/// 98% of the drawn spray was *inside* the water it was drawn over, a median
+/// of 4 cm under the isosurface, and why moving the threshold could not fix
+/// it: the defect is the shape of the predicate, not its number.
+///
+/// The clamp mirrors the splat's own write clamp for the reason recorded
+/// there — dropping the taps whose cell is outside the domain reads every
+/// boundary cell low, and the tank comes back rimmed with beads.
+float fluidFractionAt(FluidConsts* c, float3 x) {
+    int3 d = c->dims.xyz;
+    float h = c->origin.w;
+    float3 g = (x - c->origin.xyz) / h - 0.5;
+    int3 base = int3(floor(g));
+    float3 f = g - float3(base);
+    float sum = 0.0;
+    for (int k = 0; k < 2; ++k) {
+        for (int j = 0; j < 2; ++j) {
+            for (int i = 0; i < 2; ++i) {
+                int3 p = clamp(base + int3(i, j, k), int3(0), d - int3(1));
+                float w = (i == 0 ? 1.0 - f.x : f.x)
+                        * (j == 0 ? 1.0 - f.y : f.y)
+                        * (k == 0 ? 1.0 - f.z : f.z);
+                sum += w * float(c->density[cellIndex(d, p)]);
+            }
+        }
+    }
+    return sum / float(FLUID_DENSITY_SCALE * FLUID_PER_CELL);
+}
+
+/// Below this fraction a droplet is drawn at full size: one particle alone
+/// splats to `1/FLUID_PER_CELL` = 0.125 at a cell centre, so this sits just
+/// under "one droplet and nothing else near it".
+static const float FLUID_SPRAY_GONE = 0.10;
+
+/// At and above this fraction nothing is drawn.
+///
+/// **Measured, not chosen**: the highest value at which every survivor is
+/// geometrically outside the marched mesh on every scene and tick sampled,
+/// while `ribbon.loom` still keeps the several hundred droplets it genuinely
+/// throws. At 0.30 and above a few per cent are back inside.
+///
+/// A fade rather than a step because a hard threshold pops as the wave state
+/// crosses it, and a pop is a temporal artifact no golden still can see.
+static const float FLUID_SPRAY_FULL = 0.25;
+
 [numthreads(256, 1, 1)]
 void fluidClearCountsMain(uint3 tid: SV_DispatchThreadID) {
     FluidConsts* c = push.c;
@@ -1200,26 +1252,30 @@ void fluidInstanceMain(uint3 tid: SV_DispatchThreadID) {
         // A droplet the size of the volume one drawn particle stands for, so
         // the field reads as water rather than as freckles.
         radius = c->origin.w * 0.42;
-        // **Spray only, once there is a surface.** A particle in a cell at or
-        // above the isovalue is *inside* the marched mesh, so drawing it puts a
-        // blue billboard over refracting water — which is what the whole
-        // surface exists to stop. What is left is the thrown droplets, which is
-        // the half of reference image 65 a mesh cannot express.
+        // **Spray only, once there is a surface.** A particle inside the
+        // marched mesh drawn as a billboard is a bead over refracting water,
+        // which is what the whole surface exists to stop. What is left is the
+        // thrown droplets, which is the half a mesh cannot express.
         //
-        // **The isovalue arrives in the constant block rather than being typed
-        // here**, and that is the fix for a real artifact: this said `/ 2u`,
-        // half rest density, while `fluid_surface::ISO` said 0.35, so every
-        // particle in a cell between the two drew confetti over water it was
-        // already inside.
+        // **This reads the field the mesh marches, and that is the fix.** It
+        // used to compare the particle's *nearest cell* against the isovalue,
+        // and a nearest-cell read of a trilinearly-splatted field is not the
+        // same field: at the free surface it steps a whole cell while the mesh
+        // moves continuously, so the water's own skin survived the cull and
+        // was drawn a second time as beads. Measured: 98-100% of survivors
+        // were inside the mesh, a median of 4 cm under it. The count *grew as
+        // the tank calmed*, which is the tell — thrown water does the
+        // opposite. Moving the threshold could not fix a predicate whose shape
+        // was wrong, and a commit that tried is in the history.
+        //
+        // Below the isovalue rather than at it, because the marched field is
+        // padded and twice-smoothed and this one is neither: the skin sits
+        // under 0.35 in raw terms and inside the mesh in drawn terms.
         //
         // Zero radius rather than a skipped slot: the instance stride is a CPU
         // fact and a degenerate quad is discarded before rasterisation, the
         // same trick the grass fade and the covered water rings use.
-        int cell = particleCell(c, x);
-        uint iso = uint(c->timing.w * float(FLUID_DENSITY_SCALE * FLUID_PER_CELL));
-        if (c->density[cell] >= iso) {
-            radius = 0.0;
-        }
+        radius *= 1.0 - smoothstep(FLUID_SPRAY_GONE, FLUID_SPRAY_FULL, fluidFractionAt(c, x));
     }
     c->instances[tid.x * 3u] = float4(x, radius);
     c->instances[tid.x * 3u + 1u] = float4(0.20, 0.40, 0.56, 1.0);

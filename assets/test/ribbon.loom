@@ -102,6 +102,20 @@ transform = { pos = [0.0, 1.2, 0.0] }
   surface_height = 0.4375
   density = 1000.0
   drag = 2.0
+  # **The one scene in the repository that genuinely throws water**, and
+  # therefore the one that asks for the droplets to be drawn. A sheet falling
+  # 1.46 m into a shallow basin shatters at the impact, and several hundred of
+  # those particles are outside the marched mesh with metres per second on
+  # them — a mesh cannot express them at any resolution, which is the whole
+  # reason a droplet instance exists.
+  #
+  # On this tier the field is an on/off rather than a multiplier: the count is
+  # a property of the solve. See `WaterBody::spray`.
+  #
+  # `plough_cinematic` and `slosh` deliberately leave it at zero. A hull
+  # settling into a tank throws a crown, which the CPU emitter already draws,
+  # and nothing else.
+  spray = 1.0
 
 # The basin. Every piece stands clear of a cell centre: the floor's top face is
 # on world y = 0 against a first cell centre at 0.031, the kerbs are at

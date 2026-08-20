@@ -556,9 +556,19 @@ impl FluidSolver {
                 // substep, or the P2G stencil it lands in has no relation to
                 // the one it left.
                 0.9 * cell * 60.0 * f32::from(u8::try_from(SUBSTEPS).unwrap_or(2)),
-                // **The isovalue the surface is drawn at, so the spray cull is
-                // the same number.** One source of truth, carried across rather
-                // than transcribed — see `fluid_surface::ISO`.
+                // **The isovalue the surface is drawn at.** Carried across
+                // rather than transcribed — see `fluid_surface::ISO`.
+                //
+                // Nothing in the shader reads it any more. The spray cull did,
+                // and comparing against the isovalue was the bug: it read the
+                // nearest cell of a trilinearly-splatted field while the mesh
+                // marches a padded, smoothed one, so the free surface's own
+                // skin passed the test and was drawn a second time as beads.
+                // `FLUID_SPRAY_FULL` replaced it. The slot stays because the
+                // constant block's offsets are pinned by a test against the
+                // compiled module, and it stays *populated* because the next
+                // thing to want the isovalue on the device should find it
+                // right rather than stale.
                 crate::fluid_surface::ISO,
             ],
             sizes: [cells as i32, u as i32, v as i32, w as i32],
@@ -928,6 +938,7 @@ impl FluidSolver {
         #[allow(clippy::cast_possible_truncation)]
         let groups = (count as u32).div_ceil(GROUP);
         let particles = self.bufs[0].buffer;
+        let density = self.bufs[18].buffer;
         let instances = self.bufs[15].buffer;
         let stage = self.bufs[INSTANCES_STAGE].buffer;
         let bytes = (count * size_of::<ParticleInstance>()) as u64;
@@ -938,11 +949,25 @@ impl FluidSolver {
             let mut graph = RenderGraph::new();
             let p = graph.import_buffer("loom.fluid.particles", particles);
             let i = graph.import_buffer("loom.fluid.instances", instances);
+            let n = graph.import_buffer("loom.fluid.density", density);
             let s = graph.import_buffer("loom.fluid.instances_stage", stage);
+            // **The density buffer is declared because the shader reads it**,
+            // and it was not — `fluidInstanceMain` has been dereferencing
+            // `c->density` through a hole in the graph's knowledge since the
+            // cull was written. Never-do #4 covers buffers as well as images
+            // (ADR 0017's own reason: a compute pass writing a buffer and
+            // something else reading it in the same command buffer needs the
+            // dependency, and a missing one reads last frame). The new sampler
+            // reads it eight times harder, which is not a thing to do through
+            // an undeclared read.
             graph.pass_with(
                 "fluid_instances",
                 &[],
-                &[(p, BufferAccess::ComputeRead), (i, BufferAccess::ComputeReadWrite)],
+                &[
+                    (p, BufferAccess::ComputeRead),
+                    (n, BufferAccess::ComputeRead),
+                    (i, BufferAccess::ComputeReadWrite),
+                ],
                 move |d, cmd| record_dispatch(d, cmd, layout, pipeline, push, groups),
             );
             graph.pass_with(

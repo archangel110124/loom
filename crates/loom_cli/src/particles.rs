@@ -858,7 +858,15 @@ pub(crate) fn spray(
     // are raised later is a legitimate thing to author, and this is a look
     // rather than a correctness matter. Once per process: it is asked every
     // frame, and a warning sixty times a second is one nobody reads.
-    if water.spray > 0.0 {
+    //
+    // **Not on the cinematic tier**, where the field means something else. A
+    // cinematic body has no Gerstner waves to fold, so `peak_fold` is
+    // identically zero and this would fire on every scene that opts in — a
+    // warning that is always wrong is worse than none. There `spray` switches
+    // on drawing the solver's own thrown particles; see `WaterBody::spray`.
+    if water.spray > 0.0
+        && water.simulation != loom_scene::components::WaterSimTier::Cinematic
+    {
         let peak = loom_water::spray::peak_fold(water);
         if peak < loom_water::spray::SPRAY_BREAK {
             static SAID: std::sync::Once = std::sync::Once::new();
