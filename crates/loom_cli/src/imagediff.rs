@@ -473,12 +473,6 @@ mod tests {
         assert!(!diff.passes(Tolerance::default()));
     }
 
-    /// **The crop has to be the crop.** The whole value of `--rect` is that it
-    /// reports the colour of one band and not of the frame, so an off-by-one
-    /// origin or a mean taken over everything is the failure that matters. The
-    /// surround here is deliberately the complement of the patch in every
-    /// channel: averaging any of it in moves the answer immediately.
-    #[test]
     /// The self-check the metric is worthless without: a spike above the
     /// threshold is counted and one below it is not. Every number this project
     /// quotes as "salt" is this function, so a silent off-by-one in it would
@@ -508,6 +502,11 @@ mod tests {
         assert_eq!(salt(&image, 24, None), [0, 0, 0]);
     }
 
+    /// **The crop has to be the crop.** The whole value of `--rect` is that it
+    /// reports the colour of one band and not of the frame, so an off-by-one
+    /// origin or a mean taken over everything is the failure that matters. The
+    /// surround here is deliberately the complement of the patch in every
+    /// channel: averaging any of it in moves the answer immediately.
     #[test]
     fn rect_means_read_the_rectangle_and_nothing_around_it() {
         let mut image = flat(16, 16, [200, 0, 200, 255]);
