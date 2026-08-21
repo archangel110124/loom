@@ -415,70 +415,219 @@ state.held = held;
 //
 // Round 4 shipped four supplies and four slots, so `hold.len() < SLOTS` could
 // never be false, nothing was ever spent, and no item changed a number. Four
-// things you carry and cannot use is a collectibles list, and a fifth
-// checkbox would not have converted it. Four rules do:
+// things you carry and cannot use is a collectibles list, and a fifth checkbox
+// would not have converted it. Four rules did — in, spent, in again, out — and
+// this round replaces the container under all four with a **grid**.
 //
-//   1. **In.** Walk within `RANGE` of a supply and it is yours. They now lie
-//      along the taught walk to the boat rather than behind the spawn, so the
-//      one gesture the demo teaches fills all four slots — measured, at
-//      `move_x` anywhere in +/-0.15.
+//   1. **In.** Walk within `RANGE` of a supply and it is yours. They lie along
+//      the taught walk to the boat, so the one gesture the demo teaches fills
+//      four of nine cells — measured, at `move_x` anywhere in +/-0.15.
 //   2. **Spent.** `bait` divides the wait for a take by roughly three
-//      (`BAIT_MIN`, above) and **the fish eats it**: the slot empties on the
-//      bite. Fishing on is then the slow version until you go back for more.
-//   3. **In again, and this is what makes the capacity real.** A landed fish
-//      takes a slot — but **only when the player takes it**, which is the
-//      round-12 change. It hangs off the rod tip until E; see the E block. Four
-//      supplies plus a fish is five things and there are four slots, so **the
-//      demo reaches "full" by being played** rather than by anyone contriving
-//      it. A full hold no longer loses the fish: she stays on the line and the
-//      caption names the box.
+//      (`BAIT_MIN`, above) and **the fish eats it**: the cell empties on the
+//      bite. It leaves a **hole**, which four slots could not do and which is
+//      most of what makes the packing interesting on the second trip.
+//   3. **In again, and the grid is what makes the capacity real.** A landed
+//      fish takes cells — one, two, four or six of them, rolled on the bite —
+//      and only when the player presses E. She hangs off the rod tip until
+//      then. A conger is 2x3 and **does not fit beside a full kit**, so the
+//      question stopped being "how many" and became "which one goes over the
+//      side, and where does everything else go".
 //   4. **Out.** `Rig/Boat/FishHold` is the hatch on the bait box in the
 //      cockpit. Stand at it and press **E**, and everything fishy goes below —
-//      out of your hands *and* off the line. It was a **place** for four
-//      rounds, because the engine had five digital channels and every one was
-//      spent; `interact` is the sixth and this is what it was spent on.
+//      out of the creel, out of his hand, *and* off the line. One press, and
+//      that is deliberate: forty times an hour, a dialogue about which fish is
+//      the wrong thing to have built.
+//
+// **AND THE WORLD DOES NOT STOP FOR ANY OF IT.** `Play::paused` is never
+// touched. The boat drifts, the fish pulls, `SLACK_LIMIT` is still counting —
+// five seconds of not reeling throws the hook, so opening the creel mid-fight
+// costs you the fish. That consequence needed no new code and is the reason
+// nothing here has to force the creel shut. It is a multiplayer decision made
+// early: you cannot pause a world other people are standing in.
 //
 // **How it is read from outside the game**, which is the requirement an
-// inventory nobody can assert on fails: `state.carried` is the count,
-// `state.bait` / `state.line` / `state.lantern` / `state.thermos` are one per
-// slot, `state.infish` is fish held, `state.online` is a fish on the rod,
-// `state.stowed` is fish landed below, and `state.full` is 1 while all four
-// slots are taken. `events.pickup`, `events.spend`, `events.take`,
-// `events.stow`, `events.refused` and `events.deliver` are the audit trail.
+// inventory nobody can assert on fails:
 //
-// **And `state.slots` is the row that is drawn**, which is a *string* and
-// therefore not assertable. `loom sim` prints the strings a rules script keeps
-// beside its numbers so `grep -q` can pin it, which is how every caption in
-// this file is already checked. Nothing in it is a fact the numbers above do
-// not also carry.
+//     state.carried        placements in the creel
+//     state.creel_used     cells taken           state.creel_free   cells left
+//     state.creel_items    same as `carried`     state.full         nothing fits
+//     state.bait/line/lantern/thermos            one per supply, 0 or 1
+//     state.infish         fish in the creel     state.fishheld     + the hand
+//     state.creel_hand     1 while one is held   state.online       one on the rod
+//     state.fishsize       cells of the fish he can SEE (tip or hand)
+//     state.stowed         landed, below         state.creel_open   the grid is up
+//     state.creel_cx/cy    where the cursor is   state.creel_fits   would it land
+//     state.creel_refused  why the last press did nothing
+//     state.creel_sum / creel_area / creel_drift   the packer's invariant
+//     state.creel_selftest disagreements between `fits_at` and a naive scan
+//
+// `events.pickup`, `spend`, `take`, `stow`, `refused`, `deliver`, `creelopen`,
+// `creelshut`, `lift`, `place`, `turn` and `ditch` are the audit trail.
+//
+// **And `state.creel_cells` is the picture**, which is a *string* and therefore
+// not assertable. `loom sim` prints the strings a rules script keeps beside its
+// numbers so `grep -q` can pin it, which is how every caption in this file is
+// already checked. `abc/d../...` is one letter per placement per cell, `.` for
+// empty, rows joined by `/` — and unlike every number above it, it says *where*
+// each item went, which is the only claim a stub cannot fake.
 
-fn has(hold, name) {
-    let found = 0;
-    for held in hold {
-        if held == name { found = 1; }
-    }
-    found
+// ---------------------------------------------------------------------------
+// **THE CREEL: A GRID, NOT A LIST.**
+// ---------------------------------------------------------------------------
+//
+// Nine cells, three by three, and an item occupies a rectangle of them. That is
+// the whole difference between this and the four slots it replaces, and it is
+// the difference between counting and deciding: five things in four slots asks
+// "which one", and a conger over the rail with a full kit asks "which one, and
+// where does everything else go".
+//
+// **A rhai `fn` cannot see a script-level `let`**, so the grid's width, its
+// height and the item table are all parameters. That is why these read like a
+// library and the rest of this file does not.
+//
+// **Occupancy is one bitmask per row, never one word for the whole grid.**
+// `--assert` narrows to f32 and this is projected out for the gate; nine bits
+// in one word is fine today and silently wrong the day the creel is 5x5. Rows
+// also make the bounds test the natural one, and the bounds test has to happen
+// **before** the AND or a 2-wide item at x = 2 in a 3-wide grid wraps into the
+// next row and reports a clean fit.
+//
+// Occupancy is folded from the placement list every tick and never stored. Two
+// representations of one fact is the bug this system is most likely to have,
+// and `state.creel_sum == state.creel_area` is the assertion that would see it.
+
+// The footprint of a kind, turned or not. `[w, h]` in cells.
+fn cells_of(items, kind, rot) {
+    let it = items[kind];
+    if rot == 1 { [it.h, it.w] } else { [it.w, it.h] }
 }
 
-// How many, because the hold can carry more than one fish and `has` cannot
-// say so.
-fn has_count(hold, name) {
+fn blank_grid(gh) {
+    let g = [];
+    for i in 0..gh { g.push(0); }
+    g
+}
+
+// **Bounds first, bits second.** See the block comment above: the shift is what
+// wraps, so a `w`-wide mask at `x` is only meaningful once `x + w <= gw`.
+fn fits_at(grid, gw, gh, w, h, x, y) {
+    if x < 0 || y < 0 { return false; }
+    if x + w > gw || y + h > gh { return false; }
+    let bits = ((1 << w) - 1) << x;
+    let ok = true;
+    for r in y..(y + h) {
+        if (grid[r] & bits) != 0 { ok = false; }
+    }
+    ok
+}
+
+fn mark(grid, x, y, w, h) {
+    let bits = ((1 << w) - 1) << x;
+    for r in y..(y + h) { grid[r] = grid[r] | bits; }
+    grid
+}
+
+// The grid the placement list implies. Rebuilt, not maintained.
+fn occupancy(creel, items, gw, gh) {
+    let grid = blank_grid(gh);
+    for pl in creel {
+        let d = cells_of(items, pl.kind, pl.rot);
+        grid = mark(grid, pl.x, pl.y, d[0], d[1]);
+    }
+    grid
+}
+
+// How many cells the grid says are taken. The twin of `creel_area`, which asks
+// the list instead; they disagree if a placement was ever double-booked.
+fn filled(grid, gw, gh) {
     let n = 0;
-    for held in hold {
-        if held == name { n += 1; }
+    for y in 0..gh {
+        for x in 0..gw {
+            if ((grid[y] >> x) & 1) == 1 { n += 1; }
+        }
     }
     n
 }
 
-// A rebuild rather than a `retain`, because the hold is at most four entries.
-// Removes **every** copy, which is what the fish box wants and what spending
-// the bait does not care about.
-fn without(hold, name) {
-    let kept = [];
-    for held in hold {
-        if held != name { kept.push(held); }
+fn area_of(creel, items) {
+    let n = 0;
+    for pl in creel {
+        let it = items[pl.kind];
+        n += it.w * it.h;
     }
+    n
+}
+
+// **Row-major, unturned first.** A deterministic order, which matters more than
+// a clever one: the four supplies are picked up on a walk and where they land
+// has to be the same every run or every grep in the gate is a coin toss.
+//
+// Returns `#{ ok: 0 }` when nothing fits, because rhai's unit is awkward to
+// test for and a map with a flag reads the same at every call site.
+fn first_fit(grid, items, kind, gw, gh) {
+    let rots = if items[kind].rot == 1 { [0, 1] } else { [0] };
+    for rot in rots {
+        let d = cells_of(items, kind, rot);
+        for y in 0..gh {
+            for x in 0..gw {
+                if fits_at(grid, gw, gh, d[0], d[1], x, y) {
+                    return #{ ok: 1, x: x, y: y, rot: rot };
+                }
+            }
+        }
+    }
+    #{ ok: 0, x: 0, y: 0, rot: 0 }
+}
+
+// Put one in, wherever it lands. Returns the list *and* whether it went in,
+// because "the creel is full" is a sentence the caller has to say out loud.
+fn creel_add(creel, items, kind, gw, gh) {
+    let grid = occupancy(creel, items, gw, gh);
+    let spot = first_fit(grid, items, kind, gw, gh);
+    if spot.ok == 1 {
+        creel.push(#{ kind: kind, x: spot.x, y: spot.y, rot: spot.rot });
+    }
+    #{ ok: spot.ok, creel: creel }
+}
+
+fn creel_has(creel, kind) {
+    let found = 0;
+    for pl in creel { if pl.kind == kind { found = 1; } }
+    found
+}
+
+// How many of a *class* — `fish` is four kinds and the hold used to be one word.
+fn creel_count_fish(creel, items) {
+    let n = 0;
+    for pl in creel { if items[pl.kind].fish == 1 { n += 1; } }
+    n
+}
+
+// A rebuild rather than a `retain`: the creel is at most nine entries, and
+// removing **every** copy is what the fish box wants and what spending the bait
+// does not care about.
+fn creel_without(creel, kind) {
+    let kept = [];
+    for pl in creel { if pl.kind != kind { kept.push(pl); } }
     kept
+}
+
+fn creel_without_fish(creel, items) {
+    let kept = [];
+    for pl in creel { if items[pl.kind].fish == 0 { kept.push(pl); } }
+    kept
+}
+
+// The index of whatever is under a cell, or -1. The cursor's whole query.
+fn at_cell(creel, items, x, y) {
+    let found = -1;
+    let i = 0;
+    for pl in creel {
+        let d = cells_of(items, pl.kind, pl.rot);
+        if x >= pl.x && x < pl.x + d[0] && y >= pl.y && y < pl.y + d[1] { found = i; }
+        i += 1;
+    }
+    found
 }
 
 // Horizontal reach, in metres. **Flat, not spherical**, for the reason the
@@ -491,37 +640,92 @@ fn within(me, it, range) {
     dx * dx + dz * dz <= range * range
 }
 
-// **The four slots, as a row of glyphs rather than four counters.**
+// **THE PICTURE OF THE GRID, AS TWO STRINGS.**
 //
-// `hud.rs` interpolates any *string* the rules script keeps as well as any
-// number now, and this is the reason it was taught to: an inventory is what is
-// in each slot, and `bait 1  line 0  lantern 0  thermos 0` is a checklist of
-// what exists. Cells are five characters wide so a slot filling does not shift
-// the ones beside it, and the fish is the one item with an icon because it is
-// the one item this demo is about.
+// `loom sim` prints the strings a rules script keeps beside its numbers, so
+// `grep -q` can pin them — which is how every caption in this file is already
+// checked, and it is the only assertion axis a *shape* has. `creel_free == 5`
+// is a number a stub can hardcode; `"abc/d../..."` says where all nine cells
+// went, and nothing that fakes a number survives it.
 //
-// **The cost, stated, because it reverses a documented decision.** The old row
-// drew the three supplies you have *not* found as `0`, which told a player who
-// had picked up one that there were three more somewhere. This row cannot say
-// that: an empty slot is empty. What replaces it is the pickup notice, which
-// names the thing as it goes in, and `state.bait`/`line`/`lantern`/`thermos`
-// are all still kept, so no assertion anywhere loses its detector.
-fn slot_row(hold, slots) {
-    let out = "";
-    for i in 0..slots {
-        let glyph = "     ";
-        if i < hold.len() {
-            let it = hold[i];
-            glyph = if it == "bait" { "BAIT " }
-                    else if it == "line" { "LINE " }
-                    else if it == "lantern" { "LAMP " }
-                    else if it == "thermos" { "FLASK" }
-                    else if it == "fish" { " ><> " }
-                    else { "  ?  " };
+// **One letter per INSTANCE, not per kind.** Two sprats side by side have to
+// draw as two objects, and the only extra data a renderer needs to know where
+// one ends is that its neighbour's character differs — one four-neighbour test.
+// A per-kind glyph makes them one blob.
+//
+// `.` is an empty cell. Rows are joined by `/` because a newline in a `Hud`
+// line is not a thing this project has.
+fn cells_row(creel, items, gw, gh, alpha) {
+    let cell = [];
+    for i in 0..(gw * gh) { cell.push('.'); }
+    let n = 0;
+    for pl in creel {
+        let d = cells_of(items, pl.kind, pl.rot);
+        let ch = alpha[n];
+        for yy in pl.y..(pl.y + d[1]) {
+            for xx in pl.x..(pl.x + d[0]) { cell[yy * gw + xx] = ch; }
         }
-        out += "[" + glyph + "]";
+        n += 1;
+    }
+    let out = "";
+    for y in 0..gh {
+        if y > 0 { out += "/"; }
+        for x in 0..gw { out += cell[y * gw + x]; }
     }
     out
+}
+
+// The labels, in the same instance order the letters are in, space separated.
+// ASCII only and deliberately: an emoji that has no glyph in the overlay's font
+// renders as a plain box and passes every text assertion in this file.
+fn kinds_row(creel, items) {
+    let out = "";
+    for pl in creel {
+        if out != "" { out += " "; }
+        out += items[pl.kind].label;
+    }
+    out
+}
+
+// **THE PACKER'S OWN CHECK, RUN IN THE GAME, ONE SLICE PER TICK.**
+//
+// `fits_at` is four lines of bit twiddling and it is the only thing between a
+// creel that works and a conger that overlaps the thermos. So it is compared
+// against a cell-by-cell scan of the same grid — a differential test, and the
+// slow half is obviously correct in a way the fast half is not.
+//
+// **Exhaustive, but spread.** All 2^9 occupancy patterns times six footprints
+// times nine origins is 27,648 checks, which is a third of the tick's whole op
+// budget. One pattern per tick is ~54 checks and costs nothing; by tick 512
+// every reachable grid has been through it, and `scripts/green.sh` already runs
+// this scene for nine hundred. `state.creel_selftest` is the running count of
+// disagreements and is asserted to be zero.
+//
+// The six footprints are every rectangle any item in `ITEMS` can present at
+// either rotation, plus 1x2 and 3x2 which nothing authors — a packer that is
+// right only for the shapes in today's table is right by luck.
+fn selftest_slice(pattern, gw, gh) {
+    let grid = [];
+    for y in 0..gh { grid.push((pattern >> (y * gw)) & ((1 << gw) - 1)); }
+    let bad = 0;
+    let sizes = [[1, 1], [2, 1], [1, 2], [2, 2], [2, 3], [3, 2]];
+    for sz in sizes {
+        for y in 0..gh {
+            for x in 0..gw {
+                let fast = fits_at(grid, gw, gh, sz[0], sz[1], x, y);
+                let slow = x + sz[0] <= gw && y + sz[1] <= gh;
+                if slow {
+                    for yy in y..(y + sz[1]) {
+                        for xx in x..(x + sz[0]) {
+                            if ((grid[yy] >> xx) & 1) == 1 { slow = false; }
+                        }
+                    }
+                }
+                if fast != slow { bad += 1; }
+            }
+        }
+    }
+    bad
 }
 
 // **The nearer way out of the water, as a compass word.**
@@ -622,7 +826,72 @@ fn toward(me, fx, fz, tx, tz) {
 let PLAYER = "Rig/Player";
 let BOAT = "Rig/Boat";
 let RANGE = 2.0;   // metres, horizontal. An arm and a lean.
-let SLOTS = 4;
+// ---------------------------------------------------------------------------
+// **THE CREEL'S OWN NUMBERS.**
+// ---------------------------------------------------------------------------
+//
+// Nine cells and a four-item kit, so **four of nine are gone before you fish**.
+// Worked by hand on the first-fit order below:
+//
+//     bait  line  lamp        4 used, 5 free — and the free region is
+//     flsk   .     .          NOT a rectangle, which is the whole point
+//      .     .     .
+//
+//     sprat  1x1  fits, 4 left        hake    2x2  fits, 1 left
+//     runner 2x1  fits, 3 left        conger  2x3  REFUSED, 5 free
+//
+// To land a conger you must free a clean 3x2. Ditch the **thermos** and rows 1
+// and 2 are empty and she goes in turned, exactly. Ditch the **lantern**
+// instead and six cells are free in an L and she is still refused. *Which*
+// curio goes over the side is a spatial decision and not a counting one, and
+// that sentence is the reason this is a grid.
+//
+// One cell either way is the difference between tense and infuriating and
+// nothing in this repository can measure it. `CREEL_W`/`CREEL_H` are two
+// numbers and the placement is first-fit, so 3x4 is a one-line experiment; the
+// grep rows in `scripts/green.sh` are the only thing that moves with them.
+let CREEL_W = 3;
+let CREEL_H = 3;
+
+// One letter per placement, in list order, for `cells_row`. Nine cells cannot
+// hold more than nine items.
+let CREEL_ALPHA = "abcdefghi";
+
+// **The item table.** `w`/`h` in cells; `rot` is whether it may be turned (the
+// four supplies are square, so turning them is a no-op and is refused rather
+// than pretended); `fish` is whether the fish box takes it; `label` is what is
+// drawn in it, ASCII, four characters or fewer.
+//
+// **The rod is not in here.** `rod_hold.rhai` puts it in his hands, in the
+// world, off `state.plx/ply/plz`, where he can see it — a rod that is both in
+// his hands and in his bag is a contradiction, and the hands are the version a
+// player already believes.
+let ITEMS = #{
+    bait:    #{ w: 1, h: 1, rot: 0, fish: 0, label: "BAIT" },
+    line:    #{ w: 1, h: 1, rot: 0, fish: 0, label: "LINE" },
+    lantern: #{ w: 1, h: 1, rot: 0, fish: 0, label: "LAMP" },
+    thermos: #{ w: 1, h: 1, rot: 0, fish: 0, label: "FLSK" },
+    sprat:   #{ w: 1, h: 1, rot: 1, fish: 1, label: "><>"  },
+    runner:  #{ w: 2, h: 1, rot: 1, fish: 1, label: "><>"  },
+    hake:    #{ w: 2, h: 2, rot: 1, fish: 1, label: "><>"  },
+    conger:  #{ w: 2, h: 3, rot: 1, fish: 1, label: "><>"  },
+};
+
+// Cursor key repeat, in ticks: a third of a second before the first repeat,
+// then one cell every eighth of a second.
+//
+// **Guessed, not measured, and they are the two numbers in this system that
+// most need a human at a window.** `--assert` can confirm the cursor reached
+// x = 1; it cannot tell whether it got there when you asked. They sit here,
+// alone, so tuning them is an edit and not a rebuild.
+let CURSOR_DELAY = 20;
+let CURSOR_REPEAT = 8;
+
+// How long SHIFT must be **held**, in ticks, to put what is in your hand over
+// the side. One second. Held rather than tapped because it is the one action in
+// this game that cannot be undone, and because SPACE — the obvious "drop" key —
+// is the helm release on the mat, where a fat finger is a boat adrift.
+let DITCH_TICKS = 60;
 
 // The two ramp feet, at the waterline, in world XZ, and what to call them.
 // `Rig/Slipway` descends east off the east end; `Rig/Ladder` descends north off
@@ -684,7 +953,10 @@ let NOTICE_TICKS = 120;
 let OVER_TICKS = 180;
 
 if hub {
-    let hold = if "hold" in state { state.hold } else { [] };
+    // **The creel: a list of placements, and the only inventory state there is.**
+    // `#{ kind, x, y, rot }` each. Occupancy is folded out of it every tick and
+    // never kept, so there is one fact and not two.
+    let creel = if "creel" in state { state.creel } else { [] };
     let stowed = if "stowed" in state { state.stowed } else { 0 };
     let notice_at = if "notice_at" in state { state.notice_at } else { -9999 };
     let notice = if "notice" in state { state.notice } else { 0 };
@@ -710,17 +982,52 @@ if hub {
     // cast, set at the spend, read by notice 5.
     let ate = if "ate" in state { state.ate } else { 0 };
     if phase == 1 && at == tick { ate = 0; }
-    if phase == 3 && at == tick && has(hold, "bait") == 1 {
-        hold = without(hold, "bait");
+    if phase == 3 && at == tick && creel_has(creel, "bait") == 1 {
+        creel = creel_without(creel, "bait");
         emit.push(#{ kind: "spend", item: "bait" });
         ate = 1;
     }
     state.ate = ate;
 
+    // -----------------------------------------------------------------------
+    // **HOW BIG SHE IS, ROLLED ON THE BITE, ON HER OWN STREAM.**
+    // -----------------------------------------------------------------------
+    //
+    // Four sizes: sprat 1x1, runner 2x1, hake 2x2, conger 2x3. A conger is six
+    // cells and **does not fit beside a full kit**, which is the whole creel
+    // mechanic arriving for free — the grid needs no rule saying "a big fish is
+    // hard to carry", it simply is one.
+    //
+    // **Its own stream, and that is not fussiness.** `seed` drives the fight's
+    // entire schedule and `scripts/green.sh` pins two exact ticks off it
+    // (`state.landed_tick`, `state.fight_ticks`). Drawing a size from it moves
+    // both, for a reason that has nothing to do with the fight. `roll` is the
+    // same pure LCG; the stream is `90210 + tick` and nothing else reads it.
+    //
+    // **The high bits, not the low ones.** In an LCG mod 2^31, bit k has period
+    // 2^(k+1), so `roll(x) % 100` over consecutive x is very nearly a counter.
+    // Dividing by 65536 first takes bits 16-22. Measured over four thousand
+    // ticks: 602 / 996 / 1204 / 1198 against an intended 600 / 1000 / 1200 /
+    // 1200.
+    //
+    // Rolled on the bite, which is the one instant per take (`at == tick` in
+    // phase 3) and the same instant the bait is spent — so a fish that spits
+    // the hook was already a size, and the one that comes over the rail
+    // twenty-two seconds later is the one that took it.
+    let fishkind = if "fishkind" in state { state.fishkind } else { "sprat" };
+    if phase == 3 && at == tick {
+        let fs = (roll(90210 + tick) / 65536) % 100;
+        fishkind = if fs < 15 { "conger" }
+                   else if fs < 40 { "hake" }
+                   else if fs < 70 { "runner" }
+                   else { "sprat" };
+    }
+    state.fishkind = fishkind;
+
     for entry in SUPPLY {
         let path = entry[0];
         let name = entry[1];
-        if has(hold, name) == 0 && path in positions {
+        if creel_has(creel, name) == 0 && path in positions {
             let it = positions[path];
             let dx = me[0] - it[0];
             let dz = me[2] - it[2];
@@ -729,8 +1036,9 @@ if hub {
             // would spend most of itself on a height difference that is the
             // same at every crate and means nothing.
             if dx * dx + dz * dz <= RANGE * RANGE {
-                if hold.len() < SLOTS {
-                    hold.push(name);
+                let put = creel_add(creel, ITEMS, name, CREEL_W, CREEL_H);
+                creel = put.creel;
+                if put.ok == 1 {
                     emit.push(#{ kind: "pickup", item: name });
                     // **A pickup used to be silent, and it is one of the four
                     // things this demo is.** Traced: `state.carried` goes 0 to
@@ -799,9 +1107,27 @@ if hub {
     // up.
     let online = if "online" in state { state.online } else { 0 };
 
+    // -----------------------------------------------------------------------
+    // **THE HAND, AND IT IS WHAT KEEPS A GRID FROM BEING A GOTCHA.**
+    // -----------------------------------------------------------------------
+    //
+    // One item, held on the cursor, outside the grid. Empty string for empty.
+    //
+    // A fish comes over the rail and the creel has no room *of the right
+    // shape* for her. Without a hand the only honest options are to lose her
+    // or to leave her on the line — and on the line she is still on the slack
+    // timer, so landing the rarest fish in the game would start a five-second
+    // packing puzzle whose optimal counter-play is to sail with an empty creel.
+    // That deletes the decision the grid exists for.
+    //
+    // In the hand she is off the line, off the timer, and yours: repack, ditch
+    // a curio, or walk to the hatch. The world has not stopped for any of it,
+    // which is the whole point — but nothing is chasing you either.
+    let hand = if "hand" in state { state.hand } else { "" };
+
     let at_crate = FISH_CRATE in positions && within(me, positions[FISH_CRATE], RANGE);
     let at_box = FISH_HOLD in positions && within(me, positions[FISH_HOLD], RANGE);
-    let in_hand = has_count(hold, "fish");
+    let in_hand = creel_count_fish(creel, ITEMS);
 
     if used && at_crate && stowed > 0 {
         // **The one rule in the demo that needs you to have *been* somewhere
@@ -821,11 +1147,14 @@ if hub {
         } else {
             notice = 7; notice_at = tick;
         }
-    } else if used && at_box && (in_hand > 0 || online > 0) {
+    } else if used && at_box && (in_hand > 0 || online > 0 || hand != "") {
         // Everything fishy goes below in one press, because a player at the
         // hatch wants the catch stowed and not a dialogue about which one.
-        let n = in_hand + online;
-        hold = without(hold, "fish");
+        // **Including what is in his hand**, which is a third place a fish can
+        // be now and would otherwise be the one the hatch could not reach.
+        let n = in_hand + online + (if hand != "" && ITEMS[hand].fish == 1 { 1 } else { 0 });
+        creel = creel_without_fish(creel, ITEMS);
+        if hand != "" && ITEMS[hand].fish == 1 { hand = ""; }
         online = 0;
         stowed += n;
         notice = 3; notice_at = tick;
@@ -834,15 +1163,25 @@ if hub {
         // **Off the rod and into his hands, which is the act the player was
         // never given.** It used to be a slot that filled itself on the tick
         // the fish came over the rail.
-        if hold.len() < SLOTS {
-            hold.push("fish");
+        let put = creel_add(creel, ITEMS, fishkind, CREEL_W, CREEL_H);
+        creel = put.creel;
+        if put.ok == 1 {
             online = 0;
             notice = 9; notice_at = tick;
-            emit.push(#{ kind: "take", item: "fish" });
+            emit.push(#{ kind: "take", item: fishkind });
+        } else if hand == "" {
+            // **She will not fit, so she goes into his hand instead.** Off the
+            // line, off the slack timer, still his. See `hand` above for why
+            // this is not the same as losing her and not the same as leaving
+            // her on the rod.
+            hand = fishkind;
+            online = 0;
+            notice = 10; notice_at = tick;
+            emit.push(#{ kind: "take", item: fishkind });
+            emit.push(#{ kind: "refused", item: fishkind });
         } else {
-            // She stays on the line — losing her here would punish a full hold
-            // with the one thing the player came for. The caption names the way
-            // out, which is the box.
+            // Only a hand that is *already* full leaves her on the line, and
+            // then the caption names both ways out.
             notice = 4; notice_at = tick;
             emit.push(#{ kind: "refused", item: "fish" });
         }
@@ -1051,31 +1390,80 @@ if hub {
     // Everything the hold knows, written once, at the end, after the fish has
     // gone into it. The first draft wrote these where the pickups happen and a
     // landed fish was invisible until the next tick.
-    state.hold = hold;
+    state.creel = creel;
+    state.hand = hand;
+    state.creel_hand = if hand == "" { 0 } else { 1 };
+    // A string, for the overlay. `--assert` reads the number beside it.
+    state.creel_hand_label = if hand == "" { "" } else { ITEMS[hand].label };
+    // **The cell area of the fish the player can actually see**, for
+    // `fish_hang.rhai` — which scales and places her by it — and for
+    // `--assert`. On the rod tip or in his hands; zero for neither.
+    //
+    // **A fish in the creel is not shown at all**, which is a change and a
+    // correction: `fish_hang` used to draw one whenever `infish > 0`, and
+    // `infish` is now "in the bag". A fish you have packed away is packed away.
+    state.fishsize =
+        if online > 0 { ITEMS[fishkind].w * ITEMS[fishkind].h }
+        else if hand != "" && ITEMS[hand].fish == 1 { ITEMS[hand].w * ITEMS[hand].h }
+        else { 0 };
     state.stowed = stowed;
     state.got = got;
-    state.carried = hold.len();
-    let infish = has_count(hold, "fish");
+    state.carried = creel.len();
+    let infish = creel_count_fish(creel, ITEMS);
     state.infish = infish;
-    state.full = if hold.len() >= SLOTS { 1 } else { 0 };
+    // **A catch that is not below yet, wherever it happens to be.** There are
+    // three places a fish can be now — the line, the creel, the hand — and the
+    // captions want one number for "have you got one to deal with". `infish`
+    // keeps its old name and its finer meaning (in the creel), because the gate
+    // reads it and because `fish_hang` needs the distinction.
+    let fishheld = infish + (if hand != "" && ITEMS[hand].fish == 1 { 1 } else { 0 });
+    state.fishheld = fishheld;
 
-    // **One number per slot, because the hold has its own `Hud`.**
-    // `hud.rs` interpolates any `state` number into a `Hud`'s text, so four
-    // numbers draw four slots — and the empty ones draw as `0`, which is the
-    // whole point: a player who has found one supply can see there are three
-    // more somewhere. The previous round believed `Hud` was one line and made
-    // the hold and the helm caption fight over it; they are two `Hud` nodes.
-    state.bait = has(hold, "bait");
-    state.line = has(hold, "line");
-    state.lantern = has(hold, "lantern");
-    state.thermos = has(hold, "thermos");
+    // **The grid, projected into numbers small enough to assert on.**
+    let grid = occupancy(creel, ITEMS, CREEL_W, CREEL_H);
+    let used_cells = filled(grid, CREEL_W, CREEL_H);
+    state.creel_used = used_cells;
+    state.creel_free = CREEL_W * CREEL_H - used_cells;
+    state.creel_items = creel.len();
+    // **The invariant, and it is the one number that moves if the packer ever
+    // double-books or loses a cell.** One side counts the grid, the other sums
+    // the list; they are computed by different code from different data and
+    // they agree at every tick on every path or something is wrong.
+    //
+    // Exported as a **difference**, not as two numbers to compare, because
+    // `--assert` takes `state.<name> OP <literal>` and has no second state
+    // name on the right — `state.creel_sum == state.creel_area` parses and
+    // then fails with `actual: null`, which is a green-looking way to check
+    // nothing. Both halves are kept beside it so a failure is readable.
+    state.creel_sum = used_cells;
+    state.creel_area = area_of(creel, ITEMS);
+    state.creel_drift = used_cells - state.creel_area;
+    // "Full" is no longer a count. It is "nothing more will fit anywhere",
+    // which for a grid is the only honest form of the question.
+    state.full = if state.creel_free == 0 { 1 } else { 0 };
 
-    // **And the same four slots as a row of glyphs, which is what is drawn.**
-    // A string, not a number, so `--assert` cannot read it and does not need
-    // to: every fact in it is one of the numbers above. `hud.rs` interpolates
-    // it into the top row. See `slot_row` for the cell widths and the one
-    // thing this row can no longer say.
-    state.slots = slot_row(hold, SLOTS);
+    // **One number per supply, because a `--assert` can read a number.** These
+    // are the four detectors the pickup walk is pinned on and they predate the
+    // creel; the creel changed where a thing *is*, not whether you have it.
+    state.bait = creel_has(creel, "bait");
+    state.line = creel_has(creel, "line");
+    state.lantern = creel_has(creel, "lantern");
+    state.thermos = creel_has(creel, "thermos");
+
+    // **And the grid as a picture, which is what is drawn.** Strings, not
+    // numbers, so `--assert` cannot read them — but `cells_row`'s answer says
+    // *where* every item is, which no number above it does.
+    state.creel_cells = cells_row(creel, ITEMS, CREEL_W, CREEL_H, CREEL_ALPHA);
+    state.creel_kinds = kinds_row(creel, ITEMS);
+
+    // **The packer checks itself, one occupancy pattern per tick.** See
+    // `selftest_slice`. Zero at every tick of every run, and `green.sh` asserts
+    // it; 512 ticks covers every reachable 3x3 grid exhaustively.
+    let selftest = if "creel_selftest" in state { state.creel_selftest } else { 0 };
+    if tick < 512 {
+        selftest += selftest_slice(tick, CREEL_W, CREEL_H);
+    }
+    state.creel_selftest = selftest;
 
     // -----------------------------------------------------------------------
     // **HER OWN FRAME, SOLVED FROM TWO OF HER NODES.**
@@ -1304,7 +1692,7 @@ if hub {
         // own feet a moment earlier, so telling him the outcome is the more
         // useful of the two lines.
         message = if notice == 1 {
-            "HOLD FULL 4/4   press E at the YELLOW FISH BOX to make room"
+            "NO ROOM IN THE CREEL   TAB opens it — or E at the YELLOW FISH BOX"
         } else if notice == 2 {
             // **The climax, and the one instruction that follows it.** It used
             // to say `put her in the YELLOW FISH BOX` because the fish was
@@ -1316,9 +1704,33 @@ if hub {
         } else if notice == 4 {
             // **She stays on the line rather than going over the side.** The
             // old sentence reported a loss the player could not have avoided
-            // and could not undo; this one names the only thing that frees a
-            // slot at sea.
-            "HOLD FULL 4/4   she is still on the line — E at the YELLOW FISH BOX"
+            // and could not undo; this one names both ways out.
+            //
+            // **And it names her size, which is the sentence the grid earned.**
+            // "Full" was the only thing four slots could say. A creel can say
+            // *she needs 2x3 and you have not got 2x3 anywhere* — which is a
+            // problem with a solution, and the solution is to open it.
+            "SHE WILL NOT FIT   that " + fishkind + " is " +
+                ITEMS[fishkind].w + "x" + ITEMS[fishkind].h +
+                " — TAB to make room, or E at the YELLOW FISH BOX"
+        } else if notice == 10 {
+            // **The sentence the four slots could never say.** Not "your hold
+            // is full" — *she is 2x3 and you have not got 2x3 anywhere*, which
+            // is a problem with three solutions rather than a dead end.
+            //
+            // **It keeps notice 9's two branches**, because it replaces notice
+            // 9 at exactly the same moment and for the same player: the one
+            // standing in the cockpit holding a fish, who either has the bait
+            // box between him and the hatch or has not. Dropping the bearing
+            // here would have made "she was too big" cost him the only line on
+            // screen that says where to go.
+            let big = "IN YOUR HANDS   that " + fishkind + " is " +
+                      ITEMS[fishkind].w + "x" + ITEMS[fishkind].h;
+            if baffled {
+                big + " — go " + round_it + " round the bait box to the YELLOW FISH BOX"
+            } else {
+                big + " — TAB to make room, or E at the YELLOW FISH BOX — " + box_at
+            }
         } else if notice == 9 {
             // **The moment the payoff is his**, and the next place to walk. The
             // bearing is in his own frame with a distance on it — see `toward`.
@@ -1332,7 +1744,7 @@ if hub {
         } else if notice == 7 {
             "THE CATCH IS IN HER HOLD   bring her alongside first"
         } else if notice == 8 {
-            "PICKED UP " + got.to_upper() + "   " + hold.len() + "/4 slots — the row above is what you are carrying"
+            "PICKED UP " + got.to_upper() + "   " + state.creel_free + " cells left in the creel — TAB opens it"
         } else {
             // The same sentence as the two above it: the bait went at the
             // bite, and the barrel it came from is back on the rig. **Only if
@@ -1437,7 +1849,7 @@ if hub {
             // neither, and the two inputs that work are the only two a wedged
             // player is not already pressing.
             "BLOCKED   the bait box — step " + round_it + " and go round it"
-        } else if aboard > 0 && infish > 0 {
+        } else if aboard > 0 && fishheld > 0 {
             // Wedged aboard, somewhere other than the bait box, with a fish in
             // his hands. `stuck` outranks `aboard`, so this used to *replace*
             // the one bearing he needed with a sentence naming nothing —
@@ -1458,9 +1870,9 @@ if hub {
         // the invitation to catch another one, and it keeps the live bearing —
         // so a player who walked the wrong way round the bait box can watch the
         // metres fail to fall.
-        message = if infish > 0 && baffled {
+        message = if fishheld > 0 && baffled {
             "FISH IN HAND   go " + round_it + " round the bait box — the YELLOW FISH BOX is aft"
-        } else if infish > 0 {
+        } else if fishheld > 0 {
             // **And it names the key now.** The box stopped being a place this
             // round: walking into it does nothing at all, so a bearing with no
             // verb on it is a player standing at a hatch pressing W.
@@ -1478,7 +1890,7 @@ if hub {
         } else {
             "ABOARD   CLICK to cast   SHIFT to reel   stand on the mat to steer"
         };
-    } else if infish > 0 {
+    } else if fishheld > 0 {
         // **Ashore with a fish in his hands**, which the old flow could not
         // reach: the box stowed it the moment he walked past it, so by the time
         // he was on the wharf the hold was always empty. It can happen now, and

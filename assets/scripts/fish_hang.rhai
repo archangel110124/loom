@@ -12,16 +12,27 @@
 // `position`, `rotation` and `scale` off the rules script's `state`, one tick
 // stale, with no memory and therefore no state of its own.
 //
-// **`state.infish` is the condition, not `phase`.** `infish` is `has_count(hold,
-// "fish")` — how many are in your hands right now — so the fish appears when it
-// is landed and disappears on the tick it is stowed in the box, which is the
-// two moments the player needs told. A phase test would show it for
-// `OVER_TICKS` and then take it away while he was still carrying it.
+// **`state.fishsize` is the condition, not `phase` and no longer `infish`.**
+// It is the cell area of the fish the player can *see* — on the rod tip or in
+// his hands — and it is zero for a fish that is in the creel, because a fish
+// that is in the creel is in a bag. `infish` was the test until the creel
+// existed and it meant "in your hands"; it now means "packed", and leaving this
+// on it drew a fish hanging in the cockpit that the player had put away.
 //
 // `gleamsprat_chrome.obj` is 0.10 m nose to tail along -Z, so scale 6.5 is a
 // 65 cm fish, and it is turned nose-down because that is how a fish hangs. At
 // 1.9 m from the eye it is a fifth of the frame height: this is a demo's one
 // payoff and it is not being drawn coy.
+//
+// **And she is now as big as her footprint.** Four sizes go in the creel — 1,
+// 2, 4 and 6 cells — and a conger that occupies six cells and renders at a
+// sprat's 65 cm is the grid lying about the world. `1 + 0.28 * (area - 1)`
+// takes 6.5 to 8.3, 12.0 and 15.6, so the conger is a metre and a half. Linear
+// in *area*, not in length, which is wrong physically and right on screen: at
+// a true cube root she would be 1.18 m and read as a slightly large sprat.
+// **The in-hand pose backs off with her** — a 1.56 m fish at the sprat's 1.15 m
+// fills the frame — one tenth of a metre per extra cell, so the conger is held
+// at 1.65 m.
 //
 // **AND IT IS IN HIS HANDS NOW, WHICH IT WAS NOT.**
 //
@@ -49,7 +60,11 @@
 // `ponytail:` no line from the rod tip to its jaw. Needs a second node whose
 // length is a scale — worth it when the rod is in his hands, not in a holder.
 
-let infish = if "infish" in state { state.infish } else { 0.0 };
+let fishsize = if "fishsize" in state { state.fishsize } else { 0.0 };
+// 6.5 is the sprat, which is what every number in this file was chosen at.
+let grow = 1.0 + 0.28 * (if fishsize > 1.0 { fishsize - 1.0 } else { 0.0 });
+let fatness = 6.5 * grow;
+let showing = if fishsize > 0.5 { 1.0 } else { 0.0 };
 // **On the line, which is a state the fish did not used to have.** A landing
 // put it straight into a slot; now it swings off the rod tip until the player
 // presses E. `deeper_rules.rhai`'s E block is what moves it, and `online` and
@@ -88,8 +103,8 @@ if online > 0.5 {
     // pose uses and for the same reason, which is that the mesh's origin is at
     // its nose and its long axis is local -Z.
     rotation = [90.0 + swing * 9.0, -90.0, 0.0];
-    scale = [6.5, 6.5, 6.5];
-} else if infish < 0.5 {
+    scale = [fatness, fatness, fatness];
+} else if showing < 0.5 {
     // Parked at the rod butt, small. Same reasoning as the float's stow: not
     // zero scale (degenerate geometry) and not below decks (one wrong number
     // and there is a fish inside the hull).
@@ -131,10 +146,13 @@ if online > 0.5 {
     let bfz = if "bfz" in state { state.bfz } else { -1.0 };
     let rx = -bfz;
     let rz = bfx;
+    // Held further out the bigger she is — see the header. 1.15 m for a sprat,
+    // 1.65 for a conger.
+    let out = 1.15 + 0.10 * (if fishsize > 1.0 { fishsize - 1.0 } else { 0.0 });
     position = [
-        plx + bfx * 1.15 - rx * 0.42 + swing * 0.08,
+        plx + bfx * out - rx * 0.42 + swing * 0.08,
         ply + 0.22 + swing * 0.03,
-        plz + bfz * 1.15 - rz * 0.42,
+        plz + bfz * out - rz * 0.42,
     ];
     // **Broadside to the eye, and hung by the tail.** Degrees, and both
     // numbers were chosen by rendering it. `rot_x` 90 turns the mesh's
@@ -145,5 +163,5 @@ if online > 0.5 {
     // reads worse here, because the node's origin is at the nose so the flip
     // drops the body behind the bulwark.
     rotation = [90.0 + swing * 6.0, -90.0 + turn * 16.0, 0.0];
-    scale = [6.5, 6.5, 6.5];
+    scale = [fatness, fatness, fatness];
 }

@@ -1095,19 +1095,20 @@ transform = { pos = [3.0, 0.0, -10.45] }
 # So there are two rows. The top one is the hold and it is always true; the
 # bottom one is situational and whoever has most to say owns it.
 #
-# **The top row is four slots, not four counters, and that is a reversal.** It
-# used to read `bait 1  line 0  lantern 0  thermos 0`, on the argument that the
-# zeros tell a player who has found one supply that there are three more
-# somewhere. What it could not do is show what a slot *holds*, which is the
-# thing the player asked for: a fish that is in your inventory should look like
-# a fish. `slot_row` in `deeper_rules.rhai` builds `{slots}` — four five-wide
-# cells, `[ ><> ]` for the catch — and `hud.rs` interpolates a string as well as
-# a number now, which is the one Rust change this round needed.
+# **The top row is a cell count and a key, and the contents moved off it.** It
+# was four counters, then four glyph slots, and it is now `CREEL 4/9  TAB` —
+# because the creel is a *grid* and a grid does not fit on a line of text. What
+# is in it is painted in the bottom-left corner of the overlay by `hud::creel`,
+# which `Hud` cannot express: `Hud` is `anchor`, `offset`, `text`, `size`,
+# `color` and nothing else.
 #
-# The cost, stated: an empty slot is empty and no longer names what is missing.
-# The pickup notice on the bottom row says what went in as it goes in, and
-# `state.bait` / `line` / `lantern` / `thermos` are all still kept, so no
-# assertion lost its detector.
+# So this line does the one thing the picture cannot: it names the key. A
+# spatial inventory nobody knows how to open is a spatial inventory nobody
+# opens, and there is no other place in this demo that could say `TAB`.
+#
+# The cost, stated: the row no longer names what is missing. The pickup notice
+# on the bottom row says what went in as it goes in, and `state.bait` / `line` /
+# `lantern` / `thermos` are all still kept, so no assertion lost its detector.
 #
 # **Drawn only in `loom run`** — a headless render will not show either row, so
 # what a gate can check is the string the rules script produced (`game.message`
@@ -1121,7 +1122,7 @@ parent = "Rig"
   [node.components.Hud]
   anchor = "bottom_center"
   offset = [0.0, 88.0]
-  text = "HOLD  {slots}      BELOW {stowed}   CRATE {delivered}"
+  text = "CREEL {creel_used}/9  TAB      BELOW {stowed}   CRATE {delivered}"
   size = 19.0
   color = [0.86, 0.89, 0.82]
   only_in_play = true
