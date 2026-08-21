@@ -2624,6 +2624,44 @@ const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
 /// Mass for the view. The mouse writes a target; this decides how the picture
 /// gets there.
 ///
+/// # Tuning it — the whole knob set, in one place
+///
+/// Four numbers, all read from the environment once at startup ([`from_env`]),
+/// so the person who can actually judge this can change them between two runs
+/// of the same binary. **Nothing else in this file is a taste decision.**
+///
+/// ```text
+///                      default  range     what it is, in plain words
+/// LOOM_CAMERA_HZ           4.0  2 – 6     how quickly the view catches up.
+///                                         LOWER IS HEAVIER. This is the knob.
+/// LOOM_CAMERA_DAMPING     0.55  0.4 – 1   how much it bounces at the end of a
+///                                         turn. Lower bounces more; 1 does not
+///                                         bounce at all.
+/// LOOM_CAMERA_WEIGHT       1.0  0 – 1     how much of the whole effect you get.
+///                                         0 is off, exactly.
+/// LOOM_CAMERA_RESPONSE     0.5  0 – 1     how hard it works to keep up with a
+///                                         steady turn. Leave it alone.
+/// ```
+///
+/// **Heavier:** `LOOM_CAMERA_HZ=3`, then `=2.5`, then `=2`. One knob; lowering
+/// it is the whole of "more sluggish". At 2 a flick takes 417 ms to come to
+/// rest, which is about twice as long as you can consciously notice.
+/// **Sharper:** `LOOM_CAMERA_HZ=5`, then `=6`. At 6 there is almost nothing
+/// left to feel, which is why that is the ceiling.
+/// **More of a lurch at the end of a turn:** `LOOM_CAMERA_DAMPING=0.45`.
+/// **Less:** `=0.75`. **None:** `=1.0`.
+/// **Off, to compare against nothing:** `LOOM_CAMERA_WEIGHT=0`.
+/// **What plain input lag feels like, for contrast:** `LOOM_CAMERA_RESPONSE=0`.
+/// Do not ship it; it is here so the difference can be felt rather than argued.
+///
+/// Every range is a floor and a ceiling on *usability*, not taste: outside them
+/// the camera stops being one — 7.3 seconds to settle at the bottom, unaimable
+/// jitter at the top. Out-of-range values are clamped **with a line in the log**
+/// rather than in silence, because a tuning knob that quietly disagrees with
+/// what you typed teaches the wrong lesson about the feel. See [`from_env`].
+///
+/// # Why a spring with feedforward, and not a lerp
+///
 /// A damped spring with a **feedforward** term, and the feedforward is the
 /// whole reason this is weight rather than lag. A plain spring — or any
 /// low-pass — trails a sustained turn by a fixed angle, so a steady pan sits
@@ -2634,6 +2672,13 @@ const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
 /// in the transients — the view accelerates from rest, overshoots ~3° on a 60°
 /// flick, and settles in 117 ms. Sluggish, and it still arrives where you
 /// pointed it.
+///
+/// **[`Self::MAX_LAG`] bounds all of it.** Overshoot is proportional to how
+/// fast you were turning, so the 3° a conversational flick produces is 18° at
+/// mouse-flick speed and 47° at a spin — degrees at which "weight" is no longer
+/// the word for it. The lag clamp is what makes "it still gets to the places
+/// where it needs to go" a property of the code rather than of the turn rate
+/// the acceptance test happened to pick.
 ///
 /// Stepped **once per simulation tick**, so `dt` is the compile-time constant
 /// [`TICK_SECONDS`] and the framerate-independence hazard that sinks every
@@ -2684,6 +2729,50 @@ impl CameraSpring {
         prev: 0.0,
     };
 
+    /// How far the picture may ever be from the mouse. **A bound, not a taste
+    /// knob** — which is why it is a constant and not a fifth environment
+    /// variable.
+    ///
+    /// A spring's overshoot is proportional to the angular velocity it was
+    /// carrying, and nothing in the design caps that. Measured on the shipped
+    /// filter at the defaults, past a flick's endpoint:
+    ///
+    /// ```text
+    ///    300 °/s (a look across the deck)    3.07°
+    ///   1800 °/s (an ordinary mouse flick)  18.42°
+    ///   7200 °/s (a fast 360)               47.28°
+    /// ```
+    ///
+    /// The acceptance test only ever bounded the first row, so the feature
+    /// shipped asserted at a fifth of the speed it is used at.
+    ///
+    /// 6° because it is above every number this camera produces at the speeds a
+    /// player talks and walks at — the 300 °/s row is **bit-identical** clamped
+    /// and unclamped, so the feel that was tuned is the feel that ships — and
+    /// below the ~13° bucket that `deeper_player.rhai`'s heading caption
+    /// quantises to. It also *shortens* a fast flick's settle (350 → 283 ms at
+    /// 1800 °/s) and *reduces* sustained error above 800 °/s, because a bound
+    /// on the lag is a bound in both directions.
+    const MAX_LAG: f32 = 0.104_719_76; // 6°
+
+    /// The range each knob is clamped to. Named rather than written as four
+    /// literals inside [`Self::from_env`], so that
+    /// `every_setting_a_knob_can_reach_is_stable` can sweep the actual box the
+    /// human can reach instead of a box a test hard-coded to agree with itself.
+    const WEIGHT_RANGE: std::ops::RangeInclusive<f32> = 0.0..=1.0;
+    /// See [`Self::from_env`]. The ceiling is where semi-implicit Euler stops
+    /// being stable at a 60 Hz step; the floor is where a camera stops being a
+    /// camera. At `hz = 2` a 60° flick settles in 417 ms at the loosest damping
+    /// allowed, which is already twice human reaction time and as heavy as
+    /// anyone could want; at `hz = 0.5` it is **7.3 seconds**.
+    const HZ_RANGE: std::ops::RangeInclusive<f32> = 2.0..=6.0;
+    /// Above 1.0 is overdamped, and it drags the `hz` cliff down with it. Below
+    /// 0.4 the ring outlasts the turn — 1.8 s at `hz = 2`, against 417 ms at
+    /// 0.4. Every corner of `HZ_RANGE × DAMPING_RANGE` settles inside 417 ms.
+    const DAMPING_RANGE: std::ops::RangeInclusive<f32> = 0.4..=1.0;
+    /// Above 1.0 the view leads the hand by more than the hand is moving.
+    const RESPONSE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=1.0;
+
     /// Explicit parameters. Tests use this; the game reads [`Self::from_env`].
     #[must_use]
     pub fn new(weight: f32, hz: f32, zeta: f32, response: f32) -> Self {
@@ -2696,35 +2785,78 @@ impl CameraSpring {
         }
     }
 
-    /// The four knobs, from the environment, read once when play starts.
+    /// The four knobs, from the environment, read once when play starts. The
+    /// table of what each one does is on [`CameraSpring`] itself.
     ///
     /// Environment rather than a settings table because not one of these
     /// constants has been *felt* yet, and a schema written before that is a
     /// schema for the wrong three floats. It is tunable without a rebuild,
-    /// which is the property that matters this week:
+    /// which is the property that matters this week.
     ///
-    /// ```text
-    /// LOOM_CAMERA_WEIGHT=0     off, exactly
-    /// LOOM_CAMERA_HZ=3         heavier, slower to settle
-    /// LOOM_CAMERA_DAMPING=0.4  more overshoot
-    /// LOOM_CAMERA_RESPONSE=0   no feedforward — this is what lag feels like
-    /// ```
+    /// **Every knob is clamped to a range, and the ceiling on `hz` is a
+    /// stability limit rather than a matter of taste.** Semi-implicit Euler at
+    /// a 60 Hz step diverges above a natural frequency that *moves with the
+    /// damping*: the last stable `hz` is 11.41 at ζ = 0.55, 8.04 at ζ = 1 and
+    /// 4.60 at ζ = 2. So the two cannot be bounded independently. `hz ≤ 6` with
+    /// `ζ ≤ 1` is stable across the whole box with the nearest cliff at 8.04 —
+    /// a 1.34× margin — and it costs nothing, because 6 Hz already leaves
+    /// almost nothing to feel and ζ above 1 is overdamped.
+    ///
+    /// **What "unstable" looks like changed when [`Self::MAX_LAG`] landed, and
+    /// the weaker symptom is the one to design against.** Before the lag clamp,
+    /// `LOOM_CAMERA_HZ=12` made the camera NaN outright and `=-4` sent it to
+    /// 2.7e24 degrees. With the clamp both are bounded — and *still* unusable:
+    /// at `hz = 12` the view sits pinned against the bound, jittering 11.6°
+    /// tick to tick, and settles 5.6° from where the mouse points. Finite,
+    /// bounded, and a camera nobody can aim. This range is what keeps that out
+    /// of reach on the knob whose entire purpose is being swept by hand.
+    ///
+    /// **Clamping is reported, not silent.** A tuning knob that quietly
+    /// disagrees with what you typed teaches the wrong lesson about the feel.
     #[must_use]
     pub fn from_env() -> Self {
-        fn read(key: &str, fallback: f32) -> f32 {
-            std::env::var(key)
-                .ok()
-                .and_then(|v| v.parse::<f32>().ok())
-                .filter(|v| v.is_finite())
-                .unwrap_or(fallback)
+        fn read(key: &str, fallback: f32, range: &std::ops::RangeInclusive<f32>) -> f32 {
+            let asked = std::env::var(key).ok().and_then(|v| v.parse::<f32>().ok());
+            CameraSpring::knob(key, asked, fallback, range)
         }
         let d = Self::DEFAULT;
         Self::new(
-            read("LOOM_CAMERA_WEIGHT", d.weight),
-            read("LOOM_CAMERA_HZ", d.hz),
-            read("LOOM_CAMERA_DAMPING", d.zeta),
-            read("LOOM_CAMERA_RESPONSE", d.response),
+            read("LOOM_CAMERA_WEIGHT", d.weight, &Self::WEIGHT_RANGE),
+            read("LOOM_CAMERA_HZ", d.hz, &Self::HZ_RANGE),
+            read("LOOM_CAMERA_DAMPING", d.zeta, &Self::DAMPING_RANGE),
+            read("LOOM_CAMERA_RESPONSE", d.response, &Self::RESPONSE_RANGE),
         )
+    }
+
+    /// One knob's worth of "what the human typed" → "what the camera uses".
+    ///
+    /// Split out of [`Self::from_env`] so it can be tested at all. Environment
+    /// variables are process-global and these tests run in parallel, so a test
+    /// that sets one flakes against every other test that starts a [`Play`] —
+    /// and with the reading and the clamping in one function, that left the
+    /// clamping untested. It was: deleting it was injected as a fault and every
+    /// test passed, on the exact line the whole range-clamp defect was about.
+    fn knob(
+        key: &str,
+        asked: Option<f32>,
+        fallback: f32,
+        range: &std::ops::RangeInclusive<f32>,
+    ) -> f32 {
+        // A missing knob and an unreadable one are the same thing: the default.
+        // NaN and infinity are filtered here rather than clamped, because
+        // `f32::clamp` panics on a NaN bound and returns NaN for a NaN input.
+        let Some(asked) = asked.filter(|v| v.is_finite()) else {
+            return fallback;
+        };
+        let used = asked.clamp(*range.start(), *range.end());
+        if used != asked {
+            crate::log::warn(format!(
+                "{key}={asked} is outside {}..={}; using {used}",
+                range.start(),
+                range.end()
+            ));
+        }
+        used
     }
 
     /// Start settled on `target`, so pressing Play does not spring the view in
@@ -2753,6 +2885,29 @@ impl CameraSpring {
             - 2.0 * self.zeta * w * (self.vel - self.response * target_vel))
             * TICK_SECONDS;
         self.angle += self.vel * TICK_SECONDS;
+
+        // Never further from the mouse than [`Self::MAX_LAG`], in either
+        // direction.
+        //
+        // The velocity is trimmed to the target's own at the wall — and *not*
+        // for the reason you would guess. It was written against a kick coming
+        // off the stop, and measurement says there is no kick: bounding the
+        // position bounds the error whatever the velocity is doing, and the
+        // worst error after a hard stop from 600–7200 °/s is 6.000° with the
+        // trim and 6.000° without it. What it actually stops is `vel` growing
+        // without bound while pinned, which at an out-of-range frequency ends
+        // in a NaN — and a NaN fails *both* comparisons below, so it would walk
+        // straight through the clamp. Two lines that keep the range clamp from
+        // being the only thing between a mis-set knob and a dead camera. See
+        // `the_lag_clamp_survives_a_frequency_the_range_clamp_forbids`.
+        let (behind, ahead) = (target - Self::MAX_LAG, target + Self::MAX_LAG);
+        if self.angle < behind {
+            self.angle = behind;
+            self.vel = self.vel.max(target_vel);
+        } else if self.angle > ahead {
+            self.angle = ahead;
+            self.vel = self.vel.min(target_vel);
+        }
     }
 
     /// The angle to look along. Derived rather than stored, so the picture and
@@ -2988,9 +3143,14 @@ impl Play {
         // stops the two conventions drifting apart again. So the whole rig
         // reads one number: the picture, the aim ray and the walk direction
         // are the same yaw, and nothing in the game can disagree with what you
-        // see. The price is a transient — up to ~8° for the ~120 ms a flick
-        // takes to settle, walking somewhere slightly off where you ended up
-        // pointing. On a narrow deck with a rail that is the thing to watch.
+        // see. The price is a transient: you walk somewhere slightly off where
+        // you ended up pointing, for the ~120 ms a flick takes to settle.
+        // **Bounded by [`CameraSpring::MAX_LAG`] at 6°** — a guarantee from the
+        // clamp rather than a measurement of one flick, which is what the
+        // earlier "~8°" here was, and it was measured at a fifth of flick speed
+        // besides. At full walk speed 6° is 2.3 cm of lateral drift over a 60°
+        // flick and 11 cm over a 360° spin. On a narrow deck with a rail that
+        // is the thing to watch, and those are the numbers to watch it against.
         let (sin, cos) = self.view_yaw().sin_cos();
         ([-sin, 0.0, -cos], [cos, 0.0, -sin])
     }
@@ -4716,20 +4876,29 @@ transform = { pos = [0.0, 6.0, 0.0] }
         1000.0 * (target - spring.view(target)).to_degrees() / degrees_per_second
     }
 
-    /// A 60° flick: twelve ticks of input, then the mouse stops. Returns the
-    /// view angle in degrees on every tick, input and coast together.
-    fn flick(spring: &mut CameraSpring) -> Vec<f32> {
-        let step = 60.0_f32.to_radians() / 12.0;
+    /// `degrees` of input spread over `ticks` ticks, then the mouse stops.
+    /// Returns the view angle in degrees on every tick, input and coast
+    /// together.
+    #[allow(clippy::cast_precision_loss)]
+    fn flick_at(spring: &mut CameraSpring, degrees: f32, ticks: u32) -> Vec<f32> {
+        let step = degrees.to_radians() / ticks as f32;
         let mut target = 0.0;
-        (0..192)
+        (0..ticks + 180)
             .map(|tick| {
-                if tick < 12 {
+                if tick < ticks {
                     target += step;
                 }
                 spring.settle(target);
                 spring.view(target).to_degrees()
             })
             .collect()
+    }
+
+    /// A 60° flick over twelve ticks — 300 °/s, a look across the deck. The
+    /// speed the defaults were tuned at, and *not* the speed a mouse flick
+    /// happens at; see `no_speed_of_turn_throws_the_view_further_than_the_bound`.
+    fn flick(spring: &mut CameraSpring) -> Vec<f32> {
+        flick_at(spring, 60.0, 12)
     }
 
     /// **The acceptance criterion the whole design is built around.** Weight
@@ -4785,6 +4954,229 @@ transform = { pos = [0.0, 6.0, 0.0] }
         #[allow(clippy::cast_precision_loss)]
         let ms = (settled + 1 - 12) as f32 * TICK_SECONDS * 1000.0;
         assert!(ms < 150.0, "settled within half a degree after {ms:.0} ms");
+    }
+
+    /// **The bound, at the speeds a mouse actually moves.** The test above
+    /// checks 300 °/s, and overshoot is proportional to the angular velocity
+    /// the spring was carrying — so an ordinary flick, at 1000–3000 °/s, threw
+    /// the view 18° past where it was pointed and a fast 360 threw it 47°,
+    /// entirely unasserted. [`CameraSpring::MAX_LAG`] is what bounds it, and
+    /// this is the test that notices if it is removed or made a taste knob.
+    ///
+    /// Two things are asserted together and both matter: the view never leaves
+    /// the bound, and it still **lands exactly where the mouse asked**. A clamp
+    /// that bought its bound by losing the endpoint would be a worse bug than
+    /// the overshoot — that is the whole "still gets to the places where it
+    /// needs to go" property, and a clamp is the obvious way to break it.
+    #[test]
+    fn no_speed_of_turn_throws_the_view_further_than_the_bound() {
+        let bound = CameraSpring::MAX_LAG.to_degrees();
+        for (degrees, ticks) in [(60.0_f32, 12_u32), (60.0, 6), (180.0, 6), (180.0, 3), (360.0, 3)] {
+            let mut spring = CameraSpring::DEFAULT;
+            let view = flick_at(&mut spring, degrees, ticks);
+            #[allow(clippy::cast_precision_loss)]
+            let rate = degrees / (ticks as f32 * TICK_SECONDS);
+
+            // Against the *moving* target, not the endpoint: during the ramp
+            // the view is legitimately far from where the flick will finish,
+            // and the bound is on the gap to the mouse right now.
+            #[allow(clippy::cast_precision_loss)]
+            let worst = view
+                .iter()
+                .enumerate()
+                .map(|(tick, v)| {
+                    let target = degrees * (tick as u32 + 1).min(ticks) as f32 / ticks as f32;
+                    (v - target).abs()
+                })
+                .fold(f32::MIN, f32::max);
+            assert!(
+                worst <= bound + 0.01,
+                "{rate:.0}°/s: the view got {worst:.2}° from a {degrees}° flick, \
+                 past the {bound:.2}° bound — overshoot is proportional to turn \
+                 rate and nothing else caps it"
+            );
+            let landed = view.last().copied().expect("the flick produced ticks");
+            assert!(
+                (landed - degrees).abs() < 0.01,
+                "{rate:.0}°/s: it settled at {landed:.3}° instead of {degrees}° — \
+                 a bound that costs you the endpoint is lag wearing a clamp"
+            );
+        }
+    }
+
+    /// **The clamp holds even at a setting the range clamp is there to make
+    /// unreachable**, which is what the velocity trim in [`CameraSpring::settle`]
+    /// buys and the only thing it buys.
+    ///
+    /// The trim was written for a kick coming off the wall, and *that turned
+    /// out not to exist*: measured against a version without it, the worst
+    /// error after a hard stop from 600–7200 °/s is 6.000° either way, because
+    /// bounding the position bounds the error whatever the velocity is doing.
+    /// So the fault injection slipped straight through the test written for it,
+    /// which is what put this measurement on the record.
+    ///
+    /// What the trim actually does is stop `vel` growing without bound while
+    /// pinned. Held target, 100k ticks, `hz = 20`: **NaN without the trim, and
+    /// exactly 0.0 with it** — and a NaN passes *both* comparisons in the
+    /// clamp, so it would sail through the bound untouched and take the camera
+    /// with it. Two lines that turn the range clamp from the only defence into
+    /// the first one; deleting them makes a mis-set ceiling fatal instead of
+    /// merely ugly. `hz = 20` here comes through [`CameraSpring::new`]
+    /// deliberately — [`CameraSpring::from_env`] cannot reach it, and that is
+    /// exactly the assumption under test.
+    #[test]
+    fn the_lag_clamp_survives_a_frequency_the_range_clamp_forbids() {
+        let bound = CameraSpring::MAX_LAG.to_degrees();
+        for hz in [12.0_f32, 20.0, 40.0] {
+            let mut spring = CameraSpring::new(1.0, hz, 0.55, 0.5);
+            let mut target = 0.0_f32;
+            for tick in 0..20_000 {
+                if tick < 6 {
+                    target += 30.0_f32.to_radians();
+                }
+                spring.settle(target);
+                let error = (spring.view(target) - target).to_degrees();
+                assert!(
+                    error.abs() <= bound + 0.01,
+                    "hz {hz}, tick {tick}: {error:.3}° off the {bound:.2}° \
+                     bound — a NaN fails both halves of a clamp and walks \
+                     through it"
+                );
+            }
+        }
+    }
+
+    /// **A knob the human sets can only ever produce a setting inside the box**
+    /// the test below sweeps — which is what makes that sweep a statement about
+    /// the shipped camera rather than about an arbitrary set of floats.
+    ///
+    /// Every one of these rows was a real behaviour before the clamp landed:
+    /// `LOOM_CAMERA_HZ=12` made the camera NaN, `=-4` sent the view 2.7e24
+    /// degrees round, and `LOOM_CAMERA_DAMPING=-1` diverged. The knobs exist to
+    /// be swept by hand between two runs, so "don't type that" is not a design.
+    #[test]
+    fn a_knob_cannot_be_set_outside_the_box() {
+        let d = CameraSpring::DEFAULT;
+        let hz = &CameraSpring::HZ_RANGE;
+        for asked in [None, Some(f32::NAN), Some(f32::INFINITY), Some(f32::NEG_INFINITY)] {
+            let got = CameraSpring::knob("LOOM_CAMERA_HZ", asked, d.hz, hz);
+            assert_eq!(got, d.hz, "{asked:?} is not a setting; it is the default");
+        }
+        for (asked, want) in [
+            (12.0, *hz.end()),
+            (1e30, *hz.end()),
+            (-4.0, *hz.start()),
+            (0.0, *hz.start()),
+            (3.0, 3.0),
+            (*hz.start(), *hz.start()),
+            (*hz.end(), *hz.end()),
+        ] {
+            let got = CameraSpring::knob("LOOM_CAMERA_HZ", Some(asked), d.hz, hz);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "LOOM_CAMERA_HZ={asked} became {got}, wanted {want}"
+            );
+        }
+        // And the other three ranges are actually wired to their own knobs — a
+        // knob reading the wrong range still compiles and still clamps.
+        assert_eq!(
+            CameraSpring::knob("W", Some(9.0), d.weight, &CameraSpring::WEIGHT_RANGE),
+            *CameraSpring::WEIGHT_RANGE.end()
+        );
+        assert_eq!(
+            CameraSpring::knob("D", Some(-1.0), d.zeta, &CameraSpring::DAMPING_RANGE),
+            *CameraSpring::DAMPING_RANGE.start()
+        );
+        assert_eq!(
+            CameraSpring::knob("R", Some(3.0), d.response, &CameraSpring::RESPONSE_RANGE),
+            *CameraSpring::RESPONSE_RANGE.end()
+        );
+    }
+
+    /// **Every setting the human can reach arrives, and then stays put.**
+    ///
+    /// The knobs exist to be swept by hand, and semi-implicit Euler at a fixed
+    /// 60 Hz step diverges above a natural frequency that *moves with the
+    /// damping* — 11.41 Hz at ζ = 0.55 but only 8.04 at ζ = 1 — so the two
+    /// cannot be bounded independently and no per-knob check would find it.
+    ///
+    /// **Asserting "it did not diverge" is not enough, and that is measured
+    /// rather than argued.** Widening `HZ_RANGE` to 12 was injected as a fault
+    /// and a divergence check passed it, because [`CameraSpring::MAX_LAG`]
+    /// converts divergence into *chatter*: at `hz = 12` the view is finite,
+    /// pinned to the bound, jittering 11.6° tick to tick and settling 5.6° away
+    /// from where the mouse is pointing. Finite, bounded, and unusable. So what
+    /// is asserted is the property the feature is actually for — it gets where
+    /// it needs to go, and then it holds still.
+    ///
+    /// Swept through [`CameraSpring::new`] rather than the environment on
+    /// purpose: env vars are process-global and these tests run in parallel, so
+    /// an env-mutating test would flake against every other test that starts a
+    /// [`Play`]. What is asserted here is that the box is safe;
+    /// `a_knob_cannot_be_set_outside_the_box` is what asserts a human cannot
+    /// leave it.
+    #[test]
+    fn every_setting_a_knob_can_reach_arrives_and_then_holds_still() {
+        let steps = |r: &std::ops::RangeInclusive<f32>| {
+            let (lo, hi) = (*r.start(), *r.end());
+            (0..=8_i8).map(move |i| lo + (hi - lo) * f32::from(i) / 8.0)
+        };
+        let d = CameraSpring::DEFAULT;
+        assert!(
+            CameraSpring::WEIGHT_RANGE.contains(&d.weight)
+                && CameraSpring::HZ_RANGE.contains(&d.hz)
+                && CameraSpring::DAMPING_RANGE.contains(&d.zeta)
+                && CameraSpring::RESPONSE_RANGE.contains(&d.response),
+            "the defaults must themselves be reachable settings"
+        );
+
+        for hz in steps(&CameraSpring::HZ_RANGE) {
+            for zeta in steps(&CameraSpring::DAMPING_RANGE) {
+                for response in steps(&CameraSpring::RESPONSE_RANGE) {
+                    for weight in [0.0_f32, 1.0] {
+                        let mut spring = CameraSpring::new(weight, hz, zeta, response);
+                        let view = flick_at(&mut spring, 180.0, 3);
+                        let knobs =
+                            format!("weight {weight} hz {hz} damping {zeta} response {response}");
+
+                        let landed = view.last().copied().expect("the flick produced ticks");
+                        assert!(
+                            (landed - 180.0).abs() < 0.05,
+                            "{knobs}: settled at {landed:.3}° instead of 180°"
+                        );
+                        // And it arrives *soon enough to be a camera*. This is
+                        // what the floor of each range buys, and without the
+                        // assertion the floor is a comment: at hz 0.5 / ζ 0.1
+                        // — inside the first ranges written here — a 60° flick
+                        // took 7.3 seconds to settle. Stable, correct, useless.
+                        let settled = view
+                            .iter()
+                            .rposition(|v| (v - 180.0).abs() > 0.5)
+                            .unwrap_or(0);
+                        #[allow(clippy::cast_precision_loss)]
+                        let ms = (settled.saturating_sub(2) as f32) * TICK_SECONDS * 1000.0;
+                        assert!(
+                            ms < 600.0,
+                            "{knobs}: {ms:.0} ms to settle — every reachable \
+                             setting has to still be a camera"
+                        );
+                        // The last quarter second must be motionless. Chatter
+                        // against the lag clamp is finite and bounded and still
+                        // an unusable camera.
+                        let tail = &view[view.len() - 15..];
+                        let swing = tail
+                            .windows(2)
+                            .map(|w| (w[1] - w[0]).abs())
+                            .fold(f32::MIN, f32::max);
+                        assert!(
+                            swing < 0.05,
+                            "{knobs}: the view is still moving {swing:.3}° a tick \
+                             a quarter second after the mouse stopped"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The mass tell, and the test that fails if anyone "simplifies" the
