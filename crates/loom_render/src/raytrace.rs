@@ -40,6 +40,57 @@ struct Structure {
 /// [`vk::AccelerationStructureInstanceKHR`] is a constant here.
 type InstanceKey = ([f32; 12], u32, vk::DeviceAddress);
 
+/// What the TLAS would be built from, for these objects, right now.
+///
+/// **A free function so the skip has a test.** `build_instances` needs a
+/// device, a queue and a fence, so nothing in the five green checks can reach
+/// it: `render_to_png` calls `render` once, every GOLDEN row is one frame, and
+/// on a first frame `tlas` is `None` and the skip branch is never taken. A
+/// fault injected into the comparison broke six of eight frames on four scenes
+/// and passed all five checks unchanged. This is the half of it that is
+/// arithmetic, and `tests` below is what fails when the arithmetic moves.
+fn instance_keys(objects: &[Object], cutout: &[bool], blas: &[Structure]) -> Vec<InstanceKey> {
+    objects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, object)| {
+            // **An alpha-tested surface is kept out of the structure
+            // entirely.** A ray query never runs a fragment shader, so it would
+            // occlude as the full quad the leaf was cut from — a canopy of a
+            // thousand cards laying a thousand hard rectangles on the ground,
+            // and shadowing itself with them too.
+            //
+            // No shadow is not free either; it is simply the lesser wrong, and
+            // the honest one. Doing this properly means committing non-opaque
+            // hits from inside the traversal loop, which needs the hit
+            // triangle's UVs — and ADR 0021 records that a ray hit in this
+            // engine has no UVs to read. That is an ADR, not a patch.
+            //
+            // The index still comes from `enumerate` over the *whole* slice, so
+            // skipping one does not shift any other instance's custom index
+            // away from its object.
+            if cutout.get(index).copied().unwrap_or(false) {
+                return None;
+            }
+            let blas = blas.get(object.mesh as usize)?;
+            // Vulkan wants a 3x4 row-major transform; glam is column-major, so
+            // this transposes as it copies. Getting it wrong puts every shadow
+            // somewhere else in the scene — and nothing validates it.
+            let m = object.model.to_cols_array();
+            let transform = [
+                m[0], m[4], m[8], m[12], //
+                m[1], m[5], m[9], m[13], //
+                m[2], m[6], m[10], m[14],
+            ];
+            // 24 bits, against a 4096-object buffer that grows by doubling;
+            // `try_from` rather than `as` so an implausibly large scene
+            // truncates to object 0 rather than wrapping to an arbitrary one.
+            let custom_index = u32::try_from(index).unwrap_or(0) & 0x00ff_ffff;
+            Some((transform, custom_index, blas.address))
+        })
+        .collect()
+}
+
 /// Everything needed to trace rays against the current scene.
 pub(crate) struct Raytracer {
     device: ash::Device,
@@ -70,10 +121,20 @@ pub(crate) struct Raytracer {
     /// clock with and without the skip; see the table in the commit.
     ///
     /// It self-invalidates: the transform is in the key, so anything that
-    /// moves rebuilds, and the BLAS address is in it too. `build_meshes`
-    /// clears it outright, because a freed BLAS can be reallocated at the same
+    /// moves rebuilds, and the BLAS address is in it too. `build_meshes` sets
+    /// it to `None`, because a freed BLAS can be reallocated at the same
     /// address with different geometry.
-    built: Vec<InstanceKey>,
+    ///
+    /// **`None` rather than an empty list, and the difference is a scene the
+    /// engine cannot load today.** Clearing it made "nothing has been built"
+    /// and "the last build had no instances" the same value, so a `build_meshes`
+    /// onto a live `Raytracer` whose new scene produced no instances — no
+    /// meshes, or all of them alpha-cutout — would compare equal, skip, and
+    /// leave the *previous* scene's TLAS bound for every ray in the frame.
+    /// Unreachable while both call sites sit in `new()` and `tlas` is therefore
+    /// `None`; one word rather than a comment saying so, because the day that
+    /// stops being true nothing would report it.
+    built: Option<Vec<InstanceKey>>,
 }
 
 impl Raytracer {
@@ -147,7 +208,7 @@ impl Raytracer {
             layout,
             pool,
             set,
-            built: Vec::new(),
+            built: None,
         })
     }
 
@@ -181,7 +242,7 @@ impl Raytracer {
         // Every instance key holds a BLAS address, and these are the addresses
         // being freed. A new BLAS can land on a freed one, so the keys cannot
         // be trusted across this.
-        self.built.clear();
+        self.built = None;
         if ranges.is_empty() || vertex_count == 0 {
             return Ok(());
         }
@@ -247,85 +308,51 @@ impl Raytracer {
         // the TLAS has to exist whenever the device can trace, because a
         // shader's *static* use of `sceneTLAS` is a property of the shader and
         // not of what the scene happens to hold.
-        let (keys, instances): (Vec<InstanceKey>, Vec<vk::AccelerationStructureInstanceKHR>) =
-            objects
-            .iter()
-            .enumerate()
-            .filter_map(|(index, object)| {
-                // **An alpha-tested surface is kept out of the structure
-                // entirely.** A ray query never runs a fragment shader, so it
-                // would occlude as the full quad the leaf was cut from — a
-                // canopy of a thousand cards laying a thousand hard rectangles
-                // on the ground, and shadowing itself with them too.
-                //
-                // No shadow is not free either; it is simply the lesser wrong,
-                // and the honest one. Doing this properly means committing
-                // non-opaque hits from inside the traversal loop, which needs
-                // the hit triangle's UVs — and ADR 0021 records that a ray hit
-                // in this engine has no UVs to read. That is an ADR, not a
-                // patch.
-                //
-                // The index still comes from `enumerate` over the *whole*
-                // slice, so skipping one does not shift any other instance's
-                // custom index away from its object.
-                if cutout.get(index).copied().unwrap_or(false) {
-                    return None;
-                }
-                let blas = self.blas.get(object.mesh as usize)?;
-                // Vulkan wants a 3x4 row-major transform; glam is column-major,
-                // so this transposes as it copies. Getting it wrong puts every
-                // shadow somewhere else in the scene — and nothing validates it.
-                let m = object.model.to_cols_array();
-                let transform = vk::TransformMatrixKHR {
-                    matrix: [
-                        m[0], m[4], m[8], m[12], //
-                        m[1], m[5], m[9], m[13], //
-                        m[2], m[6], m[10], m[14],
-                    ],
-                };
-                let custom_index = u32::try_from(index).unwrap_or(0) & 0x00ff_ffff;
-                Some((
-                    (transform.matrix, custom_index, blas.address),
-                    vk::AccelerationStructureInstanceKHR {
-                        transform,
-                        // **The object's index, so a ray can find out what it
-                        // hit.** A shadow ray never needed this — it asks only
-                        // whether anything is in the way — but a reflection
-                        // ray has to shade the surface it lands on, and
-                        // `CommittedInstanceID()` is the only channel from
-                        // traversal back to the shader that costs nothing.
-                        //
-                        // This index addresses `push.objects` directly:
-                        // `pack_objects` and this function are both handed the
-                        // same mesh-sorted slice, in the same order, by both
-                        // the offscreen and the windowed path. Passing an
-                        // unsorted list to one and not the other would put
-                        // every reflection's colour on the wrong object, and
-                        // nothing would validate it — so the two calls stay
-                        // next to each other in `render`.
-                        //
-                        // 24 bits, against a 4096-object buffer that grows by
-                        // doubling; `try_from` rather than `as` so an
-                        // implausibly large scene truncates to object 0 rather
-                        // than wrapping to an arbitrary one.
-                        instance_custom_index_and_mask: vk::Packed24_8::new(custom_index, 0xff),
-                        instance_shader_binding_table_record_offset_and_flags:
-                            vk::Packed24_8::new(0, 0),
-                        acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
-                            device_handle: blas.address,
-                        },
-                    },
-                ))
-            })
-            .unzip();
+        let keys = instance_keys(objects, cutout, &self.blas);
         // **Nothing moved, so nothing is rebuilt.** See [`Raytracer::built`].
         // `tlas.is_some()` is what keeps the first frame honest — and an empty
         // scene still gets its zero-instance TLAS built once, for the reason
-        // spelled out below.
-        if self.tlas.is_some() && keys == self.built {
+        // spelled out below. It is not redundant beside the `Option`: `built`
+        // is assigned before the build is submitted, so a build that then fails
+        // leaves keys recorded for a structure that does not exist.
+        if self.tlas.is_some() && self.built.as_ref() == Some(&keys) {
             return Ok(());
         }
-        self.built = keys;
+        // **Built from the keys, not beside them.** A key holds everything a
+        // TLAS instance carries that varies — transform, object index, BLAS
+        // address — so deriving one from the other is what stops the skip from
+        // comparing something the build does not use. It also puts this work
+        // after the early return, where a static scene never does it at all.
+        let instances: Vec<vk::AccelerationStructureInstanceKHR> = keys
+            .iter()
+            .map(
+                |&(matrix, custom_index, address)| vk::AccelerationStructureInstanceKHR {
+                    transform: vk::TransformMatrixKHR { matrix },
+                    // **The object's index, so a ray can find out what it
+                    // hit.** A shadow ray never needed this — it asks only
+                    // whether anything is in the way — but a reflection ray has
+                    // to shade the surface it lands on, and
+                    // `CommittedInstanceID()` is the only channel from
+                    // traversal back to the shader that costs nothing.
+                    //
+                    // This index addresses `push.objects` directly:
+                    // `pack_objects` and `instance_keys` are both handed the
+                    // same mesh-sorted slice, in the same order, by both the
+                    // offscreen and the windowed path. Passing an unsorted list
+                    // to one and not the other would put every reflection's
+                    // colour on the wrong object, and nothing would validate it
+                    // — so the two calls stay next to each other in `render`.
+                    instance_custom_index_and_mask: vk::Packed24_8::new(custom_index, 0xff),
+                    instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
+                        0, 0,
+                    ),
+                    acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
+                        device_handle: address,
+                    },
+                },
+            )
+            .collect();
+        self.built = Some(keys);
         // **An empty scene still gets a TLAS, and that is a validation
         // requirement rather than tidiness.** This used to return early, so
         // `ready()` was false and `renderer.rs` skipped binding set 0 — which
@@ -625,3 +652,95 @@ const INSTANCE_SIZE: usize = std::mem::size_of::<vk::AccelerationStructureInstan
 
 /// Enough scratch that the first small build never reallocates.
 const SCRATCH_MIN: vk::DeviceSize = 1 << 20;
+
+#[cfg(test)]
+mod tests {
+    use super::{Structure, instance_keys};
+    use crate::Object;
+    use ash::vk;
+    use glam::Mat4;
+
+    /// A BLAS at a known address, and nothing else. `instance_keys` reads only
+    /// `address`, which is the whole reason it can be tested without a device.
+    fn blas(address: vk::DeviceAddress) -> Structure {
+        Structure {
+            handle: vk::AccelerationStructureKHR::null(),
+            buffer: vk::Buffer::null(),
+            allocation: None,
+            address,
+        }
+    }
+
+    fn object(mesh: u32, x: f32) -> Object {
+        Object {
+            model: Mat4::from_translation(glam::vec3(x, 0.0, 0.0)),
+            color: [1.0; 3],
+            mesh,
+            material: u32::MAX,
+            sway: 0.0,
+            deform: [0.0; 4],
+            deform_frame: [0.0; 4],
+        }
+    }
+
+    /// The property the per-frame skip rests on: a scene that moved is not the
+    /// scene it was. One millimetre is deliberate — the comparison is exact,
+    /// and a tolerance here would be either a rebuild the frame did not need or
+    /// a stale structure, depending on which side of it a scene fell.
+    #[test]
+    fn moving_an_object_changes_the_keys() {
+        let structures = [blas(0x1000), blas(0x2000)];
+        let still = [object(0, 0.0), object(1, 5.0)];
+        let moved = [object(0, 0.001), object(1, 5.0)];
+        let cutout = [false, false];
+        assert_eq!(
+            instance_keys(&still, &cutout, &structures),
+            instance_keys(&still, &cutout, &structures),
+            "the same objects must produce the same keys, or nothing is ever skipped"
+        );
+        assert_ne!(
+            instance_keys(&still, &cutout, &structures),
+            instance_keys(&moved, &cutout, &structures),
+            "a moved object must rebuild the TLAS"
+        );
+    }
+
+    /// Reordering is a change even when the set is identical, because the
+    /// custom index addresses `push.objects` by position: two objects swapping
+    /// places swaps what every reflection ray off them shades.
+    #[test]
+    fn reordering_changes_the_keys() {
+        let structures = [blas(0x1000), blas(0x2000)];
+        let cutout = [false, false];
+        let forward = [object(0, 0.0), object(1, 5.0)];
+        let backward = [object(1, 5.0), object(0, 0.0)];
+        assert_ne!(
+            instance_keys(&forward, &cutout, &structures),
+            instance_keys(&backward, &cutout, &structures)
+        );
+    }
+
+    /// A rebuilt BLAS at a new address is a new structure even for an object
+    /// that never moved — which is why the address is in the key at all.
+    #[test]
+    fn a_rebuilt_blas_changes_the_keys() {
+        let objects = [object(0, 0.0)];
+        let cutout = [false];
+        assert_ne!(
+            instance_keys(&objects, &cutout, &[blas(0x1000)]),
+            instance_keys(&objects, &cutout, &[blas(0x3000)])
+        );
+    }
+
+    /// A cutout object leaves the structure but does not shift anyone else's
+    /// custom index — `enumerate` runs over the whole slice for exactly this.
+    #[test]
+    fn cutout_is_skipped_without_shifting_the_rest() {
+        let structures = [blas(0x1000), blas(0x2000), blas(0x3000)];
+        let objects = [object(0, 0.0), object(1, 5.0), object(2, 9.0)];
+        let keys = instance_keys(&objects, &[false, true, false], &structures);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].1, 0);
+        assert_eq!(keys[1].1, 2, "the third object is still object 2");
+    }
+}
