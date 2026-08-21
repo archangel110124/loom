@@ -877,21 +877,9 @@ let ITEMS = #{
     conger:  #{ w: 2, h: 3, rot: 1, fish: 1, label: "><>"  },
 };
 
-// Cursor key repeat, in ticks: a third of a second before the first repeat,
-// then one cell every eighth of a second.
-//
-// **Guessed, not measured, and they are the two numbers in this system that
-// most need a human at a window.** `--assert` can confirm the cursor reached
-// x = 1; it cannot tell whether it got there when you asked. They sit here,
-// alone, so tuning them is an edit and not a rebuild.
-let CURSOR_DELAY = 20;
-let CURSOR_REPEAT = 8;
-
-// How long SHIFT must be **held**, in ticks, to put what is in your hand over
-// the side. One second. Held rather than tapped because it is the one action in
-// this game that cannot be undone, and because SPACE — the obvious "drop" key —
-// is the helm release on the mat, where a fat finger is a boat adrift.
-let DITCH_TICKS = 60;
+// **The cursor repeat and the ditch hold live in `deeper_player.rhai`**, not
+// here. A rules script sees no input at all, so the file that counts how long a
+// key has been down has to be the one that can see the key.
 
 // The two ramp feet, at the waterline, in world XZ, and what to call them.
 // `Rig/Slipway` descends east off the east end; `Rig/Ladder` descends north off
@@ -969,6 +957,56 @@ if hub {
     // hub used to shadow it with a position. Spending the bait needs both in
     // the same expression, which is how the collision was found.
     let me = positions[PLAYER];
+
+    // -----------------------------------------------------------------------
+    // **THE GRID IS OPEN, OR IT IS NOT, AND THE CURSOR IS SOMEWHERE.**
+    // -----------------------------------------------------------------------
+    //
+    // Latched off the movement script's events, exactly the way `station` is,
+    // because `GameRules` sees no input. This runs **before** the E block below
+    // so one press cannot both open the creel and stow a fish.
+    //
+    // **The cursor and the open flag are per-player view state.** They live in
+    // `state` today because that is the only storage `--hold` can drive and
+    // `--assert` can read; when replication arrives they are not sent — a
+    // remote client does not need to know where your cursor is.
+    let creel_open = if "creel_open" in state { state.creel_open } else { 0 };
+    let cx = if "creel_cx" in state { state.creel_cx } else { 0 };
+    let cy = if "creel_cy" in state { state.creel_cy } else { 0 };
+    // **Why the last press did nothing, and it is latched rather than
+    // per-tick.** 0 none, 1 it will not fit, 2 the cell is taken, 3 hands on
+    // the wheel, 4 your hand is already full.
+    //
+    // Latched because a per-tick flag is a fact `--assert` cannot reach:
+    // `--assert` runs once, at the end of the run, so a code written on tick
+    // 550 and cleared on 551 reads 0 at tick 600 and the row passes having
+    // checked nothing. Cleared by the next thing that works, which is also what
+    // makes it the right thing to draw.
+    let creel_refused = if "creel_refused" in state { state.creel_refused } else { 0 };
+    let creel_turn = false;
+    let creel_ditch = false;
+    let ditch_q = 0;
+    for e in events {
+        // A successful open clears the last refusal, which is what makes a
+        // latched code readable rather than permanent.
+        if e.kind == "creelopen" { creel_open = 1; creel_refused = 0; }
+        if e.kind == "creelshut" { creel_open = 0; }
+        if e.kind == "creelbusy" { creel_refused = 3; }
+        if e.kind == "cursor" {
+            if "dx" in e { cx += e.dx.to_int(); }
+            if "dy" in e { cy += e.dy.to_int(); }
+        }
+        if e.kind == "turn" { creel_turn = true; }
+        if e.kind == "ditch" { creel_ditch = true; }
+        if e.kind == "ditching" { if "q" in e { ditch_q = e.q.to_int(); } }
+    }
+    // **Clamped, not wrapped.** A cursor that reappears on the far side of a
+    // three-wide grid is a cursor you have to look for; a wall you can feel is
+    // how you count cells without reading them.
+    if cx < 0 { cx = 0; }
+    if cx > CREEL_W - 1 { cx = CREEL_W - 1; }
+    if cy < 0 { cy = 0; }
+    if cy > CREEL_H - 1 { cy = CREEL_H - 1; }
 
     // **The fish eats the bait, on the tick it takes the hook.** `at == tick`
     // in phase 3 is the bite instant and nothing else is: `at` is stamped on
@@ -1391,6 +1429,13 @@ if hub {
     // gone into it. The first draft wrote these where the pickups happen and a
     // landed fish was invisible until the next tick.
     state.creel = creel;
+    state.creel_open = creel_open;
+    state.creel_cx = cx;
+    state.creel_cy = cy;
+    state.creel_refused = creel_refused;
+    // Quarters of the way to putting what is in your hand over the side, so a
+    // held key has a bar rather than a surprise. Zero whenever SHIFT is up.
+    state.creel_ditching = ditch_q;
     state.hand = hand;
     state.creel_hand = if hand == "" { 0 } else { 1 };
     // A string, for the overlay. `--assert` reads the number beside it.

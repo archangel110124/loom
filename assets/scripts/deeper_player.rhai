@@ -297,6 +297,127 @@ memory.hands_off = hands_off;
 
 let at_helm = on_mat && !hands_off;
 
+// ---------------------------------------------------------------------------
+// **THE CREEL, AND WHAT IT DOES TO HIS BODY.**
+// ---------------------------------------------------------------------------
+//
+// **Only a movement script sees input**, so the grid's every gesture starts
+// here and crosses to `deeper_rules.rhai` as an event, exactly the way `use`
+// and `angler` do. The flag itself lives in this file's `memory`, because
+// nothing else in the engine has to know a bag is open.
+//
+// **His legs stop and his head does not, and that is the whole design.** The
+// pointer stays captured, so mouse-look keeps steering the camera while his
+// hands are in the bag — sweep the horizon, watch the rod tip, see another
+// player go over the side, with the grid up. Releasing the pointer instead is
+// what the pause menu does and it would zero all seven channels *and* stop
+// `DeviceEvent::MouseMotion`: unable to walk and unable to look, which is
+// strictly worse than the pause it is avoiding.
+//
+// **`Play::paused` is never touched.** The boat drifts, the fish pulls, and
+// `SLACK_LIMIT` is still counting — five seconds of not reeling throws the
+// hook, so rummaging mid-fight costs you the fish. That is the no-pause
+// consequence, it was already built, and it is why nothing here has to force
+// the creel shut on a bite.
+//
+// **Refused at the wheel**, with a word, because W/A/S/D are the throttle and
+// the rudder there and one key cannot be two things at one moment. This is the
+// design's worst input collision and `at_helm` — computed three lines up —
+// removes it diegetically: your hands are on the wheel.
+let bag_open = if "bag_open" in memory { memory.bag_open } else { false };
+let bag_held = if "bag_held" in memory { memory.bag_held } else { false };
+// Edge-detected here even though `Play::set_input` already does it, for the
+// reason `fire` and `interact` both carry: `--hold bag=1` writes `Runner::input`
+// straight and holds it for the rest of the run, which would strobe the grid.
+let bag_edge = bag && !bag_held;
+memory.bag_held = bag;
+
+if bag_edge {
+    if bag_open {
+        bag_open = false;
+        emit.push(#{ kind: "creelshut" });
+    } else if at_helm {
+        emit.push(#{ kind: "creelbusy" });
+    } else {
+        bag_open = true;
+        emit.push(#{ kind: "creelopen" });
+    }
+}
+// **The mat can arrive under him**, which his legs cannot do while the grid is
+// up: she is a rigid body and the deck moves. One line, and it keeps "hands on
+// the wheel" true rather than only checked at the moment of pressing.
+if bag_open && at_helm {
+    bag_open = false;
+    emit.push(#{ kind: "creelshut" });
+}
+memory.bag_open = bag_open;
+
+// **The cursor, on W/A/S/D, with a key repeat this file has to build itself.**
+// `move_x`/`move_z` are analogue axes and nothing in this engine has ever
+// edge-detected one — `interact` got its latch in Rust precisely because level
+// input is unusable for a discrete gesture. So: an edge at |axis| > 0.5, then
+// nothing for `CURSOR_DELAY`, then one cell every `CURSOR_REPEAT`.
+//
+// **These two numbers are guessed and they are the ones that most need a human
+// at a window.** `--assert` can confirm the cursor reached x = 1; it cannot
+// tell whether it got there when you asked. They are alone up here so tuning
+// them is an edit and not a rebuild.
+let CURSOR_DELAY = 20;    // a third of a second before the first repeat
+let CURSOR_REPEAT = 8;    // then one cell every eighth of a second
+
+// **How long SHIFT must be HELD to put what is in your hand over the side.**
+// One second. Held rather than tapped because it is the only irreversible act
+// in this game, and SPACE — the obvious "drop" key — is the helm release on the
+// mat, where a fat finger is a boat adrift.
+let DITCH_TICKS = 60;
+
+if bag_open {
+    // +Z on the grid is *down*, and `move_z` is forward, so W is -1.
+    let ax = if move_x > 0.5 { 1 } else if move_x < -0.5 { -1 } else { 0 };
+    let az = if move_z > 0.5 { -1 } else if move_z < -0.5 { 1 } else { 0 };
+    // One integer, so "did the direction change" is one comparison. 4 is the
+    // centre — the same trick `station` uses one screen down.
+    let packed = (ax + 1) * 3 + (az + 1);
+    let was = if "cur_was" in memory { memory.cur_was } else { 4 };
+    let held_for = if "cur_held" in memory { memory.cur_held } else { 0 };
+    let dx = 0;
+    let dy = 0;
+    if packed != was {
+        held_for = 0;
+        dx = ax;
+        dy = az;
+    } else if ax != 0 || az != 0 {
+        held_for += 1;
+        if held_for >= CURSOR_DELAY && (held_for - CURSOR_DELAY) % CURSOR_REPEAT == 0 {
+            dx = ax;
+            dy = az;
+        }
+    }
+    memory.cur_was = packed;
+    memory.cur_held = held_for;
+    if dx != 0 || dy != 0 {
+        emit.push(#{ kind: "cursor", dx: dx.to_float(), dy: dy.to_float() });
+    }
+} else {
+    memory.cur_was = 4;
+    memory.cur_held = 0;
+}
+
+// **The ditch, and its progress bar.** `== DITCH_TICKS` fires exactly once, so
+// holding SHIFT longer does not throw a second thing over the side and the
+// counter is reset by letting go. The progress is emitted in **quarters, on
+// change** — four events per ditch rather than sixty — the same discipline
+// `station` and `heading` follow, and for the same reason.
+let ditch_held = if "ditch_held" in memory { memory.ditch_held } else { 0 };
+if bag_open && sprint { ditch_held += 1; } else { ditch_held = 0; }
+if ditch_held == DITCH_TICKS { emit.push(#{ kind: "ditch" }); }
+memory.ditch_held = ditch_held;
+let dq = if ditch_held > 0 { ditch_held * 4 / DITCH_TICKS } else { 0 };
+if dq != (if "dq" in memory { memory.dq } else { -1 }) {
+    emit.push(#{ kind: "ditching", q: dq.to_float() });
+    memory.dq = dq;
+}
+
 // How fast the deck under his feet is actually travelling, from his own world
 // position one tick to the next. Written every tick whether or not he is at
 // the wheel, so the delta never spans a gap; read only when he is, which is
@@ -396,7 +517,14 @@ if at_helm {
 
 let swimming = !grounded && position[1] < SWIM_LINE;
 
-let speed = if at_helm { 0.0 } else if swimming { SWIM } else if sprint { SPRINT } else { WALK };
+// **`bag_open` first**, because the creel takes the movement keys: the same
+// W/A/S/D that walk him are the cursor, and a man who walks while packing walks
+// off the boat. His head is still free — see the creel block above.
+let speed = if bag_open { 0.0 }
+            else if at_helm { 0.0 }
+            else if swimming { SWIM }
+            else if sprint { SPRINT }
+            else { WALK };
 let target_x = wish_x * speed;
 let target_z = wish_z * speed;
 
@@ -531,10 +659,18 @@ velocity = [vx, vy, vz];
 // steps with the button already down should cast when you arrive, and an edge
 // tracked ashore is spent before you get there — which is exactly what
 // `--hold fire=1` does, and it silently produced a run with no cast in it.
-let fire_now = aboard && fire;
+// **`aboard || bag_open`**, because with the grid up LMB turns the item in
+// your hand and the creel opens ashore as well as afloat. The edge is the same
+// edge either way, so a click cannot both turn a fish and cast a line.
+let fire_now = (aboard || bag_open) && fire;
 let fire_edge = fire_now && !(if "fire_held" in memory { memory.fire_held } else { false });
 memory.fire_held = fire_now;
-if aboard && (sprint || fire_edge) {
+if bag_open {
+    // Turning what is in your hand. No `angler` while the grid is up: SHIFT is
+    // the ditch and LMB is the turn, and a reel or a cast fired from inside the
+    // inventory is one key doing two things.
+    if fire_edge { emit.push(#{ kind: "turn" }); }
+} else if aboard && (sprint || fire_edge) {
     emit.push(#{
         kind: "angler",
         reel: if sprint { 1.0 } else { 0.0 },
@@ -628,7 +764,10 @@ let STUCK_NET = 1.0;     // metres along the wish. A walk covers this in 15
 
 let px = if on_boat { stand_local[0] } else { position[0] };
 let pz = if on_boat { stand_local[2] } else { position[2] };
-let trying = !at_helm && !swimming && grounded && wish_len > 0.01;
+// **`!bag_open`, or the creel reads as being wedged.** `trying` is "he has a
+// wish and is making no progress", and with the grid up he has a wish (the
+// cursor is on the same axes) and by design no progress at all.
+let trying = !at_helm && !bag_open && !swimming && grounded && wish_len > 0.01;
 
 // **A tick this measurement cannot read, and skipping it is the whole reason
 // the second version of this still did not fire.** `on_boat` is the raw

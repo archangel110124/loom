@@ -236,6 +236,90 @@ fi
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
   --assert "state.creel_selftest == 0" --assert "state.creel_drift == 0" >/dev/null
 
+# The cast-and-hook prefix of `DEMO_FIGHT`, which is defined two hundred lines
+# below where the trip tapes live. Named here because the creel rows above need
+# a hooked fish and nothing more; copying the whole forty-key cadence would be
+# the eight-copies mistake the tape block itself was written to end.
+DEMO_FIGHT_HEAD="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:"
+
+# ---------------------------------------------------------------------------
+# **THE CREEL OPENS, AND THE WORLD DOES NOT STOP.**
+# ---------------------------------------------------------------------------
+#
+# TAB is the seventh digital channel. The flag lives in `deeper_player.rhai`'s
+# own `memory` and crosses to the rules as `creelopen` / `creelshut`, the same
+# way `station` and `use` do, because `GameRules` sees no input at all.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 300 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:" \
+  --assert "state.creel_open == 1" --assert "events.creelopen == 1" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 320 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 300:bag=1; 301:" \
+  --assert "state.creel_open == 0" --assert "events.creelshut == 1" >/dev/null
+
+# **HIS LEGS STOP AND THE ROW ABOVE PROVES IT IS THE CREEL DOING IT.** Same
+# tape, W held from tick 0 in both, TAB at 60 in the second. Measured: z is
+# **-9.310** with the grid shut and **-3.073** with it open — six and a quarter
+# metres of walk that did not happen — and he is still at -3.073 at tick 400,
+# so it is a stop and not a stumble.
+#
+# The creel takes W/A/S/D because they are the only directional input there is
+# and they are also the cursor. **His head is not taken**: the pointer stays
+# captured, so mouse-look keeps steering while his hands are in the bag. That
+# half cannot be measured here — `loom sim` has no look axis — and it is the
+# single most important thing about this system that no gate can see.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
+  --hold "0:move_z=1; 60:move_z=1,bag=1; 61:move_z=1" \
+  --assert "Rig/Player.z > -4.0" --assert "state.creel_open == 1" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 400 --hold "0:move_z=1" \
+  --assert "Rig/Player.z < -9.0" >/dev/null
+
+# **HANDS ON THE WHEEL.** W/A/S/D are the throttle and the rudder on the mat, so
+# TAB there is refused with a word rather than fighting the helm for the keys.
+# `at_helm` is `deeper_player.rhai`'s own fact — the wheel is answering you —
+# not a rectangle, so it is right for a player who pressed SPACE and let go.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 600 \
+  --hold "0:move_z=1; 550:bag=1; 551:" \
+  --assert "state.at_helm == 1" --assert "state.creel_open == 0" \
+  --assert "state.creel_refused == 3" --assert "events.creelbusy == 1" >/dev/null
+
+# **THE CURSOR: ONE TAP IS ONE CELL, A HELD KEY REPEATS TO THE WALL AND STOPS.**
+# `move_x`/`move_z` are analogue axes and nothing else in this engine has ever
+# edge-detected one, so `deeper_player.rhai` builds the latch, the delay and the
+# repeat itself. **Fifteen** ticks of D is one cell and not the eight it could
+# have been: fifteen is inside the twenty-tick delay and eight is inside it
+# twice over, so a row written at eight passes with the delay set to zero.
+# Injected: `CURSOR_DELAY = 0` skids this to two cells. Held to the end of the
+# run instead it is 17 `cursor` events and the cursor is at the wall, because
+# the grid clamps rather than wraps — deleting the clamp takes it to 17.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 300 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:move_x=1; 275:" \
+  --assert "state.creel_cx == 1" --assert "state.creel_cy == 0" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:move_x=1" \
+  --assert "state.creel_cx == 2" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:move_z=-1" \
+  --assert "state.creel_cy == 2" --assert "state.creel_cx == 0" >/dev/null
+
+# **AND THE WORLD KEEPS RUNNING, WHICH IS THE HALF THE HUMAN ASKED FOR.**
+# `Play::paused` is never touched by any of this. Two rows, and neither needed a
+# line of new code — the consequences were already built:
+#
+#   * Cast, open the creel, and wait. The take still arrives (`events.bite`) and
+#     is still missed (`events.spooked`), because LMB turns the item in your
+#     hand while the grid is up and cannot also strike a fish.
+#   * Hook one, open the creel, and stop reeling. `SLACK_LIMIT` is still
+#     counting: `events.escaped` and the phase back to 0. Rummaging mid-fight
+#     costs you the fish, and that is the whole argument for not pausing.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 \
+  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 470:bag=1; 471:" \
+  --assert "state.creel_open == 1" --assert "events.bite >= 1" \
+  --assert "events.spooked >= 1" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1200 \
+  --hold "$DEMO_FIGHT_HEAD; 526:bag=1; 527:" \
+  --assert "state.creel_open == 1" --assert "events.escaped >= 1" \
+  --assert "state.phase == 0" >/dev/null
+
 # **28.0 and not the 30.0 it was.** The berth is a metre further west and the
 # helm mat is 0.5 m further aft, so the walk aboard is longer and she is under
 # way later; she measured 29.93 at this tick. The claim is "well clear of the
