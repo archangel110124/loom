@@ -1728,7 +1728,6 @@ impl ApplicationHandler for App {
                     Some(play) => &play.world,
                     None => self.view.world(),
                 };
-                let wind = crate::weather::wind_of(&self.view.scene);
                 // **`dread` comes from the running script, or from the
                 // scene** — ADR 0069. Read here and never eased here:
                 // `self.wind_seconds` advances by a frame delta, and a
@@ -1740,6 +1739,17 @@ impl ApplicationHandler for App {
                     .as_ref()
                     .and_then(|p| p.state().number("dread"))
                     .map(|v| v as f32);
+                // **The whole weather at that rung, once.** This window used
+                // to take the ramped wind for the sea (inside
+                // `environment_with_mood`) and the file's wind for the rain
+                // and the submersion test beside it — streaks slanting at the
+                // berth's angle over a gale sea, in the one place a human
+                // judges weather. See `weather_at`.
+                let (wind, rain) = crate::weather_at(
+                    world,
+                    crate::weather::rain_of(&self.view.scene),
+                    dread,
+                );
                 let (mut environment, grade) =
                     crate::environment_with_mood(world, &wind, self.wind_seconds, dread);
                 // Whether the eye is under the water, from the same query that
@@ -1762,7 +1772,7 @@ impl ApplicationHandler for App {
                 // it**; the per-drop cull in the shader does that, per drop.
                 let drops = crate::rain_at_eye(
                     &mut environment,
-                    crate::weather::rain_of(&self.view.scene).as_ref(),
+                    rain.as_ref(),
                     &wind,
                     camera.eye,
                     self.wind_seconds,

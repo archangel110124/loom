@@ -874,7 +874,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // more**: the layer is handed the unsheltered rate and the height field in
     // the shader decides which drops the world stops, so nothing in the render
     // path marches the SDF — see `rain_at_eye`.
-    let rain = weather::rain_of(&scene);
+    let authored_rain = weather::rain_of(&scene);
     // **The mood, and where `dread` comes from — ADR 0069.** A running
     // rules script owns it; otherwise the scene's authored value does.
     // The script's copy is eased on the fixed tick inside the script, so
@@ -884,6 +884,12 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         .as_ref()
         .and_then(|r| r.state().number("dread"))
         .map(|v| v as f32);
+    // **The ladder's rung, resolved once, before anything reads the weather.**
+    // `environment_with_mood` has always substituted the ramped wind for the
+    // sea *privately*, and the four consumers below kept the file's — so the
+    // sea got up while the rain, the spray and the submersion test stayed in
+    // the berth's breeze. See `weather_at`.
+    let (weather, rain) = weather_at(&world, authored_rain, dread);
     let (mut environment, grade) =
         environment_with_mood(&world, &weather, wind_seconds, dread);
     stamp_flipbook(&mut environment, &material_library);
@@ -1298,7 +1304,11 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     // frame's instant — so the CSV and the picture cannot be
                     // reading different weather.
                     let frame_weather = weather::Weather {
-                        wind: weather::wind_of(&scene),
+                        // The ramped wind, not the file's — a CSV row that
+                        // reports the berth's breeze beside a frame drawn in a
+                        // gale is the telemetry telling the same lie the rain
+                        // used to.
+                        wind: weather_at(&world, None, dread).0,
                         rain,
                         sky: frame_sky.clone(),
                         seconds: moment,
@@ -2855,6 +2865,77 @@ pub(crate) fn mood_weather_of(
     )
 }
 
+/// The mood ladder's stages, parsed off a loaded world.
+///
+/// Four call sites had this same six-line block copied out, and the copies are
+/// how the ladder's two halves came apart: every one of them took the wind and
+/// none of them took the rain.
+fn stages_of(world: &World) -> Vec<loom_scene::components::MoodStage> {
+    world
+        .environment()
+        .and_then(|c| c.get("stages"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// The `dread` a frame is at: the running script's, else the scene's authored
+/// value, else zero. The same fallback `environment_with_mood` applies, in one
+/// place, so a caller resolving the weather itself cannot land on a different
+/// rung than the lighting did.
+#[must_use]
+fn dread_of(world: &World, dread: Option<f32>) -> f32 {
+    #[allow(clippy::cast_possible_truncation)]
+    world.environment().map_or(0.0, |c| {
+        dread.unwrap_or_else(|| {
+            c.get("dread").and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32
+        })
+    })
+}
+
+/// The scene's weather at `dread`: **both halves, off one bracket.**
+///
+/// **This exists because taking half a ladder is silent.** `mood_weather_of`
+/// returns a pair and every caller in the workspace wrote `.0` — so
+/// `rain_intensity` validated, appeared in `loom describe`, range-checked at
+/// `0..100`, and did nothing at all. Verified before the fix: a scene whose
+/// calm rung says `rain_intensity = 0.0` and whose storm rung says `40.0`
+/// reported `rain@0,3,0.rate == 6.0` — the component's own number — at ticks
+/// 1, 300, 600 and 900, while `wind@0,3,0.speed` on the same ladder climbed
+/// 1.64 -> 5.89 -> 10.70. That is the S4 prefab trap in a new place, and worse
+/// than it: there the parser ignored a key it did not know, here the whole
+/// toolchain documents the key and honours nothing.
+///
+/// The second silence is the same shape and was in every one of those callers:
+/// the ramped wind went to the sea and the *authored* wind went to the rain,
+/// the spray and the submersion test beside it. Streaks slanting at the calm
+/// angle over a gale sea, and no gate in this project can see it. One binding
+/// closes both — a caller cannot take the wind without the rain, and cannot
+/// take the wind for one consumer and the file's for the next.
+///
+/// `rain` is what the scene authored; `None` stays `None`, because a scene
+/// with no `Rain` component is dry whatever the ladder says (the documented
+/// contract on [`loom_scene::components::MoodStage::rain_intensity`], kept:
+/// rain that a mood stage could conjure would be rain with no `duration`, no
+/// audio bed and no collision bake, which is three quiet failures instead of
+/// one loud absence).
+#[must_use]
+pub(crate) fn weather_at(
+    world: &World,
+    rain: Option<loom_scene::components::Rain>,
+    dread: Option<f32>,
+) -> (loom_field::wind::Wind, Option<loom_scene::components::Rain>) {
+    let (speed, intensity) = mood_weather_of(&stages_of(world), dread_of(world, dread));
+    (
+        weather::wind_of_world_at(world, speed),
+        rain.map(|mut rain| {
+            if let Some(intensity) = intensity {
+                rain.intensity = intensity;
+            }
+            rain
+        }),
+    )
+}
+
 /// The effective `Environment` component and grade at `dread` — ADR 0069.
 ///
 /// **Beside `submerge_eye`, and the same shape:** a per-frame modification of
@@ -2969,11 +3050,7 @@ pub(crate) fn environment_with_mood(
     // that is being thrown about, and only in the window. Resolving both from
     // the same `dread` through the same `mood_weather_of` is what makes them
     // agree by construction rather than by two callers remembering to.
-    let stages: Vec<loom_scene::components::MoodStage> = component
-        .and_then(|c| c.get("stages"))
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let ramped = mood_weather_of(&stages, d)
+    let ramped = mood_weather_of(&stages_of(world), d)
         .0
         .map(|speed| crate::weather::wind_of_world_at(world, Some(speed)));
     let wind = ramped.as_ref().unwrap_or(wind);
@@ -3754,20 +3831,15 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     // wind for the whole run — `Runner::tick` derives the waves from it — so
     // reading the authored value back here would report a breeze under a boat
     // the solver has been throwing about, and `water@` would report the wrong
-    // sea with it. Same `dread`, same `mood_weather_of`, as the renderer.
+    // sea with it. Same `dread`, same `weather_at`, as the renderer — **and
+    // the rain with it**, so `rain@x,y,z.rate` reports the rung's shower
+    // rather than the file's floor.
     #[allow(clippy::cast_possible_truncation)]
-    let wind = {
-        let dread = state.number("dread").unwrap_or(0.0) as f32;
-        let stages: Vec<loom_scene::components::MoodStage> = world
-            .environment()
-            .and_then(|c| c.get("stages"))
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        match mood_weather_of(&stages, dread).0 {
-            Some(speed) => weather::wind_of_world_at(&world, Some(speed)),
-            None => weather::wind_of(&scene),
-        }
-    };
+    let (wind, ramped_rain) = weather_at(
+        &world,
+        weather::rain_of(&scene),
+        Some(state.number("dread").unwrap_or(0.0) as f32),
+    );
     // The scene's weather, sampled at the tick the run ended on — so a wind or
     // rain assertion is checked against the same clock the simulation used
     // rather than against a wall clock (never-do #8).
@@ -3778,7 +3850,7 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
             .then(|| weather::water_probe(&scene, &world, &wind, runner.wavelets(), runner.foam()))
             .flatten(),
         wind,
-        rain: weather::rain_of(&scene),
+        rain: ramped_rain,
         // **Rebuilt only when something asks about rain.** The bake is a pass
         // over every voxel in the scene and `terrain_stress.loom` has 67
         // million of them; a run that never mentions rain must not pay for it.
@@ -4805,12 +4877,7 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
     // bug in the spectrum rather than as two numbers taken at different ticks.
     let (wind, body) = match ran_dread {
         Some(dread) => {
-            let stages: Vec<loom_scene::components::MoodStage> = world
-                .environment()
-                .and_then(|c| c.get("stages"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            match mood_weather_of(&stages, dread).0 {
+            match mood_weather_of(&stages_of(&world), dread).0 {
                 Some(speed) => {
                     let ramped = weather::wind_of_world_at(&world, Some(speed));
                     let sea = weather::water_of(&world, &ramped).unwrap_or(body);
@@ -5876,6 +5943,63 @@ mod tests {
         // about 1.2e-4 — three orders below the 0.30 the bug jumped.
         let step = (cover(0.2501) - cover(0.2499)).abs();
         assert!(step < 0.001, "cloud_cover stepped by {step} across `at = 0.25`");
+    }
+
+    /// **Both halves of the weather ladder move, and neither can move alone.**
+    ///
+    /// `rain_intensity` shipped inert: `mood_weather_of` returns a pair, every
+    /// caller in the workspace wrote `.0`, and the second element was never
+    /// read anywhere. It validated, it range-checked, `loom describe`
+    /// documented it, and a scene whose calm rung said `rain_intensity = 0.0`
+    /// still rained at the component's own rate. Measured before the fix, on a
+    /// two-rung ladder eased by a rules script: `rain@0,3,0.rate` was 6.0 at
+    /// ticks 1, 300, 600 and 900 while `wind@0,3,0.speed` climbed
+    /// 1.64 -> 5.89 -> 10.70.
+    ///
+    /// **Asserted through `weather_at` rather than through `mood_weather_of`**,
+    /// which is the whole point: the pair was always correct and the plumbing
+    /// downstream of it was not. A test on the blend would have passed
+    /// throughout.
+    ///
+    /// The scene authors a `Rain`, because a ladder cannot conjure one — that
+    /// contract is documented on `MoodStage::rain_intensity` and the third
+    /// assertion pins it.
+    #[test]
+    fn the_ladder_moves_the_rain_as_well_as_the_wind() {
+        let stage = |at: f32, wind: f32, rain: &str| {
+            format!(
+                "    [[node.components.Environment.stages]]\n    at = {at}\n    \
+                 wind_speed = {wind}\n{rain}"
+            )
+        };
+        let scene = format!(
+            "[scene]\nformat = 1\nid = \"6d2f0b71-9c34-4a5e-8f10-71d2c4a9b3e6\"\n\n\
+             [[node]]\nname = \"Sky\"\n\n  [node.components.Rain]\n  intensity = 6.0\n\n  \
+             [node.components.Wind]\n  speed = 3.0\n\n  [node.components.Environment]\n  \
+             dread = 0.0\n\n{}{}",
+            stage(0.0, 3.0, "    rain_intensity = 0.0\n\n"),
+            stage(1.0, 12.0, "    rain_intensity = 40.0\n"),
+        );
+        let parsed = loom_scene::Scene::parse(&scene).expect("valid scene");
+        let world = World::from_scene(&parsed);
+        let authored = crate::weather::rain_of(&parsed);
+        let at = |d: f32| {
+            let (wind, rain) = weather_at(&world, authored, Some(d));
+            (wind.params().get("speed"), rain.map(|r| r.intensity))
+        };
+
+        // The rung's rain, not the component's — and it is the *end* values
+        // that the inert version got wrong in both directions: 6.0 where the
+        // ladder says 0, and 6.0 where it says 40.
+        assert_eq!(at(0.0), (3.0, Some(0.0)), "calm rung");
+        assert_eq!(at(1.0), (12.0, Some(40.0)), "storm rung");
+        // Blended, not stepped, and both halves at the same fraction.
+        assert_eq!(at(0.5), (7.5, Some(20.0)), "half way");
+
+        // A scene with no `Rain` stays dry whatever the ladder says.
+        let dry = scene.replace("  [node.components.Rain]\n  intensity = 6.0\n\n", "");
+        let dry = World::from_scene(&loom_scene::Scene::parse(&dry).expect("valid scene"));
+        assert_eq!(weather_at(&dry, None, Some(1.0)).1, None, "no Rain is dry");
     }
 
     /// **A light with `flicker = 0` is byte-identical, and a flickering one is
