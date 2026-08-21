@@ -1674,6 +1674,28 @@ rm -f /tmp/loom-fight-1.json /tmp/loom-fight-2.json /tmp/loom-fight-3.json
 cmp /tmp/loom-demo-1.json /tmp/loom-demo-2.json
 cmp /tmp/loom-demo-2.json /tmp/loom-demo-3.json
 rm -f /tmp/loom-demo-1.json /tmp/loom-demo-2.json /tmp/loom-demo-3.json
+
+# **And the creel's interactive half, which the run above cannot reach.** That
+# tape holds W and never presses TAB, so it covers the auto-place and the
+# packer's self-check and none of the verbs. This one opens the grid, walks the
+# cursor, lifts, places and ditches. It is the only check in this project that
+# can see a creel that replayed differently: `state_hash` is physics-only and
+# `cargo xtask repeat` derives its list from `GOLDEN`, which this scene is not
+# in. `loom sim` prints every `state` name it keeps, so comparing the whole JSON
+# byte for byte compares the whole creel.
+#
+# Traced, because a repeat tape that exercises nothing is three identical
+# nothings: this one produces `cursor` 2, `lift` 2, `place` 1 and `ditched` 1.
+# The first draft pressed E over an occupied cell and had no `place` in it.
+CREEL_TAPE="0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+280:move_x=1; 288:; 300:move_z=-1; 308:; 320:interact=1; 321:; \
+340:interact=1; 341:; 360:sprint=1; 430:"
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 460 --hold "$CREEL_TAPE" > /tmp/loom-creel-1.json
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 460 --hold "$CREEL_TAPE" > /tmp/loom-creel-2.json
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 460 --hold "$CREEL_TAPE" > /tmp/loom-creel-3.json
+cmp /tmp/loom-creel-1.json /tmp/loom-creel-2.json
+cmp /tmp/loom-creel-2.json /tmp/loom-creel-3.json
+rm -f /tmp/loom-creel-1.json /tmp/loom-creel-2.json /tmp/loom-creel-3.json
 echo "gameplay: 18 scenes asserted, 7 blocks of deliberately wrong input, fight and demo byte-identical across 3 processes"
 
 # ---------------------------------------------------------------------------
