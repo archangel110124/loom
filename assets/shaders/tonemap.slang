@@ -132,19 +132,38 @@ float4 tonemapFragmentMain(float4 pos: SV_Position) : SV_Target {
     // a corrupt pixel rather than as the authoring mistake it is.
     float3 c = max(scene.Load(int3(int2(pos.xy) - push.origin, 0)).rgb, 0.0) * push.exposure;
 
-    // **A branch, not an arithmetic accident, and it is this commit's whole
-    // acceptance test.** `lerp(l, c, 1.0)` is `l + 1.0*(c-l)`, which is not
+    // **Two branches, each guarding exactly its own operation, and that is the
+    // correction.** `lerp(l, c, 1.0)` is `l + 1.0*(c-l)`, which is not
     // bit-exact in fp32; the gate's tolerance would swallow the difference,
     // and "a neutral grade re-blesses nothing" should be true by construction
-    // rather than by luck. The condition is on push constants, so every lane
-    // in every wave agrees and the branch is free.
-    bool graded = any(push.gain != float4(1.0, 1.0, 1.0, 1.0)) || push.contrast != 1.0;
+    // rather than by luck.
+    //
+    // One shared `graded` flag broke that. It included `push.contrast != 1.0`
+    // — which guards nothing, because the contrast below is applied
+    // unconditionally — so a stage with a neutral gain, a neutral saturation
+    // and a moved contrast took the branch and ran the inexact
+    // `lerp(l, c, 1.0)` anyway.
+    //
+    // **Measured, and the honest result is that it moved no pixel.** A probe
+    // scene with exactly that grade renders byte-identical under both forms:
+    // `l + 1.0*(c-l)` is wrong by at most an ulp, which is ~1e-7 relative and
+    // three orders below one 8-bit code, so no PNG this project compares could
+    // ever have shown it. The branch's value is that the property is provable
+    // rather than measured — which is the whole reason it is a branch and not
+    // an epsilon — and a condition that does not describe the operation it
+    // guards cannot be reasoned about at all. That is what is fixed here, not
+    // a visible artifact.
+    //
+    // Both conditions are on push constants, so every lane in every wave
+    // agrees and both branches are free.
+    bool tinted = any(push.gain.rgb != float3(1.0, 1.0, 1.0));
+    bool desaturated = push.gain.w != 1.0;
 
     // ASC CDL slope, in linear light. **Equal channels is an exposure and
     // unequal is a white balance**, which is why the grade has no exposure of
     // its own — one multiply does both jobs and a second would only be a place
     // for them to disagree.
-    if (graded) {
+    if (tinted) {
         c *= push.gain.rgb;
     }
 
@@ -160,7 +179,7 @@ float4 tonemapFragmentMain(float4 pos: SV_Position) : SV_Target {
     // `Environment` can do this** — every "eerie" lighting setting anyone
     // measured came out MORE colourful than a happy baseline, because taking a
     // warm sun away stops washing albedos toward a common white.
-    if (graded) {
+    if (desaturated) {
         c = max(lerp(dot(c, LUMA).xxx, c, push.gain.w), 0.0);
     }
 
