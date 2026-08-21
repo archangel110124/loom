@@ -279,8 +279,49 @@ fn format_code(bits: u64) -> String {
 /// `getrandom` rather than `rand`: the syscall is the whole requirement, and
 /// `getrandom v0.4.3` is **already in this crate's tree** via `uuid`, so
 /// naming it adds no `[[package]]` entry to `Cargo.lock`.
-fn generate_code() -> String {
-    format_code(getrandom::u64().expect("the OS refused entropy for a room code"))
+///
+/// `None` rather than a panic if the OS refuses. That refusal is close to
+/// impossible on Linux, but this runs in `App::new` on every windowed
+/// `loom run`, and taking the whole viewer down over a decoration nobody can
+/// use yet is the wrong trade at any probability.
+///
+/// Rerolls an unfortunate code — see [`CODE_DENY`]. Eight attempts because
+/// the loop must terminate even if somebody puts a one-character entry in the
+/// list; at the measured rejection rate the second attempt is already
+/// essentially never reached.
+fn generate_code() -> Option<String> {
+    (0..8).find_map(|_| {
+        let code = format_code(getrandom::u64().ok()?);
+        wholesome(&code).then_some(code)
+    })
+}
+
+/// What the alphabet must not be allowed to spell.
+///
+/// **Dropping `I`, `L`, `O` and `U` kills most of the English list outright**
+/// — anything needing one of those four is unspellable here, which is why
+/// this list is as short as it is. What survives is what a vowel-poor
+/// alphabet can still manage, and the measured rate is not negligible:
+/// 32⁻⁴ per aligned group over three groups is **1 in 18,396** codes carrying
+/// one as a whole group, and 1 in 6,132 anywhere in the twelve symbols
+/// (measured 1 in 6,431 over four million draws, closed form 1 in 6,132).
+///
+/// A room code is read aloud and screenshotted. One in six thousand is rare
+/// enough never to have shown up in testing and common enough to happen to
+/// somebody, which is the worst of both.
+const CODE_DENY: &[&str] = &[
+    "RAPE", "FAG", "KKK", "TWAT", "WANK", "TARD", "SPAZ", "PAKY", "HEEB", "ARSE", "GASH", "SKAG",
+];
+
+/// Whether a code is safe to show somebody.
+///
+/// Checked on the **ungrouped** symbols, so a word straddling a dash is
+/// rejected too. That over-rejects — nobody reads `XXXR-APEX` as a word — but
+/// over-rejecting costs one more draw from the OS and under-rejecting costs a
+/// screenshot, and the asymmetry is not close.
+fn wholesome(code: &str) -> bool {
+    let symbols = code.replace('-', "");
+    !CODE_DENY.iter().any(|bad| symbols.contains(bad))
 }
 
 /// Read a code somebody typed or pasted, or `None` if it cannot be one.
@@ -306,6 +347,9 @@ fn normalise(typed: &str) -> Option<String> {
             c if u8::try_from(c).is_ok_and(|b| CODE_ALPHABET.contains(&b)) => out.push(c),
             _ => return None,
         }
+        // Rejects nothing the final gate below would not also reject — it
+        // is a bound on work, so a hostile ten-megabyte paste stops after
+        // thirteen characters rather than being transcribed first.
         if out.len() > CODE_SYMBOLS {
             return None;
         }
@@ -314,7 +358,19 @@ fn normalise(typed: &str) -> Option<String> {
 }
 
 /// Wide enough for twelve monospace glyphs and their dashes at 26 points.
-const CODE_WIDTH: f32 = 200.0;
+///
+/// **200 was not, and every code in the game wrapped onto two ragged centred
+/// lines.** Bisected through a real `egui::Context` on the widest code the
+/// alphabet can spell (`MMMM-WWWW-QQQQ`): it wraps at ≤ 218.484 and fits at
+/// ≥ 218.485, at every viewport and every `pixels_per_point`, because egui
+/// lays out in points. 240 is that plus a tenth, so a future font tweak has
+/// somewhere to go.
+///
+/// The guard is `the_pause_menu_shows_the_room_code_in_its_top_right`, and it
+/// had to be taught to see this: `Galley::text()` returns the *source* string,
+/// so an assertion on the drawn text passes just as happily on two fragments.
+/// The row count is the assertion.
+const CODE_WIDTH: f32 = 240.0;
 
 /// Draw ROOM CODE and the code in the top right of the game's view.
 ///
@@ -325,11 +381,33 @@ const CODE_WIDTH: f32 = 200.0;
 /// Anchored off `available_rect_before_wrap` rather than `Area::anchor`, for
 /// the reason the HUD already learned: `anchor` measures from the edges of the
 /// whole window, which under `--edit` is on top of the inspector.
-fn room_code_panel(root: &mut egui::Ui, code: &str) {
+///
+/// **`taken` is where the HUD just painted, and the panel steps below it.**
+/// The top right is not vacant: `proving_ground.loom` anchors its kill counter
+/// `top_right` at `offset = [22, 16]`, and the pause menu does not clear
+/// `playing`, so it is still on screen while the menu is up — the room code
+/// landed straight across it, 101 x 17 pixels of text on text, identically at
+/// every resolution because both are fixed pixel offsets from the same corner.
+///
+/// Dodging beats the two alternatives. Hiding `only_in_play` rows during a
+/// pause contradicts the scrim's stated job one screen up (it *dims* the score
+/// rather than deleting it), and "scenes must not author `top_right`" would be
+/// the seventh unwritten scene-authoring rule this project has accumulated.
+/// `hud::draw` was already returning these rects for its own tests and the
+/// call site was discarding them, so this costs one binding.
+fn room_code_panel(root: &mut egui::Ui, code: &str, taken: &[egui::Rect]) {
     let viewport = root.available_rect_before_wrap();
+    let left = viewport.right() - CODE_WIDTH - 24.0;
+    // Anything the HUD painted that overlaps this column pushes the panel
+    // below it. `max` over all of them rather than the first: two stacked
+    // rows in the same corner would otherwise only move it past the higher.
+    let top = taken
+        .iter()
+        .filter(|rect| rect.right() > left && rect.left() < viewport.right() - 24.0)
+        .fold(viewport.top() + 24.0, |top, rect| top.max(rect.bottom() + 12.0));
     egui::Area::new(egui::Id::new("loom_room_code"))
         .order(egui::Order::Foreground)
-        .fixed_pos(viewport.right_top() + egui::vec2(-CODE_WIDTH - 24.0, 24.0))
+        .fixed_pos(egui::pos2(left, top))
         .show(root.ctx(), |ui| {
             ui.set_width(CODE_WIDTH);
             ui.vertical_centered(|ui| {
@@ -617,7 +695,7 @@ impl App {
             .to_path_buf();
         // A read-only viewer or a `--play` session is the one that could host;
         // an `--edit` session is somebody authoring the file.
-        let room_code = session.is_none().then(generate_code);
+        let room_code = session.is_none().then(generate_code).flatten();
         Self {
             // The scene's own camera when it has one, the whole scene framed
             // when it does not.
@@ -1758,13 +1836,17 @@ impl ApplicationHandler for App {
                             if title_up {
                                 crate::hud::title_scrim(root);
                             }
-                            let _ = crate::hud::draw(root, &overlay);
+                            // The rects are the second half of this return
+                            // value and were thrown away until the room code
+                            // needed somewhere to stand — see
+                            // [`room_code_panel`].
+                            let (_, painted) = crate::hud::draw(root, &overlay);
                             if title_up {
                                 title_choice = crate::hud::title_menu(root);
                             } else if menu_open {
                                 pause_choice = crate::hud::pause_menu(root);
                                 if let Some(code) = room_code {
-                                    room_code_panel(root, code);
+                                    room_code_panel(root, code, &painted);
                                 }
                             }
                             // Last of all and in a layer of its own, so it
@@ -3084,8 +3166,8 @@ pub fn open_scene(
 #[cfg(test)]
 mod tests {
     use super::{
-        CODE_ALPHABET, CODE_SYMBOLS, Escape, egui, encode, escape_means, format_code, generate_code,
-        normalise, room_code_panel,
+        CODE_ALPHABET, CODE_DENY, CODE_SYMBOLS, Escape, egui, encode, escape_means, format_code,
+        generate_code, normalise, room_code_panel, wholesome,
     };
 
     /// A code is twelve base32 symbols in three groups of four, and every
@@ -3093,7 +3175,7 @@ mod tests {
     #[test]
     fn a_room_code_is_four_four_four_of_crockford_base32() {
         for _ in 0..64 {
-            let code = generate_code();
+            let code = generate_code().expect("the OS has entropy");
             assert_eq!(code.len(), CODE_SYMBOLS + 2, "{code} is not XXXX-XXXX-XXXX");
             assert_eq!(code.as_bytes()[4], b'-', "{code} has no group break at 4");
             assert_eq!(code.as_bytes()[9], b'-', "{code} has no group break at 9");
@@ -3110,10 +3192,18 @@ mod tests {
         }
     }
 
-    /// **The mask has to be inside the encoder's loop.** Applied once at the
-    /// call site instead, the top nibble of a `u64` silently eats a symbol of
-    /// entropy the day somebody passes a full one — which is the only bug in
-    /// this file that would not show up as a wrong-looking code.
+    /// **Twelve symbols of five bits each, and every one of them live.**
+    ///
+    /// The teeth are in the loop below: change the encoder's stride from 5 to
+    /// 4 and it reddens with `symbol 10 is dead`. That is the bug class that
+    /// matters, because a code with a stuck symbol still *looks* like a code.
+    ///
+    /// The `u64::MAX` line is weaker than it reads and is kept as a statement
+    /// of intent rather than as a guard: with `& 31` inside the loop, `i` tops
+    /// out at 11, so bits 60–63 are unreachable whatever any caller does, and
+    /// the equality is a tautology for this shape. It says out loud that a
+    /// code carries 60 bits and that the top nibble of a `u64` is discarded on
+    /// purpose.
     #[test]
     fn the_encoder_reads_sixty_bits_and_not_one_more() {
         assert_eq!(format_code(u64::MAX), format_code((1 << 60) - 1));
@@ -3137,8 +3227,37 @@ mod tests {
         }
         // And the ones that came from the OS, not from the test's own PRNG.
         for _ in 0..16 {
-            let code = generate_code();
+            let code = generate_code().expect("the OS has entropy");
             assert_eq!(normalise(&code).as_deref(), Some(code.as_str()));
+        }
+    }
+
+    /// **The alphabet can spell things, and the ones it can spell are the
+    /// ones without an `I`, `L`, `O` or `U` in them.**
+    ///
+    /// Two halves, because a sampling test alone cannot see this: at 1 in
+    /// 6,132 a hundred draws would pass on a denylist that had been emptied.
+    /// So the predicate is checked against strings built to trip it, and the
+    /// generator is checked to run through it.
+    #[test]
+    fn a_code_is_never_something_you_would_rather_not_read_out() {
+        for bad in ["RAPE-0000-0000", "0000-0WAN-K000", "000K-KK00-0000"] {
+            assert!(!wholesome(bad), "{bad} should have been rerolled");
+        }
+        for fine in ["0123-4567-89AB", "ZZZZ-ZZZZ-ZZZZ", "0000-0000-0000"] {
+            assert!(wholesome(fine), "{fine} was rejected for nothing");
+        }
+        // Every entry is spellable — an entry carrying I, L, O or U can
+        // never fire and is a comment pretending to be code.
+        for bad in CODE_DENY {
+            assert!(
+                bad.bytes().all(|b| CODE_ALPHABET.contains(&b)),
+                "{bad} cannot occur in a code at all"
+            );
+        }
+        for _ in 0..64 {
+            let code = generate_code().expect("the OS has entropy");
+            assert!(wholesome(&code), "{code} came out of the generator");
         }
     }
 
@@ -3266,29 +3385,31 @@ mod tests {
 
         // Twice: the first pass of a fresh context is a layout pass and areas
         // have no size yet, exactly as the HUD's own tests found.
-        let mut labels: Vec<(String, egui::Pos2)> = Vec::new();
+        let mut labels: Vec<(String, egui::Pos2, usize)> = Vec::new();
         for _ in 0..2 {
             let out = ctx.run_ui(input.clone(), |root| {
                 let _ = crate::hud::pause_menu(root);
-                room_code_panel(root, &code);
+                room_code_panel(root, &code, &[]);
             });
             labels = out
                 .shapes
                 .iter()
                 .filter_map(|clipped| match &clipped.shape {
-                    egui::Shape::Text(t) => Some((t.galley.text().to_owned(), t.pos)),
+                    egui::Shape::Text(t) => {
+                        Some((t.galley.text().to_owned(), t.pos, t.galley.rows.len()))
+                    }
                     _ => None,
                 })
                 .collect();
         }
 
-        let at = |wanted: &str| {
+        let found = |wanted: &str| {
             labels
                 .iter()
-                .find(|(text, _)| text == wanted)
+                .find(|(text, ..)| text == wanted)
                 .unwrap_or_else(|| panic!("the menu drew {labels:?}, with no {wanted:?} on it"))
-                .1
         };
+        let at = |wanted: &str| found(wanted).1;
         for pos in [at("ROOM CODE"), at(&code)] {
             assert!(
                 pos.x > WIDTH * 0.5,
@@ -3299,6 +3420,48 @@ mod tests {
         assert!(
             at("PAUSED").x < at("ROOM CODE").x,
             "the code should sit clear of the centred menu"
+        );
+        // **`Galley::text()` returns the source string, not what was laid
+        // out**, so every assertion above passes just as happily on a code
+        // wrapped across two ragged lines — which is what `CODE_WIDTH = 200`
+        // actually drew. A code read aloud off two lines is precisely the
+        // failure the Crockford alphabet exists to prevent, so the row count
+        // is the assertion that matters most here.
+        assert_eq!(
+            found(&code).2,
+            1,
+            "{code} wrapped: CODE_WIDTH is too narrow for twelve glyphs and two dashes"
+        );
+
+        // **And it steps below whatever the HUD already put in that corner.**
+        // `proving_ground.loom`'s kill counter is a `top_right` element that
+        // survives the pause, and the code used to land straight across it.
+        let clear = at(&code);
+        let occupied = egui::Rect::from_min_max(
+            egui::pos2(WIDTH - 125.0, 16.0),
+            egui::pos2(WIDTH - 22.0, 41.0),
+        );
+        let mut moved = egui::Pos2::ZERO;
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |root| {
+                room_code_panel(root, &code, &[occupied]);
+            });
+            moved = out
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(t) if t.galley.text() == code => Some(t.pos),
+                    _ => None,
+                })
+                .expect("the code was not drawn at all");
+        }
+        assert!(
+            moved.y > clear.y,
+            "the code stayed at {moved:?} with the corner occupied — it was at {clear:?} empty"
+        );
+        assert!(
+            moved.y > occupied.bottom(),
+            "the code at {moved:?} is still inside the HUD's {occupied:?}"
         );
     }
 
