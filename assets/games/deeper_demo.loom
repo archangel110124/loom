@@ -88,10 +88,40 @@
 #                      at the yellow fish box             it goes below
 #                      a fish on the line                 into your hands
 #
-#   **TAB**          open the creel, which is a grid and so is painted rather
-#                    than written on a line — `hud::creel`, bottom left. The
-#                    top HUD row names the key because nothing else in this
-#                    demo could.
+#   **TAB**          open the creel, and close it. It is a three-by-three grid
+#                    and so it is painted rather than written on a line —
+#                    `hud::creel`, bottom left. The top HUD row names the key
+#                    because nothing else in this demo could.
+#
+#                    **The world does not stop while it is open**, which is the
+#                    whole point of it: a fish on the line is still pulling, a
+#                    take still comes and goes, and the boat is still making
+#                    way. It takes your legs — W/A/S/D become the cursor — and
+#                    it leaves your head, so you can still look around while
+#                    your hands are in the bag. TAB on the helm mat is refused
+#                    with a word, because there W/A/S/D are the throttle and
+#                    the rudder.
+#
+#                    With it open:
+#
+#                      W A S D    move the cursor. One tap is one cell; hold to
+#                                 repeat, and it stops at the wall
+#                      E          lift what the cursor is on — or, holding
+#                                 something, put it down there
+#                      LMB        turn what you are holding. A 2x3 conger is
+#                                 3x2 turned, and sometimes only one of the two
+#                                 will go in
+#                      SHIFT      hold one second to put a thing over the side.
+#                                 What you are holding, or if your hands are
+#                                 empty, what the cursor is on. It is the only
+#                                 thing in this game you cannot undo
+#                      TAB        close it. Anything in your hand goes back
+#
+#                    A fish that will not fit **stays on the line** and waits
+#                    while you make room. Four supplies land in it on the walk
+#                    to the boat, so four of the nine cells are gone before you
+#                    have caught anything — and the five that are left are not
+#                    a rectangle, which is the whole of the puzzle.
 #
 #   **ESC**          the pause menu — Resume and Quit, over a scrim — and in
 #                    its top right, ROOM CODE with a twelve-symbol code under
