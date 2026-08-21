@@ -875,7 +875,17 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // the shader decides which drops the world stops, so nothing in the render
     // path marches the SDF — see `rain_at_eye`.
     let rain = weather::rain_of(&scene);
-    let mut environment = environment_with_wind(&world, &weather, wind_seconds);
+    // **The mood, and where `dread` comes from — ADR 0069.** A running
+    // rules script owns it; otherwise the scene's authored value does.
+    // The script's copy is eased on the fixed tick inside the script, so
+    // `--sim N` and the window agree at the same tick count.
+    #[allow(clippy::cast_possible_truncation)]
+    let dread = warmed
+        .as_ref()
+        .and_then(|r| r.state().number("dread"))
+        .map(|v| v as f32);
+    let (mut environment, grade) =
+        environment_with_mood(&world, &weather, wind_seconds, dread);
     stamp_flipbook(&mut environment, &material_library);
     submerge_eye(&mut environment, &world, &weather, terrain.as_ref(), camera.eye, wind_seconds);
     let rain_drops =
@@ -903,6 +913,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         )
         .map_err(|e| e.to_string())?;
         renderer.environment = environment;
+        renderer.grade = grade;
         renderer.set_placement(viewport);
         // Placement is a pure function of position, so the blades go up once
         // and the vertex shader re-expands and re-bends them every frame.
@@ -1150,7 +1161,13 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     // byte-identical.
                     #[allow(clippy::cast_precision_loss)]
                     let moment = wind_seconds + elapsed as f32 / 60.0;
-                    renderer.environment = environment_with_wind(&world, &weather, moment);
+                    // The mood rides the fly-through too: the lighting and
+                    // the grade come back together so the two cannot be
+                    // taken from different `dread` values.
+                    let (env, grade) =
+                        environment_with_mood(&world, &weather, moment, dread);
+                    renderer.environment = env;
+                    renderer.grade = grade;
                     stamp_flipbook(&mut renderer.environment, &material_library);
 
                     #[allow(clippy::cast_precision_loss)]
@@ -2771,12 +2788,135 @@ fn stamp_flipbook(
     }
 }
 
+/// The effective `Environment` component and grade at `dread` — ADR 0069.
+///
+/// **Beside `submerge_eye`, and the same shape:** a per-frame modification of
+/// the scene's environment from one gameplay scalar, made on the CPU before
+/// the renderer sees it. Nothing is written back, so the file on disk stays
+/// what the human authored and `--dry-run` still means something.
+///
+/// A patch key absent from a stage falls back to the scene's own component,
+/// and to `Environment::default()` if the scene did not author it either —
+/// which is exactly what `environment_of_inner`'s per-key fallbacks already
+/// say, and which is the difference between a ramp that works and one that
+/// silently no-ops on `cloud_cover` because the near stage never mentioned it.
+///
+/// `t` is clamped to the authored range, so the endpoints hold outside it and
+/// a scalar that leaves `0..1` cannot produce a look nobody authored.
+/// `sun_direction` is renormalised by `environment_of_inner`, so a rotating
+/// sun lerps through the chord and comes out unit-length with no extra code.
+pub(crate) fn mood_of(
+    component: &serde_json::Value,
+    dread: f32,
+) -> (serde_json::Value, loom_scene::components::Grade) {
+    use loom_scene::components::{Grade, MoodStage};
+
+    let stages: Vec<MoodStage> = component
+        .get("stages")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let Some(first) = stages.first() else {
+        return (component.clone(), Grade::default());
+    };
+    let last = stages.last().unwrap_or(first);
+
+    // Which pair brackets `dread`, and how far between them it sits. The
+    // endpoints hold outside the authored range rather than extrapolating: an
+    // extrapolated grade is a look nobody looked at.
+    let t = dread.clamp(first.at, last.at);
+    let (lo, hi, k) = match stages.windows(2).find(|w| t <= w[1].at) {
+        Some(w) => {
+            let span = w[1].at - w[0].at;
+            (&w[0], &w[1], if span > 0.0 { (t - w[0].at) / span } else { 0.0 })
+        }
+        // Past the last stage, or only one exists — the load-time refusal has
+        // already reported that, and this still has to answer something.
+        None => (last, last, 0.0),
+    };
+
+    let mut merged = component.clone();
+    if let Some(map) = merged.as_object_mut() {
+        let (a, b) = (&lo.environment, &hi.environment);
+        let base = |key: &str| component.get(key).cloned();
+        let mut put = |key: &str, value: Option<serde_json::Value>| {
+            if let Some(value) = value {
+                map.insert(key.to_owned(), value);
+            }
+        };
+        // A scalar the near stage does not name falls back to the scene's own
+        // value on *both* sides, so it stays put instead of ramping from a
+        // default nobody authored.
+        let mix1 = |x: Option<f32>, y: Option<f32>, key: &str| -> Option<serde_json::Value> {
+            let fallback = base(key).and_then(|v| v.as_f64()).map(|v| v as f32);
+            let (x, y) = (x.or(fallback)?, y.or(fallback)?);
+            serde_json::to_value(x + (y - x) * k).ok()
+        };
+        let mix3 = |x: Option<[f32; 3]>, y: Option<[f32; 3]>, key: &str| {
+            let fallback: Option<[f32; 3]> =
+                base(key).and_then(|v| serde_json::from_value(v).ok());
+            let (x, y) = (x.or(fallback)?, y.or(fallback)?);
+            let out = [0, 1, 2].map(|i| x[i] + (y[i] - x[i]) * k);
+            serde_json::to_value(out).ok()
+        };
+
+        put("sun_direction", mix3(a.sun_direction, b.sun_direction, "sun_direction"));
+        put("sun_strength", mix1(a.sun_strength, b.sun_strength, "sun_strength"));
+        put("sun_color", mix3(a.sun_color, b.sun_color, "sun_color"));
+        put("ambient", mix1(a.ambient, b.ambient, "ambient"));
+        put("sky_zenith", mix3(a.sky_zenith, b.sky_zenith, "sky_zenith"));
+        put("sky_horizon", mix3(a.sky_horizon, b.sky_horizon, "sky_horizon"));
+        put("fog_density", mix1(a.fog_density, b.fog_density, "fog_density"));
+        put("fog_falloff", mix1(a.fog_falloff, b.fog_falloff, "fog_falloff"));
+        put("cloud_cover", mix1(a.cloud_cover, b.cloud_cover, "cloud_cover"));
+        put("cloud_scale", mix1(a.cloud_scale, b.cloud_scale, "cloud_scale"));
+        put("exposure", mix1(a.exposure, b.exposure, "exposure"));
+    }
+
+    (merged, lo.grade.lerp(&hi.grade, k))
+}
+
+/// `environment_with_wind`, with `dread` supplied rather than read.
+///
+/// The grade comes back beside the environment because they are one look: a
+/// caller that took the lighting from one `dread` and the grade from another
+/// would render a frame nobody authored, and there is no way to notice.
+pub(crate) fn environment_with_mood(
+    world: &World,
+    wind: &loom_field::wind::Wind,
+    seconds: f32,
+    dread: Option<f32>,
+) -> (loom_render::EnvironmentData, loom_render::Grade) {
+    let grade = world.environment().map_or_else(Default::default, |component| {
+        let authored = component.get("dread").and_then(serde_json::Value::as_f64);
+        #[allow(clippy::cast_possible_truncation)]
+        let d = dread.unwrap_or_else(|| authored.unwrap_or(0.0) as f32);
+        mood_of(component, d).1
+    });
+    (
+        environment_with_wind_at(world, wind, seconds, dread),
+        loom_render::Grade {
+            gain: grade.gain,
+            contrast: grade.contrast,
+            saturation: grade.saturation,
+        },
+    )
+}
+
 pub(crate) fn environment_with_wind(
     world: &World,
     wind: &loom_field::wind::Wind,
     seconds: f32,
 ) -> loom_render::EnvironmentData {
-    let mut env = environment_of_inner(world);
+    environment_with_wind_at(world, wind, seconds, None)
+}
+
+fn environment_with_wind_at(
+    world: &World,
+    wind: &loom_field::wind::Wind,
+    seconds: f32,
+    dread: Option<f32>,
+) -> loom_render::EnvironmentData {
+    let mut env = environment_of_inner(world, dread);
     gather_lights(world, &mut env, seconds);
     let params = wind.params();
     env.wind = [
@@ -3190,11 +3330,21 @@ fn gather_lights(world: &World, env: &mut loom_render::EnvironmentData, seconds:
     env.light_count = u32::try_from(count).unwrap_or(0);
 }
 
-fn environment_of_inner(world: &World) -> loom_render::EnvironmentData {
+fn environment_of_inner(world: &World, dread: Option<f32>) -> loom_render::EnvironmentData {
     let defaults = loom_scene::components::Environment::default();
-    let Some(component) = world.environment() else {
+    let Some(authored) = world.environment() else {
         return loom_render::EnvironmentData::default();
     };
+    // The mood is resolved before a single key is read, so every fallback
+    // below sees the *effective* environment rather than the authored one.
+    // `dread` unset means "use what the scene authored", which is what makes a
+    // headless still at `dread = 0.65` a renderable golden row.
+    #[allow(clippy::cast_possible_truncation)]
+    let d = dread.unwrap_or_else(|| {
+        authored.get("dread").and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32
+    });
+    let merged = mood_of(authored, d).0;
+    let component = &merged;
     #[allow(clippy::cast_possible_truncation)]
     let scalar = |name: &str, fallback: f32| {
         component
@@ -5477,7 +5627,7 @@ mod tests {
     /// `No such file or directory` in a test that has nothing to do with files.
     /// Seen exactly that way. The pid is the whole fix.
     fn scratch() -> std::path::PathBuf {
-        let dir = std::env::temp_dir();
+        let dir = std::env::temp_dir().join(format!("loom-test-{}", std::process::id()));
         // Created here rather than at each call site: four of the twelve write
         // a file straight into it, and `temp_dir()` used to exist already.
         std::fs::create_dir_all(&dir).expect("scratch dir");
