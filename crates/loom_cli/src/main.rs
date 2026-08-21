@@ -2591,23 +2591,6 @@ fn frame_path(out: &str, index: u32) -> String {
     }
 }
 
-/// Pixel-compare two renders.
-/// Isolated pixels — the measurement three doc comments already argue from.
-///
-/// `REFLECT_MAX_RADIANCE`, ADR 0019 and ADR 0050 each pick a constant by
-/// citing a salt count, and until now no code in this repository computed one:
-/// each was re-derived from prose in a private script, which is the definition
-/// of a number nobody else can reproduce. `compare` prices a region moving and
-/// a firefly is one pixel; `flicker` needs three frames and cannot tell wider
-/// from steadier. This is the third question.
-///
-/// `--base` reports the salt *added* over another render, which is the form
-/// every one of those ADRs actually quotes: a stipple is only a regression
-/// against what the frame cost before it.
-///
-/// **Not comparable across a colour or lighting change** — ADR 0010's rule,
-/// for the same reason it binds flicker: the count is absolute, so a brighter
-/// subject scores higher without being worse.
 /// 2x2 quantisation, which is the one failure mode of the quad share that no
 /// other command here can see. See [`imagediff::quad_ratio`] for the mechanism
 /// and for why the number only means anything against the same scene.
@@ -2630,6 +2613,23 @@ fn quad_cmd(image: &str) -> (u8, String) {
     )
 }
 
+/// Pixel-compare two renders.
+/// Isolated pixels — the measurement three doc comments already argue from.
+///
+/// `REFLECT_MAX_RADIANCE`, ADR 0019 and ADR 0050 each pick a constant by
+/// citing a salt count, and until now no code in this repository computed one:
+/// each was re-derived from prose in a private script, which is the definition
+/// of a number nobody else can reproduce. `compare` prices a region moving and
+/// a firefly is one pixel; `flicker` needs three frames and cannot tell wider
+/// from steadier. This is the third question.
+///
+/// `--base` reports the salt *added* over another render, which is the form
+/// every one of those ADRs actually quotes: a stipple is only a regression
+/// against what the frame cost before it.
+///
+/// **Not comparable across a colour or lighting change** — ADR 0010's rule,
+/// for the same reason it binds flicker: the count is absolute, so a brighter
+/// subject scores higher without being worse.
 fn salt(candidate: &str, args: &[String]) -> (u8, String) {
     let mut threshold = 24_u8;
     let mut base: Option<String> = None;
