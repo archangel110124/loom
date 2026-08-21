@@ -131,15 +131,25 @@ impl FlyCamera {
 /// does not; nothing else marks a front end, so there is no flag to pass and no
 /// component to add. The camera is authored `active = false`, which is what
 /// keeps it out of `World::active_camera` and out of `player_character`'s walk
-/// — so where it sits in the file cannot matter.
+/// — so where it sits in the file changes no pixel and no gameplay assertion,
+/// both measured.
+///
+/// **It does move `World::state_hash`, and saying otherwise once was wrong.**
+/// That hash eats every entity's name and `GlobalTransform` whether or not it
+/// has a rigid body (see `a_plain_node_script_moves_its_own_transform`), so
+/// adding two nodes to a scene changes it and reordering them changes it again.
+/// Nothing pins this scene's hash and `xtask` compares a scene against itself,
+/// so nothing here is broken — but "adding a camera cannot affect determinism"
+/// is the kind of sentence someone builds on later, and it is false.
 const TITLE_CAM: &str = "Rig/TitleCamera";
 
 /// The front end: the shot it opens on, and the curtain over it.
 ///
-/// **Rendering only.** A camera has never been in the physics hash and this one
-/// is not even in the world — it is three numbers read once at load. The
-/// curtain is one rectangle in an overlay no headless path constructs. ADR
-/// 0045's line is nowhere near either.
+/// **Rendering only**, and this struct genuinely is: three numbers read once at
+/// load plus a wall clock, none of it in the world, none of it stepped by the
+/// fixed step, and the curtain is one rectangle in an overlay no headless path
+/// constructs. ADR 0045's line is nowhere near it. The *node* the numbers come
+/// from is a different question — see [`TITLE_CAM`].
 struct Front {
     /// Where the shot sits, read once from the scene's title camera.
     shot: Camera,
@@ -168,6 +178,12 @@ const EDIT: &str = "edit";
 /// the key list is written down for a player at runtime and it went stale
 /// once already: it still said "Esc frees the pointer" after Escape became
 /// the pause menu.
+///
+/// **It is the engine's list, in the engine's words** — `fire` is a channel
+/// name, and in the demo that channel casts a rod. A scene that wants to tell
+/// a player what its verbs actually do writes a `Hud` line with
+/// `only_on_title`, which is how `deeper_demo` puts its controls on the title
+/// screen without `loom_cli` ever learning the word "cast".
 const PLAY_KEYS: &str = concat!(
     "WASD to move \u{b7} mouse to look \u{b7} left click to fire \u{b7} ",
     "Space to jump \u{b7} E to interact \u{b7} Esc to pause",
@@ -211,6 +227,37 @@ const fn escape_means(menu_open: bool, playing: bool, captured: bool) -> Escape 
     } else {
         Escape::Close
     }
+}
+
+/// Whether `run` should put a front end up at all.
+///
+/// **A free function for [`escape_means`]'s reason** — the arming lives inside
+/// `run`, which needs an event loop — and because it was wrong: it read
+/// `autoplay` alone, and `--edit --play` is a legal invocation, so a scene with
+/// a title camera opened its title screen over the editor's docks. Nobody saw
+/// it because no gate runs `--edit --play` on a scene that has one; `xtask
+/// validate`'s CPU-budget block runs exactly that shape, and would have
+/// measured a menu.
+const fn front_end_wanted(autoplay: bool, editing: bool) -> bool {
+    // `--play` and nothing else. In the editor the human already has Play, and
+    // a curtain over a dock hides the panels rather than the game.
+    autoplay && !editing
+}
+
+/// Whether the title screen's buttons should be listened to yet, `clock`
+/// seconds into [`Front`]'s timeline.
+///
+/// **The curtain hides the menu and does not disarm it.** [`crate::hud::fade`]
+/// paints, and a painter takes no input, so Start and Quit are live from the
+/// first frame — under an opening curtain that begins at 99% black. Answering a
+/// click there took the screen from black to the full shot in one frame and
+/// then faded it out again, and answering Quit closed the window from behind
+/// black with nothing to show for it.
+///
+/// The buttons are still *drawn* the whole time, so nothing pops in when this
+/// turns true; only the answer waits.
+fn title_answers(clock: f32) -> bool {
+    clock >= crate::hud::TRANSITION
 }
 
 /// Crockford base32 — the ten digits and the letters, minus `I`, `L`, `O`, `U`.
@@ -1802,8 +1849,21 @@ impl ApplicationHandler for App {
                 // may run more than once, so the click is recorded rather than
                 // acted on inside it.
                 let menu_open = self.pause_menu;
-                // The front end's two halves, read out like `menu_open` is:
-                // whether its menu is up, and how black the screen is.
+                // The front end's three halves, read out like `menu_open` is:
+                // whether the title's *text* is up, whether its *menu* is, and
+                // how black the screen is.
+                //
+                // **They are not the same lifetime, and treating them as one
+                // was visible.** The menu goes on the click, which is the right
+                // feedback. The word does not: it is drawn for exactly as long
+                // as the overlay is resolved against the un-played world, which
+                // carries it through the half-second fade-out and swaps it for
+                // the game's own rows under the black. Lifting the scrim with
+                // the *menu* therefore un-dimmed a picture the word was still
+                // written across — an 18% brightness step on the same frame as
+                // the click, which is a flash where a fade was asked for. It
+                // now goes with the word.
+                let title_lines = self.play.is_none() && self.front.is_some();
                 let title_up = self.front.as_ref().is_some_and(|f| !f.leaving);
                 let curtain = self.front.as_ref().map(|f| crate::hud::curtain(f.clock));
                 let room_code = self.room_code.as_deref();
@@ -1833,7 +1893,7 @@ impl ApplicationHandler for App {
                             // things: a pause menu dims the game *and* its
                             // score, a title screen dims the sea the game's
                             // own name is written across.
-                            if title_up {
+                            if title_lines {
                                 crate::hud::title_scrim(root);
                             }
                             // The rects are the second half of this return
@@ -1875,7 +1935,13 @@ impl ApplicationHandler for App {
                     eprintln!("loom: draw failed: {e}");
                     event_loop.exit();
                 }
-                match title_choice {
+                // Not while the opening is still lifting — see
+                // [`title_answers`], which owns that reasoning and the test.
+                let answerable = self
+                    .front
+                    .as_ref()
+                    .is_some_and(|f| title_answers(f.clock));
+                match title_choice.filter(|_| answerable) {
                     Some(crate::hud::TitleChoice::Start) => {
                         if let Some(front) = self.front.as_mut() {
                             front.clock = 0.0;
@@ -3116,8 +3182,10 @@ pub fn run(
     app.frames_left = frames.filter(|n| *n > 0);
     // A front end only makes sense in front of a game, so `--play` is what
     // arms it — and when it is armed it takes autoplay's job: the game starts
-    // when the human asks for it, under the black.
-    app.front = autoplay
+    // when the human asks for it, under the black. `session` is `Some` for
+    // exactly the runs that got `--edit`; see [`front_end_wanted`] for why that
+    // is in the condition and what happened while it was not.
+    app.front = front_end_wanted(autoplay, app.session.is_some())
         .then(|| app.view.world().camera_named(TITLE_CAM))
         .flatten()
         .map(|view| Front {
@@ -3167,7 +3235,7 @@ pub fn open_scene(
 mod tests {
     use super::{
         CODE_ALPHABET, CODE_DENY, CODE_SYMBOLS, Escape, egui, encode, escape_means, format_code,
-        generate_code, normalise, room_code_panel, wholesome,
+        front_end_wanted, generate_code, normalise, room_code_panel, title_answers, wholesome,
     };
 
     /// A code is twelve base32 symbols in three groups of four, and every
@@ -3489,6 +3557,63 @@ mod tests {
         }
     }
 
+    /// **A title screen belongs in front of a game and nowhere else**, and
+    /// `--play` alone does not say that: `--edit --play` is legal, and it used
+    /// to open a title over the editor's docks. Escape there is `Close`, and
+    /// `front` is only ever cleared on the way *out* of the curtain — so a
+    /// human who reached for the editor's own Play button afterwards would find
+    /// the pause menu unreachable behind a title that never leaves.
+    #[test]
+    fn a_front_end_goes_in_front_of_a_game_and_never_in_front_of_the_editor() {
+        // (autoplay, editing)
+        for (state, want) in [
+            ((true, false), true),   // `--play`: the demo, and the whole point
+            ((true, true), false),   // `--edit --play`: the editor wins
+            ((false, true), false),  // `--edit`: no game to be in front of
+            ((false, false), false), // the read-only viewer
+        ] {
+            let (autoplay, editing) = state;
+            assert_eq!(
+                front_end_wanted(autoplay, editing),
+                want,
+                "front_end_wanted{state:?}"
+            );
+        }
+    }
+
+    /// **The menu answers exactly when the player can see it**, which is the
+    /// property, not a duration.
+    ///
+    /// `hud::fade` paints and a painter takes no input, so both buttons are
+    /// live from the first frame — under an opening curtain that starts at 99%
+    /// black. Equality in both directions is what makes this falsifiable:
+    /// dropping the guard makes the early samples answer while the curtain is
+    /// still up, and gating on anything longer than the curtain leaves a dead
+    /// button on a picture the player is looking at.
+    #[test]
+    fn the_title_answers_a_click_exactly_when_the_player_can_see_the_button() {
+        // Where a fresh `Front` starts: the top of the fade-*up*.
+        let opening = crate::hud::FADE_OUT + crate::hud::HOLD;
+        let mut answered_while_black = 0;
+        for i in 0..=150u16 {
+            let clock = f32::from(i).mul_add(crate::hud::FADE_IN / 100.0, opening);
+            let hidden = crate::hud::curtain(clock) > 0.0;
+            assert_eq!(
+                title_answers(clock),
+                !hidden,
+                "{clock:.3}s in, the curtain is {:.3} and the menu answers {}",
+                crate::hud::curtain(clock),
+                title_answers(clock)
+            );
+            answered_while_black += usize::from(hidden && title_answers(clock));
+        }
+        assert_eq!(answered_while_black, 0);
+        assert!(
+            !title_answers(opening),
+            "the very first frame answered a click it had hidden"
+        );
+    }
+
     /// A second Escape must never close the window from inside the menu — that
     /// was the reported "it just closes everything", and it is the one
     /// transition worth spelling out as a sequence rather than as a table row.
@@ -3560,5 +3685,24 @@ mod tests {
             "the title camera became the scene's: {}",
             eye.fov_y_degrees
         );
+
+        // **And what it says, which is the same kind of silent loss.** The
+        // word and both control lines are `Hud` elements with `only_on_title`,
+        // so nothing else in this project draws them and nothing else fails if
+        // they go. A title screen that has quietly lost its controls is a demo
+        // nobody can work out how to operate — the failure mode a front end
+        // exists to prevent.
+        let title = crate::hud::elements(&world, &loom_script::GameState::default(), false, true);
+        let lines: Vec<&str> = title.iter().map(crate::hud::Element::text).collect();
+        assert!(
+            lines.contains(&"DEEPER"),
+            "the demo lost its name from the title screen: {lines:?}"
+        );
+        for key in ["WASD", "MOUSE", "CLICK", "SHIFT", "E ", "TAB"] {
+            assert!(
+                lines.iter().any(|l| l.contains(key)),
+                "the title screen no longer says what {key:?} does: {lines:?}"
+            );
+        }
     }
 }

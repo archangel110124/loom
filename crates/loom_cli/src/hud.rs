@@ -33,6 +33,20 @@ pub(crate) struct Element {
     color: egui::Color32,
 }
 
+#[cfg(test)]
+impl Element {
+    /// The line after `{name}` substitution — what a player would read.
+    ///
+    /// Test-only, and `#[cfg(test)]` rather than `#[allow(dead_code)]` so it
+    /// cannot quietly become a second way to read an element at runtime. The
+    /// shape-counting technique elsewhere in this file proves a line reached
+    /// the painter; this is for asking whether the demo still says what its
+    /// keys do, which no rendered shape can answer.
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+}
+
 /// Read the scene's `Hud` components and fill in the game's numbers.
 ///
 /// Resolved every frame rather than cached: the values change every tick, and
@@ -209,15 +223,25 @@ const SCRIM: u8 = 170;
 
 /// How dark the title screen's dimming is.
 ///
-/// **Much lighter, and measured rather than matched.** The instinct is one
-/// constant for both — they are the same gesture — and it is wrong here for a
-/// specific reason: the shot behind the title is the whole point of the title,
-/// and at 170 the sun the camera was aimed at, the glitter path under the word
-/// and the light on the rig are all gone. What is left is a grey plate, which
-/// is exactly the "screenshot with text on it" a front end has to avoid. 90 is
-/// where the picture survives and the buttons still read as chrome; the word
-/// needs no help from it at all, because `draw` paints a dark copy under every
-/// line.
+/// **Much lighter than the pause menu's, because the shot behind the title is
+/// the whole point of the title.** A front end that dims its own photograph to
+/// a grey plate is a screenshot with text on it.
+///
+/// **The number is right; the comparison that first chose it was made in the
+/// wrong colour space and the note it left was wrong.** The overlay blends
+/// premultiplied into a `B8G8R8A8_SRGB` swapchain, so the hardware converts to
+/// linear, blends, and converts back — an alpha of `a` leaves the picture at
+/// `(1 - a/255)^(1/2.2)` of its *displayed* brightness, not `1 - a/255`. So 90
+/// is 82%, not 65%, and 170 would have been 61%, not 33%: the claim that 170
+/// "loses the sun and the glitter path" was an artifact of compositing on the
+/// bytes. Both would in fact have kept the picture.
+///
+/// What 90 actually buys, measured on the shipped shot under the word's box
+/// (mean sRGB 103 clear, 84 dimmed): white-on-background contrast rises from
+/// **5.7:1 to 7.6:1**. That is the case for it — a readability margin on text
+/// laid over water whose brightness nobody controls — and it holds regardless
+/// of which space the arithmetic is done in. The word needs no *more* than
+/// that, because [`draw`] paints a dark copy under every line.
 const TITLE_SCRIM: u8 = 90;
 
 /// Dim the game's view behind the title screen.
@@ -280,26 +304,58 @@ pub(crate) fn title_menu(root: &mut egui::Ui) -> Option<TitleChoice> {
             ui.set_width(MENU_WIDTH);
             ui.vertical_centered(|ui| {
                 for (label, picked) in items {
-                    let button = egui::Button::new(label);
-                    if ui.add_sized([MENU_WIDTH, 34.0], button).clicked() {
+                    // **Twenty points, not egui's thirteen.** The default is
+                    // sized for an inspector row, and under a 96-point word it
+                    // reads as a tooltip somebody left on. These two are the
+                    // only controls on the screen and the largest target on it
+                    // should not be the smallest text.
+                    let button = egui::Button::new(egui::RichText::new(label).size(20.0));
+                    if ui.add_sized([MENU_WIDTH, 40.0], button).clicked() {
                         choice = Some(picked);
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(10.0);
                 }
-                // **Escape closes the window here and that has to be said.**
-                // `escape_means(false, false, false)` is `Close`, which is the
-                // right answer for a top-level menu and a nasty surprise
-                // undocumented. The hint slot is also the only place the
-                // controls a player would open an Options screen for could go.
-                ui.label(
-                    egui::RichText::new("Esc to quit")
-                        .size(14.0)
-                        .color(egui::Color32::from_gray(180)),
-                );
             });
         });
+
+    // **Escape closes the window here and that has to be said.**
+    // `escape_means(false, false, false)` is `Close`, which is the right answer
+    // for a top-level menu and a nasty surprise undocumented.
+    //
+    // **At the bottom edge, not under the buttons.** It belongs with the rest
+    // of the legend: a scene writes its own control lines as `Hud` elements
+    // with `only_on_title`, and `deeper_demo` puts its two at 40 and 68 px up,
+    // so this sits at 16 and the three read as one block. **A title screen that
+    // authors its own lines should leave the bottom 32 px to this one.** Under
+    // the buttons it was a stray fourteen-point line between two things that
+    // were not it.
+    //
+    // Painted, with `draw`'s shadow, for `draw`'s reasons: this lands on open
+    // water whose brightness the engine does not choose, and a painter claims
+    // no click — which is what
+    // `the_title_screen_does_not_claim_clicks_in_the_viewport` is about.
+    let painter = root.painter().with_clip_rect(viewport);
+    let at = viewport.center_bottom() - egui::vec2(0.0, 16.0);
+    let font = egui::FontId::proportional(15.0);
+    painter.text(
+        at + SHADOW,
+        egui::Align2::CENTER_BOTTOM,
+        ESC_HINT,
+        font.clone(),
+        egui::Color32::from_black_alpha(190),
+    );
+    painter.text(
+        at,
+        egui::Align2::CENTER_BOTTOM,
+        ESC_HINT,
+        font,
+        egui::Color32::from_gray(190),
+    );
     choice
 }
+
+/// What Escape does on the title screen, in one place so the test can name it.
+const ESC_HINT: &str = "Esc to quit";
 
 /// Seconds of fade to black once Start is clicked.
 ///
@@ -737,7 +793,7 @@ mod tests {
             }
         }
 
-        for wanted in ["Start", "Quit", "Esc to quit"] {
+        for wanted in ["Start", "Quit", ESC_HINT] {
             assert!(
                 labels.iter().any(|l| l == wanted),
                 "the title drew {labels:?}, with no {wanted:?} on it"
@@ -787,17 +843,27 @@ mod tests {
     /// **A curtain that is even in alpha is not even to the eye.** The fill is
     /// premultiplied black over a linearised sRGB target, so alpha scales
     /// radiance and displayed brightness goes as `(1 - a)^(1/2.2)`. A linear
-    /// ramp is exactly `0.5` at the halfway point of its own fade and leaves
-    /// the screen at 73% of its brightness there; the corrected one is past
-    /// 0.75. Asserted as a threshold rather than as a round trip against the
-    /// exponent, so it survives a retune and still fails a straight line.
+    /// ramp leaves the screen at 73% of its brightness at the halfway point of
+    /// its own fade and then plunges.
+    ///
+    /// **The property, not one sample of it.** This was a threshold — `curtain(
+    /// FADE_OUT * 0.5) > 0.75` — whose doc claimed it survived a retune, and
+    /// it does not: the shipped value is `0.7824` and an exponent of `2.0`
+    /// gives exactly `0.7500`, so a gentler curve went red for being gentler.
+    /// What the fade actually has to be is *anywhere above a straight line*,
+    /// which is true for every exponent past 1 and false the instant somebody
+    /// replaces the curve with `t`.
     #[test]
     fn the_curtain_falls_evenly_to_the_eye_rather_than_to_the_alpha() {
-        assert!(
-            curtain(FADE_OUT * 0.5) > 0.75,
-            "halfway out the curtain is {}, which is a linear ramp",
-            curtain(FADE_OUT * 0.5)
-        );
+        for i in 1..100u8 {
+            let t = f32::from(i) / 100.0;
+            let at = curtain(t * FADE_OUT);
+            assert!(
+                at > t,
+                "{t:.2} of the way out the curtain is {at:.4}, at or under the \
+                 straight line it exists to not be"
+            );
+        }
         assert!(curtain(0.0).abs() < 1e-6, "the fade starts on the picture");
         assert!((curtain(FADE_OUT) - 1.0).abs() < 1e-6, "black by the hold");
         assert!((curtain(FADE_OUT + HOLD) - 1.0).abs() < 1e-6, "still black");
@@ -1144,6 +1210,22 @@ behind you, on your right";
             // a `Hud` line laid out by `draw` — and it is by far the largest
             // point size any scene in this project asks for.
             ("title", "DEEPER", 96.0_f32),
+            // **And the two control lines under it**, which is where the demo
+            // tells a first-timer what the keys are. They are the longest
+            // strings the scene authors and nothing else measures them: a HUD
+            // caption that overflows is one round of a fight, a title legend
+            // that overflows is the first thing anybody sees.
+            (
+                "title keys",
+                "WASD walk    MOUSE look    SPACE jump    SHIFT sprint",
+                19.0_f32,
+            ),
+            (
+                "title verbs",
+                "CLICK casts, and again to set the hook    SHIFT reels    \
+                 E takes the fish    TAB the creel",
+                19.0_f32,
+            ),
         ] {
             let width = laid_out_width(text, size);
             // A line measuring zero never reached the painter, which would

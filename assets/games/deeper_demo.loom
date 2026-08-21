@@ -10,16 +10,32 @@
 # panels; add `--edit` if you want them.
 #
 # **You do not start on the deck.** `--play` opens on the title screen: the rig
-# seen from 50 m off with the sun behind it, the word DEEPER over the water, and
-# Start and Quit. Escape there closes the window, which the screen says out
-# loud. Start runs a 1.5-second curtain — half a second to black, a quarter of
-# black while the world is built, then eight tenths back up on your own eyes —
-# and the window opens *black* and lifts into the shot, so the half second this
-# scene takes to load happens behind a curtain rather than as a stall. See THE
-# FRONT END at the foot of this file for the camera, and `loom_cli::hud` for the
-# curtain. Nothing in it is simulated: the front end is a camera, a rectangle
-# and two buttons, and the sea moves behind it because the water's clock is the
-# wall clock and always has been.
+# seen from 50 m off with the sun behind it, the word DEEPER over the water,
+# Start and Quit, and **the controls along the bottom** — which is where they
+# live, because there is no Options item and deliberately so. There is no
+# settings system in this tree, and an Options that opens nothing is a promise
+# broken on the second screen a player ever sees. So the one thing a player
+# would have opened it for is on the first screen instead.
+#
+# Escape there closes the window, which the screen says out loud. Start runs a
+# 1.55-second curtain — half a second to black, a quarter of black while the
+# world is built, then eight tenths back up on your own eyes — and the window
+# opens *black* and lifts into the shot, so the half second this scene takes to
+# load happens behind a curtain rather than as a stall. The buttons are drawn
+# through that opening lift but do not answer until it finishes: they are
+# invisible under it, and a click nobody could see was one had no business
+# starting the game. See THE FRONT END at the foot of this file for the camera
+# and the three lines of text, and `loom_cli::hud` for the curtain.
+#
+# **Nothing in it is simulated.** The front end is a camera, a rectangle and two
+# buttons; the sea moves behind it because the water's clock is the wall clock
+# and always has been. Two consequences worth writing down: the shot is *not*
+# `--play`'s only new state — the viewer now sits with no game running for as
+# long as the player leaves it there, with the file watcher live — and adding
+# the front end's four nodes **does** move `World::state_hash`, which eats every
+# node's name and transform. It moves no pixel and no gameplay assertion, both
+# checked, and no gate pins this scene's hash. "A camera cannot affect
+# determinism" was said once here and was false.
 #
 # **Play it in a window at least 960 px wide.** Both HUD rows are centre-
 # anchored, so a narrower window clips them at both ends. The longest line the
@@ -40,6 +56,13 @@
 # -----------------------------------------------------------------------------
 # THE CONTROLS
 # -----------------------------------------------------------------------------
+#
+# **The title screen says these too**, in two lines along the bottom — see
+# `TitleKeys` and `TitleVerbs` at the foot of this file. This section is the
+# long form and those are the two lines a player actually reads; when they
+# disagree, the ones on screen are the ones that matter, and
+# `run::the_demo_opens_on_a_camera_the_game_never_uses` is what stops either
+# from quietly emptying.
 #
 #   on the rig       W A S D walk, SHIFT sprint, SPACE jump
 #
@@ -64,6 +87,11 @@
 #                      at the crate, with a catch below   the trip closes
 #                      at the yellow fish box             it goes below
 #                      a fish on the line                 into your hands
+#
+#   **TAB**          open the creel, which is a grid and so is painted rather
+#                    than written on a line — `hud::creel`, bottom left. The
+#                    top HUD row names the key because nothing else in this
+#                    demo could.
 #
 #   **ESC**          the pause menu — Resume and Quit, over a scrim — and in
 #                    its top right, ROOM CODE with a twelve-symbol code under
@@ -256,16 +284,32 @@
 # Ranked by how likely a first-timer is to meet it. None is a stopper; all are
 # seams.
 #
-# 0. **Nobody has watched the title screen.** Every part of it that can be
-#    checked without a window is checked — the shot is rendered and looked at,
-#    the curtain's curve, the menu's words, the layer it is painted in and its
-#    refusal to eat clicks are all unit tests — and none of that is the same as
-#    seeing it. `loom run` needs a real window and this box has no Xvfb, so the
-#    pace of the fade, whether 96 pt Ubuntu-Light reads as a title or as a debug
-#    overlay, whether the pointer hand-off at the bottom of the curtain is
-#    clean, and whether a still shot with a moving sea reads as alive are all
-#    unanswered. Three durations, one scrim and one offset are the knobs; expect
-#    to move them.
+# 0. **Nobody has watched the title screen move.** `loom run` needs a real
+#    window and this box has no Xvfb. What *is* checked: the shot is rendered
+#    and looked at; the curtain's curve, the menu's words, the layer it paints
+#    into, its refusal to eat clicks and its refusal to answer one before the
+#    opening lifts are unit tests; and both fades have been composited frame by
+#    frame over the real render at the alphas the code produces, with egui's own
+#    Ubuntu-Light at the real point sizes — which answers the two questions that
+#    were open (96 pt reads as a title, not as a debug overlay; the lift is even
+#    rather than nothing-then-slam).
+#
+#    **That compositing had to be redone in linear light and the first pass was
+#    wrong.** The overlay blends premultiplied into an `_SRGB` swapchain, so the
+#    hardware blends in linear — doing it on the bytes made the fade look twice
+#    as dark at its halfway point and would have argued for retuning a curve
+#    that is correct. It is the same class of error as measuring anti-aliasing
+#    on a path the player never sees.
+#
+#    Still unanswered, and only a window can answer them: the *pace* of
+#    0.5 / 0.25 / 0.8 (the shape is proven, the durations are judgement);
+#    whether building this 214-node world fits inside the quarter second of
+#    black, and whether the first gameplay frame's pipeline warm-up lands
+#    inside it; whether the pointer hand-off under the curtain is clean;
+#    whether a static camera over a moving sea reads as alive or as a still;
+#    and the layout at window sizes other than 960x600, since the word's offset
+#    is absolute pixels. Three durations, one scrim and one offset are the
+#    knobs, all in `loom_cli::hud`; expect to move them.
 # 1. **You drive home stern-first at a wharf you cannot see.** The berth faces
 #    the way it faces, so the leg the demo teaches leaves ahead and returns
 #    astern with the destination behind the camera. Photographed at the arrival
@@ -2132,4 +2176,50 @@ parent = "Rig"
   text = "DEEPER"
   size = 96.0
   color = [1.0, 1.0, 1.0]
+  only_on_title = true
+
+# **The controls, on the one screen a first-timer is certain to read.** There
+# is no Options item to hide them behind — deliberately, because there is no
+# settings system in this tree and an Options that opens nothing is worse than
+# none — so this is where they go, and it is the missing half of that decision
+# rather than a consolation for it.
+#
+# **Authored here rather than in `loom_cli` for the same reason DEEPER is.**
+# The engine's own list exists (`run::PLAY_KEYS`, printed to the console when
+# Play hands a character over) and it says "left click to fire", because `fire`
+# is a *channel* name. In this demo that channel casts a rod. A scene knows
+# what its verbs mean and the engine cannot, so the engine keeps its list for
+# the console and the scene writes the one a player reads.
+#
+# Two lines: what moves you, then what the demo is about. Bottom-centre, 68 and
+# 40 px up, clear of the buttons at centre+96 and of the word above them. Both
+# are measured against the 960 px window this file documents by
+# `hud::the_longest_demo_caption_fits_the_narrowest_documented_window`, which
+# they are on the list of.
+[[node]]
+name = "TitleKeys"
+parent = "Rig"
+
+  [node.components.Hud]
+  anchor = "bottom_center"
+  offset = [0.0, 68.0]
+  text = "WASD walk    MOUSE look    SPACE jump    SHIFT sprint"
+  size = 19.0
+  color = [0.82, 0.86, 0.90]
+  only_on_title = true
+
+# SHIFT is on both lines and means two things, which is the demo's doing and
+# not a typo: ashore it sprints, on a fish it reels. Written out both times
+# rather than footnoted, because the line a player reads once has no room for
+# a footnote and getting it wrong costs them the fish.
+[[node]]
+name = "TitleVerbs"
+parent = "Rig"
+
+  [node.components.Hud]
+  anchor = "bottom_center"
+  offset = [0.0, 40.0]
+  text = "CLICK casts, and again to set the hook    SHIFT reels    E takes the fish    TAB the creel"
+  size = 19.0
+  color = [0.82, 0.86, 0.90]
   only_on_title = true
