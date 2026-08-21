@@ -37,6 +37,38 @@
 # checked, and no gate pins this scene's hash. "A camera cannot affect
 # determinism" was said once here and was false.
 #
+# ---------------------------------------------------------------------------
+# THE LOOK — and the three numbers that change it
+# ---------------------------------------------------------------------------
+#
+# **Every knob is listed in `docs/design/THE-LOOK.md`.** That page is the
+# handover; this is the short form.
+#
+#   brighter          `PIVOT` in `assets/shaders/tonemap.slang` — turn it DOWN
+#   more eerie        `saturation` in the last two stages BELOW — turn it UP
+#   less of it all    `CONTRAST` in `tonemap.slang` — down toward 1.00, which
+#                     is off, and measured: at 1.00 all 54 golden references
+#                     come back to inside the gate's own tolerance
+#
+# **"More eerie" is UP, and it is the one line here that reads backwards.**
+# This ladder used to desaturate to 0.26 at its far end, and the measured
+# result was a frame that was *dark* rather than *wrong*: the green cast in the
+# sea peaked at +11.0 halfway out and fell to +1.03 at the deepest water, so
+# the frame the whole mechanic exists to deliver was the least colour-cast rung
+# on the ladder. What makes deep water frightening is a colour that should not
+# be there. Draining the colour deletes the effect and leaves you with dusk.
+# Darkness is `exposure`, and darkness on its own is not the beat — ADR 0071.
+#
+# The first two numbers are different in kind, and it matters. `PIVOT` is the
+# whole engine and re-blesses all 54 references; the stages below are this
+# scene alone, and **`deeper_demo` is not in `GOLDEN`**, so every number in the
+# ladder is free to retune for ever.
+#
+# **Judge it in motion.** Nothing in this project can: `flythrough` does not
+# move `dread` and `shimmer` holds it still by design. Take the boat out and
+# hold W. Measured from the berth, `dread` is 0.000 for the first ten seconds,
+# 0.060 at twenty, and runs the whole ladder in the forty after that.
+#
 # **Play it in a window at least 960 px wide.** Both HUD rows are centre-
 # anchored, so a narrower window clips them at both ends. The longest line the
 # game can say lays out at 840 px, and
@@ -561,9 +593,17 @@ name = "Rig"
   # walks between its neighbours as it moves.
   #
   # A stage's `[..environment]` is a PATCH: anything it does not name is the
-  # block above. That is why `sun_direction` appears once in this file — the
-  # title shot is composed against that vector and a sign flip on z turns the
-  # rig into a small beige object on flat grey water.
+  # block above, and anything the block above does not name either is the
+  # component default. That is why `sun_direction` appears once in this file —
+  # the title shot is composed against that vector and a sign flip on z turns
+  # the rig into a small beige object on flat grey water.
+  #
+  # **That last rung of the fallback used to be missing, and it stepped.**
+  # `inshore` names no patch at all and this block names no `cloud_cover`, so
+  # the whole near half of the ladder held a clear sky and then snapped to 0.30
+  # the tick `dread` crossed 0.25 — a cloud deck out of nothing. Measured at
+  # 320x200, the same 0.0001 of `dread`: mean 3.115 across the boundary against
+  # 0.0032 just below it. Fixed in `mood_of`; ADR 0071.
   dread = 0.0
 
     [[node.components.Environment.stages]]
@@ -629,18 +669,18 @@ name = "Rig"
     at = 0.8
       [node.components.Environment.stages.environment]
       sun_strength = 0.40
-      sun_color = [0.82, 0.90, 0.72]
-      ambient = 0.24
-      sky_zenith = [0.07, 0.10, 0.09]
-      sky_horizon = [0.26, 0.30, 0.24]
+      sun_color = [0.80, 0.92, 0.70]
+      ambient = 0.30
+      sky_zenith = [0.07, 0.11, 0.09]
+      sky_horizon = [0.24, 0.30, 0.22]
       fog_density = 0.034
       fog_falloff = 0.03
       cloud_cover = 0.85
-      exposure = 0.68
+      exposure = 0.80
       [node.components.Environment.stages.grade]
-      gain = [0.90, 0.94, 0.88]
+      gain = [0.88, 0.97, 0.86]
       contrast = 1.06
-      saturation = 0.48
+      saturation = 0.62
 
     [[node.components.Environment.stages]]
     name = "theedge"
@@ -648,25 +688,51 @@ name = "Rig"
     # Sea and sky are one value: there is no `out there` any more and the world
     # stops at forty metres.
     #
+    # **This rung is not the darkest thing the ladder can do, deliberately —
+    # ADR 0071.** It used to be, and being darkest is what made it stop being
+    # frightening. Four dimmers were turned at once here: `sun_strength`,
+    # `ambient`, `exposure` and the grade's `saturation`. Measured over nine
+    # points on the axis, the green cast in the sea band ran +11.00 at
+    # `outofsight` and back down to **+1.03** here, and whole-frame saturation
+    # 0.196 -> 0.063 — so the deepest water was the least colour-cast rung on
+    # the ladder, and it read as nightfall rather than as wrongness. It now
+    # holds +8.28.
+    #
+    # The deck went with it too: 0.48 of sky luma at the berth down to 0.23,
+    # landing at luma 30 — too dark to work on, against this design's own words
+    # at `outofsight`, "while the deck you are standing on is still lit". It
+    # lands at 43 now.
+    #
+    # **`saturation` is the knob, and it goes UP.** Measured here at dread 1.0,
+    # 0.50 -> 0.75 moves the sea's cast +4.38 and the frame's brightness -0.1:
+    # it changes the colour and nothing else, which is exactly what this rung
+    # needs and why it must not be turned together with the dimmers.
+    #
     # `exposure` is the number you would not guess. The cloud deck's tones are
     # constants in `scene.slang`, so turning the sun down does not darken an
     # overcast sky — at `sun_strength = 0` the frame moves by a fraction of a
     # code. `exposure` is applied in the tonemap, downstream of the deck, and
-    # it is what actually takes this rung down.
+    # it is what actually takes this rung down. It is also the only dimmer that
+    # should be doing it: 0.66 -> 0.85 is +17.6 luma and almost no cast.
+    #
+    # `fog_density` is nearly inert at this rung and that surprised the
+    # measurement — 0.058 -> 0.090 buys +0.5 luma, because at `cloud_cover =
+    # 1.0` the frame is already fog-limited. Fog does its work in the middle
+    # rungs.
       [node.components.Environment.stages.environment]
       sun_strength = 0.12
-      sun_color = [0.70, 0.80, 0.66]
-      ambient = 0.13
-      sky_zenith = [0.02, 0.03, 0.03]
-      sky_horizon = [0.09, 0.11, 0.10]
+      sun_color = [0.66, 0.84, 0.62]
+      ambient = 0.22
+      sky_zenith = [0.03, 0.055, 0.042]
+      sky_horizon = [0.10, 0.15, 0.11]
       fog_density = 0.058
       fog_falloff = 0.02
       cloud_cover = 1.00
-      exposure = 0.48
+      exposure = 0.66
       [node.components.Environment.stages.grade]
-      gain = [0.86, 0.92, 0.86]
+      gain = [0.84, 1.00, 0.82]
       contrast = 1.10
-      saturation = 0.26
+      saturation = 0.50
 
   # Light air. Enough to move the surface; far too little to trouble the boat.
   [node.components.Wind]
