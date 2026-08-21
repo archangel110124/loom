@@ -1,0 +1,54 @@
+# **Can you get into the salon?** The demo hub with the player already aboard,
+# standing in the cockpit on the centreline of the deckhouse's after door.
+#
+# `extends`, not a copy, and one field is different — where the Player starts.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS SCENE EXISTS
+# ---------------------------------------------------------------------------
+#
+# > "You can't go inside of the new area on the ship."
+#
+# The refined hull has a real interior — benches, tables, a wheelhouse forward
+# — and a real door into it. Marched off the shipped meshes, the after bulkhead
+# is solid from z = -1.46 to +0.16 and from +1.08 to +1.46, and **open between
+# z = +0.16 and +1.08 from the deck up to a header at 2.60**: a 0.92 m doorway
+# against a 0.70 m capsule, with 1.98 m under the header against a 1.80 m one.
+# Inside, the sole is at 0.60-0.67 and the deckhead 2.2 m above it.
+#
+# `jib_vi_decks.loom`'s `col_house` was one solid box across the whole
+# footprint, on a headroom measurement (1.49 m) taken off the *previous* hull
+# mesh. So the door was walled up by a collider and the room behind it was
+# filled in.
+#
+# The walk is 1.3 m from the spawn to the threshold at boat-local x = -6.22,
+# then 3 m more into the room.
+#
+#   loom sim assets/test/rig_salon.loom --ticks 300 --hold move_x=1 \
+#     --assert "state.plx > -4.0"
+#
+# Before the door was cut this run ended at **plx = -6.57** — pressed against
+# the outside of the bulkhead, 0.35 m of capsule radius off it, for the whole
+# five seconds.
+
+[scene]
+format = 1
+id = "8c40d6b2-71fe-4a95-b3d7-05e29f1c6a74"
+
+[[prefab]]
+key = "demo"
+id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
+path = "../games/deeper_demo.loom"
+
+[[node]]
+name = "Rig"
+extends = "demo"
+
+[[node]]
+name = "Player"
+parent = "Rig"
+
+  # The one field this file changes. Boat-local (-7.00, 0.62): on the cockpit
+  # sole, on the door's own centreline (local z = +0.62), aft of the bait box's
+  # forward face at -7.20 by 0.20 m. World = boat pos + that.
+  transform = { pos = [-4.00, 1.60, -9.83] }

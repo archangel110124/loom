@@ -917,12 +917,67 @@ fi
 # **It is also the ladder's own row.** The swim is a real distance to the new
 # ramp on the berth side, and `Rig/Player.y > 2.2` at the end is a capsule
 # standing on the rig deck under its own movement, with no teleport.
+#
+# **The tape was re-pinned when the deckhouse opened**, deliberately, and both
+# changes make it a better tape than it was. `1460` used to press **forward**
+# and starboard at a fish box that is *aft* and starboard: it reached the box
+# by being stopped by the deckhouse's after face, and the moment that face
+# grew a door the same press walked him into the salon and left him there. It
+# now presses at the box. `1650`'s westing came down from 1.0 to 0.4 because
+# the boat's new underbody boxes hold a swimmer 0.35 m off her side instead of
+# letting him leave through her, and the old number then overshot `Rig/Ladder`
+# — which is 1.4 m wide between its kerbs — by 1.26 m to the west. Measured:
+# he lands at (-9.51, 2.30, -0.38), well up the deck.
 "$LOOM" sim assets/test/rig_adrift.loom --ticks 2000 \
-  --hold "0:; 1450:jump=1; 1460:move_z=-1,move_x=1; 1520:move_z=-1; \
-1650:move_z=-1,move_x=-1; 1880:move_z=-1" \
+  --hold "0:; 1450:jump=1; 1460:move_z=-1,move_x=-1; 1520:move_z=-1; \
+1650:move_z=-1,move_x=-0.4; 1880:move_z=-1" \
   --assert "events.stow >= 1" --assert "state.stowed == 1" \
   --assert "events.deliver == 0" --assert "state.delivered == 0" \
   --assert "Rig/Player.y > 2.2" >/dev/null
+
+# **THE HULL IS A SOLID OBJECT, WHICH IT WAS NOT.** Three faults, one cause:
+# the hull's own `BoxCollider` is demoted to mass-only the moment the deck
+# prefab attaches a plate (ADR 0060), and every box that prefab had started at
+# or above y = 0.30 — the waterline is 0. So the boat was drawn solid and
+# collided as a lid with a deckhouse on it.
+#
+# **You cannot swim through her.** Spawned two metres off her port topside and
+# swimming at her for thirty seconds. Before the underbody boxes this run ended
+# at z = +2.87 — through the hull, out the far side, thirteen metres past her,
+# at a flat 1.9 m/s with no deceleration anywhere. `-13.2` is her drawn topside
+# *at the waterline*, which is what a swimmer meets; the 3.30 m half-beam in her
+# header is the deck edge a metre and a half higher up.
+"$LOOM" sim assets/test/rig_underhull.loom --ticks 600 --hold move_z=-1 \
+  --assert "Rig/Player.z < -13.2" >/dev/null
+
+# **And you can get inside the deckhouse, which is the other end of the same
+# bug.** The refined hull has a salon with a 0.92 m door in its after bulkhead
+# and 2.2 m of headroom; `col_house` was one solid box over the whole footprint,
+# authored on a headroom measurement taken off the *previous* hull mesh. Walking
+# forward from the cockpit on the door's own centreline, this run used to end at
+# boat-local x = -6.57 — pressed on the outside of the bulkhead for five
+# seconds. It now reaches +1.83, at the salon's forward end.
+"$LOOM" sim assets/test/rig_salon.loom --ticks 300 --hold move_x=1 \
+  --assert "state.plx > -4.0" >/dev/null
+
+# **And falling off her is survivable a hundred metres out.** `rig_overboard`
+# is this claim about the rig; there was no equivalent for the hull, and at the
+# fishing ground the two rig ramps are 88 m and 114 m away — a two-minute swim
+# away from a boat that is then adrift with the catch in it.
+# `Rig/Boat/SternLadder` is a 45 degree slab off her port quarter reaching
+# y = -1.80, which is under a floating swimmer's feet.
+#
+# Row 1 is the control that makes row 3 mean anything: without it a run that
+# ended on the deck could have ended there because the swimmer never got wet.
+# Row 2 is the caption, and it is the half that only exists because the ladder
+# moves — a sentence naming a rig you cannot see is the lie round 5 told, one
+# target further on.
+"$LOOM" sim assets/test/rig_reboard.loom --ticks 240 \
+  --assert "Rig/Player.y > -1.0" --assert "Rig/Player.y < 0.0" >/dev/null
+"$LOOM" sim assets/test/rig_reboard.loom --ticks 60 \
+  | grep -q '"message": "IN THE WATER   swim east to her stern ladder"'
+"$LOOM" sim assets/test/rig_reboard.loom --ticks 900 --hold move_x=1 \
+  --assert "Rig/Player.y > 0.9" --assert "state.aboard == 1" >/dev/null
 
 # 7. **The stall limiter says so now.** It shut the throttle in round 3 and the
 #    caption went on reading "W ahead", so a player pushing a bow into a quay
@@ -1019,10 +1074,19 @@ DEMO_HOME="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
 #     exists.** `deeper_player.rhai` measures the *helmsman's* speed, and a hull
 #     pinned on a buoy pivots on it — he stands seven metres off her centre and
 #     keeps moving. `state.pinned` is the rules script's, off her own.
+#
+#     **The port row reads at 1800 and not 2000, and the reason is issue 6 in
+#     the scene's own list.** `pinned` resets whenever `at_helm` does, and a
+#     hull grinding on a buoy bounces the helmsman off the mat for a few ticks
+#     at a time. Sampled on the shipped scene: latched at 91 from about 1350 to
+#     1950, then 2 at 2000, 0 at 2050, 1 at 2100. Tick 2000 sat one flicker
+#     from the edge and the boat's new underbody boxes moved her 12 cm at that
+#     tick, which was enough. 1800 is the middle of the window and reads 91 on
+#     both sides of that change.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2000 \
   --hold "0:move_z=1; 500:move_z=1,move_x=1" \
   --assert "state.pinned == 0" --assert "state.knots > 4.0" >/dev/null
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 2000 \
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1800 \
   --hold "0:move_z=1; 500:move_z=1,move_x=-1" \
   --assert "state.pinned > 90" --assert "state.knots < 1.0" \
   | grep -q '"message": "PUSHING ON SOMETHING   S to back off"'
@@ -1130,7 +1194,7 @@ rm -f /tmp/loom-fight-1.json /tmp/loom-fight-2.json /tmp/loom-fight-3.json
 cmp /tmp/loom-demo-1.json /tmp/loom-demo-2.json
 cmp /tmp/loom-demo-2.json /tmp/loom-demo-3.json
 rm -f /tmp/loom-demo-1.json /tmp/loom-demo-2.json /tmp/loom-demo-3.json
-echo "gameplay: 15 scenes asserted, 7 blocks of deliberately wrong input, fight and demo byte-identical across 3 processes"
+echo "gameplay: 18 scenes asserted, 7 blocks of deliberately wrong input, fight and demo byte-identical across 3 processes"
 
 # ---------------------------------------------------------------------------
 # 7. Work per frame. **Nothing above this line can see a frame get slower.**

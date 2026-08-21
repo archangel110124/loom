@@ -1,6 +1,6 @@
 # **The deck of the JIB VI, as the boxes a person stands on.**
 #
-# Twenty-six collision boxes and the instance node they hang off, in the
+# Thirty-seven collision boxes and the instance node they hang off, in the
 # boat's own frame. Nothing here is drawn.
 # Instance this **as a child of a `jib_vi` instance** and the hull becomes
 # walkable:
@@ -57,8 +57,13 @@
 # `assets/test/jib_vi_stations.loom` are the detector for when they stop
 # matching.
 #
-# Every number below was measured off `jib_vi_wide.obj` by marching columns
-# through it:
+# The deck and bulwark numbers below were measured off `jib_vi_wide.obj` by
+# marching columns through it. **That mesh is no longer what the prefab draws**
+# — `jib_vi.loom` ships the refined twenty-one-material hull — so a number here
+# that has not been re-marched against the shipped meshes is a number about a
+# boat that is gone. The deckhouse note under this list was exactly that, and
+# it cost the demo its interior. Everything added since is marched off
+# `assets/meshes/jib_vi_*.obj` and says so where it lands.
 #
 #   deck at the centreline   0.66 aft, 0.60 amidships, 0.74 at x=4, 1.65 at x=8
 #   walkable half-beam       2.55 aft, 2.80 amidships, 2.30 at x=4, 0.65 at x=8
@@ -66,9 +71,37 @@
 #   deckhouse footprint      x -6.2..3.9, |z| <= 1.50 (1.05 forward of x=2.2)
 #   flybridge deck           3.08, x -6.5..4.2, |z| <= 2.60; helm console 3.45
 #
-# **The deckhouse is solid because nobody can get inside it.** Headroom under
-# its canopy is 1.49 m and a capsule is 1.90 m, so the drawn floor in there is
-# unreachable whatever the collider says.
+# **THE DECKHOUSE USED TO BE SOLID AND THAT WAS A MEASUREMENT OF A DIFFERENT
+# BOAT.** This file said "headroom under its canopy is 1.49 m and a capsule is
+# 1.90 m, so the drawn floor in there is unreachable whatever the collider
+# says", and it was true of `jib_vi_wide.obj`. The refined hull that replaced
+# it has a real salon in there and a real door into it. Marched off the
+# *shipped* meshes:
+#
+#   sole inside the house    0.60 aft, 0.62 amidships, 0.67 at x=2
+#   deckhead above it        2.2 m of clear headroom the whole length
+#   after bulkhead           drawn at x -6.265..-6.175, and OPEN between
+#                            z = +0.16 and +1.08 from the sole to a header
+#                            at 2.60 — a 0.92 m doorway with 1.98 m under it
+#   capsule in `deeper_demo` 1.80 m tall, 0.70 m across (`height = 1.8`,
+#                            `radius = 0.35`; 1.90 is the *default* shape and
+#                            is not what that scene authors)
+#
+# So the door fits and the room fits, and the one solid box across the whole
+# footprint was walling both of them up. `col_house` is now a shell — two
+# sides, an after bulkhead with the door cut out of it, and a forward end.
+#
+# **`col_house_fwd` stays solid, and that is measured too.** The drawn console
+# forward of x = 2.2 is 1.0 m proud of the sole and spans |z| <= 0.70, and the
+# cabin side narrows to |z| = 0.86 there — so the passages either side of it
+# are **0.14 m clear against a 0.70 m capsule**. The wheelhouse cannot be
+# walked into however that block is authored. The salon can.
+#
+# `ponytail:` the settees, the tables and the console are **not** collided, so
+# you walk through them. Colliding the settees costs two boxes and colliding
+# the console costs the wheelhouse (see the 0.14 m above); this file's own rule
+# is that boxes track *architecture*, and furniture is the half of the mesh
+# still being detailed. Add them when somebody minds.
 #
 # `ponytail:` deck plates are rectangles and the bow is a wedge, so the two
 # forward plates overhang the drawn hull by up to a metre of nothing. It is
@@ -238,6 +271,116 @@ transform = { pos = [8.55, 1.90, 0.0] }
   [node.components.BoxCollider]
   half_extents = [0.45, 1.00, 0.70]
 
+# --- THE HULL BELOW THE DECK, WHICH HAD NO COLLIDER AT ALL -----------------
+#
+# > "Up under the ship, if you get in the water, you don't collide with the
+# > side of the ship and can literally just go up under it and see all the
+# > insides."
+#
+# **True, and it was total rather than leaky.** The hull's own `BoxCollider` in
+# `jib_vi.loom` is demoted to mass-only the moment this file attaches a plate
+# (ADR 0060, `play.rs::demote_to_mass_only`) — which is right, or the deck is a
+# lid a metre in the air — and every box above this line starts **at or above
+# y = 0.30**: the plates at 0.315 and the bulwarks at 0.30. The waterline is 0.
+# So from the keel at -1.65 up to 0.30 the boat was open water, along her whole
+# length and both sides.
+#
+# Measured, before these boxes existed. A swimmer spawned two metres off her
+# port topside at `assets/test/rig_underhull.loom`, holding one key:
+#
+#   tick   30   z -15.185      <- outside her
+#   tick   60   z -14.234
+#   tick   90   z -13.285      <- her drawn topside is at -13.75
+#   tick  150   z -11.385      <- amidships, inside the hull
+#   tick  300   z  -6.635      <- out the far side and under the rig
+#
+# 1.9 m/s all the way through, not a tick of deceleration anywhere.
+#
+# **Sized to the waterline beam, not the maximum beam, because the swimmer's
+# eye is at the waterline.** `deeper_player.rhai` floats a capsule at centre
+# -0.70 with its head at +0.20 and its feet at -1.60, so the eye rides at
+# +0.05 and the only section he can ever see or touch is the one there. Each
+# box takes the drawn half-beam at y = +0.10 over its own span, marched off the
+# shipped meshes:
+#
+#   x    -9.4  -7.9  -6.4  -4.9  -3.4  -1.9  -0.4   1.1   2.6   4.1   5.6
+#   |z|  2.30  2.46  2.56  2.64  2.70  2.71  2.65  2.47  2.11  1.49  0.75
+#
+# Below that they are wider than the hull — at the keel, much wider — and that
+# is deliberate and costs nothing: a swimmer cannot dive. `vy` in the water is
+# `(FLOAT_Y - y) * FLOAT_RATE` and nothing else, so -0.70 is a ceiling *and* a
+# floor and there is no input that reaches the turn of the bilge.
+#
+# **They stop at y = +0.40**, which overlaps the deck plates and the bulwark
+# feet rather than meeting them, so there is no seam at the sheer for a capsule
+# to find. Above that the existing boxes own the walk.
+#
+# `ponytail:` seven axis-aligned boxes against a hull that tapers. Worst
+# overshoot is at the fat end of a segment — 0.33 m at x = 5.1 and about 0.5 m
+# near the stem, where the drawn hull is a knife edge and any box overshoots.
+# Everywhere aft of x = 2 it is under 0.16 m, which is inside the capsule's own
+# radius. Yaw them in pairs like the bulwarks if that ever has to be tighter.
+#
+# **Every one weighs nothing** — `attach_box` builds them with
+# `ColliderMassProps::Mass(0.0)` — so `jib_vi.loom`'s stability arithmetic is
+# untouched, exactly as it is by the plates above.
+
+[[node]]
+name = "col_hull_stern"
+parent = "Decks"
+transform = { pos = [-8.225, -0.65, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.325, 1.05, 2.40]
+
+[[node]]
+name = "col_hull_quarter"
+parent = "Decks"
+transform = { pos = [-5.15, -0.65, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.75, 1.05, 2.60]
+
+[[node]]
+name = "col_hull_mid"
+parent = "Decks"
+transform = { pos = [-1.65, -0.65, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.75, 1.05, 2.66]
+
+[[node]]
+name = "col_hull_fwd"
+parent = "Decks"
+transform = { pos = [1.10, -0.65, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [1.00, 1.05, 2.42]
+
+[[node]]
+name = "col_hull_shoulder"
+parent = "Decks"
+transform = { pos = [2.85, -0.65, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.75, 1.05, 1.98]
+
+[[node]]
+name = "col_hull_bow"
+parent = "Decks"
+transform = { pos = [4.35, -0.65, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.75, 1.05, 1.35]
+
+[[node]]
+name = "col_hull_forefoot"
+parent = "Decks"
+transform = { pos = [6.00, -0.65, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.90, 1.05, 0.55]
+
 # --- what stands on the deck -----------------------------------------------
 
 # The bait box in the cockpit: 0.48 m proud of the deck, which is over the
@@ -251,18 +394,71 @@ transform = { pos = [-7.80, 0.90, 0.0] }
   [node.components.BoxCollider]
   half_extents = [0.60, 0.24, 0.78]
 
-# The deckhouse, solid. See the note above: 1.49 m of headroom under its canopy
-# against a 1.90 m capsule, so its drawn floor is unreachable either way, and a
-# solid block is the honest collider until the mesh effort raises the roof.
-# What it leaves is the side deck — 1.20 m clear between this and the bulwark,
-# both sides, bow to stern, which is the header's gameplay requirement.
+# --- the deckhouse, as a shell with a door in it ---------------------------
+#
+# One box became five. Every outboard face is exactly where the solid box's
+# was — |z| = 1.50, x = -6.20 and 2.20, y 0.39 to 3.05 — so **the side deck is
+# the 1.20 m it always was** and nothing outside the house moved. What changed
+# is that the inside is now inside.
+#
+# The inboard faces sit on the drawn inner skin at |z| = 1.22, which leaves the
+# salon 2.44 m across. The sole under it is already there: `col_deck_aft`
+# reaches x = -6.05, `col_deck_mid` -6.15 to 0.05 and `col_deck_fwd` on to
+# 2.65, so the threshold and the whole room are floored. The deckhead is
+# `col_fly_deck` at 2.78 — 2.16 m over the sole.
+
 [[node]]
-name = "col_house"
+name = "col_house_port"
 parent = "Decks"
-transform = { pos = [-2.00, 1.72, 0.0] }
+transform = { pos = [-2.00, 1.72, -1.36] }
 
   [node.components.BoxCollider]
-  half_extents = [4.20, 1.33, 1.50]
+  half_extents = [4.20, 1.33, 0.14]
+
+[[node]]
+name = "col_house_stbd"
+parent = "Decks"
+transform = { pos = [-2.00, 1.72, 1.36] }
+
+  [node.components.BoxCollider]
+  half_extents = [4.20, 1.33, 0.14]
+
+# The after bulkhead, in two pieces with the doorway between them. The drawn
+# opening is z +0.16 to +1.08; these stop at exactly those numbers, so the
+# collider gap and the hole in the mesh are the same hole. 0.92 m of it against
+# a 0.70 m capsule — 0.11 m of clearance a side, which is a door you walk
+# through rather than one you aim at.
+[[node]]
+name = "col_house_aft_port"
+parent = "Decks"
+transform = { pos = [-6.15, 1.72, -0.72] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.05, 1.33, 0.78]
+
+[[node]]
+name = "col_house_aft_stbd"
+parent = "Decks"
+transform = { pos = [-6.15, 1.72, 1.34] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.05, 1.33, 0.16]
+
+# **No header box over the door, deliberately.** The drawn header is at 2.60
+# and a capsule standing on a 0.62 sole reaches 2.42, so the strip above it is
+# unreachable by walking; jumping into it arrives inside the room, which is
+# where the door leads anyway. A box there would collide with nothing.
+
+# The forward end of the salon, across the full house width. `col_house_fwd`
+# below is only |z| <= 1.05, so without this a player could walk forward out of
+# the salon at |z| 1.05-1.22 and end up inside the drawn cabin side.
+[[node]]
+name = "col_house_front"
+parent = "Decks"
+transform = { pos = [2.15, 1.72, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [0.05, 1.33, 1.50]
 
 [[node]]
 name = "col_house_fwd"

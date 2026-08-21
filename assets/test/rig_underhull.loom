@@ -1,0 +1,63 @@
+# **Can you swim through the boat?** The demo hub with the player already in
+# the sea, off her port quarter, one metre under the surface.
+#
+# `extends`, not a copy, and **one field is different** — where the Player
+# starts. Same movement script, same hull, same input path as
+# `rig_overboard.loom`; only the spawn moved.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS SCENE EXISTS
+# ---------------------------------------------------------------------------
+#
+# > "Up under the ship, if you get in the water, you don't collide with the
+# > side of the ship and can literally just go up under it and see all the
+# > insides."
+#
+# The hull's own `BoxCollider` in `jib_vi.loom` is **demoted to mass-only** the
+# moment `jib_vi_decks.loom` attaches a deck plate (ADR 0060, and
+# `play.rs::demote_to_mass_only` is where it happens). What was left collided
+# was the deck prefab's own boxes, and the lowest of those — the deck plates at
+# boat-local y 0.315 and the bulwarks from 0.30 — start **above the waterline**.
+# Everything from the keel at local y = -1.55 up to the deck plate's underside
+# was open water: a swimmer floats with his capsule centre at -0.70 and his
+# head at +0.20, which is inside that band along its whole length.
+#
+# The swim is 2 m from the spawn to where her port topside is drawn, at
+# 1.9 m/s — about 63 ticks. 600 ticks is thirty seconds of pressing on, which
+# is what a player does.
+#
+#   # she is solid from the outside
+#   loom sim assets/test/rig_underhull.loom --ticks 600 --hold move_z=-1 \
+#     --assert "Rig/Player.z < -13.2"
+#
+# Her drawn topside **at the waterline** is at z = -13.11 here (half-beam 2.66
+# amidships at y = +0.10, hull centred on z = -10.45); the 3.30 m half-beam in
+# her header is the *deck edge*, a metre and a half higher up and not what a
+# swimmer meets. So -13.2 is the claim "he never got inboard of her side".
+# Measured after: he stops at **-13.481**, one capsule radius plus a couple of
+# centimetres off the underbody box.
+#
+# Before the underbody boxes existed this run ended at **z = +2.87** — through
+# the hull, out the far side and thirteen metres past her, at a flat 1.9 m/s
+# with not a tick of deceleration anywhere in between.
+
+[scene]
+format = 1
+id = "2b7f4c19-5d80-4a3e-9c62-1e08d47ab935"
+
+[[prefab]]
+key = "demo"
+id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
+path = "../games/deeper_demo.loom"
+
+[[node]]
+name = "Rig"
+extends = "demo"
+
+[[node]]
+name = "Player"
+parent = "Rig"
+
+  # The one field this file changes. Her port topside is drawn at z = -13.75;
+  # this is two metres off it and a metre under.
+  transform = { pos = [3.0, -0.70, -16.00] }

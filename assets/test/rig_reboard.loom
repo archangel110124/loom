@@ -1,0 +1,71 @@
+# **Overboard from the BOAT, a hundred metres out, and back onto her.**
+#
+# `extends`, not a copy. **Two fields are different** — where the boat is and
+# where the player is.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS SCENE EXISTS
+# ---------------------------------------------------------------------------
+#
+# > "There also needs to be a way to get back on the ship if somebody falls
+# > off. And let's say they're, like, deep out in the water."
+#
+# `rig_overboard.loom` is the same claim about the *rig*: fall in, swim, walk
+# out. This is the claim about the *hull*, and it is the harder half. Until
+# `Rig/Boat/SternLadder` existed the answer at sea was nothing at all: the two
+# rig ramps are the only way out of the water in this scene, the caption named
+# the nearer of them, and from the fishing ground that is **88 m** to
+# `Rig/Slipway` and **114 m** to `Rig/Ladder` — a two-minute swim away from the
+# boat you were standing on, which is then adrift with your catch in it.
+#
+# She is at x = 120 here because that is where the demo's own taught gesture
+# puts her: `--hold move_z=1` reads `Rig/Boat.x > 110` at tick 2600. The spawn
+# is 2.6 m astern of the ladder's foot, floating. Facing is the default -Z, so
+# `right` is +X and `--hold move_x=1` is "swim at her".
+#
+#   # 1. he is floating, not standing and not drowning  (the control)
+#   loom sim assets/test/rig_reboard.loom --ticks 240 \
+#     --assert "Rig/Player.y > -1.0" --assert "Rig/Player.y < 0.0"
+#
+#   # 2. the caption names the thing he can actually reach
+#   loom sim assets/test/rig_reboard.loom --ticks 60 \
+#     | grep -q '"message": "IN THE WATER   swim east to her stern ladder"'
+#
+#   # 3. and the ladder puts him back on her deck
+#   loom sim assets/test/rig_reboard.loom --ticks 900 --hold move_x=1 \
+#     --assert "Rig/Player.y > 0.9" --assert "state.aboard == 1"
+#
+# `y > 0.9` is a capsule standing on something aboard her rather than swimming
+# beside her: her cockpit sole is at 0.64 and a capsule's centre rides 0.90
+# above its feet, so standing on the sole reads about 1.55 and floating reads
+# -0.70. Measured after: **1.567**, at boat-local (-6.99, -2.05) — on the sole,
+# inside `HelmMat`, which is to say he climbs out of the sea and finds himself
+# at the wheel. Run 1 is what makes run 3 mean anything; without it a run that
+# ended on the deck could have ended there because he never got wet.
+
+[scene]
+format = 1
+id = "4e9b0c37-2a61-4d85-b0f3-91c5d2a7e648"
+
+[[prefab]]
+key = "demo"
+id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
+path = "../games/deeper_demo.loom"
+
+[[node]]
+name = "Rig"
+extends = "demo"
+
+# Out at the fishing ground, on the track the demo's one key sails.
+[[node]]
+name = "Boat"
+parent = "Rig"
+transform = { pos = [120.0, 0.0, -10.45] }
+
+[[node]]
+name = "Player"
+parent = "Rig"
+
+  # The ladder's foot is at boat-local (-13.02, -1.80, -2.05), so world
+  # (106.98, -1.80, -12.50). This is 2.6 m aft of it on the same centreline.
+  transform = { pos = [104.40, -0.70, -12.50] }

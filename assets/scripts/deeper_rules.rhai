@@ -488,15 +488,24 @@ fn without(hold, name) {
 //
 // Feet, not tops: the number that matters to a swimmer is where the ramp
 // enters the water, and both of these reach y = -1.80 to be under his feet.
-fn way_out(me, ramps) {
+//
+// **The boat's own ladder is the third way out and it is the one that moves.**
+// The two rig ramps are fixed numbers; `Rig/Boat/SternLadder` is wherever she
+// happens to be, which is the whole point of it — go over the side thirty
+// metres out and the nearest way back is her transom, not a rig you cannot
+// see. So each entry carries the name of what it is and this returns both
+// halves of the sentence: a bearing computed from a target the swimmer cannot
+// reach is the same defect round 5's fixed bearing had, one target further on.
+fn way_out(me, ways) {
     let best = 1.0e9;
     let dx = 0.0;
     let dz = 0.0;
-    for r in ramps {
+    let what = "the ramp";
+    for r in ways {
         let ax = r[0] - me[0];
         let az = r[1] - me[2];
         let d = ax * ax + az * az;
-        if d < best { best = d; dx = ax; dz = az; }
+        if d < best { best = d; dx = ax; dz = az; what = r[2]; }
     }
     let ns = if dz < 0.0 { "north" } else { "south" };
     let ew = if dx > 0.0 { "east" } else { "west" };
@@ -505,7 +514,8 @@ fn way_out(me, ramps) {
     // 2.5 is a 22-degree band each side of a cardinal. Wider and "north" is
     // pointed at a ramp you can miss; narrower and almost everything is a
     // hyphenated word.
-    if a > b * 2.5 { ew } else if b > a * 2.5 { ns } else { ns + "-" + ew }
+    let word = if a > b * 2.5 { ew } else if b > a * 2.5 { ns } else { ns + "-" + ew };
+    word + " to " + what
 }
 
 // **WHERE A THING IS, IN THE FRAME OF THE MAN LOOKING FOR IT.**
@@ -563,11 +573,18 @@ let BOAT = "Rig/Boat";
 let RANGE = 2.0;   // metres, horizontal. An arm and a lean.
 let SLOTS = 4;
 
-// The two ramp feet, at the waterline, in world XZ. `Rig/Slipway` descends east
-// off the east end; `Rig/Ladder` descends north off the west end of the berth.
-// Written here rather than read from `positions` because a node's position is
-// its *centre* and what a swimmer needs is the wet end.
-let RAMPS = [[16.40, 3.40], [-9.30, -11.20]];
+// The two ramp feet, at the waterline, in world XZ, and what to call them.
+// `Rig/Slipway` descends east off the east end; `Rig/Ladder` descends north off
+// the west end of the berth. Written here rather than read from `positions`
+// because a node's position is its *centre* and what a swimmer needs is the
+// wet end.
+let RAMPS = [[16.40, 3.40, "the ramp"], [-9.30, -11.20, "the ramp"]];
+
+// The third one, and it is the only one that moves. `Rig/Boat/SternLadder` is
+// a 45 degree slab off her port quarter reaching y = -1.80, and its *centre*
+// is close enough: it is 4.8 m long and a swimmer told "swim north-west to her
+// stern ladder" is being pointed at a nineteen-metre boat he can see.
+let BOAT_LADDER = "Rig/Boat/SternLadder";
 
 // The crate on the wharf, and how close the boat has to be for the catch in her
 // hold to count as landed. 14.0 m from the crate to the hull's origin: she
@@ -1138,7 +1155,18 @@ if hub {
         // ever; round 5 replaced it with a fixed bearing that is right from one
         // corner of the sea and 114 m wrong from where the taught gesture's own
         // port miss lands. `way_out` computes it.
-        message = "IN THE WATER   swim " + way_out(me, RAMPS) + " to the ramp";
+        //
+        // **And it counts her stern ladder, which is the round-11 half.** Go
+        // over the side at the fishing ground and both rig ramps are two
+        // hundred metres away behind you; the boat you fell off is five. A
+        // sentence naming the rig there is the same lie round 5 told, and it is
+        // the one a player meets at the moment the demo is most fun.
+        let ways = RAMPS;
+        if BOAT_LADDER in positions {
+            let l = positions[BOAT_LADDER];
+            ways.push([l[0], l[2], "her stern ladder"]);
+        }
+        message = "IN THE WATER   swim " + way_out(me, ways);
     } else if noticing {
         // **Above the fight, and that is the fix rather than the ordering.**
         // This branch sat *below* `phase >= 1`, and a landing sets `phase = 5`

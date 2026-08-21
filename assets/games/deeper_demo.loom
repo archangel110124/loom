@@ -98,6 +98,35 @@
 #
 #
 # -----------------------------------------------------------------------------
+# SHE IS A SOLID OBJECT NOW, AND SHE WAS NOT
+# -----------------------------------------------------------------------------
+#
+# Three things a player found in one sitting, and they were one bug: the hull
+# was **drawn** solid and **collided** as a lid with a deckhouse-shaped brick on
+# it. The hull's own `BoxCollider` is demoted to mass-only the moment
+# `jib_vi_decks.loom` attaches a deck plate (ADR 0060) — which is right, or you
+# stand on an invisible lid a metre above the deck — and every box in that
+# prefab started at or above y = 0.30 against a waterline of 0.
+#
+#   * **You could swim through her.** Not leak through: *through*. Two metres
+#     off her port topside, holding one key, a swimmer crossed the hull at a
+#     flat 1.9 m/s and came out thirteen metres the other side. Seven underbody
+#     boxes now carry her section from the keel up to the sheer.
+#   * **You could not get into the salon**, which is the best-looking room on
+#     the boat and visible through her windows the whole time. Her after
+#     bulkhead has a 0.92 m door in it and 2.2 m of headroom behind it; the
+#     collider was one solid block, authored on a headroom measurement taken
+#     off the *previous* hull mesh.
+#   * **You could not get back aboard.** `Rig/Boat/SternLadder` is the answer
+#     and it is the only thing here that is new geometry rather than corrected
+#     collision. The caption in the water names it when it is the nearer way
+#     out, which at the fishing ground it always is — the rig is 88 m away.
+#
+# Each has a row in `scripts/green.sh` and a scene of its own:
+# `rig_underhull.loom`, `rig_salon.loom`, `rig_reboard.loom`.
+#
+#
+# -----------------------------------------------------------------------------
 # FOUR DECISIONS WORTH KNOWING BEFORE YOU CHANGE ANYTHING
 # -----------------------------------------------------------------------------
 #
@@ -215,9 +244,23 @@
 #    on the mat is hands-off, so the throttle never opens and the pair pushes
 #    into the cockpit geometry. Releasing either key clears it.
 # 8. **Wedged aboard with an empty hold, `BLOCKED` still says `go round it`**
-#    without naming what has you. There are nine colliders on that deck and
-#    nobody has worked out which.
+#    without naming what has you. There are **thirty-seven** colliders on that
+#    hull now and nobody has worked out which. The likeliest new one is the
+#    salon door: press starboard-and-slightly-aft while standing in it and the
+#    capsule can catch the jamb, which is why the collider gap is 1.12 m
+#    against a drawn opening of 0.92 — see `jib_vi_decks.loom`.
 # 9. **The deck is beige and the hub reads pale.** A palette pass, not a boat.
+# 10. **You walk through the settees, the tables and the wheelhouse console.**
+#    The deckhouse is collided as a shell and its furniture is not, on the
+#    grounds that colliding the console costs the wheelhouse outright: the
+#    passages either side of the drawn one are 0.14 m clear against a 0.70 m
+#    capsule. So the salon is a room you can walk into and the fittings in it
+#    are painted on. `jib_vi_decks.loom` states the trade where the boxes are.
+# 11. **The stern ladder adds 3.4 m to her length and it is always there.**
+#    A 45 degree ramp from y = -1.80 to her transom cap is 3.42 m of run and
+#    nothing shortens it (that file's block says what else was measured). A
+#    real one folds; this one cannot, because a node script may write a
+#    transform and there is no key left to ask it with.
 #
 #
 # -----------------------------------------------------------------------------
@@ -1656,6 +1699,121 @@ transform = { pos = [-8.00, 1.01, 2.41], scale = [1.50, 0.37, 0.15] }
   [node.components.Material]
   albedo = [0.31, 0.27, 0.22]
   roughness = 0.85
+
+# ---------------------------------------------------------------------------
+# THE STERN LADDER — the way back aboard, and the demo had none
+#
+# > "There also needs to be a way to get back on the ship if somebody falls
+# > off. And let's say they're, like, deep out in the water."
+#
+# **Falling off her was unrecoverable in the one way that matters: you lost the
+# boat.** `deeper_player.rhai`'s own header says so — *"she pops back up when
+# you let go, twenty metres west of her berth, against a closed rail, with
+# nothing in this scene that lets a swimmer climb aboard. The rig has a slipway
+# for the player and nothing for the boat."* The two rig ramps get a swimmer
+# out of the water; neither gets him back on the hull, and out at sea there is
+# no rig within a hundred metres.
+#
+# **The rise is 3.42 m and nothing shortens it.** Her transom cap is 1.58 above
+# the waterline and a ramp has to reach y = -1.80 at the bottom, for the reason
+# `Slipway` and `Ladder` state: a swimmer floats with his capsule centre at
+# -0.70 and his feet at -1.60, so a ramp that stops at the surface is a wall to
+# a man who is under it. The controller walks 50 degrees, this is at **45**, and
+# 45 degrees of 3.42 m is 3.42 m of run. So she gains three and a half metres
+# aft. That is what a dive ladder on a charter boat is, and every cheaper shape
+# was measured and thrown away:
+#
+#   * **Through the transom to the cockpit sole** (0.64, so only 2.44 m of run).
+#     The transom is a 0.92 m bulwark and `step_height` is 0.25, so crossing it
+#     needs a notch — a collider a third the height of the rail it stands for,
+#     which is `jib_vi_decks.loom`'s own named lie told backwards.
+#   * **The drawn stern gate**, which is a real hole in a real bulkhead at
+#     local z -2.24..-1.42 — and it is 0.71 m tall on a 0.20 m sill. A capsule
+#     is 1.80 m. It is a gate you step through, not one this engine can.
+#   * **Treads instead of a ramp**, at 0.25 m a riser: fourteen of them and
+#     4.2 m of run, which is longer.
+#
+# **Why the port quarter and not the centreline, which is the only free
+# parameter here.** `Rig/Ladder` — the rig's own ramp — reaches from world
+# x -10.15 to -8.45 and z -11.25 to -6.55, which is *directly astern of the
+# berth*: her transom is at world x = -6.53, so anything longer than 1.9 m aft
+# of it shares x with that ramp and the only clearance available is in z. On
+# the centreline the two pass within 0.13 m and on the starboard quarter within
+# 0.20 m, and a static collider inside a dynamic hull is a boat that gets
+# shoved out of her berth.
+#
+# **And why local z = -2.05 rather than further out, which was measured
+# twice.** At -2.35 a climber arrives with his capsule overlapping
+# `col_bulwark_aft_port` (inner face -2.56) and **walks forward along the rail
+# cap** — traced, he ends at y = 2.445, balanced on a 0.60 m bulwark with more
+# than half of himself over the deck. At -2.05 his capsule clears that face by
+# 0.21 m and he steps down onto the cockpit sole: y = 1.567, which is a man
+# standing on a deck at 0.64. It also lands him inside `HelmMat`, so climbing
+# back aboard puts him at the wheel, which is where he was going.
+#
+# That leaves world z -13.05..-11.95 against the rig ramp's -11.25: **0.70 m
+# clear**.
+#
+# `ponytail:` that clearance is a *plan* clearance and she is free to swing.
+# Yaw her 10 degrees in the berth and the ramp's foot sweeps 2.3 m in z, which
+# reaches the rig ramp. No tape in `scripts/green.sh` leaves her yawed and a
+# contact there costs a bump rather than a run, so it is left; move
+# `Rig/Ladder` west if it ever bites.
+#
+# **`half_extents = [1, 1, 1]` and the size is in `scale`.** `play.rs` multiplies
+# authored half-extents by the node's world scale, so `[1, 1, 1]` is the value
+# that makes a collider exactly its drawn box. The three `Step*` nodes above
+# author their scale twice and therefore collide at 1.50 x 0.37 x 0.15 *times*
+# themselves; they work, they are load-bearing for the boarding tape, and
+# correcting them is its own commit with a re-pin in it.
+
+[[node]]
+name = "SternLadder"
+parent = "Rig/Boat"
+transform = { pos = [-11.31, -0.09, -2.05], rot_euler = [0.0, 0.0, 45.0], scale = [2.4185, 0.09, 0.55] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.BoxCollider]
+  half_extents = [1.0, 1.0, 1.0]
+
+  [node.components.Material]
+  albedo = [0.55, 0.55, 0.53]
+  roughness = 0.75
+  metallic = 0.2
+
+# Two rails down its sides. Drawn only — a renderable node under a dynamic
+# ancestor gets no collider of its own, which is the same rule `HelmMat` and
+# the fish-box hatch are painted by — so they are edges to see and not a kerb
+# to trip on. Without them a bare slab at 45 degrees reads as a fault in the
+# geometry; the rig's two ramps carry the same pair for the same reason.
+
+[[node]]
+name = "SternLadderRailPort"
+parent = "Rig/Boat"
+transform = { pos = [-11.31, -0.09, -2.68], rot_euler = [0.0, 0.0, 45.0], scale = [2.4185, 0.16, 0.08] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.62, 0.63, 0.65]
+  roughness = 0.35
+  metallic = 0.85
+
+[[node]]
+name = "SternLadderRailStbd"
+parent = "Rig/Boat"
+transform = { pos = [-11.31, -0.09, -1.42], rot_euler = [0.0, 0.0, 45.0], scale = [2.4185, 0.16, 0.08] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.62, 0.63, 0.65]
+  roughness = 0.35
+  metallic = 0.85
 
 # ---------------------------------------------------------------------------
 # ROUND 9 — SOUND, INSIDE WHAT THE ENGINE ACTUALLY HAS

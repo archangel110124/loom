@@ -142,9 +142,11 @@ let ASTERN = 500000.0;   // less than half. A screw astern is inefficient in
 //
 // It is worth fixing because it is not recoverable in the way the sea is. She
 // pops back up when you let go (y = 0.031 at tick 3600) — twenty metres west
-// of her berth, against a closed rail, with nothing in this scene that lets a
-// swimmer climb aboard. The rig has a slipway for the player and nothing for
-// the boat.
+// of her berth, against a closed rail. **She now carries her own ramp** —
+// `Rig/Boat/SternLadder`, which is this paragraph's old last sentence answered
+// ("the rig has a slipway for the player and nothing for the boat") — so a
+// swimmer gets back onto her. Getting the *hull* back off a quay is still what
+// the limiter below is for; a boarding ramp does not steer.
 //
 // So: **if she is commanded ahead and is not making way, the throttle goes to
 // zero.** A skipper pressed on a quay does not hold full ahead, and neither
