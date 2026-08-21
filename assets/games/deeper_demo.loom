@@ -743,12 +743,28 @@ name = "Rig"
     #
     # She heels through a sustained hard turn and the sea takes him off the
     # mat; `deeper_player.rhai` already clamps the wheel to 0.3 for exactly
-    # this and the clamp runs out around Hs 0.3. **Steaming straight holds at
-    # the full 16 this engine supports** — only the sustained turn does not —
-    # so raising this rung is gameplay work on the helmsman's footing, not
-    # weather work, and it is the one thing standing between this demo and a
-    # real blow. `assets/test/weather_ramp.loom` is the ladder at 16 with the
-    # carry measured at every rung.
+    # this and the clamp runs out around Hs 0.3.
+    #
+    # **Above 5.0 the response is not monotone, and that is the real finding.**
+    # Scaling the whole ladder to a top of 5 / 10 / 16 and running three rows:
+    #
+    #                         top 5   top 10   top 16
+    #     straight, 600        PASS     PASS     PASS
+    #     straight, 3200       PASS     FAIL     PASS
+    #     full wheel, 3200     PASS     PASS     FAIL
+    #
+    # So there is no ceiling to raise this to — there is a highest rung at
+    # which the *whole* of green.sh §6 passes, and it is 5.0. The demo's helm
+    # rows are open-loop tapes whose outcome turns on where the hull happens to
+    # be after fifty seconds of constant rudder, and a rougher sea moves that
+    # unpredictably rather than steadily. It is the same fragility as the
+    # boarding walk documented on `fetch` above.
+    #
+    # **Raising this is therefore gameplay work, not weather work**: closing
+    # the loop on those tapes (steer toward a mark instead of holding a
+    # constant rudder) and giving the helmsman better footing.
+    # `assets/test/weather_ramp.loom` carries the ladder at 16 with ADR 0060's
+    # carry measured at every rung, which is where the engine's own limit is.
     wind_speed = 5.0
     # Sea and sky are one value: there is no `out there` any more and the world
     # stops at forty metres.
