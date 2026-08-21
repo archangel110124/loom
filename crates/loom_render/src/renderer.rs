@@ -3253,41 +3253,61 @@ impl Renderer {
         path: &std::path::Path,
     ) -> Result<(), RenderError> {
         let pixels = self.render(objects, particles, camera)?;
-        let file = std::fs::File::create(path).map_err(RenderError::Io)?;
-        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), self.width, self.height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        // **`Balanced` is `png`'s default and it was almost the whole marginal
-        // headless frame.** Measured on `lanternhead` at 1920x1080, quiet box,
-        // min of 3, as `(t(--frames 41) - t(--frames 1)) / 40` — forty frames
-        // rather than ten because at ~14 ms/frame the ten-frame form is mostly
-        // measuring one binary's run-to-run spread:
-        //
-        //     Balanced  402 ms/frame, 2,279,868 B
-        //     Fast       13.6         2,903,003
-        //     Fastest    11.6         3,903,850
-        //
-        // `Fast` over `Fastest`: 2 ms a frame is a poor trade for a megabyte a
-        // frame, and `Fastest` does no output buffering, so on incompressible
-        // data it can emit files *larger* than no compression at all
-        // (png 0.18.1, `common.rs:330-333`). `Fast` runs fdeflate, which beats
-        // libpng's fastest mode on ratio — though its own doc note says it can
-        // do the same thing in streaming mode, so the guard is the byte count
-        // in the table above, not the level's name.
-        //
-        // PNG is lossless at every level, so no reference moves and nothing
-        // needs re-blessing: `loom compare` decodes pixels, and `xtask repeat`'s
-        // three fresh renders all come from this same encoder at this same
-        // level. The file gets bigger; the image does not change.
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|e| {
-            RenderError::Io(std::io::Error::other(e.to_string()))
-        })?;
-        writer.write_image_data(&pixels).map_err(|e| {
-            RenderError::Io(std::io::Error::other(e.to_string()))
-        })?;
-        Ok(())
+        write_png(path, &pixels, self.width, self.height)
     }
+}
+
+/// Write RGBA8 `pixels` to `path`.
+///
+/// Shared with the window's capture path ([`crate::viewer::Viewer::capture`]),
+/// which reads back a *composited* frame — scene plus overlay — and has exactly
+/// the same encoder question to answer. One function so the answer cannot
+/// diverge: a screenshot encoded at `Balanced` while the golden images are
+/// encoded at `Fast` would cost thirty times as long per frame for a file that
+/// decodes to identical pixels.
+///
+/// # Errors
+/// [`RenderError::Io`] if the file cannot be written.
+pub(crate) fn write_png(
+    path: &std::path::Path,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(), RenderError> {
+    let file = std::fs::File::create(path).map_err(RenderError::Io)?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    // **`Balanced` is `png`'s default and it was almost the whole marginal
+    // headless frame.** Measured on `lanternhead` at 1920x1080, quiet box,
+    // min of 3, as `(t(--frames 41) - t(--frames 1)) / 40` — forty frames
+    // rather than ten because at ~14 ms/frame the ten-frame form is mostly
+    // measuring one binary's run-to-run spread:
+    //
+    //     Balanced  402 ms/frame, 2,279,868 B
+    //     Fast       13.6         2,903,003
+    //     Fastest    11.6         3,903,850
+    //
+    // `Fast` over `Fastest`: 2 ms a frame is a poor trade for a megabyte a
+    // frame, and `Fastest` does no output buffering, so on incompressible
+    // data it can emit files *larger* than no compression at all
+    // (png 0.18.1, `common.rs:330-333`). `Fast` runs fdeflate, which beats
+    // libpng's fastest mode on ratio — though its own doc note says it can
+    // do the same thing in streaming mode, so the guard is the byte count
+    // in the table above, not the level's name.
+    //
+    // PNG is lossless at every level, so no reference moves and nothing
+    // needs re-blessing: `loom compare` decodes pixels, and `xtask repeat`'s
+    // three fresh renders all come from this same encoder at this same
+    // level. The file gets bigger; the image does not change.
+    encoder.set_compression(png::Compression::Fast);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| RenderError::Io(std::io::Error::other(e.to_string())))?;
+    writer
+        .write_image_data(pixels)
+        .map_err(|e| RenderError::Io(std::io::Error::other(e.to_string())))?;
+    Ok(())
 }
 
 impl Drop for Renderer {

@@ -98,6 +98,29 @@ pub struct Viewer {
     /// window for two slices, which is the defect this mirrors deliberately.
     aa: Option<(crate::cmaa2::Cmaa2, vk::Image, vk::ImageView, Allocation)>,
 
+    /// Where the next composited frame is to be written, armed by
+    /// [`Self::capture`] and disarmed by the frame that satisfies it.
+    ///
+    /// **The whole point is that this reads the *swapchain* image**, after the
+    /// tonemap, after the UI pass and after CMAA2 — so what lands on disk is
+    /// what the human is looking at, overlay included. Capturing anywhere
+    /// earlier reproduces the picture `loom render` already produces, which is
+    /// exactly the picture that cannot see a HUD.
+    ///
+    /// One frame at a time, not a queue: the caller decides which frame it
+    /// wants and asks on that frame.
+    capture: Option<std::path::PathBuf>,
+    /// The host-visible buffer a capture copies into, and the byte count it
+    /// was sized for.
+    ///
+    /// Built on the first capture and kept, like the offscreen renderer's — a
+    /// run that never captures never allocates it, and a run that captures
+    /// every frame allocates once. Keeping it is what makes the leak question
+    /// go away: the `?` paths between arming a capture and freeing its buffer
+    /// are numerous, and a buffer owned by a field is freed by [`Drop`]
+    /// whichever way the frame ends.
+    readback: Option<(vk::Buffer, Allocation, u64)>,
+
     vertices: vk::Buffer,
     vertices_alloc: Option<Allocation>,
     vertex_address: vk::DeviceAddress,
@@ -780,6 +803,8 @@ impl Viewer {
             scene_alloc: Some(scene_alloc),
             tonemap,
             aa,
+            capture: None,
+            readback: None,
             msaa,
             vertices,
             vertices_alloc: Some(vertices_alloc),
@@ -1320,6 +1345,113 @@ impl Viewer {
         self.draw_with_ui(objects, &[], camera, None, |_| {})
     }
 
+    /// Write the **next** composited frame to `path` as a PNG.
+    ///
+    /// Scene and overlay, exactly as presented — this is the only thing in the
+    /// project that can photograph a `Ui`. `loom render` builds no egui context
+    /// at all, so a HUD row, a pause menu, a title screen or an inventory grid
+    /// was previously visible to no gate: the workaround was to count the
+    /// `Shape`s egui emitted, which proves a shape was *produced* and cannot
+    /// prove it was legible, on-screen, unoccluded or the right colour.
+    ///
+    /// The copy is taken from the swapchain image after the tonemap, after the
+    /// UI pass and after CMAA2, through the render graph like every other
+    /// barrier in this engine (never-do #4).
+    ///
+    /// Costs the capture frame a fence wait and a PNG encode. That is fine for
+    /// a screenshot and would not be for a steady state, which is why this
+    /// arms one frame rather than a mode.
+    pub fn capture(&mut self, path: std::path::PathBuf) {
+        self.capture = Some(path);
+    }
+
+    /// The buffer a capture copies into, sized for the current extent.
+    ///
+    /// Grown, never shrunk: a window that is resized smaller keeps the bigger
+    /// buffer, because the alternative is a free-and-allocate on every drag of
+    /// a window corner.
+    fn readback_buffer(&mut self, bytes: u64) -> Result<vk::Buffer, RenderError> {
+        if let Some((buffer, _, size)) = self.readback
+            && size >= bytes
+        {
+            return Ok(buffer);
+        }
+        // SAFETY: the previous buffer, if any, was only ever used by a capture
+        // whose fence has been waited on before this line can be reached.
+        unsafe { self.device.device_wait_idle() }?;
+        if let (Some((buffer, allocation, _)), Some(allocator)) =
+            (self.readback.take(), self.allocator.as_mut())
+        {
+            let _ = allocator.free(allocation);
+            // SAFETY: idled above, and nothing else holds this handle.
+            unsafe { self.device.destroy_buffer(buffer, None) };
+        }
+        let info = vk::BufferCreateInfo::default()
+            .size(bytes)
+            .usage(vk::BufferUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        // SAFETY: `info` is fully initialised and outlives the call.
+        let buffer = unsafe { self.device.create_buffer(&info, None) }?;
+        // SAFETY: `buffer` was just created on this device.
+        let requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let allocator = self
+            .allocator
+            .as_mut()
+            .ok_or_else(|| RenderError::Allocator("allocator missing".into()))?;
+        let allocation = allocator
+            .allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
+                name: "loom.viewer_capture",
+                requirements,
+                location: gpu_allocator::MemoryLocation::GpuToCpu,
+                linear: true,
+                allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
+            })
+            .map_err(|e| {
+                // SAFETY: the buffer was created two lines up and nothing else
+                // holds it; leaking it would report a leak at teardown instead
+                // of the out-of-memory that caused it.
+                unsafe { self.device.destroy_buffer(buffer, None) };
+                RenderError::Allocator(e.to_string())
+            })?;
+        // SAFETY: the allocation was made for exactly this buffer.
+        unsafe {
+            self.device
+                .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
+        }?;
+        self.names.set(buffer, "loom.viewer_capture");
+        self.readback = Some((buffer, allocation, bytes));
+        Ok(buffer)
+    }
+
+    /// Encode the buffer the last capture copied into.
+    ///
+    /// **The channel swap is the whole of the difference from the offscreen
+    /// path.** `COLOR_FORMAT` is `R8G8B8A8_SRGB` and the surface hands back
+    /// `B8G8R8A8_SRGB` (`create_swapchain` prefers either and takes what it is
+    /// given), so the bytes are the same gamma in a different order. Driven
+    /// off `self.format` rather than assumed, because the fallback branch there
+    /// takes `formats[0]` and a machine that offers neither would otherwise
+    /// write a PNG with red and blue swapped and no complaint.
+    fn write_capture(&self, path: &std::path::Path, bytes: usize) -> Result<(), RenderError> {
+        let (_, allocation, _) = self
+            .readback
+            .as_ref()
+            .ok_or_else(|| RenderError::Allocator("capture buffer missing".into()))?;
+        let mapped = allocation
+            .mapped_ptr()
+            .ok_or_else(|| RenderError::Allocator("capture memory is not host-visible".into()))?;
+        // SAFETY: the copy wrote exactly `bytes` bytes and the fence has been
+        // waited on, so the write is visible to the host.
+        let raw = unsafe { std::slice::from_raw_parts(mapped.as_ptr().cast::<u8>(), bytes) };
+        let mut pixels = raw.to_vec();
+        if matches!(self.format, vk::Format::B8G8R8A8_SRGB | vk::Format::B8G8R8A8_UNORM) {
+            for texel in pixels.chunks_exact_mut(4) {
+                texel.swap(0, 2);
+            }
+        }
+        crate::renderer::write_png(path, &pixels, self.extent.width, self.extent.height)
+    }
+
     /// Draw a frame with an optional UI layer over it.
     ///
     /// The UI records into the **same** dynamic-rendering pass as the scene, so
@@ -1523,6 +1655,20 @@ impl Viewer {
         // swapchain image starts UNDEFINED every frame — its contents are not
         // preserved between presents, and pretending otherwise would make the
         // driver keep them for nothing.
+        // **Armed before the graph is built**, because the pass below records
+        // a copy into this buffer and a buffer that does not exist yet cannot
+        // be copied into. Taken here rather than at the top of the frame so an
+        // out-of-date acquire — which returns early and rebuilds at a new
+        // extent — does not consume the request and hand back a screenshot of
+        // the wrong size.
+        let capture = match self.capture.take() {
+            Some(path) => {
+                let bytes = u64::from(self.extent.width) * u64::from(self.extent.height) * 4;
+                Some((path, self.readback_buffer(bytes)?, bytes))
+            }
+            None => None,
+        };
+
         let mut graph = RenderGraph::new();
         let target = graph.import("loom.swapchain_image", image);
 
@@ -2205,6 +2351,49 @@ impl Viewer {
             );
         }
 
+        // **The screenshot, last of all and before the present.** After the
+        // tonemap, after the UI pass, after CMAA2 — so it photographs the
+        // composited frame, overlay included, which is the entire reason it
+        // exists. Copying anything earlier would reproduce the picture
+        // `loom render` already produces and prove nothing about the HUD.
+        //
+        // The transition to `TRANSFER_SRC_OPTIMAL` is the graph's, like every
+        // other barrier here (never-do #4); the present pass below moves it on
+        // from there, which is a transition the graph was already making.
+        if let Some((_, buffer, _)) = &capture {
+            let buffer = *buffer;
+            graph.pass("capture", &[(target, Access::TransferSrc)], move |d, cmd| {
+                let region = vk::BufferImageCopy::default()
+                    .buffer_offset(0)
+                    .buffer_row_length(0)
+                    .buffer_image_height(0)
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(0)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    )
+                    .image_extent(vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    });
+                // SAFETY: the graph put the swapchain image in
+                // TRANSFER_SRC_OPTIMAL and `cmd` is recording outside any
+                // rendering block.
+                unsafe {
+                    d.cmd_copy_image_to_buffer(
+                        cmd,
+                        image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        buffer,
+                        &[region],
+                    );
+                }
+            });
+        }
+
         // Presentable layout. Declared as a pass with no work, because the
         // transition IS the work — and forgetting it is the classic first
         // swapchain bug that validation catches immediately.
@@ -2265,6 +2454,19 @@ impl Viewer {
                 }
                 Err(e) => return Err(RenderError::Vulkan(e)),
             }
+        }
+
+        // **The one place a frame is not fire-and-forget.** Reading the copy
+        // means waiting for the submit that made it, which costs this frame a
+        // full pipeline drain — paid only by frames that were asked for a
+        // screenshot, and after the present so the picture is already on its
+        // way to the compositor.
+        if let Some((path, _, bytes)) = capture {
+            // SAFETY: `in_flight` was reset and then signalled by the submit
+            // above, so this waits for exactly that submission.
+            unsafe { d.wait_for_fences(&[self.in_flight], true, u64::MAX) }?;
+            #[allow(clippy::cast_possible_truncation)]
+            self.write_capture(&path, bytes as usize)?;
         }
         Ok(())
     }
@@ -2508,6 +2710,12 @@ impl Drop for Viewer {
             if let Some(allocator) = self.allocator.as_mut() {
                 self.materials.destroy(allocator);
             }
+            if let (Some((buffer, allocation, _)), Some(allocator)) =
+                (self.readback.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+                self.device.destroy_buffer(buffer, None);
+            }
             if let (Some((mut pass, image, view, allocation)), Some(allocator)) =
                 (self.aa.take(), self.allocator.as_mut())
             {
@@ -2709,6 +2917,20 @@ fn create_swapchain(
         image_count = capabilities.max_image_count;
     }
 
+    // **`TRANSFER_SRC` so the window can be photographed.** Nothing in this
+    // repository could read back a composited frame, so the overlay — HUD,
+    // pause menu, title, inventory — was invisible to every gate the project
+    // owns; `loom render` is headless and never builds an egui context, so it
+    // renders the scene *without* the thing under test. A swapchain image can
+    // only be a copy source if it was created as one, and the flag has to be
+    // asked for here or `Viewer::capture` is a validation error.
+    //
+    // Asked for, not assumed: `supported_usage_flags` is what the surface will
+    // actually grant, and requesting a flag it does not offer is invalid usage.
+    // Every desktop driver offers this one; a surface that does not simply
+    // cannot be captured, and `capture` says so rather than crashing.
+    let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
+        | (capabilities.supported_usage_flags & vk::ImageUsageFlags::TRANSFER_SRC);
     let info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface)
         .min_image_count(image_count)
@@ -2716,7 +2938,7 @@ fn create_swapchain(
         .image_color_space(surface_format.color_space)
         .image_extent(extent)
         .image_array_layers(1)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_usage(usage)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(capabilities.current_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
