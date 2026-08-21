@@ -2116,8 +2116,18 @@ transform = { pos = [-7.80, -12.0, 0.0] }
 # THE FRONT END
 #
 # What you are looking at before you are standing on anything. `loom run --play`
-# opens on this camera with the game's name over it and two buttons; Start fades
-# to black, builds the world under the black, and lifts on the deck.
+# opens on this camera with the game's name over it, two buttons, and the
+# controls along the bottom; Start fades to black, builds the world under the
+# black, and lifts on the deck.
+#
+# **The convention is written down** — a title is a camera named
+# `Rig/TitleCamera` with `active = false`, plus `Hud` lines flagged
+# `only_on_title`, and nothing else. Chrome (the buttons, the Escape hint, the
+# curtain) belongs to the engine; the name and the verbs belong to the scene,
+# because the engine's own key list says "left click to fire" and in this game
+# that channel casts a rod. See
+# `docs/decisions/0066-a-title-is-a-camera-a-curtain-and-a-line-the-scene-wrote.md`
+# — including why there is no Options item and what no gate here can check.
 #
 # **`active = false` is load-bearing.** `World::active_camera` takes the first
 # ACTIVE camera in file order and `player_character` walks *up* from it to find
