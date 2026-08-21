@@ -1894,7 +1894,89 @@ CREEL_TAPE="0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
 cmp /tmp/loom-creel-1.json /tmp/loom-creel-2.json
 cmp /tmp/loom-creel-2.json /tmp/loom-creel-3.json
 rm -f /tmp/loom-creel-1.json /tmp/loom-creel-2.json /tmp/loom-creel-3.json
-echo "gameplay: 18 scenes asserted, 7 blocks of deliberately wrong input, fight and demo byte-identical across 3 processes"
+# ---------------------------------------------------------------------------
+# **THE DECKHAND'S FOOT STAYS WHERE HE PUT IT.**
+# ---------------------------------------------------------------------------
+#
+# **Nothing in any gate could see this animation, and that was measured before
+# these rows were written.** `deckhand_walk` is in `SCENES` and not in `GOLDEN`,
+# so no reference PNG contains any part of him. And the walk is invisible to
+# gameplay: zeroing the ankle law leaves `Root/Walker` bit-identical —
+# **x 4.456579685211182, y 0.9180648922920227 at tick 520, both ways** — because
+# `character_ancestor` keeps all 28 mesh leaves out of the collision world.
+# (The determinism hash *does* move, which is not a detector: it covers every
+# rapier body, no scene pins it for this file, and it says only "something".)
+# Thirteen scripts hang off pivots authored at +-0.001 m, and zeroing those
+# millimetres puts both legs in unison with nothing anywhere reporting it.
+#
+# **What these rows pin is horizontal foot plant, which is the one thing four
+# rounds of notes claimed was impossible to get wrong.** `deckhand_gait.rhai`
+# said "phase advances with DISTANCE, so the feet cannot skate". Distance-driven
+# phase makes the skate speed-INDEPENDENT; the amount is set by whether the
+# stride constant matches the leg's reach, and at 2.30 rad/m it did not: the
+# clock demanded a 1.37 m step from a leg that reaches 0.72 and the difference
+# left as slip. The rig's own plant metric measured the sole's VERTICAL error
+# only, which is how 46% horizontal slip survived underneath a number driven to
+# 16 mm.
+#
+# Ticks 508 and 532 bracket one right-foot stance. Measured, as shipped:
+# the ankle holds **4.4681 -> 4.4618** — 6.3 mm — while the body advances
+# **4.1766 -> 4.7364**, 560 mm. That is 1.1% slip.
+#
+# **The band was chosen by falsifying it, not by picking a round number.** Each
+# row below is one defect put back, alone, and the widest reading it produces in
+# this window:
+#
+#     as shipped            4.4618 .. 4.4699     passes
+#     walk_knee_down 6      4.4421 .. 4.4611     passes  <- a documented knob
+#     walk_knee_down 12     4.4354 .. 4.4539     passes  <- the old value, and
+#                                                           the band cannot
+#                                                           separate it from 6
+#     hip back to a sine    4.3963 .. 4.5320     FAILS
+#     walk_leg 20 alone     4.3678 .. 4.5443     FAILS   <- see below
+#     stride back to 2.30   3.9485 .. 5.0371     FAILS
+#
+# So 4.42 .. 4.52 is the tightest band that still lets `walk_knee_down` — the
+# one knob whose whole point is to trade plant for a visibly softer knee — move
+# across its documented range. **It therefore does NOT catch the stance knee on
+# its own**, and that is a deliberate limit rather than an oversight: 12 degrees
+# of stance flexion costs 13 points of skate and is exactly what a human might
+# turn it to. Falsified in all six rows before this was written.
+#
+# **`walk_leg` failing alone is correct and is the row worth understanding.**
+# The stride constant and the leg swing are coupled — `stride = pi / (2 * L *
+# sin(leg))` — so turning the swing down without turning the stride up asks the
+# clock for more ground than the leg can cover, which is exactly the defect this
+# gate exists for. It reads as a surprise the first time; it is the gate
+# teaching the coupling.
+#
+# **These literals move when the character controller does**, exactly like the
+# creel's -12.308 two blocks up, and the slack is what that is for. The claim is
+# "the body travelled half a metre and the planted foot did not move".
+DECKHAND_ANKLE_R="Root/Walker/Body/Hips/HipR/KneeR/AnkleR"
+DECKHAND_ANKLE_L="Root/Walker/Body/Hips/HipL/KneeL/AnkleL"
+"$LOOM" sim assets/test/deckhand_walk.loom --ticks 508 \
+  --assert "Root/Walker.x < 4.30" \
+  --assert "$DECKHAND_ANKLE_R.x > 4.42" --assert "$DECKHAND_ANKLE_R.x < 4.52" >/dev/null
+"$LOOM" sim assets/test/deckhand_walk.loom --ticks 532 \
+  --assert "Root/Walker.x > 4.63" \
+  --assert "$DECKHAND_ANKLE_R.x > 4.42" --assert "$DECKHAND_ANKLE_R.x < 4.52" >/dev/null
+
+# **And that the two legs are half a cycle apart**, which is the check a lost
+# side-detection offset on the HIP or the KNEE cannot survive. At tick 516 the
+# left foot is at the top of its swing and the right is planted: 0.318 against
+# 0.094. It does not cover the ankle — `deckhand_ankle.rhai` turns the boot
+# about a pivot it does not move, so unison ankles are invisible to every
+# assertion in this file and to `Root/Walker` as well. That one is a picture.
+"$LOOM" sim assets/test/deckhand_walk.loom --ticks 516 \
+  --assert "$DECKHAND_ANKLE_L.y > 0.24" --assert "$DECKHAND_ANKLE_R.y < 0.16" >/dev/null
+
+# The mirror scene walks him into the glass and stops him there, which is the
+# only scene in the project where a character is judged from the front.
+"$LOOM" sim assets/test/deckhand_mirror.loom --ticks 520 \
+  --assert "Root/Walker.x > 3.10" --assert "Root/Walker.y > 0.5" >/dev/null
+
+echo "gameplay: 20 scenes asserted, 7 blocks of deliberately wrong input, the deckhand's stance foot planted, fight and demo byte-identical across 3 processes"
 
 # ---------------------------------------------------------------------------
 # 7. Work per frame. **Nothing above this line can see a frame get slower.**

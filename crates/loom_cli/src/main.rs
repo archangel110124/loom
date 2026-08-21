@@ -6523,6 +6523,51 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         );
     }
 
+    /// **The deckhand's knobs live in two files and this is what keeps them
+    /// one set of numbers.**
+    ///
+    /// Every amplitude and rate in the character is published into `state` by
+    /// the gait clock, and thirteen joint scripts read them from there — so a
+    /// walk is retuned by editing one block. There are two copies of that
+    /// block: a scene gets ONE `GameRules`, `deeper_rules.rhai` is the demo's,
+    /// and `loom_script` runs with `set_max_modules(0)` so no rhai file can
+    /// include another. Verbatim duplication under a test is the only way to
+    /// say it once.
+    ///
+    /// Edit `deckhand_gait.rhai` and paste; this fails until you do.
+    #[test]
+    fn the_two_copies_of_the_deckhand_knobs_agree() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("workspace root");
+        let block = |name: &str| {
+            let src = std::fs::read_to_string(root.join("assets/scripts").join(name))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let open = src
+                .find("// >>> DECKHAND KNOBS\n")
+                .unwrap_or_else(|| panic!("{name} has no `>>> DECKHAND KNOBS` marker"));
+            let close = src
+                .find("// <<< DECKHAND KNOBS\n")
+                .unwrap_or_else(|| panic!("{name} has no `<<< DECKHAND KNOBS` marker"));
+            assert!(open < close, "{name}: the markers are the wrong way round");
+            src[open..close].to_owned()
+        };
+        let rig = block("deckhand_gait.rhai");
+        let demo = block("deeper_rules.rhai");
+        assert!(
+            rig.contains("state.walk_stride"),
+            "the block in deckhand_gait.rhai lost its knobs: {rig}"
+        );
+        assert_eq!(
+            rig, demo,
+            "the deckhand's knob block has drifted between \
+             assets/scripts/deckhand_gait.rhai and assets/scripts/deeper_rules.rhai — \
+             the standalone rig and the demo are now two different walks"
+        );
+    }
+
     /// **The four water scenes, pinned by hash at 600 ticks.**
     ///
     /// `cargo xtask validate` proves debug and release compute the *same*

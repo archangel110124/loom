@@ -1,0 +1,195 @@
+# THE DECKHAND IN A MIRROR — the scene that shows the thing you cannot see in
+# a first-person game: your own character, animating, from the front.
+#
+# **A mirror in Loom is two nodes and no engine work.** `scene.slang` calls
+# `tracedEnvironment` for every opaque fragment — ADR 0019 measured a roughness
+# cutoff on it and DELETED it — and mixes it in as
+# `environment * f0 * (1 - roughness * 0.7)`. At `metallic = 1.0` the `f0` IS
+# the albedo, so a pale metal at roughness 0 returns ~95% of one traced ray.
+# There is no planar pass, no second camera, no mirrored projection and no ADR;
+# `assets/games/deeper_demo.loom`'s glass is the same two nodes.
+#
+# **AND IT IS THE REASON THIS CHARACTER IS AN ARTICULATED PUPPET.** The TLAS
+# holds meshes, and ADR 0062:85 says every ray — reflection, shadow, RTAO —
+# sees a `Deform`ed or a skinned mesh at its REST pose. Rigid parts on a node
+# hierarchy are the only animation method in this engine that a reflection can
+# show moving. The reflection below is walking because the parts really moved.
+#
+# **THE FRAME GOES BEHIND THE GLASS.** A border drawn in FRONT of the mirror is
+# not a border, it is a lid: the panel reads as a flat dark rectangle with a
+# ghost in it, and every reasonable next move (a lamp, a brighter albedo) then
+# measures the frame instead. Front face at x 3.615 against the glass at 3.600,
+# and the border comes from the frame being LARGER in y and z.
+#
+# **The frame is not decoration either.** Without it the glass is invisible
+# wherever it reflects sky, because that sky is the same sky behind it.
+#
+#   loom validate assets/test/deckhand_mirror.loom
+#   loom sim assets/test/deckhand_mirror.loom --ticks 520 \
+#     --assert "Root/Walker.x > 0.0"
+#   loom render assets/test/deckhand_mirror.loom --sim 520 --out mirror.png
+#
+# Two limits, both real and both visible here. A reflected hit is shaded
+# diffuse-only, so the reflection comes back darker than the direct view — which
+# is why this character is built out of one bright feature (the sou'wester) and
+# one secondary (the mittens) against near-black. And a reflected hit has no
+# reflection of its own: two facing mirrors give one bounce, then flat albedo.
+
+[scene]
+format = 1
+id = "3f6a91c4-70d5-4e28-b13a-84c2e05df917"
+
+[[prefab]]
+key = "deckhand"
+id = "7a41c0de-5b2e-4f18-9d63-2c8ae5f10b47"
+path = "../prefabs/deckhand.loom"
+
+[[node]]
+name = "Root"
+
+  # The gait clock. One `GameRules` per scene, and this is it. Every knob for
+  # the whole character lives at the top of this file.
+  [node.components.GameRules]
+  path = "../scripts/deckhand_gait.rhai"
+
+  [node.components.Environment]
+  sun_direction = [0.34, 0.68, -0.65]
+  sun_strength = 2.2
+  sun_color = [1.0, 0.95, 0.88]
+  ambient = 0.42
+  sky_zenith = [0.26, 0.34, 0.46]
+  sky_horizon = [0.52, 0.56, 0.58]
+  fog_density = 0.0
+
+# He walks along +X toward the glass, so `rot_euler` is -90 about Y: authored
+# forward is -Z and R_y(-90) takes (0,0,-1) to (1,0,0).
+#
+# **He walks into it and stops, which is the arc.** Nothing scripts a stop: the
+# glass is a renderable with no dynamic or character ancestor, so `play.rs`
+# gives it a static collider from its drawn bounds and the capsule's 0.35 m
+# radius comes to rest against it. At tick 400 he is at x 1.566 with `blend` 1;
+# at 520 he is at 3.222 — capsule face on the glass — and the blend has decayed,
+# so the same run shows the walk, the arrival, and the idle at the mirror.
+
+[[node]]
+name = "Walker"
+parent = "Root"
+transform = { pos = [-3.0, 1.0, 0.0], rot_euler = [0.0, -90.0, 0.0] }
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+  step_height = 0.25
+
+  [node.components.Script]
+  path = "../scripts/deckhand_stroll.rhai"
+
+[[node]]
+name = "Body"
+parent = "Root/Walker"
+prefab = "deckhand"
+transform = { pos = [0.0, -0.90, 0.0] }
+
+# **Over his shoulder AND off to one side, and the second half is the part that
+# took four attempts.** A camera in front of him sees the man and not the
+# mirror. Directly behind him he eclipses his own reflection completely — the
+# reflection is on the same axis, just further away — and the frame is one
+# deckhand with a black rectangle round it. 1.25 m off the axis separates them
+# into a man and the man looking back, which is the shot.
+#
+# It is parented to him so it tracks the walk. That is the right choice for a
+# still and the wrong one for judging motion: in a rider frame a walk and a
+# treadmill are the same picture. Judge the walk on `deckhand_walk.loom`.
+[[node]]
+name = "Camera"
+parent = "Root/Walker"
+transform = { pos = [1.25, 1.32, 3.55], rot_euler = [-6.0, 11.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 42.0
+
+# ---------------------------------------------------------------------------
+# The wharf.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Deck"
+parent = "Root"
+transform = { pos = [0.0, -0.10, 0.0], scale = [8.0, 0.10, 3.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.20, 0.19, 0.17]
+  roughness = 0.92
+
+# Something for the reflection to carry besides the man. A mirror pointed at
+# nothing reflects sky, and sky is what is already behind it.
+
+[[node]]
+name = "CrateA"
+parent = "Root"
+transform = { pos = [1.30, 0.22, -1.05], scale = [0.22, 0.22, 0.22] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.42, 0.33, 0.22]
+  roughness = 0.88
+
+[[node]]
+name = "CrateB"
+parent = "Root"
+transform = { pos = [0.70, 0.16, 1.10], scale = [0.16, 0.16, 0.30] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.36, 0.29, 0.20]
+  roughness = 0.88
+
+[[node]]
+name = "Post"
+parent = "Root"
+transform = { pos = [2.60, 0.55, 1.25], scale = [0.09, 0.55, 0.09] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.30, 0.26, 0.20]
+  roughness = 0.90
+
+# ---------------------------------------------------------------------------
+# THE GLASS. Frame first, so the ordering above is visible in the file too.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "MirrorFrame"
+parent = "Root"
+transform = { pos = [3.615, 1.05, 0.0], scale = [0.015, 1.03, 0.76] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.19]
+  roughness = 0.72
+  porosity = 0.40
+
+[[node]]
+name = "Mirror"
+parent = "Root"
+transform = { pos = [3.600, 1.05, 0.0], scale = [0.010, 0.98, 0.71] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.95, 0.96, 0.97]
+  metallic = 1.0
+  roughness = 0.0
+  porosity = 0.0

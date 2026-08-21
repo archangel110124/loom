@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 71] = [
+const SCENES: [&str; 72] = [
     // The mood ladder — ADR 0069. In `GOLDEN` too, where the reasoning is.
     "assets/test/mood_deep.loom",
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
@@ -324,6 +324,18 @@ const SCENES: [&str; 71] = [
     // reasoning for a row is written and the row is owed:
     //     ("deckhand_walk", "assets/test/deckhand_walk.loom", &["--sim", "520"])
     "assets/test/deckhand_walk.loom",
+    // The same character in a mirror — `metallic = 1.0, roughness = 0.0` on a
+    // box, reflected by the one traced ray ADR 0019 already spends on every
+    // opaque fragment. **It is the only scene in either list where a subject
+    // and its own reflection are in one frame**, so it is what would catch a
+    // regression that leaves the raster path right and the TLAS stale: an
+    // animated puppet whose reflection stands still is exactly the failure
+    // ADR 0062:85 says a `Deform`ed or skinned mesh would have by design.
+    //
+    // **Also owed a `GOLDEN` row and for the same reason** — no `cargo xtask`
+    // lock this round:
+    //     ("deckhand_mirror", "assets/test/deckhand_mirror.loom", &["--sim", "520"])
+    "assets/test/deckhand_mirror.loom",
     // The only scene that runs several systems *at once*: voxel terrain, one
     // water body serving both a current and open ocean, three grass fields,
     // rain with wetness and shelter, additive and alpha particles, wind and an
