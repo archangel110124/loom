@@ -759,27 +759,129 @@ DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
 #          c . .        (1,0) is where the bait was before the fish ate it —
 #          . . .        fragmentation, arriving for free, from the loop.
 #
-#      So E does not put her in the creel. It puts her in his **hand**, off the
-#      line and off the slack timer, and the sentence on screen names her size
-#      and the three ways out. Repack the three curios into column 0 and the
-#      whole of columns 1 and 2 is a clean 2x3; or ditch one; or walk to the
-#      hatch, which is the row after this.
+#      So E is refused and she **stays on the line**, which is not a
+#      punishment: `phase` only resets when `online == 0`, so a landed fish
+#      hangs off the rod tip indefinitely — traced to tick 3900, two thousand
+#      after the landing, still there. The sentence on screen names her size and
+#      both ways out.
+#
+#      **The first version of this put her in his HAND and that was a dead
+#      end.** You have one hand: with the conger in it you cannot lift a curio
+#      to repack and you cannot ditch one either, so the only move left inside
+#      the creel is to throw away the fish you just fought for. Waiting on the
+#      line leaves both the hand and the ditch free, which is what makes the
+#      three rows below possible at all.
 #
 #      This is the row that would still pass if the creel were a counter, so it
 #      also greps the shape. There is exactly one right string.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1910 \
   --hold "$DEMO_FIGHT; 1900:interact=1; 1901:" \
-  --assert "events.take >= 1" --assert "state.online == 0" \
-  --assert "state.infish == 0" --assert "state.creel_hand == 1" \
+  --assert "events.refused >= 1" --assert "state.online == 1" \
+  --assert "state.infish == 0" --assert "state.creel_hand == 0" \
   --assert "state.creel_free == 6" --assert "state.carried == 3" \
   | grep -q '"creel_cells": "a\.b/c\.\./\.\.\."'
 
-#      **And the hatch takes what is in his hands, which is a third place a
-#      fish can be.** `DEMO_BOX` is the same tape plus the dogleg round the bait
-#      box and one E at the fish box: `stowed` is 1 and the hand is empty.
+#      **And the hatch is the way out that needs no packing at all.**
+#      `DEMO_BOX` is the same tape plus the dogleg round the bait box and one E
+#      at the fish box: she comes off the line and goes below in that one press.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2010 --hold "$DEMO_BOX" \
-  --assert "state.stowed == 1" --assert "state.creel_hand == 0" \
+  --assert "state.stowed == 1" --assert "state.online == 0" \
   --assert "events.stow >= 1" >/dev/null
+
+# 5b4. **THE WHOLE SYSTEM, AS ONE THING A PLAYER DOES.** This is the row the
+#      creel exists for and it is the only one that uses every part of it.
+#
+#      He has fought a conger for twenty-two seconds; she is over the rail and
+#      will not go in the bag. The creel reads:
+#
+#          a . b        FLSK (0,0), LINE (2,0), LAMP (0,1). Six cells free.
+#          c . .        The hole at (1,0) is where the bait was before the fish
+#          . . .        ate it. Six free cells and no 2x3 anywhere in them.
+#
+#      TAB. Two taps of D to walk the cursor to the line spool at (2,0) — two
+#      taps and not a hold, because the repeat delay is twenty ticks. Hold SHIFT
+#      for a second and the spool goes over the side, which opens columns 1 and
+#      2 across all three rows. TAB again, E at the rod, and she goes in turned
+#      the way she was born: `acc/bcc/.cc`, one cell left in the creel.
+#
+#      **Every claim in that paragraph is a `--assert` or a `grep` below**, and
+#      the two strings are the ones a stub cannot produce without having
+#      implemented the packer, the cursor, the ditch and the placement.
+DEMO_CONGER="$DEMO_FIGHT; 1900:interact=1; 1901:; 1910:bag=1; 1911:; \
+1930:move_x=1; 1938:; 1960:move_x=1; 1968:; 1990:sprint=1; 2060:; \
+2080:bag=1; 2081:; 2100:interact=1; 2101:"
+
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1980 --hold "$DEMO_CONGER" \
+  --assert "state.creel_open == 1" --assert "state.creel_cx == 2" \
+  --assert "state.creel_cy == 0" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2070 --hold "$DEMO_CONGER" \
+  --assert "events.ditched == 1" --assert "state.line == 0" \
+  --assert "state.creel_used == 2" \
+  | grep -q '"creel_cells": "a\.\./b\.\./\.\.\."'
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2110 --hold "$DEMO_CONGER" \
+  --assert "state.creel_open == 0" --assert "state.online == 0" \
+  --assert "state.infish == 1" --assert "state.creel_free == 1" \
+  --assert "state.creel_drift == 0" \
+  | grep -q '"creel_cells": "acc/bcc/\.cc"'
+
+# 5b5. **LIFT, PLACE, AND THE TWO REFUSALS.** The same three keys on a quiet
+#      deck, where the shapes are all one cell and only the rules are under
+#      test. E lifts what the cursor is over; E on a free cell puts it down; E
+#      on a taken one is refused with code 1; SHIFT on nothing is refused with
+#      code 2. Lifting frees the cells on the same tick, because occupancy is
+#      folded from the placement list and removing the placement *is* freeing
+#      them — `creel_drift` is what would catch that going wrong.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:" \
+  --assert "state.creel_hand == 1" --assert "state.creel_used == 3" \
+  --assert "events.lift == 1" --assert "state.creel_drift == 0" \
+  | grep -q '"creel_hand_label": "FLSK"'
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+300:interact=1; 301:" \
+  --assert "state.creel_hand == 0" --assert "events.place == 1" \
+  --assert "state.creel_used == 4" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+280:move_x=1; 288:; 300:interact=1; 301:" \
+  --assert "state.creel_hand == 1" --assert "state.creel_refused == 1" \
+  --assert "events.place == 0" >/dev/null
+#      The empty cell is (0,2) and it takes two taps of S to reach: the four
+#      supplies land in `abc/d../...`, so every cell in the top row and the
+#      first of the second are taken. A row aimed at (1,0) throws the BAIT away
+#      and reports a clean pass, which is what the first draft of it did.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 420 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:move_z=-1; 268:; \
+280:move_z=-1; 288:; 300:sprint=1; 370:" \
+  --assert "state.creel_cy == 2" --assert "state.creel_refused == 2" \
+  --assert "events.ditched == 0" >/dev/null
+
+# 5b6. **THE DITCH NEEDS THE KEY HELD, AND A SECOND IS A SECOND.** Twenty ticks
+#      of SHIFT throws nothing away; seventy does. It is the only irreversible
+#      act in this game, which is why it is a held key — and why it is not
+#      SPACE, which on the helm mat is the release and where a fat finger is a
+#      boat adrift.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 420 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+300:sprint=1; 320:" \
+  --assert "events.ditched == 0" --assert "state.creel_hand == 1" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 420 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+300:sprint=1; 370:" \
+  --assert "events.ditched == 1" --assert "state.creel_hand == 0" \
+  --assert "state.thermos == 0" --assert "state.creel_used == 3" >/dev/null
+
+# 5b7. **SHUTTING IT PUTS WHAT IS IN YOUR HAND BACK.** A held item has no
+#      picture and no verb outside the grid, so walking away with one is state
+#      the player cannot see. Refusing to close was the other candidate and is
+#      worse: it makes TAB stop working, which reads as a bug rather than a
+#      rule. It always fits — it came out of this grid one press ago and its own
+#      cells are still free.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+300:bag=1; 301:" \
+  --assert "state.creel_hand == 0" --assert "state.creel_used == 4" \
+  --assert "state.thermos == 1" --assert "events.stash == 1" >/dev/null
 
 # 5d2. **YOU CAN CAST FROM ANYWHERE ABOARD, AND NOTHING SAID SO.** The engine
 #      has gated the cast on `aboard` rather than on a station since the day it
@@ -877,7 +979,7 @@ DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
 #     in his hands, and zero for one that is in the creel.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 500 \
   --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:" \
-  --assert "state.infish == 0" --assert "Rig/Boat/Catch.local_y < 1.6" >/dev/null
+  --assert "state.fishsize == 0" --assert "Rig/Boat/Catch.local_y < 1.6" >/dev/null
 #     **Three poses now, not two, and the middle one is the round's change.** On
 #     the line she hangs off the rod *tip* at boat-local y 2.883; taken off, in
 #     his hands, at 1.800; parked at the rod butt at 1.560. The tip pose is the
@@ -889,10 +991,21 @@ DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
 #     (area - 1))`, so the conger this tape lands renders at 1.56 m against a
 #     sprat's 0.65 — and the in-hand pose backs off a tenth of a metre per extra
 #     cell to keep her out of the lens. `local_y` is untouched by both, which is
-#     what these two rows still pin.
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 1910 \
-  --hold "$DEMO_FIGHT; 1900:interact=1; 1901:" \
-  --assert "state.creel_hand == 1" --assert "Rig/Boat/Catch.local_y > 1.7" \
+#     what these rows still pin.
+#
+#     **A fish in the CREEL is not drawn at all**, which is the third pose and
+#     the round's change: 1.560, parked at the rod butt, because a fish you have
+#     packed away is packed away. So "in his hands" is reachable only by lifting
+#     her back out of a cell with the grid open — `$DEMO_CONGER` plus a TAB, a
+#     tap of D and an E — and that is what the second row here does. 1.803.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2110 --hold "$DEMO_CONGER" \
+  --assert "state.infish == 1" --assert "state.fishsize == 0" \
+  --assert "Rig/Boat/Catch.local_y < 1.6" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2180 \
+  --hold "$DEMO_CONGER; 2120:bag=1; 2121:; 2140:move_x=1; 2148:; \
+2170:interact=1; 2171:" \
+  --assert "state.creel_hand == 1" --assert "state.fishsize == 6" \
+  --assert "Rig/Boat/Catch.local_y > 1.7" \
   --assert "Rig/Boat/Catch.local_y < 2.2" >/dev/null
 #     **And it is in his hands, which for eight rounds it was not.** The hang was
 #     a fixed boat-local `(-7.40, 1.85, -3.60)`: he walked to the fish box and it
@@ -912,9 +1025,14 @@ DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
 #     `state.bfx`/`bfz` is that rotation, published this round for the rod, and
 #     the fish is the second thing it buys. Ten ticks after the A of the stow
 #     walk he is at boat local x -9.13 and the fish is at **-9.47**.
+#     **Measured on the rod-tip pose now**, because the conger this tape lands
+#     will not go in the creel and stays on the line: `Catch` at boat local x
+#     -8.839 with the player at -9.126, ten ticks after the A of the stow walk.
+#     The old fixed value was -7.40, so the row is the same difference it always
+#     was; it is the *pose* that changed, not the claim.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1960 \
-  --hold "$DEMO_FIGHT; 1900:move_x=-1,interact=1; 1901:move_x=-1; 1950:move_z=-1" \
-  --assert "state.creel_hand == 1" --assert "Rig/Boat/Catch.local_x < -8.5" \
+  --hold "$DEMO_FIGHT; 1900:move_x=-1; 1950:move_z=-1" \
+  --assert "state.online == 1" --assert "Rig/Boat/Catch.local_x < -8.5" \
   --assert "state.plx < -8.9" >/dev/null
 
 # 5g. **PHASE 4 — 95% OF A FISHING ROUND, AND IT HAD NO ROW.** 5f above asserts
@@ -1016,24 +1134,39 @@ DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
 #     on saying `3 m dead behind you` while he was pressed into it. The route
 #     line is drawn only while he is forward of the box and inside its x band —
 #     so this row and the next are one measurement in two halves.
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 2100 \
-  --hold "$DEMO_FIGHT; 1900:interact=1; 1901:" \
-  --assert "state.fishheld == 1" \
-  | grep -q '"message": "FISH IN HAND   go LEFT round the bait box'
+#     **`$DEMO_CONGER` and tick 2250, not the plain tape and 2100.** The
+#     conger this demo lands will not go in the creel on the first press, so on
+#     the plain tape at 2100 she is still on the line and the caption is the
+#     rod's. `$DEMO_CONGER` is the tape that empties a cell for her; 2250 is
+#     past its notice window, which is the whole point of the row — it reads the
+#     *persistent* branch and fails if the bearing stops being drawn.
+#     **`FISH IN HAND` is `FISH IN THE CREEL` now**, because that is where she
+#     is: the hand is a thing that exists only while the grid is open.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2250 --hold "$DEMO_CONGER" \
+  --assert "state.fishheld == 1" --assert "state.stuck == 0" \
+  | grep -q '"message": "FISH IN THE CREEL   go LEFT round the bait box'
 
 #     **And the other half: once he is round it, the steerable bearing is back.**
 #     Ten ticks after the A the route hint is gone and the metres are counting
 #     down. Without this row the route line could be latched on for ever and
 #     nothing would notice; with it, both branches are pinned.
-#     **The notice is 10 and not the 9 it was, and it kept both branches.**
-#     She is a conger and will not fit, so the sentence names her size — but it
-#     is the same player at the same moment, so dropping the bearing would have
-#     made "she was too big" cost him the only line on screen that says where to
-#     go. Notice 10 is notice 9 with the size on the front.
+#     **`$DEMO_CONGER` again, and the walk starts after the creel closes.**
+#     Once she is in the creel and he is round the bait box the bearing counts
+#     down: `1 m ahead on your right` at 2260, with `stuck` at 0, so the route
+#     hint really did clear rather than being latched on for ever.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2260 \
+  --hold "$DEMO_CONGER; 2110:move_x=-1; 2200:move_z=-1" \
+  --assert "state.fishheld == 1" --assert "state.stuck == 0" \
+  | grep -q '"message": "FISH IN THE CREEL   E at the YELLOW FISH BOX — 1 m ahead on your right"'
+
+#     **And the sentence a player meets when she will not go in.** Notice 4,
+#     with her size in it: "full" was the only thing four slots could ever say,
+#     and a creel can say *she needs 2x3 and you have not got 2x3 anywhere*,
+#     which is a problem with a solution rather than a dead end.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1960 \
   --hold "$DEMO_FIGHT; 1900:move_x=-1,interact=1; 1901:move_x=-1; 1950:move_z=-1" \
-  --assert "state.fishheld == 1" \
-  | grep -q '"message": "IN YOUR HANDS   that conger is 2x3 — TAB to make room, or E at the YELLOW FISH BOX — 3 m dead behind you"'
+  --assert "state.online == 1" --assert "state.infish == 0" \
+  | grep -q '"message": "SHE WILL NOT FIT   that conger is 2x3 — TAB to make room, or E at the YELLOW FISH BOX"'
 
 #     **Two: a player wedged aboard is told he is wedged.** `deeper_player.rhai`
 #     could not fire `stuck` aboard at all — the flag existed and the one place
@@ -1048,9 +1181,16 @@ DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
 #     directions clears it, and those two are the only inputs he is not already
 #     pressing. This row is the reason the wedge is worth keeping: it is the
 #     recovery, and a recovery with no instruction is a lost demo.
+#
+#     **`$DEMO_CONGER` and not the plain tape, and the reason is priority.** A
+#     fish still on the line outranks the wedge in the caption chain, and on the
+#     plain tape she *is* still on the line — the conger is refused at the rod.
+#     `$DEMO_CONGER` puts her in the creel first, so what this row measures is
+#     the wedge and not the rod.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2400 \
-  --hold "$DEMO_FIGHT; 1900:move_z=-1,interact=1; 1901:move_z=-1" \
+  --hold "$DEMO_CONGER; 2150:move_z=-1" \
   --assert "state.stuck == 1" --assert "state.aboard == 1" \
+  --assert "state.infish == 1" \
   | grep -q '"message": "BLOCKED   the bait box — step LEFT and go round it"'
 
 #     **And the control that keeps that honest**: the one gesture this demo
@@ -1097,10 +1237,13 @@ DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
   | grep -q '"creel_kinds": "FLSK BAIT LINE LAMP"'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1910 \
   --hold "$DEMO_FIGHT; 1900:interact=1; 1901:" \
-  --assert "state.creel_hand == 1" \
+  --assert "state.online == 1" \
   | grep -q '"creel_cells": "a\.b/c\.\./\.\.\."'
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 1910 \
-  --hold "$DEMO_FIGHT; 1900:interact=1; 1901:" \
+#     And the hand's own label, from the one place a fish is ever in it: lifted
+#     back out of a cell with the grid open.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2180 \
+  --hold "$DEMO_CONGER; 2120:bag=1; 2121:; 2140:move_x=1; 2148:; \
+2170:interact=1; 2171:" \
   | grep -q '"creel_hand_label": "><>"'
 
 # 5k. **THE HELM SAYS WHAT IT IS SET TO.** The old caption listed four bindings
@@ -1339,8 +1482,14 @@ DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2800 --hold "$DEMO_HOME" \
   --assert "state.stowed == 1" --assert "state.at_helm == 0" \
   | grep -q '"message": "1 BELOW   SHE IS ALONGSIDE — step off, E at the crate 5 m dead behind you"'
+#     **`events.take` has left this row and `events.refused` has joined it.**
+#     The conger this tape lands will not go in the creel, so the first E is
+#     refused and she stays on the line — and the second E, at the fish box,
+#     takes her off it and puts her below in the one press. That is the escape
+#     hatch working, and it is why the hatch reads `online` as well as the
+#     creel. `take` is covered where it can happen, in 5b4.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 3800 --hold "$DEMO_HOME" \
-  --assert "events.landed >= 1" --assert "events.take >= 1" \
+  --assert "events.landed >= 1" --assert "events.refused >= 1" \
   --assert "events.stow >= 1" --assert "events.deliver >= 1" \
   --assert "events.use == 3" \
   --assert "state.delivered == 1" --assert "state.stowed == 0" \

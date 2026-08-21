@@ -945,6 +945,28 @@ if hub {
     // `#{ kind, x, y, rot }` each. Occupancy is folded out of it every tick and
     // never kept, so there is one fact and not two.
     let creel = if "creel" in state { state.creel } else { [] };
+
+    // -----------------------------------------------------------------------
+    // **THE HAND, AND IT IS WHAT KEEPS A GRID FROM BEING A GOTCHA.**
+    // -----------------------------------------------------------------------
+    //
+    // One item, held on the cursor, outside the grid. Empty string for empty.
+    //
+    // A fish comes over the rail and the creel has no room *of the right
+    // shape* for her. Without a hand the only honest options are to lose her
+    // or to leave her on the line — and on the line she is still on the slack
+    // timer, so landing the rarest fish in the game would start a five-second
+    // packing puzzle whose optimal counter-play is to sail with an empty creel.
+    // That deletes the decision the grid exists for.
+    //
+    // In the hand she is off the line, off the timer, and yours: repack, ditch
+    // a curio, or walk to the hatch. The world has not stopped for any of it,
+    // which is the whole point — but nothing is chasing you either.
+    let hand = if "hand" in state { state.hand } else { "" };
+    // Which way up it is while it is off the grid. LMB turns it in the hand,
+    // so a 2x3 conger becomes a 3x2 one and the free cells that refused her
+    // accept her — which is the whole of the rotation mechanic.
+    let hand_rot = if "hand_rot" in state { state.hand_rot } else { 0 };
     let stowed = if "stowed" in state { state.stowed } else { 0 };
     let notice_at = if "notice_at" in state { state.notice_at } else { -9999 };
     let notice = if "notice" in state { state.notice } else { 0 };
@@ -983,6 +1005,7 @@ if hub {
     // checked nothing. Cleared by the next thing that works, which is also what
     // makes it the right thing to draw.
     let creel_refused = if "creel_refused" in state { state.creel_refused } else { 0 };
+    let creel_shutting = false;
     let creel_turn = false;
     let creel_ditch = false;
     let ditch_q = 0;
@@ -990,7 +1013,7 @@ if hub {
         // A successful open clears the last refusal, which is what makes a
         // latched code readable rather than permanent.
         if e.kind == "creelopen" { creel_open = 1; creel_refused = 0; }
-        if e.kind == "creelshut" { creel_open = 0; }
+        if e.kind == "creelshut" { creel_open = 0; creel_shutting = true; }
         if e.kind == "creelbusy" { creel_refused = 3; }
         if e.kind == "cursor" {
             if "dx" in e { cx += e.dx.to_int(); }
@@ -1065,7 +1088,10 @@ if hub {
     for entry in SUPPLY {
         let path = entry[0];
         let name = entry[1];
-        if creel_has(creel, name) == 0 && path in positions {
+        // **`hand` counts as having it.** A lifted thermos is out of the grid
+        // for as long as it is in your fist, and without this the barrel would
+        // hand you a second one while you were holding the first.
+        if creel_has(creel, name) == 0 && hand != name && path in positions {
             let it = positions[path];
             let dx = me[0] - it[0];
             let dz = me[2] - it[2];
@@ -1145,29 +1171,135 @@ if hub {
     // up.
     let online = if "online" in state { state.online } else { 0 };
 
-    // -----------------------------------------------------------------------
-    // **THE HAND, AND IT IS WHAT KEEPS A GRID FROM BEING A GOTCHA.**
-    // -----------------------------------------------------------------------
-    //
-    // One item, held on the cursor, outside the grid. Empty string for empty.
-    //
-    // A fish comes over the rail and the creel has no room *of the right
-    // shape* for her. Without a hand the only honest options are to lose her
-    // or to leave her on the line — and on the line she is still on the slack
-    // timer, so landing the rarest fish in the game would start a five-second
-    // packing puzzle whose optimal counter-play is to sail with an empty creel.
-    // That deletes the decision the grid exists for.
-    //
-    // In the hand she is off the line, off the timer, and yours: repack, ditch
-    // a curio, or walk to the hatch. The world has not stopped for any of it,
-    // which is the whole point — but nothing is chasing you either.
-    let hand = if "hand" in state { state.hand } else { "" };
-
     let at_crate = FISH_CRATE in positions && within(me, positions[FISH_CRATE], RANGE);
     let at_box = FISH_HOLD in positions && within(me, positions[FISH_HOLD], RANGE);
     let in_hand = creel_count_fish(creel, ITEMS);
 
-    if used && at_crate && stowed > 0 {
+    // **SHUTTING IT PUTS WHAT IS IN YOUR HAND BACK.**
+    //
+    // A held item is a thing with no picture and no verb outside the grid, so
+    // walking away holding one is state the player cannot see and cannot use.
+    // Refusing to close instead was the other candidate and it is worse: it
+    // makes TAB stop working, which reads as a bug rather than as a rule.
+    //
+    // **It always fits.** It came out of this grid one press ago, its own cells
+    // are still free, and `first_fit` tries the unturned rotation over every
+    // origin before it tries the turned one — so the worst case is that it goes
+    // back exactly where it was. The `ok` test is belt and braces.
+    if creel_shutting && hand != "" {
+        let put = creel_add(creel, ITEMS, hand, CREEL_W, CREEL_H);
+        creel = put.creel;
+        if put.ok == 1 {
+            emit.push(#{ kind: "stash", item: hand });
+            hand = "";
+            hand_rot = 0;
+        }
+    }
+
+    if creel_open == 1 {
+        // -------------------------------------------------------------------
+        // **INSIDE THE GRID, AND E MEANS SOMETHING ELSE.**
+        // -------------------------------------------------------------------
+        //
+        // Routed here rather than suppressed in the movement script, because
+        // the movement script would have to know what is under the cursor and
+        // it cannot see the creel at all. One press, one meaning, decided by
+        // one flag: the hatch and the crate are unreachable while the grid is
+        // up, which is right — you are not standing at either one, you are
+        // looking into a bag.
+        if used {
+            if hand == "" {
+                // **Lift.** Whatever the cursor is over comes out, keeping the
+                // way up it was packed, and its cells are freed on the same
+                // tick — the occupancy is folded from the list, so removing
+                // the placement *is* freeing the cells.
+                let i = at_cell(creel, ITEMS, cx, cy);
+                if i >= 0 {
+                    hand = creel[i].kind;
+                    hand_rot = creel[i].rot;
+                    creel.remove(i);
+                    creel_refused = 0;
+                    emit.push(#{
+                        kind: "lift",
+                        x: cx.to_float(),
+                        y: cy.to_float(),
+                        item: hand,
+                    });
+                } else {
+                    creel_refused = 2;
+                }
+            } else {
+                // **Place**, at the cursor, top-left corner first — which is
+                // the same corner `first_fit` and `cells_row` use, so what you
+                // see is where it goes.
+                let d = cells_of(ITEMS, hand, hand_rot);
+                let g = occupancy(creel, ITEMS, CREEL_W, CREEL_H);
+                if fits_at(g, CREEL_W, CREEL_H, d[0], d[1], cx, cy) {
+                    creel.push(#{ kind: hand, x: cx, y: cy, rot: hand_rot });
+                    emit.push(#{
+                        kind: "place",
+                        x: cx.to_float(),
+                        y: cy.to_float(),
+                        rot: hand_rot.to_float(),
+                        item: hand,
+                    });
+                    hand = "";
+                    hand_rot = 0;
+                    creel_refused = 0;
+                } else {
+                    creel_refused = 1;
+                }
+            }
+        }
+        // **Turn**, in the hand, never on the grid. Turning something already
+        // placed would have to answer "and what if it no longer fits", and the
+        // answer is always "lift it first" — so lifting it first is the rule.
+        // A square item says so rather than doing nothing, because "I pressed
+        // it and nothing happened" is the complaint every silent no-op earns.
+        if creel_turn {
+            if hand == "" {
+                creel_refused = 2;
+            } else if ITEMS[hand].rot == 1 {
+                hand_rot = 1 - hand_rot;
+                creel_refused = 0;
+                emit.push(#{ kind: "turned", rot: hand_rot.to_float() });
+            } else {
+                creel_refused = 5;
+            }
+        }
+        // **Over the side.** SHIFT, held one second, and it is the only
+        // irreversible thing in this game — see `deeper_player.rhai` for why it
+        // is a held key and why it is not SPACE.
+        //
+        // **It works on the grid as well as on the hand, and without that half
+        // the interesting case is a dead end.** You have one hand. Land a
+        // conger that will not fit and she is in it — so you cannot lift a
+        // curio to repack, and the only in-creel move left would be to throw
+        // away the fish you just fought for. With this, the cursor is over the
+        // line spool, SHIFT frees its cell, and columns 1 and 2 become the
+        // clean 2x3 she needs. That is the whole puzzle and it exists only
+        // because the ditch reads the cursor.
+        if creel_ditch {
+            if hand != "" {
+                emit.push(#{ kind: "ditched", item: hand });
+                notice = 11; notice_at = tick;
+                got = hand;
+                hand = "";
+                hand_rot = 0;
+            } else {
+                let i = at_cell(creel, ITEMS, cx, cy);
+                if i >= 0 {
+                    let gone = creel[i].kind;
+                    creel.remove(i);
+                    emit.push(#{ kind: "ditched", item: gone });
+                    notice = 11; notice_at = tick;
+                    got = gone;
+                } else {
+                    creel_refused = 2;
+                }
+            }
+        }
+    } else if used && at_crate && stowed > 0 {
         // **The one rule in the demo that needs you to have *been* somewhere
         // and come back.** The catch is in a hull, the crate is on a wharf, and
         // the second test is the boat's own distance — swim ashore with the
@@ -1185,14 +1317,16 @@ if hub {
         } else {
             notice = 7; notice_at = tick;
         }
-    } else if used && at_box && (in_hand > 0 || online > 0 || hand != "") {
+    } else if used && at_box && (in_hand > 0 || online > 0) {
         // Everything fishy goes below in one press, because a player at the
         // hatch wants the catch stowed and not a dialogue about which one.
-        // **Including what is in his hand**, which is a third place a fish can
-        // be now and would otherwise be the one the hatch could not reach.
-        let n = in_hand + online + (if hand != "" && ITEMS[hand].fish == 1 { 1 } else { 0 });
+        //
+        // **The hand is not searched, because a fish is never in it.** The hand
+        // exists only while the grid is open and only to move a placement from
+        // one cell to another; it is emptied back into the creel when the grid
+        // closes. See the `creelshut` handler.
+        let n = in_hand + online;
         creel = creel_without_fish(creel, ITEMS);
-        if hand != "" && ITEMS[hand].fish == 1 { hand = ""; }
         online = 0;
         stowed += n;
         notice = 3; notice_at = tick;
@@ -1207,19 +1341,21 @@ if hub {
             online = 0;
             notice = 9; notice_at = tick;
             emit.push(#{ kind: "take", item: fishkind });
-        } else if hand == "" {
-            // **She will not fit, so she goes into his hand instead.** Off the
-            // line, off the slack timer, still his. See `hand` above for why
-            // this is not the same as losing her and not the same as leaving
-            // her on the rod.
-            hand = fishkind;
-            online = 0;
-            notice = 10; notice_at = tick;
-            emit.push(#{ kind: "take", item: fishkind });
-            emit.push(#{ kind: "refused", item: fishkind });
         } else {
-            // Only a hand that is *already* full leaves her on the line, and
-            // then the caption names both ways out.
+            // **She stays on the line, and that is not a punishment — it is
+            // the only shape that leaves the puzzle solvable.**
+            //
+            // The first version of this put her in his **hand** instead, on the
+            // argument that a fish left on the rod is a fish under a timer.
+            // Measured: she is not. `phase` only resets when `online == 0`, so
+            // a landed fish hangs off the tip indefinitely — traced to tick
+            // 3900, two thousand after the landing, still there.
+            //
+            // And the hand version was a **dead end**. You have one hand. With
+            // the conger in it you cannot lift a curio to repack and you cannot
+            // ditch one either, so the only move left inside the creel is to
+            // throw away the fish you just fought for. On the line she waits
+            // while you empty a cell with both the hand and the ditch free.
             notice = 4; notice_at = tick;
             emit.push(#{ kind: "refused", item: "fish" });
         }
@@ -1437,6 +1573,17 @@ if hub {
     // held key has a bar rather than a surprise. Zero whenever SHIFT is up.
     state.creel_ditching = ditch_q;
     state.hand = hand;
+    state.hand_rot = hand_rot;
+    // **Would what is in your hand land where the cursor is?** One more fold of
+    // the occupancy per tick, which is nine bit tests, and it is what the
+    // overlay paints green or red before you commit to a press.
+    let creel_fits = 0;
+    if hand != "" {
+        let d = cells_of(ITEMS, hand, hand_rot);
+        let g = occupancy(creel, ITEMS, CREEL_W, CREEL_H);
+        if fits_at(g, CREEL_W, CREEL_H, d[0], d[1], cx, cy) { creel_fits = 1; }
+    }
+    state.creel_fits = creel_fits;
     state.creel_hand = if hand == "" { 0 } else { 1 };
     // A string, for the overlay. `--assert` reads the number beside it.
     state.creel_hand_label = if hand == "" { "" } else { ITEMS[hand].label };
@@ -1462,6 +1609,8 @@ if hub {
     // keeps its old name and its finer meaning (in the creel), because the gate
     // reads it and because `fish_hang` needs the distinction.
     let fishheld = infish + (if hand != "" && ITEMS[hand].fish == 1 { 1 } else { 0 });
+    // (`hand` can hold a fish for as long as the grid is open and one is being
+    // dragged from cell to cell, which is why the term is still here.)
     state.fishheld = fishheld;
 
     // **The grid, projected into numbers small enough to assert on.**
@@ -1490,10 +1639,14 @@ if hub {
     // **One number per supply, because a `--assert` can read a number.** These
     // are the four detectors the pickup walk is pinned on and they predate the
     // creel; the creel changed where a thing *is*, not whether you have it.
-    state.bait = creel_has(creel, "bait");
-    state.line = creel_has(creel, "line");
-    state.lantern = creel_has(creel, "lantern");
-    state.thermos = creel_has(creel, "thermos");
+    // **The hand counts.** Bait lifted out of the creel is still bait you have
+    // — and `state.bait` is what divides the wait for a take by three, so a
+    // player who happened to be holding it when the fish bit would have been
+    // fishing unbaited with bait in his fist.
+    state.bait = if hand == "bait" { 1 } else { creel_has(creel, "bait") };
+    state.line = if hand == "line" { 1 } else { creel_has(creel, "line") };
+    state.lantern = if hand == "lantern" { 1 } else { creel_has(creel, "lantern") };
+    state.thermos = if hand == "thermos" { 1 } else { creel_has(creel, "thermos") };
 
     // **And the grid as a picture, which is what is drawn.** Strings, not
     // numbers, so `--assert` cannot read them — but `cells_row`'s answer says
@@ -1706,7 +1859,30 @@ if hub {
     // The hold has its own `Hud` now, so this line is free to be situational.
     // Priority, most urgent first: a fish on the line, a boat that has stopped
     // answering, the wheel, the rod, the walk.
-    if swimming > 0 {
+    if creel_open == 1 {
+        // **An open inventory has most to say, so it owns the line.** The row
+        // above it is a cell count and the grid itself is a picture; neither
+        // can name a key or say why the last press did nothing.
+        let holding = if hand == "" { "" } else { ITEMS[hand].label };
+        message = if ditch_q > 0 {
+            // A held key with no feedback is a held key nobody holds long
+            // enough. Quarters, emitted on change — see `deeper_player.rhai`.
+            "OVER THE SIDE " + "|||||||||".sub_string(0, ditch_q * 2) +
+                "   let go of SHIFT to keep it"
+        } else if creel_refused == 1 {
+            "IT WILL NOT GO THERE   LMB turns it — or move the cursor"
+        } else if creel_refused == 2 {
+            "NOTHING IN THAT CELL   E lifts whatever the cursor is on"
+        } else if creel_refused == 5 {
+            "IT IS ONE CELL   turning it would change nothing"
+        } else if hand != "" {
+            "HOLDING " + holding + "   E puts it down   LMB turns it   " +
+                "hold SHIFT to put it over the side"
+        } else {
+            "CREEL " + state.creel_used + "/" + (CREEL_W * CREEL_H) +
+                "   WASD moves   E lifts   SHIFT ditches   TAB closes"
+        };
+    } else if swimming > 0 {
         // **The state the demo had no sentence for, and then had the wrong
         // one.** Round 4 printed "walk forward to the boat" at a swimmer for
         // ever; round 5 replaced it with a fixed bearing that is right from one
@@ -1758,24 +1934,8 @@ if hub {
             "SHE WILL NOT FIT   that " + fishkind + " is " +
                 ITEMS[fishkind].w + "x" + ITEMS[fishkind].h +
                 " — TAB to make room, or E at the YELLOW FISH BOX"
-        } else if notice == 10 {
-            // **The sentence the four slots could never say.** Not "your hold
-            // is full" — *she is 2x3 and you have not got 2x3 anywhere*, which
-            // is a problem with three solutions rather than a dead end.
-            //
-            // **It keeps notice 9's two branches**, because it replaces notice
-            // 9 at exactly the same moment and for the same player: the one
-            // standing in the cockpit holding a fish, who either has the bait
-            // box between him and the hatch or has not. Dropping the bearing
-            // here would have made "she was too big" cost him the only line on
-            // screen that says where to go.
-            let big = "IN YOUR HANDS   that " + fishkind + " is " +
-                      ITEMS[fishkind].w + "x" + ITEMS[fishkind].h;
-            if baffled {
-                big + " — go " + round_it + " round the bait box to the YELLOW FISH BOX"
-            } else {
-                big + " — TAB to make room, or E at the YELLOW FISH BOX — " + box_at
-            }
+        } else if notice == 11 {
+            "OVER THE SIDE   the " + got + " is gone"
         } else if notice == 9 {
             // **The moment the payoff is his**, and the next place to walk. The
             // bearing is in his own frame with a distance on it — see `toward`.
@@ -1916,12 +2076,12 @@ if hub {
         // so a player who walked the wrong way round the bait box can watch the
         // metres fail to fall.
         message = if fishheld > 0 && baffled {
-            "FISH IN HAND   go " + round_it + " round the bait box — the YELLOW FISH BOX is aft"
+            "FISH IN THE CREEL   go " + round_it + " round the bait box — the YELLOW FISH BOX is aft"
         } else if fishheld > 0 {
             // **And it names the key now.** The box stopped being a place this
             // round: walking into it does nothing at all, so a bearing with no
             // verb on it is a player standing at a hatch pressing W.
-            "FISH IN HAND   E at the YELLOW FISH BOX — " + box_at
+            "FISH IN THE CREEL   E at the YELLOW FISH BOX — " + box_at
         } else if stowed > 0 && boat_d <= ALONGSIDE {
             // **The sentence at the moment the demo pays off.** Traced on the
             // delivery tape, at the crate's own range: `the crate is 6 m dead
@@ -1940,7 +2100,7 @@ if hub {
         // reach: the box stowed it the moment he walked past it, so by the time
         // he was on the wharf the hold was always empty. It can happen now, and
         // the box is on the boat.
-        message = "FISH IN HAND   the YELLOW FISH BOX is aboard her — " + box_at;
+        message = "FISH IN THE CREEL   the YELLOW FISH BOX is aboard her — " + box_at;
     } else if stowed > 0 {
         // Ashore, with a catch still in her. The other half of the signpost —
         // and "by the west rail" was the same defect as "to starboard", so it
