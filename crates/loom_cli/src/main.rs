@@ -4774,8 +4774,8 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
     // the same cost: it is the other piece of stepped water state, and running
     // the simulation twice to read two of its grids would be two answers about
     // one tick.
-    let (ripple, deposited) = if ticks == 0 {
-        ([0.0; 3], 0.0)
+    let (ripple, deposited, ran_dread) = if ticks == 0 {
+        ([0.0; 3], 0.0, None)
     } else {
         let mut stepped = world.clone();
         let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
@@ -4787,7 +4787,39 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
             .as_ref()
             .and_then(loom_cli_foam)
             .map_or(0.0, |f| f.at(at[0], at[1]));
-        (ripple, foam)
+        #[allow(clippy::cast_possible_truncation)]
+        let dread = warmed.as_ref().map(|r| r.state().number("dread").unwrap_or(0.0) as f32);
+        (ripple, foam, dread)
+    };
+
+    // **And the sea the run built, not the sea the file authors.** A scene
+    // whose `Environment.stages` ramp `wind_speed` has been simulating against
+    // a rising wind for every one of those ticks — `Runner::tick` re-derives
+    // the wave set from it — so reporting the wave set resolved *before* the
+    // run would describe a millpond that has not existed since tick one. Same
+    // `dread`, same `mood_weather_of`, as `loom sim`'s assertions and as the
+    // renderer. Free when `--sim` is absent, which is every existing caller.
+    //
+    // **The wind moves with it**, or the report contradicts itself: a
+    // significant height of 0.41 m beside a `wind_speed_10m` of 3.2 reads as a
+    // bug in the spectrum rather than as two numbers taken at different ticks.
+    let (wind, body) = match ran_dread {
+        Some(dread) => {
+            let stages: Vec<loom_scene::components::MoodStage> = world
+                .environment()
+                .and_then(|c| c.get("stages"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            match mood_weather_of(&stages, dread).0 {
+                Some(speed) => {
+                    let ramped = weather::wind_of_world_at(&world, Some(speed));
+                    let sea = weather::water_of(&world, &ramped).unwrap_or(body);
+                    (ramped, sea)
+                }
+                None => (wind, body),
+            }
+        }
+        None => (wind, body),
     };
     let sample = loom_water::sample_water(&body, at, seconds, ground, flow, ripple);
     // `sample_water` sums the orbital motion onto the current, so the wave half
