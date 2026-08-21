@@ -258,9 +258,16 @@ DEMO_FIGHT_HEAD="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531
 
 # **HIS LEGS STOP AND THE ROW ABOVE PROVES IT IS THE CREEL DOING IT.** Same
 # tape, W held from tick 0 in both, TAB at 60 in the second. Measured: z is
-# **-9.310** with the grid shut and **-3.073** with it open — six and a quarter
-# metres of walk that did not happen — and he is still at -3.073 at tick 400,
-# so it is a stop and not a stumble.
+# **-12.308** with the grid shut and **-3.073** with it open — nine and a
+# quarter metres of walk that did not happen — and he is *exactly* -3.073 at
+# tick 400 and again at 900, so it is a stop and not a stumble.
+#
+# **The threshold is -9.0 and the shut figure is -12.308, which is deliberate
+# slack.** These two numbers are the boat's walk and they move whenever the
+# character controller does: `40bd02d` gave the view mass and the shut figure
+# went from -9.310 to -12.308 without this row noticing, which is what the slack
+# is for. The claim is "he walked a long way" against "he did not move", and a
+# gap of nine metres does not need a tight bound to make it.
 #
 # The creel takes W/A/S/D because they are the only directional input there is
 # and they are also the cursor. **His head is not taken**: the pointer stays
