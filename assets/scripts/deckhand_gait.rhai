@@ -16,7 +16,11 @@
 //     state.gait    phase in radians, 0..2*PI
 //     state.speed   planar speed, m/s
 //     state.blend   0 = idle, 1 = full walk
-//     state.hold    0 = arms swing, 1 = both hands on the rod
+//     state.grip    0 = arms swing, 1 = both hands on the rod
+//
+// `grip` rather than `hold` because `deeper_rules.rhai` already uses "hold" for
+// the fish hold -- four slots and a boat -- and two meanings of one word in one
+// `state` map is a bug waiting for a reader.
 //
 // **Speed is smoothed, and that is not polish.** A `CharacterController`'s
 // position is resolved against the collision world every tick, so a single
@@ -62,4 +66,4 @@ if node in positions {
 state.speed = sm;
 state.blend = if sm / 0.40 > 1.0 { 1.0 } else { sm / 0.40 };
 state.gait = (g + sm * 2.30 * dt) % 6.283185307;
-state.hold = 0.0;
+state.grip = 0.0;

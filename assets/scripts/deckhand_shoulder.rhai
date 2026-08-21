@@ -10,15 +10,15 @@
 // swinging in the sagittal plane alone put the hands 0.52 m apart, which is
 // shoulder width and not a grip on a rod; +-22 degrees brings them to 0.23 m.
 //
-// **`state.hold` REPLACES the walk term, it does not add to it.** A hand that
+// **`state.grip` REPLACES the walk term, it does not add to it.** A hand that
 // swings while it is holding a rod is worse than no animation at all.
 
 let g = if "gait" in state { state.gait } else { 0.0 };
 let b = if "blend" in state { state.blend } else { 0.0 };
-let hold = if "hold" in state { state.hold } else { 0.0 };
+let grip = if "grip" in state { state.grip } else { 0.0 };
 let left = position[0] < 0.0;
 
-if hold >= 1.0 {
+if grip >= 1.0 {
     // Solved as forward kinematics in the engine's own convention, not summed
     // by eye: 32 at the shoulder and 78 at the elbow put the mittens at
     // y 1.238, z -0.483 — between the hips and the sternum, 40 degrees below

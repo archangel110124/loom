@@ -24,9 +24,9 @@
 
 let g = if "gait" in state { state.gait } else { 0.0 };
 let b = if "blend" in state { state.blend } else { 0.0 };
-let hold = if "hold" in state { state.hold } else { 0.0 };
+let grip = if "grip" in state { state.grip } else { 0.0 };
 
-if hold >= 1.0 {
+if grip >= 1.0 {
     rotation = [78.0, 0.0, 0.0];
 } else {
     let w = if position[0] < 0.0 { g } else { g + 3.14159265 };

@@ -2264,3 +2264,56 @@ if hub {
         message = "WALK FORWARD TO THE BOAT";
     }
 }
+
+// ---------------------------------------------------------------------------
+// **THE GAIT CLOCK — the six lines that make the deckhand walk.**
+// ---------------------------------------------------------------------------
+//
+// `Rig/Player/Body` is `assets/prefabs/deckhand.loom`: 43 nodes, 27 rigid mesh
+// leaves, and fourteen node `Script`s that bend it. Loom has no skeletal
+// animation, so a character here is an articulated puppet — and that is not a
+// compromise, it is the only animation method in this engine a MIRROR can
+// reflect in motion (ADR 0062:85 — every ray sees a `Deform`ed or skinned mesh
+// at its rest pose).
+//
+// **It has to live here, and here is the only place it can.** A node `Script`
+// has no memory, so fourteen joints cannot each integrate their own phase; and
+// a node script's `position` is its LOCAL offset, so none of them can see how
+// fast he is walking. A rules script is the only thing in the engine with both
+// `state` that survives a tick and `positions` that names the world.
+//
+// The same six lines are in `deckhand_gait.rhai`, which is the standalone rig's
+// rules script. There is no way to say it once: a scene gets ONE `GameRules`
+// and this file is the demo's.
+//
+// **Smoothed over 12 ticks.** A `CharacterController`'s position is resolved
+// against the collision world every tick and stalls outright for a few ticks
+// when it catches on deck geometry, so the raw first difference flickers and an
+// unsmoothed `blend` twitches the whole body between the idle and the walk.
+//
+// **Gated on there BEING a previous sample, not on the tick number.** The first
+// rules tick is 1, not 0: a `tick < 1` guard never fires, the first difference
+// is taken against an unset 0.0, and thirty metres of rig read as 1800 m/s.
+//
+// **`grip` is 1 because the rod is always in his hands** — that has been true
+// of this demo since `rod_hold.rhai` landed. It swaps the arms' walk swing for
+// a two-handed pose; the rod itself is still posed in the boat's frame by
+// `rod_hold.rhai` and is not parented to the hand.
+let seen_pl = "gpx" in state;
+if PLAYER in positions {
+    let gp = positions[PLAYER];
+    let graw = if seen_pl {
+        let gdx = gp[0] - state.gpx;
+        let gdz = gp[2] - state.gpz;
+        (gdx * gdx + gdz * gdz).sqrt() / dt
+    } else { 0.0 };
+    state.gpx = gp[0];
+    state.gpz = gp[2];
+    let gsm = if "speed" in state { state.speed } else { 0.0 };
+    gsm = gsm + (graw - gsm) * 0.083;
+    let gg = if "gait" in state { state.gait } else { 0.0 };
+    state.speed = gsm;
+    state.blend = if gsm / 0.40 > 1.0 { 1.0 } else { gsm / 0.40 };
+    state.gait = (gg + gsm * 2.30 * dt) % 6.283185307;
+    state.grip = 1.0;
+}

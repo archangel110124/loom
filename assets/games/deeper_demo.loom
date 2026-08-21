@@ -537,6 +537,14 @@ key = "rod"
 id = "7f2c14a9-63d8-4e51-b0a7-2d9e5c81f430"
 path = "../prefabs/fishing_rod.loom"
 
+# **The man himself** — 43 nodes, 27 rigid mesh leaves, 4,140 triangles. Loom
+# has no skeletal animation, so he is an articulated puppet on a node chain and
+# fourteen node `Script`s bend him. See "THE BODY AND THE GLASS", below.
+[[prefab]]
+key = "deckhand"
+id = "7a41c0de-5b2e-4f18-9d63-2c8ae5f10b47"
+path = "../prefabs/deckhand.loom"
+
 # The channel marks. See "THE MARKS", below.
 [[prefab]]
 key = "buoy"
@@ -790,13 +798,62 @@ transform = { pos = [-4.30, 2.40, 0.90] }
   [node.components.Script]
   path = "../scripts/deeper_player.rhai"
 
+# **0.82, and it was 0.75 until he had a head.** The eye sits inside the closed
+# dome of the sou'wester and the head vanishes for free — the opaque pipeline
+# is `CullModeFlags::BACK` and an eye inside a closed shell sees only
+# backfaces. **The BRIM does not vanish**, because it is a horizontal surface
+# and the eye is above it, so you see its underside. Measured at 0.75 the ochre
+# wedge covered the bottom 18% of the frame looking sideways and about 45%
+# looking back over his shoulder, where the sou'wester's rear sweep is 30%
+# longer. At 0.82 it is gone at 90 degrees and a rim along the bottom fifth at
+# 180 — a helmet edge, which is what a hat in first person is supposed to look
+# like.
+#
+# The alternative was a `visible` flag on `MeshRenderer`, and it is refused for
+# the reason it would have been added: hiding a part from the raster path would
+# have to hide it from the TLAS too, and the mirror would then show a headless
+# man.
 [[node]]
 name = "Eye"
 parent = "Rig/Player"
-transform = { pos = [0.0, 0.75, 0.0] }
+transform = { pos = [0.0, 0.82, 0.0] }
 
   [node.components.Camera]
   fov_y_degrees = 75.0
+
+# ---------------------------------------------------------------------------
+# THE BODY AND THE GLASS
+# ---------------------------------------------------------------------------
+#
+# **`pos = [0, -0.90, 0]` and it is not a nudge.** The prefab's origin is the
+# SOLE PLANE — y 0 is the deck he stands on — and a `CharacterController`'s
+# origin is its capsule CENTRE, 0.90 m above his feet, which is the same fact
+# `Eye`'s +0.75 is measured from. Mount him at identity and he floats.
+#
+# **It could not exist at all until `play.rs` learned `character_ancestor`.** A
+# `MeshRenderer` with no *dynamic* ancestor becomes a static collider from its
+# drawn bounds, and a `CharacterController` is not a dynamic body — so all 27
+# leaves used to bake as invisible scenery at the spawn point and the player
+# walked into his own chest. That is the same engine wrinkle `Rig/Boat/Rod`'s
+# header describes as the reason the rod is parented to the hull; with the fix
+# in, the rod could now be parented to `.../HandR` and posed in his own frame
+# instead of hers. Deliberately not done in this round.
+#
+# **He is invisible from inside.** The pipeline is `CullModeFlags::BACK` and the
+# near plane is 0.1 m, so an eye inside the closed hat dome sees backfaces and
+# the head is simply not there — no `visible` flag, and there must not be one:
+# hiding a part from the raster path would have to hide it from the TLAS too,
+# which is exactly what breaks the mirror it would have been added for.
+#
+# Nothing here is a component on the instance. `prefab::expand` keeps a node's
+# `transform` and its `[node.overrides]` and DISCARDS its `components`, so the
+# fourteen joint scripts are attached inside `deckhand.loom` — the same reason
+# `rod_hold.rhai` lives inside `fishing_rod.loom`.
+[[node]]
+name = "Body"
+parent = "Rig/Player"
+prefab = "deckhand"
+transform = { pos = [0.0, -0.90, 0.0] }
 
 # ---------------------------------------------------------------------------
 # THE RIG
@@ -1162,6 +1219,90 @@ transform = { pos = [-4.0, 2.60, 4.60], scale = [4.5, 1.20, 2.00] }
   [node.components.Material]
   albedo = [0.46, 0.30, 0.22]
   roughness = 0.88
+
+# ---------------------------------------------------------------------------
+# THE MIRROR — a material, not a feature. Nothing was built for this.
+# ---------------------------------------------------------------------------
+#
+# `scene.slang` calls `tracedEnvironment` unconditionally for every opaque
+# fragment — ADR 0019 measured a roughness cutoff on it and DELETED it — and
+# mixes the result in as `environment * f0 * (1 - roughness*0.7)`. At
+# `metallic = 1.0` the `f0` IS the albedo, so a light grey metal at roughness 0
+# returns ~95% of the traced radiance. That is the mirror. No planar pass, no
+# second camera, no mirrored-projection matrix, no ADR.
+#
+# **One traced ray carries 97% of the direct view's high-frequency detail**, and
+# the knee is between roughness 0.10 and 0.20:
+#
+#     roughness  0.00  0.05  0.10  0.20  0.35  0.55
+#     detail      97%   90%   85%   63%   43%   25%
+#
+# So it ships at 0. ADR 0061's reflection jitter does not apply — every line of
+# it is inside the cinematic marched-water lane — and a flat mirror's lobe is a
+# delta function that one ray samples exactly.
+#
+# **IT FACES INWARD, AND THAT IS THE WHOLE PLACEMENT ARGUMENT.**
+# `build_instances` filters the TLAS to MESHES. Water, grass, rain, fire, smoke
+# and every particle are generated from `SV_VertexID` and are not in the
+# acceleration structure at all, so a mirror pointed at the sea reflects a hole
+# where the sea is. Pointed at the shed it reflects the deck, the rail, the
+# crates, the mast, the boat — and you. It is on the shed's north face
+# (z = 2.60), 1.7 m due south of the spawn point and dead centre.
+#
+# **The frame is not decoration.** Without it the glass is invisible wherever it
+# reflects sky, because that sky is the same sky behind the wall.
+#
+# Two limits, both real. A reflected hit is shaded diffuse-only, so the
+# reflection comes back several times darker than the direct view — which is
+# why this character is built out of one bright feature (the sou'wester) and one
+# secondary (the hands) against near-black. And a reflected hit has no
+# reflection of its own: two facing mirrors give one bounce, then flat albedo.
+#
+# **THE FRAME GOES BEHIND THE GLASS, AND GETTING THAT BACKWARDS COSTS AN HOUR.**
+# A `box` frame 30 mm proud all round, drawn 5 mm in FRONT of the mirror, does
+# not read as a border — it is a lid. Rendered that way the panel is a flat
+# dark rectangle with a barely-readable ghost in it, and every reasonable next
+# move makes it worse: four lamp positions and four intensities were measured
+# against that panel and all of them were measuring the FRAME, whose roughness
+# of 0.72 returns about 40% of the traced detail through a diffuse surface.
+# **The numbers from that sweep are void.** The frame's front face must sit
+# behind the mirror's front face — here 2.570 against 2.550 — and the border
+# comes from the frame being larger in x and y, not from it being nearer.
+#
+# With that right the reflection needs no help at all: at the demo's own hub
+# lighting the glass carries the sou'wester, both mittens, the oilskin, the
+# waders, the boots, the crates, the rail, the boat and the flag, sharp.
+#
+# **Do not add a lamp for it.** Anything bright enough to lift a man 1.7 m away
+# also lights the deck he is standing on and the glass itself, so it raises the
+# panel's mean and not its contrast.
+
+[[node]]
+name = "MirrorFrame"
+parent = "Rig"
+transform = { pos = [-4.30, 2.600, 2.585], scale = [0.46, 1.060, 0.015] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.19]
+  roughness = 0.72
+  porosity = 0.40
+
+[[node]]
+name = "Mirror"
+parent = "Rig"
+transform = { pos = [-4.30, 2.600, 2.560], scale = [0.40, 1.000, 0.010] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.95, 0.96, 0.97]
+  metallic = 1.0
+  roughness = 0.0
+  porosity = 0.0
 
 [[node]]
 name = "ShedRoof"
