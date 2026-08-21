@@ -872,15 +872,18 @@ DEMO_CONGER="$DEMO_FIGHT; 1900:interact=1; 1901:; 1910:bag=1; 1911:; \
 #
 #      Keep it in step with `state.number(...)` / `state.text(...)` in
 #      `hud.rs`'s `Creel::read`.
+#      **One run, ten greps**, not ten runs: a `deeper_demo` tick is about
+#      1.3 ms and this block is already 135 `loom sim` invocations long.
+creel_state=$("$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:")
 for name in creel_cells creel_kinds creel_open creel_cx creel_cy \
             creel_hand creel_hand_label creel_hand_w creel_hand_h creel_fits; do
-  "$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
-    --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:" \
-    | grep -q "\"$name\":" || {
-      echo "green: the creel overlay reads state.$name and the game does not export it" >&2
-      exit 1
-    }
+  printf '%s\n' "$creel_state" | grep -q "\"$name\":" || {
+    echo "green: the creel overlay reads state.$name and the game does not export it" >&2
+    exit 1
+  }
 done
+unset creel_state
 
 # 5b6. **THE DITCH NEEDS THE KEY HELD, AND A SECOND IS A SECOND.** Twenty ticks
 #      of SHIFT throws nothing away; seventy does. It is the only irreversible
