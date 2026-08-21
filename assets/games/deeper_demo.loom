@@ -38,6 +38,39 @@
 # determinism" was said once here and was false.
 #
 # ---------------------------------------------------------------------------
+# YOU HAVE A BODY, AND THERE IS A GLASS TO SEE IT IN
+# ---------------------------------------------------------------------------
+#
+# `Rig/Player/Body` is `assets/prefabs/deckhand.loom` — 44 nodes, 28 rigid mesh
+# leaves, 4,396 triangles, and thirteen `rhai` scripts that bend it. Loom has no
+# skeletal animation, so he is an articulated puppet, and **that is not a
+# compromise: ADR 0072.** Every ray in this engine sees a `Deform`ed or skinned
+# surface at its REST pose (ADR 0062:85), so rigid parts on a node hierarchy are
+# the only animation method here that a reflection can show moving.
+#
+# **The mirror is on the shed's north face, 1.7 m due south of where you spawn,
+# and you spawn facing away from it.** Turn round. The HUD says so for the first
+# 3.5 m, because a mirror nobody walks past is not a feature and this scene
+# cannot be authored to open facing it — the berth is on -Z precisely because
+# neither an authored eye yaw nor an authored character yaw expresses "start
+# facing this way" (see the block below on `Play::start`).
+#
+# It is two nodes. `metallic = 1.0, roughness = 0.0` on a `box`, reflected by
+# the one traced ray ADR 0019 already spends on every opaque fragment. No planar
+# pass, no second camera, no mirrored projection. The glass, the frame ordering
+# and the four rules that go with them are documented at `Rig/Mirror` below.
+#
+# **To change the way he walks, edit ONE block**: `>>> DECKHAND KNOBS` at the
+# top of `assets/scripts/deckhand_gait.rhai`. Seventeen named numbers —
+# `walk_leg`, `walk_knee`, `walk_bob`, `idle_breath` — published into `state`
+# and read by every joint. The same block is duplicated verbatim in
+# `deeper_rules.rhai` (a scene gets one `GameRules` and rhai has no import here)
+# and `the_two_copies_of_the_deckhand_knobs_agree` fails when they drift.
+#
+# `assets/test/deckhand_walk.loom` is the walk on its own and
+# `assets/test/deckhand_mirror.loom` is him and his reflection in one frame.
+#
+# ---------------------------------------------------------------------------
 # THE LOOK — and the three numbers that change it
 # ---------------------------------------------------------------------------
 #
