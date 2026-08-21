@@ -412,7 +412,15 @@ let ditch_held = if "ditch_held" in memory { memory.ditch_held } else { 0 };
 if bag_open && sprint { ditch_held += 1; } else { ditch_held = 0; }
 if ditch_held == DITCH_TICKS { emit.push(#{ kind: "ditch" }); }
 memory.ditch_held = ditch_held;
-let dq = if ditch_held > 0 { ditch_held * 4 / DITCH_TICKS } else { 0 };
+// **Capped at four.** `ditch_held` keeps counting while the key is down, so an
+// uncapped quarter reaches 6 at a second and a half and the rules script draws
+// `OVER THE SIDE |||||||||   let go of SHIFT to keep it` over a hand whose
+// contents went over the side half a second ago. Measured at tick 400 of a hold
+// that started at 300. Capped, the last event of a ditch is the 4 that fires it
+// and nothing follows until he lets go.
+let dq = if ditch_held >= DITCH_TICKS { 4 }
+    else if ditch_held > 0 { ditch_held * 4 / DITCH_TICKS }
+    else { 0 };
 if dq != (if "dq" in memory { memory.dq } else { -1 }) {
     emit.push(#{ kind: "ditching", q: dq.to_float() });
     memory.dq = dq;

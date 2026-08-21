@@ -450,14 +450,15 @@ state.held = held;
 //
 //     state.carried        placements in the creel
 //     state.creel_used     cells taken           state.creel_free   cells left
-//     state.creel_items    same as `carried`     state.full         nothing fits
+//     state.full           nothing fits at all
 //     state.bait/line/lantern/thermos            one per supply, 0 or 1
 //     state.infish         fish in the creel     state.fishheld     + the hand
 //     state.creel_hand     1 while one is held   state.online       one on the rod
 //     state.fishsize       cells of the fish he can SEE (tip or hand)
 //     state.stowed         landed, below         state.creel_open   the grid is up
 //     state.creel_cx/cy    where the cursor is   state.creel_fits   would it land
-//     state.creel_refused  why the last press did nothing
+//     state.creel_refused  why the last press did nothing (see the codes below)
+//     state.creel_ditching quarters of the way to putting a thing over the side
 //     state.creel_sum / creel_area / creel_drift   the packer's invariant
 //     state.creel_selftest disagreements between `fits_at` and a naive scan
 //
@@ -1028,7 +1029,19 @@ if hub {
     let creel_shutting = false;
     let creel_turn = false;
     let creel_ditch = false;
-    let ditch_q = 0;
+    // **Latched, like the cursor and the refusal, and it was not.**
+    //
+    // `deeper_player.rhai` emits `ditching` **on change** — four events per
+    // ditch rather than sixty, which is the right discipline and is what every
+    // other progress value in this file follows. Read into a per-tick local it
+    // means the bar exists on the four ticks a quarter turns over and on no
+    // others: measured, `OVER THE SIDE ||` was on screen for tick 314 and gone
+    // again at 315, so the only irreversible key in the game was held for a
+    // second against a caption that said `HOLDING FLSK`.
+    //
+    // A latch is the whole fix, and it needs no extra events. Letting go emits
+    // `q = 0` because zero is a change, so it clears itself.
+    let ditch_q = if "creel_ditching" in state { state.creel_ditching } else { 0 };
     for e in events {
         // A successful open clears the last refusal, which is what makes a
         // latched code readable rather than permanent.
@@ -1324,7 +1337,13 @@ if hub {
         // and the turn: the rule is *anything that worked wipes the last thing
         // that did not*, and the ditch was the one verb that had been left out
         // of it.
+        // **And the bar stops the moment the thing is gone.** `dq` reaches 4
+        // on the same tick the ditch fires and the player script will not emit
+        // again until he lets go, so a latched 4 would leave `let go of SHIFT
+        // to keep it` on screen over a cell that is already empty. Zeroing it
+        // here hands the line to notice 11, which says what went over.
         if creel_ditch {
+            ditch_q = 0;
             if hand != "" {
                 emit.push(#{ kind: "ditched", item: hand });
                 notice = 11; notice_at = tick;
@@ -1714,7 +1733,6 @@ if hub {
     let used_cells = filled(grid, CREEL_W, CREEL_H);
     state.creel_used = used_cells;
     state.creel_free = CREEL_W * CREEL_H - used_cells;
-    state.creel_items = creel.len();
     // **The invariant, and it is the one number that moves if the packer ever
     // double-books or loses a cell.** One side counts the grid, the other sums
     // the list; they are computed by different code from different data and
@@ -1973,6 +1991,16 @@ if hub {
             "NOTHING IN YOUR HAND   E lifts it out first, then LMB turns it"
         } else if creel_refused == 5 {
             "IT IS ONE CELL   turning it would change nothing"
+        } else if noticing && notice == 11 {
+            // **The one irreversible act gets its name said back.** Notice 11
+            // is drawn everywhere else in this file and could not reach the
+            // screen here at all: the open creel owns the line, and the bar
+            // that had been filling for a second vanished into the default
+            // help string with no word about what had gone over. Above
+            // `HOLDING`, because ditching a cell while holding something else
+            // is still the thing that just happened; below the refusals,
+            // because a refusal is about the press he made after it.
+            "OVER THE SIDE   the " + got + " is gone"
         } else if hand != "" {
             "HOLDING " + holding + "   E puts it down   LMB turns it   " +
                 "hold SHIFT to put it over the side"

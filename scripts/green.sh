@@ -933,12 +933,44 @@ unset creel_state
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 420 \
   --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
 300:sprint=1; 320:" \
-  --assert "events.ditched == 0" --assert "state.creel_hand == 1" >/dev/null
+  --assert "events.ditched == 0" --assert "state.creel_hand == 1" \
+  --assert "state.creel_ditching == 0" >/dev/null
+#      **And the bar he is holding the key against, which was on screen for one
+#      tick in sixty.** `deeper_player.rhai` emits `ditching` on *change* — four
+#      events a ditch, not sixty — and the rules script read it into a per-tick
+#      local, so `OVER THE SIDE ||` appeared on tick 314 and was gone again at
+#      315. A second of the only irreversible key in the game, against a caption
+#      reading `HOLDING FLSK`. It is latched now, and these are the only two
+#      rows in the block that stop with a key still down.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 320 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+300:sprint=1" \
+  --assert "state.creel_ditching == 1" --assert "events.ditched == 0" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 350 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+300:sprint=1" \
+  --assert "state.creel_ditching == 3" --assert "events.ditched == 0" >/dev/null
+#      **And it stops at four, and stops being a bar at all.** `ditch_held`
+#      keeps counting while the key is down: uncapped, the quarter reached 6 at
+#      a second and a half and drew `let go of SHIFT to keep it` over a hand
+#      that had been empty since 60. Held to tick 420 without ever letting go,
+#      the bar is nought and the line names what went over.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 420 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+300:sprint=1" \
+  --assert "state.creel_ditching == 0" --assert "events.ditched == 1" \
+  | grep -q '"message": "OVER THE SIDE   the thermos is gone"' 
+#      **And notice 11 could not reach the screen while the creel was open at
+#      all** — the open grid owns the caption line and never consulted the
+#      notices, so a bar that had been filling for a second vanished into the
+#      default help string with no word about what had gone over the side. It
+#      is above `HOLDING` and below the refusals now.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 420 \
   --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
 300:sprint=1; 370:" \
   --assert "events.ditched == 1" --assert "state.creel_hand == 0" \
-  --assert "state.thermos == 0" --assert "state.creel_used == 3" >/dev/null
+  --assert "state.thermos == 0" --assert "state.creel_used == 3" \
+  | grep -q '"message": "OVER THE SIDE   the thermos is gone"' 
 
 # 5b7. **SHUTTING IT PUTS WHAT IS IN YOUR HAND BACK.** A held item has no
 #      picture and no verb outside the grid, so walking away with one is state
