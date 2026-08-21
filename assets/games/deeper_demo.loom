@@ -802,26 +802,39 @@ name = "Rig"
     #     wind, 3000     PASS PASS PASS PASS PASS PASS
     #     steam, 1800    PASS PASS PASS PASS PASS PASS
     #
-    # The helm is not the constraint and never was. **The whole of green.sh
-    # §6 + §7 passes with this rung at 16.0**, every one of the 114 `green.sh`
-    # lines that names this file, the three-process byte-identity check
-    # included.
+    # **The whole of green.sh §6 + §7 passes with this rung at 16.0** — every
+    # one of the 114 lines in that file that names this scene, the
+    # three-process byte-identity check included.
     #
-    # What DOES give out is the deck, three times sooner than the hull, and it
-    # is measured on `assets/test/weather_ramp.loom` rather than here — that
-    # file is this ladder over the five-station carry instrument. ADR 0060's
-    # acceptance is 30 mm peak-to-peak in the boat frame, and its riders swept
-    # over ticks 1800-2100 give, by top rung:
+    # **But there IS a ceiling, and it is his footing, not the hull's.** Past
+    # the gate's longest tape, holding W to the far edge of the played water:
+    #
+    #     top rung    16      17      18      19      20
+    #     at tick   3400   at_helm 1   0       0       0       0
+    #     boat x     153     148     145     145     127
+    #
+    # `at_helm` going to zero is the helmsman sliding out of the mat rectangle
+    # in the BOAT's frame — `on_mat_now` in `deeper_player.rhai` — with the
+    # hull inside a few centimetres of still water throughout. It is not the
+    # boat failing. At 16 he holds the wheel the whole trip and comes off at
+    # tick 3600, by which point she has stopped at x = 158 anyway. At 17 he is
+    # off before the trip is done. The crossing is between 16 and 17.
+    #
+    # **A second instrument, on a different scene, lands in the same place.**
+    # `assets/test/weather_ramp.loom` is this ladder over the five-station
+    # carry rig, and ADR 0060's acceptance is 30 mm peak-to-peak in the boat
+    # frame. Its riders swept over ticks 1800-2100, by top rung:
     #
     #     Wind.speed   10     12     14     16     18     20
     #     worst p-p  12.9   19.2   23.6   23.9   33.6   38.5  mm
     #
-    # Monotone, crossing between 16 and 18. 16 keeps a fifth of the budget, and
-    # a wind cap raised past it is a cap raised on a passenger who will slide.
+    # Monotone, crossing between 16 and 18. Two measurements of the same organ
+    # — a passenger drifting on a heaving deck — from two directions, agreeing.
+    # 16 keeps a fifth of that budget.
     #
     # **Raising it further is ADR 0060 work, not weather work**: platform carry
-    # is upward-only and ratchets (see ADR 0074 §4), and that is the organ to
-    # fix before this number moves again.
+    # is upward-only and ratchets, and that is the organ to fix before this
+    # number moves again. ADR 0075 §4.
     wind_speed = 16.0
     rain_intensity = 30.0
     # Sea and sky are one value: there is no `out there` any more and the world
