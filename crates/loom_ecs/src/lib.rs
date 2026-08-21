@@ -386,13 +386,20 @@ impl World {
                     .get("active")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(true);
+                // **Recorded whether or not it is active**, so a spare camera
+                // still has a lens something can read it through by name. A
+                // switched-off camera used to lose its `fov_y_degrees` here,
+                // which left `camera_named` with a position and no view — and
+                // the only way round that was to leave the spare *active* and
+                // rely on it sitting below the player in the file, which is a
+                // silent, severe failure the moment anyone reorders the scene.
+                #[allow(clippy::cast_possible_truncation)]
+                let fov = camera
+                    .get("fov_y_degrees")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(60.0) as f32;
+                world.camera_fov.insert(entity, fov);
                 if active {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let fov = camera
-                        .get("fov_y_degrees")
-                        .and_then(serde_json::Value::as_f64)
-                        .unwrap_or(60.0) as f32;
-                    world.camera_fov.insert(entity, fov);
                     // First active one wins, in file order. Deterministic and
                     // explainable; picking "the last" would mean appending a
                     // node silently stole the view.
@@ -494,7 +501,27 @@ impl World {
     /// nothing about why.
     #[must_use]
     pub fn active_camera(&self) -> Option<CameraView> {
-        let entity = self.active_camera?;
+        self.camera_view(self.active_camera?)
+    }
+
+    /// The view from a named node, active or not.
+    ///
+    /// A title screen needs a second camera in the file that the *game* must
+    /// never pick: `active_camera` takes the first active one in file order and
+    /// `player_character` walks up from it, so an active spare authored above
+    /// the player both steals the view and unhooks the controller. Switched
+    /// off it is ineligible for either, and this is how it is read anyway.
+    ///
+    /// Linear in the scene, unlike [`Self::active_camera`] — it is called once
+    /// when a window opens, not once a frame.
+    #[must_use]
+    pub fn camera_named(&self, path: &str) -> Option<CameraView> {
+        let entity = self.order.iter().copied().find(|&e| self.path(e) == Some(path))?;
+        self.camera_view(entity)
+    }
+
+    /// Eye, direction and lens from one node.
+    fn camera_view(&self, entity: Entity) -> Option<CameraView> {
         if !self.is_alive(entity) {
             return None;
         }
@@ -1168,6 +1195,32 @@ mod tests {
         let view = world.active_camera().expect("the second one is active");
         close(view.eye, [0.0, 0.0, 7.0]);
         assert!((view.fov_y_degrees - 75.0).abs() < f32::EPSILON, "authored fov");
+    }
+
+    /// **A switched-off camera keeps its lens, and only a name can reach it.**
+    /// The front end opens on a spare camera the game must never pick; if
+    /// `camera_fov` were still recorded only for active cameras this would
+    /// return `None` and the only way to have a title shot would be to leave
+    /// the spare active and hope nobody moved it above the player.
+    #[test]
+    fn a_spare_camera_is_readable_by_name_and_still_not_the_scene_s() {
+        let world = world_from(
+            "[[node]]\nname = \"Stage\"\n\n\
+             [[node]]\nname = \"Spare\"\nparent = \"Stage\"\n\
+             transform = { pos = [0.0, 3.0, 9.0] }\n\
+             [node.components.Camera]\nfov_y_degrees = 42.0\nactive = false\n\n\
+             [[node]]\nname = \"Eye\"\nparent = \"Stage\"\n\
+             transform = { pos = [0.0, 0.0, 7.0] }\n\
+             [node.components.Camera]\nfov_y_degrees = 75.0\n",
+        );
+
+        let spare = world.camera_named("Stage/Spare").expect("named, so reachable");
+        close(spare.eye, [0.0, 3.0, 9.0]);
+        assert!((spare.fov_y_degrees - 42.0).abs() < f32::EPSILON, "the spare's own lens");
+
+        let scene = world.active_camera().expect("the active one");
+        close(scene.eye, [0.0, 0.0, 7.0]);
+        assert!(world.camera_named("Stage/Nope").is_none(), "an unknown path is not a camera");
     }
 
     /// A zero-scaled node has no direction to look in. Reporting no camera
