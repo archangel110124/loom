@@ -315,10 +315,17 @@ DEMO_FIGHT_HEAD="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531
 # TAB there is refused with a word rather than fighting the helm for the keys.
 # `at_helm` is `deeper_player.rhai`'s own fact — the wheel is answering you —
 # not a rectangle, so it is right for a player who pressed SPACE and let go.
+#
+# **The word is the half that was missing.** Code 3 is the one refusal a player
+# cannot read: every other one is drawn by the open creel's own caption line and
+# this one happens with the creel shut, so TAB at the wheel did nothing and said
+# nothing. Notice 10 outranks the helm line for two seconds and names the key
+# that frees his hands.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 600 \
   --hold "0:move_z=1; 550:bag=1; 551:" \
   --assert "state.at_helm == 1" --assert "state.creel_open == 0" \
-  --assert "state.creel_refused == 3" --assert "events.creelbusy == 1" >/dev/null
+  --assert "state.creel_refused == 3" --assert "events.creelbusy == 1" \
+  | grep -q '"message": "HANDS ON THE WHEEL   SPACE lets go, then TAB opens the creel"' 
 
 # **THE CURSOR: ONE TAP IS ONE CELL, A HELD KEY REPEATS TO THE WALL AND STOPS.**
 # `move_x`/`move_z` are analogue axes and nothing else in this engine has ever

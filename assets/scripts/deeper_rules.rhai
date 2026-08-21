@@ -1047,7 +1047,16 @@ if hub {
         // latched code readable rather than permanent.
         if e.kind == "creelopen" { creel_open = 1; creel_refused = 0; }
         if e.kind == "creelshut" { creel_open = 0; creel_shutting = true; }
-        if e.kind == "creelbusy" { creel_refused = 3; }
+        // **And it says so.** Code 3 is the one refusal the player cannot
+        // read, because the caption belongs to the open creel and this one
+        // happens with it shut: he pressed TAB at the wheel and the bag simply
+        // did not open, with nothing on screen about why. Notice 10 outranks
+        // the helm line for its two seconds and names the key that frees his
+        // hands. Every other silent no-op in this file already has one.
+        if e.kind == "creelbusy" {
+            creel_refused = 3;
+            notice = 10; notice_at = tick;
+        }
         if e.kind == "cursor" {
             if "dx" in e { cx += e.dx.to_int(); }
             if "dy" in e { cy += e.dy.to_int(); }
@@ -2060,6 +2069,8 @@ if hub {
             "SHE WILL NOT FIT   that " + fishkind + " is " +
                 ITEMS[fishkind].w + "x" + ITEMS[fishkind].h +
                 " — TAB to make room, or E at the YELLOW FISH BOX"
+        } else if notice == 10 {
+            "HANDS ON THE WHEEL   SPACE lets go, then TAB opens the creel"
         } else if notice == 11 {
             "OVER THE SIDE   the " + got + " is gone"
         } else if notice == 9 {
