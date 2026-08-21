@@ -16,11 +16,22 @@
 // deckhand is upright.
 //
 // **The idle sway is 4.2 degrees where it was 1.2, and the old number was
-// below the floor.** Two independent measurements of the shipped idle put the
-// MEAN pixel difference over 155 ticks at 1.7 and 3.1 grey levels out of 255 —
-// a changed-pixel count in the double digits with nothing behind it, which is
+// below the floor.** Two independent reviews measured the shipped idle's MEAN
+// pixel difference over 155 ticks at 1.7 and 3.1 grey levels out of 255 — a
+// changed-pixel count in the double digits with nothing behind it, which is
 // antialiasing on a pale mitten and not a man breathing. Changed-pixel counts
 // cannot tell a breath from a still; the mean can, and it said still.
+//
+// Re-measured on one instrument, ticks 20 against 175 at 420x460, whole frame:
+//
+//     1.2 deg, no weight shift   differing 5.7%   mean 0.71   worst 239
+//     4.2 deg, shift 1.6         differing 9.6%   mean 2.13   worst 245
+//     8.4 deg, shift 3.2         differing 10.9%  mean 3.20   worst 245
+//
+// Three times the motion for the first step and one and a half for the second,
+// and 8 degrees of spine sway on a standing man is a visible lean rather than a
+// breath. `idle_breath` and `idle_shift` are knobs; these are the numbers to
+// re-run if either moves.
 
 let g = if "gait" in state { state.gait } else { 0.0 };
 let b = if "blend" in state { state.blend } else { 0.0 };
