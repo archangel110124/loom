@@ -650,6 +650,8 @@ name = "Rig"
     [[node.components.Environment.stages]]
     name = "inshore"
     at = 0.0
+    # The floor, and it is the scene's own `Wind.speed` exactly — see `fetch`.
+    wind_speed = 3.0
     # The rig at dawn, and the only stage whose grade ADDS. A warm tilt and a
     # saturation lift with `contrast` left neutral: ADR 0068's operator already
     # moves this frame's median up a few codes, and "not too bright" was the
@@ -662,6 +664,7 @@ name = "Rig"
     [[node.components.Environment.stages]]
     name = "underway"
     at = 0.25
+    wind_speed = 3.5
     # Still a nice day. The only thing that has happened is that the light has
     # gone slightly flat and the sky has lost a little of its blue.
       [node.components.Environment.stages.environment]
@@ -681,6 +684,7 @@ name = "Rig"
     [[node.components.Environment.stages]]
     name = "outofsight"
     at = 0.5
+    wind_speed = 4.0
     # **The wrongness beat, and it is NOT dark — the third-brightest rung.**
     # The sea has gone the colour of an aquarium nobody has cleaned while the
     # deck you are standing on is still lit.
@@ -708,6 +712,7 @@ name = "Rig"
     [[node.components.Environment.stages]]
     name = "grounds"
     at = 0.8
+    wind_speed = 4.5
       [node.components.Environment.stages.environment]
       sun_strength = 0.40
       sun_color = [0.80, 0.92, 0.70]
@@ -726,6 +731,25 @@ name = "Rig"
     [[node.components.Environment.stages]]
     name = "theedge"
     at = 1.0
+    # **The top, and it is 5.0 because that is where the helm gives out.**
+    #
+    # The engine is not the constraint here and neither is the hull. green.sh
+    # §6's long-turn row — 3 200 ticks of full starboard wheel from this berth,
+    # asserting the helmsman is still on the mat and still making way — is, and
+    # a flat rung swept against it reads:
+    #
+    #     Wind.speed  3.0  3.5  4.0  4.5  5.0  5.5  6.0
+    #     full wheel  PASS PASS PASS PASS PASS FAIL FAIL
+    #
+    # She heels through a sustained hard turn and the sea takes him off the
+    # mat; `deeper_player.rhai` already clamps the wheel to 0.3 for exactly
+    # this and the clamp runs out around Hs 0.3. **Steaming straight holds at
+    # the full 16 this engine supports** — only the sustained turn does not —
+    # so raising this rung is gameplay work on the helmsman's footing, not
+    # weather work, and it is the one thing standing between this demo and a
+    # real blow. `assets/test/weather_ramp.loom` is the ladder at 16 with the
+    # carry measured at every rung.
+    wind_speed = 5.0
     # Sea and sky are one value: there is no `out there` any more and the world
     # stops at forty metres.
     #
@@ -796,6 +820,30 @@ parent = "Rig"
   surface_height = 0.0
   density = 1000.0
   drag = 2.0
+  # **Fifteen kilometres of open water upwind, and the number is chosen to sit
+  # just past a threshold rather than for its own sake.**
+  #
+  # Without a fetch the derived sea is fully-developed Pierson-Moskowitz, which
+  # is SCALE-INVARIANT: `A` goes as `U²` and `k` as `U⁻²`, so slope is the same
+  # at every wind speed there is. Measured on `ocean.loom` with its waves
+  # stripped, realised `mu_max` over a 9x9 grid runs 0.112 / 0.105 / 0.090 /
+  # 0.047 at Wind.speed 3 / 8 / 12 / 16 — the sea gets *smoother* as the wind
+  # rises — while the longest wave runs 8 m to 238 m. Raising the wind on that
+  # sea is a zoom knob, so the ladder below would move nothing worth seeing.
+  #
+  # **Why 15 000 and not 3 000.** A fetch-limited sea grows into the
+  # fully-developed one at `18_906·U10²/g` metres, which at this scene's calm
+  # rung is 14 310 m. 15 000 is just past it, so at `dread = 0` the berth is
+  # *exactly* the Pierson-Moskowitz sea this demo has always opened on —
+  # measured, `Hs = 0.16592977941036224` before and after, bit for bit — and
+  # every one of the twenty-one boarding, creel and helm rows in green.sh §6
+  # is untouched. Below the crossing the berth would be Hs 0.076, half the sea
+  # the whole demo was authored and gated on, and **that halving re-times the
+  # boarding walk**: arrival at the wheel moves from tick 360 to 200 and thirty
+  # gate rows fail. The crossing is 5% away, so this number and `Wind.speed`
+  # at the `inshore` rung must move together or the berth changes underneath
+  # every tape in the file.
+  fetch = 15000.0
 
 # ---------------------------------------------------------------------------
 # YOU

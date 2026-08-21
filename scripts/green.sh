@@ -267,6 +267,26 @@ fi
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1800 --hold move_z=1 \
   --assert "state.dread > 0.1" >/dev/null
 
+# **AND THE WEATHER RIDES THAT SAME SCALAR, WHICH NOTHING ELSE HERE CHECKS.**
+# The rows above prove `dread` moves; this proves something is wired to it on
+# the *simulation* side. Deleting the five `wind_speed` lines from the scene
+# leaves every other row in this file passing — measured — because they read a
+# mood, and a mood is a look.
+#
+# Measured on the shipped scene, holding W from the berth, `wind@3,3,-200`:
+#
+#     tick        60     1800     3000
+#     dread    0.000    0.327    0.943
+#     with     2.475    3.064    3.795
+#     without  2.475    2.469    2.229   <- the control, ladder deleted
+#
+# The readings are below the authored `Wind.speed` because that is a
+# free-stream value about 10% above U10 and the probe is at 3 m. **The
+# `without` row goes *down*, which is the tell**: unramped, the only thing
+# moving that number is gust phase.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 3000 --hold move_z=1 \
+  --assert "wind@3,3,-200.speed > 3.4" >/dev/null
+
 # The cast-and-hook prefix of `DEMO_FIGHT`, which is defined two hundred lines
 # below where the trip tapes live. Named here because the creel rows above need
 # a hooked fish and nothing more; copying the whole forty-key cadence would be
