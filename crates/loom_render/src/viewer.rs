@@ -1479,8 +1479,12 @@ impl Viewer {
         self.environment.eye_step = self.eye_tracker.step(camera.eye, self.rain_tick);
         #[allow(clippy::cast_precision_loss)]
         {
-            self.environment.viewport =
-                [self.extent.width as f32, self.extent.height as f32, 0.0, 0.0];
+            self.environment.viewport = [
+                self.extent.width as f32,
+                self.extent.height as f32,
+                crate::renderer::ao_rays(),
+                0.0,
+            ];
         }
         // Stamped rather than assigned by the caller, exactly as in
         // `renderer.rs`: the window replaces `environment` every frame from the

@@ -342,12 +342,18 @@ fn select_physical_device(
             missing.push("shaderSampledImageArrayNonUniformIndexing");
         }
 
-        // **Quad subgroup operations in the fragment stage**, which the
-        // cinematic water's reflection shares its jittered ray across —
-        // `WATER_CINEMATIC_LOBE` in `scene.slang`. Nothing else in the engine
-        // uses a subgroup operation, so this is a genuinely new hardware
-        // requirement and it is checked here rather than discovered as a
-        // `vkCreateShaderModule` failure with a capability number in it.
+        // **Quad subgroup operations in the fragment stage.** Three things in
+        // `scene.slang` need them now, and the list matters because this check
+        // is the only documentation of the requirement: the cinematic water's
+        // reflection shares its jittered ray across a quad
+        // (`WATER_CINEMATIC_LOBE`), that same function asks a quad-wide
+        // question about the shoreline before it kills a lane, and — since the
+        // AO change — `ambientVisibility` reconstructs from four lanes, which
+        // every scene with a mesh in it runs. **So this is no longer removable
+        // with cinematic water**; it was, once, and a note saying "nothing else
+        // uses a subgroup operation" would have made that look safe. Checked
+        // here rather than discovered as a `vkCreateShaderModule` failure with
+        // a capability number in it.
         //
         // Both halves matter: `QUAD` says the operations exist, and
         // `supported_stages` says they exist *in the stage that uses them* —

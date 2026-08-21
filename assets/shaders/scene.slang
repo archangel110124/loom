@@ -143,7 +143,7 @@ struct EnvironmentData {
     // exactly its 128-byte guarantee before grass needed a pointer. This is
     // per-frame data read by whatever wants it, which is what this buffer is.
     float4 eye;
-    float4 viewport;   // xy size in pixels
+    float4 viewport;   // xy size in pixels, z the AO ray dial (`aoRays`), w free
     float4 wind;       // xy direction, z speed, w gustiness
     // x turbulence, y ground drag, z seconds, w the wetness FILM — see the
     // wetness section further down, and `water.w` for its other half.
@@ -1408,11 +1408,39 @@ static const float AO_RANGE = 1.0;
 /// the reason is coherence: every pixel's sun rays go nearly the same way and
 /// share their traversal, while a hemisphere sample goes wherever the surface
 /// faces. That is why this term, and not the sun's, is the one worth halving.
-static const uint AO_RAYS = 4;
+/// **The dial, and it is a run-time one.** Rays per lane; the quad sees four
+/// times this because the four lanes take disjoint slices of one sequence.
+/// `LOOM_AO_RAYS` sets it, the default is 4, and `loom_render`'s crate docs
+/// carry the table of what each stop costs in milliseconds and in pixels — one
+/// place, in English, for someone who is choosing rather than reading this.
+///
+/// **A buffer read rather than a `static const`.** The loop was already rolled
+/// with a run-time trip count (`quadShare` picks between two values and is a
+/// per-material fact), so nothing here was ever unrolled and nothing is lost by
+/// letting the count vary: measured at 4, the compiled shader renders the same
+/// pixels and the same milliseconds as the constant did. What it buys is that
+/// the human can trade grain for frame time on their own machine without a
+/// `slangc` run — and the honest reason to want that is that the cheap stop and
+/// the expensive stop are both *defensible*, which is unusual, so the choice
+/// belongs to whoever is looking at the screen.
+///
+/// `viewport.zw` was two free trailing scalars in the environment buffer, so
+/// this moved no offset and re-pinned no layout test. Stamped by `renderer.rs`
+/// and `viewer.rs` beside the width and height, which is the same "the renderer
+/// knows this and the scene does not" rule those two already follow. `max` so a
+/// caller that leaves it zero gets a picture rather than a divide by zero.
+uint aoRays() {
+    return max(1u, uint(push.environment[0].viewport.z));
+}
 
 /// What a lane fires when it cannot share — see `cutoutMaterial` in
-/// `fragmentMain`. Today's count, at today's cost and today's picture.
-static const uint AO_RAYS_UNSHARED = 8;
+/// `fragmentMain`. **Twice the shared count**, which at the default is the
+/// eight rays this term had before the share existed: a lane with no
+/// neighbours to borrow from is the old shader, and it should cost and look
+/// like the old shader at every stop of the dial.
+uint aoRaysUnshared() {
+    return aoRays() * 2u;
+}
 
 /// The fraction of the hemisphere above `normal` that is open, within
 /// [`AO_RANGE`].
@@ -1428,8 +1456,8 @@ float ambientVisibility(float3 position, float3 normal, float bias, float2 pixel
 
     // **The dither is the QUAD's, and the lane slices the sequence.** Seeding
     // from the quad's own corner and indexing at `lane * rays + i` is what
-    // makes the four lanes' samples one stratified set of `4 * AO_RAYS`
-    // directions rather than four rotated copies of `AO_RAYS` — four rotations
+    // makes the four lanes' samples one stratified set of `4 * aoRays()`
+    // directions rather than four rotated copies of `aoRays()` — four rotations
     // of one set are four correlated estimates, and averaging them buys much
     // less than averaging four disjoint slices does. It costs three integer
     // ops and it is most of why halving the ray count is not a quality loss.
@@ -1446,7 +1474,7 @@ float ambientVisibility(float3 position, float3 normal, float bias, float2 pixel
     uint py = uint(int(pixel.y));
     uint lane = quadShare ? ((px & 1u) | ((py & 1u) << 1u)) : 0u;
     float2 seed = quadShare ? float2(float(px & ~1u), float(py & ~1u)) : pixel;
-    uint rays = quadShare ? AO_RAYS : AO_RAYS_UNSHARED;
+    uint rays = quadShare ? aoRays() : aoRaysUnshared();
     float2 dither = rayDither(seed + float2(37.0, 11.0));
     float open = 0.0;
     for (uint i = 0; i < rays; ++i) {
@@ -7028,7 +7056,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         //
         // This used to cite ADR 0019's occupancy cliff as the reason more rays
         // were refused. **That cliff does not reproduce** — see the ladder in
-        // `AO_RAYS` — so the refusal now rests on what actually measured it:
+        // `aoRays` — so the refusal now rests on what actually measured it:
         // the fifty-fold salt result below. A rejection resting on a fact that
         // no longer holds is a trap for whoever reads it next.
         //

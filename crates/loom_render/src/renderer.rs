@@ -191,6 +191,13 @@ pub struct EnvironmentData {
     /// **The grass vertex shader reasons in pixels**, because the whole
     /// minimum-width trick is "no blade may be thinner than about one pixel"
     /// and a shader cannot know what a pixel is without this.
+    ///
+    /// **`z` is [`ao_rays`]**, the AO dial — one of the two free trailing
+    /// scalars this buffer's packing exists to hand out, so it moved no offset
+    /// and re-pinned no layout test. It lodges here rather than in a field of
+    /// its own for the same reason the width does: it is what the *renderer*
+    /// knows about this frame, and both `render` and the viewer stamp it right
+    /// after they stamp the size. `w` is still free.
     pub viewport: [f32; 4],
     /// xy wind direction, z speed, w gustiness.
     ///
@@ -1201,6 +1208,46 @@ pub(crate) const TIMED_PASSES: u32 = 12;
 /// without any of them knowing it exists.
 pub(crate) fn timing_requested() -> bool {
     std::env::var_os("LOOM_GPU_TIMING").is_some_and(|v| v != "0")
+}
+
+/// Ambient-occlusion rays per lane — `LOOM_AO_RAYS`, default 4.
+///
+/// **The one dial between speed and grain in this engine**, and the crate docs
+/// carry the table of what each stop costs. It rides in `EnvironmentData`'s
+/// spare `viewport[2]`, so the shader reads it per frame and no stop needs a
+/// `slangc` run; the quad share means the picture sees four times this number.
+///
+/// An environment variable rather than a scene field, and that is the decision
+/// worth stating: how much silicon to spend is a property of the machine
+/// looking at the scene, not of the scene. A scene-authored value would make
+/// the golden images photograph whatever each `.loom` happened to say, and
+/// would have to be answered again in every scene ever written.
+///
+/// Read once. It is not a live control — nothing polls it — and re-reading the
+/// environment per frame would be a syscall in the hot path for a value that
+/// cannot change.
+///
+/// Clamped to 1..=64. Zero rays is a divide by zero and the shader floors it
+/// anyway; past 64 the term is converged and the frame is not.
+pub(crate) fn ao_rays() -> f32 {
+    static RAYS: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *RAYS.get_or_init(|| parse_ao_rays(std::env::var("LOOM_AO_RAYS").ok().as_deref()))
+}
+
+/// [`ao_rays`] without the environment, so it has a test.
+///
+/// **Zero is the case worth having a test for.** `LOOM_AO_RAYS=0` is what
+/// someone types meaning "off", and it would be a divide by zero in
+/// `ambientVisibility`; the shader floors it too, but a value that has to be
+/// caught twice should be caught here, where the reason can be written down.
+/// Anything unparseable is the default rather than an error, because this is a
+/// convenience dial and a typo should not stop a render.
+fn parse_ao_rays(raw: Option<&str>) -> f32 {
+    const DEFAULT: f32 = 4.0;
+    raw.and_then(|v| v.trim().parse::<u32>().ok())
+        .map_or(DEFAULT, |n| {
+            u16::try_from(n.clamp(1, 64)).map_or(DEFAULT, f32::from)
+        })
 }
 
 impl Renderer {
@@ -2276,7 +2323,7 @@ impl Renderer {
         #[allow(clippy::cast_precision_loss)]
         {
             self.environment.viewport =
-                [self.width as f32, self.height as f32, 0.0, 0.0];
+                [self.width as f32, self.height as f32, ao_rays(), 0.0];
         }
         // **Stamped here for the same reason the eye is.** `environment` is a
         // public field callers assign wholesale every frame, and the terrain
@@ -5194,6 +5241,25 @@ pub(crate) fn create_shader_module(
     Ok(unsafe { device.create_shader_module(&info, None) }?)
 }
 
+
+#[cfg(test)]
+mod ao_dial_tests {
+    use super::parse_ao_rays;
+
+    /// The dial's whole contract, and the only line of it that is not obvious:
+    /// **`LOOM_AO_RAYS=0` must not reach the shader.** Someone typing it means
+    /// "off", and zero rays is `open / 0.0`.
+    #[test]
+    fn the_dial_clamps_and_falls_back() {
+        assert_eq!(parse_ao_rays(None), 4.0, "unset is the shipped default");
+        assert_eq!(parse_ao_rays(Some("8")), 8.0);
+        assert_eq!(parse_ao_rays(Some(" 2 ")), 2.0, "a stray space is not a typo");
+        assert_eq!(parse_ao_rays(Some("0")), 1.0, "zero rays is a divide by zero");
+        assert_eq!(parse_ao_rays(Some("4096")), 64.0, "converged long before here");
+        assert_eq!(parse_ao_rays(Some("four")), 4.0, "a typo renders, it does not fail");
+        assert_eq!(parse_ao_rays(Some("-1")), 4.0, "and neither does a negative one");
+    }
+}
 
 #[cfg(test)]
 mod placement_tests {

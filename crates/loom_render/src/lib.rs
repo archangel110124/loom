@@ -18,6 +18,63 @@
 //! and the ADR's results table — and that variable is how the reference numbers
 //! are taken.
 //!
+//! # `LOOM_AO_RAYS` — the one dial between frame time and grain
+//!
+//! Ambient occlusion is **two thirds of the cost of ray tracing in this
+//! engine** and the only part of it whose quality is a smooth function of a
+//! number. `LOOM_AO_RAYS` is that number: rays fired per pixel. The four lanes
+//! of a 2x2 quad take *disjoint* slices of one sample sequence and then average,
+//! so the picture sees four times what a lane fires. Set it and re-run; nothing
+//! is recompiled and no shader is touched.
+//!
+//! ```text
+//! LOOM_AO_RAYS=8 loom render assets/test/croft.loom --out croft.png
+//! ```
+//!
+//! **Forward pass at 1920x1080**, min of 5 interleaved reps x last 16 of 24
+//! frames, RTX 4090 at 300 W, quiet box at load 1.6-1.9, ms:
+//!
+//! ```text
+//!                    8      4*      2      1        * = default
+//!   croft         2.202  1.692  1.445  1.332
+//!   stoneyard     0.982  0.725  0.595  0.536
+//!   spruce        0.964  0.692  0.561  0.492
+//!   lanternhead   0.856  0.654  0.564  0.528
+//!   cave          0.529  0.390  0.322  0.287
+//!   materials     0.371  0.278  0.236  0.213
+//!   primitives    0.238  0.183  0.154  0.141
+//!   against the default:  +30..+39%    -14..-19%   -19..-29%
+//! ```
+//!
+//! **And what each stop costs in pixels**, scored against a converged
+//! reference — 64 rays with the share forced off, so no stop is being marked by
+//! its own bias. Mean absolute error over the frame, and `loom salt --thresh 8`,
+//! which is the metric that sees grain:
+//!
+//! | stop | rays seen | the picture | who wants it |
+//! |---|---|---|---|
+//! | **8** | 32/quad | mean error falls ~30% below the default; grain roughly halves again | a still, a screenshot, a scene being judged. Costs a third more forward pass and nothing else |
+//! | **4** | 16/quad | **the default.** Closer to converged than *anything this engine has shipped* — mean error and grain both fall against the pre-share 8-ray shader on all twelve scenes measured | everyone, until they have a reason |
+//! | **2** | 8/quad | about last week's engine: mean error 5-10% above the default, grain still 2-4x cleaner than the pre-share shader | a GPU-bound frame. This is the stop to reach for first |
+//! | **1** | 4/quad | **the first stop that is worse than anything shipped** — `primitives` goes to mean .0775 against the old shader's .0446 — and the speckle is visible in a large matte contact shadow | a machine that is not this one |
+//!
+//! **Where it shows, plainly: on big untextured matte surfaces, and nowhere
+//! else.** `primitives` is the worst-looking scene in the repository at every
+//! stop, because it is a wide flat blue plane with hard shapes on it and
+//! nothing to hide variance behind. At 1:1 the AO band under its cylinder is
+//! visibly grainy at the default and coarsely speckled at 1. Set beside it,
+//! `croft` — a real stone building — is **indistinguishable across the entire
+//! dial** at 1:1, and `proving_ground`, an actual game, moves a mean of 0.0004
+//! from converged at the *cheapest* stop. Texture hides this completely. If a
+//! scene looks noisy, the answer is as likely to be that it wants a material as
+//! that it wants rays.
+//!
+//! Two things the dial is not. It is **read once, at first use** — nothing polls
+//! it, so it is not a live control. And it is deliberately **not a scene field**:
+//! how much silicon to spend is a property of the machine looking at the scene,
+//! not of the scene, and a scene-authored value would make the golden images
+//! photograph whatever each `.loom` happened to say.
+//!
 //! Off by default, because the queries are commands in the buffer and the
 //! ALL_COMMANDS timestamps between passes cost some overlap. The same numbers
 //! are available to a caller as [`Renderer::last_pass_times`]. The windowed
