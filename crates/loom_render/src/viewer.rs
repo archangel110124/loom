@@ -88,8 +88,10 @@ pub struct Viewer {
     tonemap: crate::tonemap::Tonemap,
 
     /// The anti-aliasing pass and the display-referred image the tonemap
-    /// writes into first, or `None` when `LOOM_CMAA2` is unset — the default,
-    /// and then the tonemap writes the swapchain image directly.
+    /// writes into first, or `None` when `LOOM_CMAA2=0`, and then the tonemap
+    /// writes the swapchain image directly. **It is on by default** —
+    /// `cmaa2::requested` reads the variable as opt-*out*, and this comment
+    /// said the opposite until ADR 0068.
     ///
     /// **The window needs this as much as the offscreen path does**, and more:
     /// it is where the human looks. Grass rendered offscreen and not in the

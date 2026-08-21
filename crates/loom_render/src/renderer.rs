@@ -1051,8 +1051,15 @@ pub struct Renderer {
     /// Always present — the frame cannot leave the device without it.
     tonemap: crate::tonemap::Tonemap,
     /// The anti-aliasing pass and the image it writes into, or `None` when
-    /// `LOOM_CMAA2` is unset — which is the default. When it is present the
-    /// readback reads *this* image rather than the colour target.
+    /// `LOOM_CMAA2=0`. **It is on by default** — `cmaa2::requested` reads the
+    /// variable as opt-*out*. When it is present the readback reads *this*
+    /// image rather than the colour target.
+    ///
+    /// **This comment said the opposite until ADR 0068**, and the cost was an
+    /// hour: an edge-directed pass downstream of the tonemap is the reason a
+    /// contrast change moves a hard silhouette by two pixels, which no model of
+    /// the tonemap alone can predict. `LOOM_CMAA2=0` is how you isolate a
+    /// change to the tonemap from what the anti-aliasing then does with it.
     aa: Option<(crate::cmaa2::Cmaa2, vk::Image, vk::ImageView, Allocation)>,
     grass_buffer: vk::Buffer,
     grass_alloc: Option<Allocation>,

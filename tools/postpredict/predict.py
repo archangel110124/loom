@@ -14,11 +14,29 @@ change is written**, and a candidate that looks wrong costs no build.
 recovered HDR must reproduce the reference **bit for bit**. Anything above
 zero means the inverse is wrong and every number this prints is void.
 
-Blind spot, stated up front: a channel that reached 255 came from any HDR
-value at or above the shoulder's clamp, so the recovered value there is a
-floor rather than the value. That is a highlight-only error, and it is why the
-acceptance criterion quotes the `worst` column with a tolerance rather than
-exactly.
+**The blind spot that matters is CMAA2, and it is worth an hour of your time.**
+`LOOM_CMAA2` defaults to *on* (`cmaa2.rs:109`), so an edge-directed
+anti-aliasing pass runs **after** the tonemap and is therefore downstream of
+everything modelled here. It is contrast-sensitive by construction: raise the
+frame's contrast and it starts finding edges it used to ignore, then blends
+across them. On a hard silhouette — `campfire`'s black log against lit ground —
+that dilates the bright side by two pixels and produces a `worst` channel of
+**103** where this file predicts **26**. That is CMAA2 doing its job on an edge
+the change made high-contrast, not a defect in the operator.
+
+Measured, `campfire`, the same A/B with only the tonemap swapped:
+
+    LOOM_CMAA2 on  (the gate's default)   residual worst 105, 23 px off by >20
+    LOOM_CMAA2=0   (the operator alone)   residual worst   1,  0 px off by >8
+
+**So compare against `LOOM_CMAA2=0` renders when you want to know whether the
+operator is what you published, and against the default when you want to know
+what the gate will say.** They are different questions and only the first one
+this file can answer.
+
+Second blind spot, smaller: a channel that reached 255 came from any HDR value
+at or above the shoulder's clamp, so the recovered value there is a floor
+rather than the value. That is a highlight-only error.
 
     python3 tools/postpredict/predict.py selftest
     python3 tools/postpredict/predict.py table
