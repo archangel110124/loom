@@ -42,16 +42,23 @@ pub(crate) fn elements(
     world: &loom_ecs::World,
     state: &GameState,
     playing: bool,
+    title: bool,
 ) -> Vec<Element> {
+    let flagged = |component: &serde_json::Value, name: &str| {
+        component
+            .get(name)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
     world
         .hud_elements()
         .into_iter()
+        // Three states, not two: playing, on the title screen, and neither —
+        // which is `loom run` with no game, and is why a title cannot simply
+        // be an element with `only_in_play = false`.
         .filter(|component| {
-            playing
-                || !component
-                    .get("only_in_play")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
+            (playing || !flagged(component, "only_in_play"))
+                && (title || !flagged(component, "only_on_title"))
         })
         .map(|component| {
             let defaults = loom_scene::components::Hud::default();
@@ -194,6 +201,177 @@ pub(crate) enum PauseChoice {
 /// narrow enough not to read as a panel.
 const MENU_WIDTH: f32 = 180.0;
 
+/// How dark the pause menu's dimming is.
+///
+/// Heavy on purpose: it is covering a game the player must stop acting on, and
+/// the frame behind it is doing nothing for them any more.
+const SCRIM: u8 = 170;
+
+/// How dark the title screen's dimming is.
+///
+/// **Much lighter, and measured rather than matched.** The instinct is one
+/// constant for both — they are the same gesture — and it is wrong here for a
+/// specific reason: the shot behind the title is the whole point of the title,
+/// and at 170 the sun the camera was aimed at, the glitter path under the word
+/// and the light on the rig are all gone. What is left is a grey plate, which
+/// is exactly the "screenshot with text on it" a front end has to avoid. 90 is
+/// where the picture survives and the buttons still read as chrome; the word
+/// needs no help from it at all, because `draw` paints a dark copy under every
+/// line.
+const TITLE_SCRIM: u8 = 90;
+
+/// Dim the game's view behind the title screen.
+///
+/// Its own entry point so the caller needs no constant: the front end draws
+/// this *before* the HUD, because the game's name is written across the sea
+/// and must be dimmed against rather than dimmed. The pause menu dims after,
+/// because a score behind a pause menu is as stale as the game is.
+pub(crate) fn title_scrim(root: &mut egui::Ui) {
+    dim(root, TITLE_SCRIM);
+}
+
+/// Paint `alpha` of black over the game's view.
+///
+/// `available_rect_before_wrap`, not the whole window: a scrim leaves the
+/// editor's panels alone, which is deliberate here and deliberately the
+/// opposite in [`fade`].
+fn dim(root: &mut egui::Ui, alpha: u8) {
+    let viewport = root.available_rect_before_wrap();
+    root.painter()
+        .rect_filled(viewport, 0.0, egui::Color32::from_black_alpha(alpha));
+}
+
+/// What the human picked on the title screen, if anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TitleChoice {
+    Start,
+    Quit,
+}
+
+/// Draw the front end's two buttons over the title shot.
+///
+/// **The game's name is not here.** It is a `Hud` element with
+/// `only_on_title`, so the word, its size, its colour and where it sits are
+/// authored in the scene like every other line of text in this project and
+/// `loom_cli` never learns what game it is running. This function owns the
+/// chrome and nothing else. The caller draws the scrim *before* the HUD, so
+/// the word is dimmed-against rather than dimmed.
+///
+/// **Start and Quit, and no Options.** There is no settings system in this
+/// tree — no persisted config, no volume, no keybind store — so an Options
+/// item would be a promise made on the first screen a player ever sees and
+/// broken on the second. `0683990` made the same call for the pause menu one
+/// commit earlier, and a title offering Options over a pause menu that does
+/// not would have the two disagree about what this is.
+///
+/// A near-copy of [`pause_menu`] rather than a shared helper: the two differ
+/// in position, heading and items, and unifying two callers costs a
+/// six-parameter function to save thirty lines that will never both change.
+/// If a third menu appears, unify then.
+pub(crate) fn title_menu(root: &mut egui::Ui) -> Option<TitleChoice> {
+    let viewport = root.available_rect_before_wrap();
+    let mut choice = None;
+    let items = [("Start", TitleChoice::Start), ("Quit", TitleChoice::Quit)];
+    egui::Area::new(egui::Id::new("loom_title_menu"))
+        .order(egui::Order::Foreground)
+        // Below the word, which the scene anchors just under centre.
+        .fixed_pos(viewport.center() + egui::vec2(-MENU_WIDTH * 0.5, 96.0))
+        .show(root.ctx(), |ui| {
+            ui.set_width(MENU_WIDTH);
+            ui.vertical_centered(|ui| {
+                for (label, picked) in items {
+                    let button = egui::Button::new(label);
+                    if ui.add_sized([MENU_WIDTH, 34.0], button).clicked() {
+                        choice = Some(picked);
+                    }
+                    ui.add_space(8.0);
+                }
+                // **Escape closes the window here and that has to be said.**
+                // `escape_means(false, false, false)` is `Close`, which is the
+                // right answer for a top-level menu and a nasty surprise
+                // undocumented. The hint slot is also the only place the
+                // controls a player would open an Options screen for could go.
+                ui.label(
+                    egui::RichText::new("Esc to quit")
+                        .size(14.0)
+                        .color(egui::Color32::from_gray(180)),
+                );
+            });
+        });
+    choice
+}
+
+/// Seconds of fade to black once Start is clicked.
+///
+/// Short: the human just acted and the screen owes them an answer. These are
+/// deliberately **not** a UI library's numbers — 300 ms is right for a control
+/// sliding in and reads as a flicker on a scene change.
+pub(crate) const FADE_OUT: f32 = 0.5;
+
+/// Seconds of black beyond however long building the world blocks for.
+///
+/// **A floor, not a ceiling.** Starting the game runs on the first frame of
+/// this window, and if it costs longer the black simply lasts longer — which
+/// is the whole reason the expensive work goes here.
+pub(crate) const HOLD: f32 = 0.25;
+
+/// Seconds back up. Longer than the way out on purpose: leaving is a
+/// dismissal, arriving is an introduction.
+pub(crate) const FADE_IN: f32 = 0.8;
+
+/// The whole transition, click to playable.
+pub(crate) const TRANSITION: f32 = FADE_OUT + HOLD + FADE_IN;
+
+/// How black the screen is, `elapsed` seconds into a transition.
+///
+/// **The exponent is the mechanism, not a taste knob.** `Color32` is
+/// premultiplied and the target is `_SRGB`, so the scrim blends in *linear*
+/// light: alpha scales radiance rather than display brightness. A linear ramp
+/// therefore leaves the screen at 73% of its brightness at the halfway point
+/// of its own fade and then plunges — nothing, nothing, slam — and the instinct
+/// then is to lengthen the duration, when the duration was never the problem.
+/// `1 - (1 - t)^2.2` is the complement of the display gamma, so what falls
+/// evenly is what the eye is actually watching.
+///
+/// One expression serves both directions: on the way up `t` runs 1 to 0 and
+/// the curve mirrors exactly. The window opening is the same function started
+/// at `FADE_OUT + HOLD`, which is why there is no second one.
+pub(crate) fn curtain(elapsed: f32) -> f32 {
+    let ramp = |t: f32| 1.0 - (1.0 - t.clamp(0.0, 1.0)).powf(2.2);
+    if elapsed < FADE_OUT {
+        ramp(elapsed / FADE_OUT)
+    } else if elapsed < FADE_OUT + HOLD {
+        1.0
+    } else {
+        ramp(1.0 - (elapsed - FADE_OUT - HOLD) / FADE_IN)
+    }
+}
+
+/// Black over the whole window at `alpha` in 0..=1.
+///
+/// **A painter, not an `Area`, and its own layer above every menu.** A
+/// full-viewport interactive region once ate every click in this codebase —
+/// that is `the_overlay_does_not_claim_clicks_in_the_viewport` — and a painter
+/// creates no region at all. `Order::Tooltip` sits above `Order::Foreground`,
+/// where both menus are: a fade that does not cover the thing it is fading out
+/// is not a fade. And the whole window rather than the game's viewport,
+/// because a transition must take the editor's panels with it where a scrim
+/// must not — `layer_painter` clips to `content_rect` in any case, which on
+/// this platform is the same rectangle minus safe-area insets of zero.
+pub(crate) fn fade(root: &egui::Ui, alpha: f32) {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if a == 0 {
+        return;
+    }
+    let ctx = root.ctx();
+    ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("loom_curtain"),
+    ))
+    .rect_filled(ctx.viewport_rect(), 0.0, egui::Color32::from_black_alpha(a));
+}
+
 /// Draw the pause menu over the frozen game and report what was clicked.
 ///
 /// **Two items, because a demo's pause menu is Resume and Quit.** Settings,
@@ -209,8 +387,7 @@ const MENU_WIDTH: f32 = 180.0;
 /// in `--play` and what an editor wants in `--edit`.
 pub(crate) fn pause_menu(root: &mut egui::Ui) -> Option<PauseChoice> {
     let viewport = root.available_rect_before_wrap();
-    root.painter()
-        .rect_filled(viewport, 0.0, egui::Color32::from_black_alpha(170));
+    dim(root, SCRIM);
 
     let mut choice = None;
     let items = [("Resume", PauseChoice::Resume), ("Quit", PauseChoice::Quit)];
@@ -509,6 +686,169 @@ mod tests {
         assert_eq!(scrims, 1, "the game behind the menu was not dimmed");
     }
 
+    /// Lay the title screen out with no window anywhere and read the shapes
+    /// back, the way `the_pause_menu_offers_resume_and_quit` does.
+    ///
+    /// `fade` is drawn at full black afterwards, so the same pass answers the
+    /// second question: **a curtain that does not cover the menu it is
+    /// dismissing is not a curtain.** egui emits shapes in layer order, so
+    /// "after every glyph" is the checkable form of "on top", and it is what
+    /// fails if the curtain is ever moved into the scrim's layer.
+    #[test]
+    fn the_title_offers_start_and_quit_under_a_curtain_that_covers_them() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        };
+
+        // Twice: the first pass of a fresh context has no fonts and no area
+        // sizes, exactly as the pause-menu and shadow tests found.
+        let mut labels: Vec<String> = Vec::new();
+        let mut scrims = 0;
+        let mut last_glyph = 0;
+        let mut curtains = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |root| {
+                title_scrim(root);
+                let _ = title_menu(root);
+                fade(root, 1.0);
+            });
+            labels = Vec::new();
+            scrims = 0;
+            last_glyph = 0;
+            curtains = Vec::new();
+            for (i, clipped) in out.shapes.iter().enumerate() {
+                match &clipped.shape {
+                    egui::Shape::Text(t) => {
+                        labels.push(t.galley.text().to_owned());
+                        last_glyph = i;
+                    }
+                    egui::Shape::Rect(r) if r.rect.width() >= 1000.0 => match r.fill.a() {
+                        255 => curtains.push(i),
+                        TITLE_SCRIM => scrims += 1,
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+
+        for wanted in ["Start", "Quit", "Esc to quit"] {
+            assert!(
+                labels.iter().any(|l| l == wanted),
+                "the title drew {labels:?}, with no {wanted:?} on it"
+            );
+        }
+        assert!(
+            !labels.iter().any(|l| l == "DEEPER"),
+            "the game's name belongs to the scene, not to {labels:?}"
+        );
+        assert_eq!(scrims, 1, "the shot behind the title was not dimmed");
+        let [curtain] = curtains[..] else {
+            panic!("expected exactly one full-black curtain, got {curtains:?}");
+        };
+        assert!(
+            curtain > last_glyph,
+            "the curtain was painted at {curtain}, under a glyph at {last_glyph}"
+        );
+    }
+
+    /// The title screen is a painter and two buttons, so the viewport behind
+    /// it is still the game's — the same guarantee the HUD gives, checked
+    /// separately because the title is the one screen drawn over open water
+    /// with nothing else to click.
+    #[test]
+    fn the_title_screen_does_not_claim_clicks_in_the_viewport() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            events: vec![egui::Event::PointerMoved(egui::pos2(200.0, 200.0))],
+            ..egui::RawInput::default()
+        };
+        let mut claimed = false;
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input.clone(), |root| {
+                title_scrim(root);
+                let _ = title_menu(root);
+                fade(root, 0.4);
+            });
+            claimed = ctx.is_pointer_over_egui();
+        }
+        assert!(!claimed, "the title screen swallowed a click over the sea");
+    }
+
+    /// **A curtain that is even in alpha is not even to the eye.** The fill is
+    /// premultiplied black over a linearised sRGB target, so alpha scales
+    /// radiance and displayed brightness goes as `(1 - a)^(1/2.2)`. A linear
+    /// ramp is exactly `0.5` at the halfway point of its own fade and leaves
+    /// the screen at 73% of its brightness there; the corrected one is past
+    /// 0.75. Asserted as a threshold rather than as a round trip against the
+    /// exponent, so it survives a retune and still fails a straight line.
+    #[test]
+    fn the_curtain_falls_evenly_to_the_eye_rather_than_to_the_alpha() {
+        assert!(
+            curtain(FADE_OUT * 0.5) > 0.75,
+            "halfway out the curtain is {}, which is a linear ramp",
+            curtain(FADE_OUT * 0.5)
+        );
+        assert!(curtain(0.0).abs() < 1e-6, "the fade starts on the picture");
+        assert!((curtain(FADE_OUT) - 1.0).abs() < 1e-6, "black by the hold");
+        assert!((curtain(FADE_OUT + HOLD) - 1.0).abs() < 1e-6, "still black");
+        assert!(curtain(TRANSITION).abs() < 1e-6, "and clear again at the end");
+        assert!(curtain(TRANSITION + 5.0).abs() < 1e-6, "and stays clear");
+
+        // Monotone in each leg, or the picture would breathe on the way down.
+        let leg = |a: f32, b: f32| {
+            let mut previous = curtain(a);
+            for i in 1..=100u8 {
+                let at = (b - a).mul_add(f32::from(i) / 100.0, a);
+                let now = curtain(at);
+                assert!(now >= previous - 1e-6, "the curtain lifted at {at}");
+                previous = now;
+            }
+        };
+        leg(0.0, FADE_OUT);
+        leg(TRANSITION, FADE_OUT + HOLD);
+    }
+
+    /// **A title is a line the scene authors, and the editor must never see
+    /// it.** There are three states, not two: an element flagged
+    /// `only_on_title` is absent while a game runs *and* absent in `loom run`
+    /// with no game at all, which is what an `only_in_play = false` title
+    /// would have got wrong.
+    #[test]
+    fn a_title_line_shows_on_the_title_screen_and_nowhere_else() {
+        let world = loom_ecs::World::from_scene(
+            &loom_scene::Scene::parse(
+                "[scene]\nformat = 1\nid = \"7c1f0b52-9a34-4d68-b0e1-2f45a8c37d90\"\n\n\
+                 [[node]]\nname = \"Root\"\n\n\
+                   [node.components.Hud]\n  text = \"DEEPER\"\n\
+                   only_on_title = true\n",
+            )
+            .expect("valid scene"),
+        );
+
+        let on_title = elements(&world, &GameState::default(), false, true);
+        assert_eq!(on_title.len(), 1, "the word belongs on the title screen");
+        assert_eq!(on_title[0].text, "DEEPER");
+
+        assert!(
+            elements(&world, &GameState::default(), false, false).is_empty(),
+            "the title was drawn over the editor"
+        );
+        assert!(
+            elements(&world, &GameState::default(), true, false).is_empty(),
+            "the title was still up during the game"
+        );
+    }
+
     /// **The overlay must not eat the trigger.** Fixing the anchoring with a
     /// transparent `CentralPanel` put the score in the right place and made
     /// the whole viewport an interactive egui region — so every click was
@@ -607,7 +947,7 @@ mod tests {
             .expect("valid scene"),
         );
 
-        let resolved = elements(&world, &GameState::default(), false);
+        let resolved = elements(&world, &GameState::default(), false, false);
 
         assert_eq!(resolved.len(), 1);
         // Anchored bottom-right, so both components must point back into the
@@ -800,6 +1140,10 @@ behind you, on your right";
             ("on-the-line caption", on_the_line, 22.0_f32),
             ("step-off caption", step_off, 22.0_f32),
             ("inventory", inventory, 19.0_f32),
+            // The title is on the same list because it is on the same path —
+            // a `Hud` line laid out by `draw` — and it is by far the largest
+            // point size any scene in this project asks for.
+            ("title", "DEEPER", 96.0_f32),
         ] {
             let width = laid_out_width(text, size);
             // A line measuring zero never reached the painter, which would

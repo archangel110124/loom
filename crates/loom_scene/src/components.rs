@@ -938,6 +938,18 @@ pub struct Hud {
     /// A score is meaningless in the editor, and an overlay that cannot be
     /// switched off obscures the thing being edited.
     pub only_in_play: bool,
+    /// Draw only on the title screen.
+    ///
+    /// **This is how a game's own name gets on screen without the engine
+    /// knowing it.** A title is a line of text over the scene, which is what
+    /// `Hud` already is — so the word, where it sits, how big it is and what
+    /// colour it is are all authored, and `loom_cli` holds no game's name.
+    ///
+    /// Not the inverse of `only_in_play`: there are three states, not two.
+    /// `loom run` with no game at all is the editor, and a title screen must
+    /// not appear over it — which is exactly what an `only_in_play = false`
+    /// title would have done.
+    pub only_on_title: bool,
 }
 
 impl Default for Hud {
@@ -949,6 +961,7 @@ impl Default for Hud {
             size: 22.0,
             color: [1.0; 3],
             only_in_play: false,
+            only_on_title: false,
         }
     }
 }

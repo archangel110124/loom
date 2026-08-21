@@ -9,6 +9,18 @@
 # frozen diorama with no instructions on it. `--play` alone builds no editor
 # panels; add `--edit` if you want them.
 #
+# **You do not start on the deck.** `--play` opens on the title screen: the rig
+# seen from 50 m off with the sun behind it, the word DEEPER over the water, and
+# Start and Quit. Escape there closes the window, which the screen says out
+# loud. Start runs a 1.5-second curtain — half a second to black, a quarter of
+# black while the world is built, then eight tenths back up on your own eyes —
+# and the window opens *black* and lifts into the shot, so the half second this
+# scene takes to load happens behind a curtain rather than as a stall. See THE
+# FRONT END at the foot of this file for the camera, and `loom_cli::hud` for the
+# curtain. Nothing in it is simulated: the front end is a camera, a rectangle
+# and two buttons, and the sea moves behind it because the water's clock is the
+# wall clock and always has been.
+#
 # **Play it in a window at least 960 px wide.** Both HUD rows are centre-
 # anchored, so a narrower window clips them at both ends. The longest line the
 # game can say lays out at 840 px, and
@@ -235,6 +247,16 @@
 # Ranked by how likely a first-timer is to meet it. None is a stopper; all are
 # seams.
 #
+# 0. **Nobody has watched the title screen.** Every part of it that can be
+#    checked without a window is checked — the shot is rendered and looked at,
+#    the curtain's curve, the menu's words, the layer it is painted in and its
+#    refusal to eat clicks are all unit tests — and none of that is the same as
+#    seeing it. `loom run` needs a real window and this box has no Xvfb, so the
+#    pace of the fade, whether 96 pt Ubuntu-Light reads as a title or as a debug
+#    overlay, whether the pointer hand-off at the bottom of the curtain is
+#    clean, and whether a still shot with a moving sea reads as alive are all
+#    unanswered. Three durations, one scrim and one offset are the knobs; expect
+#    to move them.
 # 1. **You drive home stern-first at a wharf you cannot see.** The berth faces
 #    the way it faces, so the leg the demo teaches leaves ahead and returns
 #    astern with the destination behind the camera. Photographed at the arrival
@@ -2035,3 +2057,69 @@ transform = { pos = [-7.80, -12.0, 0.0] }
 
   [node.components.Script]
   path = "../scripts/engine_note.rhai"
+
+# ---------------------------------------------------------------------------
+# THE FRONT END
+#
+# What you are looking at before you are standing on anything. `loom run --play`
+# opens on this camera with the game's name over it and two buttons; Start fades
+# to black, builds the world under the black, and lifts on the deck.
+#
+# **`active = false` is load-bearing.** `World::active_camera` takes the first
+# ACTIVE camera in file order and `player_character` walks *up* from it to find
+# the character a human drives — so an active spare authored above
+# `Rig/Player/Eye` would steal the view AND leave the player a camera on a stick
+# with no legs, silently, with every reference PNG still matching. Switched off,
+# this node is ineligible for both and where it sits in the file cannot matter.
+# `camera_named` reads it anyway, lens included. Cut this block and paste it
+# above `Rig/Player/Eye` if you want to check: nothing changes.
+#
+# **The shot points at the sun.** `Environment.sun_direction` is [0.42, 0.46,
+# -0.78], so this sits on the opposite side and looks back along it: the rig is
+# lit from behind and the glitter path runs down the frame into the lower half,
+# which is where the word goes. Pointed the other way the same rig is a small
+# beige object on flat grey water — duller than the frame the game cuts TO,
+# which is the one way a title screen cannot afford to lose.
+#
+# 50 m out, 6.5 m up, tilted 15 degrees down: horizon at ~14% of frame height,
+# the rig spanning 20-33%, and the whole bottom two thirds open water. Nine
+# degrees off the sun's bearing so the rig sits left of centre and the channel
+# marks lead out to the right. 42 degrees rather than the player's 75 —
+# `Camera`'s own docs call 40-55 cinematic and 60-90 first person, and nothing
+# blends between the two, so there is no lens to match.
+#
+# It does not move, and that is a decision rather than an omission. The sea
+# animates on `wind_seconds` whether or not anything is simulating, so the shot
+# is already alive for free; a camera move is three lines of `sin()` on top of
+# this and is worth adding only if a human looks at it and says it reads dead.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "TitleCamera"
+parent = "Rig"
+transform = { pos = [-23.70, 6.50, 44.02], rot_euler = [-15.04, -37.30, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 42.0
+  active = false
+
+# **The game's name is content, not code.** It is a `Hud` line like the tackle
+# row and the depth readout, so `loom_cli` never learns what game it is running
+# and moving the word is an edit rather than a rebuild. `only_on_title` is not
+# the inverse of `only_in_play`: there are three states, and the third —
+# `loom run` with no game at all — is the editor, which must never see this.
+#
+# Just under centre, so it lands on the open water below the rig and above the
+# buttons. 96 points is 343 px wide, which fits the 960 px narrowest window the
+# header documents with room to spare.
+[[node]]
+name = "TitleWord"
+parent = "Rig"
+
+  [node.components.Hud]
+  anchor = "center"
+  offset = [0.0, 20.0]
+  text = "DEEPER"
+  size = 96.0
+  color = [1.0, 1.0, 1.0]
+  only_on_title = true

@@ -125,6 +125,37 @@ impl FlyCamera {
     }
 }
 
+/// The node a scene's front end opens on.
+///
+/// **A convention, not a schema.** A scene either has a shot to open on or it
+/// does not; nothing else marks a front end, so there is no flag to pass and no
+/// component to add. The camera is authored `active = false`, which is what
+/// keeps it out of `World::active_camera` and out of `player_character`'s walk
+/// — so where it sits in the file cannot matter.
+const TITLE_CAM: &str = "Rig/TitleCamera";
+
+/// The front end: the shot it opens on, and the curtain over it.
+///
+/// **Rendering only.** A camera has never been in the physics hash and this one
+/// is not even in the world — it is three numbers read once at load. The
+/// curtain is one rectangle in an overlay no headless path constructs. ADR
+/// 0045's line is nowhere near either.
+struct Front {
+    /// Where the shot sits, read once from the scene's title camera.
+    shot: Camera,
+    /// Seconds into the curtain's own clock.
+    ///
+    /// **It starts at the top of the fade-*up*, which is what makes the window
+    /// open black and lift into the shot** rather than snapping on after half a
+    /// second of nothing. One curve, two entrances: the same function that
+    /// takes the picture away is the one that brings it in, so there is no
+    /// second timeline and no second easing to keep in step.
+    clock: f32,
+    /// Whether Start has been clicked. Until it has, the menu is up and the
+    /// clock is past the end of the curve.
+    leaving: bool,
+}
+
 /// The context the viewer runs in. A menu would push another.
 const FLY: &str = "fly";
 /// Driving a character while Play runs. Live only then.
@@ -488,6 +519,10 @@ struct App {
     /// two are also true of a play session in the editor that the human has
     /// merely clicked out of, and the menu must not appear for that.
     pause_menu: bool,
+    /// The front end, while it is up. `None` in the editor, in a scene with
+    /// no title camera, and from the moment the curtain finishes lifting on
+    /// the game.
+    front: Option<Front>,
     /// This session's room code, shown in the pause menu. `None` under
     /// `--edit`, because an authoring session hosts nothing.
     ///
@@ -645,6 +680,7 @@ impl App {
             fps: 0.0,
             frames_left: None,
             autoplay: false,
+            front: None,
             pause_menu: false,
             room_code,
             cpu_frames: 0,
@@ -1289,6 +1325,27 @@ impl ApplicationHandler for App {
                 // Clamped for the same reason the camera step is: a stall must
                 // not jump the wind forward and snap every blade.
                 self.wind_seconds += dt.min(0.1);
+                // The curtain runs on the same wall clock as the wind, and
+                // is clamped for the same reason: a stall must stretch the
+                // fade rather than skip it, so a hitch never jump-cuts.
+                //
+                // Read out before acting on it — `start_play` takes `&mut
+                // self`, and the borrow checker is right that these are the
+                // same `self`.
+                let leaving = self.front.as_mut().and_then(|front| {
+                    front.clock += dt.min(0.1);
+                    front.leaving.then_some(front.clock)
+                });
+                if let Some(clock) = leaving {
+                    // Under the black, where the hitch of building a world is
+                    // free. This is why the hold is a floor and not a ceiling.
+                    if clock >= crate::hud::FADE_OUT && self.play.is_none() {
+                        self.start_play();
+                    }
+                    if clock >= crate::hud::TRANSITION {
+                        self.front = None;
+                    }
+                }
                 // Once, and only when there is something to play into.
                 if self.autoplay && self.play.is_none() && self.viewer.is_some() {
                     self.autoplay = false;
@@ -1306,7 +1363,15 @@ impl ApplicationHandler for App {
                 // `pressed_this_frame`), so a key tapped and released between
                 // two redraws is still seen exactly once here rather than
                 // missed entirely.
-                if self.input.is_active(&self.bindings, FLY, "quit") {
+                // **Not while the curtain is moving.** Between Start and the
+                // game there is no `Play` and no captured pointer, which
+                // `escape_means` reads as `Close` — so a reflexive Escape
+                // after clicking Start would kill the window mid-fade. Guarded
+                // on the branch rather than by returning early: a `return`
+                // here would skip `window.request_redraw()` at the bottom of
+                // this arm and freeze the picture at whatever alpha it had.
+                let transitioning = self.front.as_ref().is_some_and(|f| f.leaving);
+                if !transitioning && self.input.is_active(&self.bindings, FLY, "quit") {
                     match escape_means(self.pause_menu, self.play.is_some(), self.captured) {
                         Escape::Resume => self.set_pause_menu(false),
                         Escape::Pause => self.set_pause_menu(true),
@@ -1358,7 +1423,15 @@ impl ApplicationHandler for App {
                     .filter(|_| self.captured || self.pause_menu)
                     .and_then(crate::play::Play::camera)
                     .map_or_else(
-                        || self.camera.camera(),
+                        // The title's shot until Play has a camera of its own,
+                        // which it gets halfway through the curtain — so the
+                        // swap happens under full black and costs nothing. No
+                        // blend: the player spawns on a railed deck and every
+                        // path from open water to his eye goes through the rig.
+                        || match &self.front {
+                            Some(front) => front.shot,
+                            None => self.camera.camera(),
+                        },
                         |view| Camera {
                             eye: Vec3::from_array(view.eye),
                             target: Vec3::from_array(view.target),
@@ -1467,11 +1540,12 @@ impl ApplicationHandler for App {
                 // HUD element parented to something that moved reads the same
                 // world the rules judged.
                 let overlay = match self.play.as_ref() {
-                    Some(play) => crate::hud::elements(&play.world, play.state(), true),
+                    Some(play) => crate::hud::elements(&play.world, play.state(), true, false),
                     None => crate::hud::elements(
                         self.view.world(),
                         &loom_script::GameState::default(),
                         false,
+                        self.front.is_some(),
                     ),
                 };
 
@@ -1650,8 +1724,13 @@ impl ApplicationHandler for App {
                 // may run more than once, so the click is recorded rather than
                 // acted on inside it.
                 let menu_open = self.pause_menu;
+                // The front end's two halves, read out like `menu_open` is:
+                // whether its menu is up, and how black the screen is.
+                let title_up = self.front.as_ref().is_some_and(|f| !f.leaving);
+                let curtain = self.front.as_ref().map(|f| crate::hud::curtain(f.clock));
                 let room_code = self.room_code.as_deref();
                 let mut pause_choice = None;
+                let mut title_choice = None;
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
                     (Some(viewer), Some(ui), Some(window)) => viewer.draw_with_ui(
                         drawn,
@@ -1671,13 +1750,28 @@ impl ApplicationHandler for App {
                             if let Some(dock) = dock.as_deref_mut() {
                                 actions.extend(dock.draw(root, &state));
                             }
+                            // **The title's scrim goes on before the HUD,
+                            // and the pause menu's after.** They dim opposite
+                            // things: a pause menu dims the game *and* its
+                            // score, a title screen dims the sea the game's
+                            // own name is written across.
+                            if title_up {
+                                crate::hud::title_scrim(root);
+                            }
                             let _ = crate::hud::draw(root, &overlay);
-                            // Last, so its scrim dims the HUD too.
-                            if menu_open {
+                            if title_up {
+                                title_choice = crate::hud::title_menu(root);
+                            } else if menu_open {
                                 pause_choice = crate::hud::pause_menu(root);
                                 if let Some(code) = room_code {
                                     room_code_panel(root, code);
                                 }
+                            }
+                            // Last of all and in a layer of its own, so it
+                            // covers the menu it is dismissing and the panels
+                            // beside it.
+                            if let Some(alpha) = curtain {
+                                crate::hud::fade(root, alpha);
                             }
                         },
                     ),
@@ -1698,6 +1792,19 @@ impl ApplicationHandler for App {
                 if let Err(e) = result {
                     eprintln!("loom: draw failed: {e}");
                     event_loop.exit();
+                }
+                match title_choice {
+                    Some(crate::hud::TitleChoice::Start) => {
+                        if let Some(front) = self.front.as_mut() {
+                            front.clock = 0.0;
+                            front.leaving = true;
+                        }
+                    }
+                    Some(crate::hud::TitleChoice::Quit) => {
+                        self.shutdown(event_loop);
+                        return;
+                    }
+                    None => {}
                 }
                 match pause_choice {
                     Some(crate::hud::PauseChoice::Resume) => self.set_pause_menu(false),
@@ -2925,7 +3032,23 @@ pub fn run(
         disk_seen,
     );
     app.frames_left = frames.filter(|n| *n > 0);
-    app.autoplay = autoplay;
+    // A front end only makes sense in front of a game, so `--play` is what
+    // arms it — and when it is armed it takes autoplay's job: the game starts
+    // when the human asks for it, under the black.
+    app.front = autoplay
+        .then(|| app.view.world().camera_named(TITLE_CAM))
+        .flatten()
+        .map(|view| Front {
+            shot: Camera {
+                eye: Vec3::from_array(view.eye),
+                target: Vec3::from_array(view.target),
+                fov_y_degrees: view.fov_y_degrees,
+            },
+            // The top of the fade-up: the window opens black and lifts.
+            clock: crate::hud::FADE_OUT + crate::hud::HOLD,
+            leaving: false,
+        });
+    app.autoplay = autoplay && app.front.is_none();
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))
@@ -3223,6 +3346,56 @@ mod tests {
             seen,
             [Escape::Pause, Escape::Resume, Escape::Pause, Escape::Resume],
             "Escape closed the window from inside a game"
+        );
+    }
+    /// **The demo has a front end, and no other gate in this project can see
+    /// that it does.** The title camera is found by name and is deliberately
+    /// invisible to every other path — so it renders no pixel, moves no
+    /// physics hash and fails no assertion if somebody renames it, reparents
+    /// it or deletes it. The failure is the feature quietly not existing,
+    /// which is the class of bug the golden gate has been fooled by twice.
+    ///
+    /// The second half is the load-bearing one: reading the spare must not
+    /// have made it the scene's. If `active_camera` ever returns the title
+    /// shot, `player_character` walks up from a node with no controller above
+    /// it and the demo becomes unplayable.
+    #[test]
+    fn the_demo_opens_on_a_camera_the_game_never_uses() {
+        let src = std::fs::read_to_string("../../assets/games/deeper_demo.loom")
+            .expect("the demo scene");
+        let scene = loom_scene::Scene::parse(&src).expect("it validates");
+        let world = loom_ecs::World::from_scene(&scene);
+
+        let shot = world
+            .camera_named(super::TITLE_CAM)
+            .unwrap_or_else(|| panic!("{} is gone, and with it the title screen", super::TITLE_CAM));
+        assert!(
+            (shot.fov_y_degrees - 42.0).abs() < f32::EPSILON,
+            "the title shot lost its lens: {}",
+            shot.fov_y_degrees
+        );
+        // Looking back along `Environment.sun_direction`, which is what puts
+        // the glitter path under the word. A shot turned away from the sun is
+        // duller than the frame it cuts to.
+        let toward_sun = [0.42_f32, 0.46, -0.78];
+        let forward = [
+            shot.target[0] - shot.eye[0],
+            shot.target[1] - shot.eye[1],
+            shot.target[2] - shot.eye[2],
+        ];
+        let horizontal = |v: [f32; 3]| {
+            let length = v[0].hypot(v[2]);
+            [v[0] / length, v[2] / length]
+        };
+        let (a, b) = (horizontal(forward), horizontal(toward_sun));
+        let cosine = b[1].mul_add(a[1], a[0] * b[0]);
+        assert!(cosine > 0.95, "the title shot points away from the sun: {cosine}");
+
+        let eye = world.active_camera().expect("the player still has one");
+        assert!(
+            (eye.fov_y_degrees - 75.0).abs() < f32::EPSILON,
+            "the title camera became the scene's: {}",
+            eye.fov_y_degrees
         );
     }
 }
