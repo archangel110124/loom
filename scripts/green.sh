@@ -1725,9 +1725,16 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 # 8b. **Press nothing for twenty seconds.** The one thing a stranger who has
 #     read nothing will do first. He keeps the supply he spawned on top of and
 #     the instruction does not decay into anything else.
+#
+#     **The tail is new and is the mirror's only signpost.** The glass is 1.7 m
+#     due south of the spawn and he starts facing away from it, because the rig
+#     is turned so the berth is on -Z and neither an authored eye yaw nor an
+#     authored character yaw can say "start facing this way". Nothing else in
+#     the demo tells him it is there. It is gated on 3.5 m from the glass, so
+#     this row is also what would catch it following him to the berth.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1200 --hold "0:" \
   --assert "Rig/Player.y > 2.2" --assert "state.carried == 1" \
-  | grep -q '"message": "WALK FORWARD TO THE BOAT"'
+  | grep -q '"message": "WALK FORWARD TO THE BOAT   — turn around: there is a GLASS on the shed"'
 
 # 8c. **Press everything at once.** W, D, SPACE, SHIFT and the trigger, held for
 #     thirty seconds. He sprints diagonally off the rig into the sea — and the
