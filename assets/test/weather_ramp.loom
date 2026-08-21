@@ -23,11 +23,11 @@
 #    tick. `weather_ramp.rhai` moves `dread` linearly over 1800 ticks and does
 #    nothing else, so a measurement at tick N reads a known rung.
 #
-# **The rungs are `dread` 0 / 0.5 / 1.0 and Wind.speed 3.5 / 10 / 20.** 3.5 is
+# **The rungs are `dread` 0 / 0.5 / 1.0 and Wind.speed 3.5 / 10 / 16.** 3.5 is
 # the wind `jib_vi_drift`'s whole header was characterised on, so `dread = 0`
-# here is that instrument unchanged apart from the fetch; 20 is the top and it
-# is measured rather than chosen — see the numbers in the commit that added
-# this file.
+# here is that instrument unchanged apart from the fetch; 16 is the top and it
+# is measured rather than chosen — the table on the rung itself has the sweep,
+# and 30 mm peak-to-peak crosses between 16 and 18.
 #
 # Read it the way `jib_vi_drift` is read, per rider and per axis:
 #

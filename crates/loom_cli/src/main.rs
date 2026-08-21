@@ -140,12 +140,15 @@ USAGE:
         resolution-dependent, so only ever compare shapes at equal voxel_size,
         which is why every row carries its own.
 
-    loom water <scene.loom> --at <x,z|x,y,z> [--sim <ticks>]
+    loom water <scene.loom> --at <x,z|x,y,z> [--sim <ticks>] [--hold <k=v,..>]
         What the water is doing at one point: surface height, normal, depth to
         the bed, and velocity. --sim picks the instant, exactly as it does for
         render; without it the answer is t = 0, which is the one moment every
         wave is at the same phase. A third component in --at asks whether that
-        height is under the surface.
+        height is under the surface. --hold is `loom sim`'s, and it is what a
+        scene whose weather rides the boat's position needs: without it the run
+        has nobody's hands on the controls and reports the berth's sea however
+        many ticks you give it.
 
     loom terrain <scene.loom|recipe.toml> [--out <prefix>] [--from <x,z>]
                               [--to <x,z>] [--max-slope <deg>]
@@ -214,7 +217,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
     ("scene", &[("--tx", true), ("--dry-run", false)]),
     ("place", &[("--op", true), ("--dry-run", false), ("--expect-version", true)]),
     ("measure", &[("--node", true), ("--shape", false)]),
-    ("water", &[("--at", true), ("--sim", true)]),
+    ("water", &[("--at", true), ("--sim", true), ("--hold", true)]),
     (
         "terrain",
         &[("--out", true), ("--from", true), ("--to", true), ("--max-slope", true)],
@@ -4779,6 +4782,10 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
     };
     #[allow(clippy::cast_precision_loss)]
     let seconds = ticks as f32 / 60.0;
+    let held = match held_input(args) {
+        Ok(h) => h,
+        Err(json) => return (2, json),
+    };
 
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -4852,7 +4859,13 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
     } else {
         let mut stepped = world.clone();
         let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
-        let (_, _, _, _, warmed) = simulate_physics(&mut stepped, base, ticks, None);
+        // **`--hold`, the same tape `render` and `sim` take.** Without it this
+        // command runs the game with nobody's hands on the controls, and on a
+        // scene whose weather rides the boat's position that means it reports
+        // the berth's sea however many ticks you give it — the one sea you can
+        // already get with `--sim 0`. Free when absent, which is every caller
+        // that existed before this.
+        let (_, _, _, _, warmed) = simulate_physics(&mut stepped, base, ticks, held.clone());
         let ripple = warmed
             .as_ref()
             .map_or([0.0; 3], |r| r.wavelets().at(at[0], at[1], seconds).surface());
@@ -7392,6 +7405,46 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         argv.extend_from_slice(spec);
         let (code, out) = run(&args(&argv));
         (code, serde_json::from_str(&out).unwrap_or_else(|_| serde_json::json!({ "raw": out })))
+    }
+
+    /// **`loom water --hold` reads the sea the player gets to, not the berth's.**
+    ///
+    /// The demo's weather is a function of where the boat is: `deeper_rules`
+    /// eases `state.dread` off the distance offshore and the ladder derives
+    /// the wave set from it. `--sim` alone runs the game with nobody's hands
+    /// on the controls, so the boat never leaves the quay and this command
+    /// reported the calm morning however many ticks it was given — the one
+    /// answer `--sim 0` already gives. There was no way to ask what the sea is
+    /// like out at the grounds.
+    ///
+    /// Asserted as a *rise*, not as a number: the ladder's rungs are free to
+    /// retune (`deeper_demo` is not in `GOLDEN`), and what must never come
+    /// back is the two answers being equal.
+    #[test]
+    fn the_water_probe_takes_a_tape_and_the_weather_rides_it() {
+        let path = "../../assets/games/deeper_demo.loom";
+        let hs = |spec: &[&str]| {
+            let (code, v) = water_at(path, spec);
+            assert_eq!(code, 0, "the demo has water: {v}");
+            v["waves"]["significant_height"].as_f64().expect("a derived sea")
+        };
+
+        // 2100 ticks is `dread` 0.50, the middle rung — enough to double `Hs`
+        // and half the wall clock of running to the top of the ladder.
+        let berth = hs(&["--at", "40,-10", "--sim", "2100"]);
+        let offshore = hs(&["--at", "40,-10", "--sim", "2100", "--hold", "move_z=1"]);
+
+        // Nobody at the wheel is the same sea as tick zero.
+        let still = hs(&["--at", "40,-10", "--sim", "0"]);
+        assert!(
+            (berth - still).abs() < 1e-6,
+            "an unheld run never leaves the berth: {berth} vs {still}"
+        );
+        // Held, she steams out and the ladder gets up under her.
+        assert!(
+            offshore > berth * 2.0,
+            "the sea offshore is {offshore} against {berth} at the quay"
+        );
     }
 
     /// **The query has to agree with the engine, or it is worth nothing as a
