@@ -1225,6 +1225,53 @@ at = 0.0
         );
     }
 
+    /// **A stage's declared ranges are checked here, because nothing else can
+    /// reach them.**
+    ///
+    /// `loom_reflect::validate` walks a component's top-level keys, so
+    /// `Environment.dread = 9.0` is refused and every `#[schemars(range(...))]`
+    /// on `MoodStage` and `Grade` is decoration — all three of these used to
+    /// validate clean and exit 0.
+    ///
+    /// **`at` is the one that failed silently**, which is why it leads. `dread`
+    /// is a `0..1` scalar and the blend clamps to the authored span, so a
+    /// ladder written `at = 0..5` uses its first fifth and its far stages are
+    /// unreachable: every rung renders, nothing errors, and the sea just never
+    /// gets worse.
+    #[test]
+    fn a_stage_value_outside_its_declared_range_is_refused() {
+        for (field, bad) in [
+            ("at", TWO_STAGES.replace("at = 1.0", "at = 5.0")),
+            (
+                "grade.saturation",
+                TWO_STAGES.replace(
+                    "sun_strength = 0.1",
+                    "sun_strength = 0.1\n[node.components.Environment.stages.grade]\n\
+                     saturation = 50.0",
+                ),
+            ),
+            (
+                "grade.gain.r",
+                TWO_STAGES.replace(
+                    "sun_strength = 0.1",
+                    "sun_strength = 0.1\n[node.components.Environment.stages.grade]\n\
+                     gain = [-9.0, 1.0, 1.0]",
+                ),
+            ),
+        ] {
+            let want = format!("Environment.stages.{field}");
+            assert!(
+                mood(&bad).iter().any(|e| e.field == want),
+                "{field} out of range validated clean: {:?}",
+                mood(&bad)
+            );
+        }
+
+        // And the in-range ladder is still accepted, or the check above is
+        // refusing everything rather than refusing the right thing.
+        assert!(mood(TWO_STAGES).is_empty(), "{:?}", mood(TWO_STAGES));
+    }
+
     /// **The near end must be free.** Every scene in the library authors no
     /// stages, and the shader detects the identity with a branch rather than
     /// an epsilon — so the default has to be exactly one, not nearly.

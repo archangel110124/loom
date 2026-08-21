@@ -1094,6 +1094,14 @@ pub struct MoodStage {
     /// Where on the axis it sits. Stages sort by this, and the endpoints hold
     /// outside the range, so a scalar that leaves `0..1` cannot produce a look
     /// nobody authored.
+    ///
+    /// **The range is enforced by `check_moods`, not by this attribute.**
+    /// `loom_reflect::validate` reaches a component's top-level keys only, so
+    /// every `schemars` range on this struct and on `Grade` is documentation
+    /// that `loom validate` cannot act on — verified: `at = 5.0` used to exit
+    /// 0. It matters most here, because `dread` is a `0..1` scalar clamped to
+    /// the authored span: a ladder written `at = 0..5` silently uses its first
+    /// fifth and its far stages are unreachable.
     #[schemars(range(min = 0.0, max = 1.0))]
     pub at: f32,
     /// What the light does here. **Every field left unset falls back to the
@@ -1139,6 +1147,10 @@ pub struct EnvironmentPatch {
 /// `loom_scene` depends on nothing else in the workspace, so the two cannot be
 /// one type; the conversion lives in `loom_cli`, the same seam
 /// `environment_of_inner` already is.
+///
+/// **The ranges below are enforced by `check_moods`, not by the attributes.**
+/// This type only ever appears nested inside a `MoodStage`, which is past the
+/// depth `loom_reflect::validate` walks — see `MoodStage::at`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Grade {

@@ -689,6 +689,48 @@ fn check_moods(nodes: &[Node]) -> Vec<SceneError> {
             errors.push(err);
         }
 
+        // **The declared ranges, enforced where they can be.**
+        //
+        // `loom_reflect::validate` walks a component's *top-level* keys, so
+        // `dread = 9.0` is refused and every `#[schemars(range(...))]` inside a
+        // stage is decoration — measured: `gain = [-9.0, ..]`, `saturation =
+        // 50.0` and `at = 5.0` all validated clean and exited 0. The struct is
+        // already deserialised here, which is the cheapest place in the project
+        // that can see them.
+        //
+        // **`at` is the one that fails silently**, and that is why this is a
+        // refusal and not a doc note. `dread` is a 0..1 scalar and `mood_of`
+        // clamps to the authored span, so a ladder written `at = 0..5` uses
+        // only its first fifth: the far stages are unreachable, every rung
+        // renders, and nothing anywhere says why the sea never gets worse.
+        for stage in &environment.stages {
+            let out_of_range = [
+                ("at", stage.at, 0.0, 1.0),
+                ("grade.gain.r", stage.grade.gain[0], 0.0, 4.0),
+                ("grade.gain.g", stage.grade.gain[1], 0.0, 4.0),
+                ("grade.gain.b", stage.grade.gain[2], 0.0, 4.0),
+                ("grade.contrast", stage.grade.contrast, 0.2, 3.0),
+                ("grade.saturation", stage.grade.saturation, 0.0, 2.0),
+            ];
+            for (field, value, low, high) in out_of_range {
+                if value >= low && value <= high {
+                    continue;
+                }
+                let mut err = SceneError::new("field_out_of_range", &node.path);
+                err.field = format!("Environment.stages.{field}");
+                err.value = serde_json::json!(value);
+                err.constraint = format!("{low}..={high}");
+                err.hint = Some(format!(
+                    "Stage `{}` sets {field} to {value}. The range is the one \
+                     the field's schema declares; `loom_reflect::validate` \
+                     reaches a component's top-level keys only, so this is \
+                     where a stage's numbers are checked.",
+                    stage.name
+                ));
+                errors.push(err);
+            }
+        }
+
         // Sorted and distinct: the blend divides by the span between a
         // bracketing pair, and two stages at one `at` is a zero-span divide.
         if let Some(w) = environment.stages.windows(2).find(|w| w[1].at <= w[0].at) {
