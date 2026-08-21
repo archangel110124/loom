@@ -65,6 +65,15 @@
 #                      at the yellow fish box             it goes below
 #                      a fish on the line                 into your hands
 #
+#   **ESC**          the pause menu — Resume and Quit, over a scrim — and in
+#                    its top right, ROOM CODE with a twelve-symbol code under
+#                    it, drawn fresh from the operating system every time the
+#                    window opens. **Nothing can join it yet.** The code is the
+#                    front end of a multiplayer decision that has been made and
+#                    not built: host-authoritative with input replication, and
+#                    the next step is a second local player, not a socket. See
+#                    `docs/decisions/0065-a-room-is-named-before-it-can-be-joined.md`.
+#
 # **THE CATCH IS SOMETHING YOU DO NOW, AND IT USED TO BE SOMETHING THAT
 # HAPPENED.** A landed fish arrived in a slot on the tick it came over the rail
 # and was put below because the player had walked near a box. Both were written

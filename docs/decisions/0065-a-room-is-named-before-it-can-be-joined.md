@@ -116,6 +116,19 @@ snapshot.** (A realistic figure for this game — ten million rooms ever, a
 thousand live at a time — is 1 in 115,292,150 at `L = 12` and 1 in 112,590 at
 `L = 10`.)
 
+**There is a third, strictest reading, and it is answered by scope rather than
+by length.** "No two people ever get the same code" could mean *any two codes
+ever issued*, years apart. That one twelve symbols does **not** buy: at the same
+hypothetical 100,000-live-for-a-year volume, `P(some pair of the 8.76 × 10⁸
+codes ever issued matched) = 0.28`, and over ten years it is 1.0. It is
+irrelevant because a room code is a **live-room namespace** — a code is
+recycled the moment its room ends, and nobody can tell that last April's
+lobby had the same name. **It stops being irrelevant the day a code is
+persisted**: a save name, a replay key, an analytics id, a shared screenshot
+someone tries to rejoin from. If a code is ever written to disk, this bound is
+the one that applies and it needs its own decision. (For the realistic figure —
+ten million rooms ever — it is 4.3 × 10⁻⁵ either way.)
+
 **Twelve, and the rest of the argument is laziness rather than paranoia.**
 Length is the one
 number that can never change later — it is baked into every client that will
@@ -127,6 +140,16 @@ exist yet**. Two characters removes a subsystem. Twelve also divides into three
 groups of four, which ten does not, and 60 bits fits a `u64` with four to spare,
 so the encoder is a shift loop with no padding case.
 
+**It is longer than the codes people will compare it to, and that is the cost
+being paid.** Among Us is six, Jackbox four. Twelve is a Wi-Fi password rather
+than a PIN. Three things make it tolerable: the grouping (nobody holds twelve
+symbols in their head, they hold three groups of four), `normalise` accepting
+any case and any separators anywhere, and the fact that a code shared over
+Discord is pasted rather than typed. **If it is ever shortened, the two things
+that come back are rate limiting on join and a ban list** — that is what the
+extra two characters bought, and it should be traded deliberately, before the
+first client ships, or never.
+
 **The alphabet's constraint is a voice channel, not a URL.** Crockford base32
 drops `I`, `L`, `O` (`1`/`0` confusion) and `U` (accidental obscenity). On input
 those four are mapped rather than refused — `I`/`L` → `1`, `O` → `0`, `U` → `V`
@@ -135,6 +158,20 @@ generated code. Grouping in fours is what makes a code readable aloud. The
 acoustic E-set (`B`/`D`/`E`/`G`/`P`/`T`/`V`/`Z`) is **not** solved, and the fix
 for it — six PGP-style words — is far worse to display in a corner and type, for
 a failure that self-corrects in two seconds when the join fails.
+
+**Dropping `U` is not the whole obscenity story, and the residue was
+measured rather than shrugged at.** Losing `I`, `L`, `O` and `U` makes most of
+the English list unspellable — that is why `CODE_DENY` in `run.rs` is twelve
+entries and not two hundred. What survives is what a vowel-poor alphabet can
+still manage, and it is not negligible: `32⁻⁴` per aligned group over three
+groups is **1 in 18,396** codes carrying one as a whole group, and 1 in 6,132
+anywhere across the twelve symbols (measured 1 in 6,431 over four million
+draws, against a closed form of 1 in 6,132). A code is read aloud and
+screenshotted; one in six thousand is rare enough never to surface in testing
+and common enough to happen to somebody, which is the worst of both. So
+`generate_code` rerolls, bounded at eight attempts, checking the **ungrouped**
+symbols so a word straddling a dash goes too — over-rejecting costs one more
+syscall and under-rejecting costs a screenshot.
 
 **Guessability is not a concern for a co-op fishing game** at this length; see
 the bearer-token figure above. It would start to matter if a room ever held
@@ -152,9 +189,12 @@ it — correctly. Entropy comes from the OS, once, at window start, on the
 presentation thread — never from the tick.
 
 Because it touches neither a scene nor the simulation, **no golden image and no
-reference hash can move.** Not by luck: `crate::hud::pause_menu` has exactly one
-call site, inside the windowed loop in `run.rs`, and `cargo xtask image` renders
-offscreen and never enters it.
+reference hash can move.** Not by luck, and by two independent arguments:
+`crate::hud::pause_menu` and `room_code_panel` each have exactly one non-test
+call site, inside the windowed draw closure in `run.rs`, and `cargo xtask image`
+shells `loom render`, which never opens a window. And the two xtask paths that
+*do* shell `loom run` (`xtask/src/main.rs:1511`, `:1574`) both pass `--edit`, so
+`session.is_some()` and `App::room_code` is `None` there regardless.
 
 **`getrandom = "=0.4.3"`, not `rand`.** The syscall is the entire requirement,
 and `getrandom v0.4.3` was already in `loom_cli`'s tree via `uuid` via
@@ -171,7 +211,33 @@ middle of the screen. Anchored off the available rect rather than
 whole window, which under `--edit` is on top of the inspector.
 
 `App::room_code` is `None` when a `loom_scene::Session` is open (`--edit`),
-because an authoring session hosts nothing.
+because an authoring session hosts nothing, and `None` if the OS refuses
+entropy — a viewer should not die over an ornament.
+
+**Two things about that corner were wrong when this shipped, and both are worth
+recording because neither was visible to the test that was written for it.**
+
+`CODE_WIDTH` was 200 points and every code in the game wrapped onto two ragged
+centred lines. Bisected through a real `egui::Context` on the widest code the
+alphabet can spell (`MMMM-WWWW-QQQQ`): it wraps at ≤ 218.484 and fits at
+≥ 218.485, at every viewport and every `pixels_per_point`, because egui lays out
+in points. It is 240 now. **The layout test could not see it**: `Galley::text()`
+returns the *source* string, so an assertion on the drawn text passes just as
+happily on two fragments. The row count is the assertion, and with it the old
+width reddens.
+
+And **the top right is not vacant.** `proving_ground.loom:386` anchors its kill
+counter there at `offset = [22, 16]`, and `set_pause_menu` does not clear
+`playing`, so the HUD keeps painting it while the menu is up — 101 × 17 pixels
+of text on text, straight across the `ROOM CODE` label, identically at every
+resolution because both are fixed pixel offsets from the same corner. The panel
+now **steps below** anything the HUD painted in its column: `hud::draw` was
+already returning those rects for its own tests and the call site was discarding
+them, so the fix costs one binding. Dodging rather than the two alternatives —
+suppressing `only_in_play` rows during a pause contradicts the scrim's stated
+job (it *dims* the score rather than deleting it), and "a scene must not author
+`top_right`" would be the seventh unwritten scene-authoring rule this project
+has accumulated, alongside "a `Grass` field owes its ground a green colour".
 
 ## The milestones, in order
 
