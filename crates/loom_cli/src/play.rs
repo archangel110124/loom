@@ -2613,11 +2613,154 @@ pub struct Play {
     /// Resolved once at Play: neither can appear mid-run.
     player: Option<loom_ecs::Entity>,
     eye: Option<loom_ecs::Entity>,
+    /// Mass for the view. See [`CameraSpring`].
+    spring: CameraSpring,
 }
 
 /// Just short of straight up or down. At exactly ±90° the forward vector is
 /// parallel to world up, `right` degenerates, and strafing snaps around.
 const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
+
+/// Mass for the view. The mouse writes a target; this decides how the picture
+/// gets there.
+///
+/// A damped spring with a **feedforward** term, and the feedforward is the
+/// whole reason this is weight rather than lag. A plain spring — or any
+/// low-pass — trails a sustained turn by a fixed angle, so a steady pan sits
+/// permanently behind your hand: at the defaults below, 27.1 ms of equivalent
+/// latency, more than the 16.7 ms a mouse event already waits for a tick.
+/// Feeding the target's own velocity forward cancels that: **5.22 ms**, at
+/// every turn rate, so the lag is under one tick and everything you feel lives
+/// in the transients — the view accelerates from rest, overshoots ~3° on a 60°
+/// flick, and settles in 117 ms. Sluggish, and it still arrives where you
+/// pointed it.
+///
+/// Stepped **once per simulation tick**, so `dt` is the compile-time constant
+/// [`TICK_SECONDS`] and the framerate-independence hazard that sinks every
+/// `lerp(a, b, 0.1)` camera simply does not exist. Four players on four
+/// machines at four frame rates get the same camera.
+///
+/// Yaw only. Pitch is deliberately rigid: it is the axis with the lowest
+/// motion-sickness threshold, it is the only one hard-clamped (a spring
+/// integrating against that wall winds up velocity it discharges when you look
+/// back down), and on a boat a vertically swimming horizon is indistinguishable
+/// from the sea moving, which is the one artifact this scene cannot afford.
+#[derive(Clone, Copy, Debug)]
+pub struct CameraSpring {
+    /// 0 turns it off exactly — bypassed, not run at a gain of zero. Blends
+    /// the filtered angle back toward the raw one in between.
+    weight: f32,
+    /// Natural frequency, Hz. Lower is heavier and slower to settle.
+    hz: f32,
+    /// Damping ratio. Below 1 overshoots; 1 arrives with no settle at all.
+    zeta: f32,
+    /// Feedforward. 0 is a plain spring and reads as input lag. Above ~0.7 the
+    /// view *leads* your hand, which is a different and worse artifact.
+    response: f32,
+    /// The filtered angle, radians.
+    angle: f32,
+    /// Its velocity. Retained — it is what makes a turn start from rest and a
+    /// stop overshoot.
+    vel: f32,
+    /// Last tick's raw target, for the finite difference the feedforward needs.
+    prev: f32,
+}
+
+impl CameraSpring {
+    /// Chosen against a measured acceptance criterion rather than by taste:
+    /// equivalent latency (steady-state error ÷ turn rate) must stay under
+    /// 20 ms, the floor of the band where flick-aim data can still measure a
+    /// difference. `4.0 / 0.55 / 0.5` gives 5.22 ms, 3.07° of overshoot and a
+    /// 117 ms settle. 3 Hz is 167 ms and you can consciously wait it out; 6 Hz
+    /// leaves nothing to feel; ζ above 0.75 is a first-order feel bought with
+    /// a second-order system; r = 0.8 crosses zero into leading the hand.
+    const DEFAULT: Self = Self {
+        weight: 1.0,
+        hz: 4.0,
+        zeta: 0.55,
+        response: 0.5,
+        angle: 0.0,
+        vel: 0.0,
+        prev: 0.0,
+    };
+
+    /// Explicit parameters. Tests use this; the game reads [`Self::from_env`].
+    #[must_use]
+    pub fn new(weight: f32, hz: f32, zeta: f32, response: f32) -> Self {
+        Self {
+            weight,
+            hz,
+            zeta,
+            response,
+            ..Self::DEFAULT
+        }
+    }
+
+    /// The four knobs, from the environment, read once when play starts.
+    ///
+    /// Environment rather than a settings table because not one of these
+    /// constants has been *felt* yet, and a schema written before that is a
+    /// schema for the wrong three floats. It is tunable without a rebuild,
+    /// which is the property that matters this week:
+    ///
+    /// ```text
+    /// LOOM_CAMERA_WEIGHT=0     off, exactly
+    /// LOOM_CAMERA_HZ=3         heavier, slower to settle
+    /// LOOM_CAMERA_DAMPING=0.4  more overshoot
+    /// LOOM_CAMERA_RESPONSE=0   no feedforward — this is what lag feels like
+    /// ```
+    #[must_use]
+    pub fn from_env() -> Self {
+        fn read(key: &str, fallback: f32) -> f32 {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| v.is_finite())
+                .unwrap_or(fallback)
+        }
+        let d = Self::DEFAULT;
+        Self::new(
+            read("LOOM_CAMERA_WEIGHT", d.weight),
+            read("LOOM_CAMERA_HZ", d.hz),
+            read("LOOM_CAMERA_DAMPING", d.zeta),
+            read("LOOM_CAMERA_RESPONSE", d.response),
+        )
+    }
+
+    /// Start settled on `target`, so pressing Play does not spring the view in
+    /// from wherever zero happens to be.
+    fn seed(&mut self, target: f32) {
+        self.angle = target;
+        self.prev = target;
+        self.vel = 0.0;
+    }
+
+    /// Advance one tick toward `target`.
+    ///
+    /// Semi-implicit: velocity is integrated first and position uses the new
+    /// velocity, which is what keeps a spring this stiff stable at 60 Hz.
+    fn settle(&mut self, target: f32) {
+        if self.weight == 0.0 {
+            // Bypassed, not damped to nothing. A zero that still runs the
+            // filter is a zero that lies.
+            self.seed(target);
+            return;
+        }
+        let w = std::f32::consts::TAU * self.hz;
+        let target_vel = (target - self.prev) / TICK_SECONDS;
+        self.prev = target;
+        self.vel += (w * w * (target - self.angle)
+            - 2.0 * self.zeta * w * (self.vel - self.response * target_vel))
+            * TICK_SECONDS;
+        self.angle += self.vel * TICK_SECONDS;
+    }
+
+    /// The angle to look along. Derived rather than stored, so the picture and
+    /// the aim ray cannot drift apart by holding two copies of one number.
+    fn view(&self, target: f32) -> f32 {
+        target + self.weight * (self.angle - target)
+    }
+}
 
 impl Play {
     /// Begin simulating. `base` is the directory scripts resolve against —
@@ -2642,6 +2785,9 @@ impl Play {
                 (t.rot_euler[1].to_radians(), t.rot_euler[0].to_radians())
             });
 
+        let mut spring = CameraSpring::from_env();
+        spring.seed(yaw);
+
         Self {
             player: world.player_character(),
             eye,
@@ -2650,6 +2796,7 @@ impl Play {
             ticks: 0,
             paused: false,
             leftover: 0.0,
+            spring,
             yaw,
             pitch: pitch.clamp(-MAX_PITCH, MAX_PITCH),
             input: PlayerInput::default(),
@@ -2775,7 +2922,11 @@ impl Play {
     /// With no character the camera takes both, so a scene with only a camera
     /// is still free to look around.
     fn apply_look(&mut self) {
-        let (yaw, pitch) = (self.yaw.to_degrees(), self.pitch.to_degrees());
+        // The picture's yaw is the sprung one — the mouse writes the target,
+        // the spring decides how the view gets there. Pitch is rigid on
+        // purpose; see [`CameraSpring`].
+        self.spring.settle(self.yaw);
+        let (yaw, pitch) = (self.view_yaw().to_degrees(), self.pitch.to_degrees());
         match self.player {
             Some(player) => {
                 if let Some(t) = self.world.transform_mut(player) {
@@ -2795,9 +2946,22 @@ impl Play {
         self.world.propagate_transforms();
     }
 
+    /// The yaw the picture is actually drawn at, once the spring has had it.
+    fn view_yaw(&self) -> f32 {
+        self.spring.view(self.yaw)
+    }
+
     /// The full look direction, pitch included. What a shot travels along.
+    ///
+    /// **Sprung, like the picture.** The crosshair sits at screen centre and
+    /// must never lie about where a shot goes; an unfiltered ray is several
+    /// degrees off it for the ~120 ms a flick takes to settle, which is over a
+    /// hundred pixels of visible drift at 1080p. Inert in the fishing demo,
+    /// which casts from a state machine and reads no aim ray at all, and live
+    /// in `proving_ground` via `fps.rhai` — where a flick-shot now lands where
+    /// the picture pointed rather than where the mouse did.
     fn aim(&self) -> [f32; 3] {
-        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        let (sin_yaw, cos_yaw) = self.view_yaw().sin_cos();
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
         [
             -sin_yaw * cos_pitch,
@@ -2816,7 +2980,18 @@ impl Play {
         // symptom was a character that moonwalks away from where you look.
         //
         // Flat, because looking at the sky must not make W walk into it.
-        let (sin, cos) = self.yaw.sin_cos();
+        //
+        // **The sprung yaw, not the raw one.** Letting the feet lead the eyes
+        // during a turn was tried and
+        // `forward_for_the_script_is_where_the_camera_looks` rejected it in
+        // one run — that invariant is older than this filter and it is what
+        // stops the two conventions drifting apart again. So the whole rig
+        // reads one number: the picture, the aim ray and the walk direction
+        // are the same yaw, and nothing in the game can disagree with what you
+        // see. The price is a transient — up to ~8° for the ~120 ms a flick
+        // takes to settle, walking somewhere slightly off where you ended up
+        // pointing. On a narrow deck with a rail that is the thing to watch.
+        let (sin, cos) = self.view_yaw().sin_cos();
         ([-sin, 0.0, -cos], [cos, 0.0, -sin])
     }
 
@@ -4519,5 +4694,260 @@ transform = { pos = [0.0, 6.0, 0.0] }
         play.advance(30.0);
 
         assert!(play.ticks <= 15, "clamped, not caught up: {}", play.ticks);
+    }
+
+    // ---------------------------------------------------------------------
+    // Camera weight. The maths is the half of a feel feature that can be
+    // proved; everything about whether it *feels* right needs a window.
+    // ---------------------------------------------------------------------
+
+    /// Turn at a constant rate for two seconds and report how far behind the
+    /// view ends up, expressed as milliseconds of equivalent latency —
+    /// steady-state error ÷ turn rate. For any first-order lag this is exactly
+    /// its time constant, so it is directly comparable to every input-latency
+    /// number in the literature.
+    fn equivalent_latency_ms(spring: &mut CameraSpring, degrees_per_second: f32) -> f32 {
+        let step = degrees_per_second.to_radians() * TICK_SECONDS;
+        let mut target = 0.0;
+        for _ in 0..120 {
+            target += step;
+            spring.settle(target);
+        }
+        1000.0 * (target - spring.view(target)).to_degrees() / degrees_per_second
+    }
+
+    /// A 60° flick: twelve ticks of input, then the mouse stops. Returns the
+    /// view angle in degrees on every tick, input and coast together.
+    fn flick(spring: &mut CameraSpring) -> Vec<f32> {
+        let step = 60.0_f32.to_radians() / 12.0;
+        let mut target = 0.0;
+        (0..192)
+            .map(|tick| {
+                if tick < 12 {
+                    target += step;
+                }
+                spring.settle(target);
+                spring.view(target).to_degrees()
+            })
+            .collect()
+    }
+
+    /// **The acceptance criterion the whole design is built around.** Weight
+    /// that costs accuracy is not weight, it is lag — so the sustained-turn
+    /// error must stay under 20 ms, which is the floor of the band where
+    /// flick-aim data can measure a difference at all, and it must not grow
+    /// with how fast you turn.
+    ///
+    /// A plain damped spring fails this at 27.1 ms; so does every low-pass, by
+    /// construction. The feedforward term is what buys it, and this test is
+    /// the reason that term is not optional.
+    #[test]
+    fn a_sustained_turn_leaves_the_view_under_one_tick_behind() {
+        for rate in [100.0_f32, 200.0, 400.0, 800.0] {
+            let mut spring = CameraSpring::DEFAULT;
+            let latency = equivalent_latency_ms(&mut spring, rate);
+            assert!(
+                (0.0..20.0).contains(&latency),
+                "{rate}°/s: {latency:.2} ms of equivalent latency — \
+                 negative leads the hand, ≥20 ms reads as input lag"
+            );
+            assert!(
+                (latency - 5.22).abs() < 0.2,
+                "{rate}°/s: {latency:.2} ms, and this number must not depend on \
+                 the turn rate — a rate-dependent one means the feedforward is gone"
+            );
+        }
+    }
+
+    /// The weight you can see: the view arrives past where you pointed it and
+    /// comes back. Bounded on both sides — too little and the second-order
+    /// system has quietly degenerated into a first-order one, too much and it
+    /// reads as a camera that missed rather than a camera with mass.
+    ///
+    /// The settle must finish inside human reaction time, so it is a texture
+    /// rather than a delay you can consciously wait through.
+    #[test]
+    fn a_flick_overshoots_a_little_and_settles_fast() {
+        let mut spring = CameraSpring::DEFAULT;
+        let view = flick(&mut spring);
+
+        let peak = view.iter().copied().fold(f32::MIN, f32::max);
+        assert!(
+            (2.0..4.0).contains(&(peak - 60.0)),
+            "overshoot {:.2}° past a 60° flick",
+            peak - 60.0
+        );
+
+        let settled = view
+            .iter()
+            .rposition(|v| (v - 60.0).abs() > 0.5)
+            .expect("it overshoots at all");
+        #[allow(clippy::cast_precision_loss)]
+        let ms = (settled + 1 - 12) as f32 * TICK_SECONDS * 1000.0;
+        assert!(ms < 150.0, "settled within half a degree after {ms:.0} ms");
+    }
+
+    /// The mass tell, and the test that fails if anyone "simplifies" the
+    /// spring back to a lerp.
+    ///
+    /// A spring starts from *zero velocity*, so the first tick of a turn barely
+    /// moves. A first-order filter tuned to the same steady-state latency
+    /// covers 96% of the first tick — there is no way to have both. This is
+    /// the difference between a camera with weight and a camera with lag, and
+    /// it is visible in one frame.
+    #[test]
+    fn the_first_tick_of_a_turn_barely_moves() {
+        let mut spring = CameraSpring::DEFAULT;
+        let view = flick(&mut spring);
+        let rigid = 60.0 / 12.0;
+        assert!(
+            view[0] < rigid * 0.5,
+            "first tick moved {:.2}° of a rigid camera's {rigid:.2}°",
+            view[0]
+        );
+        assert!(
+            view[0] > 0.0,
+            "it must still start moving on the first tick, not sit still"
+        );
+    }
+
+    /// Zero is off, exactly — the filter is bypassed, not run at a gain of
+    /// nothing. A zero that still runs the filter is a zero that lies, and it
+    /// is the setting a player reaches for when the feature makes them sick.
+    #[test]
+    fn weight_zero_is_bit_identical_to_no_filter_at_all() {
+        let mut spring = CameraSpring::new(0.0, 4.0, 0.55, 0.5);
+        let mut target = 0.0_f32;
+        for tick in 0..600 {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                target += (tick as f32 * 0.017).sin() * 0.01;
+            }
+            spring.settle(target);
+            assert_eq!(
+                spring.view(target),
+                target,
+                "tick {tick}: off must mean off"
+            );
+            // And the filter must genuinely not be *running*, not merely be
+            // multiplied by nothing at the end. Deleting the bypass leaves the
+            // line above passing — `0.0 * anything` is 0.0 — right up until
+            // `anything` is an infinity from a pathological `LOOM_CAMERA_HZ`,
+            // at which point `0.0 * inf` is a NaN and the camera dies with the
+            // feature switched off. This is the assertion that notices.
+            assert_eq!(
+                spring.angle, target,
+                "tick {tick}: off must mean the spring is not integrating at all"
+            );
+        }
+    }
+
+    /// A stalled frame delivers six ticks at once, and the spring must not
+    /// ring, blow up, or produce a NaN — the classic failure of a stiff spring
+    /// integrated with a variable `dt`. It cannot happen here *because* the
+    /// step is fixed and the stall only changes how ticks are batched, which
+    /// is the entire argument for putting this on the tick clock. Asserted
+    /// rather than assumed.
+    #[test]
+    fn a_hundred_millisecond_frame_does_not_shake_the_camera() {
+        let mut spring = CameraSpring::DEFAULT;
+        let mut target = 0.0_f32;
+        for _ in 0..40 {
+            // 100 ms of mouse arrives, then six ticks catch up at once.
+            target += 30.0_f32.to_radians();
+            for _ in 0..6 {
+                spring.settle(target);
+            }
+            let view = spring.view(target).to_degrees();
+            assert!(view.is_finite(), "the spring diverged");
+            assert!(
+                (view - target.to_degrees()).abs() < 15.0,
+                "the view is {:.1}° off a target it has had six ticks to reach",
+                view - target.to_degrees()
+            );
+        }
+    }
+
+    /// **Framerate independence, end to end through `Play::advance`.** Turn 90°
+    /// over half a second at 30, 60 and 144 fps and measure two things: where
+    /// the view lands, and how many *seconds* it takes to get there once the
+    /// mouse stops. Four players on four machines must get one camera.
+    ///
+    /// The endpoint alone would prove nothing — every convergent filter arrives
+    /// eventually, including the broken ones. The settle *time in seconds* is
+    /// the discriminating half: a camera stepped once per frame instead of once
+    /// per tick settles 2.4× faster at 144 fps than at 60, which is the entire
+    /// failure this design's fixed step exists to make impossible. Verified by
+    /// injecting exactly that fault; see the report.
+    #[test]
+    fn frame_rate_changes_neither_where_the_view_lands_nor_how_long_it_takes() {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        fn turn(fps: f32) -> (f32, f32) {
+            let mut play = Play::start(world(), std::path::Path::new("."));
+            let frames = (fps * 0.5) as u32; // half a second of turning
+            #[allow(clippy::cast_precision_loss)]
+            let per_frame = std::f32::consts::FRAC_PI_2 / frames as f32;
+            for _ in 0..frames {
+                play.look(per_frame, 0.0);
+                play.advance(1.0 / fps);
+            }
+            // Then the mouse stops and the spring is allowed to arrive.
+            let mut settled = 0.0;
+            for frame in 0..(fps as u32) {
+                play.advance(1.0 / fps);
+                if (play.view_yaw().to_degrees() + 90.0).abs() > 0.5 {
+                    #[allow(clippy::cast_precision_loss)]
+                    {
+                        settled = (frame + 1) as f32 / fps;
+                    }
+                }
+            }
+            (play.view_yaw().to_degrees(), settled)
+        }
+
+        let [(a, ta), (b, tb), (c, tc)] = [turn(30.0), turn(60.0), turn(144.0)];
+        assert!(
+            (a - b).abs() < 0.01 && (b - c).abs() < 0.01,
+            "30/60/144 fps landed at {a:.4}° / {b:.4}° / {c:.4}°"
+        );
+        assert!(
+            (a + 90.0).abs() < 0.01,
+            "and all three arrived at the 90° the mouse asked for, not {a:.4}°"
+        );
+        assert!(
+            (ta - tb).abs() < 0.02 && (tb - tc).abs() < 0.02,
+            "the settle took {ta:.3} s / {tb:.3} s / {tc:.3} s at 30/60/144 fps — \
+             a camera whose weight depends on the frame rate is four cameras"
+        );
+    }
+
+    /// The knobs are the tuning loop — a feel feature whose constants need a
+    /// rebuild to change cannot be tuned by the one person who can judge it.
+    /// Asserted on the direction of each, because a knob wired to the wrong
+    /// field still compiles.
+    #[test]
+    fn each_knob_moves_the_feel_the_way_it_says_it_does() {
+        let latency = |mut s: CameraSpring| equivalent_latency_ms(&mut s, 200.0);
+        let overshoot = |mut s: CameraSpring| {
+            flick(&mut s).iter().copied().fold(f32::MIN, f32::max) - 60.0
+        };
+        let d = CameraSpring::DEFAULT;
+
+        assert!(
+            latency(CameraSpring::new(1.0, 2.0, d.zeta, d.response)) > latency(d),
+            "lower frequency is the heavier, laggier camera"
+        );
+        assert!(
+            overshoot(CameraSpring::new(1.0, d.hz, 0.35, d.response)) > overshoot(d),
+            "less damping overshoots more"
+        );
+        assert!(
+            latency(CameraSpring::new(1.0, d.hz, d.zeta, 0.0)) > 20.0,
+            "no feedforward is exactly the input lag this design exists to avoid"
+        );
+        assert!(
+            overshoot(CameraSpring::new(0.5, d.hz, d.zeta, d.response)) < overshoot(d),
+            "half weight is half the sensation"
+        );
     }
 }
