@@ -244,7 +244,7 @@ pub(crate) fn pause_menu(root: &mut egui::Ui) -> Option<PauseChoice> {
     choice
 }
 
-/// Replace `{name}` with the game's own numbers.
+/// Replace `{name}` with the game's own numbers — or strings.
 ///
 /// An unknown name is left standing rather than blanked, so a typo appears on
 /// screen instead of quietly rendering nothing — the same reasoning as
@@ -271,7 +271,16 @@ fn interpolate(text: &str, state: &GameState) -> String {
                 // Trimmed to a whole number: a score of `200.0` is a score of
                 // 200, and nothing keeping fractional state has surfaced.
                 Some(value) => out.push_str(&format!("{value:.0}")),
-                None => out.push_str(&rest[start..=end]),
+                // Not a number, so try a string. **Numbers first and not the
+                // other way round**: a number is the assertable axis and has
+                // to keep its formatting, and a name is only ever one of the
+                // two. This is what lets a rules script draw a row of
+                // inventory slots — four cells and a fish — which four
+                // counters cannot be.
+                None => match state.text(name) {
+                    Some(text) => out.push_str(&text),
+                    None => out.push_str(&rest[start..=end]),
+                },
             },
         }
         rest = &rest[end + 1..];
@@ -702,6 +711,28 @@ mod tests {
         width
     }
 
+    /// **A `Hud` draws a string the rules script keeps, as well as a number.**
+    ///
+    /// `{message}` was this mechanism for one hard-coded name; the demo's hold
+    /// row needs it for `{slots}`, because four slots showing what is *in* them
+    /// is glyphs and four counters are not. Numbers keep their formatting, an
+    /// unknown name is still left standing, and neither of those is a thing a
+    /// string lookup may quietly take over — so all three are asserted here.
+    #[test]
+    fn a_hud_interpolates_a_string_a_number_and_neither() {
+        let mut host = loom_script::ScriptHost::default();
+        host.compile("r", r#"state.slots = "[BAIT ][ ><> ]"; state.stowed = 3;"#)
+            .expect("valid");
+        let mut state = GameState::default();
+        let view = loom_script::WorldView { positions: &[], events: &[], submersion: &[] };
+        host.rules("r", 1, 1.0 / 60.0, &view, &mut state).expect("runs");
+
+        assert_eq!(
+            interpolate("HOLD {slots}  BELOW {stowed}  CRATE {nope}", &state),
+            "HOLD [BAIT ][ ><> ]  BELOW 3  CRATE {nope}"
+        );
+    }
+
     /// **The longest line the demo can say has to fit the window it is played
     /// in**, and until this existed nothing could tell.
     ///
@@ -711,25 +742,31 @@ mod tests {
     /// an over-long line is clipped at *both* ends — it loses the verb as well
     /// as the object, which is the worst way for an instruction to fail.
     ///
-    /// The two strings below are the worst cases of the two longest branches:
-    /// `deeper_rules.rhai:1244`'s idle helm caption carrying a three-digit
-    /// range, and the `Hold` row with every slot spent and a fish below.
-    /// Neither is hypothetical — both assemble from parts reachable in one run,
-    /// and 282 m is a measured position, not a guess.
+    /// The four strings below are the worst cases of the four longest branches:
+    /// the idle helm caption carrying a three-digit range, the two sentences the
+    /// catch-on-E round made longest, and the `Hold` row with every slot filled.
+    /// None is hypothetical — all assemble from parts reachable in one run, and
+    /// 282 m is a measured position, not a guess.
     ///
-    /// **Measured, and the measurement overturned the estimate that prompted
-    /// it.** The caption lays out at **840 px** and the inventory row at
-    /// **621 px**. The round that budgeted for this worked from a per-character
+    /// **Measured, one row at a time.** The helm caption lays out at **840 px**,
+    /// the step-off line at **841**, the fish-on-the-line route line at **830**
+    /// and the slot row at **508**. The step-off line is the worst case now and
+    /// was not before: putting the catch on E added `E at the ` to it. The slot
+    /// row *fell* — 621 px to 508 — because four cells of five characters are
+    /// shorter than four names with a counter each.
+    ///
+    /// The round that budgeted for this worked from a per-character
     /// average read off a screenshot — 12.9 px/char, which puts the caption at
     /// 1135 px and predicts an overflow that does not happen. The real figure
     /// is 9.5 px/char, because the average was taken on a short all-caps
     /// string and the long branches are mostly lower case. A proportional font
     /// has no per-character width; laying the line out is the only way to ask.
     ///
-    /// The instrument is cross-checked against the one photograph anyone has
-    /// taken of this overlay: the inventory row measured **619 px** on screen
-    /// with a ruler, against **621 px** here. That agreement is what makes the
-    /// number above worth trusting.
+    /// The instrument was cross-checked against the one photograph anyone has
+    /// taken of this overlay: the inventory row of the day measured **619 px**
+    /// on screen with a ruler, against **621 px** here. That agreement is what
+    /// makes these numbers worth trusting; the row itself has since changed and
+    /// nobody has photographed the new one.
     ///
     /// `MIN_VIEWPORT` is the narrowest window this demo is documented to work
     /// in, not the narrowest egui will open. 960 px leaves the caption 120 px
@@ -744,11 +781,24 @@ mod tests {
 
         let caption = "THE HELM   W ahead  S astern  A/D wheel  SPACE lets go   \
 5 kn   HOME 282 m \u{2014} hold S";
-        let inventory =
-            "HOLD 4/4   bait 0  line 1  lantern 1  thermos 1  fish 1      BELOW 1   CRATE 1";
+        // **The round that put the catch on E made two of these longer**, which
+        // is exactly the change this test exists to catch: `E at the ...` is
+        // four characters of key name added to sentences that were already the
+        // longest ones on screen, and the route line the fish-on-the-line state
+        // draws is the longest string the file can produce at all.
+        let on_the_line = "SHE IS ON THE LINE   E takes her off \u{2014} or go RIGHT round \
+the bait box to the fish box";
+        let step_off = "1 BELOW   SHE IS ALONGSIDE \u{2014} step off, E at the crate 12 m \
+behind you, on your right";
+        // **The hold row is four slots now, not four counters** — `{slots}`,
+        // built by `slot_row` in `deeper_rules.rhai`. Worst case is every cell
+        // filled with the widest word it can hold and two-digit tallies.
+        let inventory = "HOLD  [FLASK][LAMP ][LINE ][ ><> ]      BELOW 99   CRATE 99";
 
         for (what, text, size) in [
             ("caption", caption, 22.0_f32),
+            ("on-the-line caption", on_the_line, 22.0_f32),
+            ("step-off caption", step_off, 22.0_f32),
             ("inventory", inventory, 19.0_f32),
         ] {
             let width = laid_out_width(text, size);

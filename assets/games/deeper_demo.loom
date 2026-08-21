@@ -36,24 +36,37 @@
 #                    back. Nothing pressed is neutral; she coasts to a stop.
 #
 #   anywhere aboard  **CLICK casts, and clicks again to set the hook. SHIFT
-#                    reels.** Both are refused ashore — by never being sent,
-#                    rather than by a rule that says no.
+#                    reels. The rod is in your hands**, so there is no station
+#                    to stand at — cast from the cockpit, the foredeck or the
+#                    salon door. Both keys are refused ashore, by never being
+#                    sent rather than by a rule that says no.
 #
 #   in the water     W A S D swim, at under half walking pace. The caption
 #                    names the nearer of the two ramps and the compass word for
 #                    where it lies, computed from where you are.
 #
-#   at the fish box  the catch goes below. **A place, not a key.**
-#   at the crate     what is below goes ashore and `CRATE` goes up — but only
-#                    with the boat alongside. Also a place.
+#   **E**            use what you are standing at, and it is the only key in
+#                    this demo that works ashore as well as aboard. What it
+#                    does is decided by where you are, in this order:
 #
-# **Three of those are places rather than buttons, and that is now history
-# rather than a constraint.** It was written when the engine had five digital
-# channels — `move_x`, `move_z`, `jump`, `sprint`, `fire` — and no sixth to bind
-# "take the helm" to, so the helm became a mat you stand on, the fish box a spot
-# you walk to, and so did the crate. **There is a sixth now: `interact`, on E.**
-# Nothing here uses it yet; converting the helm and the box to E is queued work,
-# and until it lands the layout below is exactly as described.
+#                      at the crate, with a catch below   the trip closes
+#                      at the yellow fish box             it goes below
+#                      a fish on the line                 into your hands
+#
+# **THE CATCH IS SOMETHING YOU DO NOW, AND IT USED TO BE SOMETHING THAT
+# HAPPENED.** A landed fish arrived in a slot on the tick it came over the rail
+# and was put below because the player had walked near a box. Both were written
+# when the engine had five digital channels — `move_x`, `move_z`, `jump`,
+# `sprint`, `fire` — and no sixth to bind a verb to, so a *place* was the only
+# budget there was. There is a sixth now, `interact` on E, and the whole tail of
+# the loop is on it: she hangs off the rod tip until you take her off, and she
+# goes below when you ask.
+#
+# **The helm and the four supplies are deliberately still places.** The helm is
+# a stance rather than an action and already has its own way out (SPACE); the
+# supplies lie along the one gesture this demo teaches, and putting them on a
+# key would mean a first-timer who holds W arrives at the boat with an empty
+# hold. Converting either is a decision, not a gap.
 #
 # **Reel is SHIFT, not W** — W is the throttle at the wheel and your legs
 # everywhere else. The cost, stated: aboard, SHIFT is reel *and* still sprint,
@@ -78,20 +91,28 @@
 #      about one every 2.7 s, which is how you can see that you are moving.
 #      `Rig/Boat.x` reaches 29.89 by tick 900.
 #   3. **SPACE.** You have let go of the wheel and the caption changes.
-#   4. **CLICK.** The rod on the port bulwark casts. Wait, and a fish takes it —
-#      the float goes clean under for the 600 ms the take is answerable in.
+#   4. **CLICK.** The rod in your hands casts — from wherever you are standing,
+#      because it is in your hands. Wait, and a fish takes it — the float goes
+#      clean under for the 600 ms the take is answerable in.
 #   5. **CLICK again inside that window** to set the hook, then hold SHIFT to
 #      reel and let go when she runs. The blank bends with the load: all
 #      twenty-four joints read `state.stress`. **Off beats on** — every cadence
 #      that lands a fish has more release than pull, which is the skill.
-#   6. Land it and it takes a slot — the one the bait it ate has just freed.
-#      SPACE, then follow the caption: it names the yellow fish box in metres in
-#      *your* frame, and the bait box is between you and it, so the walk is a
-#      dogleg.
+#   6. Land it and **she hangs off the rod tip**, swinging, with the line still
+#      through her. **Press E** and she comes off into your hands — into the
+#      slot the bait she ate has just freed, and the bottom row shows `[ ><> ]`
+#      where that bait was. SPACE, then follow the caption: it names the yellow
+#      fish box in metres in *your* frame, and the bait box is between you and
+#      it, so the walk is a dogleg. **E again at the box** and she goes below.
+#
+#      With all four slots full she stays on the line and the caption says so.
+#      That is recoverable rather than a loss: E at the fish box takes a catch
+#      off the line as well as out of your hands, so the box is always the way
+#      out of a full hold. Nothing is ever thrown back.
 #   7. Take her home. **You left ahead, so astern is how you come back**, and
 #      the helm caption carries `HOME nn m — hold S`. Step off over the boarding
-#      steps and walk west along the wharf to the crate. `CRATE` goes up. Then
-#      take bait and go again.
+#      steps and walk west along the wharf to the crate. **E**, and `CRATE` goes
+#      up. Then take bait and go again.
 #
 # The bait is what makes it a loop rather than a checklist: the fish eats yours
 # at the take, and there is none at sea.
@@ -189,9 +210,12 @@
 #   is four features and no fifth.
 # * **A second fishing spot, a second boat, a second fish species.** The demo
 #   proves the loop, not its variety.
-# * **A line from the rod tip to the float.** It is a second node whose length
-#   is a scale, and it is the obvious next thing. At six metres a real one is
-#   thinner than a pixel.
+# * **A line from the rod tip to the float, or to the fish hanging off it.** It
+#   is a second node whose length is a scale, and it is the obvious next thing —
+#   more obvious now than it was, because the rod is in your hands and its tip
+#   is a metre and a half from the camera rather than eight metres away. At six
+#   metres to the float a real one is thinner than a pixel; to the fish it would
+#   not be.
 # * **A dead man's handle.** Not needed: leaving the mat makes `at_helm` false
 #   while `aboard` stays true, so `deeper_player.rhai` writes zero thrust on the
 #   next tick. Measured on `rig_drive` with `--hold "jump=1,move_z=1"`: x = 3.0002
@@ -220,9 +244,14 @@
 #    every pinned drive number in `scripts/green.sh` from an X into a Z, and
 #    lands the helmsman a metre from the after face of the deckhouse. That is a
 #    round, not a bullet.
-# 2. **The landed fish reads as a mitten.** It tracks your hands correctly; the
-#    silhouette is a grey-green body with five splayed rays, hanging in mid-air
-#    attached to nothing. Mesh work, not a scene edit.
+# 2. **The landed fish reads as a mitten.** It tracks your hands correctly and
+#    it is in your own frame now rather than off her port beam, so turning no
+#    longer swings it out over the sea. What is left is the mesh: a grey-green
+#    body with five splayed rays. Mesh work, not a scene edit.
+#
+#    **And it is still attached to nothing**, in both poses. On the line it
+#    hangs at the rod tip with a metre of air where the line should be; in your
+#    hands there is no hand. See DELIBERATELY ABSENT.
 # 3. **Every close render is dense salt-and-pepper.** That is ADR 0019's
 #    eight-ray AO dither. Two sweeps found no scene-level knob that reaches it —
 #    ambient is flat across 2.4x, the sun about a ninth of it — and the cure is
@@ -256,7 +285,25 @@
 #    passages either side of the drawn one are 0.14 m clear against a 0.70 m
 #    capsule. So the salon is a room you can walk into and the fittings in it
 #    are painted on. `jib_vi_decks.loom` states the trade where the boxes are.
-# 11. **The stern ladder adds 3.4 m to her length and it is always there.**
+# 11. **The rod is a view-model and clips.** It is posed 0.55 m in front of the
+#    eye and 0.45 m below it — a first-person cheat, because the anatomically
+#    right grip at chest height is 76 degrees below a 37.5 degree half-FOV and
+#    entirely off the bottom of the frame. Two metres of blank at that offset
+#    reaches 2.3 m ahead of the eye, so **anything nearer than that is inside
+#    it**, and nothing depth-biases a view-model here.
+#
+#    **Stated from the geometry, not from a reproduction.** Two attempts to
+#    walk into the deckhouse and photograph it went round the outside instead;
+#    what is measured is the offset and the blank length, not a screenshot of
+#    the artifact.
+#
+# 12. **The rod does not point where you look in pitch, only in yaw.** A rules
+#    script publishes the player's flat heading and nothing else, so the blank
+#    sits at a fixed 60 degrees of elevation whether you are looking at the sky
+#    or at your feet. It reads fine because a real rod is held at an angle to
+#    the eye anyway, and fixing it means publishing a pitch nothing else wants.
+#
+# 13. **The stern ladder adds 3.4 m to her length and it is always there.**
 #    A 45 degree ramp from y = -1.80 to her transom cap is 3.42 m of run and
 #    nothing shortens it (that file's block says what else was measured). A
 #    real one folds; this one cannot, because a node script may write a
@@ -267,10 +314,20 @@
 # HOW THIS IS TESTED
 # -----------------------------------------------------------------------------
 #
-# Section 6 of `scripts/green.sh` — 14 scenes and 7 blocks of deliberately wrong
+# Section 6 of `scripts/green.sh` — 18 scenes and 7 blocks of deliberately wrong
 # input, about two minutes. It runs the whole trip on **this file** from a
 # keyboard tape (`--hold "<tick>:<keys>"`, the same field `loom run` writes when
 # a human holds a key) and asserts `state.delivered == 1` at the end of it.
+#
+# **The tape now presses E three times and the ticks are measured, not chosen.**
+# `DEMO_FIGHT` / `DEMO_BOX` / `DEMO_HELM` / `DEMO_HOME` are declared once in
+# that file and nest; eight rows used to carry a verbatim copy of the same
+# forty-key cadence. Aiming a press also found a stale claim: the comment on the
+# `rig_trip` row said the catch was stowed at tick 1310 on the walk across the
+# cockpit, and the closest that walk ever comes to the hatch is **2.08 m**
+# against a `RANGE` of 2.0 — the proximity stow it described was actually firing
+# on the way ashore, six hundred ticks later. A place fires wherever you happen
+# to be; a key has to be aimed, so it says where you are.
 #
 # `assets/test/rig_*.loom` are **not forks.** Each is an `extends` of this file —
 # `rig_trip.loom` is 16 non-comment lines, `rig_adrift.loom` is 24 — adding one
@@ -304,7 +361,8 @@ id = "3c7a5e12-8b64-4f09-a2d3-6e1b90c47f59"
 path = "../prefabs/jib_vi_decks.loom"
 
 # The rod and its reel, from the file that owns them. Twenty-four of its nodes
-# carry `../scripts/rod_bend.rhai`, so it loads up when the fight does.
+# carry `../scripts/rod_bend.rhai`, so it loads up when the fight does, and its
+# root carries `../scripts/rod_hold.rhai`, so it is in the player's hands.
 [[prefab]]
 key = "rod"
 id = "7f2c14a9-63d8-4e51-b0a7-2d9e5c81f430"
@@ -1006,11 +1064,19 @@ transform = { pos = [3.0, 0.0, -10.45] }
 # So there are two rows. The top one is the hold and it is always true; the
 # bottom one is situational and whoever has most to say owns it.
 #
-# **The empty slots draw as `0` deliberately.** Three of the four supplies are
-# behind the spawn, in the direction the demo tells you not to walk, so a player
-# who follows the one taught gesture arrives at the boat carrying one thing. A
-# counter that shows `bait 1 line 0 lantern 0 thermos 0` tells him there are
-# three more somewhere; `HOLD 1/4` alone tells him nothing he can act on.
+# **The top row is four slots, not four counters, and that is a reversal.** It
+# used to read `bait 1  line 0  lantern 0  thermos 0`, on the argument that the
+# zeros tell a player who has found one supply that there are three more
+# somewhere. What it could not do is show what a slot *holds*, which is the
+# thing the player asked for: a fish that is in your inventory should look like
+# a fish. `slot_row` in `deeper_rules.rhai` builds `{slots}` — four five-wide
+# cells, `[ ><> ]` for the catch — and `hud.rs` interpolates a string as well as
+# a number now, which is the one Rust change this round needed.
+#
+# The cost, stated: an empty slot is empty and no longer names what is missing.
+# The pickup notice on the bottom row says what went in as it goes in, and
+# `state.bait` / `line` / `lantern` / `thermos` are all still kept, so no
+# assertion lost its detector.
 #
 # **Drawn only in `loom run`** — a headless render will not show either row, so
 # what a gate can check is the string the rules script produced (`game.message`
@@ -1024,7 +1090,7 @@ parent = "Rig"
   [node.components.Hud]
   anchor = "bottom_center"
   offset = [0.0, 88.0]
-  text = "HOLD {carried}/4   bait {bait}  line {line}  lantern {lantern}  thermos {thermos}  fish {infish}      BELOW {stowed}   CRATE {delivered}"
+  text = "HOLD  {slots}      BELOW {stowed}   CRATE {delivered}"
   size = 19.0
   color = [0.86, 0.89, 0.82]
   only_in_play = true
@@ -1047,38 +1113,44 @@ parent = "Rig/Boat"
 prefab = "jib_vi_decks"
 
 # ---------------------------------------------------------------------------
-# THE ROD, IN A HOLDER ON THE PORT BULWARK, AND IT IS THE FRAME'S ONLY SUBJECT
+# THE ROD, AND IT IS IN HIS HANDS
 # ---------------------------------------------------------------------------
 #
-# **Where, and why here.** The butt sits on the aft port bulwark cap —
-# `col_bulwark_aft_port` is 0.30 m of bulwark centred on boat-local z = -2.86
-# with its top at 1.62 — and the blank leans 45 degrees outboard, putting its
-# tip 1.4 m over the water at y = 3.25. From the helm mat the eye is at
-# boat-local (-7.30, 2.29, -1.775) looking down -Z, so the butt is 31 degrees
-# below the centre of frame and 15 degrees to the left, and the tip is 19
-# degrees above it. **The rod arcs across the middle of the shot the player
-# actually has.**
+# It used to stand in a holder on the aft port bulwark, eight and a half metres
+# forward of the cockpit. That was chosen on a real measurement — the helmsman's
+# frame is "two rod holders, a strip of red gunwale and an empty horizon" that
+# does not change over 45 m of travel, and a rod arcing across it that loads up
+# when a fish runs is the first thing in the scene that answers him. It was also
+# the reason the demo did not read as *fishing*: the player was pressing CLICK
+# at a piece of scenery across the deck, and the game had let him do it from
+# anywhere aboard since the day it shipped.
 #
-# That is the whole reason it is here rather than in his hands. The measured
-# complaint about this demo is that the helmsman's frame is "two rod holders, a
-# strip of red gunwale and an empty horizon" that does not change over 45 m of
-# travel. A rod in that frame that visibly loads up when a fish runs is the
-# first thing in this scene the player can watch answer him.
+# **`rod_hold.rhai` puts it in his hands, and it lives in the prefab.** That is
+# forced rather than chosen: `prefab::expand` keeps an instance node's
+# `transform` and its `[node.overrides]` and **discards its `components`**, and
+# an override cannot add a component the prefab lacks. So the script is attached
+# in `fishing_rod.loom`, beside the twenty-four copies of `rod_bend.rhai` that
+# are there for the same reason, and it writes nothing in a scene with no hub.
 #
-# **In his hands was tried and refused, on the engine.** A renderable node whose
-# ancestors contain no *dynamic* body becomes a static collider from its drawn
-# bounds (`play.rs`) — and a `CharacterController` is not a dynamic body. So a
-# rod parented to `Rig/Player/Eye` would bake twenty-four boxes of world scenery
-# at the spawn point and the player would walk into his own tackle. Under the
-# hull there is a dynamic ancestor, the arm above it needs an authored
-# `BoxCollider` the rod does not have, and the result is geometry with no
-# physics at all — which is what a rod should be. Held gear needs an engine
-# exemption and that is an ADR, not a demo round.
+# **The transform below is therefore a fallback, not a placement.** It is the
+# old holder pose, and it is what `loom render` draws on tick 0 before any
+# script has run. Every tick after that the script owns this node.
 #
-# It bends because every one of the chain's twenty-four joints carries
-# `rod_bend.rhai`, which reads `state.stress` off the rules script. Nothing in
-# this scene authors that link; it is in the prefab, so it works here and in
-# `fishing.loom` and is a rest pose everywhere else.
+# **It stays parented to the hull, and the alternative is an engine bug.** A
+# renderable node whose ancestors contain no *dynamic* body becomes a static
+# collider from its drawn bounds (`play.rs`) — and a `CharacterController` is
+# not a dynamic body. A rod parented to `Rig/Player/Eye` would bake thirty-five
+# boxes of world scenery at the spawn point and the player would walk into his
+# own tackle. Under the hull there is a dynamic ancestor, the arm that attaches
+# to it needs an authored `BoxCollider` the rod does not have, and the result is
+# geometry with no physics at all — which is what a held rod should be. The cost
+# is that its pose has to be solved in *her* frame, which is what
+# `state.plx/ply/plz` and `state.bfx/bfz` are for.
+#
+# It still bends: every one of the chain's twenty-four joints carries
+# `rod_bend.rhai`, which reads `state.stress` off the rules script, and this
+# script writes only the root. So a rod being loaded by a fish curves out of the
+# hand holding it.
 [[node]]
 name = "Rod"
 parent = "Rig/Boat"
@@ -1137,10 +1209,16 @@ transform = { pos = [-7.60, 1.50, -3.05], scale = [0.045, 0.045, 0.045] }
 # player's own eye at those two ticks, there is no fish anywhere in the shot,
 # because there was no fish anywhere in the scene.
 #
-# It hangs in the cockpit from the tick it comes over the rail to the tick it
-# goes in the box — `state.infish`, which is exactly that interval — and the
-# geometry is in `fish_hang.rhai`. Under `Rig/Boat` so she carries it home, and
-# so no static collider is baked from it.
+# It has three poses and `fish_hang.rhai` is all of them. **On the line**
+# (`state.online`) it swings off the rod tip, which is the state that makes E a
+# thing worth pressing — a fish attached to your rod is visibly not yet yours.
+# **In your hands** (`state.infish`) it rides at his port side, in his own
+# frame. **Parked** at the rod butt, small, the rest of the time: not zero scale,
+# which is degenerate geometry, and not below decks, where one wrong number puts
+# a fish inside the hull.
+#
+# Under `Rig/Boat` so she carries it home, and so no static collider is baked
+# from it.
 [[node]]
 name = "Catch"
 parent = "Rig/Boat"

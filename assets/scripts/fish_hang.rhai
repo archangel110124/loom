@@ -50,6 +50,11 @@
 // length is a scale — worth it when the rod is in his hands, not in a holder.
 
 let infish = if "infish" in state { state.infish } else { 0.0 };
+// **On the line, which is a state the fish did not used to have.** A landing
+// put it straight into a slot; now it swings off the rod tip until the player
+// presses E. `deeper_rules.rhai`'s E block is what moves it, and `online` and
+// `infish` are mutually exclusive by construction there.
+let online = if "online" in state { state.online } else { 0.0 };
 let t = tick.to_float();
 // Her frame, from the rules script, one tick stale like everything else here.
 // The fallbacks are the old fixed spot, so a scene that runs this script
@@ -58,7 +63,33 @@ let plx = if "plx" in state { state.plx } else { -7.40 };
 let ply = if "ply" in state { state.ply } else { 0.95 };
 let plz = if "plz" in state { state.plz } else { -2.70 };
 
-if infish < 0.5 {
+if online > 0.5 {
+    // **HANGING OFF THE TIP.** The same arithmetic `rod_hold.rhai` does for the
+    // butt, carried 2.0 m up the blank: at 60 degrees of pitch that is 0.87
+    // forward and 0.50 up per metre. Duplicated rather than shared because a
+    // node script has no way to read another node's transform — `state` is
+    // numbers from the rules pass and nothing else — so the alternative is
+    // three more published numbers for a two-line sum. If the rod's pitch or
+    // the hand offsets move, this moves with them.
+    let bfx = if "bfx" in state { state.bfx } else { 0.0 };
+    let bfz = if "bfz" in state { state.bfz } else { -1.0 };
+    let rx = -bfz;
+    let rz = bfx;
+    // Swinging on the trace, which is what a fish on a line does. Smaller
+    // amplitude than the in-hand swing: it is hanging from two metres of blank
+    // rather than from a fist.
+    let swing = (t * 0.0480).sin();
+    position = [
+        plx + bfx * (0.55 + 1.74) + rx * 0.30 + swing * 0.06,
+        ply + 0.30 + 1.00,
+        plz + bfz * (0.55 + 1.74) + rz * 0.30,
+    ];
+    // Hung by the nose, broadside to the eye — the same two numbers the in-hand
+    // pose uses and for the same reason, which is that the mesh's origin is at
+    // its nose and its long axis is local -Z.
+    rotation = [90.0 + swing * 9.0, -90.0, 0.0];
+    scale = [6.5, 6.5, 6.5];
+} else if infish < 0.5 {
     // Parked at the rod butt, small. Same reasoning as the float's stow: not
     // zero scale (degenerate geometry) and not below decks (one wrong number
     // and there is a fish inside the hull).
@@ -80,7 +111,31 @@ if infish < 0.5 {
     // He is 0.35 m in radius, so this never clips him, and it rides his local
     // y, so it goes up the boarding treads and over the bait box with him
     // instead of through them.
-    position = [plx + 0.35 + swing * 0.10, ply + 0.20 + swing * 0.03, plz - 1.55];
+    // **In HIS frame now, not off her port beam.** The block above this file's
+    // code states the limit the old pose was written under — a rules script
+    // sees no rotations, so `fx`/`fz` could not be turned into hers and the
+    // fish hung 1.55 m toward her port side whichever way he was looking. That
+    // is exactly the "floating off the side of the ship" the player reported:
+    // walk to the fish box, which means turning, and the payoff swings out over
+    // open water. `state.bfx`/`bfz` is the rotation, published this round for
+    // the rod, and this is the second thing it buys.
+    //
+    // 1.15 m ahead, 0.42 m to **port** — the hand the rod is not in — and 0.53
+    // below the eye. Rendered at 0.85 m first: a 0.65 m fish at that range is
+    // 2*atan(0.325/0.85) = 41 degrees of a 75 degree FOV, which is 85% of the
+    // frame height and the sea disappears behind it. 1.15 m puts it at 31
+    // degrees, or 41% — the biggest thing in the shot without being the only
+    // thing, which is the same judgement the old pose recorded and the same
+    // number it landed on.
+    let bfx = if "bfx" in state { state.bfx } else { 0.0 };
+    let bfz = if "bfz" in state { state.bfz } else { -1.0 };
+    let rx = -bfz;
+    let rz = bfx;
+    position = [
+        plx + bfx * 1.15 - rx * 0.42 + swing * 0.08,
+        ply + 0.22 + swing * 0.03,
+        plz + bfz * 1.15 - rz * 0.42,
+    ];
     // **Broadside to the eye, and hung by the tail.** Degrees, and both
     // numbers were chosen by rendering it. `rot_x` 90 turns the mesh's
     // nose-tail axis (its local -Z) vertical; `rot_y` -90 then turns its thin

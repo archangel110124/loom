@@ -10,7 +10,7 @@
 //
 // What it is told:      tick, dt, position, velocity, grounded,
 //                       move_x, move_z, forward, right, jump, sprint, fire,
-//                       stand_node, stand_local
+//                       interact, stand_node, stand_local
 // What it answers with: velocity, helm_force, helm_torque, events on `emit`
 // What it may keep:     memory, a map that survives to the next tick
 //
@@ -41,8 +41,9 @@
 // and `fire` belonged to fishing, so position was the only budget left — and it
 // is also the only control scheme a player who was told nothing can find on
 // their own. **There is a sixth channel now, `interact` on E**, and this file
-// does not read it: moving the helm onto E is a deliberate change to make, not
-// a gap to close by accident.
+// reads it — but only to forward it as a `use` event. The helm is still a mat:
+// moving it onto E is a deliberate change to make, not a gap to close by
+// accident, and the fish is the thing that needed a key.
 //
 // **2. It swims.** Nothing in this engine catches a character in water: fall
 // off the rig and you fall forever, and round 1 shipped a rail that leaked at
@@ -540,6 +541,31 @@ if aboard && (sprint || fire_edge) {
         press: if fire_edge { 1.0 } else { 0.0 },
     });
 }
+
+// ---------------------------------------------------------------------------
+// **E, AND IT IS THE ONLY THING IN THIS FILE THAT WORKS ASHORE AS WELL.**
+// ---------------------------------------------------------------------------
+//
+// The sixth digital channel, crossing the same gap as `angler` and for the same
+// reason: `GameRules` sees no input, so a key that means "use the thing I am
+// standing at" has to enter the game here and leave as an event.
+//
+// **Not gated on `aboard`, which every other verb in this file is.** Casting is
+// aboard-only because a rod cast from the wharf is nonsense; the crate that
+// closes the trip is *on the wharf*, so gating this the same way would make the
+// demo's last beat unpressable. Where the press means something is the rules
+// script's question, and it answers it with a distance — see `within`.
+//
+// **Edge-detected here even though `Play::set_input` already does it**, and the
+// reason is the same one `fire` has: `--hold interact=1` writes `Runner::input`
+// straight and holds it for the rest of the run, which would deliver a fish to
+// the crate sixty times a second. `interact_probe.rhai` is the bench that
+// separates the two drivers.
+let use_held = if "use_held" in memory { memory.use_held } else { false };
+if interact && !use_held {
+    emit.push(#{ kind: "use" });
+}
+memory.use_held = interact;
 
 // ---------------------------------------------------------------------------
 // **WHERE HE IS STANDING, on change only.**

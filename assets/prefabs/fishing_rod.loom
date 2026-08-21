@@ -200,7 +200,17 @@ path = "../meshes/rod_blank_24.obj"
 
 [[node]]
 name = "Rod"
-# instance places this
+# instance places this -- unless a hub is holding it. `rod_hold.rhai` writes
+# this node's `position` and `rotation` from the player's own place on the
+# deck, so the rod is in his hands rather than in a rack across the cockpit.
+# **It has to be here and not on the instance**: `prefab::expand` keeps an
+# instance's `transform` and `overrides` and discards its `components`, and an
+# override cannot add a component the prefab lacks. A scene with no hub writes
+# no `state.plx`, the script assigns nothing, and the instance transform stands
+# -- the same bargain `rod_bend.rhai` makes with `state.stress`.
+
+  [node.components.Script]
+  path = "../scripts/rod_hold.rhai"
 
 [[node]]
 name = "Butt"

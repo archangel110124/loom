@@ -426,23 +426,31 @@ state.held = held;
 //      (`BAIT_MIN`, above) and **the fish eats it**: the slot empties on the
 //      bite. Fishing on is then the slow version until you go back for more.
 //   3. **In again, and this is what makes the capacity real.** A landed fish
-//      takes a slot. Four supplies plus a fish is five things and there are
-//      four slots, so **the demo reaches "full" by being played** rather than
-//      by anyone contriving it — and a refusal says so on the HUD for three
-//      seconds instead of failing silently.
+//      takes a slot — but **only when the player takes it**, which is the
+//      round-12 change. It hangs off the rod tip until E; see the E block. Four
+//      supplies plus a fish is five things and there are four slots, so **the
+//      demo reaches "full" by being played** rather than by anyone contriving
+//      it. A full hold no longer loses the fish: she stays on the line and the
+//      caption names the box.
 //   4. **Out.** `Rig/Boat/FishHold` is the hatch on the bait box in the
-//      cockpit. Stand by it and the catch goes below: slots free, `stowed`
-//      climbs. It is a **place, not a key** — the same decision the helm mat
-//      is, and for the same reason: the engine has five digital channels and
-//      every one of them is already spent.
+//      cockpit. Stand at it and press **E**, and everything fishy goes below —
+//      out of your hands *and* off the line. It was a **place** for four
+//      rounds, because the engine had five digital channels and every one was
+//      spent; `interact` is the sixth and this is what it was spent on.
 //
 // **How it is read from outside the game**, which is the requirement an
 // inventory nobody can assert on fails: `state.carried` is the count,
 // `state.bait` / `state.line` / `state.lantern` / `state.thermos` are one per
-// slot, `state.infish` is fish held, `state.stowed` is fish landed below, and
-// `state.full` is 1 while all four slots are taken. `events.pickup`,
-// `events.spend`, `events.stow` and `events.refused` are the audit trail.
-// `scripts/green.sh` asserts eight of those.
+// slot, `state.infish` is fish held, `state.online` is a fish on the rod,
+// `state.stowed` is fish landed below, and `state.full` is 1 while all four
+// slots are taken. `events.pickup`, `events.spend`, `events.take`,
+// `events.stow`, `events.refused` and `events.deliver` are the audit trail.
+//
+// **And `state.slots` is the row that is drawn**, which is a *string* and
+// therefore not assertable. `loom sim` prints the strings a rules script keeps
+// beside its numbers so `grep -q` can pin it, which is how every caption in
+// this file is already checked. Nothing in it is a fact the numbers above do
+// not also carry.
 
 fn has(hold, name) {
     let found = 0;
@@ -471,6 +479,49 @@ fn without(hold, name) {
         if held != name { kept.push(held); }
     }
     kept
+}
+
+// Horizontal reach, in metres. **Flat, not spherical**, for the reason the
+// supply loop states: everything in this demo stands on a deck and the player's
+// origin is his capsule's centre 0.9 m up, so a sphere would spend most of its
+// radius on a height difference that is the same at every prop.
+fn within(me, it, range) {
+    let dx = me[0] - it[0];
+    let dz = me[2] - it[2];
+    dx * dx + dz * dz <= range * range
+}
+
+// **The four slots, as a row of glyphs rather than four counters.**
+//
+// `hud.rs` interpolates any *string* the rules script keeps as well as any
+// number now, and this is the reason it was taught to: an inventory is what is
+// in each slot, and `bait 1  line 0  lantern 0  thermos 0` is a checklist of
+// what exists. Cells are five characters wide so a slot filling does not shift
+// the ones beside it, and the fish is the one item with an icon because it is
+// the one item this demo is about.
+//
+// **The cost, stated, because it reverses a documented decision.** The old row
+// drew the three supplies you have *not* found as `0`, which told a player who
+// had picked up one that there were three more somewhere. This row cannot say
+// that: an empty slot is empty. What replaces it is the pickup notice, which
+// names the thing as it goes in, and `state.bait`/`line`/`lantern`/`thermos`
+// are all still kept, so no assertion anywhere loses its detector.
+fn slot_row(hold, slots) {
+    let out = "";
+    for i in 0..slots {
+        let glyph = "     ";
+        if i < hold.len() {
+            let it = hold[i];
+            glyph = if it == "bait" { "BAIT " }
+                    else if it == "line" { "LINE " }
+                    else if it == "lantern" { "LAMP " }
+                    else if it == "thermos" { "FLASK" }
+                    else if it == "fish" { " ><> " }
+                    else { "  ?  " };
+        }
+        out += "[" + glyph + "]";
+    }
+    out
 }
 
 // **The nearer way out of the water, as a compass word.**
@@ -700,55 +751,100 @@ if hub {
         }
     }
 
-    // **Out: the fish hold.** A place, not a key. Everything in the hold that
-    // is a fish goes below in one step, because a player standing at the hatch
-    // wants the catch stowed and not a dialogue about which one.
-    if FISH_HOLD in positions {
-        let it = positions[FISH_HOLD];
-        let dx = me[0] - it[0];
-        let dz = me[2] - it[2];
-        if dx * dx + dz * dz <= RANGE * RANGE && has(hold, "fish") == 1 {
-            let n = 0;
-            for h in hold { if h == "fish" { n += 1; } }
-            hold = without(hold, "fish");
-            stowed += n;
-            notice = 3; notice_at = tick;
-            emit.push(#{ kind: "stow", count: n });
-        }
+    // -----------------------------------------------------------------------
+    // **E, AND EVERYTHING A FISH DOES AFTER IT IS LANDED.**
+    // -----------------------------------------------------------------------
+    //
+    // Two of this demo's verbs used to be *places*: stand near the hatch and
+    // the catch went below, stand near the crate and the trip closed. That was
+    // written when the engine had five digital channels and none of them was
+    // free. There is a sixth now (`interact`, on E), and a catch that is put
+    // away because the player walked past a box is the one beat in the loop
+    // where the game plays itself.
+    //
+    // **`deeper_player.rhai` is what sees the key** — `GameRules` sees no
+    // input at all — so it arrives here as a `use` event, on the rising edge,
+    // once per press.
+    //
+    // **What a press does is decided entirely by where he is standing**, in
+    // this order, and exactly one of them fires:
+    //
+    //   1. at the crate, with something below      -> the trip closes
+    //   2. at the fish box, with a catch anywhere  -> it goes below
+    //   3. a fish on the line                      -> it comes into his hands
+    //
+    // **2 takes a fish off the line as well as out of his hands, and that is
+    // an escape hatch rather than a convenience.** Four supplies and a fish is
+    // five things in four slots, so a full hold cannot take the catch — and if
+    // the only route below ran through his hands, a player who had picked
+    // everything up would have a fish he could neither hold nor stow and no way
+    // to free a slot at sea. Standing at the box and pressing E works from
+    // either state. The two are 3.4 m apart on this deck against a `RANGE` of
+    // 2.0, so a fish landed at the wheel is never both at once.
+    //
+    // The helm and the four supplies are deliberately still places. The helm is
+    // a stance rather than an action and has its own way out (SPACE); the
+    // supplies lie along the one gesture this demo teaches, and making them a
+    // key would mean a first-timer who holds W arrives at the boat with an
+    // empty hold. Neither is what the player asked for.
+    let used = false;
+    for e in events {
+        if e.kind == "use" { used = true; }
     }
 
-    // **ASHORE AGAIN: the crate, and the close of the whole loop.**
-    //
-    // Everything above this line is things you can do in one place. This is the
-    // only rule in the demo that needs you to have *been* somewhere and come
-    // back: the catch is in a hull, the crate is on a wharf, and the two have
-    // to be in the same place at the same time.
-    //
-    // A place again, and the same 2.0 m. The second test is the boat's own
-    // distance to the crate, which is what makes this "bring her back" and not
-    // "walk over here" — swim ashore with the catch still in a hull thirty
-    // metres out and it says so instead.
     let delivered = if "delivered" in state { state.delivered } else { 0 };
-    if FISH_CRATE in positions && stowed > 0 {
-        let c = positions[FISH_CRATE];
-        let dx = me[0] - c[0];
-        let dz = me[2] - c[2];
-        if dx * dx + dz * dz <= RANGE * RANGE {
-            let near = false;
-            if BOAT in positions {
-                let b = positions[BOAT];
-                let bx = b[0] - c[0];
-                let bz = b[2] - c[2];
-                near = bx * bx + bz * bz <= ALONGSIDE * ALONGSIDE;
-            }
-            if near {
-                delivered += stowed;
-                emit.push(#{ kind: "deliver", count: stowed });
-                stowed = 0;
-                notice = 6; notice_at = tick;
-            } else {
-                notice = 7; notice_at = tick;
-            }
+    // Set on the landing, cleared when it comes off the rod. See the fight's
+    // close, below, which is also gated on it: the rod is busy until you take
+    // the fish off it, so there is no casting over a fish you have not picked
+    // up.
+    let online = if "online" in state { state.online } else { 0 };
+
+    let at_crate = FISH_CRATE in positions && within(me, positions[FISH_CRATE], RANGE);
+    let at_box = FISH_HOLD in positions && within(me, positions[FISH_HOLD], RANGE);
+    let in_hand = has_count(hold, "fish");
+
+    if used && at_crate && stowed > 0 {
+        // **The one rule in the demo that needs you to have *been* somewhere
+        // and come back.** The catch is in a hull, the crate is on a wharf, and
+        // the second test is the boat's own distance — swim ashore with the
+        // catch still in a hull thirty metres out and it says so instead of
+        // counting.
+        let alongside = false;
+        if BOAT in positions {
+            alongside = within(positions[BOAT], positions[FISH_CRATE], ALONGSIDE);
+        }
+        if alongside {
+            delivered += stowed;
+            emit.push(#{ kind: "deliver", count: stowed });
+            stowed = 0;
+            notice = 6; notice_at = tick;
+        } else {
+            notice = 7; notice_at = tick;
+        }
+    } else if used && at_box && (in_hand > 0 || online > 0) {
+        // Everything fishy goes below in one press, because a player at the
+        // hatch wants the catch stowed and not a dialogue about which one.
+        let n = in_hand + online;
+        hold = without(hold, "fish");
+        online = 0;
+        stowed += n;
+        notice = 3; notice_at = tick;
+        emit.push(#{ kind: "stow", count: n });
+    } else if used && online > 0 {
+        // **Off the rod and into his hands, which is the act the player was
+        // never given.** It used to be a slot that filled itself on the tick
+        // the fish came over the rail.
+        if hold.len() < SLOTS {
+            hold.push("fish");
+            online = 0;
+            notice = 9; notice_at = tick;
+            emit.push(#{ kind: "take", item: "fish" });
+        } else {
+            // She stays on the line — losing her here would punish a full hold
+            // with the one thing the player came for. The caption names the way
+            // out, which is the box.
+            notice = 4; notice_at = tick;
+            emit.push(#{ kind: "refused", item: "fish" });
         }
     }
     state.delivered = delivered;
@@ -902,20 +998,28 @@ if hub {
             over_at = tick;
             if phase == 5 {
                 fish += 1;
-                // **The catch is a thing you are carrying**, which is what
-                // makes four slots a number rather than a decoration: four
-                // supplies and a fish is five, and the demo gets there by
-                // being played.
-                if hold.len() < SLOTS {
-                    hold.push("fish");
-                    notice = 2; notice_at = tick;
-                } else {
-                    notice = 4; notice_at = tick;
-                    emit.push(#{ kind: "refused", item: "fish" });
-                }
+                // **A landed fish is on the line, not in the hold**, and that
+                // is the whole of this round. It used to arrive in a slot on
+                // the tick it came over the rail — the payoff of twenty-two
+                // seconds of play happened to the player rather than being
+                // done by him — and if the hold was full it went straight back
+                // over the side with a caption.
+                //
+                // It now hangs off the rod tip until he presses E. `online` is
+                // that interval, `fish_hang.rhai` draws it there, and the E
+                // block above is what takes it off.
+                online = 1;
+                notice = 2; notice_at = tick;
+                emit.push(#{ kind: "online" });
             }
         }
-        if tick - over_at > OVER_TICKS {
+        // **And the rod is busy until the fish is off it.** Without this the
+        // fight resets to `phase == 0` after `OVER_TICKS` and the caption
+        // invites a cast over a fish still swinging from the tip. It cannot
+        // wedge: the box takes a fish off the line from either state, and the
+        // box is aboard, which is the only place a cast is possible from
+        // anyway.
+        if tick - over_at > OVER_TICKS && online == 0 {
             state.phase = 0;
             state.stress = 0.0;
             state.stam = 100.0;
@@ -928,6 +1032,7 @@ if hub {
     }
     state.over_at = over_at;
     state.fish = fish;
+    state.online = online;
 
     // **A fish that spat the bait used to say nothing at all.** Phase 3 timed
     // out back to 0 and the helm caption came straight back with no word about
@@ -964,6 +1069,13 @@ if hub {
     state.line = has(hold, "line");
     state.lantern = has(hold, "lantern");
     state.thermos = has(hold, "thermos");
+
+    // **And the same four slots as a row of glyphs, which is what is drawn.**
+    // A string, not a number, so `--assert` cannot read it and does not need
+    // to: every fact in it is one of the numbers above. `hud.rs` interpolates
+    // it into the top row. See `slot_row` for the cell widths and the one
+    // thing this row can no longer say.
+    state.slots = slot_row(hold, SLOTS);
 
     // -----------------------------------------------------------------------
     // **HER OWN FRAME, SOLVED FROM TWO OF HER NODES.**
@@ -1026,6 +1138,18 @@ if hub {
     state.plx = plx;
     state.ply = ply;
     state.plz = plz;
+    // **And which way he is facing, in her frame, which the rod needs and the
+    // fish did not get.** `fish_hang.rhai`'s header states the limit it was
+    // written under: `fx`/`fz` is a world heading, the rotation that turns it
+    // into hers is solved here, and a node script sees only `state`. So the
+    // fish hangs off his port beam rather than off his nose.
+    //
+    // A rod cannot take that deal — a fishing rod pointing ninety degrees away
+    // from where the player is looking reads as a bug, not as a hand — so the
+    // two numbers that were already computed above are now published.
+    // `rod_hold.rhai` turns them into a yaw with one `atan`.
+    state.bfx = bfx;
+    state.bfz = bfz;
 
     // **THE BAIT BOX, WHICH IS THE ONLY REASON THE WALK TO THE FISH BOX IS NOT
     // A WALK.**
@@ -1180,21 +1304,29 @@ if hub {
         // own feet a moment earlier, so telling him the outcome is the more
         // useful of the two lines.
         message = if notice == 1 {
-            "HOLD FULL 4/4   stow the catch in the yellow fish box"
+            "HOLD FULL 4/4   press E at the YELLOW FISH BOX to make room"
         } else if notice == 2 {
-            // **The one instruction the demo gives after its climax, and it
-            // pointed the wrong way.** See `toward` for the measurement. It is
-            // now his own frame, it carries the distance, and it names a colour
-            // he can pick out of the cockpit.
-            if baffled {
-                "LANDED   go " + round_it + " round the bait box — the YELLOW FISH BOX is aft"
-            } else {
-                "LANDED   put her in the YELLOW FISH BOX — " + box_at
-            }
+            // **The climax, and the one instruction that follows it.** It used
+            // to say `put her in the YELLOW FISH BOX` because the fish was
+            // already in a slot by the time this was drawn; now it is swinging
+            // off the rod tip and the first thing to do is take it off.
+            "SHE IS ON   press E to take her off the line"
         } else if notice == 3 {
             "STOWED   the catch is below. Take her home when you are done"
         } else if notice == 4 {
-            "HOLD FULL 4/4   she went back over the side"
+            // **She stays on the line rather than going over the side.** The
+            // old sentence reported a loss the player could not have avoided
+            // and could not undo; this one names the only thing that frees a
+            // slot at sea.
+            "HOLD FULL 4/4   she is still on the line — E at the YELLOW FISH BOX"
+        } else if notice == 9 {
+            // **The moment the payoff is his**, and the next place to walk. The
+            // bearing is in his own frame with a distance on it — see `toward`.
+            if baffled {
+                "IN YOUR HANDS   go " + round_it + " round the bait box — the YELLOW FISH BOX is aft"
+            } else {
+                "IN YOUR HANDS   E at the YELLOW FISH BOX — " + box_at
+            }
         } else if notice == 6 {
             "IN THE CRATE   that is a trip. Take bait and go again"
         } else if notice == 7 {
@@ -1211,6 +1343,18 @@ if hub {
             } else {
                 "IT SPAT THE HOOK   bait is on the rig   CLICK to cast again"
             }
+        };
+    } else if online > 0 {
+        // **Above the fight, because at this point the fight is over and the
+        // rod is holding a fish.** `phase` stays 5 until she comes off (see the
+        // fight's close), so without this branch the line would be the empty
+        // string the finished fight leaves behind — which is what it was for
+        // the sixty ticks between the landing notice expiring and the phase
+        // resetting, and nobody noticed because the state lasted a second.
+        message = if baffled {
+            "SHE IS ON THE LINE   E takes her off — or go " + round_it + " round the bait box to the fish box"
+        } else {
+            "SHE IS ON THE LINE   press E to take her off"
         };
     } else if phase >= 1 {
         // The fight owns the line: it is already in `message`.
@@ -1317,7 +1461,10 @@ if hub {
         message = if infish > 0 && baffled {
             "FISH IN HAND   go " + round_it + " round the bait box — the YELLOW FISH BOX is aft"
         } else if infish > 0 {
-            "FISH IN HAND   the YELLOW FISH BOX is " + box_at
+            // **And it names the key now.** The box stopped being a place this
+            // round: walking into it does nothing at all, so a bearing with no
+            // verb on it is a player standing at a hatch pressing W.
+            "FISH IN HAND   E at the YELLOW FISH BOX — " + box_at
         } else if stowed > 0 && boat_d <= ALONGSIDE {
             // **The sentence at the moment the demo pays off.** Traced on the
             // delivery tape, at the crate's own range: `the crate is 6 m dead
@@ -1325,18 +1472,24 @@ if hub {
             // at 2560. She *was* alongside; `ALONGSIDE` is 14.0 m. The player
             // was already walking to the crate on foot and was still being told
             // to bring the boat in, and no branch anywhere said "step ashore".
-            stowed + " BELOW   SHE IS ALONGSIDE — step off, the crate is " + crate_at
+            stowed + " BELOW   SHE IS ALONGSIDE — step off, E at the crate " + crate_at
         } else if stowed > 0 {
             stowed + " BELOW   the crate is " + crate_at + " — take her alongside"
         } else {
             "ABOARD   CLICK to cast   SHIFT to reel   stand on the mat to steer"
         };
+    } else if infish > 0 {
+        // **Ashore with a fish in his hands**, which the old flow could not
+        // reach: the box stowed it the moment he walked past it, so by the time
+        // he was on the wharf the hold was always empty. It can happen now, and
+        // the box is on the boat.
+        message = "FISH IN HAND   the YELLOW FISH BOX is aboard her — " + box_at;
     } else if stowed > 0 {
         // Ashore, with a catch still in her. The other half of the signpost —
         // and "by the west rail" was the same defect as "to starboard", so it
         // is the same fix. He has just stepped off a boat and could be facing
         // any way at all.
-        message = stowed + " IN HER HOLD   the crate is " + crate_at;
+        message = stowed + " IN HER HOLD   E at the crate " + crate_at;
     } else {
         message = "WALK FORWARD TO THE BOAT";
     }

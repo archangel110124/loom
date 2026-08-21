@@ -376,6 +376,38 @@ impl GameState {
         }))
     }
 
+    /// A named **string** the rules script is keeping, for a HUD.
+    ///
+    /// **Only a HUD, deliberately.** `--assert` reads `status`, `state.<name>`
+    /// and `events.<kind>`, and every one of those is a number or a word the
+    /// host chose; a string the game invented is not checkable, which is why
+    /// [`Self::number`] is the assertion axis and this is not. What it is for
+    /// is the half a number cannot say: a row of inventory slots is glyphs.
+    ///
+    /// `{message}` was that mechanism for exactly one hard-coded name. This is
+    /// the same thing for any name the script keeps.
+    #[must_use]
+    pub fn text(&self, name: &str) -> Option<String> {
+        self.values.get(name).and_then(|v| v.clone().into_string().ok())
+    }
+
+    /// Every **string** it is keeping, in name order, for reporting.
+    ///
+    /// The twin of [`Self::numbers`], and it exists for the same reason: a
+    /// gate can only check what the CLI prints. `--assert` still has no string
+    /// axis — see [`Self::text`] — so what this is for is `grep`, which is
+    /// already how every caption in `scripts/green.sh` is pinned.
+    #[must_use]
+    pub fn texts(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .values
+            .keys()
+            .filter_map(|k| self.text(k).map(|v| (k.to_string(), v)))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// Every number it is keeping, in name order, for reporting.
     #[must_use]
     pub fn numbers(&self) -> Vec<(String, f64)> {

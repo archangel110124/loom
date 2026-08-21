@@ -467,7 +467,11 @@ fi
 #    would make catching a fish the end of the demo. In a hub the fight never
 #    latches a terminal status and the terminal phases time out back to the
 #    cast. By 1800 the pilot is playing his second fish.
-"$LOOM" sim assets/test/rig_fish.loom --ticks 1800 \
+#    **And the E press is what lets the second one start.** `phase` now stays at
+#    5 while a fish is on the line, so an unattended rod never casts again --
+#    which is the point of it and is also why this row carries the same press
+#    5b does.
+"$LOOM" sim assets/test/rig_fish.loom --ticks 1800 --hold "1200:interact=1; 1201:" \
   --assert "status == playing" --assert "state.fish >= 1" \
   --assert "events.hooked >= 2" >/dev/null
 
@@ -491,9 +495,46 @@ fi
 #     a walk — which is asserted where a walk can happen, in `rig_trip.loom`
 #     below. What is left here is the half this scene can see: that the fish is
 #     **carried**, for 455 ticks and counting.
-"$LOOM" sim assets/test/rig_fish.loom --ticks 1800 \
+#
+#     **And it is carried because a key was pressed.** The landing at 1147 now
+#     puts her on the *line* (`state.online`), and the one `--hold` segment in
+#     this otherwise pilot-driven scene is the E that takes her off it. Without
+#     that press `infish` is 0 and `carried` is 3 for the whole run, which is
+#     the shape of this row's own falsification.
+"$LOOM" sim assets/test/rig_fish.loom --ticks 1800 --hold "1200:interact=1; 1201:" \
   --assert "events.pickup >= 3" --assert "events.spend >= 1" \
+  --assert "events.take >= 1" \
   --assert "state.infish >= 1" --assert "state.carried == 4" >/dev/null
+
+# 5b2. **A FULL HOLD, AND THE WAY OUT OF IT.** Four supplies and a fish is five
+#      things in four slots, so the demo reaches "full" by being played. What
+#      used to happen then was that a landed fish **went back over the side**
+#      with a caption — a loss the player could not have avoided and could not
+#      undo, at the exact beat the loop pays off.
+#
+#      She stays on the line now. `rig_fish`'s pilot is still fishing at 2600
+#      with one fish already in his hands and all four slots spent, so pressing
+#      E there is refused: `online` stays 1, `refused` is raised, and the
+#      sentence names the only thing that frees a slot at sea.
+"$LOOM" sim assets/test/rig_fish.loom --ticks 2700 \
+  --hold "1200:interact=1; 1201:; 2600:interact=1; 2601:" \
+  --assert "state.full == 1" --assert "state.online == 1" \
+  --assert "state.infish == 1" --assert "events.refused >= 1" \
+  | grep -q '"message": "HOLD FULL 4/4   she is still on the line — E at the YELLOW FISH BOX"'
+
+#      **And the way out is the box, which takes a catch off the line as well as
+#      out of your hands.** That is why the E ladder tests the box *before* the
+#      line: if the only route below ran through his hands, a full hold would be
+#      a fish he could neither hold nor stow and no way to free a slot until he
+#      sailed home. SPACE for his legs, the dogleg round the bait box, one E at
+#      1.0 m — and **both** fish go below in the one press. `stowed` is 2,
+#      `carried` falls to 3, and the rod is free again (`phase` back to 1).
+"$LOOM" sim assets/test/rig_fish.loom --ticks 2730 \
+  --hold "1200:interact=1; 1201:; 2600:interact=1; 2601:; 2620:jump=1; \
+2630:move_x=-1; 2680:move_z=-1; 2720:move_z=-1,interact=1; 2721:move_z=-1" \
+  --assert "state.stowed == 2" --assert "state.online == 0" \
+  --assert "state.infish == 0" --assert "state.carried == 3" \
+  --assert "state.full == 0" >/dev/null
 
 # 5c. **And bait is the reason it is an inventory and not a checklist.** The
 #     control is the same scene with nothing in the hold: `fight_skilled.loom`
@@ -504,6 +545,49 @@ fi
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold "move_z=1,fire=1" \
   --assert "events.spend >= 1" --assert "state.bait == 0" \
   --assert "state.carried == 3" >/dev/null
+
+# ---------------------------------------------------------------------------
+# **THE FOUR TAPES THE DEMO'S OWN ROWS ARE BUILT FROM.**
+#
+# Eight rows below used to carry a verbatim copy of the same forty-key fishing
+# cadence, and this round had to edit every one of them: the catch is taken off
+# the rod, stowed and delivered on **E** now rather than by standing near a box,
+# so three presses went into each. Eight copies of one tape is eight chances to
+# fix seven of them.
+#
+# They nest, and each is one more leg of the trip:
+#
+#   DEMO_FIGHT  W aboard, SPACE off the mat, CLICK to cast, CLICK to hook, then
+#               SHIFT in a 40-on / 50-off cadence. **The fish is landed at 1830
+#               and is on the LINE, not in the hold** -- that is the round's
+#               change and `state.online` is the number for it.
+#   DEMO_BOX    + E at 1900 (she comes off the line into his hands), the A/S
+#               dogleg round the bait box, and E at 2000 at the fish box. Ends
+#               standing at the box with `stowed == 1`.
+#   DEMO_HELM   + the reverse dogleg back onto the helm mat. Ends under way.
+#   DEMO_HOME   + astern to the berth, SPACE, over the boarding steps, west
+#               along the wharf, and **E at 3740 at the crate**.
+#
+# **Why 3740 and not "when he arrives".** He is never inside `RANGE` of the
+# crate while he is wedged against the bulwark at (-7.82, -8.33) -- that is
+# 2.44 m, and the row that used to pass here was passing on a *later* pass:
+# measured, the walk from 3700 to 3800 crosses within 1.27 m of it at about
+# 3744. 3730 through 3760 all deliver, so the press is in the middle of a
+# thirty-tick window rather than on its edge.
+DEMO_FIGHT="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
+540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
+850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
+1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
+1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
+1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1"
+DEMO_BOX="$DEMO_FIGHT; 1900:move_x=-1,interact=1; 1901:move_x=-1; \
+1950:move_z=-1; 2000:move_z=-1,interact=1; 2001:move_z=-1"
+DEMO_HELM="$DEMO_FIGHT; 1900:move_x=-1,interact=1; 1901:move_x=-1; \
+1950:move_z=-1; 2000:move_z=1,interact=1; 2001:move_z=1; 2035:move_x=1; 2060:; \
+2100:move_z=1"
+DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
+2750:move_x=-1,move_z=-0.15; 3550:move_z=-1,move_x=-0.3; \
+3740:move_z=-1,move_x=-0.3,interact=1; 3741:move_z=-1,move_x=-0.3"
 
 # 5d. **THE PLAYER FISHES, WITH HIS OWN HANDS, AND NOTHING HERE HAD EVER DONE
 #     THAT.** Every landing in this file until now was `Rig/Pilot/skilled` —
@@ -525,15 +609,43 @@ fi
 #     every single winner has more release than pull. A cadence is a decision a
 #     player learns by feel; if either control ever stops failing, the fight has
 #     become a slot pull and this says so unattended.
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 1900 \
-  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
-540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
-850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
-1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
-1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
-1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1" \
+#     **The landing is no longer the end of it, and that is this round.** A fish
+#     that came over the rail used to arrive in a slot on the same tick; it now
+#     hangs off the rod tip (`state.online`) until the player presses E. So this
+#     row is two claims: the fight can be played from the keyboard, and the
+#     catch is taken off the line by a key rather than by the clock.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1880 --hold "$DEMO_FIGHT" \
   --assert "events.hooked >= 1" --assert "events.landed >= 1" \
-  --assert "state.infish >= 1" --assert "state.carried == 4" >/dev/null
+  --assert "state.online == 1" --assert "state.infish == 0" \
+  --assert "state.carried == 3" \
+  | grep -q '"message": "SHE IS ON   press E to take her off the line"'
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1910 \
+  --hold "$DEMO_FIGHT; 1900:interact=1; 1901:" \
+  --assert "events.take >= 1" --assert "state.online == 0" \
+  --assert "state.infish == 1" --assert "state.carried == 4" >/dev/null
+
+# 5d2. **YOU CAN CAST FROM ANYWHERE ABOARD, AND NOTHING SAID SO.** The engine
+#      has gated the cast on `aboard` rather than on a station since the day it
+#      shipped — `deeper_player.rhai` emits `angler` from anywhere on the deck —
+#      and the rod stood in a rack on the aft port bulwark, so the player was
+#      pressing CLICK at a piece of scenery across the boat and had no reason to
+#      believe he could walk away from it. The rod is in his hands now
+#      (`rod_hold.rhai`), which is the half a gate cannot see, and this row is
+#      the half it can: SPACE for his legs, ninety ticks of D up her starboard
+#      side, and then CLICK. He is at boat-local x **+1.77**, nine metres from
+#      where the rack used to be, and the line goes out.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 610 \
+  --hold "0:move_z=1; 420:jump=1; 430:move_x=1; 560:; 600:fire=1; 606:" \
+  --assert "state.phase == 1" --assert "state.plx > 1.0" \
+  | grep -q '"message": "LINE OUT, BAITED   a take is close"'
+
+#      **And the control, which is the other half of "anywhere aboard".** Hold
+#      the trigger from the spawn without ever boarding: no `angler` event is
+#      ever emitted, so a rod cast from the wharf is not a refusal the fight has
+#      to carry — it is a thing that never reaches it. `phase` is still 0 after
+#      five seconds of holding it down.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 300 --hold "0:fire=1" \
+  --assert "state.phase == 0" --assert "events.angler == 0" >/dev/null
 
 # 5e. **The two endings a first-timer actually gets, and they used to be
 #     lowercase bench strings.** `the line snapped` and `it threw the hook`
@@ -606,14 +718,17 @@ fi
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 500 \
   --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:" \
   --assert "state.infish == 0" --assert "Rig/Boat/Catch.local_y < 1.6" >/dev/null
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 1900 \
-  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
-540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
-850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
-1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
-1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
-1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1" \
-  --assert "state.infish == 1" --assert "Rig/Boat/Catch.local_y > 1.7" >/dev/null
+#     **Three poses now, not two, and the middle one is the round's change.** On
+#     the line she hangs off the rod *tip* at boat-local y 2.883; taken off, in
+#     his hands, at 1.800; parked at the rod butt at 1.560. The tip pose is the
+#     only thing on screen that says a landed fish is still attached to
+#     something, which is the whole reason E has to be pressed.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1880 --hold "$DEMO_FIGHT" \
+  --assert "state.online == 1" --assert "Rig/Boat/Catch.local_y > 2.6" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1910 \
+  --hold "$DEMO_FIGHT; 1900:interact=1; 1901:" \
+  --assert "state.infish == 1" --assert "Rig/Boat/Catch.local_y > 1.7" \
+  --assert "Rig/Boat/Catch.local_y < 2.2" >/dev/null
 #     **And it is in his hands, which for eight rounds it was not.** The hang was
 #     a fixed boat-local `(-7.40, 1.85, -3.60)`: he walked to the fish box and it
 #     stayed exactly where it was, over open water, with the caption reading
@@ -623,14 +738,17 @@ fi
 #     solves in her frame from two of her own nodes. Ten ticks after the A of
 #     the stow walk he is at boat local x -9.13 and the fish is at **-9.03**;
 #     the old fixed value is -7.40, so this row is the whole difference.
+#     **And it is in his own frame now as well as at his own position**, which
+#     is the second half of the same defect. The hang was 1.55 m toward her
+#     *port beam* whichever way he was looking, because `fx`/`fz` is a world
+#     heading and the rotation into hers was solved one script away. Turning to
+#     walk to the fish box swung the payoff out over open water -- which is
+#     exactly the "floating off the side of the ship" the player reported.
+#     `state.bfx`/`bfz` is that rotation, published this round for the rod, and
+#     the fish is the second thing it buys. Ten ticks after the A of the stow
+#     walk he is at boat local x -9.13 and the fish is at **-9.47**.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1960 \
-  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
-540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
-850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
-1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
-1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
-1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; \
-1900:move_x=-1; 1950:move_z=-1" \
+  --hold "$DEMO_FIGHT; 1900:move_x=-1,interact=1; 1901:move_x=-1; 1950:move_z=-1" \
   --assert "state.infish == 1" --assert "Rig/Boat/Catch.local_x < -8.5" \
   --assert "state.plx < -8.9" >/dev/null
 
@@ -658,13 +776,7 @@ fi
 #     tick reads about -0.29 and the ball is entirely submerged. `bob` alone
 #     cannot see this — a float bucking two metres under the surface scores the
 #     same — and `local_y` alone cannot see the mean, so it takes both.
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 1770 \
-  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
-540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
-850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
-1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
-1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
-1710:sprint=1; 1750:" \
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1770 --hold "$DEMO_FIGHT" \
   --assert "state.phase == 4" --assert "state.stress > 60" \
   --assert "Rig/Boat/Float.bob > 0.45" \
   --assert "Rig/Boat/Float.local_y > 0.0" >/dev/null
@@ -679,16 +791,17 @@ fi
 #     Same tape as 5d, then two keys: **A** to clear the bait box aft, **S** to
 #     cross to the box. That is the route the caption's own bearing describes —
 #     `3 m dead behind you` — plus the one dogleg the deck furniture forces.
-#     It stows: `carried` falls 4 to 3, `infish` to 0, `stowed` to 1, and the
-#     caption becomes the return-leg signpost.
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 2300 \
-  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
-540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
-850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
-1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
-1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
-1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; \
-1900:move_x=-1; 1950:move_z=-1" \
+#
+#     **And then E, which is the round's other half.** Walking up to the hatch
+#     used to be the whole of it: the catch went below because the player had
+#     been near a box, which is the one beat in the loop where the game played
+#     itself. `DEMO_BOX` presses at 2000, standing 0.84 m off it. `carried`
+#     falls 4 to 3, `infish` to 0, `stowed` to 1.
+#
+#     **Falsifiable by deletion**: with the E at 2000 taken out he stands at the
+#     hatch for the rest of the run and every one of these four assertions
+#     fails.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2300 --hold "$DEMO_BOX" \
   --assert "events.stow >= 1" --assert "state.stowed == 1" \
   --assert "state.infish == 0" --assert "state.carried == 3" >/dev/null
 
@@ -711,25 +824,10 @@ fi
 #     the **hull** — the same distance `ALONGSIDE` judges the delivery by —
 #     rather than from a man standing seven metres forward of her origin, and
 #     because the key it names is a fact about which way *she* points.
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 2120 \
-  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
-540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
-850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
-1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
-1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
-1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; \
-1900:move_x=-1; 1950:move_z=-1" \
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2120 --hold "$DEMO_BOX" \
   --assert "state.stowed == 1" --assert "state.aboard == 1" \
   | grep -q '"message": "1 BELOW   the crate is 5 m behind you, on your left'
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 2200 \
-  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
-540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
-850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
-1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
-1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
-1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; \
-1900:move_x=-1; 1950:move_z=-1; 2000:move_z=1; 2035:move_x=1; 2060:; \
-2100:move_z=1" \
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2200 --hold "$DEMO_HELM" \
   --assert "state.stowed == 1" --assert "state.at_helm == 1" \
   | grep -q '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   HOME 19 m — hold S"'
 
@@ -754,12 +852,7 @@ fi
 #     line is drawn only while he is forward of the box and inside its x band —
 #     so this row and the next are one measurement in two halves.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2100 \
-  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
-540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
-850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
-1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
-1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
-1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; 1900:" \
+  --hold "$DEMO_FIGHT; 1900:interact=1; 1901:" \
   --assert "state.infish == 1" \
   | grep -q '"message": "FISH IN HAND   go LEFT round the bait box'
 
@@ -768,15 +861,9 @@ fi
 #     down. Without this row the route line could be latched on for ever and
 #     nothing would notice; with it, both branches are pinned.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1960 \
-  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
-540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
-850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
-1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
-1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
-1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; \
-1900:move_x=-1; 1950:move_z=-1" \
+  --hold "$DEMO_FIGHT; 1900:move_x=-1,interact=1; 1901:move_x=-1; 1950:move_z=-1" \
   --assert "state.infish == 1" \
-  | grep -q '"message": "LANDED   put her in the YELLOW FISH BOX — 3 m dead behind you"'
+  | grep -q '"message": "IN YOUR HANDS   E at the YELLOW FISH BOX — 3 m dead behind you"'
 
 #     **Two: a player wedged aboard is told he is wedged.** `deeper_player.rhai`
 #     could not fire `stuck` aboard at all — the flag existed and the one place
@@ -792,12 +879,7 @@ fi
 #     pressing. This row is the reason the wedge is worth keeping: it is the
 #     recovery, and a recovery with no instruction is a lost demo.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2400 \
-  --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
-540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
-850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
-1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
-1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
-1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; 1900:move_z=-1" \
+  --hold "$DEMO_FIGHT; 1900:move_z=-1,interact=1; 1901:move_z=-1" \
   --assert "state.stuck == 1" --assert "state.aboard == 1" \
   | grep -q '"message": "BLOCKED   the bait box — step LEFT and go round it"'
 
@@ -819,6 +901,34 @@ fi
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 40 --hold move_z=1 \
   --assert "state.carried == 2" \
   | grep -q '"message": "PICKED UP BAIT'
+
+# 5l. **THE INVENTORY ROW ITSELF, WHICH NOTHING COULD SEE.** The hold's `Hud`
+#     used to be four counters — `bait 1  line 0  lantern 0  thermos 0` — and
+#     every fact in it was a `state.<name>` an assertion could read. It is four
+#     *slots* now, showing what is in each, because a fish in your inventory
+#     should look like a fish: `slot_row` in `deeper_rules.rhai` builds
+#     `state.slots` and `hud.rs` interpolates a string as well as a number.
+#
+#     **A string the game invents is not assertable and `--assert` is not
+#     getting a string axis** — see `GameState::text`. So `loom sim` prints the
+#     strings a rules script keeps beside the numbers, and these rows `grep`
+#     them, which is exactly how every caption in this file is already pinned.
+#     Without that the one row a player reads all the time would have had no
+#     detector at all.
+#
+#     Two slots filled on the way to the boat, four at the wheel, and the fish
+#     in the slot its own bait has just freed. The cells are five characters
+#     wide so a slot filling does not shift the ones beside it, which is a
+#     claim these three greps make character by character.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 40 --hold move_z=1 \
+  | grep -q '"slots": "\[FLASK\]\[BAIT \]\[     \]\[     \]"'
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
+  --assert "state.full == 1" \
+  | grep -q '"slots": "\[FLASK\]\[BAIT \]\[LINE \]\[LAMP \]"'
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1910 \
+  --hold "$DEMO_FIGHT; 1900:interact=1; 1901:" \
+  --assert "state.infish == 1" \
+  | grep -q '"slots": "\[FLASK\]\[LINE \]\[LAMP \]\[ ><> \]"'
 
 # 5k. **THE HELM SAYS WHAT IT IS SET TO.** The old caption listed four bindings
 #     and a speed and never once stated the state of either control, so a player
@@ -884,14 +994,24 @@ fi
 #
 #   0     W          walk aboard, four supplies, on the mat by 356, ahead
 #   900   S          astern for home; the fish lands at 1147 on the way
+#   1200  E          she comes off the line and into his hands
 #   1250  SPACE      hands off the wheel
-#   1260  S + D      across the cockpit to the fish box -> STOWED at 1310
+#   1260  S + D      across the cockpit toward the fish box
 #   1320  W + A      back to the mat, which takes the helm again
 #   1380  S          astern the rest of the way; alongside by 2000
 #   2000  -          throttle shut, she settles
 #   2060  SPACE      hands off
-#   2070  S          over the boarding steps and onto the rig
-#   2150  A + S      west along the wharf to the crate -> DELIVERED at 2200
+#   2070  S          over the boarding steps -- and the walk passes the fish box
+#   2100  E          STOWED, 1.23 m off it
+#   2150  A + S      west along the wharf to the crate
+#   2200  E          DELIVERED
+#
+# **The three E presses are this round and the tick they are at is measured, not
+# guessed.** The comment above used to say "STOWED at 1310", and that was wrong
+# in a way only a press could expose: the closest this walk ever brings him to
+# the hatch between 1260 and 1400 is **2.08 m**, against a `RANGE` of 2.0. The
+# proximity stow it described actually fired on the way *ashore*, somewhere
+# between 1900 and 2100. A press has to be aimed, so it found out.
 #
 # **Four assertions, and each is a different link in the chain.** `stow` says
 # the catch went below on a walk; `deliver` says the trip closed; `stowed == 0`
@@ -899,10 +1019,14 @@ fi
 # is the number the HUD prints and the only thing in this demo that persists
 # across a trip.
 "$LOOM" sim assets/test/rig_trip.loom --ticks 2210 \
-  --hold "0:move_z=1; 900:move_z=-1; 1250:jump=1; 1260:move_z=-1,move_x=1; \
+  --hold "0:move_z=1; 900:move_z=-1; 1200:move_z=-1,interact=1; 1201:move_z=-1; \
+1250:jump=1; 1260:move_z=-1,move_x=1; \
 1320:move_z=1,move_x=-1; 1380:move_z=-1; 2000:; 2060:jump=1; 2070:move_z=-1; \
-2150:move_x=-1,move_z=-0.15" \
-  --assert "events.landed >= 1" --assert "events.stow >= 1" \
+2100:move_z=-1,interact=1; 2101:move_z=-1; \
+2150:move_x=-1,move_z=-0.15; 2200:move_x=-1,move_z=-0.15,interact=1; \
+2201:move_x=-1,move_z=-0.15" \
+  --assert "events.landed >= 1" --assert "events.take >= 1" \
+  --assert "events.stow >= 1" \
   --assert "events.deliver >= 1" --assert "state.delivered == 1" \
   --assert "state.stowed == 0" >/dev/null
 
@@ -928,12 +1052,22 @@ fi
 # letting him leave through her, and the old number then overshot `Rig/Ladder`
 # — which is 1.4 m wide between its kerbs — by 1.26 m to the west. Measured:
 # he lands at (-9.51, 2.30, -0.38), well up the deck.
+#
+# **And the refusal is now pressed for, which it never was.** The crate was a
+# place: he walked past it and was told no. `deliver == 0` on a run where nobody
+# ever asked is an assertion that cannot fail, so the tape now presses E at 1920
+# -- 1.86 m off the crate, measured, inside `RANGE` -- and the refusal sentence
+# is greped. E at 1440 takes the catch off the line and E at 1540 stows it, both
+# at measured distances.
 "$LOOM" sim assets/test/rig_adrift.loom --ticks 2000 \
-  --hold "0:; 1450:jump=1; 1460:move_z=-1,move_x=-1; 1520:move_z=-1; \
-1650:move_z=-1,move_x=-0.4; 1880:move_z=-1" \
+  --hold "0:; 1440:interact=1; 1441:; 1450:jump=1; 1460:move_z=-1,move_x=-1; \
+1520:move_z=-1; 1540:move_z=-1,interact=1; 1541:move_z=-1; \
+1650:move_z=-1,move_x=-0.4; 1880:move_z=-1; \
+1920:move_z=-1,interact=1; 1921:move_z=-1" \
   --assert "events.stow >= 1" --assert "state.stowed == 1" \
   --assert "events.deliver == 0" --assert "state.delivered == 0" \
-  --assert "Rig/Player.y > 2.2" >/dev/null
+  --assert "Rig/Player.y > 2.2" \
+  | grep -q '"message": "THE CATCH IS IN HER HOLD   bring her alongside first"'
 
 # **THE HULL IS A SOLID OBJECT, WHICH IT WAS NOT.** Three faults, one cause:
 # the hull's own `BoxCollider` is demoted to mass-only the moment the deck
@@ -1024,23 +1158,18 @@ fi
 #     of `take her alongside`. Traced before the fix: at 6 m and again at 2 m
 #     the demo was still telling the player to bring the boat in, at the exact
 #     beat it pays off, and no branch anywhere said to get out of her.
-DEMO_HOME="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
-540:sprint=1; 580:; 630:sprint=1; 670:; 720:sprint=1; 760:; 810:sprint=1; \
-850:; 900:sprint=1; 940:; 990:sprint=1; 1030:; 1080:sprint=1; 1120:; \
-1170:sprint=1; 1210:; 1260:sprint=1; 1300:; 1350:sprint=1; 1390:; \
-1440:sprint=1; 1480:; 1530:sprint=1; 1570:; 1620:sprint=1; 1660:; \
-1710:sprint=1; 1750:; 1800:sprint=1; 1840:; 1890:sprint=1; \
-1900:move_x=-1; 1950:move_z=-1; 2000:move_z=1; 2035:move_x=1; 2060:; \
-2100:move_z=1; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
-2750:move_x=-1,move_z=-0.15; 3550:move_z=-1,move_x=-0.3"
+#
+#     The tape itself is `DEMO_HOME`, declared with its three siblings above 5d.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2500 --hold "$DEMO_HOME" \
   --assert "state.stowed == 1" --assert "state.at_helm == 1" \
   | grep -q '"message": "THE HELM   ASTERN   wheel amidships   3 kn   SPACE lets go   ALONGSIDE — press SPACE"'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2800 --hold "$DEMO_HOME" \
   --assert "state.stowed == 1" --assert "state.at_helm == 0" \
-  | grep -q '"message": "1 BELOW   SHE IS ALONGSIDE — step off, the crate is 5 m dead behind you"'
+  | grep -q '"message": "1 BELOW   SHE IS ALONGSIDE — step off, E at the crate 5 m dead behind you"'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 3800 --hold "$DEMO_HOME" \
-  --assert "events.landed >= 1" --assert "events.deliver >= 1" \
+  --assert "events.landed >= 1" --assert "events.take >= 1" \
+  --assert "events.stow >= 1" --assert "events.deliver >= 1" \
+  --assert "events.use == 3" \
   --assert "state.delivered == 1" --assert "state.stowed == 0" \
   | grep -q '"message": "IN THE CRATE   that is a trip. Take bait and go again"'
 

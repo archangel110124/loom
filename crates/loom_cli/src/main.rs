@@ -3632,6 +3632,16 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     for (name, value) in state.numbers() {
         game.insert(name, serde_json::json!(value));
     }
+    // **And the strings, which used to be invisible from here.** `--assert` has
+    // no string axis and is not getting one: a number is checkable and an
+    // arbitrary word the game invented is not. But `grep -q` on this line is
+    // how every caption in `scripts/green.sh` is already pinned, and a rules
+    // script that keeps a *drawn* string — the demo's inventory row is four
+    // slots of glyphs — had no detector at all without this. Numbers first, so
+    // a name that is somehow both keeps the checkable half.
+    for (name, value) in state.texts() {
+        game.entry(name).or_insert_with(|| serde_json::json!(value));
+    }
     // What happened, by kind. Reported whether or not anything asserted on it:
     // an agent that ran a scene and sees `"damage": 0` learns why nobody died
     // from the line it already had to read.
