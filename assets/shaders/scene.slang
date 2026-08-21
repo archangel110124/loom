@@ -1351,44 +1351,106 @@ float sunVisibility(float3 position, float3 normal, float bias, float2 pixel) {
 /// *lighting* correction rather than a crude one-bounce GI.
 static const float AO_RANGE = 1.0;
 
-/// **Eight, and the reason is an occupancy cliff rather than the noise.**
+/// **Four per lane, and the quad makes it sixteen.**
 ///
-/// Noise against a 64-ray reference on `primitives` at 640x400, and cost on
-/// `lanternhead` at 1920x1080 over a 4-ray soft shadow, forward pass, median of
-/// three (0.467 ms with AO stubbed out):
+/// Was eight per pixel, unshared. Noise against a 64-ray render of the same
+/// build at 960x600 — worst channel, mean, and salt *added* at threshold 8,
+/// which is the number that can see grain — beside the whole forward pass at
+/// 1920x1080, min of three fresh processes x the last sixteen of twenty-four
+/// frames, GPU warmed, quiet box at load 1.2-1.7:
 ///
-///     rays          2       4       8       16      32
-///     worst         84      64      41      24      24
-///     mean          .1201   .0712   .0415   .0250   .0146
-///     forward ms    0.511   0.605   0.806   1.618   2.100
+///     scene         8 unshared (was)    4 + share (now)    forward ms
+///     primitives    48 / .0492 / 2408   29 / .0347 /  440   0.238 -> 0.181
+///     cave          17 / .0143 /  430   22 / .0118 /   59   0.533 -> 0.390
+///     materials     29 / .0087 /   28   14 / .0065 /   -5   0.372 -> 0.280
+///     stoneyard     28 / .0621 /  150   68 / .0562 /  163   0.985 -> 0.724
+///     croft         22 / .0411 /   91   40 / .0357 /   61   2.207 -> 1.691
+///     forest        25 / .0831 /  139   25 / .0599 /   10   1.177 -> 0.832
+///     spruce        40 / .0136 /   56   40 / .0120 /   30   0.983 -> 0.698
+///     lanternhead   12 / .0014 /    7   12 / .0011 /    9   0.868 -> 0.655
 ///
-/// Rays are 0.022, 0.024 and 0.025 ms each up to eight, and then **0.101 ms
-/// each** from eight to sixteen — a fourfold jump with nothing in the shader
-/// changing but the trip count, which is what a register-pressure or occupancy
-/// cliff looks like. Sixteen rays would cost more than the whole rest of the
-/// frame to take the worst-channel error from 41 to 24, both comfortably inside
-/// the gate's 72.
+/// **23-29% off the forward pass for a picture measurably closer to the truth**
+/// — mean error falls on 11 of the 13 scenes swept, and `primitives`' grain
+/// falls 2408 -> 440. The two it does not are `proving_ground` (.0055 ->
+/// .0090) and `gleamsprat` (.0058 -> .0062), both scenes whose absolute AO is
+/// a fifth of `croft`'s at any setting.
 ///
-/// An AO ray is also far more expensive than a sun ray at the same count — 0.024
-/// against 0.005 ms — and the reason is coherence: every pixel's sun rays go
-/// nearly the same way and share their traversal, while a hemisphere sample goes
-/// wherever the surface faces.
-static const uint AO_RAYS = 8;
+/// **The share is what buys this, not the ray count.** Four rays with no share
+/// is the control, and it is worse than eight on every scene: `primitives`
+/// 67 / .0834 / 5989, `cave` 24 / .0236 / 2280, `forest` 29 / .1449 / 678.
+/// Halving the rays alone is a straight loss; halving them and decorrelating
+/// the four lanes is a gain.
+///
+/// **The worst-channel rises are single pixels, and `worst` cannot say so.**
+/// `stoneyard`'s 68 is **one pixel of 576,000** (at (100,315); the next is 32),
+/// `croft`'s 40 is one, `proving_ground`'s 36 is two. Salt at threshold 24 —
+/// which is what sees a speck — goes *down* on `stoneyard`, to -5.
+///
+/// **The occupancy cliff this constant used to be justified by does not
+/// reproduce.** The old note here recorded 0.024 ms per ray to eight and 0.101
+/// ms each from eight to sixteen. Measured again on the same scene, unshared,
+/// forward pass at 1920x1080, marginal ms per added ray between rungs:
+///
+///     rays          2      4      8     16     |  per-ray 2->4  4->8  8->16
+///     lanternhead  0.577  0.666  0.868  1.298  |    .0445  .0505  .0538
+///     stoneyard    0.607  0.730  0.985  1.502  |    .0615  .0638  .0646
+///     cave         0.324  0.395  0.535  0.807  |    .0355  .0350  .0340
+///     croft        1.458  1.701  2.207  3.246  |    .1215  .1265  .1299
+///     materials    0.238  0.283  0.375  0.561  |    .0225  .0230  .0233
+///
+/// Flat, on five scenes, across the rung the cliff was claimed at. The loop is
+/// rolled, so the trip count cannot move the register footprint. **Anything
+/// that cites that cliff should be re-derived or struck** — the water
+/// reflection's one-ray choice below is one such citation, and its real reason
+/// is the salt measurement beside it, not the cliff.
+///
+/// An AO ray is still far more expensive than a sun ray at the same count, and
+/// the reason is coherence: every pixel's sun rays go nearly the same way and
+/// share their traversal, while a hemisphere sample goes wherever the surface
+/// faces. That is why this term, and not the sun's, is the one worth halving.
+static const uint AO_RAYS = 4;
+
+/// What a lane fires when it cannot share — see `cutoutMaterial` in
+/// `fragmentMain`. Today's count, at today's cost and today's picture.
+static const uint AO_RAYS_UNSHARED = 8;
 
 /// The fraction of the hemisphere above `normal` that is open, within
 /// [`AO_RANGE`].
-float ambientVisibility(float3 position, float3 normal, float bias, float2 pixel) {
+///
+/// `quadShare` must be **quad-uniform**. It reads the other three lanes of the
+/// 2x2, so a per-pixel value here reads lanes that took the other branch, and
+/// that is undefined.
+float ambientVisibility(float3 position, float3 normal, float bias, float2 pixel,
+                        bool quadShare) {
     float3 origin = position + normal * bias;
     float3 u, v;
     rayBasis(normal, u, v);
 
-    // Offset into the sequence, so a pixel's AO rays are not the same four
-    // directions its shadow rays used. Sharing them correlates the two terms
-    // and puts a visible dither pattern where a penumbra crosses a corner.
-    float2 dither = rayDither(pixel + float2(37.0, 11.0));
+    // **The dither is the QUAD's, and the lane slices the sequence.** Seeding
+    // from the quad's own corner and indexing at `lane * rays + i` is what
+    // makes the four lanes' samples one stratified set of `4 * AO_RAYS`
+    // directions rather than four rotated copies of `AO_RAYS` — four rotations
+    // of one set are four correlated estimates, and averaging them buys much
+    // less than averaging four disjoint slices does. It costs three integer
+    // ops and it is most of why halving the ray count is not a quality loss.
+    //
+    // Still a pure function of the integer pixel coordinate, so the dither is
+    // still screen-locked: it sits still while the world moves under it. It is
+    // locked to a 2x2 grid now rather than to a single pixel, which is the only
+    // thing about ADR 0019's determinism argument that moves.
+    //
+    // Offset by `(37, 11)` for the reason it always was: two consumers of
+    // `rayDither` sharing one pattern correlate, and a pixel's AO rays must not
+    // be the same directions its shadow rays used.
+    uint px = uint(int(pixel.x));
+    uint py = uint(int(pixel.y));
+    uint lane = quadShare ? ((px & 1u) | ((py & 1u) << 1u)) : 0u;
+    float2 seed = quadShare ? float2(float(px & ~1u), float(py & ~1u)) : pixel;
+    uint rays = quadShare ? AO_RAYS : AO_RAYS_UNSHARED;
+    float2 dither = rayDither(seed + float2(37.0, 11.0));
     float open = 0.0;
-    for (uint i = 0; i < AO_RAYS; ++i) {
-        float2 xi = raySample(dither, i);
+    for (uint i = 0; i < rays; ++i) {
+        float2 xi = raySample(dither, lane * rays + i);
         // Cosine-weighted: a disc sample lifted onto the hemisphere. Uniform
         // sampling would need the cosine applied afterwards and would spend
         // most of its rays near the horizon, where the weight is nearly zero.
@@ -1399,7 +1461,20 @@ float ambientVisibility(float3 position, float3 normal, float bias, float2 pixel
                    + normal * sqrt(max(1.0 - xi.x, 0.0));
         open += anyHit(origin, normalize(dir), bias, AO_RANGE) ? 0.0 : 1.0;
     }
-    return open / float(AO_RAYS);
+    float mine = open / float(rays);
+    if (!quadShare) {
+        return mine;
+    }
+    // **The whole reconstruction filter, and its guide is a guarantee rather
+    // than a heuristic.** A fragment quad is generated from one primitive, so
+    // these are four points on one surface — there is nothing for a depth or
+    // normal weight to reject, and the bright halo a depth-guided upsample
+    // produces cannot occur because this filter never crosses a silhouette.
+    // Anything wider than a quad is refused on determinism rather than
+    // capability: the screen-space arrangement of the quads inside a subgroup
+    // is implementation-defined, and a 2x2 is fixed by the pixel grid.
+    return (mine + QuadReadAcrossX(mine) + QuadReadAcrossY(mine)
+                 + QuadReadAcrossDiagonal(mine)) * 0.25;
 }
 
 // ---------------------------------------------------------------------------
@@ -2447,6 +2522,21 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // *changes the normal* — see the note on the sun term underneath it.
     float3 geometric = normalize(in.normal);
 
+    // **Could this fragment have been killed by the alpha cutout below?**
+    // `ambientVisibility` reads the other three lanes of the 2x2, and a quad
+    // read from a lane that executed `discard` is undefined — Slang lowers it
+    // to `OpKill`, not to a demote. Both terms of this are *material*
+    // constants and `material` is `nointerpolation`, so a quad, being one
+    // primitive, is one material and every lane agrees: a quad that could
+    // contain a kill simply does not take the sharing path. That is why this
+    // needs no `shaderDemoteToHelperInvocation` and no `slangc` capability —
+    // the control flow already excludes the hazard. `fragmentMain` has exactly
+    // one `discard`, and this is its condition.
+    //
+    // What it costs is that alpha-cut foliage keeps the unshared eight rays,
+    // at today's price. Two scenes in the repository pay it.
+    bool cutoutMaterial = false;
+
     if (in.material != NO_TEXTURE) {
         MaterialData m = push.materials[in.material];
         albedo = m.albedo.rgb;
@@ -2471,7 +2561,8 @@ float4 fragmentMain(VSOutput in) : SV_Target {
             // is on a threshold of exactly zero so that every material which
             // does not author one costs a compare and nothing else — and so
             // that a texture with no authored alpha can never erase itself.
-            if (m.meanAlbedo.w > 0.0 && sampled.a < m.meanAlbedo.w) {
+            cutoutMaterial = m.meanAlbedo.w > 0.0;
+            if (cutoutMaterial && sampled.a < m.meanAlbedo.w) {
                 discard;
             }
 
@@ -2683,7 +2774,8 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // a normal map can tilt the hemisphere far enough to put half its rays
     // under the real surface, which reads as blotches of pure occlusion.
     float3 ambient = hemisphereAmbient(normal) * ambientStrength()
-                   * ambientVisibility(in.rayOrigin, geometric, in.shadowBias, in.position.xy);
+                   * ambientVisibility(in.rayOrigin, geometric, in.shadowBias, in.position.xy,
+                                      !cutoutMaterial);
     // **Point lights, added to the ambient term.** They are unshadowed: a
     // shadowed point light needs a cube map or a ray per light per pixel, and
     // the ray tracer here is aimed at the sun. For a fire in the dark that is
@@ -6914,11 +7006,15 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     mirror = normalize(mirror - flatN * min(dot(mirror, flatN), 0.0));
     if (in.nappe.x < -0.5) {
         // **One ray, jittered inside the lobe — the marched surface only.**
-        // See `WATER_CINEMATIC_LOBE`. More rays is what ADR 0019's occupancy
-        // cliff refuses (0.024 ms each to eight, 0.101 ms each after), so the
-        // sample count does not move; what moves is that two neighbouring
-        // pixels no longer ask the same question, which is what a flat
-        // straight-edged patch *is*.
+        // See `WATER_CINEMATIC_LOBE`. The sample count does not move; what
+        // moves is that two neighbouring pixels no longer ask the same
+        // question, which is what a flat straight-edged patch *is*.
+        //
+        // This used to cite ADR 0019's occupancy cliff as the reason more rays
+        // were refused. **That cliff does not reproduce** — see the ladder in
+        // `AO_RAYS` — so the refusal now rests on what actually measured it:
+        // the fifty-fold salt result below. A rejection resting on a fact that
+        // no longer holds is a trap for whoever reads it next.
         //
         // `+ float2(19.0, 7.0)` for the reason `ambientVisibility` offsets by
         // `(37, 11)`: two consumers of `rayDither` sharing one pattern
