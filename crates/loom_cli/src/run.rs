@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use loom_input::{ActionMap, InputState};
 use loom_render::glam::Vec3;
-use loom_render::{Camera, Device, Instance, Ui, Viewer, ash, ash_window};
+use loom_render::{Camera, Device, Instance, Ui, Viewer, ash, ash_window, egui};
 
 use loom_editor::gizmo::{self, Mode};
 use loom_editor::panels::{PanelState, UiAction};
@@ -180,6 +180,141 @@ const fn escape_means(menu_open: bool, playing: bool, captured: bool) -> Escape 
     } else {
         Escape::Close
     }
+}
+
+/// Crockford base32 — the ten digits and the letters, minus `I`, `L`, `O`, `U`.
+///
+/// **The constraint is a voice channel, not a URL.** A room code is read aloud
+/// to a friend, so the alphabet drops the glyphs that collide when spoken or
+/// squinted at (`I`/`1`, `O`/`0`, `L`/`1`) and drops `U` so a code cannot
+/// spell the shorter obscenities by accident.
+const CODE_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// Symbols in a room code. Twelve of them, five bits each, so **60 bits**.
+///
+/// **Length is the one number that can never change later** — it is baked into
+/// every client that will ever parse a code, and Among Us was forced through
+/// exactly that migration once its space filled. So the argument for twelve
+/// over ten is laziness rather than paranoia: at 60 bits the code is safe as a
+/// *bearer token* (146 years at an unthrottled 10,000 guesses a second against
+/// 25,000 live rooms), which deletes rate limiting, a ban list and a separate
+/// join password from a transport that does not exist yet. Two characters
+/// removes a subsystem.
+///
+/// Twelve also divides into three groups of four, which ten does not, and 60
+/// bits fits a `u64` with four to spare, so the encoder is a shift loop with no
+/// padding case.
+const CODE_SYMBOLS: usize = 12;
+
+/// Lay `bits` out as base32 symbols, most significant first.
+///
+/// `symbols` is a parameter because the collision test encodes short codes to
+/// make the birthday arithmetic observable at a length where collisions
+/// actually happen. Nothing else varies it.
+///
+/// **The mask is inside the loop.** Applying it once at the call site instead
+/// silently drops a symbol of entropy the day someone passes a full `u64`.
+fn encode(bits: u64, symbols: usize) -> String {
+    (0..symbols)
+        .rev()
+        .map(|i| char::from(CODE_ALPHABET[((bits >> (i * 5)) & 31) as usize]))
+        .collect()
+}
+
+/// `XXXXXXXXXXXX` → `XXXX-XXXX-XXXX`. Grouping is what makes it readable aloud.
+fn grouped(symbols: &str) -> String {
+    format!(
+        "{}-{}-{}",
+        &symbols[0..4],
+        &symbols[4..8],
+        &symbols[8..CODE_SYMBOLS]
+    )
+}
+
+/// The low 60 bits of `bits` as a room code.
+fn format_code(bits: u64) -> String {
+    grouped(&encode(bits, CODE_SYMBOLS))
+}
+
+/// A fresh room code, from the operating system's entropy.
+///
+/// **This is outside the deterministic core, and that is correct placement
+/// rather than a compromise.** A room code names a session, not a simulation:
+/// it never enters a `.loom` file, never enters the physics hash, and is never
+/// readable by `loom sim --assert` or by rhai. A scene that carried its own
+/// room code would render differently in three fresh processes and
+/// `cargo xtask repeat` would fail it — correctly.
+///
+/// `getrandom` rather than `rand`: the syscall is the whole requirement, and
+/// `getrandom v0.4.3` is **already in this crate's tree** via `uuid`, so
+/// naming it adds no `[[package]]` entry to `Cargo.lock`.
+fn generate_code() -> String {
+    format_code(getrandom::u64().expect("the OS refused entropy for a room code"))
+}
+
+/// Read a code somebody typed or pasted, or `None` if it cannot be one.
+///
+/// Nothing calls this yet — there is nothing to join. It ships with the
+/// generator because the two are one decision, and because the forgiving half
+/// of an alphabet is the half that rots when it is written six weeks later.
+///
+/// Forgives what a voice channel and a chat window do to a code: any case,
+/// separators anywhere (people paste `K-7-M-Q` out of Discord one keypress at
+/// a time), and the four excluded letters mapped to what the speaker meant —
+/// `I`/`L` → `1`, `O` → `0`, `U` → `V`. Since none of those four can appear in
+/// a generated code, mapping them can only ever help.
+#[cfg_attr(not(test), expect(dead_code, reason = "no join flag yet — ADR 0065 M4"))]
+fn normalise(typed: &str) -> Option<String> {
+    let mut out = String::with_capacity(CODE_SYMBOLS);
+    for c in typed.chars() {
+        match c.to_ascii_uppercase() {
+            '-' | '_' | ' ' | '\t' => continue,
+            'I' | 'L' => out.push('1'),
+            'O' => out.push('0'),
+            'U' => out.push('V'),
+            c if u8::try_from(c).is_ok_and(|b| CODE_ALPHABET.contains(&b)) => out.push(c),
+            _ => return None,
+        }
+        if out.len() > CODE_SYMBOLS {
+            return None;
+        }
+    }
+    (out.len() == CODE_SYMBOLS).then(|| grouped(&out))
+}
+
+/// Wide enough for twelve monospace glyphs and their dashes at 26 points.
+const CODE_WIDTH: f32 = 200.0;
+
+/// Draw ROOM CODE and the code in the top right of the game's view.
+///
+/// **Its own `Area`, not a row inside [`crate::hud::pause_menu`].** That menu
+/// is a 180-pixel column centred in the viewport, so appending to it would put
+/// the code in the middle of the screen. The human asked for the top right.
+///
+/// Anchored off `available_rect_before_wrap` rather than `Area::anchor`, for
+/// the reason the HUD already learned: `anchor` measures from the edges of the
+/// whole window, which under `--edit` is on top of the inspector.
+fn room_code_panel(root: &mut egui::Ui, code: &str) {
+    let viewport = root.available_rect_before_wrap();
+    egui::Area::new(egui::Id::new("loom_room_code"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(viewport.right_top() + egui::vec2(-CODE_WIDTH - 24.0, 24.0))
+        .show(root.ctx(), |ui| {
+            ui.set_width(CODE_WIDTH);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new("ROOM CODE")
+                        .size(15.0)
+                        .color(egui::Color32::from_gray(185)),
+                );
+                ui.label(
+                    egui::RichText::new(code)
+                        .monospace()
+                        .size(26.0)
+                        .color(egui::Color32::WHITE),
+                );
+            });
+        });
 }
 
 /// How far one nudge moves a node, in metres.
@@ -353,6 +488,14 @@ struct App {
     /// two are also true of a play session in the editor that the human has
     /// merely clicked out of, and the menu must not appear for that.
     pause_menu: bool,
+    /// This session's room code, shown in the pause menu. `None` under
+    /// `--edit`, because an authoring session hosts nothing.
+    ///
+    /// **It identifies a session nobody can join yet.** There is no transport;
+    /// ADR 0065 has the plan and the reasons the transport is not this commit.
+    /// Generated once here rather than per frame, so the code a player reads
+    /// out does not change under them.
+    room_code: Option<String>,
     /// How many frames' CPU cost has been measured, and their total.
     ///
     /// **The frame's CPU work, up to the draw call — not the whole frame.**
@@ -437,6 +580,9 @@ impl App {
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .to_path_buf();
+        // A read-only viewer or a `--play` session is the one that could host;
+        // an `--edit` session is somebody authoring the file.
+        let room_code = session.is_none().then(generate_code);
         Self {
             // The scene's own camera when it has one, the whole scene framed
             // when it does not.
@@ -500,6 +646,7 @@ impl App {
             frames_left: None,
             autoplay: false,
             pause_menu: false,
+            room_code,
             cpu_frames: 0,
             cpu_total_ms: 0.0,
             cpu_worst_ms: 0.0,
@@ -1503,6 +1650,7 @@ impl ApplicationHandler for App {
                 // may run more than once, so the click is recorded rather than
                 // acted on inside it.
                 let menu_open = self.pause_menu;
+                let room_code = self.room_code.as_deref();
                 let mut pause_choice = None;
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
                     (Some(viewer), Some(ui), Some(window)) => viewer.draw_with_ui(
@@ -1527,6 +1675,9 @@ impl ApplicationHandler for App {
                             // Last, so its scrim dims the HUD too.
                             if menu_open {
                                 pause_choice = crate::hud::pause_menu(root);
+                                if let Some(code) = room_code {
+                                    room_code_panel(root, code);
+                                }
                             }
                         },
                     ),
@@ -2808,7 +2959,224 @@ pub fn open_scene(
 
 #[cfg(test)]
 mod tests {
-    use super::{Escape, escape_means};
+    use super::{
+        CODE_ALPHABET, CODE_SYMBOLS, Escape, egui, encode, escape_means, format_code, generate_code,
+        normalise, room_code_panel,
+    };
+
+    /// A code is twelve base32 symbols in three groups of four, and every
+    /// glyph on it is one a person can read down a voice channel.
+    #[test]
+    fn a_room_code_is_four_four_four_of_crockford_base32() {
+        for _ in 0..64 {
+            let code = generate_code();
+            assert_eq!(code.len(), CODE_SYMBOLS + 2, "{code} is not XXXX-XXXX-XXXX");
+            assert_eq!(code.as_bytes()[4], b'-', "{code} has no group break at 4");
+            assert_eq!(code.as_bytes()[9], b'-', "{code} has no group break at 9");
+            for c in code.chars().filter(|c| *c != '-') {
+                assert!(
+                    CODE_ALPHABET.contains(&(c as u8)),
+                    "{code} carries {c:?}, which is not in the alphabet"
+                );
+                assert!(
+                    !"ILOU".contains(c),
+                    "{code} carries {c:?}, which is exactly what Crockford excludes"
+                );
+            }
+        }
+    }
+
+    /// **The mask has to be inside the encoder's loop.** Applied once at the
+    /// call site instead, the top nibble of a `u64` silently eats a symbol of
+    /// entropy the day somebody passes a full one — which is the only bug in
+    /// this file that would not show up as a wrong-looking code.
+    #[test]
+    fn the_encoder_reads_sixty_bits_and_not_one_more() {
+        assert_eq!(format_code(u64::MAX), format_code((1 << 60) - 1));
+        assert_eq!(format_code(0), "0000-0000-0000");
+        assert_eq!(format_code(31), "0000-0000-000Z");
+        // Every symbol position is live: 5 bits apart, 12 of them.
+        for i in 0..CODE_SYMBOLS {
+            assert_ne!(format_code(1 << (i * 5)), format_code(0), "symbol {i} is dead");
+        }
+    }
+
+    /// **The property the whole thing rests on: a code parses back to itself.**
+    /// Ten thousand of them, from a fixed seed so a failure is reproducible
+    /// rather than a story about last Tuesday.
+    #[test]
+    fn every_code_round_trips_through_normalise() {
+        let mut seed = 0x10AD_C0DE_u64;
+        for _ in 0..10_000 {
+            let code = format_code(splitmix(&mut seed));
+            assert_eq!(normalise(&code).as_deref(), Some(code.as_str()));
+        }
+        // And the ones that came from the OS, not from the test's own PRNG.
+        for _ in 0..16 {
+            let code = generate_code();
+            assert_eq!(normalise(&code).as_deref(), Some(code.as_str()));
+        }
+    }
+
+    /// What a code survives between one mouth and another keyboard: any case,
+    /// separators anywhere, and the four excluded letters heard for what the
+    /// speaker meant. None of `I L O U` can be in a generated code, so mapping
+    /// them can only ever rescue a typo.
+    #[test]
+    fn a_code_read_aloud_still_resolves() {
+        // Chosen so the code carries a 1, a 0 and a V — the three symbols the
+        // four excluded letters have to be heard as.
+        let code = format_code(0x0007_6A5B_1AE7_C232);
+        assert_eq!(code, "01VA-BCDE-FGHJ");
+
+        let spoken = code
+            .replace('1', "I")
+            .replace('0', "O")
+            .replace('V', "U")
+            .to_lowercase();
+        assert_eq!(normalise(&spoken).as_deref(), Some(code.as_str()));
+
+        // Pasted out of a chat window one keypress at a time.
+        let scattered: String = code.chars().flat_map(|c| [c, ' ']).collect();
+        assert_eq!(normalise(&scattered).as_deref(), Some(code.as_str()));
+        assert_eq!(normalise("  ").as_deref(), None);
+    }
+
+    /// Malformed input is refused rather than guessed at. A code that is one
+    /// symbol short is not a code; padding it would join the wrong room.
+    #[test]
+    fn normalise_refuses_what_is_not_a_code() {
+        for bad in [
+            "",
+            "ABCD-ABCD-ABC",   // eleven
+            "ABCD-ABCD-ABCDE", // thirteen
+            "ABCD-ABCD-ABC!",  // punctuation
+            "ABCD-ABCD-ABC\u{e9}",
+            "ABCD ABCD ABCD ABCD",
+        ] {
+            assert_eq!(normalise(bad), None, "{bad:?} was accepted as a code");
+        }
+    }
+
+    /// **The collision claim, observed rather than only algebraed.**
+    ///
+    /// The design rests on `P ≈ N²/(2·A^L)`, and at `A = 32, L = 12` that
+    /// probability is far too small to see in any test that finishes. So it is
+    /// measured at a length where it bites — three symbols, 32,768 codes — and
+    /// checked against the same closed form, then checked again one symbol
+    /// longer to show the `A^L` in the denominator doing its work.
+    #[test]
+    fn the_birthday_bound_predicts_measured_collisions() {
+        /// Fraction of `trials` draws of `n` codes of `symbols` length that
+        /// contained a repeat.
+        fn measured(symbols: usize, n: usize, trials: usize, seed: &mut u64) -> f64 {
+            let mut hits = 0.0;
+            for _ in 0..trials {
+                let mut seen = std::collections::BTreeSet::new();
+                if !(0..n).all(|_| seen.insert(encode(splitmix(seed), symbols))) {
+                    hits += 1.0;
+                }
+            }
+            hits / f64::from(u32::try_from(trials).unwrap())
+        }
+        /// `1 - exp(-n²/2M)`, the standard birthday approximation.
+        fn predicted(symbols: i32, n: f64) -> f64 {
+            1.0 - (-(n * n) / (2.0 * 32f64.powi(symbols))).exp()
+        }
+
+        let mut seed = 0xB16D_5EED_u64;
+        for (symbols, n) in [(3_i32, 181_u32), (4, 724)] {
+            let want = predicted(symbols, f64::from(n));
+            let got = measured(
+                usize::try_from(symbols).unwrap(),
+                usize::try_from(n).unwrap(),
+                400,
+                &mut seed,
+            );
+            assert!(
+                (got - want).abs() < 0.08,
+                "{n} codes of {symbols} symbols collided {got:.3} of the time, \
+                 against a predicted {want:.3}"
+            );
+        }
+
+        // The scaling itself: one more symbol at the same population is 32x
+        // rarer, which is the whole reason twelve is enough.
+        let mut seed = 0x5EED_u64;
+        let short = measured(3, 181, 400, &mut seed);
+        let long = measured(4, 181, 400, &mut seed);
+        assert!(
+            long * 4.0 < short,
+            "a longer code collided {long:.3} against {short:.3} — no scaling"
+        );
+    }
+
+    /// SplitMix64. Test-only, so the collision measurement is reproducible;
+    /// nothing in the engine draws from it.
+    fn splitmix(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// **The only proof available that the code is on screen**, since nothing
+    /// in this workflow may open a window: lay the pause menu and the code
+    /// block out through a real `egui::Context` and read the shapes back.
+    ///
+    /// Both are drawn together, because the claim is not just "the code is
+    /// painted" but "it is painted top *right*, clear of the centred menu".
+    #[test]
+    fn the_pause_menu_shows_the_room_code_in_its_top_right() {
+        const WIDTH: f32 = 1000.0;
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(WIDTH, 600.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let code = format_code(0x0123_4567_89AB_CDEF);
+
+        // Twice: the first pass of a fresh context is a layout pass and areas
+        // have no size yet, exactly as the HUD's own tests found.
+        let mut labels: Vec<(String, egui::Pos2)> = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |root| {
+                let _ = crate::hud::pause_menu(root);
+                room_code_panel(root, &code);
+            });
+            labels = out
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(t) => Some((t.galley.text().to_owned(), t.pos)),
+                    _ => None,
+                })
+                .collect();
+        }
+
+        let at = |wanted: &str| {
+            labels
+                .iter()
+                .find(|(text, _)| text == wanted)
+                .unwrap_or_else(|| panic!("the menu drew {labels:?}, with no {wanted:?} on it"))
+                .1
+        };
+        for pos in [at("ROOM CODE"), at(&code)] {
+            assert!(
+                pos.x > WIDTH * 0.5,
+                "the room code was drawn at {pos:?}, in the left half of the view"
+            );
+            assert!(pos.y < 100.0, "the room code was drawn at {pos:?}, not near the top");
+        }
+        assert!(
+            at("PAUSED").x < at("ROOM CODE").x,
+            "the code should sit clear of the centred menu"
+        );
+    }
 
     /// **The Escape state machine, which is the whole of the bug report.**
     /// "When I hit escape, it takes me back to the editor type view. And then

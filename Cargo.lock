@@ -1329,6 +1329,7 @@ dependencies = [
 name = "loom_cli"
 version = "0.0.0"
 dependencies = [
+ "getrandom 0.4.3",
  "loom_asset",
  "loom_audio",
  "loom_ecs",
