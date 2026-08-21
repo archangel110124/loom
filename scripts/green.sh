@@ -36,8 +36,15 @@ fi
 # gameplay systems (rules, enemies, damage, the event log, the fight) shipped
 # covered by nothing but a human running the binary by hand.
 #
-# The whole block is under half a second. It is at the end because it needs a
-# release binary, and it uses the one `cargo test` already built.
+# **The block takes about three and a half minutes**, and the comment here said
+# half a second until someone timed it. 148 `loom sim` runs; a `deeper_demo`
+# tick is roughly 1.3 ms and the demo tapes are two thousand ticks each, so the
+# game rows are nearly all of it. That is a decision about the whole of section
+# 6 and not about any one row — trim it by shortening tapes or by sharing runs
+# (5b8 went from ten runs to one), never by dropping a claim.
+#
+# It is at the end because it needs a release binary, and it uses the one
+# `cargo test` already built.
 LOOM="${LOOM:-./target/release/loom}"
 if [ ! -x "$LOOM" ]; then
   cargo build --release -j 3 -p loom_cli
@@ -235,6 +242,30 @@ fi
 # — all four supplies stacked in one cell.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
   --assert "state.creel_selftest == 0" --assert "state.creel_drift == 0" >/dev/null
+
+# ---------------------------------------------------------------------------
+# **THE SEA GETS WORSE THE FURTHER OUT SHE GOES.**
+# ---------------------------------------------------------------------------
+#
+# ADR 0069. `Environment.stages` names five looks along a 0->1 axis and
+# `deeper_rules.rhai` eases `state.dread` along it from the boat's distance off
+# the rig. **No pixel row can see this chain** — `deeper_demo` is in `SCENES`
+# and not in `GOLDEN`, and even if it were, one still is one point on a ramp.
+# These two rows gate script -> distance -> easing for the price of the CPU.
+#
+# Rising fast and falling slow is the design (Dredge's panic meter), so the
+# near row is the one that catches an easing rate that has run away: at the
+# berth `dread` must be pinned at the floor no matter how many ticks pass.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 60 \
+  --assert "state.dread < 0.05" >/dev/null
+
+# And the far row, which is the whole chain. **1800 ticks, and the number was
+# measured rather than chosen:** she makes 2.97 m/s at full ahead, so thirty
+# seconds puts her 74 m out and `dread` at 0.33 — a 3x margin over this
+# threshold, at 2.4 s of wall clock. Saturation needs 3000 ticks and 4.1 s,
+# which buys a rounder number and nothing else.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1800 --hold move_z=1 \
+  --assert "state.dread > 0.1" >/dev/null
 
 # The cast-and-hook prefix of `DEMO_FIGHT`, which is defined two hundred lines
 # below where the trip tapes live. Named here because the creel rows above need
@@ -941,8 +972,22 @@ unset creel_state
 #      It is also a press cheaper than 5b4 — one tap of S against two of D — so
 #      the solve that needs the rotation is the better one, which is the whole
 #      argument for the mechanic being there.
+#
+#      **And the third curio is the wrong answer**, which is the sentence the
+#      grid earned and the row that says the puzzle is a puzzle. The FLSK at
+#      (0,0) is the one already under the cursor and so the cheapest of the
+#      three to throw away — zero taps — and it leaves `..a/b../...`, six free
+#      cells in an L with no 2x3 and no 3x2 in them. She stays on the line.
+#      Measured all three ways: FLSK refused, LAMP turned, LINE unturned.
 DEMO_TURNED="$DEMO_FIGHT; 1900:interact=1; 1901:; 1910:bag=1; 1911:; \
 1930:move_z=-1; 1945:; 1960:sprint=1; 2030:; 2050:bag=1; 2051:; 2100:interact=1; 2101:"
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2110 \
+  --hold "$DEMO_FIGHT; 1900:interact=1; 1901:; 1910:bag=1; 1911:; \
+1930:sprint=1; 2000:; 2050:bag=1; 2051:; 2090:interact=1; 2091:" \
+  --assert "events.ditched == 1" --assert "state.thermos == 0" \
+  --assert "state.online == 1" --assert "state.infish == 0" \
+  | grep -q '"creel_cells": "\.\.a/b\.\./\.\.\."'
+
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2110 --hold "$DEMO_TURNED" \
   --assert "events.ditched == 1" --assert "state.lantern == 0" \
   --assert "state.online == 0" --assert "state.infish == 1" \
