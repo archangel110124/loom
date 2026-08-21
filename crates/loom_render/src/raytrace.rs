@@ -35,6 +35,11 @@ struct Structure {
     address: vk::DeviceAddress,
 }
 
+/// What a TLAS instance actually is: where it sits, which object it names, and
+/// which BLAS it points at. Every other field of
+/// [`vk::AccelerationStructureInstanceKHR`] is a constant here.
+type InstanceKey = ([f32; 12], u32, vk::DeviceAddress);
+
 /// Everything needed to trace rays against the current scene.
 pub(crate) struct Raytracer {
     device: ash::Device,
@@ -54,6 +59,21 @@ pub(crate) struct Raytracer {
     layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
+    /// The keys the live TLAS was built from.
+    ///
+    /// **Rebuilding an unchanged structure costs ~0.5 ms of blocking submit
+    /// per frame and moves no pixel.** `build_instances` used to be called
+    /// unconditionally from `renderer.rs` every frame, and `submit_build`
+    /// waits on its own fence — so a static scene paid a serial stall larger
+    /// than its entire secondary-ray bill for a structure identical to the one
+    /// it replaced. Measured at 1920x1080 as the difference in per-frame wall
+    /// clock with and without the skip; see the table in the commit.
+    ///
+    /// It self-invalidates: the transform is in the key, so anything that
+    /// moves rebuilds, and the BLAS address is in it too. `build_meshes`
+    /// clears it outright, because a freed BLAS can be reallocated at the same
+    /// address with different geometry.
+    built: Vec<InstanceKey>,
 }
 
 impl Raytracer {
@@ -127,6 +147,7 @@ impl Raytracer {
             layout,
             pool,
             set,
+            built: Vec::new(),
         })
     }
 
@@ -157,6 +178,10 @@ impl Raytracer {
         vertex_count: u32,
     ) -> Result<(), RenderError> {
         self.free_blas(allocator);
+        // Every instance key holds a BLAS address, and these are the addresses
+        // being freed. A new BLAS can land on a freed one, so the keys cannot
+        // be trusted across this.
+        self.built.clear();
         if ranges.is_empty() || vertex_count == 0 {
             return Ok(());
         }
@@ -222,7 +247,8 @@ impl Raytracer {
         // the TLAS has to exist whenever the device can trace, because a
         // shader's *static* use of `sceneTLAS` is a property of the shader and
         // not of what the scene happens to hold.
-        let instances: Vec<vk::AccelerationStructureInstanceKHR> = objects
+        let (keys, instances): (Vec<InstanceKey>, Vec<vk::AccelerationStructureInstanceKHR>) =
+            objects
             .iter()
             .enumerate()
             .filter_map(|(index, object)| {
@@ -257,7 +283,9 @@ impl Raytracer {
                         m[2], m[6], m[10], m[14],
                     ],
                 };
-                Some(
+                let custom_index = u32::try_from(index).unwrap_or(0) & 0x00ff_ffff;
+                Some((
+                    (transform.matrix, custom_index, blas.address),
                     vk::AccelerationStructureInstanceKHR {
                         transform,
                         // **The object's index, so a ray can find out what it
@@ -280,19 +308,24 @@ impl Raytracer {
                         // doubling; `try_from` rather than `as` so an
                         // implausibly large scene truncates to object 0 rather
                         // than wrapping to an arbitrary one.
-                        instance_custom_index_and_mask: vk::Packed24_8::new(
-                            u32::try_from(index).unwrap_or(0) & 0x00ff_ffff,
-                            0xff,
-                        ),
+                        instance_custom_index_and_mask: vk::Packed24_8::new(custom_index, 0xff),
                         instance_shader_binding_table_record_offset_and_flags:
                             vk::Packed24_8::new(0, 0),
                         acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
                             device_handle: blas.address,
                         },
                     },
-                )
+                ))
             })
-            .collect();
+            .unzip();
+        // **Nothing moved, so nothing is rebuilt.** See [`Raytracer::built`].
+        // `tlas.is_some()` is what keeps the first frame honest — and an empty
+        // scene still gets its zero-instance TLAS built once, for the reason
+        // spelled out below.
+        if self.tlas.is_some() && keys == self.built {
+            return Ok(());
+        }
+        self.built = keys;
         // **An empty scene still gets a TLAS, and that is a validation
         // requirement rather than tidiness.** This used to return early, so
         // `ready()` was false and `renderer.rs` skipped binding set 0 — which
