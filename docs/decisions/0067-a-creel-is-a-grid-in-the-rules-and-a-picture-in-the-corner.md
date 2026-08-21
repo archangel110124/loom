@@ -358,3 +358,36 @@ the refusal that follows. All three injections caught.
 
 Two comments were also measured and found stale — the walk figure in §3, and
 this ADR's own thermos-versus-lantern sentence, which was backwards.
+
+**And four feedback defects, which are one defect.** This design puts every
+answer it gives the player on one line of text, and four of the things it had to
+say never reached that line:
+
+- **The ditch bar was on screen for one tick in sixty.** `deeper_player.rhai`
+  emits `ditching` on *change* — four events a ditch, which is the right
+  discipline — and the rules script read it into a per-tick local. Measured:
+  `OVER THE SIDE ||` at tick 314, gone at 315. A second of the only
+  irreversible key in the game, against a caption reading `HOLDING FLSK`.
+  Latched, like the cursor and the refusal beside it.
+- **And then it lied at the other end.** `ditch_held` keeps counting while the
+  key is down, so the uncapped quarter reached 6 at a second and a half and drew
+  `let go of SHIFT to keep it` over a hand emptied at 60. Capped at four, and
+  zeroed by the rules on the tick the ditch fires.
+- **Notice 11 could not reach the screen while the creel was open at all.** The
+  open grid owns the caption line and never consulted the notices, so the bar
+  finished and the line went back to the default help string with no word about
+  what had gone over the side. It is above `HOLDING` and below the refusals now.
+- **TAB at the wheel did nothing and said nothing.** §3 above says "refused with
+  a word"; there was no word. Code 3 is the one refusal a player cannot read,
+  because every other one is drawn by the open creel's own line and this one
+  happens with the creel shut. Notice 10 was free.
+
+`sprat` was also `rot: 1` at 1×1, so LMB on a one-cell fish reported success and
+changed nothing — the silent no-op that code 5's message exists to prevent,
+wearing that message's clothes.
+
+**The pattern, for whoever adds the sixth verb:** every one of these is a state
+the design had a sentence for and no path to the screen. The grid is a picture
+and the caption is the only voice; a verb is not finished until a row greps the
+line it produces. Five of the ten new rows in §6 are `grep -q '"message": ...'`
+for exactly that reason.
