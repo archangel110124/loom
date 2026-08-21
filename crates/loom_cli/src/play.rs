@@ -755,7 +755,10 @@ impl Sim {
                 // silently is not there, which is the whole class of fault
                 // this arm exists to fix.
                 pending.push((*entity, matrix, half));
-            } else if world.is_renderable(*entity) && dynamic_ancestor(world, *entity).is_none() {
+            } else if world.is_renderable(*entity)
+                && dynamic_ancestor(world, *entity).is_none()
+                && !character_ancestor(world, *entity)
+            {
                 if ball {
                     physics.add_static_ball(pos, radius);
                 } else if round {
@@ -2060,6 +2063,33 @@ pub(crate) fn dynamic_ancestor(
         current = world.parent(node);
     }
     None
+}
+
+/// True when some node above this one is a `CharacterController`.
+///
+/// **A renderable under a character is his body, not scenery.** The character
+/// node itself is already taken before every other branch — it becomes a
+/// walking capsule, never a box, "or the first thing it collided with would be
+/// itself". A *descendant* of it used to fall through to the static-box arm
+/// anyway, which is the same bug one level down: an articulated player made of
+/// separate rigid parts arrived as two dozen invisible boxes welded to the
+/// spawn point, at their rest pose, never moving when the puppet animates, and
+/// entering the cinematic water solver's obstacle bake. He walks into his own
+/// chest.
+///
+/// A no-op on everything that predates it, and that is measured rather than
+/// assumed: of the eleven scenes in `assets/` with a `CharacterController`,
+/// none has a renderable descendant.
+fn character_ancestor(world: &World, entity: loom_ecs::Entity) -> bool {
+    let mut current = world.parent(entity);
+    for _ in 0..64 {
+        let Some(node) = current else { return false };
+        if world.character(node).is_some() {
+            return true;
+        }
+        current = world.parent(node);
+    }
+    false
 }
 
 /// Gravity, and nothing else — what a character with no script does.
