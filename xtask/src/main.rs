@@ -406,7 +406,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 55] = [
+const GOLDEN: [(&str, &str, &[&str]); 56] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -773,6 +773,41 @@ const GOLDEN: [(&str, &str, &[&str]); 55] = [
     // the same terrain give the same forest every time, which is the property
     // `loom_scatter` is built around and this is the picture of it.
     ("forest", "assets/test/forest.loom", &[]),
+    // **The most silhouette in the repository, and it had no pixel gate.**
+    // 8,386 needle clusters: the scene whose 2x2 fragment quads most often
+    // straddle an edge, which is exactly what `ambientVisibility`'s quad share
+    // is weakest at. Nothing else in this list can see a share that has
+    // started costing more than it buys — `forest` above is scattered trunks
+    // and `tree_layered` is a handful of cards.
+    //
+    // It earns the row on its own numbers, not on the hypothetical: against a
+    // 64-ray render at 1920x1080 the unshared eight-ray build reads a
+    // worst-channel error of **120**, past this gate's own 72, and the shared
+    // four-ray one reads 68. The share is doing more for this scene than for
+    // any other, and that is the reverse of what the objection predicted.
+    //
+    // **The acceptance test for the share is the resolution ladder, and it has
+    // to be re-run per new scene rather than assumed.** Bleed is a perimeter
+    // effect, so its share of the frame's error must FALL as resolution rises.
+    // Mean error of the shared build minus the unshared one, vs a 64-ray
+    // reference, one row per scene:
+    //
+    //             320x200   640x400   960x600   1920x1080
+    //   cave      +.0108    -.0005    -.0025    -.0037
+    //   materials +.0003    -.0019    -.0022    -.0022
+    //   stoneyard +.0169    +.0028    -.0059    -.0146
+    //   croft     +.0071    -.0026    -.0054    -.0090
+    //   spruce    +.0034    -.0009    -.0016    -.0031
+    //   forest    -.0039    -.0188    -.0232    -.0288
+    //
+    // Monotone on every row. **Note which end this gate sits at**: at
+    // GOLDEN_SIZE the share is worse than the unshared build on six of eight
+    // scenes and better on seven of eight at 1080p, which is where the human
+    // judges and where the viewer runs. So from here this gate certifies
+    // "nothing turned blocky", not "the picture got better" — and if a row's
+    // ladder ever stops being monotone, the filter has become too wide for the
+    // frame and that is the signal to act on.
+    ("spruce", "assets/test/spruce.loom", &[]),
     // **A texture sampled on voxel terrain, which no other reference covers.**
     // `terrain_stress` and `terrain_billion` are the only other scenes that put
     // an `albedo_map` on a `VoxelVolume` and neither is in this list, so until
