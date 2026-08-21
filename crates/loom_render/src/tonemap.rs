@@ -78,6 +78,37 @@ pub(crate) struct Tonemap {
     pipeline: vk::Pipeline,
 }
 
+/// The 32 bytes `TonemapPush` reads, laid out in the shader's own order.
+///
+/// **A free function so the test can call the shipped code**, which is the
+/// whole reason it exists. The layout lived inline in `record`, and the test
+/// that claims to guard it re-derived the offsets in its own body — so the two
+/// copies could disagree with each other and with the shader while the test
+/// went on passing. Proven by injection: writing `saturation` at offset 16 and
+/// `gain[0]` at offset 28 in `record` alone, so the shader would read the
+/// saturation as the red gain, left the test green.
+///
+/// `rain.rs` already had the right pattern for this — it measures a real
+/// `#[repr(C)]` struct's field offsets rather than restating them. There is no
+/// struct here to measure, because the block is built by hand; making the
+/// builder callable is the same idea with the same cost.
+///
+/// The shader side stays a comment either way. What this can pin is that the
+/// bytes Vulkan receives are the bytes one named function produced.
+fn push_block(x: i32, y: i32, exposure: f32, grade: Grade) -> [u8; 32] {
+    // `int2 origin; float exposure; float contrast; float4 gain;`
+    let mut push = [0u8; 32];
+    push[0..4].copy_from_slice(&x.to_ne_bytes());
+    push[4..8].copy_from_slice(&y.to_ne_bytes());
+    push[8..12].copy_from_slice(&exposure.to_ne_bytes());
+    push[12..16].copy_from_slice(&grade.contrast.to_ne_bytes());
+    push[16..20].copy_from_slice(&grade.gain[0].to_ne_bytes());
+    push[20..24].copy_from_slice(&grade.gain[1].to_ne_bytes());
+    push[24..28].copy_from_slice(&grade.gain[2].to_ne_bytes());
+    push[28..32].copy_from_slice(&grade.saturation.to_ne_bytes());
+    push
+}
+
 impl Tonemap {
     /// Build the pass for a destination of `color_format`, reading `source`.
     ///
@@ -233,16 +264,7 @@ impl Tonemap {
         #[allow(clippy::cast_precision_loss)]
         let (fx, fy) = (placement.x as f32, placement.y as f32);
 
-        // 32 bytes, matching `TonemapPush` in the shader field for field.
-        let mut push = [0u8; 32];
-        push[0..4].copy_from_slice(&placement.x.to_ne_bytes());
-        push[4..8].copy_from_slice(&placement.y.to_ne_bytes());
-        push[8..12].copy_from_slice(&exposure.to_ne_bytes());
-        push[12..16].copy_from_slice(&grade.contrast.to_ne_bytes());
-        push[16..20].copy_from_slice(&grade.gain[0].to_ne_bytes());
-        push[20..24].copy_from_slice(&grade.gain[1].to_ne_bytes());
-        push[24..28].copy_from_slice(&grade.gain[2].to_ne_bytes());
-        push[28..32].copy_from_slice(&grade.saturation.to_ne_bytes());
+        let push = push_block(placement.x, placement.y, exposure, grade);
 
         // SAFETY: the caller guarantees the layouts and that `cmd` is
         // recording; every slice outlives its call.
@@ -387,26 +409,29 @@ mod tests {
     /// Written as the byte layout rather than as `size_of`, because the Rust
     /// side builds the block by hand — there is no `#[repr(C)]` struct to
     /// measure, and the offsets are the thing that can drift.
+    ///
+    /// **It calls `push_block`, and until it did it could not fail.** The
+    /// layout used to live inline in `record` and this test restated it, so
+    /// the assertions checked the test's own copy against itself. Injecting a
+    /// real swap into `record` — `saturation` at 16, `gain[0]` at 28 — left it
+    /// green. Every value below is distinct and none is `1.0`, so a field read
+    /// from the wrong offset lands on a number that identifies where it came
+    /// from rather than on a plausible neutral.
     #[test]
     fn the_push_block_is_thirty_two_bytes_in_the_documented_order() {
         let grade = Grade { gain: [2.0, 3.0, 4.0], contrast: 5.0, saturation: 6.0 };
-        let mut push = [0u8; 32];
-        push[0..4].copy_from_slice(&7i32.to_ne_bytes());
-        push[4..8].copy_from_slice(&8i32.to_ne_bytes());
-        push[8..12].copy_from_slice(&9f32.to_ne_bytes());
-        push[12..16].copy_from_slice(&grade.contrast.to_ne_bytes());
-        push[16..20].copy_from_slice(&grade.gain[0].to_ne_bytes());
-        push[20..24].copy_from_slice(&grade.gain[1].to_ne_bytes());
-        push[24..28].copy_from_slice(&grade.gain[2].to_ne_bytes());
-        push[28..32].copy_from_slice(&grade.saturation.to_ne_bytes());
+        let push = push_block(7, 8, 9.0, grade);
 
+        let f = |at: usize| f32::from_ne_bytes(push[at..at + 4].try_into().unwrap());
         // `int2 origin; float exposure; float contrast; float4 gain;`
-        assert_eq!(i32::from_ne_bytes(push[0..4].try_into().unwrap()), 7);
-        assert_eq!(i32::from_ne_bytes(push[4..8].try_into().unwrap()), 8);
-        assert!((f32::from_ne_bytes(push[8..12].try_into().unwrap()) - 9.0).abs() < f32::EPSILON);
-        assert!((f32::from_ne_bytes(push[12..16].try_into().unwrap()) - 5.0).abs() < f32::EPSILON);
-        assert!((f32::from_ne_bytes(push[16..20].try_into().unwrap()) - 2.0).abs() < f32::EPSILON);
-        assert!((f32::from_ne_bytes(push[28..32].try_into().unwrap()) - 6.0).abs() < f32::EPSILON);
+        assert_eq!(i32::from_ne_bytes(push[0..4].try_into().unwrap()), 7, "origin.x");
+        assert_eq!(i32::from_ne_bytes(push[4..8].try_into().unwrap()), 8, "origin.y");
+        assert!((f(8) - 9.0).abs() < f32::EPSILON, "exposure was {}", f(8));
+        assert!((f(12) - 5.0).abs() < f32::EPSILON, "contrast was {}", f(12));
+        assert!((f(16) - 2.0).abs() < f32::EPSILON, "gain.r was {}", f(16));
+        assert!((f(20) - 3.0).abs() < f32::EPSILON, "gain.g was {}", f(20));
+        assert!((f(24) - 4.0).abs() < f32::EPSILON, "gain.b was {}", f(24));
+        assert!((f(28) - 6.0).abs() < f32::EPSILON, "gain.w/saturation was {}", f(28));
     }
 
     /// **The default must be the identity exactly, not nearly.**
