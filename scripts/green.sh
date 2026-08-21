@@ -971,6 +971,49 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
   --assert "state.creel_hand == 0" --assert "state.creel_drift == 0" \
   | grep -q '"creel_cells": "a\.b/ccc/ccc"'
 
+# 5b10. **THE REFUSAL EXPIRES WHEN THE CURSOR LEAVES THE CELL IT WAS ABOUT.**
+#
+#      `IT WILL NOT GO THERE   LMB turns it — or move the cursor` tells the
+#      player to do a thing, and until this row doing it changed nothing: he
+#      walked the item to a cell where the overlay was painting its footprint
+#      **green** and the caption was still telling him it would not fit. Two
+#      readouts of one fact, disagreeing, and the wrong one made of words.
+#
+#      Lift the FLSK out of (0,0), step onto the BAIT at (1,0), press E: code 1
+#      and `creel_fits == 0`. Step down to (1,1), which is empty: code 0 and
+#      `creel_fits == 1`. Every refusal is a fact about the cell under the
+#      cursor, so all of them expire together when it moves.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 320 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+280:move_x=1; 288:; 300:interact=1; 301:" \
+  --assert "state.creel_refused == 1" --assert "state.creel_fits == 0" >/dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 360 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+280:move_x=1; 288:; 300:interact=1; 301:; 320:move_z=-1; 328:" \
+  --assert "state.creel_refused == 0" --assert "state.creel_fits == 1" \
+  --assert "state.creel_cx == 1" --assert "state.creel_cy == 1" >/dev/null
+
+#      **And a step into the wall is not a step.** The clear is tested after the
+#      clamp, so D at the right-hand column moves nothing and the message
+#      stands. A message that blinks off when nothing moved is the same bug the
+#      other way round, and doing this before the clamp is how you get it.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 380 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+280:move_x=1; 288:; 300:move_x=1; 308:; 320:interact=1; 321:; \
+340:move_x=1; 348:" \
+  --assert "state.creel_cx == 2" --assert "state.creel_refused == 1" >/dev/null
+
+#      **Code 4, which exists because code 2 was lying.** LMB with an empty hand
+#      used to answer `NOTHING IN THAT CELL`. The cursor is on the FLSK: there
+#      is something in that cell, and the player who reached for the turn key
+#      before the lift key was told otherwise. It now names what is missing and
+#      the key that fixes it.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 300 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:fire=1; 261:" \
+  --assert "state.creel_refused == 4" --assert "state.creel_hand == 0" \
+  --assert "events.turn == 1" \
+  | grep -q '"message": "NOTHING IN YOUR HAND   E lifts it out first, then LMB turns it"'
+
 # 5d2. **YOU CAN CAST FROM ANYWHERE ABOARD, AND NOTHING SAID SO.** The engine
 #      has gated the cast on `aboard` rather than on a station since the day it
 #      shipped — `deeper_player.rhai` emits `angler` from anywhere on the deck —

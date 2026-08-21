@@ -996,15 +996,35 @@ if hub {
     let cx = if "creel_cx" in state { state.creel_cx } else { 0 };
     let cy = if "creel_cy" in state { state.creel_cy } else { 0 };
     // **Why the last press did nothing, and it is latched rather than
-    // per-tick.** 0 none, 1 it will not fit, 2 the cell is taken, 3 hands on
-    // the wheel, 4 your hand is already full.
+    // per-tick.** Every code that exists, and there are no others:
+    //
+    //     0  nothing was refused
+    //     1  it will not go there   (E, hand full, the footprint overlaps)
+    //     2  nothing in that cell   (E or SHIFT, hand empty, cell empty)
+    //     3  hands on the wheel     (TAB on the helm mat)
+    //     4  nothing in your hand   (LMB with an empty hand)
+    //     5  it is one cell         (LMB on something that cannot turn)
+    //
+    // The list used to say `4 your hand is already full` and nothing set it,
+    // while 5 was missing and 2 was described as its own opposite. A comment
+    // that names codes the file does not use is worse than no comment: it is
+    // the first place someone adding a sixth would look for a free number.
+    //
+    // **4 exists because 2 was lying.** LMB with an empty hand used to report
+    // `nothing in that cell` — true when the cell was empty and flatly false
+    // when the cursor was sitting on a fish, which is the case a player who
+    // reached for the turn key before the lift key is actually in.
     //
     // Latched because a per-tick flag is a fact `--assert` cannot reach:
     // `--assert` runs once, at the end of the run, so a code written on tick
     // 550 and cleared on 551 reads 0 at tick 600 and the row passes having
-    // checked nothing. Cleared by the next thing that works, which is also what
-    // makes it the right thing to draw.
+    // checked nothing. Cleared by the next thing that works **and by moving the
+    // cursor** — see the fold below.
     let creel_refused = if "creel_refused" in state { state.creel_refused } else { 0 };
+    // Where the cursor was before this tick's events, so that the clamp below
+    // can tell a step that landed somewhere from a step into the wall.
+    let cx0 = cx;
+    let cy0 = cy;
     let creel_shutting = false;
     let creel_turn = false;
     let creel_ditch = false;
@@ -1030,6 +1050,22 @@ if hub {
     if cx > CREEL_W - 1 { cx = CREEL_W - 1; }
     if cy < 0 { cy = 0; }
     if cy > CREEL_H - 1 { cy = CREEL_H - 1; }
+
+    // **And a cursor that actually moved clears the refusal.**
+    //
+    // `IT WILL NOT GO THERE   LMB turns it — or move the cursor` is a line that
+    // tells the player to do a thing, and doing it used to leave the line
+    // standing: he walks the fish to a cell where the overlay is painting her
+    // footprint *green* and the caption is still telling him she does not fit.
+    // Two readouts of one fact, disagreeing, and the wrong one is the one made
+    // of words.
+    //
+    // Every code in the list above is a fact about the cell under the cursor,
+    // so every one of them expires when the cursor leaves it. **After the
+    // clamp, not before**: pressing D at the right-hand wall emits a `cursor`
+    // event and changes nothing, and a message that flickers off when nothing
+    // moved is the same bug the other way round.
+    if cx != cx0 || cy != cy0 { creel_refused = 0; }
 
     // **The fish eats the bait, on the tick it takes the hook.** `at == tick`
     // in phase 3 is the bite instant and nothing else is: `at` is stamped on
@@ -1258,7 +1294,12 @@ if hub {
         // it and nothing happened" is the complaint every silent no-op earns.
         if creel_turn {
             if hand == "" {
-                creel_refused = 2;
+                // **Not 2.** `NOTHING IN THAT CELL` was the answer here and it
+                // is false whenever the cursor is on something: a player who
+                // reached for the turn key before the lift key was told the
+                // cell was empty while looking at a fish in it. 4 says what is
+                // actually missing and names the key that fixes it.
+                creel_refused = 4;
             } else if ITEMS[hand].rot == 1 {
                 hand_rot = 1 - hand_rot;
                 creel_refused = 0;
@@ -1279,6 +1320,10 @@ if hub {
         // line spool, SHIFT frees its cell, and columns 1 and 2 become the
         // clean 2x3 she needs. That is the whole puzzle and it exists only
         // because the ditch reads the cursor.
+        // Each success clears the refusal, the same as the lift, the place
+        // and the turn: the rule is *anything that worked wipes the last thing
+        // that did not*, and the ditch was the one verb that had been left out
+        // of it.
         if creel_ditch {
             if hand != "" {
                 emit.push(#{ kind: "ditched", item: hand });
@@ -1286,6 +1331,7 @@ if hub {
                 got = hand;
                 hand = "";
                 hand_rot = 0;
+                creel_refused = 0;
             } else {
                 let i = at_cell(creel, ITEMS, cx, cy);
                 if i >= 0 {
@@ -1294,6 +1340,7 @@ if hub {
                     emit.push(#{ kind: "ditched", item: gone });
                     notice = 11; notice_at = tick;
                     got = gone;
+                    creel_refused = 0;
                 } else {
                     creel_refused = 2;
                 }
@@ -1879,6 +1926,8 @@ if hub {
             "IT WILL NOT GO THERE   LMB turns it — or move the cursor"
         } else if creel_refused == 2 {
             "NOTHING IN THAT CELL   E lifts whatever the cursor is on"
+        } else if creel_refused == 4 {
+            "NOTHING IN YOUR HAND   E lifts it out first, then LMB turns it"
         } else if creel_refused == 5 {
             "IT IS ONE CELL   turning it would change nothing"
         } else if hand != "" {
