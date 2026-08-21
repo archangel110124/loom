@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 70] = [
+const SCENES: [&str; 71] = [
     // The mood ladder — ADR 0069. In `GOLDEN` too, where the reasoning is.
     "assets/test/mood_deep.loom",
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
@@ -310,6 +310,20 @@ const SCENES: [&str; 70] = [
     // dynamic hull floating on a water body, which is the combination nothing
     // else in this list has.
     "assets/games/deeper_demo.loom",
+    // **The articulated player**, and it is a rendering path nothing else in
+    // this list covers: 27 rigid mesh leaves on a 43-node chain whose
+    // transforms are written every tick by fourteen node `Script`s off a gait
+    // clock in a `GameRules`. `deeper_demo` above instances the same prefab, so
+    // this line is not about the meshes — it is about the scripts running, the
+    // prefab resolving from `assets/test/`, and `play.rs`'s `character_ancestor`
+    // test keeping 27 `MeshRenderer`s out of the collision world.
+    //
+    // **In `SCENES` and not yet in `GOLDEN`**, which is a gap and not a
+    // judgement: a `GOLDEN` row needs a blessed reference, and the round that
+    // added this scene was not the one holding the `cargo xtask` lock. The
+    // reasoning for a row is written and the row is owed:
+    //     ("deckhand_walk", "assets/test/deckhand_walk.loom", &["--sim", "520"])
+    "assets/test/deckhand_walk.loom",
     // The only scene that runs several systems *at once*: voxel terrain, one
     // water body serving both a current and open ocean, three grass fields,
     // rain with wetness and shelter, additive and alpha particles, wind and an
