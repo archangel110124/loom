@@ -227,10 +227,31 @@
 # part that keeps it weight rather than lag: a sustained turn ends up 5.2 ms
 # behind the mouse, less than the 16.7 ms a mouse event already waits for a
 # tick. Stepped on the fixed tick, so every machine gets the same camera
-# whatever its frame rate. `LOOM_CAMERA_WEIGHT=0` turns it off exactly; `_HZ`,
-# `_DAMPING` and `_RESPONSE` are the other three knobs. Pitch is deliberately
-# rigid — on a boat a vertically swimming horizon is indistinguishable from the
-# sea moving, which is the one artifact this scene cannot afford.
+# whatever its frame rate. Pitch is deliberately rigid — on a boat a vertically
+# swimming horizon is indistinguishable from the sea moving, which is the one
+# artifact this scene cannot afford.
+#
+# **The picture is never more than 6° from the mouse**, whatever you do with it.
+# A spring's overshoot is proportional to how fast you were turning, and without
+# that bound an ordinary flick threw the view 18° past where it was pointed and
+# a fast spin 47°. At the speeds you look around a deck the clamp does nothing
+# at all — the two are bit-identical — so what it removes is only the part that
+# was never weight.
+#
+# **Tuning it, between two runs of the same binary:**
+#
+#     LOOM_CAMERA_HZ=3          heavier. Lower is heavier; 2 is the floor.
+#     LOOM_CAMERA_HZ=5          sharper. 6 is the ceiling, and by then there
+#                               is almost nothing left to feel.
+#     LOOM_CAMERA_DAMPING=0.45  more of a lurch at the end of a turn. 1.0 is
+#                               none at all.
+#     LOOM_CAMERA_WEIGHT=0      off, exactly — how to tell whether it is
+#                               better or worse than nothing.
+#
+# Out-of-range values are clamped and say so in the log. **`HZ` is the one knob
+# worth moving**; the rest are there to answer a specific question rather than
+# to be dialled in. Whether any of this is *right* is not something a test can
+# say — it needs a person, a window and a rail to walk along.
 #
 # **2. Where the four slots live.** In `GameRules` state, as `state.hold` and
 # `state.carried`, owned by `../scripts/deeper_rules.rhai` — the alternatives

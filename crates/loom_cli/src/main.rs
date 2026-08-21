@@ -168,13 +168,24 @@ USAGE:
 
         The first-person camera has weight — the view lags a turn, overshoots
         a little and settles. Four knobs, read once at startup, so it can be
-        tuned by the only person who can judge it without a rebuild:
-            LOOM_CAMERA_WEIGHT=0    off, exactly (default 1)
-            LOOM_CAMERA_HZ=3        heavier, slower to settle (default 4)
-            LOOM_CAMERA_DAMPING=0.4 more overshoot (default 0.55)
-            LOOM_CAMERA_RESPONSE=0  no feedforward (default 0.5) — this is
-                                    what plain input lag feels like, for
-                                    comparison. Do not ship it.
+        tuned between two runs by the only person who can judge it:
+
+            LOOM_CAMERA_HZ=3        how quickly the view catches up.
+                                    LOWER IS HEAVIER. This is the knob.
+                                    default 4, range 2–6.
+            LOOM_CAMERA_DAMPING=0.45  how much it bounces at the end of a
+                                    turn. Lower bounces more; 1 not at all.
+                                    default 0.55, range 0.4–1.
+            LOOM_CAMERA_WEIGHT=0    off, exactly — the way to compare it
+                                    against nothing. default 1, range 0–1.
+            LOOM_CAMERA_RESPONSE=0  no feedforward: this is what plain input
+                                    lag feels like, for contrast. Do not
+                                    ship it. default 0.5, range 0–1.
+
+        Heavier: HZ=3, then 2.5, then 2. Sharper: HZ=5, then 6. Outside a
+        range the value is clamped and a line says so — below 2 Hz a flick
+        takes seconds to settle and above 6 the view cannot be aimed, so
+        neither end is reachable by accident.
 ";
 
 /// The flags each subcommand accepts, and whether each takes a value.
@@ -5456,6 +5467,23 @@ mod tests {
         v.iter().map(|s| (*s).to_owned()).collect()
     }
 
+    /// **Scratch space that is this process's alone.**
+    ///
+    /// Every scene these tests write to disk used to go to a fixed path under
+    /// `/tmp`, which is fine for one `cargo test` and a race for two. Two
+    /// running at once — two agents in one worktree, or a rebuild alongside a
+    /// watch — write and then `remove_file` the same `loom_slice1_cinematic.loom`,
+    /// and whichever one reads after the other's cleanup fails with
+    /// `No such file or directory` in a test that has nothing to do with files.
+    /// Seen exactly that way. The pid is the whole fix.
+    fn scratch() -> std::path::PathBuf {
+        let dir = std::env::temp_dir();
+        // Created here rather than at each call site: four of the twelve write
+        // a file straight into it, and `temp_dir()` used to exist already.
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
     /// **A scheduled `--hold` is a tape, and the old one-constant form is one
     /// segment of it.**
     ///
@@ -5825,7 +5853,7 @@ mod tests {
     /// the room's offset twice over.
     #[test]
     fn placing_inside_a_moved_parent_lands_on_the_surface() {
-        let dir = std::env::temp_dir().join("loom_place_nested");
+        let dir = scratch().join("loom_place_nested");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let scene = dir.join("nested.loom");
         std::fs::write(
@@ -6160,7 +6188,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
   [node.components.Buoyancy]
 "#;
         let hash_of = |body: &str, name: &str| {
-            let path = std::env::temp_dir().join(name);
+            let path = scratch().join(name);
             std::fs::write(&path, body).expect("scratch scene");
             let (code, out) =
                 run(&args(&["sim", path.to_str().unwrap(), "--ticks", "600"]));
@@ -6232,7 +6260,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         let hover = format!("{}/assets/scripts/gleamsprat_hover.rhai", root.display());
 
         let hash_of = |body: &str, name: &str| {
-            let path = std::env::temp_dir().join(name);
+            let path = scratch().join(name);
             std::fs::write(&path, body).expect("scratch scene");
             let (code, out) = run(&args(&["sim", path.to_str().unwrap(), "--ticks", "300"]));
             let _ = std::fs::remove_file(&path);
@@ -6269,7 +6297,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         assert_ne!(idling, still, "removing the idle changed nothing — it is inert");
 
         // And the detuning: one shared phase instead of a per-node one.
-        let unison_script = std::env::temp_dir().join("loom_gleamsprat_unison.rhai");
+        let unison_script = scratch().join("loom_gleamsprat_unison.rhai");
         std::fs::write(
             &unison_script,
             script_src.replace("let seed = position[2] * 7.31;", "let seed = 0.0;"),
@@ -6448,7 +6476,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         );
 
         // And an assertion against it fails the run, naming the ADR.
-        let path = std::env::temp_dir().join("loom_slice1_cinematic.loom");
+        let path = scratch().join("loom_slice1_cinematic.loom");
         std::fs::write(&path, &cinematic).expect("scratch scene");
         let (code, out) = run(&args(&[
             "sim", path.to_str().unwrap(), "--ticks", "60",
@@ -6930,7 +6958,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         assert_eq!(authored["waves"]["count"], 7);
         assert!(authored["waves"]["wind_speed_10m"].is_null(), "{authored}");
 
-        let dir = std::env::temp_dir().join("loom_water_derived");
+        let dir = scratch().join("loom_water_derived");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let scene = dir.join("sea.loom");
         std::fs::write(
@@ -7042,7 +7070,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
     /// `validate` reports it and `render` keeps drawing a box.
     #[test]
     fn validate_reports_an_alias_that_resolves_to_nothing() {
-        let dir = std::env::temp_dir().join("loom_alias_check");
+        let dir = scratch().join("loom_alias_check");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let scene = dir.join("a.loom");
         std::fs::write(
@@ -7071,7 +7099,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
     #[test]
     fn validate_rejects_a_voxel_op_it_does_not_recognise() {
         let good = std::fs::read_to_string("../../assets/test/rain_gantry.loom").unwrap();
-        let dir = std::env::temp_dir().join("loom_voxel_op_check");
+        let dir = scratch().join("loom_voxel_op_check");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let scene = dir.join("a.loom");
         // The mesh aliases are `asset = "box"`; only the op line matches this.
@@ -7106,7 +7134,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
     #[test]
     fn validate_rejects_a_field_the_op_does_not_have() {
         let good = std::fs::read_to_string("../../assets/test/vale.loom").unwrap();
-        let dir = std::env::temp_dir().join("loom_voxel_field_check");
+        let dir = scratch().join("loom_voxel_field_check");
         std::fs::create_dir_all(&dir).expect("temp dir");
         // The recipe is named relative to the scene, so it has to come along.
         std::fs::copy("../../assets/test/vale.toml", dir.join("vale.toml")).expect("recipe");
@@ -7149,7 +7177,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
     /// **0**, and `loom validate` said `"ok": true`.
     #[test]
     fn validate_rejects_an_intersect_with_nothing_to_intersect() {
-        let dir = std::env::temp_dir().join("loom_voxel_intersect_check");
+        let dir = scratch().join("loom_voxel_intersect_check");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let scene = dir.join("a.loom");
         std::fs::write(
@@ -7186,7 +7214,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
     #[test]
     fn validate_rejects_a_terrain_rect_that_misses_the_volume() {
         let good = std::fs::read_to_string("../../assets/test/vale.loom").unwrap();
-        let dir = std::env::temp_dir().join("loom_voxel_rect_check");
+        let dir = scratch().join("loom_voxel_rect_check");
         std::fs::create_dir_all(&dir).expect("temp dir");
         std::fs::copy("../../assets/test/vale.toml", dir.join("vale.toml")).expect("recipe");
         let scene = dir.join("a.loom");
