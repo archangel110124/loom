@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+"""THE DECKHAND — round 2.  Blender 5.2, headless.
+
+    blender --background --factory-startup --python build_deckhand.py
+
+Emits eight OBJs into r1/obj/.  Three more parts (neck, collar, lamp) are the
+engine's own `cylinder` primitive and no file exists for them.
+
+AXES.  Geometry is authored DIRECTLY in Loom's frame -- Y up, forward -Z -- and
+exported with forward_axis="Y", up_axis="Z", which is Blender's identity.  So
+there is no permutation, no determinant to get wrong, and nothing to verify
+except that the numbers come back out.  The model lies on its face in
+Blender's viewport; nobody is opening Blender's viewport.
+
+NORMALS.  Every part is its own bmesh and every part ends with
+`recalc_face_normals` over its own faces, which is `normals_make_consistent
+(inside=False)` per shell -- it works per connected region, so the creel's
+three shells and the boot's two are each fixed independently.  A whole-mesh
+signed-volume check cannot see a half-inverted surface; this can't produce one.
+
+NO MIRRORING BY NEGATIVE SCALE, anywhere.  The boot and the hand are built
+left-right symmetric and the prefab uses each file twice.
+"""
+import math
+import os
+import sys
+
+import bmesh
+import bpy
+
+DIR = os.path.dirname(os.path.abspath(__file__))
+# The eight OBJs land where the engine reads them.  `DECKHAND_OBJ`
+# overrides it, which is how a round renders a variant without touching
+# the tracked meshes.
+OUT = os.environ.get("DECKHAND_OBJ",
+                     os.path.join(DIR, "..", "..", "assets", "meshes"))
+sys.path.insert(0, DIR)
+import deckhand_spec as S  # noqa: E402
+
+
+# ------------------------------------------------------------------ helpers
+def superellipse(a, b, n, e=4.0, cx=0.0, cz=0.0):
+    """A rounded rectangle in XZ.  e=2 is an ellipse, e=4 reads as a soft box."""
+    pts = []
+    for i in range(n):
+        t = 2.0 * math.pi * i / n
+        c, s = math.cos(t), math.sin(t)
+        pts.append((cx + a * math.copysign(abs(c) ** (2.0 / e), c),
+                    cz + b * math.copysign(abs(s) ** (2.0 / e), s)))
+    return pts
+
+
+def ring_xz(a, b, y, n, e=4.0, cx=0.0, cz=0.0, drop=0.0):
+    """A ring in XZ at height y.  `drop` lowers the REAR of the ring.
+
+    The hem is the strongest horizontal line on the figure and it lands at
+    mid-height, so a flat one reads as a torso wearing separate trousers --
+    which is the blockout tell the flare was built to prevent, restated at a
+    different width.  Deepening the overhang does not help; a horizontal line
+    is a horizontal line.  Breaking it does, and the cheapest break that is
+    also true of a real oilskin is that the back of the skirt hangs lower than
+    the front."""
+    out = []
+    for x, z in superellipse(a, b, n, e, cx, cz):
+        yy = y
+        if drop:
+            f = max(0.0, (z - cz) / b)
+            yy -= drop * f ** 1.4
+        out.append((x, yy, z))
+    return out
+
+
+def ring_xy(a, b, z, n, e=4.0, cx=0.0, cy=0.0):
+    """A ring in the XY plane, stacked along Z.  Used by the boot."""
+    out = []
+    for x, y in superellipse(a, b, n, e, cx, cy):
+        out.append((x, y, z))
+    return out
+
+
+def shell(bm, rings, cap_start=True, cap_end=True):
+    """Loft equal-length rings into one closed tube.  Winding is fixed later."""
+    vs = [[bm.verts.new(p) for p in r] for r in rings]
+    n = len(rings[0])
+    for k in range(len(rings) - 1):
+        for i in range(n):
+            j = (i + 1) % n
+            bm.faces.new((vs[k][i], vs[k][j], vs[k + 1][j], vs[k + 1][i]))
+    if cap_start:
+        bm.faces.new(tuple(vs[0]))
+    if cap_end:
+        bm.faces.new(tuple(vs[-1]))
+    return vs
+
+
+def finish(bm, name):
+    """Consistent outward normals, triangles, and one object in the scene."""
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    bmesh.ops.triangulate(bm, faces=bm.faces[:])
+    me = bpy.data.meshes.new(name)
+    bm.to_mesh(me)
+    tris = len(me.polygons)
+    bm.free()
+    ob = bpy.data.objects.new(name, me)
+    bpy.context.scene.collection.objects.link(ob)
+    return ob, tris
+
+
+def export(ob, key):
+    """One OBJ, identity axes, no o/g/usemtl tags for Loom's group recentring."""
+    bpy.ops.object.select_all(action="DESELECT")
+    ob.select_set(True)
+    bpy.context.view_layer.objects.active = ob
+    path = os.path.join(OUT, "deckhand_%s.obj" % key)
+    bpy.ops.wm.obj_export(
+        filepath=path, export_selected_objects=True,
+        export_normals=True, export_uv=False, export_materials=False,
+        export_triangulated_mesh=True, apply_modifiers=False,
+        forward_axis="Y", up_axis="Z",
+    )
+    keep = []
+    for line in open(path):
+        h = line.split(maxsplit=1)[0] if line.strip() else "#"
+        if h in ("o", "g", "s", "usemtl", "mtllib"):
+            continue
+        keep.append(line)
+    hdr = ("# deckhand: %s.  Loom axes -- metres, Y up, forward -Z.\n"
+           "# Generated by build_deckhand.py; never edit this file.\n" % key)
+    open(path, "w").writelines([hdr] + keep)
+    return path
+
+
+# ------------------------------------------------------------------- parts
+def build_hat():
+    """Sou'wester: tall crown + a brim short at the front, turned down at the
+    sides and swept into a long flat tail at the back.  ONE closed shell.
+
+    ROUND 1 BUILT A BRODIE HELMET and the front silhouette said `soldier`.
+    A shallow 0.135 crown on a flat 0.232 disc is a brim/dome ratio of 1.40,
+    which is the WW1 Tommy ratio; and the per-azimuth droop it used produced
+    NO front/rear differential in profile at all -- measured, front and rear
+    brim edges came out at exactly the same height, so the tail never read.
+
+    Four numbers turn it into a sou'wester, all in deckhand_spec:
+      CROWN_H > BRIM_R      taller in the crown than the brim is wide
+      BRIM_SIDE, BRIM_BACK  short front, medium sides, long tail
+      DROOP_SIDE            the sides curl over the ears...
+      DROOP_BACK            ...while the tail stays nearly flat
+
+    The droop is applied to the brim's OVERHANG PAST THE CROWN, not to its
+    whole radius, which is why the sides need extra radius before they can
+    droop visibly -- a narrow brim has nothing to bend.
+
+    Closed matters twice.  A hole would show as a lit interior; and the eye
+    sits inside the crown, where back-face culling (renderer.rs:4478) drops
+    the head for free.
+    """
+    bm = bmesh.new()
+    NA = 24
+    CH, CR, HO = S.CROWN_H, S.CROWN_R, S.HAT_OPEN
+    # (radius, y) profile.  y = 0 IS THE BRIM PLANE, which is what makes
+    # S.HAT_Y a single subtraction.  Apex first, down the crown, out along the
+    # brim, back under it, and in to the head opening.
+    prof = [(0.000, CH), (0.062 * CR / 0.172, CH - 0.016),
+            (0.112 * CR / 0.172, CH - 0.038), (0.148 * CR / 0.172, CH - 0.078),
+            (0.166 * CR / 0.172, CH - 0.134), (CR, CH - 0.186), (CR, -0.004),
+            (S.BRIM_R, -0.006), (S.BRIM_R + 0.008, -0.019),
+            (S.BRIM_R - 0.002, -0.030), (CR, -0.032),
+            (CR - 0.016, -0.072), (CR - 0.044, -HO + 0.020),
+            (CR - 0.072, -HO), (0.000, -HO)]
+    BRIM = range(7, 10)          # the three profile rows that are brim
+    rings = []
+    for pi, (r, y) in enumerate(prof):
+        row = []
+        for i in range(NA):
+            t = 2.0 * math.pi * i / NA
+            x, z = math.sin(t), math.cos(t)          # z = +1 at t = 0 -> back
+            rr, yy = r, y
+            if pi in BRIM:
+                sweep = (1.0
+                         + (S.BRIM_BACK - 1.0) * max(0.0, z) ** 1.6
+                         + (S.BRIM_SIDE - 1.0) * x * x)
+                rr = r * sweep
+                over = max(0.0, rr - CR)
+                droop = (S.DROOP_BASE + S.DROOP_SIDE * x * x
+                         + S.DROOP_BACK * max(0.0, z))
+                yy = y - over * math.tan(math.radians(droop))
+            row.append((rr * x, yy, rr * z))
+        rings.append(row)
+    vs = [[bm.verts.new(p) for p in r] for r in rings]
+    vs[0] = [vs[0][0]] * NA          # apex and floor rows are degenerate
+    vs[-1] = [vs[-1][0]] * NA
+    for k in range(len(rings) - 1):
+        for i in range(NA):
+            j = (i + 1) % NA
+            uniq = []
+            for v in (vs[k][i], vs[k][j], vs[k + 1][j], vs[k + 1][i]):
+                if v not in uniq:
+                    uniq.append(v)
+            if len(uniq) >= 3:
+                bm.faces.new(uniq)
+    return finish(bm, "hat")
+
+
+def build_torso():
+    """Oilskin smock.  Chamfered at the shoulders, tucked at the waist, and
+    FLARED at the hem so the coat overhangs the wader bib by 30 mm -- without
+    that the figure reads as a torso wearing separate trousers, which is the
+    blockout tell the blueprint called out.
+
+    DEEPER THAN ROUND 1, AND THE DEPTH IS FORWARD.  At half-depth 0.130
+    against a pelvis of 0.117 and a thigh of 0.105 the side silhouette was a
+    vertical pole of near-constant width: no chest, no belly, and every
+    millimetre of profile coming from the hat, the creel and the lamp.  The
+    `cz` column below offsets each ring forward of the spine, so the added
+    mass lands on the chest rather than symmetrically -- the back of an
+    oilskin is flat, the front is not.
+
+    ROUND 3.  Two more things the profile and the front view each needed, and
+    they pull in opposite directions, which is why they are separate columns.
+
+    THE ARM SLOT is cut here, not bought with shoulder width.  A hanging arm's
+    inner edge is SH_X - ARM_R = 0.211 and every ring from the armpit to the
+    hem used to be wider than that, so the arms sat INSIDE the torso outline
+    for their whole length and the front view was four parallel vertical bars
+    with no shoulder in it.  The torso is 0.223 at the shoulder cap and 0.184
+    at the ribs; the daylight between arm and body is the difference.
+
+    THE HEM DROPS AT THE BACK.  A flat hem plus the shadow it casts is the
+    strongest horizontal on the figure and it lands at mid-height, so it read
+    as a coat and separate trousers however far it overhung.  See ring_xz.
+    """
+    bm = bmesh.new()
+    N = 16
+    HD, cz = S.CHEST_HD, S.CHEST_CZ
+    #      half-width  half-depth       y     e     cz     rear drop
+    rings = [(0.150, HD * 0.60, +0.197, 3.4, cz * 0.50, 0.000),
+             (0.212, HD * 0.84, +0.150, 3.6, cz * 0.85, 0.000),
+             (S.SH_HW, HD * 1.00, +0.100, 3.8, cz * 1.00, 0.000),  # deepest
+             (0.200, HD * 0.96, +0.030, 3.8, cz * 1.00, 0.000),
+             (S.RIB_HW, HD * 0.84, -0.060, 3.8, cz * 0.80, 0.000),  # the slot
+             (0.184, HD * 0.80, -0.150, 3.8, cz * 0.55, 0.000),     # tuck
+             (0.192, HD * 0.92, -0.205, 3.5, cz * 0.30, 0.018),
+             (0.208, HD * 1.02, -0.252, 3.3, cz * 0.15, 0.050)]
+    shell(bm, [ring_xz(a, b, y, N, e, 0.0, z, d) for a, b, y, e, z, d in rings])
+    return finish(bm, "torso")
+
+
+def build_pelvis():
+    """Wader bib block.  Narrows to the crotch so the legs have somewhere to
+    leave from, and bulges REARWARD -- the other half of giving the side
+    silhouette a shape instead of a straight edge.
+
+    ROUND 3: THE BIB TUCKS UNDER THE COAT AND ITS WIDEST POINT IS LOWER.  It
+    used to be widest at its top ring, level with the coat's hem and narrower
+    than it, which is how you get a hard step: two flat discs of nearly the
+    same width, one above the other, with a shadow between them.  Now the top
+    ring is 0.172 -- 36 mm inside the hem, so the coat plainly covers it -- and
+    the bib swells to HIP_HW 38 mm BELOW the hem, so the eye reads a hip
+    coming out from under a coat rather than a seam.  A human's widest lower
+    point is lower and smoother, which was the note.
+    """
+    bm = bmesh.new()
+    N = 16
+    HD, cz = S.PELV_HD, S.PELV_CZ
+    rings = [(0.172, HD * 0.86, +0.123, 3.8, cz * 0.6),
+             (S.HIP_HW, HD * 1.00, +0.030, 3.8, cz * 1.3),
+             (0.202, HD * 0.90, -0.060, 3.8, cz * 0.9),
+             (0.150, HD * 0.72, -0.123, 3.6, cz * 0.2)]
+    shell(bm, [ring_xz(a, b, y, N, e, 0.0, z) for a, b, y, e, z in rings])
+    return finish(bm, "pelvis")
+
+
+def build_creel():
+    """Wicker creel: body, lid lip, one strap.  Three shells in one file --
+    the rule is one MATERIAL per file, and all three are wicker."""
+    bm = bmesh.new()
+    cw, ch, cd = S.CREEL
+    N = 12
+    shell(bm, [ring_xz(cw * 0.86, cd * 0.86, -ch, N, 3.6),
+               ring_xz(cw, cd, -ch * 0.35, N, 3.6),
+               ring_xz(cw, cd, +ch * 0.62, N, 3.6)])
+    shell(bm, [ring_xz(cw * 1.06, cd * 1.06, +ch * 0.62, N, 3.2),
+               ring_xz(cw * 1.06, cd * 1.06, +ch * 0.84, N, 3.2),
+               ring_xz(cw * 0.92, cd * 0.90, +ch, N, 3.2)])
+    # the strap: a flat band over the lid and down the outboard face
+    sw, st = 0.026, 0.008
+    shell(bm, [ring_xz(sw, cd * 1.10 + st, -ch * 0.2, 4, 12.0),
+               ring_xz(sw, cd * 1.10 + st, +ch * 0.95, 4, 12.0)])
+    return finish(bm, "creel")
+
+
+def build_boot():
+    """Sea boot: foot, flat sole, and a SHAFT.  Toe at -Z.  Built left-right
+    SYMMETRIC and used twice -- a negative scale would flip the winding and
+    Loom draws an inverted mesh pure black.
+
+    Round 1's was a flat wedge 40-72 mm tall that stopped at the ankle: a
+    shoe, and from the side it read as a flipper.  The shaft is the fix and it
+    does a second job -- it is the rearward mass at the bottom of the side
+    silhouette that a straight wader leg cannot provide.
+
+    The BOOT NODE sits at local [BOOT_Y, BOOT_Z] under an Ankle pivot at world
+    y 0.080, so the mesh origin is 40 mm off the deck and the sole must bottom
+    out at local y SOLE_Y = -0.040 EXACTLY.  Everything in r2/legfk.py's
+    foot-plant fit is measured from that number.
+    """
+    bm = bmesh.new()
+    N = 10
+    # (z, half-width, y_lo, y_hi) -- rings stacked along Z, heel (+Z) to toe.
+    # The toe is 17 mm shorter than round 1's and the heel 37 mm shorter, so
+    # the foot is less of a paddle; the height it loses there it gains in the
+    # instep, which is what makes it read as a boot from the side.
+    slices = [(+0.115, 0.055, -0.026, +0.052),
+              (+0.070, 0.078, -0.032, +0.070),
+              (+0.020, 0.084, -0.034, +0.078),
+              (-0.040, 0.082, -0.034, +0.052),
+              (-0.095, 0.072, -0.032, +0.006),
+              (-0.135, 0.046, -0.026, -0.010)]
+    rings = []
+    for z, hw, lo, hi in slices:
+        rings.append(ring_xy(hw, (hi - lo) * 0.5, z, N, 3.6, 0.0, (hi + lo) * 0.5))
+    shell(bm, rings)
+    # Sole: its own shell, 6 mm proud of the footprint, bottoming at SOLE_Y.
+    # Flat, because a deck boot's sole IS flat -- a raised heel on a wet deck
+    # is the one thing a fisherman does not wear.
+    sole = []
+    for z, hw, lo, _hi in slices:
+        sole.append(ring_xy(hw + 0.006, 0.006, z, N, 4.5, 0.0, S.SOLE_Y + 0.006))
+    shell(bm, sole)
+    # Shaft: rings stacked in Y, flaring to BOOT_TOP_R so it SWALLOWS the shin
+    # through the ankle's whole swing.  Get this wrong and the wader leg pokes
+    # out of the side of the boot top at the extremes of the stride.
+    st = []
+    for y, r, cz in ((+0.045, 0.084, +0.012), (+0.080, 0.090, +0.022),
+                     (+0.120, 0.104, +0.032),
+                     (S.BOOT_TOP, S.BOOT_TOP_R, +0.038)):
+        st.append(ring_xz(r, r, y, N, 2.6, 0.0, cz))
+    shell(bm, st)
+    return finish(bm, "boot")
+
+
+def build_hand():
+    """Mitten glove: no fingers, one thumb nub, and a CUFF.
+
+    Round 1's mitten was radius 0.055 against a sleeve of 0.054 -- one
+    millimetre wider than the thing it came out of.  Seen end-on down your own
+    arm, which is how a first-person fisherman sees it for the whole session,
+    that is not a hand, it is the end of a stick; in `fp_hold.png` the two
+    raised arms read as distant fence posts with a pale sliver beside one.
+
+    The fix is two-part and the second half matters as much as the first: the
+    mitten is 1.48x the sleeve now, AND the top two rings step OUT from the
+    sleeve before the hand begins, so the sleeve-to-hand transition is a step
+    up rather than a step sideways.  A cuff is what makes a glove read as a
+    glove at a glance.
+
+    The nub points -Z (forward), NOT sideways, which is what keeps the part
+    symmetric across X so one file serves both hands.
+    """
+    bm = bmesh.new()
+    N = 10
+    R = S.HAND_R
+    #        half-width  half-depth      y
+    shell(bm, [ring_xz(0.050, 0.042, +0.072, N, 3.0),   # cuff, into the sleeve
+               ring_xz(0.062, 0.052, +0.052, N, 3.0),   # cuff flare
+               ring_xz(R * 0.97, 0.060, +0.030, N, 3.0),
+               ring_xz(R, 0.062, -0.010, N, 3.0),       # knuckles, widest
+               ring_xz(R * 0.90, 0.058, -0.048, N, 3.0),
+               ring_xz(R * 0.55, 0.038, -0.075, N, 3.0),
+               ring_xz(R * 0.18, 0.013, -0.090, N, 3.0)])
+    thumb = []
+    for z, r in ((-0.010, 0.020), (-0.040, 0.028), (-0.068, 0.019)):
+        thumb.append(ring_xy(r, r, z, 8, 2.0, 0.0, -0.006))
+    shell(bm, thumb)
+    return finish(bm, "hand")
+
+
+def build_limb():
+    """One tapered tube, UNIT sized: radius 1 in XZ, y -1..+1.  Eight nodes
+    scale it (see deckhand_spec.limb_scale).  Thick at +Y, which is the parent
+    joint, so an upper arm tapers toward the elbow the way an arm does.
+
+    Ends are flat, not rounded: a ball sits on both of them, and a rounded cap
+    under a non-uniform scale squashes into a lens."""
+    bm = bmesh.new()
+    N = 10
+    # NO BULGE.  The 1.06 ring this used to carry at y +0.40 was a muscle
+    # nobody asked for, and it set the size of every joint ball in the figure:
+    # a ball must guarantee cover of its limb's WIDEST point, so a 6% bulge
+    # became a 6% larger sphere at each of eight joints, on top of the margin.
+    # With it the legs rendered as a chain of faceted boulders joined by
+    # narrower tubes.  Flat-sided limbs let the balls come down to a bulge you
+    # read as a joint instead of a knuckle.
+    rings = [ring_xz(1.00, 1.00, +1.00, N, 2.0),
+             ring_xz(1.00, 1.00, +0.40, N, 2.0),
+             ring_xz(0.94, 0.94, -0.35, N, 2.0),
+             ring_xz(0.84, 0.84, -1.00, N, 2.0)]
+    shell(bm, rings)
+    return finish(bm, "limb")
+
+
+def build_ball():
+    """Unit icosphere.  Eight joints scale it to their own limb's radius."""
+    bm = bmesh.new()
+    try:
+        bmesh.ops.create_icosphere(bm, subdivisions=2, radius=1.0)
+    except TypeError:
+        bmesh.ops.create_icosphere(bm, subdivisions=2, diameter=1.0)
+    return finish(bm, "ball")
+
+
+BUILDERS = dict(hat=build_hat, torso=build_torso, pelvis=build_pelvis,
+                creel=build_creel, boot=build_boot, hand=build_hand,
+                limb=build_limb, ball=build_ball)
+
+# how many nodes each file is instanced by, for the budget line
+USES = dict(hat=1, torso=1, pelvis=1, creel=1, boot=2, hand=2, limb=8, ball=8)
+
+
+def verify(path, key):
+    """Read the OBJ back.  Bounds must be the numbers we authored, and the
+    signed volume must be positive -- a whole-mesh check that cannot see a
+    half-inverted surface, which is why recalc_face_normals is the real
+    guarantee and this is only the coarse net under it."""
+    V, F = [], []
+    for line in open(path):
+        if line.startswith("v "):
+            V.append(tuple(map(float, line.split()[1:4])))
+        elif line.startswith("f "):
+            F.append([int(t.split("/")[0]) - 1 for t in line.split()[1:4]])
+        elif line[:2] in ("o ", "g "):
+            raise SystemExit("%s still has an %r tag" % (path, line[:1]))
+    vol = 0.0
+    for a, b, c in F:
+        p0, p1, p2 = V[a], V[b], V[c]
+        vol += (p0[0] * (p1[1] * p2[2] - p1[2] * p2[1])
+                - p0[1] * (p1[0] * p2[2] - p1[2] * p2[0])
+                + p0[2] * (p1[0] * p2[1] - p1[1] * p2[0])) / 6.0
+    ax = list(zip(*V))
+    print("  %-7s %5d tris x%d  vol %+.3e   X %+.3f..%+.3f  Y %+.3f..%+.3f  "
+          "Z %+.3f..%+.3f" % (key, len(F), USES[key], vol,
+                              min(ax[0]), max(ax[0]), min(ax[1]), max(ax[1]),
+                              min(ax[2]), max(ax[2])))
+    assert vol > 0, "%s: winding flipped" % key
+    return len(F)
+
+
+if __name__ == "__main__":
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    os.makedirs(OUT, exist_ok=True)
+    total = 0
+    print("THE DECKHAND -- round 2")
+    for key in S.MESHES:
+        ob, tris = BUILDERS[key]()
+        p = export(ob, key)
+        total += verify(p, key) * USES[key]
+    print("  cylinder  256 tris x3  (engine primitive, no file)")
+    total += 256 * 3
+    print("  TOTAL %d triangles for the whole character (budget 5000)" % total)
+    assert total <= 5000, "over budget"
