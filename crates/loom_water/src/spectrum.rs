@@ -153,6 +153,19 @@ pub fn wave_set(u10: f32, direction: [f32; 2]) -> WaveSet {
     // Total variance of the surface: m0 = ∫S(ω)dω = α·U⁴/(4βg²), which falls
     // out of the spectrum in closed form under u = ω⁻⁴. Hs = 4√m0.
     let m0 = ALPHA * (u * u) * (u * u) / (4.0 * BETA * GRAVITY * GRAVITY);
+    bands(m0, u, along)
+}
+
+/// The sixteen waves that carry variance `m0` around a spectrum peaked as PM's
+/// is at wind `u` (U19.5), fanned about `along`.
+///
+/// **Split out of [`wave_set`] verbatim, and that is the point.** It is the
+/// banding, not the parameterisation: any spectrum of PM's *shape* is two
+/// numbers — how much energy and where the peak is — so a fetch-limited sea
+/// reaches the same loop with different ones rather than through a second
+/// implementation of it. Moving this code rather than rewriting it is what
+/// keeps every pinned water hash where it was.
+fn bands(m0: f32, u: f32, along: [f32; 2]) -> WaveSet {
     let band_variance = m0 / FREQUENCY_BANDS as f32;
 
     // cos²(θ) spreading, sampled at the midpoints of DIRECTIONS equal slices of
