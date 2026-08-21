@@ -1584,6 +1584,12 @@ if hub {
         if fits_at(g, CREEL_W, CREEL_H, d[0], d[1], cx, cy) { creel_fits = 1; }
     }
     state.creel_fits = creel_fits;
+    // **The held item's footprint, after any turn**, so the overlay can paint
+    // the exact cells a press would fill rather than a one-cell guess. Two
+    // numbers rather than a kind name and a lookup table in Rust: the item
+    // table is authored here and `hud.rs` must not learn a second copy of it.
+    state.creel_hand_w = if hand == "" { 0 } else { cells_of(ITEMS, hand, hand_rot)[0] };
+    state.creel_hand_h = if hand == "" { 0 } else { cells_of(ITEMS, hand, hand_rot)[1] };
     state.creel_hand = if hand == "" { 0 } else { 1 };
     // A string, for the overlay. `--assert` reads the number beside it.
     state.creel_hand_label = if hand == "" { "" } else { ITEMS[hand].label };

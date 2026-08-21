@@ -1848,6 +1848,13 @@ impl ApplicationHandler for App {
                 // answered after the draw — the build closure is `FnMut` and
                 // may run more than once, so the click is recorded rather than
                 // acted on inside it.
+                // Read before the draw closure borrows `self.viewer`
+                // mutably, the same way `menu_open` is — the closure
+                // is `FnMut` and cannot hold a second borrow of self.
+                let creel = self
+                    .play
+                    .as_ref()
+                    .and_then(|play| crate::hud::Creel::read(play.state()));
                 let menu_open = self.pause_menu;
                 // The front end's three halves, read out like `menu_open` is:
                 // whether the title's *text* is up, whether its *menu* is, and
@@ -1901,6 +1908,15 @@ impl ApplicationHandler for App {
                             // needed somewhere to stand — see
                             // [`room_code_panel`].
                             let (_, painted) = crate::hud::draw(root, &overlay);
+                            // **The creel, over the HUD and under the
+                            // pause menu**, painted into the root `Ui`
+                            // so it claims neither the pointer nor the
+                            // keyboard. Draws nothing at all unless the
+                            // running game exports a grid, which is
+                            // every scene in this project but one.
+                            if let Some(view) = creel.as_ref() {
+                                let _ = crate::hud::creel(root, view);
+                            }
                             if title_up {
                                 title_choice = crate::hud::title_menu(root);
                             } else if menu_open {

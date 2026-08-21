@@ -856,6 +856,32 @@ DEMO_CONGER="$DEMO_FIGHT; 1900:interact=1; 1901:; 1910:bag=1; 1911:; \
   --assert "state.creel_cy == 2" --assert "state.creel_refused == 2" \
   --assert "events.ditched == 0" >/dev/null
 
+# 5b8. **THE TEN NAMES THE OVERLAY READS, ALL EXPORTED BY THE GAME.**
+#
+#      `hud::creel` is drawn only in `loom run`, so **no gate in this project
+#      can see it** — not `cargo xtask image`, which has no window and never
+#      constructs a `Ui`, and not `loom sim`, which draws nothing. Its eleven
+#      unit tests prove the layout and the shapes against a headless
+#      `egui::Context`, and they would all still pass if the rules script
+#      renamed `creel_cx` tomorrow: `Creel::read` would return `None`, the grid
+#      would vanish, and nothing anywhere would say so.
+#
+#      This row is the seam between the two halves. Every name the overlay
+#      reads, checked against one real run of the real game. It is the cheapest
+#      possible test and it is the only detector this feature's drawing has.
+#
+#      Keep it in step with `state.number(...)` / `state.text(...)` in
+#      `hud.rs`'s `Creel::read`.
+for name in creel_cells creel_kinds creel_open creel_cx creel_cy \
+            creel_hand creel_hand_label creel_hand_w creel_hand_h creel_fits; do
+  "$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
+    --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:" \
+    | grep -q "\"$name\":" || {
+      echo "green: the creel overlay reads state.$name and the game does not export it" >&2
+      exit 1
+    }
+done
+
 # 5b6. **THE DITCH NEEDS THE KEY HELD, AND A SECOND IS A SECOND.** Twenty ticks
 #      of SHIFT throws nothing away; seventy does. It is the only irreversible
 #      act in this game, which is why it is a held key — and why it is not

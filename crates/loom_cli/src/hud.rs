@@ -522,6 +522,341 @@ fn interpolate(text: &str, state: &GameState) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// **THE CREEL: A SPATIAL INVENTORY, PAINTED, CLAIMING NOTHING.**
+// ---------------------------------------------------------------------------
+//
+// `Hud` is `anchor`, `offset`, `text`, `size` and `color`. A grid of items that
+// occupy more than one cell is not expressible in it and never will be, so this
+// is the second thing `loom_cli` draws over a game — and it is drawn the same
+// way the HUD is, for the same three reasons.
+//
+// **Painted into the root `Ui`, never an `egui::Area`.** An `Area` claims
+// `wants_pointer_input` across its whole rect even with painted-only content,
+// and a claimed pointer is consumed before the input map ever sees it: that is
+// exactly how a visible crosshair ends up attached to a trigger that does
+// nothing, and `hud::draw`'s own comment records the round it cost. The root
+// `Ui` claims nothing. `nothing_in_the_creel_claims_the_pointer` and
+// `nothing_in_the_creel_claims_the_keyboard` are what keep that true.
+//
+// **No scrim and no full-screen panel.** The demo's frame is open water, the
+// water is what this engine is being built to show, and the world does not stop
+// while this is up — a panel across the middle hides the thing you most need to
+// see. 138 px square in a corner is 0.9% of a 1920x1080 frame.
+//
+// **Drawn only in `loom run`.** `Ui::new` occurs exactly once in this tree and
+// it is behind a `winit::window::Window`; the offscreen renderer never
+// constructs one. No reference PNG can move because of anything in this file.
+// If one does, the change touched something else and the change is wrong.
+
+/// Cell, gutter and pad in points. 3 * 38 + 2 * 4 + 2 * 8 = 138 square.
+const CELL: f32 = 38.0;
+const GUTTER: f32 = 4.0;
+const PAD: f32 = 8.0;
+/// In from the bottom-left corner of whatever the panels left over.
+const INSET: egui::Vec2 = egui::vec2(24.0, -24.0);
+
+/// What is in the hand, which is one item held on the cursor.
+pub(crate) struct Hand {
+    pub label: String,
+    /// Footprint **after** any turn, in cells, straight from the rules script —
+    /// so the preview paints the cells a press would actually fill.
+    pub w: usize,
+    pub h: usize,
+    /// Whether it would land where the cursor is. Green or red, nothing else.
+    pub fits: bool,
+}
+
+/// The creel as the overlay needs it: a grid of characters and the labels they
+/// stand for.
+pub(crate) struct Creel {
+    /// One character per cell, `.` for empty. **One letter per placement, not
+    /// per kind**, which is what lets two sprats side by side draw as two
+    /// objects: the border between two cells is drawn iff their characters
+    /// differ, which is one four-neighbour test and no extra data.
+    rows: Vec<Vec<char>>,
+    /// One label per placement, in the order the letters run.
+    labels: Vec<String>,
+    pub open: bool,
+    pub cursor: (usize, usize),
+    pub hand: Option<Hand>,
+}
+
+impl Creel {
+    /// Parse the two strings the rules script keeps. `None` for a scene that
+    /// keeps neither — which is every scene in this project but one, and is why
+    /// nothing else has to know this exists.
+    ///
+    /// A ragged grid is refused rather than drawn short: a row of the wrong
+    /// length is a packer bug, and half a grid on screen is a worse way to find
+    /// out than nothing on screen.
+    fn from_text(cells: &str, kinds: &str) -> Option<Self> {
+        let rows: Vec<Vec<char>> = cells.split('/').map(|r| r.chars().collect()).collect();
+        let width = rows.first()?.len();
+        if width == 0 || rows.iter().any(|r| r.len() != width) {
+            return None;
+        }
+        Some(Self {
+            rows,
+            labels: kinds
+                .split_whitespace()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            open: false,
+            cursor: (0, 0),
+            hand: None,
+        })
+    }
+
+    /// Read it out of the running game's own state. The same `GameState` the
+    /// HUD already interpolates — no new plumbing, and nothing in `loom_scene`.
+    pub(crate) fn read(state: &GameState) -> Option<Self> {
+        let mut creel = Self::from_text(
+            &state.text("creel_cells")?,
+            &state.text("creel_kinds").unwrap_or_default(),
+        )?;
+        let flag = |name: &str| state.number(name).unwrap_or(0.0) > 0.5;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let index = |name: &str| state.number(name).unwrap_or(0.0).max(0.0) as usize;
+        creel.open = flag("creel_open");
+        creel.cursor = (index("creel_cx"), index("creel_cy"));
+        if flag("creel_hand") {
+            creel.hand = Some(Hand {
+                label: state.text("creel_hand_label").unwrap_or_default(),
+                w: index("creel_hand_w").max(1),
+                h: index("creel_hand_h").max(1),
+                fits: flag("creel_fits"),
+            });
+        }
+        Some(creel)
+    }
+
+    fn width(&self) -> usize {
+        self.rows.first().map_or(0, Vec::len)
+    }
+
+    fn at(&self, x: usize, y: usize) -> char {
+        self.rows
+            .get(y)
+            .and_then(|row| row.get(x))
+            .copied()
+            .unwrap_or('.')
+    }
+
+    /// The label a cell's character stands for, if any.
+    fn label(&self, ch: char) -> Option<&str> {
+        let i = usize::from(u8::try_from(ch).ok()?.checked_sub(b'a')?);
+        self.labels.get(i).map(String::as_str)
+    }
+}
+
+/// Fill for an occupied cell. A catch is blue and everything else is green,
+/// off the label rather than off a kind: the item table is authored in rhai and
+/// a second copy of it here is the divergence this whole project is built to
+/// avoid.
+fn cell_fill(label: Option<&str>) -> egui::Color32 {
+    if label == Some("><>") {
+        egui::Color32::from_rgb(38, 66, 88)
+    } else {
+        egui::Color32::from_rgb(48, 62, 52)
+    }
+}
+
+/// Draw the creel, and return the plate and every cell — which is what makes
+/// the layout testable without a window.
+///
+/// Returns `None` for a `Creel` with no rows, so a caller cannot draw an empty
+/// plate over a game that has no inventory.
+pub(crate) fn creel(
+    root: &mut egui::Ui,
+    view: &Creel,
+) -> Option<(egui::Rect, Vec<egui::Rect>)> {
+    let (w, h) = (view.width(), view.rows.len());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let viewport = root.available_rect_before_wrap();
+    let painter = root.painter().with_clip_rect(viewport);
+
+    #[allow(clippy::cast_precision_loss)]
+    let span = |n: usize| n as f32 * CELL + (n as f32 - 1.0) * GUTTER;
+    let plate = egui::Rect::from_min_size(
+        egui::pos2(
+            viewport.left() + INSET.x,
+            viewport.bottom() + INSET.y - (span(h) + 2.0 * PAD),
+        ),
+        egui::vec2(span(w) + 2.0 * PAD, span(h) + 2.0 * PAD),
+    );
+    // **Dimmer when it is shut, not hidden.** There is no open/close animation
+    // to build, no "where has my stuff gone" moment, and the shapes stay
+    // legible at a glance in the middle of a fight.
+    let plate_alpha = if view.open { 150 } else { 90 };
+    painter.rect_filled(plate, 6.0, egui::Color32::from_black_alpha(plate_alpha));
+
+    let origin = plate.min + egui::vec2(PAD, PAD);
+    #[allow(clippy::cast_precision_loss)]
+    let cell_rect = |x: usize, y: usize| {
+        egui::Rect::from_min_size(
+            origin + egui::vec2(x as f32 * (CELL + GUTTER), y as f32 * (CELL + GUTTER)),
+            egui::Vec2::splat(CELL),
+        )
+    };
+
+    let mut cells = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            let rect = cell_rect(x, y);
+            cells.push(rect);
+            let ch = view.at(x, y);
+            if ch == '.' {
+                painter.rect_filled(rect, 2.0, egui::Color32::from_white_alpha(18));
+            } else {
+                painter.rect_filled(rect, 0.0, cell_fill(view.label(ch)));
+            }
+        }
+    }
+
+    // **One outline per item, not one per cell.** A 3x2 conger is a closed
+    // rectangle and not six squares, and the whole rule is: draw the edge
+    // between two cells only where their characters differ. Out of bounds
+    // counts as different, which is what closes the outer perimeter.
+    let edge = egui::Stroke::new(1.0, egui::Color32::from_gray(190));
+    for y in 0..h {
+        for x in 0..w {
+            let ch = view.at(x, y);
+            if ch == '.' {
+                continue;
+            }
+            let r = cell_rect(x, y);
+            // Half a gutter out, so two abutting items do not share a line and
+            // an item's own interior seams stay closed.
+            let g = GUTTER * 0.5;
+            let differs = |dx: isize, dy: isize| {
+                let (nx, ny) = (x as isize + dx, y as isize + dy);
+                if nx < 0 || ny < 0 || nx >= w as isize || ny >= h as isize {
+                    return true;
+                }
+                #[allow(clippy::cast_sign_loss)]
+                let other = view.at(nx as usize, ny as usize);
+                other != ch
+            };
+            if differs(0, -1) {
+                let y0 = r.top() - g;
+                painter.line_segment(
+                    [egui::pos2(r.left() - g, y0), egui::pos2(r.right() + g, y0)],
+                    edge,
+                );
+            }
+            if differs(0, 1) {
+                let y1 = r.bottom() + g;
+                painter.line_segment(
+                    [egui::pos2(r.left() - g, y1), egui::pos2(r.right() + g, y1)],
+                    edge,
+                );
+            }
+            if differs(-1, 0) {
+                let x0 = r.left() - g;
+                painter.line_segment(
+                    [egui::pos2(x0, r.top() - g), egui::pos2(x0, r.bottom() + g)],
+                    edge,
+                );
+            }
+            if differs(1, 0) {
+                let x1 = r.right() + g;
+                painter.line_segment(
+                    [egui::pos2(x1, r.top() - g), egui::pos2(x1, r.bottom() + g)],
+                    edge,
+                );
+            }
+        }
+    }
+
+    // Labels, once per item, centred on the whole footprint — found as the
+    // top-left cell of each run of a character, which is the only cell whose
+    // up and left neighbours both differ.
+    let font = egui::FontId::monospace(13.0);
+    for y in 0..h {
+        for x in 0..w {
+            let ch = view.at(x, y);
+            if ch == '.' {
+                continue;
+            }
+            let up_same = y > 0 && view.at(x, y - 1) == ch;
+            let left_same = x > 0 && view.at(x - 1, y) == ch;
+            if up_same || left_same {
+                continue;
+            }
+            let mut ex = x;
+            while ex + 1 < w && view.at(ex + 1, y) == ch {
+                ex += 1;
+            }
+            let mut ey = y;
+            while ey + 1 < h && view.at(x, ey + 1) == ch {
+                ey += 1;
+            }
+            let Some(label) = view.label(ch) else { continue };
+            let at = cell_rect(x, y).union(cell_rect(ex, ey)).center();
+            // The same dark copy every HUD line pays for, for the same reason:
+            // what is behind this is whatever the sea is doing.
+            painter.text(
+                at + SHADOW,
+                egui::Align2::CENTER_CENTER,
+                label,
+                font.clone(),
+                egui::Color32::from_black_alpha(190),
+            );
+            painter.text(
+                at,
+                egui::Align2::CENTER_CENTER,
+                label,
+                font.clone(),
+                egui::Color32::from_rgb(226, 232, 220),
+            );
+        }
+    }
+
+    if view.open {
+        // The held item's footprint at the cursor, green if a press would land
+        // it and red if it would not. Painted before the cursor ring so the
+        // ring stays the brightest thing in the grid.
+        if let Some(hand) = &view.hand {
+            let (cx, cy) = view.cursor;
+            let ex = (cx + hand.w - 1).min(w.saturating_sub(1));
+            let ey = (cy + hand.h - 1).min(h.saturating_sub(1));
+            let area = cell_rect(cx, cy).union(cell_rect(ex, ey));
+            let tint = if hand.fits {
+                egui::Color32::from_rgba_unmultiplied(90, 200, 110, 150)
+            } else {
+                egui::Color32::from_rgba_unmultiplied(214, 84, 72, 150)
+            };
+            painter.rect_filled(area, 2.0, tint);
+            painter.text(
+                area.center() + SHADOW,
+                egui::Align2::CENTER_CENTER,
+                &hand.label,
+                font.clone(),
+                egui::Color32::from_black_alpha(190),
+            );
+            painter.text(
+                area.center(),
+                egui::Align2::CENTER_CENTER,
+                &hand.label,
+                font,
+                egui::Color32::WHITE,
+            );
+        }
+        let (cx, cy) = view.cursor;
+        painter.rect_stroke(
+            cell_rect(cx.min(w - 1), cy.min(h - 1)),
+            2.0,
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 214, 120)),
+            egui::StrokeKind::Outside,
+        );
+    }
+
+    Some((plate, cells))
+}
+
 fn align(anchor: &str) -> egui::Align2 {
     match anchor {
         "top_center" => egui::Align2::CENTER_TOP,
@@ -698,6 +1033,307 @@ mod tests {
             (shadow - face - SHADOW).length() < 0.01,
             "shadow at {shadow:?} is not {SHADOW:?} from the face at {face:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // **THE CREEL.** Same technique as everything above: a real `egui::Context`
+    // with no window anywhere, two passes, and assertions on the rects that
+    // came back and the shapes that were emitted.
+    // -----------------------------------------------------------------------
+
+    /// A viewport with a side panel in it, the way the viewer actually looks.
+    fn creel_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        }
+    }
+
+    /// Lay the creel out and hand back the plate, the cells, and every shape.
+    fn creel_drawn(view: &Creel) -> (egui::Rect, Vec<egui::Rect>, Vec<egui::Shape>) {
+        let ctx = egui::Context::default();
+        let input = creel_input();
+        let mut placed = (egui::Rect::NOTHING, Vec::new());
+        let mut shapes = Vec::new();
+        // Twice: the first pass of a fresh context has no fonts and no area
+        // sizes, exactly as the shadow and pause-menu tests found.
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |root| {
+                placed = creel(root, view).expect("the creel has rows");
+            });
+            shapes = out.shapes.iter().map(|c| c.shape.clone()).collect();
+        }
+        (placed.0, placed.1, shapes)
+    }
+
+    fn open_creel(cells: &str, kinds: &str) -> Creel {
+        let mut view = Creel::from_text(cells, kinds).expect("a rectangular grid");
+        view.open = true;
+        view
+    }
+
+    /// The arithmetic, as a test, because every other test here is written
+    /// against these numbers. 3 * 38 + 2 * 4 + 2 * 8 = 138 square, and cell
+    /// (2, 2) is 2 * (38 + 4) = 84 from the origin in both axes.
+    #[test]
+    fn the_creel_is_nine_cells_where_the_arithmetic_says() {
+        let view = open_creel("abc/d../...", "BAIT LINE LAMP FLSK");
+        let (plate, cells, _) = creel_drawn(&view);
+
+        assert_eq!(cells.len(), 9);
+        assert!(
+            (plate.width() - 138.0).abs() < 0.01 && (plate.height() - 138.0).abs() < 0.01,
+            "the plate is {plate:?}, not 138 square"
+        );
+        let origin = plate.min + egui::vec2(PAD, PAD);
+        assert!((cells[0].min - origin).length() < 0.01, "cell (0,0) is {:?}", cells[0]);
+        let far = cells[8].min - origin;
+        assert!(
+            (far.x - 84.0).abs() < 0.01 && (far.y - 84.0).abs() < 0.01,
+            "cell (2,2) is {far:?} from the origin, not (84, 84)"
+        );
+        assert!((cells[0].width() - CELL).abs() < 0.01);
+    }
+
+    /// **A 3x2 item is one outline, not six squares**, and that is the whole
+    /// reason the grid is projected as one letter per *placement* rather than
+    /// per kind. The border between two cells is drawn iff their characters
+    /// differ, so a closed 3x2 has a perimeter of 2 * (3 + 2) = 10 segments;
+    /// six separate one-cell items would be 24.
+    #[test]
+    fn a_three_by_two_fish_draws_one_outline_and_not_six() {
+        let joined = open_creel("aaa/aaa/...", "><>");
+        let (_, _, shapes) = creel_drawn(&joined);
+        let segments = shapes
+            .iter()
+            .filter(|s| matches!(s, egui::Shape::LineSegment { .. }))
+            .count();
+        assert_eq!(segments, 10, "a joined 3x2 should have a 10-segment perimeter");
+
+        let apart = open_creel("abc/def/...", "A B C D E F");
+        let (_, _, shapes) = creel_drawn(&apart);
+        let segments = shapes
+            .iter()
+            .filter(|s| matches!(s, egui::Shape::LineSegment { .. }))
+            .count();
+        assert_eq!(segments, 24, "six separate items should have six perimeters");
+    }
+
+    /// One label per item, not one per cell — a 3x2 fish is one word, centred
+    /// on the whole footprint rather than on its top-left cell.
+    #[test]
+    fn a_multi_cell_item_is_labelled_once_and_in_the_middle() {
+        let view = open_creel("aaa/aaa/...", "><>");
+        let (plate, cells, shapes) = creel_drawn(&view);
+        let texts: Vec<&egui::epaint::TextShape> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        // Two: the dark copy and the bright one. See `SHADOW`.
+        assert_eq!(texts.len(), 2, "one item should paint one label, twice");
+        let face = texts[1].pos;
+        let middle = cells[0].union(cells[5]).center();
+        // `Align2::CENTER_CENTER` reports the galley's top-left, so compare on
+        // the axis the centring is unambiguous in.
+        assert!(
+            (face.x - middle.x).abs() < 12.0 && (face.y - middle.y).abs() < 12.0,
+            "the label landed at {face:?}, not near the footprint's centre {middle:?}"
+        );
+        assert!(plate.contains(face));
+    }
+
+    /// **It does not own the frame.** The world does not stop while this is up,
+    /// so a panel across the middle hides the thing the player most needs to
+    /// see. The plate lives in the bottom-left quadrant and nothing it paints
+    /// covers the viewport.
+    #[test]
+    fn the_creel_stays_in_its_corner_and_draws_no_scrim() {
+        let view = open_creel("abc/d../...", "BAIT LINE LAMP FLSK");
+        let (plate, _, shapes) = creel_drawn(&view);
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 600.0));
+
+        assert!(plate.center().x < viewport.center().x, "not on the left");
+        assert!(plate.center().y > viewport.center().y, "not at the bottom");
+        for shape in &shapes {
+            if let egui::Shape::Rect(r) = shape {
+                assert!(
+                    r.rect.width() < 500.0,
+                    "something in the creel is {} px wide — that is a scrim",
+                    r.rect.width()
+                );
+            }
+        }
+    }
+
+    /// **Nothing in it claims the pointer**, which is the regression that would
+    /// silently kill `fire` for the whole bottom-left corner of the screen. It
+    /// is painted into the root `Ui`; an `egui::Area` claims its whole rect
+    /// even with painted-only content — **injected, and this test is what
+    /// caught it**, which is the whole reason the creel is painted rather than
+    /// laid out.
+    #[test]
+    fn nothing_in_the_creel_claims_the_pointer() {
+        let view = open_creel("abc/d../...", "BAIT LINE LAMP FLSK");
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            // Inside the plate: 24 in from the left, 24 up from the bottom of
+            // 600, so (60, 520) is well within the grid.
+            events: vec![egui::Event::PointerMoved(egui::pos2(60.0, 520.0))],
+            ..creel_input()
+        };
+        let mut claimed = false;
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input.clone(), |root| {
+                let _ = creel(root, &view);
+            });
+            claimed = ctx.is_pointer_over_egui();
+        }
+        assert!(!claimed, "the creel claimed a pointer over the grid");
+    }
+
+    /// **And nothing in it claims the keyboard.** The moment a focusable widget
+    /// exists in here, egui eats every key and the player stops moving — which
+    /// matters more than usual, because W/A/S/D are the cursor.
+    ///
+    /// **What it does NOT catch is an `egui::Area`**, and that is measured
+    /// rather than assumed: wrapping the grid in one — the obvious way to do
+    /// this, and what `pause_menu` does — fails
+    /// `nothing_in_the_creel_claims_the_pointer` and leaves this one green,
+    /// because an empty `Area` claims the pointer and not the keys. The two
+    /// tests guard two different mistakes and neither substitutes for the
+    /// other.
+    #[test]
+    fn nothing_in_the_creel_claims_the_keyboard() {
+        let view = open_creel("abc/d../...", "BAIT LINE LAMP FLSK");
+        let ctx = egui::Context::default();
+        let input = creel_input();
+        let mut wants = false;
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input.clone(), |root| {
+                let _ = creel(root, &view);
+            });
+            wants = ctx.egui_wants_keyboard_input();
+        }
+        assert!(!wants, "the creel claimed the keyboard");
+    }
+
+    /// The cursor ring is on the cell the game names, and there is one of it.
+    #[test]
+    fn the_cursor_ring_sits_on_the_cell_the_game_names() {
+        let mut view = open_creel("abc/d../...", "BAIT LINE LAMP FLSK");
+        view.cursor = (2, 1);
+        let (_, cells, shapes) = creel_drawn(&view);
+        let rings: Vec<&egui::epaint::RectShape> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r) if r.stroke.width > 1.5 => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rings.len(), 1, "one cursor, not {}", rings.len());
+        // Row 1, column 2, in a row-major list of nine.
+        let wanted = cells[3 + 2];
+        assert!(
+            (rings[0].rect.min - wanted.min).length() < 0.01,
+            "the ring is at {:?}, not on cell (2,1) at {:?}",
+            rings[0].rect,
+            wanted
+        );
+    }
+
+    /// **Green when it would land, red when it would not**, and the preview is
+    /// the held item's real footprint — 2x3 covers six cells, not one.
+    #[test]
+    fn the_held_item_previews_its_own_footprint_in_green_or_red() {
+        let green = egui::Color32::from_rgba_unmultiplied(90, 200, 110, 150);
+        let red = egui::Color32::from_rgba_unmultiplied(214, 84, 72, 150);
+
+        for (fits, wanted) in [(true, green), (false, red)] {
+            let mut view = open_creel(".../.../...", "");
+            view.cursor = (1, 0);
+            view.hand = Some(Hand { label: "><>".to_owned(), w: 2, h: 3, fits });
+            let (_, cells, shapes) = creel_drawn(&view);
+            let preview = shapes
+                .iter()
+                .find_map(|s| match s {
+                    egui::Shape::Rect(r) if r.fill == wanted => Some(r.rect),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no {wanted:?} preview was painted"));
+            let footprint = cells[1].union(cells[2 * 3 + 2]);
+            assert!(
+                (preview.min - footprint.min).length() < 0.01
+                    && (preview.max - footprint.max).length() < 0.01,
+                "the preview is {preview:?}, not the 2x3 at the cursor {footprint:?}"
+            );
+        }
+    }
+
+    /// **A scene with no creel draws nothing at all**, which is every scene in
+    /// this project but one, and is why nothing else has to know this exists.
+    /// A ragged grid is refused rather than drawn short: a row of the wrong
+    /// length is a packer bug, and half a grid on screen is a worse way to find
+    /// out than nothing on screen.
+    #[test]
+    fn a_missing_or_ragged_creel_is_not_drawn() {
+        assert!(Creel::read(&GameState::default()).is_none(), "no state, no creel");
+        assert!(Creel::from_text("ab/c../...", "A B C").is_none(), "ragged");
+        assert!(Creel::from_text("", "").is_none(), "empty");
+        assert!(Creel::from_text("abc/d../...", "A B C D").is_some(), "the good case");
+    }
+
+    /// Every label in the creel is painted twice and the first one is dark, the
+    /// same rule `hud::draw` follows and for the same reason: what is behind it
+    /// is whatever the sea is doing.
+    #[test]
+    fn every_creel_label_is_backed_by_a_dark_copy_of_itself() {
+        let view = open_creel("ab./.../...", "BAIT ><>");
+        let (_, _, shapes) = creel_drawn(&view);
+        let texts: Vec<egui::Pos2> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) => Some(t.pos),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 4, "two labels should paint four texts");
+        for pair in texts.chunks(2) {
+            assert!(
+                (pair[0] - pair[1] - SHADOW).length() < 0.01,
+                "shadow at {:?} is not {SHADOW:?} from the face at {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    /// Shut, it is dimmer and it has no cursor — there is no open/close
+    /// animation to build and no "where has my stuff gone" moment, and the
+    /// shapes stay legible at a glance in the middle of a fight.
+    #[test]
+    fn a_shut_creel_is_dimmer_and_has_no_cursor() {
+        let mut view = open_creel("abc/d../...", "BAIT LINE LAMP FLSK");
+        view.open = false;
+        let (_, _, shapes) = creel_drawn(&view);
+        let rings = shapes
+            .iter()
+            .filter(|s| matches!(s, egui::Shape::Rect(r) if r.stroke.width > 1.5))
+            .count();
+        assert_eq!(rings, 0, "a shut creel drew a cursor");
+        let plate = shapes
+            .iter()
+            .find_map(|s| match s {
+                egui::Shape::Rect(r) if r.rect.width() > 100.0 => Some(r.fill),
+                _ => None,
+            })
+            .expect("a plate");
+        assert_eq!(plate, egui::Color32::from_black_alpha(90));
     }
 
     /// **An untested menu is one nobody knows is drawn.** Same technique as
