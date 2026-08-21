@@ -6680,7 +6680,23 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // is not left raw, though — the shoaling taper flattens the waves to
     // nothing as they reach it, so the cut runs along still water rather than
     // through a moving crest, which is what would make it crawl.
-    if (in.depth <= 0.0) {
+    //
+    // **Asked as a quad-wide question first, because the reflection share far
+    // below reads the other three lanes.** Slang lowers `discard` to `OpKill`,
+    // not to a demote, and a quad read from a killed lane is undefined — so a
+    // shoreline quad, where some lanes are water and some are hill, is exactly
+    // the hazard `fragmentMain` avoids by keeping alpha-cutout materials off
+    // the sharing path. Here the condition is an *interpolated varying* rather
+    // than a material constant, so no branch can be quad-uniform about it: it
+    // has to be measured. Three quad reads, in uniform control flow, before
+    // anything is killed; `quadShore` is then a quad-uniform value the share
+    // can branch on. A partly-covered quad reads its helper lanes' extrapolated
+    // depth and may answer "shore" when it is not one — which costs that quad
+    // the share and nothing else, and only on a silhouette.
+    float shore = (in.depth <= 0.0) ? 1.0 : 0.0;
+    float quadShore = shore + QuadReadAcrossX(shore) + QuadReadAcrossY(shore)
+                            + QuadReadAcrossDiagonal(shore);
+    if (shore > 0.0) {
         discard;
     }
 
@@ -7037,7 +7053,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     float3 env = tracedEnvironment(in.worldPos, flatN, mirror,
                                    reflectRough, WATER_REFLECT_BIAS,
                                    skyColor(mirror));
-    if (in.nappe.x < -0.5) {
+    if (in.nappe.x < -0.5 && quadShore == 0.0) {
         // **Four rays' worth of answer at one ray's price.** The quad is
         // already resident and already shading; sharing across it turns four
         // independent jittered samples into one averaged reflection, which is
@@ -7045,11 +7061,17 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         // stipple. Unshared it is measured at fifty times the added salt —
         // that number is what chose this design, not the cost.
         //
-        // **Quad-uniform by construction.** `nappe.x` is a per-vertex constant
-        // of -1.0 across the whole fluid mesh, so every lane of a quad on this
-        // surface takes this branch, helper lanes included. It reads lanes of a
-        // 2x2 fixed by the pixel grid rather than by scheduling, so it carries
-        // no more nondeterminism than the dither does.
+        // **Quad-uniform, and it takes both halves to say so.** `nappe.x` is a
+        // per-vertex constant of -1.0 across the whole fluid mesh, so every
+        // lane of a quad on this surface agrees about the first test; helper
+        // lanes included. `quadShore` is the second half and is the one that
+        // was missing: the shoreline `discard` far above is gated on an
+        // interpolated depth, so a quad straddling the waterline had lanes that
+        // had already executed `OpKill` when this read them. That is undefined,
+        // not merely wrong, and it is the same hazard `ambientVisibility`
+        // documents. It reads lanes of a 2x2 fixed by the pixel grid rather
+        // than by scheduling, so it carries no more nondeterminism than the
+        // dither does.
         env = (env + QuadReadAcrossX(env) + QuadReadAcrossY(env)
                    + QuadReadAcrossDiagonal(env)) * 0.25;
     }
