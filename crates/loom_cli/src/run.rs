@@ -2314,6 +2314,19 @@ impl App {
         // The ears' own state, from the simulation that owns the surface —
         // the same water body, clock and bed a crate floats on.
         let submerged = play.submerged_at(view.eye);
+        // **The ladder's rain, at this tick's rung.** Same `weather_at` the
+        // picture goes through, so the bed cannot be raining harder or softer
+        // than the streaks in front of it.
+        #[allow(clippy::cast_possible_truncation)]
+        let dread = play.state().number("dread").map(|v| v as f32);
+        let rain = crate::weather_at(
+            &play.world,
+            crate::weather::rain_of(&self.view.scene),
+            dread,
+        )
+        .1
+        .map_or(0.0, |r| r.intensity);
+        sound.set_rain(rain);
         sound.update(&play.world, play.physics(), view.eye, right, forward, submerged);
     }
 

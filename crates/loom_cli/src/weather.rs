@@ -196,12 +196,22 @@ pub(crate) fn rain_at(
 /// about cover and must keep raining exactly as it did; and a solid deck gives
 /// coverage 1 everywhere, so it does. Authoring any value above zero takes full
 /// control — that is how a scene asks for a squall.
+///
+/// **At the mood ladder's rung, not the file's floor.** A scene whose stages
+/// ramp `cloud_cover` from a clear morning to a solid overcast had its rain
+/// coverage decided by the *unramped* component — so the deck thickened in the
+/// picture while the term that decides where it rains stayed at whatever the
+/// file's own number said. Inert for every scene that authors no stages, which
+/// is every scene in the library but two.
 #[must_use]
-pub(crate) fn deck_of(world: &loom_ecs::World) -> loom_rain::Deck {
+pub(crate) fn deck_of(world: &loom_ecs::World, dread: Option<f32>) -> loom_rain::Deck {
     let defaults = loom_scene::components::Environment::default();
+    let ramped = world
+        .environment()
+        .map(|c| crate::mood_of(c, crate::dread_of(world, dread)).0);
     let scalar = |name: &str, fallback: f32| {
-        world
-            .environment()
+        ramped
+            .as_ref()
             .and_then(|c| c.get(name))
             .and_then(serde_json::Value::as_f64)
             .map_or(fallback, |v| {

@@ -1312,7 +1312,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                         rain,
                         sky: frame_sky.clone(),
                         seconds: moment,
-                        deck: weather::deck_of(&world),
+                        deck: weather::deck_of(&world, dread),
                         // Telemetry reports wind and rain; nothing in a CSV row
                         // reads the surface, so nothing here pays to bake it.
                         water: None,
@@ -3859,7 +3859,8 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
             .flatten(),
         #[allow(clippy::cast_precision_loss)]
         seconds: ticks as f32 / 60.0,
-        deck: weather::deck_of(&world),
+        #[allow(clippy::cast_possible_truncation)]
+        deck: weather::deck_of(&world, Some(state.number("dread").unwrap_or(0.0) as f32)),
     };
     // **ADR 0053 §2, and it fails the run rather than the assertion.** A
     // cinematic body is a GPU float this process cannot read without a

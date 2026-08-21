@@ -32,8 +32,16 @@ pub(crate) struct Sound {
     /// Which source gets a fresh occlusion solve this tick.
     next: usize,
     ears: Ears,
-    /// The scene's unsheltered rain rate in mm/h. Zero in a dry scene, and then
-    /// the bed renders exact silence.
+    /// The unsheltered rain rate in mm/h, **written every tick by
+    /// [`Self::set_rain`] and read by [`Self::update`] beside it**.
+    ///
+    /// It used to be read once, at construction, from the scene's own `Rain`.
+    /// That is correct for a scene whose weather is a constant and silently
+    /// wrong for one whose `Environment.stages` ramp it: the bed stayed at the
+    /// berth's rate through the whole shower, while the streaks in front of it
+    /// got heavier. Shelter is applied per tick from the room solve either
+    /// way, exactly as the visible layer applies it per drop rather than per
+    /// camera.
     rain: f32,
 }
 
@@ -63,10 +71,7 @@ impl Sound {
             sources: Vec::new(),
             next: 0,
             ears: Ears::default(),
-            // The rate the sky is producing, before any shelter. Shelter is
-            // applied per tick from the room solve, exactly as the visible
-            // layer applies it per drop rather than per camera.
-            rain: crate::weather::rain_of(scene).map_or(0.0, |r| r.intensity),
+            rain: 0.0,
         };
 
         for entity in world.entities() {
@@ -153,6 +158,11 @@ impl Sound {
                 distance: 0.0,
             },
         });
+    }
+
+    /// This tick's unsheltered rain rate, in mm/h. See [`Self::rain`].
+    pub(crate) fn set_rain(&mut self, mm_per_hour: f32) {
+        self.rain = mm_per_hour;
     }
 
     /// Re-measure and hand every voice its position for this tick.
