@@ -637,6 +637,72 @@ fn validate_components(doc: &DocumentMut, nodes: &[Node], registry: &TypeRegistr
     // its frame. `nodes` already carries the parsed paths and transforms, so
     // this needs neither the TOML document nor a tree.
     errors.extend(check_deforms(nodes));
+    errors.extend(check_moods(nodes));
+    errors
+}
+
+/// The `Environment.stages` rules — ADR 0069, and refusals rather than
+/// comments.
+///
+/// **The deserialise is the point, not the sorting.** `EnvironmentPatch` and
+/// `Grade` carry `deny_unknown_fields`, and `loom_reflect::validate` walks a
+/// component's *top-level* keys only — so `sun_strenth = 0.4` inside a stage
+/// table is a key the schema check never reaches. Dropped silently, the stage
+/// renders the near look at every `dread` and reports `{"ok": true}`, which is
+/// the S4 prefab bug in a new place. Reading the value through serde here is
+/// what turns that into an error with a line the author can find.
+fn check_moods(nodes: &[Node]) -> Vec<SceneError> {
+    let mut errors = Vec::new();
+    for node in nodes {
+        let Some(value) = node.components.get("Environment") else {
+            continue;
+        };
+        let environment = match serde_json::from_value::<components::Environment>(value.clone()) {
+            Ok(environment) => environment,
+            Err(why) => {
+                let mut err = SceneError::new("component_unreadable", &node.path);
+                err.field = "Environment".to_owned();
+                err.constraint = "a readable Environment".to_owned();
+                err.hint = Some(format!(
+                    "{why}. The schema check passed, so this is a field the \
+                     schema does not reach — most likely a misspelled key \
+                     inside a `stages` table, which would otherwise be dropped \
+                     at load and render the near look at every `dread`."
+                ));
+                errors.push(err);
+                continue;
+            }
+        };
+
+        // One stage is a constant, and a constant that looks like a ramp is
+        // worse than no ramp: the author sees a `stages` block, the scene
+        // never changes, and nothing says why.
+        if environment.stages.len() == 1 {
+            let mut err = SceneError::new("field_out_of_range", &node.path);
+            err.field = "Environment.stages".to_owned();
+            err.constraint = "at least two stages, or none".to_owned();
+            err.hint = Some(
+                "One stage cannot be blended between, so `dread` would move \
+                 nothing. Author a second stage, or drop the block."
+                    .to_owned(),
+            );
+            errors.push(err);
+        }
+
+        // Sorted and distinct: the blend divides by the span between a
+        // bracketing pair, and two stages at one `at` is a zero-span divide.
+        if let Some(w) = environment.stages.windows(2).find(|w| w[1].at <= w[0].at) {
+            let mut err = SceneError::new("field_out_of_range", &node.path);
+            err.field = "Environment.stages".to_owned();
+            err.constraint = "sorted by `at`, strictly increasing".to_owned();
+            err.hint = Some(format!(
+                "`{}` is at {} and `{}` follows it at {}. Stages are read in \
+                 file order and blended between neighbours.",
+                w[0].name, w[0].at, w[1].name, w[1].at
+            ));
+            errors.push(err);
+        }
+    }
     errors
 }
 

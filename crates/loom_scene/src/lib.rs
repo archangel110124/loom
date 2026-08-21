@@ -1147,4 +1147,130 @@ name = \"Hill\"
              does not exist and nothing said so"
         );
     }
+
+    /// A scene whose `Environment` carries a mood ladder, with the stage
+    /// blocks left for the test to append.
+    fn mood_scene(stages: &str) -> String {
+        format!(
+            "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e5f\"\n\n\
+             [[node]]\nname = \"Sky\"\n\n\
+             [node.components.Environment]\nsun_strength = 1.0\ndread = 0.5\n{stages}"
+        )
+    }
+
+    fn mood(stages: &str) -> Vec<SceneError> {
+        Scene::parse(&mood_scene(stages)).err().unwrap_or_default()
+    }
+
+    const TWO_STAGES: &str = "\
+[[node.components.Environment.stages]]
+name = \"near\"
+at = 0.0
+
+[[node.components.Environment.stages]]
+name = \"far\"
+at = 1.0
+[node.components.Environment.stages.environment]
+sun_strength = 0.1
+";
+
+    /// The happy path, so the refusals below are known to be refusing
+    /// something rather than failing to parse at all.
+    #[test]
+    fn a_sorted_mood_ladder_is_accepted() {
+        assert!(mood(TWO_STAGES).is_empty(), "{:?}", mood(TWO_STAGES));
+    }
+
+    /// **The S4 prefab bug in a new place.** `loom_reflect::validate` walks a
+    /// component's *top-level* keys only, so a key misspelled inside a stage
+    /// table is a key nothing checks: dropped at load, the stage renders the
+    /// near look at every `dread` and the scene reports `{"ok": true}`.
+    /// `deny_unknown_fields` plus the load-time deserialise is what turns that
+    /// into an error, and this is the test that the guard actually fires.
+    #[test]
+    fn a_misspelled_key_inside_a_stage_is_refused() {
+        let typo = TWO_STAGES.replace("sun_strength = 0.1", "sun_strenth = 0.1");
+        let errors = mood(&typo);
+        assert!(
+            errors.iter().any(|e| e.field == "Environment"),
+            "a misspelled key inside a stage validated clean — it would be \
+             dropped at load and the ramp would silently do nothing: {errors:?}"
+        );
+    }
+
+    /// One stage is a constant, and a constant that looks like a ramp is worse
+    /// than no ramp: the author sees a `stages` block, nothing moves, and
+    /// nothing says why.
+    #[test]
+    fn a_single_stage_is_refused() {
+        let one = "\
+[[node.components.Environment.stages]]
+name = \"only\"
+at = 0.0
+";
+        assert!(
+            mood(one).iter().any(|e| e.field == "Environment.stages"),
+            "one stage validated clean"
+        );
+    }
+
+    /// Two stages at one `at` is a zero-span divide, and out-of-order stages
+    /// blend between the wrong neighbours.
+    #[test]
+    fn an_unsorted_mood_ladder_is_refused() {
+        let backwards = TWO_STAGES.replace("at = 0.0", "at = 1.0");
+        assert!(
+            mood(&backwards).iter().any(|e| e.field == "Environment.stages"),
+            "two stages at the same `at` validated clean"
+        );
+    }
+
+    /// **The near end must be free.** Every scene in the library authors no
+    /// stages, and the shader detects the identity with a branch rather than
+    /// an epsilon — so the default has to be exactly one, not nearly.
+    #[test]
+    fn the_default_grade_is_exactly_the_identity() {
+        let g = components::Grade::default();
+        assert_eq!(g.gain, [1.0, 1.0, 1.0]);
+        assert!((g.contrast - 1.0).abs() < f32::EPSILON);
+        assert!((g.saturation - 1.0).abs() < f32::EPSILON);
+        assert!(components::Environment::default().stages.is_empty());
+    }
+
+    /// The endpoints must come back exactly, or a stage's authored numbers are
+    /// not what gets rendered at that stage.
+    #[test]
+    fn a_grade_lerp_reproduces_its_endpoints_exactly() {
+        let near = components::Grade { gain: [1.02, 1.0, 0.98], contrast: 1.0, saturation: 1.12 };
+        let far = components::Grade { gain: [0.86, 0.92, 0.86], contrast: 1.10, saturation: 0.26 };
+        assert_eq!(near.lerp(&far, 0.0), near);
+        assert_eq!(near.lerp(&far, 1.0), far);
+        // Outside the range it holds rather than extrapolating: an
+        // extrapolated grade is a look nobody looked at.
+        assert_eq!(near.lerp(&far, -3.0), near);
+        assert_eq!(near.lerp(&far, 9.0), far);
+        let mid = near.lerp(&far, 0.5);
+        assert!((mid.saturation - 0.69).abs() < 1e-6, "{mid:?}");
+    }
+
+    /// **`EnvironmentPatch` must reach every field `Environment` has**, or a
+    /// stage silently cannot move one of them and the only symptom is a ramp
+    /// that does nothing to the fog.
+    ///
+    /// Compared as key sets through serde rather than by hand, so adding a
+    /// field to `Environment` and forgetting the patch fails here.
+    #[test]
+    fn the_patch_reaches_every_environment_field() {
+        let env = serde_json::to_value(components::Environment::default()).unwrap();
+        let mut want: Vec<String> = env.as_object().unwrap().keys().cloned().collect();
+        // `stages` and `dread` are the ladder itself, not rungs on it.
+        want.retain(|k| k != "stages" && k != "dread");
+
+        let patch = serde_json::to_value(components::EnvironmentPatch::default()).unwrap();
+        let have: Vec<String> = patch.as_object().unwrap().keys().cloned().collect();
+
+        for key in want {
+            assert!(have.contains(&key), "EnvironmentPatch cannot reach `{key}`");
+        }
+    }
 }

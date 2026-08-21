@@ -1729,8 +1729,19 @@ impl ApplicationHandler for App {
                     None => self.view.world(),
                 };
                 let wind = crate::weather::wind_of(&self.view.scene);
-                let mut environment =
-                    crate::environment_with_wind(world, &wind, self.wind_seconds);
+                // **`dread` comes from the running script, or from the
+                // scene** — ADR 0069. Read here and never eased here:
+                // `self.wind_seconds` advances by a frame delta, and a
+                // mood riding that would pass the image gate, pass
+                // `cargo xtask repeat`, and be wrong only in this window.
+                #[allow(clippy::cast_possible_truncation)]
+                let dread = self
+                    .play
+                    .as_ref()
+                    .and_then(|p| p.state().number("dread"))
+                    .map(|v| v as f32);
+                let (mut environment, grade) =
+                    crate::environment_with_mood(world, &wind, self.wind_seconds, dread);
                 // Whether the eye is under the water, from the same query that
                 // muffles the sound (W7). The fly camera and a swimming
                 // character both go through here, so the window's view and the
@@ -1773,6 +1784,7 @@ impl ApplicationHandler for App {
                 };
                 if let Some(viewer) = self.viewer.as_mut() {
                     viewer.environment = environment;
+                    viewer.grade = grade;
                     viewer.set_rain(drops);
                     // **The drop simulation's clock, in ticks.** The same
                     // mapping the headless path uses — `--sim N` is N/60

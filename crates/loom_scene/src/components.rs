@@ -1040,6 +1040,155 @@ pub struct Environment {
     /// golden image reproducible.
     #[schemars(range(min = 0.01, max = 64.0))]
     pub exposure: f32,
+
+    /// The mood ladder: named looks along a `0.0 -> 1.0` axis — ADR 0069.
+    ///
+    /// **A list rather than two endpoints, and that is arithmetic rather than
+    /// taste.** A mid-water cast has to *peak* near the middle and drain to
+    /// neutral by the end, and a lerp of two endpoints cannot produce a peaked
+    /// hue at all: interpolating `sky_zenith` from `[0.16, 0.30, 0.52]` to
+    /// `[0.02, 0.03, 0.03]` gives `[0.09, 0.165, 0.275]` at the midpoint —
+    /// still blue-dominant, still a pretty sea — where the authored middle is
+    /// green-dominant and is the only rung that reads as *wrong* rather than
+    /// as dusk.
+    ///
+    /// Empty is the default, and empty is every scene authored before this,
+    /// all 54 golden references, and the editor.
+    #[serde(default)]
+    pub stages: Vec<MoodStage>,
+
+    /// Where on that axis the frame sits, when no game is running.
+    ///
+    /// **Authored on the component, not a CLI flag**, so a still can be
+    /// rendered anywhere on the ramp and the golden row is a scene file. A
+    /// flag no scene carries would be a second source of truth, and the editor
+    /// would stop being WYSIWYG on the mood.
+    ///
+    /// A rules script overrides this by writing `state.dread`, and **that
+    /// override eases on the fixed tick, never on a frame delta** — a ramp
+    /// riding a frame delta passes the image gate (one frame), passes
+    /// `cargo xtask repeat` (headless, fixed step), and is wrong only in the
+    /// window the human judges everything in.
+    #[serde(default)]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub dread: f32,
+}
+
+/// One named look on the mood axis — ADR 0069.
+///
+/// **A stage, not a grade**, because a grade alone cannot reach the far end
+/// and lighting alone cannot reach the near field. `Environment` owns
+/// darkness, fog and cloud and no grade can fake any of them; the grade owns
+/// saturation and the temperature of a warm prop and no `Environment` setting
+/// can touch either — every "eerie" lighting configuration anyone measured
+/// came out *more* colourful than the happy baseline, because taking a warm
+/// sun away stops washing albedos toward a common white. Split into two
+/// systems, a designer authors one mood in two files and discovers by hand
+/// that the fog is fighting the crush.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct MoodStage {
+    /// What this stage is called. It shows up in `loom describe` and in the
+    /// transaction log — "the sea has gone wrong" should be greppable.
+    pub name: String,
+    /// Where on the axis it sits. Stages sort by this, and the endpoints hold
+    /// outside the range, so a scalar that leaves `0..1` cannot produce a look
+    /// nobody authored.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub at: f32,
+    /// What the light does here. **Every field left unset falls back to the
+    /// scene's own `Environment`** — a stage is a diff, not a duplicate, which
+    /// is why `sun_direction` appears once in a file and not five times.
+    pub environment: EnvironmentPatch,
+    /// What the grade does here.
+    pub grade: Grade,
+}
+
+/// An `Environment` with every field optional. Same shape, and the same
+/// reason, as `[node.overrides]` on a prefab instance.
+///
+/// **`deny_unknown_fields`, and it is not tidiness.** `loom_reflect::validate`
+/// walks a component's *top-level* keys only — verified: a misspelled key
+/// inside a nested table validates clean and exits 0. Every number this design
+/// adds lives exactly there. Without the refusal a typo is accepted, dropped
+/// at load, and renders the near look while reporting `{"ok": true}` — the S4
+/// prefab bug in a new place, and the reason the parser was fixed for it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct EnvironmentPatch {
+    pub sun_direction: Option<[f32; 3]>,
+    pub sun_strength: Option<f32>,
+    pub sun_color: Option<[f32; 3]>,
+    pub ambient: Option<f32>,
+    pub sky_zenith: Option<[f32; 3]>,
+    pub sky_horizon: Option<[f32; 3]>,
+    pub fog_density: Option<f32>,
+    pub fog_falloff: Option<f32>,
+    pub cloud_cover: Option<f32>,
+    pub cloud_scale: Option<f32>,
+    pub exposure: Option<f32>,
+}
+
+/// The three numbers the tonemap grades with — ADR 0069.
+///
+/// Neutral by default, and neutral is **bit-identical**: the shader tests the
+/// same condition with a uniform branch, so a scene that authors no mood is
+/// the bare operator rather than a lerp that happens to land on it.
+///
+/// The twin of `loom_render::Grade`, which is the GPU-facing POD.
+/// `loom_scene` depends on nothing else in the workspace, so the two cannot be
+/// one type; the conversion lives in `loom_cli`, the same seam
+/// `environment_of_inner` already is.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct Grade {
+    /// Per-channel gain, in linear light. **Equal channels is an exposure and
+    /// unequal is a white balance, which is why there is no separate exposure
+    /// knob here** — one multiply does both jobs, and a second would only be a
+    /// place for them to disagree.
+    #[schemars(inner(range(min = 0.0, max = 4.0)))]
+    pub gain: [f32; 3],
+    /// A multiplier on the operator's own contrast (ADR 0068), pivoting where
+    /// it pivots. Above `1.0` steepens the toe — **this is where a scene buys
+    /// crushed blacks, and it is opt-in so one scene pays and the rest do
+    /// not.**
+    #[schemars(range(min = 0.2, max = 3.0))]
+    pub contrast: f32,
+    /// Toward grey at `0.0`, unchanged at `1.0`, exaggerated above.
+    /// **The desaturator, and nothing in `Environment` can do this.**
+    #[schemars(range(min = 0.0, max = 2.0))]
+    pub saturation: f32,
+}
+
+impl Default for Grade {
+    fn default() -> Self {
+        Self { gain: [1.0; 3], contrast: 1.0, saturation: 1.0 }
+    }
+}
+
+impl Grade {
+    /// Blend the **parameters**, field by field, with `t` clamped to `0..=1`.
+    ///
+    /// **Never two graded images.** A crossfade of two differently-hued frames
+    /// cancels chroma, and its midpoint measures *less* saturated than either
+    /// end it interpolates between — 7.91 against endpoints of 8.29 and 11.97.
+    /// That undershoot is a muddy midtone, and blending numbers cannot produce
+    /// it. It is also why there is no 3D LUT here: 32,768 lines of floats
+    /// defeats the project's first property.
+    #[must_use]
+    pub fn lerp(&self, far: &Self, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let mix = |a: f32, b: f32| a + (b - a) * t;
+        Self {
+            gain: [
+                mix(self.gain[0], far.gain[0]),
+                mix(self.gain[1], far.gain[1]),
+                mix(self.gain[2], far.gain[2]),
+            ],
+            contrast: mix(self.contrast, far.contrast),
+            saturation: mix(self.saturation, far.saturation),
+        }
+    }
 }
 
 impl Default for Environment {
@@ -1064,6 +1213,11 @@ impl Default for Environment {
             // Unit: the identity leg of the shoulder, so every scene authored
             // before the tonemap existed renders unchanged.
             exposure: 1.0,
+            // No ladder and no position on it: every scene authored
+            // before the mood existed grades with the identity, which the
+            // shader detects with a branch rather than an epsilon.
+            stages: Vec::new(),
+            dread: 0.0,
         }
     }
 }

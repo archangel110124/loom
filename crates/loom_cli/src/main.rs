@@ -2902,14 +2902,6 @@ pub(crate) fn environment_with_mood(
     )
 }
 
-pub(crate) fn environment_with_wind(
-    world: &World,
-    wind: &loom_field::wind::Wind,
-    seconds: f32,
-) -> loom_render::EnvironmentData {
-    environment_with_wind_at(world, wind, seconds, None)
-}
-
 fn environment_with_wind_at(
     world: &World,
     wind: &loom_field::wind::Wind,
@@ -5696,7 +5688,7 @@ mod tests {
     fn environment_of_text(text: &str) -> loom_render::EnvironmentData {
         let scene = loom_scene::Scene::parse(text).expect("valid scene");
         let world = World::from_scene(&scene);
-        environment_with_wind(&world, &crate::weather::wind_of(&scene), 0.0)
+        environment_with_wind_at(&world, &crate::weather::wind_of(&scene), 0.0, None)
     }
 
     /// **A light with `flicker = 0` is byte-identical, and a flickering one is
@@ -5728,7 +5720,7 @@ mod tests {
             );
             let scene = loom_scene::Scene::parse(&text).expect("valid scene");
             let world = World::from_scene(&scene);
-            environment_with_wind(&world, &crate::weather::wind_of(&scene), seconds).lights[0]
+            environment_with_wind_at(&world, &crate::weather::wind_of(&scene), seconds, None).lights[0]
         };
 
         let off_a = of(0.0, 0.0);
@@ -5846,7 +5838,7 @@ mod tests {
         let wind = crate::weather::wind_of(&scene);
 
         let flag = |y: f32| {
-            let mut env = environment_with_wind(&world, &wind, 0.0);
+            let mut env = environment_with_wind_at(&world, &wind, 0.0, None);
             assert_eq!(env.water[1], 0.0, "the flag must start off");
             submerge_eye(&mut env, &world, &wind, None, Vec3::new(3.0, y, -4.0), 0.0);
             env.water[1]
