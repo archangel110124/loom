@@ -1941,14 +1941,74 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 # invisible on screen (cream glyphs on a near-white stone), and it was found by
 # a human taking a screenshot.
 #
-# The one instrument that now exists is a unit test, not a row here:
+# The width instrument is a unit test, not a row here:
 # `loom_cli::hud::the_longest_demo_caption_fits_the_narrowest_documented_window`
 # lays the two longest strings out through egui and measures them — 840 px for
 # the caption, 621 px for the inventory row, against a documented 960 px minimum
 # window. It runs under `cargo test`, which is check 3. **It measures width and
-# nothing else**: contrast, occlusion and whether the line is drawn at all are
-# still unmeasured, and the drop shadow that fixed the invisible row is asserted
-# only as an offset.
+# nothing else.**
+#
+# **Contrast and whether the line is drawn at all are measured HERE, from
+# pixels**, and this is the row that closes the gap the paragraph above spent
+# three rounds describing. `loom run --shot` copies the *swapchain* image after
+# egui has composited into it — the only picture in this project with a `Ui` in
+# it — and `loom salt` counts, inside the band the two HUD rows occupy, the
+# pixels that sit more than 24/255 from the median of their eight neighbours.
+#
+# **Salt is the right metric because text is nothing but that shape.** A glyph
+# stroke is one or two pixels wide against its background; deck, sky and water
+# are smooth. So the number reads as "how much high-contrast fine detail is in
+# the band", which is what a legible caption is and what a caption in the deck's
+# own colour is not. Measured, on this scene at 1440x900:
+#
+#     the HUD band          3902        <- two rows of text
+#     the sky, same size       0
+#     the deck, same size      1
+#
+# Three orders of magnitude, so 1000 is a floor with four times the headroom it
+# needs, not a tuned constant. **Fault-injected before it was committed**: the
+# caption painted in the deck's own mean colour (120,116,106) with the drop
+# shadow taken off — which is the shipped bug, reproduced — scores **456** and
+# the row goes red. The residue is the glyphs still catching the deck's own
+# variation; it is nowhere near the floor, and the picture at that score is the
+# ghost text a human found by taking a screenshot.
+#
+# The rect is in pixels of a 1440x900 window (`run.rs` asks for exactly that)
+# and the HUD is anchored bottom-centre, so a window that came back a different
+# size lands the band on empty deck and fails loudly rather than passing on
+# nothing. That is the correct direction for this check to break in.
+#
+# **One second, one window.** Forty frames is enough for the world to build and
+# the rules script to write its first caption; `--hold 0:` is a hands-off tape,
+# which is what makes the run scripted — no title screen to click past, and the
+# pointer stays with whoever is at the machine.
+if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+  HUD_SHOT=/tmp/loom-hud-gate.png
+  rm -f "$HUD_SHOT"
+  "$LOOM" run assets/games/deeper_demo.loom --play --frames 40 --hold "0:" \
+    --shot "$HUD_SHOT" >/dev/null
+  hud_salt() { "$LOOM" salt "$HUD_SHOT" --rect "$1" | grep '"salt"' | tr -dc '0-9'; }
+  HUD_BAND=$(hud_salt 400,780,640,60)
+  HUD_QUIET=$(hud_salt 400,100,640,60)
+  if [ "${HUD_BAND:-0}" -lt 1000 ]; then
+    echo "FAIL: the demo's HUD band scores $HUD_BAND salt (want >= 1000) — the" >&2
+    echo "      caption is missing, occluded, or the colour of what is behind it." >&2
+    echo "      Look at $HUD_SHOT." >&2
+    exit 1
+  fi
+  # The control, and it is not decoration: it is what says the number above
+  # came from the caption rather than from a frame that had gone noisy
+  # everywhere. An equal-sized patch of sky must stay quiet.
+  if [ "${HUD_QUIET:-0}" -gt 200 ]; then
+    echo "FAIL: the sky scores $HUD_QUIET salt — the whole frame is noisy, so the" >&2
+    echo "      HUD row's $HUD_BAND proves nothing. Look at $HUD_SHOT." >&2
+    exit 1
+  fi
+  rm -f "$HUD_SHOT"
+  echo "overlay: the demo's HUD band $HUD_BAND salt against $HUD_QUIET in the sky"
+else
+  echo "skip: overlay pixel check — no display to open a window on"
+fi
 #
 # **The sim's answer to `xtask repeat`.** `state_hash` covers physics, so
 # nothing above would notice a fight that replayed differently — a float hash,

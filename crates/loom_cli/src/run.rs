@@ -229,6 +229,53 @@ const fn escape_means(menu_open: bool, playing: bool, captured: bool) -> Escape 
     }
 }
 
+/// What a script asked this window to do, when a script rather than a human is
+/// driving it.
+///
+/// **This exists because nothing in the project could photograph a `Ui`.**
+/// `loom render` is headless and never builds an egui context, so the HUD, the
+/// pause menu, the title screen, the room code and the inventory grid were
+/// visible to no gate: a HUD row shipped unreadable — pale text on pale deck —
+/// and passed every check, and the inventory's hold-to-confirm bar drew for one
+/// tick in sixty with nothing able to see it. The only check available was
+/// counting the `Shape`s egui emitted, which proves a shape was produced and
+/// says nothing about whether it was legible, on-screen or the right colour.
+///
+/// The three fields travel together and mean one thing between them, which is
+/// why they are a struct rather than three more positional arguments on
+/// [`open_scene`]: a run with any of them set is a run with no human at the
+/// keyboard.
+#[derive(Default)]
+pub struct Script {
+    /// Where to write a PNG of the last frame drawn — scene *and* overlay.
+    pub shot: Option<std::path::PathBuf>,
+    /// Scheduled player input: `loom sim`'s `--hold` tape, unchanged.
+    pub hold: Vec<(u64, loom_script::Motion)>,
+    /// Put the pause menu up as soon as play starts.
+    pub menu: bool,
+}
+
+impl Script {
+    /// Whether a script is driving the *game*, as opposed to merely taking a
+    /// picture of whatever the window would have shown anyway.
+    ///
+    /// Two consequences, and both are deliberate:
+    ///
+    /// - **No title screen.** A scripted run cannot click Start — the title's
+    ///   two controls are egui buttons and there is no key for them — so it
+    ///   would sit on the front end until its frame budget ran out. Skipping it
+    ///   drops the run into the existing autoplay path, which is the same door
+    ///   Start goes through. A `--shot` with no `--hold` and no `--menu` leaves
+    ///   the title up, which is how the title screen gets photographed.
+    /// - **Hands off the pointer.** `start_play` grabs the cursor for
+    ///   first-person look, and a background screenshot that steals the mouse
+    ///   from whoever is at the machine is not acceptable. A script has no
+    ///   mouse to look with, so it loses nothing.
+    fn driving(&self) -> bool {
+        !self.hold.is_empty() || self.menu
+    }
+}
+
 /// Whether `run` should put a front end up at all.
 ///
 /// **A free function for [`escape_means`]'s reason** — the arming lives inside
@@ -631,6 +678,8 @@ struct App {
     /// far needed a human to open a window and close it; this is what lets
     /// `cargo xtask validate` do that instead.
     frames_left: Option<u32>,
+    /// What a script asked for, or all defaults when a human is driving.
+    script: Script,
     /// Start the simulation as soon as there is a window.
     ///
     /// **This exists so a gate can reach Play.** The per-frame CPU cost that
@@ -804,6 +853,7 @@ impl App {
             wind_seconds: 0.0,
             fps: 0.0,
             frames_left: None,
+            script: Script::default(),
             autoplay: false,
             front: None,
             pause_menu: false,
@@ -1475,6 +1525,15 @@ impl ApplicationHandler for App {
                 if self.autoplay && self.play.is_none() && self.viewer.is_some() {
                     self.autoplay = false;
                     self.start_play();
+                    // `--menu`: the pause menu has no key a script can press —
+                    // Escape means *close* to a run with no captured pointer
+                    // (`escape_means(false, true, false)`), so scripting the
+                    // key would shut the window rather than photograph the
+                    // menu. Asking for the state directly is both smaller and
+                    // the only thing that works.
+                    if self.script.menu {
+                        self.set_pause_menu(true);
+                    }
                 }
                 // Clamp: a stall must not teleport the camera across the map.
                 self.step_camera(dt.min(0.1));
@@ -1898,6 +1957,24 @@ impl ApplicationHandler for App {
                 let room_code = self.room_code.as_deref();
                 let mut pause_choice = None;
                 let mut title_choice = None;
+                // **`--shot` photographs the last frame of the budget, not the
+                // first.** The last frame is the one the run has *arranged*:
+                // the tape has played out, the menu is up, the fade is over.
+                // Armed here, before the draw, because the capture is a pass
+                // inside that draw — it copies the swapchain image after the
+                // overlay has been composited into it, which is the only place
+                // a picture of the HUD exists.
+                //
+                // A sequence — one PNG per frame, the way `loom render
+                // --frames` writes them — is what an *animated* overlay needs,
+                // and is deliberately not built: see the note on `--shot` in
+                // `main.rs`.
+                if self.frames_left == Some(1) {
+                    let path = self.script.shot.take();
+                    if let (Some(path), Some(viewer)) = (path, self.viewer.as_mut()) {
+                        viewer.capture(path);
+                    }
+                }
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
                     (Some(viewer), Some(ui), Some(window)) => viewer.draw_with_ui(
                         drawn,
@@ -2183,9 +2260,12 @@ impl App {
         // First person only when the scene actually has the rig for it: a
         // character to move and a camera to see through. Without both, Play
         // stays a spectator view and the fly camera keeps working.
-        if drivable {
+        if drivable && !self.script.driving() {
             self.capture_pointer(true);
             crate::log::info(PLAY_KEYS);
+        } else if drivable {
+            // Scripted: the tape drives the character and the human keeps
+            // their mouse. `feed_play_input` knows not to consult `captured`.
         } else {
             crate::log::info(
                 "no player rig (needs a CharacterController and a Camera) — flying instead",
@@ -2241,6 +2321,25 @@ impl App {
         let Some(play) = self.play.as_mut() else {
             return;
         };
+        // **A tape overrides the keyboard, and overrides the capture gate with
+        // it.** A scripted run never grabs the pointer (see [`Script::driving`]),
+        // so the `captured` test below would read every scripted run as hands
+        // off the keys and nothing would ever move. Same schedule and the same
+        // parser `loom sim --hold` uses — the point of reaching `loom run` with
+        // it is that the inventory, the HUD and the rest of the overlay only
+        // exist in a window.
+        if !self.script.hold.is_empty() {
+            let held = crate::input_at(&self.script.hold, u64::from(play.ticks));
+            play.set_input(crate::play::PlayerInput {
+                move_axis: held.move_axis,
+                jump: held.jump,
+                sprint: held.sprint,
+                fire: held.fire,
+                interact: held.interact,
+                bag: held.bag,
+            });
+            return;
+        }
         // Only while the pointer is captured. Otherwise typing in a panel
         // would walk the character around behind the human's back.
         if !self.captured {
@@ -3214,6 +3313,7 @@ pub fn run(
     disk_seen: loom_scene::VersionToken,
     frames: Option<u32>,
     autoplay: bool,
+    script: Script,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
     // Poll, not Wait: the camera animates continuously while keys are held, and
@@ -3231,12 +3331,16 @@ pub fn run(
         disk_seen,
     );
     app.frames_left = frames.filter(|n| *n > 0);
+    let scripted = script.driving();
+    app.script = script;
     // A front end only makes sense in front of a game, so `--play` is what
     // arms it — and when it is armed it takes autoplay's job: the game starts
     // when the human asks for it, under the black. `session` is `Some` for
     // exactly the runs that got `--edit`; see [`front_end_wanted`] for why that
     // is in the condition and what happened while it was not.
-    app.front = front_end_wanted(autoplay, app.session.is_some())
+    // A script cannot click Start, so a scripted run skips the front end
+    // entirely and falls into the autoplay path below — see [`Script::driving`].
+    app.front = front_end_wanted(autoplay && !scripted, app.session.is_some())
         .then(|| app.view.world().camera_named(TITLE_CAM))
         .flatten()
         .map(|view| Front {
@@ -3264,6 +3368,7 @@ pub fn open_scene(
     editable: bool,
     frames: Option<u32>,
     autoplay: bool,
+    script: Script,
 ) -> Result<(), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let base = std::path::Path::new(path)
@@ -3279,7 +3384,7 @@ pub fn open_scene(
         .transpose()
         .map_err(|e| format!("{path}: {e}"))?;
 
-    run(path, view, session, disk_seen, frames, autoplay)
+    run(path, view, session, disk_seen, frames, autoplay, script)
 }
 
 #[cfg(test)]

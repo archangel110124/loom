@@ -171,10 +171,38 @@ USAGE:
         Carve the voxel terrain and render the result.
 
     loom run <scene.loom> [--edit] [--frames <n>] [--play]
+                          [--shot <file.png>] [--hold <k=v,..>] [--menu]
         Open the viewer. --edit gives the full editor; it reloads on change.
         --frames closes after n frames and then prints the frame's CPU cost;
         --play starts the simulation immediately, which is the only way to
         measure the per-frame work a running game actually does.
+
+        --shot writes a PNG of the LAST frame of the budget — the composited
+        frame, scene AND overlay, copied out of the swapchain image after egui
+        has drawn into it. It is the only thing in this project that can
+        photograph a Ui: `loom render` is headless and builds no egui context,
+        so a HUD row, the pause menu, the title screen and the inventory grid
+        are invisible to every other gate. It needs --frames.
+
+        The last frame rather than a numbered sequence, and that is a choice.
+        A sequence is what makes an ANIMATED overlay testable — the inventory's
+        hold-to-confirm bar drew for one tick in sixty and no still could have
+        caught it — but the last frame is the one a scripted run has arranged,
+        and one file is what a gate wants. Two runs with different --frames
+        photograph two moments; they are not two frames of one run, because the
+        window advances on a wall clock.
+
+        --hold is `loom sim`'s, same tape, same schedule, now reaching the
+        window: quoted, `0:move_z=1; 120:bag` walks forward and then opens
+        the inventory. A run with --hold or --menu is a scripted run: it skips
+        the title screen (a script cannot click Start) and never grabs the
+        pointer, so it can be taken while somebody is using the machine.
+
+        --menu puts the pause menu up as soon as play starts, which is the only
+        way to photograph it — Escape with no captured pointer means `close`.
+
+            loom run assets/games/deeper_demo.loom --play --frames 240
+                --hold '0:move_z=1; 90:; 120:bag' --shot bag.png
 
         The first-person camera has weight — the view lags a turn, overshoots
         a little and settles. Four knobs, read once at startup, so it can be
@@ -236,7 +264,10 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
             ("--size", true), ("--steps", true),
         ],
     ),
-    ("run", &[("--edit", false), ("--frames", true), ("--play", false)]),
+    ("run", &[
+        ("--edit", false), ("--frames", true), ("--play", false),
+        ("--shot", true), ("--hold", true), ("--menu", false),
+    ]),
 ];
 
 /// The first unrecognised argument in `args`, if any.
@@ -376,17 +407,44 @@ fn run(args: &[String]) -> (u8, String) {
             None => (2, USAGE.to_owned()),
         },
         Some("run") => match args.get(1) {
-            Some(path) => match run::open_scene(
-                path,
-                args.iter().any(|a| a == "--edit"),
-                flag(args, "--frames").and_then(|n| n.parse::<u32>().ok()),
-                args.iter().any(|a| a == "--play"),
-            ) {
-                Ok(()) => (0, String::new()),
-                Err(e) => (1, json_line(&serde_json::json!({
-                    "error": "run_failed", "constraint": e,
-                }))),
-            },
+            Some(path) => {
+                let frames = flag(args, "--frames").and_then(|n| n.parse::<u32>().ok());
+                let hold = match held_input(args) {
+                    Ok(tape) => tape.unwrap_or_default(),
+                    Err(json) => return (2, json),
+                };
+                let shot = flag(args, "--shot").map(std::path::PathBuf::from);
+                // **`--shot` needs a frame to photograph.** It writes the last
+                // frame of the budget, so without a budget there is no last
+                // frame and the window would run until it was closed by hand,
+                // having written nothing. Refused rather than defaulted: a
+                // default frame count is a guess about how long the scene takes
+                // to arrange itself, and a wrong guess writes a picture of a
+                // fade-in.
+                if shot.is_some() && frames.is_none() {
+                    return (2, json_line(&serde_json::json!({
+                        "error": "missing_argument",
+                        "hint": "--shot writes the last frame, so it needs --frames <n>",
+                    })));
+                }
+                let script = run::Script {
+                    shot,
+                    hold,
+                    menu: args.iter().any(|a| a == "--menu"),
+                };
+                match run::open_scene(
+                    path,
+                    args.iter().any(|a| a == "--edit"),
+                    frames,
+                    args.iter().any(|a| a == "--play"),
+                    script,
+                ) {
+                    Ok(()) => (0, String::new()),
+                    Err(e) => (1, json_line(&serde_json::json!({
+                        "error": "run_failed", "constraint": e,
+                    }))),
+                }
+            }
             None => (2, USAGE.to_owned()),
         },
         _ => (2, USAGE.to_owned()),
@@ -3754,7 +3812,7 @@ fn held_input(args: &[String]) -> Result<Option<Vec<(u64, loom_script::Motion)>>
 ///
 /// Ticks before the first segment are hands off, which is the honest answer
 /// for `--hold "600:move_z=1"` — nobody is pressing anything yet.
-fn input_at(tape: &[(u64, loom_script::Motion)], tick: u64) -> loom_script::Motion {
+pub(crate) fn input_at(tape: &[(u64, loom_script::Motion)], tick: u64) -> loom_script::Motion {
     tape.iter()
         .rev()
         .find(|(at, _)| *at <= tick)
