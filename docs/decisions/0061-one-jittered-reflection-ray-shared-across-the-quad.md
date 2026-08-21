@@ -123,9 +123,15 @@ which is the second clause.
 
 ## Rejected
 
-- **More rays.** ADR 0019's occupancy cliff: 0.024 ms each to eight and 0.101
-  ms each after. The point of the quad share is to get the variance reduction
-  without paying that.
+- **More rays.** ~~ADR 0019's occupancy cliff: 0.024 ms each to eight and 0.101
+  ms each after.~~ **That cliff has been retracted — ADR 0074, and the
+  correction is in ADR 0019 beside the original table.** Rays are linear. The
+  rejection stands on the measurement that actually chose this design and is two
+  bullets down: an unshared jitter is ~50× the added salt, and the share buys
+  the variance reduction for one ray's traversal. What is now *false* is that
+  more rays would have been unaffordable — four unshared rays here would cost
+  about four rays, and would still be the wrong shape, because the defect is
+  coherence between neighbouring pixels and not variance within one.
 - **Dropping `WATER_CINEMATIC_REFLECT_ROUGH` toward the analytic sea's 0.06.**
   Measured with the jitter present: the flat patches return and the added salt
   goes up by an order of magnitude.

@@ -134,7 +134,9 @@ dimming is at 37% of it. 2 m buys 5% more contact for double the flat dimming;
 columns *is* ambient occlusion — a term that darkens contacts and open ground
 equally is not AO, it is exposure.
 
-**Eight rays, and the reason is an occupancy cliff.** Noise against a 64-ray
+**Eight rays, and the reason is an occupancy cliff.** *(The cliff is retracted
+— see the box below. Eight was still the right count, for a different reason.)*
+Noise against a 64-ray
 reference on `primitives`, cost on `lanternhead` at 1920x1080 over the 4-ray
 shadow:
 
@@ -148,6 +150,37 @@ Rays cost 0.022–0.025 ms each up to eight and then **0.101 ms each** from eigh
 to sixteen, with nothing changing in the shader but the trip count. Sixteen rays
 would cost more than the entire rest of the frame to move the worst-channel
 error from 41 to 24, both well inside the gate's 72.
+
+> ### ⚠ The occupancy cliff does not reproduce — retracted, ADR 0074
+>
+> **The four-fold jump above has been re-measured twice, on two builds, by two
+> agents, and it is not there.** Marginal ms per added AO ray, unshared, forward
+> pass at 1920×1080, min of five interleaved reps on a quiet box:
+>
+> | scene | 2 | 4 | 8 | 16 | 2→4 | 4→8 | 8→16 |
+> | --- | --- | --- | --- | --- | --- | --- | --- |
+> | lanternhead | 0.574 | 0.663 | 0.864 | 1.293 | .0445 | .0503 | .0536 |
+> | stoneyard | 0.605 | 0.731 | 0.990 | 1.506 | .0630 | .0648 | .0645 |
+> | cave | 0.327 | 0.396 | 0.531 | 0.805 | .0345 | .0338 | .0343 |
+> | materials | 0.239 | 0.283 | 0.375 | 0.555 | .0220 | .0230 | .0225 |
+>
+> Flat, on every scene, across the rung the cliff was claimed at. The loop is
+> rolled, so the trip count cannot move the register footprint — which is the
+> mechanism a cliff would have needed. The likeliest explanation of the original
+> table is contention: this project has published one set of timings 20× wrong
+> and another 1.8–2.6× high from exactly that, and the row above (`forward ms`
+> 1.618 at sixteen rays, against 1.293 measured now) is high by the right sort
+> of margin.
+>
+> **What stands is the shape of the conclusion and not its stated reason.** Eight
+> rays was a defensible count and sixteen really did buy little. But it was the
+> *diminishing return in the picture* that justified stopping, not a cliff in the
+> cost — and anything citing the cliff to refuse rays is resting on a retracted
+> fact. ADR 0061's rejection of "more rays" was one such citation and is
+> corrected there.
+>
+> ADR 0074 replaces the fixed count with a run-time dial and records what each
+> stop costs, measured on this instrument.
 
 An AO ray costs five times a sun ray at the same count, and the reason is
 coherence: sun rays share their traversal, hemisphere samples do not.
@@ -283,13 +316,32 @@ world moves under it. That is the honest trade for refusing history.
 The cure that was not built is a **spatial** filter, which is what the noise
 budget allows and temporal accumulation is not. The cheap form is a quad-wide
 share — give each pixel of a 2x2 quad a different rotation and average across
-the quad with `QuadReadAcross*`, which is 16-ray quality at the 8-ray price and
-sidesteps the occupancy cliff entirely. Two things stopped it here: it needs
-`GroupNonUniformQuad` in the fragment stage, which this engine neither queries
-nor declares, so it would be a device-capability dependency with no fallback;
-and a helper lane at a geometry edge shades a point slightly off the surface,
-which bleeds occlusion across exactly the silhouettes AO is drawing. Both are
-answerable, and neither is answerable in this change.
+the quad with `QuadReadAcross*`, which is 16-ray quality at the 8-ray price.
+Two things stopped it here: it needs `GroupNonUniformQuad` in the fragment
+stage, which this engine neither queries nor declares, so it would be a
+device-capability dependency with no fallback; and a helper lane at a geometry
+edge shades a point slightly off the surface, which bleeds occlusion across
+exactly the silhouettes AO is drawing. Both are answerable, and neither is
+answerable in this change.
+
+> **Both were answered, and the paragraph above is now a description of what
+> ships.** `GroupNonUniformQuad` is queried in `device.rs` and declared, first
+> for the cinematic water reflection (ADR 0061) and now for this. The helper-lane
+> objection turned out to be answered by the *guide*, not by a weight: a fragment
+> quad is generated from **one primitive**, so its four lanes are four points on
+> one surface and the filter cannot cross a silhouette — there is nothing for a
+> depth or normal test to reject. The lanes take disjoint slices of one sequence
+> rather than four rotations of one set, which is what makes the average worth
+> four times the samples instead of four correlated copies. Shipped at four rays
+> per lane: **24–29% off the forward pass for a picture measurably closer to a
+> converged reference on every scene measured.** ADR 0074.
+>
+> The one thing the objection did name correctly is a real hazard, and it bit
+> elsewhere: a lane that has executed `discard` may not be read across the quad.
+> `fragmentMain` sidesteps it because alpha cutout is a material constant, so a
+> whole quad agrees and takes the unshared path. `waterFragmentMain`'s shoreline
+> `discard` is an interpolated varying, could not be reasoned about the same way,
+> and had to be measured — it was reading killed lanes in shipped code.
 
 ## Cost
 
