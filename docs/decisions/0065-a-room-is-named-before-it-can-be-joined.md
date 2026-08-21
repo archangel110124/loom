@@ -88,15 +88,36 @@ Two rules follow, and both are load-bearing:
 `getrandom::u64()` masked to 60.
 
 The requirement was "a hundred thousand people play the game and no two get the
-same code". The arithmetic is `P ≈ N²/(2·A^L)` for `N` codes live at once over
-an alphabet of `A` symbols and `L` characters, and the honest model is the
-**lifetime** one, not the snapshot one: exposure is every room ever created
-against the rooms live at that moment, `E ≈ R·L_live/A^L`. Read the human's
-number the safe way — 100,000 rooms live *simultaneously*, sustained — and
-`A = 32, L = 12` gives 1 in 13,162 for a year. Read it as lifetime volume at the
-stated scale and it is 1 in 738,000,000. Ten symbols would also be defensible.
+same code". **The snapshot question is the easy one and the wrong one.** For `N`
+codes live at once over an alphabet of `A` symbols and `L` characters, the
+birthday bound is `P ≈ N²/(2·A^L)`:
 
-**Twelve, and the argument is laziness rather than paranoia.** Length is the one
+| | `A^L` | 100,000 live at once |
+| --- | --- | --- |
+| `L = 10` | 1.126 × 10¹⁵ | 4.4 × 10⁻⁶ — 1 in 225,180 |
+| `L = 12` | 1.153 × 10¹⁸ | 4.3 × 10⁻⁹ — 1 in 230,584,301 |
+
+Both pass. **But 100,000 players is not 100,000 live rooms, and the number that
+actually matters is churn**: a code has to be unique against the rooms live *at
+the moment it is issued*, and it gets issued again every time a room ends. Over
+`R` rooms ever created against `N` live, exposure is `E ≈ R·N/A^L`. Read the
+human's number the safe way — 100,000 rooms live at all times, each lasting an
+hour, sustained for a year, so `R = 8.76 × 10⁸`:
+
+| | one year of churn at 100,000 live |
+| --- | --- |
+| `L = 10` | `E = 0.078` — **1 in 12.9. It happens, repeatedly.** |
+| `L = 12` | `E = 7.6 × 10⁻⁵` — 1 in 13,161 |
+
+That is the whole argument. On the snapshot question ten symbols looks fine by a
+factor of two hundred thousand; on the question that decides whether two players
+ever collide, it fails. **Design for concurrent-against-lifetime, not for a
+snapshot.** (A realistic figure for this game — ten million rooms ever, a
+thousand live at a time — is 1 in 115,292,150 at `L = 12` and 1 in 112,590 at
+`L = 10`.)
+
+**Twelve, and the rest of the argument is laziness rather than paranoia.**
+Length is the one
 number that can never change later — it is baked into every client that will
 ever parse a code, and Among Us was forced through exactly that migration. At 60
 bits a code is safe as a *bearer token* (146 years to a hit at an unthrottled
