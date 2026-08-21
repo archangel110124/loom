@@ -3,8 +3,8 @@
 #   loom run assets/games/proving_ground.loom --edit    # Play, then left click
 #
 # Three hunters walk out of the dark. Blow them off the platform before they
-# reach you. WASD moves, the mouse aims, left click fires, Escape frees the
-# pointer.
+# reach you. WASD moves, the mouse aims, left click fires, E interacts, and
+# Escape pauses.
 #
 # ---------------------------------------------------------------------------
 # Why this file is the point

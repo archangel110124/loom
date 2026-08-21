@@ -183,6 +183,67 @@ pub(crate) fn draw(
     (viewport, painted)
 }
 
+/// What the human picked in the pause menu, if anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PauseChoice {
+    Resume,
+    Quit,
+}
+
+/// Wide enough for the longest word on it at the default button font, and
+/// narrow enough not to read as a panel.
+const MENU_WIDTH: f32 = 180.0;
+
+/// Draw the pause menu over the frozen game and report what was clicked.
+///
+/// **Two items, because a demo's pause menu is Resume and Quit.** Settings,
+/// save slots and a volume slider are a settings system, which is a different
+/// job and nobody asked for one.
+///
+/// An `Area` rather than a `Window`: a window is draggable, collapsible and
+/// closable, and all three are wrong for something Escape already closes.
+/// Foreground order, so it sits over the editor's panels under `--edit`.
+///
+/// The scrim goes into `root`, which is the background layer — so it dims the
+/// scene and the HUD and leaves the panels alone. That is what a player wants
+/// in `--play` and what an editor wants in `--edit`.
+pub(crate) fn pause_menu(root: &mut egui::Ui) -> Option<PauseChoice> {
+    let viewport = root.available_rect_before_wrap();
+    root.painter()
+        .rect_filled(viewport, 0.0, egui::Color32::from_black_alpha(170));
+
+    let mut choice = None;
+    let items = [("Resume", PauseChoice::Resume), ("Quit", PauseChoice::Quit)];
+    egui::Area::new(egui::Id::new("loom_pause_menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(viewport.center() - egui::vec2(MENU_WIDTH * 0.5, 90.0))
+        .show(root.ctx(), |ui| {
+            ui.set_width(MENU_WIDTH);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new("PAUSED")
+                        .size(30.0)
+                        .color(egui::Color32::WHITE),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("Esc to resume")
+                        .size(14.0)
+                        .color(egui::Color32::from_gray(180)),
+                );
+                ui.add_space(16.0);
+                for (label, picked) in items {
+                    let button = egui::Button::new(label);
+                    if ui.add_sized([MENU_WIDTH, 34.0], button).clicked() {
+                        choice = Some(picked);
+                    }
+                    ui.add_space(8.0);
+                }
+            });
+        });
+    choice
+}
+
 /// Replace `{name}` with the game's own numbers.
 ///
 /// An unknown name is left standing rather than blanked, so a typo appears on
@@ -395,6 +456,48 @@ mod tests {
             (shadow - face - SHADOW).length() < 0.01,
             "shadow at {shadow:?} is not {SHADOW:?} from the face at {face:?}"
         );
+    }
+
+    /// **An untested menu is one nobody knows is drawn.** Same technique as
+    /// the shadow test above: lay it out through a real `egui::Context` with
+    /// no window anywhere, and read the shapes that came out.
+    #[test]
+    fn the_pause_menu_offers_resume_and_quit() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        };
+
+        // Twice: the first pass of a fresh context is a layout pass and areas
+        // have no size yet, exactly as the shadow test found.
+        let mut labels: Vec<String> = Vec::new();
+        let mut scrims = 0;
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |root| {
+                let _ = pause_menu(root);
+            });
+            labels = Vec::new();
+            scrims = 0;
+            for clipped in &out.shapes {
+                match &clipped.shape {
+                    egui::Shape::Text(t) => labels.push(t.galley.text().to_owned()),
+                    egui::Shape::Rect(r) if r.rect.width() >= 1000.0 => scrims += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        for wanted in ["PAUSED", "Resume", "Quit"] {
+            assert!(
+                labels.iter().any(|l| l == wanted),
+                "the menu drew {labels:?}, with no {wanted:?} on it"
+            );
+        }
+        assert_eq!(scrims, 1, "the game behind the menu was not dimmed");
     }
 
     /// **The overlay must not eat the trigger.** Fixing the anchoring with a

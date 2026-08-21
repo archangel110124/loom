@@ -23,7 +23,7 @@
 # Open it and shoot:
 #   loom run assets/test/range.loom --edit
 # then press Play. The pointer is captured, WASD moves, the mouse aims, and
-# LEFT CLICK fires. Escape hands the pointer back without stopping the run.
+# LEFT CLICK fires. Escape pauses and puts the menu up; Escape again resumes.
 #
 # `turret_range.loom` is the same level with a script that fires itself on a
 # tick instead of on a button — that is the one the tests use, because

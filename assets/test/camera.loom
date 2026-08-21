@@ -18,7 +18,7 @@
 #
 # Open it with `loom run assets/test/camera.loom --edit` and press Play: the
 # pointer is captured and WASD drives the capsule, because this scene has both
-# halves of the rig. Escape hands the pointer back without stopping the sim.
+# halves of the rig. Escape pauses and puts the menu up; Escape again resumes.
 
 [scene]
 format = 1

@@ -131,6 +131,57 @@ const FLY: &str = "fly";
 const PLAY: &str = "play";
 /// Editing actions, live only when `--edit` was passed.
 const EDIT: &str = "edit";
+/// What Play prints when it hands a character over.
+///
+/// One string rather than one per call site, because it is the only place
+/// the key list is written down for a player at runtime and it went stale
+/// once already: it still said "Esc frees the pointer" after Escape became
+/// the pause menu.
+const PLAY_KEYS: &str = concat!(
+    "WASD to move \u{b7} mouse to look \u{b7} left click to fire \u{b7} ",
+    "Space to jump \u{b7} E to interact \u{b7} Esc to pause",
+);
+/// What one press of Escape means right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Escape {
+    /// Take the menu down and give the game back the pointer.
+    Resume,
+    /// Freeze the game and put the menu up.
+    Pause,
+    /// Close the window.
+    Close,
+}
+
+/// Decide what Escape does, out of the event handler so it can be tested.
+///
+/// **A free function because nothing headless can press a key.** `App` needs a
+/// window, a device and a swapchain, so the only thing about this decision that
+/// can be checked without one is the decision itself — and it is the part that
+/// was reported broken.
+///
+/// **What it used to be:** `if captured { hand the pointer back } else { exit }`,
+/// with no menu and no pause. So the first Escape while driving released the
+/// pointer and *nothing else* — the simulation kept running, and the view fell
+/// back to the fly camera, because the frame only uses the character's camera
+/// while `self.captured`. That is the "back to the editor type view" in the
+/// report.
+/// The second Escape then found `captured` false, took the `else`, and closed
+/// the window: "it just closes everything". Two presses to lose a session.
+///
+/// `captured` is in the condition and not just `playing`: a Play session in the
+/// editor that the human has clicked out of is playing but not captured, and
+/// [`App::set_pause_menu`] recaptures on resume — so opening the menu from an
+/// uncaptured state would hand Resume a pointer the human never gave it.
+const fn escape_means(menu_open: bool, playing: bool, captured: bool) -> Escape {
+    if menu_open {
+        Escape::Resume
+    } else if playing && captured {
+        Escape::Pause
+    } else {
+        Escape::Close
+    }
+}
+
 /// How far one nudge moves a node, in metres.
 const NUDGE: f32 = 0.25;
 
@@ -296,6 +347,12 @@ struct App {
     /// and nothing headless could get there — `--frames` alone runs a paused
     /// editor, which is exactly the case where the defect costs nothing.
     autoplay: bool,
+    /// Whether the pause menu is up.
+    ///
+    /// Its own flag rather than `!captured && play.is_some()`, because those
+    /// two are also true of a play session in the editor that the human has
+    /// merely clicked out of, and the menu must not appear for that.
+    pause_menu: bool,
     /// How many frames' CPU cost has been measured, and their total.
     ///
     /// **The frame's CPU work, up to the draw call — not the whole frame.**
@@ -442,6 +499,7 @@ impl App {
             fps: 0.0,
             frames_left: None,
             autoplay: false,
+            pause_menu: false,
             cpu_frames: 0,
             cpu_total_ms: 0.0,
             cpu_worst_ms: 0.0,
@@ -1102,14 +1160,13 @@ impl ApplicationHandler for App {
                 // two redraws is still seen exactly once here rather than
                 // missed entirely.
                 if self.input.is_active(&self.bindings, FLY, "quit") {
-                    // While driving a character, Escape means "give me my
-                    // cursor back", not "close the window" — which is what it
-                    // means in every game that ever captured a pointer.
-                    if self.captured {
-                        self.capture_pointer(false);
-                    } else {
-                        event_loop.exit();
-                        return;
+                    match escape_means(self.pause_menu, self.play.is_some(), self.captured) {
+                        Escape::Resume => self.set_pause_menu(false),
+                        Escape::Pause => self.set_pause_menu(true),
+                        Escape::Close => {
+                            event_loop.exit();
+                            return;
+                        }
                     }
                 }
                 if self.input.is_active(&self.bindings, FLY, "reframe") {
@@ -1147,7 +1204,11 @@ impl ApplicationHandler for App {
                 let camera = self
                     .play
                     .as_ref()
-                    .filter(|_| self.captured)
+                    // `|| self.pause_menu`: the menu releases the pointer, and
+                    // without this the frame behind it would be the fly camera
+                    // — which is exactly the "back to the editor" the menu
+                    // exists to stop.
+                    .filter(|_| self.captured || self.pause_menu)
                     .and_then(crate::play::Play::camera)
                     .map_or_else(
                         || self.camera.camera(),
@@ -1437,6 +1498,12 @@ impl ApplicationHandler for App {
                 #[allow(clippy::disallowed_methods)]
                 let draw_started = std::time::Instant::now();
                 let mut dock = self.dock.as_mut();
+                // Read out of `self` before the borrow, like `dock`, and
+                // answered after the draw — the build closure is `FnMut` and
+                // may run more than once, so the click is recorded rather than
+                // acted on inside it.
+                let menu_open = self.pause_menu;
+                let mut pause_choice = None;
                 let result = match (self.viewer.as_mut(), self.ui.as_mut(), self.window.as_ref()) {
                     (Some(viewer), Some(ui), Some(window)) => viewer.draw_with_ui(
                         drawn,
@@ -1457,6 +1524,10 @@ impl ApplicationHandler for App {
                                 actions.extend(dock.draw(root, &state));
                             }
                             let _ = crate::hud::draw(root, &overlay);
+                            // Last, so its scrim dims the HUD too.
+                            if menu_open {
+                                pause_choice = crate::hud::pause_menu(root);
+                            }
                         },
                     ),
                     (Some(viewer), _, _) => viewer.draw(drawn, &camera),
@@ -1476,6 +1547,14 @@ impl ApplicationHandler for App {
                 if let Err(e) = result {
                     eprintln!("loom: draw failed: {e}");
                     event_loop.exit();
+                }
+                match pause_choice {
+                    Some(crate::hud::PauseChoice::Resume) => self.set_pause_menu(false),
+                    Some(crate::hud::PauseChoice::Quit) => {
+                        self.shutdown(event_loop);
+                        return;
+                    }
+                    None => {}
                 }
                 for action in actions {
                     self.act(action);
@@ -1662,9 +1741,7 @@ impl App {
         // stays a spectator view and the fly camera keeps working.
         if drivable {
             self.capture_pointer(true);
-            crate::log::info(
-                "WASD to move · mouse to look · left click to fire · Space to jump · Esc frees the pointer",
-            );
+            crate::log::info(PLAY_KEYS);
         } else {
             crate::log::info(
                 "no player rig (needs a CharacterController and a Camera) — flying instead",
@@ -1698,6 +1775,23 @@ impl App {
         self.captured = capture;
     }
 
+    /// Open or close the pause menu.
+    ///
+    /// Three things move together and all three are the point: the pointer
+    /// comes back so the menu can be clicked, the simulation stops so nothing
+    /// eats you while you read it, and `pause_menu` keeps the camera on the
+    /// game rather than letting it fall back to the fly camera.
+    ///
+    /// Resume unpauses unconditionally, so a session paused from the editor
+    /// toolbar and then Escaped resumes on Resume. That is what the word says.
+    fn set_pause_menu(&mut self, open: bool) {
+        self.pause_menu = open;
+        self.capture_pointer(!open);
+        if let Some(play) = self.play.as_mut() {
+            play.paused = open;
+        }
+    }
+
     /// Sample this frame's keys for the character being driven.
     fn feed_play_input(&mut self) {
         let Some(play) = self.play.as_mut() else {
@@ -1717,11 +1811,13 @@ impl App {
             jump: self.input.is_active(&self.bindings, PLAY, "jump"),
             sprint: self.input.is_active(&self.bindings, PLAY, "sprint"),
             fire: self.input.is_active(&self.bindings, PLAY, "fire"),
+            interact: self.input.is_active(&self.bindings, PLAY, "interact"),
         });
     }
 
     /// Stop, and go back to the authored scene exactly as it was.
     fn stop_play(&mut self) {
+        self.pause_menu = false;
         self.capture_pointer(false);
         // Stop discards the simulated world, so the explosions in it are gone
         // too. Leaving the counter high would make the first shot of the next
@@ -2708,4 +2804,56 @@ pub fn open_scene(
         .map_err(|e| format!("{path}: {e}"))?;
 
     run(path, view, session, disk_seen, frames, autoplay)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Escape, escape_means};
+
+    /// **The Escape state machine, which is the whole of the bug report.**
+    /// "When I hit escape, it takes me back to the editor type view. And then
+    /// if I hit it again, it just closes everything." Both halves of that are
+    /// the `Close` row below reached twice over, and neither is reachable now
+    /// while a character is being driven.
+    #[test]
+    fn escape_pauses_while_playing_and_closes_otherwise() {
+        // (menu_open, playing, captured)
+        for (state, want) in [
+            ((false, true, true), Escape::Pause),   // driving: put the menu up
+            ((true, true, true), Escape::Resume),   // menu up: take it down
+            ((true, false, false), Escape::Resume), // Stop under an open menu
+            ((false, false, false), Escape::Close), // just the viewer
+            ((false, true, false), Escape::Close),  // playing, clicked out
+        ] {
+            let (menu_open, playing, captured) = state;
+            assert_eq!(
+                escape_means(menu_open, playing, captured),
+                want,
+                "escape_means{state:?}"
+            );
+        }
+    }
+
+    /// A second Escape must never close the window from inside the menu — that
+    /// was the reported "it just closes everything", and it is the one
+    /// transition worth spelling out as a sequence rather than as a table row.
+    #[test]
+    fn two_escapes_while_driving_pause_and_resume_rather_than_quitting() {
+        let mut menu = false;
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let action = escape_means(menu, true, true);
+            seen.push(action);
+            match action {
+                Escape::Pause => menu = true,
+                Escape::Resume => menu = false,
+                Escape::Close => break,
+            }
+        }
+        assert_eq!(
+            seen,
+            [Escape::Pause, Escape::Resume, Escape::Pause, Escape::Resume],
+            "Escape closed the window from inside a game"
+        );
+    }
 }
