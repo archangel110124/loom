@@ -872,7 +872,12 @@ let ITEMS = #{
     line:    #{ w: 1, h: 1, rot: 0, fish: 0, label: "LINE" },
     lantern: #{ w: 1, h: 1, rot: 0, fish: 0, label: "LAMP" },
     thermos: #{ w: 1, h: 1, rot: 0, fish: 0, label: "FLSK" },
-    sprat:   #{ w: 1, h: 1, rot: 1, fish: 1, label: "><>"  },
+    // **A one-cell fish cannot be turned**, the same as a one-cell flask.
+    // `rot: 1` here made LMB on a sprat report success and change nothing —
+    // a silent no-op dressed as a verb — and cost `first_fit` a second pass
+    // over the whole grid for a footprint it had already tried. She gets the
+    // honest refusal now: `IT IS ONE CELL   turning it would change nothing`.
+    sprat:   #{ w: 1, h: 1, rot: 0, fish: 1, label: "><>"  },
     runner:  #{ w: 2, h: 1, rot: 1, fish: 1, label: "><>"  },
     hake:    #{ w: 2, h: 2, rot: 1, fish: 1, label: "><>"  },
     conger:  #{ w: 2, h: 3, rot: 1, fish: 1, label: "><>"  },

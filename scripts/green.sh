@@ -1087,6 +1087,18 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 340:move_x=1; 348:" \
   --assert "state.creel_cx == 2" --assert "state.creel_refused == 1" >/dev/null
 
+#      **And code 5, which had no row either.** LMB on a one-cell item says so
+#      rather than doing nothing, because "I pressed it and nothing happened" is
+#      the complaint every silent no-op earns. The sprat was `rot: 1` in the
+#      item table until this row was written — so LMB on a one-cell *fish*
+#      reported success and changed nothing, which is the no-op the message
+#      exists to prevent, wearing the message's own clothes.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 300 \
+  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+280:fire=1; 281:" \
+  --assert "state.creel_refused == 5" --assert "state.creel_hand == 1" \
+  | grep -q '"message": "IT IS ONE CELL   turning it would change nothing"'
+
 #      **Code 4, which exists because code 2 was lying.** LMB with an empty hand
 #      used to answer `NOTHING IN THAT CELL`. The cursor is on the FLSK: there
 #      is something in that cell, and the player who reached for the turn key
