@@ -116,7 +116,7 @@ transform = { pos = [0.0000, 0.1970, 0.0000], rot_euler = [0.00, 0.00, 0.00] }
 [[node]]
 name = "CreelM"
 parent = "Deckhand/Hips/Spine"
-transform = { pos = [0.0000, 0.1810, 0.2220], rot_euler = [0.00, 0.00, 0.00] }
+transform = { pos = [0.0000, 0.1810, 0.2280], rot_euler = [0.00, 0.00, 0.00] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "creel" }
@@ -149,7 +149,7 @@ transform = { pos = [0.0000, 0.3940, 0.0000], rot_euler = [0.000, 0.000, 0.000] 
 [[node]]
 name = "NeckM"
 parent = "Deckhand/Hips/Spine/Neck"
-transform = { pos = [0.0000, 0.0450, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.0720, 0.0450, 0.0720] }
+transform = { pos = [0.0000, 0.0190, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.0720, 0.0190, 0.0720] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "cylinder" }
@@ -163,7 +163,7 @@ transform = { pos = [0.0000, 0.0450, 0.0000], rot_euler = [0.00, 0.00, 0.00], sc
 [[node]]
 name = "HatM"
 parent = "Deckhand/Hips/Spine/Neck"
-transform = { pos = [0.0000, 0.2250, 0.0100], rot_euler = [0.00, 0.00, 0.00] }
+transform = { pos = [0.0000, 0.1540, 0.0000], rot_euler = [0.00, 0.00, 0.00] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "hat" }
@@ -177,7 +177,7 @@ transform = { pos = [0.0000, 0.2250, 0.0100], rot_euler = [0.00, 0.00, 0.00] }
 [[node]]
 name = "LampM"
 parent = "Deckhand/Hips/Spine"
-transform = { pos = [0.0000, 0.2450, -0.1500], rot_euler = [90.00, 0.00, 0.00], scale = [0.0420, 0.0280, 0.0420] }
+transform = { pos = [-0.0820, 0.2380, -0.1716], rot_euler = [90.00, 0.00, 0.00], scale = [0.0430, 0.0130, 0.0430] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "cylinder" }
@@ -191,12 +191,12 @@ transform = { pos = [0.0000, 0.2450, -0.1500], rot_euler = [90.00, 0.00, 0.00], 
 [[node]]
 name = "ShoulderL"
 parent = "Deckhand/Hips/Spine"
-transform = { pos = [-0.2760, 0.3380, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+transform = { pos = [-0.2620, 0.3380, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
 [[node]]
 name = "ShoulderBallL"
 parent = "Deckhand/Hips/Spine/ShoulderL"
-transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.0695, 0.0695, 0.0695] }
+transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.0666, 0.0666, 0.0666] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "ball" }
@@ -224,12 +224,12 @@ transform = { pos = [0.0000, -0.1550, 0.0000], rot_euler = [0.00, 0.00, 0.00], s
 [[node]]
 name = "ElbowL"
 parent = "Deckhand/Hips/Spine/ShoulderL"
-transform = { pos = [0.0000, -0.3100, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+transform = { pos = [-0.0010, -0.3100, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
 [[node]]
 name = "ElbowBallL"
 parent = "Deckhand/Hips/Spine/ShoulderL/ElbowL"
-transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.0616, 0.0616, 0.0616] }
+transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.0666, 0.0666, 0.0666] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "ball" }
@@ -257,12 +257,12 @@ transform = { pos = [0.0000, -0.1450, 0.0000], rot_euler = [0.00, 0.00, 0.00], s
 [[node]]
 name = "HandL"
 parent = "Deckhand/Hips/Spine/ShoulderL/ElbowL"
-transform = { pos = [0.0000, -0.2900, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+transform = { pos = [-0.0010, -0.2900, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
 [[node]]
 name = "HandLM"
 parent = "Deckhand/Hips/Spine/ShoulderL/ElbowL/HandL"
-transform = { pos = [0.0000, -0.0530, 0.0000], rot_euler = [0.00, 0.00, 0.00] }
+transform = { pos = [0.0000, -0.0660, 0.0000], rot_euler = [0.00, 0.00, 0.00] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "hand" }
@@ -276,12 +276,12 @@ transform = { pos = [0.0000, -0.0530, 0.0000], rot_euler = [0.00, 0.00, 0.00] }
 [[node]]
 name = "ShoulderR"
 parent = "Deckhand/Hips/Spine"
-transform = { pos = [0.2760, 0.3380, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+transform = { pos = [0.2620, 0.3380, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
 [[node]]
 name = "ShoulderBallR"
 parent = "Deckhand/Hips/Spine/ShoulderR"
-transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.0695, 0.0695, 0.0695] }
+transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.0666, 0.0666, 0.0666] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "ball" }
@@ -309,12 +309,12 @@ transform = { pos = [0.0000, -0.1550, 0.0000], rot_euler = [0.00, 0.00, 0.00], s
 [[node]]
 name = "ElbowR"
 parent = "Deckhand/Hips/Spine/ShoulderR"
-transform = { pos = [0.0000, -0.3100, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+transform = { pos = [0.0010, -0.3100, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
 [[node]]
 name = "ElbowBallR"
 parent = "Deckhand/Hips/Spine/ShoulderR/ElbowR"
-transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.0616, 0.0616, 0.0616] }
+transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.0666, 0.0666, 0.0666] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "ball" }
@@ -342,12 +342,12 @@ transform = { pos = [0.0000, -0.1450, 0.0000], rot_euler = [0.00, 0.00, 0.00], s
 [[node]]
 name = "HandR"
 parent = "Deckhand/Hips/Spine/ShoulderR/ElbowR"
-transform = { pos = [0.0000, -0.2900, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+transform = { pos = [0.0010, -0.2900, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
 [[node]]
 name = "HandRM"
 parent = "Deckhand/Hips/Spine/ShoulderR/ElbowR/HandR"
-transform = { pos = [0.0000, -0.0530, 0.0000], rot_euler = [0.00, 0.00, 0.00] }
+transform = { pos = [0.0000, -0.0660, 0.0000], rot_euler = [0.00, 0.00, 0.00] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "hand" }
@@ -366,7 +366,7 @@ transform = { pos = [-0.1180, 0.0000, 0.0000], rot_euler = [0.000, 0.000, 0.000]
 [[node]]
 name = "HipBallL"
 parent = "Deckhand/Hips/HipL"
-transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.1113, 0.1113, 0.1113] }
+transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.1146, 0.1146, 0.1146] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "ball" }
@@ -394,12 +394,12 @@ transform = { pos = [0.0000, -0.2060, 0.0000], rot_euler = [0.00, 0.00, 0.00], s
 [[node]]
 name = "KneeL"
 parent = "Deckhand/Hips/HipL"
-transform = { pos = [0.0000, -0.4120, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+transform = { pos = [-0.0010, -0.4120, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
 [[node]]
 name = "KneeBallL"
 parent = "Deckhand/Hips/HipL/KneeL"
-transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.1018, 0.1018, 0.1018] }
+transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.1146, 0.1146, 0.1146] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "ball" }
@@ -427,7 +427,7 @@ transform = { pos = [0.0000, -0.1540, 0.0000], rot_euler = [0.00, 0.00, 0.00], s
 [[node]]
 name = "AnkleL"
 parent = "Deckhand/Hips/HipL/KneeL"
-transform = { pos = [0.0000, -0.3080, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+transform = { pos = [-0.0010, -0.3080, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
 [[node]]
 name = "BootLM"
@@ -451,7 +451,7 @@ transform = { pos = [0.1180, 0.0000, 0.0000], rot_euler = [0.000, 0.000, 0.000] 
 [[node]]
 name = "HipBallR"
 parent = "Deckhand/Hips/HipR"
-transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.1113, 0.1113, 0.1113] }
+transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.1146, 0.1146, 0.1146] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "ball" }
@@ -479,12 +479,12 @@ transform = { pos = [0.0000, -0.2060, 0.0000], rot_euler = [0.00, 0.00, 0.00], s
 [[node]]
 name = "KneeR"
 parent = "Deckhand/Hips/HipR"
-transform = { pos = [0.0000, -0.4120, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+transform = { pos = [0.0010, -0.4120, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
 [[node]]
 name = "KneeBallR"
 parent = "Deckhand/Hips/HipR/KneeR"
-transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.1018, 0.1018, 0.1018] }
+transform = { pos = [0.0000, 0.0000, 0.0000], rot_euler = [0.00, 0.00, 0.00], scale = [0.1146, 0.1146, 0.1146] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "ball" }
@@ -512,7 +512,7 @@ transform = { pos = [0.0000, -0.1540, 0.0000], rot_euler = [0.00, 0.00, 0.00], s
 [[node]]
 name = "AnkleR"
 parent = "Deckhand/Hips/HipR/KneeR"
-transform = { pos = [0.0000, -0.3080, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+transform = { pos = [0.0010, -0.3080, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
 [[node]]
 name = "BootRM"
