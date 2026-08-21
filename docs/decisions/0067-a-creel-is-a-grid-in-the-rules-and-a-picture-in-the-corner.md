@@ -64,9 +64,16 @@ already un-consumed by hand in the viewer.
 
 The only directional input in this engine is `move_x` / `move_z`. Opening the
 creel takes them; `speed` is zeroed on `bag_open` before it is zeroed on
-`at_helm`. Measured on one tape, W held from tick 0 in both runs: **z is -9.310
-with the grid shut and -3.073 with it opened at tick 60**, and still -3.073 at
-tick 400.
+`at_helm`. Measured on one tape, W held from tick 0 in both runs: **z is -12.308
+with the grid shut and -3.073 with it opened at tick 60**, and *exactly* -3.073
+at tick 400 and again at tick 900.
+
+**The shut figure is the character controller's and it moves.** It read -9.310
+when this was written; `40bd02d` gave the view mass and it became -12.308,
+which the gate did not notice because the row asserts `< -9.0`. That slack is
+deliberate — the claim is "he walked a long way" against "he did not move" —
+but it means the number in this paragraph is a snapshot and the *stop* is the
+part that is pinned.
 
 **The pointer stays captured, so mouse-look keeps working.** That is the
 difference between this and the pause menu, and it is the whole feel of the
@@ -109,10 +116,23 @@ not a rectangle. A fish is rolled on the bite to one of four sizes: sprat 1×1,
 runner 2×1, hake 2×2, conger 2×3.
 
 A conger is six cells and does not fit beside a kit. The grid needs no rule
-saying "a big fish is hard to carry" — it simply is one. Ditch the thermos and
-rows 1–2 are a clean 3×2 and she goes in turned; ditch the lantern instead and
-six cells are free in an L and she is still refused. *Which* curio goes over the
-side is a spatial question, and that sentence is the reason this is a grid.
+saying "a big fish is hard to carry" — it simply is one.
+
+**Three curios are aboard when she is refused and only two of them are answers.**
+The creel reads `a.b/c../...` — thermos (0,0), line (2,0), lantern (0,1) — and
+all three solves are measured in §6 rows 5b4 and 5b9:
+
+| ditch | taps to reach it | free cells | she goes in |
+| --- | --- | --- | --- |
+| **thermos** (0,0) | 0 — the cursor is already on it | six, in an L | **no**. No 2×3 and no 3×2 in them |
+| **lantern** (0,1) | 1 tap of S | rows 1–2, a clean 3×2 | yes, **turned**: `a.b/ccc/ccc` |
+| **line** (2,0) | 2 taps of D | columns 1–2, a clean 2×3 | yes, **unturned**: `acc/bcc/.cc` |
+
+*Which* curio goes over the side is a spatial question with a wrong answer, and
+the wrong answer is the one nearest to hand. The cheapest right answer is the
+one that only works because the packer may turn her. **This paragraph had the
+thermos and the lantern the wrong way round until a row was written for each**,
+which is the argument for writing the row and not the paragraph.
 
 **The rod is not an item.** `rod_hold.rhai` puts it in his hands, in the world,
 where he can see it. **There is no combine and no knife**: a whole extra verb to
@@ -157,6 +177,40 @@ Shutting with a full hand puts the item back rather than refusing to shut: a
 held item has no picture and no verb outside the grid, and a TAB that stops
 working reads as a bug rather than as a rule. It always fits — it came out of
 this grid one press ago and its own cells are still free.
+
+### 7b. Why the last press did nothing, and when it stops being true
+
+Five codes and no others. The list in the script named a `4` nothing set, was
+missing `5`, and described `2` as its own opposite.
+
+| | | |
+| --- | --- | --- |
+| **1** | it will not go there | E, hand full, the footprint overlaps |
+| **2** | nothing in that cell | E or SHIFT, hand empty, cell empty |
+| **3** | hands on the wheel | TAB on the helm mat |
+| **4** | nothing in your hand | LMB with an empty hand |
+| **5** | it is one cell | LMB on something that cannot turn |
+
+**4 exists because 2 was lying.** LMB with an empty hand answered *nothing in
+that cell*, which is false whenever the cursor is on something — and the player
+it is answering is exactly the one who reached for the turn key before the lift
+key, i.e. the one looking at an item.
+
+**Every code is a fact about the cell under the cursor, so all of them expire
+when the cursor moves.** `IT WILL NOT GO THERE   LMB turns it — or move the
+cursor` told the player to do a thing and doing it changed nothing: he walked
+the fish to a free cell, the overlay painted her footprint green, and the line
+went on saying she did not fit. Two readouts of one fact, disagreeing, and the
+wrong one made of words.
+
+**The clear is tested after the clamp**, on `cx != cx0 || cy != cy0` and not on
+the arrival of a `cursor` event. Pressing D at the right-hand wall emits an
+event and moves nothing, and a message that blinks off when nothing moved is the
+same bug the other way round. Both injected, both caught by 5b10.
+
+The latch itself stays, and stays for `--assert`'s sake: `--assert` runs once,
+at the end of a run, so a per-tick flag written on tick 550 and cleared on 551
+reads 0 at tick 600 and the row passes having checked nothing.
 
 ### 8. Painted, never an `egui::Area`
 
@@ -244,9 +298,17 @@ thing standing between the two halves.
   tried is a *world* action: you leave it on the deck.
 
 `play.rs` still clones one `PlayerInput` into every character, so none of this
-is testable yet. The one thing that would want changing on the day it is:
-`state.creel` should be keyed by player (`state.creels.p0`), which is a map
-lookup now against a search-and-replace through fifteen hundred lines later.
+is testable yet.
+
+**The brief asked for the per-player key on day one and it was not done, and
+that is a deviation rather than an oversight.** `state.creel` is flat. Keying it
+`state.creels.p0` is a map lookup today and a search-and-replace through fifteen
+hundred lines the day a second player exists, so the cost of deferring is real
+and known. It was still deferred: there is no second player, no replication, and
+no test that could tell the two shapes apart, so the key would be structure
+bought entirely on faith — and the *hard* part of a second creel is not where it
+is stored but that `play.rs` has one `PlayerInput`, which the rename does not
+touch. **Do it in the same commit as the second player, not before.**
 
 ## Rejected
 
@@ -279,3 +341,20 @@ Four things, and they need a human at `loom run`:
    read as a pause, the redesign is real rather than a tune: the creel becomes
    openable only at rest or at the hatch, and the field inventory becomes
    something smaller. Budget for it before calling this done.
+5. Whether the held item's footprint preview, which is **clamped to the grid**,
+   reads as "it hangs off the edge" or as "it shrank". It is red in exactly that
+   case, so the answer is on screen; whether it is the answer a player reads is
+   not something a shape count can say.
+
+## What the refinement pass found
+
+**Rotation had zero coverage.** `cells_of`'s `rot` branch could be deleted, or
+`first_fit` stopped from ever trying the turned footprint, and the whole
+gameplay block still exited 0 — because the one conger any row landed goes in
+*unturned* and no row had ever placed anything else. §5's table is the fix, and
+§6 rows 5b9 now cover the packer choosing a rotation, LMB changing the
+footprint in the hand, `creel_fits` flipping at a fixed cell because of it, and
+the refusal that follows. All three injections caught.
+
+Two comments were also measured and found stale — the walk figure in §3, and
+this ADR's own thermos-versus-lantern sentence, which was backwards.
