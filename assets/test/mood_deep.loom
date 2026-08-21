@@ -1,0 +1,162 @@
+# The mood ladder, in pixels — ADR 0069.
+#
+# **The only gate on `Environment.stages` there is or can be.** Every other
+# scene in the library authors no stages, so all 54 references would pass with
+# the blend arbitrarily broken — a mid-stage `dread` reading as its near
+# endpoint, a patch key silently not reaching the shader, `Grade` never leaving
+# the identity. That is the "a gate that cannot see a feature reports a full
+# pass" failure this project has now had four times.
+#
+# **`dread` is 0.65, and the value is the point.** It is not a stage: it sits
+# 0.30 of the way from `middle` (0.5) to `far` (1.0), so this row gates the
+# *blend* rather than an endpoint. A row authored at 0.5 or 1.0 would pass with
+# the interpolation deleted entirely.
+#
+# Deliberately tiny — a ground plane, a sky, two lit boxes and water. The gate
+# renders every row four times across `image` and `repeat`, in a DEBUG binary,
+# so a slow row is paid for on every green run. `deeper_demo --sim 6000` is 69 s
+# debug and is why it is not the row.
+#
+# The boxes are one warm and one cold on purpose: the grade's `gain` is a white
+# balance and its `saturation` pulls toward luma, and neither is visible on a
+# neutral surface. A grey scene would gate the lighting half and nothing else.
+
+[scene]
+format = 1
+id = "5b3e07a9-1c64-4d82-9af3-27e5061cb8d4"
+
+[[asset]]
+key = "box"
+path = "box"
+
+[[asset]]
+key = "cylinder"
+path = "cylinder"
+
+[[node]]
+name = "Mood"
+
+  # The ladder. Two stages, so the blend has something to blend, and they are
+  # far apart on every axis the system owns — light, colour, fog, cloud,
+  # exposure, and all three grade terms — so a term that never reaches the
+  # shader shows up as a pixel difference rather than as nothing.
+  [node.components.Environment]
+  sun_direction = [0.42, 0.46, -0.78]
+  sun_strength = 1.25
+  sun_color = [1.0, 0.93, 0.80]
+  ambient = 0.45
+  sky_zenith = [0.16, 0.30, 0.52]
+  sky_horizon = [0.74, 0.72, 0.66]
+  fog_density = 0.0028
+  fog_falloff = 0.05
+  dread = 0.65
+
+    [[node.components.Environment.stages]]
+    name = "middle"
+    at = 0.5
+    # `cloud_scale` is the one key deliberately left unnamed by BOTH stages: it
+    # must fall back to the scene's own value rather than ramp from a default
+    # nobody authored, and this row is where that stays true.
+      [node.components.Environment.stages.environment]
+      sun_strength = 0.75
+      sun_color = [0.92, 0.96, 0.78]
+      ambient = 0.36
+      sky_zenith = [0.13, 0.20, 0.16]
+      sky_horizon = [0.52, 0.56, 0.40]
+      fog_density = 0.018
+      fog_falloff = 0.04
+      cloud_cover = 0.55
+      exposure = 0.88
+      [node.components.Environment.stages.grade]
+      gain = [0.96, 1.00, 0.90]
+      contrast = 1.02
+      saturation = 0.72
+
+    [[node.components.Environment.stages]]
+    name = "far"
+    at = 1.0
+      [node.components.Environment.stages.environment]
+      sun_strength = 0.12
+      sun_color = [0.70, 0.80, 0.66]
+      ambient = 0.13
+      sky_zenith = [0.02, 0.03, 0.03]
+      sky_horizon = [0.09, 0.11, 0.10]
+      fog_density = 0.058
+      fog_falloff = 0.02
+      cloud_cover = 1.00
+      exposure = 0.48
+      [node.components.Environment.stages.grade]
+      gain = [0.86, 0.92, 0.86]
+      contrast = 1.10
+      saturation = 0.26
+
+# The camera, authored so the frame is composed rather than auto-framed: a
+# whole-scene fit would put the horizon in the middle and the sky — which is
+# most of what the mood does — into a strip.
+[[node]]
+name = "Eye"
+parent = "Mood"
+transform = { pos = [0.0, 1.7, 7.2], rot_euler = [-6.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0
+
+# The sea, so the row also covers what the grade does to a specular highlight.
+[[node]]
+name = "Sea"
+parent = "Mood"
+
+  [node.components.WaterBody]
+  surface_height = -0.35
+
+    [[node.components.WaterBody.waves.waves]]
+    wavelength = 6.0
+    amplitude = 0.06
+    steepness = 0.45
+    direction = [1.0, 0.25]
+
+    [[node.components.WaterBody.waves.waves]]
+    wavelength = 2.4
+    amplitude = 0.025
+    steepness = 0.4
+    direction = [0.7, -0.7]
+
+# The jetty the boxes stand on — a dry surface for the lighting half.
+[[node]]
+name = "Deck"
+parent = "Mood"
+transform = { pos = [0.0, -0.15, 0.0], scale = [3.0, 0.15, 2.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.32, 0.29, 0.25]
+  roughness = 0.85
+
+# Warm. The grade's gain tilts red and its saturation drains this fastest.
+[[node]]
+name = "Crate"
+parent = "Mood"
+transform = { pos = [-1.3, 0.45, 0.0], scale = [0.45, 0.45, 0.45] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.62, 0.24, 0.10]
+  roughness = 0.7
+
+# Cold, and glossy enough to carry a highlight into the shoulder.
+[[node]]
+name = "Drum"
+parent = "Mood"
+transform = { pos = [1.3, 0.45, 0.0], scale = [0.4, 0.45, 0.4] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cylinder" }
+
+  [node.components.Material]
+  albedo = [0.14, 0.32, 0.40]
+  roughness = 0.28
+  metallic = 0.5

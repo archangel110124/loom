@@ -38,7 +38,9 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 69] = [
+const SCENES: [&str; 70] = [
+    // The mood ladder — ADR 0069. In `GOLDEN` too, where the reasoning is.
+    "assets/test/mood_deep.loom",
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
     // crown it threw nothing of is a rendering path, and the reasoning is on
     // that row. It still earns this line for what it always did — it loads,
@@ -378,7 +380,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 54] = [
+const GOLDEN: [(&str, &str, &[&str]); 55] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -424,6 +426,24 @@ const GOLDEN: [(&str, &str, &[&str]); 54] = [
     ("glass", "assets/test/glass.loom", &[]),
     ("materials", "assets/test/materials.loom", &[]),
     ("cave", "assets/test/cave.loom", &[]),
+    // **The only gate on `Environment.stages` there is or can be** — ADR 0069.
+    // Every other scene in this list authors no stages, so all 54 of them pass
+    // with the mood blend arbitrarily broken: a mid-stage `dread` reading as
+    // its near endpoint, a patch key never reaching the shader, the grade never
+    // leaving the identity. That is the "a gate that cannot see a feature
+    // reports a full pass" failure this project has now had four times, and it
+    // is why a new system arrives with a row rather than after one.
+    //
+    // **`dread` is authored at 0.65, and the value is the whole point.** It is
+    // not a stage: it sits 0.30 of the way from `middle` to `far`, so this row
+    // gates the *interpolation*. A row authored at either endpoint would pass
+    // with the blend deleted outright.
+    //
+    // 1.80 s in a debug binary at 320x200 — measured, and cheaper than `cave`
+    // beside it, because the scene is six nodes and the time is process
+    // startup. `deeper_demo --sim 6000` is 69 s debug and four runs across
+    // `image` and `repeat`, which is why the game is not the row.
+    ("mood_deep", "assets/test/mood_deep.loom", &[]),
     // **The recipe pipeline reaching the SDF**, which nothing else in this list
     // covers and nothing else in the project measures. `cave` and
     // `terrain_stress` are voxels too, but their landform is analytic — a
