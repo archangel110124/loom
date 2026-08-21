@@ -1,0 +1,225 @@
+# ADR 0065 — A room is named before it can be joined
+
+- **Date:** 2026-08-20
+- **Status:** **accepted** for the room code and the architecture; the transport
+  is **decided but not built**, and M2 below is **not authorised** — it is a
+  phase decision for the human, not an overnight one.
+- **Sits under:** ADR 0045, whose clause 1 the room code stays outside on
+  purpose (it is not a function of scene and tick and must never become one);
+  ADR 0053, whose *machine-local* wording is the evidence that decides the
+  lockstep question below; ADR 0060, whose boat-local `--assert` axes are the
+  frame a future reconciler needs and already has.
+- **Applies to:** `loom_cli::run` (`generate_code`, `normalise`,
+  `room_code_panel`, `App::room_code`), `crates/loom_cli/Cargo.toml`, and every
+  later networking decision.
+
+## The request
+
+> "Since this is gonna be a multiplayer game… can you make a workflow
+> researching how to add networking so we can at very least have a room code
+> style setup for our multiplayer. So the host will host, and then someone else
+> will get a code from the host, and the host will see it basically when they
+> hit escape. It should be at, like, the top right… And the code should be
+> randomly generated every time. And it should be long enough to where there
+> should never be any replicated."
+
+## Decision
+
+**Loom's multiplayer will be host-authoritative with input replication.**
+Guests send their `Motion` — the same three-state axes, yaw, pitch and button
+bits the input tape already carries — and the host runs `Runner::step`
+unmodified and broadcasts the thirteen `f32` per rigid body that
+`Physics::state_hash` already folds, plus a delta of `GameState.values` and the
+event log. **There is one simulation**, the one `loom sim --assert` already
+tests, and no second code path.
+
+**This commit builds only the room code and its display.** It identifies a
+session that nothing can yet join. That is deliberate: it is what was asked for,
+it is hours rather than months, and it forces the "generated outside the tick"
+boundary to be drawn on day one instead of retrofitted.
+
+## Why not lockstep, which this engine looks built for
+
+A deterministic fixed-step simulation is exactly what lockstep and rollback
+want, and this project has one — pinned hashes, and `cargo xtask repeat`
+comparing three fresh processes byte for byte.
+
+**But that determinism is machine-local, and this project has already said so in
+writing.** ADR 0053 concedes it for the cinematic water tier. The binary
+concedes it too: `nm -D target/release/loom` resolves `sinf@GLIBC_2.2.5`,
+`expf@GLIBC_2.27` and `acosf@GLIBC_2.43` — three glibc symbol versions of libm
+in one link, which is glibc's own record that these implementations get
+replaced. And `crates/loom_water/src/lib.rs:314` calls `phase.sin()` /
+`phase.cos()` inside the Gerstner sum whose displacement moves the hull the
+players stand on. Lockstep's failure mode across two such machines is a
+permanent, silent, unattributable desync. `rapier3d`'s `enhanced-determinism`
+covers rapier and covers none of Loom's own arithmetic.
+
+So determinism is used here for the two things it is actually good at, and for
+neither of the things it looks like it licenses:
+
+- the input tape (`main.rs:3335`) is a **two-player regression harness that
+  needs no socket**; and
+- `state_hash` sent at 1 Hz is a **desync canary** costing eight bytes a second,
+  which logs and never gates.
+
+## Why host-authoritative works unusually well here
+
+`loom_physics/src/lib.rs:837` gives every character body
+`.solver_groups(InteractionGroups::none())`. Riders exert no force on the hull,
+so the dependency graph is a tree — water → boat → riders — with **no feedback
+edge**. The host can simulate the hull without knowing where any guest stands,
+and there is no cross-player convergence loop. That fell out of a roll-stability
+fix, not a networking one.
+
+Two rules follow, and both are load-bearing:
+
+1. **The hull is the host's, permanently.** No per-object authority transfer,
+   ever. The helm is an input channel, routed to whoever stands at the wheel.
+2. **A replicated body carries `linvel` and `angvel`, not just a pose.** The
+   carry in ADR 0060 is a `velocity_at_point` query; replicate a pose alone and
+   it returns zero and every remote player slides off the deck. **That is the
+   first test to write, and it needs no network** — drive a hull from an
+   externally written pose with velocities left at zero and assert the drift.
+
+## The room code
+
+**Twelve Crockford base32 symbols, `XXXX-XXXX-XXXX`, 60 bits**, from
+`getrandom::u64()` masked to 60.
+
+The requirement was "a hundred thousand people play the game and no two get the
+same code". The arithmetic is `P ≈ N²/(2·A^L)` for `N` codes live at once over
+an alphabet of `A` symbols and `L` characters, and the honest model is the
+**lifetime** one, not the snapshot one: exposure is every room ever created
+against the rooms live at that moment, `E ≈ R·L_live/A^L`. Read the human's
+number the safe way — 100,000 rooms live *simultaneously*, sustained — and
+`A = 32, L = 12` gives 1 in 13,162 for a year. Read it as lifetime volume at the
+stated scale and it is 1 in 738,000,000. Ten symbols would also be defensible.
+
+**Twelve, and the argument is laziness rather than paranoia.** Length is the one
+number that can never change later — it is baked into every client that will
+ever parse a code, and Among Us was forced through exactly that migration. At 60
+bits a code is safe as a *bearer token* (146 years to a hit at an unthrottled
+10,000 guesses a second against 25,000 live rooms), which **deletes rate
+limiting, a ban list and a separate join password from a transport that does not
+exist yet**. Two characters removes a subsystem. Twelve also divides into three
+groups of four, which ten does not, and 60 bits fits a `u64` with four to spare,
+so the encoder is a shift loop with no padding case.
+
+**The alphabet's constraint is a voice channel, not a URL.** Crockford base32
+drops `I`, `L`, `O` (`1`/`0` confusion) and `U` (accidental obscenity). On input
+those four are mapped rather than refused — `I`/`L` → `1`, `O` → `0`, `U` → `V`
+— which can only ever rescue a typo, since none of them can appear in a
+generated code. Grouping in fours is what makes a code readable aloud. The
+acoustic E-set (`B`/`D`/`E`/`G`/`P`/`T`/`V`/`Z`) is **not** solved, and the fix
+for it — six PGP-style words — is far worse to display in a corner and type, for
+a failure that self-corrects in two seconds when the join fails.
+
+**Guessability is not a concern for a co-op fishing game** at this length; see
+the bearer-token figure above. It would start to matter if a room ever held
+something a stranger could ruin or steal, and the answer then is a join
+confirmation on the host, not a longer code.
+
+### Where it sits, and why
+
+**Outside the deterministic core, and that is correct placement rather than a
+compromise.** A room code names a session, not a simulation. It never enters a
+`.loom` file, never enters `state_hash`, and is never readable by
+`loom sim --assert` or by rhai. A scene that carried its own room code would
+render differently in three fresh processes and `cargo xtask repeat` would fail
+it — correctly. Entropy comes from the OS, once, at window start, on the
+presentation thread — never from the tick.
+
+Because it touches neither a scene nor the simulation, **no golden image and no
+reference hash can move.** Not by luck: `crate::hud::pause_menu` has exactly one
+call site, inside the windowed loop in `run.rs`, and `cargo xtask image` renders
+offscreen and never enters it.
+
+**`getrandom = "=0.4.3"`, not `rand`.** The syscall is the entire requirement,
+and `getrandom v0.4.3` was already in `loom_cli`'s tree via `uuid` via
+`loom_asset` — so the `Cargo.lock` diff is **one line and no new `[[package]]`
+entry**, and nothing new compiles.
+
+### Where it is drawn
+
+Its **own** `egui::Area` at `Order::Foreground`, anchored to the top right of
+`available_rect_before_wrap`. Not a row inside `pause_menu`: that is a 180-pixel
+column centred in the viewport, so appending to it would put the code in the
+middle of the screen. Anchored off the available rect rather than
+`Area::anchor`, for the reason `hud.rs` already learned — `anchor` measures the
+whole window, which under `--edit` is on top of the inspector.
+
+`App::room_code` is `None` when a `loom_scene::Session` is open (`--edit`),
+because an authoring session hosts nothing.
+
+## The milestones, in order
+
+| | | Cost |
+| --- | --- | --- |
+| **M1** room code + Escape-menu display | **this commit** | 0 new packages |
+| **M2** a second player exists *locally*, driven by the input tape | not started | 0 |
+| **M3** LAN socket, host-authoritative, **no prediction** | not started | see below |
+| **M4** `resolve` by LAN broadcast — the code becomes functional with no server at all | not started | 0 |
+| **M5** internet rendezvous, and prediction *if measured to be needed* | not started | +10 or +0 |
+
+**M2 is the blocker and it contains no networking.** `Sim::player` is
+`Option<usize>` (`play.rs:83`), `Play::player` is a second singleton (`:2606`),
+and `drive_characters` clones one `Motion` into every character (`:1715`,
+`:1745`, with the comment "Every character gets the same input for now" at
+`:1739`). A second player is impossible today *on one machine*. M2 makes
+`Runner.input` per-character and gives `--hold` a character prefix, so two
+scripted players can be asserted headlessly on a heaving deck before a byte
+crosses a wire. It survives every architecture on this table, including the two
+rejected below.
+
+**M3's real dependency cost is +26 packages, not +3.** `renet = "=2.0.0"` alone
+pulls three (`bytes`, `log`, `octets`) and exports six types — no socket, no
+handshake, no keepalive, no encryption. The connection layer is `renet_netcode`,
+which is the other 22 (`chacha20poly1305` and its tree). Either take it, or hand
+-write connection establishment and own it. **Say which in the commit that adds
+it.** Refused outright: `matchbox_socket` (+307 packages — 83% of Loom's whole
+graph, paid for a browser target the locked decisions rule out, and it still
+needs a signalling server), `quinn` (+98, reliable-ordered streams are the wrong
+default for 60 Hz positions), `laminar` (last shipped 2021, dead project),
+`postcard` (+22 to serialize fixed-layout `f32` arrays; `to_le_bytes` is the
+serializer).
+
+**No `loom_net` crate** until there is more than one file to put in it, and
+**no trait** for `publish`/`resolve` until the second implementation is actually
+written (never-do #12).
+
+## What this forecloses
+
+- **Deterministic replay of a networked session.** A guest's world stops being a
+  pure function of (scene, tick). Single-player `--assert`, `xtask repeat` and
+  replay are untouched.
+- **Lockstep and rollback, effectively permanently.** Rollback would also need a
+  rapier snapshot; for the record, `rapier3d`'s `serde-serialize` feature adds
+  **zero** new packages, so the *option* stays cheap even though the answer is
+  no.
+- **Competitive integrity.** A host-authoritative P2P co-op session has no
+  anti-cheat and cannot get one.
+- **Not** player count: host-authoritative scales 2→8 with no architectural
+  change. The ceiling is the host's domestic upload, not the protocol.
+
+## The two things most likely wrong with this
+
+1. **Whether prediction is needed at all is unmeasured.** Nobody has checked
+   whether 80–120 ms of input delay is noticeable while walking a heaving deck.
+   M3 therefore ships with **no prediction**, and the measurement decides
+   whether M5 gets a reconciler or a deletion. Deck-walking is the case that
+   decides it, not the rod.
+2. **The payoff milestone may be untestable in this house.** M3 and M4 assume a
+   second machine on this LAN. Nobody has established there is one. If there is
+   not, internet rendezvous (a $100 Steam AppID, or a VPS the human runs) moves
+   onto the critical path months earlier than this order budgets. **Ask before
+   scoping M3.**
+
+One further note, recorded because it will be relitigated: routing
+`loom_water`, `loom_field` and `play.rs` through the `libm` crate (already in
+the lock at `Cargo.lock:1249`, via `glam` under `parry3d`, so zero new
+packages) is a good idea
+**for save files and replays that survive a distro upgrade**, and a bad reason
+to reopen lockstep. It belongs in its own ADR, judged as a save-file property.
+The call-site count for that job is unknown — the "~70" figure in circulation
+came from a substring count and should not be quoted.
