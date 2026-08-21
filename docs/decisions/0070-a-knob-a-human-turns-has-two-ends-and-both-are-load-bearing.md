@@ -1,4 +1,4 @@
-# ADR 0068 — A knob a human turns has two ends, and both are load-bearing
+# ADR 0070 — A knob a human turns has two ends, and both are load-bearing
 
 - **Date:** 2026-08-21
 - **Status:** **accepted** and built. `CameraSpring` in `crates/loom_cli/src/play.rs`

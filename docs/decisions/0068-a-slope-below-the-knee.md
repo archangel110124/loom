@@ -66,12 +66,33 @@ not patch it downstream.
 
 ### Why the slope is 1.30
 
-Measured on the library at each value. At 1.30, shadows fall and highlights do
-not move: `lanternhead` p01 20.1 → 7.5, `ocean` 37.1 → 22.2, frame saturation up
-about a quarter, 99th percentiles within 11 codes. **1.45 was measured too and
-is where it starts to harden** — `campfire`'s p01 reaches 0 and the sky
-posterises. `cave` moves 90.6 → 77.6 and still has no blacks, because *its*
-flatness is a lighting fact and no curve fixes it.
+Measured on the library at each value. At 1.30: `lanternhead` p01 20.1 → 7.5,
+`ocean` 37.1 → 22.2, frame saturation up about a quarter — pooled over all 54
+rows, mean HSV saturation of the lit pixels goes **0.1928 → 0.2441**, +27%.
+**1.45 was measured too and is where it starts to harden** — `campfire`'s p01
+reaches 0 and the sky posterises. `cave` moves 90.6 → 77.7 and still has no
+blacks, because *its* flatness is a lighting fact and no curve fixes it.
+
+**This section said "shadows fall and highlights do not move: 99th percentiles
+within 11 codes", and that was wrong in both halves.** Re-measured across all
+54 references against the current renders — which costs no build, because the
+blessed references *are* the pre-change library:
+
+- **Shadows fall on every row.** p01 drops on 53 of 54; the exception is
+  `viewport_rect`, whose p01 is editor chrome the pass is scissored away from.
+- **Highlights RISE, on most rows.** p99 moves by more than 11 codes on **32 of
+  the 54**, up to `homestead` +20.4, `rain_overhang` +20.1, `rain_gantry` +19.2.
+  This is not a defect and should have been the headline: `PIVOT * pow(c/PIVOT,
+  1.30)` is an S about the pivot in linear light, so everything above 0.30
+  linear gets *brighter* by construction. Calling it "a slope below the knee"
+  describes half the curve.
+- **It falls only on frames that live below the pivot**, where the same
+  expression is a uniform dimming rather than a contrast increase: `dripping`
+  p99 69.7 → 54.7, `emberfall` 87.8 → 75.0, `campfire` 161.5 → 155.4. Those are
+  the three darkest rows in the library and they are the only three that drop.
+- **Nothing crushes and almost nothing clips.** Zero pure-black pixels anywhere,
+  before or after. Pure white goes 1 → 3 pixels; channels at 255 go 167 → 443,
+  of 10,368,000. Real, and 0.004% of the library.
 
 ## What it does to the gate, measured before it was written
 
@@ -108,9 +129,15 @@ to within **two codes on 53 of 54 rows**. The default answers "what will the
 gate say". A model of the tonemap alone can only ever answer the first, and
 believing it answers the second is how an hour goes.
 
-The three rows the gate will report above `worst: 72` — `campfire` 103,
-`slosh` 85, `plume_roof` 76 — are all hard silhouettes being anti-aliased
-correctly for the first time. They are not regressions.
+The **four** rows the gate will report above `worst: 72` — `campfire` 103,
+`slosh` 85, `gleamsprat_beat` 81, `plume_roof` 76 — are all hard silhouettes
+being anti-aliased correctly for the first time. They are not regressions: each
+is one to three pixels on a single scanline, and every one of them drops to
+22–25 with `LOOM_CMAA2=0`.
+
+*(This said "three" and omitted `gleamsprat_beat`. The re-bless review reads
+this document, not the commit message that had all four, so the durable count
+is the one that has to be right.)*
 
 ## Consequences
 
