@@ -1495,6 +1495,49 @@ if hub {
     state.knots = knots;
 
     // -----------------------------------------------------------------------
+    // **DREAD — the one number the whole grade hangs off: how far out she is.**
+    // -----------------------------------------------------------------------
+    //
+    // ADR 0069. `Environment.stages` in `deeper_demo.loom` names five looks
+    // along a 0->1 axis and every number in them walks between its neighbours
+    // as this moves. Nothing new is computed here: `state.bx`/`state.bz` were
+    // already written above, and this is arithmetic on them.
+    //
+    // **Rising fast and falling slow, and the asymmetry is the point.** The
+    // first change has to land while the rig is still over your shoulder, and
+    // turning for home has to feel like relief rather than a light switch —
+    // which is Dredge's panic meter, and the reason its dock reads as a
+    // sanctuary is that the meter falls fastest exactly where you are safest.
+    //
+    // **Eased HERE, on the fixed tick, and nowhere else.** `run.rs` advances
+    // `wind_seconds` by a frame delta; a ramp riding that would pass the image
+    // gate (one frame), pass `cargo xtask repeat` (headless, fixed step), and
+    // be wrong only in the window the human judges everything in. This repo
+    // already has that scar on file — `gleamsprat`'s `weather.z` was
+    // `--sim N / 60` in the gate and a free-running clock in the viewer.
+    let dread = if "dread" in state { state.dread } else { 0.0 };
+    if "bx" in state {
+        // Metres off the rig: nothing inside 25, fully out at 150.
+        //
+        // **Both numbers are calibration and were measured, not guessed.** She
+        // spawns 11 m out and makes 2.97 m/s at full ahead — 29.7 m per 600
+        // ticks, measured. At the first pair tried (60 and 260) the opening 50
+        // m of travel moved nothing at all, which is seventeen seconds of
+        // holding W with no answer, and the far end sat past a minute and a
+        // half. At 25 and 150 the first change lands about five seconds out —
+        // while the rig is still over her shoulder, which is the brief — and
+        // the far end arrives around fifty seconds.
+        let d = (state.bx * state.bx + state.bz * state.bz).sqrt();
+        let want = ((d - 25.0) / 125.0).max(0.0).min(1.0);
+        // Smoothstep, so both ends settle instead of arriving at a corner.
+        want = want * want * (3.0 - 2.0 * want);
+        // 0.020/tick reaches 90% in ~1.9 s out; 0.004/tick takes ~9.6 s back.
+        let rate = if want > dread { 0.020 } else { 0.004 };
+        dread = dread + (want - dread) * rate;
+    }
+    state.dread = dread;
+
+    // -----------------------------------------------------------------------
     // **PINNED — she is at full ahead and going nowhere.**
     // -----------------------------------------------------------------------
     //

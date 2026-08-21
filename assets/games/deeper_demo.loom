@@ -556,6 +556,118 @@ name = "Rig"
   fog_density = 0.0028
   fog_falloff = 0.05
 
+  # The mood ladder — ADR 0069. `deeper_rules.rhai` eases `state.dread` from
+  # the boat's distance off the rig, on the fixed tick, and every number below
+  # walks between its neighbours as it moves.
+  #
+  # A stage's `[..environment]` is a PATCH: anything it does not name is the
+  # block above. That is why `sun_direction` appears once in this file — the
+  # title shot is composed against that vector and a sign flip on z turns the
+  # rig into a small beige object on flat grey water.
+  dread = 0.0
+
+    [[node.components.Environment.stages]]
+    name = "inshore"
+    at = 0.0
+    # The rig at dawn, and the only stage whose grade ADDS. A warm tilt and a
+    # saturation lift with `contrast` left neutral: ADR 0068's operator already
+    # moves this frame's median up a few codes, and "not too bright" was the
+    # brief — the near end must not add to that.
+      [node.components.Environment.stages.grade]
+      gain = [1.02, 1.00, 0.98]
+      contrast = 1.00
+      saturation = 1.12
+
+    [[node.components.Environment.stages]]
+    name = "underway"
+    at = 0.25
+    # Still a nice day. The only thing that has happened is that the light has
+    # gone slightly flat and the sky has lost a little of its blue.
+      [node.components.Environment.stages.environment]
+      sun_strength = 1.00
+      sun_color = [0.98, 0.95, 0.86]
+      ambient = 0.42
+      sky_zenith = [0.15, 0.26, 0.40]
+      sky_horizon = [0.66, 0.66, 0.60]
+      fog_density = 0.009
+      cloud_cover = 0.30
+      exposure = 0.96
+      [node.components.Environment.stages.grade]
+      gain = [1.00, 1.00, 0.98]
+      contrast = 1.00
+      saturation = 0.98
+
+    [[node.components.Environment.stages]]
+    name = "outofsight"
+    at = 0.5
+    # **The wrongness beat, and it is NOT dark — the third-brightest rung.**
+    # The sea has gone the colour of an aquarium nobody has cleaned while the
+    # deck you are standing on is still lit.
+    #
+    # The green is `sky_zenith`, and blue is the trap. At matched luminance
+    # teal reads as dusk and is rather beautiful — it is Abzu — grey reads as a
+    # dull day and rust reads as a sunset. Desaturated yellow-green is the only
+    # one of the four that is unpleasant, and it only lands paired with the
+    # overcast ceiling and the saturation drop; on its own it reads smoggy.
+      [node.components.Environment.stages.environment]
+      sun_strength = 0.75
+      sun_color = [0.92, 0.96, 0.78]
+      ambient = 0.36
+      sky_zenith = [0.13, 0.20, 0.16]
+      sky_horizon = [0.52, 0.56, 0.40]
+      fog_density = 0.018
+      fog_falloff = 0.04
+      cloud_cover = 0.55
+      exposure = 0.88
+      [node.components.Environment.stages.grade]
+      gain = [0.96, 1.00, 0.90]
+      contrast = 1.02
+      saturation = 0.72
+
+    [[node.components.Environment.stages]]
+    name = "grounds"
+    at = 0.8
+      [node.components.Environment.stages.environment]
+      sun_strength = 0.40
+      sun_color = [0.82, 0.90, 0.72]
+      ambient = 0.24
+      sky_zenith = [0.07, 0.10, 0.09]
+      sky_horizon = [0.26, 0.30, 0.24]
+      fog_density = 0.034
+      fog_falloff = 0.03
+      cloud_cover = 0.85
+      exposure = 0.68
+      [node.components.Environment.stages.grade]
+      gain = [0.90, 0.94, 0.88]
+      contrast = 1.06
+      saturation = 0.48
+
+    [[node.components.Environment.stages]]
+    name = "theedge"
+    at = 1.0
+    # Sea and sky are one value: there is no `out there` any more and the world
+    # stops at forty metres.
+    #
+    # `exposure` is the number you would not guess. The cloud deck's tones are
+    # constants in `scene.slang`, so turning the sun down does not darken an
+    # overcast sky — at `sun_strength = 0` the frame moves by a fraction of a
+    # code. `exposure` is applied in the tonemap, downstream of the deck, and
+    # it is what actually takes this rung down.
+      [node.components.Environment.stages.environment]
+      sun_strength = 0.12
+      sun_color = [0.70, 0.80, 0.66]
+      ambient = 0.13
+      sky_zenith = [0.02, 0.03, 0.03]
+      sky_horizon = [0.09, 0.11, 0.10]
+      fog_density = 0.058
+      fog_falloff = 0.02
+      cloud_cover = 1.00
+      exposure = 0.48
+      [node.components.Environment.stages.grade]
+      gain = [0.86, 0.92, 0.86]
+      contrast = 1.10
+      saturation = 0.26
+
   # Light air. Enough to move the surface; far too little to trouble the boat.
   [node.components.Wind]
   direction_degrees = 20.0
