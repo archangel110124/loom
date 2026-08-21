@@ -103,10 +103,19 @@ transform = { pos = [-4.5, 0.05, 0.0], rot_euler = [0.0, 270.0, 0.0] }
 # ---------------------------------------------------------------------------
 # Somewhere to walk. Planked, so a skating foot has something to skate on.
 #
-# The seams sit BEHIND him (z 0.10 to 1.80) rather than through him. Run the
-# full 3 m width of the deck and the one under his feet reaches past the camera
-# as a pole standing in the foreground -- which is what a 30 mm box pointing at
-# a lens looks like, and it is louder than the walk it is there to measure.
+# The seams sit BEHIND him rather than through him. Run the full 3 m width of
+# the deck and the one under his feet reaches past the camera as a pole
+# standing in the foreground -- which is what a 30 mm box pointing at a lens
+# looks like, and it is louder than the walk it is there to measure.
+#
+# **z 0.40 to 1.80, and it was 0.10 to 1.80 -- which is INSIDE HIM.** These
+# have no `BoxCollider`, but `play.rs` turns any renderable with no dynamic or
+# character ancestor into a static box from its drawn bounds, so nine 12 mm
+# decorative seams were nine collision boxes standing in the walk. The capsule's
+# radius is 0.35 and the near edge was at 0.10; he clipped every one of them.
+# Measured over ticks 300-800: mean speed 1.184 m/s with them in his path
+# against 1.381 clear of it, and 22 stalled ticks against 6. The residual 6 are
+# the controller's own and are unchanged with the body's 27 meshes deleted.
 # ---------------------------------------------------------------------------
 
 [[node]]
@@ -124,7 +133,7 @@ transform = { pos = [1.0, -0.10, 0.0], scale = [10.0, 0.10, 3.0] }
 [[node]]
 name = "PlankA"
 parent = "Root"
-transform = { pos = [-5.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+transform = { pos = [-5.0, 0.005, 1.10], scale = [0.03, 0.012, 0.70] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -136,7 +145,7 @@ transform = { pos = [-5.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
 [[node]]
 name = "PlankB"
 parent = "Root"
-transform = { pos = [-4.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+transform = { pos = [-4.0, 0.005, 1.10], scale = [0.03, 0.012, 0.70] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -148,7 +157,7 @@ transform = { pos = [-4.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
 [[node]]
 name = "PlankC"
 parent = "Root"
-transform = { pos = [-3.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+transform = { pos = [-3.0, 0.005, 1.10], scale = [0.03, 0.012, 0.70] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -160,7 +169,7 @@ transform = { pos = [-3.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
 [[node]]
 name = "PlankD"
 parent = "Root"
-transform = { pos = [-2.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+transform = { pos = [-2.0, 0.005, 1.10], scale = [0.03, 0.012, 0.70] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -172,7 +181,7 @@ transform = { pos = [-2.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
 [[node]]
 name = "PlankE"
 parent = "Root"
-transform = { pos = [-1.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+transform = { pos = [-1.0, 0.005, 1.10], scale = [0.03, 0.012, 0.70] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -184,7 +193,7 @@ transform = { pos = [-1.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
 [[node]]
 name = "PlankF"
 parent = "Root"
-transform = { pos = [0.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+transform = { pos = [0.0, 0.005, 1.10], scale = [0.03, 0.012, 0.70] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -196,7 +205,7 @@ transform = { pos = [0.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
 [[node]]
 name = "PlankG"
 parent = "Root"
-transform = { pos = [1.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+transform = { pos = [1.0, 0.005, 1.10], scale = [0.03, 0.012, 0.70] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -208,7 +217,7 @@ transform = { pos = [1.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
 [[node]]
 name = "PlankH"
 parent = "Root"
-transform = { pos = [2.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+transform = { pos = [2.0, 0.005, 1.10], scale = [0.03, 0.012, 0.70] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }
@@ -220,7 +229,7 @@ transform = { pos = [2.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
 [[node]]
 name = "PlankI"
 parent = "Root"
-transform = { pos = [3.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+transform = { pos = [3.0, 0.005, 1.10], scale = [0.03, 0.012, 0.70] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "box" }

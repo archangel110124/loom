@@ -12,19 +12,30 @@
 // Twice per stride, at each heel strike, for the same reason the pelvis drops
 // twice: that is when the body is catching itself.
 //
-// The 3.2 degrees of standing pitch is a POSE and stays, blended with
-// everything else so a standing deckhand is upright.
+// `walk_stoop` is a POSE and stays, blended with everything else so a standing
+// deckhand is upright.
+//
+// **The idle sway is 4.2 degrees where it was 1.2, and the old number was
+// below the floor.** Two independent measurements of the shipped idle put the
+// MEAN pixel difference over 155 ticks at 1.7 and 3.1 grey levels out of 255 —
+// a changed-pixel count in the double digits with nothing behind it, which is
+// antialiasing on a pale mitten and not a man breathing. Changed-pixel counts
+// cannot tell a breath from a still; the mean can, and it said still.
 
 let g = if "gait" in state { state.gait } else { 0.0 };
 let b = if "blend" in state { state.blend } else { 0.0 };
-let t = tick.to_float();
+let twist = if "walk_twist" in state { state.walk_twist } else { 9.0 };
+let lean = if "walk_lean" in state { state.walk_lean } else { 3.0 };
+let stoop = if "walk_stoop" in state { state.walk_stoop } else { 3.2 };
+let breath = if "idle_breath" in state { state.idle_breath } else { 4.2 };
 
-// Breathing at 0.22 Hz, deliberately incommensurate with the neck's 0.13 Hz so
-// the two never come back into phase and the idle never looks like a loop.
-let idle = 1.2 * sin(t * 0.0230);
+// Breathing at 0.22 Hz, deliberately incommensurate with the neck's 0.13 Hz
+// and the pelvis's 0.055 Hz so no two ever come back into phase and the idle
+// never looks like a loop.
+let idle = breath * sin(tick.to_float() * 0.0230);
 
 rotation = [
-    b * (3.2 + 3.0 * sin(2.0 * g + 0.60)) + (1.0 - b) * idle,
-    b * 9.0 * sin(g),
+    b * (stoop + lean * sin(2.0 * g + 0.60)) + (1.0 - b) * (stoop + idle),
+    b * twist * sin(g),
     0.0,
 ];

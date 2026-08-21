@@ -19,16 +19,21 @@
 //
 // **A forward-flexing elbow makes the hand reach further FORWARD than back,
 // necessarily**, at every amplitude — so "front and back reach within 20%" is
-// not a criterion this can meet and is not one it should. The swing is trimmed
-// to 23/21 degrees instead; the asymmetry is what a real arm does.
+// not a criterion this can meet and is not one it should. The asymmetry is
+// what a real arm does.
+//
+// The gripped pose keeps a sixth of the swing, for the reason in
+// `deckhand_shoulder.rhai`: the demo never clears `grip`.
 
 let g = if "gait" in state { state.gait } else { 0.0 };
 let b = if "blend" in state { state.blend } else { 0.0 };
+let a = if "walk_elbow" in state { state.walk_elbow } else { 21.0 };
 let grip = if "grip" in state { state.grip } else { 0.0 };
+let w = if position[0] < 0.0 { g } else { g + 3.14159265 };
+let bend = a * sin(w + 2.69159265).max(0.0);
 
 if grip >= 1.0 {
-    rotation = [78.0, 0.0, 0.0];
+    rotation = [60.0 + b * bend * 0.17, 0.0, 0.0];
 } else {
-    let w = if position[0] < 0.0 { g } else { g + 3.14159265 };
-    rotation = [b * (11.0 + 21.0 * sin(w + 2.69159265).max(0.0)), 0.0, 0.0];
+    rotation = [b * (11.0 + bend), 0.0, 0.0];
 }

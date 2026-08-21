@@ -7,9 +7,11 @@
 
 let g = if "gait" in state { state.gait } else { 0.0 };
 let b = if "blend" in state { state.blend } else { 0.0 };
+let a = if "walk_head" in state { state.walk_head } else { 6.0 };
+let breath = if "idle_breath" in state { state.idle_breath } else { 4.2 };
 
-// 0.13 Hz, against the spine's 0.22 — two idle channels that never repeat
-// together.
-let idle = 1.5 * sin(tick.to_float() * 0.0137);
+// 0.13 Hz, against the spine's 0.22 and the pelvis's 0.055 — three idle
+// channels that never repeat together.
+let idle = breath * 0.36 * sin(tick.to_float() * 0.0137);
 
-rotation = [0.0, b * 6.0 * sin(g + 2.59159265) + (1.0 - b) * idle, 0.0];
+rotation = [0.0, b * a * sin(g + 2.59159265) + (1.0 - b) * idle, 0.0];
