@@ -1061,6 +1061,32 @@ DEMO_HOME="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; \
   --assert "state.stuck == 1" \
   | grep -q '"message": "BLOCKED   something has you — she is 19 m ahead on your left"'
 
+# **The interact channel (E), which is the sixth digital one.** The engine does
+# nothing with `interact` by itself — a script is the only thing that can — so
+# the only observable end of it is a script saying it saw a press.
+# `interact_probe.rhai` emits `used` per tick the channel is true and
+# `used_edge` per rising edge, and the pair is what separates the two drivers.
+#
+# One scheduled press: one tick, one edge, and this is the row that fails if
+# the channel is dropped anywhere between `--hold` and the rhai scope.
+"$LOOM" sim assets/test/interact_probe.loom --ticks 120 --hold "30:interact=1; 31:" \
+  --assert "events.used == 1" --assert "events.used_edge == 1" >/dev/null
+
+# Held to the end of the run: 91 ticks, still one edge. **`--hold` is level by
+# design** — it writes `Runner::input` straight — so a consumer that must not
+# repeat edge-detects for itself, exactly as `deeper_player.rhai` does for
+# `fire` after `--hold fire=1` produced 708 casts. `loom run` cannot reach this
+# state: `Play::set_input` takes the edge before the tick sees it, which is a
+# Rust test (`play::tests::holding_interact_is_one_press`) and not a row here.
+"$LOOM" sim assets/test/interact_probe.loom --ticks 120 --hold "30:interact=1" \
+  --assert "events.used == 91" --assert "events.used_edge == 1" >/dev/null
+
+# Two presses are two, which is what stops the row above from passing on a
+# channel that latched true once and never cleared.
+"$LOOM" sim assets/test/interact_probe.loom --ticks 120 \
+  --hold "30:interact=1; 31:; 60:interact=1; 61:" \
+  --assert "events.used == 2" --assert "events.used_edge == 2" >/dev/null
+
 # **WHAT NO ROW ABOVE CAN SEE: the overlay.** Every caption above is pinned
 # with `grep -q` on `loom sim`'s JSON, which proves the rules script *produced*
 # a string. It cannot prove the string was legible, fitted, or was drawn at all
@@ -1104,7 +1130,7 @@ rm -f /tmp/loom-fight-1.json /tmp/loom-fight-2.json /tmp/loom-fight-3.json
 cmp /tmp/loom-demo-1.json /tmp/loom-demo-2.json
 cmp /tmp/loom-demo-2.json /tmp/loom-demo-3.json
 rm -f /tmp/loom-demo-1.json /tmp/loom-demo-2.json /tmp/loom-demo-3.json
-echo "gameplay: 14 scenes asserted, 7 blocks of deliberately wrong input, fight and demo byte-identical across 3 processes"
+echo "gameplay: 15 scenes asserted, 7 blocks of deliberately wrong input, fight and demo byte-identical across 3 processes"
 
 # ---------------------------------------------------------------------------
 # 7. Work per frame. **Nothing above this line can see a frame get slower.**

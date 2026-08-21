@@ -476,6 +476,26 @@ close = [{ button = "Escape", trigger = "pressed" }]
         assert!(format!("{err}").contains("can never fire"));
     }
 
+    /// E is the interact key while playing, and it is `pressed` — a held key
+    /// reaching a door script sixty times a second is the bug this exists to
+    /// prevent. It is `move_up` in the `fly` context and must stay there:
+    /// contexts are what let one key mean two things.
+    #[test]
+    fn e_interacts_while_playing_and_still_flies_up() {
+        let map = ActionMap::from_toml(DEFAULT_BINDINGS).expect("shipped bindings");
+        let mut input = InputState::new();
+
+        input.set_button("KeyE", true);
+        assert!(input.is_active(&map, "play", "interact"), "E must interact");
+        assert!(input.is_active(&map, "fly", "move_up"), "E must still fly up");
+
+        input.end_frame();
+        assert!(
+            !input.is_active(&map, "play", "interact"),
+            "held E must not interact twice"
+        );
+    }
+
     /// **The M6 exit criterion.** The shipped bindings load and drive a camera.
     #[test]
     fn the_shipped_bindings_load_and_cover_the_camera() {

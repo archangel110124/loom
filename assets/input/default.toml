@@ -68,8 +68,15 @@ move_right   = [{ button = "KeyD" }, { button = "ArrowRight" }]
 # Pressed, not held: holding jump must not re-fire the instant you land.
 jump         = [{ button = "Space", trigger = "pressed" }]
 sprint       = [{ button = "ShiftLeft" }, { button = "ShiftRight" }]
-# Hands the pointer back without stopping the simulation.
-release      = [{ button = "Escape", trigger = "pressed" }]
+# Escape is NOT here. It is `quit` in the `fly` context, read once per frame
+# whatever is running, because one key cannot mean two things at one moment:
+# playing it opens the pause menu, and otherwise it closes the window. A `play`
+# binding for it sat here for two milestones and nothing ever read it.
 # Pressed, not held: one click is one shot. Holding to full-auto is a decision
 # for the weapon script, which can count ticks; it is not the binding's job.
 fire         = [{ button = "MouseLeft", trigger = "pressed" }]
+# Use what you are standing at or looking at. Pressed, not held, for a stronger
+# reason than `fire`: a door bound to a held key opens sixty times a second.
+# `Play::set_input` edge-detects it a second time, so a rebind to `held` here is
+# still one interaction per press.
+interact     = [{ button = "KeyE", trigger = "pressed" }]

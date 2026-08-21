@@ -119,6 +119,28 @@ pub struct Motion {
     /// True on the tick the fire button went down. Pressed, not held, for the
     /// same reason as `jump`.
     pub fire: bool,
+    /// True on the tick the interact button (E) went down.
+    ///
+    /// **The sixth digital channel**, and the one that lets a script answer
+    /// "use the thing I am at" without spending a movement key. Pressed, not
+    /// held, for a harder reason than `jump`: a script that opens a door while
+    /// this is true opens it every tick the key is down.
+    ///
+    /// `Play` already edge-detects it, so a human holding E produces exactly
+    /// one true. `loom sim --hold interact=1` does not — it writes this field
+    /// straight, for the whole run, which is what makes it useful for testing
+    /// and is also why a script that must not repeat should edge-detect it
+    /// itself, exactly as `deeper_player.rhai` does for `fire`.
+    ///
+    /// **There is deliberately no "what is in front of you" to go with it.** A
+    /// consumer does its own proximity test in rhai, out of what it is already
+    /// handed: `position` for "am I at the wheel", `stand_node` for "what am I
+    /// standing on", and `aim_point` / `aim_hit` / `aim_distance` for "what am
+    /// I looking at" — the same ray the weapon fires down. That is three or
+    /// four lines per interaction. An interactable registry, a focus query and
+    /// a prompt string would be a subsystem nobody has asked for, and it can
+    /// still be added later without moving this field.
+    pub interact: bool,
 
     /// Where the character's view ray lands: the first solid thing along
     /// `forward`, or a point at the end of its range when nothing is there.
@@ -248,6 +270,7 @@ impl Default for Motion {
             jump: false,
             sprint: false,
             fire: false,
+            interact: false,
             aim_point: [0.0, 0.0, -1.0],
             aim_distance: 0.0,
             aim_hit: false,
@@ -648,6 +671,7 @@ impl ScriptHost {
         scope.push("jump", motion.jump);
         scope.push("sprint", motion.sprint);
         scope.push("fire", motion.fire);
+        scope.push("interact", motion.interact);
         scope.push("aim_point", to_dynamic_vec(motion.aim_point));
         scope.push("aim_distance", f64::from(motion.aim_distance));
         scope.push("aim_hit", motion.aim_hit);
@@ -1172,6 +1196,27 @@ mod tests {
         let out = host.motion("keys", &pressed, &mut ScriptMemory::default()).expect("runs").velocity;
 
         assert!((out[1] - 5.0).abs() < 1e-6 && (out[0] - 9.0).abs() < 1e-6, "{out:?}");
+    }
+
+    /// The sixth channel reaches a script the same way the other five do.
+    /// Nothing in the engine acts on `interact`; a script is the only thing
+    /// that can, so "it arrived in the scope" is the whole contract.
+    #[test]
+    fn a_movement_script_sees_the_interact_button() {
+        let mut host = host();
+        host.compile("use", "if interact { emit.push(#{ kind: \"used\" }); }")
+            .expect("valid");
+
+        let idle = host
+            .motion("use", &walking(), &mut ScriptMemory::default())
+            .expect("runs");
+        assert!(idle.emitted.is_empty(), "nothing pressed, nothing emitted");
+
+        let pressed = Motion { interact: true, ..walking() };
+        let out = host
+            .motion("use", &pressed, &mut ScriptMemory::default())
+            .expect("runs");
+        assert_eq!(out.emitted.len(), 1, "E pressed did not reach the script");
     }
 
     /// A weapon: the host casts the ray, the script decides what to do with

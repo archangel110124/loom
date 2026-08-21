@@ -1,0 +1,45 @@
+# **The interact bench.** One character, one script, no scenery.
+#
+#   loom sim assets/test/interact_probe.loom --ticks 120 \
+#     --hold "30:interact=1; 31:" \
+#     --assert "events.used == 1" --assert "events.used_edge == 1"
+#
+# `interact` is the sixth digital channel and the engine does nothing with it
+# on its own, so this scene is the whole of its coverage below the Rust tests:
+# a press written into `Runner::input` by `--hold` has to come out of the rhai
+# scope as `interact`, and `interact_probe.rhai` is what turns that into
+# something `--assert` can count.
+#
+# There is nothing to draw and this scene is deliberately **not** in `SCENES`
+# or `GOLDEN` — it adds no rendering path, and a bench with no pixels in it
+# would only be a row that cannot fail.
+#
+# A floor, because a character with nothing under it falls for the whole run
+# and a falling character is a second variable in a test about a key.
+
+[scene]
+format = 1
+id = "3d7a1c58-2e94-4b06-8f31-6c05a9e27d4b"
+
+[[node]]
+name = "Bench"
+
+[[node]]
+name = "Floor"
+parent = "Bench"
+transform = { pos = [0.0, -0.25, 0.0], scale = [8.0, 0.5, 8.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [4.0, 0.25, 4.0]
+
+[[node]]
+name = "Player"
+parent = "Bench"
+transform = { pos = [0.0, 1.0, 0.0] }
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+
+  [node.components.Script]
+  path = "../scripts/interact_probe.rhai"

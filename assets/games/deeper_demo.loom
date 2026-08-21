@@ -47,12 +47,13 @@
 #   at the crate     what is below goes ashore and `CRATE` goes up — but only
 #                    with the boat alongside. Also a place.
 #
-# **Three of those are places rather than buttons because the engine has five
-# digital channels and all five are spent.** `move_x`, `move_z`, `jump`, `sprint`
-# and `fire` — there is no sixth to bind "take the helm" to, so the helm is a mat
-# you stand on, the fish box is a spot you walk to, and so is the crate. That
-# constraint shaped the whole layout and it is the single most useful thing to
-# know before reading anything below.
+# **Three of those are places rather than buttons, and that is now history
+# rather than a constraint.** It was written when the engine had five digital
+# channels — `move_x`, `move_z`, `jump`, `sprint`, `fire` — and no sixth to bind
+# "take the helm" to, so the helm became a mat you stand on, the fish box a spot
+# you walk to, and so did the crate. **There is a sixth now: `interact`, on E.**
+# Nothing here uses it yet; converting the helm and the box to E is queued work,
+# and until it lands the layout below is exactly as described.
 #
 # **Reel is SHIFT, not W** — W is the throttle at the wheel and your legs
 # everywhere else. The cost, stated: aboard, SHIFT is reel *and* still sprint,

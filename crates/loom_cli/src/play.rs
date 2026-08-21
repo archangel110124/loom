@@ -2549,6 +2549,11 @@ pub struct PlayerInput {
     pub jump: bool,
     pub sprint: bool,
     pub fire: bool,
+    /// The interact key (E). **Level here, edge there**: this is "is E down",
+    /// and [`Play::set_input`] turns it into one press. Holding it therefore
+    /// interacts once, whether the caller is the window sampling a `pressed`
+    /// binding or a test that never lets go.
+    pub interact: bool,
 }
 
 /// Play mode as the editor holds it: a scene's world, its simulation, and how
@@ -2583,6 +2588,19 @@ pub struct Play {
     jump_pending: bool,
     /// A fire press waiting for a tick, latched for the same reason as `jump`.
     fire_pending: bool,
+    /// An interact press waiting for a tick, latched like the two above — and
+    /// *only* set on the rising edge, which those two are not.
+    ///
+    /// `jump` and `fire` lean on their bindings being `trigger = "pressed"`,
+    /// so a held key is already one press by the time it gets here. That is
+    /// true of the window and false of everything else: `Play::set_input` is
+    /// also how a test and a scripted pilot drive a character, and either can
+    /// hold a flag true forever. A door that opens sixty times a second is the
+    /// result. So the edge is taken here, where every caller passes.
+    interact_pending: bool,
+    /// Whether interact was down last time [`Play::set_input`] was called —
+    /// the other half of that edge.
+    interact_was_down: bool,
     /// The character a human drives, and the node the view comes from.
     /// Resolved once at Play: neither can appear mid-run.
     player: Option<loom_ecs::Entity>,
@@ -2629,6 +2647,8 @@ impl Play {
             input: PlayerInput::default(),
             jump_pending: false,
             fire_pending: false,
+            interact_pending: false,
+            interact_was_down: false,
         }
     }
 
@@ -2638,6 +2658,9 @@ impl Play {
         // consumes it may not have run yet.
         self.jump_pending |= input.jump;
         self.fire_pending |= input.fire;
+        // Rising edge, not level — see `interact_pending`.
+        self.interact_pending |= input.interact && !self.interact_was_down;
+        self.interact_was_down = input.interact;
         self.input = input;
     }
 
@@ -2837,6 +2860,7 @@ impl Play {
                 // and ticks happen to line up.
                 jump: std::mem::take(&mut self.jump_pending),
                 fire: std::mem::take(&mut self.fire_pending),
+                interact: std::mem::take(&mut self.interact_pending),
                 sprint: self.input.sprint,
                 ..loom_script::Motion::default()
             };
@@ -3791,6 +3815,53 @@ transform = { pos = [0.0, 6.0, 0.0] }
             "the jump was dropped: y {resting} -> {}",
             axis(&play.world, "Level/Player", 1)
         );
+    }
+
+    /// **The interact channel reaches the tick.** Nothing in the engine acts
+    /// on `interact`, so the furthest an engine test can follow it is into the
+    /// `Motion` the scripts are handed — `loom_script`'s
+    /// `a_movement_script_sees_the_interact_button` picks it up from there,
+    /// and `assets/test/interact_probe.loom` joins the two ends under
+    /// `scripts/green.sh`.
+    #[test]
+    fn an_interact_press_reaches_the_tick() {
+        let source = std::fs::read_to_string("../../assets/test/camera.loom").expect("fixture");
+        let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+        let mut play = Play::start(world, std::path::Path::new("../../assets/test"));
+
+        play.set_input(PlayerInput { interact: true, ..PlayerInput::default() });
+        // Released before the tick runs, which is the case that loses a press
+        // that is read rather than latched.
+        play.set_input(PlayerInput::default());
+        play.run(1);
+
+        assert!(play.runner.input.interact, "the press was dropped");
+    }
+
+    /// **A door must not open sixty times a second.** `jump` and `fire` lean on
+    /// their bindings being `pressed`; this one takes the edge in
+    /// `set_input`, so a caller that never lets go — a test, a scripted pilot,
+    /// or a rebind to `held` — still gets one press.
+    #[test]
+    fn holding_interact_is_one_press() {
+        let source = std::fs::read_to_string("../../assets/test/camera.loom").expect("fixture");
+        let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+        let mut play = Play::start(world, std::path::Path::new("../../assets/test"));
+
+        let mut pressed = 0;
+        for _ in 0..60 {
+            play.set_input(PlayerInput { interact: true, ..PlayerInput::default() });
+            play.run(1);
+            pressed += i32::from(play.runner.input.interact);
+        }
+        assert_eq!(pressed, 1, "a second of holding E was {pressed} interactions");
+
+        // And letting go arms it again, or the second door never opens.
+        play.set_input(PlayerInput::default());
+        play.run(1);
+        play.set_input(PlayerInput { interact: true, ..PlayerInput::default() });
+        play.run(1);
+        assert!(play.runner.input.interact, "a second press did not register");
     }
 
     /// **The trigger, end to end.** A button press reaches a script, the

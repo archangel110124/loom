@@ -37,9 +37,12 @@
 // the same `propel` step an authored `Propulsion` goes through.
 //
 // **The helm is a place, so there is no key to learn and no key to spend.**
-// The engine has five digital channels; `jump` is jump and `fire` belongs to
-// fishing. Position was the only budget left, and it is also the only control
-// scheme a player who was told nothing can find on their own.
+// When this was written the engine had five digital channels; `jump` was jump
+// and `fire` belonged to fishing, so position was the only budget left — and it
+// is also the only control scheme a player who was told nothing can find on
+// their own. **There is a sixth channel now, `interact` on E**, and this file
+// does not read it: moving the helm onto E is a deliberate change to make, not
+// a gap to close by accident.
 //
 // **2. It swims.** Nothing in this engine catches a character in water: fall
 // off the rig and you fall forever, and round 1 shipped a rail that leaked at

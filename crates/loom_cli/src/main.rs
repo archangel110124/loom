@@ -84,8 +84,9 @@ USAGE:
         — for every tick of the run, so it is the only way to test a mapping
         *from* a press rather than something downstream of one:
         `--hold move_z=1,move_x=-1`, channels `move_x`, `move_z`, `jump`,
-        `sprint`, `fire`. Semicolons make it a SCHEDULE — each segment prefixed
-        `<tick>:` and holding until the next one, so a whole voyage is one run:
+        `sprint`, `fire`, `interact`. Semicolons make it a SCHEDULE — each
+        segment prefixed `<tick>:` and holding until the next one, so a whole
+        voyage is one run:
         `--hold 0:move_z=1; 900:move_z=-1; 1500:` (quoted). An empty segment is hands
         off the keys. --assert also
         reads the weather where it is asked about: `wind@x,y,z.speed >= 3`, and
@@ -3367,11 +3368,12 @@ fn held_input(args: &[String]) -> Result<Option<Vec<(u64, loom_script::Motion)>>
                 "jump" => held.jump = number != 0.0,
                 "sprint" => held.sprint = number != 0.0,
                 "fire" => held.fire = number != 0.0,
+                "interact" => held.interact = number != 0.0,
                 other => {
                     return Err(json_line(&serde_json::json!({
                         "error": "unknown_hold",
                         "value": other,
-                        "hint": "--hold takes move_x, move_z, jump, sprint and fire, comma \
+                        "hint": "--hold takes move_x, move_z, jump, sprint, fire and interact, comma \
                                  separated, each optionally `=value`; segments are \
                                  `<tick>:<k=v,..>` separated by `;`",
                     })));
