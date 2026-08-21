@@ -2554,6 +2554,9 @@ pub struct PlayerInput {
     /// interacts once, whether the caller is the window sampling a `pressed`
     /// binding or a test that never lets go.
     pub interact: bool,
+    /// The inventory key (Tab). Level here, edge there, exactly as `interact`
+    /// is — a held Tab must open the creel once, not sixty times a second.
+    pub bag: bool,
 }
 
 /// Play mode as the editor holds it: a scene's world, its simulation, and how
@@ -2601,6 +2604,11 @@ pub struct Play {
     /// Whether interact was down last time [`Play::set_input`] was called —
     /// the other half of that edge.
     interact_was_down: bool,
+    /// The same pair for the inventory key. Its own latch and not a shared
+    /// "any pressed key" one: E and Tab are pressed in the same second all the
+    /// time, and one flag would swallow whichever arrived second.
+    bag_pending: bool,
+    bag_was_down: bool,
     /// The character a human drives, and the node the view comes from.
     /// Resolved once at Play: neither can appear mid-run.
     player: Option<loom_ecs::Entity>,
@@ -2649,6 +2657,8 @@ impl Play {
             fire_pending: false,
             interact_pending: false,
             interact_was_down: false,
+            bag_pending: false,
+            bag_was_down: false,
         }
     }
 
@@ -2661,6 +2671,8 @@ impl Play {
         // Rising edge, not level — see `interact_pending`.
         self.interact_pending |= input.interact && !self.interact_was_down;
         self.interact_was_down = input.interact;
+        self.bag_pending |= input.bag && !self.bag_was_down;
+        self.bag_was_down = input.bag;
         self.input = input;
     }
 
@@ -2861,6 +2873,7 @@ impl Play {
                 jump: std::mem::take(&mut self.jump_pending),
                 fire: std::mem::take(&mut self.fire_pending),
                 interact: std::mem::take(&mut self.interact_pending),
+                bag: std::mem::take(&mut self.bag_pending),
                 sprint: self.input.sprint,
                 ..loom_script::Motion::default()
             };

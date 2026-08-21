@@ -80,3 +80,13 @@ fire         = [{ button = "MouseLeft", trigger = "pressed" }]
 # `Play::set_input` edge-detects it a second time, so a rebind to `held` here is
 # still one interaction per press.
 interact     = [{ button = "KeyE", trigger = "pressed" }]
+# The creel — the seventh digital channel, and the one that opens an inventory.
+#
+# **Tab is free while a game is running.** It is egui's focus key and egui
+# reports it consumed unconditionally, which the viewer already un-consumes by
+# hand for the editor's `select_next`; and `handle_editing` returns the moment
+# Play is running, so nothing in the editor can fire from it here.
+#
+# Pressed, not held, for `interact`'s reason twice over: an inventory bound to a
+# held key opens and shuts sixty times a second, which is a strobe.
+bag          = [{ button = "Tab", trigger = "pressed" }]

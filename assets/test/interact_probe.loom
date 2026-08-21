@@ -1,11 +1,17 @@
-# **The interact bench.** One character, one script, no scenery.
+# **The digital-channel bench.** One character, one script, no scenery.
 #
 #   loom sim assets/test/interact_probe.loom --ticks 120 \
 #     --hold "30:interact=1; 31:" \
 #     --assert "events.used == 1" --assert "events.used_edge == 1"
 #
-# `interact` is the sixth digital channel and the engine does nothing with it
-# on its own, so this scene is the whole of its coverage below the Rust tests:
+#   loom sim assets/test/interact_probe.loom --ticks 120 \
+#     --hold "30:bag=1; 31:" \
+#     --assert "events.bagged == 1" --assert "events.used == 0"
+#
+# `interact` is the sixth digital channel and `bag` is the seventh; the engine
+# does nothing with either on its own, so this scene is the whole of their
+# coverage below the Rust tests. It keeps its name because renaming a bench
+# breaks every line that already invokes it:
 # a press written into `Runner::input` by `--hold` has to come out of the rhai
 # scope as `interact`, and `interact_probe.rhai` is what turns that into
 # something `--assert` can count.

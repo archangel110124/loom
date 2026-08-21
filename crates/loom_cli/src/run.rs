@@ -1963,6 +1963,7 @@ impl App {
             sprint: self.input.is_active(&self.bindings, PLAY, "sprint"),
             fire: self.input.is_active(&self.bindings, PLAY, "fire"),
             interact: self.input.is_active(&self.bindings, PLAY, "interact"),
+            bag: self.input.is_active(&self.bindings, PLAY, "bag"),
         });
     }
 

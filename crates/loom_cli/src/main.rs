@@ -3369,11 +3369,12 @@ fn held_input(args: &[String]) -> Result<Option<Vec<(u64, loom_script::Motion)>>
                 "sprint" => held.sprint = number != 0.0,
                 "fire" => held.fire = number != 0.0,
                 "interact" => held.interact = number != 0.0,
+                "bag" => held.bag = number != 0.0,
                 other => {
                     return Err(json_line(&serde_json::json!({
                         "error": "unknown_hold",
                         "value": other,
-                        "hint": "--hold takes move_x, move_z, jump, sprint, fire and interact, comma \
+                        "hint": "--hold takes move_x, move_z, jump, sprint, fire, interact and bag, comma \
                                  separated, each optionally `=value`; segments are \
                                  `<tick>:<k=v,..>` separated by `;`",
                     })));

@@ -142,6 +142,20 @@ pub struct Motion {
     /// still be added later without moving this field.
     pub interact: bool,
 
+    /// True on the tick the inventory key (Tab) went down.
+    ///
+    /// **The seventh digital channel**, and the same bargain `interact` makes:
+    /// level from `--hold`, edge-detected by `Play::set_input`, so a human
+    /// holding it toggles once and a tape that holds it forever does not.
+    /// A script that must not repeat edge-detects it itself anyway, exactly as
+    /// `deeper_player.rhai` does for `fire`.
+    ///
+    /// It is a channel rather than a reuse of `interact` because an inventory
+    /// is a *mode*: while it is open, `interact` means "lift or place" and the
+    /// key that opened it has to still be able to close it. One key cannot be
+    /// both.
+    pub bag: bool,
+
     /// Where the character's view ray lands: the first solid thing along
     /// `forward`, or a point at the end of its range when nothing is there.
     ///
@@ -271,6 +285,7 @@ impl Default for Motion {
             sprint: false,
             fire: false,
             interact: false,
+            bag: false,
             aim_point: [0.0, 0.0, -1.0],
             aim_distance: 0.0,
             aim_hit: false,
@@ -704,6 +719,7 @@ impl ScriptHost {
         scope.push("sprint", motion.sprint);
         scope.push("fire", motion.fire);
         scope.push("interact", motion.interact);
+        scope.push("bag", motion.bag);
         scope.push("aim_point", to_dynamic_vec(motion.aim_point));
         scope.push("aim_distance", f64::from(motion.aim_distance));
         scope.push("aim_hit", motion.aim_hit);
@@ -1249,6 +1265,36 @@ mod tests {
             .motion("use", &pressed, &mut ScriptMemory::default())
             .expect("runs");
         assert_eq!(out.emitted.len(), 1, "E pressed did not reach the script");
+    }
+
+    /// And the seventh, which is the inventory key.
+    ///
+    /// **Separate from the interact test rather than folded into it**: the two
+    /// channels have to be independently readable, and one test that presses
+    /// both cannot tell a scope that pushed `bag` from one that aliased it to
+    /// `interact`. So this presses `bag` alone and asserts `interact` stayed
+    /// down — which is exactly the wiring mistake a seventh field invites.
+    #[test]
+    fn a_movement_script_sees_the_inventory_key_on_its_own() {
+        let mut host = host();
+        host.compile(
+            "creel",
+            "if bag { emit.push(#{ kind: \"bag\" }); } \
+             if interact { emit.push(#{ kind: \"used\" }); }",
+        )
+        .expect("valid");
+
+        let idle = host
+            .motion("creel", &walking(), &mut ScriptMemory::default())
+            .expect("runs");
+        assert!(idle.emitted.is_empty(), "nothing pressed, nothing emitted");
+
+        let pressed = Motion { bag: true, ..walking() };
+        let out = host
+            .motion("creel", &pressed, &mut ScriptMemory::default())
+            .expect("runs");
+        let kinds: Vec<&str> = out.emitted.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["bag"], "Tab alone should reach `bag` and nothing else");
     }
 
     /// A weapon: the host casts the ray, the script decides what to do with

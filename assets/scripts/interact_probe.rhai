@@ -19,7 +19,18 @@
 // What it answers with: events on `emit`
 // What it may keep: memory.held
 
+// **And the seventh channel, `bag`, on the same bench.** It is the same
+// machinery — a `--hold` name, a `Motion` field, a `scope.push` — so a second
+// scene would be a second copy of this file with one word changed. What it is
+// worth proving separately is that the two do not alias: `bagged` counts Tab
+// and `used` counts E, and a run that holds one must leave the other at zero.
+//
+//   loom sim assets/test/interact_probe.loom --ticks 120 \
+//     --hold "30:bag=1; 31:" \
+//     --assert "events.bagged == 1" --assert "events.used == 0"
+
 let held = if "held" in memory { memory.held } else { false };
+let bag_held = if "bag_held" in memory { memory.bag_held } else { false };
 
 if interact {
     emit.push(#{ kind: "used" });
@@ -28,4 +39,12 @@ if interact {
     }
 }
 
+if bag {
+    emit.push(#{ kind: "bagged" });
+    if !bag_held {
+        emit.push(#{ kind: "bagged_edge" });
+    }
+}
+
 memory.held = interact;
+memory.bag_held = bag;
