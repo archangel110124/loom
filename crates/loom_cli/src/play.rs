@@ -85,9 +85,19 @@ pub struct Sim {
     dynamic: Vec<(loom_ecs::Entity, RigidBodyHandle)>,
     /// Entities with a `CharacterController`, and their walking state.
     characters: Vec<Walker>,
-    /// The scene's water, with its waves resolved once — the same resolution
-    /// the renderer does, so a crate floats on the sea it is drawn on.
+    /// The scene's water, with its waves resolved — the same resolution the
+    /// renderer does, so a crate floats on the sea it is drawn on.
+    ///
+    /// Resolved once at load, and re-resolved on the fixed tick when a mood
+    /// stage ramps the wind. See [`Sim::reweather`].
     water: Option<loom_scene::components::WaterBody>,
+    /// Whether [`Self::water`]'s waves came from the wind rather than the file.
+    ///
+    /// **Read once, before the resolution.** After `water_of` has run there is
+    /// no way to tell a derived wave list from an authored one, and a weather
+    /// ramp that overwrote an authored sea would silently delete the one thing
+    /// a scene said explicitly about its water.
+    derived_waves: bool,
     /// The ground under the scene's voxel terrain, baked once at load.
     ///
     /// **The same grid the water shader reads**, through the same
@@ -847,6 +857,11 @@ impl Sim {
             characters.iter().position(|w| w.entity == entity)
         });
 
+        // Provenance before resolution — see `Sim::derived_waves`.
+        let derived_waves = world.water().is_some_and(|value| {
+            serde_json::from_value::<loom_scene::components::WaterBody>(value.clone())
+                .is_ok_and(|body| body.waves.waves.is_empty())
+        });
         let water = crate::weather::water_of(world, &crate::weather::wind_of_world(world));
         // The current, off the bed that was just baked. Both halves have to be
         // in hand: a river with no terrain has nothing to run down, and terrain
@@ -911,6 +926,7 @@ impl Sim {
             fluid_cost: (0.0, 0.0, 0),
             fluid_drawn: None,
             water,
+            derived_waves,
             terrain,
             flow,
             wavelets: loom_water::wavelet::WaveletField::new(),
@@ -920,6 +936,38 @@ impl Sim {
             water_events: Vec::new(),
             tick: 0,
         }
+    }
+
+    /// Re-derive the sea from a ramped wind speed — the weather ladder.
+    ///
+    /// **On the fixed tick, from the tick's own `dread`, and nowhere else.**
+    /// Waves push rigid bodies, so this is inside the deterministic core: it
+    /// must be a pure function of (scene, tick) and it is, because `dread` is
+    /// a fixed-tick script number. A ramp riding the viewer's frame clock
+    /// would pass the image gate, pass `cargo xtask repeat`, and be wrong only
+    /// in the window the human judges water in.
+    ///
+    /// A no-op for an authored wave list ([`Self::derived_waves`]) and for a
+    /// scene with no water. Cost is sixteen `ln`/`sqrt` chains, once a tick.
+    pub(crate) fn reweather(&mut self, world: &World, speed: f32) {
+        if !self.derived_waves {
+            return;
+        }
+        let Some(body) = self.water.as_mut() else {
+            return;
+        };
+        let wind = crate::weather::wind_of_world_at(world, Some(speed));
+        let params = wind.params();
+        let u10 = wind.mean_speed_at(10.0);
+        let direction = [params.get("dir_x"), params.get("dir_z")];
+        // The same two arms `water_of` takes. Not a call to `water_of` itself:
+        // that re-reads and re-deserialises the whole component every tick to
+        // rebuild a struct this already holds, and the only field that moves
+        // is this one.
+        body.waves = match body.fetch {
+            Some(fetch) => loom_water::spectrum::wave_set_fetch(u10, direction, fetch),
+            None => loom_water::spectrum::wave_set(u10, direction),
+        };
     }
 
     /// Advance the cinematic solver and let it push the bodies — ADR 0053.
@@ -2140,6 +2188,13 @@ pub struct Runner {
     /// The game's rules, if the scene has any, and the state they keep.
     rules: Option<String>,
     state: loom_script::GameState,
+    /// The mood ladder, parsed once, **only when some rung ramps the wind**.
+    ///
+    /// Empty for every scene that does not — which is every scene written
+    /// before this — so the per-tick weather costs exactly one `is_empty`
+    /// there. Parsed at load rather than inside `mood_weather_of` because that
+    /// function now runs on the fixed tick.
+    weather_stages: Vec<loom_scene::components::MoodStage>,
     /// Blasts that have not gone off yet: the tick they fire on, and what
     /// they do. Sorted by tick and drained from the front.
     ///
@@ -2293,6 +2348,17 @@ impl Runner {
             node_scripts,
             rules,
             state: loom_script::GameState::default(),
+            // Parsed only when a rung actually ramps the wind, so this stays
+            // empty — and the per-tick weather stays one `is_empty` — for
+            // every scene that does not have a weather ladder.
+            weather_stages: world
+                .environment()
+                .and_then(|c| c.get("stages"))
+                .and_then(|v| {
+                    serde_json::from_value::<Vec<loom_scene::components::MoodStage>>(v.clone()).ok()
+                })
+                .filter(|stages| stages.iter().any(|s| s.wind_speed.is_some()))
+                .unwrap_or_default(),
             pending_blasts,
             events: loom_script::EventLog::default(),
             input: loom_script::Motion::default(),
@@ -2399,6 +2465,7 @@ impl Runner {
             node_scripts: Vec::new(),
             rules: None,
             state: loom_script::GameState::default(),
+            weather_stages: Vec::new(),
             pending_blasts: Vec::new(),
             events: loom_script::EventLog::default(),
             input: loom_script::Motion::default(),
@@ -2414,6 +2481,17 @@ impl Runner {
     /// # Errors
     /// [`loom_script::ScriptError`] from whichever script failed.
     pub fn tick(&mut self, world: &mut World, tick: u64) -> Result<(), loom_script::ScriptError> {
+        // **The weather, before the step it acts on.** The rules wrote `dread`
+        // at the end of the last tick, so the sea this step is solved against
+        // is one tick behind the scalar — deterministic, and irrelevant
+        // against a ramp that takes tens of seconds to cross.
+        if !self.weather_stages.is_empty() {
+            #[allow(clippy::cast_possible_truncation)]
+            let dread = self.state.number("dread").unwrap_or(0.0) as f32;
+            if let (Some(speed), _) = crate::mood_weather_of(&self.weather_stages, dread) {
+                self.physics.reweather(world, speed);
+            }
+        }
         self.physics.step(1);
 
         // What the water did during the step, into the one log. Before the

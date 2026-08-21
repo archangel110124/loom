@@ -712,7 +712,16 @@ fn check_moods(nodes: &[Node]) -> Vec<SceneError> {
                 ("grade.contrast", stage.grade.contrast, 0.2, 3.0),
                 ("grade.saturation", stage.grade.saturation, 0.0, 2.0),
             ];
-            for (field, value, low, high) in out_of_range {
+            // The two optional ones, checked only when named — `None` means
+            // "leave the scene's own alone" and has no range to be outside of.
+            let optional = [
+                ("wind_speed", stage.wind_speed, 0.0, 40.0),
+                ("rain_intensity", stage.rain_intensity, 0.0, 100.0),
+            ];
+            let named = optional
+                .into_iter()
+                .filter_map(|(f, v, lo, hi)| v.map(|v| (f, v, lo, hi)));
+            for (field, value, low, high) in out_of_range.into_iter().chain(named) {
                 if value >= low && value <= high {
                     continue;
                 }

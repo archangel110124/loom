@@ -1612,6 +1612,70 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
   --assert "Rig/Player.y > 2.2" \
   | grep -q '"message": "THE CATCH IS IN HER HOLD   bring her alongside first"'
 
+# **THE DECK STILL CARRIES A MAN WHEN THE WEATHER GETS UP, AND NOTHING ELSE
+# HERE CAN SEE THAT.** ADR 0060 states an acceptance — 50 mm net drift and
+# 30 mm peak-to-peak, boat-frame, per rider — and until this row it was checked
+# by hand, once, at one wind speed. No pixel diff can see a rider ratchet up a
+# metre and freeze there; no determinism hash moves when he does, because he is
+# a character driven by a script and not a rigid body; and `events.station` is
+# an integral that cannot see a man bouncing ninety centimetres off a deck.
+#
+# `weather_ramp.loom` is `jib_vi_drift.loom` — the five-station carry
+# instrument — with a wind ramp over it, so the reading is taken at the top of
+# a ladder instead of in a millpond. `dread` saturates at tick 1800.
+#
+# **Four ticks over one wave period, and that is why this is four runs.** The
+# acceptance has two halves and a single tick count can only see the first: a
+# rider that swings 25 mm and comes back reads as zero net drift. The top
+# rung's peak wavelength is about 7 m, so its period is 2.1 s and 1800/1830/
+# 1860/1890 are its quarters.
+#
+# **`local_z` is the axis that goes first** — the sea runs 20° off her bow, so
+# the beam is where the deck moves. The band is 22 mm wide about each station:
+# inside ADR 0060's 30 mm, and wider than the 15.8 mm this configuration
+# actually reaches, so it is a regression bound rather than a restatement of
+# today's number.
+#
+# **Fault-injected, four ways, because a carry row that cannot fail is worse
+# than none.** Raising the ladder's top rung to 18 fails it, and to 20 fails it;
+# lowering it to 13 passes; deleting the ladder's `wind_speed` passes *this*
+# pair and fails the wind pair below — which is why both exist. The wind cap of
+# 16 in that scene is this measurement and not a preference.
+"$LOOM" sim assets/test/weather_ramp.loom --ticks 1800 \
+  --assert "Sea/Boat/PortRail.local_z < -2.290" \
+  --assert "Sea/Boat/PortRail.local_z > -2.312" \
+  --assert "Sea/Boat/BridgeDeck.local_z < -2.090" \
+  --assert "Sea/Boat/BridgeDeck.local_z > -2.112" >/dev/null
+"$LOOM" sim assets/test/weather_ramp.loom --ticks 1830 \
+  --assert "Sea/Boat/PortRail.local_z < -2.290" \
+  --assert "Sea/Boat/PortRail.local_z > -2.312" \
+  --assert "Sea/Boat/BridgeDeck.local_z < -2.090" \
+  --assert "Sea/Boat/BridgeDeck.local_z > -2.112" >/dev/null
+"$LOOM" sim assets/test/weather_ramp.loom --ticks 1860 \
+  --assert "Sea/Boat/PortRail.local_z < -2.290" \
+  --assert "Sea/Boat/PortRail.local_z > -2.312" \
+  --assert "Sea/Boat/BridgeDeck.local_z < -2.090" \
+  --assert "Sea/Boat/BridgeDeck.local_z > -2.112" >/dev/null
+"$LOOM" sim assets/test/weather_ramp.loom --ticks 1890 \
+  --assert "Sea/Boat/PortRail.local_z < -2.290" \
+  --assert "Sea/Boat/PortRail.local_z > -2.312" \
+  --assert "Sea/Boat/BridgeDeck.local_z < -2.090" \
+  --assert "Sea/Boat/BridgeDeck.local_z > -2.112" >/dev/null
+
+# **And the wind on that ladder actually rises, which is the other half.** A
+# ramp wired to nothing would pass every row above it: the riders would sit
+# still because the sea never got up, and the carry rows would report a full
+# pass having never looked at a rough sea. Deleting `wind_speed` from the scene
+# fails this pair and nothing else in the five gates.
+#
+# `Wind.speed` runs 3.5 -> 16 over the ramp. These are the *measured* readings
+# rather than the authored ones — the authored value is a free-stream number
+# about 10% above U10 and the probe is at 3 m.
+"$LOOM" sim assets/test/weather_ramp.loom --ticks 60 \
+  --assert "wind@0,3,0.speed < 4.0" >/dev/null
+"$LOOM" sim assets/test/weather_ramp.loom --ticks 1800 \
+  --assert "wind@0,3,0.speed > 9.0" >/dev/null
+
 # **THE HULL IS A SOLID OBJECT, WHICH IT WAS NOT.** Three faults, one cause:
 # the hull's own `BoxCollider` is demoted to mass-only the moment the deck
 # prefab attaches a plate (ADR 0060), and every box that prefab had started at

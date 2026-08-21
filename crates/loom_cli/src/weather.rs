@@ -237,16 +237,24 @@ pub(crate) fn rain_of(scene: &Scene) -> Option<Rain> {
 }
 
 /// The one mapping from the authored scalars to the field.
-fn wind_from(authored: Option<&serde_json::Value>) -> Wind {
+///
+/// `speed` overrides the authored value when a mood stage names one — the
+/// escalating half of a weather ramp. Everything else about the wind (where it
+/// blows from, how gusty, how turbulent) stays the scene's, because a rising
+/// wind is the same wind harder and not a different one.
+fn wind_from(authored: Option<&serde_json::Value>, speed: Option<f32>) -> Wind {
     let Some(authored) = authored
         .and_then(|value| serde_json::from_value::<loom_scene::components::Wind>(value.clone()).ok())
     else {
-        return Wind::default();
+        return speed.map_or_else(Wind::default, |speed| {
+            let d = loom_scene::components::Wind::default();
+            Wind::new(d.direction_degrees, speed, d.gustiness, d.turbulence, d.ground_drag)
+        });
     };
 
     Wind::new(
         authored.direction_degrees,
-        authored.speed,
+        speed.unwrap_or(authored.speed),
         authored.gustiness,
         authored.turbulence,
         authored.ground_drag,
@@ -267,6 +275,7 @@ pub(crate) fn wind_of(scene: &Scene) -> Wind {
             .nodes()
             .iter()
             .find_map(|node| node.components.get("Wind")),
+        None,
     )
 }
 
@@ -277,7 +286,18 @@ pub(crate) fn wind_of(scene: &Scene) -> Wind {
 /// the same function rather than through two readings of the same fields.
 #[must_use]
 pub(crate) fn wind_of_world(world: &World) -> Wind {
-    wind_from(world.wind())
+    wind_from(world.wind(), None)
+}
+
+/// The same wind with a mood rung's speed substituted — the weather ramp.
+///
+/// **This is the fixed-tick path and the only one allowed to move the sea.**
+/// `speed` comes from `mood_weather_of` at the tick's own `dread`, never from
+/// the viewer's frame clock: a `WaterBody` with no authored waves derives them
+/// from this, and those waves push rigid bodies (ADR 0045 clause 2).
+#[must_use]
+pub(crate) fn wind_of_world_at(world: &World, speed: Option<f32>) -> Wind {
+    wind_from(world.wind(), speed)
 }
 
 /// The scene's water with its wave set resolved, or `None` if it has no water.

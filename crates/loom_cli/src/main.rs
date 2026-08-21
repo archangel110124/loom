@@ -2788,6 +2788,73 @@ fn stamp_flipbook(
     }
 }
 
+/// Which pair of stages brackets `dread`, and how far between them it sits.
+///
+/// **The endpoints hold outside the authored range rather than extrapolating**
+/// — an extrapolated look is a look nobody looked at, and an extrapolated sea
+/// is a sea nobody sailed. Shared by `mood_of` and [`mood_weather_of`] so the
+/// picture and the water cannot bracket differently.
+fn bracket(
+    stages: &[loom_scene::components::MoodStage],
+    dread: f32,
+) -> (
+    &loom_scene::components::MoodStage,
+    &loom_scene::components::MoodStage,
+    f32,
+) {
+    let first = stages.first().expect("callers check for emptiness");
+    let last = stages.last().unwrap_or(first);
+    let t = dread.clamp(first.at, last.at);
+    match stages.windows(2).find(|w| t <= w[1].at) {
+        Some(w) => {
+            let span = w[1].at - w[0].at;
+            (&w[0], &w[1], if span > 0.0 { (t - w[0].at) / span } else { 0.0 })
+        }
+        // Past the last stage, or only one exists — the load-time refusal has
+        // already reported that, and this still has to answer something.
+        None => (last, last, 0.0),
+    }
+}
+
+/// The wind speed and rain rate the mood ladder asks for at `dread`, if any.
+///
+/// **Deliberately not part of `mood_of`'s merged `Environment`.** That value is
+/// deserialised as an `Environment`, which is `deny_unknown_fields`, and more
+/// importantly it is the *render* path: these two are read on the fixed tick,
+/// because a wind speed derives waves and waves push boats. Same ladder, same
+/// bracket, different side of the ADR 0045 line — which is why they are two
+/// functions and not one.
+///
+/// A stage that names nothing returns `None` and leaves the scene's own
+/// components untouched, so every scene authored before this is unaffected.
+///
+/// Takes the parsed stages rather than the component, because this one runs
+/// **every tick**: re-deserialising five stages of a dozen floats to read two
+/// of them is the sort of cost that does not show up until a scene has weather
+/// and a hundred bodies. The caller parses once at load.
+#[must_use]
+pub(crate) fn mood_weather_of(
+    stages: &[loom_scene::components::MoodStage],
+    dread: f32,
+) -> (Option<f32>, Option<f32>) {
+    if stages.is_empty() {
+        return (None, None);
+    }
+    let (lo, hi, k) = bracket(stages, dread);
+    // A rung that names nothing takes its neighbour's value rather than
+    // dropping out of the ramp — the same three-rung fallback `mood_of` needed
+    // once `deeper_demo` stepped from an unauthored near stage to an authored
+    // far one. Both silent, both a snap.
+    let mix = |a: Option<f32>, b: Option<f32>| match (a.or(b), b.or(a)) {
+        (Some(a), Some(b)) => Some((b - a).mul_add(k, a)),
+        _ => None,
+    };
+    (
+        mix(lo.wind_speed, hi.wind_speed),
+        mix(lo.rain_intensity, hi.rain_intensity),
+    )
+}
+
 /// The effective `Environment` component and grade at `dread` — ADR 0069.
 ///
 /// **Beside `submerge_eye`, and the same shape:** a per-frame modification of
@@ -2815,24 +2882,10 @@ pub(crate) fn mood_of(
         .get("stages")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
-    let Some(first) = stages.first() else {
+    if stages.is_empty() {
         return (component.clone(), Grade::default());
-    };
-    let last = stages.last().unwrap_or(first);
-
-    // Which pair brackets `dread`, and how far between them it sits. The
-    // endpoints hold outside the authored range rather than extrapolating: an
-    // extrapolated grade is a look nobody looked at.
-    let t = dread.clamp(first.at, last.at);
-    let (lo, hi, k) = match stages.windows(2).find(|w| t <= w[1].at) {
-        Some(w) => {
-            let span = w[1].at - w[0].at;
-            (&w[0], &w[1], if span > 0.0 { (t - w[0].at) / span } else { 0.0 })
-        }
-        // Past the last stage, or only one exists — the load-time refusal has
-        // already reported that, and this still has to answer something.
-        None => (last, last, 0.0),
-    };
+    }
+    let (lo, hi, k) = bracket(&stages, dread);
 
     let mut merged = component.clone();
     if let Some(map) = merged.as_object_mut() {
@@ -2901,12 +2954,29 @@ pub(crate) fn environment_with_mood(
     seconds: f32,
     dread: Option<f32>,
 ) -> (loom_render::EnvironmentData, loom_render::Grade) {
-    let grade = world.environment().map_or_else(Default::default, |component| {
-        let authored = component.get("dread").and_then(serde_json::Value::as_f64);
-        #[allow(clippy::cast_possible_truncation)]
-        let d = dread.unwrap_or_else(|| authored.unwrap_or(0.0) as f32);
-        mood_of(component, d).1
+    let component = world.environment();
+    #[allow(clippy::cast_possible_truncation)]
+    let d = component.map_or(0.0, |c| {
+        let authored = c.get("dread").and_then(serde_json::Value::as_f64);
+        dread.unwrap_or_else(|| authored.unwrap_or(0.0) as f32)
     });
+    let grade = component.map_or_else(Default::default, |c| mood_of(c, d).1);
+
+    // **The ramped wind, so the sea that is drawn is the sea that is felt.**
+    // `add_water` derives the wave set from whatever wind reaches it, and
+    // `Runner::tick` derives the buoyancy sea from the ladder's rung — so a
+    // renderer handed the *authored* wind would draw a millpond under a boat
+    // that is being thrown about, and only in the window. Resolving both from
+    // the same `dread` through the same `mood_weather_of` is what makes them
+    // agree by construction rather than by two callers remembering to.
+    let stages: Vec<loom_scene::components::MoodStage> = component
+        .and_then(|c| c.get("stages"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let ramped = mood_weather_of(&stages, d)
+        .0
+        .map(|speed| crate::weather::wind_of_world_at(world, Some(speed)));
+    let wind = ramped.as_ref().unwrap_or(wind);
     (
         environment_with_wind_at(world, wind, seconds, dread),
         loom_render::Grade {
@@ -3678,7 +3748,26 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     // Hoisted out of the struct because the water resolution needs it too: a
     // sea with no authored waves is derived from the wind, and the surface an
     // assertion reads must be the surface the renderer drew.
-    let wind = weather::wind_of(&scene);
+    //
+    // **At the ladder's rung, not the file's floor.** A scene that ramps
+    // `Environment.stages[].wind_speed` has been simulating against the ramped
+    // wind for the whole run — `Runner::tick` derives the waves from it — so
+    // reading the authored value back here would report a breeze under a boat
+    // the solver has been throwing about, and `water@` would report the wrong
+    // sea with it. Same `dread`, same `mood_weather_of`, as the renderer.
+    #[allow(clippy::cast_possible_truncation)]
+    let wind = {
+        let dread = state.number("dread").unwrap_or(0.0) as f32;
+        let stages: Vec<loom_scene::components::MoodStage> = world
+            .environment()
+            .and_then(|c| c.get("stages"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        match mood_weather_of(&stages, dread).0 {
+            Some(speed) => weather::wind_of_world_at(&world, Some(speed)),
+            None => weather::wind_of(&scene),
+        }
+    };
     // The scene's weather, sampled at the tick the run ended on — so a wind or
     // rain assertion is checked against the same clock the simulation used
     // rather than against a wall clock (never-do #8).

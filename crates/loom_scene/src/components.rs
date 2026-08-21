@@ -1110,6 +1110,34 @@ pub struct MoodStage {
     pub environment: EnvironmentPatch,
     /// What the grade does here.
     pub grade: Grade,
+    /// `Wind::speed` at this rung, in m/s. `None` leaves the scene's own.
+    ///
+    /// **The one thing on a mood stage that is inside the simulation hash**,
+    /// and it is here rather than in [`EnvironmentPatch`] for exactly that
+    /// reason: everything in that patch is read at render time, and a wind
+    /// speed is not. A `WaterBody` with no authored waves derives them from
+    /// the wind, waves drive buoyancy, and `wind@x,y,z.speed` is readable by
+    /// `--assert` — so a stage that names this changes what a game does, not
+    /// what it looks like.
+    ///
+    /// The consequence for authoring is one rule: **it must be blended at the
+    /// fixed-tick `dread` and never at the viewer's frame clock.** A sea
+    /// riding a frame delta passes the image gate, passes `cargo xtask
+    /// repeat`, and is wrong only in the window the human judges water in.
+    ///
+    /// Pointless without a fetch. A wind-derived Pierson–Moskowitz sea is
+    /// scale-invariant, so raising this makes the waves longer and no steeper;
+    /// see `WaterBody::fetch`.
+    #[schemars(range(min = 0.0, max = 40.0))]
+    pub wind_speed: Option<f32>,
+    /// `Rain::intensity` at this rung, in mm/h. `None` leaves the scene's own,
+    /// and a scene with no `Rain` component stays dry whatever this says.
+    ///
+    /// Render-side, like the rest of the patch: rain draws and wets and pushes
+    /// nothing. It is here beside [`Self::wind_speed`] because they are one
+    /// weather and authoring them in two places is how they drift apart.
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub rain_intensity: Option<f32>,
 }
 
 /// An `Environment` with every field optional. Same shape, and the same
