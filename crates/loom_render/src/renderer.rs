@@ -1037,6 +1037,13 @@ pub struct Renderer {
     environment_address: vk::DeviceAddress,
     /// What the next frame draws with. One struct, written per frame.
     pub environment: EnvironmentData,
+    /// What the tonemap grades the next frame with — ADR 0069.
+    ///
+    /// **Beside `environment` and not inside it**, because `EnvironmentData`
+    /// is a GPU buffer with a pinned layout and this rides in the tonemap's
+    /// push block. Read at record time exactly as `environment.exposure` is,
+    /// so setting it costs a `memcpy` and no descriptor write.
+    pub grade: crate::tonemap::Grade,
     max_objects: usize,
 
     /// `None` when the device has no ray query; shadows are simply skipped.
@@ -1815,6 +1822,7 @@ impl Renderer {
             environment_alloc: Some(environment_alloc),
             environment_address,
             environment: EnvironmentData::default(),
+            grade: crate::tonemap::Grade::default(),
             eye_tracker: EyeTracker::default(),
             max_objects: MAX_OBJECTS,
             pipeline_layout,
@@ -3003,6 +3011,7 @@ impl Renderer {
         {
             let (pass, view) = (&self.tonemap, self.ldr_view);
             let exposure = self.environment.exposure;
+            let grade = self.grade;
             let placement = self.placement.unwrap_or_else(|| ViewportPlacement::full(width, height));
             graph.pass(
                 "tonemap",
@@ -3015,7 +3024,7 @@ impl Renderer {
                         // The offscreen path always fills its target: there is
                         // no dock, and `loom render --viewport` sets this
                         // through `set_placement` instead.
-                        pass.record(d, cmd, view, exposure, width, height, placement);
+                        pass.record(d, cmd, view, exposure, grade, width, height, placement);
                     }
                 },
             );

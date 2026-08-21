@@ -29,8 +29,25 @@ struct TonemapPush {
     /// `exposure`.
     int2 origin;
     float exposure;
-};
+
+    /// The grade's contrast, as a **multiplier** on the operator's own.
+    ///
+    /// Two powers about one pivot compose exactly —
+    /// `P*(P*(x/P)^a/P)^b == P*(x/P)^(ab)` — so there is one `pow` in this
+    /// shader rather than two, and `1.0` is bit-exact rather than nearly so.
+    float contrast;
+
+    /// `rgb` is the ASC CDL slope, `w` is the saturation.
+    ///
+    /// They ride together because a `float4` at offset 16 is 16-aligned under
+    /// every packing rule and a bare `float3` is not — the same lane trick
+    /// `light_pad` already uses in the environment buffer.
+    float4 gain;
+};                     // 32 bytes of a guaranteed 128
 [[vk::push_constant]] TonemapPush push;
+
+/// Rec.709 luma. The saturation axis, and nothing else uses it.
+static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);
 
 /// Where the shoulder departs from identity. **Unchanged — ADR 0018.**
 static const float KNEE = 0.76;
@@ -115,13 +132,37 @@ float4 tonemapFragmentMain(float4 pos: SV_Position) : SV_Target {
     // a corrupt pixel rather than as the authoring mistake it is.
     float3 c = max(scene.Load(int3(int2(pos.xy) - push.origin, 0)).rgb, 0.0) * push.exposure;
 
+    // **A branch, not an arithmetic accident, and it is this commit's whole
+    // acceptance test.** `lerp(l, c, 1.0)` is `l + 1.0*(c-l)`, which is not
+    // bit-exact in fp32; the gate's tolerance would swallow the difference,
+    // and "a neutral grade re-blesses nothing" should be true by construction
+    // rather than by luck. The condition is on push constants, so every lane
+    // in every wave agrees and the branch is free.
+    bool graded = any(push.gain != float4(1.0, 1.0, 1.0, 1.0)) || push.contrast != 1.0;
+
+    // ASC CDL slope, in linear light. **Equal channels is an exposure and
+    // unequal is a white balance**, which is why the grade has no exposure of
+    // its own — one multiply does both jobs and a second would only be a place
+    // for them to disagree.
+    if (graded) {
+        c *= push.gain.rgb;
+    }
+
     // **The contrast, on scene-referred light, before the shoulder.** Before,
     // because a curve applied after the shoulder moves shadows and nothing
     // else — the shoulder has already spent the top of the range. The floor
     // inside the `max` is not the one above: `pow(0, s)` is
     // `exp2(log2(0) * s)` on this hardware, and `log2(0)` is a NaN even when
     // the input was an honest black.
-    c = PIVOT * pow(max(c / PIVOT, 1e-8), CONTRAST);
+    c = PIVOT * pow(max(c / PIVOT, 1e-8), CONTRAST * push.contrast);
+
+    // Toward grey at 0, unchanged at 1, exaggerated above. **Nothing in
+    // `Environment` can do this** — every "eerie" lighting setting anyone
+    // measured came out MORE colourful than a happy baseline, because taking a
+    // warm sun away stops washing albedos toward a common white.
+    if (graded) {
+        c = max(lerp(dot(c, LUMA).xxx, c, push.gain.w), 0.0);
+    }
 
     return float4(shoulder(c), 1.0);
 }

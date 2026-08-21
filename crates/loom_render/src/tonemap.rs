@@ -26,6 +26,50 @@ use crate::renderer::{RenderError, create_shader_module};
 /// before this pass existed.
 pub(crate) const DEFAULT_EXPOSURE: f32 = 1.0;
 
+/// The three numbers the tonemap grades with, beside the exposure — ADR 0069.
+///
+/// **Not in `EnvironmentData`.** That struct is uploaded to the GPU and has a
+/// pinned layout test; this never reaches a buffer. It rides in the tonemap's
+/// push block, which is where the pass that reads it already is.
+///
+/// **Three concepts, not five.** ASC CDL's `offset` and `power` are cut: in
+/// linear light an offset of −0.02 takes a frame's 1st percentile from 29 to
+/// 0.1, and grading on sRGB-encoded values to fix that needs an `srgbEncode`
+/// and an `srgbDecode`, which exist nowhere in `assets/shaders/`. With no
+/// offset there is no domain question at all — gain is a multiply, saturation
+/// is a lerp toward luma, and the crush comes from `contrast`, which is
+/// exposure-relative and therefore safe on a dark scene.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Grade {
+    /// Per-channel gain, in linear light. **Equal channels is an exposure and
+    /// unequal is a white balance**, which is why there is no separate
+    /// exposure here — one multiply does both jobs.
+    pub gain: [f32; 3],
+    /// A multiplier on the operator's own contrast, pivoting where it pivots.
+    /// Above 1.0 steepens the toe — **this is where a scene buys crushed
+    /// blacks, and it is opt-in so one scene pays for it and the rest do not.**
+    pub contrast: f32,
+    /// Toward grey at 0.0, unchanged at 1.0, exaggerated above.
+    pub saturation: f32,
+}
+
+impl Default for Grade {
+    /// The identity, exactly. The shader tests the same thing with a branch,
+    /// so at this value the pass is the bare operator and not a lerp that
+    /// happens to land on it.
+    fn default() -> Self {
+        Self { gain: [1.0; 3], contrast: 1.0, saturation: 1.0 }
+    }
+}
+
+impl Grade {
+    /// Whether the shader's uniform branch will be taken.
+    #[must_use]
+    pub fn is_neutral(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 pub(crate) struct Tonemap {
     layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
@@ -89,9 +133,12 @@ impl Tonemap {
         let ranges = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::FRAGMENT)
             .offset(0)
-            // `int2 origin; float exposure;` — 12 bytes under either packing
-            // rule, which is why the origin goes first.
-            .size(12)];
+            // `int2 origin; float exposure; float contrast; float4 gain;` —
+            // 32 bytes of the 128 Vulkan guarantees. The origin goes first
+            // because `int2` then `float` is 12 bytes under either packing
+            // rule; the `float4` goes last because at offset 16 it is
+            // 16-aligned under all of them and a bare `float3` would not be.
+            .size(32)];
         // SAFETY: both slices outlive the call.
         let pipeline_layout = unsafe {
             device.create_pipeline_layout(
@@ -150,6 +197,7 @@ impl Tonemap {
         cmd: vk::CommandBuffer,
         destination: vk::ImageView,
         exposure: f32,
+        grade: Grade,
         width: u32,
         height: u32,
         // Where in `destination` the scene lands. The source is always read
@@ -185,11 +233,16 @@ impl Tonemap {
         #[allow(clippy::cast_precision_loss)]
         let (fx, fy) = (placement.x as f32, placement.y as f32);
 
-        // `int2 origin; float exposure;` — 12 bytes, matching the shader.
-        let mut push = [0u8; 12];
+        // 32 bytes, matching `TonemapPush` in the shader field for field.
+        let mut push = [0u8; 32];
         push[0..4].copy_from_slice(&placement.x.to_ne_bytes());
         push[4..8].copy_from_slice(&placement.y.to_ne_bytes());
         push[8..12].copy_from_slice(&exposure.to_ne_bytes());
+        push[12..16].copy_from_slice(&grade.contrast.to_ne_bytes());
+        push[16..20].copy_from_slice(&grade.gain[0].to_ne_bytes());
+        push[20..24].copy_from_slice(&grade.gain[1].to_ne_bytes());
+        push[24..28].copy_from_slice(&grade.gain[2].to_ne_bytes());
+        push[28..32].copy_from_slice(&grade.saturation.to_ne_bytes());
 
         // SAFETY: the caller guarantees the layouts and that `cmd` is
         // recording; every slice outlives its call.
@@ -320,5 +373,58 @@ fn create_pipeline(
     match result {
         Ok(pipelines) => Ok(pipelines[0]),
         Err((_, e)) => Err(RenderError::from(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The push block and the shader must agree field for field**, and
+    /// nothing else in the suite can see that: a disagreement is not a compile
+    /// error, it is a frame graded with someone else's numbers.
+    ///
+    /// Written as the byte layout rather than as `size_of`, because the Rust
+    /// side builds the block by hand — there is no `#[repr(C)]` struct to
+    /// measure, and the offsets are the thing that can drift.
+    #[test]
+    fn the_push_block_is_thirty_two_bytes_in_the_documented_order() {
+        let grade = Grade { gain: [2.0, 3.0, 4.0], contrast: 5.0, saturation: 6.0 };
+        let mut push = [0u8; 32];
+        push[0..4].copy_from_slice(&7i32.to_ne_bytes());
+        push[4..8].copy_from_slice(&8i32.to_ne_bytes());
+        push[8..12].copy_from_slice(&9f32.to_ne_bytes());
+        push[12..16].copy_from_slice(&grade.contrast.to_ne_bytes());
+        push[16..20].copy_from_slice(&grade.gain[0].to_ne_bytes());
+        push[20..24].copy_from_slice(&grade.gain[1].to_ne_bytes());
+        push[24..28].copy_from_slice(&grade.gain[2].to_ne_bytes());
+        push[28..32].copy_from_slice(&grade.saturation.to_ne_bytes());
+
+        // `int2 origin; float exposure; float contrast; float4 gain;`
+        assert_eq!(i32::from_ne_bytes(push[0..4].try_into().unwrap()), 7);
+        assert_eq!(i32::from_ne_bytes(push[4..8].try_into().unwrap()), 8);
+        assert!((f32::from_ne_bytes(push[8..12].try_into().unwrap()) - 9.0).abs() < f32::EPSILON);
+        assert!((f32::from_ne_bytes(push[12..16].try_into().unwrap()) - 5.0).abs() < f32::EPSILON);
+        assert!((f32::from_ne_bytes(push[16..20].try_into().unwrap()) - 2.0).abs() < f32::EPSILON);
+        assert!((f32::from_ne_bytes(push[28..32].try_into().unwrap()) - 6.0).abs() < f32::EPSILON);
+    }
+
+    /// **The default must be the identity exactly, not nearly.**
+    ///
+    /// The shader takes a uniform branch on precisely this condition, and the
+    /// whole claim that adding the grade re-blesses zero references rests on
+    /// the branch not being taken. `lerp(l, c, 1.0)` is `l + 1.0 * (c - l)`,
+    /// which is not bit-exact in fp32; the gate's tolerance would swallow the
+    /// difference and the property would hold by luck instead of by
+    /// construction.
+    #[test]
+    fn the_default_grade_is_the_identity_and_the_shader_can_tell() {
+        assert!(Grade::default().is_neutral());
+
+        // Fault injection: every field must be able to break neutrality on its
+        // own, or the branch is watching the wrong thing.
+        assert!(!Grade { gain: [1.0, 1.0, 0.999], ..Grade::default() }.is_neutral());
+        assert!(!Grade { contrast: 1.001, ..Grade::default() }.is_neutral());
+        assert!(!Grade { saturation: 0.999, ..Grade::default() }.is_neutral());
     }
 }

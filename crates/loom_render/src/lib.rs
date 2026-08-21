@@ -71,6 +71,7 @@ pub use renderer::{PointLight, MAX_LIGHTS,
     Renderer, WaterWave,
 };
 pub use renderer::{MIN_VIEWPORT, ViewportPlacement};
+pub use tonemap::Grade;
 pub use renderer::{MAX_WAVELET_EVENTS, WAVELET_FLOATS};
 pub use ui::{Ui, UiFrame};
 pub use viewer::Viewer;

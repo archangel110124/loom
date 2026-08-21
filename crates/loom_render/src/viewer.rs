@@ -202,6 +202,10 @@ pub struct Viewer {
     environment_address: vk::DeviceAddress,
     /// What the next frame draws with. Set from the scene each frame.
     pub environment: crate::renderer::EnvironmentData,
+    /// What the tonemap grades the next frame with — ADR 0069. Set from the
+    /// scene each frame, exactly as `environment` is, so the window and a
+    /// headless still read the same authored numbers.
+    pub grade: crate::tonemap::Grade,
     /// The previous frame's camera, for the streak smear. Shared implementation
     /// with the offscreen path — see `renderer::EyeTracker`.
     eye_tracker: crate::renderer::EyeTracker,
@@ -792,6 +796,7 @@ impl Viewer {
             environment_alloc: Some(environment_alloc),
             environment_address,
             environment: crate::renderer::EnvironmentData::default(),
+            grade: crate::tonemap::Grade::default(),
             eye_tracker: crate::renderer::EyeTracker::default(),
             object_capacity: INITIAL_OBJECTS,
             requested: vk::Extent2D { width, height },
@@ -2114,6 +2119,7 @@ impl Viewer {
         }
         {
             let (pass, exposure) = (&self.tonemap, self.environment.exposure);
+            let grade = self.grade;
             let placement = placement
                 .unwrap_or_else(|| crate::ViewportPlacement::full(scene_extent.width, scene_extent.height));
             graph.pass(
@@ -2125,7 +2131,10 @@ impl Viewer {
                     // COLOR_ATTACHMENT_OPTIMAL, and `cmd` is recording outside
                     // any rendering block.
                     unsafe {
-                        pass.record(d, cmd, post_view, exposure, extent.width, extent.height, placement);
+                        pass.record(
+                            d, cmd, post_view, exposure, grade, extent.width, extent.height,
+                            placement,
+                        );
                     }
                 },
             );
