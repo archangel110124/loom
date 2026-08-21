@@ -49,14 +49,30 @@ name = "Mood"
   sky_horizon = [0.74, 0.72, 0.66]
   fog_density = 0.0028
   fog_falloff = 0.05
+  # **Authored, and off the default, on purpose.** `cloud_scale` is the one key
+  # deliberately left unnamed by BOTH stages, so it gates the middle rung of the
+  # fallback ladder: a key no stage mentions must hold the scene's own value.
+  # It said that before while authoring nothing — falling through to
+  # `Environment::default()`'s 1200.0, which is what the row would have shown
+  # either way. A fallback test whose two answers are the same number is not a
+  # test. 400.0 is a visibly tighter deck.
+  cloud_scale = 400.0
   dread = 0.65
 
     [[node.components.Environment.stages]]
     name = "middle"
     at = 0.5
-    # `cloud_scale` is the one key deliberately left unnamed by BOTH stages: it
-    # must fall back to the scene's own value rather than ramp from a default
-    # nobody authored, and this row is where that stays true.
+    # **`exposure` is named by `far` and NOT by this stage, and that is the
+    # third rung of the ladder** — a key no stage on the near side names and the
+    # scene does not author either. It must ramp from `Environment::default()`'s
+    # 1.0 toward `far`'s 0.48, not sit at 1.0 until the far stage is reached.
+    #
+    # This row could not see that until it was written this way, and the bug was
+    # live: `deeper_demo` dropped `cloud_cover` and `exposure` across its whole
+    # near half and then STEPPED as `dread` crossed 0.25 — measured at 320x200,
+    # mean 3.115 for one ten-thousandth of the axis against 0.008 either side.
+    # Both stages here named every key, so both sides of every `mix1` always had
+    # a value and the dropped-key path was never taken.
       [node.components.Environment.stages.environment]
       sun_strength = 0.75
       sun_color = [0.92, 0.96, 0.78]
@@ -66,7 +82,6 @@ name = "Mood"
       fog_density = 0.018
       fog_falloff = 0.04
       cloud_cover = 0.55
-      exposure = 0.88
       [node.components.Environment.stages.grade]
       gain = [0.96, 1.00, 0.90]
       contrast = 1.02

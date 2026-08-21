@@ -2837,7 +2837,22 @@ pub(crate) fn mood_of(
     let mut merged = component.clone();
     if let Some(map) = merged.as_object_mut() {
         let (a, b) = (&lo.environment, &hi.environment);
-        let base = |key: &str| component.get(key).cloned();
+        // **The fallback ladder has three rungs and the third is the one that
+        // was missing.** A key no stage names and the scene does not author
+        // either used to make `mix1` return `None`, which dropped the key from
+        // the merged value — and `environment_of_inner` then substituted
+        // `Environment::default()` for it anyway. So the value was the default
+        // on *one* side of a stage boundary and the authored number on the
+        // other, and `deeper_demo` stepped: `cloud_cover` snapped 0.0 -> 0.30
+        // in one tick as `dread` crossed 0.25, because `inshore` authors no
+        // patch at all and the scene names no cloud. Measured on the shipped
+        // scene at 320x200, the same 0.0001 of `dread`: mean 0.0032 below the
+        // boundary against 3.115 above it. Ending the ladder where the
+        // renderer's own ladder ends is what makes the ramp continuous, and it
+        // is what the doc comment above already promised.
+        let defaults = serde_json::to_value(loom_scene::components::Environment::default())
+            .unwrap_or(serde_json::Value::Null);
+        let base = |key: &str| component.get(key).or_else(|| defaults.get(key)).cloned();
         let mut put = |key: &str, value: Option<serde_json::Value>| {
             if let Some(value) = value {
                 map.insert(key.to_owned(), value);
@@ -5689,6 +5704,57 @@ mod tests {
         let scene = loom_scene::Scene::parse(text).expect("valid scene");
         let world = World::from_scene(&scene);
         environment_with_wind_at(&world, &crate::weather::wind_of(&scene), 0.0, None)
+    }
+
+    /// **The ramp is continuous across a stage boundary even for a key nobody
+    /// authored**, which is the one place it was not.
+    ///
+    /// `inshore` names no patch and the scene names no `cloud_cover`, so the
+    /// near half of the ladder used to drop the key entirely and let
+    /// `environment_of_inner` substitute `Environment::default()` — while the
+    /// far half interpolated the authored `0.30`. The value therefore *stepped*
+    /// as `dread` crossed `0.25`, which on `deeper_demo` is a cloud deck
+    /// appearing out of a clear sky in one tick.
+    ///
+    /// **Written as continuity rather than as an expected number**, because
+    /// the expected number is exactly what the bug got wrong: a test asserting
+    /// `0.30` at the boundary passes on the broken code, which reaches `0.30`
+    /// there too — one tick late. What no broken version can satisfy is that
+    /// the two sides of the boundary agree.
+    ///
+    /// The value either side of a boundary crossed in steps of `1e-4` must
+    /// differ by about a thousandth of the authored span, not by the span.
+    #[test]
+    fn a_key_no_stage_names_ramps_instead_of_stepping() {
+        let scene = "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e50\"\n\n\
+             [[node]]\nname = \"R\"\n\n  [node.components.Environment]\n  \
+             sun_strength = 1.0\n  dread = 0.0\n\n    \
+             [[node.components.Environment.stages]]\n    name = \"near\"\n    at = 0.0\n\n    \
+             [[node.components.Environment.stages]]\n    name = \"mid\"\n    at = 0.25\n      \
+             [node.components.Environment.stages.environment]\n      cloud_cover = 0.30\n\n    \
+             [[node.components.Environment.stages]]\n    name = \"far\"\n    at = 1.0\n      \
+             [node.components.Environment.stages.environment]\n      cloud_cover = 1.0\n";
+        let parsed = loom_scene::Scene::parse(scene).expect("valid scene");
+        let world = World::from_scene(&parsed);
+        let authored = world.environment().expect("an Environment").clone();
+        let cover = |d: f32| {
+            mood_of(&authored, d)
+                .0
+                .get("cloud_cover")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or_else(|| {
+                    f64::from(loom_scene::components::Environment::default().cloud_cover)
+                })
+        };
+
+        // The near half is a real ramp from the default, not a flat hold.
+        assert!(cover(0.125) > 0.14 && cover(0.125) < 0.16, "midpoint was {}", cover(0.125));
+
+        // And the boundary is not a cliff. The span either side is 0.30 and
+        // 0.70 over 0.25 and 0.75 of the axis, so a step of 1e-4 moves it by
+        // about 1.2e-4 — three orders below the 0.30 the bug jumped.
+        let step = (cover(0.2501) - cover(0.2499)).abs();
+        assert!(step < 0.001, "cloud_cover stepped by {step} across `at = 0.25`");
     }
 
     /// **A light with `flicker = 0` is byte-identical, and a flickering one is
