@@ -94,6 +94,9 @@ name = "Hips"
 parent = "Deckhand"
 transform = { pos = [0.0000, 0.8000, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
+  [node.components.Script]
+  path = "../scripts/deckhand_hips.rhai"
+
 [[node]]
 name = "HipsM"
 parent = "Deckhand/Hips"
@@ -112,6 +115,9 @@ transform = { pos = [0.0000, 0.1230, 0.0000], rot_euler = [0.00, 0.00, 0.00] }
 name = "Spine"
 parent = "Deckhand/Hips"
 transform = { pos = [0.0000, 0.2460, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+
+  [node.components.Script]
+  path = "../scripts/deckhand_spine.rhai"
 
 [[node]]
 name = "ChestM"
@@ -160,6 +166,9 @@ name = "Neck"
 parent = "Deckhand/Hips/Spine"
 transform = { pos = [0.0000, 0.3940, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
+  [node.components.Script]
+  path = "../scripts/deckhand_neck.rhai"
+
 [[node]]
 name = "NeckM"
 parent = "Deckhand/Hips/Spine/Neck"
@@ -207,6 +216,9 @@ name = "ShoulderL"
 parent = "Deckhand/Hips/Spine"
 transform = { pos = [-0.2720, 0.3380, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
+  [node.components.Script]
+  path = "../scripts/deckhand_shoulder.rhai"
+
 [[node]]
 name = "ShoulderBallL"
 parent = "Deckhand/Hips/Spine/ShoulderL"
@@ -239,6 +251,9 @@ transform = { pos = [0.0000, -0.1550, 0.0000], rot_euler = [0.00, 0.00, 0.00], s
 name = "ElbowL"
 parent = "Deckhand/Hips/Spine/ShoulderL"
 transform = { pos = [-0.0010, -0.3100, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+
+  [node.components.Script]
+  path = "../scripts/deckhand_elbow.rhai"
 
 [[node]]
 name = "ElbowBallL"
@@ -292,6 +307,9 @@ name = "ShoulderR"
 parent = "Deckhand/Hips/Spine"
 transform = { pos = [0.2720, 0.3380, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
+  [node.components.Script]
+  path = "../scripts/deckhand_shoulder.rhai"
+
 [[node]]
 name = "ShoulderBallR"
 parent = "Deckhand/Hips/Spine/ShoulderR"
@@ -324,6 +342,9 @@ transform = { pos = [0.0000, -0.1550, 0.0000], rot_euler = [0.00, 0.00, 0.00], s
 name = "ElbowR"
 parent = "Deckhand/Hips/Spine/ShoulderR"
 transform = { pos = [0.0010, -0.3100, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+
+  [node.components.Script]
+  path = "../scripts/deckhand_elbow.rhai"
 
 [[node]]
 name = "ElbowBallR"
@@ -377,6 +398,9 @@ name = "HipL"
 parent = "Deckhand/Hips"
 transform = { pos = [-0.1180, 0.0000, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
+  [node.components.Script]
+  path = "../scripts/deckhand_hip.rhai"
+
 [[node]]
 name = "HipBallL"
 parent = "Deckhand/Hips/HipL"
@@ -409,6 +433,9 @@ transform = { pos = [0.0000, -0.2060, 0.0000], rot_euler = [0.00, 0.00, 0.00], s
 name = "KneeL"
 parent = "Deckhand/Hips/HipL"
 transform = { pos = [-0.0010, -0.4120, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+
+  [node.components.Script]
+  path = "../scripts/deckhand_knee.rhai"
 
 [[node]]
 name = "KneeBallL"
@@ -443,6 +470,9 @@ name = "AnkleL"
 parent = "Deckhand/Hips/HipL/KneeL"
 transform = { pos = [-0.0010, -0.3080, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
+  [node.components.Script]
+  path = "../scripts/deckhand_ankle.rhai"
+
 [[node]]
 name = "BootLM"
 parent = "Deckhand/Hips/HipL/KneeL/AnkleL"
@@ -461,6 +491,9 @@ transform = { pos = [0.0000, -0.0400, -0.0450], rot_euler = [0.00, 0.00, 0.00] }
 name = "HipR"
 parent = "Deckhand/Hips"
 transform = { pos = [0.1180, 0.0000, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+
+  [node.components.Script]
+  path = "../scripts/deckhand_hip.rhai"
 
 [[node]]
 name = "HipBallR"
@@ -495,6 +528,9 @@ name = "KneeR"
 parent = "Deckhand/Hips/HipR"
 transform = { pos = [0.0010, -0.4120, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
 
+  [node.components.Script]
+  path = "../scripts/deckhand_knee.rhai"
+
 [[node]]
 name = "KneeBallR"
 parent = "Deckhand/Hips/HipR/KneeR"
@@ -527,6 +563,9 @@ transform = { pos = [0.0000, -0.1540, 0.0000], rot_euler = [0.00, 0.00, 0.00], s
 name = "AnkleR"
 parent = "Deckhand/Hips/HipR/KneeR"
 transform = { pos = [0.0010, -0.3080, 0.0000], rot_euler = [0.000, 0.000, 0.000] }
+
+  [node.components.Script]
+  path = "../scripts/deckhand_ankle.rhai"
 
 [[node]]
 name = "BootRM"

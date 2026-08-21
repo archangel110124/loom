@@ -1,0 +1,230 @@
+# THE DECKHAND WALKS — the scene that proves an articulated puppet animates.
+#
+# Loom has no skeletal animation and is not getting any (ADR 0062:107: the rung
+# above a formula is morph targets, not skinning). So a character here is
+# separate rigid parts on a node hierarchy, and this is the scene that shows
+# fourteen node `Script`s and one `GameRules` clock turning that into a walk.
+#
+# **Three things are on trial and they are separable on purpose.**
+#
+# 1. `assets/prefabs/deckhand.loom` — 43 nodes, 27 mesh leaves, 4,140 triangles.
+#    Mounted on the character with `pos = [0, -0.90, 0]`, because the prefab's
+#    origin is the SOLE PLANE and a `CharacterController`'s origin is its
+#    capsule centre, 0.90 m above his feet. Get that wrong and he floats.
+#
+# 2. `deckhand_gait.rhai` on `GameRules` — the phase, the speed and the blend.
+#    A node `Script` has no memory, so this is the only place in the engine the
+#    phase can be accumulated, and the only place that can see how fast he is
+#    going: a node script's `position` is its LOCAL offset.
+#
+# 3. The seven joint scripts, which each read that clock and write one
+#    absolute rotation. **No `MeshRenderer` in the prefab may become a
+#    collider**, and until `play.rs`'s `character_ancestor` test landed every
+#    one of the 27 did — twenty-seven invisible boxes at the spawn point,
+#    through which he could not walk. That is what the assert below checks:
+#    he starts at x -3.0 and has to reach x 0 to pass.
+#
+#   loom validate assets/test/deckhand_walk.loom
+#   loom sim assets/test/deckhand_walk.loom --ticks 420 \
+#     --assert "Root/Walker.x > 0.0" --assert "Root/Walker.y > 0.5"
+#   loom render assets/test/deckhand_walk.loom --sim 300 --out walk.png
+#
+# **He stands for the first 180 ticks and then walks, so one scene proves both
+# halves.** Ticks 0-180 are the idle: `blend` is 0, the walk terms are all
+# multiplied out, and what remains is two breath channels at 0.22 and 0.13 Hz,
+# deliberately incommensurate so the loop never repeats.
+#
+# **The camera rides him**, at local [-4.5, 0.05, 0] with 270 degrees of local
+# yaw against his own -90, so it sits 4.5 m off his beam looking back at him
+# and he stays in frame across a whole stride — 2.7 m at this pace. The deck is
+# planked so that the ground has features and a foot that skates has something
+# to skate against; a flat albedo floor would hide the one defect this scene
+# exists to show.
+
+[scene]
+format = 1
+id = "b8e07d31-45a6-4c92-8f10-6e2d93c47a5b"
+
+[[prefab]]
+key = "deckhand"
+id = "7a41c0de-5b2e-4f18-9d63-2c8ae5f10b47"
+path = "../prefabs/deckhand.loom"
+
+[[node]]
+name = "Root"
+
+  # The gait clock. One `GameRules` per scene, and this is it.
+  [node.components.GameRules]
+  path = "../scripts/deckhand_gait.rhai"
+
+  [node.components.Environment]
+  sun_direction = [0.34, 0.68, -0.65]
+  sun_strength = 2.2
+  sun_color = [1.0, 0.95, 0.88]
+  ambient = 0.42
+  sky_zenith = [0.26, 0.34, 0.46]
+  sky_horizon = [0.52, 0.56, 0.58]
+  fog_density = 0.0
+
+# ---------------------------------------------------------------------------
+# The character. `rot_euler` is -90 about Y because authored forward is -Z and
+# he walks along +X: R_y(-90) takes (0,0,-1) to (1,0,0). A movement script
+# answers with a WORLD velocity and nothing turns the node, so a character that
+# walks a direction he was not authored facing moonwalks.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Walker"
+parent = "Root"
+transform = { pos = [-3.0, 1.0, 0.0], rot_euler = [0.0, -90.0, 0.0] }
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+  step_height = 0.25
+
+  [node.components.Script]
+  path = "../scripts/deckhand_stroll.rhai"
+
+[[node]]
+name = "Body"
+parent = "Root/Walker"
+prefab = "deckhand"
+transform = { pos = [0.0, -0.90, 0.0] }
+
+[[node]]
+name = "Camera"
+parent = "Root/Walker"
+transform = { pos = [-4.5, 0.05, 0.0], rot_euler = [0.0, 270.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 34.0
+
+# ---------------------------------------------------------------------------
+# Somewhere to walk. Planked, so a skating foot has something to skate on.
+#
+# The seams sit BEHIND him (z 0.10 to 1.80) rather than through him. Run the
+# full 3 m width of the deck and the one under his feet reaches past the camera
+# as a pole standing in the foreground -- which is what a 30 mm box pointing at
+# a lens looks like, and it is louder than the walk it is there to measure.
+# ---------------------------------------------------------------------------
+
+[[node]]
+name = "Deck"
+parent = "Root"
+transform = { pos = [1.0, -0.10, 0.0], scale = [10.0, 0.10, 3.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.20, 0.19, 0.17]
+  roughness = 0.92
+
+[[node]]
+name = "PlankA"
+parent = "Root"
+transform = { pos = [-5.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.09, 0.085, 0.08]
+  roughness = 0.95
+
+[[node]]
+name = "PlankB"
+parent = "Root"
+transform = { pos = [-4.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.09, 0.085, 0.08]
+  roughness = 0.95
+
+[[node]]
+name = "PlankC"
+parent = "Root"
+transform = { pos = [-3.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.09, 0.085, 0.08]
+  roughness = 0.95
+
+[[node]]
+name = "PlankD"
+parent = "Root"
+transform = { pos = [-2.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.09, 0.085, 0.08]
+  roughness = 0.95
+
+[[node]]
+name = "PlankE"
+parent = "Root"
+transform = { pos = [-1.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.09, 0.085, 0.08]
+  roughness = 0.95
+
+[[node]]
+name = "PlankF"
+parent = "Root"
+transform = { pos = [0.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.09, 0.085, 0.08]
+  roughness = 0.95
+
+[[node]]
+name = "PlankG"
+parent = "Root"
+transform = { pos = [1.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.09, 0.085, 0.08]
+  roughness = 0.95
+
+[[node]]
+name = "PlankH"
+parent = "Root"
+transform = { pos = [2.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.09, 0.085, 0.08]
+  roughness = 0.95
+
+[[node]]
+name = "PlankI"
+parent = "Root"
+transform = { pos = [3.0, 0.005, 0.95], scale = [0.03, 0.012, 0.85] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.09, 0.085, 0.08]
+  roughness = 0.95
