@@ -221,6 +221,17 @@
 # is a real engine wrinkle and worth an issue; it was not worth an engine change
 # inside a demo round.)
 #
+# **The view has weight.** Yaw runs through a damped spring with a feedforward
+# term (`CameraSpring` in `play.rs`), so a turn accelerates from rest, arrives
+# about 3° past where you flicked, and settles in 117 ms. The feedforward is the
+# part that keeps it weight rather than lag: a sustained turn ends up 5.2 ms
+# behind the mouse, less than the 16.7 ms a mouse event already waits for a
+# tick. Stepped on the fixed tick, so every machine gets the same camera
+# whatever its frame rate. `LOOM_CAMERA_WEIGHT=0` turns it off exactly; `_HZ`,
+# `_DAMPING` and `_RESPONSE` are the other three knobs. Pitch is deliberately
+# rigid — on a boat a vertically swimming horizon is indistinguishable from the
+# sea moving, which is the one artifact this scene cannot afford.
+#
 # **2. Where the four slots live.** In `GameRules` state, as `state.hold` and
 # `state.carried`, owned by `../scripts/deeper_rules.rhai` — the alternatives
 # (a movement script's `memory`, the event log) are weighed and rejected in that

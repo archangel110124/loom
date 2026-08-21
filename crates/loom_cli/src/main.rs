@@ -165,6 +165,16 @@ USAGE:
         --frames closes after n frames and then prints the frame's CPU cost;
         --play starts the simulation immediately, which is the only way to
         measure the per-frame work a running game actually does.
+
+        The first-person camera has weight — the view lags a turn, overshoots
+        a little and settles. Four knobs, read once at startup, so it can be
+        tuned by the only person who can judge it without a rebuild:
+            LOOM_CAMERA_WEIGHT=0    off, exactly (default 1)
+            LOOM_CAMERA_HZ=3        heavier, slower to settle (default 4)
+            LOOM_CAMERA_DAMPING=0.4 more overshoot (default 0.55)
+            LOOM_CAMERA_RESPONSE=0  no feedforward (default 0.5) — this is
+                                    what plain input lag feels like, for
+                                    comparison. Do not ship it.
 ";
 
 /// The flags each subcommand accepts, and whether each takes a value.
