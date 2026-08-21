@@ -2261,7 +2261,23 @@ if hub {
         // any way at all.
         message = stowed + " IN HER HOLD   E at the crate " + crate_at;
     } else {
-        message = "WALK FORWARD TO THE BOAT";
+        // **The mirror is behind him at spawn, and a mirror nobody walks past
+        // is not a feature.** The scene is turned so the berth is on -Z (see
+        // the header: neither an authored eye yaw nor an authored character
+        // yaw can express "start facing this way"), and the glass has to face
+        // INWARD or it reflects a hole where the sea is — so it is on the shed
+        // wall at his back and no opening frame contains it. One line of the
+        // tape he is already reading is cheaper than moving either.
+        //
+        // 3.5 m, which is the wharf outside the shed and not the whole rig:
+        // past that he is at the berth and the boat is the thing to say.
+        let dmx = me[0] + 4.30;
+        let dmz = me[2] - 2.56;
+        message = if dmx * dmx + dmz * dmz < 12.25 {
+            "WALK FORWARD TO THE BOAT   — turn around: there is a GLASS on the shed"
+        } else {
+            "WALK FORWARD TO THE BOAT"
+        };
     }
 }
 
@@ -2298,7 +2314,17 @@ if hub {
 // **`grip` is 1 because the rod is always in his hands** — that has been true
 // of this demo since `rod_hold.rhai` landed. It swaps the arms' walk swing for
 // a two-handed pose; the rod itself is still posed in the boat's frame by
-// `rod_hold.rhai` and is not parented to the hand.
+// `rod_hold.rhai` and is not parented to the hand. Since the tuning round the
+// grip keeps a sixth of the stride and the standing breath underneath it, so
+// the demo — which never clears `grip` — is not the one scene in the project
+// where the arms are a photograph.
+//
+// **THE KNOB BLOCK BELOW IS A VERBATIM COPY OF THE ONE IN
+// `deckhand_gait.rhai`, AND A TEST ENFORCES THAT.** Change the walk there;
+// `the_two_copies_of_the_deckhand_knobs_agree` in `loom_cli` fails until the
+// same text is here. There is no import in this rhai — `set_max_modules(0)` —
+// and a scene gets ONE `GameRules`, so a verbatim copy under a test is the
+// only way to say it once.
 let seen_pl = "gpx" in state;
 if PLAYER in positions {
     let gp = positions[PLAYER];
@@ -2309,11 +2335,31 @@ if PLAYER in positions {
     } else { 0.0 };
     state.gpx = gp[0];
     state.gpz = gp[2];
+// >>> DECKHAND KNOBS
+state.walk_stride = 4.36;   // rad of gait per metre walked -- see below
+state.walk_leg = 30.0;      // deg  how far the thigh swings, fore and aft
+state.walk_knee = 60.4;     // deg  knee bend at the top of the swing
+state.walk_knee_down = 0.0; // deg  knee bend while the foot is DOWN -- see below
+state.walk_knee_soft = 3.7; // deg  knee never quite straight, at any phase
+state.walk_foot = 14.0;     // deg  ankle roll, heel strike to toe-off
+state.walk_arm = 23.0;      // deg  shoulder swing
+state.walk_elbow = 21.0;    // deg  elbow bend at the top of the swing
+state.walk_bob = 0.0400;    // m    how far the pelvis hangs, twice a stride
+state.walk_roll = 5.0;      // deg  pelvis roll into the standing side
+state.walk_twist = 9.0;     // deg  spine counter-yaw against the pelvis
+state.walk_lean = 3.0;      // deg  spine pitch, twice a stride
+state.walk_stoop = 3.2;     // deg  how far forward he stands, always
+state.walk_head = 6.0;      // deg  neck yaw, lagging the shoulders
+state.idle_breath = 4.2;    // deg  standing sway -- spine, shoulders, neck
+state.idle_shift = 1.6;     // deg  standing weight shift, hip to hip
+state.walk_at = 0.40;       // m/s  speed at which the walk is fully on
+// <<< DECKHAND KNOBS
+
     let gsm = if "speed" in state { state.speed } else { 0.0 };
     gsm = gsm + (graw - gsm) * 0.083;
     let gg = if "gait" in state { state.gait } else { 0.0 };
     state.speed = gsm;
-    state.blend = if gsm / 0.40 > 1.0 { 1.0 } else { gsm / 0.40 };
-    state.gait = (gg + gsm * 2.30 * dt) % 6.283185307;
+    state.blend = if gsm / state.walk_at > 1.0 { 1.0 } else { gsm / state.walk_at };
+    state.gait = (gg + gsm * state.walk_stride * dt) % 6.283185307;
     state.grip = 1.0;
 }

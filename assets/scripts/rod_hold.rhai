@@ -66,10 +66,25 @@ if "plx" in state {
     // the right-hand third rather than across the middle. He is 0.35 m in
     // radius, so the blank never passes through him, and it rides his own y, so
     // it goes up the boarding treads with him instead of through them.
+    // **0.50 / 0.40 / 0.18, and it was 0.55 / 0.30 / 0.30.** The old numbers
+    // were a first-person composition and nothing else, from before there was
+    // a body: measured against the mittens they held the butt 36 cm off his
+    // hands, 30 cm of it sideways, so the mirror — the one feature that exists
+    // to look at him — showed a man miming. The grip pose moved to meet this
+    // (`deckhand_shoulder.rhai` carries the sweep) and this moved to meet the
+    // grip; they are 88 mm apart now, which is one mitten.
+    //
+    // The frame it was tuned for survives. The eye is +0.82, so the butt was
+    // 0.52 below it and 0.55 ahead — 43.4 degrees down against a half-FOV of
+    // 37.5 — and is now 0.42 below and 0.50 ahead, 40.0 degrees down. Higher
+    // in the frame, not lower. What genuinely moves is the lateral third:
+    // 0.30 m of starboard at 0.55 m is 28.6 degrees right of centre and
+    // 0.18 m at 0.50 m is 19.8, so the reel sits nearer the middle than it did.
+    // That is the price of the rod being in his hands and it is worth it.
     position = [
-        plx + bfx * 0.55 + rx * 0.30,
-        ply + 0.30,
-        plz + bfz * 0.55 + rz * 0.30,
+        plx + bfx * 0.50 + rx * 0.18,
+        ply + 0.40,
+        plz + bfz * 0.50 + rz * 0.18,
     ];
 
     // **Sixty degrees of pitch, and the yaw is one `atan`.**
