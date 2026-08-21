@@ -1682,6 +1682,27 @@ pub struct WaterBody {
     pub surface_height: f32,
     /// The waves summed over that level.
     pub waves: WaveSet,
+    /// Metres of open water upwind, for a sea derived from the wind.
+    ///
+    /// **Absent — the default — is infinite fetch**, which is the
+    /// fully-developed Pierson–Moskowitz sea every scene before this one got,
+    /// bit for bit. Ignored entirely when [`Self::waves`] lists waves.
+    ///
+    /// A fully-developed sea is *scale-invariant*: raise the wind and the
+    /// waves grow longer exactly as fast as they grow taller, so the slope
+    /// never changes and a gale is a millpond photographed from further away.
+    /// Setting a fetch is the one thing that breaks that — a fetch-limited sea
+    /// is smaller and **steeper**, and steepens as `U^⅓`, so wind starts
+    /// buying roughness instead of scale.
+    ///
+    /// The number has a meaning outside the file: it is how far the wind has
+    /// crossed open water before it reaches here. A sheltered coastal ground
+    /// is a few kilometres; the middle of an ocean is unlimited, which is what
+    /// leaving it out says. Past `18_906·U10²/g` metres the sea *is* fully
+    /// developed and this reverts to the scale-invariant one — about 14 km at
+    /// a light breeze, so a large value goes flat at the calm end first.
+    #[schemars(range(min = 1.0, max = 100000.0))]
+    pub fetch: Option<f32>,
     /// Density in kg/m³. `1000` fresh, `1025` salt.
     ///
     /// Read by buoyancy: it is what makes a floating object sit where it does,
@@ -1808,6 +1829,10 @@ impl Default for WaterBody {
             kind: WaterKind::Ocean,
             surface_height: 0.0,
             waves: WaveSet::default(),
+            // Unlimited fetch: the fully-developed sea, which is what the
+            // derived spectrum has always produced and what every scene
+            // written before this field must keep producing.
+            fetch: None,
             // Salt water, because the default kind is an ocean and the two
             // defaults should describe one thing rather than half of each.
             density: 1025.0,

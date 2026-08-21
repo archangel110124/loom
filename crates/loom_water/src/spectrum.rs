@@ -29,15 +29,38 @@
 //! spectrum on the GPU would mean sixteen `ln`s and a `sqrt` chain per vertex
 //! to recompute a constant.
 //!
+//! # Fetch, and why a fully-developed sea is the wrong default for a game
+//!
+//! [`wave_set`] is Pierson–Moskowitz, which is the *fully-developed* limit —
+//! the wind has blown forever over unlimited water — and that limit is
+//! **scale-invariant**. `m0 ∝ U⁴` and `ω_p ∝ 1/U` give `A ∝ U²` and
+//! `k ∝ U⁻²`, so `k·A` — slope, steepness, every quantity a normal, a
+//! whitecap or a hull responds to — is *algebraically independent of the
+//! wind*. Measured over the whole legal range, `Σ Q·k·A` is 0.327 at every
+//! wind speed there is. **Raising the wind zooms the sea; it never roughens
+//! it**, and at U10 = 18 the shortest wave in the world is 94 m and a
+//! nineteen-metre boat is a cork on one tilting plane.
+//!
+//! [`wave_set_fetch`] is the fix and it is honest physics, not a fudge: a sea
+//! that has only crossed `F` metres of open water is smaller than the
+//! fully-developed one **and steeper**, and steepens as `U^⅓`. One scene
+//! fact — how much open water is upwind — buys the thing a game wants from
+//! wind and PM refuses to sell.
+//!
+//! This module's earlier note said a fetch "would be a number with no source,
+//! tuned by hand, which is the thing this module exists to abolish". That
+//! holds for amplitudes and not for fetch: sixteen amplitudes have no
+//! referent, and a coastal fishing ground genuinely has a distance to the
+//! shore. It is one number, in metres, with a meaning outside this file.
+//!
 //! # What is deliberately not built
 //!
-//! **JONSWAP's fetch-limited peak enhancement.** It needs a fetch — the
-//! distance of open water the wind has crossed — and nothing in the scene can
-//! supply one: `WaterKind::Lake` has no extent in the schema yet, so a fetch
-//! would be a number with no source, tuned by hand, which is the thing this
-//! module exists to abolish. When a lake gets a boundary, its fetch comes from
-//! that boundary and JONSWAP goes in here; the shape of this module does not
-//! change, only `m0` and the peak frequency do.
+//! **JONSWAP's peak enhancement, `γ = 3.3`.** It narrows the spectrum about
+//! its peak and moves neither `Hs` nor `ω_p` — the only two numbers sixteen
+//! equal-energy bands can carry — and it has no closed-form cumulative, which
+//! is exactly what makes [`bands`] exact rather than approximate.
+//! [`wave_set_fetch`] is therefore *fetch-limited PM*: PM's shape, JONSWAP's
+//! two parameters.
 
 use loom_scene::components::{GerstnerWave, MAX_WAVES, WaveSet};
 
@@ -227,6 +250,85 @@ fn bands(m0: f32, u: f32, along: [f32; 2]) -> WaveSet {
         // unlikely and exactly what a bound is for.
         max_height,
     }
+}
+
+/// Where the PM spectrum's peak sits, as a multiple of `g/U19.5`.
+///
+/// Derived here rather than quoted: `S(ω) ∝ ω⁻⁵·exp(−β(g/(Uω))⁴)` has
+/// `d/dω[−5·ln ω − β(g/U)⁴ω⁻⁴] = 0` at `ω⁴ = 0.8·β·(g/U)⁴`, so
+/// `ω_p = (0.8β)^¼·g/U`. With `β = 0.74` that is 0.8772, and the published
+/// figure is `0.877·g/U19.5` — which is the check that this file's `β` and
+/// the literature's are the same constant.
+const PM_PEAK: f32 = 0.877_18;
+
+/// Dimensionless fetch `g·F/U10²` at which a fetch-limited sea has grown into
+/// the fully-developed one.
+///
+/// Both laws are scale-free in `U`, so their crossing is a single number:
+/// `0.0016·√F̃ = 0.22` gives `F̃ = 18_906`. **Past it, [`wave_set_fetch`] is
+/// [`wave_set`]** — which is correct physics and a footgun, because the
+/// fully-developed sea is the scale-invariant one this function exists to
+/// escape. In metres that crossing is `18_906·U10²/g`: about 14 km at a
+/// light breeze and 640 km at storm force, so a scene with a big number in
+/// its `fetch` gets the flat sea back at its *calm* end first.
+const FULLY_DEVELOPED_FETCH: f32 = 18_906.0;
+
+/// The same sea, fetch-limited: the wind has only crossed `fetch` metres of
+/// open water.
+///
+/// `u10` and `direction` mean exactly what they mean in [`wave_set`] — read
+/// the module's reference-height note before passing anything else. `fetch` is
+/// in metres.
+///
+/// # The two laws
+///
+/// Hasselmann et al. 1973 (the JONSWAP experiment), in terms of the
+/// dimensionless fetch `F̃ = g·F/U10²`:
+///
+/// ```text
+///     Hs  = 0.0016·√F̃ · U10²/g
+///     f_p = 3.5·(g/U10) · F̃^−0.33
+/// ```
+///
+/// Those are the only two numbers [`bands`] needs, so the peak frequency is
+/// fed back in as **the PM wind that would have produced it** and the banding
+/// is reached unchanged. One expression of the spectrum, two ways of
+/// parameterising it — which is what stops this being a second implementation
+/// that can drift from the first.
+///
+/// # What it buys
+///
+/// At a 3 km fetch, `Σ Q·k·A` runs 0.39 → 0.62 across the legal wind range
+/// where PM's is pinned at 0.327 forever, and `Hs` tops out near a metre
+/// instead of near thirty. That is the whole difference between a wind knob
+/// that zooms and one that roughens.
+#[must_use]
+pub fn wave_set_fetch(u10: f32, direction: [f32; 2], fetch: f32) -> WaveSet {
+    let u10 = if u10.is_finite() { u10.min(MAX_WIND_SPEED) } else { 0.0 };
+    if u10 < MIN_WIND_SPEED {
+        return WaveSet::default();
+    }
+    // A non-positive or non-finite fetch is "unlimited", which is PM. Guarded
+    // rather than clamped because zero fetch is not a flat sea asymptotically —
+    // it is a division by zero in the peak law.
+    if !fetch.is_finite() || fetch <= 0.0 {
+        return wave_set(u10, direction);
+    }
+    let dimensionless = GRAVITY * fetch / (u10 * u10);
+    if dimensionless >= FULLY_DEVELOPED_FETCH {
+        return wave_set(u10, direction);
+    }
+    let along = normalise(direction).unwrap_or([1.0, 0.0]);
+
+    let hs = 0.0016 * dimensionless.sqrt() * u10 * u10 / GRAVITY;
+    // Hs = 4√m0, the same relation `significant_height` inverts.
+    let m0 = (hs / 4.0) * (hs / 4.0);
+
+    let omega_peak =
+        std::f32::consts::TAU * 3.5 * (GRAVITY / u10) * dimensionless.powf(-0.33);
+    let u = PM_PEAK * GRAVITY / omega_peak;
+
+    bands(m0, u, along)
 }
 
 /// The sea's memory of the wind: what [`wave_set`] is actually built from.
@@ -588,5 +690,94 @@ mod tests {
         let again = wave_set(13.5, [0.3, 0.9]);
 
         assert_eq!(once, again);
+    }
+
+    /// Total steepness, the quantity the validator bounds at 1.
+    fn fold(waves: &WaveSet) -> f32 {
+        waves
+            .waves
+            .iter()
+            .map(|w| {
+                w.steepness * (std::f32::consts::TAU / w.wavelength) * w.amplitude
+            })
+            .sum()
+    }
+
+    /// **The bug this whole feature exists for, stated as a test.**
+    ///
+    /// A fully-developed sea is scale-invariant, so its total steepness is the
+    /// *same number* at a light air and at a hurricane — which is why raising
+    /// the wind in a PM scene makes the sea bigger and never rougher. The
+    /// fetch-limited sea at a fixed fetch does what a player expects instead.
+    #[test]
+    fn a_fully_developed_sea_never_gets_steeper_and_a_fetch_limited_one_does() {
+        let flat: Vec<f32> =
+            [3.0_f32, 8.0, 16.0, 30.0].iter().map(|&u| fold(&wave_set(u, [1.0, 0.0]))).collect();
+        for pair in flat.windows(2) {
+            assert!(
+                (pair[0] - pair[1]).abs() < 1e-4,
+                "PM steepness moved with the wind: {flat:?}"
+            );
+        }
+
+        let limited: Vec<f32> = [3.0_f32, 8.0, 16.0, 30.0]
+            .iter()
+            .map(|&u| fold(&wave_set_fetch(u, [1.0, 0.0], 3000.0)))
+            .collect();
+        for pair in limited.windows(2) {
+            assert!(pair[1] > pair[0] + 0.01, "fetch-limited sea did not steepen: {limited:?}");
+        }
+        assert!(
+            limited[0] > flat[0],
+            "even the calm end should be steeper than PM: {limited:?} vs {flat:?}"
+        );
+    }
+
+    /// Past the fully-developed fetch there is no such thing as a fetch, and
+    /// the two functions must be the *same* function — not merely close.
+    ///
+    /// This is the footgun `FULLY_DEVELOPED_FETCH` documents, pinned so that a
+    /// future change to either law cannot make the seam discontinuous.
+    #[test]
+    fn an_unlimited_fetch_is_exactly_pierson_moskowitz() {
+        for &u in &[1.0_f32, 5.0, 12.0, 25.0, 42.0] {
+            let unlimited = wave_set_fetch(u, [0.3, 0.9], 1.0e9);
+            assert_eq!(unlimited, wave_set(u, [0.3, 0.9]), "at u10 {u}");
+        }
+        // And zero or nonsense is unlimited rather than a division by zero.
+        assert_eq!(wave_set_fetch(9.0, [1.0, 0.0], 0.0), wave_set(9.0, [1.0, 0.0]));
+        assert_eq!(wave_set_fetch(9.0, [1.0, 0.0], f32::NAN), wave_set(9.0, [1.0, 0.0]));
+        assert!(wave_set_fetch(9.0, [1.0, 0.0], 3000.0).waves.iter().all(|w| {
+            w.wavelength.is_finite() && w.amplitude.is_finite() && w.steepness.is_finite()
+        }));
+    }
+
+    /// **What keeps the demo's boat inside its own storm.**
+    ///
+    /// The hull is 19.07 m with a 1.65 m draft and twelve pontoons that
+    /// saturate over 2.19 m of submersion, so what breaks it is *height*, and
+    /// a fully-developed sea has no ceiling on height at all — `Hs ∝ U²`, up
+    /// to twenty-nine metres inside the legal wind range. At a 3 km fetch the
+    /// whole range fits inside 1.18 m, which is the property the demo
+    /// leans on and the reason it can raise the wind at all.
+    ///
+    /// Deliberately a bound on `Hs` and not on a derived period: the four
+    /// bands here carry *equal energy* by construction, so there is no single
+    /// wave to call the peak and any "Tp" read off this set is an arbitrary
+    /// pick dressed up as a measurement. The hull's real response is measured
+    /// against the real solver, not approximated here.
+    #[test]
+    fn a_three_kilometre_fetch_keeps_the_whole_wind_range_inside_a_metre() {
+        for &u in &[3.0_f32, 10.0, 20.0, 30.0, MAX_WIND_SPEED] {
+            let hs = significant_height(&wave_set_fetch(u, [1.0, 0.0], 3000.0));
+            // 1.175 m at the U10 clamp of 42 is the measured worst case; the
+            // bound is that plus a little, so a change to either law that
+            // moved the ceiling by ten per cent would be caught.
+            assert!(hs < 1.25, "3 km fetch at U10 {u} gives Hs {hs} m");
+        }
+        // Fault injection: the same measurement on the sea this replaces has
+        // to fail, or the bound is measuring nothing.
+        let pm = significant_height(&wave_set(20.0, [1.0, 0.0]));
+        assert!(pm > 5.0, "PM at U10 20 should be enormous, got {pm}");
     }
 }

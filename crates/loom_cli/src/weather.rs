@@ -293,12 +293,17 @@ pub(crate) fn water_of(world: &World, wind: &Wind) -> Option<WaterBody> {
         serde_json::from_value::<WaterBody>(world.water()?.clone()).ok()?;
     if body.waves.waves.is_empty() {
         let params = wind.params();
-        body.waves = loom_water::spectrum::wave_set(
-            // U10, which is what the spectrum is written against — never
-            // `Wind::speed`, which is a free-stream value about 10% above it.
-            wind.mean_speed_at(10.0),
-            [params.get("dir_x"), params.get("dir_z")],
-        );
+        // U10, which is what the spectrum is written against — never
+        // `Wind::speed`, which is a free-stream value about 10% above it.
+        let u10 = wind.mean_speed_at(10.0);
+        let direction = [params.get("dir_x"), params.get("dir_z")];
+        // **A stated fetch is the difference between wind that zooms the sea
+        // and wind that roughens it.** Absent is unlimited, which is the
+        // fully-developed sea this has always derived.
+        body.waves = match body.fetch {
+            Some(fetch) => loom_water::spectrum::wave_set_fetch(u10, direction, fetch),
+            None => loom_water::spectrum::wave_set(u10, direction),
+        };
     }
     Some(body)
 }
