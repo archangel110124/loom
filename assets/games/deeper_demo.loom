@@ -71,6 +71,52 @@
 # `assets/test/deckhand_mirror.loom` is him and his reflection in one frame.
 #
 # ---------------------------------------------------------------------------
+# THE WEATHER — five rungs, and every number is in the ladder below
+# ---------------------------------------------------------------------------
+#
+# **It is a normal morning at the rig, and it gets worse the further out you
+# go.** There is no clock and no schedule: the weather is a function of where
+# the boat is. `deeper_rules.rhai` eases `state.dread` from the distance off
+# the rig, and both the wind and the rain are rungs on that one scalar, blended
+# on the fixed tick. Turn for home and it eases back down.
+#
+# **To change the weather, edit the five stages below. There is nothing else.**
+# Each names a `wind_speed` in m/s and a `rain_intensity` in mm/h beside its
+# look, so a rung is one weather and not two. Measured on the shipped scene,
+# holding W from the berth:
+#
+#     stage        dread   wind   rain   Hs      at tick    what it is
+#     inshore       0.00    3.0    0.0   0.17 m        1    a flat calm morning
+#     underway      0.25    4.5    1.5   0.26 m     ~1660    a breeze, first spits
+#     outofsight    0.50    7.0    6.0   0.40 m     ~2100    steady rain, chop
+#     grounds       0.80   11.5   16.0   0.66 m     ~2650    heavy rain, a swell
+#     theedge       1.00   16.0   30.0   0.91 m     ~3400    a gale and a downpour
+#
+# `Hs` is significant wave height, read off the scene itself with
+# `loom water --at 40,-10 --sim <tick> --hold move_z=1`, under a boat 19.07 m
+# long drawing 1.65 m — so the top rung is a real sea and not a pond. It is
+# also the top: see the measurement on `theedge` itself. (That `--hold` is new.
+# Without it `loom water` runs the game with nobody at the wheel, and on a
+# scene whose weather rides the boat's position it reports the berth's sea
+# however many ticks you give it.)
+#
+#   arrives sooner    the easing rate in `deeper_rules.rhai`, not here
+#   rougher           `wind_speed` on the later rungs — and read `theedge`
+#   wetter            `rain_intensity` on the later rungs, 0..100 mm/h
+#   dry demo          delete the five `rain_intensity` lines; `Rain.intensity`
+#                     below is 0.0, so that is all it takes
+#   starts rough      DO NOT raise `inshore`'s `wind_speed` — see `fetch`
+#
+# **The berth's wind is welded to `WaterBody.fetch` and to thirty taught tapes
+# in `green.sh`.** `inshore`'s 3.0 and the fetch of 15 000 m are one number in
+# two places; move either alone and the sea at the quay changes, the boarding
+# walk re-times, and thirty rows of §6 fail. The full reasoning is on `fetch`.
+#
+# **Judge the rate at the wheel, not here.** How fast weather *should* arrive
+# is a feel decision and nothing in this repository can measure it — the four
+# rungs above are checkable and the ramp between them is not.
+#
+# ---------------------------------------------------------------------------
 # THE LOOK — and the three numbers that change it
 # ---------------------------------------------------------------------------
 #
@@ -652,6 +698,7 @@ name = "Rig"
     at = 0.0
     # The floor, and it is the scene's own `Wind.speed` exactly — see `fetch`.
     wind_speed = 3.0
+    rain_intensity = 0.0
     # The rig at dawn, and the only stage whose grade ADDS. A warm tilt and a
     # saturation lift with `contrast` left neutral: ADR 0068's operator already
     # moves this frame's median up a few codes, and "not too bright" was the
@@ -664,7 +711,8 @@ name = "Rig"
     [[node.components.Environment.stages]]
     name = "underway"
     at = 0.25
-    wind_speed = 3.5
+    wind_speed = 4.5
+    rain_intensity = 1.5
     # Still a nice day. The only thing that has happened is that the light has
     # gone slightly flat and the sky has lost a little of its blue.
       [node.components.Environment.stages.environment]
@@ -684,7 +732,8 @@ name = "Rig"
     [[node.components.Environment.stages]]
     name = "outofsight"
     at = 0.5
-    wind_speed = 4.0
+    wind_speed = 7.0
+    rain_intensity = 6.0
     # **The wrongness beat, and it is NOT dark — the third-brightest rung.**
     # The sea has gone the colour of an aquarium nobody has cleaned while the
     # deck you are standing on is still lit.
@@ -712,7 +761,8 @@ name = "Rig"
     [[node.components.Environment.stages]]
     name = "grounds"
     at = 0.8
-    wind_speed = 4.5
+    wind_speed = 11.5
+    rain_intensity = 16.0
       [node.components.Environment.stages.environment]
       sun_strength = 0.40
       sun_color = [0.80, 0.92, 0.70]
@@ -731,41 +781,49 @@ name = "Rig"
     [[node.components.Environment.stages]]
     name = "theedge"
     at = 1.0
-    # **The top, and it is 5.0 because that is where the helm gives out.**
+    # **The top, and it is 16.0 because that is where the DECK gives out.**
     #
-    # The engine is not the constraint here and neither is the hull. green.sh
-    # §6's long-turn row — 3 200 ticks of full starboard wheel from this berth,
-    # asserting the helmsman is still on the mat and still making way — is, and
-    # a flat rung swept against it reads:
+    # It said 5.0, and the measurement behind that varied two things at once.
+    # The sweep it quoted set every rung FLAT to one speed and read green.sh
+    # §6's long-turn row:
     #
-    #     Wind.speed  3.0  3.5  4.0  4.5  5.0  5.5  6.0
+    #     flat rung   3.0  3.5  4.0  4.5  5.0  5.5  6.0
     #     full wheel  PASS PASS PASS PASS PASS FAIL FAIL
     #
-    # She heels through a sustained hard turn and the sea takes him off the
-    # mat; `deeper_player.rhai` already clamps the wheel to 0.3 for exactly
-    # this and the clamp runs out around Hs 0.3.
+    # But a flat rung also raises the *berth* wind, and the `fetch` note above
+    # says in as many words that the berth must not move: thirty tapes in this
+    # file are calibrated on a boarding walk that grinds on that exact sea, and
+    # the failures were the helmsman arriving at the wheel at a different tick,
+    # not the sea taking him off the mat. Re-run raising only THIS rung, berth
+    # held at 3.0, same three rows verbatim from `green.sh`:
     #
-    # **Above 5.0 the response is not monotone, and that is the real finding.**
-    # Scaling the whole ladder to a top of 5 / 10 / 16 and running three rows:
+    #     top rung        5.0  8.0 10.0 12.0 16.0 20.0
+    #     turn, 3200     PASS PASS PASS PASS PASS PASS
+    #     wind, 3000     PASS PASS PASS PASS PASS PASS
+    #     steam, 1800    PASS PASS PASS PASS PASS PASS
     #
-    #                         top 5   top 10   top 16
-    #     straight, 600        PASS     PASS     PASS
-    #     straight, 3200       PASS     FAIL     PASS
-    #     full wheel, 3200     PASS     PASS     FAIL
+    # The helm is not the constraint and never was. **The whole of green.sh
+    # §6 + §7 passes with this rung at 16.0**, every one of the 114 `green.sh`
+    # lines that names this file, the three-process byte-identity check
+    # included.
     #
-    # So there is no ceiling to raise this to — there is a highest rung at
-    # which the *whole* of green.sh §6 passes, and it is 5.0. The demo's helm
-    # rows are open-loop tapes whose outcome turns on where the hull happens to
-    # be after fifty seconds of constant rudder, and a rougher sea moves that
-    # unpredictably rather than steadily. It is the same fragility as the
-    # boarding walk documented on `fetch` above.
+    # What DOES give out is the deck, three times sooner than the hull, and it
+    # is measured on `assets/test/weather_ramp.loom` rather than here — that
+    # file is this ladder over the five-station carry instrument. ADR 0060's
+    # acceptance is 30 mm peak-to-peak in the boat frame, and its riders swept
+    # over ticks 1800-2100 give, by top rung:
     #
-    # **Raising this is therefore gameplay work, not weather work**: closing
-    # the loop on those tapes (steer toward a mark instead of holding a
-    # constant rudder) and giving the helmsman better footing.
-    # `assets/test/weather_ramp.loom` carries the ladder at 16 with ADR 0060's
-    # carry measured at every rung, which is where the engine's own limit is.
-    wind_speed = 5.0
+    #     Wind.speed   10     12     14     16     18     20
+    #     worst p-p  12.9   19.2   23.6   23.9   33.6   38.5  mm
+    #
+    # Monotone, crossing between 16 and 18. 16 keeps a fifth of the budget, and
+    # a wind cap raised past it is a cap raised on a passenger who will slide.
+    #
+    # **Raising it further is ADR 0060 work, not weather work**: platform carry
+    # is upward-only and ratchets (see ADR 0074 §4), and that is the organ to
+    # fix before this number moves again.
+    wind_speed = 16.0
+    rain_intensity = 30.0
     # Sea and sky are one value: there is no `out there` any more and the world
     # stops at forty metres.
     #
@@ -821,6 +879,20 @@ name = "Rig"
   speed = 3.0
   gustiness = 0.25
   turbulence = 0.15
+
+  # **The shower. This component's own `intensity` is never used** — every rung
+  # of the ladder above names a `rain_intensity`, and a named rung wins. It is
+  # here because a mood stage cannot conjure rain: `weather_at` ramps the rate
+  # of a `Rain` the scene authored and leaves a scene without one dry, so that
+  # rain always arrives with a duration, an audio bed and a collision bake
+  # rather than as three quiet absences. Zero, so that deleting the five
+  # `rain_intensity` lines gives a dry demo rather than a permanent downpour.
+  #
+  # `duration` is deliberately absent. The shower here is not on a clock, it is
+  # on the ladder — it comes in as you steam out and it goes when you turn for
+  # home, because `dread` is a function of where the boat is.
+  [node.components.Rain]
+  intensity = 0.0
 
 # **`deterministic`, not `cinematic`.** ADR 0053's cinematic tier is read back
 # off the GPU and `loom sim` refuses the whole run rather than answer a `water@`

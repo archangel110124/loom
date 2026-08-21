@@ -256,8 +256,12 @@ fi
 # Rising fast and falling slow is the design (Dredge's panic meter), so the
 # near row is the one that catches an easing rate that has run away: at the
 # berth `dread` must be pinned at the floor no matter how many ticks pass.
+#
+# **And the berth is dry**, which is the first sentence of the design: it is a
+# normal morning at the rig and the weather arrives as you steam out. The calm
+# rung says `rain_intensity = 0.0`, so this is free on the run above.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 60 \
-  --assert "state.dread < 0.05" >/dev/null
+  --assert "state.dread < 0.05" --assert "rain@3,3,-200.rate == 0.0" >/dev/null
 
 # And the far row, which is the whole chain. **1800 ticks, and the number was
 # measured rather than chosen:** she makes 2.97 m/s at full ahead, so thirty
@@ -276,16 +280,25 @@ fi
 # Measured on the shipped scene, holding W from the berth, `wind@3,3,-200`:
 #
 #     tick        60     1800     3000
-#     dread    0.000    0.327    0.943
-#     with     2.475    3.064    3.795
+#     dread    0.000    0.326    0.942
+#     wind     2.475    4.258   11.372
+#     rain     0.000    0.000   25.928
 #     without  2.475    2.469    2.229   <- the control, ladder deleted
 #
-# The readings are below the authored `Wind.speed` because that is a
+# The wind readings are below the authored `Wind.speed` because that is a
 # free-stream value about 10% above U10 and the probe is at 3 m. **The
 # `without` row goes *down*, which is the tell**: unramped, the only thing
 # moving that number is gust phase.
+#
+# **The rain is on the same run and it is the second half of the ladder.**
+# `mood_weather_of` returns a pair and every caller in the engine used to take
+# `.0`, so `rain_intensity` validated, range-checked, documented itself in
+# `loom describe` and did nothing — with no row in this file able to tell.
+# The zero at tick 1800 is not a bug: `dread` is 0.326 there and the deck is
+# broken at 0.38 cover, so this fixed point is under a gap. It rains, elsewhere.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 3000 --hold move_z=1 \
-  --assert "wind@3,3,-200.speed > 3.4" >/dev/null
+  --assert "wind@3,3,-200.speed > 8.0" \
+  --assert "rain@3,3,-200.rate > 20.0" >/dev/null
 
 # The cast-and-hook prefix of `DEMO_FIGHT`, which is defined two hundred lines
 # below where the trip tapes live. Named here because the creel rows above need
