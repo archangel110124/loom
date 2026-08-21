@@ -224,6 +224,71 @@ pub(crate) fn salt(image: &Image, threshold: u8, rect: Option<(u32, u32, u32, u3
     counts
 }
 
+/// How much of the image has gone constant across a 2x2 fragment quad.
+///
+/// **The acceptance test for `ambientVisibility`'s quad share, which nothing
+/// else in this repository can compute.** ADR 0074 trades rays for a share
+/// across the quad; the failure mode it will eventually produce is not noise
+/// and not flicker but *blockiness* — shading going constant over each 2x2. No
+/// existing instrument sees it. `flicker` reads exactly 0.00000, by
+/// construction, because the pattern is screen-locked and perfectly still.
+/// `salt` looks for a pixel unlike its eight neighbours and a 2x2 block is
+/// four pixels agreeing. `compare` prices distance from a reference, which
+/// *falls* as resolution rises while this rises with it.
+///
+/// The mechanism is the pixel grid: a horizontal pair `(x, x+1)` lies **inside**
+/// one fragment quad when `x` is even and **across** two quads when `x` is odd.
+/// So compare the mean absolute neighbour difference on odd pairs against even
+/// pairs. An unquantised image has no idea where the quads are and scores 1.0;
+/// shading that has gone quad-constant flattens the inside pairs and pushes the
+/// ratio up. Measured on `primitives` at 1920x1080: 1.02 converged, 1.36 at the
+/// shipped four rays per lane, 1.85 at one.
+///
+/// Returns `(x, y)`. Both axes, because a filter can be wider in one.
+///
+/// **Only ever compare a scene against itself.** The absolute level is a
+/// property of the content — a frame that is mostly silhouette has no flat
+/// region to quantise and sits at 1.00 however badly the share is behaving,
+/// which is why `spruce` cannot act as this gate's subject and `primitives`
+/// can.
+pub(crate) fn quad_ratio(image: &Image) -> (f64, f64) {
+    let stride = image.width as usize * 4;
+    let mut sums = [0.0_f64; 4];
+    let mut counts = [0_u64; 4];
+    let mut add = |slot: usize, a: usize, b: usize| {
+        let d: u32 = (0..3)
+            .map(|c| u32::from(image.pixels[a + c].abs_diff(image.pixels[b + c])))
+            .sum();
+        sums[slot] += f64::from(d);
+        counts[slot] += 1;
+    };
+    for row in 0..image.height as usize {
+        for column in 0..image.width.saturating_sub(1) as usize {
+            let at = row * stride + column * 4;
+            add(usize::from(column % 2 == 1), at, at + 4);
+        }
+    }
+    for row in 0..image.height.saturating_sub(1) as usize {
+        for column in 0..image.width as usize {
+            let at = row * stride + column * 4;
+            add(2 + usize::from(row % 2 == 1), at, at + stride);
+        }
+    }
+    let mean = |slot: usize| sums[slot] / counts[slot].max(1) as f64;
+    // **A zero denominator is the worst case, not a missing answer.** No inside-
+    // quad difference at all means the shading is perfectly quad-constant, which
+    // is the failure this measures taken to its limit — so it is infinity, and
+    // returning 0.0 there (which the first draft did, and a test caught) reads
+    // in exactly the wrong direction. Both zero is a flat image: no structure
+    // either way, so 1.0.
+    let ratio = |inside: usize, across: usize| match (mean(inside), mean(across)) {
+        (i, a) if i > 0.0 => a / i,
+        (_, a) if a > 0.0 => f64::INFINITY,
+        _ => 1.0,
+    };
+    (ratio(0, 1), ratio(2, 3))
+}
+
 /// Compare two images of the same size.
 ///
 /// # Errors
@@ -471,6 +536,40 @@ mod tests {
         let diff = compare(&a, &b, Tolerance::default()).expect("same size");
 
         assert!(!diff.passes(Tolerance::default()));
+    }
+
+    /// The two ends of `quad_ratio`, because a ratio near 1.0 is exactly what
+    /// a broken implementation also returns.
+    ///
+    /// A per-pixel ramp knows nothing about the pixel grid's parity, so it must
+    /// score 1.0. The same ramp held constant over each 2x2 — which is what the
+    /// AO share does in the limit — must score far above it, and does: the
+    /// inside-quad difference goes to zero, so the ratio is bounded only by
+    /// arithmetic. Fault-injectable in one character: swap the parity test in
+    /// `quad_ratio` and the second assertion inverts.
+    #[test]
+    fn quad_constant_shading_scores_far_above_a_ramp() {
+        let mut ramp = flat(32, 32, [0, 0, 0, 255]);
+        let mut blocky = flat(32, 32, [0, 0, 0, 255]);
+        for y in 0..32_usize {
+            for x in 0..32_usize {
+                let at = (y * 32 + x) * 4;
+                for channel in 0..3 {
+                    ramp.pixels[at + channel] = u8::try_from(x * 4 + y * 2).unwrap_or(255);
+                    // Same ramp, sampled at the quad's corner: constant over
+                    // each 2x2.
+                    blocky.pixels[at + channel] =
+                        u8::try_from((x & !1) * 4 + (y & !1) * 2).unwrap_or(255);
+                }
+            }
+        }
+        let (rx, ry) = quad_ratio(&ramp);
+        assert!((rx - 1.0).abs() < 0.01, "a ramp has no parity: {rx}");
+        assert!((ry - 1.0).abs() < 0.01, "a ramp has no parity: {ry}");
+
+        let (bx, by) = quad_ratio(&blocky);
+        assert!(bx > 4.0, "quad-constant shading must be visible: {bx}");
+        assert!(by > 4.0, "quad-constant shading must be visible: {by}");
     }
 
     /// The self-check the metric is worthless without: a spike above the

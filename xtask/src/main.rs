@@ -807,6 +807,31 @@ const GOLDEN: [(&str, &str, &[&str]); 56] = [
     // "nothing turned blocky", not "the picture got better" — and if a row's
     // ladder ever stops being monotone, the filter has become too wide for the
     // frame and that is the signal to act on.
+    //
+    // **That ladder is only half the acceptance test, and it is the half that
+    // cannot see the failure it is named after.** It measures distance from
+    // truth, which falls with resolution. Quad *structure* — the shading going
+    // constant across a 2x2, which is what "turned blocky" actually means —
+    // **rises** with resolution, and no instrument in the repository reports
+    // it. `loom flicker` reads 0.00000 by construction, because the pattern is
+    // screen-locked and perfectly still.
+    //
+    // The number that does see it is R = the mean absolute difference across a
+    // quad boundary divided by the same inside a quad, per axis. An unquantised
+    // image sits at 1.0; quad-constant shading pushes it up. `primitives` at
+    // 1920x1080, Rx / Ry:
+    //
+    //   converged        1.022 / 0.996      <- the control
+    //   8 rays / lane    1.243 / 1.148
+    //   4 = the default  1.357 / 1.217
+    //   1 ray  / lane    1.848 / 1.532      <- visible as speckle
+    //
+    // **And `spruce` — this row, added expressly to watch the share — cannot
+    // see it at all**: 1.001 against the converged build's 0.999, identical to
+    // three decimals, because a frame that is mostly silhouette has no flat
+    // region for a 2x2 to go constant across. `primitives` and `forest` (1.234
+    // against 1.005) are the rows that carry this half. Keep both scenes, and
+    // read R on `primitives` when the share or the ray count next moves.
     ("spruce", "assets/test/spruce.loom", &[]),
     // **A texture sampled on voxel terrain, which no other reference covers.**
     // `terrain_stress` and `terrain_billion` are the only other scenes that put

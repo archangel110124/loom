@@ -112,6 +112,13 @@ USAGE:
         sub-pixel beads all have that shape; an edge does not. --base reports
         the salt *added* over another render. Worst channel is the number.
 
+    loom quad <image.png>
+        How much of the picture has gone constant across a 2x2 fragment quad.
+        1.0 is unquantised; higher is blockier. The acceptance test for the AO
+        quad share (ADR 0074) — `flicker` reads 0.00000 on it by construction
+        and `salt` cannot see four pixels agreeing. Compare a scene only with
+        itself: a frame that is mostly silhouette reads 1.00 regardless.
+
     loom audio <scene.loom> [--seconds <n>] [--openness <0-1>] [--out <x.wav>]
         Render the scene's weather bed offline and measure it: rms, peak, and
         tilt (high-band over low-band energy — the number that says `darker`).
@@ -333,6 +340,10 @@ fn run(args: &[String]) -> (u8, String) {
         },
         Some("salt") => match args.get(1) {
             Some(candidate) => salt(candidate, &args[2..]),
+            None => (2, USAGE.to_owned()),
+        },
+        Some("quad") => match args.get(1) {
+            Some(image) => quad_cmd(image),
             None => (2, USAGE.to_owned()),
         },
         Some("flicker") => match (args.get(1), args.get(2), args.get(3)) {
@@ -2597,6 +2608,28 @@ fn frame_path(out: &str, index: u32) -> String {
 /// **Not comparable across a colour or lighting change** — ADR 0010's rule,
 /// for the same reason it binds flicker: the count is absolute, so a brighter
 /// subject scores higher without being worse.
+/// 2x2 quantisation, which is the one failure mode of the quad share that no
+/// other command here can see. See [`imagediff::quad_ratio`] for the mechanism
+/// and for why the number only means anything against the same scene.
+fn quad_cmd(image: &str) -> (u8, String) {
+    let loaded = match imagediff::load(std::path::Path::new(image)) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            return (2, json_line(&serde_json::json!({ "error": "io_error", "constraint": e })));
+        }
+    };
+    let (x, y) = imagediff::quad_ratio(&loaded);
+    (
+        0,
+        json_line(&serde_json::json!({
+            "ok": true,
+            "image": image,
+            "quad_x": x,
+            "quad_y": y,
+        })),
+    )
+}
+
 fn salt(candidate: &str, args: &[String]) -> (u8, String) {
     let mut threshold = 24_u8;
     let mut base: Option<String> = None;
