@@ -1557,9 +1557,20 @@ if hub {
         // ticks, measured. At the first pair tried (60 and 260) the opening 50
         // m of travel moved nothing at all, which is seventeen seconds of
         // holding W with no answer, and the far end sat past a minute and a
-        // half. At 25 and 150 the first change lands about five seconds out —
-        // while the rig is still over her shoulder, which is the brief — and
-        // the far end arrives around fifty seconds.
+        // half.
+        //
+        // **Distance is not the same question as visible change, and this
+        // comment used to answer the first while claiming the second.** She
+        // passes 25 m at about five seconds — but the smoothstep below is flat
+        // there and the 0.020 ease lags it, so nothing is visible for a while
+        // yet. Measured, holding W from the berth:
+        //
+        //     seconds   5     10    15    20    25    30    40    50    60
+        //     dread     0.000 0.000 0.003 0.060 0.173 0.325 0.671 0.940 0.998
+        //
+        // **Ten seconds of nothing, then the whole ladder in forty.** If the
+        // opening dead zone is too long, lower the 25.0; if the escalation is
+        // too quick, raise the 125.0. `docs/design/THE-LOOK.md` §4.
         let d = (state.bx * state.bx + state.bz * state.bz).sqrt();
         let want = ((d - 25.0) / 125.0).max(0.0).min(1.0);
         // Smoothstep, so both ends settle instead of arriving at a corner.
