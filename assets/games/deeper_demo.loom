@@ -1852,43 +1852,69 @@ transform = { pos = [-11.31, -0.09, -1.42], rot_euler = [0.0, 0.0, 45.0], scale 
 #     than a limitation**: the engine is not running. It swells as she gathers
 #     way and dies as she coasts, which is a loop following a state.
 #
-# **`sea.wav` is synthesised and `scripts/make-sea-wav.py` is how.** There is no
-# sea recording in this repository — there are two clips in it, a hum and a
-# rain — and passing the rain bed off as a sea would be a lie in a scene file
-# that nobody could hear was one. It is eight seconds of pink-weighted noise
-# built in the frequency domain over exactly the loop length, so every partial
-# is an integer harmonic and the loop has no seam, under a three-harmonic
-# swell so it breathes instead of hissing.
+# **The synthesised bed was turned off, and what replaced it is three
+# recordings.** `sea.wav` was eight seconds of pink-weighted noise under a
+# three-harmonic swell, and `hum.wav` is three sine partials; the human's
+# verdict on hearing them was that they were worse than silence. The picture
+# that explains it is `sea.wav`'s own level plot: it falls **below −45 dBFS
+# once per eight-second loop** — the swell's three harmonics beat into a near
+# dropout — so the bed opened a hole in itself every eight seconds, and both
+# sea sources fell into it together (see the phase-lock note below). `hum.wav`
+# is the opposite failure: a spectrogram that is black above 400 Hz and a level
+# line that is flat to within 0.2 dB. An organ chord, not an engine.
+#
+# The three clips now here are field recordings, cut to loop:
+#
+#   * `sea_wash` — Sonniss GDC19 bundle, "Soft Waves Cliffs", 24/96 master.
+#   * `hull_wash` — freesound 826442 by RealSquink, CC0.
+#   * `engine_idle` — Sonniss GDC19 bundle, a Deutz VM 145 tug at idle.
+#
+# `assets/audio/CREDITS.md` carries the URLs, the licence text and the cut
+# parameters for each. Nothing here is synthesised and nothing came from a
+# generative model — every generated sea candidate measured carried a fixed
+# 1744 Hz whistle at 9 dB in 91% of frames, which no real water recording does.
+#
+# **`sea_wash` and `hull_wash` are two different recordings on purpose.** They
+# were one clip, and `Voice::new` hardcodes `cursor: 0.0` (`mix.rs:55`) with no
+# offset parameter — so two sources sharing a clip start on the same frame and
+# stay phase-locked forever. They do not layer, they double: same swell, same
+# lull, twice as loud. Two clips is the only fix available without an engine
+# change, and it is why there are three assets below rather than two.
 #
 # **None of this is in any gate and that is stated rather than hidden.**
 # `loom audio` measures the weather bed and does not mix `AudioSource` at all
-# (checked: `loom audio assets/games/proving_ground.loom` reports `rms 0.0`
-# on a scene that has one). There is no headless path to a mixed frame, so
-# what is verified here is that the scene loads, that the clip decodes, and
-# that `Engine`'s transform tracks `knots` — `--assert` can read the last of
-# those, and there is a row for it. How it *sounds* is one human with
-# headphones, and no round should pretend otherwise.
+# (checked: `main.rs`'s `audio_cmd` names no `AudioSource`, `Mixer` or `Voice`,
+# and `loom audio assets/games/proving_ground.loom` reports `rms 0.0` on a
+# scene that has one). There is no headless path to a mixed frame, so what is
+# verified here is that the scene loads, that the clips decode
+# (`loom_audio`'s `the_shipped_clips_decode` names all three), and that
+# `Engine`'s transform tracks `knots` — `--assert` can read the last of those,
+# and there is a row for it. How it *sounds* is one human with headphones, and
+# no round should pretend otherwise.
 
 [[asset]]
 key = "sea"
 id = "a51c7d92-3e64-4f08-b7a1-2d96c40e8b73"
-path = "../audio/sea.wav"
+path = "../audio/sea_wash.wav"
+
+[[asset]]
+key = "hull"
+id = "53f695b4-eb77-4d97-bb66-d5c972f999d9"
+path = "../audio/hull_wash.wav"
 
 [[asset]]
 key = "hum"
 id = "e70c4b18-25a9-4f36-8d51-3b6e9a0c7f42"
-path = "../audio/hum.wav"
+path = "../audio/engine_idle.wav"
 
 # The berth's waterline, between the rig legs and the hull. Not on the player:
 # an ambient bed parented to the listener is a constant, and a constant is the
 # one thing this engine's audio is not for.
-# **SILENCED, at the human's request, 2026-08-20.** All three sources are
-# authored exactly as they were and every one is muted: the synthesised clips
-# were judged bad enough to be worse than silence. `volume = 0.0` rather than
-# deleting the nodes, because the placement, the ranges and `engine_note.rhai`'s
-# coupling to the throttle are the parts that took the work and are the parts
-# worth keeping. Restoring the demo's sound is one edit per node once there are
-# clips worth playing — a separate effort is looking at how to make them.
+# **Unmuted, 2026-08-20, on recordings rather than synthesis.** The three
+# sources were silenced the same day at the human's request — the placement,
+# the ranges and `engine_note.rhai`'s coupling were kept precisely so that
+# turning the sound back on would be one edit per node, and it was. Every
+# volume below is the value it carried before the mute.
 [[node]]
 name = "SeaWash"
 parent = "Rig"
@@ -1896,11 +1922,12 @@ transform = { pos = [0.0, -0.25, -5.20] }
 
   [node.components.AudioSource]
   clip = { asset = "sea" }
-  volume = 0.0   # was 0.70 — see the silencing note above
+  volume = 0.70
   range = 55.0
   looping = true
 
-# The same wash on the hull, so thirty metres out is not silence. Boat local,
+# A *different* wash on the hull, so thirty metres out is not silence — see the
+# phase-lock note above for why it cannot be the same clip. Boat local,
 # amidships, just under the waterline.
 [[node]]
 name = "Wash"
@@ -1908,8 +1935,8 @@ parent = "Rig/Boat"
 transform = { pos = [0.0, -0.35, 0.0] }
 
   [node.components.AudioSource]
-  clip = { asset = "sea" }
-  volume = 0.0   # was 0.50
+  clip = { asset = "hull" }
+  volume = 0.50
   range = 35.0
   looping = true
 
@@ -1924,7 +1951,7 @@ transform = { pos = [-7.80, -12.0, 0.0] }
 
   [node.components.AudioSource]
   clip = { asset = "hum" }
-  volume = 0.0   # was 0.85
+  volume = 0.85
   range = 14.0
   looping = true
 

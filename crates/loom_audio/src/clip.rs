@@ -300,18 +300,30 @@ mod tests {
         assert!((clip.seconds() - 0.5).abs() < 1e-4, "{}", clip.seconds());
     }
 
-    /// **The two clips this repository ships decode, and one of them is
-    /// generated.** `sea.wav` is written by `scripts/make-sea-wav.py` — a
-    /// synthesised ambient bed, because there is no sea recording here and
-    /// passing the rain bed off as one would be a lie in a scene file. It is
-    /// the only asset in the project whose correctness nothing else can see:
-    /// `loom audio` mixes the weather bed and never touches an `AudioSource`,
-    /// no gate renders a mixed frame, and a WAV that fails to decode is
-    /// silence rather than an error a player would report. So this row is the
-    /// whole of `deeper_demo.loom`'s audio that any gate can reach.
+    /// **The clips this repository ships decode.** These are the only assets in
+    /// the project whose correctness nothing else can see: `loom audio` mixes
+    /// the weather bed and never touches an `AudioSource`, no gate renders a
+    /// mixed frame, and a WAV that fails to decode is silence rather than an
+    /// error a player would report. So this row is the whole of
+    /// `deeper_demo.loom`'s audio that any gate can reach, and every clip that
+    /// scene names has to be in it — `sea_wash`, `hull_wash` and `engine_idle`
+    /// were added when the demo's synthesised bed was replaced by recordings
+    /// (`assets/audio/CREDITS.md`). `sea.wav` and `hum.wav` stay because
+    /// `range.loom` and `proving_ground.loom` still use `hum`.
+    ///
+    /// It checks that a file decodes, not that it sounds like anything. The
+    /// defect that got the synthesised bed muted — `sea.wav` falling below
+    /// −45 dBFS once per loop — passes this test cleanly, and catching it would
+    /// need a level-shape assertion this deliberately does not have.
     #[test]
     fn the_shipped_clips_decode() {
-        for (name, seconds) in [("sea.wav", 8.0_f32), ("hum.wav", 2.0)] {
+        for (name, seconds) in [
+            ("sea.wav", 8.0_f32),
+            ("hum.wav", 2.0),
+            ("sea_wash.wav", 40.0),
+            ("hull_wash.wav", 24.0),
+            ("engine_idle.wav", 8.0),
+        ] {
             let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/audio/");
             let clip = Clip::load(std::path::Path::new(&format!("{path}{name}")))
                 .unwrap_or_else(|e| panic!("{name}: {}", e.detail));
