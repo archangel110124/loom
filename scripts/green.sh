@@ -801,8 +801,10 @@ DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
 #      TAB. Two taps of D to walk the cursor to the line spool at (2,0) — two
 #      taps and not a hold, because the repeat delay is twenty ticks. Hold SHIFT
 #      for a second and the spool goes over the side, which opens columns 1 and
-#      2 across all three rows. TAB again, E at the rod, and she goes in turned
-#      the way she was born: `acc/bcc/.cc`, one cell left in the creel.
+#      2 across all three rows. TAB again, E at the rod, and she goes in the way
+#      she was born — **unturned**, 2 wide and 3 tall: `acc/bcc/.cc`, one cell
+#      left in the creel. 5b9 is the same puzzle solved the other way, and that
+#      one turns her.
 #
 #      **Every claim in that paragraph is a `--assert` or a `grep` below**, and
 #      the two strings are the ones a stub cannot produce without having
@@ -911,6 +913,56 @@ unset creel_state
 300:bag=1; 301:" \
   --assert "state.creel_hand == 0" --assert "state.creel_used == 4" \
   --assert "state.thermos == 1" --assert "events.stash == 1" >/dev/null
+
+# 5b9. **THE OTHER SOLVE, AND IT IS THE ONE THAT TURNS HER.** 5b4 ditches the
+#      LINE at (2,0) and the conger goes in **unturned**, `acc/bcc/.cc`. That is
+#      not the only answer to the same puzzle and — until this row — it was the
+#      only one any gate had ever seen. Rotation could be deleted from the
+#      packer outright and the whole block still exited 0.
+#
+#      From the same refused state, `a.b/c../...`:
+#
+#          a . b        one tap of S puts the cursor on the LAMP at (0,1),
+#          c . .        SHIFT sends it over the side, and rows 1 and 2 are a
+#          . . .        clean three-wide-two-tall hole.
+#
+#      A 2x3 conger still does not fit anywhere in it — x = 0 is blocked by the
+#      FLSK and x = 1 by the LINE. **Turned she is 3x2 and she drops straight
+#      in**, filling both rows: `a.b/ccc/ccc`. `first_fit` finds that on its
+#      own, which is the rot = 1 branch of `cells_of` under test at last.
+#
+#      It is also a press cheaper than 5b4 — one tap of S against two of D — so
+#      the solve that needs the rotation is the better one, which is the whole
+#      argument for the mechanic being there.
+DEMO_TURNED="$DEMO_FIGHT; 1900:interact=1; 1901:; 1910:bag=1; 1911:; \
+1930:move_z=-1; 1945:; 1960:sprint=1; 2030:; 2050:bag=1; 2051:; 2100:interact=1; 2101:"
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2110 --hold "$DEMO_TURNED" \
+  --assert "events.ditched == 1" --assert "state.lantern == 0" \
+  --assert "state.online == 0" --assert "state.infish == 1" \
+  --assert "state.creel_free == 1" --assert "state.creel_drift == 0" \
+  | grep -q '"creel_cells": "a\.b/ccc/ccc"'
+
+#      **And LMB, which is the only key in the creel with no coverage at all.**
+#      Lift the turned conger back out — she keeps the way up she was packed,
+#      3 wide and 2 tall, and `creel_fits` says yes where she came from. One
+#      click and she is 2x3 again and `creel_fits` says no from the same cell,
+#      which is the readout the overlay paints green or red. Press E there and
+#      it is refused with code 1 rather than silently ignored.
+DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
+2160:fire=1; 2161:; 2180:interact=1; 2181:"
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2190 --hold "$DEMO_TURN_VERB" \
+  --assert "events.turn == 1" --assert "state.creel_hand_w == 2" \
+  --assert "state.creel_hand_h == 3" --assert "state.creel_fits == 0" \
+  --assert "state.creel_refused == 1" --assert "events.place == 0" >/dev/null
+
+#      Click again and she is back to 3x2, E puts her down, and the picture is
+#      the one 5b9 started from. A turn is reversible; that is why it is a tap
+#      and the ditch is a held key.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 2240 \
+  --hold "$DEMO_TURN_VERB; 2200:fire=1; 2201:; 2220:interact=1; 2221:" \
+  --assert "events.turn == 2" --assert "events.place == 1" \
+  --assert "state.creel_hand == 0" --assert "state.creel_drift == 0" \
+  | grep -q '"creel_cells": "a\.b/ccc/ccc"'
 
 # 5d2. **YOU CAN CAST FROM ANYWHERE ABOARD, AND NOTHING SAID SO.** The engine
 #      has gated the cast on `aboard` rather than on a station since the day it
