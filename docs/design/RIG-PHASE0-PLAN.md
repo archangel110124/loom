@@ -593,9 +593,15 @@ cd ~/loom && python3 tools/mesh/rig/test_split_parts.py
 Expected:
 ```
   split ok  {'deck_timber': 'rig_deck_timber.obj', 'steel_frame': 'rig_steel_frame.obj'}
-  refusal ok  .../bare.obj: no `usemtl` in the file, ...
+  refusal ok  .../bare.obj: a face appears before any `usemtl`, ...
 split_parts: all checks pass
 ```
+
+Note which refusal `bare.obj` actually trips. It carries an `f` line and no
+`usemtl` at all, so the *face-before-material* guard fires first and the
+*no-materials* guard below it is unreachable for this fixture. Both are correct
+refusals and the test asserts on `SystemExit` rather than on message text, so
+either satisfies it — but the message above is the one you will really see.
 
 - [ ] **Step 5: Commit**
 
