@@ -123,7 +123,7 @@ def weathered_timber(size=2048, seed=7):
     silvering = _fbm(size, rng, octaves=3, base=2, stretch=3)
     silvering = (silvering - silvering.min()) / (silvering.max() - silvering.min())
     rot_field = _fbm(size, rng, octaves=5, base=6, stretch=5)
-    rot = np.clip((rot_field - 0.58) / 0.22, 0.0, 1.0)
+    rot = np.clip((rot_field - 0.46) / 0.22, 0.0, 1.0)
 
     height = np.clip(grain * (1.0 - 0.55 * rot), 0.0, 1.0).astype(np.float32)
 
@@ -132,11 +132,17 @@ def weathered_timber(size=2048, seed=7):
     # it has gone. The grain drives colour as hard as it drives height, which is
     # what the milky first version was missing.
     g = grain[:, :, None]
-    dry = np.array([0.150, 0.124, 0.099]) + g * np.array([0.135, 0.115, 0.092])
-    silver = np.array([0.245, 0.240, 0.228]) + g * np.array([0.130, 0.128, 0.120])
-    rotten = np.array([0.045, 0.052, 0.038]) + g * np.array([0.040, 0.045, 0.030])
+    # **Palette D**, chosen by the human from four in-engine variants rendered at
+    # standing eye height on 2026-08-26. Darker, wetter, rot spread wider — a
+    # jetty over cold water rather than a maintained boardwalk. `silver` came
+    # down hardest because it was what dominated the frame; the tide zone below
+    # this deck needs somewhere darker to go, and the shipped palette left it
+    # none. LINEAR reflectance; `_srgb_encode` handles the transfer on the way out.
+    dry = np.array([0.070, 0.055, 0.040]) + g * np.array([0.090, 0.072, 0.052])
+    silver = np.array([0.125, 0.120, 0.108]) + g * np.array([0.080, 0.077, 0.068])
+    rotten = np.array([0.022, 0.026, 0.016]) + g * np.array([0.026, 0.029, 0.017])
 
-    s = np.clip(silvering * 1.30 - 0.30, 0.0, 1.0)[:, :, None]
+    s = np.clip(silvering * 1.10 - 0.45, 0.0, 1.0)[:, :, None]
     r = rot[:, :, None]
     rgb = dry * (1.0 - s) + silver * s
     rgb = rgb * (1.0 - r) + rotten * r

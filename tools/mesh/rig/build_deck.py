@@ -74,7 +74,7 @@ plank_w = (2 * HALF_Z - (courses - 1) * GAP) / courses
 pitch = plank_w + GAP
 
 
-def plank(z0, x0, x1, sink, uv_v0):
+def plank(z0, x0, x1, sink, uv_u0, uv_v0):
     """One board, cupped, its top edges at DECK_TOP - sink."""
     top = DECK_TOP - sink
     verts_top = []
@@ -108,12 +108,17 @@ def plank(z0, x0, x1, sink, uv_v0):
         faces.append(bm.faces.new((verts_top[s + 1][1], verts_top[s][1],
                                    bot[s][1], bot[s + 1][1])))
 
-    # UVs: 1 texture tile per 2 m along the board, 1 per board across. Every
-    # board gets its own V band so no two neighbours share grain.
+    # UVs: 1 texture tile per 2 m along the board, 1 per board across. **Every
+    # board gets its own patch**, not one of four. The Phase 0 code used
+    # `(c % 4) * 0.25`, which gave 66 courses four distinct grain bands and made
+    # the repeat plainly visible at standing height. `uv_u0` does the same job
+    # along the board, so two boards meeting at a butt joint do not continue
+    # each other's grain.
     for f in faces:
         for loop in f.loops:
             x, y, z = loop.vert.co
-            loop[uv_layer].uv = (x / 2.0, uv_v0 + (-y - z0) / plank_w * 0.25)
+            loop[uv_layer].uv = (uv_u0 + x / 2.0,
+                                 uv_v0 + (-y - z0) / plank_w * 0.25)
     return faces
 
 
@@ -126,6 +131,17 @@ def rand():
 
 
 course_spans = [[] for _ in range(courses)]
+# Board geometry is decided in this loop and only this loop -- (z0, x0, x1,
+# sink) per board, in emission order. UVs are drawn in a SEPARATE pass below,
+# after every course's board count and cut positions are already fixed. Draw
+# them from the same rand() calls here instead and the deck's board layout
+# stops being deterministic-and-fixed: an extra rand() call per board shifts
+# every later course's `n` and `cuts` draws too, so boards 0..N are unchanged
+# but course counts downstream drift -- 66 tris * 28 became 7420 tris instead
+# of the frozen 7084 the first time this was tried. Two passes over the same
+# LCG stream keep geometry bit-identical to Phase 0 while still giving every
+# board its own patch of texture.
+boards = []
 
 for c in range(courses):
     z0 = -HALF_Z + c * pitch
@@ -152,8 +168,15 @@ for c in range(courses):
         # of its neighbour is FORBIDDEN (it would exceed DECK_TOP), so the
         # variation is one-sided — boards sink, never rise.
         sink = rand() * 0.004
-        plank(z0, x0, x1, sink, (c % 4) * 0.25)
+        boards.append((z0, x0, x1, sink))
         course_spans[c].append((x0, x1))
+
+# Second pass: one board's worth of geometry is already fixed above, so these
+# rand() calls can no longer perturb board counts or cut positions -- they
+# only pick each board's patch of texture, still deterministic off the same
+# LCG.
+for z0, x0, x1, sink in boards:
+    plank(z0, x0, x1, sink, rand(), rand())
 
 # --- coverage self-check: a dropped sliver board is a hole in the deck ----
 # verify_obj's bounds check is global min/max -- other courses still reach

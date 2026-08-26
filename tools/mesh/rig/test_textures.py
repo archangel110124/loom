@@ -74,12 +74,15 @@ def test_reads_as_dark_weathered_timber():
     lin = np.where(b <= 0.04045, b / 12.92, ((b + 0.055) / 1.055) ** 2.4)
     mean = lin.mean(axis=0)
     std = lin.std(axis=0)
-    target = np.array([0.19, 0.17, 0.15])
 
-    assert (mean < target * 2.0).all(), \
-        "too pale: linear mean %s, authored target %s" % (mean.round(4), target)
-    assert (mean > target * 0.5).all(), \
-        "too dark: linear mean %s, authored target %s" % (mean.round(4), target)
+    # Palette D, approved 2026-08-26. The band is deliberately wider than the
+    # measured value in both directions: it is a regression bound, not a
+    # restatement of today's number. Measured at the time of writing:
+    # linear mean [0.098, 0.083, 0.062].
+    assert (mean < 0.16).all(), \
+        "too pale for palette D: linear mean %s" % mean.round(4)
+    assert (mean > 0.045).all(), \
+        "too dark: linear mean %s" % mean.round(4)
     assert (std > 0.015).all(), \
         "too flat: linear std %s — the grain is not reaching the colour" % std.round(4)
     assert mean[0] > mean[2], \
