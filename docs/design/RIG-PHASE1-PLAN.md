@@ -127,11 +127,12 @@ darker than what the band was written for. Update the band and say why in the
 comment — the assertion still has to be able to fail:
 
 ```python
-    # Palette D, approved 2026-08-26. The band is deliberately wider than the
-    # measured value in both directions: it is a regression bound, not a
-    # restatement of today's number. Measured at the time of writing:
-    # linear mean [0.098, 0.083, 0.062].
-    assert (lin_mean < 0.16).all(), \
+    # Palette D, approved 2026-08-26. A regression bound, not a restatement of
+    # today's number — but calibrated tightly enough to catch ONE constant going
+    # wrong, which is the regression people actually make. Measured: palette D
+    # 0.1009, reverting `silver` alone 0.1113, reverting all five Phase 0
+    # constants 0.2316. The ceiling sits between the first two.
+    assert (lin_mean < 0.125).all(), \
         "too pale for palette D: linear mean %s" % lin_mean.round(4)
     assert (lin_mean > 0.045).all(), \
         "too dark: linear mean %s" % lin_mean.round(4)
@@ -146,7 +147,17 @@ Expected: all five checks pass, and the printed linear mean is near
 Temporarily set `silver` back to its Phase 0 value
 (`[0.245, 0.240, 0.228] + g * [0.130, 0.128, 0.120]`) and re-run.
 Expected: **`too pale for palette D`**. Restore palette D.
-A band that cannot fail is not a band.
+
+**The ceiling is 0.125 and it is calibrated against exactly this test.** An
+earlier draft of this plan set it at 0.16 and prescribed the same injection — and
+the injection passed, with 30% headroom, because D's `s` blend weight
+(`1.10x − 0.45` against Phase 0's `1.30x − 0.30`) roughly halves how much of the
+frame reaches `silver` at all. Measured: palette D 0.1009, silver-only revert
+0.1113, full five-constant revert 0.2316. The ceiling sits between the first two
+deliberately.
+
+A band that only fails when every constant is wrong is a band that cannot catch
+the regression people actually make, which is one constant at a time.
 
 - [ ] **Step 4: Give every course and every board its own patch of texture**
 
