@@ -75,15 +75,19 @@ def test_reads_as_dark_weathered_timber():
     mean = lin.mean(axis=0)
     std = lin.std(axis=0)
 
-    # Palette D, approved 2026-08-26. Palette D measures linear mean
-    # [0.1009, 0.0846, 0.0623]; reverting `silver` alone to its Phase 0 value
-    # reaches [0.1113, 0.0951, 0.0728]. The ceiling sits deliberately between
-    # those two numbers — 0.16 left ~30% headroom over the silver-only
-    # regression and never tripped on it. 0.125 catches that single-constant
-    # regression while still leaving Palette D roughly 24% of headroom below
-    # it: a regression bound calibrated against a specific failure, not a
-    # restatement of today's number.
-    assert (mean < 0.125).all(), \
+    # Palette D, approved 2026-08-26. Calibrated against three measured
+    # points, not chosen for roundness:
+    #   palette D          0.1009   must pass
+    #   silver-only revert 0.1113   must fail  <- the ceiling sits between these
+    #   full Phase 0       0.2316   must fail
+    # 0.106 leaves Palette D ~5.1% headroom and no more -- tight for a
+    # regression bound, but affordable because this generator is
+    # deterministic (same seed, same bytes, verified across independent
+    # rebuilds): there is no run-to-run variance for the band to absorb, so
+    # the only thing that can move this number is somebody editing the
+    # palette, which is exactly what the band exists to catch. 0.16 and 0.125
+    # were both tried first and both left the silver-only regression passing.
+    assert (mean < 0.106).all(), \
         "too pale for palette D: linear mean %s" % mean.round(4)
     assert (mean > 0.045).all(), \
         "too dark: linear mean %s" % mean.round(4)
