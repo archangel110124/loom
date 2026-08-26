@@ -21,8 +21,10 @@ Four rules, each a scar, all enforced by `verify_obj`:
    selection on its own bounding box (mesh.rs:268-276), which takes a model
    apart when the library IS one model.
 3. Normals are recalculated PER SHELL by the caller before export, and
-   `verify_obj` checks it PER SHELL: every connected shell's own signed volume,
-   about its own centroid, must be positive. A whole-mesh check is not enough —
+   `verify_obj` checks it PER SHELL: every connected shell's own signed volume
+   must be positive. What does the work is PARTITIONING the triangles by shell,
+   not the point they are summed about — signed volume is origin-invariant for a
+   closed shell. A whole-mesh check is not enough —
    an outward 2 m cube plus an inverted 1 m one sums to +7 and passes, while
    that inverted shell draws pure black in Loom, diffuse and ambientVisibility
    to zero together. The whole-mesh `signed_volume` is the coarse net
@@ -120,12 +122,16 @@ def read_obj(path):
 def signed_volume(d, tris=None, origin=(0.0, 0.0, 0.0)):
     """Sum of tetrahedron volumes to `origin`. Positive means outward.
 
-    For a CLOSED shell this is translation-invariant and the origin is
-    irrelevant. It is a parameter because the per-shell check below must not
-    depend on that: a shell whose winding is being judged sits wherever the
-    model put it, and referencing a distant origin makes the result dominated
-    by position rather than by winding. Each shell is measured about its own
-    centroid.
+    For a CLOSED, consistently-wound shell this is **exactly** translation-
+    invariant — the divergence theorem, and measured: a unit cube 3 m from the
+    origin reports +1.000000000000, and so does the same cube 1000 m away.
+    Inverted, both report -1.000000000000.
+
+    `origin` is therefore a convenience, not a correctness requirement. The
+    per-shell check below passes each shell's own centroid because it keeps the
+    magnitudes small and readable in a failure message, NOT because the sign
+    would otherwise be wrong. An earlier version of this docstring claimed the
+    origin choice was load-bearing; it was checked and it is not.
     """
     total = 0.0
     v = d["verts"]
@@ -201,7 +207,9 @@ def verify_obj(path, *, min_volume=True):
         # cube (+8) plus an INVERTED 1 m cube (-1) sums to +7 and sails
         # through, while that second shell draws pure black — diffuse and
         # ambientVisibility to zero together. Only a per-shell volume, about
-        # each shell's own centroid, sees it. Guarded by `min_volume` like the
+        # each shell separately, sees it. The centroid is used only to keep the
+        # reported magnitude small; the sign does not depend on it. Guarded by
+        # `min_volume` like the
         # global check, because split parts are legitimately not closed.
         for i, tris in enumerate(shells(d)):
             idx = {v for t in tris for v in t}
