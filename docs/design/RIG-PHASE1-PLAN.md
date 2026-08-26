@@ -127,12 +127,13 @@ darker than what the band was written for. Update the band and say why in the
 comment — the assertion still has to be able to fail:
 
 ```python
-    # Palette D, approved 2026-08-26. A regression bound, not a restatement of
-    # today's number — but calibrated tightly enough to catch ONE constant going
+    # Palette D, approved 2026-08-26. Calibrated to catch ONE constant going
     # wrong, which is the regression people actually make. Measured: palette D
     # 0.1009, reverting `silver` alone 0.1113, reverting all five Phase 0
-    # constants 0.2316. The ceiling sits between the first two.
-    assert (lin_mean < 0.125).all(), \
+    # constants 0.2316. The ceiling sits between the first two. ~5% headroom is
+    # affordable because this generator is deterministic — there is no
+    # run-to-run variance for a band to accommodate.
+    assert (lin_mean < 0.106).all(), \
         "too pale for palette D: linear mean %s" % lin_mean.round(4)
     assert (lin_mean > 0.045).all(), \
         "too dark: linear mean %s" % lin_mean.round(4)
@@ -148,13 +149,23 @@ Temporarily set `silver` back to its Phase 0 value
 (`[0.245, 0.240, 0.228] + g * [0.130, 0.128, 0.120]`) and re-run.
 Expected: **`too pale for palette D`**. Restore palette D.
 
-**The ceiling is 0.125 and it is calibrated against exactly this test.** An
-earlier draft of this plan set it at 0.16 and prescribed the same injection — and
-the injection passed, with 30% headroom, because D's `s` blend weight
+**The ceiling is 0.106 and it is calibrated against exactly this test.** An
+earlier draft set it at 0.16 and prescribed the same injection — and the
+injection passed, with 30% headroom, because D's `s` blend weight
 (`1.10x − 0.45` against Phase 0's `1.30x − 0.30`) roughly halves how much of the
-frame reaches `silver` at all. Measured: palette D 0.1009, silver-only revert
-0.1113, full five-constant revert 0.2316. The ceiling sits between the first two
-deliberately.
+frame reaches `silver` at all. A second draft "tightened" it to 0.125, which is
+still ABOVE the 0.1113 it was meant to catch and therefore caught nothing —
+for `assert mean < X` to fail at 0.1113, X must be at or below it.
+
+    palette D            0.1009   must pass
+    silver-only revert   0.1113   must fail   <- the ceiling sits between these
+    full Phase 0 revert  0.2316   must fail
+
+0.106 leaves ~5% headroom, which is tight for a regression bound and affordable
+because **this generator is deterministic** — same seed, same bytes, verified
+across independent rebuilds. There is no run-to-run variance to accommodate, so
+the only thing that can move the number is a deliberate palette edit, and a
+deliberate edit tripping the band is the band working.
 
 A band that only fails when every constant is wrong is a band that cannot catch
 the regression people actually make, which is one constant at a time.
