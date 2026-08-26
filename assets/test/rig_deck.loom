@@ -1,0 +1,113 @@
+# The rig's deck field, and the proof that replacing a primitive with a mesh
+# moves no physics.
+#
+# `Rig/Deck` in the demo is one `box` at scale [12.0, 0.20, 7.0], and a
+# renderable with no dynamic ancestor takes its collider from its drawn bounds.
+# This scene draws timber instead and restates that collider explicitly.
+#
+# **Why `Deck` sits at `pos.y = 1.20` instead of `0.0`:** `play.rs:520`
+# anchors a static collider at the NODE's world position — never at the
+# mesh's own vertex data — and `:552-556` reads `half_extents` as LOCAL,
+# multiplied by world scale. `rig_deck_timber.obj` used to be baked at
+# absolute world height (y 1.000..1.400) with the node at the origin, which
+# renders correctly but leaves the `BoxCollider` (centred on that origin)
+# floating at y -0.2..0.2 — nowhere near the visible deck. No single node
+# transform can reconcile an absolute-baked mesh with a node-centred
+# collider, so the mesh was re-baked LOCAL-CENTRED (y -0.200..0.200,
+# `53dd3c8`) and the 1.2 m the deck sits above the rig floor now lives on
+# the node instead of in the vertices. That is also, not coincidentally,
+# exactly the transform `deeper_demo`'s own `Deck` primitive already
+# carries — so this mesh is a drop-in replacement at an unchanged node
+# transform, which matters for Phase 4.
+#
+# `half_extents = [12.0, 0.20, 7.0]` is therefore literally the primitive's
+# numbers, at scale 1, on a node at the primitive's own position. Measured:
+# a character settles at the same y on either, bit for bit.
+#
+# `Drop` is the assertion's subject. It spawns 1.6 m above the deck surface
+# and falls; the gate row asserts where it lands.
+
+[scene]
+format = 1
+id = "e0cfe1e4-9448-4a1a-a880-9ef99509a67b"
+
+[[asset]]
+key = "deck_timber"
+id = "cb4dbac7-3c13-42eb-858b-7e54dcd2e822"
+path = "../meshes/rig_deck_timber.obj"
+
+[[asset]]
+key = "deck_albedo"
+id = "4ab04384-2855-4d58-b1c9-5c4f63b6981f"
+path = "../textures/rig_deck_timber_albedo.png"
+
+[[asset]]
+key = "deck_normal"
+id = "9d6c839a-0d79-4470-9682-3ef13f855fb9"
+path = "../textures/rig_deck_timber_normal.png"
+
+[[node]]
+name = "Rig"
+
+  # The demo's own environment, so this row's picture is comparable to the
+  # scene it is a stand-in for. `deeper_demo.loom:668-676`.
+  [node.components.Environment]
+  sun_direction = [0.42, 0.46, -0.78]
+  sun_strength = 1.25
+  sun_color = [1.0, 0.93, 0.80]
+  ambient = 0.45
+  sky_zenith = [0.16, 0.30, 0.52]
+  sky_horizon = [0.74, 0.72, 0.66]
+  fog_density = 0.0028
+  fog_falloff = 0.05
+
+[[node]]
+name = "Deck"
+parent = "Rig"
+
+  [node.transform]
+  pos = [0.0, 1.20, 0.0]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "deck_timber" }
+
+  # The transcription. LOCAL half-extents, multiplied by world scale — and the
+  # scale here is 1, so these are literally the primitive's numbers. The mesh
+  # is local-centred, so it needs the node's `pos.y = 1.20` to sit at its
+  # authored world height — see the file header for why. That is also
+  # exactly `deeper_demo`'s own `Deck` transform, unchanged.
+  [node.components.BoxCollider]
+  half_extents = [12.0, 0.20, 7.0]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "deck_albedo" }
+  normal_map = { asset = "deck_normal" }
+  roughness = 0.92
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "Drop"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-4.30, 3.00, 0.90]
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+  step_height = 0.25
+
+[[node]]
+name = "Camera"
+parent = "Rig"
+
+  # Low and raking, because a deck photographed from above is a texture swatch
+  # and a deck photographed from eye height is a floor. 320x200 is GOLDEN_SIZE.
+  [node.transform]
+  pos = [-9.0, 2.60, 9.5]
+  rot_euler = [-12.0, -28.0, 0.0]
+
+  [node.components.Camera]
+  fov_y_degrees = 48.0
