@@ -33,8 +33,14 @@ TEX_DIR = os.path.join(REPO, "assets", "textures")
 
 # ---- the numbers -----------------------------------------------------------
 HALF_X, HALF_Z = 12.0, 7.0        # frozen: the quay edge is z = -7.000
-DECK_TOP = 1.400                  # frozen: every spawn and assert row reads it
-DECK_BOTTOM = 1.000               # the primitive's underside
+DECK_TOP = 1.400                  # frozen: every spawn and assert row reads it -- a WORLD height
+DECK_BOTTOM = 1.000               # the primitive's underside -- also WORLD
+# play.rs:520 anchors a static collider's BoxCollider at the node's world
+# position, and half_extents is LOCAL (:552-556) -- there is no node transform
+# that can place a box collider under a mesh baked at absolute height. So the
+# mesh is baked centred on its own local origin instead, and the scene node
+# carries pos.y = DECK_CENTRE to put it back at DECK_TOP/DECK_BOTTOM in world.
+DECK_CENTRE = 1.200                # the node y this mesh is authored to hang from
 PLANK_W = 0.200                   # across the deck, in Z
 GAP = 0.012                       # a gap you can see the sea through
 CUP = 0.008                       # centre dips this far below the edges
@@ -80,10 +86,10 @@ def plank(z0, x0, x1, sink, uv_v0):
         dip = CUP * 0.5 * (1.0 - math.cos(2.0 * math.pi * f))
         row = []
         for x in (x0, x1):
-            row.append(bm.verts.new((x, -z, top - dip)))
+            row.append(bm.verts.new((x, -z, top - dip - DECK_CENTRE)))
         verts_top.append(row)
 
-    bot = [[bm.verts.new((x, -(z0 + (s / SPAN) * plank_w), DECK_BOTTOM))
+    bot = [[bm.verts.new((x, -(z0 + (s / SPAN) * plank_w), DECK_BOTTOM - DECK_CENTRE))
             for x in (x0, x1)] for s in range(SPAN + 1)]
 
     faces = []
@@ -198,12 +204,20 @@ assert abs(lo[2] + 7.0) < 1e-3 and abs(hi[2] - 7.0) < 1e-3, \
     "z %.4f..%.4f, want -7.000..7.000" % (lo[2], hi[2])
 
 # THE ONE THAT MATTERS. Nothing drawn may stand above the invisible floor.
-assert hi[1] <= DECK_TOP + 1e-4, \
-    "a vertex reaches y=%.5f, above the collider top %.3f — the player would " \
-    "see deck above the surface he stands on" % (hi[1], DECK_TOP)
-assert hi[1] > DECK_TOP - 1e-3, \
-    "highest vertex is y=%.5f, %.1f mm BELOW the collider top — the player " \
-    "would float" % (hi[1], (DECK_TOP - hi[1]) * 1000.0)
+# This mesh is authored LOCAL, centred on DECK_CENTRE -- the scene node carries
+# pos.y = DECK_CENTRE, so a local vertex at (DECK_TOP - DECK_CENTRE) sits at
+# world DECK_TOP once placed. A vertex above that local top would still put
+# drawn deck above the collider the player stands on once the node is placed.
+LOCAL_TOP = DECK_TOP - DECK_CENTRE
+assert hi[1] <= LOCAL_TOP + 1e-4, \
+    "a vertex reaches local y=%.5f (world %.5f once the node sits at " \
+    "DECK_CENTRE=%.3f), above the local top %.3f (world deck top %.3f) — the " \
+    "player would see deck above the surface he stands on" \
+    % (hi[1], hi[1] + DECK_CENTRE, DECK_CENTRE, LOCAL_TOP, DECK_TOP)
+assert hi[1] > LOCAL_TOP - 1e-3, \
+    "highest vertex is local y=%.5f, %.1f mm BELOW the local top %.3f (world " \
+    "deck top %.3f) — the player would float" \
+    % (hi[1], (LOCAL_TOP - hi[1]) * 1000.0, LOCAL_TOP, DECK_TOP)
 
 assert info["tris"] <= 12000, "over budget: %d tris" % info["tris"]
 assert len(rigkit.read_obj(OBJ_PATH)["uvs"]) > 0, "no UVs — the texture cannot land"
