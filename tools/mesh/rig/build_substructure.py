@@ -52,6 +52,39 @@ BRACE_Y = 0.550           # world; above the 0.166 m significant wave height
 SEED = 11
 TEX_SIZE = 2048
 
+# --- the tide seam ---------------------------------------------------------
+# The band on the piles where they cross the water. **Superseding the plan
+# brief's per-pile loop**: task 3b replaced the single `rig_steel_frame.obj`
+# (all six piles at their world positions) with one `rig_pile.obj` centred on
+# its own origin, placed by six nodes. The seam follows the same shape: one
+# mesh, centred on its own origin, one `tube()` call at (0.0, 0.0, ...), six
+# nodes to place it (Task 6).
+#
+# `play.rs:768` gives ANY renderable static node with no `BoxCollider` an
+# extent of `|world_scale|` -- 2x2x2 m at scale 1 -- so "no collider" is not
+# achievable by omitting the component; the seam gets an explicit one, sized
+# and centred to sit INSIDE the pile's own [PILE_R, PILE_TOP-PILE_CENTRE,
+# PILE_R] box, so it presents nothing a swimmer could meet that the pile did
+# not already.
+TIDE_TOP = 0.450          # world y — above the splash, where growth dies
+TIDE_BOT = -0.650         # world y — below it, drowned
+TIDE_OVER = 0.004         # the band stands this far proud of the pile, drawn only
+# Half-height and node y are DERIVED from TIDE_TOP/TIDE_BOT, not authored
+# twice: a mesh centred on its own local origin needs a half-height equal to
+# half the band's total span, and a node y equal to the span's midpoint --
+# get either wrong and the mesh is not centred, which the self-check below
+# catches the same way it catches the pile.
+SEAM_HALF_Y = (TIDE_TOP - TIDE_BOT) / 2.0    # 0.550
+SEAM_NODE_Y = (TIDE_TOP + TIDE_BOT) / 2.0    # -0.100 -- world y the node sits at
+# The seam's COLLIDER uses PILE_R, not PILE_R + TIDE_OVER. The mesh is drawn
+# TIDE_OVER proud so it does not z-fight the pile beneath it -- a cosmetic,
+# sub-tolerance render offset with no gameplay meaning. Carrying that 4 mm
+# into the collider would put the seam's x/z half-extent (0.354) fractionally
+# OUTSIDE the pile's own (0.350), breaking the one property that makes a
+# redundant collider harmless: that it is a subset of a hazard the pile
+# already presents. Named here, not re-derived at the assertion.
+SEAM_COLLIDER_HALF = (PILE_R, SEAM_HALF_Y, PILE_R)
+
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)
 
@@ -146,11 +179,42 @@ rigkit.export_obj(obj2, BRACE_PATH, uv=True,
                   header="rig: cross-bracing, r%.3f at world y %.3f. No collider: "
                          "new geometry, no primitive behind it." % (BRACE_R, BRACE_Y))
 
+# ---- the tide seam, at its own origin ------------------------------------
+# A SECOND OBJ over the SAME shape the pile already is, not new volume: the
+# engine takes one OBJ per material and this band is a different material on
+# the piles it wraps. It stands TIDE_OVER proud so it does not z-fight the
+# pile beneath it -- 4 mm is far above the depth buffer's resolution at this
+# range and far below anything the player can see as a step.
+#
+# Centred on its own local origin in x/y/z, exactly like `rig_pile.obj` --
+# ONE `tube()` call at (0.0, 0.0, ...), not one per pile. Six nodes place it
+# in Task 6, at the same x/z as the piles and at world y = SEAM_NODE_Y.
+mesh3 = bpy.data.meshes.new("rig_steel_tidal")
+obj3 = bpy.data.objects.new("rig_steel_tidal", mesh3)
+bpy.context.collection.objects.link(obj3)
+bm = bmesh.new()
+uv_layer = bm.loops.layers.uv.new("UVMap")
+tube((0.0, 0.0, TIDE_BOT - SEAM_NODE_Y), (0.0, 0.0, TIDE_TOP - SEAM_NODE_Y),
+     PILE_R + TIDE_OVER, SIDES, 0.0)
+bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+bm.to_mesh(mesh3)
+bm.free()
+TIDAL_PATH = os.path.join(REPO, "assets", "meshes", "rig_steel_tidal.obj")
+rigkit.export_obj(obj3, TIDAL_PATH, uv=True,
+                  header="rig: the tide seam, centred on its own origin. World y "
+                         "%.3f..%.3f, %.0f mm proud of the pile. Six nodes place "
+                         "it at world y %.3f (SEAM_NODE_Y)."
+                         % (TIDE_BOT, TIDE_TOP, TIDE_OVER * 1000, SEAM_NODE_Y))
+
 os.makedirs(TEX_DIR, exist_ok=True)
 albedo, height = textures.weathered_steel(size=TEX_SIZE, seed=SEED)
 textures.write_png(os.path.join(TEX_DIR, "rig_steel_frame_albedo.png"), albedo)
 textures.write_png(os.path.join(TEX_DIR, "rig_steel_frame_normal.png"),
                    textures.normal_from_height(height))
+alb2, h2 = textures.tidal_growth(size=TEX_SIZE, seed=13)
+textures.write_png(os.path.join(TEX_DIR, "rig_steel_tidal_albedo.png"), alb2)
+textures.write_png(os.path.join(TEX_DIR, "rig_steel_tidal_normal.png"),
+                   textures.normal_from_height(h2))
 print("substructure: textures %dx%d written" % (TEX_SIZE, TEX_SIZE))
 
 # --- self-check ----------------------------------------------------------
@@ -206,4 +270,43 @@ print("pile: %d tris, x %.3f..%.3f y %.3f..%.3f z %.3f..%.3f"
       % (pi["tris"], pi["lo"][0], pi["hi"][0], pi["lo"][1], pi["hi"][1], pi["lo"][2], pi["hi"][2]))
 print("bracing: %d tris, world y %.3f..%.3f"
       % (bi["tris"], bi["lo"][1] + PILE_CENTRE, bi["hi"][1] + PILE_CENTRE))
+
+# --- the seam's own self-check --------------------------------------------
+t = rigkit.verify_obj(TIDAL_PATH)
+
+# Centred on its own origin in ALL THREE axes, exactly like the pile check
+# above -- same reason: no node transform can put a mesh and a matching
+# BoxCollider in the same place if the mesh is not centred on the node it
+# hangs from.
+for ax, name, half in ((0, "x", PILE_R + TIDE_OVER), (1, "y", SEAM_HALF_Y), (2, "z", PILE_R + TIDE_OVER)):
+    assert abs(t["lo"][ax] + half) < 1e-3 and abs(t["hi"][ax] - half) < 1e-3, \
+        "seam %s spans %.4f..%.4f, want %.3f..%.3f — it is not centred on its " \
+        "own origin and its collider cannot be made to match" \
+        % (name, t["lo"][ax], t["hi"][ax], -half, half)
+
+# The seam must STRADDLE the water. A band entirely above or below it is not a
+# tide line, and this is the one assertion that says what the zone is FOR.
+# TIDE_BOT and TIDE_TOP are WORLD y; WaterBody.surface_height is 0.0
+# (deeper_demo.loom:921).
+assert TIDE_BOT < 0.0 < TIDE_TOP, \
+    "the seam spans world y %.3f..%.3f and does not cross the water surface " \
+    "at y=0 — that is not a tide line" % (TIDE_BOT, TIDE_TOP)
+
+# The property that makes a redundant collider harmless: it must not exceed
+# the pile's own [PILE_R, PILE_TOP-PILE_CENTRE, PILE_R] box in any axis, so it
+# can never present something a swimmer could meet that the pile did not
+# already. This is why SEAM_COLLIDER_HALF drops TIDE_OVER (see its definition
+# above) rather than matching the drawn mesh's radius exactly.
+PILE_COLLIDER_HALF = (PILE_R, PILE_TOP - PILE_CENTRE, PILE_R)
+for ax, name in ((0, "x"), (1, "y"), (2, "z")):
+    assert SEAM_COLLIDER_HALF[ax] <= PILE_COLLIDER_HALF[ax] + 1e-9, \
+        "seam collider half-extent %s=%.3f exceeds the pile's %.3f — it would " \
+        "present something a swimmer could meet that the pile does not " \
+        "already" % (name, SEAM_COLLIDER_HALF[ax], PILE_COLLIDER_HALF[ax])
+
+assert t["tris"] <= 6000, "seam over budget: %d tris" % t["tris"]
+print("seam: %d tris, world y %.3f..%.3f, node_y=%.3f, "
+      "collider half_extents=[%.3f, %.3f, %.3f], straddles the waterline"
+      % (t["tris"], TIDE_BOT, TIDE_TOP, SEAM_NODE_Y,
+         SEAM_COLLIDER_HALF[0], SEAM_COLLIDER_HALF[1], SEAM_COLLIDER_HALF[2]))
 print("substructure: self-check passes")

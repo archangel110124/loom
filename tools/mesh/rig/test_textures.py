@@ -137,6 +137,20 @@ def test_steel_tiles_and_is_deterministic():
     print("  steel tiling ok  seam %.2f/%.2f  %.2f/%.2f" % (sx, ix, sy, iy))
 
 
+def test_tidal_growth_is_green_black_and_varied():
+    """The seam is the one place in the rig that is not brown or grey. If G does
+    not lead, this is more rust and the seam does not read."""
+    alb, _ = textures.tidal_growth(size=256, seed=13)
+    lin = np.where(alb / 255.0 <= 0.04045, (alb / 255.0) / 12.92,
+                   (((alb / 255.0) + 0.055) / 1.055) ** 2.4)
+    m = lin.reshape(-1, 3).mean(axis=0)
+    assert m[1] > m[0] * 1.15, "not green-shifted: %s" % m.round(4)
+    assert (m < 0.10).all(), "the tide zone must be the darkest thing on the rig: %s" % m.round(4)
+    # Measured 0.0152; bound set below it, as a regression check.
+    assert lin.reshape(-1, 3).std(axis=0).mean() > 0.012, "too flat"
+    print("  tidal ok  linear mean=%s" % m.round(4))
+
+
 test_tiles_seamlessly()
 test_is_deterministic()
 test_normal_map_is_a_unit_field()
@@ -144,4 +158,5 @@ test_reads_as_dark_weathered_timber()
 test_png_round_trip()
 test_steel_is_darker_and_ruster_than_timber()
 test_steel_tiles_and_is_deterministic()
+test_tidal_growth_is_green_black_and_varied()
 print("textures: all checks pass")

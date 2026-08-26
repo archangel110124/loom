@@ -206,6 +206,46 @@ def weathered_steel(size=2048, seed=11):
     return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
 
 
+def tidal_growth(size=2048, seed=13):
+    """-> (albedo uint8 HxWx3, height float32 HxW in 0..1).
+
+    The band where the piles cross the water. Three things live here: black
+    weed that hangs in vertical fronds, barnacle crust that is pale and hard and
+    clusters, and the wet steel showing through between them.
+
+    It is the darkest and the only green thing on the rig, deliberately — the
+    spec calls this the horror seam, and a seam that is the same colour as what
+    it joins is not a seam. LINEAR in, sRGB bytes out.
+    """
+    rng = np.random.default_rng(seed)
+
+    # Weed hangs, so its field is stretched along Y — generated stretched along
+    # X and transposed, the same trick `weathered_steel` uses.
+    weed_f = _fbm(size, rng, octaves=5, base=20, stretch=5).T
+    weed_f = (weed_f - weed_f.min()) / (weed_f.max() - weed_f.min())
+    # Barnacles cluster, so a low frequency gates a high one.
+    cluster = _fbm(size, rng, octaves=3, base=4)
+    cluster = (cluster - cluster.min()) / (cluster.max() - cluster.min())
+    grit = _fbm(size, rng, octaves=6, base=64)
+
+    weed = np.clip((weed_f - 0.42) / 0.30, 0.0, 1.0)
+    barnacle = np.clip((grit - 0.60) / 0.14, 0.0, 1.0) * np.clip(cluster * 1.6 - 0.35, 0.0, 1.0)
+
+    # Barnacles stand proud; weed lies flat and wet.
+    height = np.clip(0.30 + 0.55 * barnacle - 0.10 * weed + 0.15 * grit, 0.0, 1.0).astype(np.float32)
+
+    g = grit[:, :, None]
+    wet_steel = np.array([0.022, 0.024, 0.023]) + g * np.array([0.016, 0.017, 0.016])
+    weed_col = np.array([0.014, 0.030, 0.016]) + g * np.array([0.012, 0.026, 0.013])
+    shell = np.array([0.090, 0.086, 0.076]) + g * np.array([0.055, 0.052, 0.045])
+
+    w = weed[:, :, None]
+    b = barnacle[:, :, None]
+    rgb = wet_steel * (1.0 - w) + weed_col * w
+    rgb = rgb * (1.0 - b) + shell * b
+    return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
+
+
 def normal_from_height(height, strength=2.0):
     """Tangent-space normal map, +Y green (OpenGL). Wraps, like its source.
 
