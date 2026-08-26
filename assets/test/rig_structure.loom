@@ -1,0 +1,784 @@
+# The rig, assembled: deck, six piles, the tide seam, and all fourteen
+# bulwark rail/cap runs, in one scene with one gate row watching it.
+#
+# Tasks 3b, 4 and 5 each replaced one `deeper_demo.loom` primitive stand-in
+# with textured mesh(es) and a transcribed collider, proved node by node in
+# their own scenes (`rig_deck.loom`, and the substructure/bulwark equivalents
+# this task's brief points at). This scene is the first place all four zones
+# — deck, piles, seam, bulwark — share a frame, so it is the first place
+# their materials can be judged as one structure rather than four isolated
+# swatches.
+#
+# **Every position and half-extent below is copied from a generator's stdout,
+# not retyped from the plan.** `build_substructure.py` prints the pile's local
+# mesh extent and the seam's world range / node_y / `BoxCollider` — rerun
+# immediately before authoring this file:
+#
+#     pile: 60 tris, x -0.350..0.350 y -1.200..1.200 z -0.350..0.350
+#     seam: 60 tris, world y -0.650..0.450, node_y=-0.100,
+#           collider half_extents=[0.350, 0.550, 0.350], straddles the waterline
+#
+# `build_bulwark.py` prints all fourteen rail/cap node positions and
+# `BoxCollider` half-extents in one table; every `Rail*`/`Cap*` node below is
+# one row of that table, unedited:
+#
+#   rail South     node_pos=(  0.000, 1.900,   6.900) half_extents=(12.000, 0.500,  0.100)
+#   rail West      node_pos=(-11.900, 1.900,   0.000) half_extents=( 0.100, 0.500,  7.000)
+#   rail EastNorth node_pos=( 11.900, 1.900,  -2.500) half_extents=( 0.100, 0.500,  4.500)
+#   rail EastSouth node_pos=( 11.900, 1.900,   5.900) half_extents=( 0.100, 0.500,  1.100)
+#   rail NorthWest node_pos=(-11.150, 1.900,  -6.900) half_extents=( 0.850, 0.500,  0.100)
+#   rail NorthMid  node_pos=( -7.600, 1.900,  -6.900) half_extents=( 0.700, 0.500,  0.100)
+#   rail NorthEast node_pos=(  4.450, 1.900,  -6.900) half_extents=( 7.550, 0.500,  0.100)
+#   cap  South     node_pos=(  0.000, 2.800,   6.900) half_extents=(12.000, 0.120,  0.060)
+#   cap  NorthWest node_pos=(-11.150, 2.800,  -6.900) half_extents=( 0.850, 0.120,  0.060)
+#   cap  NorthMid  node_pos=( -7.600, 2.800,  -6.900) half_extents=( 0.700, 0.120,  0.060)
+#   cap  NorthEast node_pos=(  4.450, 2.800,  -6.900) half_extents=( 7.550, 0.120,  0.060)
+#   cap  West      node_pos=(-11.900, 2.800,   0.000) half_extents=( 0.060, 0.120,  7.000)
+#   cap  EastNorth node_pos=( 11.900, 2.800,  -2.500) half_extents=( 0.060, 0.120,  4.500)
+#   cap  EastSouth node_pos=( 11.900, 2.800,   5.900) half_extents=( 0.060, 0.120,  1.100)
+#
+# Pile/Seam x,z are the generator's own constants (`PILE_X = (-10.5, 0.0,
+# 10.5)`, `PILE_Z = (-5.5, 5.5)`), and the six positions below are those two
+# sets crossed, at y = -0.20 (pile) / y = -0.10 (seam) — the node heights that
+# put a LOCAL-CENTRED mesh at its authored world height, same story as
+# `rig_deck.loom`'s header on `Deck`. Every one of these numbers also matches
+# `deeper_demo.loom`'s own primitive stand-ins bit for bit (PilingNW..SE,
+# RailSouth..NorthEast, CapSouth..EastSouth) — this scene is a drop-in
+# replacement at unchanged transforms, which is what Phase 4 needs it to be.
+#
+# **The bracing is deliberately NOT in this scene.** `rig_bracing.obj` exists
+# and is built, but Task 4 measured what wiring it costs: a `BoxCollider`
+# matching its true AABB is a 21 x 11 m slab (the bracing is an open lattice
+# of eight thin rods and a box cannot express a lattice), and omitting the
+# component instead gives it a 2x2x2 m cube at the rig origin (`play.rs:768`
+# falls back to `|world_scale|` with no collider authored). Both are
+# unauthored obstacles. The mesh stays in the repo and out of the scene until
+# there is a collider that can express it.
+#
+# **`Drop` is not gated.** It is a `CharacterController` positioned to fall
+# onto the deck so a human, or a future `green.sh` row, has a settle height to
+# measure — this scene's `GOLDEN` row is an image compare with no `--sim`, so
+# nothing here executes a tick or reads that height. Same story as
+# `rig_deck.loom`'s `Drop`.
+#
+# **Camera** sits low off the north-west corner, adjusted from the brief's
+# starting guess until all four zones actually read in frame: the deck
+# surface, the bulwark above it, the piles below, and the seam where they
+# cross the water. See the render notes in the task report for what it looks
+# like at this framing and at eye height.
+
+[scene]
+format = 1
+id = "3b92a1fa-90bd-4ab1-82f5-9f08766bdeb1"
+
+[[asset]]
+key = "deck_timber"
+id = "640bf546-fdaa-45a3-b7f8-2085d6596fa4"
+path = "../meshes/rig_deck_timber.obj"
+
+[[asset]]
+key = "deck_albedo"
+id = "0c738226-ac43-4454-8e6c-59ff1931de1b"
+path = "../textures/rig_deck_timber_albedo.png"
+
+[[asset]]
+key = "deck_normal"
+id = "9913c630-c5de-4f9e-b0ec-49af8e6d43e8"
+path = "../textures/rig_deck_timber_normal.png"
+
+[[asset]]
+key = "pile_mesh"
+id = "cec42284-6b60-4d30-acb3-bb1ea50bb56d"
+path = "../meshes/rig_pile.obj"
+
+[[asset]]
+key = "steel_frame_albedo"
+id = "ba2a0a8b-d2a9-41db-80d2-5c2ca865b0b0"
+path = "../textures/rig_steel_frame_albedo.png"
+
+[[asset]]
+key = "steel_frame_normal"
+id = "4a33d231-ae07-4781-89f9-251404d254f1"
+path = "../textures/rig_steel_frame_normal.png"
+
+[[asset]]
+key = "seam_mesh"
+id = "b3193b2b-a8ef-4e17-8379-1ee4f8e6d385"
+path = "../meshes/rig_steel_tidal.obj"
+
+[[asset]]
+key = "steel_tidal_albedo"
+id = "263b1ac1-de94-4423-94cc-41eecfa97164"
+path = "../textures/rig_steel_tidal_albedo.png"
+
+[[asset]]
+key = "steel_tidal_normal"
+id = "b054c334-95ad-475b-b338-a0bece9bd951"
+path = "../textures/rig_steel_tidal_normal.png"
+
+[[asset]]
+key = "rail_south"
+id = "7a560471-55d1-4787-bf73-1ff41f8e885e"
+path = "../meshes/rig_rail_south.obj"
+
+[[asset]]
+key = "rail_west"
+id = "e7a05f06-29e3-47b1-b105-1079a301306b"
+path = "../meshes/rig_rail_west.obj"
+
+[[asset]]
+key = "rail_eastnorth"
+id = "79c4b055-4820-47eb-9e0a-55ad858f598b"
+path = "../meshes/rig_rail_eastnorth.obj"
+
+[[asset]]
+key = "rail_eastsouth"
+id = "549b92fb-407d-425f-951f-c8935807da4c"
+path = "../meshes/rig_rail_eastsouth.obj"
+
+[[asset]]
+key = "rail_northwest"
+id = "eeeea9f8-9141-49a0-9fb4-004893a4b68b"
+path = "../meshes/rig_rail_northwest.obj"
+
+[[asset]]
+key = "rail_northmid"
+id = "9fa124ce-e674-4aee-bca3-75ccee19fa7b"
+path = "../meshes/rig_rail_northmid.obj"
+
+[[asset]]
+key = "rail_northeast"
+id = "3b4eafc3-f797-4283-87e9-70bb93bd83d9"
+path = "../meshes/rig_rail_northeast.obj"
+
+[[asset]]
+key = "cap_south"
+id = "59cab30f-6bb3-4a5a-af3c-71621980fc61"
+path = "../meshes/rig_cap_south.obj"
+
+[[asset]]
+key = "cap_northwest"
+id = "0df7b329-d621-4a6f-9dfc-a90ee0533517"
+path = "../meshes/rig_cap_northwest.obj"
+
+[[asset]]
+key = "cap_northmid"
+id = "324db5ad-bd03-45da-a8fa-84a1b5920367"
+path = "../meshes/rig_cap_northmid.obj"
+
+[[asset]]
+key = "cap_northeast"
+id = "781ba640-afbe-4c25-9744-42f2791fb402"
+path = "../meshes/rig_cap_northeast.obj"
+
+[[asset]]
+key = "cap_west"
+id = "82542354-25eb-486c-a536-86cb04689236"
+path = "../meshes/rig_cap_west.obj"
+
+[[asset]]
+key = "cap_eastnorth"
+id = "8343aaf4-57a2-40c1-848e-3c46f544ef21"
+path = "../meshes/rig_cap_eastnorth.obj"
+
+[[asset]]
+key = "cap_eastsouth"
+id = "4f8257ff-07e2-4ed5-aed1-de9805030ebb"
+path = "../meshes/rig_cap_eastsouth.obj"
+
+[[node]]
+name = "Rig"
+
+  # The demo's own environment, so this row's picture is comparable to the
+  # scene it stands in for. `deeper_demo.loom:668-676`.
+  [node.components.Environment]
+  sun_direction = [0.42, 0.46, -0.78]
+  sun_strength = 1.25
+  sun_color = [1.0, 0.93, 0.80]
+  ambient = 0.45
+  sky_zenith = [0.16, 0.30, 0.52]
+  sky_horizon = [0.74, 0.72, 0.66]
+  fog_density = 0.0028
+  fog_falloff = 0.05
+
+  # The seam is a tide line and needs a tide to line. Unlimited depth is not
+  # authored here (no `waves` listed), so `fetch` derives a fetch-limited sea
+  # from `Wind.speed` instead of the scale-invariant fully-developed one.
+  [node.components.WaterBody]
+  surface_height = 0.0
+  fetch = 15000.0
+
+  [node.components.Wind]
+  speed = 3.0
+  direction_degrees = 20.0
+
+[[node]]
+name = "Deck"
+parent = "Rig"
+
+  [node.transform]
+  pos = [0.0, 1.20, 0.0]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "deck_timber" }
+
+  [node.components.BoxCollider]
+  half_extents = [12.0, 0.20, 7.0]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "deck_albedo" }
+  normal_map = { asset = "deck_normal" }
+  roughness = 0.92
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "PileNW"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-10.5, -0.20, -5.5]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "pile_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.35, 1.20, 0.35]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "steel_frame_albedo" }
+  normal_map = { asset = "steel_frame_normal" }
+  roughness = 0.85
+  metallic = 0.25
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "PileNC"
+parent = "Rig"
+
+  [node.transform]
+  pos = [0.0, -0.20, -5.5]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "pile_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.35, 1.20, 0.35]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "steel_frame_albedo" }
+  normal_map = { asset = "steel_frame_normal" }
+  roughness = 0.85
+  metallic = 0.25
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "PileNE"
+parent = "Rig"
+
+  [node.transform]
+  pos = [10.5, -0.20, -5.5]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "pile_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.35, 1.20, 0.35]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "steel_frame_albedo" }
+  normal_map = { asset = "steel_frame_normal" }
+  roughness = 0.85
+  metallic = 0.25
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "PileSW"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-10.5, -0.20, 5.5]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "pile_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.35, 1.20, 0.35]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "steel_frame_albedo" }
+  normal_map = { asset = "steel_frame_normal" }
+  roughness = 0.85
+  metallic = 0.25
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "PileSC"
+parent = "Rig"
+
+  [node.transform]
+  pos = [0.0, -0.20, 5.5]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "pile_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.35, 1.20, 0.35]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "steel_frame_albedo" }
+  normal_map = { asset = "steel_frame_normal" }
+  roughness = 0.85
+  metallic = 0.25
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "PileSE"
+parent = "Rig"
+
+  [node.transform]
+  pos = [10.5, -0.20, 5.5]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "pile_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.35, 1.20, 0.35]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "steel_frame_albedo" }
+  normal_map = { asset = "steel_frame_normal" }
+  roughness = 0.85
+  metallic = 0.25
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "SeamNW"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-10.5, -0.10, -5.5]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "seam_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.35, 0.55, 0.35]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "steel_tidal_albedo" }
+  normal_map = { asset = "steel_tidal_normal" }
+  roughness = 0.70
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "SeamNC"
+parent = "Rig"
+
+  [node.transform]
+  pos = [0.0, -0.10, -5.5]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "seam_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.35, 0.55, 0.35]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "steel_tidal_albedo" }
+  normal_map = { asset = "steel_tidal_normal" }
+  roughness = 0.70
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "SeamNE"
+parent = "Rig"
+
+  [node.transform]
+  pos = [10.5, -0.10, -5.5]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "seam_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.35, 0.55, 0.35]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "steel_tidal_albedo" }
+  normal_map = { asset = "steel_tidal_normal" }
+  roughness = 0.70
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "SeamSW"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-10.5, -0.10, 5.5]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "seam_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.35, 0.55, 0.35]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "steel_tidal_albedo" }
+  normal_map = { asset = "steel_tidal_normal" }
+  roughness = 0.70
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "SeamSC"
+parent = "Rig"
+
+  [node.transform]
+  pos = [0.0, -0.10, 5.5]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "seam_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.35, 0.55, 0.35]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "steel_tidal_albedo" }
+  normal_map = { asset = "steel_tidal_normal" }
+  roughness = 0.70
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "SeamSE"
+parent = "Rig"
+
+  [node.transform]
+  pos = [10.5, -0.10, 5.5]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "seam_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.35, 0.55, 0.35]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "steel_tidal_albedo" }
+  normal_map = { asset = "steel_tidal_normal" }
+  roughness = 0.70
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "RailSouth"
+parent = "Rig"
+
+  [node.transform]
+  pos = [0.0, 1.90, 6.90]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "rail_south" }
+
+  [node.components.BoxCollider]
+  half_extents = [12.0, 0.50, 0.10]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "deck_albedo" }
+  normal_map = { asset = "deck_normal" }
+  roughness = 0.85
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "RailWest"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-11.90, 1.90, 0.0]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "rail_west" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.10, 0.50, 7.0]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "deck_albedo" }
+  normal_map = { asset = "deck_normal" }
+  roughness = 0.85
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "RailEastNorth"
+parent = "Rig"
+
+  [node.transform]
+  pos = [11.90, 1.90, -2.50]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "rail_eastnorth" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.10, 0.50, 4.50]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "deck_albedo" }
+  normal_map = { asset = "deck_normal" }
+  roughness = 0.85
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "RailEastSouth"
+parent = "Rig"
+
+  [node.transform]
+  pos = [11.90, 1.90, 5.90]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "rail_eastsouth" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.10, 0.50, 1.10]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "deck_albedo" }
+  normal_map = { asset = "deck_normal" }
+  roughness = 0.85
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "RailNorthWest"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-11.15, 1.90, -6.90]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "rail_northwest" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.85, 0.50, 0.10]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "deck_albedo" }
+  normal_map = { asset = "deck_normal" }
+  roughness = 0.85
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "RailNorthMid"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-7.60, 1.90, -6.90]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "rail_northmid" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.70, 0.50, 0.10]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "deck_albedo" }
+  normal_map = { asset = "deck_normal" }
+  roughness = 0.85
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "RailNorthEast"
+parent = "Rig"
+
+  [node.transform]
+  pos = [4.45, 1.90, -6.90]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "rail_northeast" }
+
+  [node.components.BoxCollider]
+  half_extents = [7.55, 0.50, 0.10]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "deck_albedo" }
+  normal_map = { asset = "deck_normal" }
+  roughness = 0.85
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "CapSouth"
+parent = "Rig"
+
+  [node.transform]
+  pos = [0.0, 2.80, 6.90]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cap_south" }
+
+  [node.components.BoxCollider]
+  half_extents = [12.0, 0.12, 0.06]
+
+  # Flat colour, no maps — `CapSouth`'s own values from `deeper_demo.loom`, so
+  # this row's cap bar reads the same as the primitive it replaces.
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "CapNorthWest"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-11.15, 2.80, -6.90]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cap_northwest" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.85, 0.12, 0.06]
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "CapNorthMid"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-7.60, 2.80, -6.90]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cap_northmid" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.70, 0.12, 0.06]
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "CapNorthEast"
+parent = "Rig"
+
+  [node.transform]
+  pos = [4.45, 2.80, -6.90]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cap_northeast" }
+
+  [node.components.BoxCollider]
+  half_extents = [7.55, 0.12, 0.06]
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "CapWest"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-11.90, 2.80, 0.0]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cap_west" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.06, 0.12, 7.0]
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "CapEastNorth"
+parent = "Rig"
+
+  [node.transform]
+  pos = [11.90, 2.80, -2.50]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cap_eastnorth" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.06, 0.12, 4.50]
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "CapEastSouth"
+parent = "Rig"
+
+  [node.transform]
+  pos = [11.90, 2.80, 5.90]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "cap_eastsouth" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.06, 0.12, 1.10]
+
+  [node.components.Material]
+  albedo = [0.34, 0.26, 0.21]
+  roughness = 0.7
+  metallic = 0.4
+
+[[node]]
+name = "Drop"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-4.30, 3.00, 0.90]
+
+  [node.components.CharacterController]
+  height = 1.8
+  radius = 0.35
+  step_height = 0.25
+
+[[node]]
+name = "Camera"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-17.5, 2.20, -13.0]
+  rot_euler = [-5.0, -126.6, 0.0]
+
+  [node.components.Camera]
+  fov_y_degrees = 52.0

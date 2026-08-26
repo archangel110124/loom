@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 73] = [
+const SCENES: [&str; 74] = [
     // The mood ladder — ADR 0069. In `GOLDEN` too, where the reasoning is.
     "assets/test/mood_deep.loom",
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
@@ -358,6 +358,13 @@ const SCENES: [&str; 73] = [
     // If this row ever renders a flat grey plate, the OBJ did not load and the
     // renderer substituted a unit box — which looks exactly like success.
     "assets/test/rig_deck.loom",
+    // The whole rig, assembled: deck, six piles, the tide seam and all
+    // fourteen bulwark rail/cap runs in one 30-node scene — 27 of them
+    // renderable, none of them a primitive. If any one of the 17 meshes or 6
+    // textures this scene references fails to load, `loom validate`'s
+    // `assets` array stops being empty and this row is where that first shows
+    // up outside `rig_deck`'s single mesh.
+    "assets/test/rig_structure.loom",
 ];
 
 /// How many frames a windowed run draws before shutting itself down. Enough to
@@ -411,7 +418,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 57] = [
+const GOLDEN: [(&str, &str, &[&str]); 58] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -1065,6 +1072,45 @@ const GOLDEN: [(&str, &str, &[&str]); 57] = [
     // Both move roughly a third to a half of the frame, so the row is not
     // blind to either the texture path or the UV winding it depends on.
     ("rig_deck", "assets/test/rig_deck.loom", &[]),
+    // **The only picture of all four zones in one frame.** Tasks 3b, 4 and 5
+    // each proved their own piece in isolation (`rig_deck`, and the
+    // substructure/bulwark scenes this task's brief points at); this is where
+    // deck, piles, seam and bulwark share a camera for the first time, which
+    // is the only place a materials mismatch between them could show up.
+    // Camera is low off the north-west corner so the deck surface, the
+    // bulwark above it, the piles below and the seam where they cross the
+    // water are all in frame at once — see the task report for the judged
+    // renders.
+    //
+    // **`--sim` is pinned to `0`, not omitted, and that took proving.** The
+    // brief's assumption was that the structure is static so every tick
+    // renders the same frame; the mesh geometry does (rows 0-81 of the
+    // 320x200 frame — sky, deck, rail, cap — are bit-identical at `--sim`
+    // 0/60/300, and direct pixel sampling on the pile columns below that
+    // confirms the piles and seams are too). The *picture* is not: this
+    // scene's `WaterBody`/`Wind` (authored so the seam has a tide to line)
+    // puts a live sea across roughly the bottom 60% of frame, and comparing
+    // whole PNGs across ticks reads fraction 0.4414 (t=0 vs 60) / 0.4613 (t=0
+    // vs 300) purely from wave motion and its reflections — not from anything
+    // this row is meant to catch. `--sim 0` pins one deterministic frame
+    // rather than asserting an invariance the water breaks.
+    //
+    // Fault-injected two ways, both at this size against this tolerance
+    // (0.001 fraction / 72 worst):
+    //
+    //     all 6 Seam nodes deleted        fraction 0.0031   worst 36   (small but past tolerance — caught)
+    //     all 6 Pile normal_maps deleted  fraction 0.0000   worst  1   (invisible at this size — NOT caught)
+    //
+    // Say so plainly: at `GOLDEN_SIZE` and this camera's distance, a missing
+    // seam is a real, if modest, signal — six colour patches a few pixels
+    // each, but consistent enough across a static frame to clear the default
+    // tolerance. A missing pile normal map is not; the piles are too small
+    // and too far from camera for its lighting contribution to survive
+    // compression to 320x200. This row therefore guards the seam's *presence*
+    // and the whole assembly's *asset paths* (an empty `assets` array on
+    // `validate`), not the substructure's normal-map path — that would need a
+    // closer frame or a dedicated row.
+    ("rig_structure", "assets/test/rig_structure.loom", &["--sim", "0"]),
 ];
 
 /// Every reference renders at this size.
