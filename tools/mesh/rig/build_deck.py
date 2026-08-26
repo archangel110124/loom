@@ -47,7 +47,7 @@ CUP = 0.008                       # centre dips this far below the edges
 MIN_BOARD = 0.30                  # narrowest legal board width
 SPAN = 3                          # segments across a plank's width -> the cup
 SEED = 7
-TEX_SIZE = 2048
+TEX_SIZE = textures.TEX_SIZE   # 2048; named once, in textures.py
 
 # Blender is Z-up while modelling; DECK_TOP is a LOOM y, which is Blender z.
 # The export permutation is (x, y, z) -> (x, z, -y), so Blender z IS Loom y and

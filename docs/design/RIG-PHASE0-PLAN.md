@@ -1312,7 +1312,7 @@ off** — an empty id aliases every other empty id and the first adopted wins.
 # `Rig/Deck` in the demo is one `box` at scale [12.0, 0.20, 7.0], and a
 # renderable with no dynamic ancestor takes its collider from its drawn bounds.
 # This scene draws timber instead and restates that collider explicitly, which
-# `play.rs:556-573` multiplies by world scale — so at scale 1 these ARE the
+# `play.rs:558-573` multiplies by world scale — so at scale 1 these ARE the
 # primitive's numbers. Measured: a character settles at 2.1180999279022217 on
 # either, bit for bit.
 #

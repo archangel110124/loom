@@ -22,6 +22,13 @@ import zlib
 
 import numpy as np
 
+# The size every rig map SHIPS at. Named here rather than in each builder so
+# there is one number to change and so `test_textures.py` can assert at the
+# size the generators actually produce -- see `normal_from_height`, whose
+# output used to be measured at 128 and shipped at 2048, two maps with a
+# 12x difference in relief and one PASS between them.
+TEX_SIZE = 2048
+
 
 def _axis(size, freq):
     """Wrapped bilinear sample positions for one axis, at `freq` cells."""
@@ -246,7 +253,7 @@ def tidal_growth(size=2048, seed=13):
     return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
 
 
-def normal_from_height(height, strength=2.0):
+def normal_from_height(height, strength=0.008):
     """Tangent-space normal map, +Y green (OpenGL). Wraps, like its source.
 
     **NOT sRGB-encoded, and must never be.** A normal map is not colour — it is
@@ -255,9 +262,34 @@ def normal_from_height(height, strength=2.0):
     the transfer function over a set of vectors tilts every surface toward the
     map's brighter channels. The albedo path got an sRGB encode (see
     `_srgb_encode`); this one is asymmetric ON PURPOSE. Do not "fix" it to
-    match."""
-    dx = (np.roll(height, -1, axis=1) - np.roll(height, 1, axis=1)) * strength
-    dy = (np.roll(height, -1, axis=0) - np.roll(height, 1, axis=0)) * strength
+    match.
+
+    **`strength` is a SLOPE, not a per-texel nudge, and the difference shipped
+    a flat map.** The central difference below is taken per TEXEL, so for a
+    height field whose features live in UV space it measures `dh` across
+    `2/size` of a tile: double the resolution and every gradient halves. With
+    the old `strength=2.0` applied straight to that difference, the same
+    generator produced (weathered_timber, seed 5, normal X std / mean surface
+    tilt):
+
+        128   0.0549  11.29 deg      1024  0.0084   0.75 deg
+        512   0.0157   2.85 deg      2048  0.0047   0.04 deg   <- what shipped
+
+    The test asserted `>0.01` while running at 128 and printed PASS; the deck
+    normal map on disk tilted its surfaces by an average of 0.037 deg, which is
+    flat. Multiplying by `size` removes the resolution dependence: what is left
+    is `dh/du`, the gradient across the TILE, and `strength` becomes the one
+    thing it should have been all along — **relief amplitude as a fraction of
+    the tile's width.** 0.008 is ~8 mm of grain, pitting and barnacle crust
+    across the ~1-2 m tiles this rig uses (`build_deck.py:120` is one tile per
+    2 m along a board; `build_substructure.py`'s tubes are one per metre of
+    length), and it now measures the same at 512 as at 2048 (0.0161 / 0.0162).
+    `test_textures.py` asserts at `TEX_SIZE`, so the number under test is the
+    number on disk."""
+    ky = 0.5 * height.shape[0] * strength
+    kx = 0.5 * height.shape[1] * strength
+    dx = (np.roll(height, -1, axis=1) - np.roll(height, 1, axis=1)) * kx
+    dy = (np.roll(height, -1, axis=0) - np.roll(height, 1, axis=0)) * ky
     nx, ny, nz = -dx, -dy, np.ones_like(height)
     length = np.sqrt(nx * nx + ny * ny + nz * nz)
     v = np.stack([nx / length, ny / length, nz / length], axis=2)

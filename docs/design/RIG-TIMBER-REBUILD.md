@@ -22,7 +22,7 @@ from the drawn bounds of anything renderable (`crates/loom_cli/src/play.rs:768`)
 Swap a box for a detailed mesh and physics moves with it — and roughly 57
 `loom sim --assert` rows across eleven `rig_*.loom` scenes are watching.
 
-The escape is `crates/loom_cli/src/play.rs:556-573`: when a node carries an
+The escape is `crates/loom_cli/src/play.rs:558-573`: when a node carries an
 explicit `BoxCollider`, the half-extent is `|half_extents × world_scale|`
 instead of the drawn bounds. So **every rig node keeps its collider numbers as
 they are today, transcribed into an explicit `BoxCollider`, and only the drawn
@@ -195,6 +195,59 @@ the false "identical" above. `assets/scripts/deeper_player.rhai` is the
 movement script already in this repository and the one to attach when
 building a probe scene from scratch.
 
+#### Case 6 — one mesh is one node is one collider, so N primitives need N nodes
+
+**The zone is a material. It is not a mesh, and it is certainly not a node.**
+Nothing in the engine lets one OBJ carry more than one collider: a static
+collider is built per ENTITY, from that entity's own world matrix
+(`play.rs:517-520`), and it is centred on the node. Combine several primitives'
+geometry into one OBJ and you have not saved a draw call at the cost of some
+tidiness — you have replaced N colliders with **one collider spanning the
+combined bounding box**, including all the empty space between them.
+
+Four separate Phase 1 tasks arrived at this rule independently, each after a
+single-mesh design had already been written and had to be thrown away. It is
+recorded here because §3 below said the opposite, and because the drawn
+geometry looks *correct* in every one of these failures — it is the collider,
+which nothing renders, that is wrong.
+
+**The measurement, from the bulwark (task 5).** The brief asked for one
+`rig_bulwark_timber.obj` holding all seven rail runs. Their combined bounding
+box is `x −12 … 12, z −7 … 7` — a solid slab at rail height across the whole
+rig. That single collider closes the boarding gap (`x −6.900 … −3.100`) and the
+swim-ladder gap (`x −10.300 … −8.300`), both of which the drawn geometry
+correctly leaves open. Worse, the brief's own gap assertion walked the drawn
+spans and **would have passed while this happened**. The seven runs are also
+24.0, 14.0, 9.0, 2.2, 1.7, 1.4 and 15.1 m long, so they could not have shared a
+mesh and a matching collider even in principle. Shipped as fourteen meshes and
+fourteen nodes. The six piles (task 3b) and the six tide seams (task 6) are the
+same rule seen from the other side: those six ARE one shape, so they are **one
+mesh placed by six nodes**, each node carrying its own `BoxCollider`.
+
+**The worked warning, for Phase 2.** §4's part table groups `hardware` as
+"bollards, cleats, rings, fasteners". Emit that as one `rig_hardware.obj` and
+the two bollards —
+
+    BollardWest  pos [-6.60, 1.70, -6.40]  scale [0.22, 0.30, 0.22]
+    BollardEast  pos [-3.40, 1.70, -6.40]  scale [0.22, 0.30, 0.22]
+
+— become a single collider spanning `x −6.82 … −3.18`, `y 1.40 … 2.00`,
+`z −6.62 … −6.18`: a **3.64 m solid wall standing inside the boarding gap**,
+which §5 calls *the demo's only taught gesture; a static collider in it is
+fatal*. The two bollards are the same shape, so the right answer is one
+`rig_bollard.obj` centred on its own origin and two nodes — but nothing about
+"one zone, one OBJ" would have told anyone that, and the picture would have
+looked right.
+
+**The rule, stated once.** A zone is one MATERIAL. Its geometry takes as many
+meshes as it has distinct SHAPES and as many nodes as it has PLACEMENTS, and
+every node that replaces a colliding primitive carries that primitive's
+`BoxCollider`. Centre each mesh on its own origin in x, y **and** z, not just y
+— each node sits at its own world x/z and `play.rs:517-520` centres the
+collider on the node, so an uncentred mesh cannot have its drawing and its
+collider put in the same place by any transform. See §3, which is the section
+this rule corrects.
+
 ### Measured, not argued
 
 The table below is **case 1**, which is the case it was taken in and the only
@@ -289,8 +342,26 @@ nine coincident unit spheres at the waterline, in a scene that validated clean.
 
 ## 3. Material zones, budgets and files
 
-Each zone is one OBJ, one node, one `Material`, one albedo PNG and one normal
-PNG. A zone is also a draw call, which is why there are ten and not thirty.
+Each zone is one `Material`, one albedo PNG and one normal PNG. **A zone is a
+MATERIAL — that is the whole of what the number ten counts.** The draw-call
+argument for keeping it at ten and not thirty is an argument about materials
+and their texture bindings; it says nothing about how many OBJs or how many
+nodes the zone's geometry needs, and it must not be read as saying "one".
+
+**A zone's geometry routinely needs many meshes and many nodes**, and reading
+this table as one-OBJ-one-node has already destroyed two designs on this
+project. One mesh is one node is one collider, so replacing N colliding
+primitives takes N nodes; combining their geometry gives the whole zone a
+single collider spanning the combined bounding box, empty space included, while
+the drawn picture stays correct. **Read §1 Case 6 before building any zone
+below** — it has the bulwark measurement (`x −12 … 12` of solid collider across
+an open railing) and the bollard case (a 3.64 m wall inside the boarding gap)
+worked out. Phase 1 shipped `deck_timber` as one mesh and one node,
+`steel_frame` as one mesh in the scene and six nodes (plus `rig_bracing.obj`,
+built and deliberately unwired), `steel_tidal` as one mesh and six nodes, and
+the bulwark's two zones as fourteen meshes and fourteen nodes —
+`assets/test/rig_structure.loom` is **four zones, seventeen meshes, twenty-seven
+renderable nodes.**
 
 | zone | texture | tris (budget) | carries |
 | --- | --- | --- | --- |
@@ -354,7 +425,7 @@ its own critique/refine loop against reference before integration.
 | 2 | substructure | six piles, bracing; hangs from y=1.00 to y=-1.40, touches no seabed |
 | 3 | tide zone | where rust becomes rot. The horror seam; gets the most attention |
 | 4 | bulwark + cap rail | including **both gaps**, which are gameplay, not decoration |
-| 5 | hardware | bollards are *"the only thing in the scene that says the berth is a berth"* |
+| 5 | hardware | bollards are *"the only thing in the scene that says the berth is a berth"*. **One zone, not one mesh** — the two bollards in one OBJ is the worked failure in §1 Case 6 |
 | 6 | shed | carries the mirror — see §5 |
 | 7 | mast + lamp | `MastLamp` at intensity 220 is the hub's warmth; do not add lights |
 | 8 | props | crates, barrel, bench, lantern, spool, thermos, fish crate |

@@ -50,7 +50,7 @@ SIDES = 16                # a 0.35 m pile at 16 sides has a 6.7 mm chord error
 BRACE_R = 0.075
 BRACE_Y = 0.550           # world; above the 0.166 m significant wave height
 SEED = 11
-TEX_SIZE = 2048
+TEX_SIZE = textures.TEX_SIZE   # 2048; named once, in textures.py
 
 # --- the tide seam ---------------------------------------------------------
 # The band on the piles where they cross the water. **Superseding the plan
@@ -60,7 +60,7 @@ TEX_SIZE = 2048
 # mesh, centred on its own origin, one `tube()` call at (0.0, 0.0, ...), six
 # nodes to place it (Task 6).
 #
-# `play.rs:768` gives ANY renderable static node with no `BoxCollider` an
+# `play.rs:558-566` gives ANY renderable static node with no `BoxCollider` an
 # extent of `|world_scale|` -- 2x2x2 m at scale 1 -- so "no collider" is not
 # achievable by omitting the component; the seam gets an explicit one, sized
 # and centred to sit INSIDE the pile's own [PILE_R, PILE_TOP-PILE_CENTRE,
@@ -116,23 +116,62 @@ def tube(p0, p1, radius, sides, uv_u0):
                 p[2] + radius * (c * u[2] + sn * v[2]))))
         rings.append(ring)
 
-    faces = []
-    for s in range(sides):
-        a, b = rings[0][s], rings[0][(s + 1) % sides]
-        c, d = rings[1][s], rings[1][(s + 1) % sides]
-        faces.append(bm.faces.new((a, b, d, c)))
-    faces.append(bm.faces.new(tuple(reversed(rings[0]))))
-    faces.append(bm.faces.new(tuple(rings[1])))
+    def along_of(co):
+        return sum((co[i] - p0[i]) * ax[i] for i in range(3))
 
     # U around the circumference (one tile per full turn), V along the length at
     # one tile per metre, so a 2.4 m pile shows 2.4 tiles and the rust's downward
     # runs stay the right way up and the right size on every part.
-    for f in faces:
+    #
+    # **U comes from the RING INDEX `s`, not from `atan2` of the vertex.** Two
+    # separate defects came out of the atan2 version, both measured on the
+    # shipped meshes 2026-08-26 with a per-face max/median U-span sweep:
+    #
+    #   1. *No seam split.* `atan2` returns a value per VERTEX, so the two
+    #      vertices either side of the -pi/+pi crossing get U 0.9688 and
+    #      0.0312 and the quad between them spans 0.9375 backwards instead of
+    #      0.0625 forwards. One of sixteen side quads on `rig_pile.obj` and on
+    #      `rig_steel_tidal.obj` drew 94% of the texture, reversed and
+    #      compressed 15:1 — on all six piles and all six seams, 12 of this
+    #      scene's 27 renderables. The ring index has no such crossing: the
+    #      last quad runs (sides-1)/sides -> sides/sides = 1.0, and the texture
+    #      tiles, so U=1.0 samples what U=0.0 samples.
+    #   2. *Wrong axis entirely for a tube that is not z-aligned.*
+    #      `atan2(y - mid_y, x - mid_x)` is the angle about Blender's z, which
+    #      is only "around the circumference" when the tube's own axis IS z.
+    #      The bracing runs along x and along z, so U was being taken from the
+    #      ALONG axis: measured median face U span 0.4968 and max 0.9984 on an
+    #      8-sided tube where 0.125 is correct, U running down the tube and the
+    #      circumference carrying no variation at all. `s` is the tube's own
+    #      frame by construction and is orientation-free.
+    #
+    # V needed no change and is correct for any orientation: `along` is a
+    # projection onto the tube's own axis `ax`, not onto a world axis. Measured
+    # after the fix: the bracing's V spans equal its tube lengths (10.5 and
+    # 11.0 m) as intended, unchanged from before.
+    faces = []
+    for s in range(sides):
+        a, b = rings[0][s], rings[0][(s + 1) % sides]
+        c, d = rings[1][s], rings[1][(s + 1) % sides]
+        f = bm.faces.new((a, b, d, c))
         for loop in f.loops:
-            x, y, z = loop.vert.co
-            ang = math.atan2(y - (p0[1] + p1[1]) * 0.5, x - (p0[0] + p1[0]) * 0.5)
-            along = ((x - p0[0]) * ax[0] + (y - p0[1]) * ax[1] + (z - p0[2]) * ax[2])
-            loop[uv_layer].uv = (uv_u0 + ang / (2.0 * math.pi), along)
+            k = s + 1 if loop.vert in (b, d) else s
+            loop[uv_layer].uv = (uv_u0 + k / sides, along_of(loop.vert.co))
+        faces.append(f)
+
+    # The caps are discs, not a strip around anything, so a circumferential U
+    # is meaningless on them — feeding them the ring index would reintroduce
+    # exactly the 0.9375 span this fix removes, on a face that has no seam to
+    # split. They get a planar patch in the tube's OWN (u, v) frame instead,
+    # at the same one-tile-per-metre scale as V, so a cap is 2*radius of
+    # texture and nothing is stretched.
+    for p, ring in ((p0, tuple(reversed(rings[0]))), (p1, tuple(rings[1]))):
+        f = bm.faces.new(ring)
+        for loop in f.loops:
+            o = [loop.vert.co[i] - p[i] for i in range(3)]
+            loop[uv_layer].uv = (uv_u0 + sum(o[i] * u[i] for i in range(3)),
+                                 along_of(p) + sum(o[i] * v[i] for i in range(3)))
+        faces.append(f)
     return faces
 
 
@@ -177,7 +216,19 @@ bm.free()
 BRACE_PATH = os.path.join(REPO, "assets", "meshes", "rig_bracing.obj")
 rigkit.export_obj(obj2, BRACE_PATH, uv=True,
                   header="rig: cross-bracing, r%.3f at world y %.3f. No collider: "
-                         "new geometry, no primitive behind it." % (BRACE_R, BRACE_Y))
+                         "new geometry, no primitive behind it.\n"
+                         "IN NO SCENE. It is built and it is not wired: a BoxCollider "
+                         "cannot express an open lattice of eight thin rods (its true "
+                         "AABB is a 21 x 11 m slab) and omitting one gives a 2x2x2 m "
+                         "cube at the rig origin, so rig_structure.loom leaves it out. "
+                         "Nothing renders it and no gate covers it, which is why its "
+                         "UVs ran along the tube instead of around it -- measured "
+                         "median face U span 0.4968 on an 8-sided tube where 0.125 is "
+                         "correct -- from the first build until 2026-08-26. It is "
+                         "correct now by MEASUREMENT, not by anyone having looked at "
+                         "it. A collider is not the only thing this mesh is waiting "
+                         "for; it is waiting to be seen."
+                         % (BRACE_R, BRACE_Y))
 
 # ---- the tide seam, at its own origin ------------------------------------
 # A SECOND OBJ over the SAME shape the pile already is, not new volume: the
@@ -293,16 +344,50 @@ assert TIDE_BOT < 0.0 < TIDE_TOP, \
     "at y=0 — that is not a tide line" % (TIDE_BOT, TIDE_TOP)
 
 # The property that makes a redundant collider harmless: it must not exceed
-# the pile's own [PILE_R, PILE_TOP-PILE_CENTRE, PILE_R] box in any axis, so it
-# can never present something a swimmer could meet that the pile did not
-# already. This is why SEAM_COLLIDER_HALF drops TIDE_OVER (see its definition
-# above) rather than matching the drawn mesh's radius exactly.
-PILE_COLLIDER_HALF = (PILE_R, PILE_TOP - PILE_CENTRE, PILE_R)
+# the pile's own box in any axis, so it can never present something a swimmer
+# could meet that the pile did not already. This is why SEAM_COLLIDER_HALF
+# drops TIDE_OVER (see its definition above) rather than matching the drawn
+# mesh's radius exactly.
+#
+# **The bound is the exported pile MESH's own bounds, not PILE_R.** The first
+# version of this check read
+#
+#     PILE_COLLIDER_HALF = (PILE_R, PILE_TOP - PILE_CENTRE, PILE_R)
+#
+# and compared it against `SEAM_COLLIDER_HALF = (PILE_R, SEAM_HALF_Y, PILE_R)`.
+# `PILE_R <= PILE_R` cannot fail whatever PILE_R is, so two of the three arms
+# were decoration and only y tested anything — the same shape as the BRACE_R
+# tautology reversed further up this file, and it slipped in for the same
+# reason: naming the quantity under test as its own bound reads like rigour.
+# The exact thing the x/z arms are supposed to catch is somebody writing
+# `PILE_R + TIDE_OVER` here to match the drawn radius, and `PILE_R` as a bound
+# is blind to it.
+#
+# `pi` is `verify_obj(PILE_PATH)` — the pile as it was actually written to
+# disk, read back. PILE_R no longer stands on both sides of the comparison, so
+# the bound is a measurement rather than a restatement, and the check now says
+# what it means: *the seam collider fits inside the pile that was built*, not
+# *PILE_R is PILE_R*.
+#
+# **Reported honestly: this is defence in depth, not a new net.** The
+# fault injection that matters here —
+# `SEAM_COLLIDER_HALF = (PILE_R + TIDE_OVER, SEAM_HALF_Y, PILE_R + TIDE_OVER)`,
+# the exact edit these arms exist to stop — fires on BOTH forms (measured
+# 2026-08-26: `seam collider half-extent x=0.3540 exceeds the exported pile
+# mesh's 0.3500`), because the old right-hand side was PILE_R and the injected
+# left-hand side was not. And the other case the new form can see, a pile mesh
+# exported at a radius that is not PILE_R, is caught first by the centring
+# assertion further up (injected `PILE_R * 0.9`: *pile x spans -0.3150..0.3150,
+# want -0.350..0.350*). So no fault reaching only this arm has been
+# constructed. What changed is that the arm can no longer be read as proof of
+# something it never checked, and it stops moving in lockstep with the
+# quantity it bounds if PILE_R is ever edited on one side only.
+PILE_COLLIDER_HALF = (pi["hi"][0], pi["hi"][1], pi["hi"][2])
 for ax, name in ((0, "x"), (1, "y"), (2, "z")):
     assert SEAM_COLLIDER_HALF[ax] <= PILE_COLLIDER_HALF[ax] + 1e-9, \
-        "seam collider half-extent %s=%.3f exceeds the pile's %.3f — it would " \
-        "present something a swimmer could meet that the pile does not " \
-        "already" % (name, SEAM_COLLIDER_HALF[ax], PILE_COLLIDER_HALF[ax])
+        "seam collider half-extent %s=%.4f exceeds the exported pile mesh's " \
+        "%.4f — it would present something a swimmer could meet that the pile " \
+        "does not already" % (name, SEAM_COLLIDER_HALF[ax], PILE_COLLIDER_HALF[ax])
 
 assert t["tris"] <= 6000, "seam over budget: %d tris" % t["tris"]
 print("seam: %d tris, world y %.3f..%.3f, node_y=%.3f, "

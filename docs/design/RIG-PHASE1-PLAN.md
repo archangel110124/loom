@@ -1325,7 +1325,7 @@ node is one collider, and these structures need many.
 is built, but Task 4 measured what wiring it costs: a `BoxCollider` matching its
 true AABB is a solid 21 × 11 m slab, because the bracing is an open lattice of
 eight thin rods and a box cannot express a lattice; omitting the component gives
-it a 2 × 2 × 2 m cube at the rig origin, since `play.rs:768` falls back to
+it a 2 × 2 × 2 m cube at the rig origin, since `play.rs:558-566` falls back to
 `|world_scale|`. Both are unauthored obstacles. The mesh stays in the repo and
 out of the scene until there is a collider that can express it. Say so in the
 scene's header, so the next person does not "fix" the omission.

@@ -50,10 +50,21 @@
 # and is built, but Task 4 measured what wiring it costs: a `BoxCollider`
 # matching its true AABB is a 21 x 11 m slab (the bracing is an open lattice
 # of eight thin rods and a box cannot express a lattice), and omitting the
-# component instead gives it a 2x2x2 m cube at the rig origin (`play.rs:768`
-# falls back to `|world_scale|` with no collider authored). Both are
-# unauthored obstacles. The mesh stays in the repo and out of the scene until
-# there is a collider that can express it.
+# component instead gives it a 2x2x2 m cube at the rig origin
+# (`play.rs:558-566` falls back to `|world_scale|` when no collider is
+# authored; `:768` is the `is_renderable` guard that lets it get there at
+# all). Both are unauthored obstacles. The mesh stays in the repo and out of
+# the scene until there is a collider that can express it.
+#
+# **And a collider is not the only thing it is waiting for.** Being in no
+# scene means nothing renders it and no gate covers it, and that showed: its
+# UVs ran ALONG the tube instead of around it — measured median face U span
+# 0.4968 on an 8-sided tube where 0.125 is correct — from the first build
+# until 2026-08-26, because `tube()` took U from `atan2` about Blender z and
+# the bracing's axes are x and z. It is correct now by measurement, not
+# because anyone looked at it. Whoever wires the collider should expect to be
+# the first person to SEE this mesh, and should budget for finding more than
+# one thing wrong with it.
 #
 # **`Drop` is not gated.** It is a `CharacterController` positioned to fall
 # onto the deck so a human, or a future `green.sh` row, has a settle height to
