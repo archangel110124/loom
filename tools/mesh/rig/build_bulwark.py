@@ -33,6 +33,24 @@ construction, which is exactly the property the single-mesh design broke.
 proves a fake collider filling the boarding lane gets caught, so the assertion
 that matters here cannot silently go blind.
 
+**The rails are subdivided into four boards, and this is NOT a texturing
+device.** A first pass built each rail as a single plain box on the reasoning
+that per-board subdivision only existed to hide texture repetition on the old
+combined mesh — that reasoning was wrong. The deck this bulwark sits on is 253
+individually cupped boards with 12 mm gaps you can see the sea through; that
+IS the established visual language of the jetty, and the rail is the part of
+the structure most consistently at eye height. The subdivision is the visual
+substance of the asset, not a repetition-hiding relic, and the triangle
+budget was never close to a constraint (four boards/run costs 420 tris total
+against a 9000 budget). Each of the seven RAIL runs therefore gets four real,
+separately-shelled boards across its 1.0 m height with a 12 mm gap between
+them — actual geometric gaps, not a texture stripe — using the exact
+flush-both-edges rule `build_deck.py` uses for its courses: `rows` boards
+have `rows - 1` gaps, so the boards fill `RAIL_LO..RAIL_HI` exactly with no
+strip left over at either edge. The caps stay single boxes: 0.24 m deep,
+metal, no maps — subdividing them would be inventing detail, not restoring
+it.
+
 Run: blender --background --factory-startup --python build_bulwark.py
 """
 import os
@@ -79,6 +97,20 @@ CAPS = [
 GAPS = (("boarding", -6.900, -3.100), ("swim ladder", -10.300, -8.300))
 NORTH_Z = -6.800   # a run's z1 <= this puts it on the north rail line
 
+# --- rail board subdivision -------------------------------------------------
+# Same flush-both-ends rule `build_deck.py` uses for its courses: `rows`
+# boards have `rows - 1` gaps, not `rows`, so the boards fill RAIL_LO..RAIL_HI
+# exactly with nothing left over at either edge. BOARD_H is a starting guess;
+# `rows` is rounded from it and `board_h` is then DERIVED so the edges land
+# exactly on RAIL_LO/RAIL_HI, the same two-step the deck's plank pitch uses.
+BOARD_H = 0.235
+BOARD_GAP = 0.012
+_pitch = BOARD_H + BOARD_GAP
+_rows = int(round((RAIL_HI - RAIL_LO) / _pitch))
+_board_h = ((RAIL_HI - RAIL_LO) - (_rows - 1) * BOARD_GAP) / _rows
+BOARD_SPANS = [(RAIL_LO + r * (_board_h + BOARD_GAP), RAIL_LO + r * (_board_h + BOARD_GAP) + _board_h)
+               for r in range(_rows)]
+
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)
 
@@ -112,8 +144,12 @@ def box_local(bm, uvl, x0, x1, y0, y1, z0, z1, cx, cy, cz):
     return faces
 
 
-def build_run(kind, name, x0, x1, z0, z1, lo, hi, uv):
-    """Export one run's box, centred on its own origin. Returns its record."""
+def build_run(kind, name, x0, x1, z0, z1, lo, hi, uv, boards=None):
+    """Export one run, centred on its own origin. `boards`, if given, is a
+    list of (y0, y1) WORLD-y spans emitted as separate box shells inside the
+    same mesh -- real geometric boards with real gaps between them, not a
+    texture effect. `None` (caps) emits a single box spanning lo..hi.
+    Returns the run's record."""
     cx, cy, cz = (x0 + x1) / 2.0, (lo + hi) / 2.0, (z0 + z1) / 2.0
     hx, hy, hz = (x1 - x0) / 2.0, (hi - lo) / 2.0, (z1 - z0) / 2.0
     mesh_name = "rig_%s_%s" % (kind, name.lower())
@@ -122,17 +158,22 @@ def build_run(kind, name, x0, x1, z0, z1, lo, hi, uv):
     bpy.context.collection.objects.link(obj)
     bm = bmesh.new()
     uvl = bm.loops.layers.uv.new("UVMap") if uv else None
-    box_local(bm, uvl, x0, x1, lo, hi, z0, z1, cx, cy, cz)
+    spans = boards if boards is not None else [(lo, hi)]
+    for y0, y1 in spans:
+        box_local(bm, uvl, x0, x1, y0, y1, z0, z1, cx, cy, cz)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     bm.to_mesh(mesh)
     bm.free()
     path = os.path.join(MESH_DIR, mesh_name + ".obj")
     rigkit.export_obj(obj, path, uv=uv,
                       header="rig: %s %s. World x %.3f..%.3f y %.3f..%.3f "
-                             "z %.3f..%.3f, centred on its own origin. Node "
-                             "pos=(%.3f, %.3f, %.3f) half_extents=(%.3f, %.3f, "
-                             "%.3f)."
+                             "z %.3f..%.3f, centred on its own origin. %s "
+                             "Node pos=(%.3f, %.3f, %.3f) half_extents=(%.3f, "
+                             "%.3f, %.3f)."
                              % (kind, name, x0, x1, lo, hi, z0, z1,
+                                ("%d boards, %.4f m each, %.1f mm gaps."
+                                 % (len(spans), _board_h, BOARD_GAP * 1000))
+                                if boards is not None else "One box.",
                                 cx, cy, cz, hx, hy, hz))
     info = rigkit.verify_obj(path)
     return {
@@ -145,14 +186,16 @@ def build_run(kind, name, x0, x1, z0, z1, lo, hi, uv):
 
 RUNS = []
 for name, x0, x1, z0, z1 in RAILS:
-    RUNS.append(build_run("rail", name, x0, x1, z0, z1, RAIL_LO, RAIL_HI, uv=True))
+    RUNS.append(build_run("rail", name, x0, x1, z0, z1, RAIL_LO, RAIL_HI, uv=True, boards=BOARD_SPANS))
 for name, x0, x1, z0, z1 in CAPS:
     RUNS.append(build_run("cap", name, x0, x1, z0, z1, CAP_LO, CAP_HI, uv=False))
 
 # --- self-check: every mesh centred on its own origin ---------------------
 # The whole reason this task exists: a node transform can only place BOTH a
 # mesh and a matching BoxCollider at the same spot if the mesh is centred on
-# the node it hangs from, in all three axes.
+# the node it hangs from, in all three axes. Subdividing a rail into boards
+# must not move this -- each run is still ONE mesh, ONE node, ONE collider
+# spanning the full run; the boards are geometry INSIDE that one mesh.
 for r in RUNS:
     for ax, label in ((0, "x"), (1, "y"), (2, "z")):
         half = r["half"][ax]
@@ -172,6 +215,45 @@ for r in RUNS:
 total_tris = sum(r["tris"] for r in RUNS)
 assert total_tris <= 9000, "over budget: %d tris across %d meshes" % (total_tris, len(RUNS))
 print("bulwark: %d tris total across %d meshes" % (total_tris, len(RUNS)))
+
+# --- rail-board coverage: flush at both edges, no strip left over ---------
+# The same check `build_deck.py` runs on its courses, applied to the one
+# board layout shared by all seven rails (uniform, not randomised, so one
+# check covers every rail).
+def check_flush(spans, lo, hi, label):
+    assert abs(spans[0][0] - lo) < 1e-6, \
+        "%s: leaves a gap at the bottom edge -- starts at %.4f, want %.4f" \
+        % (label, spans[0][0], lo)
+    assert abs(spans[-1][1] - hi) < 1e-6, \
+        "%s: leaves a gap at the top edge -- ends at %.4f, want %.4f" \
+        % (label, spans[-1][1], hi)
+    for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
+        gap = b0 - a1
+        assert abs(gap - BOARD_GAP) < 1e-6, \
+            "%s: internal gap %.4f, want %.4f" % (label, gap, BOARD_GAP)
+
+
+check_flush(BOARD_SPANS, RAIL_LO, RAIL_HI, "rail boards")
+print("bulwark: rail boards flush at both edges (%d boards, %.4f m each, "
+      "%.1f mm gaps, fill %.3f..%.3f)"
+      % (len(BOARD_SPANS), _board_h, BOARD_GAP * 1000, RAIL_LO, RAIL_HI))
+
+# Fault injection: reserve a trailing gap after the last board (shrink it)
+# and confirm the flush check fires. Run on every build, not just once by
+# hand, on a LOCAL copy -- BOARD_SPANS and the files already written are
+# untouched.
+_broken = BOARD_SPANS[:-1] + [(BOARD_SPANS[-1][0], BOARD_SPANS[-1][1] - 0.05)]
+try:
+    check_flush(_broken, RAIL_LO, RAIL_HI, "rail boards")
+except AssertionError as e:
+    assert "top edge" in str(e), "fired, but not for the top edge: %s" % e
+    print("bulwark: flush fault injection ok -- a trailing gap after the "
+          "last board was caught: %s" % e)
+else:
+    raise AssertionError(
+        "check_flush did NOT fire for boards leaving a gap at the top edge "
+        "-- a build that silently shorts the last board would ship a strip "
+        "of nothing at the rail's top edge")
 
 # --- gap check 1: the DRAWN geometry (the brief's own check, kept) --------
 north_spans = [(x0, x1) for _, x0, x1, _, z1 in RAILS if z1 <= NORTH_Z]
