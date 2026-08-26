@@ -990,12 +990,17 @@ assert abs(lo[2] + 7.0) < 1e-3 and abs(hi[2] - 7.0) < 1e-3, \
     "z %.4f..%.4f, want -7.000..7.000" % (lo[2], hi[2])
 
 # THE ONE THAT MATTERS. Nothing drawn may stand above the invisible floor.
-assert hi[1] <= DECK_TOP + 1e-4, \
-    "a vertex reaches y=%.5f, above the collider top %.3f — the player would " \
-    "see deck above the surface he stands on" % (hi[1], DECK_TOP)
-assert hi[1] > DECK_TOP - 1e-3, \
-    "highest vertex is y=%.5f, %.1f mm BELOW the collider top — the player " \
-    "would float" % (hi[1], (DECK_TOP - hi[1]) * 1000.0)
+# The mesh is LOCAL, centred on DECK_CENTRE, so the bound is the local top; a
+# vertex above it still puts drawn deck above the collider once the node places it.
+LOCAL_TOP = DECK_TOP - DECK_CENTRE
+assert hi[1] <= LOCAL_TOP + 1e-4, \
+    "a vertex reaches local y=%.5f (world %.5f once the node sits at " \
+    "DECK_CENTRE=%.3f), above the local top %.3f (world deck top %.3f) — the " \
+    "player would see deck above the surface he stands on" \
+    % (hi[1], hi[1] + DECK_CENTRE, DECK_CENTRE, LOCAL_TOP, DECK_TOP)
+assert hi[1] > LOCAL_TOP - 1e-3, \
+    "highest vertex is local y=%.5f, %.1f mm BELOW the local top — the player " \
+    "would float" % (hi[1], (LOCAL_TOP - hi[1]) * 1000.0)
 
 assert info["tris"] <= 12000, "over budget: %d tris" % info["tris"]
 assert len(rigkit.read_obj(OBJ_PATH)["uvs"]) > 0, "no UVs — the texture cannot land"
@@ -1054,6 +1059,16 @@ TEX_DIR = os.path.join(REPO, "assets", "textures")
 HALF_X, HALF_Z = 12.0, 7.0        # frozen: the quay edge is z = -7.000
 DECK_TOP = 1.400                  # frozen: every spawn and assert row reads it
 DECK_BOTTOM = 1.000               # the primitive's underside
+# **This mesh is authored CENTRED ON ITS LOCAL ORIGIN, not at world height.**
+# `play.rs:520` builds a static collider at the NODE's world position and
+# `half_extents` is LOCAL (:552-556), so a mesh baked at absolute height cannot
+# be given a matching box collider from ANY single node transform -- the
+# collider lands at the origin while the deck is drawn 1.2 m above it. The scene
+# node carries pos.y = DECK_CENTRE, which puts local +/-0.200 back at world
+# 1.000..1.400 AND centres the collider on the same range. It is also exactly
+# the transform deeper_demo's existing `Deck` primitive already uses, so this
+# mesh is a drop-in replacement at an unchanged node transform.
+DECK_CENTRE = 1.200               # the node y this mesh is authored to hang from
 PLANK_W = 0.200                   # across the deck, in Z
 GAP = 0.012                       # a gap you can see the sea through
 CUP = 0.008                       # centre dips this far below the edges
@@ -1099,10 +1114,10 @@ def plank(z0, x0, x1, sink, uv_v0):
         dip = CUP * 0.5 * (1.0 - math.cos(2.0 * math.pi * f))
         row = []
         for x in (x0, x1):
-            row.append(bm.verts.new((x, -z, top - dip)))
+            row.append(bm.verts.new((x, -z, top - dip - DECK_CENTRE)))
         verts_top.append(row)
 
-    bot = [[bm.verts.new((x, -(z0 + (s / SPAN) * plank_w), DECK_BOTTOM))
+    bot = [[bm.verts.new((x, -(z0 + (s / SPAN) * plank_w), DECK_BOTTOM - DECK_CENTRE))
             for x in (x0, x1)] for s in range(SPAN + 1)]
 
     faces = []
@@ -1220,12 +1235,17 @@ assert abs(lo[2] + 7.0) < 1e-3 and abs(hi[2] - 7.0) < 1e-3, \
     "z %.4f..%.4f, want -7.000..7.000" % (lo[2], hi[2])
 
 # THE ONE THAT MATTERS. Nothing drawn may stand above the invisible floor.
-assert hi[1] <= DECK_TOP + 1e-4, \
-    "a vertex reaches y=%.5f, above the collider top %.3f — the player would " \
-    "see deck above the surface he stands on" % (hi[1], DECK_TOP)
-assert hi[1] > DECK_TOP - 1e-3, \
-    "highest vertex is y=%.5f, %.1f mm BELOW the collider top — the player " \
-    "would float" % (hi[1], (DECK_TOP - hi[1]) * 1000.0)
+# The mesh is LOCAL, centred on DECK_CENTRE, so the bound is the local top; a
+# vertex above it still puts drawn deck above the collider once the node places it.
+LOCAL_TOP = DECK_TOP - DECK_CENTRE
+assert hi[1] <= LOCAL_TOP + 1e-4, \
+    "a vertex reaches local y=%.5f (world %.5f once the node sits at " \
+    "DECK_CENTRE=%.3f), above the local top %.3f (world deck top %.3f) — the " \
+    "player would see deck above the surface he stands on" \
+    % (hi[1], hi[1] + DECK_CENTRE, DECK_CENTRE, LOCAL_TOP, DECK_TOP)
+assert hi[1] > LOCAL_TOP - 1e-3, \
+    "highest vertex is local y=%.5f, %.1f mm BELOW the local top — the player " \
+    "would float" % (hi[1], (LOCAL_TOP - hi[1]) * 1000.0)
 
 assert info["tris"] <= 12000, "over budget: %d tris" % info["tris"]
 assert len(rigkit.read_obj(OBJ_PATH)["uvs"]) > 0, "no UVs — the texture cannot land"
@@ -1337,8 +1357,14 @@ name = "Rig"
 name = "Deck"
 parent = "Rig"
 
+  # **The mesh is authored centred on its local origin, and this is the node
+  # that puts it back.** 1.20 is not a fudge: it is exactly the transform
+  # `deeper_demo`'s existing `Deck` primitive already carries, so the timber is
+  # a drop-in replacement for the box at an unchanged node transform. A mesh
+  # baked at absolute height could not be given a matching collider at all --
+  # `play.rs:520` centres a static collider on the NODE, not on the vertices.
   [node.transform]
-  pos = [0.0, 0.0, 0.0]
+  pos = [0.0, 1.20, 0.0]
 
   [node.components.MeshRenderer]
   mesh = { asset = "deck_timber" }
@@ -1405,15 +1431,27 @@ cd ~/loom
   --assert "Rig/Drop.y == -999" 2>&1 | grep actual
 ```
 
-Record the number. Then build the primitive twin and compare:
+Record the number. Then build the primitive twin and compare.
+
+**Hand-author the twin; do not sed it.** The twin differs from the mesh scene in
+four places at once and a multi-expression `sed` over a TOML file is a way to get
+a silently different scene rather than a controlled one. Copy
+`assets/test/rig_deck.loom` to `/tmp/rig_deck_prim.loom` and make exactly these
+four edits by hand:
+
+1. `mesh = { asset = "deck_timber" }` becomes `mesh = { asset = "box" }`
+2. add `scale = [12.0, 0.20, 7.0]` to the `Deck` transform — **`pos` stays
+   `[0.0, 1.20, 0.0]`**, because that is already the primitive's own transform
+3. delete the whole `[node.components.BoxCollider]` block and its `half_extents`
+   line — the primitive takes its collider from its drawn bounds, which is the
+   behaviour under comparison
+4. delete `albedo_map`, `normal_map` and `uv_scale` from the `Material` — a
+   primitive has no UVs to hang them on
+
+Then:
 
 ```bash
 cd ~/loom
-sed -e 's|mesh = { asset = "deck_timber" }|mesh = { asset = "box" }|' \
-    -e 's|  pos = \[0.0, 0.0, 0.0\]|  pos = [0.0, 1.20, 0.0]\n  scale = [12.0, 0.20, 7.0]|' \
-    -e '/\[node.components.BoxCollider\]/,+1d' \
-    -e '/albedo_map\|normal_map\|uv_scale/d' \
-    assets/test/rig_deck.loom > /tmp/rig_deck_prim.loom
 ./target/release/loom sim /tmp/rig_deck_prim.loom --ticks 300 \
   --assert "Rig/Drop.y == -999" 2>&1 | grep actual
 ```
