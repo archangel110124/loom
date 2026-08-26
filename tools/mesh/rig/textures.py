@@ -9,7 +9,7 @@ GPU while somebody is at the machine, and keeps the asset a pure function of its
 parameters — the property that let `build_boat.py` survive a migration intact.
 
 ponytail: value-noise fBm, not a Perlin/Worley library. If the timber needs
-真 grain anisotropy that this cannot reach, the upgrade path is a Cycles AO +
+true grain anisotropy that this cannot reach, the upgrade path is a Cycles AO +
 curvature bake composited on top of these, NOT a new dependency.
 
 Everything wraps: `np.roll`-based interpolation on a periodic lattice, so every
