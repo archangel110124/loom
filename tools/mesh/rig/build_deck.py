@@ -177,6 +177,11 @@ for c, spans in enumerate(course_spans):
             "course z=%.4f: hole x=%.4f..%.4f (%.1f cm) between boards" \
             % (z0, a1, b0, gap * 100)
 
+# ONE call on the whole bmesh, not one per board — and that is not a violation
+# of rigkit's rule 3. `recalc_face_normals` works per connected region already,
+# so handing it every face at once IS the per-shell recalc; each board is its
+# own region and gets its own outward orientation. `verify_obj` now proves it
+# per shell, so if this were ever wrong the build would refuse, not ship black.
 bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
 bm.to_mesh(mesh)
 bm.free()

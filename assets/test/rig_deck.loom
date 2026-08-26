@@ -24,8 +24,20 @@
 # numbers, at scale 1, on a node at the primitive's own position. Measured:
 # a character settles at the same y on either, bit for bit.
 #
-# `Drop` is the assertion's subject. It spawns 1.6 m above the deck surface
-# and falls; the gate row asserts where it lands.
+# **`Drop` is not gated, and this file used to claim it was.** There is no
+# `[[assert]]` in this scene and the GOLDEN row is
+# `("rig_deck", "assets/test/rig_deck.loom", &[])` — an image compare with no
+# `--sim`, so nothing here executes a tick or reads a settle height. `Drop`
+# spawns 1.6 m above the deck and falls so that a HUMAN running
+# `loom sim --assert` — or a future `green.sh` row, which is where this belongs
+# — has a subject to measure. Concretely, and measured: change `half_extents`
+# below to `[12.0, 0.25, 7.0]` and the rendered picture is pixel-identical,
+# every gate still passes, and the player stands 5 cm above the deck. The image
+# row cannot see the collider at all.
+#
+# The collider equality above was therefore proved BY HAND with
+# `loom sim --assert`, not by any gate in this file. Phase 1 owes this scene a
+# real assert row.
 
 [scene]
 format = 1

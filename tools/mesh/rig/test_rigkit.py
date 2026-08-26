@@ -87,7 +87,68 @@ def test_tag_stripping_is_asserted():
     raise AssertionError("verify_obj accepted a file with an `o` tag")
 
 
+# Outward-wound unit cube, corners 0..1, 12 tris. Translated and scaled to
+# build the counterexample below.
+_CUBE_V = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
+           (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]
+_CUBE_F = [(1, 4, 3), (1, 3, 2), (5, 6, 7), (5, 7, 8), (1, 2, 6), (1, 6, 5),
+           (4, 8, 7), (4, 7, 3), (1, 5, 8), (1, 8, 4), (2, 3, 7), (2, 7, 6)]
+
+
+def _write_cubes(path, cubes):
+    """cubes: list of (origin, size, outward). Writes one OBJ, no tags."""
+    lines, base = [], 0
+    for (ox, oy, oz), size, outward in cubes:
+        for vx, vy, vz in _CUBE_V:
+            lines.append("v %.6f %.6f %.6f\n"
+                         % (ox + vx * size, oy + vy * size, oz + vz * size))
+        for a, b, c in _CUBE_F:
+            # Reversing the winding is exactly what a missed per-shell
+            # recalc_face_normals leaves behind.
+            tri = (a, b, c) if outward else (a, c, b)
+            lines.append("f %d %d %d\n" % (base + tri[0], base + tri[1], base + tri[2]))
+        base += len(_CUBE_V)
+    open(path, "w").writelines(lines)
+
+
+def test_inverted_shell_is_refused():
+    """The counterexample rule 3 is written about, and that the whole-mesh
+    signed volume cannot see.
+
+    An outward 2 m cube (volume +8) plus an INVERTED 1 m cube (volume -1) sums
+    to +7 and passes any global check — while that second shell draws PURE
+    BLACK in Loom, diffuse and ambientVisibility to zero together. Only a
+    per-shell volume catches it, and it must be taken about the shell's OWN
+    centroid: a shell far enough off the origin has an origin-referenced
+    volume dominated by its position, not its winding.
+    """
+    _write_cubes(OUT, [((-1.0, -1.0, -1.0), 2.0, True),
+                       (( 3.0,  3.0,  3.0), 1.0, False)])
+    whole = rigkit.signed_volume(rigkit.read_obj(OUT))
+    assert abs(whole - 7.0) < 1e-6, "counterexample is not the one described: %.6f" % whole
+    try:
+        rigkit.verify_obj(OUT)
+    except SystemExit as e:
+        assert "shell" in str(e).lower(), "refused, but not for the shell: %s" % e
+        print("  inverted shell refused ok  whole-mesh volume=%.3f, but: %s" % (whole, e))
+        return
+    raise AssertionError(
+        "verify_obj accepted an OBJ containing an INVERTED shell — whole-mesh "
+        "volume %.3f > 0 hid it. That shell draws pure black in Loom." % whole)
+
+
+def test_open_parts_still_allowed():
+    """min_volume=False means parts need not be closed — and the per-shell
+    check must respect that flag too, or every split part fails to export."""
+    open(OUT, "w").write("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+    info = rigkit.verify_obj(OUT, min_volume=False)
+    assert info["tris"] == 1, "tris %d" % info["tris"]
+    print("  open part ok  min_volume=False accepts an unclosed shell")
+
+
 test_axes_and_tags()
 test_v_is_flipped()
 test_tag_stripping_is_asserted()
+test_inverted_shell_is_refused()
+test_open_parts_still_allowed()
 print("rigkit: all contract checks pass")

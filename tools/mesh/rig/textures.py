@@ -62,11 +62,40 @@ def _fbm(size, rng, octaves=5, base=4, gain=0.5, stretch=1):
     out = np.zeros((size, size), dtype=np.float32)
     amp, freq, norm = 1.0, base, 0.0
     for _ in range(octaves):
-        out += amp * _value_noise(size, freq, max(1, freq // stretch), rng)
+        # Floor is 2, NOT 1. freq=1 is degenerate, not merely low-frequency:
+        # `_axis` returns i0 % 1 == 0 and (i0 + 1) % 1 == 0, so both bilinear
+        # taps read the same lattice cell and the interpolation along that axis
+        # is a no-op — the octave comes out exactly flat, std 0.000000. Measured
+        # 2026-08-26: with a floor of 1, 85.7% of the silvering fBm's amplitude
+        # sat in such octaves, giving ~10.7:1 banding where this docstring
+        # promises 8:1. Two cells is the smallest frequency that still
+        # interpolates.
+        out += amp * _value_noise(size, freq, max(2, freq // stretch), rng)
         norm += amp
         amp *= gain
         freq *= 2
     return out / norm
+
+
+def _srgb_encode(linear):
+    """Linear reflectance 0..1 -> sRGB-encoded 0..1.
+
+    **This exists because the engine gamma-DECODES this map.**
+    `crates/loom_cli/src/materials.rs:194` loads `albedo_map` as
+    `ColorSpace::Srgb`, while the palette below is authored in LINEAR
+    reflectance (the same space `deeper_demo.loom:1059`'s flat
+    `albedo = [0.19, 0.17, 0.15]` is read in). The first version of this file
+    wrote `linear * 255` straight out as bytes and conflated the two, so a
+    linear 0.19 shipped as byte 48, the engine decoded byte 48 back to linear
+    0.031, and the deck drew 4-4.9x too dark. Encoded properly, linear 0.19 is
+    byte ~123.
+
+    The real piecewise transfer function, not a 1/2.2 approximation: 1/2.2 is
+    off by up to 4 byte levels and it is wrong exactly where this texture lives
+    — in the dark end, where the linear segment matters most.
+    """
+    c = np.clip(linear, 0.0, 1.0)
+    return np.where(c <= 0.0031308, c * 12.92, 1.055 * c ** (1.0 / 2.4) - 0.055)
 
 
 def weathered_timber(size=2048, seed=7):
@@ -85,8 +114,10 @@ def weathered_timber(size=2048, seed=7):
              + _fbm(size, rng, octaves=4, base=4, stretch=4) * 0.30)
     # **Normalise to the full range.** Without this the contrast depends on how
     # many octaves happened to land near the mean, and the first version of this
-    # function came out milky — mean RGB [113, 107, 97] against a target of
-    # [48, 43, 38], with a standard deviation of 8. Measured, then fixed.
+    # function came out milky — a flat, near-uniform field with a byte standard
+    # deviation of 8. Measured, then fixed. (The "target of [48, 43, 38]" this
+    # comment used to name was the sRGB bug, not a target: see `_srgb_encode`.
+    # The target is LINEAR [0.19, 0.17, 0.15], which encodes near byte 123.)
     grain = (grain - grain.min()) / (grain.max() - grain.min())
 
     silvering = _fbm(size, rng, octaves=3, base=2, stretch=3)
@@ -109,11 +140,23 @@ def weathered_timber(size=2048, seed=7):
     r = rot[:, :, None]
     rgb = dry * (1.0 - s) + silver * s
     rgb = rgb * (1.0 - r) + rotten * r
-    return (np.clip(rgb, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8), height
+    # The three palettes above are LINEAR reflectance and are composed linearly
+    # — which is the only space in which blending two materials is meaningful.
+    # The bytes that leave here are sRGB, because that is what the engine
+    # decodes them as. See `_srgb_encode`.
+    return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
 
 
 def normal_from_height(height, strength=2.0):
-    """Tangent-space normal map, +Y green (OpenGL). Wraps, like its source."""
+    """Tangent-space normal map, +Y green (OpenGL). Wraps, like its source.
+
+    **NOT sRGB-encoded, and must never be.** A normal map is not colour — it is
+    three signed vector components packed into bytes, and `materials.rs:195`
+    loads it as `ColorSpace::Linear` precisely so nothing touches them. Running
+    the transfer function over a set of vectors tilts every surface toward the
+    map's brighter channels. The albedo path got an sRGB encode (see
+    `_srgb_encode`); this one is asymmetric ON PURPOSE. Do not "fix" it to
+    match."""
     dx = (np.roll(height, -1, axis=1) - np.roll(height, 1, axis=1)) * strength
     dy = (np.roll(height, -1, axis=0) - np.roll(height, 1, axis=0)) * strength
     nx, ny, nz = -dx, -dy, np.ones_like(height)

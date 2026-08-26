@@ -20,10 +20,14 @@ Four rules, each a scar, all enforced by `verify_obj`:
    A surviving tag makes `file.obj#Group` usable, and that path recentres the
    selection on its own bounding box (mesh.rs:268-276), which takes a model
    apart when the library IS one model.
-3. Normals are recalculated PER SHELL by the caller before export. A whole-mesh
-   signed-volume check passes while most of a surface points inward, and Loom
-   draws that pure black — diffuse and ambientVisibility go to zero together.
-   `signed_volume` here is the coarse net underneath, not the guarantee.
+3. Normals are recalculated PER SHELL by the caller before export, and
+   `verify_obj` checks it PER SHELL: every connected shell's own signed volume,
+   about its own centroid, must be positive. A whole-mesh check is not enough —
+   an outward 2 m cube plus an inverted 1 m one sums to +7 and passes, while
+   that inverted shell draws pure black in Loom, diffuse and ambientVisibility
+   to zero together. The whole-mesh `signed_volume` is the coarse net
+   underneath; the per-shell partition is the guarantee. Both are skipped when
+   `min_volume=False`, because split parts need not be closed.
 4. One OBJ per material. The engine never reads `.mtl`.
 """
 import os
@@ -113,24 +117,69 @@ def read_obj(path):
             "corners": corners, "tags": tags}
 
 
-def signed_volume(d):
-    """Sum of tetrahedron volumes to the origin. Positive means outward."""
+def signed_volume(d, tris=None, origin=(0.0, 0.0, 0.0)):
+    """Sum of tetrahedron volumes to `origin`. Positive means outward.
+
+    For a CLOSED shell this is translation-invariant and the origin is
+    irrelevant. It is a parameter because the per-shell check below must not
+    depend on that: a shell whose winding is being judged sits wherever the
+    model put it, and referencing a distant origin makes the result dominated
+    by position rather than by winding. Each shell is measured about its own
+    centroid.
+    """
     total = 0.0
     v = d["verts"]
-    for a, b, c in d["tris"]:
+    ox, oy, oz = origin
+    for a, b, c in (d["tris"] if tris is None else tris):
         ax, ay, az = v[a]
         bx, by, bz = v[b]
         cx, cy, cz = v[c]
+        ax, ay, az = ax - ox, ay - oy, az - oz
+        bx, by, bz = bx - ox, by - oy, bz - oz
+        cx, cy, cz = cx - ox, cy - oy, cz - oz
         total += (ax * (by * cz - bz * cy)
                   - ay * (bx * cz - bz * cx)
                   + az * (bx * cy - by * cx)) / 6.0
     return total
 
 
-def bounds(d):
+def shells(d):
+    """Partition triangles into connected shells, by shared vertex index.
+
+    Union-find, because that is the whole algorithm — a shell is an
+    equivalence class of vertices under "appears in the same triangle", and
+    the triangles follow. Returned in order of first appearance in the face
+    list, so a failure message names a stable shell index.
+
+    ponytail: connectivity is by vertex INDEX, not by position. Two shells
+    that touch geometrically but do not share indices count as two, which is
+    exactly what `recalc_face_normals` treats as two regions — the point of
+    the check is to agree with Blender's operator, not with the geometry.
+    """
+    parent = list(range(len(d["verts"])))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for a, b, c in d["tris"]:
+        ra, rb, rc = find(a), find(b), find(c)
+        parent[rb] = ra
+        parent[rc] = ra
+
+    groups = {}
+    for t in d["tris"]:
+        groups.setdefault(find(t[0]), []).append(t)
+    return list(groups.values())
+
+
+def bounds(d, tris=None):
     v = d["verts"]
-    lo = tuple(min(p[i] for p in v) for i in range(3))
-    hi = tuple(max(p[i] for p in v) for i in range(3))
+    pts = v if tris is None else [v[i] for t in tris for i in t]
+    lo = tuple(min(p[i] for p in pts) for i in range(3))
+    hi = tuple(max(p[i] for p in pts) for i in range(3))
     return lo, hi
 
 
@@ -142,10 +191,35 @@ def verify_obj(path, *, min_volume=True):
     if not d["tris"]:
         raise SystemExit("%s: no triangles" % path)
     vol = signed_volume(d)
-    if min_volume and vol <= 0.0:
-        raise SystemExit(
-            "%s: signed volume %.6f <= 0 — normals point inward and Loom will "
-            "draw this pure black. Run recalc_face_normals per shell." % (path, vol))
+    if min_volume:
+        if vol <= 0.0:
+            raise SystemExit(
+                "%s: signed volume %.6f <= 0 — normals point inward and Loom will "
+                "draw this pure black. Run recalc_face_normals per shell." % (path, vol))
+        # **Rule 3, actually enforced.** The whole-mesh volume above is the
+        # coarse net and it has a hole the size of the rule: an outward 2 m
+        # cube (+8) plus an INVERTED 1 m cube (-1) sums to +7 and sails
+        # through, while that second shell draws pure black — diffuse and
+        # ambientVisibility to zero together. Only a per-shell volume, about
+        # each shell's own centroid, sees it. Guarded by `min_volume` like the
+        # global check, because split parts are legitimately not closed.
+        for i, tris in enumerate(shells(d)):
+            idx = {v for t in tris for v in t}
+            centroid = tuple(sum(d["verts"][j][k] for j in idx) / len(idx)
+                             for k in range(3))
+            sv = signed_volume(d, tris, centroid)
+            if sv <= 0.0:
+                slo, shi = bounds(d, tris)
+                raise SystemExit(
+                    "%s: shell %d of %d has signed volume %.6f <= 0 about its "
+                    "own centroid (%.3f, %.3f, %.3f) — %d tris, bounds "
+                    "%.3f..%.3f x %.3f..%.3f x %.3f..%.3f. Its normals point "
+                    "INWARD and Loom will draw it pure black, while the "
+                    "whole-mesh volume %.6f hides it. Run "
+                    "recalc_face_normals per shell."
+                    % (path, i, len(shells(d)), sv, centroid[0], centroid[1],
+                       centroid[2], len(tris), slo[0], shi[0], slo[1], shi[1],
+                       slo[2], shi[2], vol))
     lo, hi = bounds(d)
     return {"tris": len(d["tris"]), "verts": len(d["verts"]),
             "lo": lo, "hi": hi, "volume": vol}

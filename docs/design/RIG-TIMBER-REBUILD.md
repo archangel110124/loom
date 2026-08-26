@@ -24,11 +24,87 @@ Swap a box for a detailed mesh and physics moves with it — and roughly 57
 
 The escape is `crates/loom_cli/src/play.rs:556-573`: when a node carries an
 explicit `BoxCollider`, the half-extent is `|half_extents × world_scale|`
-instead of the drawn bounds. So **every rig node keeps its collider numbers
-exactly as they are today, transcribed 1:1 into an explicit `BoxCollider`, and
-only the drawn geometry is replaced.**
+instead of the drawn bounds. So **every rig node keeps its collider numbers as
+they are today, transcribed into an explicit `BoxCollider`, and only the drawn
+geometry is replaced.**
+
+**But that is not one rule, it is three.** This section stated transcription as
+a single general technique. The whole-branch review at the end of Phase 0
+proved it false in **two of the three cases Phase 1 will actually hit**. Only
+the first case is the clean one.
+
+#### Case 1 — axis-aligned, drawn, statically-parented node: exact, bit for bit
+
+Transcription is exact. Measured `Rig/Drop.y` = **2.318190336227417** on the
+mesh-plus-`BoxCollider` and **2.318190336227417** on the primitive it replaces
+— the same digits, not agreement to a tolerance. This is the case the evidence
+table below measures, and it is most of the rig, including the deck field
+Phase 0 built.
+
+#### Case 2 — rotated node: physically sound, NOT bit-exact
+
+`play.rs:517` builds the collider from the node's world matrix and decomposes
+it with `to_scale_rotation_translation()`, which **normalises the matrix
+columns before extracting the quaternion**. For `diag(12, 0.2, 7)` those
+divisions are exact and nothing moves. For `R·diag(…)` they are not, and the
+quaternion comes back a few ULPs off the authored rotation. Measured
+divergence: **5.8e-5 m** in the simple case, **1.3e-4 m** under a scaled
+parent. The physics is right; the last digits are not.
+
+Six demo nodes are rotated and will land here:
+
+| node | `deeper_demo.loom` |
+| --- | --- |
+| `Rig/Slipway` | `:1930` |
+| `Rig/SlipwayKerbNorth` | `:1947` |
+| `Rig/SlipwayKerbSouth` | `:1960` |
+| `Rig/Ladder` | `:2009` |
+| `Rig/LadderKerbWest` | `:2025` |
+| `Rig/LadderKerbEast` | `:2038` |
+
+**Phase 1 must PLAN the re-pin, not discover it.** `green.sh` carries three
+exact-equality asserts that a 1e-4 m divergence will move —
+`state.lcg32 == 16672` and `state.landed_tick == 1345` (`green.sh:79-80`), and
+`state.fight_ticks == 1177` (`:103`). A re-pin decided in advance is
+bookkeeping. A re-pin discovered by a red gate is indistinguishable from a
+regression, and the person who finds it will spend a day proving it is not one.
+
+#### Case 3 — node under a dynamic ancestor: the technique INVERTS
+
+**Do not transcribe these.** Adding a `BoxCollider` to a node under a dynamic
+body does not preserve the physics, it changes it in both directions at once:
+
+- **It creates physics that was not there.** Today a *primitive* child of a
+  dynamic body gets **no collider at all**. The static arm (`play.rs:768-770`)
+  requires `dynamic_ancestor(...).is_none()`; the pending arm (`:746-747`)
+  requires an explicitly authored `BoxCollider`. A drawn primitive under a hull
+  satisfies neither and falls through both.
+- **It removes physics that was.** Authoring a `BoxCollider` puts the node in
+  `pending`, and `pending` triggers `demote_to_mass_only` on the ancestor
+  (`play.rs:806-816`), which turns **every collider that body already had**
+  into a sensor (`loom_physics/src/lib.rs:331-340`). Measured: the hull stopped
+  colliding and sank **1.1 m** through the ground.
+
+Eight `Rig/Boat/*` nodes are drawn with no collider today and **must stay that
+way**: `Float` (`:1827`), `Catch` (`:1862`), `Fins` (`:1880`), `FishHold`
+(`:2261`), `FishHoldLid` (`:2286`), `HelmMat` (`:2299`),
+`SternLadderRailPort` (`:2510`), `SternLadderRailStbd` (`:2523`).
+
+#### The fourth trap: a collider needs a mesh
+
+Not in the original claim at all, and it bites the moment someone tries to work
+around case 3 with a collision-only box. The static arm requires
+**`world.is_renderable(entity)`** (`play.rs:768`) as well as the absence of a
+dynamic ancestor. So **a static node carrying a `BoxCollider` and no mesh gets
+no collider whatsoever** — verified, the character falls straight through to
+`y = -120.03`. Collision-only boxes work in `jib_vi_decks.loom` only because
+those hang off a dynamic body and go down the pending arm; re-pointed at the
+static rig they silently do nothing.
 
 ### Measured, not argued
+
+The table below is **case 1**, which is the case it was taken in and the only
+case it speaks for.
 
 Probed 2026-08-25 on this machine. A character dropped 300 ticks onto a
 4 × 0.4 × 4 m platform:
@@ -142,11 +218,34 @@ measurements say the constraint is overdraw and AA, not triangle throughput
 (`docs/design/loom-grass-system.md:79`). Budgets here are for iteration speed
 and honesty, not for the GPU.
 
-**Textures are baked from Blender procedural shader networks**, driven by the
-same parameters as the geometry. No hand-painting, no external packs, no
-generated-image step. The rot is therefore reproducible and tunable rather than
-a file someone once made — which is the property `build_boat.py` has and is the
-reason it survived a machine migration intact.
+**Textures are generated as numpy fields, NOT baked in Cycles.** This section
+used to say "baked from Blender procedural shader networks", and Phase 0 did
+not do that — deliberately. Cycles is available here (OPTIX and CUDA on the
+4090) and would give richer nodes, but a Cycles bake is **not bit-reproducible
+across machines or driver versions**, and this project's entire verification
+story is that a result reproduces byte for byte. `tools/mesh/rig/textures.py`
+is a periodic value-noise fBm evaluated in numpy: same bytes on any box, no GPU
+while somebody is at the machine, and the asset stays a pure function of its
+parameters — the property `build_boat.py` has and the reason it survived a
+machine migration intact. Phase 1's builders should extend that module, not
+reach for Cycles.
+
+The upgrade path, if procedural numpy genuinely cannot reach a surface, is a
+Cycles AO + curvature bake **composited on top of** the generated maps — an
+additional layer whose non-reproducibility is contained and declared, not a
+replacement for the reproducible base.
+
+Either way: no hand-painting, no external packs, no generated-image step. The
+rot is reproducible and tunable rather than a file someone once made.
+
+**Albedo maps are written sRGB-encoded, height and normal maps linear.**
+`crates/loom_cli/src/materials.rs:194` loads `albedo_map` as `ColorSpace::Srgb`
+and `:195` loads `normal_map` as `ColorSpace::Linear`. Palettes are authored in
+linear reflectance (the same space a flat `albedo = [0.19, 0.17, 0.15]` is read
+in) and composed there, then encoded on the way to bytes. Phase 0 shipped this
+wrong once — linear floats written straight out as bytes, the engine decoding
+them again, the deck 4-4.9x too dark. The asymmetry is the rule: colour gets
+the transfer function, vectors never do.
 
 ---
 
