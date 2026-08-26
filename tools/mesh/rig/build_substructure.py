@@ -1,5 +1,6 @@
 # tools/mesh/rig/build_substructure.py
-"""The rig's substructure — six piles and the bracing between them.
+"""The rig's substructure — one pile mesh (placed by six nodes) and the
+bracing between them.
 
 Replaces the DRAWN surface of six `cylinder` primitives in
 assets/games/deeper_demo.loom (`PilingNW` at :1063 through `PilingSE` at :1125),
@@ -7,13 +8,19 @@ each `pos = [x, -0.20, z]`, `scale = [0.35, 1.20, 0.35]` — a cylinder of radiu
 0.35 spanning world y -1.400 .. 1.000, at x in {-10.5, 0, 10.5} and z in {-5.5, 5.5}.
 
 **These six are the fifth collider case** (spec §1): their collider shape today
-is round, chosen by the string `"cylinder"` in `play.rs:588-591`. A mesh gets a
-box. Step 8 of this task measures whether anything notices; if something does,
-the piles stay primitives and only the bracing is built.
-
-The bracing is new geometry with no primitive behind it and therefore no
-collider to preserve — it is authored ABOVE the water and inboard of the piles
-so nothing can reach it.
+is round, chosen by the string `"cylinder"` in `play.rs:588-591`. Task 3 Step 8
+measured what a mesh's box collider costs a single combined mesh — nothing, if
+there is no collider at all: a probe driven horizontally into the pile line
+stopped at x=-9.7809 with the six `cylinder` primitives present and ran to
+x=-46.0 without them. The single-mesh, no-collider substructure could not
+ship. Task 3b is the fix: **two meshes, seven nodes, not seven meshes.** All
+six pilings share one scale, so they are one shape — one `rig_pile.obj`
+centred on its own origin (in all three axes, not just y, because
+`play.rs:520` centres a static collider on the NODE and each node sits at its
+own world x/z), placed by six nodes each carrying its own transform and its
+own `BoxCollider`. The bracing is new geometry with no primitive behind it and
+therefore no collider to preserve — it is authored ABOVE the water and inboard
+of the piles so nothing can reach it, and stays one object at the rig origin.
 
 Run: blender --background --factory-startup --python build_substructure.py
 """
@@ -31,7 +38,6 @@ import textures
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "..", "..", ".."))
-OBJ_PATH = os.path.join(REPO, "assets", "meshes", "rig_steel_frame.obj")
 TEX_DIR = os.path.join(REPO, "assets", "textures")
 
 PILE_R = 0.35
@@ -48,12 +54,6 @@ TEX_SIZE = 2048
 
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)
-
-mesh = bpy.data.meshes.new("rig_steel_frame")
-obj = bpy.data.objects.new("rig_steel_frame", mesh)
-bpy.context.collection.objects.link(obj)
-bm = bmesh.new()
-uv_layer = bm.loops.layers.uv.new("UVMap")
 
 
 def tube(p0, p1, radius, sides, uv_u0):
@@ -103,33 +103,50 @@ def tube(p0, p1, radius, sides, uv_u0):
     return faces
 
 
-# Blender is Z-up; PILE_* are LOOM y, which is Blender z. Loom z is Blender -y.
-for i, px in enumerate(PILE_X):
-    for j, pz in enumerate(PILE_Z):
-        tube((px, -pz, PILE_BOT - PILE_CENTRE),
-             (px, -pz, PILE_TOP - PILE_CENTRE),
-             PILE_R, SIDES, (i * 2 + j) * 0.37)
+# ---- one pile, at its own origin ----------------------------------------
+# **All six pilings are the same shape** (`scale = [0.35, 1.20, 0.35]` on every
+# one of them), so this is ONE mesh placed by six nodes rather than six meshes.
+# It is centred in x and z as well as y, because each node sits at its own
+# [x, -0.20, z] and `play.rs:520` centres that node's collider on the node.
+mesh = bpy.data.meshes.new("rig_pile")
+obj = bpy.data.objects.new("rig_pile", mesh)
+bpy.context.collection.objects.link(obj)
+bm = bmesh.new()
+uv_layer = bm.loops.layers.uv.new("UVMap")
+tube((0.0, 0.0, PILE_BOT - PILE_CENTRE),
+     (0.0, 0.0, PILE_TOP - PILE_CENTRE), PILE_R, SIDES, 0.0)
+bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+bm.to_mesh(mesh)
+bm.free()
+PILE_PATH = os.path.join(REPO, "assets", "meshes", "rig_pile.obj")
+rigkit.export_obj(obj, PILE_PATH, uv=True,
+                  header="rig: one pile, r%.2f, %d sides, centred on its own "
+                         "origin. Six nodes place it." % (PILE_R, SIDES))
 
-# Cross-bracing: one horizontal run each way at BRACE_Y, pile to pile. It is
-# ABOVE the water (Hs at the berth is 0.166 m) and inboard of the pile faces, so
-# it adds no collider anything can reach.
+# ---- the bracing, at the rig origin --------------------------------------
+# New geometry with no primitive behind it, so there is no collider to preserve
+# and it gets none. It sits at world y %.3f, above the berth's 0.166 m
+# significant wave height, and inboard of the pile faces.
+mesh2 = bpy.data.meshes.new("rig_bracing")
+obj2 = bpy.data.objects.new("rig_bracing", mesh2)
+bpy.context.collection.objects.link(obj2)
+bm = bmesh.new()
+uv_layer = bm.loops.layers.uv.new("UVMap")
 bz = BRACE_Y - PILE_CENTRE
 for pz in PILE_Z:
     for a, b in zip(PILE_X, PILE_X[1:]):
         tube((a, -pz, bz), (b, -pz, bz), BRACE_R, 8, 0.11)
 for px in PILE_X:
     tube((px, -PILE_Z[0], bz), (px, -PILE_Z[1], bz), BRACE_R, 8, 0.29)
-
 bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-bm.to_mesh(mesh)
+bm.to_mesh(mesh2)
 bm.free()
+BRACE_PATH = os.path.join(REPO, "assets", "meshes", "rig_bracing.obj")
+rigkit.export_obj(obj2, BRACE_PATH, uv=True,
+                  header="rig: cross-bracing, r%.3f at world y %.3f. No collider: "
+                         "new geometry, no primitive behind it." % (BRACE_R, BRACE_Y))
 
-os.makedirs(os.path.dirname(OBJ_PATH), exist_ok=True)
 os.makedirs(TEX_DIR, exist_ok=True)
-rigkit.export_obj(obj, OBJ_PATH, uv=True,
-                  header="rig: steel frame. 6 piles r%.2f, %d sides; bracing r%.3f at world y %.3f."
-                         % (PILE_R, SIDES, BRACE_R, BRACE_Y))
-
 albedo, height = textures.weathered_steel(size=TEX_SIZE, seed=SEED)
 textures.write_png(os.path.join(TEX_DIR, "rig_steel_frame_albedo.png"), albedo)
 textures.write_png(os.path.join(TEX_DIR, "rig_steel_frame_normal.png"),
@@ -137,30 +154,39 @@ textures.write_png(os.path.join(TEX_DIR, "rig_steel_frame_normal.png"),
 print("substructure: textures %dx%d written" % (TEX_SIZE, TEX_SIZE))
 
 # --- self-check ----------------------------------------------------------
-info = rigkit.verify_obj(OBJ_PATH)
-lo, hi = info["lo"], info["hi"]
+pi = rigkit.verify_obj(PILE_PATH)
+bi = rigkit.verify_obj(BRACE_PATH)
 
-LOCAL_TOP = PILE_TOP - PILE_CENTRE
-LOCAL_BOT = PILE_BOT - PILE_CENTRE
-assert abs(hi[1] - LOCAL_TOP) < 1e-3, \
-    "top local y=%.5f (world %.5f), want %.3f (world %.3f) — the piles must " \
-    "meet the deck's underside exactly" % (hi[1], hi[1] + PILE_CENTRE, LOCAL_TOP, PILE_TOP)
-assert abs(lo[1] - LOCAL_BOT) < 1e-3, \
-    "bottom local y=%.5f (world %.5f), want %.3f (world %.3f)" \
-    % (lo[1], lo[1] + PILE_CENTRE, LOCAL_BOT, PILE_BOT)
+# The pile must be centred on its own origin in ALL THREE axes. If it is not,
+# no node transform can put both the drawn pile and its BoxCollider in the same
+# place -- that is the whole reason this task exists.
+for ax, name, half in ((0, "x", PILE_R), (1, "y", PILE_TOP - PILE_CENTRE), (2, "z", PILE_R)):
+    assert abs(pi["lo"][ax] + half) < 1e-3 and abs(pi["hi"][ax] - half) < 1e-3, \
+        "pile %s spans %.4f..%.4f, want %.3f..%.3f — it is not centred on its " \
+        "own origin and its collider cannot be made to match" \
+        % (name, pi["lo"][ax], pi["hi"][ax], -half, half)
 
-# The piles must sit exactly where the primitives did, in x and z.
-assert abs(lo[0] - (min(PILE_X) - PILE_R)) < 1e-3, "x lo %.4f" % lo[0]
-assert abs(hi[0] - (max(PILE_X) + PILE_R)) < 1e-3, "x hi %.4f" % hi[0]
-assert abs(lo[2] - (min(PILE_Z) - PILE_R)) < 1e-3, "z lo %.4f" % lo[2]
-assert abs(hi[2] - (max(PILE_Z) + PILE_R)) < 1e-3, "z hi %.4f" % hi[2]
+# The bracing must sit ABOVE the water at the berth. Below it, it is a submerged
+# obstacle nothing was told about; at it, it is in the splash.
+assert bi["lo"][1] + PILE_CENTRE > 0.166, \
+    "bracing reaches world y %.3f, at or below the berth's 0.166 m significant " \
+    "wave height" % (bi["lo"][1] + PILE_CENTRE)
+# And inboard of the pile faces, so it can never be the thing a swimmer meets.
+# **Tolerance is BRACE_R, not 1e-6.** The north/south braces run along z at a
+# fixed x=px, so their own circular cross-section — perpendicular to their
+# axis — bulges +-BRACE_R in x around px, same as any round tube measured
+# off-axis. Measured x -10.575..10.575 against PILE_X's -10.5..10.5: exactly
+# BRACE_R=0.075 over, on a build with correct geometry, not a bug in it. The
+# bound that means what the comment says is against the pile's own OUTER
+# face (PILE_X +- PILE_R = 0.35), and this brace bulge of 0.075 sits well
+# inside that with room to spare.
+assert bi["lo"][0] >= min(PILE_X) - BRACE_R - 1e-6 and bi["hi"][0] <= max(PILE_X) + BRACE_R + 1e-6, \
+    "bracing x %.4f..%.4f escapes the pile line" % (bi["lo"][0], bi["hi"][0])
 
-# Nothing may reach north of the quay edge in the hull's lane — the boat sits
-# 0.15 m off and weighs 43,776 kg. The piles are at z -5.5 and the bracing runs
-# between them, so this is a standing guard rather than a live risk.
-assert hi[2] <= 7.0 and lo[2] >= -7.0, "substructure escapes the deck footprint"
-
-assert info["tris"] <= 8000, "over budget: %d tris" % info["tris"]
-print("substructure: %d tris, %d verts, x %.2f..%.2f y %.3f..%.3f z %.2f..%.2f"
-      % (info["tris"], info["verts"], lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]))
+assert pi["tris"] + bi["tris"] <= 8000, \
+    "over budget: %d + %d tris" % (pi["tris"], bi["tris"])
+print("pile: %d tris, x %.3f..%.3f y %.3f..%.3f z %.3f..%.3f"
+      % (pi["tris"], pi["lo"][0], pi["hi"][0], pi["lo"][1], pi["hi"][1], pi["lo"][2], pi["hi"][2]))
+print("bracing: %d tris, world y %.3f..%.3f"
+      % (bi["tris"], bi["lo"][1] + PILE_CENTRE, bi["hi"][1] + PILE_CENTRE))
 print("substructure: self-check passes")
