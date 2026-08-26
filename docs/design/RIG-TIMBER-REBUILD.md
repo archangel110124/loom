@@ -132,35 +132,68 @@ A box that circumscribes a cylinder is larger at the corners by
 `r(√2 − 1)` = 41% of the radius — 0.145 m on a piling. That is only harmless if
 nothing reaches it.
 
-**Measured on the piling swap itself, under two approaches, and they do not
-agree.** Task 3b drove a probe (`--hold move_x=-1`, 600 ticks) straight into a
-pile along a single cardinal axis, aimed square at the face: primitives and
-the new box-collider mesh stop within about a micron of each other. That is
-not evidence the shapes behave alike — it is a property of the axis. A box's
-half-width along a cardinal direction equals the circumscribed cylinder's
-radius exactly, so a straight-on hit was always going to land near-exact; the
-corner where the two shapes actually differ is untouched by a cardinal path by
-construction.
+**Measured on the piling swap itself, and only one of the two numbers below
+is a constant.** `r(√2 − 1)` = 0.145 m falls straight out of the geometry — a
+box's corner distance from its own centre against the circumscribed circle's
+radius — and does not depend on how anything approaches it. Everything past
+this paragraph does depend on that, and is reported as such.
 
-Driven diagonally instead (`move_x` and `move_z` held together, sustained the
-same 600 ticks), the two shapes' paths diverge cumulatively rather than
-settling once at contact:
+Task 3b drove a probe straight into a pile along a single cardinal axis
+(`--hold move_x=-1`, 600 ticks): primitives and the new box-collider mesh
+stopped within about a micron of each other. **That is a property of the test
+axis, not evidence the shapes behave alike.** Along a cardinal direction a
+box's half-width equals the circumscribed cylinder's radius exactly, so a
+straight-on hit was always going to land near-exact — the measurement cannot
+see the corner where the two shapes actually differ, because a cardinal path
+never reaches it.
 
-| approach | primitives, final (x, z) | mesh, final (x, z) | divergence |
-| --- | --- | --- | --- |
-| cardinal, `move_x` only | -9.7809 | -9.7809 | ~1 µm |
-| diagonal, `move_x` + `move_z` | (-42.268, -38.287) | (-44.437, -38.208) | **~2.17 m** |
+Driven diagonally instead (`move_x` and `move_z` held together, sustained for
+the same 600 ticks), the two shapes' paths diverge — and **the divergence
+itself does not hold still**:
 
-A no-collider control run the same diagonal path to (-46.0, -41.0), confirming
-both the primitive and the mesh runs were genuinely obstructed rather than
-sliding past untouched. 2.17 m is **fifteen times** the static 0.145 m corner
-gap above — the box slides along a flat face while the cylinder slides along a
-curve, so the two paths keep separating instead of offsetting once at first
-contact and then tracking together. **Say this plainly rather than let the
-cardinal number stand for the whole claim**: the piling swap is proven
-harmless along the one axis it was measured on, not in general, and a reader
-who quotes only 0.145 m here would be quoting the case that happens not to
-apply to how this rig is actually approached.
+| approach | primitives, final (x, z) | mesh, final (x, z) | no-collider control | divergence |
+| --- | --- | --- | --- | --- |
+| cardinal, `move_x` only | -9.7809 | -9.7809 | freefall, does not apply | ~1 µm |
+| diagonal, one 45° line | (-42.268, -38.287) | (-44.437, -38.208) | (-46.0, -41.0) | 2.17 m |
+| diagonal, a different 45° line | (-27.855, 21.838) | (-30.286, 24.062) | (-32.078, 27.078) | 3.29 m |
+
+Two samples, not a settled figure: 3.29 m is about 50% higher than 2.17 m, on
+a different approach line under the same hold duration. **Report a range or
+name the line, never a single number, and drop any multiplier built on top of
+one** — "fifteen times the static gap" was arithmetic performed on a number
+that moves. Both no-collider controls travelled clear past where either
+collider stopped its run, confirming both the primitive and the mesh runs
+were genuinely obstructed rather than sliding through untouched — that
+control is not optional decoration, see below.
+
+**Why it is a spread rather than one corner-gap correction:** a box slides
+along a flat face while a cylinder slides along a curve, so under sustained
+lateral pressure the two contact points keep separating rather than settling
+to a fixed offset the moment contact is made. The gap compounds with how long
+the pressure is held, which is also why a duration and a hold pattern belong
+next to any number reported here.
+
+**An unaimed probe is not a small-divergence result — it is no result.** The
+first attempt at reproducing this measurement placed the probe already
+sitting on the pile row's own z and drove it away from that row rather than
+into any pile; every configuration — primitives, mesh, and no collider at
+all — came back identical, because the probe missed all three in the same
+way. That is not agreement between the shapes, it is the absence of a test,
+and it looked exactly like a clean result until checked against a
+no-collider control. **Anyone re-measuring this must confirm their probe was
+actually obstructed** — compare against a run with no collider present and
+require it to travel measurably further — or they will report "identical"
+for a probe that never touched anything.
+
+**One more thing that cost real time here and belongs on record:** `--hold`
+does nothing to a bare `CharacterController`. `loom describe
+CharacterController` says so directly — *"A character with no script still
+falls, and does nothing else."* The movement model lives in the node's
+`Script`; a probe scene with no script attached reads `move_x`/`move_z` as
+held and does not move an inch, which is a second, silent way to reproduce
+the false "identical" above. `assets/scripts/deeper_player.rhai` is the
+movement script already in this repository and the one to attach when
+building a probe scene from scratch.
 
 ### Measured, not argued
 
