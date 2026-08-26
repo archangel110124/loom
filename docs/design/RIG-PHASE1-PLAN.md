@@ -710,6 +710,183 @@ git commit -m "feat(rig): six piles and their bracing, in rusted steel"
 
 ---
 
+### Task 3b: The piles get their own nodes — measured, not assumed
+
+Task 3 Step 8 measured what the pile colliders do, and they are not dead weight.
+A probe driven horizontally into the pile line stops at **x = -9.7809** with the
+six `cylinder` primitives present and runs to **x = -46.0** without them. A 36 m
+difference. The single-mesh, no-collider substructure cannot ship.
+
+Note which half of that measurement mattered. A probe *dropped* beside the piles
+gave identical numbers in all three axes — because it never entered their
+footprint. "Identical" from a probe that missed is not evidence, and an earlier
+driven run also read identical because a gravity term dropped it below the piles
+before it arrived. Both false negatives were caught before they were believed.
+
+**Two meshes, seven nodes — not seven meshes.** All six pilings are authored at
+the identical `scale = [0.35, 1.20, 0.35]`, so they are one shape. One pile mesh
+centred on its own origin, placed by six nodes each carrying its own transform
+and its own `BoxCollider`, is the same physics for fewer files and one asset
+instead of six.
+
+**Files:**
+- Modify: `tools/mesh/rig/build_substructure.py`
+- Create: `assets/meshes/rig_pile.obj`, `assets/meshes/rig_bracing.obj`
+- Delete: `assets/meshes/rig_steel_frame.obj` (superseded — its contents are now
+  these two, and leaving it would be a third copy of the same geometry that
+  nothing draws)
+- Keep unchanged: `assets/textures/rig_steel_frame_albedo.png`, `..._normal.png`
+  — both meshes share them.
+
+**Interfaces:**
+- Consumes: `rigkit.export_obj`, `rigkit.verify_obj`, `textures.weathered_steel`,
+  `textures.normal_from_height`, `textures.write_png`, and the `tube()` helper
+  already in this file.
+- Produces: `rig_pile.obj`, one pile centred on its own origin in ALL THREE axes,
+  spanning local `x -0.350 … 0.350`, `y -1.200 … 1.200`, `z -0.350 … 0.350`; and
+  `rig_bracing.obj`, centred on `PILE_CENTRE` in y and on the rig origin in x/z.
+
+- [ ] **Step 1: Split the emit into two objects**
+
+The pile is now built at the local origin, not at its world position — the NODE
+carries the position, which is the only arrangement in which a matching
+`BoxCollider` is possible at all (`play.rs:520` centres a static collider on the
+node). Replace the single build with:
+
+```python
+# ---- one pile, at its own origin ----------------------------------------
+# **All six pilings are the same shape** (`scale = [0.35, 1.20, 0.35]` on every
+# one of them), so this is ONE mesh placed by six nodes rather than six meshes.
+# It is centred in x and z as well as y, because each node sits at its own
+# [x, -0.20, z] and `play.rs:520` centres that node's collider on the node.
+mesh = bpy.data.meshes.new("rig_pile")
+obj = bpy.data.objects.new("rig_pile", mesh)
+bpy.context.collection.objects.link(obj)
+bm = bmesh.new()
+uv_layer = bm.loops.layers.uv.new("UVMap")
+tube((0.0, 0.0, PILE_BOT - PILE_CENTRE),
+     (0.0, 0.0, PILE_TOP - PILE_CENTRE), PILE_R, SIDES, 0.0)
+bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+bm.to_mesh(mesh)
+bm.free()
+PILE_PATH = os.path.join(REPO, "assets", "meshes", "rig_pile.obj")
+rigkit.export_obj(obj, PILE_PATH, uv=True,
+                  header="rig: one pile, r%.2f, %d sides, centred on its own "
+                         "origin. Six nodes place it." % (PILE_R, SIDES))
+
+# ---- the bracing, at the rig origin --------------------------------------
+# New geometry with no primitive behind it, so there is no collider to preserve
+# and it gets none. It sits at world y %.3f, above the berth's 0.166 m
+# significant wave height, and inboard of the pile faces.
+mesh2 = bpy.data.meshes.new("rig_bracing")
+obj2 = bpy.data.objects.new("rig_bracing", mesh2)
+bpy.context.collection.objects.link(obj2)
+bm = bmesh.new()
+uv_layer = bm.loops.layers.uv.new("UVMap")
+bz = BRACE_Y - PILE_CENTRE
+for pz in PILE_Z:
+    for a, b in zip(PILE_X, PILE_X[1:]):
+        tube((a, -pz, bz), (b, -pz, bz), BRACE_R, 8, 0.11)
+for px in PILE_X:
+    tube((px, -PILE_Z[0], bz), (px, -PILE_Z[1], bz), BRACE_R, 8, 0.29)
+bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+bm.to_mesh(mesh2)
+bm.free()
+BRACE_PATH = os.path.join(REPO, "assets", "meshes", "rig_bracing.obj")
+rigkit.export_obj(obj2, BRACE_PATH, uv=True,
+                  header="rig: cross-bracing, r%.3f at world y %.3f. No collider: "
+                         "new geometry, no primitive behind it." % (BRACE_R, BRACE_Y))
+```
+
+- [ ] **Step 2: Replace the self-check**
+
+The old check asserted the combined mesh spanned the whole pile grid. Assert the
+two new contracts instead — and assert the pile is centred, because a pile that
+is not centred on its own origin is a pile whose collider cannot match it:
+
+```python
+pi = rigkit.verify_obj(PILE_PATH)
+bi = rigkit.verify_obj(BRACE_PATH)
+
+# The pile must be centred on its own origin in ALL THREE axes. If it is not,
+# no node transform can put both the drawn pile and its BoxCollider in the same
+# place -- that is the whole reason this task exists.
+for ax, name, half in ((0, "x", PILE_R), (1, "y", PILE_TOP - PILE_CENTRE), (2, "z", PILE_R)):
+    assert abs(pi["lo"][ax] + half) < 1e-3 and abs(pi["hi"][ax] - half) < 1e-3, \
+        "pile %s spans %.4f..%.4f, want %.3f..%.3f — it is not centred on its " \
+        "own origin and its collider cannot be made to match" \
+        % (name, pi["lo"][ax], pi["hi"][ax], -half, half)
+
+# The bracing must sit ABOVE the water at the berth. Below it, it is a submerged
+# obstacle nothing was told about; at it, it is in the splash.
+assert bi["lo"][1] + PILE_CENTRE > 0.166, \
+    "bracing reaches world y %.3f, at or below the berth's 0.166 m significant " \
+    "wave height" % (bi["lo"][1] + PILE_CENTRE)
+# And inboard of the pile faces, so it can never be the thing a swimmer meets.
+assert bi["lo"][0] >= min(PILE_X) - 1e-6 and bi["hi"][0] <= max(PILE_X) + 1e-6, \
+    "bracing x %.4f..%.4f escapes the pile line" % (bi["lo"][0], bi["hi"][0])
+
+assert pi["tris"] + bi["tris"] <= 8000, \
+    "over budget: %d + %d tris" % (pi["tris"], bi["tris"])
+print("pile: %d tris, x %.3f..%.3f y %.3f..%.3f z %.3f..%.3f"
+      % (pi["tris"], pi["lo"][0], pi["hi"][0], pi["lo"][1], pi["hi"][1], pi["lo"][2], pi["hi"][2]))
+print("bracing: %d tris, world y %.3f..%.3f"
+      % (bi["tris"], bi["lo"][1] + PILE_CENTRE, bi["hi"][1] + PILE_CENTRE))
+print("substructure: self-check passes")
+```
+
+- [ ] **Step 3: Build, and prove the centring assertion can fail**
+
+Run the build; expect a `pile:` line reading `x -0.350..0.350 y -1.200..1.200
+z -0.350..0.350`. Then temporarily build the pile at `(PILE_X[0], -PILE_Z[0], …)`
+instead of `(0.0, 0.0, …)` and re-run. Expected: **`it is not centred on its own
+origin and its collider cannot be made to match`**. Restore.
+
+- [ ] **Step 4: Delete the superseded mesh**
+
+```bash
+cd ~/loom && git rm assets/meshes/rig_steel_frame.obj
+```
+Its geometry now lives in the two new files. Leaving it would be a third copy
+that nothing draws, and the next person would have to work out which is live.
+
+- [ ] **Step 5: Prove the six nodes reproduce the primitives' physics**
+
+This is the claim the whole task rests on, and it is the same test that failed
+before. Build two throwaway scenes in `/tmp` with **absolute asset paths**: one
+with the six `cylinder` primitives exactly as `deeper_demo.loom` authors them,
+one with six nodes drawing `rig_pile.obj` at the same six transforms, each
+carrying `BoxCollider { half_extents = [0.35, 1.20, 0.35] }`. Drive a probe into
+the pile line exactly as Task 3 Step 8 Part B did — start `x = -6.00, z = -5.5,
+y = 0.40`, `--hold "0:move_x=-1"`, 600 ticks:
+
+```bash
+cd ~/loom
+for V in prim mesh; do
+  printf "%-5s " "$V"
+  ./target/release/loom sim /tmp/pile6_$V.loom --ticks 600 --hold "0:move_x=-1" \
+    --assert "Probe/Drop.x == -999" 2>&1 | grep -o '"actual": [-0-9.]*'
+done
+```
+
+The primitive run should stop near **-9.78**, as measured. The mesh run should
+stop too. **They will not be bit-identical** — a box circumscribes a cylinder and
+exceeds it by `r(√2 − 1)` = 0.145 m at the corners, so the box stops the probe
+slightly sooner. Record both numbers and the difference. What must be true is
+that the mesh version STOPS, within roughly 0.15 m of where the primitive did —
+not that it matches to the digit. Say which you got.
+
+- [ ] **Step 6: Commit**
+
+```bash
+cd ~/loom
+git add tools/mesh/rig/build_substructure.py \
+        assets/meshes/rig_pile.obj assets/meshes/rig_bracing.obj
+git commit -m "feat(rig): one pile mesh, six nodes, six colliders"
+```
+
+---
+
 ### Task 4: `tidal_growth`, and the seam
 
 The spec calls this **the horror seam** and gives it the most attention of any
