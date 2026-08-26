@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 72] = [
+const SCENES: [&str; 73] = [
     // The mood ladder — ADR 0069. In `GOLDEN` too, where the reasoning is.
     "assets/test/mood_deep.loom",
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
@@ -353,6 +353,11 @@ const SCENES: [&str; 72] = [
     // the only scene where both run on one node.
     "assets/test/gleamsprat_cruise.loom",
     "assets/test/homestead.loom",
+    // The deck field: the first textured mesh in the project, and the first
+    // node whose collider is transcribed rather than taken from drawn bounds.
+    // If this row ever renders a flat grey plate, the OBJ did not load and the
+    // renderer substituted a unit box — which looks exactly like success.
+    "assets/test/rig_deck.loom",
 ];
 
 /// How many frames a windowed run draws before shutting itself down. Enough to
@@ -406,7 +411,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 56] = [
+const GOLDEN: [(&str, &str, &[&str]); 57] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -1045,6 +1050,21 @@ const GOLDEN: [(&str, &str, &[&str]); 56] = [
     // `Script` in the repository sits on a `CharacterController`.
     ("gleamsprat_cruise", "assets/test/gleamsprat_cruise.loom", &["--sim", "60"]),
     ("homestead", "assets/test/homestead.loom", &["--sim", "1800"]),
+    // The only picture of a UV-mapped, normal-mapped imported mesh anywhere in
+    // the library. Delete the albedo_map and this row still draws timber-shaped
+    // geometry at the right height — so what it actually guards is the TEXTURE
+    // reaching the surface, which nothing else in GOLDEN can see. Static scene,
+    // measured flat across ticks 0/60/300, so --sim adds nothing.
+    //
+    // Fault-injected two ways, both at this size against this tolerance
+    // (0.001 fraction / 72 worst):
+    //
+    //     albedo_map deleted        fraction 0.5141   worst 221   (mesh loads, surface goes flat)
+    //     mesh UV V un-flipped      fraction 0.2857   worst  31   (albedo/normal sample the wrong texel)
+    //
+    // Both move roughly a third to a half of the frame, so the row is not
+    // blind to either the texture path or the UV winding it depends on.
+    ("rig_deck", "assets/test/rig_deck.loom", &[]),
 ];
 
 /// Every reference renders at this size.
