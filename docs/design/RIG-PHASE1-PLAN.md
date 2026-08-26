@@ -1300,259 +1300,66 @@ aliases every other empty id and the first adopted wins.
 
 - [ ] **Step 2: Author the scene**
 
-```toml
-# The rig's structure — deck, substructure, tide seam and bulwark, in the four
-# materials Phase 1 builds. One node per material zone, because the engine reads
-# no `.mtl` and takes one OBJ per material.
-#
-# **Every node sits at the transform its primitive already carries in
-# `deeper_demo.loom`.** Each mesh is authored centred on its own local origin
-# and hangs from that y — `play.rs:520` centres a static collider on the node,
-# not on the vertices, so this is the only arrangement in which a mesh and a
-# matching `BoxCollider` can coexist. Spec §1 Case 1: all four are axis-aligned,
-# drawn and statically parented, so the transcription is exact, bit for bit.
-#
-# `Drop` is here so a human — or a future `green.sh` row — can measure the
-# settle height. **The image row does not check it.** The deck's collider
-# equality was proved by hand with `loom sim --assert`, not by any gate.
+**Do not hand-transcribe the node numbers.** Both generators PRINT the node
+position and `BoxCollider` half-extents for every node they expect —
+`build_substructure.py` for the pile and the seam, `build_bulwark.py` for all
+fourteen rails and caps. Re-run them and build the scene from what they print.
+They are the source of truth; a table retyped into a scene file is a table that
+can drift from the geometry it describes.
 
-[scene]
-format = 1
-id = "PASTE-UUID-1"
+The scene has **29 nodes**, and the shape is not the one this plan first
+imagined — Tasks 3b, 4 and 5 each replaced a single-mesh design with a
+one-node-per-primitive design, for the same reason every time: one mesh is one
+node is one collider, and these structures need many.
 
-[[asset]]
-key = "deck_timber"
-id = "PASTE-UUID-2"
-path = "../meshes/rig_deck_timber.obj"
+| node(s) | count | mesh | transform | collider |
+| --- | --- | --- | --- | --- |
+| `Deck` | 1 | `rig_deck_timber.obj` | `[0, 1.20, 0]` | `[12.0, 0.20, 7.0]` |
+| `Pile*` | 6 | `rig_pile.obj` | `[x, -0.20, z]`, x ∈ {-10.5, 0, 10.5} × z ∈ {-5.5, 5.5} | `[0.35, 1.20, 0.35]` |
+| `Seam*` | 6 | `rig_steel_tidal.obj` | `[x, -0.10, z]`, same x/z | `[0.35, 0.55, 0.35]` |
+| `Rail*` | 7 | `rig_rail_<run>.obj` | as printed | as printed |
+| `Cap*` | 7 | `rig_cap_<run>.obj` | as printed | as printed |
+| `Drop`, `Camera` | 2 | — | see below | — |
 
-[[asset]]
-key = "deck_albedo"
-id = "PASTE-UUID-3"
-path = "../textures/rig_deck_timber_albedo.png"
+**The bracing is deliberately NOT in this scene.** `rig_bracing.obj` exists and
+is built, but Task 4 measured what wiring it costs: a `BoxCollider` matching its
+true AABB is a solid 21 × 11 m slab, because the bracing is an open lattice of
+eight thin rods and a box cannot express a lattice; omitting the component gives
+it a 2 × 2 × 2 m cube at the rig origin, since `play.rs:768` falls back to
+`|world_scale|`. Both are unauthored obstacles. The mesh stays in the repo and
+out of the scene until there is a collider that can express it. Say so in the
+scene's header, so the next person does not "fix" the omission.
 
-[[asset]]
-key = "deck_normal"
-id = "PASTE-UUID-4"
-path = "../textures/rig_deck_timber_normal.png"
+**Every `[[asset]]` needs a real, distinct UUID `id`** — about 21 of them.
+Generate them with `python3 -c "import uuid; [print(uuid.uuid4()) for _ in range(24)]"`.
+An absent id becomes `""`, prefab asset merging keys identity on exactly that,
+and the first adopted wins for all of them — that once drew nine coincident unit
+spheres in a scene that validated clean.
 
-[[asset]]
-key = "steel_frame"
-id = "PASTE-UUID-5"
-path = "../meshes/rig_steel_frame.obj"
+**Materials.** Deck and rails share `rig_deck_timber_albedo.png` / `_normal.png`
+at `roughness 0.92` and `0.85`. Piles use `rig_steel_frame_*` at `roughness 0.85,
+metallic 0.25`. Seams use `rig_steel_tidal_*` at `roughness 0.70, metallic 0.0`.
+Caps are flat colour with NO maps: `albedo = [0.34, 0.26, 0.21]`,
+`roughness = 0.7`, `metallic = 0.4` — `CapSouth`'s own values.
 
-[[asset]]
-key = "steel_albedo"
-id = "PASTE-UUID-6"
-path = "../textures/rig_steel_frame_albedo.png"
+**The rig node carries a `WaterBody`** at `surface_height = 0.0` with
+`fetch = 15000.0`, and a `Wind` at `speed = 3.0, direction_degrees = 20.0` —
+the seam is a tide line and needs a tide to line. Environment values are the
+demo's own (`deeper_demo.loom:668-676`): `sun_direction = [0.42, 0.46, -0.78]`,
+`sun_strength = 1.25`, `sun_color = [1.0, 0.93, 0.80]`, `ambient = 0.45`,
+`sky_zenith = [0.16, 0.30, 0.52]`, `sky_horizon = [0.74, 0.72, 0.66]`,
+`fog_density = 0.0028`, `fog_falloff = 0.05`.
 
-[[asset]]
-key = "steel_normal"
-id = "PASTE-UUID-7"
-path = "../textures/rig_steel_frame_normal.png"
+`Drop` is a `CharacterController` at `[-4.30, 3.00, 0.90]`, height 1.8, radius
+0.35, step_height 0.25 — there so a human or a future `green.sh` row can measure
+the settle height. **The image row does not check it**; say that in the header
+rather than implying a gate watches it.
 
-[[asset]]
-key = "steel_tidal"
-id = "PASTE-UUID-8"
-path = "../meshes/rig_steel_tidal.obj"
-
-[[asset]]
-key = "tidal_albedo"
-id = "PASTE-UUID-9"
-path = "../textures/rig_steel_tidal_albedo.png"
-
-[[asset]]
-key = "tidal_normal"
-id = "PASTE-UUID-10"
-path = "../textures/rig_steel_tidal_normal.png"
-
-[[asset]]
-key = "bulwark_timber"
-id = "PASTE-UUID-11"
-path = "../meshes/rig_bulwark_timber.obj"
-
-[[asset]]
-key = "cap_metal"
-id = "PASTE-UUID-12"
-path = "../meshes/rig_cap_metal.obj"
-
-[[node]]
-name = "Rig"
-
-  # The demo's own environment, so this row's picture is comparable to the scene
-  # it stands in for. `deeper_demo.loom:668-676`.
-  [node.components.Environment]
-  sun_direction = [0.42, 0.46, -0.78]
-  sun_strength = 1.25
-  sun_color = [1.0, 0.93, 0.80]
-  ambient = 0.45
-  sky_zenith = [0.16, 0.30, 0.52]
-  sky_horizon = [0.74, 0.72, 0.66]
-  fog_density = 0.0028
-  fog_falloff = 0.05
-
-  # The seam is a tide line, so there has to be a tide to line. Surface at y=0,
-  # the same plane `deeper_demo.loom:921` puts it on.
-  [node.components.WaterBody]
-  kind = "ocean"
-  simulation = "deterministic"
-  surface_height = 0.0
-  fetch = 15000.0
-
-  [node.components.Wind]
-  direction_degrees = 20.0
-  speed = 3.0
-  gustiness = 0.25
-  turbulence = 0.15
-
-[[node]]
-name = "Deck"
-parent = "Rig"
-
-  [node.transform]
-  pos = [0.0, 1.20, 0.0]
-
-  [node.components.MeshRenderer]
-  mesh = { asset = "deck_timber" }
-
-  [node.components.BoxCollider]
-  half_extents = [12.0, 0.20, 7.0]
-
-  [node.components.Material]
-  albedo = [1.0, 1.0, 1.0]
-  albedo_map = { asset = "deck_albedo" }
-  normal_map = { asset = "deck_normal" }
-  roughness = 0.92
-  metallic = 0.0
-  uv_scale = [1.0, 1.0]
-
-[[node]]
-name = "Substructure"
-parent = "Rig"
-
-  # Six piles and their bracing, in ONE mesh and therefore under ONE node — so
-  # it can carry at most ONE collider, and a single box at this node's origin
-  # would be a 0.7 m post in the middle of the rig, not six posts under it.
-  # This node deliberately has no collider; Task 3 Step 8 measures whether that
-  # costs anything, and the fork below says what to do if it does.
-  [node.transform]
-  pos = [0.0, -0.20, 0.0]
-
-  [node.components.MeshRenderer]
-  mesh = { asset = "steel_frame" }
-
-  [node.components.Material]
-  albedo = [1.0, 1.0, 1.0]
-  albedo_map = { asset = "steel_albedo" }
-  normal_map = { asset = "steel_normal" }
-  roughness = 0.85
-  metallic = 0.25
-  uv_scale = [1.0, 1.0]
-
-[[node]]
-name = "Seam"
-parent = "Rig"
-
-  # The tide band, 4 mm proud of the piles it wraps. No collider: it is a
-  # surface on shapes that already have one, and giving it a second would put a
-  # 24 m box around six piles.
-  [node.transform]
-  pos = [0.0, -0.20, 0.0]
-
-  [node.components.MeshRenderer]
-  mesh = { asset = "steel_tidal" }
-
-  [node.components.Material]
-  albedo = [1.0, 1.0, 1.0]
-  albedo_map = { asset = "tidal_albedo" }
-  normal_map = { asset = "tidal_normal" }
-  roughness = 0.70
-  metallic = 0.0
-  uv_scale = [1.0, 1.0]
-
-[[node]]
-name = "Bulwark"
-parent = "Rig"
-
-  [node.transform]
-  pos = [0.0, 1.90, 0.0]
-
-  [node.components.MeshRenderer]
-  mesh = { asset = "bulwark_timber" }
-
-  [node.components.Material]
-  albedo = [1.0, 1.0, 1.0]
-  albedo_map = { asset = "deck_albedo" }
-  normal_map = { asset = "deck_normal" }
-  roughness = 0.85
-  metallic = 0.0
-  uv_scale = [1.0, 1.0]
-
-[[node]]
-name = "CapRail"
-parent = "Rig"
-
-  # Flat colour and no maps: it is `metallic = 0.4` today, fourteen small boxes
-  # do not earn a 1024² texture, and the values here are `CapSouth`'s own.
-  [node.transform]
-  pos = [0.0, 2.80, 0.0]
-
-  [node.components.MeshRenderer]
-  mesh = { asset = "cap_metal" }
-
-  [node.components.Material]
-  albedo = [0.34, 0.26, 0.21]
-  roughness = 0.7
-  metallic = 0.4
-
-[[node]]
-name = "Drop"
-parent = "Rig"
-
-  [node.transform]
-  pos = [-4.30, 3.00, 0.90]
-
-  [node.components.CharacterController]
-  height = 1.8
-  radius = 0.35
-  step_height = 0.25
-
-[[node]]
-name = "Camera"
-parent = "Rig"
-
-  # Low and off the north-west corner, so one frame carries all four zones: the
-  # deck's surface, the bulwark above it, the piles below, and the seam where
-  # they cross the water. A deck photographed from above is a texture swatch.
-  [node.transform]
-  pos = [-17.5, 2.20, -13.0]
-  rot_euler = [-9.0, -34.0, 0.0]
-
-  [node.components.Camera]
-  fov_y_degrees = 52.0
-```
-
-**The `Substructure` node has no collider, and Task 3 Step 8 decides whether
-that is free.** One mesh is one node is one collider, so six piles cannot be
-given six boxes from a single node — the fork is structural, not cosmetic:
-
-- **If nothing can reach a pile** (Step 8's swimmer never touches one either
-  way): ship as written. One mesh, one node, no collider. Record in the scene's
-  header that the demo's six pilings currently carry colliders nothing uses, so
-  Phase 4 is *removing dead physics*, not losing live physics — and that this
-  was measured, on this date, with the numbers.
-- **If something can reach a pile**: the substructure must become **six
-  per-pile OBJs plus one for the bracing**, seven nodes, each pile carrying
-  `BoxCollider { half_extents = [0.35, 1.20, 0.35] }` at its own
-  `pos = [x, -0.20, z]`. Splitting one material across several OBJs is legal —
-  the one-OBJ-per-material rule forbids two materials in a file, not one
-  material in two files — and all seven share the same texture pair. It costs
-  seven draw calls instead of one. **Do not attempt this as a patch on the
-  single-mesh version**; it changes `build_substructure.py`'s output contract,
-  so stop and report, and it becomes its own task.
-
-Either way the measurement goes in the commit message. "Nothing reaches the
-piles" is a claim about the whole scene's geometry and it should not be
-re-derived by the next person from scratch.
+`Camera` sits low and off the north-west corner so one frame carries all four
+zones — the deck's surface, the bulwark above it, the piles below, and the seam
+where they cross the water. Start from `pos = [-17.5, 2.20, -13.0]`,
+`rot_euler = [-9.0, -34.0, 0.0]`, `fov_y_degrees = 52.0`, and adjust if the
+render does not actually show all four. Say what you ended up with.
 
 - [ ] **Step 3: Validate and measure**
 
