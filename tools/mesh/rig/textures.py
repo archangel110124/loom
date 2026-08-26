@@ -153,6 +153,59 @@ def weathered_timber(size=2048, seed=7):
     return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
 
 
+def weathered_steel(size=2048, seed=11):
+    """-> (albedo uint8 HxWx3, height float32 HxW in 0..1).
+
+    Rusted steel plate. Three states, like the timber: sound paint, rust bloom,
+    and the dark wet streak that runs DOWN from every bloom because water does.
+    The streaking is vertical here where the timber's was horizontal — steel
+    weathers along gravity, not along a grain — so `stretch` is applied to the
+    other axis by transposing the field.
+
+    LINEAR reflectance in, sRGB bytes out. See `_srgb_encode`.
+    """
+    rng = np.random.default_rng(seed)
+
+    # Blooms are isotropic; the streaks below them are not. Build the streak
+    # field stretched along Y by generating stretched-along-X and transposing,
+    # which reuses `_fbm` rather than adding a second anisotropy path.
+    bloom = _fbm(size, rng, octaves=5, base=5)
+    bloom = (bloom - bloom.min()) / (bloom.max() - bloom.min())
+    streak = _fbm(size, rng, octaves=5, base=24, stretch=6).T
+    streak = (streak - streak.min()) / (streak.max() - streak.min())
+    pit = _fbm(size, rng, octaves=6, base=40)
+
+    rust = np.clip((bloom - 0.45) / 0.30, 0.0, 1.0)
+    # A streak only exists below a bloom, so the bloom field is smeared
+    # DOWNWARD and used to gate the streak field.
+    #
+    # **The smear must WRAP.** `np.maximum.accumulate(rust, axis=0)` is the
+    # obvious way to write "anything above this has already rusted" and it does
+    # not tile: it starts fresh at row 0, so the top of the image carries no
+    # accumulated rust and the bottom carries all of it. Measured seam 8.72
+    # against a 1.12 interior baseline — a visible band across every pile at the
+    # same height. `np.roll` wraps, and a bounded smear is the better model
+    # anyway: a streak fades with distance below the bloom that fed it.
+    REACH = size // 6
+    smear = rust.copy()
+    for k in range(1, REACH):
+        smear = np.maximum(smear, np.roll(rust, k, axis=0) * (1.0 - k / REACH))
+    run = np.clip(smear * streak * 1.4 - 0.25, 0.0, 1.0)
+
+    height = np.clip(0.35 + 0.45 * rust + 0.20 * pit, 0.0, 1.0).astype(np.float32)
+
+    p = pit[:, :, None]
+    plate = np.array([0.048, 0.050, 0.052]) + p * np.array([0.030, 0.031, 0.032])
+    rusty = np.array([0.115, 0.052, 0.024]) + p * np.array([0.085, 0.040, 0.016])
+    wet = np.array([0.030, 0.022, 0.017]) + p * np.array([0.022, 0.016, 0.012])
+
+    r = rust[:, :, None]
+    w = run[:, :, None]
+    rgb = plate * (1.0 - r) + rusty * r
+    rgb = rgb * (1.0 - w) + wet * w
+    return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
+
+
 def normal_from_height(height, strength=2.0):
     """Tangent-space normal map, +Y green (OpenGL). Wraps, like its source.
 

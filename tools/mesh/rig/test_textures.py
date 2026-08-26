@@ -109,9 +109,39 @@ def test_png_round_trip():
     print("  png ok  %d bytes" % os.path.getsize(p))
 
 
+def test_steel_is_darker_and_ruster_than_timber():
+    """Rust is red-shifted and the plate under it is near-neutral. If R does not
+    lead, this is grey paint, not rust."""
+    alb, _ = textures.weathered_steel(size=256, seed=11)
+    lin = np.where(alb / 255.0 <= 0.04045, (alb / 255.0) / 12.92,
+                   (((alb / 255.0) + 0.055) / 1.055) ** 2.4)
+    m = lin.reshape(-1, 3).mean(axis=0)
+    assert m[0] > m[2] * 1.25, "not rust-shifted: linear mean %s" % m.round(4)
+    assert (m < 0.14).all(), "too bright for wet steel: %s" % m.round(4)
+    # Measured 0.0157 at the time of writing; the bound sits below it so this
+    # is a regression check rather than a restatement of today's number.
+    assert lin.reshape(-1, 3).std(axis=0).mean() > 0.012, \
+        "too flat — the rust is not varying"
+    print("  steel ok  linear mean=%s" % m.round(4))
+
+
+def test_steel_tiles_and_is_deterministic():
+    a1, _ = textures.weathered_steel(size=128, seed=4)
+    a2, _ = textures.weathered_steel(size=128, seed=4)
+    assert hashlib.sha256(a1.tobytes()).digest() == hashlib.sha256(a2.tobytes()).digest()
+    chan = a1[:, :, 0].astype(int)
+    ix = np.abs(np.diff(chan, axis=1)).mean(); iy = np.abs(np.diff(chan, axis=0)).mean()
+    sx = np.abs(chan[:, 0] - chan[:, -1]).mean(); sy = np.abs(chan[0, :] - chan[-1, :]).mean()
+    assert sx <= ix * 2.0 + 1.0, "vertical seam %.2f vs %.2f" % (sx, ix)
+    assert sy <= iy * 2.0 + 1.0, "horizontal seam %.2f vs %.2f" % (sy, iy)
+    print("  steel tiling ok  seam %.2f/%.2f  %.2f/%.2f" % (sx, ix, sy, iy))
+
+
 test_tiles_seamlessly()
 test_is_deterministic()
 test_normal_map_is_a_unit_field()
 test_reads_as_dark_weathered_timber()
 test_png_round_trip()
+test_steel_is_darker_and_ruster_than_timber()
+test_steel_tiles_and_is_deterministic()
 print("textures: all checks pass")
