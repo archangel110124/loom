@@ -1076,10 +1076,14 @@ uv_layer = bm.loops.layers.uv.new("UVMap")
 
 pitch = PLANK_W + GAP
 courses = int(round((2 * HALF_Z) / pitch))
-# Distribute the rounding error into the gap rather than leaving a strip of bare
-# deck at one edge: a deck that stops 40 mm short is a deck with a hole in it.
-pitch = (2 * HALF_Z) / courses
-plank_w = pitch - GAP
+# Courses must be FLUSH at both z edges, the same way boards are flush at both
+# x edges below. `courses` boards have `courses - 1` gaps BETWEEN them, not
+# `courses`: a pitch that reserves a trailing GAP after every course including
+# the last leaves the far edge short by one gap -- 12 mm of open sea at the
+# exact line the collider ends. Distribute the rounding into plank width, which
+# widens each board by about 0.3 mm and puts both edges on the boundary.
+plank_w = (2 * HALF_Z - (courses - 1) * GAP) / courses
+pitch = plank_w + GAP
 
 
 def plank(z0, x0, x1, sink, uv_v0):
