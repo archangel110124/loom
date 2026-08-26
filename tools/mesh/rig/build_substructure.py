@@ -172,15 +172,32 @@ assert bi["lo"][1] + PILE_CENTRE > 0.166, \
     "bracing reaches world y %.3f, at or below the berth's 0.166 m significant " \
     "wave height" % (bi["lo"][1] + PILE_CENTRE)
 # And inboard of the pile faces, so it can never be the thing a swimmer meets.
-# **Tolerance is BRACE_R, not 1e-6.** The north/south braces run along z at a
-# fixed x=px, so their own circular cross-section — perpendicular to their
-# axis — bulges +-BRACE_R in x around px, same as any round tube measured
-# off-axis. Measured x -10.575..10.575 against PILE_X's -10.5..10.5: exactly
-# BRACE_R=0.075 over, on a build with correct geometry, not a bug in it. The
-# bound that means what the comment says is against the pile's own OUTER
-# face (PILE_X +- PILE_R = 0.35), and this brace bulge of 0.075 sits well
-# inside that with room to spare.
-assert bi["lo"][0] >= min(PILE_X) - BRACE_R - 1e-6 and bi["hi"][0] <= max(PILE_X) + BRACE_R + 1e-6, \
+# **Tolerance is PILE_R, not BRACE_R, and not the 1e-6 this started as.**
+# A pile face sits PILE_R=0.35 out from the pile's own centre, so "inboard of
+# the pile faces" means within PILE_X +- PILE_R — the check has to name that
+# quantity, not the bracing's.
+#
+# The 1e-6 version failed on the very first correct build: the north/south
+# braces (`for px in PILE_X: tube(...)`) run along z at a fixed x=px, and
+# `tube()`'s circular cross-section, perpendicular to its own axis, bulges
+# +-BRACE_R in x around px — the same way any round tube's footprint exceeds
+# its centreline off-axis. Measured x -10.575..10.575 against PILE_X's
+# -10.5..10.5: exactly BRACE_R=0.075 over.
+#
+# **The first fix, widening the tolerance to BRACE_R, was a tautology and
+# wrong.** A z-running tube of radius BRACE_R bulges to exactly px +- BRACE_R
+# — that IS the bulge, so a bound of px +- BRACE_R can never fail no matter
+# what BRACE_R is. A tolerance that scales with the exact quantity it is
+# supposed to be bounding is not a tolerance, it is the check disabling
+# itself, and it is worth naming as a trap for that reason: it reads as a
+# reasonable-looking fix and it still passed the assertion right below it.
+# Today's geometry (BRACE_R=0.075 << PILE_R=0.35) happens to satisfy the
+# correct bound too, so nothing shipped was ever actually wrong — but a
+# heavier rig thickening the bracing toward PILE_R would put it past the pile
+# faces into swimmer-reachable space with a BRACE_R-tolerant guard still
+# green. Fault-injected below: BRACE_R=0.5 fires this assertion; BRACE_R=0.075
+# does not.
+assert bi["lo"][0] >= min(PILE_X) - PILE_R - 1e-6 and bi["hi"][0] <= max(PILE_X) + PILE_R + 1e-6, \
     "bracing x %.4f..%.4f escapes the pile line" % (bi["lo"][0], bi["hi"][0])
 
 assert pi["tris"] + bi["tris"] <= 8000, \

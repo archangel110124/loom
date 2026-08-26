@@ -132,6 +132,36 @@ A box that circumscribes a cylinder is larger at the corners by
 `r(√2 − 1)` = 41% of the radius — 0.145 m on a piling. That is only harmless if
 nothing reaches it.
 
+**Measured on the piling swap itself, under two approaches, and they do not
+agree.** Task 3b drove a probe (`--hold move_x=-1`, 600 ticks) straight into a
+pile along a single cardinal axis, aimed square at the face: primitives and
+the new box-collider mesh stop within about a micron of each other. That is
+not evidence the shapes behave alike — it is a property of the axis. A box's
+half-width along a cardinal direction equals the circumscribed cylinder's
+radius exactly, so a straight-on hit was always going to land near-exact; the
+corner where the two shapes actually differ is untouched by a cardinal path by
+construction.
+
+Driven diagonally instead (`move_x` and `move_z` held together, sustained the
+same 600 ticks), the two shapes' paths diverge cumulatively rather than
+settling once at contact:
+
+| approach | primitives, final (x, z) | mesh, final (x, z) | divergence |
+| --- | --- | --- | --- |
+| cardinal, `move_x` only | -9.7809 | -9.7809 | ~1 µm |
+| diagonal, `move_x` + `move_z` | (-42.268, -38.287) | (-44.437, -38.208) | **~2.17 m** |
+
+A no-collider control run the same diagonal path to (-46.0, -41.0), confirming
+both the primitive and the mesh runs were genuinely obstructed rather than
+sliding past untouched. 2.17 m is **fifteen times** the static 0.145 m corner
+gap above — the box slides along a flat face while the cylinder slides along a
+curve, so the two paths keep separating instead of offsetting once at first
+contact and then tracking together. **Say this plainly rather than let the
+cardinal number stand for the whole claim**: the piling swap is proven
+harmless along the one axis it was measured on, not in general, and a reader
+who quotes only 0.145 m here would be quoting the case that happens not to
+apply to how this rig is actually approached.
+
 ### Measured, not argued
 
 The table below is **case 1**, which is the case it was taken in and the only
