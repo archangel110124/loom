@@ -1057,6 +1057,7 @@ DECK_BOTTOM = 1.000               # the primitive's underside
 PLANK_W = 0.200                   # across the deck, in Z
 GAP = 0.012                       # a gap you can see the sea through
 CUP = 0.008                       # centre dips this far below the edges
+MIN_BOARD = 0.30                  # narrowest legal board width
 SPAN = 3                          # segments across a plank's width -> the cup
 SEED = 7
 TEX_SIZE = 2048
@@ -1137,22 +1138,60 @@ def rand():
     return rng_state / 0x7FFFFFFF
 
 
+# The x-spans actually emitted, per course, for the coverage check at the foot
+# of this file. Collected as boards are made rather than re-parsed out of the
+# OBJ, because the question is what the generator decided, not what survived.
+course_spans = [[] for _ in range(courses)]
+
 for c in range(courses):
     z0 = -HALF_Z + c * pitch
     # Butt joints: 3 to 5 boards per course, staggered course to course so the
     # joints never line up. A deck whose joints line up reads as a texture.
     n = 3 + int(rand() * 3)
     cuts = sorted(-HALF_X + (2 * HALF_X) * rand() for _ in range(n - 1))
-    edges = [-HALF_X] + cuts + [HALF_X]
+    # **Reject the CUT, do not drop the BOARD.** Dropping a sliver board leaves
+    # an actual hole in the deck — measured at 11 of them across the field, some
+    # reaching the x edge — and `verify_obj` cannot see it, because its bounds
+    # check is global min/max and other courses still reach the edges. Keeping
+    # only cuts that clear MIN_BOARD on both sides makes every resulting span
+    # legal by construction, so nothing is ever dropped. Board count is
+    # unchanged either way: dropping a board removes one, and rejecting a cut
+    # merges two spans into one, which also removes one.
+    kept = []
+    last = -HALF_X
+    for x in cuts:
+        if x - last >= MIN_BOARD and HALF_X - x >= MIN_BOARD:
+            kept.append(x)
+            last = x
+    edges = [-HALF_X] + kept + [HALF_X]
     for k in range(len(edges) - 1):
         x0, x1 = edges[k] + (0.006 if k else 0.0), edges[k + 1]
-        if x1 - x0 < 0.30:
-            continue
         # Each board sits a little differently: a nail lifting, a board proud
         # of its neighbour is FORBIDDEN (it would exceed DECK_TOP), so the
         # variation is one-sided — boards sink, never rise.
         sink = rand() * 0.004
         plank(z0, x0, x1, sink, (c % 4) * 0.25)
+        course_spans[c].append((x0, x1))
+
+# --- coverage self-check: a dropped sliver board is a hole in the deck ----
+# `verify_obj`'s bounds check is global min/max — other courses still reach the
+# edges, so a per-course gap is invisible to it and real in the asset. This
+# walks the boards as emitted (not a re-parse of the OBJ) and asserts each
+# course is one continuous run from -HALF_X to +HALF_X, joints only.
+BUTT = 0.006 + 1e-4  # the internal board-start offset, plus float slack
+for c, spans in enumerate(course_spans):
+    z0 = -HALF_Z + c * pitch
+    spans = sorted(spans)
+    assert spans, "course z=%.4f emitted no boards at all" % z0
+    assert abs(spans[0][0] + HALF_X) < 1e-6, \
+        "course z=%.4f: hole x=%.4f..%.4f at the x=-12 edge" % (z0, -HALF_X, spans[0][0])
+    assert abs(spans[-1][1] - HALF_X) < 1e-6, \
+        "course z=%.4f: hole x=%.4f..%.4f at the x=+12 edge" % (z0, spans[-1][1], HALF_X)
+    for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
+        gap = b0 - a1
+        assert gap <= BUTT, \
+            "course z=%.4f: hole x=%.4f..%.4f (%.1f cm) between boards" \
+            % (z0, a1, b0, gap * 100)
 
 bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
 bm.to_mesh(mesh)
