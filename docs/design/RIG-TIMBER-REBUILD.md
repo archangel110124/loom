@@ -101,6 +101,37 @@ no collider whatsoever** — verified, the character falls straight through to
 those hang off a dynamic body and go down the pending arm; re-pointed at the
 static rig they silently do nothing.
 
+#### The fifth case: the mesh alias chooses the collider's SHAPE
+
+`play.rs:588-591` picks the collider shape by **string comparison on the mesh
+alias** — `"sphere"` gets a ball, `"capsule"` and `"cylinder"` get a round
+collider, everything else gets a cuboid. An imported OBJ is never called
+`"cylinder"`, so **replacing a cylinder primitive with a mesh silently turns a
+round collider into a box.** No bounds check sees it: the extents are right and
+the shape is wrong.
+
+Twelve rig nodes are `cylinder` primitives and every one of them is affected:
+
+| node | `deeper_demo.loom` | radius / half-height |
+| --- | --- | --- |
+| `PilingNW` / `NC` / `NE` / `SW` / `SC` / `SE` | `:1063`–`:1125` | 0.35 / 1.20 |
+| `BollardWest`, `BollardEast` | `:1364`, `:1377` | 0.22 / 0.30 |
+| `Mast` | `:1506` | 0.18 / 2.20 |
+| `BaitBarrel` | `:1581` | 0.45 / 0.45 |
+| `LineSpool` | `:1593` | 0.40 / 0.30 |
+| `Thermos` | `:1618` | 0.13 / 0.25 |
+
+There is no `CylinderCollider` component to author — `BoxCollider` is the only
+collider component that exists (`play.rs` carries a `ponytail:` note that a
+`SphereCollider` is the upgrade path when something needs to differ from its
+mesh). So for each of these the choice is: accept a circumscribing box and
+**prove by measurement that nothing collides differently**, or leave the node a
+primitive.
+
+A box that circumscribes a cylinder is larger at the corners by
+`r(√2 − 1)` = 41% of the radius — 0.145 m on a piling. That is only harmless if
+nothing reaches it.
+
 ### Measured, not argued
 
 The table below is **case 1**, which is the case it was taken in and the only
