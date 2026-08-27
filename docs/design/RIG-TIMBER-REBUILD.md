@@ -195,6 +195,53 @@ the false "identical" above. `assets/scripts/deeper_player.rhai` is the
 movement script already in this repository and the one to attach when
 building a probe scene from scratch.
 
+
+**A second, later measurement (Task 3, the bollards) found the round
+collider can fail in the OTHER direction too — held too long against a wall
+it should hold, rather than merely differing at a corner it should never
+have reached.** Same method as above: a probe driven straight into a
+`cylinder` primitive along one cardinal axis, `deeper_player.rhai` attached,
+a no-collider control confirming the probe was genuinely obstructed.
+`BollardEast`, approached from the east, 600 ticks:
+
+| config | through-walk, final z | into-walk, final x |
+| --- | --- | --- |
+| primitives | 41.833 | -35.089 (leaked through) |
+| mesh + `BoxCollider` | 41.833 | -2.812 (held) |
+| no collider | 41.833 | -41.833 (freefall control) |
+
+The through-walk is identical across all three, so Case 5's own hazard — a
+box closing the boarding gap — did not occur. But on the into-walk the round
+collider held correctly to within 6 mm of the box for the first ~120 ticks
+and then **leaked**: the capsule crept past it, smoothly accelerating to full
+walking speed, and was nearly clear of both bollards by 600 ticks. The box
+collider showed no such leak through 1200 ticks of the same hold.
+
+**This is a knife-edge instability in capsule-vs-round contact resolution at
+near-exact head-on approach, not a stable, reproducible defect — say both,
+because either half alone is a false report.** An independent re-measurement
+built its own scenes from scratch and got a stable round-collider hold
+through 2000 ticks at exact alignment, agreeing with the box to under
+0.2 mm — the opposite of the leak above. Sweeping the floor slab's
+half-height elsewhere in the scene (a value with no physical bearing on the
+bollard contact) flipped the outcome: 6 of 11 tested thicknesses leaked, 5
+held, no pattern tied to the thickness itself. A 1 mm lateral offset of the
+probe triggered the leak every time. The box collider was insensitive to
+every one of these perturbations.
+
+**So: the round collider is the less reliable of the two under sustained
+cardinal contact, and a mesh's box replacement is MORE reliable here — the
+opposite of what this section's own `r(√2 − 1)` framing would lead a reader
+to expect**, because that framing is about a box being too big, not about a
+cylinder being unable to hold a line it is already resting against. **Anyone
+measuring this must perturb the scene — a different floor thickness, a
+sub-millimetre offset on the probe — before trusting a "holds" result**; an
+exact-aligned probe can sit stable for 2000 ticks and still be balanced on
+the edge of the same failure. The six piles, `BaitBarrel`, `LineSpool` and
+`Thermos` are still `cylinder` primitives awaiting conversion in a later
+phase, and whoever converts them inherits this: a bare cylinder is not
+provably the safer choice just because it is round.
+
 #### Case 6 — one mesh is one node is one collider, so N primitives need N nodes
 
 **The zone is a material. It is not a mesh, and it is certainly not a node.**
