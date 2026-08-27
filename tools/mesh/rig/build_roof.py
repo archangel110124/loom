@@ -130,6 +130,20 @@ assert lo[1] >= -HALF_Y - 1e-4 and hi[1] <= HALF_Y + 1e-4, \
     "roof y spans %.4f..%.4f, outside the primitive's +/-%.3f — the fold amplitude " \
     "AMP=%.3f is too large for HALF_Y" % (lo[1], hi[1], HALF_Y, AMP)
 
+# **First, that there ARE holes.** Both checks below are parameterised by
+# `HOLES`: the count check derives both sides of its equality from it, and the
+# geometric check loops over it. With `HOLES = []` the first reads
+# "165 of 165 cells present, 0 dropped for holes", the second loops zero times
+# and reports "0 holes confirmed geometrically absent", and the build passes
+# clean -- a roof with no holes at all, waved through by two checks written to
+# prove the holes are right. Nothing downstream of here can see the difference,
+# so the non-emptiness has to be asserted before either of them runs.
+assert HOLES, \
+    "HOLES is empty -- a roof with no holes is not the roof the spec asked " \
+    "for, and every check below it is parameterised by HOLES and therefore " \
+    "vacuous: the count check compares %d cells against %d cells and the " \
+    "geometric check loops zero times." % (periods * ZSTEPS, periods * ZSTEPS)
+
 # The holes must actually be holes, and EXACTLY the ones asked for. Cells are
 # indexed, so this is an equality rather than an inequality — an inequality
 # would pass if a bug dropped the wrong cells, or twice as many.
