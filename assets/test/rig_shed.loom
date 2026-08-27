@@ -1,0 +1,270 @@
+# The shed end, on its own camera.
+#
+# `rig_structure.loom`'s own `GOLDEN` row sits low off the north-west corner
+# so the deck, bulwark, piles and seam all read in one frame (see that
+# scene's header) — and from there the shed is a sliver at the right edge of
+# a 320x200 frame, the roof's corrugation is a handful of pixels, and the
+# mast and bollards do not clear visibility at all. `loom render` draws
+# exactly one camera per scene (`World::active_camera` takes the first
+# `Camera` node and there is no flag to name another), so getting a second
+# view of the same rig means a second scene file, the same choice
+# `rig_deck.loom` already made for the deck field alone rather than
+# reframing this file. Neither `rig_deck` nor `rig_structure` has a
+# committed reference yet (`tests/references/` has no `rig_*.png`), but
+# repointing `rig_structure`'s own camera would still conflate two different
+# proofs on one row the moment one is blessed — cheaper to keep them apart
+# from the start.
+#
+# It carries `Deck` for footing — a shed with no ground under it in the
+# frame reads as a diorama piece, not as part of the rig — plus the five
+# nodes Task 4 added: `Shed`, `ShedRoof`, `Mast`, `BollardWest`,
+# `BollardEast`. Positions, half-extents and materials are copied verbatim
+# from `rig_structure.loom`, which copied them from the generators' own
+# stdout — see that scene's header for the table. Piles, seam and bulwark
+# are left out: nothing about them is new here, and `rig_structure` already
+# proves they load.
+#
+# **The shed's north face sits at world z = 2.600** (center z 4.60 minus its
+# 2.000 z half-extent) — `Mirror`/`MirrorFrame`'s mount in `deeper_demo.loom`.
+# Neither is built or added to this scene; nothing on the shed or its roof
+# may ever project past that plane. Same note as `rig_structure.loom`'s
+# header, repeated here because this is the file whoever touches the shed
+# next is most likely to have open.
+#
+# **Camera** stands on the deck, inboard of the bulwark rail rather than
+# outside it — put outside, at deck height, the rail line sits between the
+# lens and the shed's own base and cuts the sill off in every framing that
+# was tried. From inboard, at roughly cap height, looking south-east across
+# the mast toward the shed's west gable and roof, nothing between the camera
+# and the shed occludes it, and the shed's board siding, its roof's
+# corrugation and its rust streaking are all readable at 320x200. See the
+# task report for the closer shot and what it settles about the rot texture.
+
+[scene]
+format = 1
+id = "a7b8a1fe-d059-496d-bc58-209fe6dee629"
+
+[[asset]]
+key = "deck_timber"
+id = "67fb25df-f9d5-4b06-b4ab-b5b5b19bf77d"
+path = "../meshes/rig_deck_timber.obj"
+
+[[asset]]
+key = "deck_albedo"
+id = "e839767e-df24-45dd-b80b-568660cb585a"
+path = "../textures/rig_deck_timber_albedo.png"
+
+[[asset]]
+key = "deck_normal"
+id = "e913df39-c5e8-4bb5-929c-e5b1a1e77a6a"
+path = "../textures/rig_deck_timber_normal.png"
+
+[[asset]]
+key = "shed_mesh"
+id = "f01fee98-a5ff-4a01-9def-542cc2860778"
+path = "../meshes/rig_shed.obj"
+
+[[asset]]
+key = "shed_albedo"
+id = "cdc82bd8-21f6-4543-ab9f-2c337b37eab3"
+path = "../textures/rig_shed_albedo.png"
+
+[[asset]]
+key = "shed_normal"
+id = "c9c67c86-2de7-44c8-b3de-6ba3c3244d7a"
+path = "../textures/rig_shed_normal.png"
+
+[[asset]]
+key = "roof_mesh"
+id = "160bcdc1-459d-4fab-acb2-0df36e6dc609"
+path = "../meshes/rig_shed_roof.obj"
+
+[[asset]]
+key = "roof_albedo"
+id = "c0251648-6429-4437-b02f-2f54db5386b1"
+path = "../textures/rig_roof_albedo.png"
+
+[[asset]]
+key = "roof_normal"
+id = "66d7757c-6b60-414a-b55a-442ccf6af3e7"
+path = "../textures/rig_roof_normal.png"
+
+[[asset]]
+key = "mast_mesh"
+id = "8f40a9a8-70ab-4dd3-8376-dc888ab0d044"
+path = "../meshes/rig_mast.obj"
+
+[[asset]]
+key = "bollard_mesh"
+id = "bc3e2c72-c488-4de4-9c66-9d48511ea061"
+path = "../meshes/rig_bollard.obj"
+
+[[asset]]
+key = "hardware_albedo"
+id = "5cbeb42a-bed4-49cc-817c-6b1d9fd0ca54"
+path = "../textures/rig_hardware_albedo.png"
+
+[[asset]]
+key = "hardware_normal"
+id = "1abe09c9-ef60-42ff-9925-149e0a858e19"
+path = "../textures/rig_hardware_normal.png"
+
+[[node]]
+name = "Rig"
+
+  # The demo's own environment, so this row's picture is comparable to the
+  # scene it stands in for. `deeper_demo.loom:668-676`.
+  [node.components.Environment]
+  sun_direction = [0.42, 0.46, -0.78]
+  sun_strength = 1.25
+  sun_color = [1.0, 0.93, 0.80]
+  ambient = 0.45
+  sky_zenith = [0.16, 0.30, 0.52]
+  sky_horizon = [0.74, 0.72, 0.66]
+  fog_density = 0.0028
+  fog_falloff = 0.05
+
+  [node.components.WaterBody]
+  surface_height = 0.0
+  fetch = 15000.0
+
+  [node.components.Wind]
+  speed = 3.0
+  direction_degrees = 20.0
+
+[[node]]
+name = "Deck"
+parent = "Rig"
+
+  [node.transform]
+  pos = [0.0, 1.20, 0.0]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "deck_timber" }
+
+  [node.components.BoxCollider]
+  half_extents = [12.0, 0.20, 7.0]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "deck_albedo" }
+  normal_map = { asset = "deck_normal" }
+  roughness = 0.92
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "Shed"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-4.0, 2.60, 4.60]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "shed_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [4.5, 1.20, 2.00]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "shed_albedo" }
+  normal_map = { asset = "shed_normal" }
+  roughness = 0.88
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "ShedRoof"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-4.0, 3.95, 4.60]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "roof_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [4.9, 0.15, 2.40]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "roof_albedo" }
+  normal_map = { asset = "roof_normal" }
+  roughness = 0.75
+  metallic = 0.4
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "Mast"
+parent = "Rig"
+
+  [node.transform]
+  pos = [8.0, 3.60, 3.0]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mast_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.18, 2.20, 0.18]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "hardware_albedo" }
+  normal_map = { asset = "hardware_normal" }
+  roughness = 0.80
+  metallic = 0.5
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "BollardWest"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-6.60, 1.70, -6.40]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "bollard_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.22, 0.30, 0.22]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "hardware_albedo" }
+  normal_map = { asset = "hardware_normal" }
+  roughness = 0.70
+  metallic = 0.6
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "BollardEast"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-3.40, 1.70, -6.40]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "bollard_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.22, 0.30, 0.22]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "hardware_albedo" }
+  normal_map = { asset = "hardware_normal" }
+  roughness = 0.70
+  metallic = 0.6
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "Camera"
+parent = "Rig"
+
+  [node.transform]
+  pos = [6.8, 3.70, -4.2]
+  rot_euler = [-3.88, 125.49, 0.0]
+
+  [node.components.Camera]
+  fov_y_degrees = 52.0

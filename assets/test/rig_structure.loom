@@ -77,6 +77,29 @@
 # surface, the bulwark above it, the piles below, and the seam where they
 # cross the water. See the render notes in the task report for what it looks
 # like at this framing and at eye height.
+#
+# **Task 4 adds the shed, its corrugated roof, the mast, and both bollards** —
+# five nodes, textured, colliders transcribed from the primitives they
+# replace. Positions and half-extents are copied verbatim from
+# `build_shed.py`, `build_roof.py` and `build_hardware.py`'s own stdout,
+# rerun immediately before authoring this file:
+#
+#     shed:     node pos=(-4.00, 2.60,  4.60) half_extents=(4.500, 1.200, 2.000)
+#     roof:     node pos=(-4.00, 3.95,  4.60) half_extents=(4.900, 0.150, 2.400)
+#     mast:     node pos=( 8.00, 3.60,  3.00) half_extents=(0.180, 2.200, 0.180)
+#     bollard:  node pos=(-6.60, 1.70, -6.40) half_extents=(0.220, 0.300, 0.220)
+#     bollard:  node pos=(-3.40, 1.70, -6.40) half_extents=(0.220, 0.300, 0.220)
+#
+# `BollardWest` and `BollardEast` are one mesh, two nodes (spec §1 Case 6) —
+# the same `[[asset]]` referenced twice, not duplicated.
+#
+# **The shed's north face sits at world z = 2.600** (center z 4.60 minus its
+# 2.000 z half-extent). That face is `Mirror`/`MirrorFrame`'s mount in
+# `deeper_demo.loom`. Neither is rebuilt or added to this scene — spec §3
+# leaves that zone untouched, and the frame guards a stack the demo records
+# as having cost an hour to get right — but nothing on the shed or its roof
+# may ever project past that plane, in this scene or a later one, or the
+# frame's flush mount breaks the next time someone touches it.
 
 [scene]
 format = 1
@@ -196,6 +219,56 @@ path = "../meshes/rig_cap_eastnorth.obj"
 key = "cap_eastsouth"
 id = "4f8257ff-07e2-4ed5-aed1-de9805030ebb"
 path = "../meshes/rig_cap_eastsouth.obj"
+
+[[asset]]
+key = "shed_mesh"
+id = "f8b4afb8-c7d0-4dde-9b89-7325e20bec13"
+path = "../meshes/rig_shed.obj"
+
+[[asset]]
+key = "shed_albedo"
+id = "5da32375-6484-42a4-bd4b-a224766facc2"
+path = "../textures/rig_shed_albedo.png"
+
+[[asset]]
+key = "shed_normal"
+id = "334a00e9-2fbd-4528-bc77-d13b8c359fe4"
+path = "../textures/rig_shed_normal.png"
+
+[[asset]]
+key = "roof_mesh"
+id = "4a1a35f0-a999-4ec8-b77c-a7ce7ae0b7a2"
+path = "../meshes/rig_shed_roof.obj"
+
+[[asset]]
+key = "roof_albedo"
+id = "98b1d065-1ad5-45f4-a86f-c41d8edea1d6"
+path = "../textures/rig_roof_albedo.png"
+
+[[asset]]
+key = "roof_normal"
+id = "baaa25f9-1b40-4183-b0b0-77e12e4578e8"
+path = "../textures/rig_roof_normal.png"
+
+[[asset]]
+key = "mast_mesh"
+id = "a613272c-be93-492d-bc65-ffd012b55513"
+path = "../meshes/rig_mast.obj"
+
+[[asset]]
+key = "bollard_mesh"
+id = "c6bdcfcd-406f-468d-bd13-3d46297da5e1"
+path = "../meshes/rig_bollard.obj"
+
+[[asset]]
+key = "hardware_albedo"
+id = "d5790385-6cae-44ce-91ff-d5de3598d35b"
+path = "../textures/rig_hardware_albedo.png"
+
+[[asset]]
+key = "hardware_normal"
+id = "a59dd605-2977-4bc3-9829-3c874733595d"
+path = "../textures/rig_hardware_normal.png"
 
 [[node]]
 name = "Rig"
@@ -770,6 +843,111 @@ parent = "Rig"
   albedo = [0.34, 0.26, 0.21]
   roughness = 0.7
   metallic = 0.4
+
+[[node]]
+name = "Shed"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-4.0, 2.60, 4.60]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "shed_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [4.5, 1.20, 2.00]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "shed_albedo" }
+  normal_map = { asset = "shed_normal" }
+  roughness = 0.88
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "ShedRoof"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-4.0, 3.95, 4.60]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "roof_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [4.9, 0.15, 2.40]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "roof_albedo" }
+  normal_map = { asset = "roof_normal" }
+  roughness = 0.75
+  metallic = 0.4
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "Mast"
+parent = "Rig"
+
+  [node.transform]
+  pos = [8.0, 3.60, 3.0]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "mast_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.18, 2.20, 0.18]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "hardware_albedo" }
+  normal_map = { asset = "hardware_normal" }
+  roughness = 0.80
+  metallic = 0.5
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "BollardWest"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-6.60, 1.70, -6.40]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "bollard_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.22, 0.30, 0.22]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "hardware_albedo" }
+  normal_map = { asset = "hardware_normal" }
+  roughness = 0.70
+  metallic = 0.6
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "BollardEast"
+parent = "Rig"
+
+  [node.transform]
+  pos = [-3.40, 1.70, -6.40]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "bollard_mesh" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.22, 0.30, 0.22]
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "hardware_albedo" }
+  normal_map = { asset = "hardware_normal" }
+  roughness = 0.70
+  metallic = 0.6
+  uv_scale = [1.0, 1.0]
 
 [[node]]
 name = "Drop"

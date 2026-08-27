@@ -358,12 +358,13 @@ const SCENES: [&str; 74] = [
     // If this row ever renders a flat grey plate, the OBJ did not load and the
     // renderer substituted a unit box — which looks exactly like success.
     "assets/test/rig_deck.loom",
-    // The whole rig, assembled: deck, six piles, the tide seam and all
-    // fourteen bulwark rail/cap runs in one 30-node scene — 27 of them
-    // renderable, none of them a primitive. If any one of the 17 meshes or 6
-    // textures this scene references fails to load, `loom validate`'s
-    // `assets` array stops being empty and this row is where that first shows
-    // up outside `rig_deck`'s single mesh.
+    // The whole rig, assembled: deck, six piles, the tide seam, all fourteen
+    // bulwark rail/cap runs, the shed and its roof, the mast, and both
+    // bollards, in one 35-node scene — 32 of them renderable, none of them a
+    // primitive. If any one of the 21 meshes or 12 textures this scene
+    // references fails to load, `loom validate`'s `assets` array stops being
+    // empty and this row is where that first shows up outside `rig_deck`'s
+    // single mesh.
     "assets/test/rig_structure.loom",
 ];
 
@@ -418,7 +419,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 58] = [
+const GOLDEN: [(&str, &str, &[&str]); 59] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -1111,6 +1112,31 @@ const GOLDEN: [(&str, &str, &[&str]); 58] = [
     // `validate`), not the substructure's normal-map path — that would need a
     // closer frame or a dedicated row.
     ("rig_structure", "assets/test/rig_structure.loom", &["--sim", "0"]),
+    // **The only picture of the shed, its roof, the mast and both
+    // bollards.** `rig_structure`'s camera is off the north-west corner and
+    // the shed is a sliver at the frame's edge there — see that row's own
+    // comment. `loom render` draws exactly one camera per scene
+    // (`World::active_camera` takes the first `Camera` node and there is no
+    // flag to name another), so a second view means a second scene file —
+    // the same choice `rig_deck.loom` already made rather than reframing
+    // `rig_structure.loom` for one zone. This one
+    // (`assets/test/rig_shed.loom`) stands on the deck and looks across the
+    // mast at the shed's west gable and roof.
+    //
+    // Fault-injected two ways, both at this size against this tolerance
+    // (0.001 fraction / 72 worst):
+    //
+    //     Shed node deleted            fraction 0.0959   worst 207   (the whole shed drops out)
+    //     ShedRoof's albedo_map deleted  fraction 0.0152   worst 188   (roof goes flat grey)
+    //
+    // Both move far past tolerance, so this row is not blind to either the
+    // shed's presence or the roof's texture path. It says nothing about the
+    // mast or the bollards individually — they are in frame but small at
+    // this size, and `--fraction`/`--worst` on a whole-PNG compare cannot
+    // attribute a difference to one corner of it; a missing mast or bollard
+    // mesh would still trip `validate`'s `assets` array, which is the gate
+    // that actually covers them.
+    ("rig_shed", "assets/test/rig_shed.loom", &[]),
 ];
 
 /// Every reference renders at this size.
