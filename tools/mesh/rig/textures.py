@@ -353,6 +353,42 @@ def corrugated_metal(size=1024, seed=19):
     return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
 
 
+def painted_iron(size=1024, seed=23):
+    """-> (albedo uint8 HxWx3, height float32 HxW in 0..1).
+
+    Bollards and a mast: cast iron that was painted once. The paint survives in
+    the hollows and has been rubbed off every edge and every place a rope has
+    passed, which is most of a bollard.
+
+    Isotropic on purpose -- unlike the timber and unlike the piles' vertical
+    streaking, wear on a bollard has no grain and no gravity direction. It
+    follows the rope, and the rope goes everywhere.
+
+    LINEAR reflectance in, sRGB bytes out.
+    """
+    rng = np.random.default_rng(seed)
+
+    wear = _fbm(size, rng, octaves=5, base=7)
+    wear = (wear - wear.min()) / (wear.max() - wear.min())
+    pit = _fbm(size, rng, octaves=6, base=30)
+    pit = (pit - pit.min()) / (pit.max() - pit.min())
+    bare = np.clip((wear - 0.45) / 0.28, 0.0, 1.0)
+    rust = np.clip((pit - 0.68) / 0.18, 0.0, 1.0) * bare
+
+    height = np.clip(0.45 + 0.25 * pit - 0.20 * bare, 0.0, 1.0).astype(np.float32)
+
+    p = pit[:, :, None]
+    paint = np.array([0.052, 0.048, 0.044]) + p * np.array([0.030, 0.028, 0.026])
+    iron = np.array([0.070, 0.068, 0.070]) + p * np.array([0.040, 0.039, 0.040])
+    rusty = np.array([0.098, 0.050, 0.028]) + p * np.array([0.050, 0.026, 0.014])
+
+    b = bare[:, :, None]
+    r = rust[:, :, None]
+    rgb = paint * (1.0 - b) + iron * b
+    rgb = rgb * (1.0 - r) + rusty * r
+    return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
+
+
 def normal_from_height(height, strength=0.008):
     """Tangent-space normal map, +Y green (OpenGL). Wraps, like its source.
 

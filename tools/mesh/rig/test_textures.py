@@ -271,8 +271,22 @@ def test_corrugated_metal_is_cold_and_streaked():
 test_png_round_trip()
 test_steel_is_darker_and_ruster_than_timber()
 test_steel_tiles_and_is_deterministic()
+def test_painted_iron_is_dark_and_worn():
+    """Bollards and a mast: iron under paint that has mostly gone. Darker than
+    the roof, less rust-shifted than the piles — it is painted, not bare."""
+    alb, _ = textures.painted_iron(size=256, seed=23)
+    lin = np.where(alb / 255.0 <= 0.04045, (alb / 255.0) / 12.92,
+                   (((alb / 255.0) + 0.055) / 1.055) ** 2.4)
+    m = lin.reshape(-1, 3).mean(axis=0)
+    assert (m < 0.11).all(), "too bright for worn ironwork: %s" % m.round(4)
+    assert (m > 0.03).all(), "too dark: %s" % m.round(4)
+    assert lin.reshape(-1, 3).std(axis=0).mean() > 0.010, "too flat"
+    print("  iron ok  linear mean=%s" % m.round(4))
+
+
 test_tidal_growth_is_green_black_and_varied()
 test_boards_grain_runs_the_short_way()
 test_boards_are_timber_and_tile()
 test_corrugated_metal_is_cold_and_streaked()
+test_painted_iron_is_dark_and_worn()
 print("textures: all checks pass")
