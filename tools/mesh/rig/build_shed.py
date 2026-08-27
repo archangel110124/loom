@@ -83,12 +83,17 @@ def slab(x0, x1, y0, y1, z0, z1, uv_u0):
 
 # Each wall is a run of vertical boards, recessed, with a batten over every
 # joint standing at the wall plane. `outward` is the local axis the wall faces.
+# Recess is carried PER WALL (not read from the module constant inside
+# `wall()`) so a fault injection can isolate one wall -- e.g. flip only the
+# north row's sign -- instead of inverting every wall's construction at once,
+# which is what module-level RECESS did and why the north-face check was
+# never actually seen to fire the first time this was tried.
 WALLS = [
-    # (fixed axis, plane, from, to, outward sign)
-    ("z", -HALF_Z, -HALF_X, HALF_X, -1),   # north -- THE MIRROR FACE
-    ("z",  HALF_Z, -HALF_X, HALF_X, +1),   # south
-    ("x", -HALF_X, -HALF_Z, HALF_Z, -1),   # west
-    ("x",  HALF_X, -HALF_Z, HALF_Z, +1),   # east -- carries the door
+    # (fixed axis, plane, from, to, outward sign, recess)
+    ("z", -HALF_Z, -HALF_X, HALF_X, -1, RECESS),   # north -- THE MIRROR FACE
+    ("z",  HALF_Z, -HALF_X, HALF_X, +1, RECESS),   # south
+    ("x", -HALF_X, -HALF_Z, HALF_Z, -1, RECESS),   # west
+    ("x",  HALF_X, -HALF_Z, HALF_Z, +1, RECESS),   # east -- carries the door
 ]
 
 rng_state = SEED
@@ -98,13 +103,15 @@ def rand():
     return rng_state / 0x7FFFFFFF
 
 
-def wall(axis, plane, a, b, outward, door=False):
+def wall(axis, plane, a, b, outward, recess, door=False):
     """Boards recessed, battens at the plane. Nothing crosses `plane`."""
     span = b - a
     n = max(1, int(round(span / BOARD_W)))
     w = span / n
     # `inner` is the recessed board face; `plane` is where the batten sits.
-    inner = plane - outward * RECESS
+    # `recess` comes from the WALLS row, not the module constant, so one row
+    # can be inverted in isolation.
+    inner = plane - outward * recess
     for i in range(n):
         p0, p1 = a + i * w, a + (i + 1) * w
         # The door is a gap in the boards of the east wall, centred on the run.
@@ -126,8 +133,8 @@ def wall(axis, plane, a, b, outward, door=False):
                 slab(min(plane, inner), max(plane, inner), y0, HALF_Y, j0, j1, rand())
 
 
-for axis, plane, a, b, outward in WALLS:
-    wall(axis, plane, a, b, outward, door=(axis == "x" and outward > 0))
+for axis, plane, a, b, outward, recess in WALLS:
+    wall(axis, plane, a, b, outward, recess, door=(axis == "x" and outward > 0))
 
 # A flat roof deck so the box is closed and the shed is not hollow from above.
 slab(-HALF_X, HALF_X, HALF_Y - 0.04, HALF_Y, -HALF_Z, HALF_Z, 0.0)
@@ -152,20 +159,27 @@ textures.write_png(os.path.join(TEX_DIR, "rig_shed_normal.png"),
 info = rigkit.verify_obj(OBJ_PATH)
 lo, hi = info["lo"], info["hi"]
 
+# **THE ONE THAT MATTERS, CHECKED FIRST.** Local -HALF_Z is world
+# NORTH_FACE_WORLD = 2.600, and MirrorFrame starts there. A vertex below it in
+# local z is a board through the frame. This runs BEFORE the generic per-axis
+# centring loop below on purpose: a fault that is symmetric across all four
+# walls (e.g. a sign flip applied to every wall's recess at once) trips the
+# generic x-centring check first and this one is never reached, which is
+# exactly what happened the first time this assertion was fault-injected --
+# the build refused, but for the wrong reason, and this specific guard was
+# never actually seen to fire. Running it first makes it the one that fires
+# whenever it is the one that is true, instead of dead code behind a more
+# generic check.
+assert lo[2] >= -HALF_Z - 1e-4, \
+    "a vertex reaches local z=%.5f (world %.5f), north of the shed's face at " \
+    "world %.3f -- MirrorFrame occupies %.3f..%.3f and this punches through it" \
+    % (lo[2], lo[2] + SHED_CENTRE[2], NORTH_FACE_WORLD, 2.570, 2.600)
+
 for ax, name, half in ((0, "x", HALF_X), (1, "y", HALF_Y), (2, "z", HALF_Z)):
     assert abs(lo[ax] + half) < 1e-3 and abs(hi[ax] - half) < 1e-3, \
         "shed %s spans %.4f..%.4f, want %.3f..%.3f -- the mesh is not centred on " \
         "its own origin and its collider cannot be made to match" \
         % (name, lo[ax], hi[ax], -half, half)
-
-# **THE ONE THAT MATTERS.** Local -HALF_Z is world NORTH_FACE_WORLD = 2.600, and
-# MirrorFrame starts there. A vertex below it in local z is a board through the
-# frame. `lo[2]` is already asserted equal to -HALF_Z above; this states WHY, in
-# world terms, so the next person does not relax it as a duplicate.
-assert lo[2] >= -HALF_Z - 1e-4, \
-    "a vertex reaches local z=%.5f (world %.5f), north of the shed's face at " \
-    "world %.3f -- MirrorFrame occupies %.3f..%.3f and this punches through it" \
-    % (lo[2], lo[2] + SHED_CENTRE[2], NORTH_FACE_WORLD, 2.570, 2.600)
 
 assert info["tris"] <= 6000, "over budget: %d tris" % info["tris"]
 print("shed: node pos=(%.2f, %.2f, %.2f) half_extents=(%.3f, %.3f, %.3f)"
