@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 74] = [
+const SCENES: [&str; 75] = [
     // The mood ladder — ADR 0069. In `GOLDEN` too, where the reasoning is.
     "assets/test/mood_deep.loom",
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
@@ -366,6 +366,24 @@ const SCENES: [&str; 74] = [
     // empty and this row is where that first shows up outside `rig_deck`'s
     // single mesh.
     "assets/test/rig_structure.loom",
+    // The shed zone alone, close in: `rig_structure.loom`'s camera sits off
+    // the north-west corner and the shed is a sliver at the frame's edge
+    // there (see that row's comment), so this is the only scene where the
+    // shed's board siding, the roof's corrugation and its two rusted-through
+    // holes sit close enough to camera for a stray Vulkan validation message
+    // about any of them to have somewhere to surface. Same five Task 4 nodes
+    // as `rig_structure.loom` (`Shed`, `ShedRoof`, `Mast`, `BollardWest`,
+    // `BollardEast`) with the same materials, plus `Deck` for footing so the
+    // shed doesn't render as a diorama piece with no ground under it — its
+    // own 8 nodes, 13 assets, fresh UUIDs, no shared file paths with
+    // `rig_structure.loom`'s copies of the same meshes and textures, so a
+    // load failure here is independent evidence rather than a repeat of that
+    // row's. It is also in `GOLDEN` as `rig_shed`: this array's
+    // zero-validation-message render gate and that one's image-diff gate
+    // both watch this scene and neither substitutes for the other —
+    // `rig_structure` carries the establishing view of the whole assembly;
+    // this scene carries both gates for the close view of the shed end.
+    "assets/test/rig_shed.loom",
 ];
 
 /// How many frames a windowed run draws before shutting itself down. Enough to
