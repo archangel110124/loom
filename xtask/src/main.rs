@@ -375,10 +375,15 @@ const SCENES: [&str; 75] = [
     // as `rig_structure.loom` (`Shed`, `ShedRoof`, `Mast`, `BollardWest`,
     // `BollardEast`) with the same materials, plus `Deck` for footing so the
     // shed doesn't render as a diorama piece with no ground under it — its
-    // own 8 nodes, 13 assets, fresh UUIDs, no shared file paths with
-    // `rig_structure.loom`'s copies of the same meshes and textures, so a
-    // load failure here is independent evidence rather than a repeat of that
-    // row's. It is also in `GOLDEN` as `rig_shed`: this array's
+    // own 8 nodes and 13 assets, with fresh UUIDs. Those UUIDs are the ONLY
+    // thing not shared: all 13 `path` values are byte-identical to
+    // `rig_structure.loom`'s, so this row is not independent evidence about
+    // asset loading and must not be described as such — a corrupt
+    // `rig_shed.obj` fails both rows the same way, for the same reason. What
+    // it adds is a second CAMERA on the same files, close enough in that a
+    // stray Vulkan validation message about the shed's siding or the roof's
+    // holes has somewhere to surface. It is also in `GOLDEN` as `rig_shed`:
+    // this array's
     // zero-validation-message render gate and that one's image-diff gate
     // both watch this scene and neither substitutes for the other —
     // `rig_structure` carries the establishing view of the whole assembly;
@@ -1130,16 +1135,25 @@ const GOLDEN: [(&str, &str, &[&str]); 59] = [
     // `validate`), not the substructure's normal-map path — that would need a
     // closer frame or a dedicated row.
     ("rig_structure", "assets/test/rig_structure.loom", &["--sim", "0"]),
-    // **The only picture of the shed, its roof, the mast and both
-    // bollards.** `rig_structure`'s camera is off the north-west corner and
+    // **The only close picture of the shed and its roof.**
+    // `rig_structure`'s camera is off the north-west corner and
     // the shed is a sliver at the frame's edge there — see that row's own
     // comment. `loom render` draws exactly one camera per scene
     // (`World::active_camera` takes the first `Camera` node and there is no
     // flag to name another), so a second view means a second scene file —
     // the same choice `rig_deck.loom` already made rather than reframing
     // `rig_structure.loom` for one zone. This one
-    // (`assets/test/rig_shed.loom`) stands on the deck and looks across the
-    // mast at the shed's west gable and roof.
+    // (`assets/test/rig_shed.loom`) stands on the deck at y 3.70 and looks
+    // SOUTH-WEST — forward (-0.812, -0.068, +0.579) — at the shed's north
+    // wall and its EAST gable, the wall carrying the door. Not south-east,
+    // and not the west gable: the camera is at x 6.8 and the shed spans
+    // x -8.500..0.500.
+    //
+    // **The mast and the bollards are not in this frame.** At `GOLDEN_SIZE`
+    // the horizontal half-angle is 37.97 deg (atan(tan(26 deg) * 1.6)) and
+    // `Mast` sits 63.98 deg off the camera's facing, `BollardEast` 47.72,
+    // `BollardWest` 44.76; projected, they land at pixel x -260, 381 and 361
+    // of a 0..320 frame. No row in this table pictures them.
     //
     // Fault-injected two ways, both at this size against this tolerance
     // (0.001 fraction / 72 worst):
@@ -1148,12 +1162,12 @@ const GOLDEN: [(&str, &str, &[&str]); 59] = [
     //     ShedRoof's albedo_map deleted  fraction 0.0152   worst 188   (roof goes flat grey)
     //
     // Both move far past tolerance, so this row is not blind to either the
-    // shed's presence or the roof's texture path. It says nothing about the
-    // mast or the bollards individually — they are in frame but small at
-    // this size, and `--fraction`/`--worst` on a whole-PNG compare cannot
-    // attribute a difference to one corner of it; a missing mast or bollard
-    // mesh would still trip `validate`'s `assets` array, which is the gate
-    // that actually covers them.
+    // shed's presence or the roof's texture path. It says NOTHING about the
+    // mast or the bollards — not "little", nothing: they are outside the
+    // frustum by the angles above, so deleting either mesh cannot change one
+    // pixel of this render and there is no tolerance at which it would. A
+    // missing mast or bollard mesh trips `validate`'s `assets` array
+    // instead, which is the only gate that covers them.
     ("rig_shed", "assets/test/rig_shed.loom", &[]),
 ];
 

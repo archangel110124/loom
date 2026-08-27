@@ -285,9 +285,26 @@ def weathered_boards(size=1024, seed=17):
     # measured seam_y 12.10 against a 0.24 interior baseline, a hard band across
     # the wall wherever V passes 1. The shed is 2.4 m tall and the UV maps 2 m
     # per tile, so this texture IS tiled vertically — an earlier draft of this
-    # comment claimed otherwise and was wrong. A raised cosine is periodic and
-    # puts the rot at both ends of the tile, which on a wall reads as rot at the
-    # sill and under the eaves. Seam_y 0.32 against 0.29.
+    # comment claimed otherwise and was wrong. Seam_y 0.32 against 0.29.
+    #
+    # **What the cosine does, measured, not assumed.** `0.5 - 0.5*cos(2*pi*t)`
+    # has ONE maximum, at t = 0.5, and is zero at t = 0 and t = 1 — the rot
+    # sits in the MIDDLE of the tile, not at its ends. An earlier draft of this
+    # comment said "both ends"; the shipped 1024² albedo's darkest row is 509,
+    # t = 0.497. What still puts rot at both the sill and the eaves is the
+    # WALL's V range, not the ramp's shape: `build_shed.py` maps V = 1 - y/2
+    # about the shed's own centre, so the wall runs V 0.400 at its top (world
+    # y 3.80) to V 1.600 at its sill (1.40) — 1.2 tiles, both values read back
+    # off `rig_shed.obj` — and t = 0.5 falls inside that twice, at V = 0.5
+    # (world y 3.60, 200 mm under the eaves) and V = 1.5 (world y 1.60, 200 mm
+    # above the sill). Do not claim more than that from a picture: in
+    # `rig_shed.loom`'s frame neither band is legible on its own. The upper one
+    # lands inside the roof soffit's shadow (measured 36-55 luminance across
+    # those rows against the lit wall's 99), and the lower one sits in a smooth
+    # top-to-bottom falloff — 99.7 at the wall's brightest row down to 74.7 at
+    # the sill — with no local minimum at it. The band is visible in the
+    # TEXTURE (row-mean luminance 80.4 at t = 0.5 against 94.4 at t = 0), which
+    # is where it was measured.
     rot_f = _fbm(size, rng, octaves=5, base=6, stretch=4).T
     rot_f = (rot_f - rot_f.min()) / (rot_f.max() - rot_f.min())
     t = np.arange(size, dtype=np.float32) / size

@@ -1057,8 +1057,14 @@ boarding lane that a cylinder was not is exactly what spec §5 forbids.
 
 - [ ] **Step 7: Prove the clearance assertion can fail**
 
-Temporarily set `BOLLARD_R = 1.10` and re-run the build. Expected:
-**`only … m between the bollards' box faces`**. Restore `0.22`.
+Temporarily set `BOLLARD_R = 1.20` and re-run the build. Expected:
+**`only 0.800 m between the bollards' box faces`**. Restore `0.22`.
+
+**Not `1.10`** — this step said so and the value did not fire. The bollards
+are 3.20 m apart, so the gap is `3.20 - 2R`: `1.10` leaves 1.000 m against a
+bound of `2 * 0.35 + 0.20 = 0.90`, and the build prints
+`hardware: 1.000 m clear between the bollards' box faces` and passes.
+`1.20` leaves 0.800 and refuses. Both measured 2026-08-27.
 
 - [ ] **Step 8: Commit**
 

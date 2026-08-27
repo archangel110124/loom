@@ -97,9 +97,19 @@
 # 2.000 z half-extent). That face is `Mirror`/`MirrorFrame`'s mount in
 # `deeper_demo.loom`. Neither is rebuilt or added to this scene — spec §3
 # leaves that zone untouched, and the frame guards a stack the demo records
-# as having cost an hour to get right — but nothing on the shed or its roof
-# may ever project past that plane, in this scene or a later one, or the
-# frame's flush mount breaks the next time someone touches it.
+# as having cost an hour to get right — but nothing on the SHED may ever
+# project past that plane, in this scene or a later one, or the frame's flush
+# mount breaks the next time someone touches it. `loom measure --node
+# Rig/Shed` gives min z 2.5999999: flush, as built.
+#
+# **The ROOF does cross it, by 400 mm, and that is correct.** `loom measure
+# --node Rig/ShedRoof` gives min z 2.1999998 — the eaves overhang, and
+# `deeper_demo.loom`'s own `ShedRoof` primitive (pos z 4.60, scale z 2.40 →
+# z 2.200..7.000) reproduced exactly rather than a new encroachment. It is
+# harmless because it passes OVER the frame, not through it: the roof
+# occupies y 3.800..4.094 and `MirrorFrame` tops out at y 3.660 (pos y 2.600,
+# scale y 1.060), leaving 140 mm of clearance. Extend the rule to the roof
+# and you forbid an overhang the primitive already had.
 
 [scene]
 format = 1

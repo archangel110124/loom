@@ -26,19 +26,50 @@
 #
 # **The shed's north face sits at world z = 2.600** (center z 4.60 minus its
 # 2.000 z half-extent) — `Mirror`/`MirrorFrame`'s mount in `deeper_demo.loom`.
-# Neither is built or added to this scene; nothing on the shed or its roof
-# may ever project past that plane. Same note as `rig_structure.loom`'s
-# header, repeated here because this is the file whoever touches the shed
-# next is most likely to have open.
+# Neither is built or added to this scene, and **nothing on the SHED may ever
+# project past that plane**: `loom measure --node Rig/Shed` gives min z
+# 2.5999999, flush, which is what `build_shed.py` recesses its boards behind
+# its battens to hold.
+#
+# **The ROOF does cross it, by 400 mm, and that is correct.** `loom measure
+# --node Rig/ShedRoof` gives min z 2.1999998 — the eaves overhang, and
+# `deeper_demo.loom`'s own `ShedRoof` primitive (pos z 4.60, scale z 2.40 →
+# z 2.200..7.000) reproduced exactly rather than a new encroachment. It is
+# harmless because it passes OVER the frame, not through it: the roof
+# occupies y 3.800..4.094 and `MirrorFrame` tops out at y 3.660 (pos y 2.600,
+# scale y 1.060), leaving 140 mm of clearance. Extend the rule to the roof
+# and you forbid an overhang the primitive already had. Same note as
+# `rig_structure.loom`'s header, repeated here because this is the file
+# whoever touches the shed next is most likely to have open.
 #
 # **Camera** stands on the deck, inboard of the bulwark rail rather than
 # outside it — put outside, at deck height, the rail line sits between the
 # lens and the shed's own base and cuts the sill off in every framing that
-# was tried. From inboard, at roughly cap height, looking south-east across
-# the mast toward the shed's west gable and roof, nothing between the camera
-# and the shed occludes it, and the shed's board siding, its roof's
-# corrugation and its rust streaking are all readable at 320x200. See the
-# task report for the closer shot and what it settles about the rot texture.
+# was tried. It is at y 3.70, which is 0.78 m ABOVE the bulwark cap and not
+# at cap height: the caps sit at y 2.800 with a 0.120 y half-extent, so they
+# top out at 2.920.
+#
+# It looks SOUTH-WEST, not south-east. `rot_euler`'s 125.49 deg of yaw and
+# -3.88 of pitch give a forward of (-0.812, -0.068, +0.579): -x is west, +z
+# is south. What that frames is the shed's north wall and its EAST gable —
+# east, not west, because the camera is at x 6.8 and the shed spans
+# x -8.500..0.500, so the gable it can see is the one at x 0.500. That is
+# also the wall `build_shed.py` cuts the door into, and the door opening is
+# in the picture.
+#
+# **The mast and both bollards are NOT in frame.** At 320x200 with
+# `fov_y_degrees = 52.0` the horizontal half-angle is 37.97 deg
+# (atan(tan(26 deg) * 1.6)). `Mast` at (8.0, 3.60, 3.0) is 63.98 deg off the
+# camera's facing, `BollardEast` 47.72 and `BollardWest` 44.76 — projected,
+# the mast lands at pixel x -260 and the two bollards at 381 and 361, all
+# three outside a 0..320 frame, and none of them appears in the render.
+# Nothing on this row says anything about those three nodes; what covers
+# them is `loom validate`'s `assets` array.
+#
+# Nothing between the camera and the shed occludes it, and the shed's board
+# siding, its roof's corrugation and its rust streaking are all readable at
+# 320x200. See the task report for the closer shot and what it settles about
+# the rot texture.
 
 [scene]
 format = 1
