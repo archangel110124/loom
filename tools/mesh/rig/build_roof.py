@@ -1,5 +1,5 @@
 # tools/mesh/rig/build_roof.py
-"""The shed's roof — corrugated sheet with two holes rusted through it.
+"""The shed's roof — corrugated sheet with three holes rusted through it.
 
 Replaces the DRAWN surface of `ShedRoof` in assets/games/deeper_demo.loom, a
 `box` at `pos = [-4.0, 3.95, 4.60]`, `scale = [4.9, 0.15, 2.40]` — world
@@ -95,8 +95,30 @@ zstep = Z_SPAN / ZSTEPS
 
 
 def prof(x):
-    """The corrugation profile: y offset at a given x."""
-    return AMP * math.sin(2.0 * math.pi * x / PITCH)
+    """The corrugation profile: y offset at a given x.
+
+    **The period is 2*step, NOT PITCH, and that is the whole point.**
+
+    This ran at PITCH for two phases and produced no corrugation at all. Cells
+    are `step` = 0.29697 wide while PITCH is 0.300, so each cell advanced
+    0.98990 of a period and the sine sampled itself almost back to where it
+    started. Measured on the shipped mesh: max rise across ANY single cell was
+    2.86 mm, and there was exactly ONE sign change across the whole 9.8 m sheet.
+    A slow wave, not corrugated iron -- and AMP was spending 15% of a 300 mm
+    envelope that the fall and the fascia were fighting over millimetre by
+    millimetre.
+
+    Driving it at `step` instead does NOT fix it: one period per cell, sampled
+    only at cell boundaries, is identically flat. It needs TWO cells per period,
+    so consecutive boundaries land on opposite extremes. HALF_X / step is
+    exactly 16.5, so the phase at boundary i is pi*(i - 16.5) and every boundary
+    sits at exactly +/-AMP: a genuine 33-fold sawtooth, 90 mm crest to trough,
+    for zero extra triangles.
+
+    PITCH still sets how MANY folds there are, via `periods`. It just no longer
+    sets the profile's period, because the two were never the same number.
+    """
+    return AMP * math.sin(math.pi * x / step)
 
 
 def slab_roof(x0, x1, y0, y1, z0, z1):
@@ -180,6 +202,16 @@ textures.write_png(os.path.join(TEX_DIR, "rig_roof_normal.png"),
 # --- self-check ----------------------------------------------------------
 info = rigkit.verify_obj(OBJ_PATH)
 lo, hi = info["lo"], info["hi"]
+
+# HALF_X and HALF_Z parameterise both the build and the check, so on their own
+# these compare a number to itself: set HALF_X = 3.9 and the mesh obligingly
+# comes out 3.9 and passes. Pin them to the scene's authored collider first, so
+# the pair actually says "the drawn roof matches the box the player would meet".
+# assets/test/rig_shed.loom gives ShedRoof half_extents = [4.9, 0.15, 2.40].
+assert abs(HALF_X - 4.900) < 1e-9 and abs(HALF_Z - 2.400) < 1e-9, \
+    "roof half-extents drifted to (%.4f, %.4f) — the scene authors ShedRoof's " \
+    "BoxCollider as [4.9, 0.15, 2.40], and the drawn roof no longer matches it" \
+    % (HALF_X, HALF_Z)
 
 for ax, name, half in ((0, "x", HALF_X), (2, "z", HALF_Z)):
     assert abs(lo[ax] + half) < 1e-3 and abs(hi[ax] - half) < 1e-3, \
@@ -287,6 +319,23 @@ assert abs(fall - want) < 1e-3, \
     "level, or falls the wrong way, and reads as the flat slab this replaced" \
     % (fall, zb, zf, want)
 
+# **The corrugation must actually corrugate.** It did not for two phases: the
+# profile ran at PITCH while cells were `step` wide, so it aliased to one slow
+# wave -- 2.86 mm of rise across a cell, ONE sign change across 9.8 m -- and
+# nothing in this file noticed, because every check here measures the envelope
+# and a flat sheet fits an envelope perfectly. Count the folds instead.
+crests = [prof(-HALF_X + i * step) for i in range(periods + 1)]
+folds = sum(1 for a, b in zip(crests, crests[1:]) if a * b < 0)
+min_rise = min(abs(b - a) for a, b in zip(crests, crests[1:]))
+assert folds >= periods - 1, \
+    "the sheet has %d folds across %d cells — the profile is aliasing against " \
+    "the cell width and the roof is a slow wave, not corrugated iron" \
+    % (folds, periods)
+assert min_rise > AMP, \
+    "the shallowest cell rises %.1f mm against an amplitude of %.0f mm — the " \
+    "corrugation is being sampled away and AMP is buying nothing" \
+    % (min_rise * 1000, AMP * 1000)
+
 # The fascia must be there, and BELOW the sheet's low edge -- a board flush
 # with the corrugation closes nothing and casts no line along the eave.
 fy_check = HALF_Y - AMP - FALL
@@ -294,8 +343,15 @@ assert any(v[2] > HALF_Z - FASCIA_T + 1e-6 and v[1] < fy_check - 1e-6
            for v in gverts), \
     "no geometry below y %.3f at the front face — the fascia is missing or " \
     "flush with the sheet" % fy_check
-print("roof: falls %.3f m back to front (%.2f deg), fascia %.3f m"
-      % (FALL, math.degrees(math.atan2(FALL, Z_SPAN)), FASCIA_H))
+# Report the MEASUREMENT, not the constant. `fall` is sampled across zb..zf,
+# one band short of the eave, so scale it to the full span to state the pitch
+# the sheet actually has. Printing FALL here would have been the constant
+# congratulating itself.
+fall_full = fall * Z_SPAN / (zf - zb)
+print("roof: falls %.3f m measured back to front (%.2f deg), fascia %.3f m"
+      % (fall_full, math.degrees(math.atan2(fall_full, Z_SPAN)), FASCIA_H))
+print("roof: corrugation %d folds, %.0f mm crest to trough, min rise per cell "
+      "%.0f mm" % (folds, 2 * AMP * 1000, min_rise * 1000))
 
 assert info["tris"] <= 2000, "over budget: %d tris" % info["tris"]
 print("roof: node pos=(%.2f, %.2f, %.2f) half_extents=(%.3f, %.3f, %.3f)"
