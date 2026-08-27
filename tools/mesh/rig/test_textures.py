@@ -213,8 +213,47 @@ test_tiles_seamlessly()
 test_is_deterministic()
 test_normal_map_is_a_unit_field()
 test_reads_as_dark_weathered_timber()
+def test_boards_grain_runs_the_short_way():
+    """The deck's grain runs ALONG its planks, which are laid flat. A wall board
+    stands UP, so its grain runs vertically — the other axis. If this reads the
+    same as the deck the shed will look like a floor stood on its edge."""
+    alb, _ = textures.weathered_boards(size=256, seed=17)
+    chan = alb[:, :, 0].astype(float)
+    along_y = np.abs(np.diff(chan, axis=0)).mean()   # down the board
+    across_x = np.abs(np.diff(chan, axis=1)).mean()  # across it
+    assert across_x > along_y * 1.8, \
+        "grain is not vertical: across %.3f vs along %.3f" % (across_x, along_y)
+    print("  boards grain ok  across=%.3f along=%.3f" % (across_x, along_y))
+
+
+def test_boards_are_timber_and_tile():
+    alb, h = textures.weathered_boards(size=256, seed=17)
+    lin = np.where(alb / 255.0 <= 0.04045, (alb / 255.0) / 12.92,
+                   (((alb / 255.0) + 0.055) / 1.055) ** 2.4)
+    m = lin.reshape(-1, 3).mean(axis=0)
+    # The shed is authored `albedo = [0.46, 0.30, 0.22]` — warmer and lighter
+    # than the deck's palette D, because it is a painted-then-faded wall rather
+    # than a walked-on floor. R must lead by a clear margin.
+    assert m[0] > m[2] * 1.5, "not warm enough for painted timber: %s" % m.round(4)
+    # Calibrated the way palette D's was, and for the same reason: a ceiling
+    # above the regression it is meant to catch catches nothing. Measured —
+    # shipped 0.1487, `painted` brightened to fresh paint 0.2119. The ceiling
+    # sits between them. Floor is a regression bound, not a restatement.
+    assert (m < 0.175).all(), "too pale for weathered boards: %s" % m.round(4)
+    assert (m > 0.05).all(), "too dark: %s" % m.round(4)
+    chan = alb[:, :, 0].astype(int)
+    ix = np.abs(np.diff(chan, axis=1)).mean(); iy = np.abs(np.diff(chan, axis=0)).mean()
+    sx = np.abs(chan[:, 0] - chan[:, -1]).mean(); sy = np.abs(chan[0, :] - chan[-1, :]).mean()
+    assert sx <= ix * 2.0 + 1.0, "vertical seam %.2f vs %.2f" % (sx, ix)
+    assert sy <= iy * 2.0 + 1.0, "horizontal seam %.2f vs %.2f" % (sy, iy)
+    print("  boards ok  linear mean=%s  seam %.2f/%.2f %.2f/%.2f"
+          % (m.round(4), sx, ix, sy, iy))
+
+
 test_png_round_trip()
 test_steel_is_darker_and_ruster_than_timber()
 test_steel_tiles_and_is_deterministic()
 test_tidal_growth_is_green_black_and_varied()
+test_boards_grain_runs_the_short_way()
+test_boards_are_timber_and_tile()
 print("textures: all checks pass")

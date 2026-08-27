@@ -253,6 +253,61 @@ def tidal_growth(size=2048, seed=13):
     return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
 
 
+def weathered_boards(size=1024, seed=17):
+    """-> (albedo uint8 HxWx3, height float32 HxW in 0..1).
+
+    A painted timber wall that has been in salt air for years: the paint is
+    mostly gone, what is left is chalky, and the grain shows through.
+
+    **The grain runs VERTICALLY here** — down the image — because a wall board
+    stands on end. The deck's grain runs along +U because its planks lie flat.
+    Same generator, transposed anisotropy; getting it wrong makes the shed read
+    as a floor stood on its edge, which is the one thing a viewer notices
+    immediately and cannot name.
+
+    LINEAR reflectance in, sRGB bytes out. See `_srgb_encode`.
+    """
+    rng = np.random.default_rng(seed)
+
+    # Stretched along X and transposed, so the long runs end up vertical.
+    grain = (_fbm(size, rng, octaves=6, base=32, stretch=8).T * 0.70
+             + _fbm(size, rng, octaves=4, base=4, stretch=4).T * 0.30)
+    grain = (grain - grain.min()) / (grain.max() - grain.min())
+
+    # Paint survives in patches, not evenly. Low frequency, isotropic.
+    paint = _fbm(size, rng, octaves=4, base=3)
+    paint = (paint - paint.min()) / (paint.max() - paint.min())
+    kept = np.clip(paint * 1.45 - 0.35, 0.0, 1.0)
+
+    # Rot creeps up from the bottom of a board, so it is gated by a vertical
+    # ramp as well as by its own field. **The ramp has to WRAP.** A
+    # `np.linspace` down the image is the obvious ramp and it does not tile:
+    # measured seam_y 12.10 against a 0.24 interior baseline, a hard band across
+    # the wall wherever V passes 1. The shed is 2.4 m tall and the UV maps 2 m
+    # per tile, so this texture IS tiled vertically — an earlier draft of this
+    # comment claimed otherwise and was wrong. A raised cosine is periodic and
+    # puts the rot at both ends of the tile, which on a wall reads as rot at the
+    # sill and under the eaves. Seam_y 0.32 against 0.29.
+    rot_f = _fbm(size, rng, octaves=5, base=6, stretch=4).T
+    rot_f = (rot_f - rot_f.min()) / (rot_f.max() - rot_f.min())
+    t = np.arange(size, dtype=np.float32) / size
+    rise = (0.5 - 0.5 * np.cos(2.0 * np.pi * t))[:, None]
+    rot = np.clip((rot_f * 0.6 + rise * 0.6) - 0.62, 0.0, 1.0)
+
+    height = np.clip(0.30 + 0.45 * grain - 0.25 * rot, 0.0, 1.0).astype(np.float32)
+
+    g = grain[:, :, None]
+    bare = np.array([0.088, 0.066, 0.047]) + g * np.array([0.080, 0.060, 0.042])
+    painted = np.array([0.160, 0.098, 0.064]) + g * np.array([0.068, 0.042, 0.027])
+    rotten = np.array([0.030, 0.027, 0.020]) + g * np.array([0.024, 0.022, 0.016])
+
+    k = kept[:, :, None]
+    r = rot[:, :, None]
+    rgb = bare * (1.0 - k) + painted * k
+    rgb = rgb * (1.0 - r) + rotten * r
+    return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
+
+
 def normal_from_height(height, strength=0.008):
     """Tangent-space normal map, +Y green (OpenGL). Wraps, like its source.
 
