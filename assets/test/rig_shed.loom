@@ -28,8 +28,11 @@
 # 2.000 z half-extent) — `Mirror`/`MirrorFrame`'s mount in `deeper_demo.loom`.
 # Neither is built or added to this scene, and **nothing on the SHED may ever
 # project past that plane**: `loom measure --node Rig/Shed` gives min z
-# 2.5999999, flush, which is what `build_shed.py` recesses its boards behind
-# its battens to hold.
+# 2.5999999, flush, which is what `build_shed.py` holds by landing each
+# weatherboard's proud BOTTOM edge exactly on the plane and recessing its top
+# edge 22 mm behind it. The wall was board-and-batten when this was written and
+# the battens were what sat at the plane; it is lapped weatherboard now and the
+# solve is the same shape, so only the name of the proud part changed.
 #
 # **The ROOF does cross it, by 400 mm, and that is correct.** `loom measure
 # --node Rig/ShedRoof` gives min z 2.1999998 — the eaves overhang, and
