@@ -60,8 +60,19 @@ bm = bmesh.new()
 uv_layer = bm.loops.layers.uv.new("UVMap")
 
 
-def slab(x0, x1, y0, y1, z0, z1, uv_u0):
-    """One box in LOCAL metres (already centred). U across the run, V up it."""
+def slab(x0, x1, y0, y1, z0, z1, uv_u0, run):
+    """One box in LOCAL metres (already centred). U across the run, V up it.
+
+    `run` is the LOCAL axis this wall's boards are laid out along -- "x" for the
+    north and south walls, "z" for the east and west gables. U has to come from
+    that axis or it comes from a direction the board has no width in: a gable
+    board spans 0.200 m in local z and only RECESS (0.018 m) in x, so a U taken
+    from x is constant across the whole visible face and the board samples one
+    texture column stretched flat. Measured before this argument existed: 1028
+    of 3084 faces had a zero U span, every outward face of both gables among
+    them, and the west gable rendered as flat vertical stripes of constant
+    colour while the north wall in the same mesh showed fine grain.
+    """
     c = [(x0, -z0, y0), (x1, -z0, y0), (x1, -z1, y0), (x0, -z1, y0),
          (x0, -z0, y1), (x1, -z0, y1), (x1, -z1, y1), (x0, -z1, y1)]
     v = [bm.verts.new(p) for p in c]
@@ -71,13 +82,15 @@ def slab(x0, x1, y0, y1, z0, z1, uv_u0):
     for f in faces:
         for loop in f.loops:
             x, y, z = loop.vert.co
+            # Blender y is NEGATIVE local z (see `c` above), so local z is -y.
+            u = x if run == "x" else -y
             # One tile per 1 m across and per 2 m up. The grain runs vertically
             # in this texture, so V is the along-grain axis and gets the longer
             # span -- the reverse of the deck's mapping, deliberately. The wall
             # is 2.4 m, so V passes 1 and the texture DOES tile vertically:
             # `weathered_boards`'s rot ramp is a raised cosine for exactly that
             # reason. Do not "simplify" it to a linspace.
-            loop[uv_layer].uv = (uv_u0 + x / 1.0, z / 2.0)
+            loop[uv_layer].uv = (uv_u0 + u / 1.0, z / 2.0)
     return faces
 
 
@@ -120,24 +133,28 @@ def wall(axis, plane, a, b, outward, recess, door=False):
         y0 = -HALF_Y + (DOOR_H if door_here else 0.0)
         if y0 >= HALF_Y:
             continue
+        # A wall whose plane is fixed in z runs its boards along x, and vice
+        # versa; `run` is that run axis and it is where U comes from.
+        run = "x" if axis == "z" else "z"
         if axis == "z":
-            slab(p0, p1, y0, HALF_Y, min(plane, inner), max(plane, inner), rand())
+            slab(p0, p1, y0, HALF_Y, min(plane, inner), max(plane, inner), rand(), run)
         else:
-            slab(min(plane, inner), max(plane, inner), y0, HALF_Y, p0, p1, rand())
+            slab(min(plane, inner), max(plane, inner), y0, HALF_Y, p0, p1, rand(), run)
         # A batten over the joint at the far edge of every board but the last.
         if i < n - 1:
             j0, j1 = p1 - BATTEN_W * 0.5, p1 + BATTEN_W * 0.5
             if axis == "z":
-                slab(j0, j1, y0, HALF_Y, min(plane, inner), max(plane, inner), rand())
+                slab(j0, j1, y0, HALF_Y, min(plane, inner), max(plane, inner), rand(), run)
             else:
-                slab(min(plane, inner), max(plane, inner), y0, HALF_Y, j0, j1, rand())
+                slab(min(plane, inner), max(plane, inner), y0, HALF_Y, j0, j1, rand(), run)
 
 
 for axis, plane, a, b, outward, recess in WALLS:
     wall(axis, plane, a, b, outward, recess, door=(axis == "x" and outward > 0))
 
 # A flat roof deck so the box is closed and the shed is not hollow from above.
-slab(-HALF_X, HALF_X, HALF_Y - 0.04, HALF_Y, -HALF_Z, HALF_Z, 0.0)
+# It spans the whole footprint, so its widest horizontal axis is x -- run "x".
+slab(-HALF_X, HALF_X, HALF_Y - 0.04, HALF_Y, -HALF_Z, HALF_Z, 0.0, "x")
 
 bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
 bm.to_mesh(mesh)
@@ -180,6 +197,40 @@ for ax, name, half in ((0, "x", HALF_X), (1, "y", HALF_Y), (2, "z", HALF_Z)):
         "shed %s spans %.4f..%.4f, want %.3f..%.3f -- the mesh is not centred on " \
         "its own origin and its collider cannot be made to match" \
         % (name, lo[ax], hi[ax], -half, half)
+
+# **Every face a viewer can see must vary across its own width.** `slab`'s U
+# used to come from Blender x unconditionally, which is right only for the
+# walls whose boards run along x; on the two gables the board's x-extent is
+# just RECESS, so U came out constant and each board sampled one texture
+# column smeared flat across it. That is invisible to every check above --
+# the bounds, the north face and the tri budget are all exactly right on a
+# smeared mesh -- so it needs its own, asked of the FILE that shipped.
+#
+# The threshold is BATTEN_W because a batten is the narrowest thing in this
+# wall that is meant to be LOOKED at. The faces legitimately allowed a zero U
+# span are all narrower: a board or batten EDGE is RECESS (18 mm) deep, and
+# the roof deck's end strips are its 40 mm thickness. Both are hidden between
+# boards; neither can show a smear because neither shows anything.
+geom = rigkit.read_obj(OBJ_PATH)
+gv, gu = geom["verts"], geom["uvs"]
+smeared = []
+for face in geom["faces"]:
+    pts = [gv[vi] for vi, _ in face]
+    span = sorted(max(p[k] for p in pts) - min(p[k] for p in pts) for k in range(3))
+    width = span[1]                       # a planar quad: [0, narrow, long]
+    us = [gu[ti][0] for _, ti in face]
+    if width >= BATTEN_W - 1e-6 and max(us) - min(us) < 1e-9:
+        smeared.append((pts[0], width))
+if smeared:
+    raise AssertionError(
+        "%d of %d faces are at least %.3f m across and have a ZERO U span -- "
+        "they sample one texture column stretched flat over a visible board. "
+        "First at (%.3f, %.3f, %.3f), %.3f m wide. `slab`'s `run` axis is "
+        "wrong for that wall: U must come from the axis the boards run along."
+        % (len(smeared), len(geom["faces"]), BATTEN_W, smeared[0][0][0],
+           smeared[0][0][1], smeared[0][0][2], smeared[0][1]))
+print("shed: %d faces, none wider than %.0f mm with a zero U span"
+      % (len(geom["faces"]), BATTEN_W * 1000))
 
 assert info["tris"] <= 6000, "over budget: %d tris" % info["tris"]
 print("shed: node pos=(%.2f, %.2f, %.2f) half_extents=(%.3f, %.3f, %.3f)"

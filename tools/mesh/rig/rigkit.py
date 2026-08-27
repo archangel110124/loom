@@ -88,8 +88,12 @@ def read_obj(path):
     OBJ keeps `v` and `vt` as independent lists of different lengths, so
     `uvs[vertex_index]` is a bug that happens to work on a single quad and
     silently lies on anything with shared vertices.
+
+    `faces` is the same pairs GROUPED BY FACE, which is what a per-face
+    question (does this quad's UV span its own width?) needs and `corners`
+    cannot answer -- `tris` has already thrown the UV indices away.
     """
-    verts, uvs, tris, corners, tags = [], [], [], [], []
+    verts, uvs, tris, corners, faces, tags = [], [], [], [], [], []
     for line in open(path):
         parts = line.split()
         if not parts:
@@ -103,6 +107,7 @@ def read_obj(path):
             uvs.append(tuple(float(c) for c in parts[1:3]))
         elif head == "f":
             idx = []
+            face = []
             for spec in parts[1:]:
                 bits = spec.split("/")
                 i = int(bits[0])
@@ -113,10 +118,12 @@ def read_obj(path):
                     ti = j - 1 if j > 0 else len(uvs) + j
                 idx.append(vi)
                 corners.append((vi, ti))
+                face.append((vi, ti))
+            faces.append(face)
             for k in range(1, len(idx) - 1):
                 tris.append((idx[0], idx[k], idx[k + 1]))
     return {"verts": verts, "uvs": uvs, "tris": tris,
-            "corners": corners, "tags": tags}
+            "corners": corners, "faces": faces, "tags": tags}
 
 
 def signed_volume(d, tris=None, origin=(0.0, 0.0, 0.0)):
