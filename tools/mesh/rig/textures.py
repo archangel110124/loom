@@ -406,6 +406,57 @@ def painted_iron(size=1024, seed=23):
     return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
 
 
+def weathered_paint(size=1024, seed=29, paint=(0.022, 0.055, 0.125)):
+    """-> (albedo uint8 HxWx3, height float32 HxW in 0..1).
+
+    Painted timber, salt-worn. Three states: paint that has held, bare grey-warm
+    timber where it has worn through, and white salt bloom drifted over both.
+
+    **`paint` is a knob, not a constant.** Sampled off the reference's sunlit
+    wall the colour reads linear [0.036, 0.108, 0.311] — blue at 8.6x red — but
+    that sample has the SUN in it. What transfers is the hue ratio; the level
+    does not. The default keeps the ratio and drops the level to what a painted
+    board actually reflects. Retune it from the scene, not from the photograph.
+
+    Grain runs horizontally here because the boards are laid horizontally — the
+    opposite of `weathered_boards`, which was written for vertical siding.
+
+    LINEAR reflectance in, sRGB bytes out. See `_srgb_encode`.
+    """
+    rng = np.random.default_rng(seed)
+
+    # Grain along the board, which is +U for horizontal siding.
+    grain = (_fbm(size, rng, octaves=6, base=32, stretch=8) * 0.70
+             + _fbm(size, rng, octaves=4, base=4, stretch=4) * 0.30)
+    grain = (grain - grain.min()) / (grain.max() - grain.min())
+
+    # Where the paint has gone. Wear follows the weather, so it is broad and
+    # isotropic rather than following the grain.
+    wear_f = _fbm(size, rng, octaves=5, base=5)
+    wear_f = (wear_f - wear_f.min()) / (wear_f.max() - wear_f.min())
+    # Grain sits proud of the softer wood between it, so the grain wears first.
+    worn = np.clip((wear_f * 0.75 + grain * 0.25 - 0.60) / 0.16, 0.0, 1.0)
+
+    # Salt dries white in the sheltered parts, over paint and bare wood alike.
+    salt = _fbm(size, rng, octaves=4, base=9)
+    salt = np.clip((salt - salt.min()) / (salt.max() - salt.min()) * 1.2 - 0.62, 0.0, 1.0)
+
+    height = np.clip(0.35 + 0.35 * grain - 0.20 * worn, 0.0, 1.0).astype(np.float32)
+
+    g = grain[:, :, None]
+    p = np.array(paint)
+    painted = p + g * (p * 0.55)
+    # Bare timber under it: warm, mid-grey, the same family as the deck.
+    bare = np.array([0.085, 0.068, 0.050]) + g * np.array([0.070, 0.056, 0.040])
+    bloom = np.array([0.210, 0.212, 0.208]) + g * np.array([0.060, 0.060, 0.058])
+
+    w = worn[:, :, None]
+    s = salt[:, :, None]
+    rgb = painted * (1.0 - w) + bare * w
+    rgb = rgb * (1.0 - s) + bloom * s
+    return (_srgb_encode(np.clip(rgb, 0.0, 1.0)) * 255.0 + 0.5).astype(np.uint8), height
+
+
 def normal_from_height(height, strength=0.008):
     """Tangent-space normal map, +Y green (OpenGL). Wraps, like its source.
 

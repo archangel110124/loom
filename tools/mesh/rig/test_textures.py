@@ -289,4 +289,41 @@ test_boards_grain_runs_the_short_way()
 test_boards_are_timber_and_tile()
 test_corrugated_metal_is_cold_and_streaked()
 test_painted_iron_is_dark_and_worn()
+
+
+def test_paint_is_blue_and_worn_through():
+    """The reference shed is painted blue and the paint has worn back to bare
+    timber on the exposed edges. Both states must be present: all-paint reads as
+    a plastic box, all-bare reads as the shed we are replacing."""
+    alb, _ = textures.weathered_paint(size=256, seed=29)
+    lin = np.where(alb / 255.0 <= 0.04045, (alb / 255.0) / 12.92,
+                   (((alb / 255.0) + 0.055) / 1.055) ** 2.4)
+    flat = lin.reshape(-1, 3)
+    m = flat.mean(axis=0)
+    assert m[2] > m[0] * 2.0, \
+        "not blue enough: linear mean %s, B/R %.2f" % (m.round(4), m[2] / m[0])
+    # Bare timber is warm; paint is cold. If the warm pixels have vanished the
+    # paint never wore through, and if the cold ones have, it never was painted.
+    warm = (flat[:, 0] > flat[:, 2]).mean()
+    assert 0.04 < warm < 0.40, \
+        "worn fraction %.3f — want some bare timber showing, not none and not most" % warm
+    print("  paint ok  linear mean=%s  B/R %.2f  worn %.3f"
+          % (m.round(4), m[2] / m[0], warm))
+
+
+def test_paint_tiles_and_is_deterministic():
+    a1, _ = textures.weathered_paint(size=128, seed=29)
+    a2, _ = textures.weathered_paint(size=128, seed=29)
+    assert hashlib.sha256(a1.tobytes()).digest() == hashlib.sha256(a2.tobytes()).digest(), \
+        "same seed gave different bytes"
+    chan = a1[:, :, 2].astype(int)          # blue channel: the paint's own
+    ix = np.abs(np.diff(chan, axis=1)).mean(); iy = np.abs(np.diff(chan, axis=0)).mean()
+    sx = np.abs(chan[:, 0] - chan[:, -1]).mean(); sy = np.abs(chan[0, :] - chan[-1, :]).mean()
+    assert sx <= ix * 2.0 + 1.0, "vertical seam %.2f vs %.2f" % (sx, ix)
+    assert sy <= iy * 2.0 + 1.0, "horizontal seam %.2f vs %.2f" % (sy, iy)
+    print("  paint tiling ok  seam %.2f/%.2f %.2f/%.2f" % (sx, ix, sy, iy))
+
+
+test_paint_is_blue_and_worn_through()
+test_paint_tiles_and_is_deterministic()
 print("textures: all checks pass")
