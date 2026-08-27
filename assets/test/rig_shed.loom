@@ -18,7 +18,16 @@
 # It carries `Deck` for footing — a shed with no ground under it in the
 # frame reads as a diorama piece, not as part of the rig — plus the five
 # nodes Task 4 added: `Shed`, `ShedRoof`, `Mast`, `BollardWest`,
-# `BollardEast`. Positions, half-extents and materials are copied verbatim
+# `BollardEast`, and the sixth Phase 2b added, `ShedBearers`.
+#
+# **The shed is PAINTED now, not bare timber.** `Shed`'s `roughness` is 0.72
+# rather than the bare build's 0.88 — paint is smoother than a weathered board
+# and 0.88 read as chalk. `ShedBearers` is the timbers under it, split into
+# their own mesh and node: the engine is one OBJ per material and never reads
+# `.mtl`, so while they shared `rig_shed.obj` the bearers drew with the wall's
+# blue albedo and the building looked dipped. They carry the deck's own timber
+# maps and NO collider — `Shed`'s already covers that volume, and its numbers
+# are frozen by `green.sh:1903`. Positions, half-extents and materials are copied verbatim
 # from `rig_structure.loom`, which copied them from the generators' own
 # stdout — see that scene's header for the table. Piles, seam and bulwark
 # are left out: nothing about them is new here, and `rig_structure` already
@@ -107,6 +116,11 @@ path = "../textures/rig_shed_albedo.png"
 key = "shed_normal"
 id = "c9c67c86-2de7-44c8-b3de-6ba3c3244d7a"
 path = "../textures/rig_shed_normal.png"
+
+[[asset]]
+key = "shed_bearers"
+id = "3f2b9c14-7d61-4a58-9e02-6c48b5a17d90"
+path = "../meshes/rig_shed_bearers.obj"
 
 [[asset]]
 key = "roof_mesh"
@@ -204,7 +218,36 @@ parent = "Rig"
   albedo = [1.0, 1.0, 1.0]
   albedo_map = { asset = "shed_albedo" }
   normal_map = { asset = "shed_normal" }
-  roughness = 0.88
+  roughness = 0.72
+  metallic = 0.0
+  uv_scale = [1.0, 1.0]
+
+[[node]]
+name = "ShedBearers"
+parent = "Rig"
+
+  # The timbers the shed stands on. **A separate node because it is a separate
+  # material**: the engine is one OBJ per material and never reads `.mtl`, so
+  # while these shared `rig_shed.obj` they drew with the wall's painted albedo
+  # and the bearers came out blue. The photograph has bare timber and stone
+  # there. They reuse the deck's own weathered-timber maps rather than adding
+  # an eleventh material zone (spec §3) for sixty triangles.
+  #
+  # **No BoxCollider, deliberately.** `Shed` above already spans world
+  # y 1.400..3.800 and this mesh lives at 1.400..1.550, wholly inside it. A
+  # collider here would add a second body over the same volume and change what
+  # `green.sh:1903` strafes into, and those numbers are frozen.
+  [node.transform]
+  pos = [-4.0, 1.475, 4.60]
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "shed_bearers" }
+
+  [node.components.Material]
+  albedo = [1.0, 1.0, 1.0]
+  albedo_map = { asset = "deck_albedo" }
+  normal_map = { asset = "deck_normal" }
+  roughness = 0.92
   metallic = 0.0
   uv_scale = [1.0, 1.0]
 

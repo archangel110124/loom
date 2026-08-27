@@ -1158,11 +1158,26 @@ const GOLDEN: [(&str, &str, &[&str]); 59] = [
     // Fault-injected two ways, both at this size against this tolerance
     // (0.001 fraction / 72 worst):
     //
-    //     Shed node deleted            fraction 0.0959   worst 207   (the whole shed drops out)
-    //     ShedRoof's albedo_map deleted  fraction 0.0152   worst 188   (roof goes flat grey)
+    //     Shed node deleted              fraction 0.0906   worst 209   (the whole shed drops out)
+    //     ShedRoof's albedo_map deleted  fraction 0.0139   worst 188   (roof goes flat grey)
+    //     ShedBearers node deleted       fraction 0.0045   worst  71   (see below)
     //
-    // Both move far past tolerance, so this row is not blind to either the
-    // shed's presence or the roof's texture path. It says NOTHING about the
+    // Re-measured 2026-08-27 after Phase 2b rebuilt the shed as lapped
+    // weatherboard on a corrugated roof and split the bearers into their own
+    // node. The first two moved (0.0959 -> 0.0906, 0.0152 -> 0.0139) because
+    // the shed is a different shape, not because the row got weaker; the
+    // control — the same scene rendered twice — is still 0 differing pixels.
+    //
+    // The first two move far past tolerance, so this row is not blind to
+    // either the shed's presence or the roof's texture path.
+    //
+    // **`ShedBearers` is caught by the FRACTION and not by `worst`.** Its
+    // worst channel is 71 against this gate's 72 — under it by one. The
+    // bearers are 150 mm of timber behind the shed's own sill line and only a
+    // few pixels of them are lit at this size, so a `worst`-only gate would
+    // be blind to them; 0.0045 against a 0.001 fraction is what catches it.
+    // Do not raise the fraction tolerance on this row without re-measuring
+    // this number. It says NOTHING about the
     // mast or the bollards — not "little", nothing: they are outside the
     // frustum by the angles above, so deleting either mesh cannot change one
     // pixel of this render and there is no tolerance at which it would. A

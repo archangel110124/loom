@@ -2,6 +2,14 @@
 """The rig's shed -- horizontal lapped weatherboard on a plinth, with a door,
 and nothing proud of the north face.
 
+**Two meshes.** `rig_shed.obj` is the painted building; `rig_shed_bearers.obj`
+is the timbers it stands on. They are split because the engine is one OBJ per
+material and never reads `.mtl`, so a shared mesh means a shared albedo -- and
+the bearers shipped painted the same blue as the wall above them, which the
+photograph is emphatic they are not. The bearer node is renderable and carries
+NO collider: the Shed node's BoxCollider already spans world y 1.400..3.800 and
+contains that volume whole, and those numbers are frozen by `green.sh:1903`.
+
 Replaces the DRAWN surface of `Shed` in assets/games/deeper_demo.loom, a single
 `box` at `pos = [-4.0, 2.60, 4.60]`, `scale = [4.5, 1.20, 2.00]` -- world
 x -8.500..0.500, y 1.400..3.800, z 2.600..6.600.
@@ -39,6 +47,7 @@ import textures
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "..", "..", ".."))
 OBJ_PATH = os.path.join(REPO, "assets", "meshes", "rig_shed.obj")
+BEARER_PATH = os.path.join(REPO, "assets", "meshes", "rig_shed_bearers.obj")
 TEX_DIR = os.path.join(REPO, "assets", "textures")
 
 # World extents, straight off the node. HALF_* are the primitive's `scale`.
@@ -69,11 +78,49 @@ ZONE_SIZE = 1024         # spec §3: this zone is 1024², not TEX_SIZE's 2048
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)
 
-mesh = bpy.data.meshes.new("rig_shed")
-obj = bpy.data.objects.new("rig_shed", mesh)
-bpy.context.collection.objects.link(obj)
-bm = bmesh.new()
-uv_layer = bm.loops.layers.uv.new("UVMap")
+# **Two meshes, not one, and the reason is the material.** The engine is one
+# OBJ per material and never reads `.mtl` (`rigkit`'s rule 4), so anything
+# sharing this mesh shares the shed's painted-blue albedo. The bearers the
+# building stands on are bare timber in the photograph -- and they came out
+# painted the same blue as the wall above them, which reads as a building
+# that was tipped up and dipped. Splitting them into their own mesh and node
+# is the only way to give them their own map, and it is the same solve
+# `build_bulwark.py` documents for its fourteen runs.
+bm = None
+uv_layer = None
+
+
+def begin(name):
+    """Start a new mesh, and point the module-level `bm`/`uv_layer` at it.
+
+    `slab` and `board` write to those globals, which is what the file already
+    did with one mesh; rebinding them is a smaller change than threading a
+    bmesh through both signatures and every call.
+    """
+    global bm, uv_layer
+    mesh = bpy.data.meshes.new(name)
+    o = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(o)
+    bm = bmesh.new()
+    uv_layer = bm.loops.layers.uv.new("UVMap")
+    return o, mesh
+
+
+def finish(o, mesh, path, header):
+    """Recalculate normals per the export contract, write the OBJ, verify."""
+    global bm
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    bm.to_mesh(mesh)
+    bm.free()
+    bm = None
+    rigkit.export_obj(o, path, uv=True, header=header)
+    return rigkit.verify_obj(path)
+
+
+os.makedirs(os.path.dirname(OBJ_PATH), exist_ok=True)
+os.makedirs(TEX_DIR, exist_ok=True)
+
+obj, mesh = begin("rig_shed")
 
 
 def slab(x0, x1, y0, y1, z0, z1, uv_u0, run):
@@ -217,12 +264,6 @@ for cx in (-HALF_X, HALF_X):
         slab(cx - sx * CORNER_W, cx, SILL, HALF_Y,
              cz - sz * CORNER_W, cz, rand(), "z")
 
-# The plinth: bearers running across the shed, with daylight between them.
-bp = (2 * HALF_X - PLINTH_W) / (PLINTH_N - 1)
-for i in range(PLINTH_N):
-    px = -HALF_X + i * bp
-    slab(px, px + PLINTH_W, -HALF_Y, SILL, -HALF_Z, HALF_Z, rand(), "z")
-
 # A thin cap so the box is closed from above and `verify_obj`'s per-shell check
 # has no open shell to refuse. Task 3's roof is a separate mesh with an
 # overhang, so this is a lid and not a roof.
@@ -234,17 +275,38 @@ for i in range(PLINTH_N):
 # each in turn.
 slab(-HALF_X, HALF_X, HALF_Y - 0.04, HALF_Y, -HALF_Z, HALF_Z, 0.0, "x")
 
-bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-bm.to_mesh(mesh)
-bm.free()
+info = finish(obj, mesh, OBJ_PATH,
+              "rig: shed, horizontal lapped weatherboard. Each board's proud "
+              "BOTTOM edge sits on the wall plane and its top recedes %.0f mm. "
+              "Nothing proud of the north face. The bearers under it are "
+              "rig_shed_bearers.obj -- a separate mesh because they are bare "
+              "timber, not painted." % (BOARD_T * 1000))
 
-os.makedirs(os.path.dirname(OBJ_PATH), exist_ok=True)
-os.makedirs(TEX_DIR, exist_ok=True)
-rigkit.export_obj(obj, OBJ_PATH, uv=True,
-                  header="rig: shed, horizontal lapped weatherboard on bearers. "
-                         "Each board's proud BOTTOM edge sits on the wall plane "
-                         "and its top recedes %.0f mm. Nothing proud of the "
-                         "north face." % (BOARD_T * 1000))
+# --- the plinth: its own mesh, its own node, bare timber -------------------
+# Bearers running across the shed with daylight between them. Emitted CENTRED
+# ON THEIR OWN ORIGIN in all three axes, like every other rig mesh, so one
+# node transform places them: the group spans local y -HALF_Y..SILL, whose
+# centre is BEARER_CY below the shed's own.
+#
+# **It gets NO collider.** The shed's BoxCollider already spans world
+# y 1.400..3.800, which contains this volume whole; adding a second one would
+# change what `green.sh:1903` strafes into, and that node's numbers are frozen.
+BEARER_CY = (-HALF_Y + SILL) / 2.0
+BEARER_HY = PLINTH_H / 2.0                                    # y half-extent
+bobj, bmesh_data = begin("rig_shed_bearers")
+bp = (2 * HALF_X - PLINTH_W) / (PLINTH_N - 1)
+for i in range(PLINTH_N):
+    px = -HALF_X + i * bp
+    slab(px, px + PLINTH_W, -HALF_Y - BEARER_CY, SILL - BEARER_CY,
+         -HALF_Z, HALF_Z, rand(), "z")
+binfo = finish(bobj, bmesh_data, BEARER_PATH,
+               "rig: shed bearers -- %d timbers %.0f mm wide under the shed, "
+               "bare timber, NOT painted. Centred on its own origin. Node "
+               "pos=(%.3f, %.3f, %.3f) relative to the shed's own centre "
+               "(0, %.3f, 0). No collider: the Shed node's already covers this."
+               % (PLINTH_N, PLINTH_W * 1000,
+                  SHED_CENTRE[0], SHED_CENTRE[1] + BEARER_CY, SHED_CENTRE[2],
+                  BEARER_CY))
 
 albedo, height = textures.weathered_paint(size=ZONE_SIZE, seed=SEED)
 textures.write_png(os.path.join(TEX_DIR, "rig_shed_albedo.png"), albedo)
@@ -252,8 +314,8 @@ textures.write_png(os.path.join(TEX_DIR, "rig_shed_normal.png"),
                    textures.normal_from_height(height))
 
 # --- self-check ----------------------------------------------------------
-info = rigkit.verify_obj(OBJ_PATH)
 lo, hi = info["lo"], info["hi"]
+blo, bhi = binfo["lo"], binfo["hi"]
 
 # **THE ONE THAT MATTERS, and it runs FIRST.** Local -HALF_Z is world 2.600, the
 # mirror's mount. It is checked before the generic centring loop because a
@@ -264,11 +326,54 @@ assert lo[2] >= -HALF_Z - 1e-4, \
     "world %.3f — MirrorFrame occupies 2.570..2.600 and this punches through it" \
     % (lo[2], lo[2] + SHED_CENTRE[2], NORTH_FACE_WORLD)
 
-for ax, name, half in ((0, "x", HALF_X), (1, "y", HALF_Y), (2, "z", HALF_Z)):
+for ax, name, half in ((0, "x", HALF_X), (2, "z", HALF_Z)):
     assert abs(lo[ax] + half) < 1e-3 and abs(hi[ax] - half) < 1e-3, \
         "shed %s spans %.4f..%.4f, want %.3f..%.3f — not centred on its own " \
         "origin, so its collider cannot be made to match" \
         % (name, lo[ax], hi[ax], -half, half)
+
+# **y is no longer symmetric, and that is the bearer split.** The bearers were
+# the only geometry below the sill; they are now their own mesh, so this one
+# spans SILL..HALF_Y and stops PLINTH_H short of the collider's floor. The
+# COLLIDER does not move -- `green.sh:1903` strafes a character into world
+# y 1.400..3.800 and those numbers are frozen -- so what is checked here is
+# that the boarding still starts exactly at the sill and the cap still closes
+# it at the top. Moving either (a course emitted below SILL, a cap that stops
+# short of HALF_Y) fires this.
+assert abs(lo[1] - SILL) < 1e-3 and abs(hi[1] - HALF_Y) < 1e-3, \
+    "shed y spans %.4f..%.4f, want %.3f..%.3f — the boarding starts at the " \
+    "sill and the cap closes it at HALF_Y; anything else means a course or " \
+    "the cap has moved" % (lo[1], hi[1], SILL, HALF_Y)
+
+# --- the bearers: their own mesh, centred on their own origin -------------
+# Same north-face rule, checked on this mesh too: it spans the full z depth,
+# so an edit that widened it past -HALF_Z would punch the mirror frame exactly
+# as a wall board would, and the shed's own check above would never see it.
+assert blo[2] >= -HALF_Z - 1e-4, \
+    "a bearer vertex reaches local z=%.5f (world %.5f), north of the shed's " \
+    "face at world %.3f — MirrorFrame occupies 2.570..2.600" \
+    % (blo[2], blo[2] + SHED_CENTRE[2], NORTH_FACE_WORLD)
+
+for ax, name, half in ((0, "x", HALF_X), (1, "y", BEARER_HY), (2, "z", HALF_Z)):
+    assert abs(blo[ax] + half) < 1e-3 and abs(bhi[ax] - half) < 1e-3, \
+        "bearers %s span %.4f..%.4f, want %.3f..%.3f — not centred on their " \
+        "own origin, so one node transform cannot place them" \
+        % (name, blo[ax], bhi[ax], -half, half)
+
+# **Why the bearers need no collider of their own.** They sit inside the
+# volume the Shed node's BoxCollider already covers, world y 1.400..3.800.
+# Only the TOP of that containment is worth asserting: the bearers' world
+# floor is `SHED_CENTRE[1] - HALF_Y + PLINTH_H/2 - PLINTH_H/2`, identically
+# the collider's floor whatever PLINTH_H is, so a lower-bound assertion here
+# could not fail for any input and is not written. The upper bound can:
+# PLINTH_H > 2*HALF_Y (2.400 m) pushes the bearers out through the collider's
+# roof, and that is the input that fires this.
+BEARER_TOP = SHED_CENTRE[1] + BEARER_CY + BEARER_HY
+assert BEARER_TOP <= SHED_CENTRE[1] + HALF_Y + 1e-4, \
+    "the bearers reach world y %.4f, above the Shed collider's ceiling at " \
+    "%.3f — PLINTH_H %.3f exceeds the shed's full height %.3f, so they would " \
+    "need a collider of their own" \
+    % (BEARER_TOP, SHED_CENTRE[1] + HALF_Y, PLINTH_H, 2 * HALF_Y)
 
 # **The sawtooth points the right way.** Every board's proud edge is its BOTTOM
 # one. Read the shipped mesh and confirm: on the north wall, the vertices AT the
@@ -278,10 +383,12 @@ for ax, name, half in ((0, "x", HALF_X), (1, "y", HALF_Y), (2, "z", HALF_Z)):
 # would fall the wrong way, which is the one thing a photograph would show and
 # no number here would.
 d = rigkit.read_obj(OBJ_PATH)
-# Sample the BOARDS only. The corner boards and the plinth also sit on the
-# north plane -- corners spanning the full wall height, bearers below the sill --
-# and either one dragged into this mean would swamp the boards' own signal and
-# make the test read whatever those happen to average. Exclude both by extent.
+# Sample the BOARDS only. The corner boards also sit on the north plane,
+# spanning the full wall height, and dragging them into this mean would swamp
+# the boards' own signal and make the test read whatever those happen to
+# average. Exclude them by extent. (The bearers used to be excluded here too;
+# since the split they are not in this mesh at all, and the y window below
+# still excludes anything at or below the sill either way.)
 #
 # The x window is INCLUSIVE of the corner-board line and the exclusion is done
 # in y instead, which is not a paraphrase but a correction. Measured on the
@@ -301,16 +408,16 @@ d = rigkit.read_obj(OBJ_PATH)
 # check at all. The generalisation is cheap; the coverage gap was not.
 def _board_vert(v, axis):
     """Is this a weatherboard vertex on `axis`'s wall, rather than a corner
-    board, a bearer or the cap?
+    board or the cap?
 
     The run window is the axis the boards RUN along -- x for a z-wall, z for an
     x-wall. It is INCLUSIVE of the corner-board line, because every board vertex
     sits exactly on it: the boards run a2..b2 = +/-(half - CORNER_W) and have no
     other coordinate there. A window that excludes that line excludes the whole
     sample. So y does the separating instead: a corner board spans SILL..HALF_Y
-    and has vertices at exactly those two values and nowhere between, and every
-    bearer is at or below SILL. The cap is caught by the run window (its verts
-    sit at +/-HALF_X and +/-HALF_Z, outside every wall's run).
+    and has vertices at exactly those two values and nowhere between. The cap is
+    caught by the run window (its verts sit at +/-HALF_X and +/-HALF_Z, outside
+    every wall's run).
     """
     run = v[0] if axis == "z" else v[2]
     half = HALF_X if axis == "z" else HALF_Z
@@ -337,6 +444,9 @@ for axis, plane, _a, _b, outward in WALLS:
         "every shadow falls the wrong way" % (axis, plane, mean_proud, mean_back)
 print("shed: sawtooth verified proud-edge-down on all %d walls" % len(WALLS))
 
+# Spec §3 gives the `shed_timber` zone 6000 tris. The bearers left that zone
+# with their mesh -- they draw with the deck's timber maps now -- so they are
+# counted and printed separately rather than folded into this number.
 assert info["tris"] <= 6000, "over budget: %d tris" % info["tris"]
 print("shed: node pos=(%.2f, %.2f, %.2f) half_extents=(%.3f, %.3f, %.3f)"
       % (SHED_CENTRE + (HALF_X, HALF_Y, HALF_Z)))
@@ -344,4 +454,10 @@ print("shed: %d courses of %.3f m, lap %.3f, proud %.3f; %d bearers"
       % (rows, BOARD_H, LAP, BOARD_T, PLINTH_N))
 print("shed: %d tris, %d verts, local x %.3f..%.3f y %.3f..%.3f z %.3f..%.3f"
       % (info["tris"], info["verts"], lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]))
+print("bearers: node pos=(%.3f, %.3f, %.3f) half_extents=(%.3f, %.3f, %.3f), "
+      "NO collider" % (SHED_CENTRE[0], SHED_CENTRE[1] + BEARER_CY,
+                       SHED_CENTRE[2], HALF_X, BEARER_HY, HALF_Z))
+print("bearers: %d tris, %d verts, local x %.3f..%.3f y %.3f..%.3f z %.3f..%.3f"
+      % (binfo["tris"], binfo["verts"], blo[0], bhi[0], blo[1], bhi[1],
+         blo[2], bhi[2]))
 print("shed: self-check passes")
