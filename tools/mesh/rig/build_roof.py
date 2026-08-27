@@ -140,6 +140,41 @@ assert cells == full - len(HOLES), \
     "the holes asked for" % (full - len(HOLES), full, len(HOLES), cells)
 print("roof: %d of %d cells present, %d dropped for holes" % (cells, full, full - cells))
 
+# The count check above is cheap and it catches a different failure (too
+# many/few cells dropped) but it proves a subtraction happened, not that a
+# hole exists in the mesh -- `cells == full - len(HOLES)` derives both sides
+# from `HOLES` itself, so it cannot tell a correctly-cut hole from a bug that
+# cuts the WRONG cell while leaving the count untouched. This asks the
+# geometry the question directly: read back the FILE that shipped (not the
+# bmesh still in memory) and confirm no triangle centroid falls inside each
+# claimed hole's footprint.
+geom = rigkit.read_obj(OBJ_PATH)
+gverts = geom["verts"]
+# A margin bigger than the OBJ's ~1e-6 round-trip precision (export writes
+# vertices to 6 decimals) and much smaller than a cell (0.297 m x 0.96 m). A
+# full cell's SIDE WALLS sit exactly on a hole's boundary, and rounding can
+# land a wall's centroid a hair inside an unmargined open interval, which
+# misreads a neighbour's wall as a triangle inside the hole -- measured: with
+# no margin, holes (7, 1) and (8, 1) came back with 2 stray centroids each
+# and (24, 3) with 4, all boundary-riding neighbour walls, not real hits.
+HOLE_MARGIN = 0.01
+for hole_i, hole_j in HOLES:
+    hx0 = -HALF_X + hole_i * step
+    hx1 = hx0 + step
+    hz0 = -HALF_Z + hole_j * zstep
+    hz1 = hz0 + zstep
+    inside = 0
+    for ta, tb, tc in geom["tris"]:
+        tcx = (gverts[ta][0] + gverts[tb][0] + gverts[tc][0]) / 3.0
+        tcz = (gverts[ta][2] + gverts[tb][2] + gverts[tc][2]) / 3.0
+        if (hx0 + HOLE_MARGIN < tcx < hx1 - HOLE_MARGIN
+                and hz0 + HOLE_MARGIN < tcz < hz1 - HOLE_MARGIN):
+            inside += 1
+    assert inside == 0, \
+        "hole (%d, %d) at x %.3f..%.3f z %.3f..%.3f is not empty -- %d " \
+        "triangle centroids found inside it" % (hole_i, hole_j, hx0, hx1, hz0, hz1, inside)
+print("roof: %d holes confirmed geometrically absent" % len(HOLES))
+
 assert info["tris"] <= 2000, "over budget: %d tris" % info["tris"]
 print("roof: node pos=(%.2f, %.2f, %.2f) half_extents=(%.3f, %.3f, %.3f)"
       % (ROOF_CENTRE + (HALF_X, HALF_Y, HALF_Z)))
