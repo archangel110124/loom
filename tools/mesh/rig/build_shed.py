@@ -201,9 +201,15 @@ for axis, plane, a, b, outward in WALLS:
             board(axis, plane, outward, a2, b2, y0, y1, rand())
 
 # Corner boards: one plain vertical plank at each of the four verticals, sitting
-# at the wall plane so the lapped ends die into it. They are also what reaches
-# ±HALF_X and ±HALF_Z -- the boards stop CORNER_W short of both, so without
-# these the x and z centring assertions fail.
+# at the wall plane so the lapped ends die into it.
+#
+# An earlier version of this comment claimed these were what reach +/-HALF_X and
+# +/-HALF_Z, and that the x and z centring assertions fail without them. Both
+# false, and checked by deleting them: everything still passes at 1020 tris. The
+# wall PLANES pin x and z on their own -- the east and west walls sit at
+# +/-HALF_X and the north and south at +/-HALF_Z, by construction. What these
+# actually pin is y, jointly with the cap. They are here because the reference
+# has them and the corners read as mitres without them, which is reason enough.
 for cx in (-HALF_X, HALF_X):
     for cz in (-HALF_Z, HALF_Z):
         sx = 1 if cx > 0 else -1
@@ -219,9 +225,13 @@ for i in range(PLINTH_N):
 
 # A thin cap so the box is closed from above and `verify_obj`'s per-shell check
 # has no open shell to refuse. Task 3's roof is a separate mesh with an
-# overhang, so this is a lid and not a roof. It is ALSO what reaches y = HALF_Y
-# in the middle of the plan: the top course of boards ends at y 1.155, so
-# without this cap the y centring assertion fails.
+# overhang, so this is a lid and not a roof.
+#
+# It reaches y = HALF_Y, which the top course of boards does not -- that ends at
+# y 1.155. But an earlier comment here claimed the y centring assertion fails
+# without the cap, and that is false: the corner boards also reach HALF_Y, so
+# either one alone holds it. Removing BOTH is what fails. Verified by deleting
+# each in turn.
 slab(-HALF_X, HALF_X, HALF_Y - 0.04, HALF_Y, -HALF_Z, HALF_Z, 0.0, "x")
 
 bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
@@ -285,21 +295,47 @@ d = rigkit.read_obj(OBJ_PATH)
 # Cross-checked at the plane: x=±4.410 carries 16 board bottoms plus the corner
 # board's y=-1.050 and y=1.200, and this window keeps 15 board bottoms per end
 # and neither corner vertex.
-def _board_vert(v):
-    return (-HALF_X + CORNER_W - 1e-4 < v[0] < HALF_X - CORNER_W + 1e-4
+# **All four walls, not just the north one.** The first version of this check
+# filtered on the north plane alone, and an inversion applied to the south, east
+# or west wall passed it silently -- three quarters of the shed shipping with no
+# check at all. The generalisation is cheap; the coverage gap was not.
+def _board_vert(v, axis):
+    """Is this a weatherboard vertex on `axis`'s wall, rather than a corner
+    board, a bearer or the cap?
+
+    The run window is the axis the boards RUN along -- x for a z-wall, z for an
+    x-wall. It is INCLUSIVE of the corner-board line, because every board vertex
+    sits exactly on it: the boards run a2..b2 = +/-(half - CORNER_W) and have no
+    other coordinate there. A window that excludes that line excludes the whole
+    sample. So y does the separating instead: a corner board spans SILL..HALF_Y
+    and has vertices at exactly those two values and nowhere between, and every
+    bearer is at or below SILL. The cap is caught by the run window (its verts
+    sit at +/-HALF_X and +/-HALF_Z, outside every wall's run).
+    """
+    run = v[0] if axis == "z" else v[2]
+    half = HALF_X if axis == "z" else HALF_Z
+    return (-half + CORNER_W - 1e-4 < run < half - CORNER_W + 1e-4
             and SILL + 1e-4 < v[1] < HALF_Y - 1e-4)
 
-at_plane = [v for v in d["verts"] if abs(v[2] + HALF_Z) < 1e-6 and _board_vert(v)]
-assert at_plane, "no board vertex sits on the north plane at all"
-recessed = [v for v in d["verts"]
-            if -HALF_Z + BOARD_T * 0.5 < v[2] < -HALF_Z + BOARD_T * 1.5 and _board_vert(v)]
-assert recessed, "nothing sits one board-thickness behind the plane"
-mean_proud = sum(v[1] for v in at_plane) / len(at_plane)
-mean_back = sum(v[1] for v in recessed) / len(recessed)
-assert mean_proud < mean_back, \
-    "the sawtooth is inverted: the proud edge averages y=%.4f and the recessed " \
-    "edge y=%.4f, so the boards lap upward and every shadow falls the wrong way" \
-    % (mean_proud, mean_back)
+for axis, plane, _a, _b, outward in WALLS:
+    k = 2 if axis == "z" else 0
+    r0 = plane - outward * BOARD_T * 1.5
+    r1 = plane - outward * BOARD_T * 0.5
+    r_lo, r_hi = min(r0, r1), max(r0, r1)
+    at_plane = [v for v in d["verts"]
+                if abs(v[k] - plane) < 1e-6 and _board_vert(v, axis)]
+    assert at_plane, "no board vertex sits on the %s=%.3f plane at all" % (axis, plane)
+    recessed = [v for v in d["verts"]
+                if r_lo < v[k] < r_hi and _board_vert(v, axis)]
+    assert recessed, \
+        "nothing sits one board-thickness behind the %s=%.3f plane" % (axis, plane)
+    mean_proud = sum(v[1] for v in at_plane) / len(at_plane)
+    mean_back = sum(v[1] for v in recessed) / len(recessed)
+    assert mean_proud < mean_back, \
+        "the sawtooth is inverted on the %s=%.3f wall: the proud edge averages " \
+        "y=%.4f and the recessed edge y=%.4f, so the boards lap upward and " \
+        "every shadow falls the wrong way" % (axis, plane, mean_proud, mean_back)
+print("shed: sawtooth verified proud-edge-down on all %d walls" % len(WALLS))
 
 assert info["tris"] <= 6000, "over budget: %d tris" % info["tris"]
 print("shed: node pos=(%.2f, %.2f, %.2f) half_extents=(%.3f, %.3f, %.3f)"
