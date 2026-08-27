@@ -300,13 +300,25 @@ def test_paint_is_blue_and_worn_through():
                    (((alb / 255.0) + 0.055) / 1.055) ** 2.4)
     flat = lin.reshape(-1, 3)
     m = flat.mean(axis=0)
-    assert m[2] > m[0] * 2.0, \
-        "not blue enough: linear mean %s, B/R %.2f" % (m.round(4), m[2] / m[0])
     # Bare timber is warm; paint is cold. If the warm pixels have vanished the
     # paint never wore through, and if the cold ones have, it never was painted.
+    #
+    # **This band is asserted BEFORE blueness, and the order is the point.**
+    # Stripping the paint also strips the blue, so any fault big enough to push
+    # `warm` past 0.40 has already dragged B/R under 2.0. With blueness first the
+    # upper bound could never be the assertion that fires -- not for the one
+    # injection the plan named, but for ANY setting of this generator's knobs,
+    # which a sweep of the wear threshold and transition width confirmed. It was
+    # dead weight, and reordering is what brings it back to life. Measured, on a
+    # copy of textures.py with the wear threshold patched:
+    #     -0.95  B/R 4.11  worn 0.000  -> band fails LOW   (blueness still passes)
+    #     -0.60  B/R 2.87  worn 0.097  -> both pass         (the shipped value)
+    #     -0.20  B/R 0.73  worn 0.858  -> band fails HIGH  (blueness would mask it)
     warm = (flat[:, 0] > flat[:, 2]).mean()
     assert 0.04 < warm < 0.40, \
         "worn fraction %.3f — want some bare timber showing, not none and not most" % warm
+    assert m[2] > m[0] * 2.0, \
+        "not blue enough: linear mean %s, B/R %.2f" % (m.round(4), m[2] / m[0])
     print("  paint ok  linear mean=%s  B/R %.2f  worn %.3f"
           % (m.round(4), m[2] / m[0], warm))
 
