@@ -250,10 +250,29 @@ def test_boards_are_timber_and_tile():
           % (m.round(4), sx, ix, sy, iy))
 
 
+def test_corrugated_metal_is_cold_and_streaked():
+    """Galvanised sheet gone to rust. Unlike the piles' steel this is a COLD
+    base with warm rust on top, so the mean should sit near neutral rather than
+    rust-shifted — if R leads strongly this is just more pile."""
+    alb, _ = textures.corrugated_metal(size=256, seed=19)
+    lin = np.where(alb / 255.0 <= 0.04045, (alb / 255.0) / 12.92,
+                   (((alb / 255.0) + 0.055) / 1.055) ** 2.4)
+    m = lin.reshape(-1, 3).mean(axis=0)
+    # Measured 1.24 shipped; 1.05 with the rust threshold at its first-draft
+    # 0.62, which is visually bare galvanise. The band excludes both that and a
+    # roof rusted as hard as the piles.
+    assert 1.10 < m[0] / m[2] < 1.45, \
+        "should be galvanise with rust on top, got R/B %.2f (%s)" % (m[0] / m[2], m.round(4))
+    assert (m < 0.16).all(), "too bright for weathered galvanise: %s" % m.round(4)
+    assert lin.reshape(-1, 3).std(axis=0).mean() > 0.012, "too flat"
+    print("  roof ok  linear mean=%s  R/B %.2f" % (m.round(4), m[0] / m[2]))
+
+
 test_png_round_trip()
 test_steel_is_darker_and_ruster_than_timber()
 test_steel_tiles_and_is_deterministic()
 test_tidal_growth_is_green_black_and_varied()
 test_boards_grain_runs_the_short_way()
 test_boards_are_timber_and_tile()
+test_corrugated_metal_is_cold_and_streaked()
 print("textures: all checks pass")

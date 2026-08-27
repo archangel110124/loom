@@ -308,6 +308,51 @@ def weathered_boards(size=1024, seed=17):
     return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
 
 
+def corrugated_metal(size=1024, seed=19):
+    """-> (albedo uint8 HxWx3, height float32 HxW in 0..1).
+
+    Galvanised sheet, weathered. The spangle has gone chalky, rust has taken the
+    laps and the fixings, and dirt has run down from every one.
+
+    **The corrugation itself is GEOMETRY, not this texture.** `build_roof.py`
+    folds the sheet; this supplies the surface on top of it. Baking ridges into
+    the height map as well would double them and read as a moire.
+
+    LINEAR reflectance in, sRGB bytes out.
+    """
+    rng = np.random.default_rng(seed)
+
+    chalk = _fbm(size, rng, octaves=5, base=6)
+    chalk = (chalk - chalk.min()) / (chalk.max() - chalk.min())
+    # Rust starts at fixings and laps -- sparse points, not a field.
+    spot = _fbm(size, rng, octaves=6, base=14)
+    spot = (spot - spot.min()) / (spot.max() - spot.min())
+    # 0.62 leaves so little rust that the mean comes back R/B 1.05 — visually
+    # bare galvanise, and sitting on its own assertion's boundary. 0.52 gives
+    # 1.24, which reads as a rusting roof and has headroom both ways.
+    rust = np.clip((spot - 0.52) / 0.22, 0.0, 1.0)
+    # And runs DOWN from each one. Same wrapping smear as `weathered_steel`:
+    # `np.maximum.accumulate` does not tile and puts a band across the sheet.
+    REACH = size // 8
+    smear = rust.copy()
+    for k in range(1, REACH):
+        smear = np.maximum(smear, np.roll(rust, k, axis=0) * (1.0 - k / REACH))
+    dirt = np.clip(smear * 0.55 - 0.15, 0.0, 1.0)
+
+    height = np.clip(0.40 + 0.35 * rust + 0.15 * chalk, 0.0, 1.0).astype(np.float32)
+
+    c = chalk[:, :, None]
+    zinc = np.array([0.088, 0.092, 0.096]) + c * np.array([0.046, 0.048, 0.050])
+    rusty = np.array([0.150, 0.072, 0.034]) + c * np.array([0.080, 0.038, 0.016])
+    grime = np.array([0.042, 0.041, 0.038]) + c * np.array([0.028, 0.027, 0.024])
+
+    r = rust[:, :, None]
+    d = dirt[:, :, None]
+    rgb = zinc * (1.0 - r) + rusty * r
+    rgb = rgb * (1.0 - d) + grime * d
+    return (_srgb_encode(rgb) * 255.0 + 0.5).astype(np.uint8), height
+
+
 def normal_from_height(height, strength=0.008):
     """Tangent-space normal map, +Y green (OpenGL). Wraps, like its source.
 
