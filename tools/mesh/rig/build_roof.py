@@ -43,7 +43,7 @@ HALF_X, HALF_Y, HALF_Z = 4.9, 0.15, 2.40
 # over. Coarsening to a 0.30 m pitch and five z-bands gives 33 x 5 = 165 cells =
 # 1,980 tris, which fits.
 #
-# The z-bands are 0.96 m, so a hole is a whole band deep. That is not a
+# The z-bands are 0.956 m, so a hole is a whole band deep. That is not a
 # compromise: corrugated roofing does not develop pinholes, it loses a SHEET.
 # A band-deep gap is what the failure actually looks like.
 PITCH = 0.300            # one corrugation period, in X
@@ -54,6 +54,31 @@ ZONE_SIZE = 1024         # spec §3: this zone is 1024², not TEX_SIZE's 2048
 # Holes are given in CELL INDICES, not metres, so they land on cell boundaries
 # exactly and the count assertion below is exact rather than approximate.
 HOLES = [(7, 1), (8, 1), (24, 3)]     # (period index, z-band index)
+# The sheet falls from the back of the shed to the front, so water sheds over
+# the north eave rather than sitting on the ridge.
+#
+# The whole 0.3 m y envelope, spent three ways -- and it IS the whole envelope,
+# so none of these three can grow without another shrinking:
+#     AMP 0.045 + FALL 0.190 + FASCIA_H 0.060 = 0.295, inside 0.300 by 5 mm
+# The corrugation amplitude takes its cut FIRST. Measured down from the ceiling:
+# back ridge +0.150, back centreline +0.105, front centreline -0.085, fascia
+# bottom -0.145, envelope floor -0.150.
+#
+# 0.190 of fall across the sheet's 4.78 m of depth is 2.28 deg. Shallow, and
+# deliberately so: a steeper drawn roof would have to rise above the collider,
+# and the seen-<=-walked rule has held for three phases. The 3.6 deg a naive
+# re-derivation gives is what a zero-thickness sheet with no fascia would get.
+# The eave overhang -- which the roof already has, its local z being +/-2.400
+# against the shed's +/-2.000 -- does more for the read than the last degree.
+FALL = 0.190
+FASCIA_H = 0.060         # the board closing the corrugation ends at the eave
+FASCIA_T = 0.020
+# The sheet stops FASCIA_T short of the front so the fascia has a plane of its
+# own. If the sheet ran the full 2*HALF_Z the fascia's front face would be
+# COPLANAR with the cells' front wall and buried inside the slab -- z-fighting,
+# not an eave. The fascia supplies the +HALF_Z bound instead.
+Z_SPAN = 2 * HALF_Z - FASCIA_T
+FASCIA_TRIS = 12         # one closed box; the cell-count check subtracts it
 
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)
@@ -66,12 +91,31 @@ uv_layer = bm.loops.layers.uv.new("UVMap")
 
 periods = int(round((2 * HALF_X) / PITCH))
 step = (2 * HALF_X) / periods
-zstep = (2 * HALF_Z) / ZSTEPS
+zstep = Z_SPAN / ZSTEPS
 
 
 def prof(x):
     """The corrugation profile: y offset at a given x."""
     return AMP * math.sin(2.0 * math.pi * x / PITCH)
+
+
+def slab_roof(x0, x1, y0, y1, z0, z1):
+    """A closed box in LOCAL metres, UV'd to match the sheet.
+
+    Arguments are local x/y/z, but the VERTEX is built (x, -z, y) -- Blender
+    native Z-up, the same ordering the cell loop uses, because rigkit exports
+    (x, y, z) -> (x, z, -y). A literal (x, y, z) tuple here builds the board
+    lying down. Winding is left to `recalc_face_normals` like the cells.
+    """
+    v = [bm.verts.new((c[0], -c[2], c[1])) for c in (
+        (x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
+        (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1))]
+    for a, b, c, d_ in ((0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4),
+                        (2, 3, 7, 6), (1, 2, 6, 5), (0, 4, 7, 3)):
+        f = bm.faces.new((v[a], v[b], v[c], v[d_]))
+        for loop in f.loops:
+            x, y, _z = loop.vert.co
+            loop[uv_layer].uv = (x / 2.0, -y / 2.0)
 
 
 for i in range(periods):
@@ -82,10 +126,16 @@ for i in range(periods):
         z1 = z0 + zstep
         if (i, j) in HOLES:
             continue
-        yt0, yt1 = HALF_Y - AMP + prof(x0), HALF_Y - AMP + prof(x1)
-        # Top surface, following the fold.
-        a = bm.verts.new((x0, -z0, yt0)); b = bm.verts.new((x1, -z0, yt1))
-        c = bm.verts.new((x1, -z1, yt1)); d = bm.verts.new((x0, -z1, yt0))
+        # Height of the sheet at this z: full at the back, FALL lower at the
+        # front. `zt` is 0 at the back edge and 1 at the sheet's front edge, so
+        # the drop at the eave is exactly FALL and `fy` below is exact.
+        drop0 = FALL * (z0 + HALF_Z) / Z_SPAN
+        drop1 = FALL * (z1 + HALF_Z) / Z_SPAN
+        # Top surface, following the fold AND the fall -- four distinct heights.
+        a = bm.verts.new((x0, -z0, HALF_Y - AMP + prof(x0) - drop0))
+        b = bm.verts.new((x1, -z0, HALF_Y - AMP + prof(x1) - drop0))
+        c = bm.verts.new((x1, -z1, HALF_Y - AMP + prof(x1) - drop1))
+        d = bm.verts.new((x0, -z1, HALF_Y - AMP + prof(x0) - drop1))
         # Underside, flat.
         e = bm.verts.new((x0, -z0, -HALF_Y)); f = bm.verts.new((x1, -z0, -HALF_Y))
         g = bm.verts.new((x1, -z1, -HALF_Y)); h = bm.verts.new((x0, -z1, -HALF_Y))
@@ -102,6 +152,14 @@ for i in range(periods):
                 x, y, z = loop.vert.co
                 loop[uv_layer].uv = (x / 2.0, -y / 2.0)
 
+# The fascia: a board across the low edge, closing the corrugation ends.
+# Without it the sheet reads as a floating plane -- you see straight into the
+# flutes and there is nothing to cast a line along the eave. ONE box, not one
+# per corrugation: the board has no profile, so 33 of them would be the same
+# geometry at 396 tris against a 2,000 cap the sheet already spends 1,944 of.
+fy = HALF_Y - AMP - FALL         # -0.085; fascia bottom -0.145 vs floor -0.150
+slab_roof(-HALF_X, HALF_X, fy - FASCIA_H, fy + AMP, HALF_Z - FASCIA_T, HALF_Z)
+
 bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
 bm.to_mesh(mesh)
 bm.free()
@@ -110,7 +168,9 @@ os.makedirs(os.path.dirname(OBJ_PATH), exist_ok=True)
 os.makedirs(TEX_DIR, exist_ok=True)
 rigkit.export_obj(obj, OBJ_PATH, uv=True,
                   header="rig: shed roof. %d corrugations at %.3f m, amp %.3f, "
-                         "%d holes rusted through." % (periods, PITCH, AMP, len(HOLES)))
+                         "%d holes rusted through. Falls %.3f m to a fascia "
+                         "at the front eave."
+                         % (periods, PITCH, AMP, len(HOLES), FALL))
 
 albedo, height = textures.corrugated_metal(size=ZONE_SIZE, seed=SEED)
 textures.write_png(os.path.join(TEX_DIR, "rig_roof_albedo.png"), albedo)
@@ -126,9 +186,15 @@ for ax, name, half in ((0, "x", HALF_X), (2, "z", HALF_Z)):
         "roof %s spans %.4f..%.4f, want %.3f..%.3f" % (name, lo[ax], hi[ax], -half, half)
 # The corrugation must stay INSIDE the primitive's y envelope, or the drawn roof
 # stands above the collider the player would meet if he ever got up there.
+# The message named AMP alone, and AMP alone can never trip it: the top is
+# HALF_Y - AMP + prof(x) with |prof| <= AMP, so it caps at HALF_Y whatever AMP
+# is, and the underside is flat at -HALF_Y. What spends the envelope now is the
+# sum, and the sum is what the failure has to name -- measured: FASCIA_H=0.120
+# fires this, AMP=0.120 does not (it trips verify_obj's per-shell volume first).
 assert lo[1] >= -HALF_Y - 1e-4 and hi[1] <= HALF_Y + 1e-4, \
-    "roof y spans %.4f..%.4f, outside the primitive's +/-%.3f — the fold amplitude " \
-    "AMP=%.3f is too large for HALF_Y" % (lo[1], hi[1], HALF_Y, AMP)
+    "roof y spans %.4f..%.4f, outside the primitive's +/-%.3f — the envelope " \
+    "is spent AMP=%.3f + FALL=%.3f + FASCIA_H=%.3f = %.3f of %.3f" \
+    % (lo[1], hi[1], HALF_Y, AMP, FALL, FASCIA_H, AMP + FALL + FASCIA_H, 2 * HALF_Y)
 
 # **First, that there ARE holes.** Both checks below are parameterised by
 # `HOLES`: the count check derives both sides of its equality from it, and the
@@ -148,7 +214,9 @@ assert HOLES, \
 # indexed, so this is an equality rather than an inequality — an inequality
 # would pass if a bug dropped the wrong cells, or twice as many.
 full = periods * ZSTEPS
-cells = info["tris"] // 12          # 6 quads -> 12 tris per closed cell
+# Less the fascia, which is a closed box of the same 12 tris and would
+# otherwise read as one extra cell and fail this by exactly one.
+cells = (info["tris"] - FASCIA_TRIS) // 12   # 6 quads -> 12 tris per cell
 assert cells == full - len(HOLES), \
     "expected %d cells (%d full minus %d holes), got %d — the holes cut are not " \
     "the holes asked for" % (full - len(HOLES), full, len(HOLES), cells)
@@ -188,6 +256,46 @@ for hole_i, hole_j in HOLES:
         "hole (%d, %d) at x %.3f..%.3f z %.3f..%.3f is not empty -- %d " \
         "triangle centroids found inside it" % (hole_i, hole_j, hx0, hx1, hz0, hz1, inside)
 print("roof: %d holes confirmed geometrically absent" % len(HOLES))
+
+# **First, that there IS a fall**, for the same reason `HOLES` is asserted
+# non-empty above: the check below is parameterised by FALL on both sides, so
+# at FALL = 0.0 it compares 0.000 against an expected 0.000 and passes on a
+# level sheet -- the flat slab this replaced, waved through by a check written
+# to prove it is pitched. Nothing downstream can see the difference.
+assert FALL > 0.0, \
+    "FALL is 0.0 -- the sheet is level and reads as the flat slab this " \
+    "replaced, and the fall check below is parameterised by FALL on both " \
+    "sides and therefore vacuous: it compares a 0.000 m fall against a " \
+    "0.000 m expectation."
+
+# The sheet must fall the right way and by the right amount. Sampled on two
+# whole z-planes of the SHIPPED file, by MAX rather than mean: the holes make
+# the two planes carry different sets of x, and a mean over different x would
+# drift by the corrugation. The front plane is one band in from the eave so no
+# fascia vertex can reach it. The underside is flat at -HALF_Y, hence the
+# filter that drops it.
+zb, zf = -HALF_Z, HALF_Z - FASCIA_T - zstep
+back = [v[1] for v in gverts if abs(v[2] - zb) < 1e-3 and v[1] > -HALF_Y + 1e-3]
+front = [v[1] for v in gverts if abs(v[2] - zf) < 1e-3 and v[1] > -HALF_Y + 1e-3]
+assert back and front, \
+    "could not sample the sheet at z %.3f (%d verts) and z %.3f (%d verts)" \
+    % (zb, len(back), zf, len(front))
+fall = max(back) - max(front)
+want = FALL * (zf - zb) / Z_SPAN
+assert abs(fall - want) < 1e-3, \
+    "the sheet falls %.4f m between z %.3f and z %.3f, want %.4f — it is " \
+    "level, or falls the wrong way, and reads as the flat slab this replaced" \
+    % (fall, zb, zf, want)
+
+# The fascia must be there, and BELOW the sheet's low edge -- a board flush
+# with the corrugation closes nothing and casts no line along the eave.
+fy_check = HALF_Y - AMP - FALL
+assert any(v[2] > HALF_Z - FASCIA_T + 1e-6 and v[1] < fy_check - 1e-6
+           for v in gverts), \
+    "no geometry below y %.3f at the front face — the fascia is missing or " \
+    "flush with the sheet" % fy_check
+print("roof: falls %.3f m back to front (%.2f deg), fascia %.3f m"
+      % (FALL, math.degrees(math.atan2(FALL, Z_SPAN)), FASCIA_H))
 
 assert info["tris"] <= 2000, "over budget: %d tris" % info["tris"]
 print("roof: node pos=(%.2f, %.2f, %.2f) half_extents=(%.3f, %.3f, %.3f)"
