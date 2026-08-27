@@ -430,16 +430,49 @@ def weathered_paint(size=1024, seed=29, paint=(0.022, 0.055, 0.125)):
              + _fbm(size, rng, octaves=4, base=4, stretch=4) * 0.30)
     grain = (grain - grain.min()) / (grain.max() - grain.min())
 
-    # Where the paint has gone. Wear follows the weather, so it is broad and
-    # isotropic rather than following the grain.
-    wear_f = _fbm(size, rng, octaves=5, base=5)
+    # Where the paint has gone. **Wear follows the GRAIN, not the weather.**
+    # The first version read `base=5`, isotropic, and weighted the weather
+    # field 0.75 against the grain's 0.25 through a 0.16-wide transition. In
+    # the render that came out as lichen: tan blotches ~0.4 m across (base 5
+    # over a 2 m tile) with hard edges, scattered over the wall like
+    # camouflage, floating free of the boards they sit on. The photograph has
+    # nothing of the kind — its paint goes along the grain and at the edges,
+    # in streaks a hand wide.
+    #
+    # Three changes, each doing one thing:
+    #   base 5 -> 18       blobs from ~0.40 m to ~0.11 m, so they read as
+    #                      surface rather than as objects on it;
+    #   stretch 1 -> 4     the wear field is itself elongated along +U, the
+    #                      direction the board runs, so a patch is a streak;
+    #   0.25 -> 0.55 grain the grain is now the LARGER term, so where the
+    #                      paint goes is decided mostly by the timber under it.
+    # The transition widens 0.16 -> 0.28 so a patch fades out instead of
+    # ending at a contour line, and the threshold drops 0.60 -> 0.48 to keep
+    # the fully-bare fraction inside `test_textures.py`'s 0.04..0.40 band
+    # (measured 0.070 at 256²) — a wider transition alone would have starved
+    # it to 0.001 and failed the floor.
+    #
+    # Measured on the wear field, anisotropy as mean |d/dy| over mean |d/dx|:
+    # 1.66 before, 5.77 after. Higher means flatter, longer streaks.
+    wear_f = _fbm(size, rng, octaves=5, base=18, stretch=4)
     wear_f = (wear_f - wear_f.min()) / (wear_f.max() - wear_f.min())
     # Grain sits proud of the softer wood between it, so the grain wears first.
-    worn = np.clip((wear_f * 0.75 + grain * 0.25 - 0.60) / 0.16, 0.0, 1.0)
+    worn = np.clip((wear_f * 0.45 + grain * 0.55 - 0.48) / 0.28, 0.0, 1.0)
 
     # Salt dries white in the sheltered parts, over paint and bare wood alike.
-    salt = _fbm(size, rng, octaves=4, base=9)
-    salt = np.clip((salt - salt.min()) / (salt.max() - salt.min()) * 1.2 - 0.62, 0.0, 1.0)
+    #
+    # **This field was half the blotching, and fixing only the wear left it.**
+    # At `base=9`, isotropic and blending to a full 1.0, it put ~0.22 m puffs
+    # of near-white (`bloom` is 0.21 linear against the paint's 0.125, and
+    # neutral, so it takes the blue out where it lands) over the wall — read
+    # off the first corrected render, where the wear had gone streaky and
+    # these had not. Same three changes as the wear above: finer (24), run
+    # along the board (stretch 4), and a 0.5 CEILING so salt tints the paint
+    # rather than replacing it. Measured at 256²: peak blend 0.58 -> 0.35,
+    # anisotropy 0.96 -> 3.90, B/R 2.46 -> 2.51.
+    salt = _fbm(size, rng, octaves=4, base=24, stretch=4)
+    salt = np.clip((salt - salt.min()) / (salt.max() - salt.min()) * 1.3 - 0.60,
+                   0.0, 1.0) * 0.5
 
     height = np.clip(0.35 + 0.35 * grain - 0.20 * worn, 0.0, 1.0).astype(np.float32)
 
