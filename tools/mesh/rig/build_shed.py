@@ -332,6 +332,27 @@ for ax, name, half in ((0, "x", HALF_X), (2, "z", HALF_Z)):
         "origin, so its collider cannot be made to match" \
         % (name, lo[ax], hi[ax], -half, half)
 
+# **Why the bearers need no collider of their own.** They sit inside the
+# volume the Shed node's BoxCollider already covers, world y 1.400..3.800.
+# Only the TOP of that containment is worth asserting: the bearers' world
+# floor is identically the collider's floor whatever PLINTH_H is, so a
+# lower-bound assertion here could not fail for any input and is not written.
+#
+# **This runs BEFORE the shed's own y-span check, and the order is the point.**
+# The input that fires it is PLINTH_H > 2*HALF_Y (2.400 m), which pushes the
+# bearers out through the collider's roof. But any such PLINTH_H also leaves
+# `rows == 0`, and the y-span assert below then fires first -- measured at
+# PLINTH_H = 2.5, which reported `shed y spans 1.1600..1.3000` and never
+# reached this line. Ordered after, it was the eleventh assertion in this
+# project that could not fail, with a comment naming a trigger that never
+# reached it. Same remedy the north-face check above already uses: run first.
+BEARER_TOP = SHED_CENTRE[1] + BEARER_CY + BEARER_HY
+assert BEARER_TOP <= SHED_CENTRE[1] + HALF_Y + 1e-4, \
+    "the bearers reach world y %.4f, above the Shed collider's ceiling at " \
+    "%.3f — PLINTH_H %.3f exceeds the shed's full height %.3f, so they would " \
+    "need a collider of their own" \
+    % (BEARER_TOP, SHED_CENTRE[1] + HALF_Y, PLINTH_H, 2 * HALF_Y)
+
 # **y is no longer symmetric, and that is the bearer split.** The bearers were
 # the only geometry below the sill; they are now their own mesh, so this one
 # spans SILL..HALF_Y and stops PLINTH_H short of the collider's floor. The
@@ -359,21 +380,6 @@ for ax, name, half in ((0, "x", HALF_X), (1, "y", BEARER_HY), (2, "z", HALF_Z)):
         "bearers %s span %.4f..%.4f, want %.3f..%.3f — not centred on their " \
         "own origin, so one node transform cannot place them" \
         % (name, blo[ax], bhi[ax], -half, half)
-
-# **Why the bearers need no collider of their own.** They sit inside the
-# volume the Shed node's BoxCollider already covers, world y 1.400..3.800.
-# Only the TOP of that containment is worth asserting: the bearers' world
-# floor is `SHED_CENTRE[1] - HALF_Y + PLINTH_H/2 - PLINTH_H/2`, identically
-# the collider's floor whatever PLINTH_H is, so a lower-bound assertion here
-# could not fail for any input and is not written. The upper bound can:
-# PLINTH_H > 2*HALF_Y (2.400 m) pushes the bearers out through the collider's
-# roof, and that is the input that fires this.
-BEARER_TOP = SHED_CENTRE[1] + BEARER_CY + BEARER_HY
-assert BEARER_TOP <= SHED_CENTRE[1] + HALF_Y + 1e-4, \
-    "the bearers reach world y %.4f, above the Shed collider's ceiling at " \
-    "%.3f — PLINTH_H %.3f exceeds the shed's full height %.3f, so they would " \
-    "need a collider of their own" \
-    % (BEARER_TOP, SHED_CENTRE[1] + HALF_Y, PLINTH_H, 2 * HALF_Y)
 
 # **The sawtooth points the right way.** Every board's proud edge is its BOTTOM
 # one. Read the shipped mesh and confirm: on the north wall, the vertices AT the

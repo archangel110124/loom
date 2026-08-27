@@ -120,7 +120,7 @@
 # `deeper_demo.loom`'s own `ShedRoof` primitive (pos z 4.60, scale z 2.40 →
 # z 2.200..7.000) reproduced exactly rather than a new encroachment. It is
 # harmless because it passes OVER the frame, not through it: the roof
-# occupies y 3.800..4.094 and `MirrorFrame` tops out at y 3.660 (pos y 2.600,
+# occupies y 3.800..4.100 and `MirrorFrame` tops out at y 3.660 (pos y 2.600,
 # scale y 1.060), leaving 140 mm of clearance. Extend the rule to the roof
 # and you forbid an overhang the primitive already had.
 
