@@ -338,7 +338,14 @@ impl Ocean {
             let n = layer.n;
             #[allow(clippy::cast_precision_loss)]
             let cell = layer.patch / n as f32;
-            let (fx, fz) = (x / cell, z / cell);
+            // **Wrapped into the patch before the divide, not after.** The interpolant
+            // is `fx - fx.floor()`, and an `f32` ten kilometres out on a 32 m patch has
+            // ~0.001 m of resolution left in its mantissa — the fraction quantises to
+            // about 1/128 of a cell, so a boat far from the origin samples a stepped
+            // surface. `rem_euclid` first keeps the whole computation inside `[0, patch)`
+            // where the mantissa is spent on the part that matters, and it costs nothing:
+            // the wrap had to happen anyway, one line further down.
+            let (fx, fz) = (x.rem_euclid(layer.patch) / cell, z.rem_euclid(layer.patch) / cell);
             let (x0, z0) = (fx.floor(), fz.floor());
             let (tx, tz) = (fx - x0, fz - z0);
             // `rem_euclid` on the integer rather than the float: a negative coordinate
@@ -400,6 +407,7 @@ impl Ocean {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PROFILE;
 
     fn test_ocean() -> Ocean {
         Ocean::new(
@@ -557,6 +565,35 @@ mod tests {
     /// on the grid axes cannot hide there either.
     const HEADINGS: [[f32; 2]; 3] = [[1.0, 0.0], [-1.0, 0.0], [-1.0, -1.0]];
 
+    /// **Ten kilometres out is the same sea as at the origin, near enough.** Both patches
+    /// here divide 512 m, so a 10,240 m offset is a whole number of tile periods and the
+    /// two samples describe the same point.
+    ///
+    /// **Not bit-identical, and the reason is worth knowing before someone tightens this
+    /// band.** `10243.7_f32` is not `3.7 + 20 patches`; an `f32` at 10 km steps by
+    /// 0.98 mm, so the argument has already lost the information before `sample` sees it.
+    /// Measured drift is 4.2e-5 at worst, and it is *the same* with and without the
+    /// `rem_euclid` wrap in [`Ocean::sample`] (1.79e-5 against 1.82e-5 at the third
+    /// point) — which is the measurement saying the far-field quantisation lives in the
+    /// coordinate and not in the interpolant. 1e-4 catches a wrap that is actually broken
+    /// and asserts nothing this arithmetic cannot deliver.
+    #[test]
+    fn the_far_field_is_the_near_field() {
+        let mut o = test_ocean();
+        o.evolve(8.0);
+        for (x, z) in [(3.7_f32, 11.3_f32), (-6.25, 0.4), (100.1, -55.9)] {
+            let near = o.sample(x, z);
+            let far = o.sample(x + 10_240.0, z - 10_240.0);
+            for i in 0..3 {
+                assert!(
+                    (near[i] - far[i]).abs() < 1e-4,
+                    "component {i} at ({x}, {z}) reads {} near and {} ten km out",
+                    near[i], far[i]
+                );
+            }
+        }
+    }
+
     /// **The sea runs downwind, and the standing-wave failure is what this catches.**
     /// The literal Tessendorf formula against this crate's Hermitian `h0` collapses to
     /// `2·h0·cos(ωt)` — real, finite, right size, and completely stationary. Every other
@@ -638,6 +675,14 @@ mod tests {
     /// Not a gate — the two numbers that choose the shipping grid size. ADR 0076
     /// predicts ~1.24 ms at N=128 and ~7.15 ms at N=256 for nine 2D transforms, against
     /// a fixed step of 16.67 ms.
+    ///
+    /// **ADR 0076's figures are release figures and `cargo test` is a debug build**, so
+    /// the line says which profile produced it. Unlabelled, `cargo test -p loom_water --
+    /// --nocapture` printed `19.963 ms/tick (119.8% of a 16.67 ms tick)` directly beneath
+    /// the paragraph above, and the only conclusion available to a reader was that the
+    /// ocean does not fit in a frame. Release is 1.498 ms and 8.202 ms — it fits with
+    /// room to spare. Marking both cost tests `#[ignore]` was the alternative and would
+    /// have hidden the number rather than qualified it; see [`crate::PROFILE`].
     // `Instant::now` is on `clippy.toml`'s disallowed list because **simulation** must
     // not read the wall clock (never-do #8). A cost measurement is the one thing that
     // has to, and it is in `cfg(test)` where no tick can reach it.
@@ -663,9 +708,9 @@ mod tests {
                 o.evolve(f32::from(i) * (1.0 / 60.0));
             }
             let each = start.elapsed().as_secs_f64() * 1000.0 / f64::from(reps);
+            let percent = each * 100.0 / 16.666_666;
             println!(
-                "evolve, 3 cascades at N={n}: {each:.3} ms/tick ({:.1}% of a 16.67 ms tick)",
-                each * 100.0 / 16.666_666
+                "evolve, 3 cascades at N={n}: {each:.3} ms/tick ({percent:.1}% of a 16.67 ms tick) [{PROFILE}]"
             );
         }
     }

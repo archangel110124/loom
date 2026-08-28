@@ -132,6 +132,7 @@ pub fn ifft_2d(grid: &mut [Complex], n: usize, tw: &Twiddles, scratch: &mut [Com
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PROFILE;
 
     fn naive_idft_1d(input: &[Complex]) -> Vec<Complex> {
         let n = input.len();
@@ -283,24 +284,40 @@ mod tests {
     /// `cargo test -- --nocapture` rather than discovered later on a frame budget.
     ///
     /// ADR 0076 measured 0.138 ms at N=128 and 0.795 ms at N=256 for one 2D transform,
-    /// scalar and single-threaded, against a 16.67 ms tick.
+    /// scalar and single-threaded, against a 16.67 ms tick. **Those are release numbers,
+    /// and `cargo test` is a debug build by default**, where this reads about 13x worse —
+    /// so the line names the profile it was taken in. Reading a debug number under a
+    /// release prediction is how you conclude the ocean is unaffordable when it is not.
     // `Instant::now` is on `clippy.toml`'s disallowed list because **simulation** must
     // not read the wall clock (never-do #8). A cost measurement is the one thing that
     // has to, and it is in `cfg(test)` where no tick can reach it.
     #[allow(clippy::disallowed_methods)]
     #[test]
     fn cost_of_one_transform() {
+        // **Refilled every rep, and the refill is outside the clock.** This transform is
+        // unnormalised, so each pass multiplies magnitudes by roughly N^2: feeding its own
+        // output back in twenty times took the buffer to `inf` by about rep 10 and then to
+        // NaN, and what the old form timed was butterflies on NaNs. The timing happened to
+        // look right, which is the only reason it survived.
         for n in [128usize, 256] {
             let tw = Twiddles::new(n);
             let mut grid = vec![Complex { re: 1.0, im: 0.0 }; n * n];
             let mut scratch = vec![Complex::default(); n];
             ifft_2d(&mut grid, n, &tw, &mut scratch);
-            let t = std::time::Instant::now();
             let reps = 20;
+            let mut spent = std::time::Duration::ZERO;
             for _ in 0..reps {
+                grid.fill(Complex { re: 1.0, im: 0.0 });
+                let t = std::time::Instant::now();
                 ifft_2d(&mut grid, n, &tw, &mut scratch);
+                spent += t.elapsed();
             }
-            println!("ifft_2d N={n}: {:.3} ms", t.elapsed().as_secs_f64() * 1000.0 / f64::from(reps));
+            assert!(grid[0].re.is_finite(), "the timed transform produced {}", grid[0].re);
+            println!(
+                "ifft_2d N={n}: {:.3} ms ({})",
+                spent.as_secs_f64() * 1000.0 / f64::from(reps),
+                PROFILE
+            );
         }
     }
 }

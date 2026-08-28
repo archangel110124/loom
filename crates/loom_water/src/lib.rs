@@ -68,6 +68,21 @@ use loom_scene::components::{MAX_WAVES, WaterBody};
 /// sides, so this is one number spelled twice, not two numbers.
 pub const GRAVITY: f32 = 9.81;
 
+/// Which build the cost measurements in this crate's tests were taken in.
+///
+/// **Printed on every timing line, loudly, because `cargo test` is a debug build by
+/// default and the numbers those tests are compared against are release numbers.** The
+/// FFT ocean's cost tests print straight underneath doc comments citing ADR 0076's
+/// 1.24 ms; in debug they read 19.9 ms/tick and 119.8% of a 16.67 ms tick, and anyone
+/// reading that output concludes the ocean is unaffordable. It is 1.50 ms in release.
+/// Say which one produced the number, in the number's own line.
+#[cfg(test)]
+pub(crate) const PROFILE: &str = if cfg!(debug_assertions) {
+    "DEBUG BUILD -- not comparable to the release figure; re-run with --release"
+} else {
+    "release"
+};
+
 /// Everything a caller can ask about the surface at one point.
 ///
 /// Mirrors Unreal's `GetLastWaterSurfaceInfo` field for field, which is a good
