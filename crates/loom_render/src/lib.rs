@@ -88,6 +88,7 @@
 //! and Slang. If a feature here grows much beyond that, it is the obsolete
 //! pre-1.3 style and should be reconsidered.
 
+pub mod ablate;
 mod cmaa2;
 mod debug_names;
 mod device;
