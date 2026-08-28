@@ -62,9 +62,11 @@
 //! [`wave_set_fetch`] is therefore *fetch-limited PM*: PM's shape, JONSWAP's
 //! two parameters.
 
+use loom_field::noise::hash;
 use loom_scene::components::{GerstnerWave, MAX_WAVES, WaveSet};
 
 use crate::GRAVITY;
+use crate::fft::Complex;
 
 /// Below this U10, in m/s, the sea is a mirror.
 ///
@@ -304,31 +306,58 @@ const FULLY_DEVELOPED_FETCH: f32 = 18_906.0;
 /// that zooms and one that roughens.
 #[must_use]
 pub fn wave_set_fetch(u10: f32, direction: [f32; 2], fetch: f32) -> WaveSet {
+    let along = normalise(direction).unwrap_or([1.0, 0.0]);
+    match spectrum_shape(u10, fetch) {
+        Some((m0, u)) => bands(m0, u, along),
+        None => WaveSet::default(),
+    }
+}
+
+/// PM's own total variance for the wind `u` (U19.5): `m0 = α·U⁴/(4βg²)`, the
+/// same expression [`wave_set`] evaluates for the unlimited-fetch case.
+/// Factored out so [`spectrum_shape`] and [`amplitude_field`] share it rather
+/// than re-deriving it a second and third time.
+fn natural_m0(u: f32) -> f32 {
+    ALPHA * (u * u) * (u * u) / (4.0 * BETA * GRAVITY * GRAVITY)
+}
+
+/// The PM-shaped spectrum a wind and fetch reduce to: total variance `m0` and
+/// the PM19.5 wind `u` that sets its shape — the two numbers [`bands`] needs,
+/// however they were reached.
+///
+/// **The one place a wind and a fetch become a spectrum.** [`wave_set_fetch`]
+/// hands this pair straight to [`bands`], which integrates it into sixteen
+/// equal-energy bands; [`amplitude_field`] reuses the exact same derivation
+/// and evaluates the underlying density continuously instead. Same `u10`
+/// clamp, same fetch law, same constants — the sixteen-wave path and the grid
+/// path can disagree about resolution and never about physics.
+///
+/// `None` below [`MIN_WIND_SPEED`] — a mirror has no spectrum to speak of.
+fn spectrum_shape(u10: f32, fetch: f32) -> Option<(f32, f32)> {
     let u10 = if u10.is_finite() { u10.min(MAX_WIND_SPEED) } else { 0.0 };
     if u10 < MIN_WIND_SPEED {
-        return WaveSet::default();
+        return None;
     }
+
     // A non-positive or non-finite fetch is "unlimited", which is PM. Guarded
     // rather than clamped because zero fetch is not a flat sea asymptotically —
     // it is a division by zero in the peak law.
-    if !fetch.is_finite() || fetch <= 0.0 {
-        return wave_set(u10, direction);
+    if fetch.is_finite() && fetch > 0.0 {
+        let dimensionless = GRAVITY * fetch / (u10 * u10);
+        if dimensionless < FULLY_DEVELOPED_FETCH {
+            let hs = 0.0016 * dimensionless.sqrt() * u10 * u10 / GRAVITY;
+            // Hs = 4√m0, the same relation `significant_height` inverts.
+            let m0 = (hs / 4.0) * (hs / 4.0);
+
+            let omega_peak =
+                std::f32::consts::TAU * 3.5 * (GRAVITY / u10) * dimensionless.powf(-0.33);
+            let u = PM_PEAK * GRAVITY / omega_peak;
+            return Some((m0, u));
+        }
     }
-    let dimensionless = GRAVITY * fetch / (u10 * u10);
-    if dimensionless >= FULLY_DEVELOPED_FETCH {
-        return wave_set(u10, direction);
-    }
-    let along = normalise(direction).unwrap_or([1.0, 0.0]);
 
-    let hs = 0.0016 * dimensionless.sqrt() * u10 * u10 / GRAVITY;
-    // Hs = 4√m0, the same relation `significant_height` inverts.
-    let m0 = (hs / 4.0) * (hs / 4.0);
-
-    let omega_peak =
-        std::f32::consts::TAU * 3.5 * (GRAVITY / u10) * dimensionless.powf(-0.33);
-    let u = PM_PEAK * GRAVITY / omega_peak;
-
-    bands(m0, u, along)
+    let u = u10 * U19_5_PER_U10;
+    Some((natural_m0(u), u))
 }
 
 /// The sea's memory of the wind: what [`wave_set`] is actually built from.
@@ -427,6 +456,165 @@ impl SeaState {
 pub fn significant_height(waves: &WaveSet) -> f32 {
     let m0: f32 = waves.waves.iter().map(|w| w.amplitude * w.amplitude / 2.0).sum();
     4.0 * m0.sqrt()
+}
+
+/// The Pierson–Moskowitz density `S(ω) = (α·g²/ω⁵)·exp(−β(g/(Uω))⁴)`.
+///
+/// `bands()` only ever needs this density's closed-form *cumulative*,
+/// `F(ω) = exp(−β(g/(Uω))⁴)`, to place its sixteen frequencies — the density
+/// itself never appears in this file until here, because a continuous grid
+/// needs it directly rather than through its integral. Same `ALPHA`/`BETA`,
+/// so a change to either moves the sixteen-wave sea and the grid together.
+fn pm_density(omega: f32, u: f32) -> f32 {
+    let cutoff = BETA * (GRAVITY / (u * omega)).powi(4);
+    ALPHA * GRAVITY * GRAVITY / omega.powi(5) * (-cutoff).exp()
+}
+
+/// `∫_{−π/2}^{π/2} cosᵖ θ dθ` for even `p`, by Wallis' product formula.
+///
+/// The continuous counterpart of the discrete sum-to-one normalisation
+/// [`bands`] does over its sixteen fixed directions — needed here because a
+/// grid cell's angle is whatever `atan2` gives it, not one of sixteen
+/// midpoints, so there is no finite set of weights to normalise in advance.
+fn cos_power_integral(power: i32) -> f32 {
+    debug_assert!(power >= 0 && power % 2 == 0, "only defined for even p");
+    let mut product = 1.0_f32;
+    let mut k = 1;
+    while 2 * k <= power {
+        product *= (2 * k - 1) as f32 / (2 * k) as f32;
+        k += 1;
+    }
+    std::f32::consts::PI * product
+}
+
+/// A value uniformly in `(0, 1)`, exact and never exactly `0` or `1` — the
+/// upper 24 bits of a hash scale exactly to `f32`, and the `+0.5` keeps a
+/// Box–Muller `ln` away from `ln(0)`.
+fn unit_interval(h: u32) -> f32 {
+    ((h >> 8) as f32 + 0.5) * (1.0 / 16_777_216.0)
+}
+
+/// Two independent standard-normal draws for grid cell `(x, z)`, by
+/// Box–Muller from [`loom_field::noise::hash`] seeded by `(seed, x, z)`.
+///
+/// **Never `thread_rng`, never a crate RNG.** `hash` is frozen ABI (see
+/// `loom_field::noise`'s module docs) precisely so that a dependency bump can
+/// never reseed a sea underneath a determinism hash.
+fn box_muller(seed: u32, x: u32, z: u32) -> (f32, f32) {
+    let h1 = hash(hash(hash(seed).wrapping_add(x)).wrapping_add(z));
+    // A second, independent draw from the same lattice point rather than a
+    // second call into `(seed, x, z)` again, which would just repeat `h1`.
+    let h2 = hash(h1 ^ 0x9E37_79B9);
+
+    let (u1, u2) = (unit_interval(h1), unit_interval(h2));
+    let radius = (-2.0 * u1.ln()).sqrt();
+    let (sin, cos) = (std::f32::consts::TAU * u2).sin_cos();
+    (radius * cos, radius * sin)
+}
+
+/// The `h0(k)` field a wind, fetch and direction produce over an `n × n` grid
+/// on a `patch`-metre-square patch, for [`crate::fft::ifft_2d`] to turn into
+/// a height field. Row-major, index `z * n + x`.
+///
+/// `u10` is the wind at **10 m**, exactly as in [`wave_set`] and
+/// [`wave_set_fetch`] — read this module's reference-height note before
+/// passing anything else, and never `loom_field::wind::Wind::speed`, which is
+/// a free-stream value roughly 10% *above* U10; convert it with
+/// `Wind::mean_speed_at(10.0)` first.
+///
+/// # How this and the sixteen-wave path agree
+///
+/// [`spectrum_shape`] is the one place a wind and a fetch become a PM shape —
+/// a total variance `m0` and the PM19.5 wind `u` that sets where its energy
+/// sits. [`wave_set_fetch`] hands that pair to [`bands`], which integrates it
+/// into sixteen equal-energy bands; this evaluates the *density* that same
+/// cumulative is built from, [`pm_density`], at every grid cell's own `k`
+/// instead — scaled so its own integral is `m0` too, and fanned by the same
+/// `cosᵖ(θ)` spread with the same [`SPREAD_POWER`]. Two resolutions of one
+/// spectrum, not two spectra.
+///
+/// # k = 0 and the Hermitian mirror
+///
+/// The `k = 0` cell — `x == z == n/2`, since `k = 2π·(x − n/2, z − n/2) /
+/// patch` — is left zero: a mean offset is not a wave. Every other cell's
+/// conjugate is *written*, not hoped for: this walks half the grid, draws one
+/// hashed cell, and copies its conjugate into the mirror cell directly, so
+/// `h0(−k) = conj(h0(k))` holds by construction rather than by relying on the
+/// hash to land there on its own. A cell that is its own mirror — `k = 0`, or
+/// a Nyquist row/column when `n` is even — is forced real, because Hermitian
+/// symmetry demands it equal its own conjugate.
+#[must_use]
+#[allow(clippy::cast_precision_loss, clippy::similar_names)]
+pub fn amplitude_field(
+    n: usize,
+    patch: f32,
+    u10: f32,
+    fetch: f32,
+    direction: [f32; 2],
+    seed: u32,
+) -> Vec<Complex> {
+    let mut field = vec![Complex::default(); n * n];
+    let Some((m0, u)) = spectrum_shape(u10, fetch) else {
+        return field; // Below MIN_WIND_SPEED: a flat sea, every cell zero.
+    };
+    if n == 0 || !patch.is_finite() || patch <= 0.0 {
+        return field;
+    }
+
+    let scale_to_m0 = m0 / natural_m0(u);
+    let along = normalise(direction).unwrap_or([1.0, 0.0]);
+    let along_theta = along[1].atan2(along[0]);
+    let spread_norm = cos_power_integral(SPREAD_POWER);
+    let delta_k = std::f32::consts::TAU / patch;
+    let half = (n / 2) as f32;
+
+    for z in 0..n {
+        for x in 0..n {
+            let (mz, mx) = ((n - z) % n, (n - x) % n);
+            // Each unordered {cell, mirror} pair is drawn once, from its
+            // lexicographically smaller index — the mirror is never drawn
+            // from its own hash, only copied as a conjugate below.
+            if (z, x) > (mz, mx) {
+                continue;
+            }
+
+            let kx = (x as f32 - half) * delta_k;
+            let kz = (z as f32 - half) * delta_k;
+            let k = (kx * kx + kz * kz).sqrt();
+
+            let value = if k <= 0.0 {
+                Complex::default()
+            } else {
+                let (g1, g2) = box_muller(seed, x as u32, z as u32);
+
+                let omega = (GRAVITY * k).sqrt();
+                let s_omega = pm_density(omega, u) * scale_to_m0;
+                let jacobian_dw_dk = GRAVITY / (2.0 * omega); // ω = √(gk)
+                let theta = kz.atan2(kx) - along_theta;
+                let spread = if theta.abs() > std::f32::consts::FRAC_PI_2 {
+                    0.0
+                } else {
+                    theta.cos().powi(SPREAD_POWER) / spread_norm
+                };
+                // 2D areal density: the 1D-in-k density, divided by k to
+                // spread it over a ring, fanned by direction.
+                let s_k = s_omega * jacobian_dw_dk / k * spread;
+                let amplitude = (0.5 * s_k).max(0.0).sqrt();
+                Complex { re: g1 * amplitude, im: g2 * amplitude }
+            };
+
+            if (z, x) == (mz, mx) {
+                // Self-paired: k = 0, or a Nyquist row/column at even n.
+                // Hermitian symmetry forces this cell to be real.
+                field[z * n + x] = Complex { re: value.re, im: 0.0 };
+            } else {
+                field[z * n + x] = value;
+                field[mz * n + mx] = Complex { re: value.re, im: -value.im };
+            }
+        }
+    }
+
+    field
 }
 
 /// A unit vector, or `None` for anything that has no direction.
@@ -779,5 +967,73 @@ mod tests {
         // to fail, or the bound is measuring nothing.
         let pm = significant_height(&wave_set(20.0, [1.0, 0.0]));
         assert!(pm > 5.0, "PM at U10 20 should be enormous, got {pm}");
+    }
+}
+
+#[cfg(test)]
+mod amplitude_tests {
+    use super::*;
+
+    /// **The field must be Hermitian, or the sea has an imaginary part.**
+    /// `h0(-k) = conj(h0(k))` is what makes the inverse transform of a spectrum real, and
+    /// getting it wrong produces a surface that looks plausible and is not a height field.
+    #[test]
+    fn the_field_is_hermitian() {
+        let n = 16;
+        let h0 = amplitude_field(n, 200.0, 12.0, 100_000.0, [1.0, 0.0], 7);
+        for z in 0..n {
+            for x in 0..n {
+                let a = h0[z * n + x];
+                let b = h0[((n - z) % n) * n + ((n - x) % n)];
+                assert!(
+                    (a.re - b.re).abs() < 1e-6 && (a.im + b.im).abs() < 1e-6,
+                    "({x},{z}) is not the conjugate of its mirror: ({}, {}) vs ({}, {})",
+                    a.re, a.im, b.re, b.im
+                );
+            }
+        }
+    }
+
+    /// Same seed, same field, bit for bit — ADR 0076's whole licence.
+    #[test]
+    fn the_field_is_reproducible() {
+        let a = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], 3);
+        let b = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], 3);
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.re.to_bits(), y.re.to_bits());
+            assert_eq!(x.im.to_bits(), y.im.to_bits());
+        }
+    }
+
+    /// A different seed is a different sea, or the seed is not doing anything.
+    #[test]
+    fn a_different_seed_is_a_different_sea() {
+        let a = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], 3);
+        let b = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], 4);
+        assert!(a.iter().zip(b.iter()).any(|(x, y)| x.re.to_bits() != y.re.to_bits()));
+    }
+
+    /// **Zero wind is a flat sea and not a NaN.** The spectrum divides by `U`, so this is
+    /// the edge every wave model gets wrong once. `pool.loom` authors `Wind.speed = 0`.
+    #[test]
+    fn no_wind_is_a_flat_sea() {
+        let h0 = amplitude_field(16, 200.0, 0.0, 100_000.0, [1.0, 0.0], 1);
+        for (i, c) in h0.iter().enumerate() {
+            assert!(c.re.is_finite() && c.im.is_finite(), "cell {i} is not finite");
+            assert!(c.re.abs() < 1e-3 && c.im.abs() < 1e-3, "cell {i} has energy in no wind");
+        }
+    }
+
+    /// More wind is more energy, which is the one monotonic claim this module makes.
+    #[test]
+    fn a_harder_wind_is_a_bigger_sea() {
+        let energy = |u: f32| -> f32 {
+            amplitude_field(32, 200.0, u, 500_000.0, [1.0, 0.0], 1)
+                .iter()
+                .map(|c| c.re * c.re + c.im * c.im)
+                .sum()
+        };
+        let (calm, gale) = (energy(5.0), energy(18.0));
+        assert!(gale > calm * 4.0, "calm {calm}, gale {gale}");
     }
 }
