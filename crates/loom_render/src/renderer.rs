@@ -186,7 +186,7 @@ pub struct EnvironmentData {
     /// Camera position. **Here rather than in the push block**, which was at
     /// exactly its 128-byte guarantee before grass needed a pointer.
     pub eye: [f32; 4],
-    /// x viewport width in pixels, y height, zw unused.
+    /// x viewport width in pixels, y height, z the AO ray dial, w the `LOOM_ABLATE` mask.
     ///
     /// **The grass vertex shader reasons in pixels**, because the whole
     /// minimum-width trick is "no blade may be thinner than about one pixel"
@@ -2323,7 +2323,7 @@ impl Renderer {
         #[allow(clippy::cast_precision_loss)]
         {
             self.environment.viewport =
-                [self.width as f32, self.height as f32, ao_rays(), 0.0];
+                [self.width as f32, self.height as f32, ao_rays(), crate::ablate::ablation_mask()];
         }
         // **Stamped here for the same reason the eye is.** `environment` is a
         // public field callers assign wholesale every frame, and the terrain

@@ -53,6 +53,27 @@ pub fn parse_ablations(spec: Option<&str>) -> Result<u32, String> {
     Ok(mask)
 }
 
+/// The mask this process is running with, for `viewport.w`.
+///
+/// Read once, like [`crate::renderer::ao_rays`] and for the same reason: nothing polls it,
+/// and re-reading the environment per frame would be a syscall in the hot path for a value
+/// that cannot change.
+///
+/// **Panics** on an unknown name, at the first frame, with the list of valid ones. A
+/// measurement tool that carried on after being misconfigured would report a number
+/// nobody could trust.
+pub(crate) fn ablation_mask() -> f32 {
+    static MASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    #[allow(clippy::cast_precision_loss)]
+    let mask = *MASK.get_or_init(|| {
+        match parse_ablations(std::env::var("LOOM_ABLATE").ok().as_deref()) {
+            Ok(mask) => mask,
+            Err(message) => panic!("{message}"),
+        }
+    });
+    mask as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

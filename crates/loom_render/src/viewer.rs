@@ -1615,7 +1615,7 @@ impl Viewer {
                 self.extent.width as f32,
                 self.extent.height as f32,
                 crate::renderer::ao_rays(),
-                0.0,
+                crate::ablate::ablation_mask(),
             ];
         }
         // Stamped rather than assigned by the caller, exactly as in

@@ -143,7 +143,7 @@ struct EnvironmentData {
     // exactly its 128-byte guarantee before grass needed a pointer. This is
     // per-frame data read by whatever wants it, which is what this buffer is.
     float4 eye;
-    float4 viewport;   // xy size in pixels, z the AO ray dial (`aoRays`), w free
+    float4 viewport;   // xy size in pixels, z the AO ray dial (`aoRays`), w the LOOM_ABLATE mask
     float4 wind;       // xy direction, z speed, w gustiness
     // x turbulence, y ground drag, z seconds, w the wetness FILM — see the
     // wetness section further down, and `water.w` for its other half.
@@ -5730,6 +5730,18 @@ static const float WATER_CONTACT_INTRUDE = 0.5;
 static const float WATER_FOAM_WET = 0.22;
 static const float WATER_FOAM_BREAK = 0.33;
 
+/// The `LOOM_ABLATE` mask, as `loom_render::ablate` filled it.
+///
+/// **Zero on every ordinary run**, so a normal frame takes one compare against zero and
+/// nothing else. This is a measurement switch: `cargo xtask ablate` renders a scene with
+/// and without an effect and fails when the two are too *similar*, because a feature whose
+/// removal changes nothing was never drawing.
+static const uint LOOM_ABLATE_WATER_FOAM = 1u;
+
+bool ablated(uint bit) {
+    return (uint(push.environment[0].viewport.w) & bit) != 0u;
+}
+
 // ---------------------------------------------------------------------------
 // The foam trail (W2). Read `waterVertexMain` for why it is closed-form.
 // ---------------------------------------------------------------------------
@@ -7268,6 +7280,11 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // which is `foamAge` on both the albedo and the substitution. Swash is
     // exempt by construction — it takes `foamAge` from whatever the whitecap
     // terms said, and on a beach that is zero, so the sheet stays fresh.
+    // Ablation: zero the coverage at its single point of use rather than at each of the
+    // terms feeding it, so what is measured is exactly "the foam this frame drew" and
+    // not one contributor to it.
+    if (ablated(LOOM_ABLATE_WATER_FOAM)) { foam = 0.0; }
+
     float3 foamLit = lerp(WATER_FOAM_ALBEDO, WATER_FOAM_OLD_ALBEDO, foamAge)
         * (hemisphereAmbient(normal) * ambientStrength() + sunColor() * sunStrength() * toSun);
     lit = lerp(lit, foamLit, foam * lerp(1.0, WATER_FOAM_OLD_OPACITY, foamAge));
