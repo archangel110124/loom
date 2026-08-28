@@ -549,9 +549,9 @@ fn box_muller(seed: u32, x: u32, z: u32) -> (f32, f32) {
 /// conj(h0(k))` holds by construction rather than by relying on the hash to
 /// land there on its own. **Which of the pair gets hashed is not the
 /// lexicographically smaller index** — a first version of this function used
-/// that, and because the directional cone is a hard ±90° cutoff rather than
-/// merely a weight, exactly one of `{k, −k}` generically falls inside it; the
-/// other is zero by construction. Picking the grid-index-smaller one at
+/// that, and *its* directional cone was a hard ±90° cutoff rather than a
+/// magnitude, so exactly one of `{k, −k}` generically fell inside it and the
+/// other was zero by construction. Picking the grid-index-smaller one at
 /// random relative to wind direction hashed the *zero* side about half the
 /// time and threw its mirror's true energy away outright — this hashes
 /// whichever side the wind actually reaches, decided by the **sign of
@@ -1169,7 +1169,12 @@ mod amplitude_tests {
     #[test]
     fn amplitude_field_agrees_with_wave_set_fetch() {
         let u10 = 18.0_f32;
-        let fetch = 376_000.0_f32; // The plan's own scenario: a twenty-foot sea.
+        // The fetch is arbitrary here and only has to be the *same* fetch on both
+        // sides — this test asks whether `amplitude_field` and `wave_set_fetch` agree,
+        // not how big the sea is. (376 km is a 5.638 m sea, not the twenty-foot one an
+        // earlier version of this comment claimed; 6.10 m needs 440 km, which is what
+        // `the_realised_sea_is_the_size_the_spectrum_promised` uses.)
+        let fetch = 376_000.0_f32;
         // **Directions, not just `[1, 0]`.** The energy a heading carries cannot
         // depend on the heading, so every one of these must land on the same
         // `m0` — and `[-1, 0]` / `[-1, -1]` are the headings whose `along_theta`

@@ -468,21 +468,32 @@ mod tests {
     /// with the analytic significant height it was built from, or the spectrum is not
     /// being sampled correctly.
     ///
-    /// **440 km is where 6.10 m lives, and the only way to know that is to ask.** This
-    /// pairing is confirmed by putting the question to `spectrum` directly —
+    /// **440 km is where 6.10 m lives, and the way to know that is to ask.** This pairing
+    /// is confirmed by putting the question to `spectrum` directly —
     /// `significant_height(wave_set_fetch(18.0, [1.0, 0.0], f))` answers **5.638 m at
-    /// 376 km** and **6.099 m at 440 km** — and by nothing else. It is emphatically *not*
-    /// derived from a textbook parameterisation: this test previously stood at 376 km
-    /// because a Pierson-Moskowitz-with-fetch formula computed by hand was assumed to
-    /// match `spectrum.rs`, and it does not. **Never re-derive this constant analytically.
+    /// 376 km** and **6.099 m at 440 km**.
+    ///
+    /// **There *is* a textbook parameterisation underneath, and an earlier version of
+    /// this comment denied it.** `spectrum_shape` is the SPM/CERC fetch-limited relation
+    /// `Hs = 0.0016·√F̃·u10²/g` (`spectrum.rs`'s `spectrum_shape`), and
+    /// `SEA-REBUILD.md` §3.6 says so. What is true is narrower and is the part worth
+    /// keeping: this test previously stood at 376 km because a *different* hand formula —
+    /// Pierson-Moskowitz-with-fetch — was assumed to be the one in `spectrum.rs`, and it
+    /// is not. **Do not re-derive this constant from whichever fetch law comes to mind.
     /// Run the function.** A hand formula that disagrees with `spectrum.rs` is a fact
     /// about the formula, and the sea this engine builds is the one `spectrum.rs`
     /// describes.
     ///
     /// **The grid is not the risk here.** Computed against the analytic spectrum, a 128²
     /// patch of 1024 m spans wavelengths 16-1024 m and captures **99.6%** of the
-    /// variance, against a peak wavelength of 241 m at this wind. If this test fails it
-    /// is the spectrum or the symmetry, not the resolution.
+    /// variance, against a peak wavelength of **226 m** at this wind and fetch. If this
+    /// test fails it is the spectrum or the symmetry, not the resolution.
+    ///
+    /// 226 m is `spectrum_shape`'s own peak law — `ω_p = 2π·3.5·(g/u10)·F̃^-0.33`, then
+    /// `λ = 2πg/ω_p²` — evaluated at 440 km. It reads 204 m at 376 km. An earlier version
+    /// of this line said 241 m, which is a JONSWAP peak law this engine does not use; the
+    /// margin is wide enough that it changed no conclusion, which is exactly why a stale
+    /// number can sit in a comment for a review round.
     /// **Average over seeds; a single draw is not a measurement.** Task 2 measured the
     /// single-draw spread of realised `Hs` at **0.35x to 1.68x** of the analytic value,
     /// from sampling noise alone — this spectrum is narrow, so most of its energy lands in
