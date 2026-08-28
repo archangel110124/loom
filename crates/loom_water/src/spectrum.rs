@@ -553,8 +553,12 @@ fn box_muller(seed: u32, x: u32, z: u32) -> (f32, f32) {
 /// merely a weight, exactly one of `{k, −k}` generically falls inside it; the
 /// other is zero by construction. Picking the grid-index-smaller one at
 /// random relative to wind direction hashed the *zero* side about half the
-/// time and threw its mirror's true energy away outright — this looks up
-/// both candidate angles and hashes whichever the wind actually reaches. A
+/// time and threw its mirror's true energy away outright — this tests
+/// `cos(θ − θ_wind) >= 0` and hashes whichever side the wind actually
+/// reaches. That test is on the cosine rather than on `|θ − θ_wind|`
+/// precisely because the difference of two `atan2` results is not wrapped:
+/// for a wind near ±π an angle test would reject *both* sides and zero the
+/// pair. A
 /// cell that is its own mirror — `k = 0`, or a Nyquist row/column when `n` is
 /// even — is forced real, because Hermitian symmetry demands it equal its
 /// own conjugate.
@@ -617,14 +621,28 @@ pub fn amplitude_field(
                 // function did — picks the *upwind*, zero-spread side about
                 // half the time, and that half's true energy (its mirror's)
                 // is never drawn at all; it is silently thrown away rather
-                // than merely misplaced. So this looks at both candidate
-                // angles and hashes whichever one the wind actually reaches.
+                // than merely misplaced. So this hashes whichever side the
+                // wind actually reaches.
+                //
+                // **The cone test is on `cos θ`, not `|θ|`, and that is the
+                // wrap.** `atan2` returns `(-π, π]` and `along_theta` is in
+                // that range too, so their difference lands anywhere in
+                // `(-2π, 2π)`: for a wind near ±π — `[-1, 0]`, or anything
+                // off-axis behind it — `|θ| <= π/2` is false for *both*
+                // candidates, the pair falls through to no energy at all, and
+                // a third of the sea disappears (measured `m0` 1.27 against a
+                // target of 1.99 for `[-1, 0]`). `cos` is 2π-periodic, so its
+                // sign answers "is this within 90° of the wind" for an
+                // unwrapped difference for free, where `abs` cannot. The
+                // failure is invisible along `[1, 0]`, which is why every
+                // test predating this one missed it.
                 let theta = kz.atan2(kx) - along_theta;
-                let theta_mirror = (-kz).atan2(-kx) - along_theta;
-                let (hash_x, hash_z, live_theta) = if theta.abs() <= std::f32::consts::FRAC_PI_2 {
-                    (x as u32, z as u32, theta)
+                let cos_theta = theta.cos();
+                // The mirror's angle is `θ ± π`, so its cosine is `−cos θ`.
+                let (hash_x, hash_z, cos_live) = if cos_theta >= 0.0 {
+                    (x as u32, z as u32, cos_theta)
                 } else {
-                    (mx as u32, mz as u32, theta_mirror)
+                    (mx as u32, mz as u32, -cos_theta)
                 };
                 let live_is_c = (hash_x, hash_z) == (x as u32, z as u32);
 
@@ -633,11 +651,9 @@ pub fn amplitude_field(
                 let omega = (GRAVITY * k).sqrt();
                 let s_omega = pm_density(omega, u) * scale_to_m0;
                 let jacobian_dw_dk = GRAVITY / (2.0 * omega); // ω = √(gk)
-                let spread = if live_theta.abs() > std::f32::consts::FRAC_PI_2 {
-                    0.0 // both sides upwind at the exact ±90° edge: no energy either way
-                } else {
-                    live_theta.cos().powi(SPREAD_POWER) / spread_norm
-                };
+                // `cos_live >= 0` by construction above, so the cone's cutoff
+                // is already applied: exactly at ±90° it is 0 and so is this.
+                let spread = cos_live.powi(SPREAD_POWER) / spread_norm;
                 // 2D areal density: the 1D-in-k density, divided by k to
                 // spread it over a ring, fanned by direction — then scaled by
                 // the cell's own area in k-space, `(Δk)²`, to turn a density
@@ -1109,47 +1125,72 @@ mod amplitude_tests {
     ///
     /// Checked across three `patch`es and two `n`s because that is exactly the bug's
     /// signature: it moved with `patch` and didn't move with anything about the wind.
-    /// Each point **averages 24 seeds**, not one — a fetch-limited spectrum this narrow
+    /// Also checked across five wind headings, including two whose `along_theta` sits
+    /// near ±π — see the comment in the body: pinned to `[1, 0]`, this test could not
+    /// see the missing angle wrap in the directional cone at all.
+    ///
+    /// Each point **averages 200 seeds**, not one — a fetch-limited spectrum this narrow
     /// puts most of its energy in a handful of grid cells (`k_peak ≈ 0.031` against a
     /// `Δk` of `0.01–0.03` at these patches), so a single draw's `Σ|h0|²` swings up to
-    /// ±70% around its own expectation by chance alone; twenty-four draws bring that
+    /// ±70% around its own expectation by chance alone; two hundred draws bring that
     /// under the tolerance below without hiding a real, non-random disagreement. **15%**,
     /// because even the mean still truncates the spectrum below the grid's lowest
     /// resolvable `k` and above its Nyquist — exact agreement was never the target, and
-    /// demanding it would make this flaky rather than sharp. Measured (seeds 0–23,
-    /// `u10 = 18`, `fetch = 376 km`): ratios ran 0.86–1.08 across all six points, with no
-    /// trend toward either edge as `patch` or `n` changes — see the task report for the
-    /// full table and for round 1's numbers before the fix.
+    /// demanding it would make this flaky rather than sharp. Measured (seeds 0–199,
+    /// `u10 = 18`, `fetch = 376 km`): every one of the thirty points lands within 8.0% of
+    /// the target, with no trend toward either edge as `patch`, `n` or heading changes —
+    /// see the task report for the full table and for the numbers before each fix.
     #[test]
     fn amplitude_field_agrees_with_wave_set_fetch() {
         let u10 = 18.0_f32;
         let fetch = 376_000.0_f32; // The plan's own scenario: a twenty-foot sea.
-        let dir = [1.0_f32, 0.0];
-        let target_m0: f32 = {
-            let hs = significant_height(&wave_set_fetch(u10, dir, fetch));
-            (hs / 4.0) * (hs / 4.0)
-        };
+        // **Directions, not just `[1, 0]`.** The energy a heading carries cannot
+        // depend on the heading, so every one of these must land on the same
+        // `m0` — and `[-1, 0]` / `[-1, -1]` are the headings whose `along_theta`
+        // sits near ±π, where an unwrapped angle difference falls outside the
+        // ±90° cone on *both* sides of a mirror pair and silently zeroes it.
+        // Pinning this test to `[1, 0]`, as its first version did, is why that
+        // bug survived a round of review: measured `m0` was 2.04 along `+x` and
+        // 1.27 along `-x` against a target of 1.99, and nothing here could see it.
+        for &dir in &[[1.0_f32, 0.0], [0.0, 1.0], [-1.0, 0.0], [-1.0, -1.0], [-1.0, 0.05]] {
+            let target_m0: f32 = {
+                let hs = significant_height(&wave_set_fetch(u10, dir, fetch));
+                (hs / 4.0) * (hs / 4.0)
+            };
 
-        for &n in &[32usize, 64] {
-            for &patch in &[200.0_f32, 400.0, 800.0] {
-                let trials = 24_u32;
-                let mean_m0: f32 = (0..trials)
-                    .map(|seed| {
-                        amplitude_field(n, patch, u10, fetch, dir, seed)
-                            .iter()
-                            .map(|c| c.re * c.re + c.im * c.im)
-                            .sum::<f32>()
-                    })
-                    .sum::<f32>()
-                    / trials as f32;
+            for &n in &[32usize, 64] {
+                for &patch in &[200.0_f32, 400.0, 800.0] {
+                    // 200 seeds, not 24. Thirty (direction, n, patch) points
+                    // instead of six is thirty chances for one coarse grid's
+                    // handful of dominant cells to draw badly, and 24 was
+                    // already marginal: `[0, 1]` at n=64/patch=200 came out
+                    // 23% high on 24 seeds and 4.4% high on 200. Expectation
+                    // is direction-independent by symmetry, so that spread was
+                    // sampling noise, not a heading the grid dislikes. At 200
+                    // the worst point is 8.0% (`[1, 0]`, n=32, patch=200 —
+                    // genuine truncation, `Δk ≈ k_peak` there) and re-running
+                    // every point at seed offset +9000 moves the worst to
+                    // 6.3%, so the margin under 15% is real rather than lucky.
+                    // Costs 0.85 s for all thirty points.
+                    let trials = 200_u32;
+                    let mean_m0: f32 = (0..trials)
+                        .map(|seed| {
+                            amplitude_field(n, patch, u10, fetch, dir, seed)
+                                .iter()
+                                .map(|c| c.re * c.re + c.im * c.im)
+                                .sum::<f32>()
+                        })
+                        .sum::<f32>()
+                        / trials as f32;
 
-                let error = (mean_m0 - target_m0).abs() / target_m0;
-                assert!(
-                    error < 0.15,
-                    "n={n} patch={patch}: field m0 (24-seed mean) is {mean_m0:.3}, \
-                     wave_set_fetch's is {target_m0:.3} ({:.1}% off)",
-                    error * 100.0
-                );
+                    let error = (mean_m0 - target_m0).abs() / target_m0;
+                    assert!(
+                        error < 0.15,
+                        "dir={dir:?} n={n} patch={patch}: field m0 ({trials}-seed mean) is \
+                         {mean_m0:.3}, wave_set_fetch's is {target_m0:.3} ({:.1}% off)",
+                        error * 100.0
+                    );
+                }
             }
         }
     }
