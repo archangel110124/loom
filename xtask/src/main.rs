@@ -2223,9 +2223,23 @@ fn ablate() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
+    // **Unlike `image`, `validate`, `flythrough`, `shimmer` and `repeat`, a missing GPU is
+    // not success here.** Those gates all ask "did a render change when it should not
+    // have" — no device, no render, nothing to compare, so withholding an answer is the
+    // honest outcome and exit 0 is right. This gate asks the opposite question, "did a
+    // render change *enough*", and its failure mode is a check that quietly answers
+    // "yes, enough" without ever having looked — which is exactly the four-times-shipped
+    // bug the whole harness exists to catch. So a run that could not obtain a device
+    // must not report the same exit code as a run that measured every row and passed;
+    // exit 2 (invocation/environment problem, per this CLI's own convention) it is, with
+    // wording that a reader can tell apart from a genuine `DRAWING NOTHING` failure.
     if !has_vulkan_device(&loom, &root) {
-        println!("skip: cargo xtask ablate — no usable Vulkan device on this machine");
-        return std::process::ExitCode::SUCCESS;
+        eprintln!(
+            "xtask: cargo xtask ablate could not obtain a Vulkan device — nothing was \
+             rendered or compared, so nothing was verified; this is not the same as every \
+             effect passing"
+        );
+        return std::process::ExitCode::from(2);
     }
 
     let scratch = root.join("target/xtask-ablate");
