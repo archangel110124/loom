@@ -60,6 +60,7 @@ cargo xtask validate                      # 2. ZERO Vulkan validation messages
 cargo test --workspace                    # 3. unit tests + determinism hashes match
 cargo xtask image                         # 4. renders match their reference PNGs
 cargo xtask repeat                        # 5. and they render the SAME twice
+cargo xtask ablate                        # 6. and each effect changes the frame when removed
 ```
 
 **Check 5 is new (ADR 0045).** Three fresh processes per `GOLDEN` scene,
@@ -67,6 +68,17 @@ compared **byte for byte** — no tolerance, which is exactly what check 4 canno
 express. Every GPU-stateful path in the engine (the raindrop buffer, the
 particle pool) is licensed by that property, and until this existed it had been
 checked by hand once, on one GPU.
+
+**Check 6 is new.** It is the only gate here that fails on *sameness* rather than
+difference: `LOOM_ABLATE=<effect>` switches an effect off, `cargo xtask ablate` renders
+the `ABLATE` table's scene with and without it, and fails when the two renders are too
+similar — a feature whose removal changes nothing was never drawing, which checks 2–5
+cannot see because a reference image records an absence and passes for ever. Proven
+working on `whitecaps/water_foam`: 29.178% of the frame moves against a 15% floor, and
+with the wiring severed it reports 0.000% / `DRAWING NOTHING` / exit 1. Registry is
+`crates/loom_render/src/ablate.rs`'s `ABLATIONS`; **adding an effect means a row there, a
+row in `xtask`'s own `ABLATE` table, and a matching `LOOM_ABLATE_<NAME>` constant in
+`assets/shaders/scene.slang`** — three places, none of them checked against each other.
 
 `scripts/green.sh` runs all five, **and two CLI blocks the five do not cover**: §6 asserts six
 gameplay scenes with `loom sim --assert` (nothing above it has ever run a game) and §7 asserts that

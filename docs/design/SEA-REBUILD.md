@@ -261,12 +261,31 @@ judged on, and it replaces "giant" as a word.
 fully-developed ceiling at `U10 = 16` is `Hs = 0.22·U²/g = 5.74 m`. So the wind rises with
 the fetch. The pair:
 
-    U10 = 18 m/s,  fetch = 440 km   ->   Hs = 6.10 m
+    U10 = 18 m/s,  fetch = 376 km   ->   Hs = 6.10 m
 
 and it is *genuinely fetch-limited* — fully developed at 624 km — so the sea is **steeper
-than Pierson–Moskowitz**, which is exactly the property that makes it break rather than
-merely zoom. For reference, at `U10 = 18`: 200 km gives 4.11 m, 300 km gives 5.04 m,
-624 km gives 7.26 m.
+than Pierson–Moskowitz's fully-developed limit**, which is exactly the property that makes
+it break rather than merely zoom.
+
+**That fetch was 440 km in the first draft, and the correction is worth recording because
+it is a trap anyone re-deriving this will fall into.** Three standard parameterisations of
+the same sea disagree badly, and at `U10 = 18, F = 440 km` they give:
+
+    SPM / CERC fetch relation, Hs = 0.0016·sqrt(gF/U²)·U²/g      6.10 m
+    Pierson-Moskowitz with fetch, no peak enhancement            6.66 m
+    JONSWAP with gamma = 3.3                                     8.22 m
+
+**The binding one is whichever `loom_water::spectrum` already implements**, because §3's
+grid path is required to reuse those functions rather than write the physics twice — the
+sixteen-wave and grid paths must not be able to disagree about what an 18 m/s sea is. That
+module states it deliberately does **not** implement JONSWAP's `gamma`, so the middle row
+governs, and the first draft's 440 km came from the top row. 376 km is the fetch that
+lands 6.10 m under the spectrum this engine actually has.
+
+**Below `U10 = 16` the target is unreachable at any fetch.** 14 m/s would need 561 km
+against a fully-developed limit of 378 km, and 15 m/s needs 503 against 434 — both past
+the point where more fetch buys nothing. That is a floor on the top rung's wind, not a
+preference. At `U10 = 17` the fetch is 412 km; at 16, 454 km.
 
 `Wind.speed` is **not** `U10`. `spectrum.rs` is explicit that the authored field is a
 free-stream value roughly 10% above it; the rung is authored so that
@@ -483,6 +502,16 @@ The recipe, verified on `whitecaps.loom`:
 subject moves and the viewer does not. Eight frames at six ticks is one second of a break
 at 48 Hz. Judge the sequence; then judge the ablation number. Neither alone is enough —
 the sequence says whether it looks right and the ablation says whether it is there.
+
+**Proving the gate bites: sever the wiring, not the effect.** To mutation-test
+`cargo xtask ablate`, break the Rust side that feeds `viewport.w` — in `renderer.rs` or
+`viewer.rs`, make the value it writes a literal `0.0` regardless of `ablation_mask()`.
+**Never zero `foam` directly in the shader** to simulate this: that makes `fragmentMain`
+stop reading two varyings, which raises `WARNING-Shader-OutputNotConsumed`, and debug
+builds treat validation messages as fatal — every render, including the gate's own GPU
+probe, then fails for the wrong reason. And `target/debug/loom` keeps the
+previously-compiled SPIR-V after a `git checkout` of a shader file, so restoring the
+mutation requires a rebuild on the way out, not merely restoring the source.
 
 ### 7.4 Closed-form acceptance wherever it is available
 
