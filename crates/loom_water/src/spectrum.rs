@@ -512,6 +512,14 @@ fn box_muller(seed: u32, x: u32, z: u32) -> (f32, f32) {
     (radius * cos, radius * sin)
 }
 
+/// Every wavenumber the grid can carry — the `band` a single, unstacked
+/// [`amplitude_field`] wants.
+///
+/// The upper bound is infinite rather than the grid's Nyquist because the
+/// square grid's *corners* reach `√2` times it, and those cells carry real
+/// energy that a lone cascade has no reason to throw away.
+pub const WHOLE_BAND: [f32; 2] = [0.0, f32::INFINITY];
+
 /// The `h0(k)` field a wind, fetch and direction produce over an `n × n` grid
 /// on a `patch`-metre-square patch, for [`crate::fft::ifft_2d`] to turn into
 /// a height field. Row-major, index `z * n + x`.
@@ -576,6 +584,30 @@ fn box_muller(seed: u32, x: u32, z: u32) -> (f32, f32) {
 /// magnitude below, which is the shape it had when picking the wrong side
 /// threw a pair's energy away outright.
 ///
+/// # The band, and why a cascade is a slice rather than a copy
+///
+/// `band` is `[k_lo, k_hi)` in rad/m: a cell whose `|k|` falls outside it is
+/// left zero. **Half-open, deliberately** — that is what lets adjacent bands
+/// meet at one number and tile `k`-space with no cell counted twice and none
+/// skipped. [`WHOLE_BAND`] is the whole spectrum, which is what a lone cascade
+/// wants.
+///
+/// It exists because [`crate::ocean::Cascade`]s stack. Without it every
+/// cascade samples the *entire* spectrum, so a wavenumber both grids can carry
+/// is drawn once per cascade and the realised variance grows with the cascade
+/// count: measured **6.073 m of `Hs` at one cascade, 8.598 m at two and
+/// 10.559 m at three** over the same total wavenumber range, against one
+/// answer the spectrum has for all three.
+/// `cascades_are_a_band_not_another_copy_of_the_sea` is that invariant, in
+/// `ocean.rs`; it reads 6.069 / 6.096 / 6.128 m once the bands are applied.
+///
+/// The calibration is unaffected and that is the point: `s_k_one_sided` is
+/// scaled so that summing it over the whole grid reproduces `m0`, so summing
+/// it over a set of bands that tile reproduces `m0` too. Bands that overlap
+/// double-count; bands that gap lose energy. Neither is checked here — the
+/// tiling is a property of a *stack* of cascades, and [`crate::ocean::Ocean`]
+/// is where a stack exists, so that is where the assertion lives.
+///
 /// # Why the calibration is in variance
 ///
 /// `Σ_k |h0(k)|²` is the sea's variance `m0`, not `m0/N²`, **because
@@ -592,6 +624,7 @@ pub fn amplitude_field(
     u10: f32,
     fetch: f32,
     direction: [f32; 2],
+    band: [f32; 2],
     seed: u32,
 ) -> Vec<Complex> {
     let mut field = vec![Complex::default(); n * n];
@@ -632,7 +665,10 @@ pub fn amplitude_field(
             let kz = (z as f32 - half) * delta_k;
             let k = (kx * kx + kz * kz).sqrt();
 
-            let value = if k <= 0.0 {
+            let value = if k <= 0.0 || k < band[0] || k >= band[1] {
+                // Out of this cascade's band — see the docs above. `k <= 0.0`
+                // is the `k = 0` cell and is not a band question: a mean
+                // offset is not a wave at any wavenumber.
                 Complex::default()
             } else {
                 // The cosᵖ spread is π-periodic (even power), but the ±90°
@@ -769,7 +805,7 @@ mod tests {
     /// commit that changes the literal.
     #[test]
     fn the_amplitude_field_is_pinned() {
-        let field = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], 7);
+        let field = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 7);
         assert_eq!(
             digest(field.iter().flat_map(|c| [c.re, c.im])),
             0x1f52_da46_b012_dfcd,
@@ -1131,7 +1167,7 @@ mod amplitude_tests {
     #[test]
     fn the_field_is_hermitian() {
         let n = 16;
-        let h0 = amplitude_field(n, 200.0, 12.0, 100_000.0, [1.0, 0.0], 7);
+        let h0 = amplitude_field(n, 200.0, 12.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 7);
         for z in 0..n {
             for x in 0..n {
                 let a = h0[z * n + x];
@@ -1148,8 +1184,8 @@ mod amplitude_tests {
     /// Same seed, same field, bit for bit — ADR 0076's whole licence.
     #[test]
     fn the_field_is_reproducible() {
-        let a = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], 3);
-        let b = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], 3);
+        let a = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 3);
+        let b = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 3);
         for (x, y) in a.iter().zip(b.iter()) {
             assert_eq!(x.re.to_bits(), y.re.to_bits());
             assert_eq!(x.im.to_bits(), y.im.to_bits());
@@ -1159,8 +1195,8 @@ mod amplitude_tests {
     /// A different seed is a different sea, or the seed is not doing anything.
     #[test]
     fn a_different_seed_is_a_different_sea() {
-        let a = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], 3);
-        let b = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], 4);
+        let a = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 3);
+        let b = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 4);
         assert!(a.iter().zip(b.iter()).any(|(x, y)| x.re.to_bits() != y.re.to_bits()));
     }
 
@@ -1168,7 +1204,7 @@ mod amplitude_tests {
     /// the edge every wave model gets wrong once. `pool.loom` authors `Wind.speed = 0`.
     #[test]
     fn no_wind_is_a_flat_sea() {
-        let h0 = amplitude_field(16, 200.0, 0.0, 100_000.0, [1.0, 0.0], 1);
+        let h0 = amplitude_field(16, 200.0, 0.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 1);
         for (i, c) in h0.iter().enumerate() {
             assert!(c.re.is_finite() && c.im.is_finite(), "cell {i} is not finite");
             assert!(c.re.abs() < 1e-3 && c.im.abs() < 1e-3, "cell {i} has energy in no wind");
@@ -1179,7 +1215,7 @@ mod amplitude_tests {
     #[test]
     fn a_harder_wind_is_a_bigger_sea() {
         let energy = |u: f32| -> f32 {
-            amplitude_field(32, 200.0, u, 500_000.0, [1.0, 0.0], 1)
+            amplitude_field(32, 200.0, u, 500_000.0, [1.0, 0.0], WHOLE_BAND, 1)
                 .iter()
                 .map(|c| c.re * c.re + c.im * c.im)
                 .sum()
@@ -1252,7 +1288,7 @@ mod amplitude_tests {
                     let trials = 200_u32;
                     let mean_m0: f32 = (0..trials)
                         .map(|seed| {
-                            amplitude_field(n, patch, u10, fetch, dir, seed)
+                            amplitude_field(n, patch, u10, fetch, dir, WHOLE_BAND, seed)
                                 .iter()
                                 .map(|c| c.re * c.re + c.im * c.im)
                                 .sum::<f32>()

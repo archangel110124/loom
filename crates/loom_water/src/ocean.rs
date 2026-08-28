@@ -118,6 +118,39 @@ pub struct Cascade {
     pub patch: f32,
     /// Cells per side. **Must be a power of two** — [`Twiddles::new`] panics otherwise.
     pub n: usize,
+    /// The half-open band of wavenumbers this cascade carries, `[k_lo, k_hi)` in rad/m.
+    ///
+    /// **A cascade is a band, not another copy of the sea.** Left unbanded, every
+    /// cascade in a stack samples the whole spectrum, so a wavenumber two grids can both
+    /// carry is drawn once per cascade and the realised sea grows with the cascade count
+    /// — which is a sea whose size depends on a rendering decision.
+    ///
+    /// **The bands must be chosen to tile, and are not implied by the patch sizes.** Two
+    /// cascades' resolvable ranges do not meet: `patch` 1024 at `n` 128 reaches a Nyquist
+    /// of `0.393 rad/m` while `patch` 256 at the same `n` starts its fundamental at
+    /// `0.025` — they overlap over a factor of sixteen. So the tiling is stated here, in
+    /// the type, and [`Ocean::new`] asserts it: consecutive cascades must satisfy
+    /// `k_hi[i] == k_lo[i + 1]` exactly, or the stack has a gap or a double-count.
+    /// Where the stack *starts and ends* is not asserted — a stack that stops short of
+    /// the chop simply carries a smaller sea, and `significant_height` is what says so.
+    ///
+    /// Each cascade must also be able to *resolve* its band — `2π/patch <= k_lo` and
+    /// `k_hi <= π·n/patch`, up to the corner reach — but that is a quality question
+    /// rather than a correctness one and is not asserted: a band outside the grid's
+    /// range is simply empty, and the energy is lost rather than misplaced.
+    ///
+    /// [`Cascade::whole`] is the unbanded single-cascade case.
+    pub band: [f32; 2],
+}
+
+impl Cascade {
+    /// A lone cascade, carrying every wavenumber its grid can reach.
+    ///
+    /// The right thing for one tile and the wrong thing for a stack — see [`Self::band`].
+    #[must_use]
+    pub fn whole(patch: f32, n: usize) -> Self {
+        Self { patch, n, band: crate::spectrum::WHOLE_BAND }
+    }
 }
 
 /// Everything about one cascade that does not change with time.
@@ -169,7 +202,8 @@ impl Ocean {
     /// `loom_field::wind`.
     ///
     /// # Panics
-    /// If any cascade's `n` is not a power of two.
+    /// If any cascade's `n` is not a power of two, or if two consecutive cascades' bands
+    /// do not meet — see [`Cascade::band`].
     #[must_use]
     pub fn new(
         cascades: &[Cascade],
@@ -178,6 +212,30 @@ impl Ocean {
         direction: [f32; 2],
         seed: u32,
     ) -> Self {
+        // **The tiling, asserted rather than assumed.** A stack whose bands overlap
+        // draws the overlapping wavenumbers once per cascade and realises a sea bigger
+        // than the spectrum it came from; a stack with a gap realises a smaller one.
+        // Neither is visible in any picture — the sea just is the wrong size — so it is
+        // checked here, at the one place a stack exists, and exactly rather than within
+        // a tolerance: a band edge is a number an author writes down twice, not one that
+        // arithmetic arrives at.
+        //
+        // **Only that consecutive bands meet.** Where the stack as a whole starts and
+        // ends is the author's business — a stack that stops short of the chop loses
+        // energy it never claimed to carry, which is the same class of thing as a
+        // cascade whose grid cannot resolve its own band, and is checked by measuring
+        // `Hs` rather than by an assertion here.
+        for (i, pair) in cascades.windows(2).enumerate() {
+            assert!(
+                pair[0].band[1] == pair[1].band[0],
+                "cascades {i} and {} do not tile: {i} ends at {} rad/m and {} starts at {}",
+                i + 1,
+                pair[0].band[1],
+                i + 1,
+                pair[1].band[0]
+            );
+        }
+
         let mut layers = Vec::with_capacity(cascades.len());
         let mut offset = 0;
         for (index, cascade) in cascades.iter().enumerate() {
@@ -190,7 +248,8 @@ impl Ocean {
             // detail the large one has never heard of.
             #[allow(clippy::cast_possible_truncation)]
             let cascade_seed = seed.wrapping_add((index as u32).wrapping_mul(0x9E37_79B9));
-            let h0 = amplitude_field(n, cascade.patch, u10, fetch, direction, cascade_seed);
+            let h0 =
+                amplitude_field(n, cascade.patch, u10, fetch, direction, cascade.band, cascade_seed);
 
             let along = {
                 let length = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
@@ -461,9 +520,42 @@ mod tests {
     use super::*;
     use crate::PROFILE;
 
+    /// The wavenumber a `patch × patch` grid of `n` cells stops resolving at: `π·n/patch`.
+    ///
+    /// **The boundary this file bands its stacks at**, and it is a choice rather than a
+    /// derivation — see [`Cascade::band`]. A coarse cascade carries everything up to what
+    /// it can resolve and the next one takes over exactly there, which tiles as long as
+    /// the finer cascade's own fundamental `2π/patch` is below it. That holds for every
+    /// stack here and is not automatic: it needs `patch_coarse / patch_fine <= n / 2`.
+    fn nyquist(patch: f32, n: usize) -> f32 {
+        #[allow(clippy::cast_precision_loss)]
+        let n = n as f32;
+        std::f32::consts::PI * n / patch
+    }
+
+    /// The stack the engine is expected to ship: swell, sea and chop, banded at each
+    /// cascade's own Nyquist so they tile `[0, ∞)`.
+    ///
+    /// **One definition, used by both the size test and the cost test.** They were two
+    /// different configurations before — the `Hs` gate ran a single 1024 m cascade while
+    /// the timing ran three — so the sea that was measured for size was not the sea that
+    /// was measured for cost, and neither was the sea that would ship.
+    fn shipping_stack(n: usize) -> [Cascade; 3] {
+        let (swell, sea, chop) = (2048.0, 256.0, 32.0);
+        [
+            Cascade { patch: swell, n, band: [0.0, nyquist(swell, n)] },
+            Cascade { patch: sea, n, band: [nyquist(swell, n), nyquist(sea, n)] },
+            Cascade { patch: chop, n, band: [nyquist(sea, n), f32::INFINITY] },
+        ]
+    }
+
     fn test_ocean() -> Ocean {
+        let cut = nyquist(512.0, 64);
         Ocean::new(
-            &[Cascade { patch: 512.0, n: 64 }, Cascade { patch: 64.0, n: 64 }],
+            &[
+                Cascade { patch: 512.0, n: 64, band: [0.0, cut] },
+                Cascade { patch: 64.0, n: 64, band: [cut, f32::INFINITY] },
+            ],
             14.0,
             300_000.0,
             [1.0, 0.0],
@@ -548,7 +640,7 @@ mod tests {
         let mut worst = 0.0_f32;
         for n in [32usize, 64, 128] {
             for dir in HEADINGS {
-                let mut o = Ocean::new(&[Cascade { patch: 512.0, n }], 14.0, 300_000.0, dir, 9);
+                let mut o = Ocean::new(&[Cascade::whole(512.0, n)], 14.0, 300_000.0, dir, 9);
                 o.evolve(7.0);
                 let layer = &o.layers[0];
                 for (g, grid) in layer.grid.iter().enumerate() {
@@ -594,10 +686,16 @@ mod tests {
     /// about the formula, and the sea this engine builds is the one `spectrum.rs`
     /// describes.
     ///
-    /// **The grid is not the risk here.** Computed against the analytic spectrum, a 128²
-    /// patch of 1024 m spans wavelengths 16-1024 m and captures **99.6%** of the
-    /// variance, against a peak wavelength of **226 m** at this wind and fetch. If this
-    /// test fails it is the spectrum or the symmetry, not the resolution.
+    /// **It runs [`shipping_stack`], and that is the point of running it.** A gate on the
+    /// sea's size that measures a configuration nothing ships is a gate on a different
+    /// sea; this used to run one 1024 m cascade and read **6.073 m**, three centimetres
+    /// light because a single grid cannot carry both the 226 m swell and the chop. The
+    /// three tiling cascades read **6.100 m** against the analytic 6.10.
+    ///
+    /// **The grid is not the risk here.** The stack spans 4 m to 2048 m of wavelength
+    /// against a peak wavelength of **226 m** at this wind and fetch, and the peak sits
+    /// at index 9 of the swell cascade — comfortably resolved. If this test fails it is
+    /// the spectrum, the banding or the symmetry, not the resolution.
     ///
     /// 226 m is `spectrum_shape`'s own peak law — `ω_p = 2π·3.5·(g/u10)·F̃^-0.33`, then
     /// `λ = 2πg/ω_p²` — evaluated at 440 km. It reads 204 m at 376 km. An earlier version
@@ -614,21 +712,15 @@ mod tests {
     /// **200 seeds, not 24, and that number was itself measured.** Task 2's cross-path
     /// test started at 24 and had to be raised: at 24 one of its grid shapes read **23%
     /// high from sampling noise alone**, which looks exactly like a heading-dependent bug
-    /// and is not one. At 200 its worst point is 8.0%. Averaging is cheap here — a 128²
-    /// cascade evolves in well under a millisecond, so 200 draws cost a fraction of a
-    /// second — and a flaky test on the force path is expensive.
+    /// and is not one. At 200 its worst point is 8.0%. Averaging is cheap here — three
+    /// 128² cascades evolve in 1.5 ms in release, so 200 draws cost a few seconds even in
+    /// this debug build — and a flaky test on the force path is expensive.
     #[test]
     fn the_realised_sea_is_the_size_the_spectrum_promised() {
         let mut total = 0.0_f32;
         let seeds = 200;
         for seed in 0..seeds {
-            let mut o = Ocean::new(
-                &[Cascade { patch: 1024.0, n: 128 }],
-                18.0,
-                440_000.0,
-                [1.0, 0.0],
-                seed,
-            );
+            let mut o = Ocean::new(&shipping_stack(128), 18.0, 440_000.0, [1.0, 0.0], seed);
             o.evolve(20.0);
             total += o.significant_height();
         }
@@ -649,11 +741,89 @@ mod tests {
         );
     }
 
+    /// **A cascade is a band, and the sea is the same size however many bands it is
+    /// sliced into.** Left unbanded, every cascade samples the whole spectrum, so a
+    /// wavenumber two grids can both carry is drawn once per cascade and the realised
+    /// `Hs` grows with the cascade count — a sea whose size depends on a rendering
+    /// decision, which is the defect this asserts away.
+    ///
+    /// The three stacks below tile the **same** wavenumber range, `[0, π·128/1024)`, into
+    /// one, two and three bands, and every cascade can resolve the band it is given
+    /// (`2π/patch <= k_lo` and `π·n/patch >= k_hi`). So there is one right answer for all
+    /// three and it is the energy the spectrum puts in that range.
+    ///
+    /// **Measured with the bands replaced by [`crate::spectrum::WHOLE_BAND`]** — which is
+    /// exactly the shipped behaviour, every cascade sampling everything — the same three
+    /// stacks read **6.073 / 8.598 / 10.559 m** — the sea grows by three quarters when it
+    /// is drawn in three parts. Banded they read **6.069 / 6.096 / 6.128 m**.
+    ///
+    /// **200 seeds, and the band is derived not guessed.** A single realisation of this
+    /// spectrum spreads over 0.35x to 1.68x, so one draw is not a measurement;
+    /// `the_realised_sea_is_the_size_the_spectrum_promised` measured the 200-seed mean's
+    /// standard error at 0.021 m and the three stacks here are independent draws, so a
+    /// difference of two means has about 0.03 m of standard error. The realised spread
+    /// is 0.059 m, so 0.10 m is about three of those — wide enough not to flake, and a
+    /// twenty-fifth of the 2.53 m the two-cascade double-count moves.
+    #[test]
+    fn cascades_are_a_band_not_another_copy_of_the_sea() {
+        let cut_hi = nyquist(1024.0, 128);
+        // Interior edges, chosen so each cascade resolves its own band. They are written
+        // as multiples of the coarsest cascade's own `Δk` because a band edge is a number
+        // an author picks, and picking one the coarse grid already has a cell at is the
+        // one choice that costs nothing.
+        let dk = std::f32::consts::TAU / 1024.0;
+        let (two_cut, three_a, three_b) = (16.0 * dk, 8.0 * dk, 32.0 * dk);
+        let stacks: [Vec<Cascade>; 3] = [
+            vec![Cascade { patch: 1024.0, n: 128, band: [0.0, cut_hi] }],
+            vec![
+                Cascade { patch: 1024.0, n: 128, band: [0.0, two_cut] },
+                Cascade { patch: 256.0, n: 128, band: [two_cut, cut_hi] },
+            ],
+            vec![
+                Cascade { patch: 1024.0, n: 128, band: [0.0, three_a] },
+                Cascade { patch: 512.0, n: 128, band: [three_a, three_b] },
+                Cascade { patch: 256.0, n: 128, band: [three_b, cut_hi] },
+            ],
+        ];
+
+        let seeds = 200_u32;
+        let mut realised = [0.0_f32; 3];
+        for (slot, stack) in realised.iter_mut().zip(&stacks) {
+            let mut total = 0.0_f32;
+            for seed in 0..seeds {
+                let mut o = Ocean::new(stack, 18.0, 440_000.0, [1.0, 0.0], seed);
+                o.evolve(20.0);
+                total += o.significant_height();
+            }
+            #[allow(clippy::cast_precision_loss)]
+            {
+                *slot = total / seeds as f32;
+            }
+        }
+        println!(
+            "Hs over {seeds} seeds, one/two/three cascades tiling one range: \
+             {:.3} / {:.3} / {:.3} m",
+            realised[0], realised[1], realised[2]
+        );
+
+        for (i, a) in realised.iter().enumerate() {
+            for (j, b) in realised.iter().enumerate().skip(i + 1) {
+                assert!(
+                    (a - b).abs() < 0.10,
+                    "slicing the same spectrum into {} and {} cascades gives \
+                     {a:.3} m and {b:.3} m — the bands are not partitioning it",
+                    i + 1,
+                    j + 1
+                );
+            }
+        }
+    }
+
     /// A calm sea is calm. Guards the same divide-by-U edge the spectrum test does, one
     /// layer up.
     #[test]
     fn no_wind_is_a_flat_ocean() {
-        let mut o = Ocean::new(&[Cascade { patch: 256.0, n: 32 }], 0.0, 100_000.0, [1.0, 0.0], 2);
+        let mut o = Ocean::new(&[Cascade::whole(256.0, 32)], 0.0, 100_000.0, [1.0, 0.0], 2);
         o.evolve(9.0);
         assert!(o.significant_height() < 0.05, "Hs {} in no wind", o.significant_height());
     }
@@ -730,7 +900,7 @@ mod tests {
     #[test]
     fn the_sea_travels_downwind() {
         for dir in HEADINGS {
-            let mut o = Ocean::new(&[Cascade { patch: 512.0, n: 64 }], 14.0, 300_000.0, dir, 5);
+            let mut o = Ocean::new(&[Cascade::whole(512.0, 64)], 14.0, 300_000.0, dir, 5);
             let length = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
             let along = [dir[0] / length, dir[1] / length];
             o.evolve(0.0);
@@ -770,7 +940,7 @@ mod tests {
     #[test]
     fn the_pinch_sharpens_the_crests() {
         for dir in HEADINGS {
-            let mut o = Ocean::new(&[Cascade { patch: 512.0, n: 64 }], 14.0, 300_000.0, dir, 7);
+            let mut o = Ocean::new(&[Cascade::whole(512.0, 64)], 14.0, 300_000.0, dir, 7);
             o.evolve(4.0);
             let step = 4.0_f32;
             let mut covariance = 0.0_f32;
@@ -864,7 +1034,7 @@ mod tests {
     /// swell moves far enough. The gap is real; it is a band, not the whole line.
     #[test]
     fn a_single_mode_returns_after_exactly_one_period() {
-        let cascade = Cascade { patch: 512.0, n: 64 };
+        let cascade = Cascade::whole(512.0, 64);
         let (m, amplitude) = (4, 1.0_f32);
         let mut o = ocean_from_h0(cascade, [1.0, 0.0], single_mode_h0(cascade.n, m, amplitude / 2.0));
         let at = |o: &mut Ocean, t: f32| -> Vec<f32> {
@@ -924,7 +1094,7 @@ mod tests {
     /// `the_pinch_sharpens_the_crests` provably cannot see — reads **0.00241**.
     #[test]
     fn a_single_mode_has_the_steepness_its_amplitude_implies() {
-        let cascade = Cascade { patch: 512.0, n: 64 };
+        let cascade = Cascade::whole(512.0, 64);
         // `n / (4m)` is an integer, so a grid node lands exactly on the crest and exactly
         // on the steepest point — `max` over the tile is the true amplitude, not a sample
         // of the cosine somewhere near its peak.
@@ -977,7 +1147,7 @@ mod tests {
     /// band. Measured spread on the correct pipeline is **exactly zero**.
     #[test]
     fn energy_in_kx_alone_is_constant_along_z() {
-        let cascade = Cascade { patch: 512.0, n: 64 };
+        let cascade = Cascade::whole(512.0, 64);
         let n = cascade.n;
         let (m, amplitude) = (4, 1.0_f32);
         let mut o = ocean_from_h0(cascade, [1.0, 0.0], single_mode_h0(n, m, amplitude / 2.0));
@@ -1041,11 +1211,7 @@ mod tests {
     fn cost_of_evolve() {
         for n in [128usize, 256] {
             let mut o = Ocean::new(
-                &[
-                    Cascade { patch: 2048.0, n },
-                    Cascade { patch: 256.0, n },
-                    Cascade { patch: 32.0, n },
-                ],
+                &shipping_stack(n),
                 14.0,
                 300_000.0,
                 [1.0, 0.0],
