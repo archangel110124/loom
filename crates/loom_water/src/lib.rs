@@ -54,6 +54,7 @@ pub mod fft;
 pub mod flow;
 pub mod foam;
 pub mod nappe;
+pub mod ocean;
 pub mod spectrum;
 pub mod spray;
 pub mod wavelet;
