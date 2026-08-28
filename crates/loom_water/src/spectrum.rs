@@ -531,18 +531,33 @@ fn box_muller(seed: u32, x: u32, z: u32) -> (f32, f32) {
 /// cumulative is built from, [`pm_density`], at every grid cell's own `k`
 /// instead — scaled so its own integral is `m0` too, and fanned by the same
 /// `cosᵖ(θ)` spread with the same [`SPREAD_POWER`]. Two resolutions of one
-/// spectrum, not two spectra.
+/// spectrum, not two spectra — `amplitude_field_agrees_with_wave_set_fetch`
+/// checks the two against each other directly, in `Hs`, because a density and
+/// a band scheme agreeing on paper is not the same as their totals agreeing
+/// in `f32`. A grid cell is not a point, either: the density is multiplied by
+/// the cell's own area in k-space, `(Δk)²`, before it becomes a variance —
+/// omitting that was round 1's bug, and it scaled the total with `patch`
+/// alone, a purely numerical parameter with no counterpart in the sixteen
+/// waves at all.
 ///
 /// # k = 0 and the Hermitian mirror
 ///
 /// The `k = 0` cell — `x == z == n/2`, since `k = 2π·(x − n/2, z − n/2) /
 /// patch` — is left zero: a mean offset is not a wave. Every other cell's
-/// conjugate is *written*, not hoped for: this walks half the grid, draws one
-/// hashed cell, and copies its conjugate into the mirror cell directly, so
-/// `h0(−k) = conj(h0(k))` holds by construction rather than by relying on the
-/// hash to land there on its own. A cell that is its own mirror — `k = 0`, or
-/// a Nyquist row/column when `n` is even — is forced real, because Hermitian
-/// symmetry demands it equal its own conjugate.
+/// conjugate is *written*, not hoped for: this draws one hashed cell per
+/// mirror pair and copies its conjugate into the other, so `h0(−k) =
+/// conj(h0(k))` holds by construction rather than by relying on the hash to
+/// land there on its own. **Which of the pair gets hashed is not the
+/// lexicographically smaller index** — a first version of this function used
+/// that, and because the directional cone is a hard ±90° cutoff rather than
+/// merely a weight, exactly one of `{k, −k}` generically falls inside it; the
+/// other is zero by construction. Picking the grid-index-smaller one at
+/// random relative to wind direction hashed the *zero* side about half the
+/// time and threw its mirror's true energy away outright — this looks up
+/// both candidate angles and hashes whichever the wind actually reaches. A
+/// cell that is its own mirror — `k = 0`, or a Nyquist row/column when `n` is
+/// even — is forced real, because Hermitian symmetry demands it equal its
+/// own conjugate.
 #[must_use]
 #[allow(clippy::cast_precision_loss, clippy::similar_names)]
 pub fn amplitude_field(
@@ -566,6 +581,15 @@ pub fn amplitude_field(
     let along_theta = along[1].atan2(along[0]);
     let spread_norm = cos_power_integral(SPREAD_POWER);
     let delta_k = std::f32::consts::TAU / patch;
+    // `s_k` below is a *density* — energy per unit area of k-space — and a
+    // grid cell covers `(Δk)²` of that area, not a point in it. Skipping this
+    // is the bug this file's `spectrum_shape` was built to make impossible
+    // and got away with it anyway: `Σ|h0|²` came out scaling with `patch`
+    // alone (300x too hot at the plan's own 200 m test patch, 16000x at
+    // 800 m), because `patch` sets `Δk` and nothing was multiplying by it.
+    // With it, `Σ|h0|²` tracks `wave_set_fetch`'s `m0` regardless of `patch`
+    // or `n` — see `amplitude_field_agrees_with_wave_set_fetch`.
+    let cell_area = delta_k * delta_k;
     let half = (n / 2) as f32;
 
     for z in 0..n {
@@ -585,22 +609,56 @@ pub fn amplitude_field(
             let value = if k <= 0.0 {
                 Complex::default()
             } else {
-                let (g1, g2) = box_muller(seed, x as u32, z as u32);
+                // The cosᵖ spread is π-periodic (even power), but the ±90°
+                // cone that zeroes anything running against the wind is not:
+                // of a mirrored pair `{k, −k}`, exactly one generically falls
+                // inside it. Hashing whichever index happens to be
+                // lexicographically smaller — as the first version of this
+                // function did — picks the *upwind*, zero-spread side about
+                // half the time, and that half's true energy (its mirror's)
+                // is never drawn at all; it is silently thrown away rather
+                // than merely misplaced. So this looks at both candidate
+                // angles and hashes whichever one the wind actually reaches.
+                let theta = kz.atan2(kx) - along_theta;
+                let theta_mirror = (-kz).atan2(-kx) - along_theta;
+                let (hash_x, hash_z, live_theta) = if theta.abs() <= std::f32::consts::FRAC_PI_2 {
+                    (x as u32, z as u32, theta)
+                } else {
+                    (mx as u32, mz as u32, theta_mirror)
+                };
+                let live_is_c = (hash_x, hash_z) == (x as u32, z as u32);
+
+                let (g1, g2) = box_muller(seed, hash_x, hash_z);
 
                 let omega = (GRAVITY * k).sqrt();
                 let s_omega = pm_density(omega, u) * scale_to_m0;
                 let jacobian_dw_dk = GRAVITY / (2.0 * omega); // ω = √(gk)
-                let theta = kz.atan2(kx) - along_theta;
-                let spread = if theta.abs() > std::f32::consts::FRAC_PI_2 {
-                    0.0
+                let spread = if live_theta.abs() > std::f32::consts::FRAC_PI_2 {
+                    0.0 // both sides upwind at the exact ±90° edge: no energy either way
                 } else {
-                    theta.cos().powi(SPREAD_POWER) / spread_norm
+                    live_theta.cos().powi(SPREAD_POWER) / spread_norm
                 };
                 // 2D areal density: the 1D-in-k density, divided by k to
-                // spread it over a ring, fanned by direction.
-                let s_k = s_omega * jacobian_dw_dk / k * spread;
+                // spread it over a ring, fanned by direction — then scaled by
+                // the cell's own area in k-space, `(Δk)²`, to turn a density
+                // into the variance the downwind cone actually carries.
+                let s_k_one_sided = s_omega * jacobian_dw_dk / k * spread * cell_area;
+                // `s_k_one_sided` is calibrated (via `scale_to_m0`) so that
+                // summing it once per pair, over the downwind cone alone,
+                // reproduces `wave_set_fetch`'s `m0` — that's what
+                // `amplitude_field_agrees_with_wave_set_fetch` checks. But
+                // both cells of a Hermitian pair end up with the *same*
+                // magnitude, the mirror being a conjugate and not a second
+                // wave, so Parseval summing the whole grid counts every
+                // pair's variance twice unless each cell only carries half
+                // of it. This is `S(k)` as the formula below means it: the
+                // two-sided density, after that halving.
+                let s_k = s_k_one_sided * 0.5;
                 let amplitude = (0.5 * s_k).max(0.0).sqrt();
-                Complex { re: g1 * amplitude, im: g2 * amplitude }
+                let hashed = Complex { re: g1 * amplitude, im: g2 * amplitude };
+                // Whichever of {c, mirror} was live carries the drawn value;
+                // the other is its conjugate, same as the self-paired case.
+                if live_is_c { hashed } else { Complex { re: hashed.re, im: -hashed.im } }
             };
 
             if (z, x) == (mz, mx) {
@@ -977,6 +1035,11 @@ mod amplitude_tests {
     /// **The field must be Hermitian, or the sea has an imaginary part.**
     /// `h0(-k) = conj(h0(k))` is what makes the inverse transform of a spectrum real, and
     /// getting it wrong produces a surface that looks plausible and is not a height field.
+    ///
+    /// Not a completeness check on its own — an all-zero field is trivially Hermitian too,
+    /// so this only proves symmetry, not that there is a sea here at all.
+    /// `a_harder_wind_is_a_bigger_sea` and `amplitude_field_agrees_with_wave_set_fetch`
+    /// are what rule that out.
     #[test]
     fn the_field_is_hermitian() {
         let n = 16;
@@ -1035,5 +1098,59 @@ mod amplitude_tests {
         };
         let (calm, gale) = (energy(5.0), energy(18.0));
         assert!(gale > calm * 4.0, "calm {calm}, gale {gale}");
+    }
+
+    /// **The field's total energy must agree with `wave_set_fetch`'s, or the two paths
+    /// disagree about what an 18 m/s sea is** — the constraint the brief opens with, and
+    /// the one round 1's bug broke by orders of magnitude (patch-dependent, up to 16000x
+    /// at 800 m). `4·√(Σ|h0|²)` is the field's implied `Hs`, by the same `Hs = 4√m0`
+    /// relation `significant_height` uses — `m0` there is `ΣA²/2` over the sixteen waves,
+    /// `Σ|h0|²` here is its Parseval equivalent for the grid.
+    ///
+    /// Checked across three `patch`es and two `n`s because that is exactly the bug's
+    /// signature: it moved with `patch` and didn't move with anything about the wind.
+    /// Each point **averages 24 seeds**, not one — a fetch-limited spectrum this narrow
+    /// puts most of its energy in a handful of grid cells (`k_peak ≈ 0.031` against a
+    /// `Δk` of `0.01–0.03` at these patches), so a single draw's `Σ|h0|²` swings up to
+    /// ±70% around its own expectation by chance alone; twenty-four draws bring that
+    /// under the tolerance below without hiding a real, non-random disagreement. **15%**,
+    /// because even the mean still truncates the spectrum below the grid's lowest
+    /// resolvable `k` and above its Nyquist — exact agreement was never the target, and
+    /// demanding it would make this flaky rather than sharp. Measured (seeds 0–23,
+    /// `u10 = 18`, `fetch = 376 km`): ratios ran 0.86–1.08 across all six points, with no
+    /// trend toward either edge as `patch` or `n` changes — see the task report for the
+    /// full table and for round 1's numbers before the fix.
+    #[test]
+    fn amplitude_field_agrees_with_wave_set_fetch() {
+        let u10 = 18.0_f32;
+        let fetch = 376_000.0_f32; // The plan's own scenario: a twenty-foot sea.
+        let dir = [1.0_f32, 0.0];
+        let target_m0: f32 = {
+            let hs = significant_height(&wave_set_fetch(u10, dir, fetch));
+            (hs / 4.0) * (hs / 4.0)
+        };
+
+        for &n in &[32usize, 64] {
+            for &patch in &[200.0_f32, 400.0, 800.0] {
+                let trials = 24_u32;
+                let mean_m0: f32 = (0..trials)
+                    .map(|seed| {
+                        amplitude_field(n, patch, u10, fetch, dir, seed)
+                            .iter()
+                            .map(|c| c.re * c.re + c.im * c.im)
+                            .sum::<f32>()
+                    })
+                    .sum::<f32>()
+                    / trials as f32;
+
+                let error = (mean_m0 - target_m0).abs() / target_m0;
+                assert!(
+                    error < 0.15,
+                    "n={n} patch={patch}: field m0 (24-seed mean) is {mean_m0:.3}, \
+                     wave_set_fetch's is {target_m0:.3} ({:.1}% off)",
+                    error * 100.0
+                );
+            }
+        }
     }
 }
