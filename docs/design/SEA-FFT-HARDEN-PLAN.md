@@ -281,6 +281,50 @@ git commit -m "test(water): the surface is where the tile says it is"
 
 ---
 
+---
+
+### Task 5: The Nyquist row and column evolve on the wrong branch
+
+**Found during the FFT core's final re-review, and it is a real defect on the force path.**
+
+`ocean.rs` chooses each cell's time-evolution branch from `sign(k · ŵ)`, and its comment at
+`ocean.rs:202` claims that sign is *"exactly antisymmetric under `k → −k`, which is what
+keeps the evolved field Hermitian."* **It is not.** The k-vector is built as
+`(x − n/2)·Δk` while the mirror index is `(n − x) % n`, and that mapping sends `x = 0` to
+itself. On the Nyquist row and column, therefore, `k_mirror ≠ −k`, the sign does not flip,
+and the pair evolves on the same branch.
+
+Measured at `n = 64`: **62–124 cells of 4096** have `ω(mirror) ≠ −ω(cell)`, and the evolved
+height field carries an imaginary residue of **1.4–2.2% RMS** — silently discarded by the
+`.re` at `ocean.rs:313`. Zeroing `ω` on exactly those cells drops the residue to 2e-7,
+which isolates the cause beyond argument.
+
+It is small, it is pre-existing, and it is exactly the class this plan exists to end: a
+quantity that is wrong, invisible to every test, and *documented as impossible*.
+
+**Files:** `crates/loom_water/src/ocean.rs`, and `crates/loom_water/src/spectrum.rs` only
+if the mirror convention is better fixed at its source.
+
+- [ ] **Step 1: Write the failing test.** Assert the evolved field's imaginary part is
+  negligible relative to its real part — an RMS ratio below, say, 1e-5 — at several `n` and
+  several headings. It must fail on the current code at the measured 1.4–2.2%.
+
+- [ ] **Step 2: Decide where the convention is wrong**, and say so in the report. Either
+  the k-vector's `(x − n/2)` centring and the `(n − x) % n` mirror must be made consistent,
+  or the self-mirror cells must be handled explicitly the way `k = 0` already is. **Prefer
+  making the two conventions agree** — a special case is a second rule, and this bug exists
+  because two rules disagreed.
+
+- [ ] **Step 3: Fix, and confirm the residue drops to the noise floor.**
+
+- [ ] **Step 4: Correct `ocean.rs:202`.** It currently asserts the property the bug
+  violates. Whatever the fix, that comment must end up saying something true — and if
+  antisymmetry is genuinely restored, say *why* it now holds, since it plainly did not
+  before.
+
+- [ ] **Step 5: Verify and commit.** `cargo test -p loom_water`,
+  `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## Self-Review
 
 **Coverage.** The final review named six gaps: dispersion magnitude (Task 2 Step 1),
