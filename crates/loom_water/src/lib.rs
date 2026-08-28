@@ -50,6 +50,7 @@
 
 pub mod buoyancy;
 pub mod drip;
+pub mod fft;
 pub mod flow;
 pub mod foam;
 pub mod nappe;
