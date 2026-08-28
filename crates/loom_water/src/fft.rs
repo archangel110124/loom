@@ -47,6 +47,19 @@ impl Twiddles {
             .collect();
         Self { n, w }
     }
+
+    /// The twiddle table itself, for the golden-value test and nothing else.
+    ///
+    /// It exists because `Twiddles::new` is the one thing in this crate that is **not**
+    /// IEEE-exact — `f32::sin_cos` is libm — so the table has to be *pinned* against a
+    /// recorded digest rather than recomputed, and a test cannot pin what it cannot see.
+    ///
+    /// `cfg(test)` because that is its whole reason to exist — nothing in the engine reads
+    /// the roots of unity directly, and an ungated accessor is dead code in every build.
+    #[cfg(test)]
+    pub(crate) fn values(&self) -> &[Complex] {
+        &self.w
+    }
 }
 
 /// In-place inverse transform of one row.
@@ -133,6 +146,45 @@ pub fn ifft_2d(grid: &mut [Complex], n: usize, tw: &Twiddles, scratch: &mut [Com
 mod tests {
     use super::*;
     use crate::PROFILE;
+
+    /// FNV-1a over the raw bits, so a single changed ULP anywhere changes the digest.
+    ///
+    /// **Hand-written rather than taken from a crate for the same reason the transform
+    /// is**: this digest is what future determinism arguments will cite, and a crate bump
+    /// must never be able to move it.
+    fn digest(values: impl Iterator<Item = f32>) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for v in values {
+            for b in v.to_bits().to_le_bytes() {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        h
+    }
+
+    /// **The one thing in this crate that is not IEEE-exact.** `Twiddles::new` builds from
+    /// `f32::sin_cos`, which is libm and may move by a ULP across a glibc version or a
+    /// different machine — and ADR 0076 sells cross-machine reproducibility of a surface
+    /// that carries force. `loom_field::noise` is an integer lattice hash for exactly this
+    /// reason and is compared exactly; this table cannot be, so it is pinned instead.
+    ///
+    /// **If this fails, do not re-bless it casually.** A failure means every water
+    /// simulation hash on this machine differs from the one that produced the recorded
+    /// value — a `libm` or toolchain change moved the table under the project, and every
+    /// scene's sea is now a different sea. The right response is to find out *what* moved
+    /// (compare the two digests' machines, `ldd --version`, the toolchain) and to record
+    /// that in the commit before touching the literal. Editing the number to make the test
+    /// green destroys the only evidence that anything changed.
+    #[test]
+    fn the_twiddle_table_is_pinned() {
+        let tw = Twiddles::new(256);
+        assert_eq!(
+            digest(tw.values().iter().flat_map(|c| [c.re, c.im])),
+            0x3653_2497_3397_73e9,
+            "the twiddle table moved — read this test's doc comment before touching the literal"
+        );
+    }
 
     fn naive_idft_1d(input: &[Complex]) -> Vec<Complex> {
         let n = input.len();

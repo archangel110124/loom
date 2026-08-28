@@ -731,6 +731,52 @@ fn normalise(v: [f32; 2]) -> Option<[f32; 2]> {
 mod tests {
     use super::*;
 
+    /// FNV-1a over the raw bits, so a single changed ULP anywhere changes the digest.
+    ///
+    /// **Hand-written rather than taken from a crate for the same reason the transform
+    /// is**: this digest is what future determinism arguments will cite, and a crate bump
+    /// must never be able to move it.
+    fn digest(values: impl Iterator<Item = f32>) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for v in values {
+            for b in v.to_bits().to_le_bytes() {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        h
+    }
+
+    /// The whole `h0` field, pinned bit for bit.
+    ///
+    /// **This covers more than the spectrum arithmetic.** [`box_muller`] calls `ln` and
+    /// `sin_cos`, and [`spectrum_shape`] a chain of `exp`/`powf` — all libm, none of them
+    /// IEEE-exact, any of them free to move by a ULP across a glibc version or a different
+    /// machine. `loom_field::noise` is an integer lattice hash for exactly this reason and
+    /// is compared exactly; this field cannot be, so it is pinned instead. That is what
+    /// makes the cross-machine reproducibility ADR 0076 sells checkable rather than
+    /// asserted.
+    ///
+    /// **A failure means the field moved — not that it is wrong.** Every other test here
+    /// is a self-comparison, an inequality or a statistical band, and all of them will
+    /// still pass with the field a ULP away; this is the only one that can see it. What it
+    /// tells you is that every water simulation hash on this machine now differs from the
+    /// one that produced the recorded value.
+    ///
+    /// **Do not re-bless it casually.** After a system update the quick fix is to paste the
+    /// new number in, and that destroys the only evidence that anything changed. Find out
+    /// *what* moved first — toolchain, `ldd --version`, the machine — and say so in the
+    /// commit that changes the literal.
+    #[test]
+    fn the_amplitude_field_is_pinned() {
+        let field = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], 7);
+        assert_eq!(
+            digest(field.iter().flat_map(|c| [c.re, c.im])),
+            0x1f52_da46_b012_dfcd,
+            "the amplitude field moved — read this test's doc comment before touching the literal"
+        );
+    }
+
     /// One water body's worth of TOML, so the real validator judges the real
     /// derived set rather than a re-implementation of its rules.
     fn water_scene(waves: &WaveSet) -> String {
