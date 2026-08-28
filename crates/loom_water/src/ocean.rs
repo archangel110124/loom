@@ -683,6 +683,235 @@ mod tests {
         }
     }
 
+    /// An ocean whose amplitude field is handed in rather than drawn from a spectrum.
+    ///
+    /// **The three tests below are analytic and a random sea has no analytic answer.** A
+    /// single `k` has a closed-form period, a closed-form amplitude and one axis; a
+    /// spectrum-drawn field has a period per cell and an amplitude that is a draw. Only
+    /// `h0` is replaced — `omega`, `khat`, the transform, the checkerboard and the tiles
+    /// are all [`Ocean::new`]'s, so these tests exercise the shipping path rather than a
+    /// second implementation of it. The wind arguments are therefore dead except for
+    /// `direction`, which still chooses the half-plane sign.
+    fn ocean_from_h0(cascade: Cascade, direction: [f32; 2], h0: Vec<Complex>) -> Ocean {
+        let mut o = Ocean::new(&[cascade], 14.0, 300_000.0, direction, 0);
+        assert_eq!(h0.len(), o.layers[0].h0.len(), "h0 is the wrong size for this cascade");
+        o.layers[0].h0 = h0;
+        o
+    }
+
+    /// One mirror pair alive: `c` at `+m·Δk` along **x**, its conjugate at `−m·Δk`.
+    ///
+    /// `c` is real, so the conjugate is `c` again. Under this crate's convention the
+    /// realised height is then exactly `2c·cos(k·x − ωt)` with `ω = √(g·k)` — a single
+    /// travelling mode with no `z` dependence whatsoever. `kz = 0`, so the pair sits in the
+    /// centred grid's middle row.
+    fn single_mode_h0(n: usize, m: usize, c: f32) -> Vec<Complex> {
+        let mut h0 = vec![Complex::default(); n * n];
+        let half = n / 2;
+        h0[half * n + half + m] = Complex { re: c, im: 0.0 };
+        h0[half * n + half - m] = Complex { re: c, im: 0.0 };
+        h0
+    }
+
+    /// The wavenumber `single_mode_h0`'s pair carries.
+    fn mode_k(patch: f32, m: usize) -> f32 {
+        #[allow(clippy::cast_precision_loss)]
+        let m = m as f32;
+        m * std::f32::consts::TAU / patch
+    }
+
+    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
+    }
+
+    /// **This is the only test that pins how fast the sea moves.** Multiply `omega` by any
+    /// positive constant and every other test in this file still passes:
+    /// `the_sea_travels_downwind` asserts a sign and not a speed, `Hs` is time-invariant,
+    /// and the memory and rewind tests compare the ocean to itself. A sea with the right
+    /// height and the wrong period is invisible in a still — and period is exactly what a
+    /// hull's pitch and heave resonance are made of, so this is the defect that reaches the
+    /// player as "the boat doesn't float right".
+    ///
+    /// A single mode returns to itself after `T = 2π/√(g·k)` and not after `T/2`. **That
+    /// second assertion is load-bearing**: without it a stationary sea — the `ω = 0`
+    /// degenerate, which is a plausible way to get this wrong — passes the first.
+    ///
+    /// **The pair of them still admits `ω·c` for odd integer `c`**, which is why the third
+    /// assertion is here and is the one that actually pins the magnitude: at an arbitrary
+    /// fraction of a period the surface has a closed-form value, `A·cos(ω·t)`, and no scale
+    /// but 1 reproduces it. The two above are kept because they say in one line what the
+    /// closed form says in three, and because they fail with a readable number.
+    ///
+    /// **Fault-injected, four ways.** `ω × 2` returns at `T/2` as well and trips the second
+    /// assertion (1.8e-7 where a moving sea reads 2.0); `ω × 3` survives both period
+    /// assertions — it is the odd-multiple hole — and reads **−0.848 against +0.652** on the
+    /// third; `ω = 0`, the stationary sea, trips the second; `ω × 1.05` trips the third.
+    ///
+    /// **One correction to the premise.** The review held that scaling `ω` passes all nine
+    /// existing tests. It does for a *plausible* miscalibration — at `× 1.05` and `× 0.9`
+    /// this is the only test in the file that fails — but `× 1.5` and `× 2` do additionally
+    /// trip `the_sea_travels_downwind`, whose 3 s / 20 m correlation stops holding once the
+    /// swell moves far enough. The gap is real; it is a band, not the whole line.
+    #[test]
+    fn a_single_mode_returns_after_exactly_one_period() {
+        let cascade = Cascade { patch: 512.0, n: 64 };
+        let (m, amplitude) = (4, 1.0_f32);
+        let mut o = ocean_from_h0(cascade, [1.0, 0.0], single_mode_h0(cascade.n, m, amplitude / 2.0));
+        let at = |o: &mut Ocean, t: f32| -> Vec<f32> {
+            o.evolve(t);
+            o.tiles().to_vec()
+        };
+
+        let k = mode_k(cascade.patch, m);
+        let period = std::f32::consts::TAU / (GRAVITY * k).sqrt();
+        let t0 = at(&mut o, 0.0);
+        let full = max_abs_diff(&t0, &at(&mut o, period));
+        let half = max_abs_diff(&t0, &at(&mut o, period * 0.5));
+        // An arbitrary fraction — not a half, third or quarter, so that no integer multiple
+        // of the true `ω` lands back on this phase.
+        let fraction = 0.137_f32;
+        let expected = amplitude * (std::f32::consts::TAU * fraction).cos();
+        let realised = at(&mut o, period * fraction)[0];
+        println!(
+            "single mode, T = {period:.3} s: drift over T {full:.2e}, over T/2 {half:.3}, \
+             at {fraction}·T {realised:.4} against a closed-form {expected:.4}"
+        );
+
+        // The band is the phase error in `sin_cos(ω·T)` where `ω·T` is `2π` to within an
+        // `f32` — parts in 1e-6 of an amplitude-1 mode; measured 1.8e-7, banded at 1e-4.
+        assert!(
+            full < 1e-4 * amplitude,
+            "the mode did not return after one period T = {period} s: worst cell moved {full}"
+        );
+        // Half a period is a sign flip, so a sea that moves at all reads ~2·amplitude here.
+        assert!(
+            half > amplitude,
+            "the mode is period-independent — omega is not being applied: \
+             the surface at T/2 differs from t=0 by only {half}"
+        );
+        // `η(0, t) = A·cos(ω·t)` for this `h0` — the magnitude of `ω`, in one number.
+        assert!(
+            (realised - expected).abs() < 1e-4 * amplitude,
+            "at {fraction} of a period the surface reads {realised} where √(g·k) says \
+             {expected} — omega has the wrong magnitude"
+        );
+    }
+
+    /// **The pinch has a size, and `the_pinch_sharpens_the_crests` cannot see it.** That
+    /// test asserts `cov(h, div D) < 0`, which for `D = i·k̂·h` is `−Σ|k|·|h(k)|²` —
+    /// negative for *any* positive radial factor. Replace `k̂` with `k`, or with `100·k̂`,
+    /// and it still passes. This is the field `mu_max` reads, so it is the input to the
+    /// whole foam and breaking story and its magnitude is not decoration.
+    ///
+    /// For a single mode `η = A·cos(k·x)` the displacement is `D = −A·sin(k·x)·k̂` and the
+    /// steepness `k·A` — the classic Gerstner limit, `k·A = 1` being the cusp. So the
+    /// realised `max|D|` must equal the realised `max|η|`, and both must equal the `A` the
+    /// amplitude field was built with, which also pins the transform's normalisation.
+    ///
+    /// **Fault-injected twice, and both leave the other twelve tests green.** Scaling
+    /// `grid[1]`/`grid[2]` by 2.0 reads a steepness of **0.0982 against an analytic
+    /// 0.0491**; replacing `k̂` with `k` — the review's other named defect, and the one
+    /// `the_pinch_sharpens_the_crests` provably cannot see — reads **0.00241**.
+    #[test]
+    fn a_single_mode_has_the_steepness_its_amplitude_implies() {
+        let cascade = Cascade { patch: 512.0, n: 64 };
+        // `n / (4m)` is an integer, so a grid node lands exactly on the crest and exactly
+        // on the steepest point — `max` over the tile is the true amplitude, not a sample
+        // of the cosine somewhere near its peak.
+        let (m, amplitude) = (4, 1.0_f32);
+        let mut o = ocean_from_h0(cascade, [1.0, 0.0], single_mode_h0(cascade.n, m, amplitude / 2.0));
+        o.evolve(0.0);
+
+        let cells = cascade.n * cascade.n;
+        let peak = |tile: &[f32]| tile.iter().fold(0.0_f32, |a, v| a.max(v.abs()));
+        let height = peak(&o.tiles()[..cells]);
+        let displacement = peak(&o.tiles()[cells..2 * cells]);
+
+        let k = mode_k(cascade.patch, m);
+        let analytic = k * amplitude;
+        let realised = k * displacement;
+        println!(
+            "single mode k={k:.4}: height {height:.4} m, |D| {displacement:.4} m, \
+             steepness {realised:.4} against analytic {analytic:.4}"
+        );
+
+        assert!(
+            (height - amplitude).abs() < 1e-3,
+            "the realised height is {height} m where the amplitude field says {amplitude} m"
+        );
+        assert!(
+            (realised - analytic).abs() < 1e-3 * analytic,
+            "the realised steepness is {realised} where k·A is {analytic} — \
+             the horizontal displacement is the wrong size by a factor of {}",
+            realised / analytic
+        );
+    }
+
+    /// **Which axis is which.** A transpose anywhere in `h0 → ifft_2d → tiles → sample`
+    /// passes eight of the nine tests above outright — `Hs`, the seam, memory, rewind,
+    /// finiteness and the pinch are all transpose-symmetric — and reduces
+    /// `the_sea_travels_downwind` to a coin flip. `two_dimensions_agree_with_two_passes_of_one`
+    /// cannot see it either: it compares `ifft_2d` against `ifft_2d` written longhand.
+    ///
+    /// The clean catcher is a field with energy only in `kx`: it has no `z` dependence at
+    /// all, so every column of the tile must be one repeated number. A transposed pipeline
+    /// produces exactly the opposite — constant along `x`, varying along `z` — and cannot
+    /// satisfy this at any tolerance.
+    ///
+    /// Both directions are checked, because "constant along z" alone is also true of a
+    /// field that is constant everywhere, which a broken transform can easily be.
+    ///
+    /// Fault-injected two ways, one at each end of the chain: reading
+    /// `grid[x * layer.n + z]` in `evolve`'s tile write, and swapping `ix`/`iz` in
+    /// [`Ocean::sample`]'s four taps. Both read a spread of 1.99 along z against a 1e-4
+    /// band. Measured spread on the correct pipeline is **exactly zero**.
+    #[test]
+    fn energy_in_kx_alone_is_constant_along_z() {
+        let cascade = Cascade { patch: 512.0, n: 64 };
+        let n = cascade.n;
+        let (m, amplitude) = (4, 1.0_f32);
+        let mut o = ocean_from_h0(cascade, [1.0, 0.0], single_mode_h0(n, m, amplitude / 2.0));
+        o.evolve(3.0);
+
+        // **Read through `sample`, not through `tiles`.** The chain the brief names is
+        // `h0 → ifft_2d → tiles → sample`, and a swap in the last link is as wrong as one
+        // in the first. Sampling exactly on grid nodes makes the interpolant a no-op, so
+        // what this measures is the tile and not the bilinear filter.
+        #[allow(clippy::cast_precision_loss)]
+        let cell = cascade.patch / n as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let at = |o: &Ocean, i: usize, j: usize| o.sample(i as f32 * cell, j as f32 * cell)[1];
+
+        // The widest any single line of the surface gets. Along z that must be zero; along
+        // x it is the mode.
+        let spread = |line: &[f32]| -> f32 {
+            let lo = line.iter().copied().fold(f32::INFINITY, f32::min);
+            let hi = line.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            hi - lo
+        };
+        let mut along_z = 0.0_f32;
+        let mut along_x = 0.0_f32;
+        for i in 0..n {
+            let column: Vec<f32> = (0..n).map(|j| at(&o, i, j)).collect();
+            let row: Vec<f32> = (0..n).map(|j| at(&o, j, i)).collect();
+            along_z = along_z.max(spread(&column));
+            along_x = along_x.max(spread(&row));
+        }
+        println!("kx-only mode: spread along z {along_z:.2e}, along x {along_x:.3}");
+
+        assert!(
+            along_z < 1e-4 * amplitude,
+            "a field with energy only in kx varies along z by {along_z} — an axis is transposed"
+        );
+        // The mode has to be visible along x, or "constant along z" is the trivial pass a
+        // dead transform would also give.
+        assert!(
+            along_x > amplitude,
+            "the kx mode is not present along x at all (spread {along_x}) — \
+             this test would have passed vacuously"
+        );
+    }
+
     /// Not a gate — the two numbers that choose the shipping grid size. ADR 0076
     /// predicts ~1.24 ms at N=128 and ~7.15 ms at N=256 for nine 2D transforms, against
     /// a fixed step of 16.67 ms.
