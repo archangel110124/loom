@@ -201,6 +201,23 @@ impl Ocean {
 
                     // Which side of the wind this cell is on. Exactly antisymmetric
                     // under `k → −k`, which is what keeps the evolved field Hermitian.
+                    //
+                    // **`amplitude_field` decides the same thing with the same
+                    // expression**, tie-break included — one rule, one place, rather
+                    // than a dot product here and an `atan2`-then-`cos` there, which is
+                    // what it used to be and is two floating-point paths to one
+                    // boolean.
+                    //
+                    // **What a disagreement would and would not cost, measured.**
+                    // Flipping `amplitude_field`'s comparison outright and leaving this
+                    // one alone changes no test in this file: Hermitian symmetry forces
+                    // both members of a pair to share a magnitude, so which side is
+                    // "live" there now only picks *which cell's hash* is drawn, and the
+                    // direction the sea runs is set here and only here. So this is a
+                    // hygiene fix, not a live bug — the drift it prevents is the one
+                    // that bites if the cone ever goes back to being a hard cutoff
+                    // (`cos.max(0)`) rather than a magnitude, which is the shape it had
+                    // when picking the wrong side threw a pair's energy away.
                     let (mz, mx) = ((n - z) % n, (n - x) % n);
                     let dot = kx * along[0] + kz * along[1];
                     let sign = if (z, x) == (mz, mx) {
@@ -529,38 +546,61 @@ mod tests {
         }
     }
 
+    /// Every heading this file's directional tests run at.
+    ///
+    /// **`[1, 0]` alone is a blind spot, and it is a proven one.** Every test here used
+    /// to pass that and only that, which is the identical gap that let an angle-wrap bug
+    /// in `spectrum.rs`'s directional cone survive a full round of review: a suite pinned
+    /// to one heading cannot see a heading bug. `[-1, 0]` and `[-1, -1]` are the two whose
+    /// `atan2` sits near ±π, where anything that differences two angles without wrapping
+    /// falls apart, and `[-1, -1]` is additionally off-axis so a rule that happens to work
+    /// on the grid axes cannot hide there either.
+    const HEADINGS: [[f32; 2]; 3] = [[1.0, 0.0], [-1.0, 0.0], [-1.0, -1.0]];
+
     /// **The sea runs downwind, and the standing-wave failure is what this catches.**
     /// The literal Tessendorf formula against this crate's Hermitian `h0` collapses to
     /// `2·h0·cos(ωt)` — real, finite, right size, and completely stationary. Every other
     /// test in this file passes under it. This one does not: a travelling sea correlates
     /// better with itself shifted *downwind* than upwind.
+    ///
+    /// It samples *along the wind* rather than along `+x` so that it means the same
+    /// thing at every heading in [`HEADINGS`]. **Fault-injected to prove it can see a
+    /// heading bug**: replacing [`Ocean::new`]'s `k · ŵ` with a bare `kx` — a half-plane
+    /// that assumes the wind blows along `+x` — passes at `[1, 0]` and fails at
+    /// `[-1, 0]` with +20 m correlating −11.6 against −20 m's +8.8. Pinned to one
+    /// heading, this test would have reported a pass.
     #[test]
     fn the_sea_travels_downwind() {
-        let mut o = Ocean::new(&[Cascade { patch: 512.0, n: 64 }], 14.0, 300_000.0, [1.0, 0.0], 5);
-        o.evolve(0.0);
-        let before: Vec<f32> =
-            (0..64_u8).map(|i| o.sample(f32::from(i) * 8.0, 0.0)[1]).collect();
-        // Long enough for the dominant swell to move a few metres and no further.
-        o.evolve(3.0);
+        for dir in HEADINGS {
+            let mut o = Ocean::new(&[Cascade { patch: 512.0, n: 64 }], 14.0, 300_000.0, dir, 5);
+            let length = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
+            let along = [dir[0] / length, dir[1] / length];
+            o.evolve(0.0);
+            let at = |o: &Ocean, d: f32| o.sample(d * along[0], d * along[1])[1];
+            let before: Vec<f32> = (0..64_u8).map(|i| at(&o, f32::from(i) * 8.0)).collect();
+            // Long enough for the dominant swell to move a few metres and no further.
+            o.evolve(3.0);
 
-        // Correlation of the old profile against the new one, shifted each way.
-        let correlate = |shift: f32| -> f32 {
-            before
-                .iter()
-                .enumerate()
-                .map(|(i, h)| {
-                    #[allow(clippy::cast_precision_loss)]
-                    let x = i as f32 * 8.0;
-                    h * o.sample(x + shift, 0.0)[1]
-                })
-                .sum()
-        };
-        let downwind = correlate(20.0);
-        let upwind = correlate(-20.0);
-        assert!(
-            downwind > upwind,
-            "the sea is not running downwind: +20 m correlates {downwind}, −20 m {upwind}"
-        );
+            // Correlation of the old profile against the new one, shifted each way.
+            let correlate = |shift: f32| -> f32 {
+                before
+                    .iter()
+                    .enumerate()
+                    .map(|(i, h)| {
+                        #[allow(clippy::cast_precision_loss)]
+                        let d = i as f32 * 8.0;
+                        h * at(&o, d + shift)
+                    })
+                    .sum()
+            };
+            let downwind = correlate(20.0);
+            let upwind = correlate(-20.0);
+            assert!(
+                downwind > upwind,
+                "the sea is not running downwind at {dir:?}: \
+                 +20 m correlates {downwind}, −20 m {upwind}"
+            );
+        }
     }
 
     /// **The pinch sharpens crests rather than troughs**, which is the sign of the `i`
@@ -571,26 +611,28 @@ mod tests {
     /// divergence, which is negative exactly when the surface converges on its crests.
     #[test]
     fn the_pinch_sharpens_the_crests() {
-        let mut o = Ocean::new(&[Cascade { patch: 512.0, n: 64 }], 14.0, 300_000.0, [1.0, 0.0], 7);
-        o.evolve(4.0);
-        let step = 4.0_f32;
-        let mut covariance = 0.0_f32;
-        for zi in 0..32_u8 {
-            for xi in 0..32_u8 {
-                let (x, z) = (f32::from(xi) * 16.0, f32::from(zi) * 16.0);
-                let height = o.sample(x, z)[1];
-                let divergence = (o.sample(x + step, z)[0] - o.sample(x - step, z)[0]
-                    + o.sample(x, z + step)[2]
-                    - o.sample(x, z - step)[2])
-                    / (2.0 * step);
-                covariance += height * divergence;
+        for dir in HEADINGS {
+            let mut o = Ocean::new(&[Cascade { patch: 512.0, n: 64 }], 14.0, 300_000.0, dir, 7);
+            o.evolve(4.0);
+            let step = 4.0_f32;
+            let mut covariance = 0.0_f32;
+            for zi in 0..32_u8 {
+                for xi in 0..32_u8 {
+                    let (x, z) = (f32::from(xi) * 16.0, f32::from(zi) * 16.0);
+                    let height = o.sample(x, z)[1];
+                    let divergence = (o.sample(x + step, z)[0] - o.sample(x - step, z)[0]
+                        + o.sample(x, z + step)[2]
+                        - o.sample(x, z - step)[2])
+                        / (2.0 * step);
+                    covariance += height * divergence;
+                }
             }
+            assert!(
+                covariance < 0.0,
+                "the horizontal displacement spreads the crests instead of pinching them \
+                 at {dir:?}: cov(h, div D) = {covariance}"
+            );
         }
-        assert!(
-            covariance < 0.0,
-            "the horizontal displacement spreads the crests instead of pinching them: \
-             cov(h, div D) = {covariance}"
-        );
     }
 
     /// Not a gate — the two numbers that choose the shipping grid size. ADR 0076

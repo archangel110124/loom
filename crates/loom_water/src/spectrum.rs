@@ -553,15 +553,37 @@ fn box_muller(seed: u32, x: u32, z: u32) -> (f32, f32) {
 /// merely a weight, exactly one of `{k, −k}` generically falls inside it; the
 /// other is zero by construction. Picking the grid-index-smaller one at
 /// random relative to wind direction hashed the *zero* side about half the
-/// time and threw its mirror's true energy away outright — this tests
-/// `cos(θ − θ_wind) >= 0` and hashes whichever side the wind actually
-/// reaches. That test is on the cosine rather than on `|θ − θ_wind|`
-/// precisely because the difference of two `atan2` results is not wrapped:
-/// for a wind near ±π an angle test would reject *both* sides and zero the
-/// pair. A
-/// cell that is its own mirror — `k = 0`, or a Nyquist row/column when `n` is
-/// even — is forced real, because Hermitian symmetry demands it equal its
-/// own conjugate.
+/// time and threw its mirror's true energy away outright — this hashes
+/// whichever side the wind actually reaches, decided by the **sign of
+/// `k · ŵ`**. A cell that is its own mirror — `k = 0`, or a Nyquist row/column
+/// when `n` is even — is forced real, because Hermitian symmetry demands it
+/// equal its own conjugate.
+///
+/// **That dot product is the same rule, evaluated the same way, as
+/// [`crate::ocean::Ocean::new`]'s half-plane sign**, down to the `dot == 0.0`
+/// tie-break on grid index. An earlier version decided the same question here
+/// through `atan2` then `cos` — a second implementation of one boolean, on a
+/// different floating-point path, in a different file. It is one expression
+/// now so that there is nothing to drift.
+///
+/// It is worth being exact about what that drift would have cost, because it
+/// is less than it looks: Hermitian symmetry forces both members of a pair to
+/// share a magnitude, so the live side chosen here only decides *which cell's
+/// hash is drawn*, and the direction a mode travels is set in `ocean.rs`
+/// alone. Flipping this comparison and leaving `ocean.rs` alone moves no test.
+/// The hazard is latent rather than live — it becomes real the moment the
+/// cone goes back to being a hard cutoff (`cos.max(0)`) instead of the
+/// magnitude below, which is the shape it had when picking the wrong side
+/// threw a pair's energy away outright.
+///
+/// # Why the calibration is in variance
+///
+/// `Σ_k |h0(k)|²` is the sea's variance `m0`, not `m0/N²`, **because
+/// [`crate::fft::ifft_2d`] is deliberately unnormalised** and `ocean.rs`
+/// applies no `1/N²` on the way out. Parseval for that convention makes the
+/// raw transform's variance exactly this sum. The three decisions are only
+/// correct together; changing any one of them without the other two lands a
+/// twenty-foot sea at 0.37 mm.
 #[must_use]
 #[allow(clippy::cast_precision_loss, clippy::similar_names)]
 pub fn amplitude_field(
@@ -624,27 +646,31 @@ pub fn amplitude_field(
                 // than merely misplaced. So this hashes whichever side the
                 // wind actually reaches.
                 //
-                // **The cone test is on `cos θ`, not `|θ|`, and that is the
-                // wrap.** `atan2` returns `(-π, π]` and `along_theta` is in
-                // that range too, so their difference lands anywhere in
-                // `(-2π, 2π)`: for a wind near ±π — `[-1, 0]`, or anything
-                // off-axis behind it — `|θ| <= π/2` is false for *both*
-                // candidates, the pair falls through to no energy at all, and
-                // a third of the sea disappears (measured `m0` 1.27 against a
-                // target of 1.99 for `[-1, 0]`). `cos` is 2π-periodic, so its
-                // sign answers "is this within 90° of the wind" for an
-                // unwrapped difference for free, where `abs` cannot. The
-                // failure is invisible along `[1, 0]`, which is why every
-                // test predating this one missed it.
-                let theta = kz.atan2(kx) - along_theta;
-                let cos_theta = theta.cos();
-                // The mirror's angle is `θ ± π`, so its cosine is `−cos θ`.
-                let (hash_x, hash_z, cos_live) = if cos_theta >= 0.0 {
-                    (x as u32, z as u32, cos_theta)
+                // **Which side is live is `sign(k · ŵ)`, written exactly as
+                // `ocean.rs` writes it**, tie-break included. One rule, one
+                // expression: deciding it a second way — `atan2` then `cos`,
+                // as an earlier version did — is two floating-point paths to
+                // one boolean, and see this function's docs for what that can
+                // and cannot cost.
+                //
+                // It also removes the angle wrap outright rather than dodging
+                // it. `atan2` returns `(-π, π]`, so a difference of two of
+                // them lands anywhere in `(-2π, 2π)`: an `|θ| <= π/2` cone
+                // rejects *both* sides of a pair for a wind near ±π and
+                // silently zeroes it (measured `m0` 1.27 against a target of
+                // 1.99 for `[-1, 0]`, invisible along `[1, 0]`). A dot product
+                // has no branch cut to wrap around.
+                let dot = kx * along[0] + kz * along[1];
+                let live_is_c = dot > 0.0 || (dot == 0.0 && (z, x) < (mz, mx));
+                let (hash_x, hash_z) = if live_is_c {
+                    (x as u32, z as u32)
                 } else {
-                    (mx as u32, mz as u32, -cos_theta)
+                    (mx as u32, mz as u32)
                 };
-                let live_is_c = (hash_x, hash_z) == (x as u32, z as u32);
+                // Only the spread *magnitude* still needs the angle: the live
+                // side's `|cos(θ − θ_wind)|`. The mirror's angle is `θ ± π`,
+                // so its cosine is `−cos θ` and the magnitude is shared.
+                let cos_live = (kz.atan2(kx) - along_theta).cos().abs();
 
                 let (g1, g2) = box_muller(seed, hash_x, hash_z);
 
