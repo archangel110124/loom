@@ -19,15 +19,24 @@
 
 /// Every ablatable effect, and its bit.
 ///
-/// **Adding an effect means adding a row here and a row to `xtask`'s own table.** The two
-/// are deliberately not shared: `xtask` links nothing from the engine, because a gate that
-/// shares code with the thing it checks can be fooled by the same bug twice.
+/// **Adding an effect means adding a row here, a row to `xtask`'s own table, AND a matching
+/// `static const uint LOOM_ABLATE_<NAME>` in `assets/shaders/scene.slang`** (currently
+/// `LOOM_ABLATE_WATER_FOAM`, next to `ablated()`). The three are deliberately not shared —
+/// `xtask` links nothing from the engine, because a gate that shares code with the thing it
+/// checks can be fooled by the same bug twice, and Slang cannot import a Rust constant at
+/// all. **Nothing enforces that the Slang constant's value matches the bit assigned here.**
+/// A mismatch fails open: `LOOM_ABLATE=<name>` would ablate whichever effect actually holds
+/// that bit in Slang, the frame would still move past the floor, and `cargo xtask ablate`
+/// would report `ok` having never measured the intended effect.
 ///
 /// Bits are assigned explicitly rather than by position, so reordering this table cannot
 /// silently repoint an existing name at a different effect.
 pub const ABLATIONS: &[(&str, u32)] = &[("water_foam", 1 << 0)];
 
 /// The bit for whitecap and swash foam on the water surface.
+///
+/// Must equal `LOOM_ABLATE_WATER_FOAM` in `assets/shaders/scene.slang` — see the warning on
+/// [`ABLATIONS`] above; nothing checks that these two agree.
 pub const WATER_FOAM: u32 = 1 << 0;
 
 /// Parse a `LOOM_ABLATE` value into a mask.

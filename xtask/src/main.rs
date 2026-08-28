@@ -1193,14 +1193,19 @@ const GOLDEN_SIZE: &str = "320x200";
 
 /// What each ablatable effect is measured on, and how much of the frame it must move.
 ///
-/// `(scene, LOOM_ABLATE value, minimum fraction of pixels that must change)`
+/// `(label, scene path, LOOM_ABLATE value, extra render args, minimum fraction of pixels
+/// that must change)` — the same shape `GOLDEN` uses for the scene path and its extra
+/// args, so that adding an effect really is "a row" the way both tables' doc comments
+/// claim: the scene need not live under `assets/test/` and the tick need not be `400`.
 ///
 /// **This table is hand-kept and deliberately not shared with `loom_render`'s own
 /// registry.** `xtask` links nothing from the engine — a gate that shares code with the
 /// thing it checks can be fooled by the same bug twice — so adding an effect means adding
-/// a row in both places. The floor is set from a measured run and written down with the
-/// row, never guessed: too low and the check passes on a feature that has almost stopped
-/// drawing, which is the exact failure it exists to catch.
+/// a row here, a row to `ABLATIONS` in `loom_render::ablate`, and a matching
+/// `LOOM_ABLATE_<NAME>` constant in `assets/shaders/scene.slang` (see the warnings on both
+/// of those). The floor is set from a measured run and written down with the row, never
+/// guessed: too low and the check passes on a feature that has almost stopped drawing,
+/// which is the exact failure it exists to catch.
 ///
 /// The scene is chosen to be the one where the effect is *loudest*. `whitecaps.loom`
 /// measures `foam.coverage = 0.954` at the origin, which is why foam is measured there
@@ -1213,7 +1218,13 @@ const GOLDEN_SIZE: &str = "320x200";
 /// reproducibly (byte-identical `with` renders across two runs). 0.15 is roughly half of
 /// that — comfortably clear of run-to-run noise, and nowhere near the 0.0 a fully dead
 /// effect would score.
-const ABLATE: [(&str, &str, f64); 1] = [("whitecaps", "water_foam", 0.15)];
+const ABLATE: [(&str, &str, &str, &[&str], f64); 1] = [(
+    "whitecaps",
+    "assets/test/whitecaps.loom",
+    "water_foam",
+    &["--sim", "400"],
+    0.15,
+)];
 
 /// **The pixel diff `CLAUDE.md`'s definition of green has never had.**
 ///
@@ -2248,10 +2259,9 @@ fn ablate() -> std::process::ExitCode {
     println!("scene                effect          changed%   floor%   verdict");
     let mut failures = Vec::new();
 
-    for (scene, effect, floor) in ABLATE {
-        let path = format!("assets/test/{scene}.loom");
-        let with = scratch.join(format!("{scene}_{effect}_with.png"));
-        let without = scratch.join(format!("{scene}_{effect}_without.png"));
+    for (label, scene, effect, extra, floor) in ABLATE {
+        let with = scratch.join(format!("{label}_{effect}_with.png"));
+        let without = scratch.join(format!("{label}_{effect}_without.png"));
 
         // **A stale PNG must not survive to be scored.** Everything below this line
         // detects a failed render by its exit status, but that check is only as strong
@@ -2264,44 +2274,50 @@ fn ablate() -> std::process::ExitCode {
         let _ = std::fs::remove_file(&without);
 
         let render = |out: &Path, env: &[(&str, &str)]| {
-            run_env(
-                &loom,
-                &root,
-                &[
-                    "render",
-                    &path,
-                    "--sim",
-                    "400",
-                    "--size",
-                    GOLDEN_SIZE,
-                    "--out",
-                    &out.to_string_lossy(),
-                ],
-                env,
-            )
+            let out_str = out.to_string_lossy();
+            let mut argv: Vec<&str> = vec!["render", scene];
+            argv.extend_from_slice(extra);
+            argv.extend_from_slice(&["--size", GOLDEN_SIZE, "--out", &out_str]);
+            run_env(&loom, &root, &argv, env)
         };
+
+        // **`LOOM_ABLATE` must be cleared for the "with" render, not merely left unset
+        // here.** `run_env` inherits the calling process's environment — it never calls
+        // `env_clear` — so a human who runs `LOOM_ABLATE=water_foam cargo xtask ablate`
+        // would otherwise get it ablated in BOTH renders, a 0.000% difference, and a
+        // false `DRAWING NOTHING` on the one instrument whose zero has to mean something.
+        // Setting it to `""` explicitly overrides whatever was inherited; `parse_ablations`
+        // already treats empty as "ablate nothing".
+        let with_render = render(&with, &[("LOOM_ABLATE", "")]);
+        let without_render = render(&without, &[("LOOM_ABLATE", effect)]);
 
         // `Command::output()` returning `Ok` only means the process launched — a
         // `loom render` that starts and then exits non-zero is `Ok` with a failed
         // `status`, which `.is_err()` alone never sees. Checked explicitly here, the
-        // way `image()` checks its own `render.status.success()`. Kept as two named
-        // results rather than one short-circuited `||` so a failure says which of the
-        // two renders broke.
-        let with_render = render(&with, &[]);
-        let without_render = render(&without, &[("LOOM_ABLATE", effect)]);
-        let render_failure = match (&with_render, &without_render) {
-            (Ok(o), _) if !o.status.success() => {
-                Some(format!("with: {}", String::from_utf8_lossy(&o.stderr).trim()))
+        // way `image()` checks its own `render.status.success()`. Each side is checked
+        // independently and both are reported — a `match` that stops at the first arm
+        // to fire previously let a failed "without" status hide a spawn error on "with"
+        // whenever both sides went wrong at once.
+        let mut render_failures = Vec::new();
+        match &with_render {
+            Err(e) => render_failures.push(format!("with: {e}")),
+            Ok(o) if !o.status.success() => {
+                render_failures.push(format!("with: {}", String::from_utf8_lossy(&o.stderr).trim()));
             }
-            (_, Ok(o)) if !o.status.success() => {
-                Some(format!("without: {}", String::from_utf8_lossy(&o.stderr).trim()))
+            Ok(_) => {}
+        }
+        match &without_render {
+            Err(e) => render_failures.push(format!("without: {e}")),
+            Ok(o) if !o.status.success() => {
+                render_failures.push(format!("without: {}", String::from_utf8_lossy(&o.stderr).trim()));
             }
-            (Err(e), _) => Some(format!("with: {e}")),
-            (_, Err(e)) => Some(format!("without: {e}")),
-            _ => None,
-        };
-        if let Some(reason) = render_failure {
-            failures.push(format!("{scene}/{effect}: render failed ({reason})"));
+            Ok(_) => {}
+        }
+        if !render_failures.is_empty() {
+            failures.push(format!(
+                "{label}/{effect}: render failed ({})",
+                render_failures.join("; ")
+            ));
             continue;
         }
 
@@ -2310,7 +2326,7 @@ fn ablate() -> std::process::ExitCode {
             &root,
             &["compare", &with.to_string_lossy(), &without.to_string_lossy()],
         ) else {
-            failures.push(format!("{scene}/{effect}: compare failed to run"));
+            failures.push(format!("{label}/{effect}: compare failed to run"));
             continue;
         };
         // `compare` legitimately exits 1 for the case this loop expects — the two
@@ -2323,27 +2339,27 @@ fn ablate() -> std::process::ExitCode {
         // fraction" below (which still stands as a backstop for anything else odd).
         if output.status.code() == Some(2) {
             failures.push(format!(
-                "{scene}/{effect}: compare could not run: {}",
+                "{label}/{effect}: compare could not run: {}",
                 String::from_utf8_lossy(&output.stdout).trim()
             ));
             continue;
         }
         let text = String::from_utf8_lossy(&output.stdout);
         let Some(fraction) = read_field(&text, "\"fraction\"") else {
-            failures.push(format!("{scene}/{effect}: compare printed no fraction"));
+            failures.push(format!("{label}/{effect}: compare printed no fraction"));
             continue;
         };
 
         let ok = fraction >= floor;
         println!(
-            "{scene:<20} {effect:<15} {:>7.3}  {:>7.3}   {}",
+            "{label:<20} {effect:<15} {:>7.3}  {:>7.3}   {}",
             fraction * 100.0,
             floor * 100.0,
             if ok { "ok" } else { "DRAWING NOTHING" }
         );
         if !ok {
             failures.push(format!(
-                "{scene}/{effect}: removing it changed {:.3}% of the frame, floor is {:.3}% \
+                "{label}/{effect}: removing it changed {:.3}% of the frame, floor is {:.3}% \
                  — the effect is not drawing",
                 fraction * 100.0,
                 floor * 100.0

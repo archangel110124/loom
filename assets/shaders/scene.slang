@@ -5732,10 +5732,18 @@ static const float WATER_FOAM_BREAK = 0.33;
 
 /// The `LOOM_ABLATE` mask, as `loom_render::ablate` filled it.
 ///
-/// **Zero on every ordinary run**, so a normal frame takes one compare against zero and
-/// nothing else. This is a measurement switch: `cargo xtask ablate` renders a scene with
-/// and without an effect and fails when the two are too *similar*, because a feature whose
-/// removal changes nothing was never drawing.
+/// **Zero on every ordinary run**, so a normal frame's `ablated()` call costs a
+/// float-to-uint convert, a bitwise AND, a compare and a branch — not "one compare against
+/// zero and nothing else". This is a measurement switch: `cargo xtask ablate` renders a
+/// scene with and without an effect and fails when the two are too *similar*, because a
+/// feature whose removal changes nothing was never drawing.
+///
+/// **Must equal `water_foam`'s bit in `ABLATIONS` (`crates/loom_render/src/ablate.rs`).**
+/// This is the third of three places the bit is recorded — `ABLATIONS`, `xtask`'s own
+/// `ABLATE` table, and this constant — and nothing checks that this one agrees with the
+/// other two. A mismatch does not fail loudly: `LOOM_ABLATE=water_foam` would ablate
+/// whatever effect actually holds this bit in Slang, the frame would still move past the
+/// floor, and `cargo xtask ablate` would report `ok` having never measured foam.
 static const uint LOOM_ABLATE_WATER_FOAM = 1u;
 
 bool ablated(uint bit) {
