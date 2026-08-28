@@ -51,9 +51,12 @@ impl Twiddles {
 
 /// In-place inverse transform of one row.
 ///
-/// **Unnormalised.** The `1/N` is applied once by the caller against the whole field
-/// rather than twice here, because two divisions by `N` on an `f32` are not one division
-/// by `N²`, and the caller is where the scale is documented.
+/// **Unnormalised, and no caller normalises it either.** There is no `1/N` anywhere on
+/// this path, by design rather than by omission: `spectrum::amplitude_field` is calibrated in
+/// *variance*, drawing each `h0` with the standard deviation that makes the **unnormalised**
+/// transform land on the spectrum's `m0`. Parseval is what ties the two ends together — the
+/// `N²` the forward-and-back pair would divide out is already absorbed into the amplitudes
+/// on the way in. Dividing here would shrink the sea by `N`.
 ///
 /// # Panics
 /// If `buf.len()` does not match the size the twiddles were built for.
@@ -281,6 +284,10 @@ mod tests {
     ///
     /// ADR 0076 measured 0.138 ms at N=128 and 0.795 ms at N=256 for one 2D transform,
     /// scalar and single-threaded, against a 16.67 ms tick.
+    // `Instant::now` is on `clippy.toml`'s disallowed list because **simulation** must
+    // not read the wall clock (never-do #8). A cost measurement is the one thing that
+    // has to, and it is in `cfg(test)` where no tick can reach it.
+    #[allow(clippy::disallowed_methods)]
     #[test]
     fn cost_of_one_transform() {
         for n in [128usize, 256] {

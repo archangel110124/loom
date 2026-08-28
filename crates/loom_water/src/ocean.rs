@@ -439,16 +439,20 @@ mod tests {
     }
 
     /// **The number the human asked for.** `SEA-REBUILD.md` §3.6 targets Hs = 6.10 m —
-    /// twenty feet — at U10 = 18 with **376 km** of fetch. The realised field must agree
+    /// twenty feet — at U10 = 18 with **440 km** of fetch. The realised field must agree
     /// with the analytic significant height it was built from, or the spectrum is not
     /// being sampled correctly.
     ///
-    /// **376 and not 440, and the difference is not a rounding.** Three standard
-    /// parameterisations disagree by up to 35% at the same wind and fetch: the SPM
-    /// relation says 6.10 m at 440 km, Pierson-Moskowitz-with-fetch says 6.66 m there,
-    /// and JONSWAP with `gamma = 3.3` says 8.22 m. `loom_water::spectrum` implements the
-    /// middle one and deliberately omits `gamma`, so that is the one this test is written
-    /// against. §3.6 records the whole table.
+    /// **440 km is where 6.10 m lives, and the only way to know that is to ask.** This
+    /// pairing is confirmed by putting the question to `spectrum` directly —
+    /// `significant_height(wave_set_fetch(18.0, [1.0, 0.0], f))` answers **5.638 m at
+    /// 376 km** and **6.099 m at 440 km** — and by nothing else. It is emphatically *not*
+    /// derived from a textbook parameterisation: this test previously stood at 376 km
+    /// because a Pierson-Moskowitz-with-fetch formula computed by hand was assumed to
+    /// match `spectrum.rs`, and it does not. **Never re-derive this constant analytically.
+    /// Run the function.** A hand formula that disagrees with `spectrum.rs` is a fact
+    /// about the formula, and the sea this engine builds is the one `spectrum.rs`
+    /// describes.
     ///
     /// **The grid is not the risk here.** Computed against the analytic spectrum, a 128²
     /// patch of 1024 m spans wavelengths 16-1024 m and captures **99.6%** of the
@@ -475,7 +479,7 @@ mod tests {
             let mut o = Ocean::new(
                 &[Cascade { patch: 1024.0, n: 128 }],
                 18.0,
-                376_000.0,
+                440_000.0,
                 [1.0, 0.0],
                 seed,
             );
@@ -484,9 +488,17 @@ mod tests {
         }
         #[allow(clippy::cast_precision_loss)]
         let hs = total / seeds as f32;
-        println!("realised Hs, {seeds}-seed mean at U10=18 / 376 km: {hs:.3} m (analytic 6.10)");
+        println!("realised Hs, {seeds}-seed mean at U10=18 / 440 km: {hs:.3} m (analytic 6.10)");
+        // **0.25 m, and it used to be 0.92.** The wide band was absorbing a 0.46 m error
+        // in the *target*, so the test passed for the wrong reason. The seed set is fixed
+        // at `0..200`, so there is no run-to-run noise at all; what the band has to leave
+        // room for is the spread of the 200-seed mean itself, and that is measured — the
+        // realised `m0` has a coefficient of variation of **0.097**, so `Hs` has about
+        // half that and the mean of 200 draws has a standard error of **0.021 m**. 0.25 m
+        // is a dozen of those, and it still catches a 4% miscalibration where 0.92 m hid
+        // a 7.5% one.
         assert!(
-            (hs - 6.10).abs() < 0.92,
+            (hs - 6.10).abs() < 0.25,
             "mean Hs over {seeds} seeds came out {hs:.2} m against an expected 6.10 m"
         );
     }
