@@ -52,7 +52,7 @@ Changing one of these requires an ADR in `docs/decisions/` and human approval.
 
 ---
 
-## Definition of green — all four, every time
+## Definition of green — all six, every time
 
 ```bash
 cargo clippy --workspace -- -D warnings   # 1. clean
@@ -80,7 +80,7 @@ with the wiring severed it reports 0.000% / `DRAWING NOTHING` / exit 1. Registry
 row in `xtask`'s own `ABLATE` table, and a matching `LOOM_ABLATE_<NAME>` constant in
 `assets/shaders/scene.slang`** — three places, none of them checked against each other.
 
-`scripts/green.sh` runs all five, **and two CLI blocks the five do not cover**: §6 asserts six
+`scripts/green.sh` runs the first five (check 6 is owed a line — see below), **and two CLI blocks they do not cover**: §6 asserts six
 gameplay scenes with `loom sim --assert` (nothing above it has ever run a game) and §7 asserts that
 `cave`'s `Volume::bake` count does not grow with its frame count (nothing above it can see a frame
 get slower — that regression moves no pixel and no hash, only the clock). Both use the release
