@@ -261,31 +261,42 @@ judged on, and it replaces "giant" as a word.
 fully-developed ceiling at `U10 = 16` is `Hs = 0.22·U²/g = 5.74 m`. So the wind rises with
 the fetch. The pair:
 
-    U10 = 18 m/s,  fetch = 376 km   ->   Hs = 6.10 m
+    U10 = 18 m/s,  fetch = 440 km   ->   Hs = 6.10 m
 
 and it is *genuinely fetch-limited* — fully developed at 624 km — so the sea is **steeper
 than Pierson–Moskowitz's fully-developed limit**, which is exactly the property that makes
 it break rather than merely zoom.
 
-**That fetch was 440 km in the first draft, and the correction is worth recording because
-it is a trap anyone re-deriving this will fall into.** Three standard parameterisations of
-the same sea disagree badly, and at `U10 = 18, F = 440 km` they give:
+**440 km was briefly "corrected" to 376 km and then corrected back, and the round trip is
+the lesson.** Three standard parameterisations of the same sea disagree badly. At
+`U10 = 18, F = 440 km`, computed analytically:
 
     SPM / CERC fetch relation, Hs = 0.0016·sqrt(gF/U²)·U²/g      6.10 m
     Pierson-Moskowitz with fetch, no peak enhancement            6.66 m
     JONSWAP with gamma = 3.3                                     8.22 m
 
-**The binding one is whichever `loom_water::spectrum` already implements**, because §3's
-grid path is required to reuse those functions rather than write the physics twice — the
-sixteen-wave and grid paths must not be able to disagree about what an 18 m/s sea is. That
-module states it deliberately does **not** implement JONSWAP's `gamma`, so the middle row
-governs, and the first draft's 440 km came from the top row. 376 km is the fetch that
-lands 6.10 m under the spectrum this engine actually has.
+The intermediate draft reasoned that since `loom_water::spectrum` documents itself as
+Pierson–Moskowitz and deliberately omits JONSWAP's `gamma`, the middle row must govern,
+and moved the fetch to 376 km to land 6.10 m under it.
 
-**Below `U10 = 16` the target is unreachable at any fetch.** 14 m/s would need 561 km
-against a fully-developed limit of 378 km, and 15 m/s needs 503 against 434 — both past
-the point where more fetch buys nothing. That is a floor on the top rung's wind, not a
-preference. At `U10 = 17` the fetch is 412 km; at 16, 454 km.
+**That was wrong, and it was wrong for an instructive reason: it modelled the engine
+instead of measuring it.** Asked directly —
+`significant_height(wave_set_fetch(18.0, F))` — this engine answers **5.638 m at 376 km
+and 6.099 m at 440 km**. Its realised sea tracks the *top* row. So the original 440 km was
+right, and the correction broke a number that was already correct.
+
+**The rule this earns: when the question is what this engine does, run this engine.** A
+formula from the literature that shares a name with the code is a hypothesis about the
+code, not a description of it. The grid path is verified against `wave_set_fetch` by test
+(`amplitude_field_agrees_with_wave_set_fetch`) rather than against any of the three rows
+above, which is the correct thing to anchor to and is why the two paths now agree to 8%
+regardless of which row a human believes.
+
+**Below `U10 = 16` the target is unreachable at any fetch** — 14 m/s needs 561 km against
+a fully-developed limit of 378, and 15 m/s needs 503 against 434, both past the point
+where more fetch buys anything. That is a floor on the top rung's wind rather than a
+preference. Those figures come from the same analytic model as the table, so **treat them
+as the hypothesis and confirm against `wave_set_fetch` before authoring a rung.**
 
 `Wind.speed` is **not** `U10`. `spectrum.rs` is explicit that the authored field is a
 free-stream value roughly 10% above it; the rung is authored so that
