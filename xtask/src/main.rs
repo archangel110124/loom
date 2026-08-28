@@ -2253,6 +2253,16 @@ fn ablate() -> std::process::ExitCode {
         let with = scratch.join(format!("{scene}_{effect}_with.png"));
         let without = scratch.join(format!("{scene}_{effect}_without.png"));
 
+        // **A stale PNG must not survive to be scored.** Everything below this line
+        // detects a failed render by its exit status, but that check is only as strong
+        // as this file keeps it — a future edit that loosens it would otherwise let
+        // `compare` silently score yesterday's frame against today's, exactly the false
+        // "ok" this gate was built to end. Removing the two paths first makes that
+        // impossible by construction: a render that does not succeed leaves nothing
+        // here for `compare` to read, regardless of how the failure is detected later.
+        let _ = std::fs::remove_file(&with);
+        let _ = std::fs::remove_file(&without);
+
         let render = |out: &Path, env: &[(&str, &str)]| {
             run_env(
                 &loom,
@@ -2271,8 +2281,27 @@ fn ablate() -> std::process::ExitCode {
             )
         };
 
-        if render(&with, &[]).is_err() || render(&without, &[("LOOM_ABLATE", effect)]).is_err() {
-            failures.push(format!("{scene}/{effect}: render failed"));
+        // `Command::output()` returning `Ok` only means the process launched — a
+        // `loom render` that starts and then exits non-zero is `Ok` with a failed
+        // `status`, which `.is_err()` alone never sees. Checked explicitly here, the
+        // way `image()` checks its own `render.status.success()`. Kept as two named
+        // results rather than one short-circuited `||` so a failure says which of the
+        // two renders broke.
+        let with_render = render(&with, &[]);
+        let without_render = render(&without, &[("LOOM_ABLATE", effect)]);
+        let render_failure = match (&with_render, &without_render) {
+            (Ok(o), _) if !o.status.success() => {
+                Some(format!("with: {}", String::from_utf8_lossy(&o.stderr).trim()))
+            }
+            (_, Ok(o)) if !o.status.success() => {
+                Some(format!("without: {}", String::from_utf8_lossy(&o.stderr).trim()))
+            }
+            (Err(e), _) => Some(format!("with: {e}")),
+            (_, Err(e)) => Some(format!("without: {e}")),
+            _ => None,
+        };
+        if let Some(reason) = render_failure {
+            failures.push(format!("{scene}/{effect}: render failed ({reason})"));
             continue;
         }
 
@@ -2284,6 +2313,21 @@ fn ablate() -> std::process::ExitCode {
             failures.push(format!("{scene}/{effect}: compare failed to run"));
             continue;
         };
+        // `compare` legitimately exits 1 for the case this loop expects — the two
+        // renders differ by more than its default tolerance — so `status.success()`
+        // cannot be the test here the way it is in `image()`, where a match is the
+        // whole point. Exit 2 is `compare`'s own "the invocation was wrong" (a path
+        // it could not load); that is the only status this loop treats as a failure
+        // before looking at the output, and it is checked first so a bad path is
+        // reported as "compare could not run" rather than the vaguer "printed no
+        // fraction" below (which still stands as a backstop for anything else odd).
+        if output.status.code() == Some(2) {
+            failures.push(format!(
+                "{scene}/{effect}: compare could not run: {}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            ));
+            continue;
+        }
         let text = String::from_utf8_lossy(&output.stdout);
         let Some(fraction) = read_field(&text, "\"fraction\"") else {
             failures.push(format!("{scene}/{effect}: compare printed no fraction"));
