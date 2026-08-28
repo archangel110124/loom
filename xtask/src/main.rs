@@ -403,7 +403,7 @@ fn main() -> std::process::ExitCode {
     // below drives the engine over dozens of scenes and will use the whole
     // machine; see [`GateLock`] for what running two at once did.
     let _lock = match task.as_str() {
-        "validate" | "image" | "flythrough" | "shimmer" | "repeat" => match GateLock::acquire(&task) {
+        "validate" | "image" | "flythrough" | "shimmer" | "repeat" | "ablate" => match GateLock::acquire(&task) {
             Ok(lock) => Some(lock),
             Err(e) => {
                 eprintln!("{e}");
@@ -419,12 +419,14 @@ fn main() -> std::process::ExitCode {
         "flythrough" => flythrough(),
         "shimmer" => shimmer(),
         "repeat" => repeat(),
+        "ablate" => ablate(),
         other => {
             eprintln!(
                 "unknown task {other:?}\n\nUSAGE:\n    cargo xtask validate\n    \
                  cargo xtask image [--bless]\n    cargo xtask flythrough
     cargo xtask shimmer
-    cargo xtask repeat"
+    cargo xtask repeat
+    cargo xtask ablate"
             );
             std::process::ExitCode::from(2)
         }
@@ -1188,6 +1190,30 @@ const GOLDEN: [(&str, &str, &[&str]); 59] = [
 
 /// Every reference renders at this size.
 const GOLDEN_SIZE: &str = "320x200";
+
+/// What each ablatable effect is measured on, and how much of the frame it must move.
+///
+/// `(scene, LOOM_ABLATE value, minimum fraction of pixels that must change)`
+///
+/// **This table is hand-kept and deliberately not shared with `loom_render`'s own
+/// registry.** `xtask` links nothing from the engine — a gate that shares code with the
+/// thing it checks can be fooled by the same bug twice — so adding an effect means adding
+/// a row in both places. The floor is set from a measured run and written down with the
+/// row, never guessed: too low and the check passes on a feature that has almost stopped
+/// drawing, which is the exact failure it exists to catch.
+///
+/// The scene is chosen to be the one where the effect is *loudest*. `whitecaps.loom`
+/// measures `foam.coverage = 0.954` at the origin, which is why foam is measured there
+/// and not on `ocean`.
+///
+/// Measured 2026-08-28 at `GOLDEN_SIZE` (this is what `ablate()` actually renders — the
+/// 0.2752 figure recorded when `LOOM_ABLATE_WATER_FOAM` first worked was taken at 640x400
+/// and does not transfer): `loom render whitecaps.loom --sim 400 --size 320x200` with and
+/// without `LOOM_ABLATE=water_foam`, then `loom compare`, gives `fraction = 0.29178125`,
+/// reproducibly (byte-identical `with` renders across two runs). 0.15 is roughly half of
+/// that — comfortably clear of run-to-run noise, and nowhere near the 0.0 a fully dead
+/// effect would score.
+const ABLATE: [(&str, &str, f64); 1] = [("whitecaps", "water_foam", 0.15)];
 
 /// **The pixel diff `CLAUDE.md`'s definition of green has never had.**
 ///
@@ -2166,6 +2192,116 @@ fn run(loom: &Path, root: &Path, args: &[&str]) -> Result<Output, String> {
         .current_dir(root)
         .output()
         .map_err(|e| e.to_string())
+}
+
+/// `loom`, with environment variables set.
+///
+/// A sibling of [`run`] rather than a parameter on it, because every other caller passes
+/// none and threading an empty slice through all of them would be noise.
+fn run_env(loom: &Path, root: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<Output, String> {
+    let mut command = Command::new(loom);
+    command.args(args).current_dir(root);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().map_err(|e| e.to_string())
+}
+
+/// Render each scene with and without one effect, and fail if they are too alike.
+///
+/// **This is the only check in this repository that fails on SAMENESS**, and that is the
+/// whole point of it. `image` and `repeat` both ask whether a render changed when it
+/// should not have. Neither can see a feature that is registered, tested, closed-form
+/// correct and drawing nothing — which has shipped four times here. Removing such a
+/// feature changes no pixel, so it scores zero and this task fails it.
+fn ablate() -> std::process::ExitCode {
+    let root = repo_root();
+    let loom = match build_debug(&root) {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("xtask: {message}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    if !has_vulkan_device(&loom, &root) {
+        println!("skip: cargo xtask ablate — no usable Vulkan device on this machine");
+        return std::process::ExitCode::SUCCESS;
+    }
+
+    let scratch = root.join("target/xtask-ablate");
+    let _ = std::fs::create_dir_all(&scratch);
+
+    println!("scene                effect          changed%   floor%   verdict");
+    let mut failures = Vec::new();
+
+    for (scene, effect, floor) in ABLATE {
+        let path = format!("assets/test/{scene}.loom");
+        let with = scratch.join(format!("{scene}_{effect}_with.png"));
+        let without = scratch.join(format!("{scene}_{effect}_without.png"));
+
+        let render = |out: &Path, env: &[(&str, &str)]| {
+            run_env(
+                &loom,
+                &root,
+                &[
+                    "render",
+                    &path,
+                    "--sim",
+                    "400",
+                    "--size",
+                    GOLDEN_SIZE,
+                    "--out",
+                    &out.to_string_lossy(),
+                ],
+                env,
+            )
+        };
+
+        if render(&with, &[]).is_err() || render(&without, &[("LOOM_ABLATE", effect)]).is_err() {
+            failures.push(format!("{scene}/{effect}: render failed"));
+            continue;
+        }
+
+        let Ok(output) = run(
+            &loom,
+            &root,
+            &["compare", &with.to_string_lossy(), &without.to_string_lossy()],
+        ) else {
+            failures.push(format!("{scene}/{effect}: compare failed to run"));
+            continue;
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let Some(fraction) = read_field(&text, "\"fraction\"") else {
+            failures.push(format!("{scene}/{effect}: compare printed no fraction"));
+            continue;
+        };
+
+        let ok = fraction >= floor;
+        println!(
+            "{scene:<20} {effect:<15} {:>7.3}  {:>7.3}   {}",
+            fraction * 100.0,
+            floor * 100.0,
+            if ok { "ok" } else { "DRAWING NOTHING" }
+        );
+        if !ok {
+            failures.push(format!(
+                "{scene}/{effect}: removing it changed {:.3}% of the frame, floor is {:.3}% \
+                 — the effect is not drawing",
+                fraction * 100.0,
+                floor * 100.0
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        println!("\nok: {} ablation(s), every effect is drawing", ABLATE.len());
+        return std::process::ExitCode::SUCCESS;
+    }
+    eprintln!();
+    for failure in &failures {
+        eprintln!("xtask: {failure}");
+    }
+    std::process::ExitCode::from(1)
 }
 
 /// Whether this machine can create a Vulkan device at all.
