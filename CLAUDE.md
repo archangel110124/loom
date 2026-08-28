@@ -55,7 +55,7 @@ Changing one of these requires an ADR in `docs/decisions/` and human approval.
 ## Definition of green — all six, every time
 
 ```bash
-cargo clippy --workspace -- -D warnings   # 1. clean
+cargo clippy --workspace --all-targets -- -D warnings   # 1. clean, tests included
 cargo xtask validate                      # 2. ZERO Vulkan validation messages
 cargo test --workspace                    # 3. unit tests + determinism hashes match
 cargo xtask image                         # 4. renders match their reference PNGs
