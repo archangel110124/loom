@@ -449,13 +449,20 @@ impl Ocean {
             let n = layer.n;
             #[allow(clippy::cast_precision_loss)]
             let cell = layer.patch / n as f32;
-            // **Wrapped into the patch before the divide, not after.** The interpolant
-            // is `fx - fx.floor()`, and an `f32` ten kilometres out on a 32 m patch has
-            // ~0.001 m of resolution left in its mantissa — the fraction quantises to
-            // about 1/128 of a cell, so a boat far from the origin samples a stepped
-            // surface. `rem_euclid` first keeps the whole computation inside `[0, patch)`
-            // where the mantissa is spent on the part that matters, and it costs nothing:
-            // the wrap had to happen anyway, one line further down.
+            // **Wrapped into the patch before the divide**, which puts `fx` in
+            // `[0, n)` and so makes `x0` non-negative before the integer wrap below
+            // ever sees it.
+            //
+            // **It does not buy far-field accuracy, and an earlier version of this
+            // comment claimed it did** — a mantissa argument about a boat ten
+            // kilometres out sampling a stepped surface. Measured over 200
+            // realisations of `test_ocean`, the near/far disagreement is
+            // median 5.05e-5 / p90 8.99e-5 / max 1.52e-4 **with** this wrap and
+            // median 5.01e-5 / p90 8.99e-5 / max 1.51e-4 **without** it. Identical, and
+            // `the_far_field_is_the_near_field`'s own docs already said so. The
+            // quantisation lives in the `f32` coordinate before `sample` is called:
+            // `10243.7_f32` is not `3.7 + 20` patches, and no arithmetic here can put
+            // that information back.
             let (fx, fz) = (x.rem_euclid(layer.patch) / cell, z.rem_euclid(layer.patch) / cell);
             let (x0, z0) = (fx.floor(), fz.floor());
             let (tx, tz) = (fx - x0, fz - z0);
@@ -863,11 +870,24 @@ mod tests {
     /// **Not bit-identical, and the reason is worth knowing before someone tightens this
     /// band.** `10243.7_f32` is not `3.7 + 20 patches`; an `f32` at 10 km steps by
     /// 0.98 mm, so the argument has already lost the information before `sample` sees it.
-    /// Measured drift is 4.2e-5 at worst, and it is *the same* with and without the
-    /// `rem_euclid` wrap in [`Ocean::sample`] (1.79e-5 against 1.82e-5 at the third
-    /// point) — which is the measurement saying the far-field quantisation lives in the
-    /// coordinate and not in the interpolant. 1e-4 catches a wrap that is actually broken
-    /// and asserts nothing this arithmetic cannot deliver.
+    /// The residual is that quantisation times the local slope, and it is *the same* with
+    /// and without the `rem_euclid` wrap in [`Ocean::sample`] — which is the measurement
+    /// saying the far-field error lives in the coordinate and not in the interpolant.
+    ///
+    /// **5e-4, and it was 1e-4, which was marginal.** The drift is a property of the
+    /// realisation, not of the arithmetic: across 250 draws — 200 seeds at `[1, 0]` and
+    /// 50 at each of [`HEADINGS`] — it runs **median 5.1e-5, p90 9.0e-5, worst 1.61e-4**.
+    /// A 1e-4 band therefore sits *inside* the spread and fails on about one realisation
+    /// in fifty, which is what it did: an unrelated fault injection elsewhere in this
+    /// crate moved seed 11's draw and this test read 1.29e-4 and failed for a reason that
+    /// was not the fault. 5e-4 is about three times the worst of 250 draws, and still an
+    /// order of magnitude below `the_tile_wraps_without_a_seam`'s 0.05 m.
+    ///
+    /// **What it does and does not catch.** It sees a wrap that has actually broken — a
+    /// coordinate that lands on the wrong tile reads a different sea entirely. It cannot
+    /// see a *consistent* misalignment: injecting a half-cell offset into `fx` shifts
+    /// near and far identically and reads 3.7e-5, which is below the correct code's own
+    /// drift. That is `sample_on_a_node_is_the_node`'s job, not this one's.
     #[test]
     fn the_far_field_is_the_near_field() {
         let mut o = test_ocean();
@@ -877,9 +897,72 @@ mod tests {
             let far = o.sample(x + 10_240.0, z - 10_240.0);
             for i in 0..3 {
                 assert!(
-                    (near[i] - far[i]).abs() < 1e-4,
+                    (near[i] - far[i]).abs() < 5e-4,
                     "component {i} at ({x}, {z}) reads {} near and {} ten km out",
                     near[i], far[i]
+                );
+            }
+        }
+    }
+
+    /// **[`Ocean::sample`] on a grid node reads that node, and nothing between.**
+    ///
+    /// A half-cell offset between `sample`'s interpolation and the tile's own indexing is
+    /// invisible in every other test in this file — `Hs`, the seam, the pinch and the
+    /// axis identity are all shift-invariant, and `the_far_field_is_the_near_field`
+    /// shifts near and far by the *same* half cell and reads 3.7e-5, below its own
+    /// arithmetic noise. **Fault-injected**: `+ 0.5` on `fx` in [`Ocean::sample`] fails
+    /// this test and leaves the other 135 in the crate green, including
+    /// `the_tile_wraps_without_a_seam` and `the_far_field_is_the_near_field`, which are
+    /// the two that look as though they cover it. What it would cost is the thing
+    /// `loom_water`'s module docs open
+    /// by warning about: the CPU surface buoyancy reads sitting half a cell from the GPU
+    /// tile that is drawn, so the boat floats beside the wave.
+    ///
+    /// Node `i` sits at `i · patch/n`, which for a power-of-two `n` and this patch is
+    /// exact in `f32`, so the interpolant's weights are exactly 0 and the comparison is
+    /// exact rather than banded — `a + (b − a)·0.0` is `a`.
+    ///
+    /// One cascade, because that is the instrument: with two, `sample` returns a sum and
+    /// a half-cell error in one layer could be cancelled by the other.
+    ///
+    /// **The seams are in the list on purpose.** Node `n − 1` interpolates toward node
+    /// `0`, and `-cell` must land back on node `n − 1` — the two places an off-by-one in
+    /// the wrap shows up and nowhere else does.
+    #[test]
+    fn sample_on_a_node_is_the_node() {
+        let cascade = Cascade::whole(512.0, 64);
+        let n = cascade.n;
+        let mut o = Ocean::new(&[cascade], 14.0, 300_000.0, [1.0, 0.0], 4);
+        o.evolve(6.0);
+        #[allow(clippy::cast_precision_loss)]
+        let cell = cascade.patch / n as f32;
+        let cells = n * n;
+        let tiles = o.tiles();
+
+        // Grid nodes, plus two coordinates that must wrap onto one: `-cell` is node
+        // `n − 1`, and one whole patch out is node 0 again.
+        #[allow(clippy::cast_precision_loss)]
+        let cases: [(f32, f32, usize, usize); 8] = [
+            (0.0, 0.0, 0, 0),
+            (cell, 0.0, 1, 0),
+            (0.0, cell, 0, 1),
+            (7.0 * cell, 23.0 * cell, 7, 23),
+            ((n - 1) as f32 * cell, (n - 1) as f32 * cell, n - 1, n - 1),
+            ((n - 1) as f32 * cell, 0.0, n - 1, 0),
+            (-cell, -cell, n - 1, n - 1),
+            (cascade.patch, cascade.patch, 0, 0),
+        ];
+        for (x, z, ix, iz) in cases {
+            let got = o.sample(x, z);
+            // `sample` returns `[dx, height, dz]`; the tiles are `[height, dx, dz]`.
+            for (component, slot) in [(0usize, 1usize), (1, 0), (2, 2)] {
+                let want = tiles[component * cells + iz * n + ix];
+                assert_eq!(
+                    got[slot], want,
+                    "sample({x}, {z}) component {component} reads {} where node \
+                     ({ix}, {iz}) of the tile holds {want}",
+                    got[slot]
                 );
             }
         }
@@ -1191,6 +1274,7 @@ mod tests {
              this test would have passed vacuously"
         );
     }
+
 
     /// Not a gate — the two numbers that choose the shipping grid size. ADR 0076
     /// predicts ~1.24 ms at N=128 and ~7.15 ms at N=256 for nine 2D transforms, against

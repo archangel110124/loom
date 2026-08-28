@@ -21,6 +21,30 @@
 //!   a free-stream value and is roughly 10% *above* U10. Convert it with
 //!   `loom_field::wind::Wind::mean_speed_at(10.0)`; never pass it here raw.
 //!
+//! # The cells that are forced real, and why
+//!
+//! [`amplitude_field`] hands back a Hermitian field: `h0(−k) = conj(h0(k))`,
+//! written rather than hoped for, because that is what makes the inverse
+//! transform's output real. Four cells of an even-`n` grid are **their own
+//! mirror** under the index map `(n − x) % n`, and Hermitian symmetry then
+//! demands they equal their own conjugate — so they are forced real, with
+//! their imaginary part dropped:
+//!
+//! ```text
+//! index (z, x)        k                its case
+//! (n/2, n/2)          (0, 0)           also zeroed outright — a mean offset is not a wave
+//! (n/2, 0)            (k_nyq, 0)       on the Nyquist column, across the row of k_z = 0
+//! (0, n/2)            (0, k_nyq)       on the Nyquist row, across the column of k_x = 0
+//! (0, 0)              (k_nyq, k_nyq)   both axes at Nyquist
+//! ```
+//!
+//! Index `n/2` carries `k = 0` and index `0` carries the Nyquist wavenumber
+//! `−(n/2)·Δk`, whose negation is off the grid — `+k_nyq` and `−k_nyq` are one
+//! bin. That aliasing is also why [`crate::ocean::Ocean`] freezes the whole
+//! Nyquist row and column in *time*: any quantity that must be odd in `k` has
+//! no value there. This module's job stops at the amplitude, which is even in
+//! `k`, so only the four self-mirror cells are special here.
+//!
 //! # Why there is no Slang twin
 //!
 //! This runs on the CPU, once, when the wind changes — it produces the sixteen
@@ -706,6 +730,17 @@ pub fn amplitude_field(
                 // Only the spread *magnitude* still needs the angle: the live
                 // side's `|cos(θ − θ_wind)|`. The mirror's angle is `θ ± π`,
                 // so its cosine is `−cos θ` and the magnitude is shared.
+                //
+                // **`.abs()`, and never `.max(0.0)` — this line is where that
+                // edit gets made.** `kx` and `kz` are *this* cell's, and the
+                // loop visits the lexicographically smaller index of each pair,
+                // which is the upwind member about half the time. Clamping
+                // instead of taking the magnitude therefore zeroes the spread
+                // for about half the pairs in the grid and throws their energy
+                // away outright rather than misplacing it — the historical bug,
+                // and invisible in a still, because the sea simply comes out
+                // small. The function's docs say the same thing from the other
+                // end; this is the keystroke.
                 let cos_live = (kz.atan2(kx) - along_theta).cos().abs();
 
                 let (g1, g2) = box_muller(seed, hash_x, hash_z);
@@ -713,8 +748,13 @@ pub fn amplitude_field(
                 let omega = (GRAVITY * k).sqrt();
                 let s_omega = pm_density(omega, u) * scale_to_m0;
                 let jacobian_dw_dk = GRAVITY / (2.0 * omega); // ω = √(gk)
-                // `cos_live >= 0` by construction above, so the cone's cutoff
-                // is already applied: exactly at ±90° it is 0 and so is this.
+                // **There is no ±90° cutoff here and nothing to clamp.** This
+                // is a magnitude: `|cos|^p` is zero only for a cell lying
+                // exactly across the wind, and falls off smoothly either side.
+                // Both members of a mirror pair carry it, because Hermitian
+                // symmetry forces them to share a magnitude — which side the
+                // energy *travels* is `ocean.rs`'s half-plane sign and is not
+                // decided by this factor. See `cos_live` above before editing.
                 let spread = cos_live.powi(SPREAD_POWER) / spread_norm;
                 // 2D areal density: the 1D-in-k density, divided by k to
                 // spread it over a ring, fanned by direction — then scaled by
