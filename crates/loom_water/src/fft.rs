@@ -177,8 +177,15 @@ mod tests {
         }
     }
 
-    /// An impulse at the origin transforms to a constant field. If bit reversal is wrong
-    /// this fails in a way that is instantly readable, unlike the agreement test.
+    /// An impulse at the origin transforms to a constant field: it proves the DC term and
+    /// the overall scaling are right, and it fails in a way that is instantly readable if
+    /// they are not — unlike the agreement test's per-bin diffs.
+    ///
+    /// **It cannot see a broken bit-reversal permutation.** `brev(0) = 0` for every
+    /// transform size, so bin 0 is a fixed point of the permutation and this test passes
+    /// identically whether it runs or not. `the_fast_transform_agrees_with_the_slow_one`
+    /// is the one that guards the permutation — its inputs are nonzero at every bin, at
+    /// sizes where the permutation is nontrivial.
     #[test]
     fn an_impulse_becomes_a_constant() {
         let n = 16;
