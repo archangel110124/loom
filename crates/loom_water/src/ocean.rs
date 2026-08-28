@@ -46,13 +46,29 @@
 //! With the other sign every wave in the sea marches into the wind — measured, and the
 //! reason `the_sea_travels_downwind` exists.
 //!
-//! `s` must be exactly antisymmetric or the surface stops being real. It is taken from
-//! the sign of `k·ŵ`, which is exact under negation in `f32` (`(−a)·c + (−b)·d` is the
-//! bit-exact negation of `a·c + b·d`), and forced to zero on the four cells that are
-//! their own mirror — `k = 0` and the Nyquist row/column — because those are real and a
-//! real number times `e^{iωt}` is not. Freezing three Nyquist cells rather than beating
-//! them at `2cos(ωt)` is a deliberate and invisible simplification: they sit at the
-//! grid's resolution limit and carry essentially no energy.
+//! `s` must be exactly antisymmetric **under the mirror the transform actually uses**, or
+//! the surface stops being real. That mirror is the index map `(n − x) % n`, and it is
+//! `k → −k` only away from index 0: index 0 carries the Nyquist wavenumber `−(n/2)·Δk`,
+//! whose negation is off the grid, so `(n − 0) % n` is 0 again and that axis' `k` comes
+//! back unflipped. Away from the Nyquist row and column, `s` is the sign of `k·ŵ`, which
+//! *is* exact under negation in `f32` (`(−a)·c + (−b)·d` is the bit-exact negation of
+//! `a·c + b·d`). On the Nyquist row and column it is forced to zero, because no nonzero
+//! antisymmetric function exists on a cell whose mirror is not its negation.
+//!
+//! **That is `2n − 1` frozen cells, not three, and the difference was a live bug.** An
+//! earlier version froze only the four cells that are their own mirror and asserted the
+//! sign was "exactly antisymmetric under `k → −k`" — which the rest of the Nyquist row
+//! and column disproved: their pairs evolved on the same branch, `ifft_2d` returned a
+//! complex field, and `evolve`'s `.re` discarded an imaginary residue measured at
+//! **0.46% to 5.9%** of the real RMS. `the_evolved_field_has_no_imaginary_part` is the
+//! test; it now reads 2.5e-7.
+//!
+//! Freezing them rather than beating them at `2cos(ωt)` costs nothing worth having: a
+//! Nyquist mode is a standing pattern this grid cannot resolve the travel of — `+k_nyq`
+//! and `−k_nyq` are one bin — and the row and column sit at the resolution limit, where
+//! the spectrum has least energy. Measured on the 128² cascade
+//! `the_realised_sea_is_the_size_the_spectrum_promised` runs, freezing them moves the
+//! 200-seed mean `Hs` from 6.072 m to 6.073 m.
 //!
 //! # The scale, and the one place this deviates from the brief
 //!
@@ -114,8 +130,9 @@ struct Layer {
     twiddles: Twiddles,
     /// `∓√(g·k)` per cell — the dispersion relation with the half-plane sign already
     /// folded in (negative on the downwind side, so a mode's phase is `k·x − ωt`), which
-    /// leaves `evolve` one multiply and one `sin_cos` and no branch. Zero on the four
-    /// cells that are their own mirror, which freezes them real.
+    /// leaves `evolve` one multiply and one `sin_cos` and no branch. Zero on the whole
+    /// Nyquist row and column — the `2n − 1` cells whose mirror index does not carry
+    /// `−k` — which is what keeps the evolved field Hermitian.
     omega: Vec<f32>,
     /// `k̂` per cell, zero at `k = 0`. The horizontal pinch is `i·k̂·h`.
     khat: Vec<[f32; 2]>,
@@ -199,8 +216,33 @@ impl Ocean {
                     let kz = (z as f32 - half) * delta_k;
                     let k = (kx * kx + kz * kz).sqrt();
 
-                    // Which side of the wind this cell is on. Exactly antisymmetric
-                    // under `k → −k`, which is what keeps the evolved field Hermitian.
+                    // **The one place the two conventions in this file are reconciled.**
+                    // `amplitude_field` pairs cell `(z, x)` with `((n − z) % n,
+                    // (n − x) % n)` and writes the conjugate there; the `k` grid is
+                    // `(index − n/2)·Δk`. Those agree — the mirror index carries `−k` —
+                    // everywhere except index 0, which holds the Nyquist wavenumber
+                    // `−(n/2)·Δk`, whose negation is off the grid: `(n − 0) % n` is 0
+                    // again, so that axis' `k` comes back *unflipped*.
+                    //
+                    // So on the Nyquist row and column — `2n − 1` cells — the grid cannot
+                    // represent `−k` at all, and **every quantity that must be odd in
+                    // `k` is therefore zero there.** Two are: the half-plane sign folded
+                    // into `omega`, and `khat`. Both are handled by the single flag
+                    // below rather than by a case each, because they fail for one reason.
+                    //
+                    // What it costs to get wrong, measured: with only the four
+                    // *self*-mirror cells frozen, mirror pairs on that row and column
+                    // evolve on the same branch, `ifft_2d` returns a complex field, and
+                    // the `.re` in `evolve` silently discards an imaginary residue of
+                    // 4.6e-3 to 5.9e-2 of the real RMS.
+                    // `the_evolved_field_has_no_imaginary_part` is the test.
+                    //
+                    // Freezing them is honest rather than a patch: `+k_nyq` and `−k_nyq`
+                    // are one bin, so a Nyquist mode is a standing pattern whose travel
+                    // this grid cannot resolve, and it sits where the spectrum has least
+                    // energy. `k = 0` needs no case of its own — `√(g·0)` is already zero
+                    // and `khat` is already guarded on `k > 0`.
+                    let mirror_carries_minus_k = x != 0 && z != 0;
                     //
                     // **`amplitude_field` decides the same thing with the same
                     // expression**, tie-break included — one rule, one place, rather
@@ -220,10 +262,7 @@ impl Ocean {
                     // when picking the wrong side threw a pair's energy away.
                     let (mz, mx) = ((n - z) % n, (n - x) % n);
                     let dot = kx * along[0] + kz * along[1];
-                    let sign = if (z, x) == (mz, mx) {
-                        // Its own mirror — `k = 0`, or a Nyquist row/column. Hermitian
-                        // symmetry forces such a cell real, and a real number times
-                        // `e^{iωt}` is not. Frozen.
+                    let sign = if !mirror_carries_minus_k {
                         0.0
                     } else if dot > 0.0 || (dot == 0.0 && (z, x) < (mz, mx)) {
                         // The `dot == 0.0` tie-break matters only on the axis exactly
@@ -244,7 +283,20 @@ impl Ocean {
                     // `k·x − ωt`. `the_sea_travels_downwind` is the test, and it read
                     // −34.2 downwind against +23.6 upwind before this sign moved.
                     omega.push(-sign * (GRAVITY * k).sqrt());
-                    khat.push(if k > 0.0 { [kx / k, kz / k] } else { [0.0, 0.0] });
+                    khat.push(if k > 0.0 && mirror_carries_minus_k {
+                        [kx / k, kz / k]
+                    } else {
+                        // Odd in `k`, so it is zero wherever the mirror cannot carry
+                        // `−k` — see above. The pinch `i·k̂·h` is Hermitian only because
+                        // `k̂(−k) = −k̂(k)`; leaving `k̂` alone here and freezing `ω`
+                        // alone fixes the height field and leaves the two displacement
+                        // grids carrying a 5.5e-2 imaginary residue, which is what
+                        // `the_evolved_field_has_no_imaginary_part` reported at the
+                        // half-done fix. The Nyquist row and column therefore carry no
+                        // horizontal pinch, which is the same simplification as
+                        // carrying no travel.
+                        [0.0, 0.0]
+                    });
                 }
             }
 
@@ -461,6 +513,64 @@ mod tests {
         for (i, v) in o.tiles().iter().enumerate() {
             assert!(v.is_finite(), "tile value {i} is {v}");
         }
+    }
+
+    /// **The surface is real, and `evolve` throws away the evidence when it is not.**
+    ///
+    /// `the_surface_is_real_and_finite` reads [`Ocean::tiles`], which is the `.re` of the
+    /// transform's output — so a field that came out complex looks perfectly finite and
+    /// perfectly plausible there, with its imaginary half already discarded. This reads
+    /// the working grids instead, which after [`Ocean::evolve`] hold `ifft_2d`'s complex
+    /// output verbatim, and asserts the imaginary part is at the noise floor relative to
+    /// the real one.
+    ///
+    /// **What it caught.** `omega`'s half-plane sign was forced to zero only on the four
+    /// cells that are their own mirror, and `khat` was not forced anywhere. But the
+    /// mirror index `(n − x) % n` carries `−k` only when `x != 0`: index 0 holds the
+    /// Nyquist wavenumber, whose negation is off the grid, so every cell of the Nyquist
+    /// row and column mirrors to one whose `k` is *not* `−k`. Their `ω` did not flip
+    /// sign, the pair evolved on one branch, and the field stopped being Hermitian.
+    ///
+    /// Measured before the fix, over the nine (size, heading) pairs below: **4.6e-3 to
+    /// 5.9e-2** of the real RMS, worst at the smallest grid because the frozen set is
+    /// `2n − 1` cells of `n²`. At `n = 64` the height grid alone reads 1.6e-2 to 1.9e-2.
+    /// After: **2.5e-7**, which is `f32` transform noise.
+    ///
+    /// **Both halves of the fix are needed and this test says which.** Freezing `omega`
+    /// alone takes grid 0 to the noise floor and leaves grids 1 and 2 — the horizontal
+    /// pinch `i·k̂·h` — at 5.5e-2, because `k̂` is odd in `k` for the same reason `ω`'s
+    /// sign is. That intermediate state still passes `the_surface_is_real_and_finite`.
+    ///
+    /// The band is 1e-5: about 1.6 orders above the realised 2.5e-7 and 2.7 below the
+    /// smallest defect reading, so it is neither flaky nor able to miss the bug's return.
+    #[test]
+    fn the_evolved_field_has_no_imaginary_part() {
+        let mut worst = 0.0_f32;
+        for n in [32usize, 64, 128] {
+            for dir in HEADINGS {
+                let mut o = Ocean::new(&[Cascade { patch: 512.0, n }], 14.0, 300_000.0, dir, 9);
+                o.evolve(7.0);
+                let layer = &o.layers[0];
+                for (g, grid) in layer.grid.iter().enumerate() {
+                    // Summed in `f64` because the ratio is the point: an `f32`
+                    // accumulator over 16k squares is itself at the 1e-7 the fixed
+                    // field reads, and the test would then be measuring its own sum.
+                    let (re, im) = grid.iter().fold((0.0_f64, 0.0_f64), |(a, b), c| {
+                        (a + f64::from(c.re) * f64::from(c.re), b + f64::from(c.im) * f64::from(c.im))
+                    });
+                    assert!(re > 0.0, "grid {g} at n={n}, {dir:?} is empty — a vacuous pass");
+                    #[allow(clippy::cast_possible_truncation)]
+                    let ratio = (im / re).sqrt() as f32;
+                    worst = worst.max(ratio);
+                    assert!(
+                        ratio < 1e-5,
+                        "grid {g} at n={n}, heading {dir:?} carries an imaginary residue of \
+                         {ratio:.3e} of its real RMS — the evolved field is not Hermitian"
+                    );
+                }
+            }
+        }
+        println!("worst imaginary/real RMS over the evolved grids: {worst:.3e}");
     }
 
     /// **The number the human asked for.** `SEA-REBUILD.md` §3.6 targets Hs = 6.10 m —
