@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 76] = [
+const SCENES: [&str; 78] = [
     // The mood ladder — ADR 0069. In `GOLDEN` too, where the reasoning is.
     "assets/test/mood_deep.loom",
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
@@ -183,6 +183,12 @@ const SCENES: [&str; 76] = [
     // physics has never heard of. The `--sim 120` render is the cascade path. `wake` is in
     // this list for the same two-branch reason.
     "assets/test/ocean_fft.loom",
+    // The two teal scenes, in `SCENES` but deliberately not in `GOLDEN`: they exercise the
+    // `WaterBody.optics` upload — the only path where a scene's own attenuation and
+    // backscatter reach the environment buffer — and a reference for either wants a human
+    // to bless it. `ocean_tropical` is also the only water scene with a sand shelf under it.
+    "assets/test/ocean_fft_boat.loom",
+    "assets/test/ocean_tropical.loom",
     // The whitecap trail (W2). Three extra `loom_sample_water` taps per water
     // vertex and a fifth varying out of `waterVertexMain`, which is the one
     // place a wrong `TEXCOORD` index or an overflowed output signature would
