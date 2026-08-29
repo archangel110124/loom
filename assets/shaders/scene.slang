@@ -256,6 +256,25 @@ struct EnvironmentData {
     /// CPU, so no other scene's shader touches this at all.
     LoomFluidVertex* fluidVertices;
     uint2 fluidPad;
+    /// The FFT ocean — ADR 0076. x how many cascades, y cells per side, zw
+    /// unused. **Zero cascades means this water is not a spectrum sea**, and
+    /// `waterVertexMain` then sums the sixteen Gerstner waves exactly as it
+    /// always did, which is every scene in the repository but `ocean_fft`.
+    ///
+    /// Appended after the fluid pointer for the reason that was appended after
+    /// the cascade block: every offset above it is unmoved.
+    float4 ocean;
+    /// Each cascade's patch, in metres — one lane per cascade, cascade order.
+    float4 oceanPatch;
+    /// Each cascade's longest carried wavelength, in metres. **The Nyquist fade
+    /// reads this and nothing else** — see `waterCascadeFade`.
+    float4 oceanLongest;
+    /// The tiles: `LOOM_OCEAN_TILES` of `ocean.y²` per cascade, in cascade
+    /// order. A copy of the CPU cascade, which is the authoritative one — this
+    /// side never writes it, and `loom water --at` reads the same numbers
+    /// through the Rust half.
+    float* oceanTiles;
+    uint2 oceanPad;
 };
 
 /// One vertex of the cinematic free surface, as `loom_render::FluidVertex`
@@ -2096,6 +2115,23 @@ LoomFoamField foamField() {
     field.edge_cells = push.environment[0].foamEdgeCells;
     field.coverage = push.environment[0].foamCoverage;
     return field;
+}
+
+/// This tick's FFT cascade, assembled from the environment fields that carry it
+/// — ADR 0076. `count == 0` is water that is not a spectrum sea, and
+/// `loom_ocean_at` then returns the still surface.
+///
+/// **The tiles are the CPU's**, exactly as the foam field above is: they are
+/// transformed inside the fixed step, buoyancy pushes bodies with them, and
+/// `loom water --at` prints the same numbers through the Rust half. Nothing here
+/// writes them, and nothing here reads one back — ADR 0045 clause 2.
+LoomOcean oceanCascade() {
+    LoomOcean sea;
+    sea.patch = push.environment[0].oceanPatch;
+    sea.n = int(push.environment[0].ocean.y);
+    sea.count = int(push.environment[0].ocean.x);
+    sea.tiles = push.environment[0].oceanTiles;
+    return sea;
 }
 
 // ---------------------------------------------------------------------------
@@ -5024,6 +5060,49 @@ float waterSamplingCell(float2 xz, float2 centre) {
     return max(WATER_CELL, max(offset.x, offset.y) / (float(WATER_RES) * 0.5));
 }
 
+/// **The Nyquist fade for a cascade, which is a band rather than a wave** — one
+/// amplitude weight per cascade, in the lanes `loom_ocean_at` multiplies by.
+///
+/// The sixteen-wave path fades each wave on its own wavelength, because it has
+/// one. A cascade does not: it carries every wavenumber in `[k_lo, k_hi)` at
+/// once, so a per-wave weight is not expressible and one number per cascade is
+/// the only shape available. This keys on **the longest wavelength the cascade
+/// carries** — `2π/k_lo`, uploaded as `oceanLongest` — through the same two
+/// constants and the same `waterSamplingCell` the wave path uses.
+///
+/// **The cost of that choice, stated because it is a choice.** Keying on the
+/// long end means a cascade is drawn where the local cell cannot resolve its
+/// *short* end, so the short end of every band aliases; keying on the short end
+/// instead is worse in a way that is not a trade at all, because the chop
+/// cascade's Nyquist wavelength is 0.5 m against this mesh's finest 0.5 m cell,
+/// so it would be weighted to zero **everywhere, including at the camera** — a
+/// third of the sea deleted rather than drawn imperfectly. That is the same
+/// judgement `WATER_FADE_WHOLE`'s own comment records after the river came out
+/// as a mirror: deleting detail the mesh can represent imperfectly is worse than
+/// drawing it imperfectly.
+///
+/// For `shipping_stack` at n = 128 the weights come out: swell (longest 2048 m)
+/// whole everywhere and only fading past the last real ring; sea (32 m) whole to
+/// about 512 m of Chebyshev radius; chop (4 m) whole to about 64 m and gone by
+/// 128 m. The 50 km skirt is far enough out that all three are near zero, which
+/// is what keeps the wrapped tile from drawing noise onto the horizon.
+///
+/// `ponytail:` a cascade is gated on one end of its band. The honest version
+/// weights it by the *fraction of its band* the local cell can resolve —
+/// `(k_resolvable − k_lo)/(k_hi − k_lo)` against the spectrum's own energy
+/// distribution — which fades the short end out of a cascade instead of taking
+/// the whole cascade with it. Build that if the aliasing this leaves in
+/// measurably matters; `cargo xtask shimmer` and `loom salt` are what say so.
+float4 waterCascadeFade(LoomOcean sea, float cell) {
+    float4 weight = float4(0.0, 0.0, 0.0, 0.0);
+    for (int c = 0; c < LOOM_OCEAN_MAX_CASCADES; ++c) {
+        if (c >= sea.count) { break; }
+        weight[c] = smoothstep(
+            WATER_FADE_GONE, WATER_FADE_WHOLE, push.environment[0].oceanLongest[c] / cell);
+    }
+    return weight;
+}
+
 struct WaterOutput {
     float4 clip : SV_Position;
     float3 worldPos : TEXCOORD0;
@@ -5367,7 +5446,36 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
         waveletPool(), xz, push.environment[0].weather.z);
     float3 waveletSurface = float3(waveletAt.height, waveletAt.slope.x, waveletAt.slope.y);
 
-    LoomWaterSample surfaceAt = loom_sample_water(
+    // **The wave model, and the only branch in this shader that picks one** —
+    // ADR 0076. A body that asked for the spectrum is displaced by the CPU's own
+    // cascade tiles; every other body sums the sixteen waves, character for
+    // character as it did before this branch existed.
+    //
+    // The two are not alternatives at a point: `wave_model = "spectrum"` is
+    // refused at load beside an authored wave list, so a spectrum body's
+    // `faded.count` is zero and the sum below would draw a flat sea. That is why
+    // this is a branch rather than an addition.
+    LoomOcean sea = oceanCascade();
+    LoomWaterSample surfaceAt;
+    if (sea.count > 0) {
+        // **The last tick's tile, not a re-evaluation at frame time.** The
+        // cascade is stateless — ADR 0076's whole argument — so evaluating it at
+        // the frame's own clock would be *legal*, and it would cost a full
+        // `evolve` at 3.710 ms of a 16.67 ms tick, on the CPU, per frame. The
+        // tile the simulation already built is free. What that costs is written
+        // up in the task-3 report with the judder measurement beside it.
+        surfaceAt = loom_sample_cascade(
+            loom_ocean_at(sea, xz, waterCascadeFade(sea, sampleCell)),
+            // No orbital velocity: `render_tiles` does not upload the three
+            // velocity tiles, because nothing on this side reads a water
+            // velocity — the same reason the flow grid below is zero.
+            float3(0.0, 0.0, 0.0),
+            surface,
+            ground,
+            float3(0.0, 0.0, 0.0),
+            waveletSurface);
+    } else {
+    surfaceAt = loom_sample_water(
         faded,
         surface,
         ground,
@@ -5382,6 +5490,7 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
         // is what would need it, and that is river mesh shaping, not W8.
         float3(0.0, 0.0, 0.0),
         waveletSurface);
+    }
 
     // The horizontal displacement is half of what makes a Gerstner wave read
     // as water rather than as a sine: crests pinch toward each other. It is
@@ -5454,6 +5563,18 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
                      * push.environment[0].wind.z * FOAM_TRAIL_DRIFT;
     float decay = 1.0;
     float trail = 0.0;
+    // **A spectrum sea has no closed-form trail, and this is not a shortcut** —
+    // ADR 0076. Every tap below asks the surface for `mu_max` at `t - tau`, and
+    // the argument that makes that legal is that `mu_max` is a pure function of
+    // `(x, t)` the shader can simply evaluate. The cascade is not: the uploaded
+    // tiles are ONE instant, so there is no past in them to sample, and the ten
+    // taps would silently read the present ten times and call it a trail.
+    //
+    // What carries foam history for a spectrum body instead is the advected CPU
+    // field (ADR 0055), which is stepped inside the fixed step and read through
+    // `foamField()` in the fragment shader. `ocean_fft` reads 0.886 coverage at a
+    // crest through it. The instantaneous `breakMu` above is the other half.
+    if (sea.count == 0) {
     [unroll]
     for (int tap = 1; tap <= FOAM_TRAIL_TAPS; ++tap) {
         float tau = float(tap) * FOAM_TRAIL_STEP;
@@ -5470,6 +5591,7 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
             float3(0.0, 0.0, 0.0),
             float3(0.0, 0.0, 0.0));
         trail = max(trail, decay * smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, past.mu_max));
+    }
     }
     out.foamHist = trail;
     out.baseXZ = xz;

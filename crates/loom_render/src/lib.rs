@@ -329,7 +329,19 @@ mod tests {
             1040,
             "fluidVertices — the marched surface the cinematic tier draws"
         );
-        assert_eq!(size_of::<EnvironmentData>(), 1056, "the whole struct");
+        // **The FFT ocean, appended after the fluid pointer on the same rule** —
+        // ADR 0076. `fluidPad` ends at 1056, a multiple of 16, so three `float4`s
+        // land flush at 1056, 1072 and 1088; the tile pointer follows at 1104 with
+        // no padding, and two words behind it take the stride back to 16.
+        assert_eq!(at(std::ptr::from_ref(&base.ocean).cast()), 1056, "ocean");
+        assert_eq!(at(std::ptr::from_ref(&base.ocean_patch).cast()), 1072, "oceanPatch");
+        assert_eq!(at(std::ptr::from_ref(&base.ocean_longest).cast()), 1088, "oceanLongest");
+        assert_eq!(
+            at(std::ptr::from_ref(&base.ocean_tiles).cast()),
+            1104,
+            "oceanTiles — the cascade the spectrum sea is displaced by"
+        );
+        assert_eq!(size_of::<EnvironmentData>(), 1120, "the whole struct");
     }
 
     /// **`ParticleInstance` is written by a shader as well as by the CPU**,

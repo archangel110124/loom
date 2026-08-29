@@ -621,6 +621,34 @@ struct LoomWaterSample {
     float2 break_dir;
 };
 
+/// `mu_max` and its axis, from the horizontal compression matrix.
+///
+/// The Rust half is `loom_water::breaking`, and there is one of it there for the
+/// reason there is one of it here: **both wave models read this**, so the
+/// Gerstner path's closed-form `S` and the cascade's differenced one cannot
+/// come to disagree about what breaking is.
+struct LoomBreaking {
+    float mu_max;
+    float2 dir;
+};
+
+LoomBreaking loom_breaking(float sxx, float szz, float sxz) {
+    // The 2x2 symmetric eigenproblem, closed form — the Rust half's comment
+    // carries the reasoning and the fallback.
+    float disc = sqrt((sxx - szz) * (sxx - szz) + 4.0 * sxz * sxz);
+    float mu_max = 0.5 * (sxx + szz + disc);
+    float2 eig_a = float2(mu_max - szz, sxz);
+    float2 eig_b = float2(sxz, mu_max - sxx);
+    float2 pick = dot(eig_a, eig_a) >= dot(eig_b, eig_b) ? eig_a : eig_b;
+    float pick_len = sqrt(pick.x * pick.x + pick.y * pick.y);
+    LoomBreaking out;
+    out.mu_max = mu_max;
+    out.dir = pick_len > 0.0
+        ? float2(pick.x / pick_len, pick.y / pick_len)
+        : float2(1.0, 0.0);
+    return out;
+}
+
 LoomWaterSample loom_sample_water(
     LoomWaveSet set,
     float surface_height,
@@ -713,17 +741,7 @@ LoomWaterSample loom_sample_water(
         normal = float3(0.0, 1.0, 0.0);
     }
 
-    // The 2x2 symmetric eigenproblem, closed form — the Rust half's comment
-    // carries the reasoning and the fallback.
-    float disc = sqrt((sxx - szz) * (sxx - szz) + 4.0 * sxz * sxz);
-    float mu_max = 0.5 * (sxx + szz + disc);
-    float2 eig_a = float2(mu_max - szz, sxz);
-    float2 eig_b = float2(sxz, mu_max - sxx);
-    float2 pick = dot(eig_a, eig_a) >= dot(eig_b, eig_b) ? eig_a : eig_b;
-    float pick_len = sqrt(pick.x * pick.x + pick.y * pick.y);
-    float2 break_dir = pick_len > 0.0
-        ? float2(pick.x / pick_len, pick.y / pick_len)
-        : float2(1.0, 0.0);
+    LoomBreaking breaking = loom_breaking(sxx, szz, sxz);
 
     LoomWaterSample result;
     result.height = surface_height + displacement.y;
@@ -732,8 +750,190 @@ LoomWaterSample loom_sample_water(
     result.velocity = velocity;
     result.depth = depth;
     result.fold = flatten;
-    result.mu_max = mu_max;
-    result.break_dir = break_dir;
+    result.mu_max = breaking.mu_max;
+    result.break_dir = breaking.dir;
+    return result;
+}
+
+// The FFT cascade — the Slang half of `loom_water::ocean` and of
+// `loom_water::sample_cascade`, which is the other wave model a body can ask
+// for (ADR 0076, `WaveModel::Spectrum`).
+//
+// Never edit this by hand: it is emitted from the Rust, and editing it changes
+// the GPU alone — which is the divergence that puts a boat above its own water,
+// and this is the model where that is likeliest, because there is no closed
+// form on either side to read the answer off.
+
+// How many cascades the upload can carry. Four because the per-cascade numbers
+// ride in `float4` lanes of the environment buffer and a fifth would cost a
+// second pair of them; `loom_water::ocean::shipping_stack` uses three.
+static const int LOOM_OCEAN_MAX_CASCADES = 4;
+
+// Tiles per cascade in the upload, and their order:
+// `height, dx, dz, dh/dx, dh/dz, Sxx, Szz, Sxz`.
+//
+// **Eight of the eleven a cascade holds.** The velocity triple is not uploaded
+// because nothing on this side reads a water velocity — see
+// `Ocean::render_tiles`, which is the one place that decision is made.
+static const int LOOM_OCEAN_TILES = 8;
+
+struct LoomOcean {
+    // Each cascade's patch, in metres, one lane per cascade.
+    float4 patch;
+    // Cells per side. One number for the whole stack: the upload indexes every
+    // cascade at one stride, and `Ocean::render_tiles` refuses a stack that
+    // does not share an `n`.
+    int n;
+    // How many cascades. **Zero is a body with no cascade at all**, and every
+    // sample below is then the still surface — which is the same answer the
+    // Rust `sample_cascade` gives a `Spectrum` body with no ocean, and it is
+    // deliberately NOT a fallback to the Gerstner sum.
+    int count;
+    // `count * LOOM_OCEAN_TILES * n * n` floats, cascade-major then tile-major
+    // then row-major.
+    float* tiles;
+};
+
+// Everything the cascade knows at one world point — the Slang half of
+// `loom_water::ocean::OceanSample`, less the velocity this side is not given.
+struct LoomOceanSample {
+    // `[dx, height, dz]`, the order `LoomWaterSample::displacement` uses.
+    float3 displacement;
+    // `[dh/dx, dh/dz]` in base space, as the Gerstner path's slopes are.
+    float2 slope;
+    float sxx;
+    float szz;
+    float sxz;
+};
+
+// Every tile summed over every cascade at a world XZ — the Slang half of
+// `loom_water::ocean::Ocean::probe`.
+//
+// **`weight` is the caller's per-cascade amplitude, one lane per cascade**, and
+// it is a parameter for the same reason `flow` and `wavelet` are parameters to
+// `loom_sample_water`: this function knows nothing about the mesh sampling it.
+// Pass `float4(1, 1, 1, 1)` for the surface the CPU answers with; the water mesh
+// passes its Nyquist fade, which is a property of that mesh and of nothing else.
+//
+// Cascades are summed in index order and only in index order — float addition is
+// not associative and the Rust sums them the same way, so the order is part of
+// the surface's definition rather than an implementation detail.
+//
+// Each tile is periodic, so the lookup wraps in both axes **and the bilinear
+// interpolation wraps its upper neighbour too**: the cell at `n - 1`
+// interpolates toward index 0, not off the end. Without that a boat crossing
+// the seam steps.
+LoomOceanSample loom_ocean_at(LoomOcean sea, float2 xz, float4 weight) {
+    float v[LOOM_OCEAN_TILES];
+    for (int i = 0; i < LOOM_OCEAN_TILES; ++i) { v[i] = 0.0; }
+
+    if (sea.count > 0 && sea.n > 0) {
+        int cells = sea.n * sea.n;
+        for (int c = 0; c < LOOM_OCEAN_MAX_CASCADES; ++c) {
+            if (c >= sea.count) { break; }
+            float patch = sea.patch[c];
+            float cell = patch / float(sea.n);
+            // `rem_euclid`, spelled out: `fmod` keeps the sign of the dividend
+            // and a negative coordinate must land on the far side of the tile.
+            float rx = fmod(xz.x, patch);
+            float rz = fmod(xz.y, patch);
+            if (rx < 0.0) { rx += abs(patch); }
+            if (rz < 0.0) { rz += abs(patch); }
+            float fx = rx / cell;
+            float fz = rz / cell;
+            float x0 = floor(fx);
+            float z0 = floor(fz);
+            float tx = fx - x0;
+            float tz = fz - z0;
+            // `fx` is already in `[0, n)`, so this modulo is the identity
+            // except at the one coordinate a division can round up to exactly
+            // `n` — which is the case the Rust's `rem_euclid` on the index
+            // covers too.
+            int ix0 = int(x0) % sea.n;
+            int iz0 = int(z0) % sea.n;
+            int ix1 = (ix0 + 1) % sea.n;
+            int iz1 = (iz0 + 1) % sea.n;
+
+            int base = c * LOOM_OCEAN_TILES * cells;
+            for (int t = 0; t < LOOM_OCEAN_TILES; ++t) {
+                int tile = base + t * cells;
+                float a = sea.tiles[tile + iz0 * sea.n + ix0];
+                float b = sea.tiles[tile + iz0 * sea.n + ix1];
+                float cc = sea.tiles[tile + iz1 * sea.n + ix0];
+                float d = sea.tiles[tile + iz1 * sea.n + ix1];
+                float top = a + (b - a) * tx;
+                float bottom = cc + (d - cc) * tx;
+                v[t] += (top + (bottom - top) * tz) * weight[c];
+            }
+        }
+    }
+
+    LoomOceanSample out;
+    out.displacement = float3(v[1], v[0], v[2]);
+    out.slope = float2(v[3], v[4]);
+    out.sxx = v[5];
+    out.szz = v[6];
+    out.sxz = v[7];
+    return out;
+}
+
+// The FFT half of the surface — the Slang half of `loom_water::sample_cascade`.
+//
+// **Every field keeps the meaning it has on the Gerstner path**, which is the
+// whole contract of the opt-in: the vertex shader, buoyancy and the CLI all read
+// a `LoomWaterSample` and none of them may need to know which model filled it.
+//
+// `orbital` is the cascade's own velocity at this point, a parameter for the
+// same reason `flow` is one: `loom_ocean_at` is not given the velocity tiles,
+// because nothing on the GPU reads a water velocity. The water mesh passes
+// `float3(0, 0, 0)`; the agreement test passes the real thing, which is what
+// keeps the twin complete rather than merely consistent with its one caller.
+//
+// **Shoaling does not apply.** A cascade is a periodic deep-water tile and
+// cannot feel a bed; `depth` is still reported, and a scene that wants the
+// shallows wants the Gerstner model.
+LoomWaterSample loom_sample_cascade(
+    LoomOceanSample c,
+    float3 orbital,
+    float surface_height,
+    float ground_height,
+    float3 flow,
+    float3 wavelet)
+{
+    float depth = surface_height - ground_height;
+
+    float3 displacement = c.displacement;
+    displacement.y += wavelet.x;
+    float3 velocity = float3(flow.x + orbital.x, flow.y + orbital.y, flow.z + orbital.z);
+
+    float slope_x = c.slope.x + wavelet.y;
+    float slope_z = c.slope.y + wavelet.z;
+    // The trace, which is what `fold` is on both paths.
+    float fold = c.sxx + c.szz;
+
+    float3 normal = float3(-slope_x, 1.0 - fold, -slope_z);
+    float normal_length = sqrt(normal.x * normal.x
+                             + normal.y * normal.y
+                             + normal.z * normal.z);
+    if (normal_length > 0.0) {
+        normal = float3(normal.x / normal_length,
+                        normal.y / normal_length,
+                        normal.z / normal_length);
+    } else {
+        normal = float3(0.0, 1.0, 0.0);
+    }
+
+    LoomBreaking breaking = loom_breaking(c.sxx, c.szz, c.sxz);
+
+    LoomWaterSample result;
+    result.height = surface_height + displacement.y;
+    result.normal = normal;
+    result.displacement = displacement;
+    result.velocity = velocity;
+    result.depth = depth;
+    result.fold = fold;
+    result.mu_max = breaking.mu_max;
+    result.break_dir = breaking.dir;
     return result;
 }
 "#

@@ -943,6 +943,43 @@ mod tests {
         assert!(state.stage.contains(vk::PipelineStageFlags2::DRAW_INDIRECT));
     }
 
+    /// **The FFT ocean's frame, and why it needs no barrier** — ADR 0076. The
+    /// cascade is written by the CPU into host-visible memory before the frame is
+    /// submitted, so both draws that read it are first touches in this command
+    /// buffer and `vkQueueSubmit`'s host-write domain operation is the whole
+    /// dependency. Two reads in a row add nothing to that.
+    ///
+    /// It is declared anyway, and this test is what says the declaration is
+    /// correct rather than merely present: an omitted buffer and a buffer that
+    /// genuinely needs nothing look identical from a call site, which is the
+    /// distinction never-do #4 exists to keep visible.
+    #[test]
+    fn a_host_written_ocean_read_by_two_passes_emits_no_barrier() {
+        let barriers = plan_buffers(|g| {
+            let ocean = g.import_buffer("loom.ocean", vk::Buffer::null());
+            g.pass_with("forward", &[], &[(ocean, BufferAccess::VertexRead)], |_, _| {});
+            g.pass_with("water", &[], &[(ocean, BufferAccess::VertexRead)], |_, _| {});
+        });
+
+        assert!(barriers.is_empty(), "{barriers:?}");
+    }
+
+    /// And the same buffer the day the cascade is filled on the device instead of
+    /// by a host write — a staging copy, or the compute `evolve` ADR 0076 leaves as
+    /// an upgrade path. **Then the water draw does need a barrier, and the graph
+    /// places it because the declaration is already there.** That is the whole
+    /// return on declaring a dependency that costs nothing today.
+    #[test]
+    fn an_uploaded_ocean_gets_one_barrier_before_the_water_draw() {
+        let barriers = plan_buffers(|g| {
+            let ocean = g.import_buffer("loom.ocean", vk::Buffer::null());
+            g.pass_with("ocean_upload", &[], &[(ocean, BufferAccess::TransferDst)], |_, _| {});
+            g.pass_with("water", &[], &[(ocean, BufferAccess::VertexRead)], |_, _| {});
+        });
+
+        assert_eq!(barriers, [BufferTransition { pass: "water", buffer: "loom.ocean" }]);
+    }
+
     #[test]
     fn present_is_the_last_transition() {
         let transitions = plan(|g| {

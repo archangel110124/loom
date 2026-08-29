@@ -213,6 +213,15 @@ const SEA_SEED: u32 = 0x5EA_0076;
 struct Layer {
     patch: f32,
     n: usize,
+    /// The longest wavelength this cascade actually carries, in metres:
+    /// `2π/k_lo`, never above the patch.
+    ///
+    /// **Held for the renderer and for nothing else.** A cascade is a band, so the
+    /// water mesh cannot fade it wave by wave the way it fades the sixteen Gerstner
+    /// ones — it needs one representative length per cascade, and this is the end of
+    /// the band that survives longest as the sampling coarsens. `k_lo = 0` means the
+    /// cascade reaches down to its own fundamental, whose wavelength is the patch.
+    longest: f32,
     /// The frozen amplitude field, Hermitian by construction. Never written after
     /// construction: this is what makes `evolve` a pure function of `t`.
     h0: Vec<Complex>,
@@ -549,9 +558,18 @@ impl Ocean {
                 }
             }
 
+            // The band's low end as a wavelength, clamped to the patch: a tile cannot
+            // carry a wave longer than its own fundamental however low the band
+            // reaches, and `k_lo = 0` has no wavelength at all.
+            let longest = if cascade.band[0] > 0.0 {
+                (std::f32::consts::TAU / cascade.band[0]).min(cascade.patch)
+            } else {
+                cascade.patch
+            };
             layers.push(Layer {
                 patch: cascade.patch,
                 n,
+                longest,
                 h0,
                 twiddles: Twiddles::new(n),
                 omega,
@@ -796,14 +814,89 @@ impl Ocean {
         4.0 * m0.sqrt()
     }
 
-    /// Every tile, concatenated: `[height, dx, dz]` per cascade in cascade order.
+    /// Every tile, concatenated: all [`TILES_PER_CASCADE`] of them per cascade, in
+    /// cascade order — the layout [`Self::tiles`]' own field documents.
     ///
     /// The whole ocean as one slice, so "did this change" is one comparison rather than
     /// a walk over a structure.
+    ///
+    /// (This sentence used to say `[height, dx, dz]`, which was true when a cascade
+    /// carried three tiles and has been false since it carried eleven.)
     #[must_use]
     pub fn tiles(&self) -> &[f32] {
         &self.tiles
     }
+
+    /// The tiles the water mesh draws from, and the numbers it needs to index them.
+    ///
+    /// **Eight tiles of the eleven, and the three left behind are the velocity
+    /// triple.** Nothing on the GPU reads a water velocity: `WaterOutput` carries no
+    /// such field and `waterVertexMain` already passes `float3(0, 0, 0)` where the
+    /// current would go, with a comment saying the surface a river is drawn at is the
+    /// surface a still lake is drawn at. **This is an upload decision and not a model
+    /// decision** — the CPU keeps all eleven, because buoyancy's drag reads
+    /// [`crate::WaterSample::velocity`], so the day something on the GPU wants the
+    /// orbital motion the tiles are already there and only this function changes.
+    ///
+    /// Order per cascade, which is [`super::slang`]'s `LOOM_OCEAN_TILES` order and the
+    /// only place it is written down for the upload:
+    /// `height, dx, dz, ∂h/∂x, ∂h/∂z, Sxx, Szz, Sxz`.
+    ///
+    /// **A stack whose cascades do not share one `n` returns nothing at all**, because
+    /// the upload indexes every cascade at one stride and a per-cascade offset table
+    /// would be three more numbers in the environment buffer for a stack this engine
+    /// does not build — [`shipping_stack`] is uniform and is the only stack there is.
+    /// An empty return is water with no cascade, and the mesh then draws the Gerstner
+    /// sum exactly as it always did.
+    #[must_use]
+    pub fn render_tiles(&self) -> RenderTiles {
+        let Some(first) = self.layers.first() else {
+            return RenderTiles::default();
+        };
+        if self.layers.iter().any(|l| l.n != first.n) {
+            return RenderTiles::default();
+        }
+        let n = first.n;
+        let cells = n * n;
+        let mut tiles = Vec::with_capacity(self.layers.len() * RENDER_TILES_PER_CASCADE * cells);
+        for layer in &self.layers {
+            // Two runs rather than eight, because the kept tiles are contiguous either
+            // side of the velocity triple: 0..3 then 6..11.
+            tiles.extend_from_slice(&self.tiles[layer.offset..][..T_VY * cells]);
+            tiles.extend_from_slice(
+                &self.tiles[layer.offset + T_DHDX * cells..]
+                    [..(TILES_PER_CASCADE - T_DHDX) * cells],
+            );
+        }
+        RenderTiles {
+            tiles,
+            patch: self.layers.iter().map(|l| l.patch).collect(),
+            longest: self.layers.iter().map(|l| l.longest).collect(),
+            n,
+        }
+    }
+}
+
+/// How many of a cascade's [`TILES_PER_CASCADE`] tiles the renderer is given.
+///
+/// See [`Ocean::render_tiles`] for which eight and why the other three stay home.
+pub const RENDER_TILES_PER_CASCADE: usize = 8;
+
+/// What the water mesh needs to draw a cascade — [`Ocean::render_tiles`].
+///
+/// A struct rather than a tuple because four returns of two different shapes is
+/// exactly the arrangement a caller gets wrong silently.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RenderTiles {
+    /// [`RENDER_TILES_PER_CASCADE`] tiles of `n²` per cascade, in cascade order.
+    pub tiles: Vec<f32>,
+    /// Each cascade's patch, in metres — the wrap the GPU's lookup does.
+    pub patch: Vec<f32>,
+    /// Each cascade's longest carried wavelength, in metres. **The mesh's Nyquist
+    /// fade reads this and nothing else**: see `Layer::longest`.
+    pub longest: Vec<f32>,
+    /// Cells per side, shared by every cascade.
+    pub n: usize,
 }
 
 #[cfg(test)]

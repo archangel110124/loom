@@ -168,6 +168,15 @@ pub struct Viewer {
     foam_address: vk::DeviceAddress,
     foam_params: [f32; 4],
     foam_coverage: vk::DeviceAddress,
+    /// The FFT cascade — see [`Viewer::set_ocean`]. Uploaded **per tick**, exactly
+    /// as the foam field above it is.
+    ocean_buffer: vk::Buffer,
+    ocean_alloc: Option<Allocation>,
+    ocean_address: vk::DeviceAddress,
+    ocean_params: [f32; 4],
+    ocean_patch: [f32; 4],
+    ocean_longest: [f32; 4],
+    ocean_tiles: vk::DeviceAddress,
     /// The cinematic tier's marched free surface — see
     /// [`Viewer::set_fluid_surface`]. Uploaded **per frame drawn**, because the
     /// marcher runs on whatever the solver holds now; the two bakes above are
@@ -591,6 +600,16 @@ impl Viewer {
                 "loom.viewer_foam",
                 vk::BufferUsageFlags::empty(),
             )?;
+        // The FFT cascade. Same ceiling as offscreen — 2 MB, of which the shipping
+        // three-cascade stack at n = 128 uses 1.5 MB.
+        let (ocean_buffer, ocean_alloc, ocean_address) =
+            crate::renderer::create_address_buffer(
+                &raw,
+                &mut allocator,
+                (crate::renderer::MAX_OCEAN_SAMPLES * size_of::<f32>()) as u64,
+                "loom.viewer_ocean",
+                vk::BufferUsageFlags::empty(),
+            )?;
         // The marched free surface. Same ceiling as offscreen — 12 MB, of which
         // `slosh.loom` uses a twentieth.
         let (fluid_buffer, fluid_alloc, fluid_address) =
@@ -763,6 +782,13 @@ impl Viewer {
             foam_address,
             foam_params: [0.0, 0.0, 1.0, 0.0],
             foam_coverage: 0,
+            ocean_buffer,
+            ocean_alloc: Some(ocean_alloc),
+            ocean_address,
+            ocean_params: [0.0; 4],
+            ocean_patch: [1.0; 4],
+            ocean_longest: [1.0; 4],
+            ocean_tiles: 0,
             fluid_buffer,
             fluid_alloc: Some(fluid_alloc),
             fluid_address,
@@ -1036,6 +1062,63 @@ impl Viewer {
                 .as_ref()
                 .ok_or_else(|| RenderError::Allocator("foam buffer is gone".into()))?,
             &coverage[..side * side],
+        )
+    }
+
+    /// Hand the viewer this tick's FFT cascade — ADR 0076.
+    ///
+    /// Mirrors [`crate::Renderer::set_ocean`] in every particular, including that it
+    /// is called **per tick**. The window has to make the same call the headless path
+    /// does or the two disagree about where the water is — the defect ADR 0046 §7
+    /// records against `set_ripples`, and the reason `set_foam` beside this exists in
+    /// the same commit as its offscreen twin.
+    ///
+    /// **This one is not called yet, and the gap is real.** `crates/loom_cli/src/run.rs`
+    /// is the only caller a viewer has and it was carrying uncommitted work of the
+    /// human's when this landed, so the line was written into
+    /// `.superpowers/sdd/SEA-FFT-WIRE-PLAN/task-3-report.md` for them to paste rather
+    /// than added here. Until it is, a window showing `ocean_fft` draws a **flat** sea
+    /// — a spectrum body authors no waves, so the Gerstner sum it falls back to sums
+    /// nothing — while the physics runs the real one. No gate sees it: every gate goes
+    /// through the headless path, which is wired.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the viewer is being torn down.
+    pub fn set_ocean(
+        &mut self,
+        tiles: &[f32],
+        patch: &[f32],
+        longest: &[f32],
+        n: usize,
+    ) -> Result<(), RenderError> {
+        let cascades = patch.len();
+        let wanted = cascades * crate::renderer::OCEAN_TILES_PER_CASCADE * n * n;
+        if tiles.is_empty()
+            || cascades == 0
+            || cascades > crate::renderer::MAX_OCEAN_CASCADES
+            || longest.len() != cascades
+            || n == 0
+            || n > crate::renderer::MAX_OCEAN_N
+            || tiles.len() < wanted
+        {
+            self.ocean_params = [0.0; 4];
+            self.ocean_tiles = 0;
+            return Ok(());
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.ocean_params = [cascades as f32, n as f32, 0.0, 0.0];
+        }
+        self.ocean_patch = [1.0; 4];
+        self.ocean_longest = [1.0; 4];
+        self.ocean_patch[..cascades].copy_from_slice(patch);
+        self.ocean_longest[..cascades].copy_from_slice(longest);
+        self.ocean_tiles = self.ocean_address;
+        write_slice(
+            self.ocean_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("ocean buffer is gone".into()))?,
+            &tiles[..wanted],
         )
     }
 
@@ -1630,6 +1713,10 @@ impl Viewer {
         self.environment.flow_velocities = self.flow_velocities;
         self.environment.foam = self.foam_params;
         self.environment.foam_coverage = self.foam_coverage;
+        self.environment.ocean = self.ocean_params;
+        self.environment.ocean_patch = self.ocean_patch;
+        self.environment.ocean_longest = self.ocean_longest;
+        self.environment.ocean_tiles = self.ocean_tiles;
         self.environment.foam_edge_cells = crate::renderer::FOAM_EDGE_CELLS;
         self.environment.fluid_vertices = self.fluid_address_or_null;
         self.environment.rain_drops = self.rain_sim.drops_address;
@@ -1702,6 +1789,20 @@ impl Viewer {
                 .collect();
         let gpu_particle_count = self.gpu_particles.count();
         let gpu_particle_address = self.gpu_particles.instances_address;
+
+        // **The FFT cascade's tiles, declared for the passes that read them**, exactly
+        // as the offscreen path declares them and for the same reason — never-do #4
+        // covers buffers, and `waterVertexMain` reaches these through a device address
+        // where nothing in the type system says the draw depends on them. Empty when
+        // the scene is not a spectrum sea, which today is every scene the window can
+        // open: nothing calls `Viewer::set_ocean` yet, and its docs say why.
+        let mut pass_buffers = gpu_particle_uses;
+        if self.ocean_tiles != 0 {
+            pass_buffers.push((
+                graph.import_buffer("loom.viewer_ocean", self.ocean_buffer),
+                loom_render_graph::BufferAccess::VertexRead,
+            ));
+        }
 
         let extent = self.extent;
         // **The scene's rectangle, from the frame that was just laid out** —
@@ -1861,9 +1962,10 @@ impl Viewer {
         graph.pass_with(
             "forward",
             &forward_uses,
-            // The pool's instance buffer, read by the particle vertex shader.
-            // Empty in a scene with no GPU emitter.
-            &gpu_particle_uses,
+            // The pool's instance buffer, read by the particle vertex shader,
+            // and the ocean tiles the water vertex shader reads when the pass
+            // is not split. Empty in a scene with neither.
+            &pass_buffers,
             move |d, cmd| {
                 // SAFETY: the graph transitioned every attachment already.
                 unsafe {
@@ -2075,9 +2177,10 @@ impl Viewer {
             graph.pass_with(
                 "water",
                 &water_uses,
-                // Declared here too, because the particle draws move into this
-                // block when the pass splits. Read-after-read costs nothing.
-                &gpu_particle_uses,
+                // Declared here too, because the particle draws and the water
+                // draw both move into this block when the pass splits.
+                // Read-after-read costs nothing.
+                &pass_buffers,
                 move |d, cmd| {
                     // SAFETY: the graph has moved the opaque pair to
                     // SHADER_READ_ONLY_OPTIMAL and the attachments to their
@@ -2762,6 +2865,7 @@ impl Drop for Viewer {
             self.device.destroy_buffer(self.ripple_buffer, None);
             self.device.destroy_buffer(self.flow_buffer, None);
             self.device.destroy_buffer(self.foam_buffer, None);
+            self.device.destroy_buffer(self.ocean_buffer, None);
             self.device.destroy_buffer(self.fluid_buffer, None);
             if let (Some(allocation), Some(allocator)) =
                 (self.grass_alloc.take(), self.allocator.as_mut())
@@ -2785,6 +2889,11 @@ impl Drop for Viewer {
             }
             if let (Some(allocation), Some(allocator)) =
                 (self.foam_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            if let (Some(allocation), Some(allocator)) =
+                (self.ocean_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
             }

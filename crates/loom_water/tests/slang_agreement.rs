@@ -330,7 +330,13 @@ fn the_slang_half_compiles_for_the_gpu_too() {
     // A minimal consumer, because a function nobody calls can be dropped before
     // anything checks it.
     let source = format!(
-        "{}\nRWStructuredBuffer<float> loom_water_probe;\n\n\
+        "{}\nRWStructuredBuffer<float> loom_water_probe;\n\
+         // The tile pointer arrives through a push constant because that is\
+         // where it comes from in the real shader, `push.environment[0]`. A\
+         // pointer to a function-local array compiles for the C++ target and\
+         // is a SPIR-V type error, which is what this test exists to catch.\n\
+         struct OceanProbePush {{ float* tiles; }};\n\
+         [vk::push_constant] OceanProbePush probePush;\n\n\
          [shader(\"compute\")]\n[numthreads(1,1,1)]\n\
          void probeMain(uint3 tid : SV_DispatchThreadID)\n{{\n\
          \x20   LoomWaveSet set;\n    set.count = 1;\n\
@@ -340,8 +346,13 @@ fn the_slang_half_compiles_for_the_gpu_too() {
          \x20   set.waves[0].steepness = 0.5;\n\
          \x20   set.waves[0].speed_scale = 1.0;\n\
          \x20   LoomWaterSample s = loom_sample_water(set, 0.0, -4.0, float2(1.0, 2.0), 3.0, float3(0.4, 0.0, -0.2), float3(0.05, 0.02, -0.03));\n\
+         \x20   LoomOcean sea;\n    sea.patch = float4(4.0, 0.0, 0.0, 0.0);\n\
+         \x20   sea.n = 1;\n    sea.count = 1;\n    sea.tiles = probePush.tiles;\n\
+         \x20   LoomOceanSample c = loom_ocean_at(sea, float2(1.0, 2.0), float4(1.0, 1.0, 1.0, 1.0));\n\
+         \x20   LoomWaterSample f = loom_sample_cascade(c, float3(0.0, 0.0, 0.0), 0.0, -4.0, float3(0.4, 0.0, -0.2), float3(0.05, 0.02, -0.03));\n\
          \x20   loom_water_probe[0] = s.height + s.normal.y + s.displacement.x\n\
-         \x20       + s.velocity.z + s.depth + s.fold + s.mu_max + s.break_dir.x;\n}}\n",
+         \x20       + s.velocity.z + s.depth + s.fold + s.mu_max + s.break_dir.x\n\
+         \x20       + f.height + f.normal.y + f.displacement.x + f.fold + f.mu_max;\n}}\n",
         loom_water::slang()
     );
     std::fs::write(&shader, source).expect("write shader");
@@ -771,5 +782,223 @@ fn run(command: &mut Command, what: &str) {
         "{what} failed\n--- stdout ---\n{}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// **The FFT cascade is on the force path too, so its twin is measured like the
+/// surface's** — ADR 0076.
+///
+/// This is the model where a silent divergence is likeliest, because neither
+/// side has a closed form to read the answer off: the CPU differences a tile and
+/// the GPU interpolates one, and "the boat floats above the water" would be the
+/// only symptom. What is compared is every field of `LoomWaterSample` that a
+/// `spectrum` body produces, at 512 scattered points of a two-cascade ocean.
+///
+/// The tiles cross into Slang as literals for the same reason the bed does: what
+/// is under test is the *lookup* — the patch wrap, the bilinear tap, the seam,
+/// and the cascade sum's order — and a second bake would only add a step both
+/// sides share.
+#[test]
+fn the_rust_and_the_slang_sample_the_same_cascade() {
+    let Some(slangc) = tool("slangc") else {
+        eprintln!("skipping: slangc is not on PATH");
+        return;
+    };
+    let Some(cxx) = tool("c++").or_else(|| tool("g++")).or_else(|| tool("clang++")) else {
+        eprintln!("skipping: no C++ compiler");
+        return;
+    };
+
+    // Two cascades, because summing them in index order is part of the surface's
+    // definition and one cascade cannot check it. Sixteen cells a side so the
+    // tiles fit in a source file: 2 x 8 x 256 floats.
+    let cut = loom_water::ocean::nyquist(256.0, 16);
+    let mut sea = loom_water::ocean::Ocean::new(
+        &[
+            loom_water::ocean::Cascade { patch: 256.0, n: 16, band: [0.0, cut] },
+            loom_water::ocean::Cascade { patch: 32.0, n: 16, band: [cut, f32::INFINITY] },
+        ],
+        18.0,
+        440_000.0,
+        [0.9, 0.3],
+        0x0C_EA_11,
+    );
+    // One instant, and every sample below is asked for it: the tiles carry no
+    // clock and `sample_water` debug-asserts that the two agree.
+    const WHEN: f32 = 7.5;
+    sea.evolve(WHEN);
+    let render = sea.render_tiles();
+    assert_eq!(render.n, 16);
+    assert_eq!(render.tiles.len(), 2 * loom_water::ocean::RENDER_TILES_PER_CASCADE * 16 * 16);
+
+    let body = WaterBody {
+        surface_height: 1.75,
+        wave_model: loom_scene::components::WaveModel::Spectrum,
+        ..WaterBody::default()
+    };
+    let bed = bed();
+    let samples = samples();
+
+    let mut source = String::from(loom_voxel::heightfield::slang());
+    source.push_str(loom_water::slang());
+    source.push_str(
+        "\nvoid emit(LoomOcean sea, LoomHeightField bed, float surface_height, float2 xz, \
+         float3 orbital, float3 flow, float3 wavelet)\n{\n\
+         \x20   float ground_height = loom_ground_height(bed, xz);\n\
+         \x20   LoomOceanSample c = loom_ocean_at(sea, xz, float4(1.0, 1.0, 1.0, 1.0));\n\
+         \x20   LoomWaterSample s = loom_sample_cascade(c, orbital, surface_height, \
+         ground_height, flow, wavelet);\n\
+         \x20   printf(\"%.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g \
+         %.9g %.9g %.9g %.9g\\n\",\n\
+         \x20       s.height, s.normal.x, s.normal.y, s.normal.z,\n\
+         \x20       s.displacement.x, s.displacement.y, s.displacement.z,\n\
+         \x20       s.velocity.x, s.velocity.y, s.velocity.z, s.depth, s.fold,\n\
+         \x20       s.mu_max, s.break_dir.x, s.break_dir.y, ground_height);\n}\n",
+    );
+    source.push_str(
+        "\n[shader(\"compute\")]\n[numthreads(1,1,1)]\n\
+         void computeMain(uint3 tid : SV_DispatchThreadID)\n{\n",
+    );
+    source.push_str(&format!("    float tiles[{}];\n", render.tiles.len()));
+    for (i, v) in render.tiles.iter().enumerate() {
+        source.push_str(&format!("    tiles[{i}] = {v:?};\n"));
+    }
+    source.push_str(&format!(
+        "    LoomOcean sea;\n    sea.patch = float4({:?}, {:?}, 0.0, 0.0);\n\
+         \x20   sea.n = {};\n    sea.count = {};\n    sea.tiles = &tiles[0];\n",
+        render.patch[0],
+        render.patch[1],
+        render.n,
+        render.patch.len(),
+    ));
+    source.push_str(&format!(
+        "    float heights[{}];\n",
+        bed.height.len()
+    ));
+    for (i, h) in bed.height.iter().enumerate() {
+        source.push_str(&format!("    heights[{i}] = {h:?};\n"));
+    }
+    source.push_str(&format!(
+        "    LoomHeightField bed;\n    bed.origin = float2({:?}, {:?});\n\
+         \x20   bed.spacing = {:?};\n    bed.side = {};\n    bed.height = &heights[0];\n",
+        bed.origin[0], bed.origin[1], bed.spacing, bed.side,
+    ));
+    for [x, z, _] in &samples {
+        // **The orbital velocity is handed in rather than looked up**, because
+        // `loom_ocean_at` is not given the velocity tiles — nothing on the GPU
+        // reads a water velocity, so `Ocean::render_tiles` does not upload them.
+        // What is checked here is that the two sides add the current to it the
+        // same way, which is the only thing this side does with it.
+        let v = sea.at(*x, *z).velocity;
+        source.push_str(&format!(
+            "    emit(sea, bed, {:?}, float2({x:?}, {z:?}), float3({:?}, {:?}, {:?}), \
+             float3({:?}, {:?}, {:?}), float3({:?}, {:?}, {:?}));\n",
+            body.surface_height,
+            v[0],
+            v[1],
+            v[2],
+            FLOW[0],
+            FLOW[1],
+            FLOW[2],
+            WAVELET[0],
+            WAVELET[1],
+            WAVELET[2],
+        ));
+    }
+    source.push_str("}\n");
+
+    let dir = std::env::temp_dir().join(format!("loom_cascade_agree_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let shader = dir.join("cascade.slang");
+    std::fs::write(&shader, source).expect("write shader");
+    std::fs::write(dir.join("harness.cpp"), HARNESS).expect("write harness");
+
+    let kernel_cpp = dir.join("kernel.cpp");
+    run(
+        Command::new(slangc)
+            .arg(&shader)
+            .args(["-target", "cpp", "-entry", "computeMain", "-stage", "compute"])
+            .arg("-o")
+            .arg(&kernel_cpp),
+        "slangc",
+    );
+    let binary = dir.join("harness");
+    run(
+        Command::new(cxx)
+            .args(["-O0", "-w", "-std=c++17"])
+            .arg(format!("-I{}", dir.display()))
+            .arg(dir.join("harness.cpp"))
+            .arg("-o")
+            .arg(&binary),
+        "c++",
+    );
+
+    let output = Command::new(&binary).output().expect("run the compiled kernel");
+    assert!(output.status.success(), "the kernel exited {}", output.status);
+    let text = String::from_utf8(output.stdout).expect("kernel output is utf-8");
+    let rows: Vec<Vec<f32>> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.split_whitespace().map(|n| n.parse().expect("a number")).collect())
+        .collect();
+    assert_eq!(rows.len(), samples.len(), "the kernel printed {} rows", rows.len());
+
+    // Otherwise this agrees for free — a kernel that read zeros out of the tile
+    // buffer would match a flat sea and prove nothing.
+    let largest = rows.iter().flatten().fold(0.0_f32, |a, b| a.max(b.abs()));
+    assert!(largest > 1.0, "the Slang cascade is flat — largest value {largest}");
+
+    let mut worst = 0.0_f32;
+    let mut worst_at = (0, 0);
+    let mut steepest = 0.0_f32;
+    for (i, ([x, z, _], row)) in samples.iter().zip(&rows).enumerate() {
+        let ground = bed.at(*x, *z);
+        let cpu =
+            loom_water::sample_water(&body, Some(&sea), [*x, *z], WHEN, ground, FLOW, WAVELET);
+        steepest = steepest.max(cpu.mu_max);
+        let expected = [
+            cpu.height,
+            cpu.normal[0],
+            cpu.normal[1],
+            cpu.normal[2],
+            cpu.displacement[0],
+            cpu.displacement[1],
+            cpu.displacement[2],
+            cpu.velocity[0],
+            cpu.velocity[1],
+            cpu.velocity[2],
+            cpu.depth,
+            cpu.fold,
+            cpu.mu_max,
+            cpu.break_dir[0],
+            cpu.break_dir[1],
+            ground,
+        ];
+        assert_eq!(row.len(), expected.len(), "row {i} has {} values", row.len());
+        for (field, (rust, slang)) in expected.iter().zip(row).enumerate() {
+            let delta = (rust - slang).abs();
+            assert!(delta.is_finite(), "sample {i} field {field}: {rust} vs {slang}");
+            if delta > worst {
+                worst = delta;
+                worst_at = (i, field);
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+    eprintln!(
+        "cascade agreement: worst absolute difference {worst:e} over {} samples \
+         (16 values each), steepest mu_max {steepest}",
+        samples.len()
+    );
+    // The breaking columns are the ones a wrong tile index would leave at zero
+    // while the height still looked plausible.
+    assert!(steepest > 0.01, "the cascade never steepened — mu_max peaked at {steepest}");
+    assert!(
+        worst < EPSILON,
+        "the Rust and the Slang disagree by {worst} at sample {} field {} — \
+         the two halves of the FFT ocean have diverged",
+        worst_at.0,
+        worst_at.1
     );
 }

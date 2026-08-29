@@ -436,6 +436,30 @@ pub struct EnvironmentData {
     pub fluid_vertices: vk::DeviceAddress,
     /// Keeps the struct's stride 16-byte aligned, as `foam_pad` does.
     pub fluid_pad: [u32; 2],
+    /// The FFT ocean: x how many cascades, y cells per side, zw unused.
+    ///
+    /// **Zero cascades means this water is not a spectrum sea** — ADR 0076 — and
+    /// `waterVertexMain` then sums the sixteen Gerstner waves exactly as it always
+    /// did. Every scene in the repository but `ocean_fft` is on that branch.
+    ///
+    /// Appended after the fluid block for the reason that block was appended after
+    /// the cascade one: every offset above it is unmoved.
+    pub ocean: [f32; 4],
+    /// Each cascade's patch, in metres — one lane per cascade, in cascade order.
+    pub ocean_patch: [f32; 4],
+    /// Each cascade's longest carried wavelength, in metres.
+    ///
+    /// **The mesh's Nyquist fade reads this and nothing else.** A cascade is a band
+    /// rather than a wave, so it cannot be faded wave by wave the way the sixteen
+    /// are; see `waterCascadeFade` in `scene.slang`.
+    pub ocean_longest: [f32; 4],
+    /// The tiles: [`OCEAN_TILES_PER_CASCADE`] of `ocean[1]²` per cascade, in cascade
+    /// order. A copy of the CPU cascade, which is the authoritative one — nothing
+    /// here ever writes back, because a GPU float reaching a force is what ADR 0045
+    /// clause 2 forbids, and this surface floats a boat.
+    pub ocean_tiles: vk::DeviceAddress,
+    /// Keeps the struct's stride 16-byte aligned, as `fluid_pad` does.
+    pub ocean_pad: [u32; 2],
 }
 
 /// A point light, as the GPU reads it.
@@ -561,6 +585,13 @@ impl Default for EnvironmentData {
             cascade_c: [0.0; 4],
             fluid_vertices: 0,
             fluid_pad: [0; 2],
+            // No cascade: `ocean[0]` is the flag the water mesh branches on, so a
+            // scene that does not ask for the spectrum draws exactly as it did.
+            ocean: [0.0; 4],
+            ocean_patch: [1.0; 4],
+            ocean_longest: [1.0; 4],
+            ocean_tiles: 0,
+            ocean_pad: [0; 2],
         }
     }
 }
@@ -608,6 +639,36 @@ pub const MAX_FLOW_SAMPLES: usize = 256 * 256;
 /// Spelled here rather than imported, like the two above it — the renderer
 /// depends on neither `loom_scene` nor `loom_water`.
 pub const MAX_FOAM_SAMPLES: usize = 128 * 128;
+
+/// Cascades the ocean buffer can carry, mirroring the generated shader's
+/// `LOOM_OCEAN_MAX_CASCADES`.
+///
+/// Four because the per-cascade numbers ride in `float4` lanes of the environment
+/// buffer and a fifth would cost a second pair of them.
+/// `loom_water::ocean::shipping_stack` builds three.
+pub const MAX_OCEAN_CASCADES: usize = 4;
+
+/// Cells per side the ocean buffer can carry, mirroring
+/// `loom_water::ocean::SHIPPING_N`.
+///
+/// Spelled again here rather than imported, for the reason [`MAX_WAVES`] gives:
+/// `loom_render` does not depend on `loom_water` at run time, and `loom_water`
+/// cannot import `ash` at all. A cascade past this is refused by [`Renderer::set_ocean`]
+/// rather than truncated — half a tile is a sea with a seam through it.
+pub const MAX_OCEAN_N: usize = 128;
+
+/// Tiles per cascade in the upload, mirroring
+/// `loom_water::ocean::RENDER_TILES_PER_CASCADE` and the shader's
+/// `LOOM_OCEAN_TILES`: `height, dx, dz, ∂h/∂x, ∂h/∂z, Sxx, Szz, Sxz`.
+///
+/// **Eight of the eleven a cascade holds.** The velocity triple is not uploaded
+/// because nothing on the GPU reads a water velocity — `loom_water::ocean::Ocean::render_tiles`
+/// is where that decision is made and why.
+pub const OCEAN_TILES_PER_CASCADE: usize = 8;
+
+/// Floats the ocean tile buffer holds — 2 MB at the ceiling, 1.5 MB as shipped.
+pub const MAX_OCEAN_SAMPLES: usize =
+    MAX_OCEAN_CASCADES * OCEAN_TILES_PER_CASCADE * MAX_OCEAN_N * MAX_OCEAN_N;
 
 /// How many cells the foam field's boundary fade covers, mirroring
 /// `loom_water::foam::FOAM_EDGE_CELLS`. Uploaded rather than compiled into the
@@ -1117,6 +1178,21 @@ pub struct Renderer {
     foam_params: [f32; 4],
     /// `foam_address`, or null when this scene has no foam field.
     foam_coverage: vk::DeviceAddress,
+    /// The FFT cascade's tiles — see [`Renderer::set_ocean`]. Host-visible for the
+    /// reason the ripple and foam buffers are: it is rewritten every tick, because
+    /// the tiles ARE the sea at one instant.
+    ocean_buffer: vk::Buffer,
+    ocean_alloc: Option<Allocation>,
+    ocean_address: vk::DeviceAddress,
+    /// x cascade count, y cells per side; stamped into the environment at render
+    /// time so a caller replacing the environment wholesale cannot lose it, exactly
+    /// as `foam_params` is.
+    ocean_params: [f32; 4],
+    /// Each cascade's patch, and each cascade's longest carried wavelength.
+    ocean_patch: [f32; 4],
+    ocean_longest: [f32; 4],
+    /// `ocean_address`, or null when this scene's water is not a spectrum sea.
+    ocean_tiles: vk::DeviceAddress,
     flow_alloc: Option<Allocation>,
     flow_address: vk::DeviceAddress,
     /// xy origin, z spacing, w nodes per axis; stamped at render time for the
@@ -1494,6 +1570,19 @@ impl Renderer {
             vk::BufferUsageFlags::empty(),
         )?;
 
+        // The FFT cascade: three cascades of 128² x 8 tiles, 1.5 MB, written every
+        // tick like the foam field above it and for the same reason — it is not a
+        // bake, it is the sea at this instant (ADR 0076). Sized for the ceiling
+        // rather than for the shipping stack, so raising `SHIPPING_N` to 128 from
+        // below or adding a fourth cascade needs no allocation change.
+        let (ocean_buffer, ocean_alloc, ocean_address) = create_address_buffer(
+            &raw,
+            &mut allocator,
+            (MAX_OCEAN_SAMPLES * size_of::<f32>()) as u64,
+            "loom.ocean",
+            vk::BufferUsageFlags::empty(),
+        )?;
+
         // Built before the pipeline, because the pipeline layout needs its
         // descriptor set layout. `None` on a device without ray query, which
         // is the whole graceful-degradation path: same pipeline, no shadows.
@@ -1814,6 +1903,13 @@ impl Renderer {
             foam_address,
             foam_params: [0.0, 0.0, 1.0, 0.0],
             foam_coverage: 0,
+            ocean_buffer,
+            ocean_alloc: Some(ocean_alloc),
+            ocean_address,
+            ocean_params: [0.0; 4],
+            ocean_patch: [1.0; 4],
+            ocean_longest: [1.0; 4],
+            ocean_tiles: 0,
             flow_alloc: Some(flow_alloc),
             flow_address,
             flow_params: [0.0, 0.0, 1.0, 0.0],
@@ -2135,6 +2231,75 @@ impl Renderer {
         )
     }
 
+    /// Hand the renderer this tick's FFT cascade — ADR 0076.
+    ///
+    /// **Per tick, like [`Self::set_foam`], and for a stronger reason.** The tiles are
+    /// the sea at one instant and carry no clock of their own; handing over a tile the
+    /// simulation has moved past is the boat-above-its-water failure `loom_water`'s
+    /// module docs open on, with nothing to blame on either side.
+    ///
+    /// `tiles` is `loom_water::ocean::Ocean::render_tiles`'s output verbatim:
+    /// [`OCEAN_TILES_PER_CASCADE`] tiles of `n²` per cascade, in cascade order. `patch`
+    /// and `longest` carry one number per cascade — the tile's side in metres, and the
+    /// longest wavelength that cascade carries, which is what the mesh's Nyquist fade
+    /// reads.
+    ///
+    /// **Nothing is read back** — an assertion reads this same surface through
+    /// `water@x,z` and `loom water --at`, so a GPU float on that path is exactly what
+    /// ADR 0045 clause 2 forbids, and this surface pushes rapier bodies.
+    ///
+    /// An empty slice is water that is not a spectrum sea, and `waterVertexMain` then
+    /// sums the sixteen Gerstner waves bit for bit as it always did — which is every
+    /// scene in the repository but `ocean_fft`.
+    ///
+    /// **A stack past the buffer's ceiling is refused rather than truncated.** Half a
+    /// tile is not a smaller sea, it is a sea with a seam through it, and the seam
+    /// would be somewhere no test looks.
+    ///
+    /// # Errors
+    /// If the buffer is gone, which means the renderer is being torn down.
+    pub fn set_ocean(
+        &mut self,
+        tiles: &[f32],
+        patch: &[f32],
+        longest: &[f32],
+        n: usize,
+    ) -> Result<(), RenderError> {
+        let cascades = patch.len();
+        let wanted = cascades * OCEAN_TILES_PER_CASCADE * n * n;
+        if tiles.is_empty()
+            || cascades == 0
+            || cascades > MAX_OCEAN_CASCADES
+            || longest.len() != cascades
+            || n == 0
+            || n > MAX_OCEAN_N
+            || tiles.len() < wanted
+        {
+            self.ocean_params = [0.0; 4];
+            self.ocean_tiles = 0;
+            return Ok(());
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.ocean_params = [cascades as f32, n as f32, 0.0, 0.0];
+        }
+        // Lanes past the cascade count are never read — the shader breaks out of its
+        // loop at `count` — but they are filled with the patch rather than left at
+        // zero, because a zero patch is a division by zero if that loop is ever
+        // widened and a debugger reading garbage is a wasted hour either way.
+        self.ocean_patch = [1.0; 4];
+        self.ocean_longest = [1.0; 4];
+        self.ocean_patch[..cascades].copy_from_slice(patch);
+        self.ocean_longest[..cascades].copy_from_slice(longest);
+        self.ocean_tiles = self.ocean_address;
+        write_slice(
+            self.ocean_alloc
+                .as_ref()
+                .ok_or_else(|| RenderError::Allocator("ocean buffer is gone".into()))?,
+            &tiles[..wanted],
+        )
+    }
+
     /// Hand the renderer the cinematic fluid's free surface — ADR 0057 addendum.
     ///
     /// One [`crate::FluidVertex`] per vertex, three per triangle, as
@@ -2342,6 +2507,10 @@ impl Renderer {
         self.environment.foam = self.foam_params;
         self.environment.foam_coverage = self.foam_coverage;
         self.environment.foam_edge_cells = FOAM_EDGE_CELLS;
+        self.environment.ocean = self.ocean_params;
+        self.environment.ocean_patch = self.ocean_patch;
+        self.environment.ocean_longest = self.ocean_longest;
+        self.environment.ocean_tiles = self.ocean_tiles;
         // And the cinematic free surface, for the fifth.
         self.environment.fluid_vertices = self.fluid_address_or_null;
         // Same argument again: the drop and splash buffers are the renderer's
@@ -2445,6 +2614,30 @@ impl Renderer {
                 .collect();
         let gpu_particle_count = self.gpu_particles.count();
         let gpu_particle_address = self.gpu_particles.instances_address;
+
+        // **The FFT cascade's tiles, declared for the passes that read them** —
+        // never-do #4 covers buffers as well as images, which is the lesson the drop
+        // buffer forced. `waterVertexMain` reads these through a device address, so
+        // nothing in the type system says the water draw depends on them.
+        //
+        // No barrier comes out of this today and that is the correct answer rather
+        // than a gap: the tiles are written by the CPU into host-visible memory before
+        // the frame is submitted, so the vertex reads are the first touch in this
+        // command buffer and `vkQueueSubmit`'s host-write domain operation is the
+        // whole dependency. What the declaration buys is the day the cascade is
+        // evolved on the device instead — a compute pass or a staging copy — when the
+        // graph will place the barrier without anyone here remembering to.
+        // `loom_render_graph`'s two ocean tests pin both halves of that.
+        //
+        // Empty when the scene is not a spectrum sea, so every other scene declares
+        // exactly what it always did.
+        let mut pass_buffers = gpu_particle_uses;
+        if self.ocean_tiles != 0 {
+            pass_buffers.push((
+                graph.import_buffer("loom.ocean", self.ocean_buffer),
+                loom_render_graph::BufferAccess::VertexRead,
+            ));
+        }
 
         let (width, height) = (self.width, self.height);
         let (color_view, depth_view) = (self.color_view, self.depth_view);
@@ -2587,10 +2780,11 @@ impl Renderer {
         graph.pass_with(
             "forward",
             &forward_uses,
-            // The pool's instance buffer, read by the particle vertex shader.
-            // Empty when the scene has no GPU emitter, so a scene without one
-            // declares exactly what it always did.
-            &gpu_particle_uses,
+            // The pool's instance buffer, read by the particle vertex shader,
+            // and the ocean tiles the water vertex shader reads when the pass
+            // is not split. Both empty on a scene with neither, so a scene
+            // without one declares exactly what it always did.
+            &pass_buffers,
             move |d, cmd| {
                 // SAFETY: the graph has already transitioned both attachments
                 // into the layouts this recording requires.
@@ -2842,9 +3036,11 @@ impl Renderer {
                 "water",
                 &water_uses,
                 // The particle draws move into this block when the pass splits,
-                // so the instance buffer is read here too. Read-after-read
-                // needs no barrier, which is why declaring it twice is free.
-                &gpu_particle_uses,
+                // so the instance buffer is read here too — and so are the
+                // ocean tiles, since this is where the water is drawn whenever
+                // there is anything behind it to sample. Read-after-read needs
+                // no barrier, which is why declaring them twice is free.
+                &pass_buffers,
                 move |d, cmd| {
                     // SAFETY: the graph has transitioned the opaque pair to
                     // SHADER_READ_ONLY_OPTIMAL and the attachments to their
@@ -3368,6 +3564,7 @@ impl Drop for Renderer {
             self.device.destroy_buffer(self.ripple_buffer, None);
             self.device.destroy_buffer(self.flow_buffer, None);
             self.device.destroy_buffer(self.foam_buffer, None);
+            self.device.destroy_buffer(self.ocean_buffer, None);
             self.device.destroy_buffer(self.fluid_buffer, None);
             self.device.destroy_buffer(self.particle_buffer, None);
             if let (Some(allocation), Some(allocator)) =
@@ -3392,6 +3589,11 @@ impl Drop for Renderer {
             }
             if let (Some(allocation), Some(allocator)) =
                 (self.foam_alloc.take(), self.allocator.as_mut())
+            {
+                let _ = allocator.free(allocation);
+            }
+            if let (Some(allocation), Some(allocator)) =
+                (self.ocean_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
             }

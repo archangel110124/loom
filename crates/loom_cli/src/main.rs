@@ -1036,6 +1036,28 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                 .set_foam(coverage, *origin, *cell, *side)
                 .map_err(|e| e.to_string())?;
         }
+        // **And the FFT cascade the run evolved** — ADR 0076, and the same rule
+        // again: the tiles are not a bake, they are the sea at the instant
+        // `--sim N` reached, and `Sim::evolve_sea`'s invariant is that they hold
+        // exactly `tick x TICK_SECONDS`. So the still is drawn from the same
+        // tiles the buoyancy solver pushed the buoy with, which is the whole of
+        // what ADR 0076 promises and the only way a body that floats on the CPU
+        // can be seen to float in the picture.
+        //
+        // **The last tick's tile, and no re-evaluation at frame time.** The
+        // cascade is stateless, so asking it for the frame's own clock would be
+        // legal — and it would cost a full `Ocean::evolve` at 3.710 ms per frame
+        // to move the sea by at most one tick's worth. Measured in the task-3
+        // report; the tile is free.
+        //
+        // Empty on every other scene, and `waterVertexMain` then sums the
+        // sixteen Gerstner waves bit for bit as it always did.
+        if let Some(sea) = warmed.as_ref().and_then(loom_cli_sea) {
+            let tiles = sea.render_tiles();
+            renderer
+                .set_ocean(&tiles.tiles, &tiles.patch, &tiles.longest, tiles.n)
+                .map_err(|e| e.to_string())?;
+        }
         // **The cinematic free surface** — ADR 0057 addendum. Stepped state
         // like the two above it: what is uploaded is the isosurface of whatever
         // the `--sim N` run left in the solver. Empty on every scene outside
@@ -1343,6 +1365,17 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                                 field.cell(),
                                 field.side(),
                             )
+                            .map_err(|e| e.to_string())?;
+                    }
+                    // And the FFT cascade, re-read every frame for the same
+                    // reason and more sharply: the tiles ARE the sea at one
+                    // instant, so a fly-through that uploaded tick zero's would
+                    // be sixteen photographs of a frozen ocean under a boat that
+                    // is visibly moving on it.
+                    if let Some(sea) = runner.sea() {
+                        let tiles = sea.render_tiles();
+                        renderer
+                            .set_ocean(&tiles.tiles, &tiles.patch, &tiles.longest, tiles.n)
                             .map_err(|e| e.to_string())?;
                     }
                     // And the cinematic surface, re-marched every frame for the
@@ -3312,7 +3345,22 @@ fn add_water(
     if body.simulation == loom_scene::components::WaterSimTier::Cinematic {
         return;
     }
-    let waves = &body.waves.waves;
+    // **A spectrum body uploads no wave set, and the empty one is the point** —
+    // ADR 0076. `weather::water_of` derives sixteen Gerstner waves from the wind
+    // for any body that authors none, `wave_model` or not, and `sample_water`
+    // simply ignores them on the FFT path — so uploading them here would draw a
+    // sea the physics has never heard of. That is the boat-above-its-water
+    // failure with the roles swapped, and it is exactly what `sample_cascade`
+    // refuses on the CPU side: a body that asked for the spectrum and has no
+    // cascade gets the still surface, *not* a plausible-looking Gerstner mirror.
+    // Both sides now answer flat when there is no cascade, which is a difference
+    // a human can see rather than one they cannot.
+    let none = Vec::new();
+    let waves = if body.wave_model == loom_scene::components::WaveModel::Spectrum {
+        &none
+    } else {
+        &body.waves.waves
+    };
 
     // Depth is no longer in here: it is a per-vertex query against the terrain
     // height grid `set_terrain` uploads, which is the same grid the buoyancy
