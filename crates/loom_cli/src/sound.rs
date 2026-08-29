@@ -43,6 +43,16 @@ pub(crate) struct Sound {
     /// way, exactly as the visible layer applies it per drop rather than per
     /// camera.
     rain: f32,
+    /// This tick's sea, written by [`Self::set_sea`] and read by
+    /// [`Self::update`] beside the rain — for the same reason the rain rate is
+    /// written per tick rather than read once: a scene whose weather ramps
+    /// raises its sea with it, and a bed fixed at load would stay a millpond
+    /// through the whole gale.
+    ///
+    /// **The default is a flat calm and renders exact zeros**, so a scene with
+    /// no `WaterBody` never sets this and sounds exactly as it did before the
+    /// sea had a sound.
+    sea: loom_audio::sea::SeaState,
 }
 
 impl Sound {
@@ -72,6 +82,7 @@ impl Sound {
             next: 0,
             ears: Ears::default(),
             rain: 0.0,
+            sea: loom_audio::sea::SeaState::default(),
         };
 
         for entity in world.entities() {
@@ -165,6 +176,21 @@ impl Sound {
         self.rain = mm_per_hour;
     }
 
+    /// This tick's sea, as the simulation measured it. See [`Self::sea`].
+    ///
+    /// **Nothing in this commit calls it, and the `allow` is the honest way to
+    /// say so.** Its one call site is the window's `update_sound`, in
+    /// `run.rs` — the human's own file, modified and uncommitted, which this
+    /// work is not permitted to touch. The two-line hunk is written out in
+    /// `.superpowers/sdd/SEA-SOUND-PLAN/task-2-report.md` for them to paste,
+    /// exactly as the viewer's ocean upload was handed over. **Delete this
+    /// attribute the moment that lands** — a stale `allow` is how a genuinely
+    /// dead method survives.
+    #[allow(dead_code)]
+    pub(crate) fn set_sea(&mut self, sea: loom_audio::sea::SeaState) {
+        self.sea = sea;
+    }
+
     /// Re-measure and hand every voice its position for this tick.
     ///
     /// `submerged` is whether the listener's head is under the water — asked of
@@ -200,6 +226,12 @@ impl Sound {
             openness: if submerged { 0.0 } else { room.openness },
             volume: 1.0,
         });
+
+        // The sea. Unlike the rain it takes no `openness`: shelter from a sea
+        // is distance from it, and a shoreline louder than open water is the
+        // shore work this slice deliberately excludes. A roof over a listener
+        // does not quieten the surf.
+        self.audio.set_sea(self.sea);
 
         if self.sources.is_empty() {
             return;

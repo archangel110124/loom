@@ -1798,6 +1798,17 @@ impl Sim {
         self.sea.as_ref()
     }
 
+    /// The scene's water body with its wave set resolved, as this run holds it.
+    ///
+    /// **Handed out rather than re-read from the world**, because
+    /// [`Sim::reweather`] moves it: a scene whose `Environment.stages` ramp the
+    /// wind has a different wave set here than `weather::water_of` would build
+    /// off the file, and that difference is the whole ladder.
+    #[must_use]
+    pub fn water(&self) -> Option<&loom_scene::components::WaterBody> {
+        self.water.as_ref()
+    }
+
     /// Advance whole ticks.
     pub fn step(&mut self, ticks: u32) {
         for _ in 0..ticks {
@@ -2541,6 +2552,12 @@ impl Runner {
         self.physics.sea()
     }
 
+    /// Straight through to [`Sim::water`], under the same arrangement.
+    #[must_use]
+    pub fn water(&self) -> Option<&loom_scene::components::WaterBody> {
+        self.physics.water()
+    }
+
     /// The collision world this run is holding, for anything that has to cast a
     /// ray against what is actually there — the drips, in practice (ADR 0054).
     #[must_use]
@@ -3262,6 +3279,33 @@ impl Play {
         self.runner.foam()
     }
 
+    /// What the sea sounds like this tick, for the audio bed.
+    ///
+    /// **Assembled here rather than in the window** so the one line the viewer
+    /// needs is `sound.set_sea(play.sea_state())`, and so the three numbers
+    /// come off the run that owns them: the cascade, the foam field and the
+    /// wave set the ladder may have moved. See [`crate::weather::sea_state`]
+    /// for why not one of them is re-derived.
+    ///
+    /// A scene with no water answers a flat calm, which the bed renders as
+    /// exact zeros.
+    ///
+    /// **Only the tests call it in this commit**, and the `allow` says so
+    /// rather than hiding it: the caller is the window's `update_sound` in
+    /// `run.rs`, the human's own uncommitted file, and the hunk to paste is in
+    /// `.superpowers/sdd/SEA-SOUND-PLAN/task-2-report.md`. **Delete this
+    /// attribute when that lands.**
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn sea_state(&self) -> loom_audio::sea::SeaState {
+        crate::weather::sea_state(
+            self.runner.water(),
+            self.runner.sea(),
+            self.runner.foam(),
+            crate::weather::wind_of_world(&self.world).mean_speed_at(10.0),
+        )
+    }
+
     /// The cinematic tier's free surface and spray — see [`Sim::fluid_draw`].
     ///
     /// **This is the window's half of it.** `loom render --sim N` has asked
@@ -3558,6 +3602,63 @@ transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
   dynamic = true
   mass = 10.0
 "#;
+
+
+    /// **The window's own reading of the sea, which nothing else can check.**
+    /// `loom run` is the only caller of `Play::sea_state` and it cannot be run
+    /// headless, so without this the live half of the sea's sound is asserted
+    /// by nobody.
+    ///
+    /// Three claims, and the third is the one worth having: a scene with no
+    /// water reads a flat calm; a breaking sea reports a breaking fraction; and
+    /// an FFT sea's height is the **cascade's** `4√m0` and not the sixteen
+    /// derived waves' analytic value. Those two answer for different seas and
+    /// only one of them is under the boat.
+    #[test]
+    fn the_sea_state_is_read_off_the_run() {
+        let load = |name: &str| {
+            let src = std::fs::read_to_string(format!("../../assets/test/{name}.loom"))
+                .expect("fixture");
+            World::from_scene(&Scene::parse(&src).expect("valid scene"))
+        };
+        let base = std::path::Path::new("../../assets/test");
+
+        let mut dry = Play::start(load("cave"), base);
+        dry.run(30);
+        assert_eq!(
+            dry.sea_state(),
+            loom_audio::sea::SeaState::default(),
+            "a scene with no water has to read a flat calm, or it will not be silent"
+        );
+
+        let mut breaking = Play::start(load("whitecaps"), base);
+        breaking.run(300);
+        let state = breaking.sea_state();
+        assert!(state.hs > 1.0, "whitecaps reported a millpond: Hs {}", state.hs);
+        assert!(
+            state.breaking > 0.0,
+            "a sea named for its whitecaps reported nothing breaking: {}",
+            state.breaking
+        );
+
+        let mut fft = Play::start(load("ocean_fft"), base);
+        fft.run(60);
+        let state = fft.sea_state();
+        let cascade = fft.runner.sea().expect("ocean_fft opts into the cascade").significant_height();
+        let derived = loom_water::spectrum::significant_height(
+            &fft.runner.water().expect("a water body").waves,
+        );
+        assert!(
+            (state.hs - cascade).abs() < 1e-6,
+            "the bed was handed {} where the cascade is at {cascade}",
+            state.hs
+        );
+        assert!(
+            (cascade - derived).abs() > 1e-3,
+            "the two heights agree to {}, so this test could not tell them apart",
+            (cascade - derived).abs()
+        );
+    }
 
     fn world() -> World {
         World::from_scene(&Scene::parse(FALLING).expect("valid scene"))

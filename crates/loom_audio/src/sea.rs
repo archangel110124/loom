@@ -26,11 +26,12 @@
 //! (swell, then hiss) because float addition is not associative and this
 //! crate's output is compared byte for byte.
 //!
-//! **One call is one continuous stretch.** The filter states and the sample
-//! cursor start at zero every call, so calling [`bed`] repeatedly for
-//! successive buffers restarts the texture and clicks at the joins. A streaming
-//! sea wants the state carried across buffers the way [`crate::rain::RainBed`]
-//! carries its own; that is a struct this does not need yet.
+//! **One call of [`bed`] is one continuous stretch.** It makes its own
+//! [`SeaBed`], whose filter states and sample cursor start at zero, so calling
+//! it repeatedly for successive buffers restarts the texture and clicks at the
+//! joins. Successive buffers hold one [`SeaBed`] across them instead — the way
+//! [`crate::rain::RainBed`] carries its own — and that is the path the mixer
+//! takes.
 //!
 //! # Where the numbers come from
 //!
@@ -44,7 +45,12 @@
 /// These are the water's numbers, passed in rather than re-derived: a second
 /// opinion about how rough the sea is would be free to disagree with the one
 /// the boat floats on.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// **[`Default`] is a dead flat calm, and that is the load-bearing default.** A
+/// scene with no `WaterBody` hands this in, and [`bed`] answers it with exact
+/// zeros — so every scene that has no sea sounds byte for byte as it did before
+/// there was one.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SeaState {
     /// Significant wave height in metres — `loom_water::significant_height`.
     pub hs: f32,
@@ -187,6 +193,181 @@ fn one_pole(cutoff_hz: f32, sample_rate: f32) -> f32 {
     1.0 - x
 }
 
+/// The seed the engine's own sea uses, so what plays and what `loom audio`
+/// renders are the same texture.
+///
+/// One constant rather than a per-scene number: a sea's *identity* is its
+/// state, and two scenes at the same state should sound the same.
+pub const SEED: u32 = 0x5EA;
+
+/// Seconds for the level to follow a change in the sea.
+///
+/// The same figure `rain.rs` smooths its own level over, for the same reason:
+/// a gain that jumps between one buffer and the next clicks. A sea state moves
+/// far slower than this, so it costs nothing when nothing is changing.
+const SMOOTHING_SECONDS: f32 = 0.35;
+
+/// What the gains are heading toward. One per buffer, not one per sample.
+#[derive(Debug, Clone, Copy)]
+struct Targets {
+    swell: f32,
+    hiss: f32,
+    /// Corner of the hiss band, in Hz. Smoothed rather than the coefficient,
+    /// because the coefficient is exponential in it.
+    cutoff: f32,
+}
+
+impl Targets {
+    fn of(state: SeaState) -> Self {
+        // Loudness rises fast and then flattens, the curve `rain.rs` puts on
+        // rate for the same reason: the step from a 0.5 m ripple to a 1.5 m
+        // chop is far more audible than the step from 4.5 m to 6.1 m.
+        let wind = (state.wind.max(0.0) / WIND_FULL).min(1.0);
+        Self {
+            swell: (state.hs.max(0.0) / HS_FULL).min(1.0).sqrt() * SWELL_GAIN * HEADROOM,
+            hiss: (state.breaking.max(0.0) / BREAK_FULL).min(1.0).sqrt() * HISS_GAIN * HEADROOM,
+            cutoff: HISS_CALM_HZ + (HISS_GALE_HZ - HISS_CALM_HZ) * wind,
+        }
+    }
+}
+
+/// The sea as a **stream**: [`bed`]'s arithmetic with its filter states and its
+/// sample cursor carried across buffers.
+///
+/// This exists because [`bed`] is a pure function and restarts everything it
+/// owns on every call, so feeding it one audio buffer at a time restarts the
+/// texture and clicks at every join. [`crate::rain::RainBed`] is the shape this
+/// follows, and for the same reason.
+///
+/// **There is one implementation of the sound and it is here.** [`bed`] is a
+/// one-shot render through this, so an offline `.wav` and what the speakers
+/// play cannot drift apart.
+#[derive(Debug, Clone)]
+pub struct SeaBed {
+    rate: f32,
+    seed: u32,
+    /// The surge's noise coordinate, offset per seed so two seeds do not
+    /// breathe in lockstep. An integer under 2^10 is exact in an f32.
+    surge_offset: f32,
+    /// Monotonic sample counter. See the note in the loop about 2^24.
+    cursor: u32,
+    /// Two poles for the swell — 12 dB/octave, because one pole leaves enough
+    /// top end that the "rumble" still hisses — and one for the hiss.
+    swell_state: [f32; 2],
+    hiss_state: f32,
+    swell_k: f32,
+    /// The smoothed gains, or `None` until the first sample.
+    ///
+    /// **`None` rather than zero, and that is what keeps [`bed`] a pure
+    /// function.** A bed that started at silence and ramped would make a
+    /// one-shot render of a heavy sea quieter than the state it was asked for,
+    /// which is exactly the measurement every constant above was chosen
+    /// against. So the first sample *snaps* to its target and only later
+    /// changes are smoothed.
+    smoothed: Option<Targets>,
+}
+
+impl SeaBed {
+    #[must_use]
+    pub fn new(sample_rate: u32, seed: u32) -> Self {
+        #[allow(clippy::cast_precision_loss)]
+        let rate = sample_rate.max(1) as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let surge_offset = (loom_field::noise::hash(seed) >> 22) as f32;
+        Self {
+            rate,
+            seed,
+            surge_offset,
+            cursor: 0,
+            swell_state: [0.0; 2],
+            hiss_state: 0.0,
+            swell_k: one_pole(SWELL_HZ, rate),
+            smoothed: None,
+        }
+    }
+
+    /// One sample, advancing every piece of state this owns.
+    fn next(&mut self, target: Targets, smoothing: f32) -> f32 {
+        let now = match self.smoothed {
+            None => target,
+            Some(previous) => Targets {
+                swell: smoothing.mul_add(target.swell - previous.swell, previous.swell),
+                hiss: smoothing.mul_add(target.hiss - previous.hiss, previous.hiss),
+                cutoff: smoothing.mul_add(target.cutoff - previous.cutoff, previous.cutoff),
+            },
+        };
+        self.smoothed = Some(now);
+
+        let cursor = self.cursor;
+        self.cursor = cursor.wrapping_add(1);
+        // Past 2^24 samples — 349 s at 48 kHz — this quantises, because that
+        // is where an f32 stops holding consecutive integers. Harmless here:
+        // the surge below wants seconds of resolution, not samples, and the
+        // render stays a pure function of its arguments either way.
+        #[allow(clippy::cast_precision_loss)]
+        let t = cursor as f32 / self.rate;
+        // `[1 - SURGE_DEPTH, 1)`: the surge only ever subtracts, so the peak
+        // stays where SWELL_GAIN and HEADROOM were measured.
+        let surge = SURGE_DEPTH.mul_add(
+            loom_field::noise::value([t / SURGE_SECONDS, self.surge_offset, 0.0]),
+            1.0 - SURGE_DEPTH,
+        );
+
+        let n = white(cursor, self.seed, 1);
+        self.swell_state[0] += (n - self.swell_state[0]) * self.swell_k;
+        self.swell_state[1] += (self.swell_state[0] - self.swell_state[1]) * self.swell_k;
+
+        // The hiss is what the low-pass did *not* keep, from its own stream —
+        // a high-pass by subtraction, the shape `rain.rs` uses.
+        let hiss_k = one_pole(now.cutoff, self.rate);
+        let m = white(cursor, self.seed, 2);
+        self.hiss_state += (m - self.hiss_state) * hiss_k;
+        let high = m - self.hiss_state;
+
+        // **Fixed order: swell, then hiss.** Float addition is not associative
+        // and this output is compared byte for byte.
+        self.swell_state[1].mul_add(now.swell * surge, high * now.hiss)
+    }
+
+    /// Add `out.len()` mono samples of sea into `out`.
+    ///
+    /// **Adds rather than overwrites**, the same contract
+    /// [`crate::rain::RainBed::render`] has, so a bed sits under whatever has
+    /// already been rendered.
+    pub fn render_mono(&mut self, state: SeaState, out: &mut [f32]) {
+        let target = Targets::of(state);
+        let smoothing = one_pole(1.0 / SMOOTHING_SECONDS, self.rate);
+        for slot in out.iter_mut() {
+            *slot += self.next(target, smoothing);
+        }
+    }
+
+    /// Add the sea into `out`, which is interleaved stereo.
+    ///
+    /// **The same sample in both ears, deliberately.** The mono argument on
+    /// [`bed`] is a measurement argument — [`crate::rain::measure`]'s tilt
+    /// reads two decorrelated channels as Nyquist content — and duplicating is
+    /// the one widening that keeps it honest, because two identical channels
+    /// interleave to a signal at the same tilt as either.
+    ///
+    /// `ponytail:` so the sea sits in the middle of the head rather than
+    /// around it. Placing it is the shore work — a shoreline louder than open
+    /// water — which the plan excludes on purpose; that is where a real
+    /// decorrelation belongs, together with the answer to what it does to the
+    /// measurement.
+    pub fn render(&mut self, state: SeaState, out: &mut [f32]) {
+        let target = Targets::of(state);
+        let smoothing = one_pole(1.0 / SMOOTHING_SECONDS, self.rate);
+        for frame in out.chunks_mut(2) {
+            let value = self.next(target, smoothing);
+            frame[0] += value;
+            if frame.len() > 1 {
+                frame[1] += value;
+            }
+        }
+    }
+}
+
 /// `seconds` of sea, as **mono** samples at `sample_rate`.
 ///
 /// # Mono, and the trap that decided it
@@ -205,11 +386,21 @@ fn one_pole(cutoff_hz: f32, sample_rate: f32) -> f32 {
 /// test that says so.
 ///
 /// So the bed is one channel, and widening it is the caller's business.
-/// Whatever does that should place the sea rather than duplicating it: a sea
-/// arriving identically at both ears collapses to a point in the middle of your
-/// head, which is the fold `rain.rs` takes care to avoid.
+/// [`SeaBed::render`] duplicates it, which is the one widening that leaves the
+/// measurement meaning what it meant.
+///
+/// **One call is one continuous stretch**, because it makes its own
+/// [`SeaBed`]. Successive buffers want one of those held across them; that is
+/// what the struct is for.
 ///
 /// A still sea returns exact zeros — see `a_still_sea_is_exactly_silent`.
+///
+/// **Bit-identical to the pure-function form this replaced**, checked sample by
+/// sample at Hs 0.6 / 2.5 / 6.1 m. The one exception is the *exactly still* sea,
+/// where a sample that was `-0.0` is now `+0.0`: [`SeaBed::render_mono`] adds
+/// into its buffer rather than assigning, and `0.0 + -0.0` is `+0.0`. Both
+/// encode to the same PCM zero and both compare equal; nothing downstream can
+/// tell them apart.
 #[must_use]
 pub fn bed(state: SeaState, seconds: f32, sample_rate: u32, seed: u32) -> Vec<f32> {
     #[allow(clippy::cast_precision_loss)]
@@ -217,57 +408,7 @@ pub fn bed(state: SeaState, seconds: f32, sample_rate: u32, seed: u32) -> Vec<f3
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let frames = (rate * seconds.max(0.0)) as usize;
     let mut out = vec![0.0_f32; frames];
-
-    // Loudness rises fast and then flattens, the curve `rain.rs` puts on rate
-    // for the same reason: the step from a 0.5 m ripple to a 1.5 m chop is far
-    // more audible than the step from 4.5 m to 6.1 m.
-    let swell = (state.hs.max(0.0) / HS_FULL).min(1.0).sqrt() * SWELL_GAIN * HEADROOM;
-    let hiss = (state.breaking.max(0.0) / BREAK_FULL).min(1.0).sqrt() * HISS_GAIN * HEADROOM;
-    let wind = (state.wind.max(0.0) / WIND_FULL).min(1.0);
-
-    let swell_k = one_pole(SWELL_HZ, rate);
-    let hiss_k = one_pole(HISS_CALM_HZ + (HISS_GALE_HZ - HISS_CALM_HZ) * wind, rate);
-
-    // The surge's noise coordinate is offset per seed, so two seeds do not
-    // breathe in lockstep. An integer under 2^10 is exact in an f32.
-    #[allow(clippy::cast_precision_loss)]
-    let surge_offset = (loom_field::noise::hash(seed) >> 22) as f32;
-
-    // Two poles for the swell — 12 dB/octave, because one pole leaves enough
-    // top end that the "rumble" still hisses — and one for the hiss.
-    let mut swell_state = [0.0_f32; 2];
-    let mut hiss_state = 0.0_f32;
-
-    for (i, slot) in out.iter_mut().enumerate() {
-        #[allow(clippy::cast_possible_truncation)]
-        let cursor = i as u32;
-        // Past 2^24 samples — 349 s at 48 kHz — this quantises, because that
-        // is where an f32 stops holding consecutive integers. Harmless here:
-        // the surge below wants seconds of resolution, not samples, and the
-        // render stays a pure function of its arguments either way.
-        #[allow(clippy::cast_precision_loss)]
-        let t = cursor as f32 / rate;
-        // `[1 - SURGE_DEPTH, 1)`: the surge only ever subtracts, so the peak
-        // stays where SWELL_GAIN and HEADROOM were measured.
-        let surge = SURGE_DEPTH.mul_add(
-            loom_field::noise::value([t / SURGE_SECONDS, surge_offset, 0.0]),
-            1.0 - SURGE_DEPTH,
-        );
-
-        let n = white(cursor, seed, 1);
-        swell_state[0] += (n - swell_state[0]) * swell_k;
-        swell_state[1] += (swell_state[0] - swell_state[1]) * swell_k;
-
-        // The hiss is what the low-pass did *not* keep, from its own stream —
-        // a high-pass by subtraction, the shape `rain.rs` uses.
-        let m = white(cursor, seed, 2);
-        hiss_state += (m - hiss_state) * hiss_k;
-        let high = m - hiss_state;
-
-        // **Fixed order: swell, then hiss.** Float addition is not associative
-        // and this output is compared byte for byte.
-        *slot = swell_state[1].mul_add(swell * surge, high * hiss);
-    }
+    SeaBed::new(sample_rate, seed).render_mono(state, &mut out);
     out
 }
 
@@ -293,6 +434,120 @@ mod tests {
         assert!(!a.is_empty(), "the bed rendered nothing to compare");
         for (i, (x, y)) in a.iter().zip(&b).enumerate() {
             assert_eq!(x.to_bits(), y.to_bits(), "sample {i} differs between two renders");
+        }
+    }
+
+    /// **The reason [`SeaBed`] exists.** Two successive buffers off one bed
+    /// must be byte-identical to one render of both, or the streaming path is
+    /// a different sound from the one every constant above was measured on —
+    /// and the join is where a restarted filter clicks.
+    #[test]
+    fn a_stream_joins_without_a_seam() {
+        let state = sea(3.0, 0.05);
+        let whole = bed(state, 1.0, RATE, 5);
+        let mut streamed = vec![0.0_f32; whole.len()];
+        let mut streaming = SeaBed::new(RATE, 5);
+        // Deliberately not a divisor of the length: a seam that only ever
+        // lands on a round boundary is a seam this would not see.
+        for chunk in streamed.chunks_mut(1_000) {
+            streaming.render_mono(state, chunk);
+        }
+        for (i, (a, b)) in whole.iter().zip(&streamed).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "sample {i} differs across the buffer joins");
+        }
+    }
+
+    /// A changed state must not click, and the level must actually arrive.
+    ///
+    /// Smoothing is what stops the click; a smoothing that never converged
+    /// would be a bed permanently quieter than the sea it is reporting, which
+    /// no other test here can see.
+    #[test]
+    fn a_changing_sea_slews_and_arrives() {
+        let mut streaming = SeaBed::new(RATE, 5);
+        let mut quiet = vec![0.0_f32; RATE as usize];
+        streaming.render_mono(sea(0.2, 0.0), &mut quiet);
+
+        // One buffer of the new state, then a second: the first holds the
+        // slew, the second is the state itself.
+        let mut slew = vec![0.0_f32; RATE as usize / 2];
+        streaming.render_mono(sea(6.1, 0.2), &mut slew);
+        let mut settled = vec![0.0_f32; RATE as usize];
+        streaming.render_mono(sea(6.1, 0.2), &mut settled);
+
+        let step = slew.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0_f32, f32::max);
+        let inside = quiet
+            .windows(2)
+            .chain(settled.windows(2))
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            step <= inside,
+            "the level change jumped harder than the sea itself moves: {step} against {inside}"
+        );
+
+        let reference = measure(&bed(sea(6.1, 0.2), 1.0, RATE, 5), RATE);
+        let arrived = measure(&settled, RATE);
+        assert!(
+            (arrived.rms - reference.rms).abs() < reference.rms * 0.05,
+            "the smoothed level never reached the sea it was given: rms {} against {}",
+            arrived.rms,
+            reference.rms
+        );
+    }
+
+    /// **The mix, not the bed** — [`HEADROOM`] is a statistical bound on the
+    /// sea *alone*, and the mixer sums the sea with the weather.
+    ///
+    /// Measured at the worst legal pair — the top rung of [`HS_FULL`] with a
+    /// `breaking` fraction well past anything the FFT sea reaches, under rain
+    /// at and beyond `rain::FULL_RATE`, thirty seconds at 48 kHz:
+    ///
+    ///     rain rms 0.1898 peak 0.7802   sea rms 0.1622 peak 0.6883
+    ///     mix  rms 0.2496 peak 1.2905   samples past full scale: 105 of 2,880,000
+    ///
+    /// **So the sum does briefly exceed full scale, and this test says so
+    /// rather than hiding it.** 0.0036% of samples, isolated and single —
+    /// two independent Gaussian beds, each inside its own trim, whose tails
+    /// occasionally land together. There is deliberately no master limiter:
+    /// one would change what every existing rain scene renders, and a scene
+    /// with no water sounding byte for byte as it did is the acceptance test
+    /// this feature was built against. What is asserted instead is that the
+    /// overshoot stays vanishingly rare, which fails the moment either bed's
+    /// level grows.
+    ///
+    /// Rain saturates at `rain::FULL_RATE`, so 12 and 40 mm/h measure
+    /// identically; the loop runs both to keep that visible.
+    #[test]
+    fn the_sea_and_the_rain_together_barely_touch_full_scale() {
+        let seconds = 30.0;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let frames = (RATE as f32 * seconds) as usize;
+        for intensity in [12.0, 40.0] {
+            let mut out = vec![0.0_f32; frames * 2];
+            let mut rain = crate::rain::RainBed::new(RATE);
+            rain.render(
+                crate::rain::RainAudio { intensity, openness: 1.0, volume: 1.0 },
+                &mut out,
+            );
+            SeaBed::new(RATE, SEED).render(
+                SeaState { hs: HS_FULL, breaking: 0.2, wind: WIND_FULL },
+                &mut out,
+            );
+            let m = measure(&out, RATE);
+            #[allow(clippy::cast_precision_loss)]
+            let over = out.iter().filter(|s| s.abs() > 1.0).count() as f64 / out.len() as f64;
+            assert!(
+                over < 0.0001,
+                "{intensity} mm/h over the heaviest sea puts {:.4}% of samples past full scale",
+                over * 100.0
+            );
+            assert!(
+                m.peak < 1.5,
+                "{intensity} mm/h over the heaviest sea peaks at {}, which is a level error \
+                 rather than a coincident tail",
+                m.peak
+            );
         }
     }
 

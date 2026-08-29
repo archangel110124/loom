@@ -185,6 +185,49 @@ pub(crate) fn water_probe(
     })
 }
 
+/// The sea state the audio bed is a function of — **read off the water, never
+/// re-derived from it**.
+///
+/// Every number here is one the simulation already computed this tick, for the
+/// reason `loom_water`'s own header opens on: a second opinion about how rough
+/// the sea is would be free to disagree with the sea the boat floats on, and
+/// this project has shipped that defect before.
+///
+/// - **`hs`** is `Ocean::significant_height` — the cascade's own `4√m0` over
+///   its tiles — when there is a cascade. For a `gerstner` body there is none,
+///   and the answer is `spectrum::significant_height` of the wave set that body
+///   actually carries. That is the same pair of arms `loom water --at` reports
+///   `waves.significant_height` from, spelled once here and read there.
+/// - **`breaking`** is the foam field's mean coverage. The field is built for
+///   *any* water body and its crest deposit is driven by `mu_max` past
+///   `FOAM_CREST_BREAK`, so it answers "what fraction of this surface is
+///   breaking" for both wave models through one implementation — which is what
+///   makes the gerstner case need no invention. It carries hull wake with it,
+///   deliberately: a wake is white water and sounds like it.
+/// - **`wind`** is U10, the same figure the wave set was built from. It is a
+///   tone control in the bed and never a level.
+///
+/// A scene with no water never reaches this and gets [`SeaState::default`],
+/// which renders exact silence.
+pub(crate) fn sea_state(
+    body: Option<&WaterBody>,
+    sea: Option<&loom_water::ocean::Ocean>,
+    foam: Option<&loom_water::foam::FoamField>,
+    u10: f32,
+) -> loom_audio::sea::SeaState {
+    let Some(body) = body else {
+        return loom_audio::sea::SeaState::default();
+    };
+    loom_audio::sea::SeaState {
+        hs: sea.map_or_else(
+            || loom_water::spectrum::significant_height(&body.waves),
+            loom_water::ocean::Ocean::significant_height,
+        ),
+        breaking: foam.map_or(0.0, loom_water::foam::FoamField::mean),
+        wind: u10,
+    }
+}
+
 /// The FFT cascade a scene's water asks for, from the same wind the wave set is.
 ///
 /// **The one place a scene's `spectrum` body becomes an ocean**, and it sits beside

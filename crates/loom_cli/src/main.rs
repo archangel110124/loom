@@ -4853,6 +4853,21 @@ fn audio_cmd(path: &str, args: &[String]) -> (u8, String) {
             }))),
         },
     };
+    // **The sea is stepped state and there is no reading of it at tick zero** —
+    // see [`scene_sea_state`]. The default is two seconds rather than none for
+    // that reason, and it costs nothing on a scene with no water.
+    let ticks = match flag(args, "--sim") {
+        None => 120_u32,
+        Some(spec) => match spec.parse::<u32>() {
+            Ok(t) => t,
+            _ => return (2, json_line(&serde_json::json!({
+                "error": "invalid_argument", "value": spec,
+                "constraint": "--sim takes a whole number of ticks",
+                "hint": "Ticks are the fixed 60 Hz simulation step; `--sim 90` is 1.5 s. \
+                         It is how far the sea has been running when the bed reads it.",
+            }))),
+        },
+    };
     let openness = match flag(args, "--openness") {
         None => 1.0_f32,
         Some(spec) => match spec.parse::<f32>() {
@@ -4883,6 +4898,28 @@ fn audio_cmd(path: &str, args: &[String]) -> (u8, String) {
     };
 
     let intensity = weather::rain_of(&scene).map_or(0.0, |r| r.intensity);
+    // **The sea, or `None` for a scene with no water.** `None` and not a calm
+    // state: a scene with no `WaterBody` must render the same bytes it did
+    // before the sea had a sound, and the way to be sure of that is to add
+    // nothing to the buffer rather than to argue about what adding zero does.
+    // **`--sea hs,breaking,wind` renders a stated sea instead of the scene's
+    // own**, and it exists because the three constants `loom_audio::sea` flags
+    // as wanting a human's ear cannot be judged from the repository's scenes:
+    // no scene here reaches the top rung of `HS_FULL` with a breaking fraction
+    // to match, and auditioning a sea is the only way those get confirmed. It
+    // skips the run, because it is not asking the scene anything.
+    let stated = flag(args, "--sea").is_some();
+    let sea = match flag(args, "--sea") {
+        None => scene_sea_state(&scene, path, ticks),
+        Some(spec) => match parse_sea_state(&spec) {
+            Some(state) => Some(state),
+            None => return (2, json_line(&serde_json::json!({
+                "error": "invalid_argument", "value": spec,
+                "constraint": "--sea takes HS,BREAKING,WIND — metres, a fraction in [0, 1], m/s",
+                "hint": "`--sea 6.1,0.2,18` is the heaviest sea this engine builds.",
+            }))),
+        },
+    };
     const RATE: u32 = 48_000;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let frames = (RATE as f32 * seconds) as usize;
@@ -4899,6 +4936,12 @@ fn audio_cmd(path: &str, args: &[String]) -> (u8, String) {
         loom_audio::rain::RainAudio { intensity, openness, volume: 1.0 },
         &mut samples,
     );
+    // **After the rain and into the same buffer**, the order the mixer's own
+    // callback uses. One `SeaBed` for the whole span, never `sea::bed` per
+    // chunk — see its docs.
+    if let Some(state) = sea {
+        loom_audio::sea::SeaBed::new(RATE, loom_audio::sea::SEED).render(state, &mut samples);
+    }
     let measured = loom_audio::rain::measure(&samples, RATE);
 
     let mut written = serde_json::Value::Null;
@@ -4918,12 +4961,79 @@ fn audio_cmd(path: &str, args: &[String]) -> (u8, String) {
         "source": source,
         "intensity": intensity,
         "openness": openness,
+        // How far the sea had been running when its state was read. Not the
+        // same clock as `seconds`, which is the length of the render — and
+        // null under `--sea`, which states the sea instead of asking a run for
+        // it and therefore runs nothing.
+        "ticks": (!stated).then_some(ticks),
+        // The three numbers the sea bed is a function of, so a row of this
+        // output can be read without the scene beside it. Null for a scene
+        // with no water, which is the case that adds nothing to the buffer.
+        "sea": sea.map(|s| serde_json::json!({
+            "hs": s.hs, "breaking": s.breaking, "wind": s.wind,
+        })),
         "seconds": seconds,
         "rms": measured.rms,
         "peak": measured.peak,
         "tilt": measured.tilt,
         "out": written,
     })))
+}
+
+/// `HS,BREAKING,WIND` for `--sea`, all finite and `breaking` inside `[0, 1]`.
+fn parse_sea_state(spec: &str) -> Option<loom_audio::sea::SeaState> {
+    let parts: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse::<f32>().ok()).collect();
+    let [hs, breaking, wind] = parts[..] else { return None };
+    let ok = hs.is_finite() && wind.is_finite() && (0.0..=1.0).contains(&breaking);
+    ok.then_some(loom_audio::sea::SeaState { hs, breaking, wind })
+}
+
+/// The sea state a scene's water has reached after `ticks`, or `None` for a
+/// scene with no water at all.
+///
+/// **`None` and not a flat calm.** A scene with no `WaterBody` must render the
+/// same bytes it did before the sea had a sound, and the way to be certain of
+/// that is to add nothing to the buffer rather than to reason about what adding
+/// zero does to a float.
+///
+/// # Why this runs the simulation
+///
+/// Both numbers the bed needs are *stepped state*. The cascade is zero until
+/// `Ocean::evolve` fills it, and the foam field starts empty and is filled by
+/// `FoamField::step` — which is strided, so one tick refreshes an eighth of the
+/// domain. Reading either before the simulation has run is not a calm sea, it
+/// is the absence of a reading, and it would report every ocean in the
+/// repository as glass. That is the same reason `loom water --at` grew `--sim`:
+/// the wake grid it reported was a hard-coded zero.
+///
+/// **So this takes them off a run**, through the same `simulate_physics` that
+/// command uses, and never builds an ocean or a foam field of its own — there
+/// is one sea in a run and a second would be a second opinion about it.
+///
+/// `ponytail:` the wind handed to the bed is the scene's authored wind, not a
+/// mood rung's ramped one, so on a `weather_ramp` scene the *level* follows the
+/// ladder (it comes off the run's own wave set) and the hiss *colour* does not.
+/// Wind is a tone control in `loom_audio::sea` and moves nothing when the sea
+/// is not breaking; the fix is a wind accessor on `Runner`, when something
+/// needs one.
+fn scene_sea_state(
+    scene: &Scene,
+    path: &str,
+    ticks: u32,
+) -> Option<loom_audio::sea::SeaState> {
+    let mut world = World::from_scene(scene);
+    // Checked before the run, so a scene with no water pays nothing — which is
+    // every scene that had this command's old behaviour.
+    world.water()?;
+    let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+    let (_, _, _, _, warmed) = simulate_physics(&mut world, base, ticks, None);
+    let runner = warmed?;
+    Some(weather::sea_state(
+        runner.water(),
+        runner.sea(),
+        runner.foam(),
+        weather::wind_of_world(&world).mean_speed_at(10.0),
+    ))
 }
 
 fn water(path: &str, args: &[String]) -> (u8, String) {

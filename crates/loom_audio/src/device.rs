@@ -53,6 +53,13 @@ pub struct Playing {
     /// taken it is gone, so this costs one `Option` check per callback
     /// thereafter.
     pub rain_recording: Option<(Vec<f32>, u32, u16)>,
+    /// The sea, which is not a voice either and for the same reasons.
+    ///
+    /// **[`crate::sea::SeaState::default`] is a flat calm and renders exact
+    /// zeros**, so a scene with no `WaterBody` never sets this and the bed adds
+    /// nothing at all — which is what keeps every scene that has no sea
+    /// sounding byte for byte as it did before there was one.
+    pub sea: crate::sea::SeaState,
 }
 
 /// An open output stream.
@@ -100,6 +107,11 @@ impl Audio {
         // has any business touching it. What the game changes is the
         // *parameters*, which go through `Playing`.
         let mut bed = crate::rain::RainBed::new(sample_rate);
+        // The sea, on the same thread and under the same rule. One `SeaBed`
+        // held across every callback, never `sea::bed` per buffer: that
+        // function restarts its filters and its cursor on each call, so a
+        // buffer's worth of it is a click at every join.
+        let mut sea = crate::sea::SeaBed::new(sample_rate, crate::sea::SEED);
         let stream = device
             .build_output_stream(
                 config.config(),
@@ -125,6 +137,14 @@ impl Audio {
                             // never resets, so the texture has no loop point —
                             // it is generated, not played back.
                             bed.render(playing.rain, &mut stereo);
+                            // **After the rain, in that fixed order**, adding
+                            // into the same buffer. Neither bed is limited and
+                            // the sum can touch full scale on the heaviest
+                            // legal weather — `sea::tests`'
+                            // `the_sea_and_the_rain_together_barely_touch_full_scale`
+                            // measures exactly how rarely, and says why there
+                            // is no master trim here.
+                            sea.render(playing.sea, &mut stereo);
                         }
                         _ => stereo.fill(0.0),
                     }
@@ -243,6 +263,17 @@ impl Audio {
         }
     }
 
+    /// Set the sea the ambient bed renders.
+    ///
+    /// The same shape as [`Self::set_rain`] and cheap for the same reason: it
+    /// moves three floats under the lock the voices already use, and the bed
+    /// smooths them, so a sea that jumps between ticks is still a fade.
+    pub fn set_sea(&self, sea: crate::sea::SeaState) {
+        if let Ok(mut playing) = self.playing.lock() {
+            playing.sea = sea;
+        }
+    }
+
     /// Stop everything, for Stop in the editor.
     pub fn silence(&self) {
         if let Ok(mut playing) = self.playing.lock() {
@@ -251,6 +282,8 @@ impl Audio {
             // raining through it would be the one sound the editor could not
             // stop.
             playing.rain = crate::rain::RainAudio::default();
+            // And the sea with it, for the same reason.
+            playing.sea = crate::sea::SeaState::default();
         }
     }
 }
