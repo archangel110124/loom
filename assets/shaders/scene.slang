@@ -5671,7 +5671,39 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
             push.environment[0].weather.z - tau,
             float3(0.0, 0.0, 0.0),
             float3(0.0, 0.0, 0.0));
-        trail = max(trail, decay * smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, past.mu_max));
+        // **The same wander the fragment shader applies — SEA-REBUILD §4.3.**
+        // The trail is the DOMINANT coverage term on a Gerstner sea: rendering
+        // `float4(instant, field, in.foamHist, 1)` on `whitecaps --sim 400`
+        // comes back almost entirely blue. Leaving it on the flat threshold
+        // would have fixed the silhouette on the two spectrum scenes and left
+        // the reference whitecap field exactly as polygonal as it was — and a
+        // constant this term pays is a constant the whole scene pays.
+        //
+        // At the tap's own place and time, because that is where and when the
+        // crest that left this foam broke.
+        //
+        // **The patch octave only, and the cell octave is not here at all.**
+        // That octave exists to bend a boundary *inside* one mesh cell, which
+        // is a question only a fragment can ask: it is a 0.71 m lattice and
+        // this is evaluated at a 0.5 m vertex spacing, so at vertex rate it is
+        // under Nyquist and would be per-vertex noise rather than a field.
+        // Taking it at its own mean instead was built first and is worse than
+        // useless — a flat +0.0175 on the threshold, wandering nothing and
+        // costing coverage everywhere. `cargo xtask ablate`'s
+        // `whitecaps/water_foam` row is what measured it: **14.889% with that
+        // constant against a 15.0% floor, which is the gate it failed.**
+        //
+        // Gated on the base threshold for the fragment shader's reason: the
+        // wander only ever raises, so a tap under it contributes nothing under
+        // any wander, and the tap is then ten `loom_value_noise` calls a vertex
+        // that never had to happen.
+        if (past.mu_max > WATER_FOAM_WET) {
+            float tapUp = waterFoamBreakPatch(
+                xz - trailWind * tau, push.environment[0].weather.z - tau);
+            trail = max(trail, decay * smoothstep(WATER_FOAM_WET + tapUp,
+                                                  WATER_FOAM_BREAK + tapUp,
+                                                  past.mu_max));
+        }
     }
     }
     out.foamHist = trail;
@@ -5942,6 +5974,137 @@ static const float WATER_CONTACT_INTRUDE = 0.5;
 
 static const float WATER_FOAM_WET = 0.22;
 static const float WATER_FOAM_BREAK = 0.33;
+
+/// **The breaking threshold wanders — SEA-REBUILD §4.3.**
+///
+/// `loom_grass::coverage` and `groundLayerWeight` above both learned this: a
+/// cutoff on a smooth quantity — at any threshold, softened by any amount —
+/// draws its boundary along a clean curve, and a clean curve is the synthetic
+/// tell. Here it is worse than a curve. `in.breakMu` is a **varying**, written
+/// per vertex as `surfaceAt.mu_max`, so a constant threshold on it has
+/// straight iso-contours *inside every triangle*; the boundary is not a smooth
+/// curve, it is the water mesh's own polygons. That is the reported "renders
+/// weird": rafts with corners, reading as torn paper.
+///
+/// **The wander only ever RAISES the pair, and that is not negotiable.** Both
+/// numbers move together by the same non-negative amount, so a sea whose
+/// `mu_max` never reaches `WATER_FOAM_WET` still foams *nowhere* — which is
+/// what every foam gate and every `water@x,z.foam` assertion in this
+/// repository rests on. `loom_grass`'s wander only ever subtracts for exactly
+/// this reason, and CLAUDE.md records that a symmetric version there was
+/// caught by an existing test within a minute. `the_gentle_sea_still_foams_nowhere`
+/// is this one's.
+///
+/// **Two octaves, and the measurement is what says two.** The near field of
+/// `ocean_fft_boat --yaw 15 --pitch 55` is entirely inside clipmap level 0 —
+/// rendered the Chebyshev bands and the whole lower 80% of the frame is under
+/// 32 m — so a triangle edge there is `WATER_CELL` = **0.5 m**, about 8-25
+/// pixels at 1000x1000 (`foot` measured at 0.02-0.06 m/px over the same
+/// frame). §4.3 asks for a wander "at tens of metres so a crest breaks in
+/// patches", and at 28.6 m a cell sees 1.7% of that octave's swing: it moves
+/// whole rafts around and cannot bend a single edge. The second octave is
+/// sized at the cell instead. One octave cannot do both jobs and the factor
+/// between them is about twenty.
+///
+/// **The amplitudes are sized against the gap, which is 0.11, and against the
+/// measured slope of `breakMu`.** Rendering
+/// `|grad(in.breakMu)| / foot` in bands over the transition band gives, along
+/// the contour (area weighted by the gradient, which is what a contour is),
+/// **about 0.35 in `mu_max` units per metre**. So a threshold offset of `A`
+/// slides the boundary `A / 0.35` metres, and the cell octave's swing across
+/// one 0.5 m cell is what bends the edge rather than translating it.
+static const float WATER_FOAM_PATCH_SCALE = 0.035;
+/// The patch octave's peak, and it is **rectified** — see
+/// `waterFoamBreakPatch`. Half the sea is left at the documented threshold
+/// exactly and the other half is progressively suppressed, which is both what
+/// "a crest breaks in patches" means and what keeps the coverage. The raw
+/// octave was built first and is a uniform tax dressed as patchiness: it raises
+/// the threshold *everywhere* by a mean of half its amplitude, and
+/// `cargo xtask ablate`'s `whitecaps/water_foam` row fell from **21.422% to
+/// 17.166%** against a 15.0% floor for it. Rectified at half this peak the row
+/// is **20.205%**, and doubling the peak to this costs 0.075 of a point more
+/// (20.130%) because the untouched half is what the row is made of. 0.100 and
+/// 0.150 were measured too — 20.014% and 19.897%, with coverage renders
+/// indistinguishable from this one — so this is the knee.
+static const float WATER_FOAM_PATCH = 0.060;
+/// A slice of the noise volume no other term uses. The z axis is hashed like
+/// the other two, so a lattice apart is a different field.
+static const float WATER_FOAM_PATCH_SLICE = 21.3;
+/// Cycles per second the patch field drifts **through** its own z axis.
+///
+/// §4.3 asks for the wander to drift with the wave. It is done as evolution
+/// rather than as translation because the CPU has to reproduce this exactly —
+/// `WaterProbe::foam_at` answers `water@x,z.foam` and a wander on one side
+/// only is two opinions about the sea — and the CPU probe has the simulated
+/// clock and does **not** have the shader's `push.environment[0].wind`. Time
+/// on z is the drift both sides can spell. 0.05 is a patch field that turns
+/// over in about twenty seconds, against a foam half-life of eight.
+static const float WATER_FOAM_PATCH_DRIFT = 0.05;
+/// The cell octave: the one that is allowed to bend a polygon edge, so its
+/// lattice is sized at the mesh cell rather than at the sea.
+///
+/// 1.4 cycles/m is a 0.71 m lattice against a 0.5 m cell, so a cell spans most
+/// of one period. **Isotropic and unstretched**, for `WATER_FOAM_RAFT_SCALE`'s
+/// reason: a stretched threshold field combs the boundary into parallel
+/// ribbons.
+static const float WATER_FOAM_CELL_SCALE = 1.4;
+/// Its amplitude, and **it is not rectified**, unlike the patch octave. This
+/// one has to vary *everywhere* — a flat half of it is a flat half of the sea
+/// with the straight edges still in it — so it pays its mean, and what it buys
+/// is the acceptance test. Judged on the coverage mask alone
+/// (`return float4(foam.xxx, 1)` on `ocean_fft_boat --sim 500 --yaw 15
+/// --pitch 55`): at 0.035 the flat-topped polygon at the raft's crest is
+/// broken but still readable, at this it is gone and the rim is torn, at 0.075
+/// the raft is visibly thinner for very little more tearing. Beside it,
+/// `cargo xtask ablate`'s row and worst-channel `loom salt` on the reported
+/// shot:
+///
+///     0.035   ablate 20.130   salt 9,072
+///     0.055   ablate 19.708   salt 8,922      <- shipped
+///     0.075   ablate 19.347   salt 8,812
+static const float WATER_FOAM_CELL = 0.055;
+/// Its own slice of the noise volume, a lattice clear of every other term's.
+static const float WATER_FOAM_CELL_SLICE = 27.9;
+
+/// How much this point's breaking threshold is raised, in `mu_max` units.
+/// **Never negative** — see `WATER_FOAM_PATCH`.
+///
+/// Sampled at the **base** XZ, not at `worldPos.xz`. The displaced position is
+/// what the lace and the raft ride, because they are a texture on the drawn
+/// surface; this is a threshold the CPU has to agree with at a point, and the
+/// CPU knows the base grid and not the displacement it will be drawn at.
+///
+/// `wLace` is `waterFoamWeights().x`, and the cell octave rides it exactly as
+/// `waterFoamRaft` does: at 1.4 cycles/m isotropic it is well under the lace's
+/// `0.55 x 6` = 3.3, so that weight bounds it with room to spare. It retires
+/// toward **0.5, its own mean**, never toward zero — fading a term to zero
+/// instead of to its own mean is the sign error §1 of the band-limit report
+/// cost 72% of that gap to, and here zero would mean the far field quietly
+/// getting its foam back.
+/// The patch half of the wander on its own: §4.3's "tens of metres, so a crest
+/// breaks in patches", with none of the cell octave in it.
+///
+/// **Rectified about the noise's own mean.** `saturate((n - 0.5) * 2)` leaves
+/// the lower half of the field at exactly zero — those crests break on the
+/// documented threshold, unchanged — and ramps the upper half to the full
+/// amplitude. That is the shape "in patches" actually asks for; the raw octave
+/// instead raises the threshold everywhere by a mean of `WATER_FOAM_PATCH / 2`,
+/// which is a flat tax on foam coverage that happens to vary. The measurement
+/// is in `WATER_FOAM_PATCH`.
+float waterFoamBreakPatch(float2 xz, float seconds) {
+    float n = loom_value_noise(
+        float3(xz * WATER_FOAM_PATCH_SCALE,
+               WATER_FOAM_PATCH_SLICE + seconds * WATER_FOAM_PATCH_DRIFT));
+    return WATER_FOAM_PATCH * saturate((n - 0.5) * 2.0);
+}
+
+float waterFoamBreakWander(float2 xz, float seconds, float wLace) {
+    float cell = lerp(0.5,
+                      loom_value_noise(float3(xz * WATER_FOAM_CELL_SCALE,
+                                              WATER_FOAM_CELL_SLICE)),
+                      wLace);
+    return waterFoamBreakPatch(xz, seconds) + WATER_FOAM_CELL * cell;
+}
 
 /// The `LOOM_ABLATE` mask, as `loom_render::ablate` filled it.
 ///
@@ -7695,7 +7858,26 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // appeared and vanished with the ring instead of being left behind by it.
     // The mechanism moves to the foam field's hull and impact deposits, which
     // remember. The ring's slope still shapes the normal above.
-    float instant = smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, in.breakMu);
+    // **The threshold wanders — see `WATER_FOAM_PATCH`.** Both ends by the same
+    // non-negative amount, so the gate keeps its meaning and a gentle sea still
+    // foams nowhere.
+    //
+    // **Gated on the unwandered floor, which is exact rather than an
+    // approximation.** The wander only ever raises the pair, so a point whose
+    // `mu_max` has not reached the *base* `WATER_FOAM_WET` cannot foam under
+    // any wander this can return — the same guarantee the gentle-sea property
+    // rests on, spent here as a skip. Two `loom_value_noise` taps are not
+    // cheap: unconditional they cost **+0.181 ms** of the water pass on
+    // `ocean_fft_boat` at 1920x1080 (0.256 -> 0.437, min of 80 frames), which
+    // is as much as evaluating the whole cascade per fragment would. Past 0.22
+    // is 9.9% of a wind sea's samples (`WaterSample::mu_max`'s own table), so
+    // most quads skip both.
+    float breakUp = 0.0;
+    float instant = 0.0;
+    if (in.breakMu > WATER_FOAM_WET) {
+        breakUp = waterFoamBreakWander(in.baseXZ, push.environment[0].weather.z, fw.x);
+        instant = smoothstep(WATER_FOAM_WET + breakUp, WATER_FOAM_BREAK + breakUp, in.breakMu);
+    }
     // **The advected field, and it is a third floor rather than a second
     // opinion** — ADR 0055. The trail remembers what a *wave* did, because a
     // wave is the only thing whose past is a closed form in `(x, t)`; this
@@ -7789,7 +7971,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
 
     foam = max(foam, shoreFoam * SWASH_OPACITY);
 
-    float broken = smoothstep(WATER_FOAM_BREAK, 0.50, in.breakMu);
+    float broken = smoothstep(WATER_FOAM_BREAK + breakUp, 0.50 + breakUp, in.breakMu);
     foam = max(foam, broken * smoothstep(fnoise * 0.4, fnoise * 0.4 + 0.6, broken));
 
     // **A material swap, not white paint.** Foam is opaque packed bubbles: it

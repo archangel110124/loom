@@ -126,12 +126,8 @@ impl WaterProbe {
     /// the instantaneous term that question is answered.
     pub fn foam_at(&self, xz: [f32; 2], seconds: f32) -> f32 {
         let mu = self.at(xz, seconds).mu_max;
-        // `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, mu)`, the shader's two
-        // constants spelled again next to the branch that uses them.
-        let t = ((mu - 0.22) / (0.33 - 0.22)).clamp(0.0, 1.0);
-        let instant = t * t * 2.0_f32.mul_add(-t, 3.0);
         let field = self.foam.as_ref().map_or(0.0, |f| f.at(xz[0], xz[1]));
-        instant.max(field)
+        instant_foam(mu, xz, seconds).max(field)
     }
 
     /// The surface at a world XZ, at the tick the run ended on.
@@ -438,6 +434,68 @@ pub(crate) fn water_of(world: &World, wind: &Wind) -> Option<WaterBody> {
     Some(body)
 }
 
+/// **The breaking threshold's wander, the CPU half — SEA-REBUILD §4.3.**
+///
+/// `waterFoamBreakWander` in `assets/shaders/scene.slang`, spelled again here
+/// because a shader cannot read a Rust constant and this is not a
+/// [`loom_field`] expression tree — the same arrangement `groundLayerWeight`
+/// and `WATER_FOAM_WET` itself already live under. **The constants below and
+/// the shader's must move together**, and
+/// `the_gentle_sea_still_foams_nowhere` is what fails when only one of them
+/// does: `water@x,z.foam` answers this, `loom sim --assert` reads that, and a
+/// wander on one side only is two opinions about the same sea.
+///
+/// The noise is `loom_field::noise::value` — the frozen integer-lattice hash
+/// whose Slang half is compared to it **exactly** by the agreement test, which
+/// is what makes writing this twice safe at all.
+///
+/// **Only ever positive.** Both foam thresholds move up by it together, so a
+/// sea whose `mu_max` never reaches `WATER_FOAM_WET` still foams nowhere.
+///
+/// The cell octave is taken at full weight: the shader retires it on the
+/// fragment's screen footprint and a point query has none, so this is the
+/// near-field answer, which is what "the surface at this point" means.
+fn break_wander(xz: [f32; 2], seconds: f32) -> f32 {
+    /// `WATER_FOAM_PATCH_SCALE`.
+    const PATCH_SCALE: f32 = 0.035;
+    /// `WATER_FOAM_PATCH`.
+    const PATCH: f32 = 0.060;
+    /// `WATER_FOAM_PATCH_SLICE`.
+    const PATCH_SLICE: f32 = 21.3;
+    /// `WATER_FOAM_PATCH_DRIFT`.
+    const PATCH_DRIFT: f32 = 0.05;
+    /// `WATER_FOAM_CELL_SCALE`.
+    const CELL_SCALE: f32 = 1.4;
+    /// `WATER_FOAM_CELL`.
+    const CELL: f32 = 0.055;
+    /// `WATER_FOAM_CELL_SLICE`.
+    const CELL_SLICE: f32 = 27.9;
+
+    let patch = loom_field::noise::value([
+        xz[0] * PATCH_SCALE,
+        xz[1] * PATCH_SCALE,
+        PATCH_DRIFT.mul_add(seconds, PATCH_SLICE),
+    ]);
+    // `waterFoamBreakPatch`'s rectification: the lower half of the octave is
+    // exactly zero, so half the sea breaks on the documented threshold.
+    let patch = ((patch - 0.5) * 2.0).clamp(0.0, 1.0);
+    let cell = loom_field::noise::value([xz[0] * CELL_SCALE, xz[1] * CELL_SCALE, CELL_SLICE]);
+    CELL.mul_add(cell, PATCH * patch)
+}
+
+/// The whitecap coverage a crest of this steepness is drawn with right now.
+///
+/// `smoothstep(WATER_FOAM_WET + w, WATER_FOAM_BREAK + w, mu)` — the water
+/// fragment shader's two constants and [`break_wander`]'s `w`, spelled once
+/// here for every caller in this crate rather than once per caller.
+pub(crate) fn instant_foam(mu_max: f32, xz: [f32; 2], seconds: f32) -> f32 {
+    let wander = break_wander(xz, seconds);
+    let lo = 0.22 + wander;
+    let hi = 0.33 + wander;
+    let t = ((mu_max - lo) / (hi - lo)).clamp(0.0, 1.0);
+    t * t * 2.0_f32.mul_add(-t, 3.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,5 +576,60 @@ mod tests {
 
         assert!(spread(&still) < 1e-3, "the calm field is not uniform");
         assert!(spread(&swirling) > 0.1, "turbulence does not vary in space");
+    }
+
+    /// **A sea too gentle to break still foams nowhere — SEA-REBUILD §4.3's
+    /// guard rail, asserted.**
+    ///
+    /// `break_wander` raises both foam thresholds together and is never
+    /// negative, so `WATER_FOAM_WET` keeps the meaning every `water@x,z.foam`
+    /// assertion in this repository rests on: below it there is no foam, at any
+    /// position, at any time. `loom_grass::coverage` makes the same promise the
+    /// other way up and CLAUDE.md records that a symmetric version there was
+    /// caught by an existing test within a minute; this is that test for the
+    /// sea.
+    ///
+    /// **Seen to fail before it passed.** Centring the wander on its own mean
+    /// — `PATCH * (patch - 0.5) + CELL * (cell - 0.5)`, the symmetric version —
+    /// makes it reach **-0.0303**, which trips the first assertion; with that
+    /// one lifted it reports foam under the gate on **79,803 of 333,396** grid
+    /// points. A test that has not been watched fail is not a test.
+    #[test]
+    fn the_gentle_sea_still_foams_nowhere() {
+        // A lattice deliberately coprime with nothing in particular but wide
+        // enough to cross many periods of both octaves: the patch octave is
+        // 28.6 m and the cell octave 0.71 m, so 3.1 m steps over 900 m walk
+        // through 31 patches and land on a different phase of the cell octave
+        // every time.
+        let mut worst = f32::INFINITY;
+        let mut foaming = 0_u32;
+        let mut points = 0_u32;
+        for it in 0_i16..21 {
+            let seconds = f32::from(it) * 3.7;
+            for iz in 0_i16..63 {
+                for ix in 0_i16..63 {
+                    let xz = [f32::from(ix) * 3.1 - 97.0, f32::from(iz) * 3.1 - 97.0];
+                    worst = worst.min(break_wander(xz, seconds));
+                    // Just under the gate. `WATER_FOAM_WET` itself is the
+                    // smoothstep's own zero and would pass on a symmetric
+                    // wander too at exactly that value.
+                    for mu in [0.0, 0.1, 0.219, 0.22] {
+                        points += 1;
+                        if instant_foam(mu, xz, seconds) > 0.0 {
+                            foaming += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            worst >= 0.0,
+            "the wander went negative ({worst}), so it can LOWER the breaking \
+             threshold and a sea too gentle to break would foam"
+        );
+        assert_eq!(
+            foaming, 0,
+            "{foaming} of {points} points under WATER_FOAM_WET drew foam"
+        );
     }
 }

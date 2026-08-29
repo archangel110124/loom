@@ -4237,16 +4237,6 @@ fn wavelet_upload(field: &loom_water::wavelet::WaveletField) -> WaveletUpload {
         .collect()
 }
 
-/// The whitecap coverage a crest of this steepness is drawn with right now.
-///
-/// `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, mu)` — the water fragment
-/// shader's two constants, spelled once here for the two callers in this file
-/// rather than twice.
-fn instant_foam(mu_max: f32) -> f32 {
-    let t = ((mu_max - 0.22) / (0.33 - 0.22)).clamp(0.0, 1.0);
-    t * t * 2.0_f32.mul_add(-t, 3.0)
-}
-
 /// A runner's foam field, as a free function so `loom water --at` can pass it
 /// to `Option::and_then` without naming the type twice.
 fn loom_cli_foam(runner: &play::Runner) -> Option<&loom_water::foam::FoamField> {
@@ -5262,7 +5252,7 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
             // the instantaneous whitecap coverage. `deposited` is the field's
             // half and is zero at `--sim 0`, because a field starts empty.
             "foam": {
-                "coverage": instant_foam(sample.mu_max).max(deposited),
+                "coverage": weather::instant_foam(sample.mu_max, at, seconds).max(deposited),
                 "field": deposited,
                 "mu_max": sample.mu_max,
             },
@@ -8599,8 +8589,8 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
     fn the_fold_distribution_the_sss_mask_is_calibrated_against() {
         const SIDE: u16 = 401;
         /// `WATER_FOLD_REF` in `assets/shaders/scene.slang`. Mirrored the way
-        /// `instant_foam` mirrors the foam thresholds: the shader is the one
-        /// that ships it, and this is what says the sea still suits it.
+        /// `weather::instant_foam` mirrors the foam thresholds: the shader is
+        /// the one that ships it, and this is what says the sea still suits it.
         const FOLD_REF: f32 = 0.35;
 
         // The instant `--sim 400` reports, which is the instant the
