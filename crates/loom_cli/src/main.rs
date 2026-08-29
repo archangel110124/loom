@@ -3380,6 +3380,14 @@ fn add_water(
     // because this function does not know where the camera is —
     // `submerge_eye` stamps it once the shot is framed.
     env.water = [body.surface_height, 0.0, 1.0, 0.0];
+    // **The sea's colour, as the two coefficients it is derived from.** Absent
+    // from the file, `WaterOptics::default` is pure water — the same numbers
+    // `EnvironmentData::default` already holds and the shader used to compile
+    // in — so this assignment is a no-op for every scene that authors nothing.
+    let [ar, ag, ab] = body.optics.attenuation;
+    let [br, bg, bb] = body.optics.backscatter;
+    env.water_attenuation = [ar, ag, ab, 0.0];
+    env.water_backscatter = [br, bg, bb, 0.0];
     env.attenuation_depth = body.waves.attenuation_depth;
     // Truncated at the cap the shader's loop is bounded by, which is also the
     // schema's `maxItems`, so this only bites on a hand-built body.

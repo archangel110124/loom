@@ -1493,6 +1493,121 @@ fn check_swell(body: &components::WaterBody, node: &str) -> Vec<SceneError> {
     errors
 }
 
+/// The optical rules — the four ways an authored `optics` table cannot be meant.
+///
+/// **A nested table gets no schema check at all**, for the reason `check_swell`
+/// spells out: the registry resolves one level and descends no further, so an
+/// array of three floats inside `WaterBody.optics` is never range-checked. The
+/// `schemars` attributes on [`components::WaterOptics`] would be documentation
+/// even if there were any; these are the enforcement.
+///
+/// Each refusal replaces a symptom that reads as an engine fault rather than as
+/// a number the author typed:
+///
+/// - a negative attenuation makes `exp(-c·d)` *grow* with depth, so the sea
+///   turns into a light source and the deeper the water the brighter it gets;
+/// - a zero attenuation in every channel divides `R∞`'s denominator down to the
+///   backscatter alone, which is 0.33 — a white sea — and a zero in one channel
+///   alone is that channel blown out with nothing to blame;
+/// - a negative backscatter is a negative reflectance, which reaches the frame
+///   as a colour below black and is clamped into a hue nobody authored;
+/// - a backscatter at or above the attenuation in *every* channel is water that
+///   sends back more than it takes out. `R∞` saturates toward 0.33 flat across
+///   the spectrum, so the sea goes pale grey — and the author who reached for
+///   turbidity gets less colour rather than more, which is exactly backwards
+///   from what they were doing.
+///
+/// The "every channel" wording on the last one is deliberate and not a
+/// weakening: a *single* channel where `b_b` approaches `c` is real water. It
+/// is what red does in a turbid coastal sea, and refusing it would refuse
+/// Jerlov 9C.
+fn check_water_optics(body: &components::WaterBody, node: &str) -> Vec<SceneError> {
+    let optics = body.optics;
+    let mut errors = Vec::new();
+    let mut refuse = |code: &str, field: &str, value: Value, constraint: &str, hint: String| {
+        let mut err = SceneError::new(code, node);
+        err.field = format!("WaterBody.optics.{field}");
+        err.value = value;
+        err.constraint = constraint.to_owned();
+        err.hint = Some(hint);
+        errors.push(err);
+    };
+
+    let channels = ["red (650 nm)", "green (550 nm)", "blue (450 nm)"];
+
+    for (i, c) in optics.attenuation.iter().copied().enumerate() {
+        // `!c.is_finite()` first, because `nan` is a spelling TOML accepts and
+        // `nan <= 0.0` is false — the one value that would slip past this.
+        if !c.is_finite() || c <= 0.0 {
+            refuse(
+                "water_attenuation_not_positive",
+                "attenuation",
+                Value::from(Vec::from(optics.attenuation)),
+                "every channel strictly greater than 0",
+                format!(
+                    "the {} channel is {c}. Beer-Lambert reads this as \
+                     `exp(-{c}·metres)`, so at zero the water never darkens \
+                     and below zero it brightens with depth; and it is `R∞`'s \
+                     denominator, where zero is infinite reflectance. The \
+                     clearest water that physically exists is pure water at \
+                     [0.341, 0.058, 0.013] per metre — nothing natural is \
+                     below that. See `WaterOptics` for the Jerlov table, and \
+                     note the field is `K_d`, not the beam coefficient.",
+                    channels[i]
+                ),
+            );
+        }
+    }
+
+    for (i, bb) in optics.backscatter.iter().copied().enumerate() {
+        if bb < 0.0 {
+            refuse(
+                "water_backscatter_negative",
+                "backscatter",
+                Value::from(Vec::from(optics.backscatter)),
+                "every channel greater than or equal to 0",
+                format!(
+                    "the {} channel is {bb}. Backscatter is the fraction of \
+                     light sent back up out of the column, so a negative one \
+                     is a negative reflectance. Pure water is \
+                     [0.00035, 0.00075, 0.00175]; raising it toward \
+                     [0.0138, 0.0187, 0.0269] is Jerlov III, which is where \
+                     the sea reads teal. Zero is legal and is a body with no \
+                     colour of its own.",
+                    channels[i]
+                ),
+            );
+        }
+    }
+
+    if optics
+        .backscatter
+        .iter()
+        .zip(optics.attenuation)
+        .all(|(bb, c)| *bb >= c)
+    {
+        refuse(
+            "water_backscatters_more_than_it_attenuates",
+            "backscatter",
+            Value::from(Vec::from(optics.backscatter)),
+            "below `attenuation` in at least one channel",
+            format!(
+                "backscatter is {:?} against an attenuation of {:?}, so every \
+                 channel sends back at least as much as the column removes. \
+                 `R∞ = 0.33·b_b/(c + b_b)` then saturates toward 0.33 in all \
+                 three, which is a pale grey sea rather than a vivid one — \
+                 raising backscatter past this point *removes* colour. Real \
+                 water keeps `b_b` well under its attenuation; the most turbid \
+                 Jerlov type in the `WaterOptics` table is at 15% of it in \
+                 blue and 4% in red.",
+                optics.backscatter, optics.attenuation
+            ),
+        );
+    }
+
+    errors
+}
+
 /// The water rules a schema range cannot express, because each one relates
 /// several fields to each other.
 ///
@@ -1543,6 +1658,7 @@ fn check_water(
     let mut errors = Vec::new();
     errors.extend(check_tier(&body, node, has_gameplay, cinematic_bodies));
     errors.extend(check_swell(&body, node));
+    errors.extend(check_water_optics(&body, node));
     let count = body.waves.waves.len();
 
     // **Two seas authored in one component** — ADR 0076. The spectrum builds

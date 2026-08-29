@@ -1813,6 +1813,13 @@ pub struct WaterBody {
     /// is water that goes nowhere, which is every scene authored before this
     /// existed and every ocean and lake authored after it.
     pub flow: Option<FlowField>,
+    /// What colour this water is, as the two coefficients that decide it.
+    ///
+    /// **Absent is the sea every scene in this repository already has** — see
+    /// [`WaterOptics`], whose defaults are the pure-water numbers the shader
+    /// held as constants before the field existed. Nothing moves until a scene
+    /// types a table.
+    pub optics: WaterOptics,
     /// How much spray a breaking crest throws, as a multiplier. `0` is none.
     ///
     /// **Zero by default, and that is the whole compatibility story**: spray
@@ -2028,6 +2035,9 @@ impl Default for WaterBody {
             density: 1025.0,
             drag: 1.0,
             flow: None,
+            // Pure water: the clearest sea that physically exists, and the two
+            // constants `scene.slang` held before this was authorable.
+            optics: WaterOptics::default(),
             // No spray, so a sea authored before W5 throws none.
             spray: 0.0,
             // ADR 0053 §1: default off, and that is not politeness. Every
@@ -2038,6 +2048,123 @@ impl Default for WaterBody {
             fill: 0.5,
             acknowledge_nondeterminism: false,
             material: AssetRef::default(),
+        }
+    }
+}
+
+/// What a body of water is made of, optically — the two coefficient sets the
+/// sea's colour is *derived* from rather than a colour to author.
+///
+/// **The sea is navy because of `backscatter` and nothing else.** What a viewer
+/// reads as the colour of deep water is light that entered it, scattered, and
+/// came back out — not sky reflecting off it. `scene.slang` computes the
+/// deep-water remote-sensing reflectance `R∞ = 0.33·b_b/(K_d + b_b)` from these
+/// two, and there is deliberately no way to author `R∞` directly: a hand-picked
+/// value is what once made this engine's sea read as polished pewter, R/B 0.95
+/// against 0.62 for a photograph of a real storm sea.
+///
+/// Both are per metre, at roughly **650 / 550 / 450 nm** — the red, green and
+/// blue this renderer means by those words.
+///
+/// # What a number here means
+///
+/// The standard classification of natural water is **Jerlov's**: types I, IA,
+/// IB, II and III for open ocean, and 1C through 9C for coastal water, running
+/// progressively greener as particulates and CDOM rise. **The quantity Jerlov
+/// classified by is `K_d`, which is [`Self::attenuation`]** — so a row of his
+/// table is one field of this struct, directly.
+///
+/// `a` and `b` below are Solonenko & Mobley, *Inherent optical properties of
+/// Jerlov water types*, Appl. Opt. **54**(17):5392 (2015), read at 650/550/450
+/// nm. `backscatter` is `½·b_w + 0.0183·(b − b_w)` — the molecular half
+/// backscatters isotropically, the particulate half at the Petzold
+/// average-particle fraction — with `b_w` the Morel molecular scattering this
+/// struct's own default is half of, so the row for pure water *is* the default.
+/// `attenuation` is `K_d = 1.0395·(a + b_b)/µ_0` at a high sun (Gordon 1989),
+/// which for pure water returns the default to within 9%.
+///
+/// The last column is the green-to-blue ratio of the `R∞` those two produce,
+/// which is the number that says navy or teal: **below about 0.2 is navy, and
+/// the transition is near 0.42.**
+///
+/// ```text
+///  type          attenuation  650/550/450     backscatter  650/550/450     G/B
+///  pure water    0.341   0.058   0.013        0.00035  0.00075  0.00175    0.108
+///  Jerlov I      0.3659  0.0687  0.0216       0.00035  0.00075  0.00176    0.145
+///  Jerlov IA     0.3659  0.0689  0.0262       0.00038  0.00079  0.00180    0.175
+///  Jerlov IB     0.3667  0.0700  0.0289       0.00116  0.00170  0.00293    0.258
+///  Jerlov II     0.3712  0.0760  0.0383       0.00528  0.00727  0.01091    0.394
+///  Jerlov III    0.3828  0.0911  0.0719       0.01382  0.01866  0.02694    0.624
+///  Jerlov 1C     0.3823  0.0913  0.1270       0.00535  0.00740  0.01109    0.934
+///  Jerlov 3C     0.3950  0.1117  0.2004       0.01498  0.02012  0.02914    1.202
+/// ```
+///
+/// **`backscatter` is the whole of the hue and `attenuation` is the whole of
+/// the range.** Down the table `backscatter` rises by a factor of forty while
+/// `attenuation` in red barely moves, because red is absorbed by the water
+/// molecule itself and no amount of silt changes that. Blue is where a turbid
+/// water goes short-sighted: fifty metres at the top, five at the bottom.
+///
+/// **A caveat worth knowing before authoring a number that is not on this
+/// table.** How much of this reaches the frame depends entirely on where the
+/// camera is: at a grazing angle Fresnel returns nearly all of the sky and
+/// almost none of the water, so a sea photographed from the waterline is mostly
+/// a mirror and moving `backscatter` forty-fold moves the picture by a few
+/// levels. `assets/test/ocean_tropical.loom` is framed to show it — the
+/// measurement of what these two do is in `.superpowers/sdd/`.
+///
+/// `assets/test/ocean_tropical.loom` and `assets/test/ocean_fft_boat.loom`
+/// author the Jerlov III row.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct WaterOptics {
+    /// Attenuation per metre at 650 / 550 / 450 nm — how fast downwelling light
+    /// is lost crossing this water. **This is `K_d`, the diffuse attenuation
+    /// coefficient, which is the quantity Jerlov water types are defined by.**
+    ///
+    /// **Not the *beam* coefficient `c = a + b`**, and the difference matters
+    /// exactly once the water scatters: `c` counts forward-scattered light as
+    /// lost, and forward-scattered light goes on to reach the eye anyway. For
+    /// water as clear as the default the two are the same number to within a
+    /// few percent, because pure water barely scatters at all; for Jerlov III
+    /// `c` is fifteen times `K_d` in blue, and authoring it here would make a
+    /// turbid sea black rather than green.
+    ///
+    /// **This is the field that makes water go dark with depth**, through
+    /// Beer–Lambert, and it is also `R∞`'s denominator. Red is gone in three
+    /// metres at the default and blue survives fifty, and that spread is why
+    /// deep water is blue at all.
+    ///
+    /// The default is pure water: Pope & Fry absorption plus Morel molecular
+    /// scattering — the clearest ocean that physically exists, and clearer than
+    /// Jerlov I, which already carries a little of everything.
+    ///
+    /// Every channel must be **strictly positive**. Zero is infinite
+    /// reflectance and is refused at load.
+    pub attenuation: [f32; 3],
+    /// Backscatter per metre at 650 / 550 / 450 nm — the part of the scattering
+    /// that sends light back the way it came.
+    ///
+    /// **The turbidity knob, and the only one.** Raising it turns navy toward
+    /// teal, because what comes back up out of a water column is scattered
+    /// light. See the table on [`WaterOptics`] for what a value means.
+    ///
+    /// The default is pure water's molecular backscatter. Must be
+    /// non-negative, and below [`Self::attenuation`] in at least one channel —
+    /// water that backscatters more than it attenuates does not exist.
+    pub backscatter: [f32; 3],
+}
+
+impl Default for WaterOptics {
+    /// **Pure water, and these two lines are the whole compatibility story.**
+    /// They are the values `scene.slang` held as `WATER_EXTINCT` and
+    /// `WATER_BACKSCATTER` before this struct existed, so a scene that authors
+    /// no `optics` table uploads exactly the constants the shader used to
+    /// compile in, and renders bit for bit as it did.
+    fn default() -> Self {
+        Self {
+            attenuation: [0.341, 0.058, 0.013],
+            backscatter: [0.00035, 0.00075, 0.00175],
         }
     }
 }

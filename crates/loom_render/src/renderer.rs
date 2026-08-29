@@ -460,6 +460,21 @@ pub struct EnvironmentData {
     pub ocean_tiles: vk::DeviceAddress,
     /// Keeps the struct's stride 16-byte aligned, as `fluid_pad` does.
     pub ocean_pad: [u32; 2],
+    /// Diffuse attenuation `K_d` per metre at 650 / 550 / 450 nm — xyz, w unused.
+    ///
+    /// **This and [`Self::water_backscatter`] are what the sea's colour is
+    /// derived from**, and there is no third field carrying the colour itself:
+    /// the shader computes `R∞ = 0.33·b_b/(K_d + b_b)` from these two every time
+    /// it needs it. `loom_scene::components::WaterOptics` is the authoring
+    /// side, its documentation carries the Jerlov table, and its defaults are
+    /// the two values below — so a scene that authors no `optics` uploads
+    /// exactly the constants `scene.slang` used to compile in.
+    ///
+    /// Appended after the ocean block for the reason that block was appended
+    /// after the fluid one: every offset above it is unmoved.
+    pub water_attenuation: [f32; 4],
+    /// Backscatter per metre at the same three wavelengths — xyz, w unused.
+    pub water_backscatter: [f32; 4],
 }
 
 /// A point light, as the GPU reads it.
@@ -592,6 +607,14 @@ impl Default for EnvironmentData {
             ocean_longest: [1.0; 4],
             ocean_tiles: 0,
             ocean_pad: [0; 2],
+            // **Pure water, which is what `scene.slang` compiled in before the
+            // sea's colour was authorable.** A scene with no `WaterBody` — and
+            // one whose `WaterBody` says nothing about `optics` — uploads these
+            // and renders bit for bit as it did. Mirrors
+            // `loom_scene::components::WaterOptics::default`, which is the
+            // documented half.
+            water_attenuation: [0.341, 0.058, 0.013, 0.0],
+            water_backscatter: [0.00035, 0.00075, 0.00175, 0.0],
         }
     }
 }

@@ -1,0 +1,262 @@
+# The scene that opts in to the FFT ocean — ADR 0076, and the only thing this
+# slice moves.
+#
+# **`wave_model = "spectrum"` is the whole feature at this point.** Every other
+# water scene in the repository omits the field, gets `gerstner`, and renders
+# and simulates bit for bit as it did — the same shape of opt-in
+# `ParticleEmitter.gpu` used, and the reason the wiring can land one readable
+# commit at a time instead of moving fourteen golden references and every water
+# scene's determinism hash at once.
+#
+# **The cascade layout is not authored here and that is deliberate.** A scene
+# says which model; how many cascades, at what patch size and over which band
+# of wavenumbers, is `loom_water`'s `shipping_stack`. Bands that must meet
+# exactly are the kind of number an author gets wrong silently — a gap loses
+# energy, an overlap double-counts it — so per-scene cascades wait for a slice
+# of their own.
+#
+# # The sea this asks for
+#
+# **Twenty feet: `Hs = 6.10 m`.** The pair that realises it is `U10 = 18 m/s`
+# with `fetch = 440 000 m`, and neither number is free —
+# `docs/design/SEA-REBUILD.md` §3.6 has both derivations:
+#
+# - `U10 = 18` because the *fully-developed* ceiling at 16 m/s is
+#   `0.22·U²/g = 5.74 m`, so no fetch at all reaches 6.10 from below 16.
+# - `fetch = 440 000` and not the 376 000 an analytic detour once argued for.
+#   Three standard parameterisations of the same sea disagree by 35%, and this
+#   engine measured — `significant_height(wave_set_fetch(18.0, F))` — answers
+#   5.638 m at 376 km and 6.099 m at 440 km. When the question is what this
+#   engine does, run this engine.
+#
+# **Those 440 km are split 420 + 20 between a swell and the wind sea, and the
+# split is exact rather than tuned.** A fetch-limited `Hs` is
+# `0.0016·U·√(F/g)`, so `Hs ∝ √F` at a fixed wind and `m0 ∝ F` — fetches
+# add. 5.959 m of swell and 1.300 m of wind sea in quadrature is 6.0994 m,
+# which is `0.0016·18·√(440000/9.81)` to every digit either is quoted to.
+# Nothing here was chosen to make the height come out; the height could not
+# have moved.
+#
+# Both halves are genuinely fetch-limited — this wind is fully developed at
+# 624 km — so both are *steeper* than the Pierson–Moskowitz limit rather than
+# merely bigger, which is the property that makes a sea break instead of zoom.
+#
+# **What the split buys is a sea that breaks at all.** One fetch cannot carry
+# both a twenty-foot height and a short steep tail. Measured over this scene's
+# own sea at tick 400, 160,801 points across the 2048 m tile
+# (`play::tests::the_crossing_sea_breaks_and_its_trace_over_reports_it`):
+#
+#                            realised Hs   mean mu_max   past 0.45
+#     440 km in one sea      5.957 m       0.0515        1 point   0.0006%
+#     420 + 20 at 60°        5.897 m       0.0842        162       0.1007%
+#
+# **One point of 160,801 becomes 162**, with 63% more mean compression behind
+# it. The height is a property of the long waves and the breaking is a
+# property of the short ones, and a single fetch has to choose.
+#
+# **The realised heights are single draws and 5.957 is not a contradiction of
+# 6.0994.** This spectrum is narrow, so most of its energy lands in few cells
+# and one seed is a small sample: `ocean::tests::
+# the_realised_sea_is_the_size_the_spectrum_promised` measures the single-draw
+# spread at 0.35x to 1.68x of the analytic value and averages 200 seeds to get
+# 6.100 m. The scene has one seed. The 1% between the two rows above is that
+# noise, not a change in energy — the energies are equal by construction.
+#
+# # The crossing, and why 60°
+#
+# The wind blows toward 15° and the swell runs toward 75° — `[cos 75°,
+# sin 75°]`, which is `[0.25881904, 0.9659258]`, the wind's own pair swapped
+# because 15° and 75° are complementary.
+#
+# **60° is a ceiling as much as a choice.** A grid cell holds one complex
+# amplitude and therefore one direction of travel, and the directional spread
+# is a magnitude, so a swell authored more than 90° off the wind is realised
+# on the right *axis* travelling the wind's way along it. A genuinely opposed
+# sea needs two grids or a per-cell direction and neither exists. 50–70° is a
+# real crossing well inside what one grid can represent.
+#
+# And it is the case `WaterSample::mu_max` was written for and had never met:
+# the largest eigenvalue of the horizontal compression rather than its trace
+# (`WaterSample::fold`), because two seas compressing two axes at once *add
+# their traces* while neither axis has folded. Measured here, past 0.45:
+#
+#                            eigenvalue   trace
+#     420 + 20, swell along  0.1766%      0.9129%
+#     420 + 20, swell at 60° 0.1007%      0.8800%
+#
+# **Turning the swell across the wind drops the eigenvalue 43% and the trace
+# 3.6%.** The trace is very nearly blind to the difference between a sea
+# running one way and a sea running two, and on the crossing sea 89% of the
+# whitecaps it would paint are on water where neither axis has folded. That
+# decision was made long before this engine had a crossing sea to make it on;
+# this scene is the first one it has.
+#
+# **`Wind.speed` is not `U10`.** The authored field is the free-stream value
+# the height profile saturates toward, and at the meteorological standard 10 m
+# the field is 0.9083 of it — so `19.8165` measures `mean_speed_at(10.0) =
+# 17.999987`. Anything that changes `ground_drag` here changes `U10` with it.
+#
+# **Deep water, no bed.** There is no `VoxelVolume` and `attenuation_depth`
+# stays at its default zero, so nothing shoals and the surface is the open
+# ocean everywhere in frame. A 6 m sea over a shallow bed is a different
+# physical problem and not the one this scene is the acceptance test for.
+#
+# The camera sits at 7 m — a small ship's bridge over crests that reach about
+# 5.6 m, so the near field is water rather than a horizon line. A distant orbit
+# would frame the whole sea and photograph none of it; the spectral tail is
+# exactly the detail that disappears first at range.
+
+[scene]
+format = 1
+id = "5c2e9a41-7b38-4d6f-a1c0-8e3f2b95d074"
+
+[[node]]
+name = "Sea"
+
+  [node.components.Environment]
+  sun_direction = [0.26, 0.38, -0.89]
+  sun_strength = 1.15
+  sun_color = [1.0, 0.95, 0.86]
+  ambient = 0.5
+  sky_zenith = [0.13, 0.25, 0.47]
+  sky_horizon = [0.55, 0.62, 0.70]
+  fog_density = 0.004
+  fog_falloff = 0.03
+
+  # Beaufort 8. **`speed` is free-stream, not U10, and 19.8165 is a measured
+  # number — do not tidy it to 20.** `loom_field::wind` warns three times that
+  # the authored field is the value the height profile saturates toward, and at
+  # the meteorological standard 10 m the profile is
+  # `ground_drag + (1 - ground_drag)·10/12 = 0.90833` of it. Measured through
+  # `Wind::mean_speed_at(10.0)`:
+  #
+  #     speed 19.80   -> U10 17.984999
+  #     speed 19.8165 -> U10 17.999987   <- this
+  #     speed 19.83   -> U10 18.012249
+  #
+  # A round 20.0 is `U10 = 18.167`, which is a different sea and a different
+  # `Hs`. Changing `ground_drag` below changes U10 with it.
+  [node.components.Wind]
+  direction_degrees = 15.0
+  speed = 19.8165
+  gustiness = 1.3
+  turbulence = 1.0
+  ground_drag = 0.45
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  # No `waves` table: the spectrum builds the whole surface, and authoring a
+  # wave list beside it is refused at load rather than silently dropped.
+  [node.components.WaterBody]
+  kind = "ocean"
+  wave_model = "spectrum"
+  surface_height = 0.0
+  density = 1025.0
+  drag = 2.0
+  # The wind sea: short, steep, and 20 km of the 440 the scene's energy is.
+  fetch = 20000.0
+
+    # **Jerlov III — a scattering sea, and the reason this water is teal
+    # rather than navy.** `ocean_fft.loom` is the measurement scene and keeps
+    # the default, which is pure water: the clearest sea that physically
+    # exists, whose backscatter is molecular and whose deep colour therefore
+    # comes out green-to-blue 0.108 — navy, nearly black.
+    #
+    # The numbers are one row of the Jerlov table on `WaterOptics`, which
+    # carries the sources and the derivation. **They are not a colour grade.**
+    # `R∞ = 0.33·b_b/(K_d + b_b)` stays derived in the shader, and what these
+    # two do is move it from (0.00034, 0.00421, 0.03915) to
+    # (0.01150, 0.05609, 0.08991) — **green-to-blue 0.108 -> 0.624**, past the
+    # 0.42 where navy becomes teal, with thirteen times the green.
+    #
+    # **What that is worth at THIS camera is small, and the honest number is
+    # here rather than in a report nobody reads.** The lens is 3.4 m up and
+    # 40 m back, so almost every water pixel is at a grazing angle where
+    # Fresnel returns the sky and not the water. Measured over the bottom 80
+    # rows of a 960x600 render at `--sim 400`:
+    #
+    #                    R     G     B     G/B
+    #     pure water    46.0  53.0  68.9  0.769
+    #     Jerlov III    49.1  65.5  79.7  0.822
+    #
+    # Twelve levels of green in the near field, three in the far. To see what
+    # these coefficients actually do, look at `ocean_tropical.loom`, which is
+    # framed for it.
+    [node.components.WaterBody.optics]
+    attenuation = [0.3828, 0.0911, 0.0719]
+    backscatter = [0.01382, 0.01866, 0.02694]
+
+    # The other 420 km, arrived from 60° to starboard as a swell — the
+    # remnant of a wind that blew somewhere else and has since left, which is
+    # why it carries its own `u10` and its own heading and takes nothing from
+    # the scene's `Wind`.
+    #
+    # `u10` is the same 18 m/s because this is one storm's energy divided in
+    # two, not two storms; a swell under a *different* wind is the other thing
+    # this field can say and is not what this scene is the acceptance test for.
+    [node.components.WaterBody.swell]
+    u10 = 18.0
+    fetch = 420000.0
+    direction = [0.25881904, 0.9659258]
+
+# One object with a known size, because a still of open water has no scale in
+# it — a 6 m sea and a 0.6 m chop photograph identically without something to
+# measure against. Two metres across, moored at 24 m.
+#
+# **And it floats, which is this scene's acceptance test rather than its
+# decoration.** ADR 0076's whole argument is that the FFT surface stays on the
+# force path — buoyancy reads the same water the GPU draws — and the way that
+# fails is exactly the way `loom_water`'s module docs open: "a boat floating
+# visibly above the water it is drawn on, with nothing to blame". A buoy
+# hovering over a trough means the CPU and the GPU disagree about where the
+# water is; a buoy sitting *in* the surface and rising with it means they
+# agree. Until the render half lands the CPU side is what can be checked, and
+# `loom water --at 3.5,-24 --sim N` beside `loom sim --assert` is how.
+# ---------------------------------------------------------------------------
+# THE BOAT
+# ---------------------------------------------------------------------------
+
+# The hull, its paint and its sixteen pontoons, from the file that owns them.
+# Nothing about the boat is authored here — an instance plus a transform, the
+# same way `fishing.loom` takes her.
+[[prefab]]
+key = "jib_vi"
+id = "3c7a5e12-8b64-4f09-a2d3-6e1b90c47f58"
+path = "../prefabs/jib_vi.loom"
+
+# **This scene exists to be looked at, and that is the whole of its job.**
+# `ocean_fft.loom` is the measurement scene — a buoy of known size on open
+# water, because a still of the sea has no scale in it. This is the same sea
+# with the thing the sea was built for sitting in it.
+#
+# A nineteen-metre hull is its own scale bar. At `Hs = 6.10 m` the sea is a
+# third of her length, which is a number that means nothing written down and
+# everything when you watch her take one over the bow.
+#
+# She floats on the same tiles the shader displaces from — that is ADR 0076's
+# whole argument, and the way it fails is the way `loom_water`'s module docs
+# open: "a boat floating visibly above the water it is drawn on, with nothing
+# to blame". If she rides clear of her own water here, that is the bug, and it
+# is visible without measuring anything.
+[[node]]
+name = "Boat"
+parent = "Sea"
+transform = { pos = [0.0, 0.0, 0.0] }
+prefab = "jib_vi"
+
+# **Off her starboard quarter and low.** A sea reads as flat from above and as
+# a wall from the waterline; three metres up and forty back is the height a
+# person on another boat would see her from, which is the only view that shows
+# both the swell she is riding and the chop crossing it.
+#
+# Yawed 18 degrees so she sits across the frame rather than end-on, and pitched
+# down a little because the horizon is where the sea's size is legible.
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [-34.0, 3.4, 26.0], rot_euler = [-4.0, -32.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 50.0

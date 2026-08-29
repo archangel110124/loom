@@ -1,0 +1,172 @@
+# **The aesthetic target: tropical water from the waterline.**
+#
+# `ocean_fft.loom` is the measurement scene — a buoy of known size, a Beaufort 8
+# storm, and pure water, so its numbers stay comparable. `ocean_fft_boat.loom`
+# is the showcase with scale in it. This one is neither: it is the photograph,
+# and it exists to show what `WaterBody.optics` does when the rest of the scene
+# lets it.
+#
+# # Three things together, and the colour is only one of them
+#
+# **1. A grazing sea is a mirror, and no coefficient can change that.** Fresnel
+# a few degrees off the surface returns nearly all of the sky and almost none of
+# the water, so `R∞` — the colour that comes back out of the column — arrives
+# multiplied by a few percent. Measured on `ocean_fft_boat.loom`, camera 3.4 m
+# up and 40 m back: moving `backscatter` from pure water to Jerlov III lifts the
+# near field by 11 levels of 255 and the far field by about 3. The lever works
+# and the framing was eating it.
+#
+# **2. Turquoise over deep water does not exist.** The colour in a Caribbean
+# photograph is white carbonate sand two or three metres down — `behind * T` in
+# `scene.slang`, the bed seen through an attenuating column — and the clear
+# tropics over an abyss are *navy*, which is what Jerlov I is. So this scene has
+# a shelf. Measured over it, in the near half of the frame:
+#
+#                        R      G      B     G/B
+#     pure water        68.5  170.7  227.7  0.750   a bright cyan
+#     Jerlov III        72.7  152.7  174.6  0.874   turquoise
+#
+# **3. A bright hazy sky rather than a crisp blue one**, because whatever the
+# sea does reflect should be near-white — a saturated blue sky makes a blue sea
+# for a reason that has nothing to do with the water.
+#
+# # The sea
+#
+# **Modest and close: `U10 = 6 m/s` fully developed, `Hs` about 0.9 m.** A
+# twenty-foot sea photographed from 1.1 m is a wall of water with one face in
+# it; a one-metre sea at the same height is a field of faces, which is what the
+# reference image is. `speed` is free-stream and not `U10` —
+# `loom_field::wind`'s height profile reaches 0.90833 of the authored field at
+# the meteorological 10 m with this `ground_drag`, so 6.6 measures
+# `U10 = 5.995`. Unlimited fetch, so this is the Pierson–Moskowitz sea for that
+# wind and nothing was tuned to reach a height.
+
+[scene]
+format = 1
+id = "9d41b83e-2c57-4a06-8f19-5b7ea0c36d24"
+
+[[node]]
+name = "Sea"
+
+  # **A hazy tropical noon.** The sun is high and on the far side of the water
+  # the camera looks at, which is the geometry `scene.slang`'s subsurface term
+  # needs: a wave face between the sun and the lens is a thin sheet with the
+  # light behind it.
+  #
+  # The sky is deliberately washed out and the fog is an order of magnitude up
+  # on the storm scenes, because the horizon in the reference is haze rather
+  # than a line — and because it is what hides the far edge of the shelf below.
+  [node.components.Environment]
+  sun_direction = [0.18, 0.62, -0.76]
+  sun_strength = 1.45
+  sun_color = [1.0, 0.97, 0.92]
+  ambient = 0.62
+  sky_zenith = [0.30, 0.48, 0.72]
+  sky_horizon = [0.82, 0.86, 0.88]
+  fog_density = 0.016
+  fog_falloff = 0.05
+
+  # Beaufort 4. See the header: 6.6 free-stream is U10 5.995 at this drag.
+  [node.components.Wind]
+  direction_degrees = 200.0
+  speed = 6.6
+  gustiness = 0.7
+  turbulence = 0.6
+  ground_drag = 0.45
+
+# **The carbonate shelf: white sand, five metres down, 160 m square.**
+#
+# One box op at a coarse voxel, because a flat bed is all this needs and the
+# cost is cubic in the resolution. The volume's near corner is its node, so this
+# spans x −80..80 and z −110..50 — the camera stands at z = 14 and looks toward
+# −Z, so there are 124 m of shelf in front of it.
+#
+# **Its far edge is a discontinuity and the fog is what hides it.** Depth goes
+# from 5 m to bottomless in one cell there, which is a visible line in the water
+# if you can see it; at `fog_density = 0.016` the edge is 86% fogged out. That
+# is the same trap `shore.loom`'s header names — anything reading depth has to
+# be saturated, or fogged, by the time the grid runs out.
+#
+# **Five metres and not three.** At three the caustic web is the loudest thing
+# in frame and the water reads as a swimming pool; at five the column has
+# absorbed enough red for the bed to arrive as colour rather than as pattern.
+[[node]]
+name = "Shelf"
+parent = "Sea"
+transform = { pos = [-80.0, -24.0, -110.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 1.0
+  chunks = [5, 1, 5]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [80.0, 9.0, 80.0]
+  half_extents = [82.0, 10.0, 82.0]
+  mode = "union"
+
+  # Carbonate sand. Bright and nearly neutral — the hue in the frame is the
+  # water's, and a yellow bed would put it there instead.
+  [node.components.Material]
+  albedo = [0.74, 0.71, 0.62]
+  roughness = 0.92
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  # No `waves` table: the spectrum builds the whole surface, and authoring a
+  # wave list beside it is refused at load rather than silently dropped.
+  #
+  # `attenuation_depth` stays at its default zero, so nothing shoals over the
+  # shelf. A 5 m bed under a 0.9 m sea is deep enough that shoaling would be a
+  # few percent, and turning it on would be a second thing this scene is
+  # demonstrating.
+  [node.components.WaterBody]
+  kind = "ocean"
+  wave_model = "spectrum"
+  surface_height = 0.0
+  density = 1025.0
+  drag = 2.0
+
+    # **Jerlov III, and it is a row of a published table rather than a colour
+    # somebody liked.** `WaterOptics`'s documentation carries the whole table,
+    # its sources and its derivation; this row is `K_d` and `b_b` for the most
+    # turbid of the open-ocean types.
+    #
+    # **What it does, exactly.** `R∞ = 0.33·b_b/(K_d + b_b)` stays derived in
+    # the shader — there is no way to author a colour here — and these two move
+    # it from (0.00034, 0.00421, 0.03915) to (0.01150, 0.05609, 0.08991):
+    # **green-to-blue 0.108 -> 0.624**, well past the 0.42 where navy becomes
+    # teal, and thirteen times as much green coming back out of the column.
+    #
+    # **Why the most turbid oceanic type rather than a clear tropical one.**
+    # See the header: teal over *deep* water is a scattering water, and the
+    # clear tropics over an abyss are navy. Over this shelf the two coefficient
+    # sets do different jobs — `attenuation` is what the bed is seen through
+    # and `backscatter` is the colour of the column itself — and it is Jerlov
+    # III's backscatter that turns the pure-water cyan into turquoise.
+    #
+    # **Attenuation barely moves and that is the point of authoring `K_d`.**
+    # Red is 0.341 -> 0.383, so this sea still loses its red in three metres
+    # and still goes dark past the shelf. The *beam* coefficient for the same
+    # water is 1.42 per metre in blue — fifteen times this — and authoring that
+    # here would make the sea black.
+    [node.components.WaterBody.optics]
+    attenuation = [0.3828, 0.0911, 0.0719]
+    backscatter = [0.01382, 0.01866, 0.02694]
+
+# **The lens is 1.1 m over still water in a sea whose crests reach 0.9**, so it
+# ships the odd wave face across the bottom of the frame — which is the view the
+# reference photograph is taken from, and the only one where the near field is
+# water seen face-on instead of a mirror at 3 degrees.
+#
+# Pitched down 3 degrees only. The horizon has to stay in frame: crests breaking
+# it is half of what makes a sea read as a sea at this height.
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [0.0, 1.1, 14.0], rot_euler = [-3.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 58.0

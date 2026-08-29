@@ -1142,6 +1142,81 @@ name = \"Hill\"
     /// the registry validates one level and a swell is a nested table — the
     /// `schemars` attributes on `Swell` are what the inspector draws, not what
     /// the loader enforces. `flow.speed` has the same hole and always has.
+    /// **The four optical refusals, and the sea that is accepted between
+    /// them.**
+    ///
+    /// The first assertion is the one that matters most: a `WaterBody` with no
+    /// `optics` table at all parses, and `WaterOptics::default` is pure water —
+    /// which is the whole reason no scene in this repository moved when the
+    /// field landed. The refusals below are the same nested-table hole
+    /// `check_swell`'s docs name: an array of three floats inside a component
+    /// is never range-checked by the registry.
+    #[test]
+    fn water_optics_that_cannot_be_meant_are_refused_by_name() {
+        use components::WaterOptics;
+
+        // Absent is pure water, exactly.
+        Scene::parse(&water_scene("")).expect("a WaterBody with no optics table");
+        assert_eq!(WaterOptics::default().attenuation, [0.341, 0.058, 0.013]);
+        assert_eq!(WaterOptics::default().backscatter, [0.00035, 0.00075, 0.00175]);
+
+        let sea = |body: &str| {
+            water_scene(&format!("[node.components.WaterBody.optics]\n{body}"))
+        };
+        // Jerlov III, which is what `ocean_tropical.loom` authors.
+        Scene::parse(&sea(
+            "attenuation = [0.3828, 0.0911, 0.0719]\n\
+             backscatter = [0.01382, 0.01866, 0.02694]\n",
+        ))
+        .expect("a Jerlov III sea is a sea");
+
+        let only = |src: String, code: &str| {
+            let errors = Scene::parse(&src).expect_err("this water cannot be meant");
+            assert_eq!(errors.len(), 1, "one fault, reported once: {errors:?}");
+            assert_eq!(errors[0].error, code, "{errors:?}");
+            errors.into_iter().next().expect("one error")
+        };
+
+        // Zero absorption is infinite reflectance; one channel is enough.
+        let err = only(
+            sea("attenuation = [0.341, 0.0, 0.013]\n"),
+            "water_attenuation_not_positive",
+        );
+        assert!(
+            err.hint.as_deref().unwrap_or_default().contains("[0.341, 0.058, 0.013]"),
+            "name the value that fixes it: {err:?}"
+        );
+        // And below zero the water brightens with depth.
+        only(
+            sea("attenuation = [-0.341, 0.058, 0.013]\n"),
+            "water_attenuation_not_positive",
+        );
+
+        // A negative reflectance.
+        only(
+            sea("backscatter = [0.00035, -0.00075, 0.00175]\n"),
+            "water_backscatter_negative",
+        );
+
+        // Backscatter at or above attenuation in EVERY channel: `R∞` saturates
+        // toward 0.33 flat and the sea goes pale grey.
+        let err = only(
+            sea("attenuation = [0.341, 0.058, 0.013]\nbackscatter = [0.4, 0.06, 0.02]\n"),
+            "water_backscatters_more_than_it_attenuates",
+        );
+        assert!(
+            err.hint.as_deref().unwrap_or_default().contains("removes"),
+            "say which way the picture moves: {err:?}"
+        );
+
+        // One channel at it is real water and is accepted — refusing it would
+        // refuse the turbid end of the Jerlov table.
+        Scene::parse(&sea(
+            "attenuation = [0.341, 0.058, 0.013]\nbackscatter = [0.4, 0.00075, 0.00175]\n",
+        ))
+        .expect("one channel backscattering hard is a coastal sea, not a fault");
+    }
+
     #[test]
     fn a_half_authored_swell_is_refused_by_name() {
         let sea = |body: &str| {

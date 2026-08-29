@@ -275,6 +275,19 @@ struct EnvironmentData {
     /// through the Rust half.
     float* oceanTiles;
     uint2 oceanPad;
+    /// What this water is made of, optically: diffuse attenuation per metre at
+    /// 650 / 550 / 450 nm — xyz, w unused.
+    ///
+    /// **This and `waterBackscatter` are the sea's colour**, and nothing here
+    /// carries the colour itself; see `waterDeep()`. A scene that authors no
+    /// `WaterBody.optics` uploads pure water — the values this file held as
+    /// `WATER_EXTINCT` and `WATER_BACKSCATTER` — so it shades exactly as it did.
+    ///
+    /// Appended after the ocean block for the reason that block was appended
+    /// after the fluid one: every offset above it is unmoved.
+    float4 waterAttenuation;
+    /// Backscatter per metre at the same three wavelengths — xyz, w unused.
+    float4 waterBackscatter;
 };
 
 /// One vertex of the cinematic free surface, as `loom_render::FluidVertex`
@@ -5607,14 +5620,22 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     return out;
 }
 
-/// Beam attenuation per metre at roughly 650 / 550 / 450 nm — Pope & Fry
-/// absorption plus Morel molecular scattering. Red is gone in three metres,
-/// blue survives fifty, and that spread is why deep water is blue at all.
-static const float3 WATER_EXTINCT = float3(0.341, 0.058, 0.013);
-/// Backscatter for pure water. **The turbidity knob, and the only one.**
-/// Raising it turns navy toward teal, because what comes back up out of a
-/// water column is scattered light, not reflected light.
-static const float3 WATER_BACKSCATTER = float3(0.00035, 0.00075, 0.00175);
+/// Attenuation per metre at roughly 650 / 550 / 450 nm — `K_d`, the diffuse
+/// coefficient Jerlov water types are defined by. Red is gone in three metres
+/// at the default, blue survives fifty, and that spread is why deep water is
+/// blue at all.
+///
+/// **Authored per body since the optics slice, and it was a constant before
+/// that.** The value a scene that says nothing gets is the constant this
+/// replaced — Pope & Fry absorption plus Morel molecular scattering, which is
+/// pure water and the clearest sea that physically exists — so nothing moved.
+/// `loom_scene::components::WaterOptics` is the authoring side and carries the
+/// Jerlov table of what other values mean.
+float3 waterExtinct() { return push.environment[0].waterAttenuation.xyz; }
+/// Backscatter. **The turbidity knob, and the only one.** Raising it turns
+/// navy toward teal, because what comes back up out of a water column is
+/// scattered light, not reflected light.
+float3 waterBackscatter() { return push.environment[0].waterBackscatter.xyz; }
 
 /// What deep water looks like when you see into it rather than off it.
 ///
@@ -5634,8 +5655,10 @@ static const float3 WATER_BACKSCATTER = float3(0.00035, 0.00075, 0.00175);
 /// ratio to 0.95 — neutral grey, polished pewter — against 0.62 for a
 /// photograph of a real storm sea. A mirror over a void has no colour of its
 /// own, and that is what this was.
-static const float3 WATER_DEEP =
-    0.33 * WATER_BACKSCATTER / (WATER_EXTINCT + WATER_BACKSCATTER);
+float3 waterDeep() {
+    float3 bb = waterBackscatter();
+    return 0.33 * bb / (waterExtinct() + bb);
+}
 static const float3 WATER_SHALLOW = float3(0.020, 0.070, 0.075);
 /// Depth over which the tint reaches its deep value, in metres.
 static const float WATER_TINT_DEPTH = 5.0;
@@ -5791,7 +5814,7 @@ static const float WATER_CREST_THIN = 0.225;
 /// Column, in metres, past which thin-water scatter has stopped.
 ///
 /// **A gate, not a strength.** How much light survives the crossing is
-/// `exp(-WATER_EXTINCT * thick)` and is not tuned here; this only says where
+/// `exp(-waterExtinct() * thick)` and is not tuned here; this only says where
 /// the effect is switched off entirely, so that a deep column cannot glow
 /// through the wrap lobe. Six metres is `shore`'s own shelf: the shallow band
 /// glows, the water past the drop-off does not, and the sea with no bed under
@@ -6678,7 +6701,7 @@ float3 waterBehind(
     behind = max((behind - fogColor(normalize(bg - eye)) * bgFog) / max(1.0 - bgFog, 0.15),
                  float3(0.0, 0.0, 0.0));
 
-    return exp(-WATER_EXTINCT * (viewLeg + downLeg));
+    return exp(-waterExtinct() * (viewLeg + downLeg));
 }
 
 // ---------------------------------------------------------------------------
@@ -7297,7 +7320,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // Wrap-lobe form (Barré-Brisebois): perturbing the sun direction by the
     // surface normal widens the lobe so the glow spreads around the crest
     // instead of appearing only at exact alignment. **The hue is not authored**
-    // — it falls out of `WATER_EXTINCT` through Beer-Lambert, so the colour of
+    // — it falls out of `waterExtinct()` through Beer-Lambert, so the colour of
     // a backlit wave is the colour water actually transmits: through 2 m that
     // is (0.51, 0.89, 0.97), the luminous turquoise a breaking crest has.
     float thick = (column < WATER_NO_BED)
@@ -7311,17 +7334,17 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     float3 sss = sunColor() * sunStrength()
                * pow(saturate(dot(-view, h)), WATER_SSS_POWER)
                * max(crest, saturate(1.0 - column / WATER_GLOW_COLUMN))
-               * exp(-WATER_EXTINCT * thick);
+               * exp(-waterExtinct() * thick);
 
     // **What the eye actually receives from below, split by how much water is
     // in the way.** `T` is the fraction that crossed the column; `1 - T` is
     // the fraction that scattered before it got there.
     //
     // The old form was `body * downwelling`, where `body` interpolated
-    // `WATER_SHALLOW` toward `WATER_DEEP` by an authored bed depth. That was a
+    // `WATER_SHALLOW` toward the deep colour by an authored bed depth. That was a
     // hand-picked *linear* stand-in for exactly this, with no view-angle
     // dependence, and it is deleted rather than supplemented — this is the
-    // decomposition it approximated. `L -> infinity` gives `WATER_DEEP *
+    // decomposition it approximated. `L -> infinity` gives `waterDeep() *
     // downwelling`, which is what it used to answer everywhere; `L -> 0` gives
     // the background unattenuated, which is the shoreline.
     //
@@ -7332,7 +7355,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // `skyView` scales the volume term ONLY. `behind` was lit by its own
     // shading pass; darkening it in a trough would dim the seabed for a reason
     // that has nothing to do with the seabed.
-    float3 through = behind * T + WATER_DEEP * downwelling * (1.0 - T) + sss;
+    float3 through = behind * T + waterDeep() * downwelling * (1.0 - T) + sss;
 
     // **The sea reflects the scene now, and it is one ray.** This was
     // `skyColor(reflect(...))` — an analytic sky and nothing else, so a quay

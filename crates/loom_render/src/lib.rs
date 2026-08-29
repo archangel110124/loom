@@ -341,7 +341,21 @@ mod tests {
             1104,
             "oceanTiles — the cascade the spectrum sea is displaced by"
         );
-        assert_eq!(size_of::<EnvironmentData>(), 1120, "the whole struct");
+        // **The optics pair, appended after the ocean block on the same rule** —
+        // the sea's colour, authorable per `WaterBody`. `oceanPad` ends at 1120,
+        // a multiple of 16, so both `float4`s land flush and the stride needs no
+        // padding at all.
+        assert_eq!(
+            at(std::ptr::from_ref(&base.water_attenuation).cast()),
+            1120,
+            "waterAttenuation — the Beer-Lambert coefficient and R-infinity's denominator"
+        );
+        assert_eq!(
+            at(std::ptr::from_ref(&base.water_backscatter).cast()),
+            1136,
+            "waterBackscatter — the turbidity knob the sea's colour is derived from"
+        );
+        assert_eq!(size_of::<EnvironmentData>(), 1152, "the whole struct");
     }
 
     /// **`ParticleInstance` is written by a shader as well as by the CPU**,
