@@ -704,26 +704,25 @@ float3 hemisphereAmbient(float3 normal) {
 // out of scope.
 // ---------------------------------------------------------------------------
 
-/// Extinction per metre under the surface.
-///
-/// **The whole effect is the ratio to the fog above.** A scene authors
-/// `fog_density` in the thousandths — hundreds of metres of visibility — and
-/// this is 0.07: an e-fold in fourteen metres, three quarters gone by twenty.
-/// Clear sea rather than soup, and a calibration knob rather than a constant of
-/// nature — it is the number to turn if a lake should read as murkier than an
-/// ocean, and the number a per-body `clarity` would replace when one exists.
-static const float UNDERWATER_EXTINCTION = 0.07;
+// **Both of the constants that used to be here are gone, and that is the whole
+// of this section's change.** The extinction was one scalar per metre and the
+// tint was a hand-picked teal, and between them they painted everything below
+// the waterline — so `WaterBody.optics` reached the surface and stopped there.
+// A scene could author Jerlov III, watch the sea above go turquoise, and swim
+// into a frame that had never heard of it. `waterExtinct()` and `waterDeep()`
+// are the same two accessors the surface reads; nothing new is plumbed.
 
-/// The water's own colour, before the light coming down through it.
-///
-/// Blue-green rather than blue: red goes first in real water, and a tint that
-/// is merely a darker sky reads as night rather than as being underneath
-/// something.
-static const float3 UNDERWATER_TINT = float3(0.08, 0.30, 0.28);
 /// How much of the surface's light still reaches you looking straight DOWN.
 /// Small: below you is a deep column that has already absorbed nearly
 /// everything, which is why the sea floor of a photograph fades to black long
 /// before the surface does.
+///
+/// **The last calibration knob in this section, and it is now a ratio rather
+/// than a brightness.** `underwaterColor` anchors its downward limit on
+/// `waterDeep()`, so this no longer scales the colour at all — it says only how
+/// much brighter the ceiling is than the void. That ratio is a property of the
+/// *surface* transmitting, not of the water absorbing, and nothing in
+/// `WaterOptics` measures it: an honest constant, and named as one.
 static const float UNDERWATER_DOWN = 0.13;
 /// The sun through a rippled ceiling — a soft bloom, not a disc.
 static const float UNDERWATER_SHAFT = 0.55;
@@ -737,9 +736,18 @@ static const float UNDERSIDE_CAUSTIC = 1.8;
 ///
 /// Scaled by how much light is actually up there, so a night dive is dark and
 /// an authored-dark environment stays dark. Brightness rather than colour is
-/// taken from the sky — multiplying tint by sky *colour* would drag the
-/// blue-green back toward whatever hue the sky is, which is the one thing this
-/// is meant not to do.
+/// taken from the sky — multiplying the veil by sky *colour* would drag the
+/// hue back toward whatever hue the sky is, which is the one thing this is
+/// meant not to do.
+///
+/// **The colour is `waterDeep()`, which is the surface's own `R∞`.** Looking
+/// straight down from inside the medium into a column with no bed in it, what
+/// reaches the eye is light that scattered back up out of that column — which
+/// is exactly the quantity `R∞ = 0.33·b_b/(K_d + b_b)` names, and exactly the
+/// term `waterFragmentMain` multiplies by `downwelling` at `L -> infinity`.
+/// So the sea seen from a metre above the surface and the sea seen from a
+/// metre below it are now two evaluations of one expression, and a scene
+/// cannot author a turquoise sea that turns teal when you swim into it.
 float3 underwaterColor(float3 dir) {
     float above = ambientStrength()
                 * dot(skyGradient(float3(0.0, 1.0, 0.0)), float3(0.2126, 0.7152, 0.0722))
@@ -763,8 +771,30 @@ float3 underwaterColor(float3 dir) {
     float shaft = pow(saturate(dot(dir, sunDirection())), UNDERWATER_SHAFT_POWER)
                 * saturate(dir.y) * sunStrength();
 
-    return UNDERWATER_TINT * above * column
-         + sunColor() * shaft * UNDERWATER_SHAFT;
+    // **And it crossed the water to get here.** This added `sunColor()` — a
+    // warm near-white — with nothing between it and the eye, which was
+    // survivable only while the veil beside it was a bright hand-picked teal.
+    // Against a derived `R∞` it is the loudest thing in the frame, and an
+    // orange sun bloom three metres down is the one colour water guarantees you
+    // cannot see: red is the first thing it takes. So the shaft gets the same
+    // Beer-Lambert the seabed gets, over the slant from the surface to the eye
+    // along the sun's own ray. The `0.15` floor on the sun's elevation is the
+    // one `waterFragmentMain` already uses for the same division.
+    float slant = max(stillWaterLevel() - push.environment[0].eye.y, 0.0)
+                / max(sunDirection().y, 0.15);
+
+    // **The downward limit is the derived one and the rest is a ratio to it.**
+    // `column` was written as a fraction of an authored tint that was itself
+    // the *upward* brightness; dividing by `UNDERWATER_DOWN` re-anchors it, so
+    // `dir.y = -1` gives `waterDeep() * above` on the nose — the veiling light
+    // of a semi-infinite column, no constant involved — and looking up scales
+    // that by `1 / UNDERWATER_DOWN`. **`UNDERWATER_DOWN` is therefore still a
+    // calibration knob and is now the only one left here**: it says how much
+    // brighter the ceiling is than the void, which is a real ratio nothing in
+    // `WaterOptics` measures, because it depends on the surface transmitting
+    // rather than on the water absorbing.
+    return waterDeep() * above * (column / UNDERWATER_DOWN)
+         + sunColor() * exp(-waterExtinct() * slant) * shaft * UNDERWATER_SHAFT;
 }
 
 /// Cheap 2D value noise, for shaping things that are meant to look irregular.
@@ -813,20 +843,39 @@ float valueNoise(float2 p) {
 /// the ray, not a per-step march: for density `d * exp(-b*y)` the optical
 /// depth has an exact solution, so the whole effect is a handful of ALU with
 /// no loop and no samples.
-float fogAmount(float3 from, float3 to) {
+///
+/// **`float3`, and the third channel is the point.** Air is achromatic here and
+/// every above-water return splats one scalar, so the atmosphere is bit for bit
+/// what it was; water is not, and a scalar was the structural reason red could
+/// not go first underwater. See the branch below.
+float3 fogAmount(float3 from, float3 to) {
     float3 delta = to - from;
     float distance = length(delta);
     if (distance < 1e-4) {
-        return 0.0;
+        return float3(0.0, 0.0, 0.0);
     }
-    // **Submerged, the same term with different constants.** Water's density
-    // does not fall off with altitude — the height falloff below is an
+    // **Submerged, the same term with the water's own coefficients.** Water's
+    // density does not fall off with altitude — the height falloff below is an
     // atmosphere model and would make the sea thinner near the surface — so
     // this is plain Beer-Lambert over the distance. One branch, taken by every
     // surface in the frame at once, which is what makes it an atmosphere
     // rather than a tint on the water shader.
+    //
+    // **`waterExtinct()`, which is `K_d`, and not the beam coefficient
+    // `c = a + b`.** For a ray to a specific point `c` is the textbook operand
+    // and it is the wrong one here for two reasons that agree. Physically,
+    // ocean scattering is overwhelmingly forward — the light `c` counts as lost
+    // is still travelling toward the eye and a wide-field camera collects it,
+    // which is why oceanographic *imaging* attenuation sits far nearer `K` than
+    // `c`. Structurally, `K_d` is what the surface already attenuates the
+    // seabed by, four thousand lines down: `waterBehind` returns
+    // `exp(-waterExtinct() * (viewLeg + downLeg))`. Using anything else here
+    // would make the same bed, at the same depth, a different colour across the
+    // waterline — which is the defect this whole change exists to close. And
+    // `c` for Jerlov III is fifteen times this in blue, so the sea would be
+    // black at three metres.
     if (eyeUnderwater()) {
-        return 1.0 - exp(-distance * UNDERWATER_EXTINCTION);
+        return 1.0 - exp(-distance * waterExtinct());
     }
 
     float riseRate = delta.y / distance;
@@ -842,7 +891,10 @@ float fogAmount(float3 from, float3 to) {
         float climb = fogFalloff() * riseRate;
         depth = atOrigin * (1.0 - exp(-climb * distance)) / climb;
     }
-    return 1.0 - exp(-depth);
+    // One scalar splatted: air's extinction has no colour in this engine, and
+    // splatting it is what keeps every above-water frame identical.
+    float above = 1.0 - exp(-depth);
+    return float3(above, above, above);
 }
 
 /// What fog looks like along a view direction.
@@ -2925,7 +2977,7 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     // Last, over the finished shading. Fog is what is between the eye and the
     // surface, so it replaces the surface's colour rather than joining the
     // lighting that produced it.
-    float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+    float3 fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     lit = lerp(lit, fogColor(-view), fog);
 
     // **Opacity, and it is deliberately not applied to the colour.** The blend
@@ -4329,7 +4381,7 @@ float4 particleFragmentMain(ParticleOutput in, out float depth : SV_DepthLessEqu
         if (clip.w > 1e-6) {
             depth = min(clip.z / clip.w, in.position.z);
         }
-        float fogS = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+        float3 fogS = fogAmount(push.environment[0].eye.xyz, in.worldPos);
         // Premultiplied throughout, so the fog target is the fog colour times
         // this fragment's own coverage — blending toward the bare fog colour
         // would add light the fragment does not cover.
@@ -4347,7 +4399,7 @@ float4 particleFragmentMain(ParticleOutput in, out float depth : SV_DepthLessEqu
         if (fire.r + fire.g + fire.b <= 0.0008 && fire.a <= 0.0008) {
             discard;
         }
-        float fogF = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+        float3 fogF = fogAmount(push.environment[0].eye.xyz, in.worldPos);
         // **The second site that hard-coded `0.0`, and the alpha has to be
         // fogged along with the colour rather than merely passed through.**
         // Fog sits between the eye and the flame AND between the eye and
@@ -4357,7 +4409,14 @@ float4 particleFragmentMain(ParticleOutput in, out float depth : SV_DepthLessEqu
         // flame that kept its opacity while its emission was attenuated would
         // fade to a black silhouette at range, which is worse than the
         // see-through this change exists to fix.
-        return float4(fire.rgb * (1.0 - fogF), fire.a * (1.0 - fogF));
+        //
+        // **Alpha takes the least-fogged channel**, because alpha is one
+        // number and the fog is now three. Above water all three are equal and
+        // this is the value it always was; underwater, a flame whose red has
+        // been absorbed is still emitting blue and still occludes, so the
+        // channel that survives longest is the one that decides whether the
+        // fragment is there at all.
+        return float4(fire.rgb * (1.0 - fogF), fire.a * (1.0 - min(fogF.r, min(fogF.g, fogF.b))));
     }
 
     float r = length(in.local);
@@ -4419,7 +4478,7 @@ float4 particleFragmentMain(ParticleOutput in, out float depth : SV_DepthLessEqu
         discard;
     }
     float3 toEye = push.environment[0].eye.xyz - in.worldPos;
-    float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+    float3 fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     alpha = saturate(alpha);
 
     if (in.additive > 0.5) {
@@ -4890,7 +4949,7 @@ float4 grassFragmentMain(GrassOutput in) : SV_Target {
 
     // Same haze every other surface gets, so grass sits in the scene rather
     // than floating in front of it.
-    float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+    float3 fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     return float4(lerp(lit, fogColor(normalize(in.worldPos - push.environment[0].eye.xyz)), fog), 1.0);
 }
 
@@ -6697,7 +6756,7 @@ float3 waterBehind(
     // drawn. At `1e-3` the multiplier reached a thousand. Past 85% fog the
     // surface itself is fogged out too, so the term it is feeding is invisible
     // either way.
-    float bgFog = fogAmount(eye, bg);
+    float3 bgFog = fogAmount(eye, bg);
     behind = max((behind - fogColor(normalize(bg - eye)) * bgFog) / max(1.0 - bgFog, 0.15),
                  float3(0.0, 0.0, 0.0));
 
@@ -6991,7 +7050,7 @@ float4 nappeColor(WaterOutput in) {
     float fresnel = 0.02 + 0.98 * pow(saturate(1.0 - dot(normal, view)), 5.0);
     lit = lerp(lit, skyColor(reflect(-view, normal)), fresnel * (1.0 - 0.7 * aeration));
 
-    float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+    float3 fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     return float4(lerp(lit, fogColor(-view), fog), 1.0);
 }
 
@@ -7126,7 +7185,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         // window the underside mirrors the seabed, so it should be reading the
         // dark downward part of the column, and now it does.
         float3 lit = lerp(through, underwaterColor(reflect(-view, normal)), fresnel);
-        float fogUnder = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+        float3 fogUnder = fogAmount(push.environment[0].eye.xyz, in.worldPos);
         return float4(lerp(lit, fogColor(-view), fogUnder), 1.0);
     }
 
@@ -7607,7 +7666,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         * (hemisphereAmbient(normal) * ambientStrength() + sunColor() * sunStrength() * toSun);
     lit = lerp(lit, foamLit, foam * lerp(1.0, WATER_FOAM_OLD_OPACITY, foamAge));
 
-    float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+    float3 fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     return float4(lerp(lit, fogColor(-view), fog), 1.0);
 }
 
@@ -7833,7 +7892,7 @@ float4 rainFragmentMain(RainOutput in) : SV_Target {
     // A scene authored dark gets dark rain rather than white scratches, which
     // is the rule `Environment` already imposes on everything else.
     float3 sky = lerp(skyHorizon(), skyZenith(), 0.5);
-    float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+    float3 fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     // Fog attenuates an emitter rather than tinting it — the same reasoning as
     // the additive particles: blending toward the fog colour would ADD grey
     // light, and distant rain would glow through the haze.
@@ -7935,7 +7994,7 @@ float4 rainSplashFragmentMain(SplashOutput in) : SV_Target {
     // Lit by the sky, like the streaks, and for the same reason: a scene
     // authored dark gets dark splashes rather than white specks.
     float3 sky = lerp(skyHorizon(), skyZenith(), 0.5);
-    float fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
+    float3 fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
     if (alpha <= 0.002) {
         discard;
     }
