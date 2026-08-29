@@ -411,6 +411,37 @@ impl Ocean {
         direction: [f32; 2],
         seed: u32,
     ) -> Self {
+        Self::with_swell(cascades, u10, fetch, direction, None, seed)
+    }
+
+    /// The same, with a **swell** summed into every cascade beside the wind sea.
+    ///
+    /// See [`crate::spectrum::Swell`] and [`amplitude_field`]'s "Two seas in one
+    /// grid": the energies are summed, not the amplitudes, and `swell = None` is
+    /// [`Self::new`] bit for bit.
+    ///
+    /// **The swell is summed into the same stack, not given a stack of its own.**
+    /// A cascade is a band of wavenumbers rather than a sea, so the swell's
+    /// energy lands in whichever cascade can resolve it — the long cascade for a
+    /// groundswell, the sea and chop cascades for its tail — and the tiling
+    /// assertion above keeps that from being double-counted. A second stack would
+    /// double the six transforms a tick and could not be banded against the first.
+    ///
+    /// **One half-plane for both seas**, from
+    /// [`crate::spectrum::running_direction`], which is the same vector
+    /// `amplitude_field` drew the hashes on. A cell holds one complex amplitude
+    /// and therefore one direction of travel, so a swell authored more than 90°
+    /// off the wind is realised on the right axis running the wind's way along
+    /// it — see [`crate::spectrum::Swell`] for the ceiling and the upgrade.
+    #[must_use]
+    pub fn with_swell(
+        cascades: &[Cascade],
+        u10: f32,
+        fetch: f32,
+        direction: [f32; 2],
+        swell: Option<crate::spectrum::Swell>,
+        seed: u32,
+    ) -> Self {
         // **The tiling, asserted rather than assumed.** A stack whose bands overlap
         // draws the overlapping wavenumbers once per cascade and realises a sea bigger
         // than the spectrum it came from; a stack with a gap realises a smaller one.
@@ -447,19 +478,25 @@ impl Ocean {
             // detail the large one has never heard of.
             #[allow(clippy::cast_possible_truncation)]
             let cascade_seed = seed.wrapping_add((index as u32).wrapping_mul(0x9E37_79B9));
-            let h0 =
-                amplitude_field(n, cascade.patch, u10, fetch, direction, cascade.band, cascade_seed);
+            let h0 = amplitude_field(
+                n,
+                cascade.patch,
+                u10,
+                fetch,
+                direction,
+                swell,
+                cascade.band,
+                cascade_seed,
+            );
 
-            let along = {
-                let length = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
-                if length > 0.0 && length.is_finite() {
-                    [direction[0] / length, direction[1] / length]
-                } else {
-                    // The same fallback `amplitude_field` uses, so the half-plane split
-                    // agrees with the side the energy was drawn on.
-                    [1.0, 0.0]
-                }
-            };
+            // **The same function `amplitude_field` drew the hashes on**, so the
+            // half-plane split here agrees with the side the energy is on — and
+            // when the wind has died and only a swell is left, both follow the
+            // swell rather than a wind direction that means nothing. This was
+            // the same normalisation written out inline in both files, which was
+            // one rule in two places the moment there were two seas to choose
+            // between.
+            let along = crate::spectrum::running_direction(u10, fetch, direction, swell);
             let delta_k = std::f32::consts::TAU / cascade.patch;
             #[allow(clippy::cast_precision_loss)]
             let half = (n / 2) as f32;
@@ -613,6 +650,10 @@ impl Ocean {
     /// three `amplitude_field` passes and cannot be done per tick, so a `spectrum` body
     /// keeps the sea its scene's wind built at load. No scene both ramps and asks for the
     /// spectrum; when one does, the ramp is a slice of its own.
+    ///
+    /// **No swell yet.** [`Self::with_swell`] takes one and `WaterBody` cannot author
+    /// one, so this passes `None` and every existing scene realises exactly the sea it
+    /// did before. The scene half is the next task of `SEA-DUAL-SPECTRUM-PLAN`.
     #[must_use]
     pub fn for_body(
         body: &loom_scene::components::WaterBody,
@@ -1181,6 +1222,173 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A wind sea breaks where a swell of the same height does not — the whole
+    /// reason two spectra are summed into one grid.**
+    ///
+    /// Whitecapping is driven by *steepness*, and fetch buys height by making the sea
+    /// *longer*: `ocean_fft`'s 440 km sea realises 6.1 m — a genuine twenty-foot sea —
+    /// at a 226 m peak wavelength, so `Hs/λp ≈ 0.027`, and it barely breaks. Per wave
+    /// `k·A` is what a crest responds to, and a short wave carries it out of all
+    /// proportion to its height.
+    ///
+    /// **The two seas here carry the same energy, redistributed, and that is exact
+    /// rather than tuned.** A fetch-limited `Hs` is `0.0016·√(gF/U²)·U²/g`, which is
+    /// `∝ √F` at fixed wind, so `m0 ∝ F` and fetches add: 440 km of swell against
+    /// 420 km of swell plus 20 km of wind sea is the same `m0` by arithmetic, with no
+    /// number chosen to make it so. Both realise **6.127 m and 6.129 m**, asserted
+    /// below, because a breaking comparison at two different heights would prove
+    /// nothing.
+    ///
+    /// **Same heading for both**, deliberately. A crossing sea changes the compression
+    /// matrix's anisotropy and therefore its largest eigenvalue — which is the case
+    /// `WaterSample::mu_max` was built as an eigenvalue rather than a trace to handle,
+    /// and which the next task of the plan gives it — but it is a second effect, and
+    /// measuring two at once is not a measurement. This isolates steepness.
+    ///
+    /// The threshold is [`crate::foam::FOAM_CREST_BREAK`] — **the engine's own, not one
+    /// picked for this test**; it is what the foam a scene draws is thresholded on.
+    /// Measured over 8 seeds × 181² points spanning the 2048 m swell tile:
+    ///
+    /// ```text
+    ///                    Hs      mu_max mean   max     past 0.22   past 0.45
+    /// swell alone        6.127   0.0508        0.429   1.000%      0.000%
+    /// swell + wind sea   6.129   0.0827        0.731   9.902%      0.133%
+    /// ```
+    ///
+    /// So the sea goes from **not breaking anywhere** — zero samples of 262,088 past
+    /// the threshold, its highest reading 0.429 against 0.45 — to breaking over about
+    /// one part in 750 of its surface, with 63% more mean compression behind it. The
+    /// bounds below are stated as absolutes rather than as a ratio because the "before"
+    /// is exactly zero and a ratio against zero says nothing; both have room, and every
+    /// input here is fixed, so there is no run-to-run spread to leave room for.
+    ///
+    /// **`side` must be coprime with the cascade patches, and 181 is prime for that
+    /// reason.** A sample lattice of `side` points across 2048 m visits the chop
+    /// cascade's 32 m tile at phases `64·i mod side` and the sea cascade's 256 m tile at
+    /// `8·i mod side`, so a `side` sharing a factor with 64 revisits a handful of fixed
+    /// phases instead of covering the tile. Measured: `side = 128` — two samples per
+    /// chop period — reads a mean `mu_max` of **0.0681 against 0.0508**, 34% high, from
+    /// nothing but where its points landed. 181, 257 and 401 agree to the fourth decimal
+    /// (0.0508 / 0.0509 / 0.0509 and 0.0827 throughout), which is what says the number
+    /// is the surface's and not the lattice's.
+    #[test]
+    fn a_wind_sea_breaks_where_a_swell_of_the_same_height_does_not() {
+        use crate::spectrum::Swell;
+        // 440 km of fetch, split. `m0 ∝ fetch`, so the two seas are the same size.
+        let (swell_fetch, wind_fetch) = (420_000.0_f32, 20_000.0_f32);
+        let u10 = 18.0_f32;
+        let heading = [1.0_f32, 0.0];
+        let seeds = 8_u32;
+        let side = 181_usize;
+        let span = 2048.0_f32; // The swell cascade's own patch.
+
+        // Measured at four thresholds rather than one, because the shape of the rise
+        // is the evidence and a single number is not. `FOAM_CREST_BREAK` is the one
+        // asserted on.
+        let thresholds = [0.15_f32, 0.22, 0.30, crate::foam::FOAM_CREST_BREAK];
+        let mut report = [[0.0_f32; 4]; 2];
+        let mut hs = [0.0_f32; 2];
+        let mut mean_mu = [0.0_f32; 2];
+        let mut max_mu = [0.0_f32; 2];
+
+        for (case, swell) in [
+            None,
+            Some(Swell { u10, fetch: swell_fetch, direction: heading }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fetch = if swell.is_some() { wind_fetch } else { swell_fetch + wind_fetch };
+            for seed in 0..seeds {
+                let mut o =
+                    Ocean::with_swell(&shipping_stack(SHIPPING_N), u10, fetch, heading, swell, seed);
+                o.evolve(20.0);
+                hs[case] += o.significant_height();
+
+                let mut sum = 0.0_f32;
+                let mut past = [0_usize; 4];
+                for iz in 0..side {
+                    for ix in 0..side {
+                        #[allow(clippy::cast_precision_loss)]
+                        let at = |i: usize| span * i as f32 / side as f32;
+                        let s = o.at(at(ix), at(iz));
+                        // The same eigenvalue `sample_cascade` hands the foam field and
+                        // the shader — not a second definition of breaking.
+                        let (mu, _) = crate::breaking(s.sxx, s.szz, s.sxz);
+                        sum += mu;
+                        max_mu[case] = max_mu[case].max(mu);
+                        for (slot, t) in past.iter_mut().zip(&thresholds) {
+                            if mu > *t {
+                                *slot += 1;
+                            }
+                        }
+                    }
+                }
+                #[allow(clippy::cast_precision_loss)]
+                let cells = (side * side) as f32;
+                mean_mu[case] += sum / cells;
+                #[allow(clippy::cast_precision_loss)]
+                for (slot, count) in report[case].iter_mut().zip(past) {
+                    *slot += count as f32 / cells;
+                }
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let n = seeds as f32;
+            hs[case] /= n;
+            mean_mu[case] /= n;
+            for slot in &mut report[case] {
+                *slot /= n;
+            }
+        }
+
+        for (case, label) in ["swell alone", "swell + wind sea"].iter().enumerate() {
+            println!(
+                "{label:16}  Hs {:.3} m  mu_max mean {:.4} max {:.4}  \
+                 past {:?}: {:.5} {:.5} {:.5} {:.5}",
+                hs[case],
+                mean_mu[case],
+                max_mu[case],
+                thresholds,
+                report[case][0],
+                report[case][1],
+                report[case][2],
+                report[case][3],
+            );
+        }
+
+        // **Matched height, or the comparison is not a comparison.** 2%: the two are
+        // 0.03% apart and each is a fixed 8-seed mean, so this is a guard against a
+        // future change to the fetch split rather than a tolerance anything sits near.
+        let mismatch = (hs[0] - hs[1]).abs() / hs[0];
+        assert!(
+            mismatch < 0.02,
+            "the two seas are not the same size: {:.3} m against {:.3} m",
+            hs[0], hs[1]
+        );
+
+        let (before, after) = (report[0][3], report[1][3]);
+        assert!(
+            before < 1.0e-4,
+            "the swell-only sea already breaks over {:.4}% of its surface — the defect \
+             this test is the acceptance for is not present",
+            before * 100.0
+        );
+        assert!(
+            after > 1.0e-3,
+            "the wind sea breaks over only {:.4}% of the surface against {:.4}% without \
+             it — a wind sea is supposed to be what makes a sea break",
+            after * 100.0,
+            before * 100.0
+        );
+        // The mean is the noise-free half of the same claim: it does not depend on
+        // where a threshold sits at all.
+        assert!(
+            mean_mu[1] > 1.4 * mean_mu[0],
+            "mean mu_max {:.4} with a wind sea against {:.4} without",
+            mean_mu[1], mean_mu[0]
+        );
     }
 
     /// A calm sea is calm. Guards the same divide-by-U edge the spectrum test does, one

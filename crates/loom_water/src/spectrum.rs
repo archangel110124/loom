@@ -77,6 +77,30 @@
 //! referent, and a coastal fishing ground genuinely has a distance to the
 //! shore. It is one number, in metres, with a meaning outside this file.
 //!
+//! # Two seas, and why one spectrum could not break
+//!
+//! Fetch buys height by making the sea *longer*, and that is not the same
+//! thing as making it steeper. At `U10 = 18` over 440 km the peak wavelength
+//! is 226 m, so a six-metre sea has `Hs/λp ≈ 0.027` — a genuine twenty-foot
+//! sea that whitecaps over **none** of its surface, because whitecapping is a
+//! steepness threshold and `k·A` per wave is what it reads. A short wave
+//! carries `k·A` out of all proportion to its height: 3.0 m at 226 m gives
+//! 0.083, and 0.65 m at 31 m gives 0.132.
+//!
+//! So [`amplitude_field`] takes an optional [`Swell`] and sums a *second*
+//! spectrum into the same grid — the long sea for the height, a short wind sea
+//! for the breaking. **The energies are summed, never the amplitudes**, and
+//! `swell = None` is bit-for-bit the field this module produced before it
+//! existed. `ocean.rs`'s `a_wind_sea_breaks_where_a_swell_of_the_same_height_does_not`
+//! is the measurement: at one `Hs`, redistributing 20 km of the 440 km fetch
+//! into a wind sea takes the fraction of the surface past
+//! `foam::FOAM_CREST_BREAK` from **0.000% to 0.133%** and the mean `mu_max`
+//! from 0.0508 to 0.0827.
+//!
+//! [`wave_set`] and [`wave_set_fetch`] are untouched by this and still model
+//! one sea — see `amplitude_field_agrees_with_wave_set_fetch` for what the two
+//! paths assert about each other now that one of them can hold two.
+//!
 //! # What is deliberately not built
 //!
 //! **JONSWAP's peak enhancement, `γ = 3.3`.** It narrows the spectrum about
@@ -544,6 +568,107 @@ fn box_muller(seed: u32, x: u32, z: u32) -> (f32, f32) {
 /// energy that a lone cascade has no reason to throw away.
 pub const WHOLE_BAND: [f32; 2] = [0.0, f32::INFINITY];
 
+/// A second sea summed into the same grid: a **swell**, in the physical sense —
+/// the remnant of a wind that has blown somewhere else and left.
+///
+/// Three numbers, and they are exactly the three [`amplitude_field`] already
+/// takes for the wind sea, because the two are the same kind of object. Which
+/// one is "the wind sea" is a statement about the scene, not about the physics:
+/// the wind sea is the one the scene's `Wind` is blowing now.
+///
+/// **Its heading is taken modulo π.** The `cosᵖ` spread is a *magnitude*, so a
+/// swell running `+d` and one running `−d` place identical energy in identical
+/// cells; which way a mode actually travels is [`crate::ocean::Ocean`]'s
+/// half-plane sign, and that follows [`running_direction`]. So a swell authored
+/// more than 90° from the wind is realised on the right *axis* and runs along
+/// the wind's side of it. `ponytail:` one half-plane per grid, because a cell
+/// holds one complex amplitude and therefore one direction of travel; the
+/// upgrade is a per-cell sign chosen by whichever sea dominates that cell,
+/// which `ocean.rs` would have to evaluate both spectra to reproduce.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Swell {
+    /// The wind that raised it, at **10 m** — see this module's reference-height
+    /// trap, and never `loom_field::wind::Wind::speed`.
+    pub u10: f32,
+    /// How far that wind blew over open water, in metres. Non-positive or
+    /// non-finite is unlimited fetch, exactly as in [`wave_set_fetch`].
+    pub fetch: f32,
+    /// Its heading on XZ, modulo π — see the type's docs.
+    pub direction: [f32; 2],
+}
+
+/// The direction the sea as a whole runs: the wind's while there is a wind sea,
+/// the swell's when the wind has died and only the swell is left.
+///
+/// **One rule, called by [`amplitude_field`] and by
+/// [`crate::ocean::Ocean::with_swell`]**, which is the arrangement the
+/// half-plane sign already lives under and for the same reason: this grid
+/// decides *which cell's hash is drawn* from this vector and `ocean.rs` decides
+/// *which way every mode travels* from it, and a disagreement between the two
+/// is a sea that runs against its own energy.
+///
+/// With no swell it is `normalise(direction)` and nothing else, which is
+/// bit-for-bit what both callers computed inline before this existed.
+#[must_use]
+pub fn running_direction(
+    u10: f32,
+    fetch: f32,
+    direction: [f32; 2],
+    swell: Option<Swell>,
+) -> [f32; 2] {
+    let wind = normalise(direction).unwrap_or([1.0, 0.0]);
+    if spectrum_shape(u10, fetch).is_some() {
+        return wind;
+    }
+    match swell {
+        Some(s) if spectrum_shape(s.u10, s.fetch).is_some() => {
+            normalise(s.direction).unwrap_or(wind)
+        }
+        _ => wind,
+    }
+}
+
+/// One sea reduced to the three numbers a grid cell needs of it.
+///
+/// [`spectrum_shape`] is still the only place a wind and a fetch become a
+/// spectrum; this is that pair plus the heading, so that summing a second sea
+/// into a cell is one more call to [`Shape::variance_at`] rather than a second
+/// copy of the derivation.
+#[derive(Clone, Copy)]
+struct Shape {
+    /// The PM19.5 wind that sets where this sea's energy sits.
+    u: f32,
+    /// `m0 / natural_m0(u)`: what rescales PM's own variance to this sea's.
+    scale_to_m0: f32,
+    /// The heading as an angle, for the `cosᵖ` spread.
+    theta: f32,
+}
+
+impl Shape {
+    /// `None` for a sea below [`MIN_WIND_SPEED`] — a mirror has no spectrum.
+    fn of(u10: f32, fetch: f32, direction: [f32; 2]) -> Option<Self> {
+        let (m0, u) = spectrum_shape(u10, fetch)?;
+        let along = normalise(direction).unwrap_or([1.0, 0.0]);
+        Some(Self { u, scale_to_m0: m0 / natural_m0(u), theta: along[1].atan2(along[0]) })
+    }
+
+    /// This sea's share of the **one-sided** variance a grid cell carries:
+    /// the 1D-in-k density, turned areal by the `ω → k` Jacobian and the ring
+    /// factor `1/k`, fanned by `|cos(θ − θ₀)|ᵖ`, and multiplied by the cell's own
+    /// area in k-space.
+    ///
+    /// **`.abs()`, and never `.max(0.0)`** — see [`amplitude_field`]'s body for
+    /// what clamping here costs. `theta_k` is `atan2(kz, kx)`, passed in
+    /// because both seas share it and it is a transcendental call.
+    fn variance_at(&self, k: f32, theta_k: f32, spread_norm: f32, cell_area: f32) -> f32 {
+        let omega = (GRAVITY * k).sqrt();
+        let s_omega = pm_density(omega, self.u) * self.scale_to_m0;
+        let jacobian_dw_dk = GRAVITY / (2.0 * omega); // ω = √(gk)
+        let spread = (theta_k - self.theta).cos().abs().powi(SPREAD_POWER) / spread_norm;
+        s_omega * jacobian_dw_dk / k * spread * cell_area
+    }
+}
+
 /// The `h0(k)` field a wind, fetch and direction produce over an `n × n` grid
 /// on a `patch`-metre-square patch, for [`crate::fft::ifft_2d`] to turn into
 /// a height field. Row-major, index `z * n + x`.
@@ -571,6 +696,31 @@ pub const WHOLE_BAND: [f32; 2] = [0.0, f32::INFINITY];
 /// omitting that was round 1's bug, and it scaled the total with `patch`
 /// alone, a purely numerical parameter with no counterpart in the sixteen
 /// waves at all.
+///
+/// # Two seas in one grid
+///
+/// `swell` sums a second spectrum into the same cells — the argument is in
+/// [`Swell`] and the reason is ADR 0076's: **whitecapping is driven by
+/// steepness, not height, and fetch buys height by making the sea longer.** At
+/// `U10 = 18` over 440 km the peak wavelength is 226 m, so a six-metre sea has
+/// `Hs/λp ≈ 0.027` and does not break. Per wave `k·A` is what a crest, a
+/// normal and a hull respond to, and a short wave carries it out of all
+/// proportion to its height: 3.0 m at 226 m gives `k·A = 0.083`, while 0.65 m
+/// at 31 m gives 0.132. A wind sea a fifth the height is steeper than the swell
+/// it rides on.
+///
+/// **The energies are summed, never the amplitudes.** Two independent seas
+/// superpose in variance; adding amplitudes would give both seas one draw's
+/// phase and correlate them into a single larger sea with the wrong statistics.
+/// The sum is in a fixed order — wind sea, then swell — because float addition
+/// is not associative and this reaches the force path. With `swell = None` the
+/// sum is `0.0 + x`, which is `x` bit for bit: **no sea authored before this
+/// parameter existed moves by a ULP.**
+///
+/// Everything below is unchanged by the second spectrum, because it is a
+/// property of the *cell* rather than of the sea in it: `k = 0` is still zero,
+/// the mirror pairing is still written, and the four self-mirror cells are
+/// still forced real. Only the variance that goes into the draw is a sum.
 ///
 /// # k = 0 and the Hermitian mirror
 ///
@@ -641,27 +791,38 @@ pub const WHOLE_BAND: [f32; 2] = [0.0, f32::INFINITY];
 /// correct together; changing any one of them without the other two lands a
 /// twenty-foot sea at 0.37 mm.
 #[must_use]
-#[allow(clippy::cast_precision_loss, clippy::similar_names)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::similar_names,
+    clippy::too_many_arguments
+)]
 pub fn amplitude_field(
     n: usize,
     patch: f32,
     u10: f32,
     fetch: f32,
     direction: [f32; 2],
+    swell: Option<Swell>,
     band: [f32; 2],
     seed: u32,
 ) -> Vec<Complex> {
     let mut field = vec![Complex::default(); n * n];
-    let Some((m0, u)) = spectrum_shape(u10, fetch) else {
-        return field; // Below MIN_WIND_SPEED: a flat sea, every cell zero.
-    };
+    // **Two seas, and either may be absent.** A wind below `MIN_WIND_SPEED`
+    // carrying a swell is a glassy groundswell and is a sea; only a grid with
+    // neither is a mirror.
+    let wind_sea = Shape::of(u10, fetch, direction);
+    let swell_sea = swell.and_then(|s| Shape::of(s.u10, s.fetch, s.direction));
+    if wind_sea.is_none() && swell_sea.is_none() {
+        return field; // Below MIN_WIND_SPEED on both: a flat sea, every cell zero.
+    }
     if n == 0 || !patch.is_finite() || patch <= 0.0 {
         return field;
     }
 
-    let scale_to_m0 = m0 / natural_m0(u);
-    let along = normalise(direction).unwrap_or([1.0, 0.0]);
-    let along_theta = along[1].atan2(along[0]);
+    // The half-plane the hashes are drawn on — the wind's while there is a wind
+    // sea, the swell's when there is not. `ocean.rs` reads the same function
+    // for the sign that decides which way every mode travels.
+    let along = running_direction(u10, fetch, direction, swell);
     let spread_norm = cos_power_integral(SPREAD_POWER);
     let delta_k = std::f32::consts::TAU / patch;
     // `s_k` below is a *density* — energy per unit area of k-space — and a
@@ -727,11 +888,13 @@ pub fn amplitude_field(
                 } else {
                     (mx as u32, mz as u32)
                 };
-                // Only the spread *magnitude* still needs the angle: the live
-                // side's `|cos(θ − θ_wind)|`. The mirror's angle is `θ ± π`,
-                // so its cosine is `−cos θ` and the magnitude is shared.
+                // Only the spread *magnitude* still needs the angle, and both
+                // seas need this one: each takes `|cos(θ_k − θ₀)|` against its
+                // own heading, in `Shape::variance_at`. The mirror's angle is
+                // `θ ± π`, so its cosine is `−cos θ` and the magnitude is
+                // shared.
                 //
-                // **`.abs()`, and never `.max(0.0)` — this line is where that
+                // **`.abs()` there, and never `.max(0.0)` — that is where this
                 // edit gets made.** `kx` and `kz` are *this* cell's, and the
                 // loop visits the lexicographically smaller index of each pair,
                 // which is the upwind member about half the time. Clamping
@@ -740,27 +903,41 @@ pub fn amplitude_field(
                 // away outright rather than misplacing it — the historical bug,
                 // and invisible in a still, because the sea simply comes out
                 // small. The function's docs say the same thing from the other
-                // end; this is the keystroke.
-                let cos_live = (kz.atan2(kx) - along_theta).cos().abs();
+                // end; `Shape::variance_at` is the keystroke.
+                let theta_k = kz.atan2(kx);
 
                 let (g1, g2) = box_muller(seed, hash_x, hash_z);
 
-                let omega = (GRAVITY * k).sqrt();
-                let s_omega = pm_density(omega, u) * scale_to_m0;
-                let jacobian_dw_dk = GRAVITY / (2.0 * omega); // ω = √(gk)
-                // **There is no ±90° cutoff here and nothing to clamp.** This
-                // is a magnitude: `|cos|^p` is zero only for a cell lying
-                // exactly across the wind, and falls off smoothly either side.
-                // Both members of a mirror pair carry it, because Hermitian
-                // symmetry forces them to share a magnitude — which side the
-                // energy *travels* is `ocean.rs`'s half-plane sign and is not
-                // decided by this factor. See `cos_live` above before editing.
-                let spread = cos_live.powi(SPREAD_POWER) / spread_norm;
-                // 2D areal density: the 1D-in-k density, divided by k to
-                // spread it over a ring, fanned by direction — then scaled by
-                // the cell's own area in k-space, `(Δk)²`, to turn a density
-                // into the variance the downwind cone actually carries.
-                let s_k_one_sided = s_omega * jacobian_dw_dk / k * spread * cell_area;
+                // **Two seas, summed in variance and never in amplitude**, and
+                // summed in this order — the wind sea first, the swell second —
+                // and only in this order: float addition is not associative and
+                // this number reaches the foam and the hull forces a scene
+                // draws. Adding the two *amplitudes* instead would put one
+                // draw's phase on both seas and correlate them into a single
+                // larger sea: crests that always coincide, `Hs` too high, and
+                // Rayleigh statistics nothing else in this crate expects.
+                // Energies add because the seas are independent, and one
+                // complex-Gaussian draw of the summed variance is exactly the
+                // sum of two independent draws of the parts.
+                //
+                // `Shape::variance_at` carries the per-sea arithmetic — the
+                // `cosᵖ` spread is a *magnitude* there, with no ±90° cutoff
+                // and nothing to clamp: both members of a mirror pair carry it,
+                // because Hermitian symmetry forces them to share one, and
+                // which side the energy *travels* is `ocean.rs`'s half-plane
+                // sign and is not decided by this factor. See `live_is_c`
+                // above before editing either.
+                //
+                // With no swell this is `0.0 + x`, which is `x` bit for bit, so
+                // every sea authored before this parameter existed realises the
+                // field it always did.
+                let mut s_k_one_sided = 0.0_f32;
+                if let Some(shape) = wind_sea {
+                    s_k_one_sided += shape.variance_at(k, theta_k, spread_norm, cell_area);
+                }
+                if let Some(shape) = swell_sea {
+                    s_k_one_sided += shape.variance_at(k, theta_k, spread_norm, cell_area);
+                }
                 // `s_k_one_sided` is calibrated (via `scale_to_m0`) so that
                 // summing it once per pair, over the downwind cone alone,
                 // reproduces `wave_set_fetch`'s `m0` — that's what
@@ -845,7 +1022,7 @@ mod tests {
     /// commit that changes the literal.
     #[test]
     fn the_amplitude_field_is_pinned() {
-        let field = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 7);
+        let field = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], None, WHOLE_BAND, 7);
         assert_eq!(
             digest(field.iter().flat_map(|c| [c.re, c.im])),
             0x1f52_da46_b012_dfcd,
@@ -890,7 +1067,7 @@ mod tests {
     fn the_banded_amplitude_field_is_pinned() {
         let dk = std::f32::consts::TAU / 200.0;
         let band = [2.0 * dk, 4.0 * dk];
-        let field = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], band, 7);
+        let field = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], None, band, 7);
         // Not the point of the test, but a band that filtered nothing — or everything —
         // would pin a digest just as happily, and this is one line to say it did not.
         let live = field.iter().filter(|c| c.re != 0.0 || c.im != 0.0).count();
@@ -899,6 +1076,43 @@ mod tests {
             digest(field.iter().flat_map(|c| [c.re, c.im])),
             0x3ada_5906_73a5_8d8d,
             "the banded amplitude field moved — read this test's doc comment before \
+             touching the literal"
+        );
+    }
+
+    /// The same field again with a **swell** summed into it, pinned bit for bit —
+    /// because neither pin above executes the second spectrum at all.
+    ///
+    /// `swell = None` is `0.0 + x`, so the two pins above are unmoved by this parameter
+    /// existing (they were re-run and did not change, which is the evidence that the
+    /// no-swell path is untouched). That is exactly why they cannot cover the arm that
+    /// sums: a digest taken over a branch that is never taken pins nothing.
+    ///
+    /// The swell here crosses the wind at 90° and is a different, weaker sea (9 m/s over
+    /// 20 km against 12 m/s over 100 km), so neither its heading nor its shape can
+    /// coincide with the wind sea's and read as a pass by accident. `differs` is one
+    /// line to say the summed field is not the wind sea's field — a `swell` argument
+    /// that was quietly dropped on the floor would pin a digest just as happily.
+    ///
+    /// Everything [`the_amplitude_field_is_pinned`] says about not re-blessing a moved
+    /// literal applies here unchanged.
+    #[test]
+    fn the_dual_amplitude_field_is_pinned() {
+        let swell = Swell { u10: 9.0, fetch: 20_000.0, direction: [0.0, 1.0] };
+        let field =
+            amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], Some(swell), WHOLE_BAND, 7);
+        let wind_only =
+            amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], None, WHOLE_BAND, 7);
+        let differs = field
+            .iter()
+            .zip(&wind_only)
+            .filter(|(a, b)| a.re.to_bits() != b.re.to_bits())
+            .count();
+        assert_eq!(differs, 974, "the swell no longer reaches the cells this digest was taken over");
+        assert_eq!(
+            digest(field.iter().flat_map(|c| [c.re, c.im])),
+            0x4a85_b0a9_4c96_936e,
+            "the dual amplitude field moved — read this test's doc comment before \
              touching the literal"
         );
     }
@@ -1254,19 +1468,29 @@ mod amplitude_tests {
     /// so this only proves symmetry, not that there is a sea here at all.
     /// `a_harder_wind_is_a_bigger_sea` and `amplitude_field_agrees_with_wave_set_fetch`
     /// are what rule that out.
+    ///
+    /// **Run with a swell as well as without.** Summing a second spectrum happens
+    /// inside the draw, before the mirror is written, so the symmetry cannot be lost
+    /// there by construction — but "by construction" is what the first version of this
+    /// function said too, and the crossing swell also puts energy in cells the wind
+    /// sea's cone leaves near zero, which is where a symmetry bug would hide.
     #[test]
     fn the_field_is_hermitian() {
         let n = 16;
-        let h0 = amplitude_field(n, 200.0, 12.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 7);
-        for z in 0..n {
-            for x in 0..n {
-                let a = h0[z * n + x];
-                let b = h0[((n - z) % n) * n + ((n - x) % n)];
-                assert!(
-                    (a.re - b.re).abs() < 1e-6 && (a.im + b.im).abs() < 1e-6,
-                    "({x},{z}) is not the conjugate of its mirror: ({}, {}) vs ({}, {})",
-                    a.re, a.im, b.re, b.im
-                );
+        let swell = Swell { u10: 9.0, fetch: 20_000.0, direction: [0.0, 1.0] };
+        for swell in [None, Some(swell)] {
+            let h0 = amplitude_field(n, 200.0, 12.0, 100_000.0, [1.0, 0.0], swell, WHOLE_BAND, 7);
+            for z in 0..n {
+                for x in 0..n {
+                    let a = h0[z * n + x];
+                    let b = h0[((n - z) % n) * n + ((n - x) % n)];
+                    assert!(
+                        (a.re - b.re).abs() < 1e-6 && (a.im + b.im).abs() < 1e-6,
+                        "swell={swell:?}: ({x},{z}) is not the conjugate of its mirror: \
+                         ({}, {}) vs ({}, {})",
+                        a.re, a.im, b.re, b.im
+                    );
+                }
             }
         }
     }
@@ -1274,8 +1498,8 @@ mod amplitude_tests {
     /// Same seed, same field, bit for bit — ADR 0076's whole licence.
     #[test]
     fn the_field_is_reproducible() {
-        let a = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 3);
-        let b = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 3);
+        let a = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], None, WHOLE_BAND, 3);
+        let b = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], None, WHOLE_BAND, 3);
         for (x, y) in a.iter().zip(b.iter()) {
             assert_eq!(x.re.to_bits(), y.re.to_bits());
             assert_eq!(x.im.to_bits(), y.im.to_bits());
@@ -1285,27 +1509,43 @@ mod amplitude_tests {
     /// A different seed is a different sea, or the seed is not doing anything.
     #[test]
     fn a_different_seed_is_a_different_sea() {
-        let a = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 3);
-        let b = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 4);
+        let a = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], None, WHOLE_BAND, 3);
+        let b = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], None, WHOLE_BAND, 4);
         assert!(a.iter().zip(b.iter()).any(|(x, y)| x.re.to_bits() != y.re.to_bits()));
     }
 
     /// **Zero wind is a flat sea and not a NaN.** The spectrum divides by `U`, so this is
     /// the edge every wave model gets wrong once. `pool.loom` authors `Wind.speed = 0`.
+    ///
+    /// **Zero wind with a swell on it is not flat**, which is the other half and is a
+    /// real sea state — a glassy groundswell, the wind gone and the water still moving.
+    /// It is also the only case that exercises [`running_direction`]'s second arm: the
+    /// half-plane has to follow the swell, because a dead wind's heading means nothing
+    /// and the modes would run along it anyway.
     #[test]
     fn no_wind_is_a_flat_sea() {
-        let h0 = amplitude_field(16, 200.0, 0.0, 100_000.0, [1.0, 0.0], WHOLE_BAND, 1);
+        let h0 = amplitude_field(16, 200.0, 0.0, 100_000.0, [1.0, 0.0], None, WHOLE_BAND, 1);
         for (i, c) in h0.iter().enumerate() {
             assert!(c.re.is_finite() && c.im.is_finite(), "cell {i} is not finite");
             assert!(c.re.abs() < 1e-3 && c.im.abs() < 1e-3, "cell {i} has energy in no wind");
         }
+
+        let swell = Swell { u10: 12.0, fetch: 100_000.0, direction: [0.0, 1.0] };
+        let h0 = amplitude_field(16, 200.0, 0.0, 100_000.0, [1.0, 0.0], Some(swell), WHOLE_BAND, 1);
+        let m0: f32 = h0.iter().map(|c| c.re * c.re + c.im * c.im).sum();
+        assert!(m0 > 0.1, "a swell under a dead wind realised m0 = {m0}");
+        assert_eq!(
+            running_direction(0.0, 100_000.0, [1.0, 0.0], Some(swell)),
+            [0.0, 1.0],
+            "with no wind sea the whole grid must run along the swell"
+        );
     }
 
     /// More wind is more energy, which is the one monotonic claim this module makes.
     #[test]
     fn a_harder_wind_is_a_bigger_sea() {
         let energy = |u: f32| -> f32 {
-            amplitude_field(32, 200.0, u, 500_000.0, [1.0, 0.0], WHOLE_BAND, 1)
+            amplitude_field(32, 200.0, u, 500_000.0, [1.0, 0.0], None, WHOLE_BAND, 1)
                 .iter()
                 .map(|c| c.re * c.re + c.im * c.im)
                 .sum()
@@ -1320,6 +1560,25 @@ mod amplitude_tests {
     /// at 800 m). `4·√(Σ|h0|²)` is the field's implied `Hs`, by the same `Hs = 4√m0`
     /// relation `significant_height` uses — `m0` there is `ΣA²/2` over the sixteen waves,
     /// `Σ|h0|²` here is its Parseval equivalent for the grid.
+    ///
+    /// # What this asserts now that a grid can hold two seas
+    ///
+    /// **The sum, and not the swell alone.** `wave_set_fetch` models one sea, so there
+    /// is no sixteen-wave object to compare a dual grid against directly — but energies
+    /// are what add, and `m0` *is* the energy: a grid carrying a wind sea and a swell
+    /// must realise `m0(wind sea) + m0(swell)`, each term being one `wave_set_fetch`
+    /// this test can build. So the invariant is unchanged in kind and wider in reach:
+    /// **the grid path and the sixteen-wave path still cannot disagree about what a sea
+    /// is, and now they cannot disagree about what two of them are either.** The
+    /// alternative — comparing a dual grid against the swell's `wave_set_fetch` alone
+    /// and widening the tolerance to absorb the wind sea — is exactly the "quietly
+    /// becomes a test of half the sea" the plan names, and it would pass while the
+    /// second spectrum contributed nothing at all.
+    ///
+    /// The single-sea half below is untouched and still runs first: it is what pins the
+    /// `swell = None` path, which is bit-for-bit the field this function produced before
+    /// the parameter existed. Measured with the swell: **3.9% off along the swell's own
+    /// heading and 3.7% off across it at 60°**, against the same 15%.
     ///
     /// Checked across three `patch`es and two `n`s because that is exactly the bug's
     /// signature: it moved with `patch` and didn't move with anything about the wind.
@@ -1378,7 +1637,7 @@ mod amplitude_tests {
                     let trials = 200_u32;
                     let mean_m0: f32 = (0..trials)
                         .map(|seed| {
-                            amplitude_field(n, patch, u10, fetch, dir, WHOLE_BAND, seed)
+                            amplitude_field(n, patch, u10, fetch, dir, None, WHOLE_BAND, seed)
                                 .iter()
                                 .map(|c| c.re * c.re + c.im * c.im)
                                 .sum::<f32>()
@@ -1395,6 +1654,55 @@ mod amplitude_tests {
                     );
                 }
             }
+        }
+
+        // ---- and with a swell, against the *sum* — see this test's docs. ----
+        //
+        // 60 km rather than the 20 km `a_wind_sea_breaks_where_a_swell_of_the_same_height_does_not`
+        // uses, because this grid has to *resolve* both seas for the comparison to
+        // mean anything: at `patch = 800`, `n = 64` the Nyquist is 0.251 rad/m and a
+        // 20 km wind sea peaks at 0.214, with most of its tail past the edge. 60 km
+        // peaks at 0.103 and the swell at 0.031, both well inside. A truncated sea
+        // reading low would be a fact about the grid, not about the sum.
+        let wind_fetch = 60_000.0_f32;
+        let swell = Swell { u10, fetch, direction: [1.0, 0.0] };
+        let swell_m0 = {
+            let hs = significant_height(&wave_set_fetch(swell.u10, swell.direction, swell.fetch));
+            (hs / 4.0) * (hs / 4.0)
+        };
+        // Two headings for the wind sea: with the swell, and crossing it at 60°. The
+        // energy a heading carries cannot depend on the heading, so both must land on
+        // the same sum — which is also what says the second spectrum's spread is
+        // normalised the same way as the first's.
+        for &dir in &[[1.0_f32, 0.0], [0.5, 0.866_025_4]] {
+            let target_m0 = {
+                let hs = significant_height(&wave_set_fetch(u10, dir, wind_fetch));
+                (hs / 4.0) * (hs / 4.0) + swell_m0
+            };
+            let trials = 200_u32;
+            let mean_m0: f32 = (0..trials)
+                .map(|seed| {
+                    amplitude_field(64, 800.0, u10, wind_fetch, dir, Some(swell), WHOLE_BAND, seed)
+                        .iter()
+                        .map(|c| c.re * c.re + c.im * c.im)
+                        .sum::<f32>()
+                })
+                .sum::<f32>()
+                / trials as f32;
+
+            let error = (mean_m0 - target_m0).abs() / target_m0;
+            println!(
+                "swell + wind sea along {dir:?}: field m0 {mean_m0:.4}, \
+                 wave_set_fetch sum {target_m0:.4} ({:.1}% off)",
+                error * 100.0
+            );
+            assert!(
+                error < 0.15,
+                "with a swell, dir={dir:?}: field m0 ({trials}-seed mean) is {mean_m0:.4} \
+                 against a two-sea sum of {target_m0:.4} ({:.1}% off) — the grid and the \
+                 sixteen-wave path disagree about how big two seas are",
+                error * 100.0
+            );
         }
     }
 }
