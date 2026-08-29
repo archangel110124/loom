@@ -6042,6 +6042,101 @@ static const float3 WATER_FOAM_OLD_ALBEDO = float3(0.28, 0.30, 0.32);
 /// dispersing raft is holes: the water's own reflection comes back through it,
 /// which is the difference between foam ageing and foam dimming.
 static const float WATER_FOAM_OLD_OPACITY = 0.55;
+/// **Foam is a material, not a tint — SEA-REBUILD §4.4's second half.**
+///
+/// A raft of packed bubbles is a rough dielectric. It has a specular lobe, and
+/// the lobe is nothing like the water's: `WATER_ROUGHNESS` is 0.08, a mirror
+/// that makes the sun a point, and drawing foam with a purely Lambert response
+/// was what left every whitecap in this shader reading as matte paper. The
+/// water's own mirror is already gone under foam — the composite below
+/// *replaces* `lit` rather than adding to it — so this is what comes back in
+/// its place, and it is broad enough to be a sheen across the whole raft rather
+/// than a highlight on part of it.
+///
+/// `f0` is a water/air film's, the same 0.02 the surface itself uses; foam is
+/// bright because it scatters, not because it is metal.
+static const float WATER_FOAM_ROUGHNESS = 0.55;
+static const float WATER_FOAM_F0 = 0.02;
+/// **The lace modulates opacity, and not only at the rim.**
+///
+/// `foam` is `smoothstep(fnoise +- ferode, wetc)` — the noise enters as the
+/// *threshold* a coverage is eroded against, so it can only bite where `wetc`
+/// is inside that band. On a spectrum sea `wetc` is not a gradient: `instant`
+/// is `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, breakMu)` and a crest
+/// crosses those two numbers in a fraction of a cell, so the mask is 0 or 1
+/// with a straight mesh-interpolated line between them. **Measured, not
+/// argued** — `return float4(foam.xxx, 1)` on `ocean_fft_boat --sim 500
+/// --yaw 15 --pitch 55` is a binary stencil of hard-edged polygons with no
+/// lace anywhere inside them. That is the reported "renders weird": a raft was
+/// a flat opaque slab of one colour with a straight edge, and the whole octave
+/// ladder above it was drawing into a band a pixel or two wide.
+///
+/// So the lace carves the raft *throughout*. A whitecap is entrained air in
+/// holes, thinning as it drains, and the fraction it has stopped covering is
+/// what this is. Applied to the coverage, so it is opacity **and** albedo —
+/// a hole is water showing through, not grey foam.
+///
+/// **It band-limits on the ladder's own weight.** `waterFoamRaft` is one raw
+/// octave and carries no weight of its own, so this term lerps it toward the
+/// *mean* it would have had — `WATER_FOAM_HOLE_MEAN` — on `waterFoamWeights().x`,
+/// the same number the lace retires by. Toward the mean and never toward zero,
+/// for the reason §1 of the band-limit report gives at length: fading a term to
+/// zero instead of to its own mean is the sign error that cost 72% of that gap.
+/// Zero here would mean the far field's rafts closing up solid, which is the
+/// defect this whole constant exists to remove.
+///
+/// **One number, and it is 1.0 — a hole is a hole.** A fresh/old pair was
+/// built first, on the reasoning that a draining raft should be holier than a
+/// breaking one, and deleted: `WATER_FOAM_OLD_OPACITY` and
+/// `WATER_FOAM_OLD_ALBEDO` already carry ageing, `foamAge` is 0 across every
+/// raft in the reported shot (measured — `return float4(foamAge, holes, foam,
+/// 1)`), so the pair had nothing to separate, and at anything under 1.0 the
+/// raft never actually opens. That last part is the one that matters and it
+/// is what the pictures say: at 0.85 the holes are a dimming and the raft's
+/// silhouette is still the mesh's straight line, because a 15%-opaque foam
+/// pixel is still a foam pixel. At 1.0 the raft is genuinely cut through, and
+/// a hole that reaches the rim tears it — which is where the ragged edge in
+/// the after image comes from.
+static const float WATER_FOAM_HOLES = 1.00;
+/// Width of the noise band the holes open through, in raft-density units.
+/// Comparable to the slice's own 0.157 standard deviation, so a hole has an
+/// edge and a rim rather than being a wash over the whole raft.
+static const float WATER_FOAM_HOLE_BAND = 0.25;
+/// The mean of `saturate((raft - 0.5) / WATER_FOAM_HOLE_BAND)` over the
+/// slice's own distribution, which is what the term flattens to once the
+/// ladder has retired. `loom_value_noise` is a trilinear lerp of uniform
+/// hashes, so one octave of it has sigma = `sqrt((1/12)(2/3)^3)` = 0.157 (the
+/// derivation `WATER_FOAM_ERODE` gives), and with `c = 0.157 / 0.25 = 0.628`
+/// this is `c * (phi(0) - phi(1/c)) + P(z > 1/c)` = 0.628*0.2869 + 0.056
+/// = 0.236.
+static const float WATER_FOAM_HOLE_MEAN = 0.236;
+/// The raft texture's own slice of the noise volume. Any value the three
+/// octaves above (0.0, 4.1, 7.3) do not use; a lattice apart is enough for
+/// `loom_value_noise`, whose z axis is hashed like the other two.
+static const float WATER_FOAM_RAFT_SLICE = 11.7;
+/// The raft texture's frequency, in cycles per metre, and it is **isotropic** —
+/// the one number here that was chosen against the obvious guess.
+///
+/// The lace is stretched `WATER_FOAM_STREAK = 6` across its own frame, and the
+/// raft was built stretched with it. It is wrong: at 6, and at 2.5, the holes
+/// come out as parallel ribbons and a breaking crest reads as braided rope
+/// rather than as churn. `whitecaps --sim 400` at 1000x1000, worst-channel
+/// `loom salt`: stretched 2.5 scores 3,127 and isotropic scores 3,081; the
+/// reported `ocean_fft_boat` shot scores 10,064 stretched and **9,530**
+/// isotropic. Both the picture and the number pick the same one.
+///
+/// The lace wants the stretch because the lace is what lays a patch along the
+/// crest that made it; the bubbles inside the patch have no such axis. The
+/// frame is still the breaking frame (`waterFoamRaft` samples in `wd`), so the
+/// raft rotates with the crest — an isotropic pattern in a rotating frame,
+/// which costs nothing and keeps ADR 0053 §7 true of every term here.
+///
+/// **1.1 is the knee.** 1.8 scores 10,009 and 2.6 scores 10,953 on that shot —
+/// past this the raft is finer than the ladder's own bound and starts
+/// generating exactly the stipple the ladder exists to stop. At 1.1 the peak
+/// frequency is a third of the lace's `0.55 * 6` = 3.3, so
+/// `waterFoamWeights().x` bounds it with room to spare.
+static const float WATER_FOAM_RAFT_SCALE = 1.1;
 // -- The foam's octave ladder, band-limited — SEA-REBUILD §4.4 ---------------
 //
 // **This replaces `WATER_FOAM_FINE_RANGE = 40.0`**, which retired the second
@@ -6172,8 +6267,46 @@ float waterFoamNoise(float2 wp, float2 wd, float3 w) {
 /// the mean shift above painting foam that the noise never justified.
 static const float WATER_FOAM_ERODE = 0.15;
 static const float WATER_FOAM_ERODE_FLAT = 0.265;
+/// How much of the lace's contrast this fragment still carries: 1 where every
+/// octave is resolved, 0 where the ladder has retired all of them. The
+/// amplitudes are the ones `waterFoamNoise` weights its octaves by, so this is
+/// literally "what fraction of the noise's own spread survives here".
+float waterFoamLaceAmount(float3 w) {
+    return saturate(0.65 * (w.x + w.y) + 0.35 * w.z);
+}
+
 float waterFoamErode(float3 w) {
-    return lerp(WATER_FOAM_ERODE_FLAT, WATER_FOAM_ERODE, saturate(0.65 * (w.x + w.y) + 0.35 * w.z));
+    return lerp(WATER_FOAM_ERODE_FLAT, WATER_FOAM_ERODE, waterFoamLaceAmount(w));
+}
+
+/// **The raft's own texture — SEA-REBUILD §4.4's "the lace modulates opacity".**
+///
+/// A slice of its own rather than a reuse of `waterFoamNoise`, and that is the
+/// whole reason this works. That noise is the *threshold* the coverage is
+/// eroded against, so foam exists exactly where it is low; carving the raft
+/// with it puts every hole where the raft had already ended. Measured: at hole
+/// strength 0.90 against `fnoise` the reported shot moved 9,998 -> 9,985 on
+/// `loom salt` and the picture did not visibly change, because the two
+/// patterns are the same pattern.
+///
+/// Returned **unweighted**, on [0,1), so the caller can lerp it toward its own
+/// mean rather than toward zero as the ladder retires — §1 of the band-limit
+/// report: fading a term to zero instead of to its own mean is the sign error
+/// that cost 72% of that gap.
+///
+/// Sampled in the breaking frame (`wd` is `in.breakDir`, not the wind — ADR
+/// 0053 §7), so a raft rotates with the crest that entrained its air.
+///
+/// **A shading bump off this was built and deleted.** Three taps instead of
+/// one bought a central-difference slope for the foam's normal; against the
+/// bumpless render it moved **0.068% of the reported shot at worst-channel 26,
+/// and 0.171% of `whitecaps` at worst 6** — the second is inside the golden
+/// gate's own tolerance, so it is a term that cannot be seen paying for two
+/// thirds of this function. Same disposal as the grass phase's
+/// alpha-to-coverage, for the same reason.
+float waterFoamRaft(float2 wp, float2 wd) {
+    float2 fuv = float2(dot(wp, wd), dot(wp, float2(-wd.y, wd.x))) * WATER_FOAM_RAFT_SCALE;
+    return loom_value_noise(float3(fuv, WATER_FOAM_RAFT_SLICE));
 }
 
 /// Capillary detail on the water surface, below anything the mesh can carry.
@@ -7528,12 +7661,20 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     float2 fflow = loom_flow_at(flowField(), in.worldPos.xz);
     float3 fw = waterFoamWeights(foot);
     float fnoise;
+    // The raft's own texture — see `waterFoamRaft`. It rides the same two flow
+    // phases `fnoise` does, for the reason `waterDetailSlope` gives: a river's
+    // foam has to go where the river goes, and still water has to come out bit
+    // for bit as it did.
+    float raft;
     if (dot(fflow, fflow) <= 0.0) {
         fnoise = waterFoamNoise(wp, wd, fw);
+        raft = waterFoamRaft(wp, wd);
     } else {
         LoomFlowPhase fp = waterFlowPhase(wp, fflow, push.environment[0].weather.z);
         fnoise = waterFoamNoise(fp.uvA, wd, fw) * fp.wA
                + waterFoamNoise(fp.uvB, wd, fw) * (1.0 - fp.wA);
+        raft = waterFoamRaft(fp.uvA, wd) * fp.wA
+             + waterFoamRaft(fp.uvB, wd) * (1.0 - fp.wA);
     }
     // How wide the coverage is eroded through: 0.15 while the lace is whole,
     // opening out to the noise's own spread as the ladder retires it.
@@ -7661,13 +7802,27 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // which is `foamAge` on both the albedo and the substitution. Swash is
     // exempt by construction — it takes `foamAge` from whatever the whitecap
     // terms said, and on a beach that is zero, so the sheet stays fresh.
+    // **The raft is holes.** See `WATER_FOAM_HOLES`: without this the coverage
+    // saturates and a whitecap is a flat opaque polygon with a straight edge.
+    // Above the ablation, so `LOOM_ABLATE=water_foam` still zeroes everything.
+    float holes = lerp(WATER_FOAM_HOLE_MEAN,
+                       saturate((raft - 0.5) / WATER_FOAM_HOLE_BAND),
+                       fw.x);
+    foam *= 1.0 - WATER_FOAM_HOLES * holes;
+
     // Ablation: zero the coverage at its single point of use rather than at each of the
     // terms feeding it, so what is measured is exactly "the foam this frame drew" and
     // not one contributor to it.
     if (ablated(LOOM_ABLATE_WATER_FOAM)) { foam = 0.0; }
 
+    // **A rough dielectric, not a Lambert card** — see `WATER_FOAM_ROUGHNESS`.
+    // Measured: dropping this lobe moves **6.364% of `whitecaps`** at
+    // worst-channel 38, so it is not decoration; a sunlit raft is the case it
+    // is for, and the reported shot's overcast sea barely notices it (0.071%).
     float3 foamLit = lerp(WATER_FOAM_ALBEDO, WATER_FOAM_OLD_ALBEDO, foamAge)
-        * (hemisphereAmbient(normal) * ambientStrength() + sunColor() * sunStrength() * toSun);
+        * (hemisphereAmbient(normal) * ambientStrength() + sunColor() * sunStrength() * toSun)
+        + specular(normal, view, sunDirection(), WATER_FOAM_ROUGHNESS, float3(WATER_FOAM_F0))
+          * sunColor() * sunStrength() * toSun;
     lit = lerp(lit, foamLit, foam * lerp(1.0, WATER_FOAM_OLD_OPACITY, foamAge));
 
     float3 fog = fogAmount(push.environment[0].eye.xyz, in.worldPos);
