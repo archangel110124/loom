@@ -93,6 +93,25 @@ the price of the boat floating on the water you can see, and it is worth it.
 **`N = 128`, three cascades, is affordable today** — 1.24 ms of a 16.67 ms tick, with a
 deliberately naive implementation. That is **49,152 components against the present 16**.
 
+> **AMENDED after integration, and this supersedes the two paragraphs below.** The table
+> above timed the transform alone. A tick as actually built costs **3.710 ms release
+> (22.3% of a 16.67 ms tick)** at `N = 128`, because a cascade carries **eleven** tiles and
+> not three: six transformed (`h, dx, dz` and their spectral `∂/∂t`, so the water has a
+> velocity) and five central-differenced (`∂h/∂x, ∂h/∂z, Sxx, Szz, Sxz`), which is what
+> `WaterSample::mu_max` needs and what the "only a richer field to read" claim below got
+> wrong.
+>
+> So **`N = 128` is the shipping size and no longer a fallback** — `N = 256` measures
+> **126.6% of a tick** and is unavailable until the three optimisations below are spent,
+> and possibly after. The `~2.4 ms` estimate for `N = 256` in the original text assumed
+> three fields; against eleven it is not close.
+>
+> One accepted ceiling: the central-difference stencil keeps **78.2%** of the compression's
+> rms against the exact spectral form, so `mu_max` is systematically under-read by about a
+> fifth. The exact form is eleven transforms per cascade against six, and is the marked
+> upgrade path rather than a defect — but any foam threshold tuned against this sea is
+> tuned against a 0.78 factor, and moving to the exact form would move them.
+
 **`N = 256` is the target**, via three exact optimisations, none of them speculative:
 
 - the three fields are **real**, so two pack into one complex transform — 1.5x;
