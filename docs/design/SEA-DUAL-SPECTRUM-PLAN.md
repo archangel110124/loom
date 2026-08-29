@@ -105,11 +105,20 @@ does not.
   Gerstner body, a fetch outside the schema. Name the required value in the error, as
   `ParticleEmitter`'s four refusals do.
 
-- [ ] **Step 3** Give `ocean_fft` a swell crossing its wind sea. **A crossing sea is the case
-  `WaterSample::mu_max` was built as an eigenvalue rather than a trace to handle** — its own
-  docs record that on two 10 m swells 90° apart the trace calls 12.32% of the surface past
-  breaking where the eigenvalue calls 0.00%. That machinery has never had a crossing sea to
-  prove itself on; this gives it one, and the report should say which number it now reads.
+- [ ] **Step 3** Give `ocean_fft` a swell crossing its wind sea — **and it must stay inside
+  ±90°**, for a reason Task 1 discovered and marked: a grid cell carries one amplitude and
+  one travel direction, so a swell authored more than 90° off the wind lands on the right
+  axis *travelling the wind's way along it*. A genuinely opposed sea needs two grids or a
+  per-cell direction, and neither is in scope here.
+
+  That limit is worth stating plainly because it **weakens** what this step can demonstrate.
+  `WaterSample::mu_max` is an eigenvalue rather than a trace precisely to handle crossing
+  seas — its docs record that on two 10 m swells **90° apart** the trace calls 12.32% of the
+  surface past breaking where the eigenvalue calls 0.00%. At 90° exactly we are at the edge
+  of what one grid can represent, so a swell at, say, 50–70° off the wind is the honest test:
+  a real crossing, well inside the representable range. Report the trace and the eigenvalue
+  both, and say how far apart they are — that comparison is the closest this engine has come
+  to exercising a decision it made long before it had a sea to make it on.
 
 - [ ] **Step 4** Re-pin every hash that moves, deliberately, in the same commit.
 
