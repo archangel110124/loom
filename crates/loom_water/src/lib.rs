@@ -476,10 +476,13 @@ fn breaking(sxx: f32, szz: f32, sxz: f32) -> (f32, [f32; 2]) {
 /// the answer is then the still surface — flat, motionless, unbroken.** It is not a
 /// fallback to the sixteen waves, deliberately: a second sea that looks plausible at the
 /// point of use is the boat-above-its-water defect this crate's header opens on, and a
-/// mirror is unmistakable. Two callers reach here that way on purpose —
-/// [`spray::spray`], which samples the surface at each droplet's *birth* time and so
-/// cannot read a tile evolved to the current tick, and `loom_cli`'s underwater-eye flag,
-/// which has no ocean until the render half of ADR 0076 lands.
+/// mirror is unmistakable. One caller reaches here that way on purpose — `loom_cli`'s
+/// underwater-eye flag, which has no ocean until the render half of ADR 0076 lands.
+///
+/// (It used to be two. [`spray::spray`] samples the surface at each droplet's *birth*
+/// time, could not read a tile evolved to the current tick, and so was handed the mirror
+/// and threw nothing at all. It goes through [`sample_water_born`] now, which reads the
+/// ring of past tiles [`ocean::Ocean::keep`] fills.)
 ///
 /// **Shoaling does not apply.** A cascade is a periodic deep-water tile and cannot feel a
 /// bed (ADR 0076, "what does not change"); `depth` is still reported, and a scene that
@@ -511,6 +514,24 @@ fn sample_cascade(
         );
         sea.at(world_xz[0], world_xz[1])
     });
+    cascade_sample(body, c, depth, flow, wavelet)
+}
+
+/// The arithmetic half of [`sample_cascade`], over a cascade lookup that has already
+/// happened.
+///
+/// **Split out so the past can be read through the same lines the present is.**
+/// [`sample_water_born`] hands it an [`ocean::Ocean::at_kept`] lookup from a droplet's
+/// birth instant; `sample_cascade` hands it an [`ocean::Ocean::at`] on the current tick.
+/// Every field's meaning, and the order every sum is taken in, is one copy of the code
+/// rather than two that can drift.
+fn cascade_sample(
+    body: &WaterBody,
+    c: ocean::OceanSample,
+    depth: f32,
+    flow: [f32; 3],
+    wavelet: [f32; 3],
+) -> WaterSample {
     let mut displacement = c.displacement;
     displacement[1] += wavelet[0];
     let velocity =
@@ -540,6 +561,49 @@ fn sample_cascade(
         mu_max,
         break_dir,
     }
+}
+
+/// The surface at a **past** instant, for a droplet's birth — [`spray::spray`]'s one
+/// caller.
+///
+/// **A droplet's arc is what the crest that threw it could do**, so the crown's launch
+/// point, its strength and the drift it inherits all come from the surface at the moment
+/// it left, not from the surface now. Evaluating the sea at `t` instead would move a
+/// crown's origin every frame — the droplets would slide along with the water rather
+/// than fly free of it, which is the opposite of what spray is.
+///
+/// The two models answer it differently and that is the whole of this function:
+///
+/// - **Gerstner is closed form at a point**, so any `t` is free and the answer is exactly
+///   [`sample_water`] with no ocean. Always `Some`.
+/// - **The spectrum is a tile stack evolved to one instant.** It is a pure function of
+///   `t` as well (ADR 0076), but evaluating one costs a whole [`ocean::Ocean::evolve`],
+///   and every `(cell, slot)` [`spray::spray`] considers has its own jittered birth
+///   time — thousands of distinct instants in a frame. `ocean_fft_storm.loom`'s fixed
+///   step measures 4.11 ms a tick end to end, so recomputing is not a slower option, it
+///   is not an option. The past is *kept* instead: [`ocean::Ocean::at_kept`] reads the
+///   newest snapshot at or before `t`.
+///
+/// **`None` is the honest answer when the ring does not reach back to `t`**, which is a
+/// run's first second and a scene whose sea nobody keeps. The caller throws no crown; it
+/// must not substitute the current tick, which is the defect above with extra steps.
+///
+/// No `flow` and no `wavelet`: a crest crown is thrown by the swell, and a river current
+/// or a boat's wake at the birth point is not part of what threw it — the same two zeros
+/// [`spray::spray`] has always passed.
+#[must_use]
+pub fn sample_water_born(
+    body: &WaterBody,
+    sea: Option<&Ocean>,
+    world_xz: [f32; 2],
+    t: f32,
+    ground_height: f32,
+) -> Option<WaterSample> {
+    if body.wave_model == WaveModel::Spectrum {
+        let c = sea?.at_kept(t, world_xz[0], world_xz[1])?;
+        return Some(cascade_sample(body, c, body.surface_height - ground_height, [0.0; 3], [0.0; 3]));
+    }
+    Some(sample_water(body, None, world_xz, t, ground_height, [0.0; 3], [0.0; 3]))
 }
 
 /// The Slang half, emitted verbatim into the generated shader.

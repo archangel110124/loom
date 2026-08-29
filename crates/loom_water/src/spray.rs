@@ -8,12 +8,22 @@
 //! crests that are already going white rather than from a second opinion about
 //! where a wave is breaking.
 //!
-//! **Closed form, no state, and never read by anything.** A droplet is a
-//! function of `(body, t, region)` — the cell it came from, the slot of time it
-//! was born in, and a ballistic arc from there. Nothing accumulates, nothing is
+//! **Closed form, and never read by anything.** A droplet is a function of
+//! `(body, sea, t, region)` — the cell it came from, the slot of time it was
+//! born in, and a ballistic arc from there. Nothing accumulates here, nothing is
 //! read back, nothing produces a force, and no assertion can see it. That is
-//! ADR 0045 clause 1 satisfied by not having any state to argue about, and it
-//! is the same shape as `loom_rain::splashes`, deliberately.
+//! ADR 0045 clause 1, and it is the same shape as `loom_rain::splashes`,
+//! deliberately.
+//!
+//! **The one piece of state is behind `sea`, and it is a recording rather than
+//! an accumulator.** A Gerstner body answers any past instant for free, because
+//! the sum is closed form at a point. An FFT body cannot: the cascade is a pure
+//! function of `t` too, but evaluating one instant costs a whole tile stack, so
+//! the simulation *keeps* every eighth tick's tiles and this reads the newest
+//! one at or before a droplet's birth (`ocean::Ocean::keep`). That ring is
+//! filled only from the fixed step, so its contents are a function of the tick
+//! count and nothing else — `--sim N` in one jump and stepping to N leave the
+//! same droplets in the air.
 //!
 //! **The region follows the eye, and that is allowed here specifically.**
 //! Spray is drawn and nothing else, so ADR 0045's trap clause — a *force*
@@ -21,9 +31,10 @@
 //! how the population stays bounded on an unbounded ocean, exactly as
 //! `loom_rain::splashes` bounds itself.
 
-use crate::sample_water;
+use crate::ocean::Ocean;
+use crate::sample_water_born;
 use loom_field::noise::hash;
-use loom_scene::components::WaterBody;
+use loom_scene::components::{WaterBody, WaveModel};
 
 /// Fold at which a crest starts throwing droplets.
 ///
@@ -128,6 +139,14 @@ pub struct Droplet {
 ///
 /// Computed at full depth, which is the ceiling: `shoal` only ever *reduces*
 /// an amplitude, so a shelving sea folds less than this and never more.
+///
+/// **Gerstner bodies only, and it is zero on a `spectrum` one.** A cascade has no wave
+/// list to sum: its fold is differenced off tiles that do not exist until the first
+/// evolve. So a caller must not read a zero here as "this sea cannot break" on a
+/// spectrum body — it means the question was asked of the wrong model.
+/// `ponytail:` the spectrum's own ceiling is the per-cascade max of `Sxx + Szz` summed
+/// over the stack, one walk of `Ocean::tiles`. Build it when a spectrum sea is authored
+/// too gentle to break and somebody has to work out why nothing sprayed.
 #[must_use]
 pub fn peak_fold(body: &WaterBody) -> f32 {
     body.waves
@@ -141,8 +160,13 @@ pub fn peak_fold(body: &WaterBody) -> f32 {
 
 /// Every droplet in the air around `eye` at time `t`.
 ///
+/// `sea` is the simulation's cascade, and it is what a `spectrum` body's crests are read
+/// from — see [`sample_water_born`]. `None` on a Gerstner body, which is every sea that
+/// has not opted in, and the closed form answers those. A spectrum body handed `None`
+/// throws nothing rather than inventing a surface.
+///
 /// `ground` answers the bed height under a point, for the same reason
-/// [`sample_water`] takes one: this crate does not know what a voxel is. A
+/// [`crate::sample_water`] takes one: this crate does not know what a voxel is. A
 /// closure that returns [`loom_voxel::heightfield::NO_GROUND`]'s value — any
 /// large negative — is an open sea.
 ///
@@ -151,15 +175,25 @@ pub fn peak_fold(body: &WaterBody) -> f32 {
 #[must_use]
 pub fn spray(
     body: &WaterBody,
+    sea: Option<&Ocean>,
     eye: [f32; 3],
     t: f32,
     ground: &dyn Fn(f32, f32) -> f32,
 ) -> Vec<Droplet> {
     let mut out = Vec::new();
+    // **What "this body has a surface at all" means differs by model**: a Gerstner sea
+    // is its wave list, and a spectrum sea is its cascade — which a spectrum body has
+    // *instead* of a wave list, so the old `waves.is_empty()` test rejected every one of
+    // them before the loop even started.
+    let has_a_surface = if body.wave_model == WaveModel::Spectrum {
+        sea.is_some()
+    } else {
+        !body.waves.waves.is_empty()
+    };
     // A mirror throws nothing, and a sea that authors no spray throws nothing —
     // which is what keeps every reference image of every sea unmoved. Asking
-    // costs a grid of `sample_water` calls, so both are checked before the loop.
-    if body.spray <= 0.0 || body.waves.waves.is_empty() || t < 0.0 {
+    // costs a grid of surface samples, so both are checked before the loop.
+    if body.spray <= 0.0 || !has_a_surface || t < 0.0 {
         return out;
     }
 
@@ -175,7 +209,7 @@ pub fn spray(
             // Two slots is the whole history: a droplet outlives its slot by
             // less than one more.
             for slot in (slot_now - 1)..=slot_now {
-                crown_in(body, [ix, iz], slot, eye, t, ground, &mut out);
+                crown_in(body, sea, [ix, iz], slot, eye, t, ground, &mut out);
             }
         }
     }
@@ -183,8 +217,13 @@ pub fn spray(
 }
 
 /// One cell's crown for one slot of time, if it threw one.
+// Eight because the sea joined the seven that were already here, and every one of them
+// is a distinct thing this cell needs: what the water is, where the eye is, when it is,
+// and what the bed does. The same allow `foam.rs` takes one function along.
+#[allow(clippy::too_many_arguments)]
 fn crown_in(
     body: &WaterBody,
+    sea: Option<&Ocean>,
     cell: [i32; 2],
     slot: i32,
     eye: [f32; 3],
@@ -223,16 +262,17 @@ fn crown_in(
     // crest that was there when it left; evaluating the surface at `t` would
     // make a droplet's arc depend on water it is no longer touching.
     //
-    // **Which is exactly why no ocean is passed, and why a `spectrum` body throws no
-    // spray at all today.** The cascade is a set of tiles evolved to *one* instant — the
-    // current tick — and `born` is not that instant, so there is no ocean here that could
-    // be passed. `sample_water` answers a spectrum body with no ocean with the still
-    // surface, whose fold is zero, so the test below rejects every crown rather than
-    // inventing one out of the sixteen derived waves the body is not floating on.
-    // `Sim::new` warns when a scene authors both. Wiring it means either an ocean per
-    // spray slot or moving the sample onto the current tick, and neither is this slice's
-    // question.
-    let surface = sample_water(body, None, at, born, ground(at[0], at[1]), [0.0; 3], [0.0; 3]);
+    // **Which is why the ocean has to be able to answer about the past**, and is the
+    // whole of what stood between a `spectrum` body and any spray at all: the cascade is
+    // a stack of tiles evolved to *one* instant, and `born` is never that instant. It
+    // now answers off the ring `Ocean::keep` fills on the fixed step — see
+    // `sample_water_born`, which is also where the Gerstner path's closed form lives.
+    //
+    // `None` is a birth older than the ring reaches, which is a run's first second. No
+    // crown, rather than one launched off the wrong water.
+    let Some(surface) = sample_water_born(body, sea, at, born, ground(at[0], at[1])) else {
+        return;
+    };
     if surface.fold <= SPRAY_BREAK {
         return;
     }
@@ -793,7 +833,7 @@ mod tests {
         for tick in 0..120 {
             #[allow(clippy::cast_precision_loss)]
             let t = tick as f32 / 60.0;
-            assert!(spray(&flat, [0.0, 2.0, 0.0], t, &deep).is_empty());
+            assert!(spray(&flat, None, [0.0, 2.0, 0.0], t, &deep).is_empty());
         }
     }
 
@@ -806,7 +846,7 @@ mod tests {
         for tick in 0..600 {
             #[allow(clippy::cast_precision_loss)]
             let t = tick as f32 / 60.0;
-            assert!(spray(&storm, [0.0, 2.0, 0.0], t, &deep).is_empty());
+            assert!(spray(&storm, None, [0.0, 2.0, 0.0], t, &deep).is_empty());
         }
     }
 
@@ -818,7 +858,7 @@ mod tests {
         let storm = sea(0.55, 0.85);
         let count = |body: &WaterBody| {
             (0..240)
-                .map(|tick| spray(body, [0.0, 2.0, 0.0], tick as f32 / 60.0, &deep).len())
+                .map(|tick| spray(body, None, [0.0, 2.0, 0.0], tick as f32 / 60.0, &deep).len())
                 .sum::<usize>()
         };
 
@@ -831,8 +871,8 @@ mod tests {
     #[test]
     fn the_same_second_gives_the_same_spray() {
         let storm = sea(0.55, 0.85);
-        let a = spray(&storm, [3.0, 2.0, -4.0], 5.25, &deep);
-        let b = spray(&storm, [3.0, 2.0, -4.0], 5.25, &deep);
+        let a = spray(&storm, None, [3.0, 2.0, -4.0], 5.25, &deep);
+        let b = spray(&storm, None, [3.0, 2.0, -4.0], 5.25, &deep);
 
         assert!(!a.is_empty(), "the sea threw nothing to compare");
         assert_eq!(a, b);
@@ -847,7 +887,7 @@ mod tests {
         let mut early = f32::NEG_INFINITY;
         let mut late = f32::NEG_INFINITY;
         for tick in 0..600 {
-            for d in spray(&storm, [0.0, 2.0, 0.0], tick as f32 / 60.0, &deep) {
+            for d in spray(&storm, None, [0.0, 2.0, 0.0], tick as f32 / 60.0, &deep) {
                 if d.fraction < 0.15 {
                     early = early.max(d.position[1]);
                 } else if d.fraction > 0.85 {
@@ -866,7 +906,7 @@ mod tests {
     fn spray_stays_near_the_eye() {
         let storm = sea(0.55, 0.85);
         let eye = [40.0, 2.0, -20.0];
-        let out = spray(&storm, eye, 9.0, &deep);
+        let out = spray(&storm, None, eye, 9.0, &deep);
         assert!(!out.is_empty());
         for d in &out {
             let distance = (d.position[0] - eye[0]).hypot(d.position[2] - eye[2]);
@@ -893,7 +933,7 @@ mod tests {
                     for j in -20_i16..20 {
                         let at = [f32::from(i) * 0.7, f32::from(j) * 0.7];
                         worst = worst
-                            .max(sample_water(&body, None, at, t, -400.0, [0.0; 3], [0.0; 3]).fold);
+                            .max(crate::sample_water(&body, None, at, t, -400.0, [0.0; 3], [0.0; 3]).fold);
                     }
                 }
             }
@@ -906,7 +946,7 @@ mod tests {
                     .map(|tick| {
                         #[allow(clippy::cast_precision_loss)]
                         let t = tick as f32 / 60.0;
-                        spray(&body, [0.0, 2.0, 0.0], t, &deep).len()
+                        spray(&body, None, [0.0, 2.0, 0.0], t, &deep).len()
                     })
                     .sum();
                 assert_eq!(thrown, 0, "a sea under the ceiling threw {thrown} droplets");
@@ -925,9 +965,105 @@ mod tests {
         let land = |_x: f32, _z: f32| 1.0_f32;
 
         for tick in 0..240 {
-            let out = spray(&shore, [0.0, 2.0, 0.0], tick as f32 / 60.0, &land);
+            let out = spray(&shore, None, [0.0, 2.0, 0.0], tick as f32 / 60.0, &land);
             assert!(out.is_empty(), "spray on dry land: {out:?}");
         }
+    }
+
+    /// **The gap this file was written around, closed: an FFT sea throws spray.**
+    ///
+    /// Before the ring existed, a `spectrum` body reached `sample_water` with no ocean,
+    /// got the still surface back, and every crown failed the break test — the feature
+    /// was a silent no-op on the one model a storm scene wants. The three halves here are
+    /// the three ways that can come back:
+    ///
+    /// 1. **Without a sea it still throws nothing** — the mirror rule. A spectrum body
+    ///    handed `None` must not fall back to a wave list it does not have.
+    /// 2. **With a kept ring it throws**, which is the whole point.
+    /// 3. **A sea that was evolved but never kept throws nothing**, because `at_kept`
+    ///    reads the ring and not the current tiles. That is what would fail if
+    ///    `Sim::evolve_sea` stopped calling `Ocean::keep` — the exact regression that
+    ///    would otherwise be invisible until somebody rendered a storm.
+    #[test]
+    fn a_spectrum_sea_throws_spray_off_its_kept_tiles() {
+        use loom_scene::components::{WaveModel, WaterBody};
+        let body = WaterBody {
+            wave_model: WaveModel::Spectrum,
+            spray: 8.0,
+            fetch: Some(50_000.0),
+            ..WaterBody::default()
+        };
+        let eye = [0.0_f32, 4.0, 0.0];
+        // Long enough that `born` reaches back past the oldest kept snapshot for some
+        // droplets and not for others, which is the case the `None` arm exists for.
+        let ticks = 96_u32;
+        let stride = 8;
+
+        let mut sea = crate::ocean::Ocean::for_body(&body, 25.0, [1.0, 0.0]).expect("a cascade");
+        let at_tick = |tick: u32| f32::from(u16::try_from(tick).expect("small")) / 60.0;
+        for tick in 0..=ticks {
+            sea.evolve(at_tick(tick));
+            if tick % stride == 0 {
+                sea.keep();
+            }
+        }
+        let t = at_tick(ticks);
+
+        assert!(
+            spray(&body, None, eye, t, &deep).is_empty(),
+            "a spectrum body with no ocean invented a surface to spray off"
+        );
+
+        let thrown = spray(&body, Some(&sea), eye, t, &deep);
+        assert!(!thrown.is_empty(), "a 25 m/s sea with spray = 8 threw nothing");
+        assert_eq!(thrown.len() % SPRAY_CROWN, 0, "a partial crown");
+        assert_eq!(thrown, spray(&body, Some(&sea), eye, t, &deep), "not reproducible");
+
+        // The same sea, evolved identically and never kept: the ring is empty, every
+        // birth is older than nothing, and no crown is thrown.
+        let mut unkept = crate::ocean::Ocean::for_body(&body, 25.0, [1.0, 0.0]).expect("a cascade");
+        for tick in 0..=ticks {
+            unkept.evolve(at_tick(tick));
+        }
+        assert!(
+            spray(&body, Some(&unkept), eye, t, &deep).is_empty(),
+            "spray read tiles nobody kept"
+        );
+    }
+
+    /// **The ring is a recording of the fixed step, so it cannot depend on how the
+    /// caller got there.** `--sim N` in one jump loops the same `step`, but the property
+    /// that matters is the one asserted here: filling the ring in two runs that visit the
+    /// same ticks leaves the same droplets in the air.
+    #[test]
+    fn the_ring_does_not_care_how_the_ticks_were_dispatched() {
+        use loom_scene::components::{WaveModel, WaterBody};
+        let body = WaterBody {
+            wave_model: WaveModel::Spectrum,
+            spray: 8.0,
+            fetch: Some(50_000.0),
+            ..WaterBody::default()
+        };
+        let at_tick = |tick: u32| f32::from(u16::try_from(tick).expect("small")) / 60.0;
+        let run = |chunk: u32| {
+            let mut sea =
+                crate::ocean::Ocean::for_body(&body, 25.0, [1.0, 0.0]).expect("a cascade");
+            let mut tick = 0;
+            while tick <= 96 {
+                for _ in 0..chunk.min(97 - tick) {
+                    sea.evolve(at_tick(tick));
+                    if tick % 8 == 0 {
+                        sea.keep();
+                    }
+                    tick += 1;
+                }
+            }
+            spray(&body, Some(&sea), [0.0, 4.0, 0.0], at_tick(96), &deep)
+        };
+
+        let one_at_a_time = run(1);
+        assert!(!one_at_a_time.is_empty(), "the sea threw nothing to compare");
+        assert_eq!(one_at_a_time, run(97), "one jump left different spray than 97 steps");
     }
 
     // -- W9, the impact crown -------------------------------------------------

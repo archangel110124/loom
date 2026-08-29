@@ -259,6 +259,20 @@ const TRANSFORMED: usize = 6;
 /// `∂h/∂x, ∂h/∂z, Sxx, Szz, Sxz`. See [`Ocean::evolve`].
 pub const TILES_PER_CASCADE: usize = TRANSFORMED + 5;
 
+/// How many past instants [`Ocean::keep`] retains.
+///
+/// **Eight, and it is spray's number.** [`crate::spray::spray`] samples the surface at
+/// each droplet's *birth* time, and a droplet older than
+/// [`crate::spray::SPRAY_LIFETIME`] has already gone — so the ring has to reach 0.9 s
+/// back and no further. Nothing else reads it, and a scene that authors no spray never
+/// calls [`Ocean::keep`] at all, so it costs those scenes nothing.
+///
+/// The *stride* between snapshots is the caller's, because it is a tick count and this
+/// crate has no tick: `Sim::evolve_sea` keeps one every `SEA_KEEP_TICKS = 8`, which puts
+/// seven gaps at 0.933 s over the 0.9 s needed, and a test beside it asserts that pair
+/// spans [`crate::spray::SPRAY_LIFETIME`] rather than trusting this comment.
+pub const KEPT: usize = 8;
+
 const T_HEIGHT: usize = 0;
 const T_DX: usize = 1;
 const T_DZ: usize = 2;
@@ -364,8 +378,9 @@ pub struct OceanSample {
 /// Construct once per sea state; call [`Self::evolve`] per tick and [`Self::sample`] per
 /// query.
 ///
-/// **`Clone` copies the tiles and the tables, and it is how a query gets one.** It is not
-/// cheap — a few megabytes at the shipping size — and it is not how the simulation should
+/// **`Clone` copies the tiles, the tables and the kept ring, and it is how a query gets
+/// one.** It is not cheap — a few megabytes at the shipping size, and up to [`KEPT`]
+/// tile stacks more on a sea that keeps — and it is not how the simulation should
 /// ever get one: there is one ocean in a run and the simulation owns it. It exists so
 /// `loom water --at` and `water@x,z` can hold the sea the run ended on, exactly as they
 /// hold the foam field and the wavelet pool.
@@ -389,6 +404,23 @@ pub struct Ocean {
     /// `NaN` compares false against every `t`, so an ocean nobody evolved fails that
     /// assertion rather than reading as a flat sea at `t = 0`.
     t: f32,
+    /// Past tile buffers and the `t` each holds, oldest first, at most [`KEPT`] of them.
+    ///
+    /// **The one piece of state in this file, and it is why a spectrum sea can throw
+    /// spray at all.** Everything else here is a pure function of `t` — but evaluating
+    /// [`Self::evolve`] costs a whole tile stack, and spray asks about *thousands* of
+    /// distinct birth instants a frame, so a droplet born 0.4 s ago cannot have its
+    /// birth surface recomputed on demand: `ocean_fft_storm.loom`'s fixed step measures
+    /// 4.11 ms a tick end to end.
+    /// It falls out of work the fixed step has already done instead: [`Self::keep`]
+    /// copies the current tiles aside, the caller strides those copies, and
+    /// [`Self::at_kept`] reads the newest one at or before an asked-for instant.
+    ///
+    /// **Empty unless a caller asks for it**, so no existing scene grows a byte, and
+    /// filled only from the fixed step — which is what makes its contents a pure
+    /// function of the tick count and therefore identical under `--sim N` in one jump
+    /// and under stepping there.
+    kept: Vec<(f32, Vec<f32>)>,
 }
 
 impl Ocean {
@@ -617,7 +649,7 @@ impl Ocean {
             });
             offset += TILES_PER_CASCADE * cells;
         }
-        Self { layers, tiles: vec![0.0; offset], t: f32::NAN }
+        Self { layers, tiles: vec![0.0; offset], t: f32::NAN, kept: Vec::new() }
     }
 
     /// The ocean a scene's water body asks for, or `None` for one that did not ask.
@@ -696,7 +728,7 @@ impl Ocean {
     /// costs exactly what a step forward does.
     pub fn evolve(&mut self, t: f32) {
         // Destructured so the tile buffer and the layers are two disjoint borrows.
-        let Self { layers, tiles, t: at } = self;
+        let Self { layers, tiles, t: at, kept: _ } = self;
         *at = t;
         for layer in layers.iter_mut() {
             let cells = layer.n * layer.n;
@@ -765,7 +797,7 @@ impl Ocean {
     /// toward index `0`, not off the end. Without that a boat crossing the seam steps.
     #[must_use]
     pub fn sample(&self, x: f32, z: f32) -> [f32; 3] {
-        let p = self.probe(x, z);
+        let p = Self::probe(&self.layers, &self.tiles, x, z);
         [p[T_DX], p[T_HEIGHT], p[T_DZ]]
     }
 
@@ -777,7 +809,14 @@ impl Ocean {
     /// the cascade order are decided.
     #[must_use]
     pub fn at(&self, x: f32, z: f32) -> OceanSample {
-        let p = self.probe(x, z);
+        Self::read(&self.layers, &self.tiles, x, z)
+    }
+
+    /// [`Self::at`] against a given tile buffer, which is the current one or one
+    /// [`Self::keep`] set aside. The layers are the same either way: a snapshot is the
+    /// tiles alone, because everything else about a cascade is frozen at construction.
+    fn read(layers: &[Layer], tiles: &[f32], x: f32, z: f32) -> OceanSample {
+        let p = Self::probe(layers, tiles, x, z);
         OceanSample {
             displacement: [p[T_DX], p[T_HEIGHT], p[T_DZ]],
             velocity: [p[T_VX], p[T_VY], p[T_VZ]],
@@ -794,9 +833,52 @@ impl Ocean {
         self.t
     }
 
-    fn probe(&self, x: f32, z: f32) -> [f32; TILES_PER_CASCADE] {
+    /// Copy the instant the tiles currently hold into the ring [`Self::at_kept`] reads.
+    ///
+    /// **Called from the fixed step and from nowhere else**, on a stride the caller
+    /// chooses — see [`KEPT`]. Called with the same `t` twice it stores it twice, which
+    /// is not a case the fixed step can produce and not one worth a branch: the caller
+    /// evolves once per tick and keeps on a tick count.
+    ///
+    /// Steady state allocates nothing: the oldest buffer is taken off the front, filled
+    /// from the current tiles and pushed back on. `KEPT` is eight, so the shift is seven
+    /// pointer moves and the copy is one `memcpy` of the tile stack.
+    pub fn keep(&mut self) {
+        if self.kept.len() == KEPT {
+            let mut oldest = self.kept.remove(0);
+            oldest.0 = self.t;
+            oldest.1.copy_from_slice(&self.tiles);
+            self.kept.push(oldest);
+        } else {
+            self.kept.push((self.t, self.tiles.clone()));
+        }
+    }
+
+    /// Everything the cascade knew at a world XZ at the newest kept instant **at or
+    /// before** `t` — [`Self::at`], asked about the past.
+    ///
+    /// **The answer is snapped back to the ring's stride, never interpolated**, so what
+    /// comes out is a surface this simulation genuinely held rather than a blend of two
+    /// it held. The caller that wants it — [`crate::spray::spray`] — is choosing which
+    /// crests threw and where the crown left from, and one stride's worth of lag is
+    /// small against a crown: measured on `ocean_fft_storm.loom` at (3, −7) across one
+    /// eight-tick stride, the water moved 0.34 m horizontally and 9 mm vertically,
+    /// under a quarter of a `SPRAY_CELL`.
+    ///
+    /// `None` when the ring does not reach back that far, which is a run's first second
+    /// and a sea nobody called [`Self::keep`] on. A caller that gets `None` throws
+    /// nothing; it must not fall back to the current tick, which would put a droplet's
+    /// launch point on water it is no longer touching.
+    #[must_use]
+    pub fn at_kept(&self, t: f32, x: f32, z: f32) -> Option<OceanSample> {
+        // Oldest first and short, so the newest match is the last one that qualifies.
+        let (_, tiles) = self.kept.iter().rev().find(|(kept, _)| *kept <= t)?;
+        Some(Self::read(&self.layers, tiles, x, z))
+    }
+
+    fn probe(layers: &[Layer], tiles: &[f32], x: f32, z: f32) -> [f32; TILES_PER_CASCADE] {
         let mut out = [0.0_f32; TILES_PER_CASCADE];
-        for layer in &self.layers {
+        for layer in layers {
             let n = layer.n;
             #[allow(clippy::cast_precision_loss)]
             let cell = layer.patch / n as f32;
@@ -833,7 +915,7 @@ impl Ocean {
 
             let cells = n * n;
             for (component, slot) in out.iter_mut().enumerate() {
-                let tile = &self.tiles[layer.offset + component * cells..][..cells];
+                let tile = &tiles[layer.offset + component * cells..][..cells];
                 let a = tile[iz0 * n + ix0];
                 let b = tile[iz0 * n + ix1];
                 let c = tile[iz1 * n + ix0];

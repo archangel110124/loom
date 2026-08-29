@@ -843,6 +843,7 @@ fn blast_template(world: &World) -> Vec<(loom_particles::Emitter, Visual)> {
 pub(crate) fn spray(
     world: &World,
     water: &loom_scene::components::WaterBody,
+    sea: Option<&loom_water::ocean::Ocean>,
     ground: &dyn Fn(f32, f32) -> f32,
     eye: [f32; 3],
     seconds: f32,
@@ -864,8 +865,15 @@ pub(crate) fn spray(
     // identically zero and this would fire on every scene that opts in — a
     // warning that is always wrong is worse than none. There `spray` switches
     // on drawing the solver's own thrown particles; see `WaterBody::spray`.
+    //
+    // **Not on a `spectrum` body either, and for the same shape of reason.** `peak_fold`
+    // sums a wave list, a spectrum body has none, so it is identically zero there and
+    // this would fire on every FFT sea whose crests are in fact breaking hard enough to
+    // throw. The equivalent ceiling for a cascade is a walk of its tiles; see
+    // `peak_fold`'s own `ponytail:` note for when to build it.
     if water.spray > 0.0
         && water.simulation != loom_scene::components::WaterSimTier::Cinematic
+        && water.wave_model != loom_scene::components::WaveModel::Spectrum
     {
         let peak = loom_water::spray::peak_fold(water);
         if peak < loom_water::spray::SPRAY_BREAK {
@@ -882,7 +890,7 @@ pub(crate) fn spray(
             });
         }
     }
-    let droplets = loom_water::spray::spray(water, eye, seconds, ground);
+    let droplets = loom_water::spray::spray(water, sea, eye, seconds, ground);
     if droplets.is_empty() {
         return Vec::new();
     }
@@ -1301,7 +1309,7 @@ mod tests {
         for tick in [0_u32, 60, 300, 900] {
             #[allow(clippy::cast_precision_loss)]
             let t = f32::from(u16::try_from(tick).expect("small")) / 60.0;
-            assert!(spray(&world, &body, &deep, eye, t).is_empty(), "tick {tick}");
+            assert!(spray(&world, &body, None, &deep, eye, t).is_empty(), "tick {tick}");
         }
 
         // **Authored on is not enough — the sea also has to break, and
@@ -1318,7 +1326,7 @@ mod tests {
             #[allow(clippy::cast_precision_loss)]
             let t = f32::from(u16::try_from(tick).expect("small")) / 60.0;
             assert!(
-                spray(&world, &body, &deep, eye, t).is_empty(),
+                spray(&world, &body, None, &deep, eye, t).is_empty(),
                 "a sea whose fold never reaches SPRAY_BREAK sprayed at tick {tick}"
             );
         }
@@ -1337,7 +1345,7 @@ mod tests {
             .map(|tick| {
                 #[allow(clippy::cast_precision_loss)]
                 let t = tick as f32 / 60.0;
-                spray(&world, &body, &deep, eye, t).len()
+                spray(&world, &body, None, &deep, eye, t).len()
             })
             .sum();
         assert!(thrown > 0, "a breaking sea threw no spray in ten seconds");
@@ -1349,7 +1357,7 @@ mod tests {
             .flat_map(|tick| {
                 #[allow(clippy::cast_precision_loss)]
                 let t = tick as f32 / 60.0;
-                spray(&world, &body, &deep, eye, t)
+                spray(&world, &body, None, &deep, eye, t)
             })
             .collect();
         let first = drops.first().expect("droplets");

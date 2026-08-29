@@ -18,6 +18,26 @@ use loom_render::glam::{Mat4, Quat, Vec3};
 /// wall clock.
 pub const TICK_SECONDS: f32 = 1.0 / 60.0;
 
+/// Ticks between the cascade snapshots spray reads — [`loom_water::ocean::Ocean::keep`].
+///
+/// **The stride is here because it is a tick count and `loom_water` has no tick.** The
+/// pair that matters is this and `ocean::KEPT`: `KEPT - 1` gaps of this many ticks must
+/// span `spray::SPRAY_LIFETIME`, or a droplet still in the air asks for a surface the
+/// ring has already dropped and is silently never thrown. Eight ticks x seven gaps is
+/// 0.933 s over the 0.9 s needed — `the_sea_ring_spans_a_droplets_life` asserts it.
+///
+/// **Eight rather than one**, because a snapshot is the whole tile stack: three cascades
+/// of eleven 128² tiles is 2.06 MB, so keeping every tick to reach back 0.9 s would be
+/// 111 MB and eight of them is 16.5 MB.
+///
+/// What the stride costs is that a crown launches from the surface as it was up to
+/// 0.133 s ago. Measured on `ocean_fft_storm.loom` at (3, −7) between ticks 400 and 408,
+/// which is exactly one stride: the water there moved **0.34 m horizontally and 9 mm
+/// vertically** — under a quarter of a `SPRAY_CELL`. The jitter that keeps crowns off a
+/// metronome lives in `born` and is *not* snapped with the sample, so the crowns still
+/// appear at their own moments; only the water they read is quantised.
+const SEA_KEEP_TICKS: u64 = 8;
+
 /// How far a goal must move before the route is worth recomputing, squared.
 const REPLAN_DISTANCE: f32 = 1.5 * 1.5;
 /// How close counts as having reached a waypoint, squared.
@@ -921,18 +941,6 @@ impl Sim {
         // function that reads them (`weather::sea_of`), because two spellings of that
         // is how a scene comes to report one sea and float on another.
         let sea = crate::weather::sea_of(world, &crate::weather::wind_of_world(world));
-        // A silent no-op is worse than a missing feature: a `spectrum` body that
-        // authors spray throws none, because `spray` samples the surface at each
-        // droplet's *birth* time and the cascade is evolved only to the current tick.
-        // See `loom_water::spray::spray`.
-        if sea.is_some() && water.as_ref().is_some_and(|w| w.spray > 0.0) {
-            crate::log::warn(
-                "this WaterBody asks for the spectrum and authors spray; spray reads \
-                 the surface at each droplet's birth time and the FFT cascade holds \
-                 only the current tick, so no droplet will be thrown"
-                    .to_owned(),
-            );
-        }
         if water.is_none() && !floating.is_empty() {
             crate::log::warn(
                 "the scene has Buoyancy but no WaterBody; nothing will float".to_owned(),
@@ -1780,11 +1788,23 @@ impl Sim {
     /// function of it — nothing accumulates — so a rewind costs exactly what a step
     /// forward does, which is the property `loom render --sim N` rests on.
     ///
-    /// Free for every scene without a `spectrum` body, which is all of them but one.
+    /// Free for every scene without a `spectrum` body, which is all of them but
+    /// `ocean_fft.loom` and `ocean_fft_storm.loom`.
     fn evolve_sea(&mut self) {
+        // **Kept on a tick count, so the ring is a function of the tick and nothing
+        // else** — which is what makes `--sim N` in one jump and stepping to N leave the
+        // same spray in the air. Decided before the borrow because it reads `water`.
+        //
+        // **And only for a scene that authors spray**, which is the only reader: an
+        // `ocean_fft.loom` that draws no droplets keeps no tiles and grows by nothing.
+        let keep = self.tick.is_multiple_of(SEA_KEEP_TICKS)
+            && self.water.as_ref().is_some_and(|w| w.spray > 0.0);
         if let Some(sea) = self.sea.as_mut() {
             #[allow(clippy::cast_precision_loss)]
             sea.evolve(self.tick as f32 * TICK_SECONDS);
+            if keep {
+                sea.keep();
+            }
         }
     }
 
@@ -5872,6 +5892,83 @@ transform = { pos = [0.0, 6.0, 0.0] }
         assert!(
             overshoot(CameraSpring::new(0.5, d.hz, d.zeta, d.response)) < overshoot(d),
             "half weight is half the sensation"
+        );
+    }
+
+    /// **The stride and the ring depth are one decision made in two crates**, so this
+    /// asserts the pair rather than trusting the comment on either. `KEPT - 1` gaps of
+    /// `SEA_KEEP_TICKS` have to reach back a whole `SPRAY_LIFETIME`; if they do not, a
+    /// droplet still in the air asks for a surface the ring has dropped and is silently
+    /// never thrown — which is the exact shape of the no-op this whole slice removed.
+    #[test]
+    fn the_sea_ring_spans_a_droplets_life() {
+        #[allow(clippy::cast_precision_loss)]
+        let span = (loom_water::ocean::KEPT as u64 - 1) as f32
+            * SEA_KEEP_TICKS as f32
+            * TICK_SECONDS;
+        assert!(
+            span >= loom_water::spray::SPRAY_LIFETIME,
+            "the ring reaches {span} s back and a droplet lives {} s",
+            loom_water::spray::SPRAY_LIFETIME
+        );
+    }
+
+    /// **`evolve_sea` keeps, and that wiring is the only thing between an FFT storm and
+    /// no spray at all.**
+    ///
+    /// `loom_water` can prove the ring works and cannot see whether anything fills it —
+    /// which is precisely how a `spectrum` body came to author `spray` and throw nothing.
+    /// So this steps the real simulation and asks the sea about an instant half a second
+    /// behind the tick it holds.
+    #[test]
+    fn the_running_sea_remembers_the_instants_spray_reads() {
+        const SRC: &str = r#"
+[scene]
+format = 1
+id = "b1d4e9a7-3c25-4f81-9e60-72ab5d8c4f13"
+
+[[node]]
+name = "Sea"
+
+  [node.components.Wind]
+  direction_degrees = 15.0
+  speed = 27.5
+  ground_drag = 0.45
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  wave_model = "spectrum"
+  surface_height = 0.0
+  spray = 8.0
+  fetch = 50000.0
+"#;
+        let world = World::from_scene(&Scene::parse(SRC).expect("valid scene"));
+        let mut sim = Sim::new(&world);
+        // Past the ring's own depth, so it has rolled at least once.
+        let ticks = 96;
+        sim.step(ticks);
+        let sea = sim.sea().expect("the scene opts into the cascade");
+        #[allow(clippy::cast_precision_loss)]
+        let now = ticks as f32 * TICK_SECONDS;
+
+        assert_eq!(sea.evolved_at(), now, "the tiles are not on the tick");
+        assert!(
+            sea.at_kept(now - 0.5, 3.0, -7.0).is_some(),
+            "the sea forgot half a second ago; spray reads back a whole SPRAY_LIFETIME"
+        );
+        assert!(
+            sea.at_kept(now - 5.0, 3.0, -7.0).is_none(),
+            "the sea answered about five seconds ago, which it cannot know"
+        );
+        // And what it remembers is a surface it actually held, not the current one.
+        assert_ne!(
+            sea.at_kept(now - 0.5, 3.0, -7.0),
+            Some(sea.at(3.0, -7.0)),
+            "the past reads identical to the present"
         );
     }
 }

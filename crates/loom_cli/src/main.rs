@@ -939,7 +939,19 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                 .as_ref()
                 .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(x, z))
         };
-        particles.extend(particles::spray(&world, &body, &ground, camera.eye.to_array(), wind_seconds));
+        // **The cascade the `--sim` run left behind, for a `spectrum` body.** Spray reads
+        // the surface at each droplet's *birth* time, and only the run has those: the
+        // ring of past tiles is filled on the fixed step. A still with no `--sim` has no
+        // run, so an FFT sea throws nothing at tick zero — which is the honest answer,
+        // and the same one the Gerstner path gives for a sea that has not moved yet.
+        particles.extend(particles::spray(
+            &world,
+            &body,
+            warmed.as_ref().and_then(crate::play::Runner::sea),
+            &ground,
+            camera.eye.to_array(),
+            wind_seconds,
+        ));
     }
     // The scene's rain, resolved once. `None` for a scene that authors none,
     // which is dry rather than drizzly. **No sky volume is built for it any
