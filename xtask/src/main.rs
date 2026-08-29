@@ -1271,6 +1271,11 @@ const GOLDEN_SIZE: &str = "320x200";
 /// that — comfortably clear of run-to-run noise, and nowhere near the 0.0 a fully dead
 /// effect would score.
 ///
+/// **Re-measured 2026-08-29 at 0.19717**, still comfortably over the floor. It has drifted
+/// because `whitecaps`' water has changed twice since — the foam commits, and the backlit
+/// term's mask below. The floor is deliberately not re-tightened: this column measures
+/// "is it drawing", not "is it drawing exactly what it drew in August".
+///
 /// **`ocean_fft` / `ocean_spectrum`.** Measured 2026-08-29 at `GOLDEN_SIZE`:
 /// `loom render assets/test/ocean_fft.loom --sim 400 --size 320x200` with and without
 /// `LOOM_ABLATE=ocean_spectrum`, then `loom compare`, gives `fraction = 0.587546875`
@@ -1291,7 +1296,27 @@ const GOLDEN_SIZE: &str = "320x200";
 /// nothing), and `LOOM_ABLATE=water_foam` still moves exactly the 0.29178125 recorded
 /// above. A Slang constant that had collided with foam's bit would have shown up as a
 /// large number in the first of those and a changed one in the second.
-const ABLATE: [(&str, &str, &str, &[&str], f64); 2] = [
+///
+/// **`ocean_tropical` / `water_glow`.** The backlit subsurface term, measured 2026-08-29 at
+/// `GOLDEN_SIZE`: `loom render assets/test/ocean_tropical.loom --sim 400 --size 320x200`
+/// with and without `LOOM_ABLATE=water_glow`, then `loom compare`, gives `fraction =
+/// 0.011359375` (`differing` 727 of 64000, `mean` 0.0741, `worst` 14). Reproducible: both
+/// sides byte-identical across two runs. 0.005 is roughly half of that, on the same rule the
+/// two rows above use.
+///
+/// **Read the `fraction` this table uses at `compare`'s DEFAULT tolerance**, which is what
+/// `ablate` below invokes — `channel = 2`, so a pixel that moved one or two levels is not
+/// counted. At zero tolerance the same pair of renders differs across **9.792%** of the
+/// frame. The two numbers are eight times apart and only the first belongs in this column;
+/// a floor set from the second would have failed a working effect, and did, once.
+///
+/// **`ocean_tropical` rather than a steep sea, and that is the point of the row.** Every
+/// other water scene here would pass this check on the old `crest` gate; a Beaufort 4
+/// Pierson–Moskowitz sea never reaches `WATER_FOLD_REF`, so on this scene the term drew
+/// **nothing at all** — 0 pixels — and no reference image could have said so. It is the
+/// smallest number in this table because a modest sea seen from 1.1 m with a 38° sun is a
+/// poor backlighting geometry; the wrap lobe there is 0.02–0.10 against a ceiling of 1.
+const ABLATE: [(&str, &str, &str, &[&str], f64); 3] = [
     (
         "whitecaps",
         "assets/test/whitecaps.loom",
@@ -1305,6 +1330,13 @@ const ABLATE: [(&str, &str, &str, &[&str], f64); 2] = [
         "ocean_spectrum",
         &["--sim", "400"],
         0.30,
+    ),
+    (
+        "ocean_tropical",
+        "assets/test/ocean_tropical.loom",
+        "water_glow",
+        &["--sim", "400"],
+        0.005,
     ),
 ];
 

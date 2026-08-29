@@ -31,7 +31,8 @@
 ///
 /// Bits are assigned explicitly rather than by position, so reordering this table cannot
 /// silently repoint an existing name at a different effect.
-pub const ABLATIONS: &[(&str, u32)] = &[("water_foam", 1 << 0), ("ocean_spectrum", 1 << 1)];
+pub const ABLATIONS: &[(&str, u32)] =
+    &[("water_foam", 1 << 0), ("ocean_spectrum", 1 << 1), ("water_glow", 1 << 2)];
 
 /// The bit for whitecap and swash foam on the water surface.
 ///
@@ -52,6 +53,18 @@ pub const WATER_FOAM: u32 = 1 << 0;
 /// Must equal `LOOM_ABLATE_OCEAN_SPECTRUM` in `assets/shaders/scene.slang` — see the
 /// warning on [`ABLATIONS`] above; nothing checks that these two agree.
 pub const OCEAN_SPECTRUM: u32 = 1 << 1;
+
+/// The bit for the backlit subsurface term on the water surface.
+///
+/// Ablating it zeroes `sss` at its single point of use, so what is measured is the light
+/// that came up through the water and nothing else. **The registered scene is
+/// `ocean_tropical`**: its Beaufort 4 sea never reaches `WATER_FOLD_REF`, so before `lift`
+/// replaced `crest` this term drew nothing at all there — the exact failure this harness
+/// exists to catch, and a blessed reference of it would have recorded the absence for ever.
+///
+/// Must equal `LOOM_ABLATE_WATER_GLOW` in `assets/shaders/scene.slang` — see the warning on
+/// [`ABLATIONS`] above; nothing checks that these two agree.
+pub const WATER_GLOW: u32 = 1 << 2;
 
 /// Parse a `LOOM_ABLATE` value into a mask.
 ///
@@ -112,6 +125,7 @@ mod tests {
     fn a_name_is_its_bit() {
         assert_eq!(parse_ablations(Some("water_foam")), Ok(WATER_FOAM));
         assert_eq!(parse_ablations(Some("ocean_spectrum")), Ok(OCEAN_SPECTRUM));
+        assert_eq!(parse_ablations(Some("water_glow")), Ok(WATER_GLOW));
         assert_eq!(
             parse_ablations(Some("water_foam,ocean_spectrum")),
             Ok(WATER_FOAM | OCEAN_SPECTRUM)
