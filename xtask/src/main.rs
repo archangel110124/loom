@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 78] = [
+const SCENES: [&str; 79] = [
     // The mood ladder — ADR 0069. In `GOLDEN` too, where the reasoning is.
     "assets/test/mood_deep.loom",
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
@@ -189,6 +189,14 @@ const SCENES: [&str; 78] = [
     // to bless it. `ocean_tropical` is also the only water scene with a sand shelf under it.
     "assets/test/ocean_fft_boat.loom",
     "assets/test/ocean_tropical.loom",
+    // **The only scene here with a submerged camera**, and it is `ocean_tropical`
+    // with the lens moved 1.5 m under its own waterline. `eyeUnderwater()` had
+    // been a branch in `scene.slang` since W4 with nothing in `SCENES` taking
+    // it, which is how the underwater medium kept painting itself from two
+    // hardcoded constants after `WaterBody.optics` existed: no gate here can
+    // see an absent feature. Not in `GOLDEN` — a reference is the human's to
+    // bless.
+    "assets/test/ocean_under.loom",
     // The whitecap trail (W2). Three extra `loom_sample_water` taps per water
     // vertex and a fifth varying out of `waterVertexMain`, which is the one
     // place a wrong `TEXCOORD` index or an overflowed output signature would

@@ -6512,6 +6512,44 @@ mod tests {
         assert_eq!(flag(40.0), 0.0);
     }
 
+    /// **`ocean_under` renders from under the water, and this is what keeps it
+    /// doing so.**
+    ///
+    /// The underwater medium painted itself from two hardcoded constants for
+    /// several slices after `WaterBody.optics` existed, and it survived every
+    /// gate in this project because no gate here can see an *absent* feature:
+    /// `cargo xtask image` reports a full pass over a branch nothing renders.
+    /// The fix was a scene, and a scene is only a gate while its camera stays
+    /// where it was put — raise `ocean_under`'s eye above y = 0 and the frame
+    /// is still valid, still renders, still diffs clean, and covers nothing.
+    ///
+    /// So the assertion is the flag itself, taken through `submerge_eye` — the
+    /// same function the render path writes the environment buffer with — at
+    /// each scene's own authored camera. `ocean_tropical` is the other half:
+    /// it is `ocean_under` with the lens 2.6 m higher, and a change that
+    /// submerged *everything* would pass a one-sided version of this.
+    #[test]
+    fn the_underwater_scene_renders_from_under_the_water() {
+        for (scene, submerged) in [("ocean_under", 1.0), ("ocean_tropical", 0.0)] {
+            let path = format!("../../assets/test/{scene}.loom");
+            let src = std::fs::read_to_string(&path).expect("the scene exists");
+            let parsed = Scene::parse(&src).expect("it parses");
+            let world = World::from_scene(&parsed);
+            let wind = crate::weather::wind_of(&parsed);
+            let eye = Vec3::from_array(
+                world.active_camera().expect("an authored camera").eye,
+            );
+
+            let mut env = environment_with_wind_at(&world, &wind, 0.0, None);
+            submerge_eye(&mut env, &world, &wind, None, eye, 0.0);
+
+            assert_eq!(
+                env.water[1], submerged,
+                "{scene}'s authored camera is on the wrong side of its own                  water surface — eye {eye:?}",
+            );
+        }
+    }
+
     /// **A scene with no `WaterBody` draws no water at all**, and the flag the
     /// draw is skipped on is the only thing that says so — there is no vertex
     /// buffer to be empty. Every scene that shipped before W4 depends on this.
