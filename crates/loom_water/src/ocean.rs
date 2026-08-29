@@ -66,9 +66,12 @@
 //! Freezing them rather than beating them at `2cos(ωt)` costs nothing worth having: a
 //! Nyquist mode is a standing pattern this grid cannot resolve the travel of — `+k_nyq`
 //! and `−k_nyq` are one bin — and the row and column sit at the resolution limit, where
-//! the spectrum has least energy. Measured on the 128² cascade
-//! `the_realised_sea_is_the_size_the_spectrum_promised` runs, freezing them moves the
-//! 200-seed mean `Hs` from 6.072 m to 6.073 m.
+//! the spectrum has least energy. Freezing them moved the 200-seed mean `Hs` from
+//! **6.072 m to 6.073 m** — measured on the single 1024 m / 128² cascade that
+//! `the_realised_sea_is_the_size_the_spectrum_promised` ran at the time. **That is not
+//! the configuration the test runs now.** Task 3 replaced it with `shipping_stack`'s
+//! three cascades, which read 6.100 m, so a reader who runs the named test to look for
+//! 6.072/6.073 finds a different sea and not a regression.
 //!
 //! # The scale, and the one place this deviates from the brief
 //!
@@ -449,9 +452,15 @@ impl Ocean {
             let n = layer.n;
             #[allow(clippy::cast_precision_loss)]
             let cell = layer.patch / n as f32;
-            // **Wrapped into the patch before the divide**, which puts `fx` in
-            // `[0, n)` and so makes `x0` non-negative before the integer wrap below
-            // ever sees it.
+            // **Wrapped into the patch before the divide.** Not for the sign — `wrap`
+            // below is `rem_euclid` on `i64` and already sends a negative index to the
+            // far side of the tile, so an earlier version of this line credited this
+            // `rem_euclid` with work that was already done. What it does buy is *range*:
+            // `f32 as i64` saturates in Rust rather than wrapping, so a coordinate whose
+            // `x / cell` exceeds `i64::MAX` would floor, cast to `i64::MAX` and index a
+            // constant cell for every such `x` — measured, `1e20_f32 as i64` is
+            // `9223372036854775807`. This keeps `fx` in `[0, n)`, so the cast never sees
+            // a number it cannot hold. Delete it and that returns.
             //
             // **It does not buy far-field accuracy, and an earlier version of this
             // comment claimed it did** — a mantissa argument about a boat ten
@@ -699,10 +708,14 @@ mod tests {
     /// light because a single grid cannot carry both the 226 m swell and the chop. The
     /// three tiling cascades read **6.100 m** against the analytic 6.10.
     ///
-    /// **The grid is not the risk here.** The stack spans 4 m to 2048 m of wavelength
-    /// against a peak wavelength of **226 m** at this wind and fetch, and the peak sits
-    /// at index 9 of the swell cascade — comfortably resolved. If this test fails it is
-    /// the spectrum, the banding or the symmetry, not the resolution.
+    /// **The grid is not the risk here.** The stack's longest wave is the swell
+    /// cascade's own **2048 m** and its shortest is **0.354 m** — the corner of the chop
+    /// cascade, `k = 17.77` rad/m on a 32 m / 128 grid, with 0.50 m along its axes. 4 m
+    /// is where the chop's band *opens* (`k_lo = π·128/256 = 1.5708`), not where the stack
+    /// stops, and an earlier version of this line quoted it as the latter. Against a peak
+    /// wavelength of **226 m** at this wind and fetch the peak sits at index 9 of the
+    /// swell cascade — comfortably resolved either way. If this test fails it is the
+    /// spectrum, the banding or the symmetry, not the resolution.
     ///
     /// 226 m is `spectrum_shape`'s own peak law — `ω_p = 2π·3.5·(g/u10)·F̃^-0.33`, then
     /// `λ = 2πg/ω_p²` — evaluated at 440 km. It reads 204 m at 376 km. An earlier version
@@ -755,9 +768,14 @@ mod tests {
     /// decision, which is the defect this asserts away.
     ///
     /// The three stacks below tile the **same** wavenumber range, `[0, π·128/1024)`, into
-    /// one, two and three bands, and every cascade can resolve the band it is given
-    /// (`2π/patch <= k_lo` and `π·n/patch >= k_hi`). So there is one right answer for all
-    /// three and it is the energy the spectrum puts in that range.
+    /// one, two and three bands, and every cascade can resolve the top of the band it is
+    /// given (`π·n/patch >= k_hi`, which holds for all six cascades here). The matching
+    /// lower condition `2π/patch <= k_lo` is **not** true and an earlier version of this
+    /// line stated it as if measured: the leading cascade of all three stacks has
+    /// `k_lo = 0`, which no grid's `Δk` is at or below. It is vacuous rather than wrong —
+    /// there is nothing below `k_lo` for that cascade to fail to resolve — but it is not
+    /// a fact about these stacks. So there is one right answer for all three and it is
+    /// the energy the spectrum puts in that range.
     ///
     /// **Measured with the bands replaced by [`crate::spectrum::WHOLE_BAND`]** — which is
     /// exactly the shipped behaviour, every cascade sampling everything — the same three
@@ -1210,11 +1228,16 @@ mod tests {
         );
     }
 
-    /// **Which axis is which.** A transpose anywhere in `h0 → ifft_2d → tiles → sample`
-    /// passes eight of the nine tests above outright — `Hs`, the seam, memory, rewind,
-    /// finiteness and the pinch are all transpose-symmetric — and reduces
-    /// `the_sea_travels_downwind` to a coin flip. `two_dimensions_agree_with_two_passes_of_one`
-    /// cannot see it either: it compares `ifft_2d` against `ifft_2d` written longhand.
+    /// **Which axis is which.** A transpose applied *consistently* through the whole of
+    /// `h0 → ifft_2d → tiles → sample` cancels and is unobservable, which is why "eight
+    /// of nine tests pass a transpose" — what an earlier version of this comment claimed
+    /// — is a statement about a defect nobody can have. A transpose in **one link** is
+    /// the real hazard, and the rest of the suite catches it thinly: of the 136 tests in
+    /// this crate, each injection below trips exactly three, and this test is one of the
+    /// three in both cases. `Hs`, the seam, memory, rewind and finiteness are all
+    /// transpose-symmetric and see nothing, and
+    /// `two_dimensions_agree_with_two_passes_of_one` cannot see it either: it compares
+    /// `ifft_2d` against `ifft_2d` written longhand.
     ///
     /// The clean catcher is a field with energy only in `kx`: it has no `z` dependence at
     /// all, so every column of the tile must be one repeated number. A transposed pipeline
@@ -1224,10 +1247,14 @@ mod tests {
     /// Both directions are checked, because "constant along z" alone is also true of a
     /// field that is constant everywhere, which a broken transform can easily be.
     ///
-    /// Fault-injected two ways, one at each end of the chain: reading
-    /// `grid[x * layer.n + z]` in `evolve`'s tile write, and swapping `ix`/`iz` in
-    /// [`Ocean::sample`]'s four taps. Both read a spread of 1.99 along z against a 1e-4
-    /// band. Measured spread on the correct pipeline is **exactly zero**.
+    /// Fault-injected two ways, one at each end of the chain. Reading
+    /// `grid[x * layer.n + z]` in `evolve`'s tile write additionally trips
+    /// `the_pinch_sharpens_the_crests` and `the_sea_travels_downwind`; swapping `ix`/`iz`
+    /// in [`Ocean::sample`]'s four taps additionally trips the pinch and
+    /// `sample_on_a_node_is_the_node`. Both read a spread of **1.99 along z** here,
+    /// against a 1e-4 band, and both leave the along-x spread that should read 1.986 at
+    /// 0.000. Measured spread along z on the correct pipeline is **exactly zero**, so
+    /// this is the clean catcher of the three — no tolerance is being leaned on.
     #[test]
     fn energy_in_kx_alone_is_constant_along_z() {
         let cascade = Cascade::whole(512.0, 64);
