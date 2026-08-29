@@ -20,8 +20,8 @@
 /// Every ablatable effect, and its bit.
 ///
 /// **Adding an effect means adding a row here, a row to `xtask`'s own table, AND a matching
-/// `static const uint LOOM_ABLATE_<NAME>` in `assets/shaders/scene.slang`** (currently
-/// `LOOM_ABLATE_WATER_FOAM`, next to `ablated()`). The three are deliberately not shared —
+/// `static const uint LOOM_ABLATE_<NAME>` in `assets/shaders/scene.slang`** (they sit
+/// together next to `ablated()`). The three are deliberately not shared —
 /// `xtask` links nothing from the engine, because a gate that shares code with the thing it
 /// checks can be fooled by the same bug twice, and Slang cannot import a Rust constant at
 /// all. **Nothing enforces that the Slang constant's value matches the bit assigned here.**
@@ -31,13 +31,27 @@
 ///
 /// Bits are assigned explicitly rather than by position, so reordering this table cannot
 /// silently repoint an existing name at a different effect.
-pub const ABLATIONS: &[(&str, u32)] = &[("water_foam", 1 << 0)];
+pub const ABLATIONS: &[(&str, u32)] = &[("water_foam", 1 << 0), ("ocean_spectrum", 1 << 1)];
 
 /// The bit for whitecap and swash foam on the water surface.
 ///
 /// Must equal `LOOM_ABLATE_WATER_FOAM` in `assets/shaders/scene.slang` — see the warning on
 /// [`ABLATIONS`] above; nothing checks that these two agree.
 pub const WATER_FOAM: u32 = 1 << 0;
+
+/// The bit for the FFT cascade that displaces a `wave_model = "spectrum"` surface — ADR
+/// 0076.
+///
+/// Ablating it makes `waterVertexMain` read `sea.count == 0`, which is the same value a
+/// Gerstner body carries, so the shader takes its `loom_sample_water` branch. A spectrum
+/// body authors no wave list — that is refused at load — so that branch sums nothing and
+/// draws the flat plane. Removing the cascade therefore removes the whole sea, which is
+/// what makes it worth measuring: the failure this gate exists to catch is a cascade that
+/// is uploaded, sampled and contributing nothing.
+///
+/// Must equal `LOOM_ABLATE_OCEAN_SPECTRUM` in `assets/shaders/scene.slang` — see the
+/// warning on [`ABLATIONS`] above; nothing checks that these two agree.
+pub const OCEAN_SPECTRUM: u32 = 1 << 1;
 
 /// Parse a `LOOM_ABLATE` value into a mask.
 ///
@@ -97,6 +111,11 @@ mod tests {
     #[test]
     fn a_name_is_its_bit() {
         assert_eq!(parse_ablations(Some("water_foam")), Ok(WATER_FOAM));
+        assert_eq!(parse_ablations(Some("ocean_spectrum")), Ok(OCEAN_SPECTRUM));
+        assert_eq!(
+            parse_ablations(Some("water_foam,ocean_spectrum")),
+            Ok(WATER_FOAM | OCEAN_SPECTRUM)
+        );
     }
 
     #[test]

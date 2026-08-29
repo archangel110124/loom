@@ -5456,6 +5456,11 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     // `faded.count` is zero and the sum below would draw a flat sea. That is why
     // this is a branch rather than an addition.
     LoomOcean sea = oceanCascade();
+    // **The ablation switch for the whole FFT sea** — `crates/loom_render/src/ablate.rs`.
+    // Zeroing the count is the one edit that removes the cascade *as a rendering path*
+    // rather than dimming it: the branch below falls to the Gerstner sum, which a spectrum
+    // body has no waves for, so the surface goes flat. Zero on every ordinary run.
+    if (ablated(LOOM_ABLATE_OCEAN_SPECTRUM)) { sea.count = 0; }
     LoomWaterSample surfaceAt;
     if (sea.count > 0) {
         // **The last tick's tile, not a re-evaluation at frame time.** The
@@ -5867,6 +5872,20 @@ static const float WATER_FOAM_BREAK = 0.33;
 /// whatever effect actually holds this bit in Slang, the frame would still move past the
 /// floor, and `cargo xtask ablate` would report `ok` having never measured foam.
 static const uint LOOM_ABLATE_WATER_FOAM = 1u;
+
+/// The bit for the FFT cascade — ADR 0076.
+///
+/// **Must equal `ocean_spectrum`'s bit in `ABLATIONS`
+/// (`crates/loom_render/src/ablate.rs`)**, on exactly the warning above: this is the third
+/// of the three places that bit is written down and nothing checks the three agree.
+///
+/// Ablating it zeroes `sea.count` in `waterVertexMain`, which is the value a Gerstner body
+/// already carries, so the shader takes its `loom_sample_water` branch — and a spectrum
+/// body has no wave list, so that branch draws the flat plane. **A runtime branch and not a
+/// constant fold**, which matters here: hard-wiring the flat surface would let the compiler
+/// drop the varyings `fragmentMain` no longer reads, and `WARNING-Shader-OutputNotConsumed`
+/// is fatal in a debug build (`SEA-REBUILD.md` §7.3).
+static const uint LOOM_ABLATE_OCEAN_SPECTRUM = 2u;
 
 bool ablated(uint bit) {
     return (uint(push.environment[0].viewport.w) & bit) != 0u;

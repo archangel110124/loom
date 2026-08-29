@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 75] = [
+const SCENES: [&str; 76] = [
     // The mood ladder — ADR 0069. In `GOLDEN` too, where the reasoning is.
     "assets/test/mood_deep.loom",
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
@@ -168,6 +168,21 @@ const SCENES: [&str; 75] = [
     "assets/test/meadow.loom",
     "assets/test/grass_slope.loom",
     "assets/test/ocean.loom",
+    // The FFT ocean — ADR 0076. **The only scene with `wave_model = "spectrum"`**, so it
+    // is the only exercise of the cascade upload (1.5 MB a tick of host-visible tiles read
+    // by the vertex shader through a device address), of the buffer dependency declared for
+    // it on the `forward` and `water` passes, and of the branch in `waterVertexMain` that
+    // picks a wave model at all. Nothing else in this list can raise a validation message
+    // about any of them.
+    //
+    // **Both runs this pass makes are needed here, and they take different branches.** The
+    // no-`--sim` render has no cascade — the tiles are built inside the fixed step, so a
+    // scene that never steps uploads `count = 0` — and it is what proves a spectrum body
+    // with no sea still parses, still uploads an *empty* wave set (see the `add_water` fix
+    // in the task-3 report) and draws the flat plane rather than a sixteen-wave sea the
+    // physics has never heard of. The `--sim 120` render is the cascade path. `wake` is in
+    // this list for the same two-branch reason.
+    "assets/test/ocean_fft.loom",
     // The whitecap trail (W2). Three extra `loom_sample_water` taps per water
     // vertex and a fifth varying out of `waterVertexMain`, which is the one
     // place a wrong `TEXCOORD` index or an overflowed output signature would
@@ -444,7 +459,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 59] = [
+const GOLDEN: [(&str, &str, &[&str]); 60] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -657,6 +672,28 @@ const GOLDEN: [(&str, &str, &[&str]); 59] = [
     // 0.1% tolerance — and reproduces every other water reference byte for
     // byte, which is the mutation proving the trail is what does the work.
     ("whitecaps", "assets/test/whitecaps.loom", &["--sim", "300"]),
+    // **The FFT ocean, and no other reference draws one** — ADR 0076. Every other water
+    // row here sums an authored or wind-derived Gerstner wave list; this is the only frame
+    // in which `waterVertexMain` takes its cascade branch, samples the CPU's uploaded
+    // tiles, and applies the per-cascade Nyquist fade. A numeric change in
+    // `loom_ocean_at`, in `loom_sample_cascade`, in the tile order that
+    // `Ocean::render_tiles` writes, or in `waterCascadeFade` moves this reference and
+    // nothing else in this table.
+    //
+    // **`--sim 400` is the tick the whole slice was measured at** and it is not arbitrary:
+    // the buoy is settled and riding (task 2 measured mean offset -0.091 m over ticks
+    // 300-900, so anything before 300 is still the transient), `mu_max` at the buoy reads
+    // 0.1024 there, and 0.93% of the surface is past `WATER_FOAM_WET` so there is visible
+    // whitecap in frame. It is also the tick `ABLATE`'s row renders, so the two gates
+    // photograph the same instant.
+    //
+    // **What this row is blind to.** The `ocean_fft` window draws a FLAT sea today —
+    // `Viewer::set_ocean` has no caller, because its only possible one is
+    // `crates/loom_cli/src/run.rs`, which is the human's uncommitted file (task-3 report
+    // §7 has the block to paste). Every gate in this repository goes through the headless
+    // path, so no reference and no diff here can see that; it shows up only when a human
+    // opens a window.
+    ("ocean_fft", "assets/test/ocean_fft.loom", &["--sim", "400"]),
     // **The foam field, and nothing else in this list can see it** — ADR 0055.
     // Every other water scene's foam is a closed form in `(x, t)`: the
     // instantaneous whitecap coverage and the ten-tap trail that unrolls it.
@@ -1218,13 +1255,43 @@ const GOLDEN_SIZE: &str = "320x200";
 /// reproducibly (byte-identical `with` renders across two runs). 0.15 is roughly half of
 /// that — comfortably clear of run-to-run noise, and nowhere near the 0.0 a fully dead
 /// effect would score.
-const ABLATE: [(&str, &str, &str, &[&str], f64); 1] = [(
-    "whitecaps",
-    "assets/test/whitecaps.loom",
-    "water_foam",
-    &["--sim", "400"],
-    0.15,
-)];
+///
+/// **`ocean_fft` / `ocean_spectrum`.** Measured 2026-08-29 at `GOLDEN_SIZE`:
+/// `loom render assets/test/ocean_fft.loom --sim 400 --size 320x200` with and without
+/// `LOOM_ABLATE=ocean_spectrum`, then `loom compare`, gives `fraction = 0.587546875`
+/// (`differing` 37603 of 64000, `mean` 8.5647, `worst` 220). Reproducible: both sides are
+/// byte-identical across two runs. 0.30 is roughly half of that, on the same rule the row
+/// above uses.
+///
+/// **It is over half the frame because ablating the cascade removes the sea, not a
+/// highlight on it.** `ocean_fft` is the only scene that asks for `wave_model =
+/// "spectrum"`, a spectrum body is refused an authored wave list at load, and the shader's
+/// model branch is on `sea.count` — so zeroing the count drops it into the Gerstner sum
+/// with nothing to sum and the surface goes flat. That is the honest measurement of "is
+/// this rendering path drawing", which is the question this table asks.
+///
+/// **The bit was cross-checked against the other two sites rather than assumed**, because
+/// nothing in the build does it: `LOOM_ABLATE=ocean_spectrum` on `whitecaps.loom` moves
+/// **0 pixels of 64000** (a Gerstner scene has no cascade, so the correct answer is
+/// nothing), and `LOOM_ABLATE=water_foam` still moves exactly the 0.29178125 recorded
+/// above. A Slang constant that had collided with foam's bit would have shown up as a
+/// large number in the first of those and a changed one in the second.
+const ABLATE: [(&str, &str, &str, &[&str], f64); 2] = [
+    (
+        "whitecaps",
+        "assets/test/whitecaps.loom",
+        "water_foam",
+        &["--sim", "400"],
+        0.15,
+    ),
+    (
+        "ocean_fft",
+        "assets/test/ocean_fft.loom",
+        "ocean_spectrum",
+        &["--sim", "400"],
+        0.30,
+    ),
+];
 
 /// **The pixel diff `CLAUDE.md`'s definition of green has never had.**
 ///
