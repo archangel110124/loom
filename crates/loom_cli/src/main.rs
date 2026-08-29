@@ -5232,6 +5232,13 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
                 "still_height": body.surface_height,
                 "normal": sample.normal,
                 "displacement": sample.displacement,
+                // **The trace of the horizontal compression** — the quantity
+                // `WATER_FOLD_REF` calibrates the subsurface-scattering mask
+                // against, and the only one of the sample's shading terms the
+                // command did not report. `foam.mu_max` beside it is the
+                // *eigenvalue*: related, larger nowhere, and not the number
+                // `crest` divides.
+                "fold": sample.fold,
             },
             // The interactive events' own contribution at this point,
             // separately from the surface they have already been added to:
@@ -8480,5 +8487,198 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
             key,
             "an edited grass field kept its key, so the edit never shows"
         );
+    }
+    /// **The fold distribution `WATER_FOLD_REF` is calibrated against, and the
+    /// evidence that the FFT sea did not move it.**
+    ///
+    /// The water shader masks its subsurface term on
+    /// `crest = saturate(in.fold / WATER_FOLD_REF)`, where `fold` is the trace
+    /// of the horizontal Jacobian ([`loom_water::WaterSample::fold`]). Rare's
+    /// assumption, which that mask exists to express, is that light scatters
+    /// through water *on the side of a wave* — so where `crest` saturates is a
+    /// percentile of the fold and not a taste, and it has to leave the mask a
+    /// minority of the surface rather than a wash.
+    ///
+    /// **The question this answers is whether replacing sixteen Gerstner waves
+    /// with a three-cascade FFT ocean moved that percentile.** It did not.
+    /// Measured at `SIDE = 401` over the 2048 m swell patch at tick 400:
+    ///
+    /// ```text
+    ///                   sigma    p50      p90     p95     p99     p99.9   max
+    /// ocean (gerstner)  0.1887   0.0003  0.2453  0.3118  0.4254  0.5379  0.639
+    /// whitecaps (gerst) 0.2078   0.0002  0.2723  0.3436  0.4622  0.5604  0.629
+    /// ocean_fft         0.1894  -0.0007  0.2436  0.3124  0.4422  0.5829  0.888
+    /// ocean_fft_storm   0.2019  -0.0006  0.2598  0.3333  0.4709  0.6214  0.923
+    ///
+    ///                   fraction of the surface at fold >= 0.35 (crest == 1)
+    /// ocean (gerstner)  3.106%      <- the sea the constant was set on
+    /// whitecaps (gerst) 4.657%
+    /// ocean_fft         3.305%
+    /// ocean_fft_storm   4.206%
+    /// ```
+    ///
+    /// **`WATER_FOLD_REF = 0.35` is the 96.894th percentile on `ocean` and the
+    /// 96.695th on `ocean_fft`.** The mask saturates over the same three per
+    /// cent of the sea it was authored to saturate over. Reading `ocean`'s
+    /// percentile back off the other seas — printed below, and it returns 0.3500
+    /// on `ocean` itself, which is the arithmetic's self-check — the reference
+    /// they ask for is **0.3552** (`ocean_fft`), 0.3776 (storm) and 0.3848
+    /// (`whitecaps`): all *above* what ships, all by too little to render.
+    ///
+    /// **Why the FFT sea looked like it had moved, and had not.** `mu_max` —
+    /// the *eigenvalue* — genuinely did: `whitecaps` runs one way, so its trace
+    /// and its eigenvalue agree (0.2974 against 0.3158 at the origin, measured
+    /// below), while `ocean_fft` is a crossing sea whose trace runs several
+    /// times its eigenvalue (`play`'s
+    /// `the_crossing_sea_breaks_and_its_trace_over_reports_it`: 0.88% against
+    /// 0.10% past 0.45). `fold` is the trace, and the trace did not move. A
+    /// recalibration argued from `mu_max` would have been argued from the wrong
+    /// quantity.
+    ///
+    /// **The pipeline's own validity check is the sigma column.** The whitecap
+    /// thresholds in `scene.slang` are documented as set from `σ(fold) = 0.189`
+    /// on the seven-wave `ocean`; this measures 0.1887 and asserts it. A
+    /// measurement that could not reproduce the engine's own recorded number
+    /// would not be evidence about anything.
+    ///
+    /// **`SIDE` is prime**, for the reason `play`'s crossing-sea test measures:
+    /// every cascade patch is a power of two, so a power-of-two side samples one
+    /// sublattice of the 32 m chop tile for ever. Checked here at 257, 401, 601
+    /// and 1009 — every percentile agrees to the third decimal, and only `max`,
+    /// which is one point, moves. **And the span is the whole swell patch**: the
+    /// cascade is periodic at 2048 m, so that is the entire sea rather than a
+    /// window on it, and a short span cannot hold a swell wavelength.
+    #[test]
+    fn the_fold_distribution_the_sss_mask_is_calibrated_against() {
+        const SIDE: u16 = 401;
+        /// `WATER_FOLD_REF` in `assets/shaders/scene.slang`. Mirrored the way
+        /// `instant_foam` mirrors the foam thresholds: the shader is the one
+        /// that ships it, and this is what says the sea still suits it.
+        const FOLD_REF: f32 = 0.35;
+
+        // The instant `--sim 400` reports, which is the instant the
+        // recalibration's renders were taken at: one measurement, not two.
+        let t = 400.0 / 60.0;
+        // The swell cascade's own patch — the sea's full period.
+        let step = 2048.0 / f32::from(SIDE);
+
+        let quantile = |sorted: &[f32], q: f64| -> f32 {
+            #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+            #[allow(clippy::cast_possible_truncation)]
+            let i = (q * (sorted.len() - 1) as f64).round() as usize;
+            sorted[i]
+        };
+
+        let mut saturating = Vec::new();
+        let mut sigmas = Vec::new();
+        let mut sorted = Vec::new();
+        let scenes = ["ocean", "whitecaps", "ocean_fft", "ocean_fft_storm"];
+        for scene in scenes {
+            let src = std::fs::read_to_string(format!("../../assets/test/{scene}.loom"))
+                .expect("the scene");
+            let world = World::from_scene(&Scene::parse(&src).expect("valid scene"));
+            let wind = crate::weather::wind_of_world(&world);
+            let body = crate::weather::water_of(&world, &wind).expect("the scene has water");
+            // `None` on a Gerstner body, and `sample_water` then takes the
+            // closed-form path. One function, both models — which is the whole
+            // contract of `WaveModel`, and the reason these four rows are
+            // comparable at all.
+            let sea = crate::weather::sea_of_body(&body, &wind).map(|mut sea| {
+                sea.evolve(t);
+                sea
+            });
+            let at = |x: f32, z: f32| {
+                loom_water::sample_water(&body, sea.as_ref(), [x, z], t, -1000.0, [0.0; 3], [0.0; 3])
+            };
+
+            let mut all = Vec::with_capacity(usize::from(SIDE) * usize::from(SIDE));
+            for iz in 0..SIDE {
+                for ix in 0..SIDE {
+                    all.push(at(f32::from(ix) * step, f32::from(iz) * step).fold);
+                }
+            }
+            all.sort_unstable_by(f32::total_cmp);
+            #[allow(clippy::cast_precision_loss)]
+            let n = all.len() as f64;
+            let mean = all.iter().map(|f| f64::from(*f)).sum::<f64>() / n;
+            let sigma =
+                (all.iter().map(|f| (f64::from(*f) - mean).powi(2)).sum::<f64>() / n).sqrt();
+            #[allow(clippy::cast_precision_loss)]
+            let past = |r: f32| all.iter().filter(|f| **f >= r).count() as f64 * 100.0 / n;
+            let origin = at(0.0, 0.0);
+
+            println!(
+                "{scene:16} sigma {sigma:.4}  p50 {:.4}  p90 {:.4}  p95 {:.4}  p99 {:.4}  \
+                 p99.9 {:.4}  max {:.4}\n\
+                 {:16} origin fold {:.4} mu_max {:.4}  crest >= 0.5/0.7/1.0: \
+                 {:.3}% {:.3}% {:.3}%  at a reference of 0.25/0.30: {:.3}% {:.3}%",
+                quantile(&all, 0.50),
+                quantile(&all, 0.90),
+                quantile(&all, 0.95),
+                quantile(&all, 0.99),
+                quantile(&all, 0.999),
+                all[all.len() - 1],
+                "",
+                origin.fold,
+                origin.mu_max,
+                past(FOLD_REF * 0.5),
+                past(FOLD_REF * 0.7),
+                past(FOLD_REF),
+                past(0.25),
+                past(0.30),
+            );
+            saturating.push(past(FOLD_REF));
+            sigmas.push(sigma);
+            sorted.push(all);
+        }
+
+        // **The recalibrated reference, computed rather than eyeballed.** The
+        // percentile `WATER_FOLD_REF` holds on `ocean` — the sea it was set on —
+        // read back off each of the other seas. `ocean`'s own row returns
+        // `FOLD_REF` by construction, which is the arithmetic's self-check.
+        let authored = 1.0 - saturating[0] / 100.0;
+        for (scene, all) in scenes.iter().zip(&sorted) {
+            println!(
+                "{scene:16} the reference that holds `ocean`'s p{:.3} here: {:.4}",
+                authored * 100.0,
+                quantile(all, authored),
+            );
+        }
+
+        // **The validity check, first.** `scene.slang`'s whitecap thresholds are
+        // documented as `σ(fold) = 0.189` on the seven-wave `ocean`; if this
+        // pipeline cannot reproduce that, none of the rows above are evidence.
+        assert!(
+            (sigmas[0] - 0.189).abs() < 0.005,
+            "sigma(fold) on `ocean` measures {:.4}, and `scene.slang`'s whitecap \
+             thresholds are documented as set from 0.189 on that scene. Either the \
+             scene changed or this measurement is not the one the shader was tuned by",
+            sigmas[0],
+        );
+
+        // **The claim: the mask kept its selectivity across the wave-model
+        // change.** `ocean` is the sea `WATER_FOLD_REF` was set on and
+        // `ocean_fft` is the sea it now has to serve; the constant saturates
+        // over the same slice of both, so it does not need moving.
+        let (tuned, fft) = (saturating[0], saturating[2]);
+        assert!(
+            (fft - tuned).abs() < 0.5,
+            "WATER_FOLD_REF = {FOLD_REF} saturates over {tuned:.3}% of `ocean` and \
+             {fft:.3}% of `ocean_fft`. Those were within a fifth of a point of each \
+             other, which is what says the FFT sea did not move the calibration — \
+             recheck the reference against the distribution printed above"
+        );
+
+        // **And it is a minority of the surface, on every sea we author.** Rare's
+        // assumption is that light scatters through the *side of a wave*; a mask
+        // that saturates over a fifth of the sea is a wash, and one that
+        // saturates nowhere never lights a crest.
+        for (scene, past) in scenes.iter().zip(&saturating) {
+            assert!(
+                (1.0..8.0).contains(past),
+                "on {scene} the SSS mask saturates over {past:.3}% of the surface, \
+                 which is no longer a wave's side"
+            );
+        }
     }
 }
