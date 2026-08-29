@@ -34,6 +34,7 @@ pub mod clip;
 pub mod device;
 pub mod mix;
 pub mod rain;
+pub mod sea;
 
 pub use clip::{Clip, ClipError};
 pub use device::{Audio, AudioError};
