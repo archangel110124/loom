@@ -355,7 +355,15 @@ mod tests {
             1136,
             "waterBackscatter — the turbidity knob the sea's colour is derived from"
         );
-        assert_eq!(size_of::<EnvironmentData>(), 1152, "the whole struct");
+        // **The sea's vertical scale, appended after the optics pair on the same
+        // rule.** `waterBackscatter` ends at 1152, a multiple of 16, so the
+        // `float4` lands flush and the stride needs no padding at all.
+        assert_eq!(
+            at(std::ptr::from_ref(&base.water_scale).cast()),
+            1152,
+            "waterScale — sigma, what the backlit mask normalises elevation by"
+        );
+        assert_eq!(size_of::<EnvironmentData>(), 1168, "the whole struct");
     }
 
     /// **`ParticleInstance` is written by a shader as well as by the CPU**,

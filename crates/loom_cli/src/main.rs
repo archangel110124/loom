@@ -3327,6 +3327,14 @@ pub(crate) fn resolve_cascade(world: &World, surface_height: f32) -> Option<Reso
     })
 }
 
+/// The significant height, in metres, below which a sea is glass and the backlit
+/// subsurface term is switched off — **the ceiling of Douglas sea state 1,
+/// "calm (rippled)"** (state 0 is "calm, glassy"; state 2, "smooth", starts here).
+///
+/// Read by [`add_water`] alone. See the note there for why a scale-free mask
+/// needs an absolute floor and what it looked like without one.
+const GLASSY_SIGNIFICANT_HEIGHT: f32 = 0.1;
+
 /// Put the scene's sea into the environment the shader reads.
 ///
 /// **The waves are derived from the wind unless the file lists its own.** A sea
@@ -3388,6 +3396,42 @@ fn add_water(
     let [br, bg, bb] = body.optics.backscatter;
     env.water_attenuation = [ar, ag, ab, 0.0];
     env.water_backscatter = [br, bg, bb, 0.0];
+    // **How high a crest stands on THIS sea**, which is what the backlit
+    // subsurface mask normalises a fragment's elevation by. `Hs = 4σ`, and the
+    // wave set is the one this body carries — the sixteen `weather::water_of`
+    // derived from the wind, or the list the file authored.
+    //
+    // **The analytic wave set and not `Ocean::significant_height`**, unlike
+    // `weather::sea_state`, and the difference is that this function has no
+    // cascade: it is called once per frame from the render path, and building
+    // and evolving an ocean here to measure a shading normaliser would be three
+    // `amplitude_field` passes for a number the spectrum already answers in
+    // closed form. Both are `4√m0` of the same Pierson–Moskowitz sea.
+    //
+    // **Zero for a body whose wave set is empty**, which is a still pool and a
+    // `spectrum` body with no cascade, and the shader reads zero as glass.
+    //
+    // **And zero for a sea too small to have a crest at all.** The mask is
+    // `elevation / 2σ`, which is scale-free by design — that is the whole fix —
+    // and scale-free means a millimetre of ripple normalises to a crest exactly
+    // as a six-metre swell does. The crossing it is multiplied by does not
+    // shrink with it (`WATER_TROUGH_THICK` is metres of water, not wave
+    // heights), so an unfloored mask lights the top 2% of a dead calm as
+    // brightly as the top 2% of a storm. `rain_pool` is the scene that showed
+    // it: `Hs = 0.0892 m`, and unfloored it moved 4.05% of its frame at worst
+    // channel 16 against `HEAD`, against 1.71% at worst 9 with the floor in.
+    //
+    // The floor is a published row, not a taste: **the Douglas sea state scale
+    // puts state 1 — "calm (rippled)" — at `Hs` 0 to 0.1 m**, and state 0 is
+    // "calm (glassy)". A sea inside state 1 has no crest for light to cross and
+    // is switched off here rather than in the shader, so the threshold is
+    // written down once.
+    //
+    // `ponytail:` a hard step at 0.1 m. A scene whose wind ramps across
+    // Beaufort 1 would pop; none does, and the smooth version wants a second
+    // constant for the band it fades over. Fade it if a ramp ever crosses this.
+    let hs = loom_water::spectrum::significant_height(&body.waves);
+    env.water_scale = [if hs >= GLASSY_SIGNIFICANT_HEIGHT { hs * 0.25 } else { 0.0 }, 0.0, 0.0, 0.0];
     env.attenuation_depth = body.waves.attenuation_depth;
     // Truncated at the cap the shader's loop is bounded by, which is also the
     // schema's `maxItems`, so this only bites on a hand-built body.
@@ -6539,6 +6583,76 @@ mod tests {
                 "{scene}'s authored camera is on the wrong side of its own                  water surface — eye {eye:?}",
             );
         }
+    }
+
+    /// **A glassy sea hands the shader no crest to glow from.**
+    ///
+    /// `scene.slang`'s backlit subsurface term is masked by `elevation / 2σ` —
+    /// how high this point stands on its own sea — which is what makes it fire
+    /// on a Beaufort 4 swell where the old steepness gate never could. Being
+    /// scale-free is the fix and it is also the trap: a millimetre of ripple
+    /// normalises to a crest just as a six-metre swell does, while the crossing
+    /// it is multiplied by stays in metres of water. So a dead calm would glow
+    /// on its top 2% exactly as brightly as a storm does on its.
+    ///
+    /// `water_scale.x` is the one number that decides it, and zero is the
+    /// shader's "there is no crest here" — so this is the assertion, on the
+    /// CPU, where the threshold is written down.
+    ///
+    /// **Watched to fail**: with the `GLASSY_SIGNIFICANT_HEIGHT` floor removed,
+    /// the windless pool below reports `sigma = 0.0066` rather than 0, and
+    /// `rain_pool.loom` — `Hs = 0.0892 m`, sigma 0.0223 — reports 0.0223 rather
+    /// than 0. Against `HEAD` at `320x200`, `rain_pool` moves **4.05% of its
+    /// frame at worst channel 16 without the floor and 1.71% at worst 9 with
+    /// it**; what is left is the `min(column, sheet)` crossing change, which is
+    /// a different part of the same commit.
+    #[test]
+    fn a_glassy_sea_hands_the_shader_no_crest_to_glow_from() {
+        // A dead calm. `Wind` has to be authored at zero: absent, the component
+        // defaults to a breeze and the lake gets the sea that goes with it.
+        let glass = environment_of_text(
+            "[scene]\nformat = 1\n\n[[node]]\nname = \"Pool\"\n\n\
+             [node.components.Wind]\nspeed = 0.0\n\n\
+             [node.components.WaterBody]\nkind = \"lake\"\nsurface_height = 0.0\n",
+        );
+        assert_eq!(
+            glass.water_scale[0], 0.0,
+            "a windless sea is glass and must hand the shader no crest scale",
+        );
+
+        // The other side: the scene this whole term exists for. `Hs = 0.8031 m`
+        // is Pierson–Moskowitz at U10 = 5.995, which is what `ocean_tropical`
+        // authors, and sigma is a quarter of it.
+        //
+        // **`loom water --at` reports 0.8115 on the same scene and that is not a
+        // disagreement**: that is `Ocean::significant_height`, `4√m0` measured
+        // off the evolved cascade's tiles, and this is the closed-form `4√m0` of
+        // the wave set the same spectrum produced. 1.0% apart, and the render
+        // path takes the analytic one because it has no cascade — see
+        // `add_water`.
+        let src = std::fs::read_to_string("../../assets/test/ocean_tropical.loom")
+            .expect("the scene exists");
+        let parsed = Scene::parse(&src).expect("it parses");
+        let world = World::from_scene(&parsed);
+        let wind = crate::weather::wind_of(&parsed);
+        let sea = environment_with_wind_at(&world, &wind, 0.0, None);
+        assert!(
+            (sea.water_scale[0] - 0.2008).abs() < 0.002,
+            "ocean_tropical's sigma is Hs/4; got {}",
+            sea.water_scale[0],
+        );
+
+        // And the band between them, which is what the floor is for: a sea
+        // inside Douglas state 1 is rippled, not crested.
+        let rippled = environment_of_text(
+            "[scene]\nformat = 1\n\n[[node]]\nname = \"Sea\"\n\n\
+             [node.components.Wind]\nspeed = 1.2\n\n\
+             [node.components.WaterBody]\nkind = \"ocean\"\nsurface_height = 0.0\n",
+        );
+        assert_eq!(
+            rippled.water_scale[0], 0.0,
+            "Douglas state 1 is calm, rippled — no crest, no glow",
+        );
     }
 
     /// **A scene with no `WaterBody` draws no water at all**, and the flag the

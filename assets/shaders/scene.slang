@@ -288,6 +288,16 @@ struct EnvironmentData {
     float4 waterAttenuation;
     /// Backscatter per metre at the same three wavelengths — xyz, w unused.
     float4 waterBackscatter;
+    /// The sea's own vertical scale: x is σ, the RMS surface elevation in
+    /// metres, yzw unused. **Zero is glass** — a body with no wave set.
+    ///
+    /// `Hs = 4σ`, so `2σ` is how far a significant crest stands above still
+    /// water; `WATER_CREST_SIGMA` is that two and `waterCrestScale()` is the
+    /// product. Nothing else reads this.
+    ///
+    /// Appended after the optics pair for the reason that pair was appended
+    /// after the ocean block: every offset above it is unmoved.
+    float4 waterScale;
 };
 
 /// One vertex of the cinematic free surface, as `loom_render::FluidVertex`
@@ -5732,6 +5742,16 @@ float3 waterExtinct() { return push.environment[0].waterAttenuation.xyz; }
 /// scattered light, not reflected light.
 float3 waterBackscatter() { return push.environment[0].waterBackscatter.xyz; }
 
+/// How far above still water a **significant crest** on this sea stands, in
+/// metres — `WATER_CREST_SIGMA · σ`.
+///
+/// **Zero is glass**, and every caller must treat it as such rather than
+/// dividing by it: a body with no wave set uploads `σ = 0` and there is then no
+/// crest for light to cross.
+float waterCrestScale() {
+    return WATER_CREST_SIGMA * push.environment[0].waterScale.x;
+}
+
 /// What deep water looks like when you see into it rather than off it.
 ///
 /// **Derived, not eyeballed.** This is the standard deep-water remote-sensing
@@ -5929,6 +5949,23 @@ static const float WATER_NO_BED = 1.0e4;
 /// alignment.
 static const float WATER_SSS_DISTORT = 0.35;
 static const float WATER_SSS_POWER = 4.0;
+/// How far above still water a **significant crest** stands, in units of σ.
+///
+/// `Hs = 4σ` is the significant wave height — the mean crest-to-trough height
+/// of the highest third — so a significant crest reaches `2σ` above the still
+/// line. That is the referent, and it is the whole of this number: `lift == 1`
+/// means "as high as this sea's own significant crest", whatever sea it is.
+///
+/// **This is what makes the mask scale-free, which is the defect it fixes.**
+/// The gate used to be `crest`, the fold over `WATER_FOLD_REF` — an absolute
+/// threshold on *steepness*. On `ocean` that saturates 3.1% of the surface and
+/// on `ocean_tropical`'s 0.81 m Pierson–Moskowitz sea it saturates essentially
+/// none of it, because a gentle sea is not a shallow storm: it is a *smaller*
+/// sea, and its crests are just as much thin sheets with light behind them.
+/// Elevation over `2σ` saturates the same 2.3% of a Gaussian surface at every
+/// sea state, which is the selectivity the fold gate had on the one sea it was
+/// authored against and had nowhere else.
+static const float WATER_CREST_SIGMA = 2.0;
 /// Fold value treated as "fully a crest" for SHADING ONLY.
 ///
 /// **Never use this to normalise foam coverage.** Foam thresholds absolutely,
@@ -6135,6 +6172,20 @@ static const uint LOOM_ABLATE_WATER_FOAM = 1u;
 /// drop the varyings `fragmentMain` no longer reads, and `WARNING-Shader-OutputNotConsumed`
 /// is fatal in a debug build (`SEA-REBUILD.md` §7.3).
 static const uint LOOM_ABLATE_OCEAN_SPECTRUM = 2u;
+
+/// The bit for the backlit subsurface term on the water surface.
+///
+/// **Must equal `water_glow`'s bit in `ABLATIONS`
+/// (`crates/loom_render/src/ablate.rs`)**, on exactly the warning above: this is the third
+/// of the three places that bit is written down and nothing checks the three agree.
+///
+/// Ablating it zeroes `sss` at its single point of use, so what is measured is the light
+/// that came through the water and nothing else — not the wrap lobe, not the crest mask,
+/// not the crossing. **The registered scene is `ocean_tropical`**, which is the sea this
+/// term could not reach until `lift` replaced `crest`: a Beaufort 4 Pierson–Moskowitz sea
+/// never crosses `WATER_FOLD_REF`, so the old gate drew literally nothing there and a
+/// reference image of it would have recorded the absence and passed for ever.
+static const uint LOOM_ABLATE_WATER_GLOW = 4u;
 
 bool ablated(uint bit) {
     return (uint(push.environment[0].viewport.w) & bit) != 0u;
@@ -7655,8 +7706,8 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     float3 T = waterBehind(screenUv, in.worldPos, push.environment[0].eye.xyz,
                            in.depth, refracted, behind, column, gap);
 
-    // **Backlit scatter, gated on how THIN the water is — not on view angle
-    // and, as of this commit, not on crest either.**
+    // **Backlit scatter, gated on how THIN the water is — not on view angle,
+    // and, as of this commit, not on steepness either.**
     //
     // The term this replaces was `body * 6.0 * pow(dot(-view, sunDir), 3)`,
     // which glows a trough exactly as brightly as a crest and so reads as haze
@@ -7668,13 +7719,32 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // its turquoise.** Shoaling flattens the swell as it comes onto the shelf,
     // so `in.fold` — and with it `crest` — goes to zero across exactly the
     // shallow band where a real sea glows most. The term was gated on the one
-    // quantity guaranteed to vanish where it was needed. It now gates on the
-    // column `waterBehind` measures: light that crossed two metres of water
-    // and came back up is thin-water scatter whatever shape the surface is in,
-    // which is the ambient-driven body term `0651775` deleted, arriving from
-    // the physics rather than from a constant. `crest` stays as the *other*
-    // way to be thin, which is what keeps a breaking wave glowing in deep
-    // water.
+    // quantity guaranteed to vanish where it was needed. It gained the column
+    // `waterBehind` measures: light that crossed two metres of water and came
+    // back up is thin-water scatter whatever shape the surface is in.
+    //
+    // **`crest` was the wrong gate over the open sea too, and that is what this
+    // commit fixes.** Off a bed the column is the sentinel, the shallow half of
+    // the gate is identically zero, and the mask was `crest` alone — an
+    // absolute threshold on *steepness*, on a quantity whose scale is the sea's
+    // own. A Beaufort 4 sea never reaches it, so `ocean_tropical` — a 0.81 m
+    // Pierson–Moskowitz sea framed from 1.1 m above its own waterline, which is
+    // the photograph this whole optics chain exists to make — got no subsurface
+    // light at all. But a gentle groundswell's crest is exactly as much a thin
+    // sheet with the sun behind it as a storm wave's is; being a sheet is a
+    // fact about **elevation**, not about steepness, and every photograph of a
+    // backlit swell says so. So the mask is now `lift`: how high this point
+    // stands above the still line, in units of this sea's own significant crest
+    // (`waterCrestScale`, `2σ`). It saturates on the same 2.3% of a Gaussian
+    // surface at every sea state, where `crest` saturated 3.1% of `ocean` and
+    // ~0% of a Beaufort 4 sea.
+    //
+    // **A glassy sea has `σ = 0` and no crest**, so `lift` is zero over the
+    // whole surface and the term is off — which is the property `crest` used to
+    // supply through the fold bound and which had to survive the change.
+    //
+    // **Steepness has not gone; it has stopped being a switch.** `crest` still
+    // sets `skyView` above, which is a question about surface shape.
     //
     // Wrap-lobe form (Barré-Brisebois): perturbing the sun direction by the
     // surface normal widens the lobe so the glow spreads around the crest
@@ -7682,18 +7752,37 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // — it falls out of `waterExtinct()` through Beer-Lambert, so the colour of
     // a backlit wave is the colour water actually transmits: through 2 m that
     // is (0.51, 0.89, 0.97), the luminous turquoise a breaking crest has.
-    float thick = (column < WATER_NO_BED)
-        ? column * lerp(1.0, WATER_CREST_THIN, crest)
-        // No bed to measure: the open sea, where the old pair of authored
-        // thicknesses is still the only answer available. Written as the same
-        // ratio so a bedless scene comes out bit for bit as before.
-        : WATER_TROUGH_THICK * lerp(1.0, WATER_CREST_THIN, crest)
-          / max(sunDirection().y, 0.15);
+    float crestScale = waterCrestScale();
+    float lift = crestScale > 0.0
+        ? saturate((in.worldPos.y - stillWaterLevel()) / crestScale)
+        : 0.0;
+    // **The crossing is whichever of the two transmits more**, which is what
+    // `min` of two path lengths says under Beer-Lambert: `max(exp(-Ka),
+    // exp(-Kb)) == exp(-K·min(a, b))`. Light reaches the eye either by crossing
+    // the crest or by going down to a bed and back, and the shorter path is the
+    // one that carries the colour.
+    //
+    // **It was `column` alone wherever there was a bed, and that is the second
+    // half of `ocean_tropical`'s defect.** Its sand shelf is five metres down,
+    // so the measured column is 12–14 m over the whole frame — past
+    // `WATER_GLOW_COLUMN` (so the shallow gate never opened either) and thick
+    // enough that what little survived arrived navy. A five-metre bed does not
+    // make a crest above it a thicker sheet.
+    //
+    // `WATER_TROUGH_THICK` is still the only answer available for the crest
+    // crossing itself and is still the authored 4 m, measured against nothing.
+    float sheet = WATER_TROUGH_THICK / max(sunDirection().y, 0.15);
+    float thick = min(column, sheet) * lerp(1.0, WATER_CREST_THIN, lift);
     float3 h = normalize(sunDirection() + normal * WATER_SSS_DISTORT);
     float3 sss = sunColor() * sunStrength()
                * pow(saturate(dot(-view, h)), WATER_SSS_POWER)
-               * max(crest, saturate(1.0 - column / WATER_GLOW_COLUMN))
+               * max(lift, saturate(1.0 - column / WATER_GLOW_COLUMN))
                * exp(-waterExtinct() * thick);
+    // Ablation, at the term's single point of use rather than at each of the
+    // factors feeding it, exactly as `LOOM_ABLATE_WATER_FOAM` is applied: what
+    // is measured is then "the light this frame brought up through the water"
+    // and not one contributor to it.
+    if (ablated(LOOM_ABLATE_WATER_GLOW)) { sss = float3(0.0, 0.0, 0.0); }
 
     // **What the eye actually receives from below, split by how much water is
     // in the way.** `T` is the fraction that crossed the column; `1 - T` is

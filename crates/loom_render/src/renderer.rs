@@ -475,6 +475,25 @@ pub struct EnvironmentData {
     pub water_attenuation: [f32; 4],
     /// Backscatter per metre at the same three wavelengths — xyz, w unused.
     pub water_backscatter: [f32; 4],
+    /// The sea's own vertical scale: x is **σ, the RMS surface elevation in
+    /// metres**, yzw unused.
+    ///
+    /// **What the backlit-scatter mask normalises elevation by**, and the only
+    /// reason it exists is that "how high is this point on its wave" has no
+    /// scene-free answer: half a metre is a crest on `ocean_tropical` and is
+    /// inside the noise on `ocean_fft_storm`. `Hs = 4σ` is the standard
+    /// significant wave height, so `2σ` is how far a significant crest stands
+    /// above still water and is the shader's `WATER_CREST_SIGMA`.
+    ///
+    /// **Zero is a sea with no waves** — glass — and the shader reads that as
+    /// "there is no crest here to be a thin sheet", which is what keeps a still
+    /// pool from glowing. Uploaded from
+    /// `loom_water::spectrum::significant_height` of the wave set the body
+    /// carries, which is the same figure `loom water --at` reports.
+    ///
+    /// Appended after the optics pair for the reason that pair was appended
+    /// after the ocean block: every offset above it is unmoved.
+    pub water_scale: [f32; 4],
 }
 
 /// A point light, as the GPU reads it.
@@ -615,6 +634,10 @@ impl Default for EnvironmentData {
             // documented half.
             water_attenuation: [0.341, 0.058, 0.013, 0.0],
             water_backscatter: [0.00035, 0.00075, 0.00175, 0.0],
+            // **Glass.** A scene with no `WaterBody` has no sea to have a
+            // scale, and a body whose wave set is empty is a still pool; both
+            // read zero here and neither glows.
+            water_scale: [0.0; 4],
         }
     }
 }
