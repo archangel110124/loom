@@ -95,6 +95,14 @@ impl Weather {
 /// `water@` assertion would come to disagree with the picture.
 pub(crate) struct WaterProbe {
     body: WaterBody,
+    /// The FFT cascade, cloned off the runner at the tick the run ended on — ADR 0076.
+    ///
+    /// **Cloned rather than rebuilt, for the reason the wavelet pool and the foam field
+    /// are cloned**: there is one ocean in a run, the simulation owns it and evolves it
+    /// inside the fixed step, and a probe that built a second one would be a second
+    /// opinion about where the surface is. It holds the tiles for `Weather::seconds` and
+    /// [`WaterProbe::at`] is only ever asked for that instant.
+    sea: Option<loom_water::ocean::Ocean>,
     bed: Option<loom_voxel::heightfield::HeightField>,
     flow: Option<loom_water::flow::FlowGrid>,
     /// The interactive events as they stood at the end of the run, cloned off
@@ -138,7 +146,15 @@ impl WaterProbe {
         // beside it** — `sample_water` has one water-velocity argument, so
         // `water@x,z.speed` reads what a floating body there would feel.
         let flow = [flow[0] + wavelet.velocity[0], flow[1], flow[2] + wavelet.velocity[1]];
-        loom_water::sample_water(&self.body, xz, seconds, ground, flow, wavelet.surface())
+        loom_water::sample_water(
+            &self.body,
+            self.sea.as_ref(),
+            xz,
+            seconds,
+            ground,
+            flow,
+            wavelet.surface(),
+        )
     }
 }
 
@@ -154,11 +170,42 @@ pub(crate) fn water_probe(
     wind: &Wind,
     wavelets: &loom_water::wavelet::WaveletField,
     foam: Option<&loom_water::foam::FoamField>,
+    sea: Option<&loom_water::ocean::Ocean>,
 ) -> Option<WaterProbe> {
     let body = water_of(world, wind)?;
     let bed = crate::scene_terrain_field(scene);
     let flow = bed.as_ref().and_then(|g| crate::river_flow(g, &body));
-    Some(WaterProbe { body, bed, flow, wavelets: wavelets.clone(), foam: foam.cloned() })
+    Some(WaterProbe {
+        body,
+        sea: sea.cloned(),
+        bed,
+        flow,
+        wavelets: wavelets.clone(),
+        foam: foam.cloned(),
+    })
+}
+
+/// The FFT cascade a scene's water asks for, from the same wind the wave set is.
+///
+/// **The one place a scene's `spectrum` body becomes an ocean**, and it sits beside
+/// [`water_of`] on purpose: the two must be built from the same `u10` and the same
+/// heading, or the sea a scene *reports* and the sea it *floats on* are two seas.
+/// `None` for a scene with no water and for every `gerstner` body, which is all of them
+/// but `ocean_fft`.
+///
+/// **It does not evolve what it builds.** `Ocean::new` leaves every tile zero; who calls
+/// [`loom_water::ocean::Ocean::evolve`], and when, is the ownership decision written down
+/// on [`loom_water::ocean::Ocean::for_body`] — the simulation, once per fixed step.
+#[must_use]
+pub(crate) fn sea_of(world: &World, wind: &Wind) -> Option<loom_water::ocean::Ocean> {
+    let body = water_of(world, wind)?;
+    let params = wind.params();
+    // U10, not `Wind::speed` — the same line `water_of` takes, for the same reason.
+    loom_water::ocean::Ocean::for_body(
+        &body,
+        wind.mean_speed_at(10.0),
+        [params.get("dir_x"), params.get("dir_z")],
+    )
 }
 
 /// The same query, for a caller that holds the pieces rather than a [`Weather`].

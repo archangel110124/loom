@@ -156,7 +156,60 @@ impl Cascade {
     }
 }
 
+/// The wavenumber a `patch × patch` grid of `n` cells stops resolving at: `π·n/patch`.
+///
+/// **The boundary this file bands its stacks at**, and it is a choice rather than a
+/// derivation — see [`Cascade::band`]. A coarse cascade carries everything up to what
+/// it can resolve and the next one takes over exactly there, which tiles as long as the
+/// finer cascade's own fundamental `2π/patch` is below it. That holds for every stack
+/// here and is not automatic: it needs `patch_coarse / patch_fine <= n / 2`.
+#[must_use]
+pub fn nyquist(patch: f32, n: usize) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    let n = n as f32;
+    std::f32::consts::PI * n / patch
+}
+
+/// Cells per side of every shipping cascade — ADR 0076's proven rung.
+///
+/// The ADR measured 128² × 3 cascades × 3 fields at **1.24 ms** of a 16.67 ms tick and
+/// 256² at 7.15 ms, and called 128 "the proven fallback if the estimate does not survive
+/// measurement". This crate's `cost_of_evolve` prints what it actually costs, now that
+/// there are six fields rather than three; 256 is a constant away and is not a redesign.
+pub const SHIPPING_N: usize = 128;
+
+/// The stack the engine ships: swell, sea and chop, banded at each cascade's own
+/// Nyquist so they tile `[0, ∞)`.
+///
+/// **One definition, used by the size test, the cost test and every scene.** They were
+/// two different configurations before — the `Hs` gate ran a single 1024 m cascade while
+/// the timing ran three — so the sea that was measured for size was not the sea that was
+/// measured for cost, and neither was the sea that would ship.
+///
+/// **The layout is the engine's and not the scene's** (ADR 0076, and
+/// `WaveModel::Spectrum`'s own docs): band edges that must meet *exactly* are the kind of
+/// number an author gets wrong silently, and [`Ocean::new`] asserts they meet.
+#[must_use]
+pub fn shipping_stack(n: usize) -> [Cascade; 3] {
+    let (swell, sea, chop) = (2048.0, 256.0, 32.0);
+    [
+        Cascade { patch: swell, n, band: [0.0, nyquist(swell, n)] },
+        Cascade { patch: sea, n, band: [nyquist(swell, n), nyquist(sea, n)] },
+        Cascade { patch: chop, n, band: [nyquist(sea, n), f32::INFINITY] },
+    ]
+}
+
+/// The seed every scene's ocean is drawn with.
+///
+/// **A constant, because the sea is part of the scene and a scene is reproducible.** The
+/// draw is what turns a spectrum into one particular set of crests; a seed off a clock,
+/// an address or a scene id would make `loom sim --assert`, `cargo xtask repeat` and the
+/// pinned hashes all answer differently on the next run or the next machine. A scene that
+/// wants a different sea gets a different wind, not a different draw.
+const SEA_SEED: u32 = 0x5EA_0076;
+
 /// Everything about one cascade that does not change with time.
+#[derive(Clone)]
 struct Layer {
     patch: f32,
     n: usize,
@@ -172,27 +225,161 @@ struct Layer {
     omega: Vec<f32>,
     /// `k̂` per cell, zero at `k = 0`. The horizontal pinch is `i·k̂·h`.
     khat: Vec<[f32; 2]>,
-    /// The three working grids — height, displacement x, displacement z — held so a
-    /// per-tick evolve allocates nothing. Fully overwritten before they are read.
-    grid: [Vec<Complex>; 3],
+    /// The six transformed working grids, in [`Ocean::tiles`] order — held so a per-tick
+    /// evolve allocates nothing. Fully overwritten before they are read.
+    grid: [Vec<Complex>; TRANSFORMED],
     scratch: Vec<Complex>,
-    /// Where this layer's three tiles start in [`Ocean::tiles`].
+    /// Where this layer's [`TILES_PER_CASCADE`] tiles start in [`Ocean::tiles`].
     offset: usize,
+}
+
+/// How many of a cascade's tiles come out of a transform, and their order in
+/// [`Ocean::tiles`]: `height, dx, dz, vy, vx, vz`.
+///
+/// **Six rather than three, and the three new ones are `∂/∂t`.** A mode's time
+/// evolution is `h·e^{i·s·ωt}`, so its time derivative is `i·s·ω·h` — one multiply on
+/// the spectrum, and then the same inverse transform. It is done spectrally rather than
+/// by differencing two ticks for the same reason [`Ocean::evolve`] is stateless: a
+/// difference needs the surface at a second time, and asking for one would make the
+/// velocity at tick `t` depend on which other tick was evaluated.
+const TRANSFORMED: usize = 6;
+
+/// How many `n²` tiles a cascade contributes to [`Ocean::tiles`].
+///
+/// The [`TRANSFORMED`] six, then five more finite-differenced from them —
+/// `∂h/∂x, ∂h/∂z, Sxx, Szz, Sxz`. See [`Ocean::evolve`].
+pub const TILES_PER_CASCADE: usize = TRANSFORMED + 5;
+
+const T_HEIGHT: usize = 0;
+const T_DX: usize = 1;
+const T_DZ: usize = 2;
+const T_VY: usize = 3;
+const T_VX: usize = 4;
+const T_VZ: usize = 5;
+const T_DHDX: usize = 6;
+const T_DHDZ: usize = 7;
+const T_SXX: usize = 8;
+const T_SZZ: usize = 9;
+const T_SXZ: usize = 10;
+
+/// One tile value, by component and integer cell. No wrapping: callers wrap.
+#[inline]
+fn cell(tiles: &[f32], offset: usize, n: usize, component: usize, x: usize, z: usize) -> f32 {
+    tiles[offset + component * n * n + z * n + x]
+}
+
+/// The five differenced tiles, from the six transformed ones.
+///
+/// **The slopes and the breaking criterion, by central differences on the tile, once per
+/// tick.** [`crate::WaterSample::mu_max`] is the largest eigenvalue of the symmetric part
+/// of the horizontal Jacobian, and the matrix it is the eigenvalue of is `S = −∂D/∂x`
+/// where `D` is the horizontal displacement — which is exactly what the Gerstner path's
+/// `Σ Q·k·A·sin φ · dᵢdⱼ` is, term by term, differentiated in closed form. The cascade
+/// has no closed form to differentiate, so it is differenced.
+///
+/// **What differencing costs, measured.** A central difference over one cell returns
+/// `sin(k·Δ)/Δ` where the exact derivative returns `k`, per axis — so a mode at the tile's
+/// Nyquist reads *zero* and the top of every cascade's band is under-read. Summed over
+/// [`shipping_stack`] at `U10 = 18` and 440 km, the rms of the compression's trace is
+/// **0.1276 differenced against 0.1630 exact — 78.2% kept** at `n = 128`, and 79.9% at
+/// `n = 256`. So the sea reads about a fifth less steep than it is, everywhere, and the
+/// foam that thresholds it is correspondingly thinner.
+///
+/// It is the reason each cascade differences its *own* tile at its *own* spacing rather
+/// than one summed field being differenced at the finest: a cascade carries only the band
+/// it can resolve, so the worst attenuation a mode sees is set by its own grid and not by
+/// the coarsest in the stack.
+///
+/// `ponytail:` the exact form is five more inverse transforms per cascade — multiply
+/// grids 0, 1 and 2 by `i·k` before transforming instead of differencing after — which is
+/// **eleven transforms a tick against six**, near enough twice this file's whole cost. Do
+/// that, not a wider stencil, if foam ever needs the missing 22%.
+///
+/// `Sxz` is the symmetric part `−½(∂dx/∂z + ∂dz/∂x)`. Analytically the two halves are
+/// equal — both are `IFFT(k·k̂x·k̂z·h)` — but two different stencils on a discrete tile
+/// are not, and an asymmetric matrix has no real eigenvalue guarantee at all.
+fn derive(tiles: &mut [f32], offset: usize, n: usize, patch: f32) {
+    #[allow(clippy::cast_precision_loss)]
+    let span = 2.0 * patch / n as f32;
+    for z in 0..n {
+        let (zp, zm) = ((z + 1) % n, (z + n - 1) % n);
+        for x in 0..n {
+            let (xp, xm) = ((x + 1) % n, (x + n - 1) % n);
+            let d = |component: usize, ax: usize, az: usize, bx: usize, bz: usize| {
+                (cell(tiles, offset, n, component, ax, az)
+                    - cell(tiles, offset, n, component, bx, bz))
+                    / span
+            };
+            let dhdx = d(T_HEIGHT, xp, z, xm, z);
+            let dhdz = d(T_HEIGHT, x, zp, x, zm);
+            let sxx = -d(T_DX, xp, z, xm, z);
+            let szz = -d(T_DZ, x, zp, x, zm);
+            // Summed in this order and only in this order: float addition is not
+            // associative and this reaches the foam a scene draws.
+            let sxz = -0.5 * (d(T_DX, x, zp, x, zm) + d(T_DZ, xp, z, xm, z));
+            let i = z * n + x;
+            for (component, value) in
+                [(T_DHDX, dhdx), (T_DHDZ, dhdz), (T_SXX, sxx), (T_SZZ, szz), (T_SXZ, sxz)]
+            {
+                tiles[offset + component * n * n + i] = value;
+            }
+        }
+    }
+}
+
+/// Everything the cascade knows at one world point, every tile summed over every layer.
+///
+/// The fields carry [`crate::WaterSample`]'s meanings, not new ones — this is the shape
+/// the FFT half of [`crate::sample_water`] reads and nothing else consumes it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct OceanSample {
+    /// `[dx, height, dz]` — the order [`crate::WaterSample::displacement`] uses, so a
+    /// caller that already speaks the Gerstner path needs no second layout.
+    pub displacement: [f32; 3],
+    /// `[vx, vy, vz]`, m/s: the orbital motion, with no current in it.
+    pub velocity: [f32; 3],
+    /// `[∂h/∂x, ∂h/∂z]` in *base* space — the derivative with respect to the sample
+    /// point, not to the displaced position, which is what the Gerstner path's
+    /// `slope_x`/`slope_z` are too.
+    pub slope: [f32; 2],
+    /// `Sxx` of the horizontal compression `−∂D/∂x`. See [`derive`].
+    pub sxx: f32,
+    /// `Szz` of the same matrix.
+    pub szz: f32,
+    /// `Sxz` of the same matrix, symmetrised.
+    pub sxz: f32,
 }
 
 /// A stack of FFT tiles evaluated at one time.
 ///
 /// Construct once per sea state; call [`Self::evolve`] per tick and [`Self::sample`] per
 /// query.
+///
+/// **`Clone` copies the tiles and the tables, and it is how a query gets one.** It is not
+/// cheap — a few megabytes at the shipping size — and it is not how the simulation should
+/// ever get one: there is one ocean in a run and the simulation owns it. It exists so
+/// `loom water --at` and `water@x,z` can hold the sea the run ended on, exactly as they
+/// hold the foam field and the wavelet pool.
+#[derive(Clone)]
 pub struct Ocean {
     layers: Vec<Layer>,
-    /// Every layer's three tiles, concatenated in layer order: `[height, dx, dz]` per
-    /// layer, each `n²` long, row-major with index `z·n + x`.
+    /// Every layer's [`TILES_PER_CASCADE`] tiles, concatenated in layer order:
+    /// `[height, dx, dz, vy, vx, vz, dh/dx, dh/dz, Sxx, Szz, Sxz]` per layer, each `n²`
+    /// long, row-major with index `z·n + x`.
     ///
-    /// One flat buffer rather than three per layer because it is what a caller uploads,
+    /// One flat buffer rather than one per field because it is what a caller uploads,
     /// hashes or walks — and because the accessor the tests read has to be a single
     /// contiguous slice for a bitwise comparison to mean "the whole ocean".
     tiles: Vec<f32>,
+    /// The `t` the tiles hold, or `NaN` before the first [`Self::evolve`].
+    ///
+    /// **Read by [`crate::sample_water`], which asserts it against its own `t`.** The
+    /// tiles are the surface at one instant and nothing in them says which; a caller
+    /// that evolved to one tick and sampled at another would get a plausible, wrong,
+    /// silent answer — the boat-above-its-water failure this crate's header opens on.
+    /// `NaN` compares false against every `t`, so an ocean nobody evolved fails that
+    /// assertion rather than reading as a flat sea at `t = 0`.
+    t: f32,
 }
 
 impl Ocean {
@@ -369,17 +556,64 @@ impl Ocean {
                 twiddles: Twiddles::new(n),
                 omega,
                 khat,
-                grid: [
-                    vec![Complex::default(); cells],
-                    vec![Complex::default(); cells],
-                    vec![Complex::default(); cells],
-                ],
+                grid: std::array::from_fn(|_| vec![Complex::default(); cells]),
                 scratch: vec![Complex::default(); n],
                 offset,
             });
-            offset += 3 * cells;
+            offset += TILES_PER_CASCADE * cells;
         }
-        Self { layers, tiles: vec![0.0; offset] }
+        Self { layers, tiles: vec![0.0; offset], t: f32::NAN }
+    }
+
+    /// The ocean a scene's water body asks for, or `None` for one that did not ask.
+    ///
+    /// # Who owns this, and who evolves it
+    ///
+    /// **The simulation owns it: `loom_cli::play::Sim`, beside the wavelet pool and the
+    /// foam field, evolved once at the top of every fixed step before any body reads the
+    /// surface.** Nothing else evolves one. `loom water --at` and `water@x,z` assertions
+    /// read the sim's, cloned off the runner exactly as they clone the foam field; the
+    /// renderer will read the sim's too.
+    ///
+    /// **It anchors to the water body and never to the camera** — ADR 0045's stated
+    /// trap, which binds here for the same reason it binds the foam field: this surface
+    /// produces a force on a rapier body, and a domain that followed the viewer would
+    /// make physics depend on where somebody stood. There is in fact nothing to anchor:
+    /// [`Self::sample`] wraps a world XZ into the patch, so the tiles are pinned to world
+    /// coordinates and the sea is the same sea at every distance from every eye. Any
+    /// future windowing of this — a moving high-detail region, a per-camera cascade — is
+    /// the trap, not an optimisation.
+    ///
+    /// **`u10` and `direction` are the wind's, and they must be the same two numbers the
+    /// sixteen-wave path is derived from** (`loom_cli::weather::water_of`), or a scene
+    /// reports one sea and floats on another. `u10` is the wind at 10 m — never
+    /// `Wind::speed`, which is a free-stream value about 10% above it; see
+    /// [`crate::spectrum`]'s reference-height trap.
+    ///
+    /// **The sea does not ride the weather ladder yet.** `Sim::reweather` re-derives the
+    /// sixteen waves from a ramped wind every tick; rebuilding the amplitude field costs
+    /// three `amplitude_field` passes and cannot be done per tick, so a `spectrum` body
+    /// keeps the sea its scene's wind built at load. No scene both ramps and asks for the
+    /// spectrum; when one does, the ramp is a slice of its own.
+    #[must_use]
+    pub fn for_body(
+        body: &loom_scene::components::WaterBody,
+        u10: f32,
+        direction: [f32; 2],
+    ) -> Option<Self> {
+        if body.wave_model != loom_scene::components::WaveModel::Spectrum {
+            return None;
+        }
+        Some(Self::new(
+            &shipping_stack(SHIPPING_N),
+            u10,
+            // Absent is unlimited fetch — the fully-developed sea. `spectrum_shape`
+            // reads a non-finite fetch as unlimited, which is the same arm
+            // `wave_set` takes for the same `None`.
+            body.fetch.unwrap_or(f32::INFINITY),
+            direction,
+            SEA_SEED,
+        ))
     }
 
     /// Fill every tile for simulation time `t`, in seconds.
@@ -390,7 +624,8 @@ impl Ocean {
     /// costs exactly what a step forward does.
     pub fn evolve(&mut self, t: f32) {
         // Destructured so the tile buffer and the layers are two disjoint borrows.
-        let Self { layers, tiles } = self;
+        let Self { layers, tiles, t: at } = self;
+        *at = t;
         for layer in layers.iter_mut() {
             let cells = layer.n * layer.n;
             for i in 0..cells {
@@ -412,6 +647,16 @@ impl Ocean {
                 let [kx, kz] = layer.khat[i];
                 layer.grid[1][i] = Complex { re: -kx * h.im, im: kx * h.re };
                 layer.grid[2][i] = Complex { re: -kz * h.im, im: kz * h.re };
+                // **The velocity, differentiated on the spectrum rather than in time.**
+                // `∂h/∂t` of `h0·e^{i·s·ωt}` is `i·s·ω·h`, so the vertical rate is one
+                // multiply on the mode this loop already built, and the two horizontal
+                // rates are that same `∂h/∂t` put through the identical pinch. Three
+                // more inverse transforms and no second instant, which is what keeps
+                // the velocity as stateless as the surface.
+                let dh = Complex { re: -layer.omega[i] * h.im, im: layer.omega[i] * h.re };
+                layer.grid[3][i] = dh;
+                layer.grid[4][i] = Complex { re: -kx * dh.im, im: kx * dh.re };
+                layer.grid[5][i] = Complex { re: -kz * dh.im, im: kz * dh.re };
             }
             for (g, grid) in layer.grid.iter_mut().enumerate() {
                 ifft_2d(grid, layer.n, &layer.twiddles, &mut layer.scratch);
@@ -430,6 +675,7 @@ impl Ocean {
                     }
                 }
             }
+            derive(tiles, layer.offset, layer.n, layer.patch);
         }
     }
 
@@ -447,7 +693,37 @@ impl Ocean {
     /// toward index `0`, not off the end. Without that a boat crossing the seam steps.
     #[must_use]
     pub fn sample(&self, x: f32, z: f32) -> [f32; 3] {
-        let mut out = [0.0_f32; 3];
+        let p = self.probe(x, z);
+        [p[T_DX], p[T_HEIGHT], p[T_DZ]]
+    }
+
+    /// Everything the cascade knows at a world XZ, in one lookup.
+    ///
+    /// The same bilinear taps [`Self::sample`] makes, over all
+    /// [`TILES_PER_CASCADE`] tiles rather than three — which is one query per
+    /// [`crate::sample_water`] call rather than four, and one place where the wrap and
+    /// the cascade order are decided.
+    #[must_use]
+    pub fn at(&self, x: f32, z: f32) -> OceanSample {
+        let p = self.probe(x, z);
+        OceanSample {
+            displacement: [p[T_DX], p[T_HEIGHT], p[T_DZ]],
+            velocity: [p[T_VX], p[T_VY], p[T_VZ]],
+            slope: [p[T_DHDX], p[T_DHDZ]],
+            sxx: p[T_SXX],
+            szz: p[T_SZZ],
+            sxz: p[T_SXZ],
+        }
+    }
+
+    /// The simulation time the tiles hold, or `NaN` before the first [`Self::evolve`].
+    #[must_use]
+    pub fn evolved_at(&self) -> f32 {
+        self.t
+    }
+
+    fn probe(&self, x: f32, z: f32) -> [f32; TILES_PER_CASCADE] {
+        let mut out = [0.0_f32; TILES_PER_CASCADE];
         for layer in &self.layers {
             let n = layer.n;
             #[allow(clippy::cast_precision_loss)]
@@ -484,8 +760,7 @@ impl Ocean {
             let (ix1, iz1) = ((ix0 + 1) % n, (iz0 + 1) % n);
 
             let cells = n * n;
-            // Height is tile 0 and lands in slot 1: the return is `[dx, height, dz]`.
-            for (component, out_slot) in [(0usize, 1usize), (1, 0), (2, 2)] {
+            for (component, slot) in out.iter_mut().enumerate() {
                 let tile = &self.tiles[layer.offset + component * cells..][..cells];
                 let a = tile[iz0 * n + ix0];
                 let b = tile[iz0 * n + ix1];
@@ -493,7 +768,7 @@ impl Ocean {
                 let d = tile[iz1 * n + ix1];
                 let top = a + (b - a) * tx;
                 let bottom = c + (d - c) * tx;
-                out[out_slot] += top + (bottom - top) * tz;
+                *slot += top + (bottom - top) * tz;
             }
         }
         out
@@ -535,35 +810,6 @@ impl Ocean {
 mod tests {
     use super::*;
     use crate::PROFILE;
-
-    /// The wavenumber a `patch × patch` grid of `n` cells stops resolving at: `π·n/patch`.
-    ///
-    /// **The boundary this file bands its stacks at**, and it is a choice rather than a
-    /// derivation — see [`Cascade::band`]. A coarse cascade carries everything up to what
-    /// it can resolve and the next one takes over exactly there, which tiles as long as
-    /// the finer cascade's own fundamental `2π/patch` is below it. That holds for every
-    /// stack here and is not automatic: it needs `patch_coarse / patch_fine <= n / 2`.
-    fn nyquist(patch: f32, n: usize) -> f32 {
-        #[allow(clippy::cast_precision_loss)]
-        let n = n as f32;
-        std::f32::consts::PI * n / patch
-    }
-
-    /// The stack the engine is expected to ship: swell, sea and chop, banded at each
-    /// cascade's own Nyquist so they tile `[0, ∞)`.
-    ///
-    /// **One definition, used by both the size test and the cost test.** They were two
-    /// different configurations before — the `Hs` gate ran a single 1024 m cascade while
-    /// the timing ran three — so the sea that was measured for size was not the sea that
-    /// was measured for cost, and neither was the sea that would ship.
-    fn shipping_stack(n: usize) -> [Cascade; 3] {
-        let (swell, sea, chop) = (2048.0, 256.0, 32.0);
-        [
-            Cascade { patch: swell, n, band: [0.0, nyquist(swell, n)] },
-            Cascade { patch: sea, n, band: [nyquist(swell, n), nyquist(sea, n)] },
-            Cascade { patch: chop, n, band: [nyquist(sea, n), f32::INFINITY] },
-        ]
-    }
 
     fn test_ocean() -> Ocean {
         let cut = nyquist(512.0, 64);
@@ -1331,6 +1577,18 @@ mod tests {
     /// Not a gate — the two numbers that choose the shipping grid size. ADR 0076
     /// predicts ~1.24 ms at N=128 and ~7.15 ms at N=256 for nine 2D transforms, against
     /// a fixed step of 16.67 ms.
+    ///
+    /// **It measures eighteen transforms now, not nine, and the ADR's figures no longer
+    /// bound it.** Putting the cascade on the force path (ADR 0076, Task 2) needed the
+    /// water's *velocity* as well as its position, and `∂/∂t` of the three fields is
+    /// three more inverse transforms per cascade — six per cascade rather than three —
+    /// plus five finite-differenced tiles for the normal and the breaking criterion.
+    /// Measured here, release: **3.710 ms/tick at N=128 (22.3% of a tick)** and
+    /// 21.105 ms at N=256 (126.6%). So `SHIPPING_N = 128` is not the fallback the ADR
+    /// called it; **it is the only rung that fits**, and 256 is now out of reach for the
+    /// same reason 512 always was. The three optimisations the ADR names — real-field
+    /// packing, the Hermitian half-transform, threading by rows — are still unspent and
+    /// still exact, and they are what would buy 256 back.
     ///
     /// **ADR 0076's figures are release figures and `cargo test` is a debug build**, so
     /// the line says which profile produced it. Unlabelled, `cargo test -p loom_water --

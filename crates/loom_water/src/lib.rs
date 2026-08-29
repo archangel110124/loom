@@ -17,6 +17,21 @@
 //! one implementation transcribed once (see [`slang`]) and measured against
 //! each other, not because one copies the other.
 //!
+//! **Two wave models now, and the shader knows one of them** — ADR 0076.
+//! [`loom_scene::components::WaveModel`] selects: `gerstner`, the default and
+//! everything below, or `spectrum`, an inverse-FFT cascade in [`ocean`] that
+//! [`sample_water`] reads instead of summing waves. Every field of
+//! [`WaterSample`] keeps its meaning across both, which is the whole contract —
+//! buoyancy, the CLI, `rhai` and the shader read the struct and none of them
+//! asks which model filled it.
+//!
+//! **The one-implementation guarantee above holds for `gerstner` today and not
+//! yet for `spectrum`.** [`slang`] is a transcription of the Gerstner sum, and
+//! the cascade's GPU half — uploading the CPU tiles the simulation already
+//! transformed, which is ADR 0076's design and needs no second implementation
+//! either — is the next slice. Until it lands, a `spectrum` scene's picture is
+//! not what its physics reads, and that is a known gap rather than a drift.
+//!
 //! # The formula
 //!
 //! Gerstner (trochoidal) waves, the standard form. For each wave, with
@@ -59,7 +74,8 @@ pub mod spectrum;
 pub mod spray;
 pub mod wavelet;
 
-use loom_scene::components::{MAX_WAVES, WaterBody};
+use loom_scene::components::{MAX_WAVES, WaterBody, WaveModel};
+use ocean::Ocean;
 
 /// Standard gravity, m/s². Sets every wave's phase speed through `ω = sqrt(gk)`.
 ///
@@ -74,7 +90,9 @@ pub const GRAVITY: f32 = 9.81;
 /// default and the numbers those tests are compared against are release numbers.** The
 /// FFT ocean's cost tests print straight underneath doc comments citing ADR 0076's
 /// 1.24 ms; in debug they read 19.9 ms/tick and 119.8% of a 16.67 ms tick, and anyone
-/// reading that output concludes the ocean is unaffordable. It is 1.50 ms in release.
+/// reading that output concludes the ocean is unaffordable. It was 1.50 ms in release
+/// then and is 3.71 ms now that the cascade carries velocity too — still a fifth of a
+/// tick, and `ocean.rs`'s `cost_of_evolve` carries both current numbers.
 /// Say which one produced the number, in the number's own line.
 #[cfg(test)]
 pub(crate) const PROFILE: &str = if cfg!(debug_assertions) {
@@ -94,11 +112,13 @@ pub struct WaterSample {
     pub height: f32,
     /// Unit surface normal, **analytic** — see [`sample_water`].
     pub normal: [f32; 3],
-    /// The full Gerstner offset from the sample point, for rendering.
+    /// The full offset from the sample point, for rendering.
     ///
     /// Horizontal as well as vertical: that horizontal pinch is what turns a
     /// sine wave into water, and it is also why the normal cannot be finite-
-    /// differenced.
+    /// differenced *in world space*. The Gerstner sum and the FFT cascade both
+    /// produce one — the cascade's is `i·k̂·h`, the same displacement the same
+    /// physics asks for — so this field means one thing under either model.
     pub displacement: [f32; 3],
     /// Velocity of the water here, m/s. Drag and buoyancy read it.
     ///
@@ -118,6 +138,11 @@ pub struct WaterSample {
     pub depth: f32,
     /// How close this point is to folding: `Σ Q·k·A·sin φ`, the term
     /// subtracted from the normal's Y just below.
+    ///
+    /// **Under `WaveModel::Spectrum` it is the same quantity from a different
+    /// source**: the trace of `−∂D/∂x` differenced off the cascade's own
+    /// displacement tiles (`ocean::derive`), which is what that sum *is*, term
+    /// by term. Same meaning, same scale, same 1.0 cusp.
     ///
     /// **Raw, and never normalised by `Σ Q·k·A`.** Dividing would make a
     /// glassy sea and a storm sea both reach 1.0 at every crest, so anything
@@ -224,6 +249,14 @@ pub fn shoal(k: f32, depth: f32, attenuation_depth: f32) -> f32 {
 
 /// Sample the water surface at a world XZ position and simulation time.
 ///
+/// `sea` is the FFT cascade a `spectrum` body's surface comes from — ADR 0076
+/// — evolved to this same `t` by the simulation that owns it, and `None` for
+/// every `gerstner` body, which is every scene but `ocean_fft`. It is a
+/// parameter for exactly the reason `ground_height`, `flow` and `wavelet` are:
+/// this function must stay a function of its arguments, or it stops being the
+/// one thing the shader is a transcription of. What a `spectrum` body does
+/// with it, and what it answers when handed `None`, is [`sample_cascade`].
+///
 /// `flow` is the river's current at this point, in m/s, and is added to
 /// [`WaterSample::velocity`]. It is a pre-sampled vector for exactly the reason
 /// `ground_height` is a pre-sampled scalar: it comes off a grid derived from
@@ -275,12 +308,16 @@ pub fn shoal(k: f32, depth: f32, attenuation_depth: f32) -> f32 {
 #[must_use]
 pub fn sample_water(
     body: &WaterBody,
+    sea: Option<&Ocean>,
     world_xz: [f32; 2],
     t: f32,
     ground_height: f32,
     flow: [f32; 3],
     wavelet: [f32; 3],
 ) -> WaterSample {
+    if body.wave_model == WaveModel::Spectrum {
+        return sample_cascade(body, sea, world_xz, t, ground_height, flow, wavelet);
+    }
     let mut displacement = [0.0_f32; 3];
     // **The current is the base the orbital motion is summed onto**, rather
     // than added at the end, so the two are one velocity from the first line.
@@ -382,6 +419,27 @@ pub fn sample_water(
         [0.0, 1.0, 0.0]
     };
 
+    let (mu_max, break_dir) = breaking(sxx, szz, sxz);
+
+    WaterSample {
+        height: body.surface_height + displacement[1],
+        normal,
+        displacement,
+        velocity,
+        depth,
+        fold: flatten,
+        mu_max,
+        break_dir,
+    }
+}
+
+/// [`WaterSample::mu_max`] and [`WaterSample::break_dir`] from the compression matrix.
+///
+/// **One implementation, read by both wave models**, so the Gerstner path's closed-form
+/// `S` and the cascade's differenced one cannot come to disagree about what breaking is.
+/// The Slang half of it is written out again in [`slang`] and kept honest by
+/// `slang_agreement`, which is the same arrangement the rest of this file lives under.
+fn breaking(sxx: f32, szz: f32, sxz: f32) -> (f32, [f32; 2]) {
     // The 2x2 symmetric eigenproblem, closed form. `disc` is the gap between
     // the two eigenvalues, so it is zero exactly where the compression is
     // isotropic and the direction below is genuinely undefined.
@@ -396,14 +454,89 @@ pub fn sample_water(
     let pick_len = (pick[0] * pick[0] + pick[1] * pick[1]).sqrt();
     let break_dir =
         if pick_len > 0.0 { [pick[0] / pick_len, pick[1] / pick_len] } else { [1.0, 0.0] };
+    (mu_max, break_dir)
+}
 
+/// The FFT half of [`sample_water`]: `WaveModel::Spectrum` — ADR 0076.
+///
+/// **Every field keeps the meaning it has on the Gerstner path.** That is the whole
+/// contract of the opt-in: buoyancy, the CLI, `rhai` and the shader all read
+/// [`WaterSample`] and none of them may need to know which model filled it.
+///
+/// - `height`, `displacement` and `velocity` are the cascade's, summed in cascade order
+///   inside [`ocean::Ocean::at`], with `flow` as the velocity's base exactly as above.
+/// - `normal` is `(−∂h/∂x, 1 − fold, −∂h/∂z)`, the same construction and the same
+///   base-space derivatives; the cascade differences its tiles for them rather than
+///   summing a closed form.
+/// - `fold` is the trace of the compression and `mu_max` its largest eigenvalue, through
+///   the one [`breaking`] both models call.
+/// - `depth` is still-water depth and is unchanged.
+///
+/// **`sea` is `None` for a body that asked for the spectrum and was given no ocean, and
+/// the answer is then the still surface — flat, motionless, unbroken.** It is not a
+/// fallback to the sixteen waves, deliberately: a second sea that looks plausible at the
+/// point of use is the boat-above-its-water defect this crate's header opens on, and a
+/// mirror is unmistakable. Two callers reach here that way on purpose —
+/// [`spray::spray`], which samples the surface at each droplet's *birth* time and so
+/// cannot read a tile evolved to the current tick, and `loom_cli`'s underwater-eye flag,
+/// which has no ocean until the render half of ADR 0076 lands.
+///
+/// **Shoaling does not apply.** A cascade is a periodic deep-water tile and cannot feel a
+/// bed (ADR 0076, "what does not change"); `depth` is still reported, and a scene that
+/// wants the shallows wants the Gerstner model until §3's bake exists.
+fn sample_cascade(
+    body: &WaterBody,
+    sea: Option<&Ocean>,
+    world_xz: [f32; 2],
+    t: f32,
+    ground_height: f32,
+    flow: [f32; 3],
+    wavelet: [f32; 3],
+) -> WaterSample {
+    let depth = body.surface_height - ground_height;
+    // **No ocean is the still surface**, which falls out of running the identical
+    // arithmetic over a zero cascade rather than being a second return. The wavelets
+    // still ride on it: a wake is CPU state that exists whichever model built the swell
+    // under it.
+    let c = sea.map_or_else(ocean::OceanSample::default, |sea| {
+        // **The tiles are one instant and carry no clock of their own.** Sampling a tile
+        // evolved to a different tick is the silent wrong answer this whole crate is
+        // arranged against, so it is an assertion rather than a comment. Debug-only
+        // because the release cost is a branch on the force path and a mismatch is a
+        // wiring mistake, not an input: it cannot arise from scene data.
+        debug_assert!(
+            sea.evolved_at() == t,
+            "the ocean holds t = {} and the surface was asked for t = {t}",
+            sea.evolved_at()
+        );
+        sea.at(world_xz[0], world_xz[1])
+    });
+    let mut displacement = c.displacement;
+    displacement[1] += wavelet[0];
+    let velocity =
+        [flow[0] + c.velocity[0], flow[1] + c.velocity[1], flow[2] + c.velocity[2]];
+
+    let slope_x = c.slope[0] + wavelet[1];
+    let slope_z = c.slope[1] + wavelet[2];
+    // The trace, which is what `fold` is on both paths — see `WaterSample::fold`.
+    let fold = c.sxx + c.szz;
+
+    let normal = [-slope_x, 1.0 - fold, -slope_z];
+    let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+    let normal = if length > 0.0 {
+        [normal[0] / length, normal[1] / length, normal[2] / length]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+
+    let (mu_max, break_dir) = breaking(c.sxx, c.szz, c.sxz);
     WaterSample {
         height: body.surface_height + displacement[1],
         normal,
         displacement,
         velocity,
         depth,
-        fold: flatten,
+        fold,
         mu_max,
         break_dir,
     }
@@ -631,7 +764,7 @@ mod tests {
         let mut still = body(Vec::new());
         still.surface_height = 3.5;
 
-        let s = sample_water(&still, [12.0, -7.0], 4.25, -2.0, [0.0; 3], [0.0; 3]);
+        let s = sample_water(&still, None, [12.0, -7.0], 4.25, -2.0, [0.0; 3], [0.0; 3]);
 
         assert_eq!(s.height, 3.5);
         assert_eq!(s.normal, [0.0, 1.0, 0.0]);
@@ -651,7 +784,7 @@ mod tests {
         let w = wave(std::f32::consts::TAU, 0.5, 0.4, [1.0, 0.0]);
         let sea = body(vec![w]);
 
-        let s = sample_water(&sea, [0.0, 0.0], 0.0, 0.0, [0.0; 3], [0.0; 3]);
+        let s = sample_water(&sea, None, [0.0, 0.0], 0.0, 0.0, [0.0; 3], [0.0; 3]);
 
         assert!(s.height.abs() < 1e-6, "sin(0) = 0, so the surface is at rest level: {s:?}");
         assert!((s.displacement[0] - 0.2).abs() < 1e-6, "Q·A·cos(0) = 0.2: {s:?}");
@@ -670,7 +803,7 @@ mod tests {
     fn the_analytic_normal_is_not_what_finite_differencing_would_give() {
         let sea = body(vec![wave(9.0, 1.2, 0.9, [1.0, 0.0])]);
         let t = 1.0;
-        let height = |x: f32| sample_water(&sea, [x, 0.0], t, 0.0, [0.0; 3], [0.0; 3]).height;
+        let height = |x: f32| sample_water(&sea, None, [x, 0.0], t, 0.0, [0.0; 3], [0.0; 3]).height;
 
         // Walk a wavelength: the two disagree everywhere, and the question is
         // how badly at the worst point — which is at the crests, where the
@@ -679,7 +812,7 @@ mod tests {
         let mut worst = 0.0_f32;
         for i in 0..900 {
             let x = i as f32 * (9.0 / 900.0);
-            let analytic = sample_water(&sea, [x, 0.0], t, 0.0, [0.0; 3], [0.0; 3]).normal;
+            let analytic = sample_water(&sea, None, [x, 0.0], t, 0.0, [0.0; 3], [0.0; 3]).normal;
 
             // What a finite difference sees: three base points, whose heights
             // are read as if the surface were still above those base points. It
@@ -709,8 +842,8 @@ mod tests {
     /// lights the whole sea wrong.
     #[test]
     fn the_normal_follows_the_wave_direction() {
-        let along_x = sample_water(&body(vec![wave(8.0, 0.4, 0.7, [1.0, 0.0])]), [1.0, 1.0], 0.0, 0.0, [0.0; 3], [0.0; 3]);
-        let along_z = sample_water(&body(vec![wave(8.0, 0.4, 0.7, [0.0, 1.0])]), [1.0, 1.0], 0.0, 0.0, [0.0; 3], [0.0; 3]);
+        let along_x = sample_water(&body(vec![wave(8.0, 0.4, 0.7, [1.0, 0.0])]), None, [1.0, 1.0], 0.0, 0.0, [0.0; 3], [0.0; 3]);
+        let along_z = sample_water(&body(vec![wave(8.0, 0.4, 0.7, [0.0, 1.0])]), None, [1.0, 1.0], 0.0, 0.0, [0.0; 3], [0.0; 3]);
 
         assert!(along_x.normal[0].abs() > 0.1, "{along_x:?}");
         assert_eq!(along_x.normal[2], 0.0, "a wave along +X tilts nothing on Z");
@@ -737,7 +870,7 @@ mod tests {
             let mut folds = false;
             for i in 0..2000 {
                 let x = i as f32 * (std::f32::consts::TAU / 2000.0);
-                let moved = x + sample_water(&sea, [x, 0.0], 0.0, 0.0, [0.0; 3], [0.0; 3]).displacement[0];
+                let moved = x + sample_water(&sea, None, [x, 0.0], 0.0, 0.0, [0.0; 3], [0.0; 3]).displacement[0];
                 if moved < previous {
                     folds = true;
                 }
@@ -763,7 +896,7 @@ mod tests {
             let mut folds = false;
             for i in 0..2000 {
                 let x = i as f32 * (std::f32::consts::TAU / 2000.0);
-                let moved = x + sample_water(&sea, [x, 0.0], 0.0, 0.0, [0.0; 3], [0.0; 3]).displacement[0];
+                let moved = x + sample_water(&sea, None, [x, 0.0], 0.0, 0.0, [0.0; 3], [0.0; 3]).displacement[0];
                 if moved < previous {
                     folds = true;
                 }
@@ -791,7 +924,7 @@ mod tests {
 
         for tick in 0..500 {
             let t = tick as f32 / 60.0;
-            let s = sample_water(&sea, [t * 3.0 - 400.0, 90.0 - t], t, -5.0, [0.0; 3], [0.0; 3]);
+            let s = sample_water(&sea, None, [t * 3.0 - 400.0, 90.0 - t], t, -5.0, [0.0; 3], [0.0; 3]);
             for v in [s.height, s.depth] {
                 assert!(v.is_finite(), "{s:?}");
             }
@@ -810,8 +943,8 @@ mod tests {
     #[test]
     fn only_the_first_sixteen_waves_are_summed() {
         let small = wave(11.0, 0.1, 0.3, [1.0, 0.3]);
-        let capped = sample_water(&body(vec![small; MAX_WAVES]), [3.0, 5.0], 2.0, 0.0, [0.0; 3], [0.0; 3]);
-        let over = sample_water(&body(vec![small; MAX_WAVES + 4]), [3.0, 5.0], 2.0, 0.0, [0.0; 3], [0.0; 3]);
+        let capped = sample_water(&body(vec![small; MAX_WAVES]), None, [3.0, 5.0], 2.0, 0.0, [0.0; 3], [0.0; 3]);
+        let over = sample_water(&body(vec![small; MAX_WAVES + 4]), None, [3.0, 5.0], 2.0, 0.0, [0.0; 3], [0.0; 3]);
 
         assert_eq!(capped.height, over.height);
         assert_eq!(capped.displacement, over.displacement);
@@ -825,15 +958,15 @@ mod tests {
         let sea = body(vec![wave(10.0, 0.4, 0.5, [1.0, 0.0])]);
         let at = [0.0, 0.0];
 
-        let now = sample_water(&sea, at, 0.0, 0.0, [0.0; 3], [0.0; 3]).height;
-        let later = sample_water(&sea, at, 0.7, 0.0, [0.0; 3], [0.0; 3]).height;
+        let now = sample_water(&sea, None, at, 0.0, 0.0, [0.0; 3], [0.0; 3]).height;
+        let later = sample_water(&sea, None, at, 0.7, 0.0, [0.0; 3], [0.0; 3]).height;
         assert!((now - later).abs() > 0.05, "the surface is frozen: {now} vs {later}");
 
         // ω = sqrt(g·k), so the crest travels sqrt(g/k) metres per second. One
         // period later the same point is back where it started.
         let k = std::f32::consts::TAU / 10.0;
         let period = std::f32::consts::TAU / (GRAVITY * k).sqrt();
-        let one_period = sample_water(&sea, at, period, 0.0, [0.0; 3], [0.0; 3]).height;
+        let one_period = sample_water(&sea, None, at, period, 0.0, [0.0; 3], [0.0; 3]).height;
         assert!((now - one_period).abs() < 1e-3, "{now} vs {one_period} after one period");
     }
 
@@ -858,7 +991,7 @@ mod tests {
             let (mut low, mut high) = (f32::INFINITY, f32::NEG_INFINITY);
             for i in 0..200 {
                 let t = i as f32 * 0.05;
-                let h = sample_water(&sea, [0.0, 0.0], t, ground, [0.0; 3], [0.0; 3]).height;
+                let h = sample_water(&sea, None, [0.0, 0.0], t, ground, [0.0; 3], [0.0; 3]).height;
                 low = low.min(h);
                 high = high.max(h);
             }
@@ -902,8 +1035,8 @@ mod tests {
         // Including a bed a metre under the surface: with no authored depth,
         // even that must not change a single bit of the answer.
         for ground in [-1000.0, -6.0, -1.0, 0.5] {
-            let a = sample_water(&open, [3.0, -4.0], 1.25, ground, [0.0; 3], [0.0; 3]);
-            let b = sample_water(&open, [3.0, -4.0], 1.25, -1000.0, [0.0; 3], [0.0; 3]);
+            let a = sample_water(&open, None, [3.0, -4.0], 1.25, ground, [0.0; 3], [0.0; 3]);
+            let b = sample_water(&open, None, [3.0, -4.0], 1.25, -1000.0, [0.0; 3], [0.0; 3]);
             assert_eq!(a.height, b.height, "ground {ground} moved the surface");
             assert_eq!(a.displacement, b.displacement);
             assert_eq!(a.velocity, b.velocity);
@@ -926,7 +1059,7 @@ mod tests {
             let mut previous = f32::NEG_INFINITY;
             for i in 0..2000 {
                 let x = i as f32 * (std::f32::consts::TAU / 2000.0);
-                let moved = x + sample_water(&sea, [x, 0.0], 0.0, ground, [0.0; 3], [0.0; 3]).displacement[0];
+                let moved = x + sample_water(&sea, None, [x, 0.0], 0.0, ground, [0.0; 3], [0.0; 3]).displacement[0];
                 assert!(
                     moved >= previous,
                     "the surface folds at depth {}: x = {x} moved to {moved} behind {previous}",
@@ -963,7 +1096,7 @@ mod tests {
             for i in 0..8000 {
                 let x = i as f32 * (SHORE / 8000.0);
                 let ground = rise * (x - SHORE);
-                let moved = x + sample_water(&sea, [x, 0.0], 0.0, ground, [0.0; 3], [0.0; 3]).displacement[0];
+                let moved = x + sample_water(&sea, None, [x, 0.0], 0.0, ground, [0.0; 3], [0.0; 3]).displacement[0];
                 if moved < previous {
                     folded = true;
                 }
@@ -1000,6 +1133,7 @@ mod tests {
             for zi in 0..120_u8 {
                 let sample = sample_water(
                     &crossing,
+                    None,
                     [f32::from(xi) * 0.1, f32::from(zi) * 0.1],
                     3.0,
                     -1000.0,
@@ -1040,6 +1174,7 @@ mod tests {
             for zi in 0..80_u8 {
                 let sample = sample_water(
                     &single,
+                    None,
                     [f32::from(xi) * 0.4, f32::from(zi) * 0.4],
                     7.0,
                     -1000.0,
@@ -1057,6 +1192,133 @@ mod tests {
         }
         eprintln!("single swell: worst |mu_max - max(fold, 0)| = {worst:e}");
         assert!(worst < 1e-6, "mu_max is not the fold on a one-direction sea: {worst}");
+    }
+
+    /// A body that asks for the spectrum, with the wave list an empty sea keeps.
+    fn spectrum_body() -> WaterBody {
+        WaterBody { wave_model: WaveModel::Spectrum, ..WaterBody::default() }
+    }
+
+    /// **A `spectrum` body with no ocean is a mirror, not sixteen waves.**
+    ///
+    /// The fallback is the one design decision in `sample_cascade` that could have gone
+    /// the other way, and going the other way is the defect this crate's header opens
+    /// on: a second sea that looks entirely plausible at the point of use. A mirror
+    /// cannot be mistaken for the real thing.
+    #[test]
+    fn a_spectrum_body_with_no_ocean_is_flat_rather_than_gerstner() {
+        let mut body = spectrum_body();
+        body.surface_height = 2.5;
+        // The sixteen waves a derived sea carries, present and deliberately ignored.
+        body.waves = spectrum::wave_set(18.0, [1.0, 0.0]);
+        assert!(!body.waves.waves.is_empty(), "the wave list has to be non-empty here");
+
+        for tick in 0..40_u8 {
+            let t = f32::from(tick) / 60.0;
+            let s = sample_water(&body, None, [3.0, -7.0], t, -1000.0, [0.0; 3], [0.0; 3]);
+            assert_eq!(s.height, 2.5, "the still level moved: {s:?}");
+            assert_eq!(s.displacement, [0.0; 3]);
+            assert_eq!(s.velocity, [0.0; 3]);
+            assert_eq!(s.normal, [0.0, 1.0, 0.0]);
+            assert_eq!(s.mu_max, 0.0);
+        }
+    }
+
+    /// **The number this slice exists to produce: the derived sea breaks on its own.**
+    ///
+    /// Before ADR 0076 the only water in this repository that ever reached
+    /// `WATER_FOAM_WET = 0.22` was `whitecaps.loom`, and only because a human
+    /// hand-authored five waves at 18 m/s to make it. `ocean.loom`'s seven authored
+    /// waves peak at `mu_max` 0.175 and `shore.loom`'s at 0.059, both under the
+    /// threshold, so a beach in this engine has never deposited foam.
+    /// `.superpowers/sdd/SEA-FFT-CORE-PLAN/baseline/README.md` records all three.
+    ///
+    /// The cascade at the same wind -- `U10 = 18`, 440 km, nothing authored -- measured
+    /// over 160,801 points of `ocean_fft`'s own sea, at tick 400:
+    ///
+    /// ```text
+    /// mean mu_max 0.0502   rms 0.0802   max 0.43
+    /// over 0.22 (foam starts)  0.93%
+    /// over 0.33 (fully white)  0.02%
+    /// mean instantaneous coverage 0.19%
+    /// ```
+    ///
+    /// Stable to three digits from 401 samples a side to 1601 -- see `SIDE` below for
+    /// the one sampling choice that is not free.
+    ///
+    /// **0.93% is thin against the 5-8% a real Beaufort 8 sea whitecaps at, and two
+    /// causes are known.** A fifth of it is the central-difference stencil, which keeps
+    /// 78.2% of the compression's rms and is measured in `ocean::derive`. The rest is
+    /// that linear superposition does not sharpen a crest the way a breaking wave does,
+    /// and that the grid stops at 0.35 m so the short tail that steepens a surface most
+    /// is simply absent. Neither is this slice's to fix, and both are why the assertion
+    /// below is that the sea breaks *at all* rather than that it breaks by an amount.
+    ///
+    /// The floor is 0.2% -- an eighth of the realised figure, and far above the zero
+    /// every unauthored sea in this engine has produced until now.
+    #[test]
+    fn the_derived_sea_breaks_without_a_hand_authoring_it() {
+        // **Not a power of two, and that is a measurement rather than a preference.**
+        // Every cascade's patch is, so a power-of-two side steps the chop tile by a
+        // whole number of cells and samples one sublattice of it forever: 256 reads
+        // 3.00% of the surface past the threshold and 1024 reads 1.50%, against 0.93%
+        // for 401, 801 and 1601 alike. An aliased sample of a periodic tile is not a
+        // small error, it is a different sea.
+        const SIDE: u16 = 401;
+        let body = spectrum_body();
+        let mut sea = ocean::Ocean::for_body(&body, 18.0, [1.0, 0.0])
+            .expect("a spectrum body has an ocean");
+        // The instant `loom water --at ... --sim 400` reports on, so the numbers in
+        // this comment and the numbers on the command line are one measurement.
+        let t = 400.0 / 60.0;
+        sea.evolve(t);
+
+        let side = SIDE;
+        // Across the largest cascade's patch, so the swell is sampled over whole
+        // periods rather than over one flank of one crest.
+        let step = 2048.0 / f32::from(side);
+        let (mut wet, mut white, mut n) = (0_u32, 0_u32, 0_u32);
+        let (mut sum, mut sq, mut worst, mut coverage) = (0.0_f64, 0.0_f64, f32::MIN, 0.0_f64);
+        for iz in 0..side {
+            for ix in 0..side {
+                let at = [f32::from(ix) * step, f32::from(iz) * step];
+                let s = sample_water(&body, Some(&sea), at, t, -1000.0, [0.0; 3], [0.0; 3]);
+                n += 1;
+                sum += f64::from(s.mu_max);
+                sq += f64::from(s.mu_max) * f64::from(s.mu_max);
+                worst = worst.max(s.mu_max);
+                if s.mu_max > 0.22 {
+                    wet += 1;
+                }
+                if s.mu_max > 0.33 {
+                    white += 1;
+                }
+                // `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, mu)` -- the shader's two
+                // constants, and the pair `loom water`'s `foam.coverage` uses.
+                let u = ((s.mu_max - 0.22) / (0.33 - 0.22)).clamp(0.0, 1.0);
+                coverage += f64::from(u * u * 2.0_f32.mul_add(-u, 3.0));
+            }
+        }
+        let total = f64::from(n);
+        let pct = |c: u32| f64::from(c) * 100.0 / total;
+        println!(
+            "derived sea at U10=18/440km: mean mu_max {:.4}, rms {:.4}, max {worst:.4}; \
+             >0.22 {:.2}%, >0.33 {:.2}%, mean coverage {:.4}",
+            sum / total,
+            (sq / total).sqrt(),
+            pct(wet),
+            pct(white),
+            coverage / total
+        );
+        assert!(
+            pct(wet) > 0.2,
+            "only {:.3}% of the derived sea is past WATER_FOAM_WET -- an FFT sea that \
+             never breaks renders with no foam at all, which is what this slice is for",
+            pct(wet)
+        );
+        // The vacuous pass to rule out: a criterion stuck at some large constant would
+        // clear the floor above without measuring anything.
+        assert!(pct(wet) < 40.0, "{:.1}% of the sea is breaking at once", pct(wet));
     }
 
     /// The Slang half has to carry the same constants. A numeric comparison

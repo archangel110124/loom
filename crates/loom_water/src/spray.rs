@@ -222,7 +222,17 @@ fn crown_in(
     // **Sampled at the moment of birth, not now.** The crown is thrown by the
     // crest that was there when it left; evaluating the surface at `t` would
     // make a droplet's arc depend on water it is no longer touching.
-    let surface = sample_water(body, at, born, ground(at[0], at[1]), [0.0; 3], [0.0; 3]);
+    //
+    // **Which is exactly why no ocean is passed, and why a `spectrum` body throws no
+    // spray at all today.** The cascade is a set of tiles evolved to *one* instant — the
+    // current tick — and `born` is not that instant, so there is no ocean here that could
+    // be passed. `sample_water` answers a spectrum body with no ocean with the still
+    // surface, whose fold is zero, so the test below rejects every crown rather than
+    // inventing one out of the sixteen derived waves the body is not floating on.
+    // `Sim::new` warns when a scene authors both. Wiring it means either an ocean per
+    // spray slot or moving the sample onto the current tick, and neither is this slice's
+    // question.
+    let surface = sample_water(body, None, at, born, ground(at[0], at[1]), [0.0; 3], [0.0; 3]);
     if surface.fold <= SPRAY_BREAK {
         return;
     }
@@ -883,7 +893,7 @@ mod tests {
                     for j in -20_i16..20 {
                         let at = [f32::from(i) * 0.7, f32::from(j) * 0.7];
                         worst = worst
-                            .max(sample_water(&body, at, t, -400.0, [0.0; 3], [0.0; 3]).fold);
+                            .max(sample_water(&body, None, at, t, -400.0, [0.0; 3], [0.0; 3]).fold);
                     }
                 }
             }

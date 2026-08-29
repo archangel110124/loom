@@ -102,10 +102,20 @@ parent = "Sea"
 # One object with a known size, because a still of open water has no scale in
 # it — a 6 m sea and a 0.6 m chop photograph identically without something to
 # measure against. Two metres across, moored at 24 m.
+#
+# **And it floats, which is this scene's acceptance test rather than its
+# decoration.** ADR 0076's whole argument is that the FFT surface stays on the
+# force path — buoyancy reads the same water the GPU draws — and the way that
+# fails is exactly the way `loom_water`'s module docs open: "a boat floating
+# visibly above the water it is drawn on, with nothing to blame". A buoy
+# hovering over a trough means the CPU and the GPU disagree about where the
+# water is; a buoy sitting *in* the surface and rising with it means they
+# agree. Until the render half lands the CPU side is what can be checked, and
+# `loom water --at 3.5,-24 --sim N` beside `loom sim --assert` is how.
 [[node]]
 name = "Buoy"
 parent = "Sea"
-transform = { pos = [3.5, 0.0, -24.0], scale = [1.0, 1.4, 1.0] }
+transform = { pos = [3.5, 0.0, -24.0] }
 
   [node.components.MeshRenderer]
   mesh = { asset = "sphere" }
@@ -113,6 +123,30 @@ transform = { pos = [3.5, 0.0, -24.0], scale = [1.0, 1.4, 1.0] }
   [node.components.Material]
   albedo = [0.62, 0.19, 0.13]
   roughness = 0.7
+
+  # **2100 kg over 4.19 m^3 is 501 kg/m^3 — half the density of sea water, so
+  # the sphere floats with its equator on the waterline.** That is the number
+  # the visual acceptance is read against: the buoy is half in, and the offset
+  # between its centre and `loom water --at`'s surface height stays near zero
+  # while both move several metres.
+  #
+  # **Lighter is not a better float, it is an unstable one.** A sphere pontoon's
+  # buoyant force is capped at its full displacement, so a light body that a
+  # crest closes over is accelerated by the difference — at 300 kg this buoy
+  # left the scene entirely, reaching y = 645 km by tick 900. Measured: 300 kg
+  # diverges, 500 kg and up do not, and the same divergence happens under
+  # `gerstner` at the same mass, so it is a property of a cork in a six-metre
+  # sea rather than of the FFT.
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 2100.0
+
+  # Everything default. **The scale above is uniform for this component's
+  # sake**: a sphere-shaped node gets one pontoon of its own radius, because a
+  # sphere *is* a pontoon — but the radius taken is the node's *largest* half
+  # extent, so stretching it to 1 x 1.4 x 1 would displace 11.5 m^3 where the
+  # body is 5.9, and the buoy would ride a metre clear of its own water.
+  [node.components.Buoyancy]
 
 [[node]]
 name = "Camera"

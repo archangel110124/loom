@@ -166,6 +166,33 @@ pub struct Sim {
     /// The advected foam field — ADR 0055. Built for any water body: a foam
     /// field is the near field of whatever water is in shot.
     foam: Option<loom_water::foam::FoamField>,
+    /// The FFT cascade — ADR 0076. `None` for a `gerstner` body, which is every
+    /// scene but `ocean_fft`.
+    ///
+    /// **This is the ownership decision, and it is the thing a later reader will
+    /// get wrong.** The simulation owns the ocean and nothing else builds one:
+    /// [`Sim::evolve_sea`] fills its tiles once at the top of every fixed step,
+    /// from `self.tick` alone, *before* buoyancy, the foam field or a script can
+    /// read the surface. `loom water --at` and `water@x,z` clone this one rather
+    /// than building a second (`weather::water_probe`), and the renderer will
+    /// read this one too. A second ocean anywhere is a second opinion about
+    /// where the surface is — the defect `loom_water`'s header opens on.
+    /// `loom water --sim 0` is the one exception and has to be: it runs no
+    /// simulation, so there is nothing to clone.
+    ///
+    /// **It anchors to the water body and never to the camera** — ADR 0045's
+    /// stated trap, which binds here exactly as it binds [`Sim::foam`], and
+    /// harder than it binds the spray: this surface pushes rapier bodies. There
+    /// is in fact nothing to anchor. `Ocean::sample` wraps a world XZ into the
+    /// patch, so the tiles are pinned to world coordinates and the sea is the
+    /// same sea however far the eye is from it. `Sim` cannot see a camera at
+    /// all, and it must stay that way.
+    ///
+    /// **Unlike the two fields above it, this is not state.** The tiles at tick
+    /// `t` are a pure function of `(scene, t)` — ADR 0076's whole licence for
+    /// putting an FFT ocean on the force path — so it is held per-tick for
+    /// *cost*, not for memory, and rewinding it is free.
+    sea: Option<loom_water::ocean::Ocean>,
     /// Bodies that float, in scene order, with their pontoons already in body
     /// space. **Order is fixed at load and never sorted**: the forces are
     /// summed as floats, and a different visiting order is a different number
@@ -889,6 +916,23 @@ impl Sim {
                 .map_or([0.0, 0.0], |g| [g.matrix[12], g.matrix[14]]);
             loom_water::foam::FoamField::new(centre, body)
         });
+        // **The ocean, built once from the scene's own wind** — the same `u10` and the
+        // same heading `water_of` derives the sixteen waves from, through the one
+        // function that reads them (`weather::sea_of`), because two spellings of that
+        // is how a scene comes to report one sea and float on another.
+        let sea = crate::weather::sea_of(world, &crate::weather::wind_of_world(world));
+        // A silent no-op is worse than a missing feature: a `spectrum` body that
+        // authors spray throws none, because `spray` samples the surface at each
+        // droplet's *birth* time and the cascade is evolved only to the current tick.
+        // See `loom_water::spray::spray`.
+        if sea.is_some() && water.as_ref().is_some_and(|w| w.spray > 0.0) {
+            crate::log::warn(
+                "this WaterBody asks for the spectrum and authors spray; spray reads \
+                 the surface at each droplet's birth time and the FFT cascade holds \
+                 only the current tick, so no droplet will be thrown"
+                    .to_owned(),
+            );
+        }
         if water.is_none() && !floating.is_empty() {
             crate::log::warn(
                 "the scene has Buoyancy but no WaterBody; nothing will float".to_owned(),
@@ -913,7 +957,7 @@ impl Sim {
             .filter(|w| w.simulation == loom_scene::components::WaterSimTier::Cinematic)
             .and_then(|w| build_fluid(world, w, &obstacles));
 
-        Self {
+        let mut sim = Self {
             physics,
             nav: None,
             player,
@@ -931,11 +975,16 @@ impl Sim {
             flow,
             wavelets: loom_water::wavelet::WaveletField::new(),
             foam,
+            sea,
             floating,
             propelled,
             water_events: Vec::new(),
             tick: 0,
-        }
+        };
+        // The invariant `evolve_sea` states, established: the ocean holds tick 0's
+        // instant before anything can read it, including a query on a run of no ticks.
+        sim.evolve_sea();
+        sim
     }
 
     /// Re-derive the sea from a ramped wind speed — the weather ladder.
@@ -1038,6 +1087,12 @@ impl Sim {
         // be two seas at once.
         let mut flat = water.clone();
         flat.waves.waves.clear();
+        // **And no cascade either.** The solver's free surface is the whole surface, so
+        // an FFT sea summed on top would be two seas at once for exactly the reason
+        // sixteen Gerstner waves would. `gerstner` with an empty wave list is the mirror
+        // this wants; leaving `spectrum` here would reach the same still surface through
+        // a `None` ocean, which is the right answer arrived at by accident.
+        flat.wave_model = loom_scene::components::WaveModel::Gerstner;
         // **Whitewater, out of the readback and onto the CPU field the shader
         // already reads** — ADR 0057 addendum, and it needs no new machinery at
         // all. The probes come back as plain `f32` inside the fixed step, so
@@ -1128,6 +1183,7 @@ impl Sim {
             }
             let wrench = loom_water::buoyancy::solve(
                 &flat,
+                None,
                 &floating.buoyancy,
                 &floating.states,
                 centre,
@@ -1163,7 +1219,7 @@ impl Sim {
             let ground = move |x: f32, z: f32| {
                 terrain.map_or(loom_voxel::heightfield::NO_GROUND, |t| t.at(x, z))
             };
-            field.step(&flat, t, self.flow.as_ref(), &[], &ground);
+            field.step(&flat, None, t, self.flow.as_ref(), &[], &ground);
         }
     }
 
@@ -1344,6 +1400,7 @@ impl Sim {
 
             let wrench = loom_water::buoyancy::solve(
                 water,
+                self.sea.as_ref(),
                 &floating.buoyancy,
                 &floating.states,
                 centre,
@@ -1496,6 +1553,7 @@ impl Sim {
                 // current does not move it up or down.
                 let surface = loom_water::sample_water(
                     water,
+                    self.sea.as_ref(),
                     [position[0], position[2]],
                     t,
                     ground,
@@ -1591,7 +1649,7 @@ impl Sim {
             let ground = move |x: f32, z: f32| {
                 terrain.map_or(loom_voxel::heightfield::NO_GROUND, |t| t.at(x, z))
             };
-            field.step(water, t, self.flow.as_ref(), &hulls, &ground);
+            field.step(water, self.sea.as_ref(), t, self.flow.as_ref(), &hulls, &ground);
         }
     }
 
@@ -1657,7 +1715,8 @@ impl Sim {
             .as_ref()
             .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(at[0], at[2]));
         let wavelet = self.wavelets.at(at[0], at[2], t).surface();
-        loom_water::buoyancy::submersion_at(water, at, 0.0, t, ground, wavelet) > 0.5
+        loom_water::buoyancy::submersion_at(water, self.sea.as_ref(), at, 0.0, t, ground, wavelet)
+            > 0.5
     }
 
     /// Apply every live thrust, in load order, once per fixed step.
@@ -1702,6 +1761,43 @@ impl Sim {
         }
     }
 
+    /// Fill the FFT cascade's tiles for the tick `self.tick` now names — ADR 0076.
+    ///
+    /// **The invariant: the ocean always holds `self.tick × TICK_SECONDS`.** It is
+    /// established at construction and restored at the end of every fixed step, so the
+    /// surface is filled *before* anything in a tick reads it and is still that tick's
+    /// surface after [`Self::step`] returns — which is what `loom water --at --sim N` and
+    /// a `water@` assertion clone. The tiles are one instant and carry no clock a caller
+    /// could check against, so `sample_water` asserts the `t` it was asked for against
+    /// the `t` they hold; that is what makes this invariant checkable rather than a
+    /// convention.
+    ///
+    /// **Once per tick and inside the fixed step**, like the wavelet pool's sweep and the
+    /// foam field's advection, and for the same reason: a surface that produces a force
+    /// is filled on the simulation's clock or not at all.
+    ///
+    /// **`t` comes from `self.tick` and nothing else** (never-do #8). Evolving is a pure
+    /// function of it — nothing accumulates — so a rewind costs exactly what a step
+    /// forward does, which is the property `loom render --sim N` rests on.
+    ///
+    /// Free for every scene without a `spectrum` body, which is all of them but one.
+    fn evolve_sea(&mut self) {
+        if let Some(sea) = self.sea.as_mut() {
+            #[allow(clippy::cast_precision_loss)]
+            sea.evolve(self.tick as f32 * TICK_SECONDS);
+        }
+    }
+
+    /// The tick's cascade, for whoever is drawing or asserting about the surface.
+    ///
+    /// Read-only and one direction only, exactly as [`Self::wavelets`] and [`Self::foam`]
+    /// are: the simulation owns the ocean and evolves it, and a caller that wants the sea
+    /// at another instant is asking a question only the simulation can answer.
+    #[must_use]
+    pub fn sea(&self) -> Option<&loom_water::ocean::Ocean> {
+        self.sea.as_ref()
+    }
+
     /// Advance whole ticks.
     pub fn step(&mut self, ticks: u32) {
         for _ in 0..ticks {
@@ -1716,6 +1812,11 @@ impl Sim {
             self.float();
             self.physics.step();
             self.tick += 1;
+            // **The sea last, for the tick just entered.** See `evolve_sea`: the
+            // invariant is that the tiles always hold `self.tick`'s instant, which makes
+            // them ready for the next iteration's forces and correct for every query
+            // made after this call returns.
+            self.evolve_sea();
         }
         // Baked after the first step, once, for the reason every query here
         // has the same caveat: the broad-phase tree is built during the step,
@@ -2429,6 +2530,15 @@ impl Runner {
     #[must_use]
     pub fn foam(&self) -> Option<&loom_water::foam::FoamField> {
         self.physics.foam()
+    }
+
+    /// The FFT cascade this run has reached — straight through to [`Sim::sea`].
+    ///
+    /// The simulation owns the ocean and evolves it; this hands it out read-only, the
+    /// same arrangement `wavelets` and `foam` are under.
+    #[must_use]
+    pub fn sea(&self) -> Option<&loom_water::ocean::Ocean> {
+        self.physics.sea()
     }
 
     /// The collision world this run is holding, for anything that has to cast a
@@ -3482,7 +3592,7 @@ transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
         #[allow(clippy::cast_precision_loss)]
         let heights: Vec<f32> = ticks
             .map(|tick| {
-                loom_water::sample_water(&water, [at[0], at[2]], tick as f32 * TICK_SECONDS, 0.0, [0.0; 3], [0.0; 3])
+                loom_water::sample_water(&water, None, [at[0], at[2]], tick as f32 * TICK_SECONDS, 0.0, [0.0; 3], [0.0; 3])
                     .height
             })
             .collect();

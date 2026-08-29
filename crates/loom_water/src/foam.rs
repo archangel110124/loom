@@ -266,20 +266,23 @@ impl FoamField {
     pub fn step(
         &mut self,
         body: &WaterBody,
+        sea: Option<&crate::ocean::Ocean>,
         t: f32,
         flow: Option<&FlowGrid>,
         hulls: &[Hull],
         ground: &dyn Fn(f32, f32) -> f32,
     ) {
-        self.step_with_threshold(body, t, flow, hulls, ground, FOAM_CREST_BREAK);
+        self.step_with_threshold(body, sea, t, flow, hulls, ground, FOAM_CREST_BREAK);
     }
 
     /// [`Self::step`] with the crest threshold as an argument, which is what
     /// the sweep that chose [`FOAM_CREST_BREAK`] varies. Nothing else passes
     /// anything but that constant.
+    #[allow(clippy::too_many_arguments)]
     fn step_with_threshold(
         &mut self,
         body: &WaterBody,
+        sea: Option<&crate::ocean::Ocean>,
         t: f32,
         flow: Option<&FlowGrid>,
         hulls: &[Hull],
@@ -306,8 +309,15 @@ impl FoamField {
         // comparison instead of 2,048 wave sums a tick. Measured on
         // `whitecaps`, which does *not* take the skip: 600 ticks of `loom sim`
         // is 0.43 s with the crest loop and 0.10 s without.
-        if crate::spray::peak_fold(body) > break_at {
-            self.deposit_crests(body, t, ground, break_at);
+        // **A `spectrum` body is not gated on its wave list.** `peak_fold` bounds the
+        // Gerstner sum, and a spectrum body's sixteen derived waves are not the sea it
+        // floats on — the cascade is, and a tile's ceiling is a max over `n²` cells
+        // rather than a sixteen-term sum, so there is no equally cheap bound to gate on.
+        // The crest pass therefore runs on every tick of an FFT sea; that it is the
+        // tick's whole cost is what `CREST_STRIDE` already answers.
+        let spectrum = body.wave_model == loom_scene::components::WaveModel::Spectrum;
+        if spectrum || crate::spray::peak_fold(body) > break_at {
+            self.deposit_crests(body, sea, t, ground, break_at);
         }
 
         for hull in hulls {
@@ -398,6 +408,7 @@ impl FoamField {
     fn deposit_crests(
         &mut self,
         body: &WaterBody,
+        sea: Option<&crate::ocean::Ocean>,
         t: f32,
         ground: &dyn Fn(f32, f32) -> f32,
         break_at: f32,
@@ -414,7 +425,7 @@ impl FoamField {
                 }
                 let p = self.world_of(ix, iz);
                 let sample =
-                    crate::sample_water(body, p, t, ground(p[0], p[1]), [0.0; 3], [0.0; 3]);
+                    crate::sample_water(body, sea, p, t, ground(p[0], p[1]), [0.0; 3], [0.0; 3]);
                 // Dry land deposits nothing — the same test the shader
                 // discards the shoreline on.
                 if sample.depth <= 0.0 {
@@ -760,7 +771,7 @@ mod tests {
         for tick in 0..ticks {
             #[allow(clippy::cast_precision_loss)]
             let t = tick as f32 * TICK_SECONDS;
-            field.step_with_threshold(&body, t, None, &[], &deep, break_at);
+            field.step_with_threshold(&body, None, t, None, &[], &deep, break_at);
         }
         field.mean()
     }
@@ -828,7 +839,7 @@ mod tests {
         for tick in 0..600 {
             #[allow(clippy::cast_precision_loss)]
             let t = tick as f32 * TICK_SECONDS;
-            field.step(&body, t, Some(&flow), &[], &deep);
+            field.step(&body, None, t, Some(&flow), &[], &deep);
         }
         let after = width(&field);
         let travelled = centroid_x(&field) - start;
@@ -871,7 +882,7 @@ mod tests {
         for tick in 0..720 {
             #[allow(clippy::cast_precision_loss)]
             let t = tick as f32 * TICK_SECONDS;
-            field.step(&body, t, None, &[], &deep);
+            field.step(&body, None, t, None, &[], &deep);
         }
         let twelve = field.at(0.0, 0.0);
         assert!(
@@ -881,7 +892,7 @@ mod tests {
         for tick in 720..2100 {
             #[allow(clippy::cast_precision_loss)]
             let t = tick as f32 * TICK_SECONDS;
-            field.step(&body, t, None, &[], &deep);
+            field.step(&body, None, t, None, &[], &deep);
         }
         let left = field.at(0.0, 0.0);
         assert!(left < 0.05, "still {left} thirty-five seconds after the deposit");
@@ -912,7 +923,7 @@ mod tests {
                 radius: 0.8,
                 wetted: 0.8,
             };
-            field.step(&body, t, None, &[hull], &deep);
+            field.step(&body, None, t, None, &[hull], &deep);
             x += 6.0 * TICK_SECONDS;
         }
         let behind = field.at(x - 4.0, 0.0);
@@ -957,7 +968,7 @@ mod tests {
                     }
                 })
                 .collect();
-            field.step(&body, t, None, &hulls, &deep);
+            field.step(&body, None, t, None, &hulls, &deep);
             x += speed * TICK_SECONDS;
         }
         let astern = field.at(x - 15.0, 1.836);
@@ -978,7 +989,7 @@ mod tests {
                 #[allow(clippy::cast_precision_loss)]
                 let t = f32::from(tick) * TICK_SECONDS;
                 field.deposit_disc([f32::from(tick % 8) - 4.0, 0.0], 1.0, 0.7);
-                field.step(&body, t, None, &[], &deep);
+                field.step(&body, None, t, None, &[], &deep);
             }
             field.coverage().iter().map(|c| c.to_bits()).collect::<Vec<_>>()
         };

@@ -3365,7 +3365,22 @@ pub(crate) fn submerge_eye(
     // taper flattens the waves over it — off the grid it is bottomless, which
     // is what an open ocean wants.
     let ground = terrain.map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(eye.x, eye.z));
-    let under = loom_water::buoyancy::submersion_at(&body, eye.to_array(), 0.0, seconds, ground, [0.0; 3]);
+    // **No cascade here, and a `spectrum` body therefore reads its still level.** This
+    // is the render path, which has no ocean until ADR 0076's GPU half lands (Task 3):
+    // building one per frame is three `amplitude_field` passes, and reading the
+    // simulation's would mean this function could see the runner, which it cannot. The
+    // answer is right whenever the eye is not within a wave height of the surface, which
+    // is every camera in the repository; it is wrong for a camera *in* an FFT sea, and
+    // that is the case Task 3 fixes rather than a bound this can tighten.
+    let under = loom_water::buoyancy::submersion_at(
+        &body,
+        None,
+        eye.to_array(),
+        0.0,
+        seconds,
+        ground,
+        [0.0; 3],
+    );
     env.water[1] = f32::from(under > 0.5);
 }
 
@@ -3941,7 +3956,16 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
         // **Built only when something asks about water**, the same bargain the
         // sky makes below and for the same reason: it bakes the bed.
         water: asked_about("water")
-            .then(|| weather::water_probe(&scene, &world, &wind, runner.wavelets(), runner.foam()))
+            .then(|| {
+                weather::water_probe(
+                    &scene,
+                    &world,
+                    &wind,
+                    runner.wavelets(),
+                    runner.foam(),
+                    runner.sea(),
+                )
+            })
             .flatten(),
         wind,
         rain: ramped_rain,
@@ -4159,6 +4183,11 @@ fn instant_foam(mu_max: f32) -> f32 {
 /// to `Option::and_then` without naming the type twice.
 fn loom_cli_foam(runner: &play::Runner) -> Option<&loom_water::foam::FoamField> {
     runner.foam()
+}
+
+/// A runner's FFT cascade, for the same reason [`loom_cli_foam`] exists.
+fn loom_cli_sea(runner: &play::Runner) -> Option<&loom_water::ocean::Ocean> {
+    runner.sea()
 }
 
 /// The foam field as an upload, or `None` for a scene with no water.
@@ -4945,8 +4974,18 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
     // the same cost: it is the other piece of stepped water state, and running
     // the simulation twice to read two of its grids would be two answers about
     // one tick.
-    let (ripple, deposited, ran_dread) = if ticks == 0 {
-        ([0.0; 3], 0.0, None)
+    //
+    // **And the FFT cascade with them, for the same reason and off the same run.** The
+    // simulation owns the ocean and evolves it once per tick (`Sim::evolve_sea`); a
+    // second one built here would be a second opinion about where the surface is. At
+    // `--sim 0` there is no run to take it from, so one is built and evolved to t = 0 —
+    // which is the same arithmetic the runner's own construction does.
+    let (ripple, deposited, ran_dread, sea) = if ticks == 0 {
+        let mut sea = weather::sea_of(&world, &wind);
+        if let Some(sea) = sea.as_mut() {
+            sea.evolve(0.0);
+        }
+        ([0.0; 3], 0.0, None, sea)
     } else {
         let mut stepped = world.clone();
         let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
@@ -4966,7 +5005,8 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
             .map_or(0.0, |f| f.at(at[0], at[1]));
         #[allow(clippy::cast_possible_truncation)]
         let dread = warmed.as_ref().map(|r| r.state().number("dread").unwrap_or(0.0) as f32);
-        (ripple, foam, dread)
+        let sea = warmed.as_ref().and_then(loom_cli_sea).cloned();
+        (ripple, foam, dread, sea)
     };
 
     // **And the sea the run built, not the sea the file authors.** A scene
@@ -4993,7 +5033,8 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
         }
         None => (wind, body),
     };
-    let sample = loom_water::sample_water(&body, at, seconds, ground, flow, ripple);
+    let sample =
+        loom_water::sample_water(&body, sea.as_ref(), at, seconds, ground, flow, ripple);
     // `sample_water` sums the orbital motion onto the current, so the wave half
     // is the difference. Subtracted rather than sampled a second time with no
     // flow: two samples is two chances to disagree.
@@ -5053,9 +5094,21 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
             // the raw sample: "did I get the sea I asked for" is answered by
             // where the waves came from and how big they are.
             "waves": {
+                // **Which model actually built the surface above** — ADR 0076. Without
+                // it the wave list below reads as the sea, and on a `spectrum` body it
+                // is not: those sixteen are derived and ignored, and the cascade is
+                // what buoyancy and the numbers above came from.
+                "model": body.wave_model,
                 "source": if authored { "authored" } else { "wind" },
                 "count": body.waves.waves.len(),
-                "significant_height": loom_water::spectrum::significant_height(&body.waves),
+                // **The realised height of the sea that was actually sampled.** For a
+                // spectrum body that is the cascade's own `4√m0` over its tiles, not the
+                // sixteen derived waves' analytic value — the two answer for different
+                // seas and only one of them is under the boat.
+                "significant_height": sea.as_ref().map_or_else(
+                    || loom_water::spectrum::significant_height(&body.waves),
+                    loom_water::ocean::Ocean::significant_height,
+                ),
                 "attenuation_depth": body.waves.attenuation_depth,
                 "max_height": body.waves.max_height,
                 // Only when it is what the sea was built from. Reporting the
@@ -5065,8 +5118,15 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
             },
             // Null when `--at` named no height: not "no", but "not asked".
             "submerged": y.map(|y| {
-                loom_water::buoyancy::submersion_at(&body, [at[0], y, at[1]], 0.0, seconds, ground, [0.0; 3])
-                    > 0.5
+                loom_water::buoyancy::submersion_at(
+                    &body,
+                    sea.as_ref(),
+                    [at[0], y, at[1]],
+                    0.0,
+                    seconds,
+                    ground,
+                    [0.0; 3],
+                ) > 0.5
             }),
         })),
     )
@@ -6960,6 +7020,18 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
             ("pool", "48ea499e33fae26c"),
             ("river", "8bcea14bbb3c76cd"),
             ("water_crate", "44c2b37b20042c65"),
+            // **New, and it is the pin that says the FFT ocean is on the force path**
+            // — ADR 0076. `ocean_fft` is the one scene with `wave_model = "spectrum"`,
+            // and its hash comes from a buoy floating on tiles the CPU transformed
+            // inside the fixed step. If the cascade ever stopped reaching buoyancy this
+            // would move; if the cascade were not deterministic it could not be pinned
+            // at all, which is the property ADR 0076's whole argument rests on.
+            //
+            // **The other four did not move when it was added, and that is the check on
+            // the opt-in rather than a lucky escape.** `wave_model` defaults to
+            // `gerstner` and `sample_water` branches on it, so a leak would move every
+            // water scene in the repository at once.
+            ("ocean_fft", "6b23df17418109ef"),
         ] {
             let path = format!("../../assets/test/{scene}.loom");
             // **Cinematic water is barred from a pinned hash** — ADR 0053 §3:
@@ -6981,7 +7053,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
             );
         }
         assert_eq!(
-            pinned, 4,
+            pinned, 5,
             "a water scene moved into the cinematic tier and dropped out of \
              the pinned set. That is legal (ADR 0053 §3) and it is not free: \
              pin a replacement scene, or say here why there is none."
@@ -7553,7 +7625,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         let world = World::from_scene(&scene);
         let wind = crate::weather::wind_of_world(&world);
         let body = crate::weather::water_of(&world, &wind).expect("ocean has water");
-        let expected = loom_water::sample_water(&body, [3.5, -9.0], 90.0 / 60.0, -1.0e9, [0.0; 3], [0.0; 3]);
+        let expected = loom_water::sample_water(&body, None, [3.5, -9.0], 90.0 / 60.0, -1.0e9, [0.0; 3], [0.0; 3]);
 
         assert_eq!(v["surface"]["height"].as_f64().unwrap() as f32, expected.height);
         assert_eq!(v["surface"]["normal"][1].as_f64().unwrap() as f32, expected.normal[1]);

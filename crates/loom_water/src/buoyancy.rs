@@ -139,9 +139,14 @@ pub fn submerged_volume(radius: f32, centre_y: f32, surface_y: f32) -> f32 {
 /// summed inside [`sample_water`] — **there is one water velocity and one drag
 /// term**, and a river carries a crate through the same arithmetic that makes
 /// it bob under a crest.
+///
+/// `sea` is the FFT cascade for a `spectrum` body, evolved to this same `t` by the
+/// simulation that owns it — ADR 0076 and [`crate::ocean::Ocean::for_body`]. `None` for
+/// every `gerstner` body, which is every scene but one.
 #[must_use]
 pub fn solve(
     water: &WaterBody,
+    sea: Option<&crate::ocean::Ocean>,
     buoyancy: &Buoyancy,
     pontoons: &[PontoonState],
     centre_of_mass: [f32; 3],
@@ -162,6 +167,7 @@ pub fn solve(
         // zero would float a crate on the open sea's swell in a foot of water.
         let surface: WaterSample = sample_water(
             water,
+            sea,
             [pontoon.at[0], pontoon.at[2]],
             t,
             pontoon.ground,
@@ -277,10 +283,13 @@ pub fn solve(
 ///
 /// **Same surface, same clock, same height field as the solver.** It reads
 /// [`sample_water`] like everything else does, so a listener cannot be told it
-/// is underwater by a surface a crate floating beside it disagrees with.
+/// is underwater by a surface a crate floating beside it disagrees with — which is why
+/// `sea` is here too, and why it must be the same ocean at the same `t` that [`solve`]
+/// was handed.
 #[must_use]
 pub fn submersion_at(
     water: &WaterBody,
+    sea: Option<&crate::ocean::Ocean>,
     at: [f32; 3],
     radius: f32,
     t: f32,
@@ -296,7 +305,7 @@ pub fn submersion_at(
     // audio path and the eye-underwater flag both ask. Passing zero here would
     // be a second opinion about where the surface is, which is the one thing
     // this crate's header forbids.
-    let surface = sample_water(water, [at[0], at[2]], t, ground, [0.0; 3], wavelet);
+    let surface = sample_water(water, sea, [at[0], at[2]], t, ground, [0.0; 3], wavelet);
     if radius <= 0.0 {
         return f32::from(u8::from(surface.height > at[1]));
     }
@@ -430,7 +439,7 @@ mod tests {
             ground: DEEP, flow: [0.0; 3], wavelet: [0.0; 3],
         }];
 
-        let w = solve(&water, &buoyancy, &pontoons, [0.0; 3], 0.0);
+        let w = solve(&water, None, &buoyancy, &pontoons, [0.0; 3], 0.0);
 
         let expected = 1000.0 * (2.0 / 3.0 * std::f32::consts::PI) * GRAVITY;
         assert!((w.force[1] - expected).abs() < 1.0, "{w:?} vs {expected}");
@@ -461,7 +470,7 @@ mod tests {
             })
             .collect();
 
-        let four = solve(&water, &buoyancy, &tilted, [0.0; 3], 0.0);
+        let four = solve(&water, None, &buoyancy, &tilted, [0.0; 3], 0.0);
         // Right-hand rule: the deeper +X side pushed up is a torque about −Z...
         assert!(
             four.torque[2].abs() > 1.0,
@@ -473,6 +482,7 @@ mod tests {
 
         let one = solve(
             &water,
+            None,
             &buoyancy,
             &[PontoonState {
                 at: [0.0, 0.0, 0.0],
@@ -500,6 +510,7 @@ mod tests {
         let sinking = |speed: f32| {
             solve(
                 &water,
+                None,
                 &buoyancy,
                 &[PontoonState {
                     at: [0.0, -1.0, 0.0],
@@ -532,6 +543,7 @@ mod tests {
         let water = still();
         let w = solve(
             &water,
+            None,
             &Buoyancy::default(),
             &[PontoonState {
                 at: [0.0, 9.0, 0.0],
@@ -571,10 +583,11 @@ mod tests {
         // Away from the origin: at phase zero the orbital motion is purely
         // vertical, so a test placed there would be checking nothing.
         let at = [3.0, -0.4, 0.0];
-        let flow = sample_water(&water, [at[0], at[2]], 0.0, 0.0, [0.0; 3], [0.0; 3]).velocity;
+        let flow = sample_water(&water, None, [at[0], at[2]], 0.0, 0.0, [0.0; 3], [0.0; 3]).velocity;
 
         let w = solve(
             &water,
+            None,
             &buoyancy,
             &[PontoonState { at, radius: 0.5, velocity: [0.0; 3], ground: DEEP, flow: [0.0; 3], wavelet: [0.0; 3] }],
             [0.0; 3],
@@ -615,16 +628,16 @@ mod tests {
             wavelet: [0.0; 3],
         };
 
-        let still = solve(&water, &buoyancy, &[pontoon([0.0; 3])], [0.0; 3], 0.0);
+        let still = solve(&water, None, &buoyancy, &[pontoon([0.0; 3])], [0.0; 3], 0.0);
         assert_eq!(still.force, [0.0; 3], "flat water with no current is not still");
 
-        let carried = solve(&water, &buoyancy, &[pontoon([2.0, 0.0, 0.0])], [0.0; 3], 0.0);
+        let carried = solve(&water, None, &buoyancy, &[pontoon([2.0, 0.0, 0.0])], [0.0; 3], 0.0);
         assert!(carried.force[0] > 1e-3, "the current does not push: {:?}", carried.force);
         assert_eq!(carried.force[2], 0.0, "a current along X pushes along Z");
 
         // And it pushes *harder* when it runs faster, which is what makes
         // `FlowField::speed` a knob rather than a switch.
-        let faster = solve(&water, &buoyancy, &[pontoon([4.0, 0.0, 0.0])], [0.0; 3], 0.0);
+        let faster = solve(&water, None, &buoyancy, &[pontoon([4.0, 0.0, 0.0])], [0.0; 3], 0.0);
         assert!(
             (faster.force[0] - 2.0 * carried.force[0]).abs() < 1e-3,
             "drag against the current is not linear: {} then {}",
@@ -658,8 +671,8 @@ mod tests {
             })
             .collect();
 
-        let a = solve(&water, &Buoyancy::default(), &pontoons, [0.0; 3], 3.5);
-        let b = solve(&water, &Buoyancy::default(), &pontoons, [0.0; 3], 3.5);
+        let a = solve(&water, None, &Buoyancy::default(), &pontoons, [0.0; 3], 3.5);
+        let b = solve(&water, None, &Buoyancy::default(), &pontoons, [0.0; 3], 3.5);
         assert_eq!(a.force[1].to_bits(), b.force[1].to_bits());
         assert_eq!(a.torque[0].to_bits(), b.torque[0].to_bits());
     }
@@ -685,10 +698,10 @@ mod tests {
         };
 
         // Well clear of the water, on it, and well under it.
-        assert_eq!(solve(&water, &buoyancy, &at(6.0), [0.0; 3], 0.0).submerged, 0.0);
-        let half = solve(&water, &buoyancy, &at(0.0), [0.0; 3], 0.0).submerged;
+        assert_eq!(solve(&water, None, &buoyancy, &at(6.0), [0.0; 3], 0.0).submerged, 0.0);
+        let half = solve(&water, None, &buoyancy, &at(0.0), [0.0; 3], 0.0).submerged;
         assert!((half - 0.5).abs() < 1e-5, "spheres centred on the surface: {half}");
-        assert_eq!(solve(&water, &buoyancy, &at(-6.0), [0.0; 3], 0.0).submerged, 1.0);
+        assert_eq!(solve(&water, None, &buoyancy, &at(-6.0), [0.0; 3], 0.0).submerged, 1.0);
 
         // And it is the *fraction of the body*, not of the wet pontoons: two
         // corners under and two out is half a body, not a whole one.
@@ -696,7 +709,7 @@ mod tests {
         for (index, state) in tilted.iter_mut().enumerate() {
             state.at[1] = if index < 2 { -6.0 } else { 6.0 };
         }
-        let split = solve(&water, &buoyancy, &tilted, [0.0; 3], 0.0).submerged;
+        let split = solve(&water, None, &buoyancy, &tilted, [0.0; 3], 0.0).submerged;
         assert!((split - 0.5).abs() < 1e-5, "two of four under is half: {split}");
     }
 
@@ -705,7 +718,7 @@ mod tests {
     /// every script that reads it.
     #[test]
     fn a_body_with_no_pontoons_is_dry_rather_than_nan() {
-        let w = solve(&still(), &Buoyancy::default(), &[], [0.0; 3], 0.0);
+        let w = solve(&still(), None, &Buoyancy::default(), &[], [0.0; 3], 0.0);
 
         assert_eq!(w.submerged, 0.0);
         assert!(w.submerged.is_finite());
@@ -717,11 +730,11 @@ mod tests {
         let mut sea = still();
         sea.surface_height = 2.0;
 
-        assert_eq!(submersion_at(&sea, [3.0, 1.0, -4.0], 0.0, 0.0, DEEP, [0.0; 3]), 1.0);
-        assert_eq!(submersion_at(&sea, [3.0, 3.0, -4.0], 0.0, 0.0, DEEP, [0.0; 3]), 0.0);
+        assert_eq!(submersion_at(&sea, None, [3.0, 1.0, -4.0], 0.0, 0.0, DEEP, [0.0; 3]), 1.0);
+        assert_eq!(submersion_at(&sea, None, [3.0, 3.0, -4.0], 0.0, 0.0, DEEP, [0.0; 3]), 0.0);
         // A sphere straddling it is neither, which is what makes the same
         // function usable for a head as for a hull.
-        let straddling = submersion_at(&sea, [3.0, 2.0, -4.0], 0.5, 0.0, DEEP, [0.0; 3]);
+        let straddling = submersion_at(&sea, None, [3.0, 2.0, -4.0], 0.5, 0.0, DEEP, [0.0; 3]);
         assert!((straddling - 0.5).abs() < 1e-5, "{straddling}");
     }
 

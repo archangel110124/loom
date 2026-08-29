@@ -104,6 +104,9 @@ impl Probe for WaterProbe {
                 ];
                 let sample = loom_water::sample_water(
                     &self.body,
+                    // No cascade, and this probe is not registered for a body that
+                    // would need one — see `probes`.
+                    None,
                     at,
                     frame.sim_time,
                     loom_voxel::heightfield::NO_GROUND,
@@ -212,7 +215,17 @@ pub(crate) fn probes(scene: &Scene, world: &World) -> Vec<Box<dyn Probe>> {
         .water()
         .and_then(|v| serde_json::from_value::<loom_scene::components::WaterBody>(v.clone()).ok())
     {
-        out.push(Box::new(WaterProbe { body }));
+        // **A `spectrum` body gets no column rather than a column of zeros** — ADR 0076.
+        // The FFT surface lives in tiles the simulation evolves once per tick, and
+        // `columns` takes `&self` and a time, so this probe cannot hold one and cannot
+        // build one per row. Passing no cascade would report the still surface, and a
+        // wave-height column reading a flat 0.000 for a six-metre sea is the instrument
+        // that stopped containing its subject — the failure this project has already
+        // paid for once. An absent column says so in the header; a zero does not.
+        // Wiring it means `columns(&mut self)` and a probe that owns an ocean.
+        if body.wave_model == loom_scene::components::WaveModel::Gerstner {
+            out.push(Box::new(WaterProbe { body }));
+        }
     }
     if has("Rain") {
         out.push(Box::new(RainProbe));

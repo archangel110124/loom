@@ -25,6 +25,7 @@ pub struct Complex {
 /// Held rather than recomputed because `sin_cos` per butterfly is most of the cost, and
 /// because a table is one place for the values to be identical across every call — which
 /// is what makes the transform reproducible rather than merely deterministic-looking.
+#[derive(Clone)]
 pub struct Twiddles {
     n: usize,
     w: Vec<Complex>,

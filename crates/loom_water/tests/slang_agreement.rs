@@ -255,7 +255,7 @@ fn the_rust_and_the_slang_compute_the_same_surface() {
             inside += 1;
         }
         let cpu =
-            loom_water::sample_water(&body, [sample[0], sample[1]], sample[2], ground, FLOW, WAVELET);
+            loom_water::sample_water(&body, None, [sample[0], sample[1]], sample[2], ground, FLOW, WAVELET);
         let expected = [
             cpu.height,
             cpu.normal[0],
