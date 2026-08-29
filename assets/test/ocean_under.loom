@@ -1,5 +1,4 @@
-# **The view from under the surface, and the only scene in this repository
-# that has one.**
+# **The view from under the surface of a sea that authors its own optics.**
 #
 # `assets/test/ocean_tropical.loom` is this scene with the lens 1.1 m *above*
 # the water; every line below except the camera is copied from it, so the two
@@ -7,22 +6,29 @@
 # from either side of one surface. That is the point: what the water is made of
 # has to reach the picture the same way from both.
 #
-# **Why it exists.** `eyeUnderwater()` has been a branch in `scene.slang` since
-# W4, and until this file landed nothing in `SCENES` ever took it — so the
-# underwater medium could paint itself from two hardcoded constants for as long
-# as it liked and every gate reported a full pass. An absent feature is the one
-# failure class no gate here can see, and a submerged camera was absent.
+# **Why it exists, and it is a narrow gap rather than an open one.**
+# `assets/test/underwater.loom` has been in `GOLDEN` since the below-surface
+# branch landed and its camera is genuinely submerged, so `eyeUnderwater()` was
+# never dead code. What no scene combined was a submerged eye **and** an
+# authored `WaterBody.optics` — `underwater.loom` takes the pure-water default —
+# so when the medium below the waterline went on painting itself from
+# `UNDERWATER_EXTINCTION` and `UNDERWATER_TINT` after those fields existed, no
+# reference image could tell: a constant and a correctly-read default look the
+# same until a scene authors something else. This is that scene.
 #
 # **In `SCENES` and deliberately not in `GOLDEN`.** A reference image is the
 # human's to bless.
 #
 # # What to look for
 #
-# Red goes first. The white carbonate shelf is 5 m down and about 10 m away
-# along the slant, and at Jerlov III's `K_d` of 0.3828/m in red against
-# 0.0719/m in blue, 2% of the red survives that crossing against 49% of the
-# blue. Sand that reads neutral grey here means the medium is attenuating all
-# three channels at one rate, which is what it used to do.
+# Red goes first. The white carbonate shelf is 5 m down, so it is 3.5 m below
+# this lens and the slant to it runs from about 7 m at the bottom of the frame
+# out to tens of metres at the horizon. At Jerlov III's `K_d` of 0.3828/m in
+# red against 0.0719/m in blue, seven metres of that leaves 7% of the red
+# against 60% of the blue, and it only widens with range. **Sand that reads
+# neutral grey here means the medium is attenuating all three channels at one
+# rate**, which is what it did until the medium read `optics`: measured on this
+# frame, the near bed's linear R/B was 0.904 and is now 0.045.
 #
 [scene]
 format = 1

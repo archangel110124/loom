@@ -6516,12 +6516,13 @@ mod tests {
     /// doing so.**
     ///
     /// The underwater medium painted itself from two hardcoded constants for
-    /// several slices after `WaterBody.optics` existed, and it survived every
-    /// gate in this project because no gate here can see an *absent* feature:
-    /// `cargo xtask image` reports a full pass over a branch nothing renders.
-    /// The fix was a scene, and a scene is only a gate while its camera stays
-    /// where it was put — raise `ocean_under`'s eye above y = 0 and the frame
-    /// is still valid, still renders, still diffs clean, and covers nothing.
+    /// several slices after `WaterBody.optics` existed, and `underwater.loom`
+    /// — submerged, in `GOLDEN`, blessed — could not see it, because it authors
+    /// no `optics` and a constant is indistinguishable from a correctly-read
+    /// default. `ocean_under` is the scene that can tell them apart, and a
+    /// scene is only a gate while its camera stays where it was put: raise this
+    /// eye above y = 0 and the frame is still valid, still renders, still diffs
+    /// clean, and covers nothing.
     ///
     /// So the assertion is the flag itself, taken through `submerge_eye` — the
     /// same function the render path writes the environment buffer with — at

@@ -189,13 +189,14 @@ const SCENES: [&str; 79] = [
     // to bless it. `ocean_tropical` is also the only water scene with a sand shelf under it.
     "assets/test/ocean_fft_boat.loom",
     "assets/test/ocean_tropical.loom",
-    // **The only scene here with a submerged camera**, and it is `ocean_tropical`
-    // with the lens moved 1.5 m under its own waterline. `eyeUnderwater()` had
-    // been a branch in `scene.slang` since W4 with nothing in `SCENES` taking
-    // it, which is how the underwater medium kept painting itself from two
-    // hardcoded constants after `WaterBody.optics` existed: no gate here can
-    // see an absent feature. Not in `GOLDEN` — a reference is the human's to
-    // bless.
+    // **The submerged camera that also authors `optics`**, and it is
+    // `ocean_tropical` with the lens moved 1.5 m under its own waterline.
+    // `underwater` below is submerged too and has been since the below-surface
+    // branch landed — what neither it nor anything else had was a scene where
+    // the eye is under water the *scene* described, which is how the medium
+    // kept painting itself from two hardcoded constants after
+    // `WaterBody.optics` existed. A constant and a correctly-read default are
+    // the same picture. Not in `GOLDEN` — a reference is the human's to bless.
     "assets/test/ocean_under.loom",
     // The whitecap trail (W2). Three extra `loom_sample_water` taps per water
     // vertex and a fifth varying out of `waterVertexMain`, which is the one

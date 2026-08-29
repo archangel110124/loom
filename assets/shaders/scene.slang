@@ -711,6 +711,10 @@ float3 hemisphereAmbient(float3 normal) {
 // A scene could author Jerlov III, watch the sea above go turquoise, and swim
 // into a frame that had never heard of it. `waterExtinct()` and `waterDeep()`
 // are the same two accessors the surface reads; nothing new is plumbed.
+//
+// **`underwater.loom` is submerged and blessed and could not catch this**,
+// because it authors no `optics` and a constant is the same picture as a
+// correctly-read default. `ocean_under.loom` is the scene that can.
 
 /// How much of the surface's light still reaches you looking straight DOWN.
 /// Small: below you is a deep column that has already absorbed nearly
