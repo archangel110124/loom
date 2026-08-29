@@ -848,50 +848,79 @@ pub(crate) fn spray(
     eye: [f32; 3],
     seconds: f32,
 ) -> Vec<ParticleInstance> {
-    // **A sea too gentle to break can never spray, and nothing else would say
-    // so.** `fold` is `Σ Q·k·A·sin φ`, so `Σ Q·k·A` is its ceiling; under
-    // `SPRAY_BREAK` the crest test inside `spray()` fails at every point and
-    // every instant, and the author sees an empty sky and concludes the
-    // feature is broken. It was not hypothetical — *every* sea in this
-    // repository was under the threshold when spray shipped.
-    //
-    // Warned from here rather than refused at load, because a sea whose waves
-    // are raised later is a legitimate thing to author, and this is a look
-    // rather than a correctness matter. Once per process: it is asked every
-    // frame, and a warning sixty times a second is one nobody reads.
-    //
-    // **Not on the cinematic tier**, where the field means something else. A
-    // cinematic body has no Gerstner waves to fold, so `peak_fold` is
-    // identically zero and this would fire on every scene that opts in — a
-    // warning that is always wrong is worse than none. There `spray` switches
-    // on drawing the solver's own thrown particles; see `WaterBody::spray`.
-    //
-    // **Not on a `spectrum` body either, and for the same shape of reason.** `peak_fold`
-    // sums a wave list, a spectrum body has none, so it is identically zero there and
-    // this would fire on every FFT sea whose crests are in fact breaking hard enough to
-    // throw. The equivalent ceiling for a cascade is a walk of its tiles; see
-    // `peak_fold`'s own `ponytail:` note for when to build it.
-    if water.spray > 0.0
-        && water.simulation != loom_scene::components::WaterSimTier::Cinematic
-        && water.wave_model != loom_scene::components::WaveModel::Spectrum
-    {
-        let peak = loom_water::spray::peak_fold(water);
-        if peak < loom_water::spray::SPRAY_BREAK {
-            static SAID: std::sync::Once = std::sync::Once::new();
-            SAID.call_once(|| {
-                crate::log::warn(format!(
-                    "the WaterBody authors spray = {:.2} but its waves peak at a fold of \
-                     {peak:.3}, under the {:.2} a crest has to reach to break — so no \
-                     droplet can ever be thrown. Raise `steepness` or `amplitude`, or \
-                     shorten `wavelength`.",
-                    water.spray,
-                    loom_water::spray::SPRAY_BREAK,
-                ));
-            });
-        }
-    }
     let droplets = loom_water::spray::spray(water, sea, eye, seconds, ground);
     if droplets.is_empty() {
+        // **A sea too gentle to break can never spray, and nothing else would say
+        // so.** `fold` is `Σ Q·k·A·sin φ`, so `Σ Q·k·A` is its ceiling; under
+        // `SPRAY_BREAK` the crest test inside `spray()` fails at every point and
+        // every instant, and the author sees an empty sky and concludes the
+        // feature is broken. It was not hypothetical — *every* sea in this
+        // repository was under the threshold when spray shipped.
+        //
+        // Warned from here rather than refused at load, because a sea whose waves
+        // are raised later is a legitimate thing to author, and this is a look
+        // rather than a correctness matter. Once per process: it is asked every
+        // frame, and a warning sixty times a second is one nobody reads.
+        //
+        // **Asked only on a frame that threw nothing**, which is what makes the
+        // spectrum path affordable: the cascade's ceiling is a walk of 98,304 tile
+        // values, not a sixteen-term sum. It loses no warning that was printed before —
+        // a ceiling under the threshold means every crest test failed, so the frame was
+        // empty by construction — and an empty frame is the only moment an author is
+        // asking this question anyway.
+        //
+        // **Not on the cinematic tier**, where the field means something else. A
+        // cinematic body has no Gerstner waves to fold, so `peak_fold` is
+        // identically zero and this would fire on every scene that opts in — a
+        // warning that is always wrong is worse than none. There `spray` switches
+        // on drawing the solver's own thrown particles; see `WaterBody::spray`.
+        let spectrum = water.wave_model == loom_scene::components::WaveModel::Spectrum;
+        if water.spray > 0.0 && water.simulation != loom_scene::components::WaterSimTier::Cinematic
+        {
+            // **The two models carry different ceilings and the sentence printed below
+            // has to be the one that is true.** A wave list's `Σ Q·k·A` is analytic and
+            // over all time — that sea can be told it will *never* throw. A cascade's is
+            // the largest fold its tiles reach *at this instant*
+            // (`Ocean::peak_fold`), and a sea that is not breaking now may break in ten
+            // seconds: measured over 40 quarter-second steps of a 50 km fetch, the
+            // ceiling wanders 0.212–0.289 at `u10 = 2` and 1.34–1.51 on
+            // `ocean_fft_storm.loom`, about ±15% either way. So the spectrum arm says
+            // "is not breaking", never "cannot break".
+            //
+            // `NaN` before the first `evolve` and on a spectrum body with no cascade at
+            // all, and `NaN < SPRAY_BREAK` is false — a sea nobody has evolved yet is
+            // not a sea that has been measured and found flat.
+            let peak = if spectrum {
+                sea.map_or(f32::NAN, loom_water::ocean::Ocean::peak_fold)
+            } else {
+                loom_water::spray::peak_fold(water)
+            };
+            if peak < loom_water::spray::SPRAY_BREAK {
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| {
+                    let break_at = loom_water::spray::SPRAY_BREAK;
+                    let (authored, tail) = (water.spray, "and no droplet is thrown.");
+                    crate::log::warn(if spectrum {
+                        format!(
+                            "the WaterBody authors spray = {authored:.2} but its cascade is \
+                             folding at most {peak:.3} anywhere on its tiles this tick, \
+                             under the {break_at:.2} a crest has to reach to break — so \
+                             nothing on this sea is breaking {tail} Raise the scene's \
+                             `Wind.speed` or its `fetch`. (A spectrum ceiling is this \
+                             instant's, not the run's: a sea this gentle now can break \
+                             later.)"
+                        )
+                    } else {
+                        format!(
+                            "the WaterBody authors spray = {authored:.2} but its waves peak \
+                             at a fold of {peak:.3}, under the {break_at:.2} a crest has \
+                             to reach to break — so no crest can ever break {tail} Raise \
+                             `steepness` or `amplitude`, or shorten `wavelength`."
+                        )
+                    });
+                });
+            }
+        }
         return Vec::new();
     }
     let visual = droplet_visual(world);
@@ -1217,6 +1246,93 @@ mod tests {
         let plumes = Plumes::new(&world, calm(), None);
 
         assert!(!plumes.instances().is_empty(), "a chimney should preview");
+    }
+
+    /// **Neither FFT scene is a sea that cannot break, and the warning above must never
+    /// say it is.** The gap this closed was a `peak_fold` of exactly zero on a spectrum
+    /// body — a number that said nothing about the sea, so the warning had to be switched
+    /// off on the one model a storm scene wants and an author with no spray in frame had
+    /// nothing to read. `Ocean::peak_fold` answers instead, and this pins both halves:
+    /// the ceiling is a real number well over `SPRAY_BREAK` on both scenes at every tick
+    /// looked at (so no false warning), and it is measured off the scenes as they are
+    /// loaded rather than off a hand-built body.
+    ///
+    /// Measured, at ticks 0 / 120 / 400 / 900:
+    ///
+    /// ```text
+    /// ocean_fft.loom        1.376  1.363  1.288  1.217     Hs  5.897
+    /// ocean_fft_storm.loom  1.507  1.508  1.459  1.378     Hs 12.286
+    /// ```
+    ///
+    /// The wander is the tiles moving, not noise in the measurement: this ceiling is a
+    /// max over the tiles that exist at one instant, which is exactly what separates it
+    /// from the Gerstner `Σ Q·k·A` that is fixed for the run.
+    #[test]
+    fn both_fft_scenes_have_a_ceiling_far_over_the_spray_threshold() {
+        for (scene, floor, roof) in
+            [("ocean_fft.loom", 1.2_f32, 1.4_f32), ("ocean_fft_storm.loom", 1.3, 1.6)]
+        {
+            let source = std::fs::read_to_string(format!("../../assets/test/{scene}"))
+                .expect("fixture");
+            let world = World::from_scene(&loom_scene::Scene::parse(&source).expect("valid scene"));
+            let wind = crate::weather::wind_of_world(&world);
+            let body = crate::weather::water_of(&world, &wind).expect("the scene has water");
+            let mut sea = crate::weather::sea_of_body(&body, &wind).expect("a spectrum sea");
+            assert!(sea.peak_fold().is_nan(), "{scene} answered before it was evolved");
+
+            for tick in [0_u16, 120, 400, 900] {
+                sea.evolve(f32::from(tick) / 60.0);
+                let ceiling = sea.peak_fold();
+                assert!(
+                    ceiling > loom_water::spray::SPRAY_BREAK,
+                    "{scene} at tick {tick} reads a ceiling of {ceiling}, under \
+                     SPRAY_BREAK — the warning would tell an author this sea cannot break"
+                );
+                assert!(
+                    (floor..roof).contains(&ceiling),
+                    "{scene} at tick {tick} folds at most {ceiling}, outside {floor}..{roof}"
+                );
+            }
+
+            // And the other side of the warning, through the function that prints it: the
+            // same scene under a wind too light to break throws nothing, and the arm that
+            // measures why is the one this walks. Not asserted on the log — the store is
+            // global and the `Once` is per process, so a test that read it would race
+            // every other test in the binary; the claim the message makes is asserted in
+            // `loom_water::spray`'s own `the_cascade_ceiling_bounds_every_sample_and_
+            // predicts_a_dry_sea`, which is where the Gerstner half is asserted too.
+            //
+            // **The swell goes with the wind, or the control is not a control.** These
+            // scenes author a 420 km / 900 km swell that carries its own `u10` and takes
+            // nothing from the argument below — leave it on and a 2 m/s wind still folds
+            // at 0.891, because the swell is doing the folding.
+            let gentle = loom_scene::components::WaterBody {
+                spray: 8.0,
+                swell: None,
+                fetch: Some(50_000.0),
+                ..body.clone()
+            };
+            let mut calm_sea =
+                loom_water::ocean::Ocean::for_body(&gentle, 2.0, [1.0, 0.0]).expect("a cascade");
+            let deep = |_x: f32, _z: f32| -1000.0_f32;
+            for tick in 0..24_u16 {
+                let t = f32::from(tick) / 60.0;
+                calm_sea.evolve(t);
+                if tick % 8 == 0 {
+                    calm_sea.keep();
+                }
+                assert!(
+                    spray(&world, &gentle, Some(&calm_sea), &deep, [0.0, 4.0, 0.0], t).is_empty(),
+                    "a sea folding at most {} threw spray",
+                    calm_sea.peak_fold()
+                );
+            }
+            assert!(
+                calm_sea.peak_fold() < loom_water::spray::SPRAY_BREAK,
+                "the gentle control is not gentle: {}",
+                calm_sea.peak_fold()
+            );
+        }
     }
 
     fn sea() -> World {

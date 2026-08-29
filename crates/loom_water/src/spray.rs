@@ -143,10 +143,16 @@ pub struct Droplet {
 /// **Gerstner bodies only, and it is zero on a `spectrum` one.** A cascade has no wave
 /// list to sum: its fold is differenced off tiles that do not exist until the first
 /// evolve. So a caller must not read a zero here as "this sea cannot break" on a
-/// spectrum body — it means the question was asked of the wrong model.
-/// `ponytail:` the spectrum's own ceiling is the per-cascade max of `Sxx + Szz` summed
-/// over the stack, one walk of `Ocean::tiles`. Build it when a spectrum sea is authored
-/// too gentle to break and somebody has to work out why nothing sprayed.
+/// spectrum body — it means the question was asked of the wrong model, and
+/// [`Ocean::peak_fold`] is the one to ask instead.
+///
+/// **The two are not the same kind of ceiling and a caller has to know which it holds.**
+/// This one is analytic and over all time: `Σ Q·k·A` is true before a tick has run and
+/// stays true for the whole run, so a sea under [`SPRAY_BREAK`] here can be told it will
+/// *never* break. [`Ocean::peak_fold`] is a max over the tiles that exist at one
+/// instant, so a cascade under the threshold is a sea that is not breaking *now* and may
+/// break in ten seconds. See its docs; the distinction is the reason it is a method
+/// there rather than another arm of this function.
 #[must_use]
 pub fn peak_fold(body: &WaterBody) -> f32 {
     body.waves
@@ -950,6 +956,101 @@ mod tests {
                     })
                     .sum();
                 assert_eq!(thrown, 0, "a sea under the ceiling threw {thrown} droplets");
+            }
+        }
+    }
+
+    /// **The cascade's ceiling is a ceiling too, and a spectrum sea too gentle to break
+    /// now says so.** The twin of the test above, for the model that has no wave list:
+    /// `Ocean::peak_fold` is the per-cascade max of `Sxx + Szz` summed over the stack,
+    /// and the two halves are the same two claims — no sample of the field may exceed
+    /// it, and a sea under `SPRAY_BREAK` must throw nothing.
+    ///
+    /// **The sampling is over one whole swell patch and its side is prime.** Every tile
+    /// is periodic on its own patch — 2048, 256 and 32 m — and the two finer ones divide
+    /// the coarsest, so `[0, 2048)²` is not a sample of the sea, it *is* the sea: no
+    /// world point exists outside it. A smaller domain reads systematically low because
+    /// it sees one flank of the 2048 m swell rather than a crest, and a side that shares
+    /// a factor with 32 or 256 lands on the same handful of chop phases in every patch
+    /// it crosses. 401 is prime, which is also why `play`'s crossing-sea measurement
+    /// uses it, and the step it gives (5.107 m) walks 401 distinct phases through the
+    /// chop rather than 64.
+    ///
+    /// It is a loose ceiling and that is honest rather than a defect: the three cascades'
+    /// maxima are at three different places, so no single point can reach their sum.
+    /// Measured on `ocean_fft_storm.loom` at tick 400 the worst sample is 0.923 against
+    /// a 1.459 ceiling. What the test forbids is the direction that matters — a sample
+    /// *over* the ceiling, which is what would send an author to raise a wind that was
+    /// already high enough.
+    #[test]
+    fn the_cascade_ceiling_bounds_every_sample_and_predicts_a_dry_sea() {
+        use loom_scene::components::{WaterBody, WaveModel};
+        const SIDE: u16 = 401;
+        // The largest cascade's patch: `shipping_stack`'s 2048 m, and therefore the
+        // period of the whole summed field.
+        let step = 2048.0 / f32::from(SIDE);
+        // A sea that breaks and one that cannot be seen to. `u10 = 2` is the gentle
+        // half and it is measured, not guessed: its ceiling wanders 0.212..0.289 over
+        // forty quarter-seconds, under `SPRAY_BREAK` at every one of them.
+        for (u10, breaks) in [(2.0_f32, false), (18.0, true)] {
+            let body = WaterBody {
+                wave_model: WaveModel::Spectrum,
+                spray: 8.0,
+                fetch: Some(50_000.0),
+                ..WaterBody::default()
+            };
+            let mut sea = crate::ocean::Ocean::for_body(&body, u10, [1.0, 0.0]).expect("a cascade");
+            assert!(sea.peak_fold().is_nan(), "an unevolved cascade answered a ceiling");
+
+            let t = 400.0 / 60.0;
+            sea.evolve(t);
+            let ceiling = sea.peak_fold();
+            assert_eq!(
+                ceiling > SPRAY_BREAK,
+                breaks,
+                "u10 {u10} put the ceiling at {ceiling}, the wrong side of {SPRAY_BREAK}"
+            );
+
+            let mut worst = f32::NEG_INFINITY;
+            for iz in 0..SIDE {
+                for ix in 0..SIDE {
+                    let at = [f32::from(ix) * step, f32::from(iz) * step];
+                    let fold = crate::sample_water(
+                        &body,
+                        Some(&sea),
+                        at,
+                        t,
+                        -1000.0,
+                        [0.0; 3],
+                        [0.0; 3],
+                    )
+                    .fold;
+                    worst = worst.max(fold);
+                }
+            }
+            assert!(
+                worst <= ceiling,
+                "fold reached {worst} over the whole tile, over the {ceiling} ceiling \
+                 Ocean::peak_fold promised"
+            );
+
+            // And the claim the warning in `loom_cli::particles::spray` prints: a sea
+            // under the threshold throws nothing. Every eighth tick kept, as
+            // `Sim::evolve_sea` does, or the ring spray reads is empty and this would
+            // pass on a sea that breaks.
+            if !breaks {
+                let mut kept =
+                    crate::ocean::Ocean::for_body(&body, u10, [1.0, 0.0]).expect("a cascade");
+                let mut thrown = 0;
+                for tick in 0..120_u16 {
+                    let t = f32::from(tick) / 60.0;
+                    kept.evolve(t);
+                    if tick % 8 == 0 {
+                        kept.keep();
+                    }
+                    thrown += spray(&body, Some(&kept), [0.0, 2.0, 0.0], t, &deep).len();
+                }
+                assert_eq!(thrown, 0, "a cascade under the ceiling threw {thrown} droplets");
             }
         }
     }

@@ -950,6 +950,51 @@ impl Ocean {
         4.0 * m0.sqrt()
     }
 
+    /// The largest [`crate::WaterSample::fold`] this sea can reach right now, anywhere.
+    ///
+    /// On the spectrum path `fold` is `Sxx + Szz` summed over the stack, and
+    /// [`Self::probe`] interpolates a cascade's tiles bilinearly — a convex combination
+    /// of four cells, so no sample of a cascade exceeds that cascade's largest cell.
+    /// The per-cascade maxima summed is therefore a true ceiling on the fold at every
+    /// world point, which is what [`crate::spray::peak_fold`] is for a wave list.
+    ///
+    /// **It is not the same kind of number as that one, and the difference is the whole
+    /// reason this is documented rather than merely written.** `Σ Q·k·A` is *analytic*
+    /// and over all time: it is true before a tick has run and it stays true forever, so
+    /// a Gerstner sea under [`crate::spray::SPRAY_BREAK`] can be told it will never
+    /// break. This is a ceiling over **the tiles that exist now** — one instant of one
+    /// draw. A cascade under the threshold this second is a sea that is not breaking
+    /// *yet*, not a sea that cannot; the honest sentence a caller can build on it is
+    /// "this sea is not breaking", never "this sea will never break".
+    ///
+    /// `NaN` before the first [`Self::evolve`], for [`Self::evolved_at`]'s reason: the
+    /// tiles are zero then, and a flat sea and a sea nobody has evolved yet must not
+    /// answer the same. A comparison against `NaN` is false, so a caller that forgets
+    /// stays quiet rather than warning about a sea it has not looked at.
+    ///
+    /// Cascades add in index order, on the same non-associativity grounds as
+    /// [`Self::sample`]. **One walk of two tiles per cascade** — the same cost as
+    /// [`Self::significant_height`] — so ask it when an author needs an answer, not
+    /// every frame.
+    #[must_use]
+    pub fn peak_fold(&self) -> f32 {
+        if self.t.is_nan() {
+            return f32::NAN;
+        }
+        let mut ceiling = 0.0_f32;
+        for layer in &self.layers {
+            let cells = layer.n * layer.n;
+            let sxx = &self.tiles[layer.offset + T_SXX * cells..][..cells];
+            let szz = &self.tiles[layer.offset + T_SZZ * cells..][..cells];
+            ceiling += sxx
+                .iter()
+                .zip(szz)
+                .map(|(sxx, szz)| sxx + szz)
+                .fold(f32::NEG_INFINITY, f32::max);
+        }
+        ceiling
+    }
+
     /// Every tile, concatenated: all [`TILES_PER_CASCADE`] of them per cascade, in
     /// cascade order — the layout [`Self::tiles`]' own field documents.
     ///

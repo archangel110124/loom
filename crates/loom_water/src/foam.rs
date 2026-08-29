@@ -302,19 +302,36 @@ impl FoamField {
 
         // **A sea that cannot break deposits nothing, and the skip is most of
         // this function's cost.** `peak_fold` is `Σ Q·k·A`, the ceiling the
-        // fold reaches anywhere at any instant, and `mu_max` cannot exceed it:
-        // the two eigenvalues sum to the trace and the smaller one is what the
-        // other direction is compressed by. So a pool, a river and a wake —
+        // fold reaches anywhere at any instant, and `mu_max` cannot exceed it — see the
+        // next paragraph for why, which is *not* the "the eigenvalues sum to the trace"
+        // this line used to claim: they do, but the smaller one is free to be negative
+        // and that argument is only ever true by luck. So a pool, a river and a wake —
         // every scene in this repository whose water is calm — pay one
         // comparison instead of 2,048 wave sums a tick. Measured on
         // `whitecaps`, which does *not* take the skip: 600 ticks of `loom sim`
         // is 0.43 s with the crest loop and 0.10 s without.
-        // **A `spectrum` body is not gated on its wave list.** `peak_fold` bounds the
-        // Gerstner sum, and a spectrum body's sixteen derived waves are not the sea it
-        // floats on — the cascade is, and a tile's ceiling is a max over `n²` cells
-        // rather than a sixteen-term sum, so there is no equally cheap bound to gate on.
-        // The crest pass therefore runs on every tick of an FFT sea; that it is the
-        // tick's whole cost is what `CREST_STRIDE` already answers.
+        //
+        // **A `spectrum` body is not gated at all, and the reason is that this gate
+        // thresholds the wrong quantity to use the cascade's ceiling.**
+        // `Ocean::peak_fold` now bounds a cascade's `fold` — the *trace* of the
+        // compression — but `deposit_crests` below thresholds `mu_max`, its largest
+        // *eigenvalue*, and a trace bounds an eigenvalue only where the other one is
+        // non-negative. On the Gerstner path that holds for a different reason and the
+        // gate is sound: `fold`'s ceiling is `Σ Q·k·A` and each wave contributes a rank-1
+        // `c·d dᵀ` with `|c| ≤ Q·k·A`, so `Σ Q·k·A` bounds `mu_max` by Weyl whatever the
+        // phases do. A cascade's cell can hold pure shear — trace near zero, eigenvalues
+        // ±s — so `Σ max(Sxx + Szz)` is not that bound, and a gate built on it would skip
+        // the walk on a tick where a crest was in fact breaking. Silently losing foam is
+        // worse than paying for the walk.
+        //
+        // **And there is nothing to win here anyway.** The sound bound is the per-cascade
+        // max of `mu_max` itself, another walk of the same tiles with a `sqrt` a cell.
+        // Measured on `ocean_fft_storm.loom`, ticks 0/120/400/900: that ceiling is
+        // 1.131 / 1.154 / 1.135 / 1.089 against this gate's `break_at` of 0.45 — so it
+        // would never once skip, and would have cost 49,152 square roots a tick to say
+        // so. `ocean_fft.loom` is the same shape. `ponytail:` build it if a spectrum sea
+        // gentle enough to sit under 0.45 is ever authored; until one is, the crest pass
+        // runs on every tick of an FFT sea and `CREST_STRIDE` is what answers its cost.
         let spectrum = body.wave_model == loom_scene::components::WaveModel::Spectrum;
         if spectrum || crate::spray::peak_fold(body) > break_at {
             self.deposit_crests(body, sea, t, ground, break_at);
