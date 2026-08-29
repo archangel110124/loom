@@ -1437,6 +1437,33 @@ fn check_water(
     let mut errors = Vec::new();
     errors.extend(check_tier(&body, node, has_gameplay, cinematic_bodies));
     let count = body.waves.waves.len();
+
+    // **Two seas authored in one component** — ADR 0076. The spectrum builds
+    // the entire surface from a wavenumber grid, so a hand-written wave list
+    // beside it is not summed in, not blended, and not warned about: it is
+    // dropped. That is the same shape of failure the emitter refusals exist to
+    // replace — a field the author typed, that the engine reads past, whose
+    // symptom arrives later as "the waves I authored do nothing".
+    //
+    // The message says which half to remove because either is a coherent
+    // scene and only the author knows which one was meant.
+    if body.wave_model == components::WaveModel::Spectrum && count > 0 {
+        let mut err = SceneError::new("spectrum_water_authors_waves", node);
+        err.field = "WaterBody.wave_model".to_owned();
+        err.value = Value::from("spectrum");
+        err.constraint =
+            "wave_model = \"spectrum\" with no waves.waves entries".to_owned();
+        err.hint = Some(format!(
+            "this body asks for the spectrum model and also authors {count} \
+             Gerstner wave(s); the spectrum replaces the wave sum outright, so \
+             those waves would silently draw and push nothing. Remove the \
+             {count} `[[node.components.WaterBody.waves.waves]]` table(s) to \
+             keep `wave_model = \"spectrum\"` — a spectrum sea is shaped by \
+             the scene's `Wind` and by `fetch`, not by an amplitude list — or \
+             remove `wave_model` to keep the waves."
+        ));
+        errors.push(err);
+    }
     if count > components::MAX_WAVES {
         let mut err = SceneError::new("too_many_waves", node);
         err.field = "WaterBody.waves.waves".to_owned();

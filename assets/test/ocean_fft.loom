@@ -1,0 +1,123 @@
+# The scene that opts in to the FFT ocean — ADR 0076, and the only thing this
+# slice moves.
+#
+# **`wave_model = "spectrum"` is the whole feature at this point.** Every other
+# water scene in the repository omits the field, gets `gerstner`, and renders
+# and simulates bit for bit as it did — the same shape of opt-in
+# `ParticleEmitter.gpu` used, and the reason the wiring can land one readable
+# commit at a time instead of moving fourteen golden references and every water
+# scene's determinism hash at once.
+#
+# **The cascade layout is not authored here and that is deliberate.** A scene
+# says which model; how many cascades, at what patch size and over which band
+# of wavenumbers, is `loom_water`'s `shipping_stack`. Bands that must meet
+# exactly are the kind of number an author gets wrong silently — a gap loses
+# energy, an overlap double-counts it — so per-scene cascades wait for a slice
+# of their own.
+#
+# # The sea this asks for
+#
+# **Twenty feet: `Hs = 6.10 m`.** The pair that realises it is `U10 = 18 m/s`
+# with `fetch = 440 000 m`, and neither number is free —
+# `docs/design/SEA-REBUILD.md` §3.6 has both derivations:
+#
+# - `U10 = 18` because the *fully-developed* ceiling at 16 m/s is
+#   `0.22·U²/g = 5.74 m`, so no fetch at all reaches 6.10 from below 16.
+# - `fetch = 440 000` and not the 376 000 an analytic detour once argued for.
+#   Three standard parameterisations of the same sea disagree by 35%, and this
+#   engine measured — `significant_height(wave_set_fetch(18.0, F))` — answers
+#   5.638 m at 376 km and 6.099 m at 440 km. When the question is what this
+#   engine does, run this engine.
+#
+# It is genuinely fetch-limited: fully developed at 624 km, so the sea is
+# *steeper* than the Pierson–Moskowitz limit rather than merely bigger, which
+# is the property that makes it break instead of zoom.
+#
+# **`Wind.speed` is not `U10`.** The authored field is the free-stream value
+# the height profile saturates toward, and at the meteorological standard 10 m
+# the field is 0.9083 of it — so `19.8165` measures `mean_speed_at(10.0) =
+# 17.999987`. Anything that changes `ground_drag` here changes `U10` with it.
+#
+# **Deep water, no bed.** There is no `VoxelVolume` and `attenuation_depth`
+# stays at its default zero, so nothing shoals and the surface is the open
+# ocean everywhere in frame. A 6 m sea over a shallow bed is a different
+# physical problem and not the one this scene is the acceptance test for.
+#
+# The camera sits at 7 m — a small ship's bridge over crests that reach about
+# 5.6 m, so the near field is water rather than a horizon line. A distant orbit
+# would frame the whole sea and photograph none of it; the spectral tail is
+# exactly the detail that disappears first at range.
+
+[scene]
+format = 1
+id = "3a7d5f26-9c14-4e83-b0d2-6f1e8a4c7b95"
+
+[[node]]
+name = "Sea"
+
+  [node.components.Environment]
+  sun_direction = [0.26, 0.38, -0.89]
+  sun_strength = 1.15
+  sun_color = [1.0, 0.95, 0.86]
+  ambient = 0.5
+  sky_zenith = [0.13, 0.25, 0.47]
+  sky_horizon = [0.55, 0.62, 0.70]
+  fog_density = 0.004
+  fog_falloff = 0.03
+
+  # Beaufort 8. **`speed` is free-stream, not U10, and 19.8165 is a measured
+  # number — do not tidy it to 20.** `loom_field::wind` warns three times that
+  # the authored field is the value the height profile saturates toward, and at
+  # the meteorological standard 10 m the profile is
+  # `ground_drag + (1 - ground_drag)·10/12 = 0.90833` of it. Measured through
+  # `Wind::mean_speed_at(10.0)`:
+  #
+  #     speed 19.80   -> U10 17.984999
+  #     speed 19.8165 -> U10 17.999987   <- this
+  #     speed 19.83   -> U10 18.012249
+  #
+  # A round 20.0 is `U10 = 18.167`, which is a different sea and a different
+  # `Hs`. Changing `ground_drag` below changes U10 with it.
+  [node.components.Wind]
+  direction_degrees = 15.0
+  speed = 19.8165
+  gustiness = 1.3
+  turbulence = 1.0
+  ground_drag = 0.45
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  # No `waves` table: the spectrum builds the whole surface, and authoring a
+  # wave list beside it is refused at load rather than silently dropped.
+  [node.components.WaterBody]
+  kind = "ocean"
+  wave_model = "spectrum"
+  surface_height = 0.0
+  density = 1025.0
+  drag = 2.0
+  fetch = 440000.0
+
+# One object with a known size, because a still of open water has no scale in
+# it — a 6 m sea and a 0.6 m chop photograph identically without something to
+# measure against. Two metres across, moored at 24 m.
+[[node]]
+name = "Buoy"
+parent = "Sea"
+transform = { pos = [3.5, 0.0, -24.0], scale = [1.0, 1.4, 1.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "sphere" }
+
+  [node.components.Material]
+  albedo = [0.62, 0.19, 0.13]
+  roughness = 0.7
+
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [0.0, 7.0, 10.0], rot_euler = [-8.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0

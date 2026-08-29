@@ -1710,6 +1710,21 @@ pub struct WaterBody {
     pub surface_height: f32,
     /// The waves summed over that level.
     pub waves: WaveSet,
+    /// Which wave model this body's surface comes from.
+    ///
+    /// **Default [`WaveModel::Gerstner`], which is today's behaviour exactly** —
+    /// the same precedent `ParticleEmitter.gpu` set, where "default `false`, so
+    /// all eight blessed particle references are untouched" is the whole reason
+    /// the feature could land in a readable diff. Every scene in this
+    /// repository predates this field, gets the default, and renders and
+    /// simulates bit for bit as it did.
+    ///
+    /// Opting in selects the *model* and nothing else: the cascade layout is
+    /// the engine's, not the scene's. Bands that must meet exactly are the kind
+    /// of number an author gets wrong silently — a gap loses energy, an overlap
+    /// double-counts it — so authoring them is deferred to its own slice rather
+    /// than smuggled in beside a one-word switch.
+    pub wave_model: WaveModel,
     /// Metres of open water upwind, for a sea derived from the wind.
     ///
     /// **Absent — the default — is infinite fetch**, which is the
@@ -1729,7 +1744,26 @@ pub struct WaterBody {
     /// leaving it out says. Past `18_906·U10²/g` metres the sea *is* fully
     /// developed and this reverts to the scale-invariant one — about 14 km at
     /// a light breeze, so a large value goes flat at the calm end first.
-    #[schemars(range(min = 1.0, max = 100000.0))]
+    ///
+    /// **The ceiling is 1 000 km rather than 100 km, and 1 000 km is where the
+    /// parameter stops meaning anything.** Past `18_906·U10²/g` the sea is
+    /// fully developed and further fetch buys nothing at all; that threshold
+    /// reaches 1 000 km at `U10 = 22.8 m/s` — a strong gale, above any sea
+    /// state authored here — so the bound sits at the far end of the range
+    /// where the field still changes the answer, rather than at a round
+    /// number. The old 100 km ceiling was inside that range and cut it off:
+    /// at 18 m/s the sea is fetch-limited out to 624 km.
+    ///
+    /// That is the fetch the project is aiming at. `U10 = 18` with
+    /// `fetch = 440_000` realises `Hs = 6.10 m` — the twenty-foot sea — and is
+    /// **genuinely fetch-limited at 440 of its 624 km**, so it is *steeper*
+    /// than the fully-developed limit rather than merely larger, which is what
+    /// makes it break instead of zoom. `docs/design/SEA-REBUILD.md` §3.6 has
+    /// the derivation and the round trip that briefly "corrected" it to 376 km
+    /// by modelling the engine instead of measuring it.
+    ///
+    /// Raising a maximum accepts strictly more, so no scene changes.
+    #[schemars(range(min = 1.0, max = 1000000.0))]
     pub fetch: Option<f32>,
     /// Density in kg/m³. `1000` fresh, `1025` salt.
     ///
@@ -1810,6 +1844,38 @@ pub struct WaterBody {
     pub material: AssetRef,
 }
 
+/// Which wave model a [`WaterBody`]'s surface comes from — ADR 0076.
+///
+/// Beside [`WaterSimTier`], and the two are orthogonal on purpose: the tier
+/// says what *guarantees* the body runs under, this says what *shape* the
+/// surface has. Both are one word in the scene text so that either trade is
+/// one grep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WaveModel {
+    /// A sum of at most [`MAX_WAVES`] Gerstner waves — authored in
+    /// [`WaterBody::waves`], or derived from the scene's `Wind` when that list
+    /// is empty.
+    ///
+    /// **The default, and every scene written before ADR 0076.** Sixteen equal-
+    /// energy waves carry a sea's scale but not its tail, which is why the
+    /// chop that reads as water has to be painted on rather than simulated.
+    #[default]
+    Gerstner,
+    /// An inverse-FFT ocean: a directional spectrum sampled onto a wavenumber
+    /// grid and transformed into tiles, in `loom_water::ocean`.
+    ///
+    /// Still a pure function of (scene, tick) — that statelessness is ADR
+    /// 0076's whole licence for putting it on the force path — so buoyancy,
+    /// `loom sim --assert` and `rhai` all keep reading the surface a body
+    /// actually floats on.
+    ///
+    /// **The cascade layout is the engine's, not the scene's.** A body says
+    /// which model; how many cascades, at what patch size and which band, is
+    /// `loom_water`'s `shipping_stack`.
+    Spectrum,
+}
+
 /// Which set of guarantees a [`WaterBody`] runs under — ADR 0053.
 ///
 /// The project's third founding property — the runtime is deterministic, so
@@ -1857,6 +1923,9 @@ impl Default for WaterBody {
             kind: WaterKind::Ocean,
             surface_height: 0.0,
             waves: WaveSet::default(),
+            // Opt-in, default off — the ADR 0047 precedent. Nothing that
+            // exists moves until a scene types the other word.
+            wave_model: WaveModel::Gerstner,
             // Unlimited fetch: the fully-developed sea, which is what the
             // derived spectrum has always produced and what every scene
             // written before this field must keep producing.

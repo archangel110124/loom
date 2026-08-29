@@ -1076,6 +1076,59 @@ name = \"Hill\"
         assert!(errors[0].constraint.contains("ocean"), "{errors:?}");
     }
 
+    /// **Absent is today's behaviour, exactly** — the precedent
+    /// `ParticleEmitter.gpu` set ("default `false`, so all eight blessed
+    /// particle references are untouched"), and the whole reason ADR 0076 can
+    /// land without moving a pixel or a determinism hash. Every water scene in
+    /// this repository omits `wave_model` and must keep summing its waves.
+    #[test]
+    fn a_water_body_that_says_nothing_is_a_gerstner_sea() {
+        assert_eq!(
+            serde_json::from_str::<components::WaterBody>("{}")
+                .expect("an empty table is all defaults")
+                .wave_model,
+            components::WaveModel::Gerstner,
+            "the default moved, and every blessed water reference moves with it"
+        );
+
+        // And a wave list beside the absent field is not the contradiction
+        // below — it is what fourteen scenes here already say.
+        Scene::parse(&water_scene(
+            "\n[[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 18.0\namplitude = 0.16\nsteepness = 0.22\n\
+             direction = [1.0, 0.2]\n",
+        ))
+        .expect("today's sea, unchanged");
+    }
+
+    /// **Two seas authored in one component.** The spectrum builds the whole
+    /// surface from a wavenumber grid, so a hand-written wave list beside it is
+    /// dropped rather than summed — the silent-no-op shape every refusal on
+    /// `ParticleEmitter` exists to replace. The message names *which half* to
+    /// remove, because both are coherent scenes and only the author knows which
+    /// one was meant.
+    #[test]
+    fn spectrum_water_that_also_authors_waves_is_refused() {
+        Scene::parse(&water_scene("wave_model = \"spectrum\"\n"))
+            .expect("the spectrum on its own is the opt-in");
+
+        let errors = Scene::parse(&water_scene(
+            "wave_model = \"spectrum\"\n\
+             [[node.components.WaterBody.waves.waves]]\n\
+             wavelength = 18.0\namplitude = 0.16\nsteepness = 0.22\n\
+             direction = [1.0, 0.2]\n",
+        ))
+        .expect_err("a spectrum and a wave list are two seas");
+
+        assert_eq!(errors.len(), 1, "one fault, reported once: {errors:?}");
+        assert_eq!(errors[0].error, "spectrum_water_authors_waves");
+        assert_eq!(errors[0].field, "WaterBody.wave_model");
+        let hint = errors[0].hint.as_deref().unwrap_or_default();
+        assert!(hint.contains("waves.waves"), "name one half: {errors:?}");
+        assert!(hint.contains("remove `wave_model`"), "and the other: {errors:?}");
+        assert!(hint.contains('1'), "and how many waves: {errors:?}");
+    }
+
     /// **A sign typo is its own mistake.** Folding it through `.abs()` blamed
     /// steepness for a negative amplitude and printed the value with the sign
     /// flipped, and reported `steepness = -9.0` as "value -9.0, constraint at
