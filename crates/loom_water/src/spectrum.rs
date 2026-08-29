@@ -853,6 +853,56 @@ mod tests {
         );
     }
 
+    /// The same field, pinned again through a **band that actually filters** — because
+    /// the pin above runs on [`WHOLE_BAND`] and therefore never executes the filter at
+    /// all.
+    ///
+    /// `amplitude_field(32, 200.0, …)` has `Δk = 2π/200` and a largest `|k|` of 0.711
+    /// rad/m at the grid corner, so against `[0, ∞)` neither `k < band[0]` nor
+    /// `k >= band[1]` can be true for any cell: 1023 of its 1024 cells are live, the one
+    /// dead cell is `k = 0`, and the digest above pins exactly one of the two branches —
+    /// the one where banding does nothing.
+    ///
+    /// **That gap was measured, not supposed.** Relaxing `k >= band[1]` to `k > band[1]`
+    /// — one ring of cells double-counted at every interior boundary of a cascade stack,
+    /// which is the precise defect banding exists to prevent — leaves **every one of the
+    /// 136 tests that existed before this one green**. `cascades_are_a_band_not_another_copy_of_the_sea` is the
+    /// invariant written against that defect and it does not fire: it reads
+    /// **6.069 / 6.097 / 6.145 m** against a 0.10 m band. One ring is far too little
+    /// energy for a statistical gate; that one needs roughly a 15% overlap before it
+    /// moves.
+    ///
+    /// So the band here is picked to bite at both ends and to sit exactly on a cell.
+    /// `[2·Δk, 4·Δk)` leaves 36 of the 1024 cells live: `k = 0` and everything inside
+    /// `2·Δk` fall below it, everything at or beyond `4·Δk` falls above it, and — the
+    /// point — the four axis cells at `|k|` of exactly `4·Δk` sit **on** the upper edge,
+    /// where `>=` drops them and `>` would keep them. Both edges are written as multiples
+    /// of the same `TAU / patch` the function computes, and `√(x²)` returns `|x|` exactly
+    /// in `f32`, so the comparison is bit-exact rather than nearly so; a band edge chosen
+    /// off-lattice would make this pin blind to the same defect the pin above is blind to.
+    ///
+    /// **Fault-injected, and it fires.** With `k >= band[1]` relaxed to `k > band[1]` the
+    /// live count goes 36 → 40 and this digest reads `0x7d1d_9c0b_65f4_d381` against the
+    /// `0x3ada_5906_73a5_8d8d` pinned below. Everything
+    /// [`the_amplitude_field_is_pinned`] says about not re-blessing a moved literal
+    /// applies here unchanged.
+    #[test]
+    fn the_banded_amplitude_field_is_pinned() {
+        let dk = std::f32::consts::TAU / 200.0;
+        let band = [2.0 * dk, 4.0 * dk];
+        let field = amplitude_field(32, 200.0, 12.0, 100_000.0, [1.0, 0.0], band, 7);
+        // Not the point of the test, but a band that filtered nothing — or everything —
+        // would pin a digest just as happily, and this is one line to say it did not.
+        let live = field.iter().filter(|c| c.re != 0.0 || c.im != 0.0).count();
+        assert_eq!(live, 36, "the band no longer selects the cells this digest was taken over");
+        assert_eq!(
+            digest(field.iter().flat_map(|c| [c.re, c.im])),
+            0x3ada_5906_73a5_8d8d,
+            "the banded amplitude field moved — read this test's doc comment before \
+             touching the literal"
+        );
+    }
+
     /// One water body's worth of TOML, so the real validator judges the real
     /// derived set rather than a re-implementation of its rules.
     fn water_scene(waves: &WaveSet) -> String {

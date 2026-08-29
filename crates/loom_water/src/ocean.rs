@@ -1133,6 +1133,22 @@ mod tests {
     /// this is the only test in the file that fails — but `× 1.5` and `× 2` do additionally
     /// trip `the_sea_travels_downwind`, whose 3 s / 20 m correlation stops holding once the
     /// swell moves far enough. The gap is real; it is a band, not the whole line.
+    ///
+    /// **The expected period is a literal, and that is load-bearing.** Deriving it from
+    /// `crate::GRAVITY` — as this test did — makes the expectation and the subject the
+    /// same constant, so they move together and the test cannot see `g` itself change.
+    /// Measured: set `GRAVITY` to Mars' **3.7** and the computed-period version of this
+    /// test passes *identically* — `T = 14.743 s`, drift 1.79e-7, the closed form matched
+    /// to four figures — which is the exact "right height, wrong period" sea it was
+    /// written to catch, sailing straight through its own gate.
+    ///
+    /// **The rest of the crate is not a substitute.** `GRAVITY = 3.7` does fail 18 tests
+    /// in `loom_water` — in `drip`, `nappe`, `spray`, `wavelet`, `foam` and `spectrum`,
+    /// each of which reads `g` for something of its own — but not one of them is about
+    /// the ocean's dispersion, so a wrong `g` reaching `Ocean` had no gate of its own.
+    /// Pinned against the literal below it does: `GRAVITY = 3.7` trips the first
+    /// assertion at a drift of **1.87** where a mode that returns reads 1.8e-7, and the
+    /// line printed above it reads `0.8635 against a closed-form 0.6518`.
     #[test]
     fn a_single_mode_returns_after_exactly_one_period() {
         let cascade = Cascade::whole(512.0, 64);
@@ -1143,8 +1159,17 @@ mod tests {
             o.tiles().to_vec()
         };
 
-        let k = mode_k(cascade.patch, m);
-        let period = std::f32::consts::TAU / (GRAVITY * k).sqrt();
+        // **A literal, and the one line in this test that must not be computed.** Written
+        // as `TAU / (GRAVITY * mode_k(cascade.patch, m)).sqrt()` this reads the same
+        // constant `Ocean::new` reads, so the two move together and the test is blind to
+        // the only thing it exists to pin — set `GRAVITY` to Mars' 3.7 and every assertion
+        // below still passes, on a sea with the right height and the wrong period.
+        //
+        // The arithmetic, once, at `g = 9.81 m/s²`: `k = m·2π/patch = 4·2π/512 = 2π/128 =
+        // 0.049087 rad/m`; `ω = √(g·k) = √(9.81 · 0.049087) = 0.693937 rad/s`;
+        // `T = 2π/ω = 9.054415 s`. `patch` and `m` are powers of two, so `k` is exact in
+        // `f32` and re-deriving this by hand lands on the same number.
+        let period = 9.054_415_f32;
         let t0 = at(&mut o, 0.0);
         let full = max_abs_diff(&t0, &at(&mut o, period));
         let half = max_abs_diff(&t0, &at(&mut o, period * 0.5));
@@ -1232,9 +1257,9 @@ mod tests {
     /// `h0 → ifft_2d → tiles → sample` cancels and is unobservable, which is why "eight
     /// of nine tests pass a transpose" — what an earlier version of this comment claimed
     /// — is a statement about a defect nobody can have. A transpose in **one link** is
-    /// the real hazard, and the rest of the suite catches it thinly: of the 136 tests in
-    /// this crate, each injection below trips exactly three, and this test is one of the
-    /// three in both cases. `Hs`, the seam, memory, rewind and finiteness are all
+    /// the real hazard, and the rest of the suite catches it thinly: each injection below
+    /// trips exactly three tests in this crate, and this test is one of the three in both
+    /// cases. `Hs`, the seam, memory, rewind and finiteness are all
     /// transpose-symmetric and see nothing, and
     /// `two_dimensions_agree_with_two_passes_of_one` cannot see it either: it compares
     /// `ifft_2d` against `ifft_2d` written longhand.
