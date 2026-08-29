@@ -117,8 +117,16 @@ let HELM_Z_MAX = -0.90;
 // rig is 24 m across, and a boat that answers the wheel at three knots is a
 // better demo than one that porpoises at seven. Measured, in this scene: see
 // the round's report.
-let AHEAD = 1100000.0;
-let ASTERN = 500000.0;   // less than half. A screw astern is inefficient in
+// **Scaled with the hull's mass, 2026-08-29.** These three were tuned against a
+// 43,776 kg boat. That mass was wrong — it had been scaled by a volume *ratio*
+// rather than set to the hull's displacement — and is now 57,636 kg, measured
+// three ways from the meshes. Force over mass is what a helm actually feels, so
+// all three are multiplied by 57636/43776 = 1.31661 to leave the handling
+// exactly where it was tuned. Without it she reaches x = 8.2 m in the 900 ticks
+// `rig_drive` gives her to make 40, because a third more boat is being pushed by
+// the same thrust.
+let AHEAD = 1448270.0;
+let ASTERN = 658305.0;   // less than half. A screw astern is inefficient in
                          // life and a stern that digs in is the same failure
                          // as a bow that does, so this end of the range gets
                          // the wider margin.
@@ -173,7 +181,7 @@ let STALL_TICKS = 45;    // three quarters of a second below that speed with
                          // the throttle open. Long enough that a wave or a
                          // hard turn cannot close the throttle; short enough
                          // that the bow has not yet buried itself.
-let WHEEL = 1300000.0;   // newton-metres of yaw. The hull's yaw inertia is
+let WHEEL = 1711593.0;   // newton-metres of yaw. The hull's yaw inertia is
                          // about 1.5e6 kg m^2 and the pontoons damp the
                          // rotation, so this is a terminal rate, not an
                          // acceleration — measured in the report.
