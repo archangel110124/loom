@@ -1433,8 +1433,18 @@ mod tests {
     /// threshold, so a beach in this engine has never deposited foam.
     /// `.superpowers/sdd/SEA-FFT-CORE-PLAN/baseline/README.md` records all three.
     ///
-    /// The cascade at the same wind -- `U10 = 18`, 440 km, nothing authored -- measured
-    /// over 160,801 points of `ocean_fft`'s own sea, at tick 400:
+    /// The cascade at the same wind -- `U10 = 18`, **unlimited fetch**, nothing
+    /// authored -- measured over 160,801 points, at tick 400:
+    ///
+    /// **Unlimited, and the comment here said "440 km" and was wrong.**
+    /// `spectrum_body()` is `WaterBody::default()` with the model switched, and
+    /// `WaterBody::fetch` defaults to `None`, which `Ocean::for_body` reads as infinite
+    /// -- the fully-developed Pierson-Moskowitz sea, which is a *different and larger*
+    /// sea than 440 km at this wind (7.27 m against 6.10 analytically). The numbers
+    /// below were always this sea's; only the label was another's. Nor is it
+    /// `ocean_fft`'s sea any more: that scene now splits its fetch between a wind sea
+    /// and a crossing swell, and its own figures are in `loom_cli`'s
+    /// `the_crossing_sea_breaks_and_its_trace_over_reports_it`.
     ///
     /// ```text
     /// mean mu_max 0.0502   rms 0.0802   max 0.43
@@ -1502,7 +1512,8 @@ mod tests {
         let total = f64::from(n);
         let pct = |c: u32| f64::from(c) * 100.0 / total;
         println!(
-            "derived sea at U10=18/440km: mean mu_max {:.4}, rms {:.4}, max {worst:.4}; \
+            "derived sea at U10=18, unlimited fetch: mean mu_max {:.4}, rms {:.4}, \
+             max {worst:.4}; \
              >0.22 {:.2}%, >0.33 {:.2}%, mean coverage {:.4}",
             sum / total,
             (sq / total).sqrt(),

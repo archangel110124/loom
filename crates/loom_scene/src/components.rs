@@ -1765,6 +1765,33 @@ pub struct WaterBody {
     /// Raising a maximum accepts strictly more, so no scene changes.
     #[schemars(range(min = 1.0, max = 1000000.0))]
     pub fetch: Option<f32>,
+    /// A second sea summed into this body's spectrum: a **swell**.
+    ///
+    /// **Absent — the default — is exactly the sea this body had before the
+    /// field existed**, and that is arithmetic rather than politeness: with no
+    /// swell the amplitude field sums `0.0 + x`, which is `x` bit for bit, so
+    /// every scene in this repository realises the same surface, the same
+    /// buoyancy and the same hash. The `ParticleEmitter.gpu` precedent again.
+    ///
+    /// **The division is the physical one.** The wind sea is the scene's
+    /// `Wind` and [`Self::fetch`] — the weather blowing here, now. A swell is
+    /// weather that has *left*: a wind that blew somewhere else, whose waves
+    /// have outrun it and arrived carrying a heading of their own. So a swell
+    /// authors its own [`Swell::u10`], [`Swell::fetch`] and
+    /// [`Swell::direction`] and takes nothing from the scene's wind.
+    ///
+    /// **Spectrum bodies only**, and refused at load on a `gerstner` one:
+    /// sixteen Gerstner waves are derived from one wind and have nowhere to
+    /// put a second sea, so the field would be authored and read past.
+    ///
+    /// Two seas are what make a sea *break*, and at *matched* significant
+    /// height. Measured on `assets/test/ocean_fft.loom` over 160,801 points of
+    /// its own sea: 440 km in one sea puts **one point** past
+    /// `FOAM_CREST_BREAK`, and the same energy split 420 + 20 between a swell
+    /// and a wind sea puts **162**. The short steep tail is what breaks and
+    /// the long waves are what carry the height, and a single fetch has to
+    /// choose between them.
+    pub swell: Option<Swell>,
     /// Density in kg/m³. `1000` fresh, `1025` salt.
     ///
     /// Read by buoyancy: it is what makes a floating object sit where it does,
@@ -1842,6 +1869,68 @@ pub struct WaterBody {
     pub acknowledge_nondeterminism: bool,
     /// The surface material.
     pub material: AssetRef,
+}
+
+/// The remnant of a wind that blew somewhere else — see [`WaterBody::swell`].
+///
+/// Three numbers, and they are exactly the three the wind sea already takes,
+/// because the two are the same kind of object: which one is "the wind sea" is
+/// a statement about the scene rather than about the physics.
+///
+/// **Every field is refused at load rather than defaulted into silence.** The
+/// defaults here — no wind, no heading — are deliberately values no sea can
+/// have, so a half-written table is named in an error instead of summing zero
+/// energy along a heading that means nothing. That is the S4 lesson the
+/// emitter refusals are written from: a constraint nobody enforces is a
+/// constraint the author meets as a symptom later.
+///
+/// **Its heading is taken modulo π, and that is a ceiling worth knowing before
+/// authoring one.** A cell of the amplitude grid holds one complex amplitude
+/// and therefore one direction of travel, so a swell authored more than 90°
+/// off the wind is realised on the right *axis* running the wind's way along
+/// it. An opposed sea needs two grids or a per-cell direction and neither
+/// exists. 50–70° off the wind is a real crossing well inside what one grid
+/// can represent; 170° is a following sea wearing the wrong number.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Swell {
+    /// The wind that raised it, at **10 m** — never a `Wind::speed`, which is
+    /// the free-stream value the height profile saturates toward and runs
+    /// about 10% above it.
+    ///
+    /// It is the *old* wind and has no reason to match the scene's: a 12 m/s
+    /// swell under a 5 m/s breeze is a sea after a gale, which is the state
+    /// this field exists to express.
+    #[schemars(range(min = 0.1, max = 40.0))]
+    pub u10: f32,
+    /// How far that wind blew over open water, in metres.
+    ///
+    /// **Absent is unlimited fetch** — the fully-developed Pierson–Moskowitz
+    /// sea — exactly as on [`WaterBody::fetch`], and the same range for the
+    /// same reason.
+    ///
+    /// Fetches *add* in energy: `m0 ∝ fetch` at a fixed wind, so splitting one
+    /// sea's fetch between a swell and a wind sea keeps its significant height
+    /// and changes nothing but where the energy sits in wavenumber.
+    #[schemars(range(min = 1.0, max = 1000000.0))]
+    pub fetch: Option<f32>,
+    /// Travel direction on the XZ plane. Normalised on use, so any length
+    /// works — but not a length of zero, which is refused.
+    ///
+    /// A vector rather than the compass degrees `Wind` authors, because this
+    /// sits inside `WaterBody` beside `waves.waves[].direction`, which is a
+    /// vector; and because "no direction" then has a spelling the loader can
+    /// refuse, where every angle is a valid one.
+    pub direction: [f32; 2],
+}
+
+impl Default for Swell {
+    fn default() -> Self {
+        // **Not a sea, on purpose.** Both are refused at load, so an author
+        // who opens the table and leaves a field out is told which one, rather
+        // than getting a swell of no height running nowhere.
+        Self { u10: 0.0, fetch: None, direction: [0.0, 0.0] }
+    }
 }
 
 /// Which wave model a [`WaterBody`]'s surface comes from — ADR 0076.
@@ -1930,6 +2019,10 @@ impl Default for WaterBody {
             // derived spectrum has always produced and what every scene
             // written before this field must keep producing.
             fetch: None,
+            // No second sea. `amplitude_field` then sums `0.0 + x`, which is
+            // `x` bit for bit, so every scene written before this field
+            // realises exactly the surface it did.
+            swell: None,
             // Salt water, because the default kind is an ocean and the two
             // defaults should describe one thing rather than half of each.
             density: 1025.0,

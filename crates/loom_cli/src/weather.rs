@@ -241,11 +241,21 @@ pub(crate) fn sea_state(
 /// on [`loom_water::ocean::Ocean::for_body`] — the simulation, once per fixed step.
 #[must_use]
 pub(crate) fn sea_of(world: &World, wind: &Wind) -> Option<loom_water::ocean::Ocean> {
-    let body = water_of(world, wind)?;
+    sea_of_body(&water_of(world, wind)?, wind)
+}
+
+/// The same, for a caller that already holds the body.
+///
+/// **Split out so a test can measure one body against a variant of itself** —
+/// the swell removed, the fetch put back — without a second spelling of the
+/// wind-to-`U10` conversion. Two spellings of that is exactly how the sea a
+/// scene reports and the sea it floats on stop being one sea.
+#[must_use]
+pub(crate) fn sea_of_body(body: &WaterBody, wind: &Wind) -> Option<loom_water::ocean::Ocean> {
     let params = wind.params();
     // U10, not `Wind::speed` — the same line `water_of` takes, for the same reason.
     loom_water::ocean::Ocean::for_body(
-        &body,
+        body,
         wind.mean_speed_at(10.0),
         [params.get("dir_x"), params.get("dir_z")],
     )

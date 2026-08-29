@@ -1387,6 +1387,112 @@ fn check_tier(
     errors
 }
 
+/// The swell rules, as refusals rather than comments — the second sea a
+/// `spectrum` body may author.
+///
+/// **A nested table gets no schema check at all**, and that is why the ranges
+/// below are spelled out here instead of being left to `schemars`. The
+/// registry validates one level: it resolves a field's `$ref`, checks its
+/// declared type, its enum and its range, and for a field whose value is an
+/// *object* there is no number to range-check and it descends no further. So
+/// `swell.fetch = 5.0e9` passes the schema exactly as `flow.speed = 900.0`
+/// does. The attributes on [`components::Swell`] are still worth carrying —
+/// they are what the inspector and `loom describe` draw — but they are
+/// documentation here, not enforcement.
+///
+/// Each refusal replaces a symptom that reads as an engine fault:
+///
+/// - a swell on a `gerstner` body is a field the loader reads past entirely,
+///   so the author sees the sea they did not ask for and nothing says why;
+/// - a swell with no heading normalises to the *wind's* heading, which is a
+///   crossing sea that is silently not crossing — the one failure this whole
+///   feature exists to make visible;
+/// - a swell with no wind carries no energy, so the second sea is authored,
+///   validated, summed, and worth exactly zero.
+fn check_swell(body: &components::WaterBody, node: &str) -> Vec<SceneError> {
+    let Some(swell) = body.swell else {
+        return Vec::new();
+    };
+    let mut errors = Vec::new();
+    let mut refuse = |code: &str, field: &str, value: Value, constraint: &str, hint: String| {
+        let mut err = SceneError::new(code, node);
+        err.field = format!("WaterBody.swell.{field}");
+        err.value = value;
+        err.constraint = constraint.to_owned();
+        err.hint = Some(hint);
+        errors.push(err);
+    };
+
+    if body.wave_model != components::WaveModel::Spectrum {
+        refuse(
+            "swell_on_gerstner_water",
+            "u10",
+            Value::from(swell.u10),
+            "a swell only on wave_model = \"spectrum\"",
+            "a swell is a second spectrum summed into the amplitude grid, and \
+             the gerstner model has no grid: it is a sum of sixteen waves \
+             derived from one wind, so this swell would be authored, \
+             validated and read past — the same silent drop \
+             `spectrum_water_authors_waves` refuses in the other direction. \
+             Set `wave_model = \"spectrum\"`, or drop `swell`."
+                .to_owned(),
+        );
+    }
+
+    // Length rather than each component: `[0, 0]` is the spelling that arrives
+    // by omission, and `normalise` answers `None` for it — after which
+    // `running_direction` falls back to the *wind's* heading and the crossing
+    // sea the author wrote is a following one. Nothing downstream can tell
+    // that from a swell genuinely authored along the wind.
+    let [dx, dz] = swell.direction;
+    if dx.hypot(dz) <= 0.0 {
+        refuse(
+            "swell_without_direction",
+            "direction",
+            Value::from(vec![dx, dz]),
+            "direction = [x, z], any non-zero length",
+            "a swell is weather that has left, so its heading is the whole \
+             point of authoring one — and a zero vector does not normalise, so \
+             this sea would run along the scene's `Wind` instead and read as a \
+             swell that simply agrees with it. Travel direction on XZ, \
+             clockwise from +X as `Wind.direction_degrees` is: [1, 0] runs \
+             toward +X, [0, 1] toward +Z."
+                .to_owned(),
+        );
+    }
+
+    // The heading is taken modulo π — one complex amplitude per cell is one
+    // direction of travel — so past 90° the sea lands on the authored axis
+    // running the wind's way along it. Not refused, because the *axis* is
+    // still what was asked for and a swell with no wind sea beside it (a dead
+    // calm after a gale) is realised exactly; it is on `Swell`'s docs instead.
+
+    for (field, value, min, max) in [
+        ("u10", swell.u10, 0.1_f32, 40.0_f32),
+        ("fetch", swell.fetch.unwrap_or(1.0), 1.0, 1_000_000.0),
+    ] {
+        if !(min..=max).contains(&value) {
+            refuse(
+                &format!("swell_{field}_out_of_range"),
+                field,
+                Value::from(value),
+                &format!("between {min} and {max}"),
+                format!(
+                    "the schema says {min}–{max} and nothing enforces it on a \
+                     nested table, so it is enforced here. `{field}` is \
+                     {value}. A swell's `u10` is the old wind at 10 m and its \
+                     `fetch` is how far that wind blew, in metres; leave \
+                     `fetch` out entirely for unlimited fetch — the \
+                     fully-developed sea — rather than writing a large number \
+                     for it."
+                ),
+            );
+        }
+    }
+
+    errors
+}
+
 /// The water rules a schema range cannot express, because each one relates
 /// several fields to each other.
 ///
@@ -1436,6 +1542,7 @@ fn check_water(
 
     let mut errors = Vec::new();
     errors.extend(check_tier(&body, node, has_gameplay, cinematic_bodies));
+    errors.extend(check_swell(&body, node));
     let count = body.waves.waves.len();
 
     // **Two seas authored in one component** — ADR 0076. The spectrum builds

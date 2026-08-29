@@ -651,9 +651,16 @@ impl Ocean {
     /// keeps the sea its scene's wind built at load. No scene both ramps and asks for the
     /// spectrum; when one does, the ramp is a slice of its own.
     ///
-    /// **No swell yet.** [`Self::with_swell`] takes one and `WaterBody` cannot author
-    /// one, so this passes `None` and every existing scene realises exactly the sea it
-    /// did before. The scene half is the next task of `SEA-DUAL-SPECTRUM-PLAN`.
+    /// **`u10`, `fetch` and `direction` are the wind sea's; the swell brings its own
+    /// three.** `WaterBody::swell` is the authored remnant of a wind that blew
+    /// somewhere else, so it takes nothing from the scene's `Wind` — that division is
+    /// the physical one and it is what makes the default free: a body with no swell
+    /// passes `None` here, [`amplitude_field`] sums `0.0 + x`, and every scene written
+    /// before the field existed realises exactly the surface it did.
+    ///
+    /// A swell on a `gerstner` body is refused at load rather than dropped here
+    /// (`loom_scene`'s `swell_on_gerstner_water`), so the `None` this function returns
+    /// for one can never be a swell going quietly missing.
     #[must_use]
     pub fn for_body(
         body: &loom_scene::components::WaterBody,
@@ -663,14 +670,20 @@ impl Ocean {
         if body.wave_model != loom_scene::components::WaveModel::Spectrum {
             return None;
         }
-        Some(Self::new(
+        // Absent is unlimited fetch — the fully-developed sea — on both seas.
+        // `spectrum_shape` reads a non-finite fetch as unlimited, which is the same arm
+        // `wave_set` takes for the same `None`.
+        let unlimited = |fetch: Option<f32>| fetch.unwrap_or(f32::INFINITY);
+        Some(Self::with_swell(
             &shipping_stack(SHIPPING_N),
             u10,
-            // Absent is unlimited fetch — the fully-developed sea. `spectrum_shape`
-            // reads a non-finite fetch as unlimited, which is the same arm
-            // `wave_set` takes for the same `None`.
-            body.fetch.unwrap_or(f32::INFINITY),
+            unlimited(body.fetch),
             direction,
+            body.swell.map(|s| crate::spectrum::Swell {
+                u10: s.u10,
+                fetch: unlimited(s.fetch),
+                direction: s.direction,
+            }),
             SEA_SEED,
         ))
     }
@@ -1228,7 +1241,8 @@ mod tests {
     /// reason two spectra are summed into one grid.**
     ///
     /// Whitecapping is driven by *steepness*, and fetch buys height by making the sea
-    /// *longer*: `ocean_fft`'s 440 km sea realises 6.1 m — a genuine twenty-foot sea —
+    /// *longer*: a single 440 km sea — which is what `ocean_fft` authored before it
+    /// authored a swell — realises 6.1 m, a genuine twenty-foot sea,
     /// at a 226 m peak wavelength, so `Hs/λp ≈ 0.027`, and it barely breaks. Per wave
     /// `k·A` is what a crest responds to, and a short wave carries it out of all
     /// proportion to its height.

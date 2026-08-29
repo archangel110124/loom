@@ -29,9 +29,67 @@
 #   5.638 m at 376 km and 6.099 m at 440 km. When the question is what this
 #   engine does, run this engine.
 #
-# It is genuinely fetch-limited: fully developed at 624 km, so the sea is
-# *steeper* than the Pierson–Moskowitz limit rather than merely bigger, which
-# is the property that makes it break instead of zoom.
+# **Those 440 km are split 420 + 20 between a swell and the wind sea, and the
+# split is exact rather than tuned.** A fetch-limited `Hs` is
+# `0.0016·U·√(F/g)`, so `Hs ∝ √F` at a fixed wind and `m0 ∝ F` — fetches
+# add. 5.959 m of swell and 1.300 m of wind sea in quadrature is 6.0994 m,
+# which is `0.0016·18·√(440000/9.81)` to every digit either is quoted to.
+# Nothing here was chosen to make the height come out; the height could not
+# have moved.
+#
+# Both halves are genuinely fetch-limited — this wind is fully developed at
+# 624 km — so both are *steeper* than the Pierson–Moskowitz limit rather than
+# merely bigger, which is the property that makes a sea break instead of zoom.
+#
+# **What the split buys is a sea that breaks at all.** One fetch cannot carry
+# both a twenty-foot height and a short steep tail. Measured over this scene's
+# own sea at tick 400, 160,801 points across the 2048 m tile
+# (`play::tests::the_crossing_sea_breaks_and_its_trace_over_reports_it`):
+#
+#                            realised Hs   mean mu_max   past 0.45
+#     440 km in one sea      5.957 m       0.0515        1 point   0.0006%
+#     420 + 20 at 60°        5.897 m       0.0842        162       0.1007%
+#
+# **One point of 160,801 becomes 162**, with 63% more mean compression behind
+# it. The height is a property of the long waves and the breaking is a
+# property of the short ones, and a single fetch has to choose.
+#
+# **The realised heights are single draws and 5.957 is not a contradiction of
+# 6.0994.** This spectrum is narrow, so most of its energy lands in few cells
+# and one seed is a small sample: `ocean::tests::
+# the_realised_sea_is_the_size_the_spectrum_promised` measures the single-draw
+# spread at 0.35x to 1.68x of the analytic value and averages 200 seeds to get
+# 6.100 m. The scene has one seed. The 1% between the two rows above is that
+# noise, not a change in energy — the energies are equal by construction.
+#
+# # The crossing, and why 60°
+#
+# The wind blows toward 15° and the swell runs toward 75° — `[cos 75°,
+# sin 75°]`, which is `[0.25881904, 0.9659258]`, the wind's own pair swapped
+# because 15° and 75° are complementary.
+#
+# **60° is a ceiling as much as a choice.** A grid cell holds one complex
+# amplitude and therefore one direction of travel, and the directional spread
+# is a magnitude, so a swell authored more than 90° off the wind is realised
+# on the right *axis* travelling the wind's way along it. A genuinely opposed
+# sea needs two grids or a per-cell direction and neither exists. 50–70° is a
+# real crossing well inside what one grid can represent.
+#
+# And it is the case `WaterSample::mu_max` was written for and had never met:
+# the largest eigenvalue of the horizontal compression rather than its trace
+# (`WaterSample::fold`), because two seas compressing two axes at once *add
+# their traces* while neither axis has folded. Measured here, past 0.45:
+#
+#                            eigenvalue   trace
+#     420 + 20, swell along  0.1766%      0.9129%
+#     420 + 20, swell at 60° 0.1007%      0.8800%
+#
+# **Turning the swell across the wind drops the eigenvalue 43% and the trace
+# 3.6%.** The trace is very nearly blind to the difference between a sea
+# running one way and a sea running two, and on the crossing sea 89% of the
+# whitecaps it would paint are on water where neither axis has folded. That
+# decision was made long before this engine had a crossing sea to make it on;
+# this scene is the first one it has.
 #
 # **`Wind.speed` is not `U10`.** The authored field is the free-stream value
 # the height profile saturates toward, and at the meteorological standard 10 m
@@ -97,7 +155,21 @@ parent = "Sea"
   surface_height = 0.0
   density = 1025.0
   drag = 2.0
-  fetch = 440000.0
+  # The wind sea: short, steep, and 20 km of the 440 the scene's energy is.
+  fetch = 20000.0
+
+    # The other 420 km, arrived from 60° to starboard as a swell — the
+    # remnant of a wind that blew somewhere else and has since left, which is
+    # why it carries its own `u10` and its own heading and takes nothing from
+    # the scene's `Wind`.
+    #
+    # `u10` is the same 18 m/s because this is one storm's energy divided in
+    # two, not two storms; a swell under a *different* wind is the other thing
+    # this field can say and is not what this scene is the acceptance test for.
+    [node.components.WaterBody.swell]
+    u10 = 18.0
+    fetch = 420000.0
+    direction = [0.25881904, 0.9659258]
 
 # One object with a known size, because a still of open water has no scale in
 # it — a 6 m sea and a 0.6 m chop photograph identically without something to

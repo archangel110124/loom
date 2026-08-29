@@ -1129,6 +1129,86 @@ name = \"Hill\"
         assert!(hint.contains('1'), "and how many waves: {errors:?}");
     }
 
+    /// **The four swell refusals, and the accepted sea they bracket.**
+    ///
+    /// A swell is the authored remnant of a wind that blew somewhere else, and
+    /// every way of half-authoring one fails *silently* without these: on a
+    /// gerstner body the table is read past entirely; with no heading it
+    /// normalises to the scene's own wind and the crossing sea is quietly a
+    /// following one; with no `u10` it sums zero energy. None of those change
+    /// `ok: true`, and all three read as an engine that ignored the file.
+    ///
+    /// **The range pair is checked here rather than by the schema**, because
+    /// the registry validates one level and a swell is a nested table — the
+    /// `schemars` attributes on `Swell` are what the inspector draws, not what
+    /// the loader enforces. `flow.speed` has the same hole and always has.
+    #[test]
+    fn a_half_authored_swell_is_refused_by_name() {
+        let sea = |body: &str| {
+            water_scene(&format!(
+                "wave_model = \"spectrum\"\n[node.components.WaterBody.swell]\n{body}"
+            ))
+        };
+        let ok = "u10 = 18.0\nfetch = 420000.0\ndirection = [0.26, 0.97]\n";
+
+        Scene::parse(&sea(ok)).expect("a fully authored swell on a spectrum body");
+
+        // Absent is unlimited fetch, exactly as on `WaterBody::fetch` — not a
+        // missing value, so not a refusal.
+        Scene::parse(&sea("u10 = 18.0\ndirection = [0.26, 0.97]\n"))
+            .expect("a swell with no fetch is a fully-developed one");
+
+        let only = |src: String, code: &str| {
+            let errors = Scene::parse(&src).expect_err("this swell cannot be meant");
+            assert_eq!(errors.len(), 1, "one fault, reported once: {errors:?}");
+            assert_eq!(errors[0].error, code, "{errors:?}");
+            errors.into_iter().next().expect("one error")
+        };
+
+        // A swell on a gerstner body: no grid to sum a second spectrum into.
+        let err = only(
+            water_scene(&format!("[node.components.WaterBody.swell]\n{ok}")),
+            "swell_on_gerstner_water",
+        );
+        assert!(
+            err.hint.as_deref().unwrap_or_default().contains("wave_model = \"spectrum\""),
+            "name the value that fixes it: {err:?}"
+        );
+
+        // No heading. `[0, 0]` is what omission produces and what a typo
+        // produces, and it does not normalise.
+        let err = only(sea("u10 = 18.0\nfetch = 420000.0\n"), "swell_without_direction");
+        assert_eq!(err.field, "WaterBody.swell.direction");
+        assert!(
+            err.hint.as_deref().unwrap_or_default().contains("[1, 0]"),
+            "name the shape of the value: {err:?}"
+        );
+        only(
+            sea("u10 = 18.0\nfetch = 420000.0\ndirection = [0.0, 0.0]\n"),
+            "swell_without_direction",
+        );
+
+        // No wind: a second sea carrying no energy at all.
+        let err = only(sea("fetch = 420000.0\ndirection = [0.26, 0.97]\n"), "swell_u10_out_of_range");
+        assert_eq!(err.field, "WaterBody.swell.u10");
+        assert!(
+            err.hint.as_deref().unwrap_or_default().contains("0.1"),
+            "name the bound: {err:?}"
+        );
+
+        // And the range the nested schema cannot enforce.
+        only(sea("u10 = 48.0\ndirection = [0.26, 0.97]\n"), "swell_u10_out_of_range");
+        let err = only(
+            sea("u10 = 18.0\nfetch = 5000000.0\ndirection = [0.26, 0.97]\n"),
+            "swell_fetch_out_of_range",
+        );
+        assert_eq!(err.field, "WaterBody.swell.fetch");
+        assert!(
+            err.hint.as_deref().unwrap_or_default().contains("1000000"),
+            "name the bound: {err:?}"
+        );
+    }
+
     /// **A sign typo is its own mistake.** Folding it through `.abs()` blamed
     /// steepness for a negative amplitude and printed the value with the sign
     /// flipped, and reported `steepness = -9.0` as "value -9.0, constraint at

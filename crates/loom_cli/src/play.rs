@@ -3660,6 +3660,219 @@ transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
         );
     }
 
+    /// **The crossing sea `ocean_fft` authors, and the one measurement this
+    /// engine has never been able to take.**
+    ///
+    /// Three claims, and the third is the one worth having.
+    ///
+    /// 1. **The swell reaches the ocean.** A `swell` table that the scene
+    ///    parses, the schema accepts and `Ocean::for_body` drops on the floor
+    ///    would look exactly like a swell that works — same `ok: true`, same
+    ///    picture at a glance. Here the split sea is *measured* against the
+    ///    single sea it replaced.
+    /// 2. **The height did not move, and the breaking did.** 440 km in one sea
+    ///    against 420 + 20 split between a swell and a wind sea is the same
+    ///    `m0` by construction, because `Hs ∝ √F` at a fixed wind and fetches
+    ///    therefore add in energy. So `Hs` is held to 2% while the fraction of
+    ///    the surface past `FOAM_CREST_BREAK` goes from nothing at all to
+    ///    something — one fetch cannot carry both the height and the short
+    ///    steep tail that breaks.
+    /// 3. **The trace and the eigenvalue disagree, on a real crossing sea.**
+    ///    `WaterSample::mu_max` is the largest eigenvalue of the horizontal
+    ///    compression rather than its trace (`WaterSample::fold`) precisely to
+    ///    handle a sea running two ways at once, and until this scene existed
+    ///    there was no crossing sea in the repository to prove it on: the
+    ///    12.32%-against-0.00% figure in `mu_max`'s docs is a synthetic pair
+    ///    of swells, not a sea anything floats in.
+    ///
+    /// # Measured, at `SIDE = 401` over the 2048 m tile, tick 400
+    ///
+    /// ```text
+    ///                          Hs        mean mu_max   past 0.45 by
+    ///                                                  eigenvalue   trace
+    /// 440 km, one sea          5.957 m   0.0515        0.0006%      0.0093%
+    /// 420 + 20, swell along    5.977 m   0.0843        0.1766%      0.9129%
+    /// 420 + 20, swell at 60°   5.897 m   0.0842        0.1007%      0.8800%
+    /// ```
+    ///
+    /// **`Hs` is a single draw and the three rows differ by 1%, which is noise
+    /// rather than energy.** This spectrum is narrow, so one seed is a small
+    /// sample: `loom_water::ocean`'s `the_realised_sea_is_the_size_the_spectrum
+    /// _promised` measures the single-draw spread at 0.35x to 1.68x and needs
+    /// 200 seeds to land on the analytic 6.100 m. The 2% bound below is a check
+    /// that the *split* did not move the energy — which it cannot, because
+    /// `m0 ∝ F` — not a claim that a single draw is the analytic height.
+    ///
+    /// **The middle row is the control, and it is what makes the third row
+    /// mean anything.** A spectrum sea carries a `cos^p` directional spread,
+    /// so its compression is never purely one-axis and the trace over-reports
+    /// a little on *any* of these. What isolates the crossing is turning the
+    /// swell 60° and changing nothing else: **the eigenvalue falls 43%
+    /// (0.1766 → 0.1007) and the trace falls 3.6% (0.9129 → 0.8800)**. The
+    /// trace is very nearly blind to the difference between a sea running one
+    /// way and a sea running two, which is exactly the failure `mu_max` was
+    /// made an eigenvalue to avoid: it would paint the same whitecaps on both,
+    /// and on the crossing sea 89% of them (0.8800 against 0.1007) would be
+    /// on water where neither axis has folded.
+    ///
+    /// The two are 8.7x apart on the crossing sea against 5.2x on the aligned
+    /// one — the gap widens with the crossing, which is the direction the
+    /// argument predicts and the reason the assertion below is a ratio.
+    ///
+    /// **`SIDE` is prime and that is a measurement rather than a preference.**
+    /// Every cascade's patch is a power of two, so a power-of-two side steps
+    /// the 32 m chop tile by a whole number of cells and samples one
+    /// sublattice of it forever. Measured on this scene's crossing sea:
+    ///
+    /// ```text
+    /// side   mean mu_max   eigenvalue   trace
+    ///  128   0.0786        0.0000%      0.9338%     <- power of two
+    ///  512   0.0917        0.1644%      1.5812%     <- power of two
+    ///  257   0.0842        0.1014%      0.8933%
+    ///  401   0.0842        0.1007%      0.8800%     <- this
+    ///  601   0.0842        0.0963%      0.9028%
+    /// 1009   0.0842        0.0978%      0.9010%
+    /// ```
+    ///
+    /// The four primes agree on the mean to four decimals and on the tail to
+    /// about 5%. **128 reports that this sea does not break at all** and 512
+    /// reports 63% more breaking than it has, from nothing but where their
+    /// points landed. An aliased sample of a periodic tile is not a small
+    /// error, it is a different sea.
+    #[test]
+    fn the_crossing_sea_breaks_and_its_trace_over_reports_it() {
+        const SIDE: u16 = 401;
+        let src = std::fs::read_to_string("../../assets/test/ocean_fft.loom")
+            .expect("the scene");
+        let world = World::from_scene(&Scene::parse(&src).expect("valid scene"));
+        let wind = crate::weather::wind_of_world(&world);
+        let split = crate::weather::water_of(&world, &wind).expect("the scene has water");
+        assert!(split.swell.is_some(), "the scene stopped authoring a swell");
+
+        // The scene as it was before the split: one 440 km sea, no swell. The
+        // two fetches sum to it exactly, which is what makes `Hs` the control.
+        let single = loom_scene::components::WaterBody {
+            fetch: Some(440_000.0),
+            swell: None,
+            ..split.clone()
+        };
+
+        // The instant `loom water --at ... --sim 400` reports on, so the
+        // numbers here and the numbers on the command line are one measurement.
+        let t = 400.0 / 60.0;
+        // Across the largest cascade's patch, so the swell is sampled over
+        // whole periods rather than over one flank of one crest.
+        let step = 2048.0 / f32::from(SIDE);
+        // `(Hs, past-threshold on mu_max, past-threshold on fold, mean mu_max)`.
+        let measure = |body: &loom_scene::components::WaterBody| {
+            let mut sea = crate::weather::sea_of_body(body, &wind).expect("a spectrum sea");
+            sea.evolve(t);
+            let (mut eigen, mut trace, mut n, mut sum) = (0_u32, 0_u32, 0_u32, 0.0_f64);
+            for iz in 0..SIDE {
+                for ix in 0..SIDE {
+                    let at = [f32::from(ix) * step, f32::from(iz) * step];
+                    let s = loom_water::sample_water(
+                        body,
+                        Some(&sea),
+                        at,
+                        t,
+                        -1000.0,
+                        [0.0; 3],
+                        [0.0; 3],
+                    );
+                    n += 1;
+                    sum += f64::from(s.mu_max);
+                    if s.mu_max > loom_water::foam::FOAM_CREST_BREAK {
+                        eigen += 1;
+                    }
+                    if s.fold > loom_water::foam::FOAM_CREST_BREAK {
+                        trace += 1;
+                    }
+                }
+            }
+            let total = f64::from(n);
+            let pct = |c: u32| f64::from(c) * 100.0 / total;
+            (sea.significant_height(), pct(eigen), pct(trace), sum / total, eigen, trace, n)
+        };
+
+        // **The control that attributes the gap to the crossing.** The same
+        // split with the swell laid along the wind instead of 60° across it.
+        // Without it the comparison proves nothing: a spectrum sea carries a
+        // `cos^p` directional spread, so its compression is never purely
+        // one-axis and the trace over-reports a little even on one sea. What
+        // the eigenvalue exists for is the crossing, and this row is what
+        // isolates it.
+        let mut aligned = split.clone();
+        let params = wind.params();
+        if let Some(swell) = aligned.swell.as_mut() {
+            swell.direction = [params.get("dir_x"), params.get("dir_z")];
+        }
+
+        let (hs_one, eigen_one, trace_one, mean_one, ne_one, nt_one, n) = measure(&single);
+        let (hs_al, eigen_al, trace_al, mean_al, ne_al, nt_al, _) = measure(&aligned);
+        let (hs_two, eigen_two, trace_two, mean_two, ne_two, nt_two, _) = measure(&split);
+        println!(
+            "at side {SIDE} ({n} points), past FOAM_CREST_BREAK = 0.45:\n\
+             440 km, one sea:        Hs {hs_one:.3} m  mean mu_max {mean_one:.4}  \
+             eigenvalue {ne_one} ({eigen_one:.4}%)  trace {nt_one} ({trace_one:.4}%)\n\
+             420 + 20, swell along:  Hs {hs_al:.3} m  mean mu_max {mean_al:.4}  \
+             eigenvalue {ne_al} ({eigen_al:.4}%)  trace {nt_al} ({trace_al:.4}%)\n\
+             420 + 20, swell at 60:  Hs {hs_two:.3} m  mean mu_max {mean_two:.4}  \
+             eigenvalue {ne_two} ({eigen_two:.4}%)  trace {nt_two} ({trace_two:.4}%)"
+        );
+
+        assert!(
+            (hs_two - hs_one).abs() / hs_one < 0.02,
+            "the split moved the sea's height: {hs_one:.4} m to {hs_two:.4} m. \
+             Fetches add in energy, so 420 + 20 has to be 440 — a height that \
+             moved means the swell is not being summed as a second variance"
+        );
+        // 0.005% is eight of the 160,801 points; the measured figure is one.
+        // Not zero, because a floor at exactly zero would fail on a lattice
+        // that happened to land on the single crest this sea does have.
+        assert!(
+            eigen_one < 0.005,
+            "the single 440 km sea already breaks at {eigen_one:.4}%, so this \
+             test cannot show that the split is what makes it break"
+        );
+        // Half the measured 0.1007%, which is 168x the row above it.
+        assert!(
+            eigen_two > 0.05,
+            "the crossing sea puts {eigen_two:.4}% past FOAM_CREST_BREAK, \
+             which is the same nothing the single sea puts there — the swell \
+             is not reaching the amplitude field"
+        );
+        assert!(
+            trace_two > eigen_two * 4.0,
+            "the trace calls {trace_two:.4}% breaking against the eigenvalue's \
+             {eigen_two:.4}%, measured 8.7x apart. If they agree here, either \
+             the swell is absent or `mu_max` has quietly become the trace and \
+             the whole reason it is an eigenvalue is gone"
+        );
+        // **The gap has to WIDEN with the crossing**, or the trace's
+        // over-report is just the directional spread and this sea proves
+        // nothing about eigenvalues. Measured 5.2x aligned against 8.7x at
+        // 60°, and the mechanism is that the eigenvalue drops 43% while the
+        // trace drops 3.6%.
+        assert!(
+            trace_two / eigen_two > trace_al / eigen_al,
+            "turning the swell 60° across the wind left the trace and the \
+             eigenvalue no further apart than laying it along: {:.2}x aligned, \
+             {:.2}x crossing. The crossing is then doing nothing to the \
+             breaking criterion, which is the one thing this scene exists to \
+             show",
+            trace_al / eigen_al,
+            trace_two / eigen_two
+        );
+        assert!(
+            eigen_two < eigen_al * 0.75,
+            "the eigenvalue read {eigen_two:.4}% on the crossing sea against \
+             {eigen_al:.4}% on the aligned one, measured 43% down. A crossing \
+             sea compresses two axes at once and neither has folded as far as \
+             the one axis did — an eigenvalue that does not notice is a trace"
+        );
+    }
+
     fn world() -> World {
         World::from_scene(&Scene::parse(FALLING).expect("valid scene"))
     }

@@ -7189,7 +7189,20 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
             // the opt-in rather than a lucky escape.** `wave_model` defaults to
             // `gerstner` and `sample_water` branches on it, so a leak would move every
             // water scene in the repository at once.
-            ("ocean_fft", "6b23df17418109ef"),
+            //
+            // **Re-pinned by the dual spectrum, in the commit that moved it.**
+            // `ocean_fft` now authors a `swell` — 420 km of the 440 its energy
+            // is, crossing the wind sea at 60° — so its surface is a different
+            // surface and the buoy on it takes a different path. Was
+            // 6b23df17418109ef.
+            //
+            // **The four above did not move, and that is the check on the
+            // default rather than a lucky escape.** `WaterBody::swell` defaults
+            // to `None`, `amplitude_field` then sums `0.0 + x`, and a leak
+            // would move every water scene in the repository at once — which
+            // is exactly what this loop would report, one scene before it got
+            // here.
+            ("ocean_fft", "91dbfa6598e2a32e"),
         ] {
             let path = format!("../../assets/test/{scene}.loom");
             // **Cinematic water is barred from a pinned hash** — ADR 0053 §3:
