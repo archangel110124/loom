@@ -5956,22 +5956,138 @@ static const float3 WATER_FOAM_OLD_ALBEDO = float3(0.28, 0.30, 0.32);
 /// dispersing raft is holes: the water's own reflection comes back through it,
 /// which is the difference between foam ageing and foam dimming.
 static const float WATER_FOAM_OLD_OPACITY = 0.55;
-/// Where the second octave stops.
+// -- The foam's octave ladder, band-limited — SEA-REBUILD §4.4 ---------------
+//
+// **This replaces `WATER_FOAM_FINE_RANGE = 40.0`**, which retired the second
+// octave past a fixed distance in metres. That constant had the mechanism right
+// and was wrong in three ways this generalises rather than tunes. Every number
+// below is worst-channel `loom salt` on
+// `ocean_fft_boat --sim 500 --yaw 15 --pitch 55` at 1000x1000, where the shot
+// scored **29,462** before this change against a **5,789** floor — what
+// `LOOM_ABLATE=water_foam` scores on the same frame, so the whole lace was
+// costing 23,673 of it.
+//
+// **It faded the octave to zero rather than to its own mean.** `loom_value_noise`
+// is on [0,1), so dropping a 0.35-amplitude octave takes 0.175 off `fnoise` —
+// and `fnoise` is the *threshold* the coverage is eroded against
+// (`smoothstep(fnoise - 0.15, fnoise + 0.15, wetc)`), not a colour. A lower
+// threshold is more foam, so the far field grew a wash of extra whitecap whose
+// every edge is sub-pixel. Centring that fade on 0.5 and changing nothing else
+// scores **12,260**: over half the stipple was foam that existed only because
+// retiring an octave had moved the mean.
+//
+// **The first octave never got the treatment at all**, and it is the larger of
+// the two. Its cross-streak lattice period is 30 cm, which is under a pixel long
+// before the horizon at any downward camera. Flattening it to its mean as well
+// scores **7,487** — within noise of the 7,472 that retiring every octave
+// scores, so the first octave is where the remaining lace was.
+//
+// **And a distance in metres is the wrong instrument**, for the reason
+// `FIRE_OCTAVE_STEP` above already gives at length: it is blind to resolution
+// and blind to grazing angle, and a downward camera over water is nothing but
+// grazing angle. The bound is Nyquist in SCREEN space, from a real derivative.
+//
+// So every octave rolls off on one rule, and a coarser rung comes in under the
+// first as it goes, so structure survives at whatever frequency the range can
+// carry instead of the surface going to a flat wash. Judged on `loom salt`,
+// which can see stipple — not on `flicker`, which cannot tell "wider" from
+// "less stable".
+
+/// Lattice scales of the ladder, in cycles per metre ALONG the streak. Across it
+/// they are `WATER_FOAM_STREAK` times finer, and that short axis is the one that
+/// goes under a pixel first, so it is the axis the band limit is taken on.
 ///
-/// **Not taste — an aliasing bound.** Its cross-streak lattice period is
-/// `1/(WATER_FOAM_STREAK · 2.3)` = 7.3 cm, and `loom_value_noise` is evaluated
-/// analytically with no mip chain, so past ~30 m that octave is far under a
-/// pixel and becomes a twinkle generator. One `saturate` retires it.
-static const float WATER_FOAM_FINE_RANGE = 40.0;
+/// The coarse rung is two octaves under the lace — `0.55 / 4` — so it survives
+/// four times the footprint the lace does, which is what keeps a whitecap from
+/// being a flat blob for the whole band between the lace dying and this dying.
+static const float WATER_FOAM_COARSE = 0.1375;
+static const float WATER_FOAM_LACE = 0.55;
+static const float WATER_FOAM_FINE = 2.3;
+/// Cycles per pixel an octave is whole below and gone above, the same
+/// instrument `FIRE_NYQUIST_LOW`/`HIGH` use and the same units.
+///
+/// **Half the fire shader's numbers, and that is not caution.** Fire integrates
+/// its noise along a ray, so 0.5 cycles per pixel — Nyquist itself — is the
+/// honest limit there. This noise is *thresholded*: `smoothstep(fnoise ± 0.15,
+/// wetc)` is very nearly a binariser, and binarising a signal puts energy far
+/// above its own band, so the lattice is still visible as hatching well before
+/// it reaches Nyquist. Measured: retiring at fire's own 0.5/0.25 scores 12,427
+/// on the shot above — barely better than centring the fade and not
+/// band-limiting at all — and this pair scores 11,059. Half again as
+/// conservative (0.1667/0.0833) is worth only 664 more while retiring the lace
+/// half as far out, so this is the knee of the curve rather than a hard limit,
+/// and the residue past it belongs to the binariser rather than to the lattice.
+static const float WATER_FOAM_NYQUIST_LOW = 0.125;
+static const float WATER_FOAM_NYQUIST_HIGH = 0.25;
+
+/// How much of one octave this fragment can carry: 1 fully resolved, 0 past the
+/// bound. `foot` is metres of world per pixel across this fragment, measured
+/// once at the top of `waterFragmentMain`.
+float foamOctaveWeight(float scale, float foot) {
+    float cyclesPerPixel = foot * scale * WATER_FOAM_STREAK;
+    return saturate((WATER_FOAM_NYQUIST_HIGH - cyclesPerPixel)
+                  / (WATER_FOAM_NYQUIST_HIGH - WATER_FOAM_NYQUIST_LOW));
+}
+
+/// The ladder's three weights at this footprint: lace, coarse, fine.
+///
+/// Split from the noise because the erosion band needs them too, and because
+/// the flow map evaluates the noise twice at one footprint — the weights are a
+/// property of the pixel, not of the sample.
+float3 waterFoamWeights(float foot) {
+    float wLace = foamOctaveWeight(WATER_FOAM_LACE, foot);
+    // The coarse rung is the lace's understudy rather than a third layer: it is
+    // worth exactly what the lace has lost, so it is silent everywhere the lace
+    // is whole and the near field is untouched by its existence.
+    float wCoarse = foamOctaveWeight(WATER_FOAM_COARSE, foot) * (1.0 - wLace);
+    return float3(wLace, wCoarse, foamOctaveWeight(WATER_FOAM_FINE, foot));
+}
 
 /// The foam's lace, in the breaking frame. Split out so the flow map can
 /// evaluate it twice; `wd` is the **breaking direction** the streaks lie along
-/// (`in.breakDir`, not the wind — ADR 0053 §7) and `fine` retires the second
-/// octave at range.
-float waterFoamNoise(float2 wp, float2 wd, float fine) {
+/// (`in.breakDir`, not the wind — ADR 0053 §7) and `w` is `waterFoamWeights`
+/// for this fragment's footprint.
+///
+/// Centred on 0.5, with every octave weighted about that centre, so an octave
+/// going away costs contrast and never moves the threshold. Where the fragment
+/// carries both of the original two, this is `0.65·n₁ + 0.35·n₂` exactly — the
+/// amplitudes the old code drew at zero range. What changed is that it holds
+/// out to wherever the pixels last, instead of the second octave beginning to
+/// fade at the camera and being gone by 40 m.
+float waterFoamNoise(float2 wp, float2 wd, float3 w) {
     float2 fuv = float2(dot(wp, wd), dot(wp, float2(-wd.y, wd.x)) * WATER_FOAM_STREAK);
-    return loom_value_noise(float3(fuv * 0.55, 0.0)) * 0.65
-         + loom_value_noise(float3(fuv * 2.3, 7.3)) * 0.35 * fine;
+    return 0.5
+         + ((loom_value_noise(float3(fuv * WATER_FOAM_LACE, 0.0)) - 0.5) * w.x
+          + (loom_value_noise(float3(fuv * WATER_FOAM_COARSE, 4.1)) - 0.5) * w.y) * 0.65
+         + (loom_value_noise(float3(fuv * WATER_FOAM_FINE, 7.3)) - 0.5) * 0.35 * w.z;
+}
+
+/// Half-width of the band the coverage is eroded through, given how much of the
+/// lace the fragment kept.
+///
+/// **The other half of band-limiting, and without it the fix loses foam.**
+/// `foam = smoothstep(fnoise ± half, wetc)` averaged over a footprint the lace
+/// no longer resolves is not that same smoothstep at the noise's mean — it is
+/// the noise's own distribution, which is wider. Holding the band at 0.15 while
+/// the noise flattens therefore throws coverage away: `cargo xtask ablate`'s
+/// `water_foam` row, which is how much of `whitecaps` foam is responsible for
+/// at 320x200 — a resolution where almost nothing is resolved — fell from
+/// 29.178% to 18.139% against its 15.0 floor with the band held fixed.
+///
+/// The two numbers are matched slopes, not taste. `loom_value_noise` is a
+/// trilinear lerp of uniform hashes, so its standard deviation is
+/// `sqrt((1/12)·(2/3)³)` = 0.157, and `0.65·n₁ + 0.35·n₂` has
+/// `sqrt(0.65² + 0.35²)·0.157` = 0.116. A `smoothstep` of half-width `B` has
+/// the central slope of a normal of `sigma = 0.532·B`, so the flat end wants
+/// `B = sqrt(0.116² + 0.080²) / 0.532` = 0.265 to pass the same fraction of
+/// pixels the lace used to. Measured: it brings the row back to **22.178%** and
+/// costs 21 on `loom salt` — nothing, because a wider transition is a softer
+/// edge. It does not reach 29.178% and should not: the rest of that number was
+/// the mean shift above painting foam that the noise never justified.
+static const float WATER_FOAM_ERODE = 0.15;
+static const float WATER_FOAM_ERODE_FLAT = 0.265;
+float waterFoamErode(float3 w) {
+    return lerp(WATER_FOAM_ERODE_FLAT, WATER_FOAM_ERODE, saturate(0.65 * (w.x + w.y) + 0.35 * w.z));
 }
 
 /// Capillary detail on the water surface, below anything the mesh can carry.
@@ -5990,11 +6106,16 @@ float waterFoamNoise(float2 wp, float2 wd, float fine) {
 /// Central differences on `loom_value_noise` at a fixed epsilon cost three taps
 /// an octave and no storage.
 ///
-/// **No `ddx`/`ddy` anywhere.** The shoreline `discard` is the first statement
-/// of `waterFragmentMain`, so derivatives in those quads are undefined — and
-/// those quads are exactly the waterline that `shore` and `river` exist to
-/// protect. The distance fade is computed from `length(toEye)` instead, which
-/// is an analytic footprint and correct in a killed quad.
+/// **No `ddx`/`ddy` of its own.** The shoreline `discard` is very nearly the
+/// first statement of `waterFragmentMain`, so a derivative taken from here is
+/// undefined in the quads that straddle the waterline — exactly the pixels
+/// `shore` and `river` exist to protect. `WATER_DETAIL_RANGE` below is computed
+/// from `length(toEye)` instead, which is an analytic footprint and correct in
+/// a killed quad. The foam's band limit does read a real derivative and pays
+/// for it by taking it *before* the discard, in uniform control flow, as the
+/// entry point's first statement; this term could read the same `foot` and has
+/// not, because widening the capillary detail re-blesses every water reference
+/// in the repository for a symptom nobody has reported.
 static const float WATER_DETAIL_SCALE = 1.6;
 
 // -- How hard the capillary detail tilts the surface — W11 -------------------
@@ -6853,6 +6974,28 @@ float4 nappeColor(WaterOutput in) {
 
 [shader("fragment")]
 float4 waterFragmentMain(WaterOutput in) : SV_Target {
+    // **The fragment's world footprint, and it is taken HERE for a reason.**
+    //
+    // The water path's only derivative, and every statement below this one is a
+    // place it could not have been taken. Slang lowers `discard` to `OpKill`,
+    // not to a demote, so a derivative read after the shoreline discard reads a
+    // dead lane in every quad that straddles the waterline — undefined, at
+    // exactly the pixels `shore` and `river` exist to protect. The nappe
+    // `return` above is the same hazard with a `return` in place of the
+    // `discard`, and `in.nappe` is an interpolated varying, so no branch on it
+    // is quad-uniform either. First statement of the entry point is the only
+    // place all four lanes are certainly live — the same reason `quadShore`
+    // asks its question before anything is killed, and the same trap
+    // `flameColor` names where it takes its `fwidth` above its own early exit.
+    //
+    // Metres of world per pixel, on the horizontal plane, because the noise
+    // this feeds is a function of `worldPos.xz` and nothing else. The larger of
+    // the two screen axes: the footprint is an ellipse, and it is the major
+    // axis that decides whether a lattice cell is resolved. This is what a
+    // distance in metres cannot say — at a downward camera the same 40 m of
+    // range is a centimetre per pixel underfoot and half a metre per pixel
+    // toward the horizon, and the horizon is where the stipple was.
+    float foot = max(length(ddx(in.worldPos.xz)), length(ddy(in.worldPos.xz)));
     // The falling sheet, which shares this pipeline and nothing else — ADR
     // 0054. Before the shoreline discard, because a nappe hangs in the air over
     // dry ground as often as not.
@@ -7292,20 +7435,23 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // what keeps a patch from sitting nailed to the world while the wave that
     // made it travels out from under it.
     float2 wp = in.worldPos.xz - windDir * windv.z * push.environment[0].weather.z * 0.05;
-    float fine = saturate(1.0 - length(toEye) / WATER_FOAM_FINE_RANGE);
     // **And downstream, where there is a stream — W8.** Foam floating on a
     // river goes where the river goes; the wind drift above is the open-sea
     // answer and is a few percent of a wind speed, which on `river.loom` is
     // nothing at all beside a 3 m/s current.
     float2 fflow = loom_flow_at(flowField(), in.worldPos.xz);
+    float3 fw = waterFoamWeights(foot);
     float fnoise;
     if (dot(fflow, fflow) <= 0.0) {
-        fnoise = waterFoamNoise(wp, wd, fine);
+        fnoise = waterFoamNoise(wp, wd, fw);
     } else {
         LoomFlowPhase fp = waterFlowPhase(wp, fflow, push.environment[0].weather.z);
-        fnoise = waterFoamNoise(fp.uvA, wd, fine) * fp.wA
-               + waterFoamNoise(fp.uvB, wd, fine) * (1.0 - fp.wA);
+        fnoise = waterFoamNoise(fp.uvA, wd, fw) * fp.wA
+               + waterFoamNoise(fp.uvB, wd, fw) * (1.0 - fp.wA);
     }
+    // How wide the coverage is eroded through: 0.15 while the lace is whole,
+    // opening out to the noise's own spread as the ladder retires it.
+    float ferode = waterFoamErode(fw);
     // **The trail is the coverage's floor, not an addition to it.** A point
     // under a steepening crest is foamy because of the crest; a point the
     // crest has left is foamy because of what the crest did. Taking the
@@ -7356,7 +7502,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // every foam pixel toward the water; thresholding the *coverage* against
     // the noise instead dissolves the patch from its edges inward, which is
     // how foam actually leaves — in shrinking lace, not in a uniform fade.
-    float foam = smoothstep(fnoise - 0.15, fnoise + 0.15, wetc);
+    float foam = smoothstep(fnoise - ferode, fnoise + ferode, wetc);
     // Past the breaking threshold foam wins outright, noise or no noise: a
     // crest that has broken is white along its whole length.
     // **Past the breaking threshold foam wins — but not uniformly.** This used
