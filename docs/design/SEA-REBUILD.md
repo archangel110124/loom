@@ -190,6 +190,31 @@ camera"*).
 
 ## 3. The wave field
 
+> **⚠ PARTLY SUPERSEDED, 2026-08-29 — read this before building any of it.**
+>
+> This section designs a **baked wave-ray field** that warps each wave's `k`, direction and
+> amplitude across a grid. That was the right shape for the sixteen-Gerstner sum it was
+> written against, and §3.1–3.4 are obsolete for the deep-water spine, which is now the FFT
+> cascade of ADR 0076: a periodic tile is **homogeneous by construction**, so there is no
+> per-wave quantity to warp at a point — every wave in a tile touches every point of it.
+>
+> **What survives unchanged:** §3.5's argument that fetch and not wind is the knob that makes
+> a sea grow, §3.6's twenty-foot target and the reconciliation table behind it, and the
+> physical facts — `omega` is conserved as a wave shoals, `k` grows, Green's law amplifies,
+> refraction turns crests toward the beach.
+>
+> **What needs redeciding:** how a periodic homogeneous tile meets a shore at all. The
+> options are a shallow-water model inshore cross-faded with the FFT offshore, a spatially
+> varying amplitude-and-direction warp applied to the tile as an approximation, or a hybrid
+> where the tile supplies only the short bands. Each has a different cost and a different
+> honesty, and the choice belongs to the human — it is a design conversation, not an
+> implementation detail.
+>
+> §4's breaking limiter and §5's curl sheet are **not** affected: both read the surface's own
+> steepness and depth at a point, and neither cares which model produced it.
+
+
+
 **The fact that makes this tractable: `omega` is conserved as a wave shoals.** A wave
 crossing onto a shelf keeps its period for ever; only `k`, its direction and its amplitude
 change. So all time dependence stays one global constant per wave, and everything spatial
