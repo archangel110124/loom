@@ -351,7 +351,7 @@
 #
 # The movement script is not `fps.rhai` because that one detonates a 5 m blast
 # where the view ray lands on `fire`, and the centrepiece of this scene is a
-# 43,776 kg dynamic rigid body. `fire` arrives here unspent, for fishing.
+# 57,636 kg dynamic rigid body. `fire` arrives here unspent, for fishing.
 #
 # **The scene is turned, not the camera.** `Play::start` takes its opening yaw
 # from the eye node's authored rotation and then writes yaw onto the character,
@@ -594,7 +594,7 @@
 format = 1
 id = "b2a43f8f-314a-4d92-b4aa-322411869fcd"
 
-# The hull, its paint and its twelve pontoons, from the file that owns them.
+# The hull, its paint and its sixteen pontoons, from the file that owns them.
 [[prefab]]
 key = "jib_vi"
 id = "3c7a5e12-8b64-4f09-a2d3-6e1b90c47f58"

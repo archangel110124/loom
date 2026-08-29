@@ -6,34 +6,38 @@
 # can hold a hull-shaped object level for minutes without capsizing, and
 # whether it rights itself when pushed.
 #
-# **The pontoons are hand-placed and that is the whole point of the scene.**
-# `Buoyancy`'s default is four pontoons derived from the node's own size, at
-# its horizontal corners, with radii summing to the body's volume. For a crate
-# that is exactly right. For a boat it is badly wrong, because the node's
-# bounding box is 19.07 x 9.96 x 6.60 m and **most of that box is superstructure
-# and air** — the hull is the bottom 1.66 m of it. Four corner spheres sized to
-# the whole box would displace several times what the hull does and the boat
-# would ride on the surface like a cork, which is the failure the component's
-# own documentation warns about in the neighbouring case.
+# **The pontoons are solved from the hull's own section curve, and that is the
+# whole point of the scene.** `Buoyancy`'s default is four pontoons derived
+# from the node's own size, at its horizontal corners, with radii summing to
+# the body's volume. For a crate that is exactly right. For a boat it is badly
+# wrong, because the node's bounding box is 19.07 x 9.96 x 6.60 m and **most of
+# that box is superstructure and air** — the hull is the bottom 1.66 m of it.
+# Four corner spheres sized to the whole box would displace several times what
+# the hull does and the boat would ride on the surface like a cork, which is
+# the failure the component's own documentation warns about in the neighbouring
+# case.
 #
-# So twelve pontoons, along the hull, tapering with the waterlines:
+# So sixteen pontoons — eight pairs, one pair per slab of equal displaced
+# volume, each pair sized to reproduce that slab's displacement *and* its
+# waterplane area. `../prefabs/jib_vi.loom` owns the derivation; three
+# properties of it are worth having in front of you here:
 #
-#   - **Twelve, not four**, because righting torque comes from the forces
+#   - **Sixteen, not four**, because righting torque comes from the forces
 #     landing at *different places*. Four give a boat almost no roll stiffness
 #     at the beam, and a hull with no roll stiffness lies down at the first
 #     asymmetry and never gets up — which is exactly the "capsizes for no
 #     reason" this scene is built to catch.
-#   - **z = ±1.951 amidships narrowing to ±0.918 at the bow**, because the hull
-#     narrows. Pontoons wider than the hull would generate a righting moment
-#     the boat does not have, which is the same lie as the cork, told the other
-#     way round.
-#   - **Centred at y = -0.247 with radius 1.093**, so each sits exactly two
-#     thirds submerged at rest. That is deliberate: a sphere fully under
-#     displaces a constant volume no matter how the boat moves, and contributes
-#     **nothing** to stability. A sphere crossing the surface gains and loses
-#     displacement as it rises and falls, and that change is the restoring
-#     force. Pontoons buried below the waterline are a common way to build a
-#     boat that floats and still capsizes.
+#   - **z runs ±1.30 amidships down to ±0.73 forward**, each one the centroid
+#     of that slab's own half-waterplane, because the hull narrows. Pontoons
+#     wider than the hull would generate a righting moment the boat does not
+#     have, which is the same lie as the cork, told the other way round.
+#   - **Every sphere crosses the surface**, at immersions from 35% to 64% by
+#     volume — none saturated, none dry. That is deliberate: a sphere fully
+#     under displaces a constant volume no matter how the boat moves and
+#     contributes **nothing** to stability. A sphere crossing the surface gains
+#     and loses displacement as it rises and falls, and that change is the
+#     restoring force. Pontoons buried below the waterline are a common way to
+#     build a boat that floats and still capsizes.
 #
 # **The hull is `jib_vi_wide.obj`, and the beam is why every number here moved.**
 # The first hull had a cabin ±2.52 m standing on a deck ±2.41 m — wider than the
@@ -44,17 +48,17 @@
 # also the more faithful boat: a party boat sells rail space, and the reference
 # photograph has anglers lined along the sides.
 #
-# Both pontoon numbers are solved for, not chosen. The wide hull displaces
-# 57.64 m^3 below the waterline against the narrow one's 50.0, a ratio of 1.152,
-# so `mass` scales 38000 -> **43776** and each of the twelve carries 3.648 m^3.
-# Asking that to be two thirds of a sphere gives a whole sphere of 5.472 m^3 and
-# therefore r = 1.0932. The offset follows from the spherical cap: a centre
-# 0.247 m below the surface leaves a submerged depth of h = r + 0.247 = 1.340,
-# and pi*h^2*(3r - h)/3 = 3.648 m^3 — two thirds again, which is the point.
-# Total 12 x 3.648 = 43.78 m^3 puts the waterline at y = 0, where the model's
-# origin already is, because it was exported that way. The z offsets scale with
-# the beam by the same 6.60/5.75 = 1.1478, and the collider's half-beam with
-# them, 2.87 -> 3.30.
+# **`mass` is measured, not scaled, and the scaling is the defect this file
+# used to carry.** It read: the wide hull displaces 57.64 m^3 below the
+# waterline against the narrow one's 50.0, a ratio of 1.152, so scale a guessed
+# 38,000 kg by it and get 43,776. Neither input was a measurement of this hull,
+# and the output was **24% short of what she actually displaces** — 13,860 kg
+# light — while twelve spheres tuned to hold *that* weight up hid it by
+# floating her at the right height for the wrong reason. `mass` is now
+# **57,636 kg**, which is 57.636 m^3 of fresh water: `jib_vi_wide.obj`
+# integrated below y = 0, three ways, agreeing to 0.02%. `../prefabs/jib_vi.loom`
+# carries the provenance and the argument for the designed line over the
+# painted one.
 #
 # **The scene first shipped with r = 0.945 at y = -0.6, and that is the failure
 # the bullet above describes, written into the file it warns in.** Those
@@ -73,38 +77,65 @@
 # carries force, the sim hash and `--assert` (ADR 0059 §1). A cinematic volume
 # around a nineteen-metre hull is a separate experiment and a separate scene.
 #
-# **What this hull is measured to do.** Dropped from 0.4 m it settles at a
-# mean of y = +0.024 — 2.4 cm above the designed line — and is still there at
-# tick 36000, ten minutes in, having drifted 11 mm and bobbing 3.2–4.1 cm peak
-# to peak on the wave texture. The 2.4 cm is not this scene's arithmetic: it is
-# a 2.5% buoyancy excess the engine adds whenever `damp_linear` is nonzero
-# (the fixed step applies gravity before buoyancy, and the displacement-scaled
-# damping rectifies that jitter into net lift — measured at the same 2.5% on an
-# independent four-sphere calibration body, and extrapolating damp_linear -> 0
-# lands on y = 0 exactly). Do not tune `mass` to cancel it; the tune would go
-# wrong the moment the integrator is fixed. Total tilt off vertical at rest is
-# under 0.7°, so it is level in trim as well as in heel. Heeled and released
-# **from the level settle height** it rights itself from 80° and inverts from
-# 82° — but that release condition flatters it: released at each angle's own
-# heeled equilibrium the vanishing angle is **~75°**, and a static GZ curve
-# computed outside the physics engine from the same spherical-cap formula
-# agrees at 74.9° (GZ peaks at 0.70 m at 21°, GM = 2.7 m). Quote 75°, and say
-# which release you mean if this line ever becomes an assertion. On the
-# pontoons this scene first shipped with, the same test rights from 40° and
-# inverts from 42°. Once over, it floats hull-up indefinitely — the inverted
-# state is stable, which is correct for an enclosed superstructure.
+# **What this hull is measured to do.** Dropped from 0.4 m she settles at a
+# mean of y = +0.0206 — 2.1 cm above the designed line — over ticks 1800-3900,
+# and is still there at tick 36000, ten minutes in, having drifted 21 mm and
+# bobbing 2.1-2.7 cm peak to peak on the wave texture. In still water (the same
+# scene with `Wind.speed = 0`) she settles at **+0.02126 exactly and holds it**.
+# The 2.1 cm is not this scene's arithmetic: it is a 2.5% buoyancy excess the
+# engine adds whenever `damp_linear` is nonzero (the fixed step applies gravity
+# before buoyancy, and the displacement-scaled damping rectifies that jitter
+# into net lift — measured at the same 2.5% on an independent four-sphere
+# calibration body, and extrapolating damp_linear -> 0 lands on y = 0 exactly).
+# Do not tune `mass` to cancel it; the tune would go wrong the moment the
+# integrator is fixed.
+#
+# **Trim at rest is +0.016°, in still water, and that number is the whole
+# reason the pontoon stations are shifted 2.2994 m forward of the hull's own.**
+# The engine has no way to say where a `RigidBody`'s centre of gravity is — it
+# is the node origin — and this hull's centre of buoyancy is 2.2994 m aft of
+# that. Left where the hull's volume is, she trims **8.78° by the head** and
+# sinks 0.351 m. The prefab's `Buoyancy` comment has the argument.
+#
+# On the wave texture, trim and heel both peak at **0.63° and 0.67°** over
+# ticks 1800-3900, so she is level in trim as well as in heel.
+#
+# **Heeled and released from the level settle height she rights herself from
+# 87.5° and inverts from 87.8°** (still water, bisected to half a degree,
+# released at rot_euler x = θ and read at tick 3600). On the twelve pontoons
+# this file used to carry, the same rig on the same build gives 81.2° and
+# 81.6°, so the corrected set is worth six degrees. Both numbers flatter the
+# boat, because releasing at the *level* settle height starts her with more
+# reserve than her own heeled equilibrium would; say which release you mean if
+# this line ever becomes an assertion. Once over she floats hull-up
+# indefinitely — the inverted state is stable, which is correct for an enclosed
+# superstructure, though nothing here models one.
+#
+# **Neither vanishing angle is a claim about the real boat's range of
+# stability**, and this is worth saying because the old header's "~75°" read
+# like one. A pontoon proxy has no deckhouse and no downflooding point; what
+# these numbers measure is the sphere set. What is a claim about the hull is
+# the waterplane: the set's transverse second moment is 114.9 m^4 against the
+# hull's own 123.3 and its longitudinal 1063.8 against 1152.2, both about the
+# centre of mass. Soft by 7-8% in each, which is the safe direction.
 #
 # **Having an angle of vanishing stability is not the bug — every real boat has
 # one.** Coming back from 30° and not from 60° would be correct behaviour. The
-# defect was having it at 40°, which is inside the range an ordinary sea
-# reaches, and it came entirely from the two numbers above.
+# defect the paragraph above was written about was having it at 40°, which is
+# inside the range an ordinary sea reaches, and it came entirely from the
+# r = 0.945 / y = -0.6 pair.
 #
-# The wind sweep says the same thing from the other side, re-measured on this
-# hull: at `speed = 40` — the schema takes 40 and refuses 41 — the sea it
-# builds swings the boat through 35 m peak to peak and rolls it 10.8° at
-# worst, and it still never goes over; at 35 m/s that is 27 m and 6.1°. (The
-# 17 m and "under 8°" this paragraph used to quote were the narrow hull's and
-# are void.) On this tier there is no wind speed a scene can author that
+# The wind sweep says the same thing from the other side, re-measured on the
+# corrected pontoons: at `speed = 40` — the schema takes 40 and refuses 41 —
+# the sea it builds carries the boat through **36.5 m of vertical travel** and
+# rolls her **2.7°** at worst, and she still never goes over; at 35 m/s that is
+# 26.6 m and 2.2°. (Sampled every 300 ticks from 300 to 3900; the vertical
+# range is the wave, not a sinking — at these wind speeds the trough really is
+# thirty metres down.) On the twelve pontoons, the same sweep rolls her **10.8°
+# at 40 and 7.4° at 35**, so the corrected set is three to four times steadier
+# in a storm as well as six degrees later to capsize.
+#
+# On this tier there is no wind speed a scene can author that
 # capsizes it — and part of the reason is that `loom_physics` has no windage
 # term at all: wind reaches the hull only as wave slope, so there is no
 # beam-on heeling force here at any speed.
@@ -211,9 +242,11 @@ transform = { pos = [0.0, 0.40, 0.0] }
 
   [node.components.RigidBody]
   dynamic = true
-  # 43.8 tonnes, set to the pontoons' displacement at the designed waterline
-  # rather than guessed — see the header's arithmetic.
-  mass = 43776.0
+  # **57.636 tonnes: the hull's own measured displacement below her designed
+  # waterline** — `../prefabs/jib_vi.loom` has the provenance and the choice of
+  # waterline. It replaced 43,776 kg, which was a ratio applied to a guess and
+  # was 24% light.
+  mass = 57636.0
 
   # **The collider is here for the inertia, not for the collisions.** Without
   # one the body defaults to a 2 x 2 x 2 box — eight cubic metres — and a
@@ -230,58 +263,80 @@ transform = { pos = [0.0, 0.40, 0.0] }
 
   [node.components.Buoyancy]
   coefficient = 1.0
-  # Defaults, stated rather than inherited, because this scene is about
+  # Defaults, stated rather than inherited, because these scenes are about
   # stability and the damping is half of that: an analytic wave field has no
   # dissipation of its own, so an undamped pontoon gains amplitude every wave
   # until the boat launches.
   damp_linear = 4.0
   damp_quadratic = 1.0
 
-  # Stern, wide — a charter transom carries its beam right aft.
+  # **Sixteen pontoons, copied verbatim from `../prefabs/jib_vi.loom`, which
+  # is where they were solved and where the reasoning for them lives** — eight
+  # equal-volume slabs of the hull's own section curve, one sphere pair per
+  # slab reproducing that slab's displacement *and* its waterplane area, the
+  # whole set shifted 2.2994 m forward so the centre of buoyancy lands on the
+  # centre of gravity the engine puts at the node origin. Read that file's
+  # header before changing anything here, and change both together.
+  #
+  # **Order is the sum order** — stern to bow, port then starboard — because
+  # `loom_water::buoyancy::solve` sums in it and float addition is not
+  # associative.
+  # Slab 0.
   [[node.components.Buoyancy.pontoons]]
-  offset = [-7.5, -0.247, -1.836]
-  radius = 1.093
+  offset = [-5.9109, 0.2683, -1.1518]
+  radius = 1.3462
   [[node.components.Buoyancy.pontoons]]
-  offset = [-7.5, -0.247, 1.836]
-  radius = 1.093
-
-  # Amidships, the widest part of the hull and the source of most of the roll
-  # stiffness.
+  offset = [-5.9109, 0.2683, 1.1518]
+  radius = 1.3462
+  # Slab 1.
   [[node.components.Buoyancy.pontoons]]
-  offset = [-4.5, -0.247, -1.951]
-  radius = 1.093
+  offset = [-3.859, -0.0247, -1.2271]
+  radius = 1.1859
   [[node.components.Buoyancy.pontoons]]
-  offset = [-4.5, -0.247, 1.951]
-  radius = 1.093
+  offset = [-3.859, -0.0247, 1.2271]
+  radius = 1.1859
+  # Slab 2.
   [[node.components.Buoyancy.pontoons]]
-  offset = [-1.5, -0.247, -1.951]
-  radius = 1.093
+  offset = [-2.1885, -0.1309, -1.2711]
+  radius = 1.1364
   [[node.components.Buoyancy.pontoons]]
-  offset = [-1.5, -0.247, 1.951]
-  radius = 1.093
+  offset = [-2.1885, -0.1309, 1.2711]
+  radius = 1.1364
+  # Slab 3.
   [[node.components.Buoyancy.pontoons]]
-  offset = [1.5, -0.247, -1.951]
-  radius = 1.093
+  offset = [-0.6905, -0.1917, -1.2959]
+  radius = 1.1104
   [[node.components.Buoyancy.pontoons]]
-  offset = [1.5, -0.247, 1.951]
-  radius = 1.093
-
-  # Forward, narrowing.
+  offset = [-0.6905, -0.1917, 1.2959]
+  radius = 1.1104
+  # Slab 4.
   [[node.components.Buoyancy.pontoons]]
-  offset = [4.5, -0.247, -1.607]
-  radius = 1.093
+  offset = [0.7407, -0.2109, -1.2908]
+  radius = 1.1025
   [[node.components.Buoyancy.pontoons]]
-  offset = [4.5, -0.247, 1.607]
-  radius = 1.093
-
-  # The bow. Narrow, because the hull is — a pontoon wider than the boat
-  # invents a righting moment the boat does not have.
+  offset = [0.7407, -0.2109, 1.2908]
+  radius = 1.1025
+  # Slab 5.
   [[node.components.Buoyancy.pontoons]]
-  offset = [7.5, -0.247, -0.918]
-  radius = 1.093
+  offset = [2.1844, -0.2104, -1.2481]
+  radius = 1.1027
   [[node.components.Buoyancy.pontoons]]
-  offset = [7.5, -0.247, 0.918]
-  radius = 1.093
+  offset = [2.1844, -0.2104, 1.2481]
+  radius = 1.1027
+  # Slab 6.
+  [[node.components.Buoyancy.pontoons]]
+  offset = [3.7571, -0.1602, -1.1291]
+  radius = 1.1236
+  [[node.components.Buoyancy.pontoons]]
+  offset = [3.7571, -0.1602, 1.1291]
+  radius = 1.1236
+  # Slab 7.
+  [[node.components.Buoyancy.pontoons]]
+  offset = [5.9667, 0.058, -0.7255]
+  radius = 1.2278
+  [[node.components.Buoyancy.pontoons]]
+  offset = [5.9667, 0.058, 0.7255]
+  radius = 1.2278
 
 
 # The twelve materials the refined hull brought with it — weathering,

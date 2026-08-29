@@ -830,7 +830,15 @@ mod tests {
         assert_eq!(at(std::ptr::from_ref(&e.sigma).cast()), 16);
     }
 
-    /// The twelve pontoons of `jib_vi_float.loom`, in the file's own order.
+    /// A hull-shaped pontoon set: the twelve `jib_vi_float.loom` carried
+    /// before its sections were measured, kept verbatim.
+    ///
+    /// **It is a frozen fixture and is deliberately not the scene's current
+    /// sixteen.** What the two tests below need is a row of spheres along a
+    /// nineteen-metre hull; re-reading the scene would make them fail whenever
+    /// somebody re-solved the boat, which is the coupling that makes a shed
+    /// test useless as a regression bound. The scene's own numbers are
+    /// asserted in `assets/prefabs/jib_vi.loom`, not here.
     fn jib_vi() -> Vec<crate::buoyancy::PontoonState> {
         [
             [-7.5, -1.836], [-7.5, 1.836],

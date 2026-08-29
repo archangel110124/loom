@@ -113,6 +113,17 @@ pub struct Wrench {
 ///
 /// Fully out is zero and fully under is the whole sphere; both are exact rather
 /// than a limit of the formula, so a body high in the air costs one comparison.
+///
+/// **A generated section table integrated exactly was weighed against this and
+/// rejected.** A real hull section widens as it rises, so it carries the same
+/// nonlinearity on physical grounds rather than by imitation, and it would make
+/// ADR 0063's shed source exact instead of estimated. It was not built, because
+/// the defect that raised the question was entirely in the data: a boat whose
+/// pontoons were 24% light and parked partly outside its own waterline. A
+/// second immersion model on this function is new code on the path a crate in a
+/// river and a buoy in a pool share with every hull in the repository, and the
+/// cap already provides the property the ramp lacks. Solve the spheres — see
+/// [`crate::buoyancy::solve`]'s callers and `assets/prefabs/jib_vi.loom`.
 #[must_use]
 pub fn submerged_volume(radius: f32, centre_y: f32, surface_y: f32) -> f32 {
     if radius <= 0.0 {

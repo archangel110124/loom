@@ -2183,6 +2183,26 @@ pub struct Buoyancy {
     /// gives no torque and the object spins, and hand-placed corner spheres
     /// with a radius each big enough to look right total several times the
     /// object's actual volume, so it floats like a cork.
+    ///
+    /// **For anything hull-shaped, solve the set rather than placing it.** A
+    /// sphere pair reproduces a slice of hull exactly when its displacement
+    /// *and* its waterplane area both match that slice's, which is two
+    /// equations — `V = pi.d^2.(3r - d)/3` with `d = r - offset.y`, and
+    /// `A = pi.(r^2 - offset.y^2)` — in the pair's two unknowns. Doing that
+    /// per slab of equal displaced volume gets the hull's displacement, its
+    /// waterplane area and its longitudinal distribution of both, none of
+    /// which a hand-placed row of identical spheres gets: the row that
+    /// `assets/prefabs/jib_vi.loom` replaced was 24% light in buoyancy, 36%
+    /// soft in heave, and held a pair of spheres up 0.87 m ahead of the
+    /// forefoot, over water the hull never touched. That prefab is the worked
+    /// example and states the arithmetic.
+    ///
+    /// **Whatever the set, its centre of buoyancy has to land on the body's
+    /// centre of mass**, which is the node origin and cannot be moved
+    /// (`loom_physics::add_box_body` hangs the whole mass on one node-centred
+    /// cuboid). A set laid out where a real hull's volume actually is will
+    /// therefore trim: `jib_vi`'s does so by 8.78 degrees, and the prefab
+    /// shifts its stations bodily to cancel it.
     #[schemars(length(max = 16))]
     pub pontoons: Vec<Pontoon>,
     /// Multiplier on the buoyant force. `1.0` is Archimedes.

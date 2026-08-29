@@ -132,52 +132,91 @@ transform = { pos = [0.0, 0.40, 0.0] }
 
   [node.components.RigidBody]
   dynamic = true
-  mass = 43776.0
+  # **57.636 tonnes: the hull's own measured displacement below her designed
+  # waterline** — `../prefabs/jib_vi.loom` has the provenance and the choice of
+  # waterline. It replaced 43,776 kg, which was a ratio applied to a guess and
+  # was 24% light.
+  mass = 57636.0
 
   [node.components.BoxCollider]
   half_extents = [9.53, 1.66, 3.30]
 
   [node.components.Buoyancy]
   coefficient = 1.0
+  # Defaults, stated rather than inherited, because these scenes are about
+  # stability and the damping is half of that: an analytic wave field has no
+  # dissipation of its own, so an undamped pontoon gains amplitude every wave
+  # until the boat launches.
   damp_linear = 4.0
   damp_quadratic = 1.0
 
+  # **Sixteen pontoons, copied verbatim from `../prefabs/jib_vi.loom`, which
+  # is where they were solved and where the reasoning for them lives** — eight
+  # equal-volume slabs of the hull's own section curve, one sphere pair per
+  # slab reproducing that slab's displacement *and* its waterplane area, the
+  # whole set shifted 2.2994 m forward so the centre of buoyancy lands on the
+  # centre of gravity the engine puts at the node origin. Read that file's
+  # header before changing anything here, and change both together.
+  #
+  # **Order is the sum order** — stern to bow, port then starboard — because
+  # `loom_water::buoyancy::solve` sums in it and float addition is not
+  # associative.
+  # Slab 0.
   [[node.components.Buoyancy.pontoons]]
-  offset = [-7.5, -0.247, -1.836]
-  radius = 1.093
+  offset = [-5.9109, 0.2683, -1.1518]
+  radius = 1.3462
   [[node.components.Buoyancy.pontoons]]
-  offset = [-7.5, -0.247, 1.836]
-  radius = 1.093
+  offset = [-5.9109, 0.2683, 1.1518]
+  radius = 1.3462
+  # Slab 1.
   [[node.components.Buoyancy.pontoons]]
-  offset = [-4.5, -0.247, -1.951]
-  radius = 1.093
+  offset = [-3.859, -0.0247, -1.2271]
+  radius = 1.1859
   [[node.components.Buoyancy.pontoons]]
-  offset = [-4.5, -0.247, 1.951]
-  radius = 1.093
+  offset = [-3.859, -0.0247, 1.2271]
+  radius = 1.1859
+  # Slab 2.
   [[node.components.Buoyancy.pontoons]]
-  offset = [-1.5, -0.247, -1.951]
-  radius = 1.093
+  offset = [-2.1885, -0.1309, -1.2711]
+  radius = 1.1364
   [[node.components.Buoyancy.pontoons]]
-  offset = [-1.5, -0.247, 1.951]
-  radius = 1.093
+  offset = [-2.1885, -0.1309, 1.2711]
+  radius = 1.1364
+  # Slab 3.
   [[node.components.Buoyancy.pontoons]]
-  offset = [1.5, -0.247, -1.951]
-  radius = 1.093
+  offset = [-0.6905, -0.1917, -1.2959]
+  radius = 1.1104
   [[node.components.Buoyancy.pontoons]]
-  offset = [1.5, -0.247, 1.951]
-  radius = 1.093
+  offset = [-0.6905, -0.1917, 1.2959]
+  radius = 1.1104
+  # Slab 4.
   [[node.components.Buoyancy.pontoons]]
-  offset = [4.5, -0.247, -1.607]
-  radius = 1.093
+  offset = [0.7407, -0.2109, -1.2908]
+  radius = 1.1025
   [[node.components.Buoyancy.pontoons]]
-  offset = [4.5, -0.247, 1.607]
-  radius = 1.093
+  offset = [0.7407, -0.2109, 1.2908]
+  radius = 1.1025
+  # Slab 5.
   [[node.components.Buoyancy.pontoons]]
-  offset = [7.5, -0.247, -0.918]
-  radius = 1.093
+  offset = [2.1844, -0.2104, -1.2481]
+  radius = 1.1027
   [[node.components.Buoyancy.pontoons]]
-  offset = [7.5, -0.247, 0.918]
-  radius = 1.093
+  offset = [2.1844, -0.2104, 1.2481]
+  radius = 1.1027
+  # Slab 6.
+  [[node.components.Buoyancy.pontoons]]
+  offset = [3.7571, -0.1602, -1.1291]
+  radius = 1.1236
+  [[node.components.Buoyancy.pontoons]]
+  offset = [3.7571, -0.1602, 1.1291]
+  radius = 1.1236
+  # Slab 7.
+  [[node.components.Buoyancy.pontoons]]
+  offset = [5.9667, 0.058, -0.7255]
+  radius = 1.2278
+  [[node.components.Buoyancy.pontoons]]
+  offset = [5.9667, 0.058, 0.7255]
+  radius = 1.2278
 
 # --- the hull's parts, drawn ------------------------------------------------
 

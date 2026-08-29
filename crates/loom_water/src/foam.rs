@@ -936,8 +936,11 @@ mod tests {
     /// **A nineteen-metre hull leaves a wake as long as itself**, which the
     /// single-station test above cannot see.
     ///
-    /// Twelve stations in two rows, laid out like `jib_vi`'s pontoons, driving
-    /// at the speed `jib_vi_underway.loom` settles at. The defect this pins is
+    /// Twelve stations in two rows, laid out like a nineteen-metre hull's
+    /// pontoons and driving at about the speed `jib_vi_underway.loom` settles
+    /// at. Both are frozen here on purpose: the boat now carries sixteen
+    /// pontoons solved from her sections, and a wake test that tracked her
+    /// layout would move every time somebody re-solved her. The defect this pins is
     /// a hull dragging its own deposits along with it: a cell on the track sits
     /// inside the union of twelve drag reaches for the whole six seconds the
     /// hull takes to pass, which carried it forward and interpolated it away.

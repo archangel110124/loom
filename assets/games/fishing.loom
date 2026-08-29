@@ -36,7 +36,7 @@
 format = 1
 id = "b41d8e07-32f5-4c6a-9e18-7d05a2b3f6c9"
 
-# The hull, its paint and its twelve pontoons, from the file that owns them.
+# The hull, its paint and its sixteen pontoons, from the file that owns them.
 # Nothing about the boat is authored here — an instance plus a transform.
 [[prefab]]
 key = "jib_vi"

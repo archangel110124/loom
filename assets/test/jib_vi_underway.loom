@@ -1,26 +1,28 @@
 # The nineteen-metre boat, under way — the first thing in this repository that
 # drives a floating hull.
 #
-# Everything about the boat comes from `../prefabs/jib_vi.loom`: the twelve
-# hand-placed pontoons, the 43,776 kg solved from their displacement, the
-# 1.093 m radius that sits each sphere exactly two thirds submerged. Nothing
-# about the hull is authored here. What is authored here is one thrust.
+# Everything about the boat comes from `../prefabs/jib_vi.loom`: the sixteen
+# pontoons solved from her section curve, the 57,636 kg that is her measured
+# displacement at the designed waterline. Nothing about the hull is authored
+# here. What is authored here is one thrust.
 #
 # **This is the scene the shed bug was invisible without.** `swept_volume` took
 # a *waterplane* radius — 8.8145 m for this hull — and squared it, so the first
 # tick this boat moved it emitted `pi r^2 U dt` = 97.63 m^3 of displaced water
 # per packet at 6 m/s, scaled by the submerged fraction to **65.12 m^3**,
-# against a hull that displaces 43.78 m^3 in total. Sampled at its own twelve
-# pontoons that is 5.56 m of trench at 6 m/s and 7.70 m at 8 m/s. Nothing had
+# against a hull that displaced 43.78 m^3 in total — the figures are the ones
+# of the day, before `mass` and the pontoons were corrected. Sampled at the
+# twelve pontoons she then had, that is 5.56 m of trench at 6 m/s and 7.70 m
+# at 8 m/s. Nothing had
 # ever moved a floating body, so nothing had ever fired it. See ADR 0063 and
 # `loom_water::wavelet::a_hull_does_not_dig_a_hole_under_itself`.
 #
-# **1.6 MN is not a boat engine and the number is honest about why.** Damping
+# **1.9 MN is not a boat engine and the number is honest about why.** Damping
 # in `loom_water::buoyancy` is `displaced * (damp_quadratic * v|v| +
 # damp_linear * v)`, applied to all three axes with one coefficient. On this
-# hull `displaced` is 43,776 kg with `damp_linear` 4.0 per second and
+# hull `displaced` is 57,636 kg with `damp_linear` 4.0 per second and
 # `damp_quadratic` 1.0, so the water resists surge as hard as it resists
-# heave — 43,776 * (v^2 + 4v) newtons, which is **219 kN at one metre a
+# heave — 57,636 * (v^2 + 4v) newtons, which is **288 kN at one metre a
 # second**, as much resistance fore-and-aft as in heave. That is right for
 # heave, which is what those numbers were chosen for (`jib_vi_float.loom`'s
 # header: an analytic wave field has no dissipation of its own, so an undamped
@@ -33,20 +35,31 @@
 #
 # **Measured, this build**, from a standing start at x = -34:
 #
-#   tick  300 ( 5 s)   x = -15.66   y = -0.099
-#   tick  600 (10 s)   x =  +2.35   y = -0.130
-#   tick  900 (15 s)   x = +20.28   y = -0.115
-#   tick 1200 (20 s)   x = +38.19   y = -0.139
+#   tick  300 ( 5 s)   x = -15.89   y = -0.049
+#   tick  600 (10 s)   x =  +2.37   y = -0.054
+#   tick  900 (15 s)   x = +20.51   y = -0.067
+#   tick 1200 (20 s)   x = +38.69   y = -0.043
 #
-# so she settles at **3.586 m/s** — seven knots, a working boat's cruise — and
-# holds her trim to within 4 cm of it for the rest of the run.
+# so she settles at **3.636 m/s** — seven knots, a working boat's cruise — and
+# holds her trim to within 3 cm of it for the rest of the run.
 #
-# **There is a ceiling above this and it is worth knowing about.** Thrust is in
-# the body frame, so as the bow digs in the vector acquires a downward
-# component and drives it in further. Swept: 2.0 MN reaches 3.74 m/s but the
-# trim walks (y -0.31 at tick 600, -0.44 at 900), and 2.63 MN — the figure the
-# damping above says would buy 6 m/s — submarines outright, y = -14.34 by tick
-# 1200. **1.6 MN is the fastest this hull goes and stays a boat.**
+# **The thrust moved 1.6 -> 1.9 MN when the hull's mass was corrected, and that
+# is the same number rather than a new one.** The damping above scales on
+# `displaced`, which went from 43.75 m^3 to the hull's measured 57.64, so the
+# force that makes this hull do seven knots went up with it. 1.6 MN on the
+# corrected hull reaches 3.334 m/s and is at x = -1.08 at tick 600, which is
+# the wrong side of the `x > 0` acceptance below; 1.9 MN puts her at +2.37,
+# within 2 cm of the +2.35 this file has always recorded. The wake assertions
+# read 0.192 and 0.000 against their 0.15 and 0.02 bounds.
+#
+# **The submarining ceiling this paragraph used to name is gone, and that is
+# the corrected hull rather than a lucky escape.** It said 2.0 MN walked the
+# trim and 2.63 MN drove her under by tick 1200. Re-measured: 2.6 MN holds
+# y = -0.10, 3.0 MN holds -0.20 and 3.5 MN holds -0.18 at 4.8 m/s. Thrust is
+# still in the body frame and a bow that digs in still steers the vector
+# downward — the mechanism is real — but a hull that is 32% heavier and whose
+# buoyancy is distributed like her sections no longer trims far enough by the
+# head to start it. **1.9 MN is a cruise, not a ceiling.**
 #
 # **There is no `max_speed` on `Propulsion` and there must not be.** The
 # terminal speed above is already set by this force against the hull's authored
@@ -95,7 +108,7 @@
 format = 1
 id = "5f2a9c14-7e63-4b08-a1d9-3c6b70e58a42"
 
-# The hull, its paint and its twelve pontoons, from the file that owns them.
+# The hull, its paint and its sixteen pontoons, from the file that owns them.
 [[prefab]]
 key = "jib_vi"
 id = "3c7a5e12-8b64-4f09-a2d3-6e1b90c47f58"
@@ -145,17 +158,17 @@ parent = "Sea"
 prefab = "jib_vi"
 transform = { pos = [-34.0, 0.0, 0.0] }
 
-  # 1.6 MN along the body's own +X, which is the bow — see the header for why
-  # a 44-tonne boat needs 163 tonnes-force to make seven knots, and for the
-  # measured ceiling just above it. In the body frame, so a hull that yaws on a
-  # wave keeps pushing the way her bow now points.
+  # 1.9 MN along the body's own +X, which is the bow — see the header for why
+  # a 58-tonne boat needs 194 tonnes-force to make seven knots. In the body
+  # frame, so a hull that yaws on a wave keeps pushing the way her bow now
+  # points.
   #
   # An override rather than a component, because the node is a prefab instance
   # and the parser refuses components on one — ADR 0008. The prefab does not
   # carry a `Propulsion` at all, which is correct: a hull is not a hull under
   # power, and every other scene that floats this boat wants it stationary.
   [node.overrides]
-  "Propulsion.force" = [1600000.0, 0.0, 0.0]
+  "Propulsion.force" = [1900000.0, 0.0, 0.0]
 
 # A fixed mark on the run, so a still can tell a moving boat from a parked one
 # and so the wake has something to be measured against.
