@@ -125,8 +125,8 @@ let HELM_Z_MAX = -0.90;
 // exactly where it was tuned. Without it she reaches x = 8.2 m in the 900 ticks
 // `rig_drive` gives her to make 40, because a third more boat is being pushed by
 // the same thrust.
-let AHEAD = 1448270.0;
-let ASTERN = 658305.0;   // less than half. A screw astern is inefficient in
+let AHEAD = 1100000.0;
+let ASTERN = 500000.0;   // less than half. A screw astern is inefficient in
                          // life and a stern that digs in is the same failure
                          // as a bow that does, so this end of the range gets
                          // the wider margin.
@@ -181,7 +181,7 @@ let STALL_TICKS = 45;    // three quarters of a second below that speed with
                          // the throttle open. Long enough that a wave or a
                          // hard turn cannot close the throttle; short enough
                          // that the bow has not yet buried itself.
-let WHEEL = 1711593.0;   // newton-metres of yaw. The hull's yaw inertia is
+let WHEEL = 1300000.0;   // newton-metres of yaw. The hull's yaw inertia is
                          // about 1.5e6 kg m^2 and the pontoons damp the
                          // rotation, so this is a terminal rate, not an
                          // acceleration — measured in the report.
