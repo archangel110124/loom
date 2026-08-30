@@ -6416,12 +6416,60 @@ static const float WATER_FOAM_NYQUIST_LOW = 0.125;
 static const float WATER_FOAM_NYQUIST_HIGH = 0.25;
 
 /// How much of one octave this fragment can carry: 1 fully resolved, 0 past the
-/// bound. `foot` is metres of world per pixel across this fragment, measured
-/// once at the top of `waterFragmentMain`.
+/// bound. `foot` is **the noise's own frame** per pixel — `foamFrameFoot`,
+/// measured once at the top of `waterFragmentMain`.
+///
+/// **It used to be metres of world per pixel times `WATER_FOAM_STREAK`, and
+/// that is a different quantity.** The lace is not sampled in world space: it
+/// is sampled at `R(wd) . wp`, a rotation into the local breaking frame (ADR
+/// 0053 section 7). The screen derivative of that is `R . dwp + dR . wp`, and
+/// the second term — the frame turning under a lever arm `|wp|` — is the one
+/// `foot` cannot see. Measured on the buoy shot (`ocean_fft`, eye 2 m above the
+/// sea): the true frame footprint is **2x to 50x** `foot * WATER_FOAM_STREAK`
+/// over most of the frame, so every octave was declared resolved at up to fifty
+/// times the frequency it actually had, and the binariser below turned that
+/// into the rectilinear hatching the human reported. `foamFrameFoot` takes the
+/// derivative of the coordinate that is actually sampled, which is what the
+/// paragraph above always claimed this was.
 float foamOctaveWeight(float scale, float foot) {
-    float cyclesPerPixel = foot * scale * WATER_FOAM_STREAK;
+    float cyclesPerPixel = foot * scale;
     return saturate((WATER_FOAM_NYQUIST_HIGH - cyclesPerPixel)
                   / (WATER_FOAM_NYQUIST_HIGH - WATER_FOAM_NYQUIST_LOW));
+}
+
+/// The frame the foam's lace and raft are sampled in, and its screen footprint.
+///
+/// **This band-limits a coordinate that is genuinely badly behaved; it does not
+/// repair it.** `R(wd) . wp` is not translation-invariant: `wp` is an absolute
+/// world position, so the `dR . wp` term grows with distance from the world
+/// origin, and the same sea drawn 400 m out has a lace 20x finer than the same
+/// sea drawn at the origin (measured — offsetting `wp` by 300 m on the buoy shot
+/// turns the lace into white noise). No rotation of a scalar noise's domain by a
+/// non-gradient direction field can avoid that. What this does is stop the
+/// ladder lying about it, so the octaves retire where the coordinate has run
+/// away instead of hatching. Anything that wants lace to survive a spinning
+/// frame has to stop rotating the domain — flow-aligned taps in a fixed frame,
+/// which is a different feature and costs taps.
+///
+/// **Must be called before any `discard` or early `return`**, for the reason
+/// `waterFragmentMain`'s own `foot` gives at length: Slang lowers `discard` to
+/// `OpKill`, so a derivative taken after one reads a dead lane.
+///
+/// `x`/`y` are the frame's forward axis; `z` is the larger of the two screen
+/// axes of `R(wd) . worldPos.xz`, in the same units the lattice scales are
+/// quoted in — cycles per unit of *this* coordinate, so `foamOctaveWeight` no
+/// longer multiplies by `WATER_FOAM_STREAK` (the stretch is already in the
+/// coordinate's second component).
+///
+/// The wind drift the sampler subtracts from `worldPos.xz` is spatially
+/// constant, so it contributes nothing to either derivative and is left out.
+float3 foamFrameFoot(float2 breakDir, float2 worldXZ) {
+    // Renormalised for the reason the sampler gives: `breakDir` is an
+    // interpolated per-vertex eigenvector, so it is short wherever two vertices
+    // disagree, and a short vector here is a stretched lattice.
+    float2 wd = normalize(breakDir + float2(1e-4, 0.0));
+    float2 fuv = float2(dot(worldXZ, wd), dot(worldXZ, float2(-wd.y, wd.x)) * WATER_FOAM_STREAK);
+    return float3(wd, max(length(ddx(fuv)), length(ddy(fuv))));
 }
 
 /// The ladder's three weights at this footprint: lace, coarse, fine.
@@ -7429,6 +7477,11 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // range is a centimetre per pixel underfoot and half a metre per pixel
     // toward the horizon, and the horizon is where the stipple was.
     float foot = max(length(ddx(in.worldPos.xz)), length(ddy(in.worldPos.xz)));
+    // **And the foam frame's own footprint, here for exactly the same reason.**
+    // The lace is not a function of `worldPos.xz`; it is a function of that
+    // position rotated into the breaking frame, and only the derivative of the
+    // rotated coordinate can band-limit it. See `foamOctaveWeight`.
+    float3 foamFrame = foamFrameFoot(in.breakDir, in.worldPos.xz);
     // The falling sheet, which shares this pipeline and nothing else — ADR
     // 0054. Before the shoreline discard, because a nappe hangs in the air over
     // dry ground as often as not.
@@ -7899,8 +7952,11 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // in heading give a short vector in between, and a short vector here is a
     // stretched lattice rather than a rotated one. The `1e-4` keeps flat water
     // — where the eigenvector is genuinely undefined — off a zero-length
-    // normalize; nothing there draws foam anyway.
-    float2 wd = normalize(in.breakDir + float2(1e-4, 0.0));
+    // normalize; nothing there draws foam anyway. Both are done in
+    // `foamFrameFoot`, at the top of this function, because the same frame has
+    // to be differentiated there and a second `normalize` here could differ
+    // from it in the last bit.
+    float2 wd = foamFrame.xy;
     float2 windDir = normalize(windv.xy + float2(1e-4, 0.0));
     // Foam drifts downwind. Sampling in a frame that slides with the wind is
     // what keeps a patch from sitting nailed to the world while the wave that
@@ -7911,7 +7967,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // answer and is a few percent of a wind speed, which on `river.loom` is
     // nothing at all beside a 3 m/s current.
     float2 fflow = loom_flow_at(flowField(), in.worldPos.xz);
-    float3 fw = waterFoamWeights(foot);
+    float3 fw = waterFoamWeights(foamFrame.z);
     float fnoise;
     // The raft's own texture — see `waterFoamRaft`. It rides the same two flow
     // phases `fnoise` does, for the reason `waterDetailSlope` gives: a river's
