@@ -65,9 +65,34 @@ pub const SPRAY_RANGE: f32 = 34.0;
 
 /// Droplets per crown.
 ///
-/// §2.2e: "a crown is a ring emitted with outward+upward velocity". Seven
-/// rather than eight so the ring does not read as a square from above.
-pub const SPRAY_CROWN: usize = 7;
+/// **Twenty-one, and seven was a necklace.** §2.2e asks for "a ring emitted
+/// with outward+upward velocity", and seven identical droplets on one ring at
+/// one radius is exactly the artifact [`crown`] fifty lines down was built to
+/// avoid — its own docs call it "a string of manufactured beads" and answer it
+/// with [`Droplet::scale`] and [`Droplet::alpha`], which the crest crown then
+/// left at 1.0. Photographed at 2x on `lucent --sim 300` the crest spray reads
+/// as arcs of evenly-spaced pearls, because that is what it is.
+///
+/// **The count is not what costs.** [`SPLASH_RING`]'s own measurement is the
+/// authority and it is on the same primitive: sixteen times the quads costs
+/// 0.012 ms in the pass that draws them and nothing in the forward pass. So
+/// this is set by what a puff has to look like. On `lucent` it is
+/// 1,113 -> 3,339 droplets, and 0.15% -> 0.46% of the frame.
+pub const SPRAY_CROWN: usize = 21;
+
+/// How far a droplet's launch may sit off its crown's nominal arc, either way.
+///
+/// **A ring is the one shape torn water is not.** With every droplet at one
+/// speed and one elevation the crown stays a perfect expanding circle for its
+/// whole life, which is what makes twenty-one beads read as twenty-one beads
+/// rather than as a puff. Spreading the launch turns the ring into a cone and
+/// the crown into a cloud with a front and a back — and it is free, because
+/// the arc is already a closed form of the velocity.
+///
+/// 0.55 keeps every droplet on a rising, outward path (the multiplier stays in
+/// `0.45..1.55`); past 1.0 some of them launch inward or downward, which reads
+/// as the crest sucking water back in.
+const SPRAY_SPREAD: f32 = 0.55;
 
 /// Metres per second outward and upward at a fold of exactly 1.0 — the cusp.
 ///
@@ -311,10 +336,21 @@ fn crown_in(
     ];
     let spin = unit(5) * std::f32::consts::TAU;
     for i in 0..SPRAY_CROWN {
+        // **Four independent draws per droplet, off the cell's own seed.** The
+        // offset is `i` scaled past the shifts used above so no droplet can
+        // collide with the crown's own place, time or spin draw. Still a pure
+        // function of `(cell, slot, i)`, so `--sim N` in one jump and stepping
+        // to N throw the same water — which is the property the whole file
+        // rests on.
+        #[allow(clippy::cast_possible_truncation)]
+        let d = |k: u32| unit(0x1000 + (i as u32) * 8 + k);
         #[allow(clippy::cast_precision_loss)]
         let angle = spin + std::f32::consts::TAU * (i as f32) / (SPRAY_CROWN as f32);
-        let outward = SPRAY_OUT * strength;
-        let up = SPRAY_UP * strength;
+        // The cone — see [`SPRAY_SPREAD`]. Two draws rather than one, so a
+        // droplet thrown far is not also thrown high and the crown gains a
+        // depth a scaled ring cannot have.
+        let outward = SPRAY_OUT * strength * SPRAY_SPREAD.mul_add(d(0).mul_add(2.0, -1.0), 1.0);
+        let up = SPRAY_UP * strength * SPRAY_SPREAD.mul_add(d(1).mul_add(2.0, -1.0), 1.0);
         let v = [
             drift[0] + angle.cos() * outward,
             up,
@@ -324,8 +360,15 @@ fn crown_in(
             position: ballistic(base, v, age),
             velocity: ballistic_velocity(v, age),
             fraction: age / SPRAY_LIFETIME,
-            scale: 1.0,
-            alpha: 1.0,
+            // The other half of breaking the necklace, and it is the same pair
+            // [`crown`] uses for the same stated reason — a band of a crown
+            // shares one `fraction` and therefore one drawn size. Reusing
+            // `SPLASH_SIZE_JITTER` rather than authoring a second width: it is
+            // the same question about the same primitive.
+            scale: SPLASH_SIZE_JITTER.mul_add(d(2).mul_add(2.0, -1.0), 1.0),
+            // Never zero: a fully transparent droplet is a quad that costs
+            // what it always cost and draws no water.
+            alpha: 0.45f32.mul_add(d(3).mul_add(2.0, -1.0), 0.55),
         });
     }
 }
@@ -882,6 +925,42 @@ mod tests {
 
         assert!(!a.is_empty(), "the sea threw nothing to compare");
         assert_eq!(a, b);
+    }
+
+    /// **A crest crown is torn water, not a necklace.** Every droplet used to
+    /// leave at one speed, one elevation, one size and full opacity, which
+    /// photographs as evenly-spaced pearls on a perfect expanding ring — the
+    /// artifact [`crown`] answers with [`Droplet::scale`] and
+    /// [`Droplet::alpha`] and that this path then left at 1.0.
+    ///
+    /// Watched to fail on the shipped constants: with `SPRAY_SPREAD = 0.0` and
+    /// `scale`/`alpha` back at 1.0 every one of these four assertions trips.
+    #[test]
+    fn a_crest_crown_is_not_a_necklace() {
+        let storm = sea(0.55, 0.85);
+        // One crown, isolated: `spray` returns cell-then-slot order, so the
+        // first SPRAY_CROWN droplets are one cell's throw.
+        let all = spray(&storm, None, [0.0, 2.0, 0.0], 5.25, &deep);
+        assert!(all.len() >= SPRAY_CROWN, "the sea threw no whole crown");
+        let crown = &all[..SPRAY_CROWN];
+
+        let spread = |f: &dyn Fn(&Droplet) -> f32| {
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for d in crown {
+                lo = lo.min(f(d));
+                hi = hi.max(f(d));
+            }
+            hi - lo
+        };
+        assert!(spread(&|d| d.scale) > 0.3, "every droplet is the same size: a string of beads");
+        assert!(spread(&|d| d.alpha) > 0.3, "every droplet is equally opaque: a ring with no gaps");
+        // The cone. Horizontal speed apart is the ring's radius spreading; the
+        // vertical is what gives the crown a front and a back.
+        assert!(
+            spread(&|d| d.velocity[0].hypot(d.velocity[2])) > 0.2,
+            "every droplet leaves at one outward speed, so the crown stays a circle"
+        );
+        assert!(spread(&|d| d.velocity[1]) > 0.2, "every droplet leaves at one elevation");
     }
 
     /// Droplets are ballistic: a crown thrown a moment ago is above the crest

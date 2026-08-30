@@ -53,15 +53,20 @@
 # same frame with it on.
 #
 #     the bed through the water   71.66% of the frame   mean 13.62   worst 145
-#     subsurface glow             14.49%                mean  0.77   worst  95
-#     foam                        54.49%                mean  3.65   worst 106
-#     spray                        0.17%                mean  0.06   worst 180
+#     subsurface glow             13.67%                mean  0.60   worst  95
+#     foam                        55.48%                mean  7.25   worst 132
+#     spray                        0.56%                mean  0.17   worst 186
+#
+# Foam's mean and spray's area both roughly doubled at the foam-density pass
+# (`foamAge` was calling 0.33-second-old foam ten seconds old, and the crest
+# crown was seven identical beads). The glow's fraction fell by the same work:
+# brighter foam covers more of the water the glow was lighting.
 #
 # **Water is 77.40% of this frame** (measured the same way, against a render with
 # the `Water` node deleted), so the bed is doing visible work over **92.6% of the
 # water**. Spray's fraction is small and its worst channel is the largest in the
 # table, which is what a scatter of bright sub-metre droplets looks like to a
-# pixel diff: **1,113 droplets are in the air at this instant**, and the same
+# pixel diff: **3,339 droplets are in the air at this instant**, and the same
 # scene with `spray = 0.0` renders `particles: 0`.
 #
 # The bed's number and the spray's are against edited copies of this scene rather
@@ -73,7 +78,7 @@
 # instant:
 #
 #     mu_max mean 0.1278   past 0.22 (foam onset) 26.24%   past 0.33 (breaking) 11.15%
-#     foam painted over 14.10% of the surface      1,113 droplets in the air
+#     foam painted over 14.10% of the surface      3,339 droplets in the air
 #
 # **14.1% painted is a stylised sea and it should be read as one.** `scene.slang`
 # records `ocean`'s measured coverage as 4–7% and Monahan's whitecap relation at
@@ -269,7 +274,15 @@ parent = "Sea/Water"
   drag = 0.5
   turbulence = 0.6
   turbulence_scale = 0.8
-  size = [0.15, 0.04]
+  # **A sprite here is a fistful of torn water, not one drop.** 15 cm was the
+  # literal reading and it is under two pixels at the range this spray lives at
+  # — 15 to 34 m, the far end of `SPRAY_RANGE` — so the crowns read as a scatter
+  # of isolated beads and vanished entirely at the 800 px the GIF is judged at.
+  # Measured on this frame downscaled to 800: 0.15 -> 0.22 takes legible spray
+  # from 0.12% of the frame to 0.37%. 0.30 was rendered too and goes back to
+  # reading as blobs — the marker beside it is 20 cm square, and past about one
+  # marker width a droplet stops being water in the air.
+  size = [0.22, 0.06]
   color_start = [0.95, 0.98, 1.0]
   color_end = [0.70, 0.80, 0.88]
   alpha = [0.9, 0.0]
