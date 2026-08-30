@@ -55,8 +55,30 @@ publish = false
 # `debug_assertions` on and every layer armed — it changes only how fast the
 # arithmetic underneath runs. The cost is a one-time rebuild of them.
 #
-# **Not `opt-level = 3` on the whole dev profile**, which would strip the
-# assertions and overflow checks the rest of the engine is debugged with.
+# **The whole dev profile is optimised now, and the note that used to sit here
+# was wrong.** It read: *"Not `opt-level = 3` on the whole dev profile, which
+# would strip the assertions and overflow checks the rest of the engine is
+# debugged with."* `opt-level` does no such thing — `debug-assertions` and
+# `overflow-checks` are their own keys, default to true in dev, and are set
+# explicitly below so nobody has to remember that again.
+#
+# Measured, `whitecaps --sim 400` at `GOLDEN_SIZE`, and the render is
+# byte-identical at zero tolerance either way:
+#
+#     dev, opt-level 0     5.561 s
+#     dev, opt-level 2     2.781 s      <- 2.0x, layers still armed
+#     release              0.618 s
+#
+# **The gap to release is the validation layers, not the arithmetic.** They are
+# gated on `cfg!(debug_assertions)` (`loom_render/src/instance.rs:118`), so they
+# are exactly what `cargo xtask validate` exists to run and exactly what cannot
+# be optimised away. 2x is the whole prize here and it is worth a one-time
+# rebuild: `validate` is a 17-minute gate.
+[profile.dev]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
+
 [profile.dev.package.loom_voxel]
 opt-level = 3
 [profile.dev.package.loom_terrain]
