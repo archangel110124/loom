@@ -21,6 +21,12 @@ if cargo metadata --no-deps --format-version 1 | grep -q '"name":"xtask"'; then
   # path in the engine — the drop buffer, the particle pool — is licensed by
   # that second property, and until this existed it was checked by hand once.
   cargo xtask repeat
+  # **The only gate here that fails on *sameness*.** `LOOM_ABLATE=<effect>`
+  # switches an effect off and this fails when the two renders are too similar
+  # — a feature whose removal changes nothing was never drawing, which none of
+  # the four above can see, because a reference image records an absence and
+  # passes for ever.
+  cargo xtask ablate
 else
   echo "skip: cargo xtask validate — xtask crate does not exist yet (M2)"
 fi
@@ -1973,25 +1979,86 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 # variation; it is nowhere near the floor, and the picture at that score is the
 # ghost text a human found by taking a screenshot.
 #
-# The rect is in pixels of a 1440x900 window (`run.rs` asks for exactly that)
-# and the HUD is anchored bottom-centre, so a window that came back a different
-# size lands the band on empty deck and fails loudly rather than passing on
-# nothing. That is the correct direction for this check to break in.
+# **The rect is derived from the shot, not assumed.** It was literal pixels of
+# a 1440x900 window because `run.rs` asks for exactly that — but asking is all
+# it can do. A tiling compositor hands back whatever slot is free (measured on
+# Hyprland: 1892x2085 against the 1440x900 requested), and a fractional display
+# scale makes the swapchain larger than the points egui laid the overlay out
+# in. Either one puts the band on empty deck, and then the row goes red for the
+# machine rather than for the HUD — loudly, which was the right direction, but
+# it is not a finding and a gate that cries wolf on arrival gets blessed away.
+#
+# So the band is stated the way the HUD is actually anchored — `hud.rs` draws
+# it at `viewport.center_bottom()`, centred, a fixed number of *points* up —
+# and converted to pixels with the `ppp` the run now reports. **On a 1440x900
+# window at 1.0 ppp this reproduces the old literals exactly**, 400,780,640,60
+# and 400,100,640,60, which is the property that keeps the calibration below
+# measured rather than re-tuned.
+#
+# **The floors do not scale, and that was measured rather than reasoned.** The
+# first version of this scaled them by the band's area, on the argument that
+# salt is a *count* and a 1.5 ppp band holds 2.25x the pixels. The band then
+# scored 2941 against a floor of 2250 — 1.3x headroom where 1.0 ppp has 3.9x,
+# so the law was wrong and would have made this row flaky rather than strict.
+# Salt counts pixels that sit far from their neighbours, which is a glyph's
+# *edge*: scaling up lengthens the outline but thickens the stroke, and the
+# interior stops counting. The two measurements either side of that are
+#
+#     1440x900 at 1.0 ppp     band 3902     sky 0
+#     1892x2085 at 1.5 ppp    band 2941     sky 0
+#
+# — the same order of magnitude, no growth with area. So 1000 and 200 are flat.
 #
 # **One second, one window.** Forty frames is enough for the world to build and
 # the rules script to write its first caption; `--hold 0:` is a hands-off tape,
 # which is what makes the run scripted — no title screen to click past, and the
 # pointer stays with whoever is at the machine.
-if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+#
+# `WINDIR` is in the guard because on Windows there is a display and neither X11
+# variable is set, so the check would otherwise skip itself into a silent pass.
+if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}${WINDIR:-}" ]; then
   HUD_SHOT=/tmp/loom-hud-gate.png
   rm -f "$HUD_SHOT"
-  "$LOOM" run assets/games/deeper_demo.loom --play --frames 40 --hold "0:" \
-    --shot "$HUD_SHOT" >/dev/null
+  # The geometry line goes to stderr with the rest of the console; stdout is the
+  # frame report and is not wanted.
+  HUD_GEOM=$("$LOOM" run assets/games/deeper_demo.loom --play --frames 40 --hold "0:" \
+    --shot "$HUD_SHOT" 2>&1 >/dev/null \
+    | sed -n 's/^loom: shot \([0-9]*\)x\([0-9]*\) px at \([0-9.]*\) ppp$/\1 \2 \3/p' | tail -1)
+  if [ -z "$HUD_GEOM" ]; then
+    echo "FAIL: the run did not report its shot geometry, so the band cannot be" >&2
+    echo "      placed. Expected a 'loom: shot WxH px at N ppp' line from run.rs." >&2
+    exit 1
+  fi
+  read -r SHOT_W SHOT_H SHOT_PPP <<<"$HUD_GEOM"
+  # Centred, 640x60 pt; the band 120 pt up from the bottom edge, the sky control
+  # 100 pt down from the top. `awk` and not `bc`, which is not installed
+  # everywhere this has to run — this box has no `bc`.
+  hud_rect() {
+    awk -v W="$SHOT_W" -v H="$SHOT_H" -v S="$SHOT_PPP" -v edge="$1" 'BEGIN {
+      bw = 640 * S; bh = 60 * S
+      x = int((W - bw) / 2)
+      y = (edge == "bottom") ? int(H - 120 * S) : int(100 * S)
+      if (x < 0 || y < 0 || x + bw > W || y + bh > H) exit 1
+      printf "%d,%d,%d,%d", x, y, bw, bh
+    }'
+  }
+  HUD_BAND_RECT=$(hud_rect bottom) || {
+    echo "FAIL: a ${SHOT_W}x${SHOT_H} px shot at $SHOT_PPP ppp is too small to hold the" >&2
+    echo "      HUD band. The documented minimum window is 960 pt wide." >&2
+    exit 1
+  }
+  HUD_SKY_RECT=$(hud_rect top) || {
+    echo "FAIL: a ${SHOT_W}x${SHOT_H} px shot at $SHOT_PPP ppp is too small to hold the" >&2
+    echo "      sky control, so the band below would prove nothing." >&2
+    exit 1
+  }
+  HUD_FLOOR=1000
+  HUD_CEIL=200
   hud_salt() { "$LOOM" salt "$HUD_SHOT" --rect "$1" | grep '"salt"' | tr -dc '0-9'; }
-  HUD_BAND=$(hud_salt 400,780,640,60)
-  HUD_QUIET=$(hud_salt 400,100,640,60)
-  if [ "${HUD_BAND:-0}" -lt 1000 ]; then
-    echo "FAIL: the demo's HUD band scores $HUD_BAND salt (want >= 1000) — the" >&2
+  HUD_BAND=$(hud_salt "$HUD_BAND_RECT")
+  HUD_QUIET=$(hud_salt "$HUD_SKY_RECT")
+  if [ "${HUD_BAND:-0}" -lt "$HUD_FLOOR" ]; then
+    echo "FAIL: the demo's HUD band scores $HUD_BAND salt (want >= $HUD_FLOOR) — the" >&2
     echo "      caption is missing, occluded, or the colour of what is behind it." >&2
     echo "      Look at $HUD_SHOT." >&2
     exit 1
@@ -1999,13 +2066,14 @@ if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
   # The control, and it is not decoration: it is what says the number above
   # came from the caption rather than from a frame that had gone noisy
   # everywhere. An equal-sized patch of sky must stay quiet.
-  if [ "${HUD_QUIET:-0}" -gt 200 ]; then
+  if [ "${HUD_QUIET:-0}" -gt "$HUD_CEIL" ]; then
     echo "FAIL: the sky scores $HUD_QUIET salt — the whole frame is noisy, so the" >&2
     echo "      HUD row's $HUD_BAND proves nothing. Look at $HUD_SHOT." >&2
     exit 1
   fi
   rm -f "$HUD_SHOT"
-  echo "overlay: the demo's HUD band $HUD_BAND salt against $HUD_QUIET in the sky"
+  echo "overlay: the demo's HUD band $HUD_BAND salt against $HUD_QUIET in the sky" \
+       "— ${SHOT_W}x${SHOT_H} px at $SHOT_PPP ppp"
 else
   echo "skip: overlay pixel check — no display to open a window on"
 fi

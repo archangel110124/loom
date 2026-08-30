@@ -3299,6 +3299,20 @@ impl Play {
         self.runner.foam()
     }
 
+    /// The FFT cascade this play session's simulation has reached — ADR 0076.
+    ///
+    /// **Beside `foam` because it is the same kind of thing**: CPU water state
+    /// the window has to be handed, on the tick that produced it.
+    /// `Sim::evolve_sea`'s invariant is that the tiles always hold exactly
+    /// `tick x TICK_SECONDS`, so what this returns is never a frame stale and
+    /// never a frame early.
+    ///
+    /// `None` for a Gerstner body, which is every scene that has not opted in.
+    #[must_use]
+    pub fn sea(&self) -> Option<&loom_water::ocean::Ocean> {
+        self.runner.sea()
+    }
+
     /// What the sea sounds like this tick, for the audio bed.
     ///
     /// **Assembled here rather than in the window** so the one line the viewer

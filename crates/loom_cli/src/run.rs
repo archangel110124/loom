@@ -1896,6 +1896,31 @@ impl ApplicationHandler for App {
                     {
                         crate::log::warn(format!("foam: {e}"));
                     }
+                    // **And the FFT cascade** — ADR 0076 — on exactly the rule
+                    // the two fields above it follow. Without this the window
+                    // draws a FLAT sea for a `spectrum` body while the physics
+                    // runs the real one: such a body authors no waves, so the
+                    // Gerstner sum the shader falls back to sums nothing, and
+                    // a buoy heaves on a plane. Observed, not theorised.
+                    //
+                    // **No gate can catch that.** `validate`, `image`,
+                    // `repeat`, `ablate` and `test` all go through the
+                    // headless path, which was wired first; nothing in this
+                    // repository photographs a window.
+                    //
+                    // Last tick's tile, not a re-evaluation at frame time. The
+                    // cascade is stateless so re-evaluating would be legal —
+                    // that is a real dividend of ADR 0076 — but it costs a
+                    // full `Ocean::evolve` at 3.710 ms to move the surface
+                    // 8.5 mm, and measured, the tick boundary does not judder.
+                    if let Some(sea) = self.play.as_ref().and_then(crate::play::Play::sea) {
+                        let tiles = sea.render_tiles();
+                        if let Err(e) =
+                            viewer.set_ocean(&tiles.tiles, &tiles.patch, &tiles.longest, tiles.n)
+                        {
+                            crate::log::warn(format!("ocean: {e}"));
+                        }
+                    }
                     // **And the cinematic free surface**, marched above. Empty
                     // outside the tier and in edit mode, where there is no
                     // simulation and so no solver — the same rule the two
@@ -1971,6 +1996,25 @@ impl ApplicationHandler for App {
                 // `main.rs`.
                 if self.frames_left == Some(1) {
                     let path = self.script.shot.take();
+                    // **The geometry the shot actually came out at**, because a
+                    // gate that measures a rectangle inside it cannot assume
+                    // one. `with_inner_size` above is a *request*: a tiling
+                    // compositor ignores it outright, and a fractional scale
+                    // makes the swapchain bigger than the points egui laid the
+                    // overlay out in — so neither the window's size nor the
+                    // HUD's size in the PNG is knowable from the file alone.
+                    // Both numbers, together, are. `scripts/green.sh` reads
+                    // this line to place its band; see the overlay row there.
+                    if path.is_some()
+                        && let Some(window) = self.window.as_ref()
+                    {
+                        let px = window.inner_size();
+                        let ppp = window.scale_factor();
+                        crate::log::info(format!(
+                            "shot {}x{} px at {ppp:.4} ppp",
+                            px.width, px.height
+                        ));
+                    }
                     if let (Some(path), Some(viewer)) = (path, self.viewer.as_mut()) {
                         viewer.capture(path);
                     }
