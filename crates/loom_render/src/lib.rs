@@ -694,6 +694,48 @@ mod tests {
         );
     }
 
+    /// **The foam's streak frame is a uniform, and a varying here paints the
+    /// water mesh's own triangulation onto the sea.**
+    ///
+    /// `foamFrameFoot` takes `ddx`/`ddy` of the coordinate the lace is sampled
+    /// in, which is the only honest way to band-limit it. A screen derivative of
+    /// a **per-vertex interpolated varying** is piecewise constant on each
+    /// triangle and jumps at every triangle edge — so if the frame comes from
+    /// one, every octave weight and the erosion band with them become
+    /// per-triangle constants, and the sea is painted in flat hard-edged facets.
+    /// Photographed by the human on `ocean_fft` four metres from the buoy and
+    /// reproduced in `.superpowers/sdd/foam-field/`: `dbg_wetc_erode_lacew.png`
+    /// is the lace weight rendered straight, and it is a mosaic of triangles.
+    ///
+    /// `push.environment[0].wind` is a uniform, so `dR` is exactly zero and the
+    /// footprint is the honest world footprint. Text rather than arithmetic for
+    /// the reason the two tests above give: there is no CPU twin of the lace.
+    #[test]
+    fn the_foam_streak_frame_is_a_uniform() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/scene.slang"
+        ))
+        .expect("scene.slang is beside the crate that compiles it");
+        let needle = "foamFrameFoot(";
+        let call = source
+            .rfind(needle)
+            .map(|i| &source[i + needle.len()..])
+            .expect("the frame is measured somewhere");
+        let argument = call.split(',').next().unwrap_or_default().trim();
+        assert!(
+            argument.starts_with("push."),
+            "the foam streak frame is measured from `{argument}`, which is not a uniform. \
+             `foamFrameFoot` differentiates whatever it is handed, and the derivative of an \
+             interpolated varying is constant per triangle — the sea comes out faceted."
+        );
+        assert!(
+            !source.contains("breakDir :"),
+            "`breakDir` is back as a water varying. It was the frame that faceted the sea; \
+             see `WATER_FOAM_STREAK` for the three defects that came out of it."
+        );
+    }
+
     /// SPIR-V starts with the magic number `0x0723_0203` and is a whole number
     /// of 32-bit words. Cheap proof that `build.rs` produced a real module
     /// rather than an empty or truncated file.

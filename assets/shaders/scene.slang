@@ -5242,10 +5242,6 @@ struct WaterOutput {
     /// *shape* (a trough sees less sky than a crest) and is signed. Breaking
     /// and shape are two questions and the eigenvalue only answers one.
     float breakMu : TEXCOORD7;
-    /// The direction the surface is folding along, world xz, unnormalised
-    /// across the triangle. Foam streaks lie along it — ADR 0053 §7 deleted the
-    /// global-wind frame this replaces.
-    float2 breakDir : TEXCOORD8;
     /// **The falling sheet, and zero on every analytic surface vertex** — ADR
     /// 0054.
     ///
@@ -5328,7 +5324,6 @@ WaterOutput nappeVertex(uint nappeID) {
         out.baseXZ = lipA.xz;
         out.waveletSlope = float2(0.0, 0.0);
         out.breakMu = 0.0;
-        out.breakDir = float2(0.0, 0.0);
         out.nappe = float4(0.0, 0.0, 0.0, 0.0);
         return out;
     }
@@ -5370,7 +5365,6 @@ WaterOutput nappeVertex(uint nappeID) {
     out.baseXZ = float2(u, 0.0);
     out.waveletSlope = float2(0.0, 0.0);
     out.breakMu = 0.0;
-    out.breakDir = float2(0.0, 0.0);
     // **Departure time, from the jet velocity rather than from a clock.** Free
     // fall gives `t_fall = (V_j − V_i)/g` exactly, so this parcel left the
     // brink that long ago. See `WaterOutput::nappe`.
@@ -5420,7 +5414,6 @@ WaterOutput fluidVertexMain(uint vertexID: SV_VertexID) {
     out.baseXZ = v.position.xz;
     out.waveletSlope = float2(0.0, 0.0);
     out.breakMu = 0.0;
-    out.breakDir = float2(1.0, 0.0);
     // **`x` is negative here, which says "cinematic free surface"** — see
     // `WATER_CINEMATIC_REFLECT_ROUGH`. It stays in the lane that already
     // answers "what kind of water is this": `> 0.5` a falling sheet, `< -0.5`
@@ -5625,7 +5618,6 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
     out.depth = min(surfaceAt.depth, WATER_DEPTH_SENTINEL);
     out.fold = surfaceAt.fold;
     out.breakMu = surfaceAt.mu_max;
-    out.breakDir = surfaceAt.break_dir;
 
     // **Foam outlives the crest that made it, and that is what makes it foam.**
     //
@@ -6331,13 +6323,39 @@ static const float FOAM_TRAIL_DRIFT = 0.02;
 /// dropped in round blobs, which is the most recognisable thing about a real
 /// whitecap field.
 ///
-/// **It used to lie across the global wind** (`WATER_FOAM_STRETCH`, deleted by
-/// ADR 0053 §7). One wind direction is right only for a pure wind sea: a swell
-/// crossing the wind, a shore turning it, or a wake had their foam combed the
-/// wrong way, and the error was invisible on `whitecaps` precisely because
-/// that scene authors every wave within 20° of the wind. `in.breakDir` is the
-/// eigenvector of the local compression, so a patch is streaked along the crest
-/// it came off.
+/// **It lies along the global wind, and it went back to doing so** — ADR 0049's
+/// "`WATER_FOAM_STRETCH` is `WATER_FOAM_STREAK`" section is amended, with its
+/// own dated note. That section replaced the wind with `in.breakDir`, the
+/// eigenvector of the local compression, so a patch was combed along the crest
+/// it came off. The argument was right about the physics and wrong about what a
+/// per-fragment rotating domain does to everything downstream of it, and three
+/// separate defects came out of the same term:
+///
+/// - `178da5b` found the band-limit ladder could not see the frame's own
+///   rotation and was declaring octaves resolved at up to **50x** their true
+///   frequency, which drew a rectilinear lattice;
+/// - the same commit measured the coordinate to be **translation-variant** —
+///   offsetting the sea by 300 m turns its lace into white noise — and recorded
+///   that no rotation of a scalar noise's domain by a non-gradient direction
+///   field can avoid that;
+/// - and `foamFrameFoot`'s honest footprint, being `ddx` of a **per-vertex
+///   interpolated varying**, is piecewise constant on each triangle and jumps at
+///   every triangle edge. So every octave weight and the erosion band with them
+///   were per-triangle constants, and the sea beside `ocean_fft`'s buoy was
+///   painted in its own triangulation — hard-edged faceted shards, photographed
+///   by the human and reproduced in `.superpowers/sdd/foam-field/`.
+///
+/// A global direction has none of those: `dR` is exactly zero, so the footprint
+/// is the honest world footprint, it is smooth, and it is translation-invariant.
+/// It is also what every readable production ocean does — Crest, gasgiant,
+/// Houdini's "Streak Direction" and WaveWorks all comb foam by a **uniform**,
+/// and Tessendorf's own eigenvector is universally used as a scalar and
+/// discarded as a direction (`foam-rebuild-report.md` §1.2).
+///
+/// The cost is the one ADR 0049 named: one direction is right only for a pure
+/// wind sea, so a swell crossing the wind is combed the wrong way. That is a
+/// wrong *angle* on a soft texture. The other is a wrong *shape*, with the mesh
+/// showing through it.
 static const float WATER_FOAM_STREAK = 6.0;
 /// Not white. Foam is packed bubbles, and bubbles are dielectric films: the
 /// brightest sea foam in a photograph sits well under paper white, and pinning
@@ -6551,18 +6569,15 @@ static const float WATER_FOAM_NYQUIST_HIGH = 0.25;
 /// bound. `foot` is **the noise's own frame** per pixel — `foamFrameFoot`,
 /// measured once at the top of `waterFragmentMain`.
 ///
-/// **It used to be metres of world per pixel times `WATER_FOAM_STREAK`, and
-/// that is a different quantity.** The lace is not sampled in world space: it
-/// is sampled at `R(wd) . wp`, a rotation into the local breaking frame (ADR
-/// 0053 section 7). The screen derivative of that is `R . dwp + dR . wp`, and
-/// the second term — the frame turning under a lever arm `|wp|` — is the one
-/// `foot` cannot see. Measured on the buoy shot (`ocean_fft`, eye 2 m above the
-/// sea): the true frame footprint is **2x to 50x** `foot * WATER_FOAM_STREAK`
-/// over most of the frame, so every octave was declared resolved at up to fifty
-/// times the frequency it actually had, and the binariser below turned that
-/// into the rectilinear hatching the human reported. `foamFrameFoot` takes the
-/// derivative of the coordinate that is actually sampled, which is what the
-/// paragraph above always claimed this was.
+/// **It is metres of world per pixel through the streak frame, and taking that
+/// derivative rather than assuming it is what `178da5b` fixed.** With the frame
+/// per-fragment, its screen derivative was `R . dwp + dR . wp` and the second
+/// term — the frame turning under a lever arm `|wp|` — was invisible here, so
+/// octaves were declared resolved at up to **50x** their true frequency and the
+/// binariser below turned that into rectilinear hatching. The frame is a global
+/// uniform now (see `WATER_FOAM_STREAK`), so `dR` is zero and the two readings
+/// agree — but `foamFrameFoot` still takes the derivative rather than
+/// reconstructing it, because a measured quantity cannot go stale.
 float foamOctaveWeight(float scale, float foot) {
     float cyclesPerPixel = foot * scale;
     return saturate((WATER_FOAM_NYQUIST_HIGH - cyclesPerPixel)
@@ -6571,17 +6586,13 @@ float foamOctaveWeight(float scale, float foot) {
 
 /// The frame the foam's lace and raft are sampled in, and its screen footprint.
 ///
-/// **This band-limits a coordinate that is genuinely badly behaved; it does not
-/// repair it.** `R(wd) . wp` is not translation-invariant: `wp` is an absolute
-/// world position, so the `dR . wp` term grows with distance from the world
-/// origin, and the same sea drawn 400 m out has a lace 20x finer than the same
-/// sea drawn at the origin (measured — offsetting `wp` by 300 m on the buoy shot
-/// turns the lace into white noise). No rotation of a scalar noise's domain by a
-/// non-gradient direction field can avoid that. What this does is stop the
-/// ladder lying about it, so the octaves retire where the coordinate has run
-/// away instead of hatching. Anything that wants lace to survive a spinning
-/// frame has to stop rotating the domain — flow-aligned taps in a fixed frame,
-/// which is a different feature and costs taps.
+/// **`streakDir` is a global uniform and must stay one.** The two properties
+/// that buys are the whole reason `WATER_FOAM_STREAK`'s doc gives for the
+/// amendment: `R` is constant across the frame, so `d(R . wp)` is `R . dwp` —
+/// smooth, and free of the per-triangle jump a `ddx` of an interpolated varying
+/// has — and `R . wp` is translation-invariant, so the same sea drawn 400 m from
+/// the origin has the same lace as one drawn on it. Both fail for any
+/// per-fragment frame, whatever it is derived from.
 ///
 /// **Must be called before any `discard` or early `return`**, for the reason
 /// `waterFragmentMain`'s own `foot` gives at length: Slang lowers `discard` to
@@ -6595,11 +6606,11 @@ float foamOctaveWeight(float scale, float foot) {
 ///
 /// The wind drift the sampler subtracts from `worldPos.xz` is spatially
 /// constant, so it contributes nothing to either derivative and is left out.
-float3 foamFrameFoot(float2 breakDir, float2 worldXZ) {
-    // Renormalised for the reason the sampler gives: `breakDir` is an
-    // interpolated per-vertex eigenvector, so it is short wherever two vertices
-    // disagree, and a short vector here is a stretched lattice.
-    float2 wd = normalize(breakDir + float2(1e-4, 0.0));
+float3 foamFrameFoot(float2 streakDir, float2 worldXZ) {
+    // The `1e-4` keeps water with no authored wind — where the direction is
+    // genuinely undefined — off a zero-length normalize, and lands it on `+x`.
+    // A short vector here is a stretched lattice rather than a rotated one.
+    float2 wd = normalize(streakDir + float2(1e-4, 0.0));
     float2 fuv = float2(dot(worldXZ, wd), dot(worldXZ, float2(-wd.y, wd.x)) * WATER_FOAM_STREAK);
     return float3(wd, max(length(ddx(fuv)), length(ddy(fuv))));
 }
@@ -6624,10 +6635,10 @@ float4 waterFoamWeights(float foot) {
                   foamOctaveWeight(WATER_FOAM_GRAIN, foot));
 }
 
-/// The foam's lace, in the breaking frame. Split out so the flow map can
-/// evaluate it twice; `wd` is the **breaking direction** the streaks lie along
-/// (`in.breakDir`, not the wind — ADR 0053 §7) and `w` is `waterFoamWeights`
-/// for this fragment's footprint.
+/// The foam's lace, in the streak frame. Split out so the flow map can
+/// evaluate it twice; `wd` is the **global wind direction** the streaks lie
+/// along (`foamFrame.xy` — see `WATER_FOAM_STREAK`) and `w` is
+/// `waterFoamWeights` for this fragment's footprint.
 ///
 /// Centred on 0.5, with every octave weighted about that centre, so an octave
 /// going away costs contrast and never moves the threshold. Where the fragment
@@ -6701,8 +6712,8 @@ float waterFoamErode(float4 w) {
 /// report: fading a term to zero instead of to its own mean is the sign error
 /// that cost 72% of that gap.
 ///
-/// Sampled in the breaking frame (`wd` is `in.breakDir`, not the wind — ADR
-/// 0053 §7), so a raft rotates with the crest that entrained its air.
+/// Sampled in the streak frame (`wd` is the global wind — see
+/// `WATER_FOAM_STREAK`), so a raft is combed the same way its lace is.
 ///
 /// **A shading bump off this was built and deleted.** Three taps instead of
 /// one bought a central-difference slope for the foam's normal; against the
@@ -7626,7 +7637,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // The lace is not a function of `worldPos.xz`; it is a function of that
     // position rotated into the breaking frame, and only the derivative of the
     // rotated coordinate can band-limit it. See `foamOctaveWeight`.
-    float3 foamFrame = foamFrameFoot(in.breakDir, in.worldPos.xz);
+    float3 foamFrame = foamFrameFoot(push.environment[0].wind.xy, in.worldPos.xz);
     // The falling sheet, which shares this pipeline and nothing else — ADR
     // 0054. Before the shoreline discard, because a nappe hangs in the air over
     // dry ground as often as not.
@@ -8160,19 +8171,11 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // gusting and turbulence to a *direction* that here only needs to say which
     // way the streaks lie.
     float4 windv = push.environment[0].wind;
-    // **The frame the streaks lie in is the local breaking direction now**, not
-    // the wind — ADR 0053 §7. The wind still carries the patch (below); what it
-    // no longer does is decide which way the lace is combed, which is a
-    // property of the crest that entrained the air.
-    //
-    // Renormalised because it is interpolated: two vertices whose crests differ
-    // in heading give a short vector in between, and a short vector here is a
-    // stretched lattice rather than a rotated one. The `1e-4` keeps flat water
-    // — where the eigenvector is genuinely undefined — off a zero-length
-    // normalize; nothing there draws foam anyway. Both are done in
-    // `foamFrameFoot`, at the top of this function, because the same frame has
-    // to be differentiated there and a second `normalize` here could differ
-    // from it in the last bit.
+    // **The frame the streaks lie in is the global wind**, and `foamFrameFoot`
+    // at the top of this function is where it is normalised — the same frame has
+    // to be differentiated there, and a second `normalize` here could differ
+    // from it in the last bit. See `WATER_FOAM_STREAK` for why this is a uniform
+    // and not the local breaking direction it was between ADR 0049 and today.
     float2 wd = foamFrame.xy;
     float2 windDir = normalize(windv.xy + float2(1e-4, 0.0));
     // Foam drifts downwind. Sampling in a frame that slides with the wind is

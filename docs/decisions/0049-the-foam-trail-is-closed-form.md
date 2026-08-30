@@ -172,6 +172,50 @@ sea and was invisible on `whitecaps.loom` precisely because that scene authors
 every wave within 20° of the wind. They now lie along `break_dir`, the local
 compression's eigenvector — ADR 0053 §7.
 
+### AMENDED 2026-08-30: reverted. The frame is the global wind again.
+
+**This section is withdrawn.** It was right about the physics and wrong about
+what a *per-fragment rotating domain* does to everything downstream of it, and
+three separate defects were traced back to that one term:
+
+1. **The band-limit ladder could not see the frame's own rotation.** The screen
+   derivative of `R(wd)·wp` is `R·dwp + dR·wp`, and only the first term was ever
+   measured, so octaves were declared fully resolved at **2x to 50x** their true
+   frequency and the near-binary erosion threshold turned that into a
+   rectilinear lattice. `178da5b` fixed the measurement — see
+   `.superpowers/sdd/foam-lattice-report.md`.
+2. **The coordinate is translation-variant.** `R(x)·x` for a non-gradient
+   direction field `R` cannot be made translation-invariant by any choice of
+   constants. Measured: offsetting the same sea by 300 m turns its lace into
+   white noise. `178da5b` recorded this as latent, because every scene in the
+   repository is near the world origin.
+3. **`ddx` of an interpolated varying is piecewise constant on each triangle.**
+   This is what the honest measurement in (1) then exposed: `foamFrameFoot`
+   differentiates the frame, `break_dir` arrives as a per-vertex varying, so
+   every octave weight and the erosion band with them became **per-triangle
+   constants** and jumped at every triangle edge. The sea beside `ocean_fft`'s
+   buoy was painted in the water mesh's own triangulation — hard-edged faceted
+   shards, photographed by the human. `.superpowers/sdd/foam-field-report.md`
+   has the repro, the probes and the fix.
+
+A global uniform has none of the three: `dR` is exactly zero, so the footprint
+is the honest world footprint, it is smooth across triangle edges, and it is
+translation-invariant. It is also what every readable production ocean does —
+Crest, gasgiant's `Ocean_FoamTrailDirection0/1`, Houdini's "Streak Direction"
+and WaveWorks all comb foam by a **uniform**, and Tessendorf's own minimum
+eigenvector is universally used as a *scalar* and discarded as a *direction*
+(`foam-rebuild-report.md` §1.2 has the sources).
+
+**The cost is exactly the one this section named**, and it is accepted: one
+direction is right only for a pure wind sea, so a swell crossing the wind has
+its foam combed the wrong way. That is a wrong *angle* on a soft texture. What
+it replaces is a wrong *shape*, with the mesh showing through it.
+
+`WaterSample::break_dir` is untouched — it is still computed, still compared by
+the CPU/GPU agreement test, and still available to anything that wants a local
+breaking axis. What is gone is the water vertex shader's `breakDir` varying,
+which had this as its only consumer.
+
 ## Foam ages
 
 `age = foamHist / max(instantaneous, foamHist)`, free, because both numbers were
