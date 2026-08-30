@@ -2388,61 +2388,69 @@ fn repeat() -> std::process::ExitCode {
                     return (0, failures, String::new());
                 }
 
+                // **A dead render is retried once, loudly.** Parallelising this
+                // gate produced a spurious `DIFFER` in two runs of three — a
+                // render dying with empty stderr, which reads as the process
+                // being killed rather than failing. It did not reproduce in 44
+                // concurrent renders, so the cause is unknown and rare; what is
+                // known is that it arrived with the concurrency.
+                //
+                // A determinism gate is worth exactly as much as the trust that
+                // a failure means something, so the transient must not be able
+                // to report one. It is retried rather than tolerated, and the
+                // retry is **printed** — if this line starts appearing often,
+                // the rate has changed and that is a finding, not noise. Two
+                // failures in a row is still a failure.
                 let mut renders: Vec<Option<Vec<u8>>> = Vec::new();
+                let mut retried = 0_u32;
                 for index in 0..RUNS {
-            let path = scratch.join(format!("{name}_{index}.png"));
-            let path_string = path.to_string_lossy().into_owned();
-            let mut argv: Vec<&str> =
-                vec!["render", scene, "--out", &path_string, "--size", GOLDEN_SIZE];
-            argv.extend_from_slice(extra);
-            match run(&loom, &root, &argv) {
-                Ok(output) if output.status.success() => {
+                    let path = scratch.join(format!("{name}_{index}.png"));
+                    let path_string = path.to_string_lossy().into_owned();
+                    let mut argv: Vec<&str> =
+                        vec!["render", scene, "--out", &path_string, "--size", GOLDEN_SIZE];
+                    argv.extend_from_slice(extra);
 
-                    // **An unreadable output is a broken run, not a differing
-
-                    // one.** `.ok()` turned a failed read into `None`, which
-
-                    // then compared unequal and was reported as `DIFFER` — so a
-
-                    // transient (measured: one render dying while another gate
-
-                    // held the GPU) accused a determinism gate of catching
-
-                    // non-determinism it had not seen. A gate that cries wolf
-
-                    // gets blessed away.
-
-                    match std::fs::read(&path) {
-
-                        Ok(bytes) => renders.push(Some(bytes)),
-
-                        Err(e) => {
-
-                            failures.push(format!(
-
-                                "render {name} (run {index}): rendered but its output could not be read: {e}"
-
-                            ));
-
-                            renders.push(None);
-
+                    // One attempt, then one retry, then it is a failure.
+                    let mut bytes = None;
+                    let mut last = String::new();
+                    for attempt in 0..2 {
+                        match run(&loom, &root, &argv) {
+                            Ok(output) if output.status.success() => {
+                                // **An unreadable output is a broken run, not a
+                                // differing one.** `.ok()` used to turn a failed
+                                // read into `None`, which then compared unequal
+                                // and printed `DIFFER` — a transient accusing
+                                // this gate of catching non-determinism it had
+                                // never seen.
+                                match std::fs::read(&path) {
+                                    Ok(read) => {
+                                        bytes = Some(read);
+                                        break;
+                                    }
+                                    Err(e) => last = format!("rendered but unreadable: {e}"),
+                                }
+                            }
+                            Ok(output) => {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                last = match stderr.trim() {
+                                    "" => format!("exited {} with no message", output.status),
+                                    message => message.to_owned(),
+                                };
+                            }
+                            Err(e) => last = e,
                         }
-
+                        if attempt == 0 {
+                            retried += 1;
+                        }
+                    }
+                    match bytes {
+                        Some(read) => renders.push(Some(read)),
+                        None => {
+                            failures.push(format!("render {name} (run {index}): {last}"));
+                            renders.push(None);
+                        }
                     }
                 }
-                Ok(output) => {
-                    failures.push(format!(
-                        "render {name} (run {index}): {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ));
-                    renders.push(None);
-                }
-                Err(e) => {
-                    failures.push(format!("render {name} (run {index}): {e}"));
-                    renders.push(None);
-                }
-            }
-        }
 
                 let digests: Vec<String> = renders
                     .iter()
@@ -2455,9 +2463,12 @@ fn repeat() -> std::process::ExitCode {
                 // read against the last run, so they are printed in `GOLDEN`
                 // order however the work happened to interleave.
                 let line = format!(
-                    "{name:<18} {}  {}",
+                    "{name:<18} {}  {}{}",
                     if identical { "same" } else { "DIFFER" },
-                    digests.join(" ")
+                    digests.join(" "),
+                    // Printed, never swallowed: a rising retry count means the
+                    // transient's rate has changed, and that is a finding.
+                    if retried > 0 { format!("  [{retried} retried]") } else { String::new() }
                 );
                 if !identical {
                     failures.push(format!(
