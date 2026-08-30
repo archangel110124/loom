@@ -320,10 +320,10 @@ DEMO_FIGHT_HEAD="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531
 # own `memory` and crosses to the rules as `creelopen` / `creelshut`, the same
 # way `station` and `use` do, because `GameRules` sees no input at all.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 300 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:" \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:" \
   --assert "state.creel_open == 1" --assert "events.creelopen == 1" >/dev/null
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 320 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 300:bag=1; 301:" \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 300:bag=1; 301:" \
   --assert "state.creel_open == 0" --assert "events.creelshut == 1" >/dev/null
 
 # **HIS LEGS STOP AND THE ROW ABOVE PROVES IT IS THE CREEL DOING IT.** Same
@@ -376,13 +376,13 @@ DEMO_FIGHT_HEAD="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531
 # run instead it is 17 `cursor` events and the cursor is at the wall, because
 # the grid clamps rather than wraps — deleting the clamp takes it to 17.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 300 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:move_x=1; 275:" \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:move_x=1; 275:" \
   --assert "state.creel_cx == 1" --assert "state.creel_cy == 0" >/dev/null
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:move_x=1" \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:move_x=1" \
   --assert "state.creel_cx == 2" >/dev/null
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:move_z=-1" \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:move_z=-1" \
   --assert "state.creel_cy == 2" --assert "state.creel_cx == 0" >/dev/null
 
 # **AND THE WORLD KEEPS RUNNING, WHICH IS THE HALF THE HUMAN ASKED FOR.**
@@ -918,17 +918,17 @@ DEMO_CONGER="$DEMO_FIGHT; 1900:interact=1; 1901:; 1910:bag=1; 1911:; \
 #      folded from the placement list and removing the placement *is* freeing
 #      them — `creel_drift` is what would catch that going wrong.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:" \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:" \
   --assert "state.creel_hand == 1" --assert "state.creel_used == 3" \
   --assert "events.lift == 1" --assert "state.creel_drift == 0" \
   | grep -q '"creel_hand_label": "FLSK"'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 300:interact=1; 301:" \
   --assert "state.creel_hand == 0" --assert "events.place == 1" \
   --assert "state.creel_used == 4" >/dev/null
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 280:move_x=1; 288:; 300:interact=1; 301:" \
   --assert "state.creel_hand == 1" --assert "state.creel_refused == 1" \
   --assert "events.place == 0" >/dev/null
@@ -937,7 +937,7 @@ DEMO_CONGER="$DEMO_FIGHT; 1900:interact=1; 1901:; 1910:bag=1; 1911:; \
 #      first of the second are taken. A row aimed at (1,0) throws the BAIT away
 #      and reports a clean pass, which is what the first draft of it did.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 420 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:move_z=-1; 268:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:move_z=-1; 268:; \
 280:move_z=-1; 288:; 300:sprint=1; 370:" \
   --assert "state.creel_cy == 2" --assert "state.creel_refused == 2" \
   --assert "events.ditched == 0" >/dev/null
@@ -961,7 +961,7 @@ DEMO_CONGER="$DEMO_FIGHT; 1900:interact=1; 1901:; 1910:bag=1; 1911:; \
 #      **One run, ten greps**, not ten runs: a `deeper_demo` tick is about
 #      1.3 ms and this block is already 135 `loom sim` invocations long.
 creel_state=$("$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:")
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:")
 for name in creel_cells creel_kinds creel_open creel_cx creel_cy \
             creel_hand creel_hand_label creel_hand_w creel_hand_h creel_fits; do
   printf '%s\n' "$creel_state" | grep -q "\"$name\":" || {
@@ -977,7 +977,7 @@ unset creel_state
 #      SPACE, which on the helm mat is the release and where a fat finger is a
 #      boat adrift.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 420 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 300:sprint=1; 320:" \
   --assert "events.ditched == 0" --assert "state.creel_hand == 1" \
   --assert "state.creel_ditching == 0" >/dev/null
@@ -989,11 +989,11 @@ unset creel_state
 #      reading `HOLDING FLSK`. It is latched now, and these are the only two
 #      rows in the block that stop with a key still down.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 320 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 300:sprint=1" \
   --assert "state.creel_ditching == 1" --assert "events.ditched == 0" >/dev/null
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 350 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 300:sprint=1" \
   --assert "state.creel_ditching == 3" --assert "events.ditched == 0" >/dev/null
 #      **And it stops at four, and stops being a bar at all.** `ditch_held`
@@ -1002,7 +1002,7 @@ unset creel_state
 #      that had been empty since 60. Held to tick 420 without ever letting go,
 #      the bar is nought and the line names what went over.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 420 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 300:sprint=1" \
   --assert "state.creel_ditching == 0" --assert "events.ditched == 1" \
   | grep -q '"message": "OVER THE SIDE   the thermos is gone"' 
@@ -1012,7 +1012,7 @@ unset creel_state
 #      default help string with no word about what had gone over the side. It
 #      is above `HOLDING` and below the refusals now.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 420 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 300:sprint=1; 370:" \
   --assert "events.ditched == 1" --assert "state.creel_hand == 0" \
   --assert "state.thermos == 0" --assert "state.creel_used == 3" \
@@ -1025,7 +1025,7 @@ unset creel_state
 #      rule. It always fits — it came out of this grid one press ago and its own
 #      cells are still free.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 300:bag=1; 301:" \
   --assert "state.creel_hand == 0" --assert "state.creel_used == 4" \
   --assert "state.thermos == 1" --assert "events.stash == 1" >/dev/null
@@ -1107,11 +1107,11 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #      `creel_fits == 1`. Every refusal is a fact about the cell under the
 #      cursor, so all of them expire together when it moves.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 320 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 280:move_x=1; 288:; 300:interact=1; 301:" \
   --assert "state.creel_refused == 1" --assert "state.creel_fits == 0" >/dev/null
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 360 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 280:move_x=1; 288:; 300:interact=1; 301:; 320:move_z=-1; 328:" \
   --assert "state.creel_refused == 0" --assert "state.creel_fits == 1" \
   --assert "state.creel_cx == 1" --assert "state.creel_cy == 1" >/dev/null
@@ -1121,7 +1121,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #      stands. A message that blinks off when nothing moved is the same bug the
 #      other way round, and doing this before the clamp is how you get it.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 380 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 280:move_x=1; 288:; 300:move_x=1; 308:; 320:interact=1; 321:; \
 340:move_x=1; 348:" \
   --assert "state.creel_cx == 2" --assert "state.creel_refused == 1" >/dev/null
@@ -1133,7 +1133,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #      reported success and changed nothing, which is the no-op the message
 #      exists to prevent, wearing the message's own clothes.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 300 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 280:fire=1; 281:" \
   --assert "state.creel_refused == 5" --assert "state.creel_hand == 1" \
   | grep -q '"message": "IT IS ONE CELL   turning it would change nothing"'
@@ -1144,7 +1144,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #      before the lift key was told otherwise. It now names what is missing and
 #      the key that fixes it.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 300 \
-  --hold "0:move_z=1; 240:; 250:bag=1; 251:; 260:fire=1; 261:" \
+  --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:fire=1; 261:" \
   --assert "state.creel_refused == 4" --assert "state.creel_hand == 0" \
   --assert "events.turn == 1" \
   | grep -q '"message": "NOTHING IN YOUR HAND   E lifts it out first, then LMB turns it"'
@@ -2117,7 +2117,7 @@ rm -f /tmp/loom-demo-1.json /tmp/loom-demo-2.json /tmp/loom-demo-3.json
 # Traced, because a repeat tape that exercises nothing is three identical
 # nothings: this one produces `cursor` 2, `lift` 2, `place` 1 and `ditched` 1.
 # The first draft pressed E over an occupied cell and had no `place` in it.
-CREEL_TAPE="0:move_z=1; 240:; 250:bag=1; 251:; 260:interact=1; 261:; \
+CREEL_TAPE="0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 280:move_x=1; 288:; 300:move_z=-1; 308:; 320:interact=1; 321:; \
 340:interact=1; 341:; 360:sprint=1; 430:"
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 460 --hold "$CREEL_TAPE" > /tmp/loom-creel-1.json
