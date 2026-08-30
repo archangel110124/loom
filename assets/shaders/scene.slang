@@ -5707,11 +5707,54 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
         // wander only ever raises, so a tap under it contributes nothing under
         // any wander, and the tap is then ten `loom_value_noise` calls a vertex
         // that never had to happen.
-        if (past.mu_max > WATER_FOAM_WET) {
+        //
+        // **`WATER_FOAM_BREAK`/`_BROKEN`, and NOT `WATER_FOAM_WET`/`_BREAK` —
+        // remembering wetness is what turned the sea white.**
+        //
+        // `FoamField`'s own `FOAM_CREST_BREAK` says the sentence this used to
+        // get wrong: *"`WATER_FOAM_BREAK` = 0.33 is where a crest is drawn
+        // white now; where it leaves a raft still there eight seconds later is
+        // a different question, and using one number for both is what turns a
+        // sea white."* This asked the memory question with the number one rung
+        // BELOW the one it warns about — `WATER_FOAM_WET` = 0.22, which is
+        // *wet*, not broken — so a crest that merely steepened left 3.3 s of
+        // coverage behind it.
+        //
+        // What that cost, measured on `lucent --sim 300` at 1280x720:
+        // `in.foamHist` was above 0.05 on **100% of the water** at a mean of
+        // 0.344, and `foam = smoothstep(fnoise +- ferode, wetc)` is very nearly
+        // a binariser against a noise centred on 0.5 with sigma 0.116 — so a
+        // coverage of a third put the threshold's *most discriminating band*
+        // over the entire sea and painted half of it in 6x-stretched lace. That
+        // is the shredded ribbons and the nested contour rings the human
+        // reported; ablating foam gives a clean sea, and dropping this term
+        // alone gives a clean sea. It was latent before `d03e6d1` and grey
+        // rather than white (rendered at `9b8ce94`: the same shapes, a quarter
+        // the contrast), which is why the age fix appeared to cause it.
+        //
+        // Swept on the same shot, `legible%` from `foam_legibility.py`:
+        //
+        //     0.22 / 0.33 (what this was)  14.35%   half the sea is lace
+        //     0.33 / 0.50 (this)            4.14%   ribbons behind broken crests
+        //     0.38 / 0.55                   3.06%
+        //     0.45 / 0.62 (`FoamField`'s)   2.51%
+        //
+        // The top row is the biggest number and the defect; the metric measures
+        // area x contrast and cannot tell foam from a lace-textured sea, which
+        // is exactly what it was rewarding. 0.33/0.50 is the pair already in
+        // this file for "this crest has broken", so the trail now remembers the
+        // state the fragment shader paints white, and no constant was invented.
+        //
+        // **It does NOT match `FOAM_CREST_BREAK` = 0.45 and should not.** That
+        // number was swept against an 8 s half-life with advection to land at
+        // 4.73% steady-state coverage; this is a 3.3 s window decaying at
+        // `FOAM_TRAIL_DECAY` with no advection, so the same coverage wants a
+        // lower gate. Two mechanisms, one question, two calibrations.
+        if (past.mu_max > WATER_FOAM_BREAK) {
             float tapUp = waterFoamBreakPatch(
                 xz - trailWind * tau, push.environment[0].weather.z - tau);
-            trail = max(trail, decay * smoothstep(WATER_FOAM_WET + tapUp,
-                                                  WATER_FOAM_BREAK + tapUp,
+            trail = max(trail, decay * smoothstep(WATER_FOAM_BREAK + tapUp,
+                                                  WATER_FOAM_BROKEN + tapUp,
                                                   past.mu_max));
         }
     }
@@ -6032,6 +6075,10 @@ static const float WATER_CONTACT_INTRUDE = 0.5;
 
 static const float WATER_FOAM_WET = 0.22;
 static const float WATER_FOAM_BREAK = 0.33;
+/// Where a broken crest is white along its whole length, on `mu_max` — the far
+/// end of the pair `WATER_FOAM_BREAK` opens. It was a bare `0.50` at its one
+/// use; it has two now.
+static const float WATER_FOAM_BROKEN = 0.50;
 
 /// **The breaking threshold wanders — SEA-REBUILD §4.3.**
 ///
@@ -6233,14 +6280,46 @@ bool ablated(uint bit) {
 /// water pass at 1920x1080 — see the ADR 0049 amendment.
 static const float FOAM_TRAIL_STEP = 0.33;
 static const int FOAM_TRAIL_TAPS = 10;
-/// What a patch is worth one tap later. **0.858 per 0.33 s is 0.60 per 1.1 s**,
-/// which is exactly the decay the three-tap trail had: the taps got finer, the
-/// half-life did not move, and no reference moves for that reason alone.
+/// What a patch is worth one tap later. **`0.1 ^ (FOAM_TRAIL_STEP /
+/// WATER_FOAM_AGE_SECONDS)` = 0.9268 — a raft's coverage falls to a tenth over
+/// the same ten seconds `foamAge` already ages its albedo across.**
+///
+/// **It was 0.858 and that was never derived.** Its own doc said so: *"0.858
+/// per 0.33 s is 0.60 per 1.1 s, which is exactly the decay the three-tap trail
+/// had: the taps got finer, the half-life did not move."* Inherited, not
+/// measured — and it is a **1.49 s half-life** against Koepke's ten seconds,
+/// five times too fast, on a shader that names ten seconds twice
+/// (`WATER_FOAM_OLD_ALBEDO`, `WATER_FOAM_AGE_SECONDS`).
+///
+/// Koepke has whitecap reflectance falling 55% to 3–10% over about ten
+/// seconds, so the survival factor over the window is somewhere in
+/// 0.055 to 0.18; the geometric middle is a tenth, which is the number above.
+/// The bracket is 0.909 to 0.945 and this sits in it.
+///
+/// **The old value was load-bearing for the wrong reason, and only the trail's
+/// old threshold made it look right.** A trail seeded from `WATER_FOAM_WET`
+/// covered the whole sea, and a fast decay was what kept that from being solid
+/// white — it dragged the coverage down into the *middle* of the erosion
+/// noise's distribution instead, which is the band where a near-binary
+/// threshold shreds. With the trail seeded from breaking (see the loop) the
+/// area is small, so the decay's job goes back to being what its name says:
+/// draining a raft. Measured on `whitecaps --sim 400`, `legible%`:
+///
+///     0.858 (inherited)  6.17%      0.940   10.97%
+///     0.900              8.09%      0.9268  10.02%   <- this
+///                                   0.970   12.65%
 ///
 /// **Zero reproduces the pre-W2 picture exactly**, which is the stub the
 /// golden gate is measured against: with no decay every tap is worth nothing
 /// and `wetc` falls back to the instantaneous coverage.
-static const float FOAM_TRAIL_DECAY = 0.858;
+///
+/// **The window is still 3.3 s and this makes its far end visible**: the
+/// oldest tap is now worth 0.477 rather than 0.216, so the trail ends at a
+/// contour rather than fading out through it. That contour is eroded by the
+/// same noise as everything else and I could not find it in a still, but it is
+/// the thing to look at first if a trail ever reads as having a hem. The cure
+/// is more taps, which is `loom_sample_water` per vertex per tap.
+static const float FOAM_TRAIL_DECAY = 0.9268;
 /// Fraction of the wind speed foam is carried at. Surface drift is a few
 /// percent of the wind over open water, and this is deliberately slower than
 /// the *pattern* drift the fragment shader applies to the noise: the noise
@@ -8248,7 +8327,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
 
     foam = max(foam, shoreFoam * SWASH_OPACITY);
 
-    float broken = smoothstep(WATER_FOAM_BREAK + breakUp, 0.50 + breakUp, in.breakMu);
+    float broken = smoothstep(WATER_FOAM_BREAK + breakUp, WATER_FOAM_BROKEN + breakUp, in.breakMu);
     foam = max(foam, broken * smoothstep(fnoise * 0.4, fnoise * 0.4 + 0.6, broken));
 
     // **A material swap, not white paint.** Foam is opaque packed bubbles: it

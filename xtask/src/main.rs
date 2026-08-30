@@ -1293,6 +1293,35 @@ const GOLDEN_SIZE: &str = "320x200";
 /// decay envelope instead, foam is white where it is fresh and the row moved 0.19505 ->
 /// 0.25541. The floor stays at 0.15 for the same reason it stayed after the drift down.
 ///
+/// ## **Re-measured 2026-08-30 at 0.13898, and THE FLOOR MOVED 0.15 -> 0.07**
+///
+/// Read this before trusting any row above it: **every figure from 0.29178 down to
+/// 0.25541 was measured while the vertex foam trail was seeded from `WATER_FOAM_WET`**
+/// — it remembered a crest that merely got *wet* rather than one that *broke*, so
+/// `in.foamHist` came back above 0.05 on 100% of `lucent`'s water at a mean of 0.344 and
+/// the near-binary erosion threshold painted half the sea in 6x-stretched lace. The human
+/// flew a viewer 1.4 m over the water and called it shredded; the ablated frame is a
+/// clean sea. So this column has been reading "how much of the frame is lace" and the
+/// floor derived from it inherited that.
+///
+/// Measured on this tree, `loom render assets/test/whitecaps.loom --sim 400 --size
+/// 320x200` with and without `LOOM_ABLATE=water_foam`, then `loom compare`:
+///
+/// ```text
+/// trail seeded from            row      note
+/// WATER_FOAM_WET  / _BREAK    0.25541  the shipped defect
+/// WATER_FOAM_BREAK/ _BROKEN   0.09511  the fix, at the old FOAM_TRAIL_DECAY = 0.858
+/// WATER_FOAM_BREAK/ _BROKEN   0.13898  and at the derived 0.9268                 <- this
+/// ```
+///
+/// **0.07 is roughly half of 0.13898**, which is the rule every other floor in this table
+/// was set by, applied to the first measurement of this row taken on a trail that is not
+/// smearing. The gate keeps its meaning — a severed `LOOM_ABLATE_WATER_FOAM` still scores
+/// 0.000 and reports `DRAWING NOTHING`, which is the failure it exists for — and 13.9% of
+/// a frame is emphatically an effect that draws. **Lowering a floor to pass a change is
+/// the wrong move nine times in ten; the tenth is when the number the floor was derived
+/// from was measuring the defect, and that is the claim being made here.**
+///
 /// **`ocean_fft` / `ocean_spectrum`.** Measured 2026-08-29 at `GOLDEN_SIZE`:
 /// `loom render assets/test/ocean_fft.loom --sim 400 --size 320x200` with and without
 /// `LOOM_ABLATE=ocean_spectrum`, then `loom compare`, gives `fraction = 0.587546875`
@@ -1342,7 +1371,7 @@ const ABLATE: [(&str, &str, &str, &[&str], f64); 3] = [
         "assets/test/whitecaps.loom",
         "water_foam",
         &["--sim", "400"],
-        0.15,
+        0.07,
     ),
     (
         "ocean_fft",

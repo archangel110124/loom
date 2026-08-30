@@ -632,6 +632,68 @@ mod tests {
         );
     }
 
+    /// **The trail remembers a crest that BROKE, not one that got merely wet.**
+    ///
+    /// `FoamField`'s `FOAM_CREST_BREAK` writes the rule down: *"`WATER_FOAM_BREAK`
+    /// = 0.33 is where a crest is drawn white now; where it leaves a raft still
+    /// there eight seconds later is a different question, and using one number
+    /// for both is what turns a sea white."* The vertex trail asked the memory
+    /// question with `WATER_FOAM_WET` = 0.22 — a rung *below* the number that
+    /// warning is about — so `in.foamHist` came back above 0.05 on **100% of
+    /// `lucent`'s water** at a mean of 0.344, the coverage sat in the middle of
+    /// the erosion noise's own distribution, and half the sea was painted in
+    /// 6x-stretched lace. That is the shredded-ribbon artifact.
+    ///
+    /// Text rather than arithmetic because there is no CPU twin to compare
+    /// against — `WaterProbe::foam_at` deliberately omits the trail — so what
+    /// is checkable is which pair the one implementation names. Same idiom as
+    /// `foam_one_tap_behind_the_crest_is_still_fresh` above.
+    #[test]
+    fn the_foam_trail_remembers_breaking_and_not_wetness() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/scene.slang"
+        ))
+        .expect("scene.slang is beside the crate that compiles it");
+        let literal = |name: &str| -> f64 {
+            let needle = format!(" {name} = ");
+            let start = source.find(&needle).unwrap_or_else(|| panic!("no {name}")) + needle.len();
+            let rest = &source[start..];
+            let end = rest.find(';').expect("a terminated declaration");
+            rest[..end].trim().parse().unwrap_or_else(|_| panic!("{name} is not a number"))
+        };
+        let wet = literal("WATER_FOAM_WET");
+        let breaking = literal("WATER_FOAM_BREAK");
+        let broken = literal("WATER_FOAM_BROKEN");
+        assert!(
+            wet < breaking && breaking < broken,
+            "the three foam gates must stay ordered wet {wet} < break {breaking} < broken \
+             {broken}; the trail's band is the top pair and the shading gate the bottom one."
+        );
+
+        // The trail loop, from its `for` to the varying it writes.
+        let start = source.find("for (int tap = 1; tap <= FOAM_TRAIL_TAPS;").expect("the trail loop");
+        let end = source[start..].find("out.foamHist = trail;").expect("the trail's output") + start;
+        let loop_body = &source[start..end];
+        let seed = loop_body
+            .rfind("trail = max(trail, decay * smoothstep(")
+            .map(|i| &loop_body[i..])
+            .expect("the trail's one accumulation");
+        assert!(
+            seed.starts_with("trail = max(trail, decay * smoothstep(WATER_FOAM_BREAK + tapUp,"),
+            "the trail is seeded from `{}`, which is not the breaking pair. Remembering \
+             `WATER_FOAM_WET` covers the whole sea in trail and the near-binary erosion \
+             threshold turns that into lace.",
+            seed.lines().next().unwrap_or_default()
+        );
+        assert!(
+            loop_body.contains("if (past.mu_max > WATER_FOAM_BREAK) {"),
+            "the trail's tap gate is not `WATER_FOAM_BREAK`. Gate and band must be the \
+             same pair: a gate one rung below the band spends ten `loom_value_noise` \
+             calls a vertex on taps the band then draws nothing from."
+        );
+    }
+
     /// SPIR-V starts with the magic number `0x0723_0203` and is a whole number
     /// of 32-bit words. Cheap proof that `build.rs` produced a real module
     /// rather than an empty or truncated file.
