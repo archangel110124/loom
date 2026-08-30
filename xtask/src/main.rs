@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 79] = [
+const SCENES: [&str; 80] = [
     // The mood ladder — ADR 0069. In `GOLDEN` too, where the reasoning is.
     "assets/test/mood_deep.loom",
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
@@ -189,6 +189,17 @@ const SCENES: [&str; 79] = [
     // to bless it. `ocean_tropical` is also the only water scene with a sand shelf under it.
     "assets/test/ocean_fft_boat.loom",
     "assets/test/ocean_tropical.loom",
+    // **The showcase**: the one scene that has to hold the backlit subsurface glow, the bed
+    // seen through the column, the whitecaps and the spray in a single frame, from a camera
+    // above the water. It is also the `water_glow` ablation's scene, below — `ocean_tropical`
+    // held that row and the term is nearly silent there, because its sun is 38° up and its
+    // steepest resolved face is 9.6°, so no face on it can be backlit at all.
+    //
+    // **In `SCENES` and not `GOLDEN`.** Its rendering paths are all covered elsewhere
+    // (`ocean_tropical` the optics upload, `whitecaps` the foam, `spindrift` the spray,
+    // `shore` the shallow band) and a reference image of an aesthetic deliverable is the
+    // human's to bless.
+    "assets/test/lucent.loom",
     // **The submerged camera that also authors `optics`**, and it is
     // `ocean_tropical` with the lens moved 1.5 m under its own waterline.
     // `underwater` below is submerged too and has been since the below-surface
@@ -1297,29 +1308,28 @@ const GOLDEN_SIZE: &str = "320x200";
 /// above. A Slang constant that had collided with foam's bit would have shown up as a
 /// large number in the first of those and a changed one in the second.
 ///
-/// **`ocean_tropical` / `water_glow`.** The backlit subsurface term, re-measured at
-/// `GOLDEN_SIZE` after the wrap lobe came out: `loom render
-/// assets/test/ocean_tropical.loom --sim 400 --size 320x200` with and without
-/// `LOOM_ABLATE=water_glow`, then `loom compare`, gives `fraction = 0.00578125`
-/// (`differing` 370 of 64000, `mean` 0.0238, `worst` 20). Reproducible: both sides
-/// byte-identical across two runs. 0.0028 is roughly half of that, on the same rule the
-/// two rows above use.
+/// **`lucent` / `water_glow`.** The backlit subsurface term, measured at `GOLDEN_SIZE`:
+/// `loom render assets/test/lucent.loom --sim 300 --size 320x200` with and without
+/// `LOOM_ABLATE=water_glow`, then `loom compare`, gives `fraction = 0.106015625`
+/// (`differing` 6785 of 64000, `mean` 0.7672, `worst` 76). Reproducible: both sides
+/// byte-identical across two runs. 0.05 is roughly half of that, on the same rule the two
+/// rows above use.
 ///
 /// **Read the `fraction` this table uses at `compare`'s DEFAULT tolerance**, which is what
 /// `ablate` below invokes — `channel = 2`, so a pixel that moved one or two levels is not
-/// counted. At zero tolerance the same pair of renders differs across **1.475%** of the
+/// counted. At zero tolerance the same pair of renders differs across **15.49%** of the
 /// frame. Only the first belongs in this column; a floor set from the second would have
 /// failed a working effect, and did, once.
 ///
-/// **It is the smallest number in this table, and after the lobe change that is a fact
-/// about the scene rather than about the term.** The backlit path is Lambert's cosine on
-/// the face the light enters, so it is non-zero only where a visible face is tilted
-/// further from the vertical than the sun is above the horizon.
-/// `ocean_tropical`'s steepest resolved face is 9.6° and its sun is 38.3° up, so almost
-/// nothing on it can be backlit at all: what survives is the capillary tail of the shading
-/// normal on the steepest crests. **This row wants a scene authored for the term** — a
-/// low sun over a sea with faces steeper than it — and there is not one in the repository
-/// yet. Until there is, the margin here is thin on purpose and worth watching.
+/// **This row was `ocean_tropical` and it moved here, because the term's gate is now a
+/// fact about the scene's geometry.** The backlit path is Lambert's cosine on the face the
+/// light enters, so it is non-zero only where a visible face is tilted further from the
+/// vertical than the sun is above the horizon. `ocean_tropical`'s sun is 38.3° up and its
+/// steepest resolved face is 9.6°, so almost nothing on it can be backlit at all: it
+/// measured **0.578%** against a floor of 0.28%, a margin too thin to be a gate.
+/// `lucent.loom` is authored for exactly this term — a 6.9° sun over a sea whose faces
+/// reach 39.4° — which is what an ablation row is supposed to be pointed at: the scene
+/// where the effect is loudest.
 const ABLATE: [(&str, &str, &str, &[&str], f64); 3] = [
     (
         "whitecaps",
@@ -1336,11 +1346,11 @@ const ABLATE: [(&str, &str, &str, &[&str], f64); 3] = [
         0.30,
     ),
     (
-        "ocean_tropical",
-        "assets/test/ocean_tropical.loom",
+        "lucent",
+        "assets/test/lucent.loom",
         "water_glow",
-        &["--sim", "400"],
-        0.0028,
+        &["--sim", "300"],
+        0.05,
     ),
 ];
 

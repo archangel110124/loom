@@ -8699,6 +8699,105 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
     /// which is one point, moves. **And the span is the whole swell patch**: the
     /// cascade is periodic at 2048 m, so that is the entire sea rather than a
     /// window on it, and a short span cannot hold a swell wavelength.
+    /// **`lucent.loom` breaks, and it throws.**
+    ///
+    /// The showcase scene has to hold four things in one frame and two of them
+    /// are thresholds it either clears or does not: the whitecaps are
+    /// `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, mu_max)` in the water
+    /// shader and the spray fires above `spray::SPRAY_BREAK`, and both numbers
+    /// are 0.33. Neither is visible in a passing gate — a sea that stopped
+    /// breaking would render as a perfectly reasonable calm sea, and
+    /// `lucent.loom` is not in `GOLDEN`, so nothing else in the build would
+    /// notice.
+    ///
+    /// **A spray emitter that throws zero is the failure mode.** `spray` is a
+    /// multiplier on how many crests throw, not on whether the sea can throw at
+    /// all: under `SPRAY_BREAK` the crest test inside `spray()` fails at every
+    /// point and any multiplier gives nothing. `splash.loom` is that case and
+    /// `particles::tests::a_breaking_sea_sprays_and_a_calm_one_does_not` pins
+    /// it. So this counts droplets rather than asserting a flag.
+    ///
+    /// The grid side is prime for the reason the fold-distribution test below
+    /// gives: every wavelength here is a whole or half metre, and a
+    /// power-of-two side would sample one sublattice of them for ever.
+    #[test]
+    fn lucent_breaks_and_throws() {
+        /// `WATER_FOAM_BREAK` in `assets/shaders/scene.slang` and
+        /// `spray::SPRAY_BREAK` in `loom_water` — one decision, where a crest
+        /// is breaking, spelled a third time here so this test says what it is
+        /// measuring against rather than importing one of the two and implying
+        /// the other follows.
+        const BREAK: f32 = 0.33;
+        const SIDE: u16 = 251;
+        /// Metres. Twelve of the 13 m swell and thirty-two of the 5 m chop, so
+        /// no wave is sampled at one phase.
+        const SPAN: f32 = 160.0;
+
+        let src = std::fs::read_to_string("../../assets/test/lucent.loom").expect("the scene");
+        let scene = Scene::parse(&src).expect("valid scene");
+        let world = World::from_scene(&scene);
+        let wind = crate::weather::wind_of_world(&world);
+        let body = crate::weather::water_of(&world, &wind).expect("lucent has water");
+        assert!(body.spray > 0.0, "lucent must author spray or nothing throws at all");
+
+        // The instant the scene's own command line renders.
+        let t = 300.0 / 60.0;
+        let step = SPAN / f32::from(SIDE);
+        let terrain = scene_terrain_field(&scene);
+        let ground = |x: f32, z: f32| {
+            terrain
+                .as_ref()
+                .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(x, z))
+        };
+
+        let mut mu = Vec::with_capacity(usize::from(SIDE) * usize::from(SIDE));
+        // `weather::instant_foam` is the CPU twin of the shader's
+        // `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, mu)` with its noise
+        // erosion, so this column is *painted white*, which is the quantity
+        // Monahan's whitecap relation is comparable to. `past(BREAK)` above it
+        // is the surface that is breaking, which is a larger number.
+        let mut painted = 0.0_f64;
+        for iz in 0..SIDE {
+            for ix in 0..SIDE {
+                let (x, z) = (f32::from(ix) * step - SPAN / 2.0, f32::from(iz) * step - SPAN / 2.0);
+                let sample =
+                    loom_water::sample_water(&body, None, [x, z], t, ground(x, z), [0.0; 3], [0.0; 3]);
+                painted += f64::from(crate::weather::instant_foam(sample.mu_max, [x, z], t));
+                mu.push(sample.mu_max);
+            }
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let n = mu.len() as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let past = |r: f32| mu.iter().filter(|m| **m >= r).count() as f64 * 100.0 / n;
+        let breaking = past(BREAK);
+        let mean = mu.iter().map(|m| f64::from(*m)).sum::<f64>() / n;
+
+        // The droplets in the air at the instant the scene renders, from the
+        // scene's own eye — the population is bounded by `SPRAY_RANGE` around
+        // it, so it is not a property of the sea alone.
+        let eye = [0.0, 4.5, 16.0];
+        let thrown = crate::particles::spray(&world, &body, None, &ground, eye, t).len();
+
+        println!(
+            "lucent  mu_max mean {mean:.4}  past 0.22 {:.3}%  past {BREAK} \
+             {breaking:.3}%  foam painted {:.3}%  droplets in the air at \
+             t = {t:.2}s: {thrown}",
+            past(0.22),
+            painted * 100.0 / n,
+        );
+
+        assert!(
+            breaking > 0.0,
+            "no point on lucent's sea reaches {BREAK}: it has stopped breaking, so the              whitecaps and the spray are both off and the scene shows two of its four things"
+        );
+        assert!(
+            thrown > 0,
+            "lucent threw no spray at all at t = {t}. `spray` is authored at {}, so the sea's              fold ceiling has fallen under SPRAY_BREAK — check the three `steepness` values.",
+            body.spray
+        );
+    }
+
     #[test]
     fn the_fold_distribution_the_sss_mask_is_calibrated_against() {
         const SIDE: u16 = 401;

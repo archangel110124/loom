@@ -1,0 +1,301 @@
+# **Four things at once: light through the crest, the bed through the column,
+# foam, and spray — from a camera above the water.**
+#
+#     loom render assets/test/lucent.loom --sim 300 --size 1920x1080 -o /tmp/lucent.png
+#     loom-scene lucent --play
+#
+# Every other sea in this repository shows one of those. `ocean_tropical` is the
+# colour, `whitecaps` the foam, `spindrift` the spray, `shore` the shallow band.
+# This one has to hold all four in one frame, and they do not want the same
+# scene.
+#
+# # The tension, and how it is settled
+#
+# **Seeing the bed wants shallow, clear, calm water. Foam and spray want a
+# steep, energetic sea. Backlighting wants a low sun; seeing *into* water wants
+# a high one.** Three fights, and the settlement is different in each.
+#
+# **Steep and shallow is not a contradiction here, and that is arithmetic
+# rather than luck.** `fold` — the quantity the whitecaps, the spray and the
+# breaking test all key on — is `Σ Q·k·A·sin φ`, and this engine parameterises a
+# Gerstner wave so that `Q·k·A = steepness / N`. So **`fold` is a function of
+# `steepness` alone: it does not know the amplitude or the wavelength.** The
+# three waves below carry `steepness` 0.80/0.82/0.82, so the sea's fold ceiling
+# is 0.813 — well past `WATER_FOAM_BREAK` and `SPRAY_BREAK`, both 0.33 — while
+# their amplitudes sum to a crest of only **1.16 m**. That is what lets a
+# breaking sea sit over three metres of water.
+#
+# **Low sun and a visible bed is settled by looking down rather than by raising
+# the sun.** The camera is 4.5 m up and pitched 16° down, so the near half of
+# the frame is water seen at 25-45° from the normal — inside Fresnel's
+# see-into-it band — while the far half grazes and reads as sky and crest. The
+# sun sits at **6.9° of elevation, 19° off the camera's bearing**, which puts it
+# behind the water the lens is pointed at.
+#
+# **6.9° is not a mood, it is the condition the subsurface term needs.** After
+# the wrap lobe came out (see `scene.slang`'s long comment at the term), the
+# backlit-crest path is gated on `saturate(-dot(normal, sunDirection()))` —
+# Lambert's cosine on the face the light enters, which for a thin sheet is the
+# one *behind* the face you can see. That is non-zero only where the visible
+# face is tilted further from the vertical than the sun is above the horizon.
+# `ocean_tropical` is the counter-example and it is measured: over a 36-point
+# grid at its own render instant its steepest *resolved* face is **9.6°** and its
+# sun is 38.3° up, so almost nothing on it can be backlit at all and its
+# subsurface term is correctly nearly silent. The same grid on this sea reads
+# **39.4°** against a 6.9° sun. (Both are the Gerstner normal; the shading normal
+# adds the Cox–Munk capillary slope on top, which is what softens the cosine at
+# the terminator instead of a wrap constant.)
+#
+# # The four things, each a number
+#
+# Measured at `--sim 300`, 1280x720, at this camera. `LOOM_ABLATE` switches an
+# effect off; the fraction is `loom compare` at **zero** tolerance against the
+# same frame with it on.
+#
+#     the bed through the water   71.66% of the frame   mean 13.62   worst 145
+#     subsurface glow             14.49%                mean  0.77   worst  95
+#     foam                        54.49%                mean  3.65   worst 106
+#     spray                        0.17%                mean  0.06   worst 180
+#
+# **Water is 77.40% of this frame** (measured the same way, against a render with
+# the `Water` node deleted), so the bed is doing visible work over **92.6% of the
+# water**. Spray's fraction is small and its worst channel is the largest in the
+# table, which is what a scatter of bright sub-metre droplets looks like to a
+# pixel diff: **1,113 droplets are in the air at this instant**, and the same
+# scene with `spray = 0.0` renders `particles: 0`.
+#
+# The bed's number and the spray's are against edited copies of this scene rather
+# than against ablations, because neither is a switchable effect: `behind * T` is
+# the refraction path itself, and spray is a scene-authored population.
+#
+# **Off the screen and onto the sea**, from
+# `loom_cli`'s `lucent_breaks_and_throws` — a 251×251 grid over 160 m at the same
+# instant:
+#
+#     mu_max mean 0.1278   past 0.22 (foam onset) 26.24%   past 0.33 (breaking) 11.15%
+#     foam painted over 14.10% of the surface      1,113 droplets in the air
+#
+# **14.1% painted is a stylised sea and it should be read as one.** `scene.slang`
+# records `ocean`'s measured coverage as 4–7% and Monahan's whitecap relation at
+# that scene's 14 m/s as 3.2%; this sea is at 11 m/s and about three times
+# whiter than either. It is authored that way because whitecaps and spray have to
+# be legible in a *still*, and because the same `steepness` that makes them is
+# what makes the crests thin enough for the subsurface term to light. If the
+# breaking limiter ever lands, this is the first scene it should be re-argued
+# against.
+#
+# # What this scene is NOT showing, and why
+#
+# **It has no surf, and it must not be read as having any.** `SEA-REBUILD.md`
+# §4.1's depth-limited breaking limiter and §5's curl sheet are both unbuilt. So:
+#
+# - **Nothing here enforces the depth limit; the scene is authored to respect
+#   it.** Munk's breaker index puts a wave's height at breaking at about
+#   `0.78 · h`. The deterministic maximum here — all three waves in phase — is
+#   `H = 2 × 1.16 = 2.32 m` over `h = 3.2 m`, so `H/h = 0.725`, inside 0.78. The
+#   `Hs` the engine reports is 2.078 m (`4σ` of the three-wave sum), `Hs/h =
+#   0.65`. Those numbers are checked, not hoped: if this wave set is ever made
+#   taller, it goes past the index and the sea becomes a thing that cannot
+#   physically stand there.
+# - **`attenuation_depth` is left at its default zero, so nothing shoals.** A
+#   13 m swell over 3.2 m of water is `kh = 1.55` — intermediate water, where a
+#   real wave would already have slowed, shortened, steepened and broken. What
+#   is drawn is a deep-water Gerstner sea with a bed painted underneath it.
+#   Turning shoaling on would flatten exactly the crests this scene exists to
+#   backlight, and `shoal()` has no breaking limiter behind it to put the energy
+#   anywhere else.
+# - **A crest here goes white and throws droplets; it never plunges.** There is
+#   no curl, no lip, no barrel and no broken-water sheet after the break.
+#
+# # The water
+#
+# **Jerlov II**, the middle open-ocean row of `WaterOptics`'s table: `K_d` =
+# 0.3712 / 0.0760 / 0.0383 and `b_b` = 0.00528 / 0.00727 / 0.01091, `G/B` 0.394.
+# Jerlov III (`ocean_tropical`'s row) was rendered beside it and is more
+# turquoise but hazes the bed out; Jerlov IB shows the bed most sharply and goes
+# navy in the troughs. II is where both halves are legible at once, which is the
+# whole request.
+#
+# **3.2 m of water, and the shelf is 200 m square.** Its far edge is a
+# discontinuity — the same trap `shore.loom` and `ocean_tropical.loom` name — and
+# `fog_density = 0.008` is what hides it. The bed is bright carbonate sand,
+# nearly neutral, so the colour in the frame is the water's.
+#
+# # The camera, and the two alternatives
+#
+# Swept at 1280x720 and kept in `.superpowers/sdd/sea-showcase/`:
+#
+#     waterline   eye 2.2 m, pitch  -8°   one wave face fills the frame; most
+#                                         drama, least bed
+#     shelf       eye 4.5 m, pitch -16°   this one — bed and crests both legible
+#     overlook    eye 8.0 m, pitch -26°   the whole wave field and the most bed,
+#                                         but the sea reads as corrugation
+#
+# Sun elevation was swept at 6.9 / 10.1 / 19.9°: at 20° the glow washes flat over
+# the whole sea and the wave structure goes with it, which is the failure mode
+# the subsurface term's own comment records.
+#
+# **No boat.** `ocean_fft_boat.loom` is the scene with scale in it; a hull here
+# covers the water that is the subject. The `Marker` is `spindrift.loom`'s
+# device instead — one 3.6 m pile, 20 cm square, off to the left — because a
+# still of open water has no scale in it and a droplet could be any size at all.
+
+[scene]
+format = 1
+id = "6b2e4f19-30ad-4c7e-b158-9e0d7a5c2f84"
+
+[[node]]
+name = "Sea"
+
+  # A low sun, 19° off the lens's bearing rather than straight down it, so the
+  # glitter path is beside the subject instead of on top of it. The sky is
+  # deliberately not a saturated blue: whatever the sea reflects should be near
+  # neutral, or a blue sky makes a blue sea for a reason that has nothing to do
+  # with the water.
+  [node.components.Environment]
+  sun_direction = [0.33, 0.12, -0.936]
+  sun_strength = 1.8
+  sun_color = [1.0, 0.94, 0.84]
+  ambient = 0.34
+  sky_zenith = [0.10, 0.26, 0.56]
+  sky_horizon = [0.58, 0.66, 0.74]
+  fog_density = 0.008
+  fog_falloff = 0.05
+
+  # 11 m/s. The wind does two things here that the wave set does not: it drives
+  # the Cox–Munk capillary slope the shading normal carries (`WATER_DETAIL_*`),
+  # which is what softens the backlit cosine at the terminator, and it sets the
+  # foam's own wander.
+  [node.components.Wind]
+  direction_degrees = 190.0
+  speed = 11.0
+  gustiness = 1.0
+  turbulence = 0.9
+
+# **The shelf: bright sand, 3.2 m down, 200 m square.** One box op at a
+# one-metre voxel — a flat bed needs nothing finer and the cost is cubic in the
+# resolution. The volume's near corner is its node, so this spans x −90..90 and
+# z −130..50; the camera stands at z = 16 and looks toward −Z, so there are
+# 146 m of shelf in front of it.
+[[node]]
+name = "Shelf"
+parent = "Sea"
+transform = { pos = [-90.0, -24.0, -130.0] }
+
+  [node.components.VoxelVolume]
+  voxel_size = 1.0
+  chunks = [6, 1, 6]
+
+  [[node.components.VoxelVolume.ops]]
+  kind = "box"
+  center = [96.0, 10.8, 96.0]
+  half_extents = [98.0, 10.0, 98.0]
+  mode = "union"
+
+  # Carbonate sand: bright and nearly neutral. A yellow bed would put its own
+  # hue in the frame, and the hue here is supposed to be the water's.
+  [node.components.Material]
+  albedo = [0.84, 0.80, 0.70]
+  roughness = 0.92
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+  density = 1025.0
+  drag = 2.0
+  # How many crests throw, not how hard: a droplet's arc is what the crest that
+  # threw it can do. `spindrift.loom`'s value, on a sea with a comparable fold
+  # ceiling. Zero is the default and is every sea that predates W5.
+  spray = 8.0
+
+    # Jerlov II — a published row, not a colour somebody liked. See the header
+    # for why this row and not the two either side of it, and `WaterOptics` for
+    # the table and its sources.
+    [node.components.WaterBody.optics]
+    attenuation = [0.3712, 0.0760, 0.0383]
+    backscatter = [0.00528, 0.00727, 0.01091]
+
+  # **Three waves with no common factor between their wavelengths**, each
+  # carrying about a third of the fold budget, so the sum passes 0.33 where two
+  # of them crest together — a few percent of the surface at any instant, which
+  # is what a breaking sea looks like. One wave at the same total steepness
+  # breaks in a corrugated line right across the scene.
+  #
+  # Nothing shorter than 5 m: the Nyquist fade deletes waves under about four
+  # metres at range, and a wave that is there in the near field and gone in the
+  # mid field is worse than one that was never authored.
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 13.0
+  amplitude = 0.62
+  steepness = 0.80
+  direction = [1.0, 0.2]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 7.5
+  amplitude = 0.34
+  steepness = 0.82
+  direction = [0.85, -0.5]
+  speed_scale = 1.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 5.0
+  amplitude = 0.20
+  steepness = 0.82
+  direction = [1.0, 0.62]
+  speed_scale = 1.0
+
+# What a droplet off this water looks like. A `ParticleEmitter` under the
+# `WaterBody` is the water's splash and never plays where it sits — spray
+# borrows its colour and size rather than inventing a second answer to "what
+# does this water throw".
+[[node]]
+name = "Spray"
+parent = "Sea/Water"
+
+  [node.components.ParticleEmitter]
+  rate = 0.0
+  burst = 70
+  lifetime = 0.8
+  lifetime_jitter = 0.4
+  speed = 4.5
+  spread_degrees = 55.0
+  radius = 0.4
+  gravity = -9.0
+  drag = 0.5
+  turbulence = 0.6
+  turbulence_scale = 0.8
+  size = [0.15, 0.04]
+  color_start = [0.95, 0.98, 1.0]
+  color_end = [0.70, 0.80, 0.88]
+  alpha = [0.9, 0.0]
+  seed = 61
+
+# The scale reference. 3.6 m of 20 cm pile, half of it under water — so it also
+# carries the waterline band the gap-to-solid foam draws, which nothing else in
+# this frame shows.
+[[node]]
+name = "Marker"
+parent = "Sea"
+transform = { pos = [-4.2, 0.7, -7.0], scale = [0.20, 3.6, 0.20] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.16, 0.14, 0.12]
+  roughness = 0.85
+
+# See the header's sweep. 4.5 m up and 16° down is the one place both the bed
+# and the backlit crests are legible in the same frame.
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [0.0, 4.5, 16.0], rot_euler = [-16.0, 0.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 55.0
