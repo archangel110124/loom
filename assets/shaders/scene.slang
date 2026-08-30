@@ -5931,7 +5931,7 @@ static const float WATER_CREST_THIN = 0.225;
 /// **A gate, not a strength.** How much light survives the crossing is
 /// `exp(-waterExtinct() * thick)` and is not tuned here; this only says where
 /// the effect is switched off entirely, so that a deep column cannot glow
-/// through the wrap lobe. Six metres is `shore`'s own shelf: the shallow band
+/// through the subsurface term. Six metres is `shore`'s own shelf: the shallow band
 /// glows, the water past the drop-off does not, and the sea with no bed under
 /// it (`column == WATER_NO_BED`) is left to `crest` alone — which is what
 /// keeps `ocean` and `squall` byte-identical.
@@ -5944,11 +5944,32 @@ static const float WATER_DEPTH_SENTINEL = 100.0;
 /// Large enough that every gate reading it is off, small enough to stay exact
 /// in a float.
 static const float WATER_NO_BED = 1.0e4;
-/// How far the sun direction is bent by the surface normal before the lobe is
-/// evaluated. Widens the glow around a crest rather than pinning it to exact
-/// alignment.
-static const float WATER_SSS_DISTORT = 0.35;
-static const float WATER_SSS_POWER = 4.0;
+/// Henyey–Greenstein asymmetry for ocean water. **Derived, not authored.**
+///
+/// HG's backscatter fraction has a closed form:
+///
+/// ```text
+///   b_b / b = (1 - g)/(2g) · ( (1 + g)/sqrt(1 + g²) − 1 )
+/// ```
+///
+/// Setting that equal to **0.0183** — the Petzold average-particle backscatter
+/// fraction that `WaterOptics`'s doc table already builds every `backscatter`
+/// row from, `½·b_w + 0.0183·(b − b_w)` — and inverting gives **g = 0.9186**.
+/// So this number is a consequence of one already in this codebase rather than
+/// a second opinion about the same water, and
+/// `loom_render`'s `the_phase_asymmetry_is_petzold_s_backscatter_fraction`
+/// re-runs the inversion against this literal so it cannot drift.
+///
+/// **What it is used for is narrower than the name suggests.** See the long
+/// comment at the subsurface term: refraction confines both in-water rays to
+/// the Snell cone, so the scattering angle an above-water eye can see is never
+/// below 82.8°, and over 82.8–180° this phase function only runs between
+/// 0.076 and 0.022 of isotropic — flat to a factor of 1.8 over the angles a
+/// real frame produces. It is the right multiplier for the *shallow column* — a real
+/// single-scattering path — and it is deliberately **not** applied to the
+/// backlit-crest path, which is diffuse transmission and is already carried by
+/// `waterExtinct()` being `K_d` rather than the beam coefficient.
+static const float WATER_PHASE_G = 0.9186;
 /// How far above still water a **significant crest** stands, in units of σ.
 ///
 /// `Hs = 4σ` is the significant wave height — the mean crest-to-trough height
@@ -6180,7 +6201,7 @@ static const uint LOOM_ABLATE_OCEAN_SPECTRUM = 2u;
 /// of the three places that bit is written down and nothing checks the three agree.
 ///
 /// Ablating it zeroes `sss` at its single point of use, so what is measured is the light
-/// that came through the water and nothing else — not the wrap lobe, not the crest mask,
+/// that came through the water and nothing else — not the subsurface term, not the crest mask,
 /// not the crossing. **The registered scene is `ocean_tropical`**, which is the sea this
 /// term could not reach until `lift` replaced `crest`: a Beaufort 4 Pierson–Moskowitz sea
 /// never crosses `WATER_FOLD_REF`, so the old gate drew literally nothing there and a
@@ -7004,8 +7025,8 @@ float3 waterBehind(
     float3 refracted,
     out float3 behind,
     /// Metres of water the light crossed, both legs — `WATER_NO_BED` when
-    /// there is nothing behind the surface. The wrap lobe reads it, so that
-    /// how thin the water is is measured once rather than authored twice.
+    /// there is nothing behind the surface. The subsurface term reads it, so
+    /// that how thin the water is is measured once rather than authored twice.
     out float column,
     /// Metres of water between the surface and whatever OPAQUE thing is behind
     /// it — `WATER_NO_BED` when there is nothing behind it at all.
@@ -7013,8 +7034,8 @@ float3 waterBehind(
     /// **Not `column`, and the difference is the whole of the waterline band.**
     /// `column` is an optical path through *a bed the height grid knows about*,
     /// and is deliberately left at the sentinel on every scene with no voxel
-    /// volume so that `ocean`'s submerged posts do not tell the wrap lobe they
-    /// are standing in a hundred metres of water. That is the right rule for an
+    /// volume so that `ocean`'s submerged posts do not tell the subsurface term
+    /// they are standing in a hundred metres of water. That is the right rule for an
     /// absorption path and the wrong one for a waterline: it makes `column`
     /// unusable on the open sea, which is where every boat is. This is a
     /// geometric gap to the depth buffer, so it answers there.
@@ -7109,8 +7130,8 @@ float3 waterBehind(
     float downLeg = min(bedDepth, WATER_DEPTH_SENTINEL) * loomWaterSecant(sunDirection().y);
     // **Only a bed the height grid actually knows about reports a column.** At
     // the sentinel the depth is not 100 m of water, it is "no voxel volume
-    // here" — so `ocean`'s submerged posts must not tell the wrap lobe they
-    // are standing in a hundred metres. `T` still uses it, and gets the same
+    // here" — so `ocean`'s submerged posts must not tell the subsurface term
+    // they are standing in a hundred metres. `T` still uses it, and gets the same
     // answer it always did: nothing survives that path either way.
     if (bedDepth < WATER_DEPTH_SENTINEL) {
         column = viewLeg + downLeg;
@@ -7799,9 +7820,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // **Steepness has not gone; it has stopped being a switch.** `crest` still
     // sets `skyView` above, which is a question about surface shape.
     //
-    // Wrap-lobe form (Barré-Brisebois): perturbing the sun direction by the
-    // surface normal widens the lobe so the glow spreads around the crest
-    // instead of appearing only at exact alignment. **The hue is not authored**
+    // **The hue is not authored**
     // — it falls out of `waterExtinct()` through Beer-Lambert, so the colour of
     // a backlit wave is the colour water actually transmits: through 2 m that
     // is (0.51, 0.89, 0.97), the luminous turquoise a breaking crest has.
@@ -7826,10 +7845,84 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // crossing itself and is still the authored 4 m, measured against nothing.
     float sheet = WATER_TROUGH_THICK / max(sunDirection().y, 0.15);
     float thick = min(column, sheet) * lerp(1.0, WATER_CREST_THIN, lift);
-    float3 h = normalize(sunDirection() + normal * WATER_SSS_DISTORT);
+    // **The lobe is gone, and the geometry is why it could never have worked.**
+    //
+    // What stood here was `pow(saturate(dot(-view, normalize(sunDirection() +
+    // normal * 0.35))), 4.0)` — a wrap lobe with two authored constants and no
+    // referent for either. It evaluated to 0.02-0.11 on `ocean_tropical`, so
+    // the term arrived as a lift rather than a luminance, and its peak is
+    // provably below the waterline: maximising over `view` wants
+    // `view = -(L + N*d)`, whose normal component is `-(L.N) - d < 0`.
+    //
+    // **The honest replacement was tried first and falsified.** Both in-water
+    // directions exist here — `refracted` for the eye, `refract(-sunDirection(),
+    // normal, 1/WATER_IOR)` for the sun — so the single-scattering angle can be
+    // taken for real. It cannot help, and that is a theorem rather than a
+    // measurement: refraction confines both rays to the Snell cone, half-angle
+    // `asin(1/1.333) = 48.6 deg`. The sun's in-water ray goes DOWN inside it and
+    // the ray that leaves for an above-water eye goes UP inside it, so with
+    // `a, b <= 48.6 deg` off the vertical, `cos(theta) <= -cos(a + b) <=
+    // -cos(97.2 deg) = 0.125`: **the scattering angle is at least 82.8 degrees
+    // for every camera, every sun and every wave face this engine can author.**
+    // Over 82.8-180 deg the Henyey-Greenstein phase function at `g = 0.9186` —
+    // the asymmetry whose backscatter fraction is exactly the Petzold 0.0183
+    // that `WaterOptics` builds its `backscatter` column from — runs from
+    // 0.00606 sr^-1 down to 0.00176, which is **0.076 to 0.022 of isotropic**;
+    // and over the angles a real frame actually produces (92-121 deg measured
+    // across `ocean_tropical`) it is 0.058 to 0.033, **a constant to within a
+    // factor of 1.8**. There is no single-scattering lobe to have: the sun's
+    // forward peak is unreachable from above the water, and what it would buy
+    // if it were reachable is a factor of two. A backlit crest is not showing
+    // you a forward peak; it is showing you multiply-scattered light.
+    //
+    // **And this renderer already carries the coefficient for that.**
+    // `waterExtinct()` is `K_d`, the DIFFUSE attenuation coefficient, and
+    // `WaterOptics::attenuation`'s own documentation says why it is not the
+    // beam coefficient: forward-scattered light is not lost, it goes on to
+    // reach the eye. Beer-Lambert on `K_d` is the multiple-scattering transport
+    // model. Multiplying it by a single-scattering lobe double-counts a
+    // direction the diffusion has already smeared out.
+    //
+    // **So the only directional fact a thin sheet licenses is Lambert's cosine
+    // on the face the light enters**, and the two paths enter through different
+    // faces:
+    //
+    // - A crest is a sheet with the sun BEHIND it. In the parallel-faced sheet
+    //   this comment has asserted since the term was written, the entry face's
+    //   normal is `-normal`, so the entry cosine is `-dot(normal, L)`. It is
+    //   the exact complement of `toSun` above: the sun either lights the face
+    //   you can see or it lights the one behind it, never both.
+    // - A shallow column is lit from ABOVE — down through the surface you are
+    //   looking at, and back up. Its entry face is the one you see, so its
+    //   entry cosine is `toSun` itself.
+    //
+    // Zero authored constants where there were two, and the horizon band that
+    // killed the sign-flip experiment cannot form: far-field water faces up,
+    // the sun is above it, `backlit` is zero there by construction.
+
+    // **The single-scattering phase function, at the angle the geometry
+    // actually offers**, and `g` is not authored: it is the Henyey-Greenstein
+    // asymmetry whose backscatter fraction
+    // `b_b/b = (1-g)/(2g) * ((1+g)/sqrt(1+g*g) - 1)` equals **0.0183**, the
+    // Petzold average-particle fraction `WaterOptics` already builds its whole
+    // `backscatter` column out of. Inverting that gives g = 0.9186, which is
+    // the value Mobley quotes for the same reason.
+    //
+    // `WATER_PHASE_G`'s own doc carries the inversion, and `loom_render`'s
+    // `the_phase_asymmetry_is_petzold_s_backscatter_fraction` re-runs it
+    // against the literal so it cannot drift.
+    float3 sunIn = refract(-sunDirection(), normal, 1.0 / WATER_IOR);
+    float cosScatter = dot(sunIn, -refracted);
+    float gg = WATER_PHASE_G * WATER_PHASE_G;
+    float pd = max(1.0 + gg - 2.0 * WATER_PHASE_G * cosScatter, 1e-4);
+    // Normalised to isotropic (`4*pi*p`), so 1.0 would be "as much as a
+    // uniformly scattering medium sends this way". Bounded by the theorem
+    // above to 0.022-0.076 for every above-water camera in this engine.
+    float phase = (1.0 - gg) / (pd * sqrt(pd));
+    float backlit = saturate(-dot(normal, sunDirection()));
+    float shallow = saturate(1.0 - column / WATER_GLOW_COLUMN);
     float3 sss = sunColor() * sunStrength()
-               * pow(saturate(dot(-view, h)), WATER_SSS_POWER)
-               * max(lift, saturate(1.0 - column / WATER_GLOW_COLUMN))
+               * max(lift * backlit, shallow * toSun * phase)
                * exp(-waterExtinct() * thick);
     // Ablation, at the term's single point of use rather than at each of the
     // factors feeding it, exactly as `LOOM_ABLATE_WATER_FOAM` is applied: what

@@ -536,6 +536,45 @@ mod tests {
         );
     }
 
+    /// **`WATER_PHASE_G` is Petzold's 0.0183 read backwards, and this re-reads
+    /// it forwards.**
+    ///
+    /// The subsurface term's phase function is the one place in the shader
+    /// where a literature number is inverted rather than quoted, and an
+    /// inverted number is exactly the kind that drifts: somebody rounds it,
+    /// somebody tunes it half a percent to make a scene look right, and the
+    /// referent quietly stops being the referent. So the inversion is run
+    /// here against the literal in the source.
+    ///
+    /// `b_b/b = (1-g)/(2g)·((1+g)/sqrt(1+g²) − 1)` is the closed-form
+    /// backscatter fraction of the Henyey–Greenstein phase function, and
+    /// **0.0183** is the Petzold average-particle fraction that
+    /// `WaterOptics`'s doc table builds every `backscatter` row from
+    /// (`½·b_w + 0.0183·(b − b_w)`). One number, two users.
+    #[test]
+    fn the_phase_asymmetry_is_petzold_s_backscatter_fraction() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/scene.slang"
+        ))
+        .expect("scene.slang is beside the crate that compiles it");
+
+        let needle = "static const float WATER_PHASE_G = ";
+        let start = source.find(needle).expect("no WATER_PHASE_G") + needle.len();
+        let rest = &source[start..];
+        let end = rest.find(';').expect("a terminated declaration");
+        let g: f64 = rest[..end].trim().parse().expect("a number");
+
+        let backscatter_fraction = (1.0 - g) / (2.0 * g) * ((1.0 + g) / (1.0 + g * g).sqrt() - 1.0);
+        assert!(
+            (backscatter_fraction - 0.0183).abs() < 5e-5,
+            "WATER_PHASE_G = {g} backscatters {backscatter_fraction} of what it \
+             scatters, against Petzold's 0.0183. The constant is that number \
+             inverted; if the water has genuinely changed, change 0.0183 in \
+             `WaterOptics`'s table first and re-invert."
+        );
+    }
+
     /// SPIR-V starts with the magic number `0x0723_0203` and is a whole number
     /// of 32-bit words. Cheap proof that `build.rs` produced a real module
     /// rather than an empty or truncated file.

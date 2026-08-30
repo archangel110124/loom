@@ -1297,25 +1297,29 @@ const GOLDEN_SIZE: &str = "320x200";
 /// above. A Slang constant that had collided with foam's bit would have shown up as a
 /// large number in the first of those and a changed one in the second.
 ///
-/// **`ocean_tropical` / `water_glow`.** The backlit subsurface term, measured 2026-08-29 at
-/// `GOLDEN_SIZE`: `loom render assets/test/ocean_tropical.loom --sim 400 --size 320x200`
-/// with and without `LOOM_ABLATE=water_glow`, then `loom compare`, gives `fraction =
-/// 0.011359375` (`differing` 727 of 64000, `mean` 0.0741, `worst` 14). Reproducible: both
-/// sides byte-identical across two runs. 0.005 is roughly half of that, on the same rule the
+/// **`ocean_tropical` / `water_glow`.** The backlit subsurface term, re-measured at
+/// `GOLDEN_SIZE` after the wrap lobe came out: `loom render
+/// assets/test/ocean_tropical.loom --sim 400 --size 320x200` with and without
+/// `LOOM_ABLATE=water_glow`, then `loom compare`, gives `fraction = 0.00578125`
+/// (`differing` 370 of 64000, `mean` 0.0238, `worst` 20). Reproducible: both sides
+/// byte-identical across two runs. 0.0028 is roughly half of that, on the same rule the
 /// two rows above use.
 ///
 /// **Read the `fraction` this table uses at `compare`'s DEFAULT tolerance**, which is what
 /// `ablate` below invokes — `channel = 2`, so a pixel that moved one or two levels is not
-/// counted. At zero tolerance the same pair of renders differs across **9.792%** of the
-/// frame. The two numbers are eight times apart and only the first belongs in this column;
-/// a floor set from the second would have failed a working effect, and did, once.
+/// counted. At zero tolerance the same pair of renders differs across **1.475%** of the
+/// frame. Only the first belongs in this column; a floor set from the second would have
+/// failed a working effect, and did, once.
 ///
-/// **`ocean_tropical` rather than a steep sea, and that is the point of the row.** Every
-/// other water scene here would pass this check on the old `crest` gate; a Beaufort 4
-/// Pierson–Moskowitz sea never reaches `WATER_FOLD_REF`, so on this scene the term drew
-/// **nothing at all** — 0 pixels — and no reference image could have said so. It is the
-/// smallest number in this table because a modest sea seen from 1.1 m with a 38° sun is a
-/// poor backlighting geometry; the wrap lobe there is 0.02–0.10 against a ceiling of 1.
+/// **It is the smallest number in this table, and after the lobe change that is a fact
+/// about the scene rather than about the term.** The backlit path is Lambert's cosine on
+/// the face the light enters, so it is non-zero only where a visible face is tilted
+/// further from the vertical than the sun is above the horizon.
+/// `ocean_tropical`'s steepest resolved face is 9.6° and its sun is 38.3° up, so almost
+/// nothing on it can be backlit at all: what survives is the capillary tail of the shading
+/// normal on the steepest crests. **This row wants a scene authored for the term** — a
+/// low sun over a sea with faces steeper than it — and there is not one in the repository
+/// yet. Until there is, the margin here is thin on purpose and worth watching.
 const ABLATE: [(&str, &str, &str, &[&str], f64); 3] = [
     (
         "whitecaps",
@@ -1336,7 +1340,7 @@ const ABLATE: [(&str, &str, &str, &[&str], f64); 3] = [
         "assets/test/ocean_tropical.loom",
         "water_glow",
         &["--sim", "400"],
-        0.005,
+        0.0028,
     ),
 ];
 
