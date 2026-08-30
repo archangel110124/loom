@@ -15,15 +15,25 @@
 # steep, energetic sea. Backlighting wants a low sun; seeing *into* water wants
 # a high one.** Three fights, and the settlement is different in each.
 #
-# **Steep and shallow is not a contradiction here, and that is arithmetic
-# rather than luck.** `fold` — the quantity the whitecaps, the spray and the
-# breaking test all key on — is `Σ Q·k·A·sin φ`, and this engine parameterises a
-# Gerstner wave so that `Q·k·A = steepness / N`. So **`fold` is a function of
-# `steepness` alone: it does not know the amplitude or the wavelength.** The
-# three waves below carry `steepness` 0.80/0.82/0.82, so the sea's fold ceiling
-# is 0.813 — well past `WATER_FOAM_BREAK` and `SPRAY_BREAK`, both 0.33 — while
-# their amplitudes sum to a crest of only **1.16 m**. That is what lets a
-# breaking sea sit over three metres of water.
+# **Steep and shallow is not a contradiction here, and the reason is `k`.**
+# `fold` — the quantity the whitecaps, the spray and the breaking test all key
+# on — is `Σ steepness·k·A·sin φ` (`loom_water/src/lib.rs:388`), so it is
+# governed by `k·A`: **wave height over wavelength, not wave height.** Short
+# waves have large `k`, so a low sea of short chop reaches the same fold as a
+# tall sea of long swell. The three waves below:
+#
+#     lambda 13.0  A 0.62  steepness 0.80   k 0.4833   s*k*A 0.2397
+#     lambda  7.5  A 0.34  steepness 0.82   k 0.8378   s*k*A 0.2336
+#     lambda  5.0  A 0.20  steepness 0.82   k 1.2566   s*k*A 0.2061
+#                                       fold ceiling =  0.6794
+#
+# — twice `WATER_FOAM_BREAK` and `SPRAY_BREAK`, both 0.33, while the amplitudes
+# sum to a crest of only **1.16 m**. That is what lets a breaking sea sit over
+# three metres of water.
+#
+# **The validator's cap is a different quantity and it is easy to confuse them.**
+# It refuses `steepness·k·A > 1/N` *per wave* — 0.333 here — which is the
+# self-intersection bound. Each of the three sits at about 0.7 of it.
 #
 # **Low sun and a visible bed is settled by looking down rather than by raising
 # the sun.** The camera is 4.5 m up and pitched 16° down, so the near half of
