@@ -1402,7 +1402,7 @@ const ABLATE: [(&str, &str, &str, &[&str], f64); 3] = [
 fn image(bless: bool) -> std::process::ExitCode {
     let root = repo_root();
 
-    let loom = match build_debug(&root) {
+    let loom = match build_release(&root) {
         Ok(path) => path,
         Err(message) => {
             eprintln!("xtask: {message}");
@@ -1422,11 +1422,17 @@ fn image(bless: bool) -> std::process::ExitCode {
     let scratch = root.join("target/xtask-image");
     let _ = std::fs::create_dir_all(&scratch);
 
+    let filter = only_filter();
+    let mut skipped = 0_usize;
     let mut failures = Vec::new();
     let mut blessed = Vec::new();
     let mut checked = 0;
 
     for (name, scene, extra) in GOLDEN {
+        if !selected(filter.as_ref(), name, scene) {
+            skipped += 1;
+            continue;
+        }
         // **A missing scene fails the gate.** It used to skip, which meant
         // renaming a scene file quietly dropped a whole rendering path out of
         // coverage while the gate still printed success. That is the one
@@ -1525,6 +1531,9 @@ fn image(bless: bool) -> std::process::ExitCode {
 
     if failures.is_empty() {
         println!("cargo xtask image: {checked} scene(s) match their reference");
+    if skipped > 0 {
+        println!("  (--only: {skipped} row(s) skipped — this run did not cover them)");
+    }
         return std::process::ExitCode::SUCCESS;
     }
     for failure in &failures {
@@ -1558,7 +1567,7 @@ fn image(bless: bool) -> std::process::ExitCode {
 /// of the thing being investigated. It prints a table and returns success.
 fn shimmer() -> std::process::ExitCode {
     let root = repo_root();
-    let loom = match build_debug(&root) {
+    let loom = match build_release(&root) {
         Ok(path) => path,
         Err(message) => {
             eprintln!("xtask: {message}");
@@ -1742,7 +1751,7 @@ fn read_field(json: &str, key: &str) -> Option<f64> {
 /// than a set of flags to remember.
 fn flythrough() -> std::process::ExitCode {
     let root = repo_root();
-    let loom = match build_debug(&root) {
+    let loom = match build_release(&root) {
         Ok(path) => path,
         Err(message) => {
             eprintln!("xtask: {message}");
@@ -1871,7 +1880,13 @@ fn validate() -> std::process::ExitCode {
     let mut failures = Vec::new();
     let mut checked = 0;
 
+    let filter = only_filter();
+    let mut skipped = 0_usize;
     for scene in SCENES {
+        if !selected(filter.as_ref(), scene, scene) {
+            skipped += 1;
+            continue;
+        }
         // Missing means unverified, not fine — see the same guard in `image`.
         if !root.join(scene).exists() {
             failures.push(format!(
@@ -2086,6 +2101,9 @@ fn validate() -> std::process::ExitCode {
 
     if failures.is_empty() {
         println!("cargo xtask validate: {checked} scene runs, zero validation messages");
+    if skipped > 0 {
+        println!("  (--only: {skipped} row(s) skipped — this run did not cover them)");
+    }
         return std::process::ExitCode::SUCCESS;
     }
 
@@ -2256,7 +2274,7 @@ fn collect(failures: &mut Vec<String>, what: &str, result: &Result<Output, Strin
 /// no tolerance at all, which a tolerant comparison cannot see.
 fn repeat() -> std::process::ExitCode {
     let root = repo_root();
-    let loom = match build_debug(&root) {
+    let loom = match build_release(&root) {
         Ok(path) => path,
         Err(message) => {
             eprintln!("xtask: {message}");
@@ -2280,7 +2298,13 @@ fn repeat() -> std::process::ExitCode {
     println!("{RUNS} fresh processes per scene, compared byte for byte.");
     println!();
 
+    let filter = only_filter();
+    let mut skipped = 0_usize;
     for (name, scene, extra) in GOLDEN {
+        if !selected(filter.as_ref(), name, scene) {
+            skipped += 1;
+            continue;
+        }
         if !root.join(scene).exists() {
             failures.push(format!("{name}: {scene} is missing"));
             continue;
@@ -2337,6 +2361,9 @@ fn repeat() -> std::process::ExitCode {
     if failures.is_empty() {
         println!();
         println!("cargo xtask repeat: {checked} scene(s) reproduce byte for byte");
+    if skipped > 0 {
+        println!("  (--only: {skipped} row(s) skipped — this run did not cover them)");
+    }
         return std::process::ExitCode::SUCCESS;
     }
     eprintln!();
@@ -2390,7 +2417,7 @@ fn run_env(loom: &Path, root: &Path, args: &[&str], env: &[(&str, &str)]) -> Res
 /// feature changes no pixel, so it scores zero and this task fails it.
 fn ablate() -> std::process::ExitCode {
     let root = repo_root();
-    let loom = match build_debug(&root) {
+    let loom = match build_release(&root) {
         Ok(path) => path,
         Err(message) => {
             eprintln!("xtask: {message}");
@@ -2422,7 +2449,13 @@ fn ablate() -> std::process::ExitCode {
     println!("scene                effect          changed%   floor%   verdict");
     let mut failures = Vec::new();
 
+    let filter = only_filter();
+    let mut skipped = 0_usize;
     for (label, scene, effect, extra, floor) in ABLATE {
+        if !selected(filter.as_ref(), label, scene) {
+            skipped += 1;
+            continue;
+        }
         let with = scratch.join(format!("{label}_{effect}_with.png"));
         let without = scratch.join(format!("{label}_{effect}_without.png"));
 
@@ -2531,7 +2564,10 @@ fn ablate() -> std::process::ExitCode {
     }
 
     if failures.is_empty() {
-        println!("\nok: {} ablation(s), every effect is drawing", ABLATE.len());
+        println!("\nok: {} ablation(s), every effect is drawing", ABLATE.len() - skipped);
+        if skipped > 0 {
+            println!("  (--only: {skipped} row(s) skipped — this run did not cover them)");
+        }
         return std::process::ExitCode::SUCCESS;
     }
     eprintln!();
@@ -2570,6 +2606,57 @@ fn run_cargo(root: &Path, args: &[&str]) -> Result<Output, String> {
         .current_dir(root)
         .output()
         .map_err(|e| format!("could not run cargo: {e}"))
+}
+
+/// The release binary, for the gates that compare *pixels* rather than listen
+/// to the validation layers.
+///
+/// **Measured, not assumed: a debug render and a release render are the same
+/// image.** `loom compare --channel 0 --fraction 0 --worst 0` reports 0 of
+/// 64,000 differing pixels on `whitecaps`, `lucent`, and — the two that matter,
+/// because they are the GPU-stateful paths — `emberfall` (the particle pool)
+/// and `rain_gantry` (the drop buffer). The shaders are the same SPIR-V either
+/// way, and the CPU half is already held to debug/release agreement by
+/// `the_two_profiles_simulate_the_same_world`.
+///
+/// What it buys: **5.561 s per scene in debug against 0.618 s in release** at
+/// `GOLDEN_SIZE` — nine times, on `image` (60 scenes), `repeat` (three runs of
+/// each) and `flythrough` (sixteen frames of each).
+///
+/// **`validate` is deliberately NOT on this path.** Its whole job is to run the
+/// validation layers, which panic in debug by design; a release binary would
+/// report a clean sweep having listened to nothing.
+fn build_release(root: &Path) -> Result<PathBuf, String> {
+    let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["build", "--release", "-p", "loom_cli"])
+        .current_dir(root)
+        .status()
+        .map_err(|e| format!("could not run cargo: {e}"))?;
+    if !status.success() {
+        return Err("the release build failed; nothing to render".to_owned());
+    }
+    let binary = root.join("target/release/loom");
+    if binary.exists() {
+        Ok(binary)
+    } else {
+        Err(format!("{} was not produced", binary.display()))
+    }
+}
+
+/// `--only <substring>`: run just the rows whose name or scene path contains it.
+///
+/// **A convenience, and it is never what CI runs.** A gate that has been
+/// narrowed has not been passed, so every call site prints what it skipped —
+/// silent truncation reading as "covered everything" is the failure this whole
+/// gate suite exists to prevent.
+fn only_filter() -> Option<String> {
+    let mut args = std::env::args().skip_while(|a| a != "--only");
+    args.next()?;
+    args.next()
+}
+
+fn selected(filter: Option<&String>, name: &str, scene: &str) -> bool {
+    filter.is_none_or(|f| name.contains(f.as_str()) || scene.contains(f.as_str()))
 }
 
 fn build_debug(root: &Path) -> Result<PathBuf, String> {
