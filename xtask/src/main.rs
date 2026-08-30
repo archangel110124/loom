@@ -1882,42 +1882,59 @@ fn validate() -> std::process::ExitCode {
 
     let filter = only_filter();
     let mut skipped = 0_usize;
-    for scene in SCENES {
-        if !selected(filter.as_ref(), scene, scene) {
-            skipped += 1;
-            continue;
-        }
-        // Missing means unverified, not fine — see the same guard in `image`.
-        if !root.join(scene).exists() {
-            failures.push(format!(
-                "{scene}: missing — the scene list names a file that does not exist"
-            ));
-            continue;
-        }
-        checked += 1;
-        let out = root.join("target/xtask-validate.png");
-        let result = run(
-            &loom,
-            &root,
-            &["render", scene, "--out", out.to_str().unwrap_or("out.png")],
-        );
-        collect(&mut failures, &format!("render {scene}"), &result);
 
-        // `--sim` runs physics before drawing, which is a different set of
-        // buffer writes than a static render.
-        let result = run(
-            &loom,
-            &root,
-            &[
-                "render",
-                scene,
-                "--sim",
-                "120",
-                "--out",
-                out.to_str().unwrap_or("out.png"),
-            ],
-        );
-        collect(&mut failures, &format!("render --sim {scene}"), &result);
+    // **Every job writes its own PNG.** All eighty scenes used to render to one
+    // `target/xtask-validate.png`; serially that was merely wasteful, and in
+    // parallel it is a race. The index is the scene's position in `SCENES`, so
+    // a leftover file names the scene that wrote it.
+    let scratch = root.join("target/xtask-validate");
+    let _ = std::fs::create_dir_all(&scratch);
+
+    let wanted: Vec<(usize, &str)> = SCENES
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, scene)| {
+            let keep = selected(filter.as_ref(), scene, scene);
+            if !keep {
+                skipped += 1;
+            }
+            keep
+        })
+        .collect();
+
+    let jobs: Vec<_> = wanted
+        .into_iter()
+        .map(|(index, scene)| {
+            let loom = loom.clone();
+            let root = root.clone();
+            let out = scratch.join(format!("{index:03}.png"));
+            move || -> (u32, Vec<String>) {
+                let mut failures = Vec::new();
+                // Missing means unverified, not fine — see the same guard in `image`.
+                if !root.join(scene).exists() {
+                    failures.push(format!(
+                        "{scene}: missing — the scene list names a file that does not exist"
+                    ));
+                    return (0, failures);
+                }
+                let out = out.to_str().unwrap_or("out.png");
+                let result = run(&loom, &root, &["render", scene, "--out", out]);
+                collect(&mut failures, &format!("render {scene}"), &result);
+
+                // `--sim` runs physics before drawing, which is a different set of
+                // buffer writes than a static render.
+                let result =
+                    run(&loom, &root, &["render", scene, "--sim", "120", "--out", out]);
+                collect(&mut failures, &format!("render --sim {scene}"), &result);
+                (1, failures)
+            }
+        })
+        .collect();
+
+    for (ran, mut found) in in_parallel(gate_jobs(), jobs) {
+        checked += ran;
+        failures.append(&mut found);
     }
 
     // The windowed path, if there is a display to open on. This is where every
@@ -2643,6 +2660,131 @@ fn build_release(root: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// How many scene processes to keep in flight.
+///
+/// **Each render is its own process with its own Vulkan device**, so this is
+/// bounded by the GPU rather than by cores: four submitting queues keep a 4090
+/// busy without any one of them waiting on another's fence. `LOOM_GATE_JOBS=1`
+/// restores the serial behaviour, which is what to reach for when a gate fails
+/// and the interleaved output is hard to read.
+///
+/// Nothing here shares a file: every job writes its own PNG. That is a
+/// requirement rather than a happy accident — `validate` used to point all
+/// eighty scenes at one `target/xtask-validate.png`, which is exactly the kind
+/// of shared mutable path that turns a parallel run into a flaky one.
+fn gate_jobs() -> usize {
+    let asked = match std::env::var("LOOM_GATE_JOBS").ok().and_then(|v| v.parse::<usize>().ok()) {
+        Some(n) if n >= 1 => n,
+        _ => std::thread::available_parallelism().map_or(4, |n| n.get().min(4)),
+    };
+    let headroom = gpu_headroom();
+    let jobs = asked.min(headroom);
+    if jobs < asked {
+        println!(
+            "  (gpu busy: {jobs} job(s) instead of {asked} — something else is using the card)"
+        );
+    }
+    jobs.max(1)
+}
+
+/// How many render processes this card can take **right now**, given whatever
+/// else is already on it.
+///
+/// **The point is not to go faster, it is not to freeze the desktop.** A gate
+/// is a background chore; a game or a ComfyUI batch is the thing the human is
+/// actually doing, and four more Vulkan devices arriving on a saturated card is
+/// how a compositor stops responding. So this yields to whatever is already
+/// there rather than competing with it.
+///
+/// **VRAM is the reliable signal; utilisation is not, on this class of
+/// machine.** Measured idle on the development box: **37–41% utilisation with
+/// 4.0 GB resident**, which is the compositor and its shader, not work. A
+/// threshold anywhere near that baseline would throttle every gate on an idle
+/// machine, so utilisation is only consulted at 80% — high enough that only a
+/// real workload reaches it — while the count of jobs comes from free memory.
+///
+/// `PER_JOB_MB` is deliberately generous: a `GOLDEN_SIZE` render is far under
+/// it, but the same pool runs 1920x1080 windowed frames with MSAA and a TLAS,
+/// and the failure mode of guessing low is the one this function exists to
+/// prevent.
+///
+/// No `nvidia-smi`, no answer, no throttle — CI has no GPU and a missing tool
+/// must not silently serialise a gate that would have been fine.
+fn gpu_headroom() -> usize {
+    /// Free megabytes assumed needed per concurrent render process.
+    const PER_JOB_MB: u64 = 1536;
+    /// Utilisation at or above which the card is doing someone else's work.
+    const BUSY_PERCENT: u64 = 80;
+
+    let Ok(out) = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=memory.used,memory.total,utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+    else {
+        return usize::MAX;
+    };
+    if !out.status.success() {
+        return usize::MAX;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(line) = text.lines().next() else {
+        return usize::MAX;
+    };
+    let fields: Vec<u64> = line
+        .split(',')
+        .filter_map(|f| f.trim().parse::<u64>().ok())
+        .collect();
+    let [used, total, utilisation] = fields[..] else {
+        return usize::MAX;
+    };
+    if utilisation >= BUSY_PERCENT {
+        return 1;
+    }
+    usize::try_from(total.saturating_sub(used) / PER_JOB_MB).unwrap_or(1).max(1)
+}
+
+/// Run `jobs` with at most `width` in flight, returning results **in input
+/// order**.
+///
+/// Order matters: a gate's output is read by a human comparing it against the
+/// last run, and a report whose rows shuffle between runs is one nobody can
+/// diff. The work is unordered; the reporting is not.
+fn in_parallel<T, F>(width: usize, jobs: Vec<F>) -> Vec<T>
+where
+    F: FnOnce() -> T + Send,
+    T: Send,
+{
+    if width <= 1 || jobs.len() <= 1 {
+        return jobs.into_iter().map(|j| j()).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<T>>> =
+        (0..jobs.len()).map(|_| std::sync::Mutex::new(None)).collect();
+    let jobs: Vec<std::sync::Mutex<Option<F>>> =
+        jobs.into_iter().map(|j| std::sync::Mutex::new(Some(j))).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..width.min(jobs.len()) {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(cell) = jobs.get(i) else { return };
+                let Some(job) = cell.lock().ok().and_then(|mut g| g.take()) else {
+                    return;
+                };
+                let value = job();
+                if let Ok(mut slot) = slots[i].lock() {
+                    *slot = Some(value);
+                }
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .filter_map(|m| m.into_inner().ok().flatten())
+        .collect()
+}
+
 /// `--only <substring>`: run just the rows whose name or scene path contains it.
 ///
 /// **A convenience, and it is never what CI runs.** A gate that has been
@@ -2656,7 +2798,15 @@ fn only_filter() -> Option<String> {
 }
 
 fn selected(filter: Option<&String>, name: &str, scene: &str) -> bool {
-    filter.is_none_or(|f| name.contains(f.as_str()) || scene.contains(f.as_str()))
+    // Comma-separated, because the thing this is most wanted for is blessing a
+    // *set* of rows that share no substring — the water rows one commit, the
+    // tonemap rows another — and one substring cannot name a set.
+    filter.is_none_or(|f| {
+        f.split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .any(|p| name.contains(p) || scene.contains(p))
+    })
 }
 
 fn build_debug(root: &Path) -> Result<PathBuf, String> {
