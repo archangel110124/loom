@@ -8718,8 +8718,24 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
     /// it. So this counts droplets rather than asserting a flag.
     ///
     /// The grid side is prime for the reason the fold-distribution test below
-    /// gives: every wavelength here is a whole or half metre, and a
-    /// power-of-two side would sample one sublattice of them for ever.
+    /// gives, and it matters *more* since this sea became a spectrum: every
+    /// cascade patch is a power of two (2048 / 256 / 32 m), so a power-of-two
+    /// side steps the chop tile by a whole number of cells and samples one
+    /// sublattice of it for ever. `play`'s crossing-sea test measures what that
+    /// costs — 128 reports a sea that does not break at all.
+    ///
+    /// # The sea this measures is the FFT cascade, not the wave list
+    ///
+    /// `lucent.loom` sets `wave_model = "spectrum"`, so `body.waves` holds
+    /// sixteen *derived and ignored* bands and the surface is the cascade. This
+    /// test therefore builds the ocean and warms it tick by tick exactly as a
+    /// `--sim 300` run does, including [`loom_water::ocean::Ocean::keep`]'s ring
+    /// — spray reads the surface at each droplet's *birth* instant and can only
+    /// find it there. Handing `sample_water` a `None` instead reads the empty
+    /// authored wave list and measures a mirror: it reported `mu_max mean
+    /// 0.0000`, no breaking and no droplets, on the same scene whose render was
+    /// throwing 546 at the time. The render's `particles` count and `thrown`
+    /// below now agree exactly, which is what says the two halves see one sea.
     #[test]
     fn lucent_breaks_and_throws() {
         /// `WATER_FOAM_BREAK` in `assets/shaders/scene.slang` and
@@ -8729,9 +8745,17 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         /// the other follows.
         const BREAK: f32 = 0.33;
         const SIDE: u16 = 251;
-        /// Metres. Twelve of the 13 m swell and thirty-two of the 5 m chop, so
-        /// no wave is sampled at one phase.
+        /// Metres. The water the camera can actually see — 146 m of shelf in
+        /// front of the eye — rather than a cascade patch, because this scene's
+        /// claim is about what is in the frame. The chop cascade is periodic at
+        /// 32 m, so a 160 m window holds five of its periods and the step is
+        /// 0.637 m, which shares no factor with it.
         const SPAN: f32 = 160.0;
+        /// `Sim::evolve_sea`'s stride, spelled here for the same reason `BREAK`
+        /// is: this test warms the cascade the way a run does, and the ring
+        /// [`loom_water::spray::spray`] reads a droplet's birth instant out of
+        /// is filled on that stride and no other.
+        const SEA_KEEP_TICKS: u16 = 8;
 
         let src = std::fs::read_to_string("../../assets/test/lucent.loom").expect("the scene");
         let scene = Scene::parse(&src).expect("valid scene");
@@ -8742,6 +8766,18 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
 
         // The instant the scene's own command line renders.
         let t = 300.0 / 60.0;
+        // **The cascade, warmed exactly as `--sim 300` warms it.** This sea is
+        // `wave_model = "spectrum"`, so its surface *is* the FFT tiles: handing
+        // `sample_water` a `None` here reads the empty authored wave list and
+        // measures a mirror. It did, and reported a sea that neither breaks nor
+        // throws while the render beside it threw 1,071 droplets.
+        let mut sea = crate::weather::sea_of_body(&body, &wind).expect("a spectrum sea");
+        for tick in 0..=300_u16 {
+            sea.evolve(f32::from(tick) / 60.0);
+            if tick % SEA_KEEP_TICKS == 0 {
+                sea.keep();
+            }
+        }
         let step = SPAN / f32::from(SIDE);
         let terrain = scene_terrain_field(&scene);
         let ground = |x: f32, z: f32| {
@@ -8757,12 +8793,27 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         // Monahan's whitecap relation is comparable to. `past(BREAK)` above it
         // is the surface that is breaking, which is a larger number.
         let mut painted = 0.0_f64;
+        // **The tallest crest the sea actually puts up over this window**, which
+        // is the depth-limit statistic a spectrum sea has. The Gerstner triple
+        // had a deterministic all-in-phase ceiling to check Munk's breaker index
+        // against; sixteen bands per cascade over three cascades do not, so what
+        // the header quotes is this and `Hs`.
+        let (mut crest, mut trough) = (f32::MIN, f32::MAX);
         for iz in 0..SIDE {
             for ix in 0..SIDE {
                 let (x, z) = (f32::from(ix) * step - SPAN / 2.0, f32::from(iz) * step - SPAN / 2.0);
-                let sample =
-                    loom_water::sample_water(&body, None, [x, z], t, ground(x, z), [0.0; 3], [0.0; 3]);
+                let sample = loom_water::sample_water(
+                    &body,
+                    Some(&sea),
+                    [x, z],
+                    t,
+                    ground(x, z),
+                    [0.0; 3],
+                    [0.0; 3],
+                );
                 painted += f64::from(crate::weather::instant_foam(sample.mu_max, [x, z], t));
+                crest = crest.max(sample.height);
+                trough = trough.min(sample.height);
                 mu.push(sample.mu_max);
             }
         }
@@ -8777,14 +8828,16 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         // scene's own eye — the population is bounded by `SPRAY_RANGE` around
         // it, so it is not a property of the sea alone.
         let eye = [0.0, 4.5, 16.0];
-        let thrown = crate::particles::spray(&world, &body, None, &ground, eye, t).len();
+        let thrown =
+            crate::particles::spray(&world, &body, Some(&sea), &ground, eye, t).len();
 
         println!(
             "lucent  mu_max mean {mean:.4}  past 0.22 {:.3}%  past {BREAK} \
-             {breaking:.3}%  foam painted {:.3}%  droplets in the air at \
-             t = {t:.2}s: {thrown}",
+             {breaking:.3}%  foam painted {:.3}%  crest {crest:.3} m  trough \
+             {trough:.3} m  H {:.3} m  droplets in the air at t = {t:.2}s: {thrown}",
             past(0.22),
             painted * 100.0 / n,
+            crest - trough,
         );
 
         assert!(
@@ -8793,7 +8846,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         );
         assert!(
             thrown > 0,
-            "lucent threw no spray at all at t = {t}. `spray` is authored at {}, so the sea's              fold ceiling has fallen under SPRAY_BREAK — check the three `steepness` values.",
+            "lucent threw no spray at all at t = {t}. `spray` is authored at {}, so the sea's              fold ceiling has fallen under SPRAY_BREAK — check `Wind.speed`, `fetch` and the              `swell` table, which are the three things this sea's steepness is made of.",
             body.spray
         );
     }
