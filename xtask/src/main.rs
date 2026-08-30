@@ -1981,6 +1981,14 @@ fn validate() -> std::process::ExitCode {
     // over a surface that is not the ground.
     "assets/test/rain_gantry.loom",
         ] {
+            // **`--only` reaches this list too.** It did not, and that was the
+            // whole reason a scoped run could not get under a minute: asking
+            // for four water scenes still opened six windows and timed five
+            // more. A gate that ignores its own filter is one nobody narrows.
+            if !selected(filter.as_ref(), scene, scene) {
+                skipped += 1;
+                continue;
+            }
             if !root.join(scene).exists() {
                 continue;
             }
@@ -2043,6 +2051,11 @@ fn validate() -> std::process::ExitCode {
             // branch. Measured 0.735 ms/frame debug, well inside the budget.
             "assets/test/wake.loom",
         ] {
+            // Same as the windowed list above: the filter reaches here too.
+            if !selected(filter.as_ref(), scene, scene) {
+                skipped += 1;
+                continue;
+            }
             if !root.join(scene).exists() {
                 continue;
             }
@@ -2317,19 +2330,38 @@ fn repeat() -> std::process::ExitCode {
 
     let filter = only_filter();
     let mut skipped = 0_usize;
-    for (name, scene, extra) in GOLDEN {
-        if !selected(filter.as_ref(), name, scene) {
-            skipped += 1;
-            continue;
-        }
-        if !root.join(scene).exists() {
-            failures.push(format!("{name}: {scene} is missing"));
-            continue;
-        }
-        checked += 1;
 
-        let mut renders: Vec<Option<Vec<u8>>> = Vec::new();
-        for index in 0..RUNS {
+    // **Parallel across scenes, sequential within one.** The three runs of a
+    // scene must each be a *fresh process*, which they are either way — but
+    // running them concurrently would change what is being measured, and a
+    // gate that hunts non-determinism is the last place to introduce a new
+    // source of it. Scenes are independent, so that is where the width goes.
+    let wanted: Vec<_> = GOLDEN
+        .iter()
+        .filter(|(name, scene, _)| {
+            let keep = selected(filter.as_ref(), name, scene);
+            if !keep {
+                skipped += 1;
+            }
+            keep
+        })
+        .collect();
+
+    let jobs: Vec<_> = wanted
+        .into_iter()
+        .map(|(name, scene, extra)| {
+            let loom = loom.clone();
+            let root = root.clone();
+            let scratch = scratch.clone();
+            move || -> (u32, Vec<String>, String) {
+                let mut failures = Vec::new();
+                if !root.join(scene).exists() {
+                    failures.push(format!("{name}: {scene} is missing"));
+                    return (0, failures, String::new());
+                }
+
+                let mut renders: Vec<Option<Vec<u8>>> = Vec::new();
+                for index in 0..RUNS {
             let path = scratch.join(format!("{name}_{index}.png"));
             let path_string = path.to_string_lossy().into_owned();
             let mut argv: Vec<&str> =
@@ -2337,7 +2369,38 @@ fn repeat() -> std::process::ExitCode {
             argv.extend_from_slice(extra);
             match run(&loom, &root, &argv) {
                 Ok(output) if output.status.success() => {
-                    renders.push(std::fs::read(&path).ok());
+
+                    // **An unreadable output is a broken run, not a differing
+
+                    // one.** `.ok()` turned a failed read into `None`, which
+
+                    // then compared unequal and was reported as `DIFFER` — so a
+
+                    // transient (measured: one render dying while another gate
+
+                    // held the GPU) accused a determinism gate of catching
+
+                    // non-determinism it had not seen. A gate that cries wolf
+
+                    // gets blessed away.
+
+                    match std::fs::read(&path) {
+
+                        Ok(bytes) => renders.push(Some(bytes)),
+
+                        Err(e) => {
+
+                            failures.push(format!(
+
+                                "render {name} (run {index}): rendered but its output could not be read: {e}"
+
+                            ));
+
+                            renders.push(None);
+
+                        }
+
+                    }
                 }
                 Ok(output) => {
                     failures.push(format!(
@@ -2353,25 +2416,39 @@ fn repeat() -> std::process::ExitCode {
             }
         }
 
-        let digests: Vec<String> = renders
-            .iter()
-            .map(|bytes| bytes.as_deref().map_or_else(|| "-".to_owned(), digest))
-            .collect();
-        let identical = renders
-            .iter()
-            .all(|bytes| bytes.is_some() && *bytes == renders[0]);
-        println!(
-            "{name:<18} {}  {}",
-            if identical { "same" } else { "DIFFER" },
-            digests.join(" ")
-        );
-        if !identical {
-            failures.push(format!(
-                "{name}: three runs of one scene produced different bytes ({}) — \
-                 a GPU-stateful path is depending on something that is not the \
-                 scene and the tick",
-                digests.join(" ")
-            ));
+                let digests: Vec<String> = renders
+                    .iter()
+                    .map(|bytes| bytes.as_deref().map_or_else(|| "-".to_owned(), digest))
+                    .collect();
+                let identical = renders
+                    .iter()
+                    .all(|bytes| bytes.is_some() && *bytes == renders[0]);
+                // **Reported after the pool, not from inside it.** The rows are
+                // read against the last run, so they are printed in `GOLDEN`
+                // order however the work happened to interleave.
+                let line = format!(
+                    "{name:<18} {}  {}",
+                    if identical { "same" } else { "DIFFER" },
+                    digests.join(" ")
+                );
+                if !identical {
+                    failures.push(format!(
+                        "{name}: three runs of one scene produced different bytes ({}) — \
+                         a GPU-stateful path is depending on something that is not the \
+                         scene and the tick",
+                        digests.join(" ")
+                    ));
+                }
+                (1, failures, line)
+            }
+        })
+        .collect();
+
+    for (ran, mut found, line) in in_parallel(gate_jobs(), jobs) {
+        checked += ran;
+        failures.append(&mut found);
+        if !line.is_empty() {
+            println!("{line}");
         }
     }
 
