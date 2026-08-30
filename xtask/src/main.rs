@@ -168,8 +168,9 @@ const SCENES: [&str; 80] = [
     "assets/test/meadow.loom",
     "assets/test/grass_slope.loom",
     "assets/test/ocean.loom",
-    // The FFT ocean — ADR 0076. **The only scene with `wave_model = "spectrum"`**, so it
-    // is the only exercise of the cascade upload (1.5 MB a tick of host-visible tiles read
+    // The FFT ocean — ADR 0076. **The first scene with `wave_model = "spectrum"` and the
+    // only one in `GOLDEN`** — `lucent` opted in below and is not blessed — so it
+    // is the only *blessed* exercise of the cascade upload (1.5 MB a tick of host-visible tiles read
     // by the vertex shader through a device address), of the buffer dependency declared for
     // it on the `forward` and `water` passes, and of the branch in `waterVertexMain` that
     // picks a wave model at all. Nothing else in this list can raise a validation message
@@ -197,8 +198,14 @@ const SCENES: [&str; 80] = [
     //
     // **In `SCENES` and not `GOLDEN`.** Its rendering paths are all covered elsewhere
     // (`ocean_tropical` the optics upload, `whitecaps` the foam, `spindrift` the spray,
-    // `shore` the shallow band) and a reference image of an aesthetic deliverable is the
-    // human's to bless.
+    // `shore` the shallow band, `ocean_fft` the cascade) and a reference image of an
+    // aesthetic deliverable is the human's to bless. **So `--bless --only lucent` matches
+    // nothing**: this scene has no reference and changing it moves no golden.
+    //
+    // **It is a `wave_model = "spectrum"` scene now**, which is what stopped it
+    // corrugating, and it is the only spectrum sea in the repository with a bed under it,
+    // authored optics, spray and foam all at once — `ocean_fft` has none of those. Its
+    // own header carries the measurements.
     "assets/test/lucent.loom",
     // **The submerged camera that also authors `optics`**, and it is
     // `ocean_tropical` with the lens moved 1.5 m under its own waterline.
@@ -1365,6 +1372,28 @@ const GOLDEN_SIZE: &str = "320x200";
 /// `lucent.loom` is authored for exactly this term — a 6.9° sun over a sea whose faces
 /// reach 39.4° — which is what an ablation row is supposed to be pointed at: the scene
 /// where the effect is loudest.
+///
+/// **Re-measured after `lucent` became an FFT dual spectrum, at 0.10541, and THE FLOOR
+/// DOES NOT MOVE.** The scene now sets `wave_model = "spectrum"` with a 3 500 m wind sea
+/// crossing a 4 200 m second sea, which is a different surface, a different wind
+/// (`U10` 9.99 → 35.0) and therefore a different set of backlit faces. Both rows below
+/// were taken **on this tree**, same command, same size, same `--sim 300`, so they are
+/// one measurement rather than a new number against a remembered one — the 0.106016
+/// above was taken several water commits ago and this tree renders the same Gerstner
+/// scene at 0.102266:
+///
+/// ```text
+/// wave model              row       zero-tolerance   worst
+/// gerstner, 3 waves       0.102266  0.153672          57
+/// spectrum, dual          0.105406  0.167891         117
+/// ```
+///
+/// **3% apart on the column the gate reads**, so 0.05 is still roughly half of it and
+/// the floor is left exactly where it was — moving a floor that did not need to move is
+/// how a gate quietly loses its meaning. What did move is the term's *strength*: the
+/// worst channel goes 57 → 117 and the zero-tolerance area 15.4% → 16.8%, because a
+/// young spectrum sea presents far steeper faces to a 6.9° sun than three waves did.
+/// Both sides byte-identical across two runs.
 const ABLATE: [(&str, &str, &str, &[&str], f64); 3] = [
     (
         "whitecaps",

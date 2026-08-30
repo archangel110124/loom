@@ -1,13 +1,68 @@
 # **Four things at once: light through the crest, the bed through the column,
-# foam, and spray — from a camera above the water.**
+# foam, and spray — from a camera above the water, on a sea that does not
+# repeat.**
 #
-#     loom render assets/test/lucent.loom --sim 300 --size 1920x1080 -o /tmp/lucent.png
+#     loom render assets/test/lucent.loom --sim 300 --size 1920x1080 --out /tmp/lucent.png
 #     loom-scene lucent --play
 #
 # Every other sea in this repository shows one of those. `ocean_tropical` is the
 # colour, `whitecaps` the foam, `spindrift` the spray, `shore` the shallow band.
 # This one has to hold all four in one frame, and they do not want the same
-# scene.
+# scene. **It is also the scene the library iterates on**: it is in `SCENES`, it
+# is the `water_glow` row of `ABLATE`, and `loom_cli`'s
+# `lucent_breaks_and_throws` measures its sea off the screen. It is deliberately
+# **not** in `GOLDEN` — every rendering path in it is covered by a reference
+# elsewhere, and a reference image of an aesthetic deliverable is the human's to
+# bless.
+#
+# # The sea is an FFT dual spectrum, and that is what stopped it corrugating
+#
+# **It used to be three authored Gerstner waves and it looked like three
+# authored Gerstner waves.** Long-crested, evenly spaced, the same wave repeated
+# across the mid-field in rows: the corrugation this branch was opened to fix.
+# The fix is `wave_model = "spectrum"` — ADR 0076's cascade, three FFT patches
+# at 2048 / 256 / 32 m, each periodic on its own scale, so nothing in frame
+# repeats at a period the eye can find.
+#
+# ## `wave_model = "spectrum"` on its own is not the fix, and that is measured
+#
+# A single wind sea is a **flatter** picture than the Gerstner triple it
+# replaces, not a rougher one, because a fetch-limited spectrum puts its energy
+# in long low-steepness waves. The control, same wind, same everything else,
+# one 20 km fetch and no `swell` table:
+#
+#     one sea,  fetch 20 000       Hs 2.534 m   breaking  2.427%   painted  3.827%   903 droplets
+#     two seas, 3 500 + 4 200      Hs 1.282 m   breaking  7.824%   painted 10.598%  2583 droplets
+#
+# **The taller sea is the one that does not break.** Splitting the fetch halves
+# the peak wavelength of each half, and `mu_max` is a compression — it scales
+# with `k`, not with height — so two short seas crossing at 70° fold three times
+# as much surface as one long one carrying twice the energy. That is the same
+# argument the three-wave set used to make with hand-authored `steepness`
+# values, now made by the fetch law in `loom_water::spectrum`.
+#
+# ## Short fetches are what keep it inside the depth limit
+#
+# `Hs` is `0.0016·U10·√(F/g)` and `mu_max` is very nearly blind to `F` at a fixed
+# wind. Measured on this scene, at U10 = 35 m/s throughout:
+#
+#     fetches (m)     Hs       H (crest-trough)   breaking   painted   droplets
+#      3 500 + 4 200  1.282 m   2.246 m            7.824%    10.598%     2583
+#      4 000 + 5 000  1.399 m   2.535 m            8.044%    10.787%     2520
+#      9 000 + 11 000 2.233 m   3.934 m            8.389%    11.285%     2520
+#
+# **The fetch is a height knob with the breaking left alone**, which is exactly
+# the freedom this scene needs: it wants a sea that breaks over three metres of
+# water. The shipped pair is the shortest of the three, because it is the one
+# that fits under Munk's breaker index — see below.
+#
+# ## The TOML trap this scene was written into once
+#
+# `spray`, `fetch` and every other `WaterBody` scalar **must appear before the
+# first sub-table header**. Written after `[node.components.WaterBody.swell]`,
+# `spray = 8.0` parses as `swell.spray`, the body authors no spray at all,
+# `Ocean::keep`'s ring never runs, and the scene renders `particles: 0` with no
+# error anywhere. It is silent and it costs the whole fourth subject.
 #
 # # The tension, and how it is settled
 #
@@ -16,24 +71,48 @@
 # a high one.** Three fights, and the settlement is different in each.
 #
 # **Steep and shallow is not a contradiction here, and the reason is `k`.**
-# `fold` — the quantity the whitecaps, the spray and the breaking test all key
-# on — is `Σ steepness·k·A·sin φ` (`loom_water/src/lib.rs:388`), so it is
-# governed by `k·A`: **wave height over wavelength, not wave height.** Short
-# waves have large `k`, so a low sea of short chop reaches the same fold as a
-# tall sea of long swell. The three waves below:
+# `mu_max` — the quantity the whitecaps, the spray and the breaking test all key
+# on — is the largest eigenvalue of `Σ steepness·k·A·(d ⊗ d)·sin φ`, so it is
+# governed by `k·A`: **wave height over wavelength, not wave height.** A young
+# sea under a hard wind has large `k`, so it reaches the same fold as a tall
+# swell at a fifth of the height. Measured on the 251×251 grid over 160 m at
+# `--sim 300` (`loom_cli`'s `lucent_breaks_and_throws`):
 #
-#     lambda 13.0  A 0.62  steepness 0.80   k 0.4833   s*k*A 0.2397
-#     lambda  7.5  A 0.34  steepness 0.82   k 0.8378   s*k*A 0.2336
-#     lambda  5.0  A 0.20  steepness 0.82   k 1.2566   s*k*A 0.2061
-#                                       fold ceiling =  0.6794
+#     mu_max mean 0.1190   past 0.22 (foam onset) 24.54%   past 0.33 (breaking) 7.82%
+#     crest +1.118 m   trough -1.128 m   H 2.246 m   Hs 1.282 m
 #
-# — twice `WATER_FOAM_BREAK` and `SPRAY_BREAK`, both 0.33, while the amplitudes
-# sum to a crest of only **1.16 m**. That is what lets a breaking sea sit over
+# — where `WATER_FOAM_BREAK` and `SPRAY_BREAK` are both 0.33 — while the sea is
+# only 2.25 m from trough to crest. That is what lets a breaking sea sit over
 # three metres of water.
 #
-# **The validator's cap is a different quantity and it is easy to confuse them.**
-# It refuses `steepness·k·A > 1/N` *per wave* — 0.333 here — which is the
-# self-intersection bound. Each of the three sits at about 0.7 of it.
+# **`Wind.speed` stopped being decoration and the number had to move: 11 → 38.53
+# m/s.** On the Gerstner sea the wind drove the Cox–Munk capillary slope and the
+# foam's wander and *nothing else* — the three waves were authored beside it and
+# took nothing from it. Under `spectrum` the wind **is** the sea, so it is now
+# the only knob on how much of this surface breaks, and it is authored at what
+# the picture needs rather than at a mood.
+#
+# **38.5321 is a measured number — do not tidy it to 38.5 or to 40.**
+# `Wind.speed` is the free-stream value the height profile saturates toward and
+# at the meteorological standard 10 m the profile is 0.90833 of it, so this is
+# `U10 = 34.999985` through `Wind::mean_speed_at(10.0)`. The same arithmetic
+# `ocean_fft.loom` documents at its own `19.8165`.
+#
+# **U10 = 35 m/s is hurricane force and this scene is a stylisation, stated
+# rather than hidden.** Monahan's relation is `W = 3.84e-6 · U10^3.41` — the one
+# `scene.slang` quotes at 3.2% for `ocean`'s 14 m/s, and it reproduces: 3.11%.
+#
+#     wave model         U10        painted   Monahan at that U10   ratio
+#     gerstner, 3 waves   9.99 m/s   14.10%    0.98%                14.3x
+#     spectrum, dual     35.00 m/s   10.60%   70.73%                 0.15x
+#
+# **The scene went from fourteen times whiter than its own wind to a seventh of
+# it.** Neither is a measurement of a real ocean, and the swap is not an
+# improvement in realism — it is a change in *what the number is a property
+# of*. It was three hand-placed `steepness` values with a wind standing beside
+# them; it is now a spectrum, so it moves when the wind moves and there is one
+# knob rather than four. A 3.5 km fetch under a 35 m/s wind is a shore-hugging
+# sea, which is the sea a 200 m shelf would carry.
 #
 # **Low sun and a visible bed is settled by looking down rather than by raising
 # the sun.** The camera is 4.5 m up and pitched 16° down, so the near half of
@@ -51,63 +130,46 @@
 # `ocean_tropical` is the counter-example and it is measured: over a 36-point
 # grid at its own render instant its steepest *resolved* face is **9.6°** and its
 # sun is 38.3° up, so almost nothing on it can be backlit at all and its
-# subsurface term is correctly nearly silent. The same grid on this sea reads
-# **39.4°** against a 6.9° sun. (Both are the Gerstner normal; the shading normal
-# adds the Cox–Munk capillary slope on top, which is what softens the cosine at
-# the terminator instead of a wrap constant.)
+# subsurface term is correctly nearly silent. **Changing the wave model left the
+# glow's area alone and made it brighter**: 13.80% of the frame to 13.73%, at a
+# mean of 0.60 → 0.84 and a worst channel of 81 → 117. The measurement is in the
+# table below; the mechanism is that a young spectrum sea presents more steep
+# faces to a 6.9° sun, which is inference and not something measured here.
 #
 # # The four things, each a number
 #
 # Measured at `--sim 300`, 1280x720, at this camera. `LOOM_ABLATE` switches an
 # effect off; the fraction is `loom compare` at **zero** tolerance against the
-# same frame with it on.
+# same frame with it on. The right-hand column is the same measurement on the
+# three-wave Gerstner sea this replaced, at the same commit.
 #
-#     the bed through the water   71.66% of the frame   mean 13.62   worst 145
-#     subsurface glow             14.24%                mean  0.67   worst  95
-#     foam                        25.94%                mean  3.41   worst 134
-#     spray                        0.56%                mean  0.17   worst 186
+#                                    FFT dual spectrum        Gerstner triple
+#     the bed through the water   69.89%  mean 15.12  w162   70.94%  14.42  145
+#     subsurface glow             13.73%  mean  0.84  w117   13.80%   0.60   81
+#     foam                        17.68%  mean  2.36  w188   25.13%   3.41  129
+#     spray                        0.50%  mean  0.14  w178    0.56%   0.17  172
+#     droplets in the air          2,583                      3,339
 #
-# Foam's mean and spray's area both roughly doubled at the foam-density pass
-# (`foamAge` was calling 0.33-second-old foam ten seconds old, and the crest
-# crown was seven identical beads).
+# **Foam is the subject that got weaker and it is the one to watch.** 25.13% to
+# 17.68% of the frame, and 14.10% to 10.60% of the surface painted white. It is
+# not a wiring failure — the ablation still moves 17.7% of the frame and the CPU
+# grid still finds 7.8% of the sea past `WATER_FOAM_BREAK` — it is that an
+# honest spectrum does not reach 0.33 over as much of its surface as three waves
+# authored at `steepness` 0.8 did. Every other subject held or improved: the
+# glow is unchanged in area and **40% brighter in the mean**, the bed is
+# unchanged, and spray lost 23% of its droplets while gaining worst-channel
+# contrast.
 #
-# **Foam then fell 55.48% -> 25.94% and that is the fix, not a loss.** The
-# vertex foam trail was seeded from `WATER_FOAM_WET` — it remembered a crest
-# that got *wet* rather than one that *broke* — so `in.foamHist` was above 0.05
-# on 100% of this frame's water at a mean of 0.344, which put the erosion
-# noise's near-binary threshold in its most discriminating band over the entire
-# sea and painted half of it in 6x-stretched lace. From 1.4 m over the water it
-# read as torn ribbons and nested contour rings. The trail now remembers
-# `WATER_FOAM_BREAK`/`_BROKEN`, the pair the shader already paints white with,
-# and drains on `WATER_FOAM_AGE_SECONDS`. The glow rises with it because foam
-# now covers less of the water the glow was lighting.
-#
-# **Water is 77.40% of this frame** (measured the same way, against a render with
-# the `Water` node deleted), so the bed is doing visible work over **92.6% of the
-# water**. Spray's fraction is small and its worst channel is the largest in the
-# table, which is what a scatter of bright sub-metre droplets looks like to a
-# pixel diff: **3,339 droplets are in the air at this instant**, and the same
+# **Water is 77.41% of this frame** (measured the same way, against a render
+# with the `Water` node deleted), so the bed is doing visible work over **90.3%
+# of the water**. Spray's fraction is small and its worst channel the largest in
+# the table, which is what a scatter of bright sub-metre droplets looks like to
+# a pixel diff: **2,583 droplets are in the air at this instant**, and the same
 # scene with `spray = 0.0` renders `particles: 0`.
 #
 # The bed's number and the spray's are against edited copies of this scene rather
 # than against ablations, because neither is a switchable effect: `behind * T` is
 # the refraction path itself, and spray is a scene-authored population.
-#
-# **Off the screen and onto the sea**, from
-# `loom_cli`'s `lucent_breaks_and_throws` — a 251×251 grid over 160 m at the same
-# instant:
-#
-#     mu_max mean 0.1278   past 0.22 (foam onset) 26.24%   past 0.33 (breaking) 11.15%
-#     foam painted over 14.10% of the surface      3,339 droplets in the air
-#
-# **14.1% painted is a stylised sea and it should be read as one.** `scene.slang`
-# records `ocean`'s measured coverage as 4–7% and Monahan's whitecap relation at
-# that scene's 14 m/s as 3.2%; this sea is at 11 m/s and about three times
-# whiter than either. It is authored that way because whitecaps and spray have to
-# be legible in a *still*, and because the same `steepness` that makes them is
-# what makes the crests thin enough for the subsurface term to light. If the
-# breaking limiter ever lands, this is the first scene it should be re-argued
-# against.
 #
 # # What this scene is NOT showing, and why
 #
@@ -116,19 +178,21 @@
 #
 # - **Nothing here enforces the depth limit; the scene is authored to respect
 #   it.** Munk's breaker index puts a wave's height at breaking at about
-#   `0.78 · h`. The deterministic maximum here — all three waves in phase — is
-#   `H = 2 × 1.16 = 2.32 m` over `h = 3.2 m`, so `H/h = 0.725`, inside 0.78. The
-#   `Hs` the engine reports is 2.078 m (`4σ` of the three-wave sum), `Hs/h =
-#   0.65`. Those numbers are checked, not hoped: if this wave set is ever made
-#   taller, it goes past the index and the sea becomes a thing that cannot
-#   physically stand there.
-# - **`attenuation_depth` is left at its default zero, so nothing shoals.** A
-#   13 m swell over 3.2 m of water is `kh = 1.55` — intermediate water, where a
-#   real wave would already have slowed, shortened, steepened and broken. What
-#   is drawn is a deep-water Gerstner sea with a bed painted underneath it.
-#   Turning shoaling on would flatten exactly the crests this scene exists to
-#   backlight, and `shoal()` has no breaking limiter behind it to put the energy
-#   anywhere else.
+#   `0.78 · h`. A spectrum sea has no deterministic all-in-phase ceiling to
+#   check that against, so what is checked is what the sea actually puts up:
+#   over the 251×251 grid at the render instant the crest is **+1.118 m**, the
+#   trough **-1.128 m**, so `H = 2.246 m` over `h = 3.2 m` and **`H/h = 0.702`**,
+#   inside 0.78. `Hs` is 1.282 m, `Hs/h = 0.40`. Those numbers are checked, not
+#   hoped, and the test prints them: **raising either `fetch` is what breaks
+#   this**, because the fetch law is where the height lives. The 9 000 + 11 000
+#   row in the table above reaches `H/h = 1.23` and is outside the index.
+# - **`attenuation_depth` reads 9.44 m and it is inert.** A `spectrum` body has
+#   it *derived* rather than defaulted — `bands` sets it to half the longest
+#   band — but `sample_cascade` does not shoal at all: a cascade is a periodic
+#   deep-water tile and cannot feel a bed (ADR 0076). So what is drawn is still
+#   a deep-water sea with a bed painted underneath it, exactly as before; only
+#   the number the CLI reports changed. A scene that wants real shallows wants
+#   the Gerstner model until SEA-REBUILD §3's bake exists.
 # - **A crest here goes white and throws droplets; it never plunges.** There is
 #   no curl, no lip, no barrel and no broken-water sheet after the break.
 #
@@ -146,6 +210,12 @@
 # `fog_density = 0.008` is what hides it. The bed is bright carbonate sand,
 # nearly neutral, so the colour in the frame is the water's.
 #
+# **Deepening the bed was measured and rejected.** A 4.5 m shelf costs the bed
+# 70.36% of the frame at mean 15.58 → 69.22% at 12.55, and a 5.05 m one → 68.86%
+# at 11.58: the bed stays on nearly as many pixels and gets steadily dimmer on
+# each of them, which is the wrong half of the trade. It would have bought room
+# for a taller sea; short fetches buy the same breaking without it.
+#
 # # The camera, and the two alternatives
 #
 # Swept at 1280x720 and kept in `.superpowers/sdd/sea-showcase/`:
@@ -153,12 +223,19 @@
 #     waterline   eye 2.2 m, pitch  -8°   one wave face fills the frame; most
 #                                         drama, least bed
 #     shelf       eye 4.5 m, pitch -16°   this one — bed and crests both legible
-#     overlook    eye 8.0 m, pitch -26°   the whole wave field and the most bed,
-#                                         but the sea reads as corrugation
+#     overlook    eye 8.0 m, pitch -26°   the whole wave field and the most bed
+#
+# The overlook was rejected on the Gerstner sea because from up there it read as
+# corrugation. That specific objection is gone with the wave model and the sweep
+# is owed a re-run; the shelf camera is kept because it is the one that puts the
+# bed and the backlit crests in one frame, which was always the stronger reason.
 #
 # Sun elevation was swept at 6.9 / 10.1 / 19.9°: at 20° the glow washes flat over
 # the whole sea and the wave structure goes with it, which is the failure mode
-# the subsurface term's own comment records.
+# the subsurface term's own comment records. **That sweep was also taken on the
+# Gerstner sea.** Its conclusion is a property of the shading term rather than of
+# the surface, so it is expected to survive, but it has not been re-run and
+# should not be quoted as if it had.
 #
 # **No boat.** `ocean_fft_boat.loom` is the scene with scale in it; a hull here
 # covers the water that is the subject. The `Marker` is `spindrift.loom`'s
@@ -187,13 +264,27 @@ name = "Sea"
   fog_density = 0.008
   fog_falloff = 0.05
 
-  # 11 m/s. The wind does two things here that the wave set does not: it drives
-  # the Cox–Munk capillary slope the shading normal carries (`WATER_DETAIL_*`),
-  # which is what softens the backlit cosine at the terminator, and it sets the
-  # foam's own wander.
+  # **This is the sea, not a mood.** Under `wave_model = "spectrum"` the wind
+  # sea below is built from this speed and the body's `fetch`, so `speed` is the
+  # only knob on how much of this surface breaks — see the header for the wind
+  # the picture asked for and what it costs in honesty.
+  #
+  # **`speed` is free-stream, not U10, and 38.5321 is measured — do not tidy
+  # it.** `loom_field::wind` warns that the authored field is the value the
+  # height profile saturates toward, and at the meteorological standard 10 m
+  # the profile is 0.90833 of it. Through `Wind::mean_speed_at(10.0)`:
+  #
+  #     speed 38.50    -> U10 34.970829
+  #     speed 38.5321  -> U10 34.999985   <- this
+  #     speed 40.00    -> U10 36.333332
+  #
+  # It also still does the two things it did before the wave model changed: it
+  # drives the Cox–Munk capillary slope the shading normal carries
+  # (`WATER_DETAIL_*`), which is what softens the backlit cosine at the
+  # terminator, and it sets the foam's own wander.
   [node.components.Wind]
   direction_degrees = 190.0
-  speed = 11.0
+  speed = 38.5321
   gustiness = 1.0
   turbulence = 0.9
 
@@ -227,8 +318,16 @@ transform = { pos = [-90.0, -24.0, -130.0] }
 name = "Water"
 parent = "Sea"
 
+  # **Every scalar here has to sit above the first sub-table header.** TOML
+  # gives a bare key to whatever table was opened last, so a `spray` written
+  # after `[...WaterBody.swell]` becomes `swell.spray`, is dropped, and the
+  # scene loses its whole spray population with no error. See the header.
   [node.components.WaterBody]
   kind = "ocean"
+  # ADR 0076's FFT cascade — 2048 / 256 / 32 m patches, each periodic on its own
+  # scale. This is the one field that stops the sea corrugating; every number
+  # below only decides which sea it is.
+  wave_model = "spectrum"
   surface_height = 0.0
   density = 1025.0
   drag = 2.0
@@ -236,6 +335,28 @@ parent = "Sea"
   # threw it can do. `spindrift.loom`'s value, on a sea with a comparable fold
   # ceiling. Zero is the default and is every sea that predates W5.
   spray = 8.0
+  # **The wind sea: 3.5 km of fetch, which is a shore-hugging sea.** Short
+  # because `Hs ∝ √F` while `mu_max` barely moves with `F` — so this is the
+  # height knob, and it is set at what keeps `H/h` under Munk's 0.78 over a
+  # 3.2 m bed. The header has the three-row sweep.
+  fetch = 3500.0
+
+    # **The second sea, 70° to port.** One fetch cannot carry both the height
+    # and the short steep tail that breaks — measured on this scene, one 20 km
+    # sea is *taller* (Hs 2.53 m against 1.28) and breaks over a third as much
+    # surface. Splitting it halves each half's peak wavelength, and compression
+    # scales with `k`.
+    #
+    # **A 4.2 km fetch is not a swell in the oceanographic sense and this
+    # comment will not pretend it is.** `swell` is what `WaterBody` calls its
+    # second spectrum; what is authored here is a second young wind sea off a
+    # different reach of the same storm, which is what a crossing sea over a
+    # shelf actually is. It carries its own `u10` and takes nothing from the
+    # scene's `Wind`.
+    [node.components.WaterBody.swell]
+    u10 = 21.0
+    fetch = 4200.0
+    direction = [-0.5, 0.8660254]
 
     # Jerlov II — a published row, not a colour somebody liked. See the header
     # for why this row and not the two either side of it, and `WaterOptics` for
@@ -243,36 +364,6 @@ parent = "Sea"
     [node.components.WaterBody.optics]
     attenuation = [0.3712, 0.0760, 0.0383]
     backscatter = [0.00528, 0.00727, 0.01091]
-
-  # **Three waves with no common factor between their wavelengths**, each
-  # carrying about a third of the fold budget, so the sum passes 0.33 where two
-  # of them crest together — a few percent of the surface at any instant, which
-  # is what a breaking sea looks like. One wave at the same total steepness
-  # breaks in a corrugated line right across the scene.
-  #
-  # Nothing shorter than 5 m: the Nyquist fade deletes waves under about four
-  # metres at range, and a wave that is there in the near field and gone in the
-  # mid field is worse than one that was never authored.
-  [[node.components.WaterBody.waves.waves]]
-  wavelength = 13.0
-  amplitude = 0.62
-  steepness = 0.80
-  direction = [1.0, 0.2]
-  speed_scale = 1.0
-
-  [[node.components.WaterBody.waves.waves]]
-  wavelength = 7.5
-  amplitude = 0.34
-  steepness = 0.82
-  direction = [0.85, -0.5]
-  speed_scale = 1.0
-
-  [[node.components.WaterBody.waves.waves]]
-  wavelength = 5.0
-  amplitude = 0.20
-  steepness = 0.82
-  direction = [1.0, 0.62]
-  speed_scale = 1.0
 
 # What a droplet off this water looks like. A `ParticleEmitter` under the
 # `WaterBody` is the water's splash and never plays where it sits — spray
