@@ -1428,91 +1428,119 @@ fn image(bless: bool) -> std::process::ExitCode {
     let mut blessed = Vec::new();
     let mut checked = 0;
 
-    for (name, scene, extra) in GOLDEN {
-        if !selected(filter.as_ref(), name, scene) {
-            skipped += 1;
-            continue;
-        }
-        // **A missing scene fails the gate.** It used to skip, which meant
-        // renaming a scene file quietly dropped a whole rendering path out of
-        // coverage while the gate still printed success. That is the one
-        // failure mode a regression harness must not have, because every
-        // phase after this one trusts it to be watching.
-        if !root.join(scene).exists() {
-            failures.push(format!(
-                "{name}: {scene} is missing — the golden list names a scene that \
-                 does not exist, so this rendering path is unverified"
-            ));
-            continue;
-        }
-        checked += 1;
-
-        let rendered = scratch.join(format!("{name}.png"));
-        let reference = references.join(format!("{name}.png"));
-        let rendered_path = rendered.to_string_lossy().into_owned();
-
-        let mut argv: Vec<&str> = vec!["render", scene, "--out", &rendered_path, "--size", GOLDEN_SIZE];
-        argv.extend_from_slice(extra);
-        let render = match run(&loom, &root, &argv) {
-            Ok(output) => output,
-            Err(e) => {
-                failures.push(format!("render {name}: {e}"));
-                continue;
+    let wanted: Vec<_> = GOLDEN
+        .iter()
+        .filter(|(name, scene, _)| {
+            let keep = selected(filter.as_ref(), name, scene);
+            if !keep {
+                skipped += 1;
             }
-        };
-        if !render.status.success() {
-            failures.push(format!(
-                "render {name}: {}",
-                String::from_utf8_lossy(&render.stderr).trim()
-            ));
-            continue;
-        }
+            keep
+        })
+        .collect();
 
-        // A reference that does not exist yet is not a failure the first time
-        // a scene is added — but it is not a pass either. Blessing is the only
-        // way to create one, so the intent is always explicit.
-        if !reference.exists() {
-            if bless {
-                if let Err(e) = std::fs::copy(&rendered, &reference) {
-                    failures.push(format!("{name}: cannot write reference: {e}"));
-                } else {
-                    blessed.push(format!("{name} (new)"));
+    let jobs: Vec<_> = wanted
+        .into_iter()
+        .map(|(name, scene, extra)| {
+            let loom = loom.clone();
+            let root = root.clone();
+            let scratch = scratch.clone();
+            let references = references.clone();
+            move || -> (u32, Vec<String>, Vec<String>) {
+                let mut failures = Vec::new();
+                let mut blessed = Vec::new();
+
+                // **A missing scene fails the gate.** It used to skip, which meant
+                // renaming a scene file quietly dropped a whole rendering path out
+                // of coverage while the gate still printed success. That is the one
+                // failure mode a regression harness must not have, because every
+                // phase after this one trusts it to be watching.
+                if !root.join(scene).exists() {
+                    failures.push(format!(
+                        "{name}: {scene} is missing — the golden list names a scene \
+                         that does not exist, so this rendering path is unverified"
+                    ));
+                    return (0, failures, blessed);
                 }
-            } else {
-                failures.push(format!(
-                    "{name}: no reference image; run `cargo xtask image --bless` to create one"
-                ));
-            }
-            continue;
-        }
 
-        if bless {
-            match std::fs::copy(&rendered, &reference) {
-                Ok(_) => blessed.push(name.to_owned()),
-                Err(e) => failures.push(format!("{name}: cannot write reference: {e}")),
-            }
-            continue;
-        }
+                let rendered = scratch.join(format!("{name}.png"));
+                let reference = references.join(format!("{name}.png"));
+                let rendered_path = rendered.to_string_lossy().into_owned();
 
-        let compared = match run(
-            &loom,
-            &root,
-            &["compare", &rendered_path, &reference.to_string_lossy()],
-        ) {
-            Ok(output) => output,
-            Err(e) => {
-                failures.push(format!("{name}: {e}"));
-                continue;
+                let mut argv: Vec<&str> =
+                    vec!["render", scene, "--out", &rendered_path, "--size", GOLDEN_SIZE];
+                argv.extend_from_slice(extra);
+                let render = match run(&loom, &root, &argv) {
+                    Ok(output) => output,
+                    Err(e) => {
+                        failures.push(format!("render {name}: {e}"));
+                        return (1, failures, blessed);
+                    }
+                };
+                if !render.status.success() {
+                    failures.push(format!(
+                        "render {name}: {}",
+                        String::from_utf8_lossy(&render.stderr).trim()
+                    ));
+                    return (1, failures, blessed);
+                }
+
+                // A reference that does not exist yet is not a failure the first
+                // time a scene is added — but it is not a pass either. Blessing is
+                // the only way to create one, so the intent is always explicit.
+                if !reference.exists() {
+                    if bless {
+                        match std::fs::copy(&rendered, &reference) {
+                            Ok(_) => blessed.push(format!("{name} (new)")),
+                            Err(e) => {
+                                failures.push(format!("{name}: cannot write reference: {e}"));
+                            }
+                        }
+                    } else {
+                        failures.push(format!(
+                            "{name}: no reference image; run `cargo xtask image --bless` \
+                             to create one"
+                        ));
+                    }
+                    return (1, failures, blessed);
+                }
+
+                if bless {
+                    match std::fs::copy(&rendered, &reference) {
+                        Ok(_) => blessed.push((*name).to_owned()),
+                        Err(e) => failures.push(format!("{name}: cannot write reference: {e}")),
+                    }
+                    return (1, failures, blessed);
+                }
+
+                let compared = match run(
+                    &loom,
+                    &root,
+                    &["compare", &rendered_path, &reference.to_string_lossy()],
+                ) {
+                    Ok(output) => output,
+                    Err(e) => {
+                        failures.push(format!("{name}: {e}"));
+                        return (1, failures, blessed);
+                    }
+                };
+                if !compared.status.success() {
+                    // The JSON carries the numbers; printing it whole means the
+                    // reader sees how far off it was, not merely that it was.
+                    failures.push(format!(
+                        "{name}: {}",
+                        String::from_utf8_lossy(&compared.stdout).replace('\n', " ")
+                    ));
+                }
+                (1, failures, blessed)
             }
-        };
-        if !compared.status.success() {
-            // The JSON carries the numbers; printing it whole means the reader
-            // sees how far off it was, not merely that it was.
-            failures.push(format!(
-                "{name}: {}",
-                String::from_utf8_lossy(&compared.stdout).replace('\n', " ")
-            ));
-        }
+        })
+        .collect();
+
+    for (ran, mut found, mut ok) in in_parallel(gate_jobs(), jobs) {
+        checked += ran;
+        failures.append(&mut found);
+        blessed.append(&mut ok);
     }
 
     if bless {
