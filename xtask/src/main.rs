@@ -1287,6 +1287,12 @@ const GOLDEN_SIZE: &str = "320x200";
 /// term's mask below. The floor is deliberately not re-tightened: this column measures
 /// "is it drawing", not "is it drawing exactly what it drew in August".
 ///
+/// **Re-measured 2026-08-30 at 0.25541**, the largest it has been. `foamAge` was reading a
+/// 0.33-second-old trail as ten-second drained foam and painting nine tenths of a Gerstner
+/// sea `WATER_FOAM_OLD_ALBEDO` at 0.55 opacity; with the age taken off the trail's own
+/// decay envelope instead, foam is white where it is fresh and the row moved 0.19505 ->
+/// 0.25541. The floor stays at 0.15 for the same reason it stayed after the drift down.
+///
 /// **`ocean_fft` / `ocean_spectrum`.** Measured 2026-08-29 at `GOLDEN_SIZE`:
 /// `loom render assets/test/ocean_fft.loom --sim 400 --size 320x200` with and without
 /// `LOOM_ABLATE=ocean_spectrum`, then `loom compare`, gives `fraction = 0.587546875`

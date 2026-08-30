@@ -575,6 +575,63 @@ mod tests {
         );
     }
 
+    /// **A raft one tap behind the crest must read as fresh, not as drained
+    /// foam** — the property `foamAge` was getting exactly backwards.
+    ///
+    /// The share `foamHist / max(instant, foamHist)` reaches 1.0 the moment the
+    /// crest moves on, and it was being fed straight into
+    /// `lerp(WATER_FOAM_ALBEDO, WATER_FOAM_OLD_ALBEDO, ..)`. On `lucent --sim
+    /// 300` that painted 89.8% of the water with Koepke's ten-second foam
+    /// `(0.28, 0.30, 0.32)` at 0.55 opacity, which is darker than the sea it
+    /// replaced — the whole of "I cannot see the foam".
+    ///
+    /// Re-runs the shipped arithmetic on the four literals read out of
+    /// `scene.slang`, so raising `FOAM_TRAIL_TAPS` or shortening
+    /// `WATER_FOAM_AGE_SECONDS` past the point where a fresh raft starts
+    /// greying fails here rather than in a still nobody renders.
+    #[test]
+    fn foam_one_tap_behind_the_crest_is_still_fresh() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/scene.slang"
+        ))
+        .expect("scene.slang is beside the crate that compiles it");
+        let literal = |name: &str| -> f64 {
+            let needle = format!(" {name} = ");
+            let start = source.find(&needle).unwrap_or_else(|| panic!("no {name}")) + needle.len();
+            let rest = &source[start..];
+            let end = rest.find(';').expect("a terminated declaration");
+            rest[..end].trim().parse().unwrap_or_else(|_| panic!("{name} is not a number"))
+        };
+        let decay = literal("FOAM_TRAIL_DECAY");
+        let step = literal("FOAM_TRAIL_STEP");
+        let taps = literal("FOAM_TRAIL_TAPS");
+        let full = literal("WATER_FOAM_AGE_SECONDS");
+
+        // The shipped expression, with the share at 1.0 — foam the crest has
+        // entirely left, which is the case that was wrong.
+        let age = |hist: f64| {
+            let k = (hist.max(1.0e-4).ln() / decay.ln()).clamp(0.0, taps);
+            (k * step / full).clamp(0.0, 1.0)
+        };
+
+        let fresh = age(decay);
+        assert!(
+            fresh < 0.05,
+            "foam {step} s behind the crest reads {fresh} of the way to drained.              `WATER_FOAM_OLD_ALBEDO` is ten-second foam; a raft this young must be white."
+        );
+        let oldest = age(decay.powf(taps));
+        assert!(
+            oldest > fresh * 4.0 && oldest <= 1.0,
+            "the trail's oldest tap reads {oldest} against its freshest {fresh}: the              ageing ramp has stopped separating them, so `foamAge` is a constant again."
+        );
+        assert!(
+            (oldest - taps * step / full).abs() < 1.0e-6,
+            "the oldest tap is {} s of history and should read exactly that far along a              {full} s curve; it reads {oldest}.",
+            taps * step
+        );
+    }
+
     /// SPIR-V starts with the magic number `0x0723_0203` and is a whole number
     /// of 32-bit words. Cheap proof that `build.rs` produced a real module
     /// rather than an empty or truncated file.

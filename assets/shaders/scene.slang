@@ -6277,6 +6277,14 @@ static const float3 WATER_FOAM_OLD_ALBEDO = float3(0.28, 0.30, 0.32);
 /// dispersing raft is holes: the water's own reflection comes back through it,
 /// which is the difference between foam ageing and foam dimming.
 static const float WATER_FOAM_OLD_OPACITY = 0.55;
+/// How long a raft takes to become `WATER_FOAM_OLD_ALBEDO` — Koepke's own
+/// "roughly ten seconds", the same source the two constants above are from, so
+/// this is a reading of that table rather than a fourth authored number.
+///
+/// **It is the denominator `foamAge` was missing.** See the derivation at
+/// `foamAge`'s use: the trail carries the elapsed time in its decay and the
+/// share threw it away.
+static const float WATER_FOAM_AGE_SECONDS = 10.0;
 /// **Foam is a material, not a tint — SEA-REBUILD §4.4's second half.**
 ///
 /// A raft of packed bubbles is a rough dielectric. It has a specular lobe, and
@@ -8144,7 +8152,38 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // coverage under the noise, which is how foam leaves in this shader
     // everywhere else — in shrinking lace, not by dimming. The trail is the
     // only term that describes foam that is *old*.
-    float foamAge = in.foamHist / max(max(instant, in.foamHist), 1.0e-5);
+    //
+    // **The ratio is a SHARE, not an age, and using it as one greyed nine
+    // tenths of a sea.** `WATER_FOAM_OLD_ALBEDO` is Koepke's drained foam,
+    // ten seconds after the break; the share above reaches 1.0 the instant the
+    // crest moves on, which on this trail is **0.33 s**. Measured on
+    // `lucent --sim 300`: `foamAge` was 0.88 in the mean with **89.8% of the
+    // water past 0.9**, so almost the whole sea was painted `(0.28, 0.30,
+    // 0.32)` at 0.55 opacity — darker than the water it replaced. Setting it
+    // to zero moves legible foam from 1.60% of the frame to 16.15%.
+    //
+    // **The trail's own decay envelope is the clock, and it is free.** Tap `k`
+    // is worth at most `FOAM_TRAIL_DECAY^k`, so `log_D(foamHist)` *is* `k` and
+    // `k * FOAM_TRAIL_STEP` is the seconds. Clamped to the window the trail can
+    // see: a value below `D^TAPS` came from a weak break rather than an old
+    // one, and reading that as age is the same mistake one level down.
+    //
+    // A partly-covered tap therefore reads OLDER than it is — the decay and
+    // the coverage are multiplied together and only their product survives.
+    // That error is in the direction the shader already had, which is why it is
+    // acceptable and why it is stated here instead of being carried by a
+    // second varying.
+    //
+    // **The consequence, said plainly: this trail cannot reach old foam.**
+    // 3.3 s of window against a 10 s curve caps `foamAge` at 0.33, so
+    // `WATER_FOAM_OLD_ALBEDO`'s far end is unreachable through the whitecap
+    // trail and is approached only a third of the way. Foam that really is ten
+    // seconds old is not in this shader's reach at all; it would need the
+    // advected field to carry a deposit time, which it does not.
+    float trailTaps = clamp(log(max(in.foamHist, 1.0e-4)) / log(FOAM_TRAIL_DECAY),
+                            0.0, float(FOAM_TRAIL_TAPS));
+    float foamAge = in.foamHist / max(max(instant, in.foamHist), 1.0e-5)
+                  * saturate(trailTaps * FOAM_TRAIL_STEP / WATER_FOAM_AGE_SECONDS);
     // **Eroded by the noise rather than faded by it.** A multiply would dim
     // every foam pixel toward the water; thresholding the *coverage* against
     // the noise instead dissolves the patch from its edges inward, which is
