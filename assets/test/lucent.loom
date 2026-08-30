@@ -63,14 +63,24 @@
 # same frame with it on.
 #
 #     the bed through the water   71.66% of the frame   mean 13.62   worst 145
-#     subsurface glow             13.67%                mean  0.60   worst  95
-#     foam                        55.48%                mean  7.25   worst 132
+#     subsurface glow             14.24%                mean  0.67   worst  95
+#     foam                        25.94%                mean  3.41   worst 134
 #     spray                        0.56%                mean  0.17   worst 186
 #
 # Foam's mean and spray's area both roughly doubled at the foam-density pass
 # (`foamAge` was calling 0.33-second-old foam ten seconds old, and the crest
-# crown was seven identical beads). The glow's fraction fell by the same work:
-# brighter foam covers more of the water the glow was lighting.
+# crown was seven identical beads).
+#
+# **Foam then fell 55.48% -> 25.94% and that is the fix, not a loss.** The
+# vertex foam trail was seeded from `WATER_FOAM_WET` — it remembered a crest
+# that got *wet* rather than one that *broke* — so `in.foamHist` was above 0.05
+# on 100% of this frame's water at a mean of 0.344, which put the erosion
+# noise's near-binary threshold in its most discriminating band over the entire
+# sea and painted half of it in 6x-stretched lace. From 1.4 m over the water it
+# read as torn ribbons and nested contour rings. The trail now remembers
+# `WATER_FOAM_BREAK`/`_BROKEN`, the pair the shader already paints white with,
+# and drains on `WATER_FOAM_AGE_SECONDS`. The glow rises with it because foam
+# now covers less of the water the glow was lighting.
 #
 # **Water is 77.40% of this frame** (measured the same way, against a render with
 # the `Water` node deleted), so the bed is doing visible work over **92.6% of the

@@ -6506,6 +6506,30 @@ static const float WATER_FOAM_RAFT_SCALE = 1.1;
 static const float WATER_FOAM_COARSE = 0.1375;
 static const float WATER_FOAM_LACE = 0.55;
 static const float WATER_FOAM_FINE = 2.3;
+/// **The ladder's bottom rung — one octave below `WATER_FOAM_FINE`, for the
+/// near field the ladder had nothing to say about.**
+///
+/// The three rungs above only ever *retire*: they answer "is this lattice too
+/// fine for the pixel". Nothing answered the other question — "is the finest
+/// lattice I have far too COARSE for the pixel" — and at a camera 1.4 m over
+/// the water the answer was yes by an order of magnitude. `WATER_FOAM_FINE` is
+/// 2.3 cycles per unit of a frame stretched `WATER_FOAM_STREAK`, so its long
+/// axis has a 0.43 m period; two metres from the eye that is ~250 px, and the
+/// iso-contour of a 6x-stretched noise at that scale is a **regular triangular
+/// sawtooth 30 px on a side**. That is the "hard triangular shards" in the
+/// reported shot, and it is not a mesh edge — it is this noise, resolved far
+/// past the point where it reads as lace.
+///
+/// **It costs nothing anywhere the pixel cannot resolve it, and it changes
+/// nothing there either.** The amplitude is *taken from* `WATER_FOAM_FINE`
+/// rather than added beside it — see `waterFoamNoise` — so the noise's total
+/// spread at every footprint is exactly what it was, `waterFoamLaceAmount` is
+/// unchanged, and `WATER_FOAM_ERODE_FLAT`'s derivation from that spread still
+/// holds. Where this rung has retired the two forms are identical expressions.
+///
+/// 4x `WATER_FOAM_FINE`, the same step the ladder takes between every other
+/// pair of rungs (0.1375 -> 0.55 -> 2.3).
+static const float WATER_FOAM_GRAIN = 9.2;
 /// Cycles per pixel an octave is whole below and gone above, the same
 /// instrument `FIRE_NYQUIST_LOW`/`HIGH` use and the same units.
 ///
@@ -6585,13 +6609,19 @@ float3 foamFrameFoot(float2 breakDir, float2 worldXZ) {
 /// Split from the noise because the erosion band needs them too, and because
 /// the flow map evaluates the noise twice at one footprint — the weights are a
 /// property of the pixel, not of the sample.
-float3 waterFoamWeights(float foot) {
+float4 waterFoamWeights(float foot) {
     float wLace = foamOctaveWeight(WATER_FOAM_LACE, foot);
     // The coarse rung is the lace's understudy rather than a third layer: it is
     // worth exactly what the lace has lost, so it is silent everywhere the lace
     // is whole and the near field is untouched by its existence.
     float wCoarse = foamOctaveWeight(WATER_FOAM_COARSE, foot) * (1.0 - wLace);
-    return float3(wLace, wCoarse, foamOctaveWeight(WATER_FOAM_FINE, foot));
+    // `.w` is the grain rung — see `WATER_FOAM_GRAIN`. It is always <= `.z`,
+    // because it is the higher frequency and this ladder retires from the top,
+    // which is what lets `waterFoamNoise` spend `.z - .w` on the fine rung and
+    // keep the pair's amplitude at exactly `0.35 * .z`.
+    return float4(wLace, wCoarse,
+                  foamOctaveWeight(WATER_FOAM_FINE, foot),
+                  foamOctaveWeight(WATER_FOAM_GRAIN, foot));
 }
 
 /// The foam's lace, in the breaking frame. Split out so the flow map can
@@ -6605,12 +6635,19 @@ float3 waterFoamWeights(float foot) {
 /// amplitudes the old code drew at zero range. What changed is that it holds
 /// out to wherever the pixels last, instead of the second octave beginning to
 /// fade at the camera and being gone by 40 m.
-float waterFoamNoise(float2 wp, float2 wd, float3 w) {
+float waterFoamNoise(float2 wp, float2 wd, float4 w) {
     float2 fuv = float2(dot(wp, wd), dot(wp, float2(-wd.y, wd.x)) * WATER_FOAM_STREAK);
+    // **The finest 0.35 of the spread is SPENT, not shared.** `w.w <= w.z`
+    // always, so `(w.z - w.w)` and `w.w` sum to `w.z`: the pair carries exactly
+    // the amplitude the fine rung carried alone, and where the grain has
+    // retired (`w.w == 0`) this is the old expression term for term. What
+    // changes is only *which* lattice that amplitude is spent on as the pixel
+    // gets small enough to resolve a finer one — see `WATER_FOAM_GRAIN`.
     return 0.5
          + ((loom_value_noise(float3(fuv * WATER_FOAM_LACE, 0.0)) - 0.5) * w.x
           + (loom_value_noise(float3(fuv * WATER_FOAM_COARSE, 4.1)) - 0.5) * w.y) * 0.65
-         + (loom_value_noise(float3(fuv * WATER_FOAM_FINE, 7.3)) - 0.5) * 0.35 * w.z;
+         + ((loom_value_noise(float3(fuv * WATER_FOAM_FINE, 7.3)) - 0.5) * (w.z - w.w)
+          + (loom_value_noise(float3(fuv * WATER_FOAM_GRAIN, 3.7)) - 0.5) * w.w) * 0.35;
 }
 
 /// Half-width of the band the coverage is eroded through, given how much of the
@@ -6641,11 +6678,11 @@ static const float WATER_FOAM_ERODE_FLAT = 0.265;
 /// octave is resolved, 0 where the ladder has retired all of them. The
 /// amplitudes are the ones `waterFoamNoise` weights its octaves by, so this is
 /// literally "what fraction of the noise's own spread survives here".
-float waterFoamLaceAmount(float3 w) {
+float waterFoamLaceAmount(float4 w) {
     return saturate(0.65 * (w.x + w.y) + 0.35 * w.z);
 }
 
-float waterFoamErode(float3 w) {
+float waterFoamErode(float4 w) {
     return lerp(WATER_FOAM_ERODE_FLAT, WATER_FOAM_ERODE, waterFoamLaceAmount(w));
 }
 
@@ -8147,7 +8184,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // answer and is a few percent of a wind speed, which on `river.loom` is
     // nothing at all beside a 3 m/s current.
     float2 fflow = loom_flow_at(flowField(), in.worldPos.xz);
-    float3 fw = waterFoamWeights(foamFrame.z);
+    float4 fw = waterFoamWeights(foamFrame.z);
     float fnoise;
     // The raft's own texture — see `waterFoamRaft`. It rides the same two flow
     // phases `fnoise` does, for the reason `waterDetailSlope` gives: a river's
