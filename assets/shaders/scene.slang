@@ -5816,6 +5816,58 @@ static const float WATER_TINT_DEPTH = 5.0;
 /// pixel, which is the classic water shimmer; this is the smallest roughness
 /// that still reads as sun glitter rather than as a hard white dot.
 static const float WATER_ROUGHNESS = 0.08;
+/// How much of the sub-pixel slope variance reaches the lobe — SEA-REBUILD §4.5.
+///
+/// **1.0 is the physical coefficient and there is deliberately no taste knob
+/// beside it.** Widening a GGX lobe to swallow normal variance is
+/// `α'² = α² + 2σ²` (Kaplanyan/Tokuyoshi), with `σ²` the per-axis slope
+/// variance of everything finer than the filter — which is exactly what
+/// `specVar` accumulates. A fudge factor here would be a second calibration
+/// standing in front of `WATER_DETAIL_RMS`, and the whole reason the sea was
+/// oily is that a calibration nobody re-derived stood in front of Cox and Munk.
+static const float WATER_SPEC_AA = 2.0;
+/// The ceiling on the widened lobe.
+///
+/// Not for stability — the formula is bounded by construction — but because a
+/// sea whose every lobe has gone Lambertian has no glitter path left, and the
+/// glitter path is most of what says "this is water and not fog". It is
+/// reached wherever the whole capillary band is under a pixel, which at a
+/// grazing camera is most of the mid field, so it is the number that actually
+/// decides what the far half of a sea looks like.
+///
+/// **Chosen on the two frames the acceptance names, and on `whitecaps` at
+/// 1280x720 for the look.** Worst-channel `loom salt`, against **232** and
+/// **6,480** at `dcc61b3`:
+///
+///     cap      0.12   0.18   0.25   0.30   0.35   0.40   0.45
+///     shore   1,200  1,463    922    295    162    159    160
+///     boat    7,764  8,070  7,627  6,895  6,458  6,383  6,383
+///
+/// The knee is between 0.30 and 0.35 and it is sharp; **0.35 is the smallest
+/// value that brings both frames in under the pre-change numbers** while the
+/// surface carries three times the capillary slope it used to. Above it the
+/// numbers stop moving and `whitecaps`' mid field loses its crest silhouettes
+/// into a silver haze — at 0.45 the wave shapes are gone, which is a rougher
+/// answer than the sea is.
+///
+/// Non-monotone below the knee, and that is the metric rather than the term: a
+/// half-widened highlight covers more pixels at *middling* brightness, which is
+/// more isolated pixels than either a point or a sheet. Only past the knee do
+/// they merge.
+static const float WATER_SPEC_AA_MAX = 0.35;
+
+/// Roughness widened to swallow the normal detail below the filter.
+///
+/// The one line of §4.5, and the reason detail can be *added* to a shading
+/// normal without buying sparkle with it: a band that goes sub-pixel is not
+/// deleted and not drawn — it becomes lobe width, which is what it physically
+/// is. Applied to the sun's glitter and to the traced reflection alike; those
+/// are the two terms narrow enough to alias.
+float waterFilteredRoughness(float roughness, float variance) {
+    float a = roughness * roughness;
+    float widened = sqrt(sqrt(a * a + WATER_SPEC_AA * variance));
+    return min(max(roughness, widened), WATER_SPEC_AA_MAX);
+}
 /// Water's refractive index against air's 1.0.
 ///
 /// It is here for one number: `asin(1/1.333)` is 48.6°, the critical angle, and
@@ -6829,28 +6881,104 @@ static const float WATER_DETAIL_DRIFT = 0.03;
 // engine happened to have a slope handy. The mechanism now lives inside
 // `rainRingsAt`'s envelope, where the ring that earns the calm is the ring
 // being calmed.
-/// Where the detail stops. `loom_value_noise` is analytic and has no mip chain,
-/// so past this the lattice is under a pixel and becomes a twinkle generator
-/// rather than detail — the same bound the foam's fine octaves take, for the
-/// same reason.
-static const float WATER_DETAIL_RANGE = 70.0;
+/// How much finer the second capillary octave is than the first, and how fast
+/// it travels across it.
+///
+/// Named because the band limit below has to know both periods: an octave that
+/// cannot be resolved has to be *retired and paid for in roughness*, and an
+/// inlined 2.9 cannot be read by the code doing the retiring.
+static const float WATER_DETAIL_OCTAVE_STEP = 2.9;
+static const float WATER_DETAIL_OCTAVE_DRIFT = 0.7;
+/// What the second octave is worth against the first.
+static const float WATER_DETAIL_OCTAVE_GAIN = 0.5;
+
+/// The RMS of the shape `waterDetailSlopeAt` returns at full weight, per axis.
+///
+/// **This is the calibration bug that made every sea in this engine oily, and
+/// it is one divide.** `detailStrength` is `sqrt(0.003 + 5.12e-3·U)` — a
+/// Cox-Munk RMS *slope*, and its own comment says so. Multiplying it by a shape
+/// only produces that slope if the shape has unit RMS. The shape here is a
+/// central difference of `loom_value_noise` at `e = 0.5`, whose per-axis RMS is
+/// **0.2740** (measured, and pinned by
+/// `loom_field::noise::tests::the_central_difference_gradient_has_a_known_rms`),
+/// and the two octaves are `g1 + 0.5·g2`, so the pair's RMS is `sqrt(1.25)`
+/// times that: **0.3064**. So the term was applying 30.6% of the slope it
+/// documents, and the sea was drawn at a third of the roughness Cox and Munk
+/// photographed. Dividing by this makes the constant above mean what it says.
+///
+/// The factorisation matters as much as the number: `variance carried` below
+/// is `(w1² + 0.25·w2²)/1.25`, which is exactly this RMS with the per-octave
+/// weights folded in, so what is *not* carried falls out of the same algebra
+/// rather than needing a second constant.
+static const float WATER_DETAIL_RMS = 0.3064;
+
+/// A band of the shading normal that the pixel cannot resolve, as a fraction
+/// of what it would carry whole — the two Nyquist constants, applied to a
+/// footprint rather than to a mesh cell.
+///
+/// **The mesh's fade and this one are the same question asked of two different
+/// sampling rates, and that is the whole of §4.5.** `waterCascadeFade` retires
+/// a wave the *vertex lattice* cannot represent, and ADR 0012 is right that the
+/// displacement must go with it. A shading normal is not sampled at the
+/// vertices; it is sampled at the pixel, whose footprint at this camera is a
+/// centimetre where the mesh cell is half a metre. So the normal keeps a band
+/// long after the geometry has to give it up, and gives it up only when the
+/// *pixel* runs out — which is what `foot` measures directly and what
+/// `WATER_DETAIL_RANGE`'s 70 m was a distance-shaped guess at. The guess is
+/// deleted: at a downward camera it kept detail that was already stipple, and
+/// at a grazing one it deleted detail three pixels wide.
+///
+/// **Its two constants are not ADR 0012's, and the difference is what the
+/// filter is.** `WATER_FADE_WHOLE`/`GONE` are 4 and 2 because a vertex lattice
+/// *reconstructs* a wave piecewise-linearly between its samples, and Nyquist is
+/// where that stops meaning anything. A shading normal is **point-sampled**: it
+/// is evaluated once at the pixel centre with no reconstruction and no mip
+/// chain, so the same two samples per period that reconstruct a wave badly
+/// produce, here, uncorrelated values in neighbouring pixels — which is stipple
+/// rather than detail. Measured on `shore.loom` at `--yaw 20 --pitch 60`, the
+/// exact frame SEA-REBUILD §4.5 names, worst-channel `loom salt`:
+///
+///     WHOLE / GONE   4 / 2    8 / 4    12 / 6   16 / 8
+///     shore salt     5,382      563      160      147
+///
+/// 4 / 2 is Nyquist and it is 23x the stipple this frame carried before the
+/// detail was corrected. 12 / 6 is where it stops moving; 16 / 8 buys 13 more
+/// isolated pixels and costs the near field an octave, so the knee is 12.
+/// **These are for `loom_value_noise`, which is point-sampled. A cascade tile
+/// is not, and is filtered on ADR 0012's own 4 / 2** — `loom_ocean_at` reads it
+/// bilinearly, so between two taps there is a reconstruction, which is exactly
+/// the property Nyquist is stated against. The noise has none: it is one
+/// evaluation at the pixel centre, and its neighbour is an independent draw.
+static const float WATER_SHADE_WHOLE = 12.0;
+static const float WATER_SHADE_GONE = 6.0;
+
+float waterBandCarried(float wavelength, float foot, float gone, float whole) {
+    return smoothstep(gone, whole, wavelength / max(foot, 1e-6));
+}
 /// The capillary slope at one point, with the wind's global drift and nothing
 /// else. Split out so the flow map below can evaluate it twice.
-float2 waterDetailSlopeAt(float2 xz, float t, float2 drift) {
+float2 waterDetailSlopeAt(float2 xz, float t, float2 drift, float2 octave) {
     float2 a = (xz - drift * t) * WATER_DETAIL_SCALE;
     // The second octave runs crosswise and faster, so the two do not travel as
     // one sheet — which is what a single scrolling layer always looks like.
-    float2 b = (xz + float2(-drift.y, drift.x) * t * 0.7) * (WATER_DETAIL_SCALE * 2.9);
+    float2 b = (xz + float2(-drift.y, drift.x) * t * WATER_DETAIL_OCTAVE_DRIFT)
+             * (WATER_DETAIL_SCALE * WATER_DETAIL_OCTAVE_STEP);
     const float e = 0.5;
-    float2 g;
-    g.x = (loom_value_noise(float3(a.x + e, 0.0, a.y))
-         - loom_value_noise(float3(a.x - e, 0.0, a.y))) / (2.0 * e);
-    g.y = (loom_value_noise(float3(a.x, 0.0, a.y + e))
-         - loom_value_noise(float3(a.x, 0.0, a.y - e))) / (2.0 * e);
-    g.x += (loom_value_noise(float3(b.x + e, 3.1, b.y))
-          - loom_value_noise(float3(b.x - e, 3.1, b.y))) / (2.0 * e) * 0.5;
-    g.y += (loom_value_noise(float3(b.x, 3.1, b.y + e))
-          - loom_value_noise(float3(b.x, 3.1, b.y - e))) / (2.0 * e) * 0.5;
+    float2 g = float2(0.0, 0.0);
+    if (octave.x > 0.0) {
+        g.x = (loom_value_noise(float3(a.x + e, 0.0, a.y))
+             - loom_value_noise(float3(a.x - e, 0.0, a.y))) / (2.0 * e) * octave.x;
+        g.y = (loom_value_noise(float3(a.x, 0.0, a.y + e))
+             - loom_value_noise(float3(a.x, 0.0, a.y - e))) / (2.0 * e) * octave.x;
+    }
+    if (octave.y > 0.0) {
+        g.x += (loom_value_noise(float3(b.x + e, 3.1, b.y))
+              - loom_value_noise(float3(b.x - e, 3.1, b.y))) / (2.0 * e)
+              * (WATER_DETAIL_OCTAVE_GAIN * octave.y);
+        g.y += (loom_value_noise(float3(b.x, 3.1, b.y + e))
+              - loom_value_noise(float3(b.x, 3.1, b.y - e))) / (2.0 * e)
+              * (WATER_DETAIL_OCTAVE_GAIN * octave.y);
+    }
     return g;
 }
 
@@ -6865,11 +6993,11 @@ float2 waterDetailSlopeAt(float2 xz, float t, float2 drift) {
 /// A gradient is linear, so blending the two phases' slopes is the same thing
 /// as blending the two phases' surfaces and differencing — no approximation is
 /// being made by doing it in this order, only two taps saved.
-float2 waterDetailSlope(float2 xz, float t, float2 drift, float2 flow) {
-    if (dot(flow, flow) <= 0.0) { return waterDetailSlopeAt(xz, t, drift); }
+float2 waterDetailSlope(float2 xz, float t, float2 drift, float2 flow, float2 octave) {
+    if (dot(flow, flow) <= 0.0) { return waterDetailSlopeAt(xz, t, drift, octave); }
     LoomFlowPhase p = waterFlowPhase(xz, flow, t);
-    return waterDetailSlopeAt(p.uvA, t, drift) * p.wA
-         + waterDetailSlopeAt(p.uvB, t, drift) * (1.0 - p.wA);
+    return waterDetailSlopeAt(p.uvA, t, drift, octave) * p.wA
+         + waterDetailSlopeAt(p.uvB, t, drift, octave) * (1.0 - p.wA);
 }
 
 // -- Rain rings on open water: the dispersive lattice ------------------------
@@ -7809,8 +7937,38 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         in.worldPos.xz, push.environment[0].weather.z, ringGate, ringEnvelope);
 
     float3 flatN = normal;
+    // **Per-axis slope variance this pixel cannot resolve** — every band the
+    // shading normal gives up is added here and comes back out as roughness
+    // below (SEA-REBUILD §4.5). Detail that is merely deleted is how a sea goes
+    // to glass; detail that is *retired into the lobe* is how it stays water.
+    float specVar = 0.0;
+    // **The band the mesh could not rasterise is NOT put back into the normal,
+    // and that was measured rather than assumed.**
+    //
+    // The obvious reading of `waterCascadeFade` is that it deletes a whole
+    // cascade from the *shading* as well as from the geometry, and that a
+    // normal — being per-pixel — could carry what the vertices could not. It
+    // was built: the cascade's own Nyquist wavelength against the pixel
+    // footprint, minus what the mesh already drew, one extra `loom_ocean_at`
+    // whose weight lane is the difference. **It moved 0.000% of `lucent`,
+    // `shore` and `ocean_fft`, at worst channel 0.** It cannot move any of
+    // them, and the reason is geometric rather than a bug:
+    //
+    //     mesh cell   = r / (WATER_RES/2)            grows linearly in r
+    //     footprint  ~= r² / (focal · eye height)    grows quadratically
+    //
+    // so past `r ≈ focal·height/64` — 73 m at `lucent`'s 1080p camera — **the
+    // pixel is coarser than the mesh cell**, and the mesh's fade does not begin
+    // until 64 m. The window where the pixel could rescue a band the vertices
+    // dropped is a few metres wide and inside both smoothsteps' feet. At a
+    // grazing view of a sea there is no such band: what the mesh gives up is
+    // already sub-pixel.
+    //
+    // Which is why the whole of the answer is below. A band that neither the
+    // vertices nor the pixel can carry does not become a normal — it becomes
+    // **lobe width**, which is what it physically is (§4.5).
     {
-        float detailFade = saturate(1.0 - length(toEye) / WATER_DETAIL_RANGE);
+        float detailFade = 1.0;
         // Calmer over a beach than over the shelf, which is true of real water
         // and keeps the ripples off the very edge of the shoreline cut.
         detailFade *= saturate(in.depth * 0.7 + 0.2);
@@ -7839,6 +7997,17 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         float2 dw = normalize(windv.xy + float2(1e-4, 0.0));
         float local = length(grassWind(in.worldPos).xz);
         float detailStrength = sqrt(WATER_DETAIL_CALM + WATER_DETAIL_COXMUNK * local);
+        // **Each octave lives or dies on the footprint, and what dies is
+        // paid for.** `foot` is metres of world per pixel, taken in uniform
+        // control flow at the top of this function. An octave whose lattice
+        // period is under about four of those is not detail any more, it is a
+        // twinkle generator — the same statement `WATER_DETAIL_RANGE`'s 70 m
+        // used to make in the wrong units.
+        float2 octave = float2(
+            waterBandCarried(1.0 / WATER_DETAIL_SCALE, foot,
+                             WATER_SHADE_GONE, WATER_SHADE_WHOLE),
+            waterBandCarried(1.0 / (WATER_DETAIL_SCALE * WATER_DETAIL_OCTAVE_STEP), foot,
+                             WATER_SHADE_GONE, WATER_SHADE_WHOLE));
         // **And carried by the river — W8.** The current is the one advection
         // in this shader that is honestly per-pixel: it is a bake off the bed,
         // it is what the buoyancy solver integrates, and a river whose surface
@@ -7848,13 +8017,27 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
             in.worldPos.xz,
             push.environment[0].weather.z,
             dw * windv.z * WATER_DETAIL_DRIFT,
-            loom_flow_at(flowField(), in.worldPos.xz));
+            loom_flow_at(flowField(), in.worldPos.xz),
+            octave);
         // A slope subtracted from the normal's horizontal components — the
         // standard perturbation. The surface stays exactly where the vertex
         // shader put it; only how it catches light changes, which is what keeps
         // this out of the "second opinion about the drawn surface" that the
         // rejected wave-set version would have been.
-        normal = normalize(normal - float3(g.x, 0.0, g.y) * detailStrength * detailFade);
+        //
+        // **Divided by the shape's own RMS**, so `detailStrength` is the
+        // Cox-Munk slope its comment claims and not 31% of it. See
+        // `WATER_DETAIL_RMS`.
+        float detailSlope = detailStrength * detailFade;
+        normal = normalize(
+            normal - float3(g.x, 0.0, g.y) * (detailSlope / WATER_DETAIL_RMS));
+        // What the two octaves still carry, as a fraction of the band's total
+        // slope variance: `(w1² + 0.25·w2²)/1.25`. The rest is the lobe's.
+        float carried = (octave.x * octave.x
+                       + WATER_DETAIL_OCTAVE_GAIN * WATER_DETAIL_OCTAVE_GAIN
+                         * octave.y * octave.y)
+                      / (1.0 + WATER_DETAIL_OCTAVE_GAIN * WATER_DETAIL_OCTAVE_GAIN);
+        specVar += detailSlope * detailSlope * saturate(1.0 - carried);
         // **The rings, added after the detail they suppress.** Subtracted like
         // every other slope in this block, so the surface stays exactly where
         // the vertex shader put it and only the shading normal moves. Branched
@@ -8132,6 +8315,16 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     }
     float baseRough = (in.nappe.x < -0.5) ? WATER_CINEMATIC_REFLECT_ROUGH
                                           : WATER_REFLECT_ROUGH;
+    // **Not filtered by `specVar`, and it was tried.** This number is a
+    // *dilution* — `tracedEnvironment` lerps its traced answer toward the miss
+    // colour by exactly it, reaching the sky at 1.0 — which is what its own
+    // constant's comment says it is and what a lobe width is not. Widening it
+    // with the sub-pixel variance renders **byte for byte the same picture** on
+    // `whitecaps`, `shore` and `ocean_fft_boat`, because the distance term
+    // beside it has already saturated everywhere the variance is large. So it
+    // buys nothing and would have made a dilution pretend to be a lobe. The
+    // variance belongs on the sun's GGX lobe above, which is the one term here
+    // narrow enough to alias.
     float reflectRough = saturate(baseRough
                                 + length(toEye) / WATER_REFLECT_RANGE);
     float3 env = tracedEnvironment(in.worldPos, flatN, mirror,
@@ -8160,7 +8353,8 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
                    + QuadReadAcrossDiagonal(env)) * 0.25;
     }
     float3 lit = lerp(through, env, fresnel);
-    lit += specular(normal, view, sunDirection(), WATER_ROUGHNESS, float3(0.02))
+    lit += specular(normal, view, sunDirection(),
+                    waterFilteredRoughness(WATER_ROUGHNESS, specVar), float3(0.02))
          * sunColor() * sunStrength() * toSun;
 
     // **Whitecaps.** See the constants above for why the threshold is absolute.

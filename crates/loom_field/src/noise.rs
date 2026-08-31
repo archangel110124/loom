@@ -215,4 +215,40 @@ mod tests {
             assert!(slang.contains(needle), "the Slang half is missing `{needle}`");
         }
     }
+
+    /// **The RMS of the capillary detail's own gradient, which `scene.slang`'s
+    /// `WATER_DETAIL_RMS` divides by.**
+    ///
+    /// The water shader builds its capillary slope as a central difference of
+    /// this noise at `e = 0.5`, and then multiplies it by a Cox-Munk RMS slope
+    /// — an operation that is only what its own comment says it is if the
+    /// shape it scales has unit RMS. It does not: it is measured here. The
+    /// constant in the shader is this number, and this test is what stops the
+    /// two drifting apart.
+    ///
+    /// One octave, per axis. The shader's two octaves are `g1 + 0.5·g2` at two
+    /// scales, so their combined RMS is `sqrt(1 + 0.25)` times this — the
+    /// factorisation `WATER_DETAIL_RMS` is written in.
+    #[test]
+    fn the_central_difference_gradient_has_a_known_rms() {
+        const E: f32 = 0.5;
+        let mut sum = 0.0_f64;
+        let mut n = 0_u32;
+        for i in 0..20_000 {
+            #[allow(clippy::cast_precision_loss)]
+            let f = i as f32;
+            // An irrational-ish walk, so the samples do not land on a
+            // sub-lattice and read one phase of the noise.
+            let (x, z) = (f * 0.7392 - 900.0, f * -0.4471 + 300.0);
+            let g = (value([x + E, 0.0, z]) - value([x - E, 0.0, z])) / (2.0 * E);
+            sum += f64::from(g) * f64::from(g);
+            n += 1;
+        }
+        #[allow(clippy::cast_lossless)]
+        let rms = (sum / f64::from(n)).sqrt();
+        assert!(
+            (rms - 0.2740).abs() < 0.004,
+            "one-octave gradient RMS is {rms}, and `WATER_DETAIL_RMS` is derived from 0.2740"
+        );
+    }
 }
