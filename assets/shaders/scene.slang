@@ -6735,6 +6735,48 @@ float waterFoamNoise(float2 wp, float2 wd, float4 w) {
 /// costs 21 on `loom salt` — nothing, because a wider transition is a softer
 /// edge. It does not reach 29.178% and should not: the rest of that number was
 /// the mean shift above painting foam that the noise never justified.
+/// **Stage 2 of the foam pipeline: the progressive blur, in pixels.**
+///
+/// `instant` is `smoothstep(WET, BREAK, in.breakMu)` and `in.breakMu` is a
+/// *per-vertex* varying, so its level sets are straight lines across a triangle
+/// that kink at every edge. The band is 0.11 wide in fold units, and wherever
+/// the fold changes by more than that in a pixel — a steep crest, the near
+/// field — the whole transition happens inside one pixel and the level set is
+/// printed as a hard-edged polygon. Measured with the term probe
+/// (`float4(instant, field, in.foamHist, 1)`) on `lucent --sim 300`: `instant`
+/// is a field of angular white shards with straight edges, against a `field`
+/// channel that is smooth everywhere. That is the "facets", and it is an
+/// aliasing artifact rather than a feature the sea has.
+///
+/// So the blur is measured in **pixels**, not metres: the band widens by
+/// `fwidth(breakMu)` times this, which makes the transition exactly this many
+/// pixels wide wherever it would have been narrower and does nothing at all
+/// where the fold is already gentle. A world-space radius cannot express that —
+/// the same crest is half a pixel at the horizon and two hundred underfoot.
+///
+/// This is the analytic form of what Sea of Thieves gets by blurring the foam
+/// buffer with feedback. **Blurring the buffer here would have been the wrong
+/// half**: `FoamField` holds one of the three coverage terms and the probe
+/// above says it is already the smooth one, while `instant` and `in.foamHist`
+/// are shader varyings that are not in it at all — and it is read by
+/// `water@x,z.foam` under ADR 0045, so every assertion would have moved for a
+/// picture that barely did. See `.superpowers/sdd/foam-pipeline-report.md`.
+///
+/// **Four, and it costs nothing — which is the surprise.** A blur that widens
+/// a band usually trades coverage for softness, and this one does not: on
+/// `lucent` at 1920x1080 the foam-legibility `cover%` runs 4.23 at 1.6 px and
+/// **4.32** at 4.0, `whitecaps` 15.69 -> 15.82, and `plough` is unmoved to two
+/// decimals. Widening symmetrically spreads as much foam outward as it takes
+/// off the peak. Past about 6 the near field starts to read as a wash.
+///
+/// **Its measured share of this fix is the smaller half, and that is worth
+/// recording.** Blur alone, against HEAD: 1.27% of `lucent` moves, 0.60% of
+/// `whitecaps`, 0.002% of `plough`, and `cover%` is flat on all three. The
+/// picture changes because of the texture — see `waterFoamDetail`. What the
+/// blur removes is the *aliasing*: the hard polygon outline on a shard, which
+/// no amount of detail hides and which a still photograph is the wrong
+/// instrument for.
+static const float WATER_FOAM_BLUR_PIXELS = 4.0;
 static const float WATER_FOAM_ERODE = 0.15;
 static const float WATER_FOAM_ERODE_FLAT = 0.265;
 /// How much of the lace's contrast this fragment still carries: 1 where every
@@ -7816,6 +7858,11 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // position rotated into the breaking frame, and only the derivative of the
     // rotated coordinate can band-limit it. See `foamOctaveWeight`.
     float3 foamFrame = foamFrameFoot(push.environment[0].wind.xy, in.worldPos.xz);
+    // **And how fast the fold changes per pixel — stage 2's blur, measured.**
+    // Here for the same reason as the two above: `fwidth` is a derivative and
+    // every statement below the discard is a place it could not have been
+    // taken. See `WATER_FOAM_BLUR_PIXELS`.
+    float breakFoot = fwidth(in.breakMu);
     // The falling sheet, which shares this pipeline and nothing else — ADR
     // 0054. Before the shoreline discard, because a nappe hangs in the air over
     // dry ground as often as not.
@@ -8487,7 +8534,13 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     float instant = 0.0;
     if (in.breakMu > WATER_FOAM_WET) {
         breakUp = waterFoamBreakWander(in.baseXZ, push.environment[0].weather.z, fw.x);
-        instant = smoothstep(WATER_FOAM_WET + breakUp, WATER_FOAM_BREAK + breakUp, in.breakMu);
+        // **Stage 2.** The band opens by whatever it takes to make the
+        // transition `WATER_FOAM_BLUR_PIXELS` wide on screen, and by nothing
+        // where it is already wider than that. Symmetric, so the band keeps its
+        // centre and a gentle sea still foams nowhere.
+        float blur = breakFoot * WATER_FOAM_BLUR_PIXELS;
+        instant = smoothstep(WATER_FOAM_WET + breakUp - blur,
+                             WATER_FOAM_BREAK + breakUp + blur, in.breakMu);
     }
     // **The advected field, and it is a third floor rather than a second
     // opinion** — ADR 0055. The trail remembers what a *wave* did, because a
