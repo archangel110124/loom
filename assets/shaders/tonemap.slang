@@ -115,6 +115,50 @@ float3 shoulder(float3 c) {
     return c * ((1.0 - d * d / (peak + d - KNEE)) / peak);
 }
 
+/// The ordered 8x8 Bayer value at a pixel, in [0, 1) — ADR 0077.
+///
+/// Built by interleaving the bits of `x ^ y` and `y` rather than from a table,
+/// which is the standard construction and costs no memory.
+float bayer8(uint2 p) {
+    uint a = (p.x ^ p.y) & 7u;
+    uint b = p.y & 7u;
+    uint v = (((a >> 2) & 1u) << 5) | (((b >> 2) & 1u) << 4)
+           | (((a >> 1) & 1u) << 3) | (((b >> 1) & 1u) << 2)
+           | ((a & 1u) << 1) | (b & 1u);
+    return float(v) * (1.0 / 64.0);
+}
+
+/// Half an output code of dither, **expressed in linear light** — ADR 0077.
+///
+/// The attachment is `R8G8B8A8_SRGB` (`renderer.rs:43`), so the hardware
+/// encodes and quantises after this shader returns and the value here is
+/// linear. Half a code of *linear* is the wrong quantity: sRGB's slope varies
+/// by two orders across the range, so a fixed linear offset is invisible in the
+/// highlights and enormous in the shadows — exactly backwards, because the
+/// shadows are where the banding is.
+///
+/// sRGB's power segment is `L = ((s + 0.055)/1.055)^2.4`, so
+/// `dL/ds = (2.4/1.055) * L^(7/12)`. One `pow` per channel, and no
+/// encode/decode pair — which `tonemap.rs` records as existing nowhere in
+/// `assets/shaders/`. Below the transfer's linear knee the slope is `1/12.92`;
+/// that region is codes 0 and 1, where there is nothing to dither between, and
+/// it is handled for correctness rather than for appearance.
+///
+/// **A function of the integer pixel coordinate and nothing else**, the same
+/// rule `rayDither` follows, which is what keeps the frame a pure function of
+/// its tick and `cargo xtask repeat` byte-identical.
+static const float SRGB_LINEAR_KNEE = 0.0031308;
+static const float SRGB_SLOPE = 2.4 / 1.055;
+float3 dithered(float3 c, uint2 pixel) {
+    float3 slope = float3(
+        c.r < SRGB_LINEAR_KNEE ? (1.0 / 12.92) : SRGB_SLOPE * pow(c.r, 7.0 / 12.0),
+        c.g < SRGB_LINEAR_KNEE ? (1.0 / 12.92) : SRGB_SLOPE * pow(c.g, 7.0 / 12.0),
+        c.b < SRGB_LINEAR_KNEE ? (1.0 / 12.92) : SRGB_SLOPE * pow(c.b, 7.0 / 12.0));
+    // Centred on zero: the offset must not shift the mean, only break the step.
+    float offset = (bayer8(pixel) - 0.5 + 0.5 / 64.0) * (1.0 / 255.0);
+    return max(c + slope * offset, 0.0);
+}
+
 /// One oversized triangle. The same three vertices, and the same reason, as
 /// the CMAA2 passes: a full-screen quad is two triangles with a seam down the
 /// diagonal where the rasteriser evaluates the same pixels twice.
@@ -183,5 +227,5 @@ float4 tonemapFragmentMain(float4 pos: SV_Position) : SV_Target {
         c = max(lerp(dot(c, LUMA).xxx, c, push.gain.w), 0.0);
     }
 
-    return float4(shoulder(c), 1.0);
+    return float4(dithered(shoulder(c), uint2(pos.xy)), 1.0);
 }
