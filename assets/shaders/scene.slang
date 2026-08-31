@@ -6894,23 +6894,73 @@ static const float WATER_DETAIL_OCTAVE_GAIN = 0.5;
 
 /// The RMS of the shape `waterDetailSlopeAt` returns at full weight, per axis.
 ///
-/// **This is the calibration bug that made every sea in this engine oily, and
-/// it is one divide.** `detailStrength` is `sqrt(0.003 + 5.12e-3·U)` — a
-/// Cox-Munk RMS *slope*, and its own comment says so. Multiplying it by a shape
-/// only produces that slope if the shape has unit RMS. The shape here is a
-/// central difference of `loom_value_noise` at `e = 0.5`, whose per-axis RMS is
-/// **0.2740** (measured, and pinned by
+/// **A unit conversion and nothing else.** `detailStrength` is an RMS slope, so
+/// multiplying it by a shape only produces that slope if the shape has unit
+/// RMS. The shape here is a central difference of `loom_value_noise` at
+/// `e = 0.5`, whose per-axis RMS is **0.2740** (measured, and pinned by
 /// `loom_field::noise::tests::the_central_difference_gradient_has_a_known_rms`),
 /// and the two octaves are `g1 + 0.5·g2`, so the pair's RMS is `sqrt(1.25)`
-/// times that: **0.3064**. So the term was applying 30.6% of the slope it
-/// documents, and the sea was drawn at a third of the roughness Cox and Munk
-/// photographed. Dividing by this makes the constant above mean what it says.
+/// times that: **0.3064**. Dividing by it makes the weight beside it a number
+/// with a meaning rather than a number times an unknown.
 ///
 /// The factorisation matters as much as the number: `variance carried` below
 /// is `(w1² + 0.25·w2²)/1.25`, which is exactly this RMS with the per-octave
 /// weights folded in, so what is *not* carried falls out of the same algebra
 /// rather than needing a second constant.
 static const float WATER_DETAIL_RMS = 0.3064;
+
+/// **The capillary band's share of the sea's total slope variance, as an
+/// amplitude — and this is the only honest thing to multiply `detailStrength`
+/// by.**
+///
+/// `detailStrength` is `sqrt(0.003 + 5.12e-3·U)`: Cox & Munk's mean-square
+/// slope of a **whole** wind-roughened surface — swell, chop, short gravity
+/// waves and capillaries together, integrated over every wavenumber their
+/// sun-glitter photographs could see. This term draws *two octaves of noise*.
+/// Handing the whole figure to those two octaves counts the swell and the chop
+/// a second time, on top of the mesh that is already drawing them, and the sea
+/// comes out as a blanket of frequency rather than as water. That is what
+/// `1.0` here did, and it is the defect this constant exists to close.
+///
+/// **Derived from `loom_water::spectrum`, not chosen.** The engine's sea is
+/// Pierson-Moskowitz, whose slope-variance density is flat per octave above the
+/// peak — `dσ²/d ln ω = α·exp(−1.25·(ω_p/ω)⁴)`, which is `α` to within a
+/// percent past `2ω_p` — so a band's share of the total is its width in octaves
+/// over the spectrum's own, weighted by that rolloff at the peak end:
+///
+///     band drawn      λ ∈ [1/(SCALE·STEP), 2/SCALE] = 0.216 .. 1.25 m
+///                     value noise on a lattice of period p carries its slope
+///                     energy over about λ ∈ [p, 2p], so two octaves spaced
+///                     STEP apart span log2(2·STEP) = 2.54 octaves
+///     spectrum        from the sea's own peak down to the capillary cutoff
+///
+/// Evaluated over every sea authored in this repository (`lucent` at U10 38.5
+/// with 3.5-4.2 km fetches, `ocean_fft` 19.8, `whitecaps` 18, `ocean` 14,
+/// `shore` 6, `ocean_tropical` 6.6) and over capillary cutoffs from 2 to 17 mm:
+///
+///     N (octaves)   9.3 .. 16.5      share  0.153 .. 0.274
+///     weight = √share               **0.392 .. 0.523**
+///
+/// It is that tight because both ends move together — a windier sea has a
+/// longer peak wavelength *and* a larger Cox-Munk total. **0.45 is the middle
+/// of that range and it is a constant**, because a per-scene number would be
+/// two spectrum lookups in the fragment shader to move a figure by ±15%.
+///
+/// **The band butts against the mesh and does not overlap it.** The geometry is
+/// gone below `WATER_FADE_WHOLE · WATER_CELL` = 2 m; the noise's coarse end is
+/// 1.25 m. Nothing is drawn twice and the 2 m .. 1.25 m gap is inside both
+/// smoothsteps' feet.
+///
+/// **What is below 0.216 m is not lost, it is `WATER_ROUGHNESS`** — that is
+/// what a microfacet roughness *is*, and widening it further is measured to
+/// make a calm sea frosted glass.
+///
+/// Historical note, because the number nearly went the other way: before this,
+/// the shape's RMS above was not divided out at all, so the term happened to
+/// apply **0.306** — 68% of the honest weight, by accident. Dividing it out and
+/// leaving the weight at 1.0 tripled the ripples, which is the "blanket of
+/// frequency" the human reported. The honest answer is neither: it is 0.45.
+static const float WATER_DETAIL_BAND = 0.45;
 
 /// A band of the shading normal that the pixel cannot resolve, as a fraction
 /// of what it would carry whole — the two Nyquist constants, applied to a
@@ -8025,10 +8075,12 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
         // this out of the "second opinion about the drawn surface" that the
         // rejected wave-set version would have been.
         //
-        // **Divided by the shape's own RMS**, so `detailStrength` is the
-        // Cox-Munk slope its comment claims and not 31% of it. See
-        // `WATER_DETAIL_RMS`.
-        float detailSlope = detailStrength * detailFade;
+        // **Divided by the shape's own RMS and weighted by the band's share of
+        // the sea**, so what lands on the normal is the slope Cox and Munk
+        // measured *in the two octaves this term draws* rather than the whole
+        // sea's — which the mesh under it is already drawing. See
+        // `WATER_DETAIL_RMS` and `WATER_DETAIL_BAND`.
+        float detailSlope = detailStrength * detailFade * WATER_DETAIL_BAND;
         normal = normalize(
             normal - float3(g.x, 0.0, g.y) * (detailSlope / WATER_DETAIL_RMS));
         // What the two octaves still carry, as a fraction of the band's total
