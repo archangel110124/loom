@@ -240,7 +240,9 @@ struct EnvironmentData {
     /// How many cells the boundary fade covers. Uploaded rather than compiled
     /// in, so `loom_water::foam::FOAM_EDGE_CELLS` cannot drift away from it.
     float foamEdgeCells;
-    uint foamPad;
+    /// Bindless index of the sea-foam detail texture, or `NO_TEXTURE` — see
+    /// `waterFoamDetail`. Rides what was `foamPad`.
+    uint foamTexture;
     /// The waterfall's lip, end A: xyz world, w the discharge in m²/s.
     /// **Zero discharge means this scene has no cascade** (ADR 0054), and the
     /// nappe's slice of the water draw then collapses to a point.
@@ -1893,6 +1895,18 @@ float4 sampleMap(uint index, float2 uv) {
 /// failure class a golden PNG cannot see.
 float4 sampleMapLevel(uint index, float2 uv, float lod) {
     return textures[NonUniformResourceIndex(index)].SampleLevel(uv, lod);
+}
+
+/// As [`sampleMap`], with the caller's own screen derivatives.
+///
+/// **`SampleGrad` is mandatory anywhere the implicit derivative is dead**, and
+/// `waterFragmentMain` is such a place: Slang lowers its shoreline `discard` to
+/// `OpKill`, so every quad straddling the waterline has lanes that no longer
+/// exist by the time the foam is shaded. `Sample` there asks those lanes what
+/// UV they got and picks a mip from the answer. The derivatives come from
+/// `foamFrameFoot`, taken as the first statement of the entry point.
+float4 sampleMapGrad(uint index, float2 uv, float2 dx, float2 dy) {
+    return textures[NonUniformResourceIndex(index)].SampleGrad(uv, dx, dy);
 }
 
 /// How coarse a mip a reflected hit reads.
@@ -6658,13 +6672,34 @@ float foamOctaveWeight(float scale, float foot) {
 ///
 /// The wind drift the sampler subtracts from `worldPos.xz` is spatially
 /// constant, so it contributes nothing to either derivative and is left out.
-float3 foamFrameFoot(float2 streakDir, float2 worldXZ) {
+struct LoomFoamFrame {
+    /// The frame's forward axis — the global wind, normalised.
+    float2 dir;
+    /// Screen derivatives of the frame coordinate. **Kept as vectors rather
+    /// than collapsed to `foot`** so the detail texture can be sampled with
+    /// `SampleGrad`: the sea at a grazing angle has a footprint tens of times
+    /// longer than it is wide, and feeding the major axis to both arguments
+    /// picks a mip for the worst direction and blurs the sharp one away.
+    float2 dx;
+    float2 dy;
+    /// The larger of the two, in units of the frame coordinate per pixel — the
+    /// major axis of the footprint ellipse, which is what decides whether a
+    /// lattice cell is resolved.
+    float foot;
+};
+
+LoomFoamFrame foamFrameFoot(float2 streakDir, float2 worldXZ) {
     // The `1e-4` keeps water with no authored wind — where the direction is
     // genuinely undefined — off a zero-length normalize, and lands it on `+x`.
     // A short vector here is a stretched lattice rather than a rotated one.
     float2 wd = normalize(streakDir + float2(1e-4, 0.0));
     float2 fuv = float2(dot(worldXZ, wd), dot(worldXZ, float2(-wd.y, wd.x)) * WATER_FOAM_STREAK);
-    return float3(wd, max(length(ddx(fuv)), length(ddy(fuv))));
+    LoomFoamFrame frame;
+    frame.dir = wd;
+    frame.dx = ddx(fuv);
+    frame.dy = ddy(fuv);
+    frame.foot = max(length(frame.dx), length(frame.dy));
+    return frame;
 }
 
 /// The ladder's three weights at this footprint: lace, coarse, fine.
@@ -6789,6 +6824,114 @@ float waterFoamLaceAmount(float4 w) {
 
 float waterFoamErode(float4 w) {
     return lerp(WATER_FOAM_ERODE_FLAT, WATER_FOAM_ERODE, waterFoamLaceAmount(w));
+}
+
+/// **Stage 3 of the foam pipeline: the detail comes from a texture.**
+///
+/// Sea of Thieves' foam talk is four slides — raw procedural noise ("too
+/// noisy"), the same mask progressively blurred, that blur blended with a foam
+/// *texture*, and the result blended with water. This engine had the first
+/// slide and the fourth and neither of the two in the middle, which is why its
+/// foam produced a lattice, then facets, then stringiness: raw value noise
+/// showing through a near-binariser, with nothing after it.
+///
+/// **What a texture buys that an octave ladder cannot.** `loom_value_noise` is
+/// a trilinear lerp of a hash lattice, so it has no structure at any scale but
+/// that lattice's — its level sets kink on cell boundaries, and `foam =
+/// smoothstep(fnoise ± ferode, wetc)` is very nearly a binariser, which prints
+/// those kinks as straight edges. Foam is torn into filaments by shear and has
+/// structure the lattice has no way to make. `tools/texture/foam.py` builds one
+/// — a domain-warped ridged fBm — and the mip chain band-limits it in hardware,
+/// which is what the `foamOctaveWeight` ladder was doing by hand.
+///
+/// **Two taps, at scales in a ratio of 2.7.** One tap tiles visibly: value
+/// noise repeats too but has no recognisable features to notice, and a texture
+/// does. A non-integer ratio puts the beat between the two periods far past
+/// anything in frame. This is the same 0.65/0.35 split, and the same reason for
+/// it, that `waterFoamNoise` weights its own pair by.
+///
+/// **Spread-matched to the noise it replaces, and that is not decoration.**
+/// Every threshold above this — `WATER_FOAM_WET`, the erode band's derivation,
+/// the ablate row's floor — was calibrated against a field with a particular
+/// standard deviation. `water_foam.png` is histogram-equalised to *uniform* on
+/// [0, 1) (see the generator), whose sd is `1/sqrt(12)` = 0.2887; the 0.65/0.35
+/// pair carries `sqrt(0.65² + 0.35²)·0.2887` = 0.2131. `waterFoamNoise`'s own
+/// doc derives its sd as 0.116. So the deviation is scaled by 0.116 / 0.2131 =
+/// **0.544**, and swapping the pattern then changes *which* pixels are foam and
+/// never how many. Without it the coverage would have moved on every water
+/// scene in the repository and no number above would have meant what it says.
+static const float WATER_FOAM_TEX_AMPLITUDE = 0.544;
+/// How far the *texture* is combed along the wind, and it is not
+/// `WATER_FOAM_STREAK`.
+///
+/// The lace was stretched 6x because value noise has no shape of its own and
+/// the stretch was the only thing making it read as streaks. This texture is
+/// already filamentary, so it needs less — and 6x was measured to be actively
+/// harmful here: the stretch divides the tile's across-wind repeat by six, and
+/// at `WATER_FOAM_TEX_COARSE` that put a visible comb of identical blobs
+/// every 1.2 m across `whitecaps`' far field. A tiling texture cannot have both
+/// a short repeat and unrecognisable features, which is exactly the trade value
+/// noise did not have to make.
+static const float WATER_FOAM_TEX_STREAK = 2.5;
+/// Tiles of the texture per unit of the streak frame, coarse tap.
+///
+/// A tile spans `1 / scale` metres along the wind and `1 / (scale · streak)`
+/// across it — so this is 30 m by 12 m, and the repeat is off the end of every
+/// shot in the gates. The generator's octaves run from a quarter of the tile
+/// down to a sixty-fourth, which is 7.5 m to 0.47 m along the wind and 3 m to
+/// 0.19 m across: long streaks with fine cross-structure, which is what a foam
+/// raft is.
+static const float WATER_FOAM_TEX_COARSE = 0.033;
+/// The fine tap, at 2.9x — a ratio deliberately not a small integer, so the two
+/// tiles beat at a period far past anything in frame.
+static const float WATER_FOAM_TEX_FINE = 0.096;
+/// The fine tap's frame, turned against the coarse one (cos, sin of ~53°).
+///
+/// **Two taps of one texture at two scales still share a lattice orientation**,
+/// and two aligned grids read as one grid. Turning the second is what breaks
+/// that, and it costs nothing: the pattern is combed along the wind either way,
+/// the second is simply combed across the first, which is what a sea running
+/// two swells actually does to its foam.
+static const float2 WATER_FOAM_TEX_TURN = float2(0.6, 0.8);
+/// An offset between the taps, so the two never sample the same texel of the
+/// same tile at the same place and correlate into a single stronger pattern.
+static const float2 WATER_FOAM_TEX_OFFSET = float2(0.37, 0.11);
+
+/// The foam detail field, in [0, 1), centred on 0.5 — a drop-in for
+/// `waterFoamNoise` and the same thing downstream: the *threshold* the coverage
+/// is eroded against, never a colour.
+///
+/// `wp` is the sample position (the wind-drifted world xz, or a flow phase's);
+/// `frame` is `foamFrameFoot`, whose derivatives were taken before the
+/// shoreline `discard` for the reason `sampleMapGrad` states.
+///
+/// **`ponytail:` the derivatives are the un-drifted frame's.** The wind drift
+/// the caller subtracts is spatially constant so it contributes nothing, but a
+/// flow phase's coordinate is warped and its true derivative differs. Same
+/// approximation `waterFoamWeights` already makes for the same pair of samples;
+/// tighten it when a river's foam is the subject.
+float2 foamTexTurn(float2 v) {
+    return float2(v.x * WATER_FOAM_TEX_TURN.x - v.y * WATER_FOAM_TEX_TURN.y,
+                  v.x * WATER_FOAM_TEX_TURN.y + v.y * WATER_FOAM_TEX_TURN.x);
+}
+
+float waterFoamDetail(LoomFoamFrame frame, float2 wp) {
+    uint index = push.environment[0].foamTexture;
+    float2 across = float2(-frame.dir.y, frame.dir.x);
+    // The frame's own stretch is `WATER_FOAM_STREAK`; the texture wants its
+    // own, so the derivatives are rescaled to match rather than reused raw.
+    float2 fix = float2(1.0, WATER_FOAM_TEX_STREAK / WATER_FOAM_STREAK);
+    float2 fuv = float2(dot(wp, frame.dir), dot(wp, across) * WATER_FOAM_TEX_STREAK);
+    float2 dx = frame.dx * fix;
+    float2 dy = frame.dy * fix;
+    float a = sampleMapGrad(index, fuv * WATER_FOAM_TEX_COARSE,
+                            dx * WATER_FOAM_TEX_COARSE,
+                            dy * WATER_FOAM_TEX_COARSE).r;
+    float b = sampleMapGrad(index,
+                            foamTexTurn(fuv) * WATER_FOAM_TEX_FINE + WATER_FOAM_TEX_OFFSET,
+                            foamTexTurn(dx) * WATER_FOAM_TEX_FINE,
+                            foamTexTurn(dy) * WATER_FOAM_TEX_FINE).r;
+    return 0.5 + ((a - 0.5) * 0.65 + (b - 0.5) * 0.35) * WATER_FOAM_TEX_AMPLITUDE;
 }
 
 /// **The raft's own texture — SEA-REBUILD §4.4's "the lace modulates opacity".**
@@ -7857,7 +8000,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // The lace is not a function of `worldPos.xz`; it is a function of that
     // position rotated into the breaking frame, and only the derivative of the
     // rotated coordinate can band-limit it. See `foamOctaveWeight`.
-    float3 foamFrame = foamFrameFoot(push.environment[0].wind.xy, in.worldPos.xz);
+    LoomFoamFrame foamFrame = foamFrameFoot(push.environment[0].wind.xy, in.worldPos.xz);
     // **And how fast the fold changes per pixel — stage 2's blur, measured.**
     // Here for the same reason as the two above: `fwidth` is a derivative and
     // every statement below the discard is a place it could not have been
@@ -8469,7 +8612,7 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // to be differentiated there, and a second `normalize` here could differ
     // from it in the last bit. See `WATER_FOAM_STREAK` for why this is a uniform
     // and not the local breaking direction it was between ADR 0049 and today.
-    float2 wd = foamFrame.xy;
+    float2 wd = foamFrame.dir;
     float2 windDir = normalize(windv.xy + float2(1e-4, 0.0));
     // Foam drifts downwind. Sampling in a frame that slides with the wind is
     // what keeps a patch from sitting nailed to the world while the wave that
@@ -8480,7 +8623,13 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // answer and is a few percent of a wind speed, which on `river.loom` is
     // nothing at all beside a 3 m/s current.
     float2 fflow = loom_flow_at(flowField(), in.worldPos.xz);
-    float4 fw = waterFoamWeights(foamFrame.z);
+    float4 fw = waterFoamWeights(foamFrame.foot);
+    // **Stage 3: the detail is a texture where the scene has one.** The
+    // procedural ladder below is the fallback for a build whose foam PNG failed
+    // to decode — it is still the whole band-limited implementation and still
+    // what `ferode` is derived from, so this is one pattern swapped, not two
+    // pipelines. See `waterFoamDetail`.
+    bool textured = push.environment[0].foamTexture != NO_TEXTURE;
     float fnoise;
     // The raft's own texture — see `waterFoamRaft`. It rides the same two flow
     // phases `fnoise` does, for the reason `waterDetailSlope` gives: a river's
@@ -8488,12 +8637,15 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // for bit as it did.
     float raft;
     if (dot(fflow, fflow) <= 0.0) {
-        fnoise = waterFoamNoise(wp, wd, fw);
+        fnoise = textured ? waterFoamDetail(foamFrame, wp) : waterFoamNoise(wp, wd, fw);
         raft = waterFoamRaft(wp, wd);
     } else {
         LoomFlowPhase fp = waterFlowPhase(wp, fflow, push.environment[0].weather.z);
-        fnoise = waterFoamNoise(fp.uvA, wd, fw) * fp.wA
-               + waterFoamNoise(fp.uvB, wd, fw) * (1.0 - fp.wA);
+        fnoise = textured
+            ? waterFoamDetail(foamFrame, fp.uvA) * fp.wA
+                + waterFoamDetail(foamFrame, fp.uvB) * (1.0 - fp.wA)
+            : waterFoamNoise(fp.uvA, wd, fw) * fp.wA
+                + waterFoamNoise(fp.uvB, wd, fw) * (1.0 - fp.wA);
         raft = waterFoamRaft(fp.uvA, wd) * fp.wA
              + waterFoamRaft(fp.uvB, wd) * (1.0 - fp.wA);
     }

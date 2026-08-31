@@ -173,6 +173,12 @@ impl SceneView {
 
     /// The material table this scene's objects index into.
     #[must_use]
+    /// The library itself, for the two engine-owned textures the environment
+    /// reaches by alias rather than through a `Material`.
+    pub fn materials(&self) -> &crate::materials::MaterialLibrary {
+        &self.materials
+    }
+
     pub fn material_table(&self) -> &[loom_render::MaterialData] {
         &self.materials.materials
     }

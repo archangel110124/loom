@@ -976,7 +976,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     let (weather, rain) = weather_at(&world, authored_rain, dread);
     let (mut environment, grade) =
         environment_with_mood(&world, &weather, wind_seconds, dread);
-    stamp_flipbook(&mut environment, &material_library);
+    stamp_engine_textures(&mut environment, &material_library);
     submerge_eye(&mut environment, &world, &weather, terrain.as_ref(), camera.eye, wind_seconds);
     let rain_drops =
         rain_at_eye(&mut environment, rain.as_ref(), &weather, camera.eye, wind_seconds);
@@ -1280,7 +1280,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                         environment_with_mood(&world, &weather, moment, dread);
                     renderer.environment = env;
                     renderer.grade = grade;
-                    stamp_flipbook(&mut renderer.environment, &material_library);
+                    stamp_engine_textures(&mut renderer.environment, &material_library);
 
                     #[allow(clippy::cast_precision_loss)]
                     let turn = spin * index as f32;
@@ -2919,7 +2919,9 @@ fn compare(a: &str, b: &str, args: &[String]) -> (u8, String) {
 /// block, which is at 124 of its 128 bytes. The vertex shader reads them to
 /// bend a blade, so they have to reach the GPU somehow and this is the buffer
 /// for per-scene data.
-/// Point the environment at the scene's fire flipbook, if it declares one.
+/// Point the environment at the textures the *engine* reaches by name rather
+/// than through a `Material`: the scene's fire flipbook, and the foam detail
+/// texture the engine owns.
 ///
 /// **By a reserved alias rather than a component field**, and the choice is
 /// worth stating. The flipbook is per-scene, not per-emitter: every additive
@@ -2928,12 +2930,19 @@ fn compare(a: &str, b: &str, args: &[String]) -> (u8, String) {
 /// fragment shader for a value that never differs between them. A reserved
 /// name is the smaller lie — a scene declares `[[asset]] key = "fire_flipbook"`
 /// and the fire uses it.
-fn stamp_flipbook(
+pub(crate) fn stamp_engine_textures(
     env: &mut loom_render::EnvironmentData,
     materials: &materials::MaterialLibrary,
 ) {
     if let Some(slot) = materials.by_alias.get("fire_flipbook") {
         env.fire_flipbook = *slot;
+    }
+    // The foam detail texture is the engine's own and reaches the library
+    // without any scene naming it — see `materials::MaterialLibrary::for_scene`.
+    // Same alias mechanism from here on, so there is one way a texture becomes
+    // an environment index rather than two.
+    if let Some(slot) = materials.by_alias.get("water_foam") {
+        env.foam_texture = *slot;
     }
 }
 

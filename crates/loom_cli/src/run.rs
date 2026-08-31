@@ -1811,6 +1811,15 @@ impl ApplicationHandler for App {
                 );
                 let (mut environment, grade) =
                     crate::environment_with_mood(world, &wind, self.wind_seconds, dread);
+                // **The window stamped neither engine-owned texture, and that
+                // was a real hole rather than tidiness.** `loom render` has
+                // called this since the fire flipbook landed; this path builds
+                // its environment from scratch every frame and never did, so a
+                // scene's flipbook — and now the sea's foam detail — reached
+                // the offscreen PNG and not the window the human judges in.
+                // The same defect class as the viewer drawing at one MSAA
+                // sample: measuring the effect somewhere the effect is not.
+                crate::stamp_engine_textures(&mut environment, self.view.materials());
                 // Whether the eye is under the water, from the same query that
                 // muffles the sound (W7). The fly camera and a swimming
                 // character both go through here, so the window's view and the

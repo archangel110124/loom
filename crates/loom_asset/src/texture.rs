@@ -160,25 +160,50 @@ pub fn mip_chain(level0: Vec<u8>, width: u32, height: u32, space: ColorSpace) ->
 /// if it is not a PNG this can turn into RGBA8.
 pub fn load(path: &std::path::Path, space: ColorSpace) -> Result<Texture, AssetError> {
     let file = std::fs::File::open(path).map_err(AssetError::Io)?;
-    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+    decode(
+        std::io::BufReader::new(file),
+        space,
+        &path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned()),
+        &path.display().to_string(),
+    )
+}
+
+/// [`load`] from bytes already in hand, for a texture the *engine* owns rather
+/// than a scene.
+///
+/// **The sea-foam detail texture is `include_bytes!`d into the binary**, and
+/// this is the door it comes through. It has no `[[asset]]` entry in any of
+/// the sixty scenes that carry a `WaterBody`, because it is not a scene's
+/// asset: it is the engine's, every water body draws exactly the same one, and
+/// `Scene::asset_path` resolves only against the declaring file (ADR 0024, no
+/// search path). See `loom_cli::materials` for the routing argument.
+///
+/// # Errors
+/// [`AssetError::Unsupported`] if the bytes are not a PNG this can turn into
+/// RGBA8. `name` names the texture; `label` is what a failure is reported
+/// against.
+pub fn decode<R: std::io::BufRead + std::io::Seek>(
+    source: R,
+    space: ColorSpace,
+    name: &str,
+    label: &str,
+) -> Result<Texture, AssetError> {
+    let mut decoder = png::Decoder::new(source);
     // Everything becomes 8-bit RGBA: one GPU format for every texture means
     // one bindless array rather than one per format combination.
     decoder.set_transformations(png::Transformations::normalize_to_color8());
 
     let mut reader = decoder
         .read_info()
-        .map_err(|e| AssetError::Unsupported(format!("{}: {e}", path.display())))?;
+        .map_err(|e| AssetError::Unsupported(format!("{label}: {e}")))?;
     let mut raw = vec![0; reader.output_buffer_size().unwrap_or(0)];
     let info = reader
         .next_frame(&mut raw)
-        .map_err(|e| AssetError::Unsupported(format!("{}: {e}", path.display())))?;
+        .map_err(|e| AssetError::Unsupported(format!("{label}: {e}")))?;
 
     let (width, height) = (info.width, info.height);
     if width == 0 || height == 0 {
-        return Err(AssetError::Unsupported(format!(
-            "{} is {width}x{height}",
-            path.display()
-        )));
+        return Err(AssetError::Unsupported(format!("{label} is {width}x{height}")));
     }
 
     // Widen whatever came out to RGBA. `normalize_to_color8` leaves the
@@ -197,16 +222,13 @@ pub fn load(path: &std::path::Path, space: ColorSpace) -> Result<Texture, AssetE
             .collect(),
         other => {
             return Err(AssetError::Unsupported(format!(
-                "{}: {other:?} is not a colour type this can widen to RGBA8",
-                path.display()
+                "{label}: {other:?} is not a colour type this can widen to RGBA8"
             )));
         }
     };
 
     Ok(Texture {
-        name: path
-            .file_stem()
-            .map_or_else(String::new, |s| s.to_string_lossy().into_owned()),
+        name: name.to_owned(),
         width,
         height,
         space,

@@ -405,7 +405,12 @@ pub struct EnvironmentData {
     /// `loom_water::foam::FOAM_EDGE_CELLS`.
     pub foam_edge_cells: f32,
     /// Keeps the struct's stride 16-byte aligned, as `flow_pad` does.
-    pub foam_pad: [u32; 1],
+    /// Bindless index of the sea-foam detail texture, or [`crate::NO_TEXTURE`].
+    ///
+    /// Stage 3 of the foam pipeline — see `waterFoamDetail` in `scene.slang`.
+    /// It rides the lane that was `foam_pad`, so the struct's stride and every
+    /// offset in the layout test below are unchanged.
+    pub foam_texture: u32,
     /// The waterfall's lip, end A: xyz world, w the discharge in m²/s.
     ///
     /// **`w == 0` means this scene has no cascade**, which is every scene in
@@ -434,7 +439,7 @@ pub struct EnvironmentData {
     /// Appended after the cascade block for the reason that block was appended
     /// after the foam one: every offset above it is unmoved.
     pub fluid_vertices: vk::DeviceAddress,
-    /// Keeps the struct's stride 16-byte aligned, as `foam_pad` does.
+    /// Keeps the struct's stride 16-byte aligned, as `foam_texture` does.
     pub fluid_pad: [u32; 2],
     /// The FFT ocean: x how many cascades, y cells per side, zw unused.
     ///
@@ -610,7 +615,7 @@ impl Default for EnvironmentData {
             foam: [0.0, 0.0, 1.0, 0.0],
             foam_coverage: 0,
             foam_edge_cells: 1.0,
-            foam_pad: [0; 1],
+            foam_texture: crate::NO_TEXTURE,
             // No cascade: the discharge in `cascade_a[3]` is the flag the
             // nappe's quads collapse on, so a scene that authors none renders
             // exactly as it did.
