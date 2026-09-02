@@ -638,7 +638,7 @@ mod tests {
     /// = 0.33 is where a crest is drawn white now; where it leaves a raft still
     /// there eight seconds later is a different question, and using one number
     /// for both is what turns a sea white."* The vertex trail asked the memory
-    /// question with `WATER_FOAM_WET` = 0.22 — a rung *below* the number that
+    /// question with `WATER_FOAM_WET` — a rung *below* the number that
     /// warning is about — so `in.foamHist` came back above 0.05 on **100% of
     /// `lucent`'s water** at a mean of 0.344, the coverage sat in the middle of
     /// the erosion noise's own distribution, and half the sea was painted in

@@ -8713,8 +8713,10 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
     /// The showcase scene has to hold four things in one frame and two of them
     /// are thresholds it either clears or does not: the whitecaps are
     /// `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, mu_max)` in the water
-    /// shader and the spray fires above `spray::SPRAY_BREAK`, and both numbers
-    /// are 0.33. Neither is visible in a passing gate — a sea that stopped
+    /// shader and the spray fires above `spray::SPRAY_BREAK`. **Those were one
+    /// number, 0.33, and are now two**: the foam pair moved down to
+    /// 0.13 / 0.24 to raise coverage and spray stayed where it was, so this
+    /// test reports both columns rather than one. Neither is visible in a passing gate — a sea that stopped
     /// breaking would render as a perfectly reasonable calm sea, and
     /// `lucent.loom` is not in `GOLDEN`, so nothing else in the build would
     /// notice.
@@ -8747,12 +8749,17 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
     /// below now agree exactly, which is what says the two halves see one sea.
     #[test]
     fn lucent_breaks_and_throws() {
-        /// `WATER_FOAM_BREAK` in `assets/shaders/scene.slang` and
-        /// `spray::SPRAY_BREAK` in `loom_water` — one decision, where a crest
-        /// is breaking, spelled a third time here so this test says what it is
-        /// measuring against rather than importing one of the two and implying
-        /// the other follows.
-        const BREAK: f32 = 0.33;
+        /// `spray::SPRAY_BREAK` in `loom_water`, spelled here so this test
+        /// says what it is measuring against rather than importing it.
+        ///
+        /// **It used to be `WATER_FOAM_BREAK` as well and no longer is.** The
+        /// two were one decision — where a crest is breaking — until the foam
+        /// pair moved to 0.13 / 0.24 to raise coverage; spray stayed at 0.33,
+        /// so the sentence below about "both numbers are 0.33" now holds only
+        /// for the spray half. The foam half of this test's claim is
+        /// `past(weather::FOAM_WET)` in the report line, and it is the number
+        /// that moved.
+        const BREAK: f32 = loom_water::spray::SPRAY_BREAK;
         const SIDE: u16 = 251;
         /// Metres. The water the camera can actually see — 146 m of shelf in
         /// front of the eye — rather than a cascade patch, because this scene's
@@ -8841,10 +8848,11 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
             crate::particles::spray(&world, &body, Some(&sea), &ground, eye, t).len();
 
         println!(
-            "lucent  mu_max mean {mean:.4}  past 0.22 {:.3}%  past {BREAK} \
+            "lucent  mu_max mean {mean:.4}  past {} {:.3}%  past {BREAK} \
              {breaking:.3}%  foam painted {:.3}%  crest {crest:.3} m  trough \
              {trough:.3} m  H {:.3} m  droplets in the air at t = {t:.2}s: {thrown}",
-            past(0.22),
+            crate::weather::FOAM_WET,
+            past(crate::weather::FOAM_WET),
             painted * 100.0 / n,
             crest - trough,
         );

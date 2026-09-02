@@ -1512,24 +1512,39 @@ mod tests {
     ///
     /// ```text
     /// mean mu_max 0.0502   rms 0.0802   max 0.43
-    /// over 0.22 (foam starts)  0.93%
-    /// over 0.33 (fully white)  0.02%
-    /// mean instantaneous coverage 0.19%
+    /// over 0.13 (foam starts)  10.81%
+    /// over 0.24 (fully white)   0.48%
+    /// mean instantaneous coverage 3.26%
     /// ```
+    ///
+    /// **Those three rows read 0.93% / 0.02% / 0.19% until the foam pair moved
+    /// from 0.22 / 0.33 to 0.13 / 0.24.** The sea is bit for bit the same one
+    /// -- `mean mu_max`, `rms` and `max` are untouched, which is what says only
+    /// the thresholds moved -- and the change is a **17x** rise in painted
+    /// coverage. That is the point of the move: Monahan at this wind
+    /// (`3.84e-6 x 18^3.41`) is 7.3%, so 0.19% was 39 times too little foam and
+    /// 3.26% is within a factor of two of the physics, on the low side, which
+    /// is where a stylised sea should sit.
     ///
     /// Stable to three digits from 401 samples a side to 1601 -- see `SIDE` below for
     /// the one sampling choice that is not free.
     ///
-    /// **0.93% is thin against the 5-8% a real Beaufort 8 sea whitecaps at, and two
-    /// causes are known.** A fifth of it is the central-difference stencil, which keeps
+    /// **10.81% past the wet gate is a surface that is *starting* to foam, not one
+    /// that is white: only 0.48% reaches `WATER_FOAM_BREAK` and the painted mean is
+    /// 3.26%.** Two causes still hold the realised figure down and neither is this
+    /// slice's to fix. A fifth of it is the central-difference stencil, which keeps
     /// 78.2% of the compression's rms and is measured in `ocean::derive`. The rest is
     /// that linear superposition does not sharpen a crest the way a breaking wave does,
     /// and that the grid stops at 0.35 m so the short tail that steepens a surface most
-    /// is simply absent. Neither is this slice's to fix, and both are why the assertion
-    /// below is that the sea breaks *at all* rather than that it breaks by an amount.
+    /// is simply absent. Both are why the assertion below is that the sea breaks *at
+    /// all* rather than that it breaks by an amount.
     ///
-    /// The floor is 0.2% -- an eighth of the realised figure, and far above the zero
-    /// every unauthored sea in this engine has produced until now.
+    /// The floor stays at 0.2% and is now a fifty-fourth of the realised figure rather
+    /// than an eighth. **Deliberately not raised with the number.** It exists to catch
+    /// a sea that has stopped breaking, and a floor re-fitted to whatever the current
+    /// thresholds happen to produce would pass every future threshold change by
+    /// construction -- which is the vacuous pass the assertion below this one already
+    /// rules out from the other side.
     #[test]
     fn the_derived_sea_breaks_without_a_hand_authoring_it() {
         // **Not a power of two, and that is a measurement rather than a preference.**
@@ -1539,6 +1554,15 @@ mod tests {
         // for 401, 801 and 1601 alike. An aliased sample of a periodic tile is not a
         // small error, it is a different sea.
         const SIDE: u16 = 401;
+        /// `WATER_FOAM_WET` in `assets/shaders/scene.slang`, and
+        /// `loom_cli::weather::FOAM_WET`. **The third hand-written copy of one
+        /// number** -- `loom_water` sits below `loom_cli` in the graph and
+        /// cannot import the twin, so this is a mirror and moves in the same
+        /// commit or this test measures a sea the engine does not draw.
+        const WET: f32 = 0.13;
+        /// `WATER_FOAM_BREAK`. See [`WET`]. **Not `spray::SPRAY_BREAK`**, which
+        /// is still 0.33: the two numbers were one decision and are now two.
+        const BREAK: f32 = 0.24;
         let body = spectrum_body();
         let mut sea = ocean::Ocean::for_body(&body, 18.0, [1.0, 0.0])
             .expect("a spectrum body has an ocean");
@@ -1561,15 +1585,15 @@ mod tests {
                 sum += f64::from(s.mu_max);
                 sq += f64::from(s.mu_max) * f64::from(s.mu_max);
                 worst = worst.max(s.mu_max);
-                if s.mu_max > 0.22 {
+                if s.mu_max > WET {
                     wet += 1;
                 }
-                if s.mu_max > 0.33 {
+                if s.mu_max > BREAK {
                     white += 1;
                 }
                 // `smoothstep(WATER_FOAM_WET, WATER_FOAM_BREAK, mu)` -- the shader's two
                 // constants, and the pair `loom water`'s `foam.coverage` uses.
-                let u = ((s.mu_max - 0.22) / (0.33 - 0.22)).clamp(0.0, 1.0);
+                let u = ((s.mu_max - WET) / (BREAK - WET)).clamp(0.0, 1.0);
                 coverage += f64::from(u * u * 2.0_f32.mul_add(-u, 3.0));
             }
         }
@@ -1578,7 +1602,7 @@ mod tests {
         println!(
             "derived sea at U10=18, unlimited fetch: mean mu_max {:.4}, rms {:.4}, \
              max {worst:.4}; \
-             >0.22 {:.2}%, >0.33 {:.2}%, mean coverage {:.4}",
+             >{WET} {:.2}%, >{BREAK} {:.2}%, mean coverage {:.4}",
             sum / total,
             (sq / total).sqrt(),
             pct(wet),
@@ -1587,7 +1611,7 @@ mod tests {
         );
         assert!(
             pct(wet) > 0.2,
-            "only {:.3}% of the derived sea is past WATER_FOAM_WET -- an FFT sea that \
+            "only {:.3}% of the derived sea is past WATER_FOAM_WET ({WET}) -- an FFT sea that \
              never breaks renders with no foam at all, which is what this slice is for",
             pct(wet)
         );

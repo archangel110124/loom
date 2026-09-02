@@ -483,6 +483,27 @@ fn break_wander(xz: [f32; 2], seconds: f32) -> f32 {
     CELL.mul_add(cell, PATCH * patch)
 }
 
+/// `WATER_FOAM_WET` in `assets/shaders/scene.slang`: where the sea starts to
+/// darken and wet, the lower end of the pair [`instant_foam`] opens.
+///
+/// **Named rather than spelled inline, because this number has four copies and
+/// they have to move together.** The shader owns it; this is its CPU twin, and
+/// `loom_water`'s `the_derived_sea_breaks_without_a_hand_authoring_it` and
+/// `main`'s `lucent_breaks_and_throws` each hold a fourth in a doc comment
+/// there is no import path for. `the_gentle_sea_still_foams_nowhere` reads
+/// *this* one, so the test that guards the property cannot drift away from the
+/// number it is guarding.
+pub(crate) const FOAM_WET: f32 = 0.13;
+/// `WATER_FOAM_BREAK`: where a crest is drawn white. See [`FOAM_WET`].
+///
+/// **No longer equal to [`loom_water::spray::SPRAY_BREAK`], which stayed at
+/// 0.33.** They were one decision — "where a crest is breaking" — and this
+/// commit split them deliberately: the foam pair moved to raise coverage, and
+/// how many crests *throw droplets* is a separate look judgement with its own
+/// cost. Whether spray follows is the human's call; see the foam-threshold
+/// report.
+pub(crate) const FOAM_BREAK: f32 = 0.24;
+
 /// The whitecap coverage a crest of this steepness is drawn with right now.
 ///
 /// `smoothstep(WATER_FOAM_WET + w, WATER_FOAM_BREAK + w, mu)` — the water
@@ -490,8 +511,8 @@ fn break_wander(xz: [f32; 2], seconds: f32) -> f32 {
 /// here for every caller in this crate rather than once per caller.
 pub(crate) fn instant_foam(mu_max: f32, xz: [f32; 2], seconds: f32) -> f32 {
     let wander = break_wander(xz, seconds);
-    let lo = 0.22 + wander;
-    let hi = 0.33 + wander;
+    let lo = FOAM_WET + wander;
+    let hi = FOAM_BREAK + wander;
     let t = ((mu_max - lo) / (hi - lo)).clamp(0.0, 1.0);
     t * t * 2.0_f32.mul_add(-t, 3.0)
 }
@@ -589,11 +610,16 @@ mod tests {
     /// caught by an existing test within a minute; this is that test for the
     /// sea.
     ///
-    /// **Seen to fail before it passed.** Centring the wander on its own mean
-    /// — `PATCH * (patch - 0.5) + CELL * (cell - 0.5)`, the symmetric version —
-    /// makes it reach **-0.0303**, which trips the first assertion; with that
-    /// one lifted it reports foam under the gate on **79,803 of 333,396** grid
-    /// points. A test that has not been watched fail is not a test.
+    /// **Seen to fail before it passed, and re-watched when the pair moved to
+    /// 0.13 / 0.24.** Centring the wander on its own mean —
+    /// `PATCH * (patch - 0.5) + CELL * (cell - 0.5)`, the symmetric version —
+    /// makes it reach **-0.0563**, which trips the first assertion; with that
+    /// one lifted it reports foam under the gate on **146,098 of 333,396**
+    /// grid points. (At the old 0.22 / 0.33 the same break read -0.0303 and
+    /// 79,803: the wander's peak is unchanged at 0.115, so lowering `FOAM_WET`
+    /// made it a *larger fraction* of the gate and a symmetric version now
+    /// leaks nearly twice as widely. The guard matters more than it did, not
+    /// less.) A test that has not been watched fail is not a test.
     #[test]
     fn the_gentle_sea_still_foams_nowhere() {
         // A lattice deliberately coprime with nothing in particular but wide
@@ -610,10 +636,15 @@ mod tests {
                 for ix in 0_i16..63 {
                     let xz = [f32::from(ix) * 3.1 - 97.0, f32::from(iz) * 3.1 - 97.0];
                     worst = worst.min(break_wander(xz, seconds));
-                    // Just under the gate. `WATER_FOAM_WET` itself is the
-                    // smoothstep's own zero and would pass on a symmetric
-                    // wander too at exactly that value.
-                    for mu in [0.0, 0.1, 0.219, 0.22] {
+                    // Just under the gate, **derived from [`FOAM_WET`] rather
+                    // than spelled**: the literals here were `0.219, 0.22`,
+                    // which silently stopped straddling the gate the moment
+                    // the pair moved down and left the test asserting nothing
+                    // about the boundary it exists to guard. `FOAM_WET` itself
+                    // is the smoothstep's own zero and would pass on a
+                    // symmetric wander too at exactly that value; the rung
+                    // below it is the one that catches a negative wander.
+                    for mu in [0.0, FOAM_WET * 0.5, FOAM_WET - 0.001, FOAM_WET] {
                         points += 1;
                         if instant_foam(mu, xz, seconds) > 0.0 {
                             foaming += 1;

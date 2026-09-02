@@ -105,9 +105,17 @@
 #     wave model         U10        painted   Monahan at that U10   ratio
 #     gerstner, 3 waves   9.99 m/s   14.10%    0.98%                14.3x
 #     spectrum, dual     35.00 m/s   10.60%   70.73%                 0.15x
+#     + foam pair 0.13/0.24          25.43%   70.73%                 0.36x
 #
 # **The scene went from fourteen times whiter than its own wind to a seventh of
-# it.** Neither is a measurement of a real ocean, and the swap is not an
+# it**, and the third row is the correction: `WATER_FOAM_WET`/`_BREAK` moved
+# from 0.22 / 0.33 to 0.13 / 0.24 because the human held this frame up against
+# Sea of Thieves and said there was not enough foam. The sea below is
+# untouched — `mu_max mean 0.1190`, `H 2.246 m` and the droplet count are the
+# same as before the move — only what counts as foamy changed, so the ratio is
+# the one number in this table that could move at all.
+#
+# None of the three is a measurement of a real ocean, and the swap is not an
 # improvement in realism — it is a change in *what the number is a property
 # of*. It was three hand-placed `steepness` values with a wind standing beside
 # them; it is now a spectrum, so it moves when the wind moves and there is one

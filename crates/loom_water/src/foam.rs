@@ -79,10 +79,15 @@ pub fn decay_per_tick() -> f32 {
 
 /// Where a crest starts leaving foam behind it, on `WaterSample::mu_max`.
 ///
-/// **Swept against the memory, not chosen.** `WATER_FOAM_BREAK` = 0.33 is where
-/// a crest is drawn white *now*; where it leaves a raft still there eight
-/// seconds later is a different question, and using one number for both is what
-/// turns a sea white. Steady-state mean coverage of the field on
+/// **Swept against the memory, not chosen.** `WATER_FOAM_BREAK` is where a crest
+/// is drawn white *now*; where it leaves a raft still there eight seconds later
+/// is a different question, and using one number for both is what turns a sea
+/// white. The literal used to be quoted here as 0.33; it is 0.24 since the foam
+/// pair moved for coverage, and this number deliberately did **not** follow —
+/// the sweep that chose it is against the field's own half-life and is
+/// reproduced below, and the shipped `plough` and `whitecaps` renders are
+/// numerically unchanged by that move, which is what says the two gates are
+/// genuinely separate questions. Steady-state mean coverage of the field on
 /// `whitecaps.loom` after 600 ticks at the shipped 8 s half-life, printed by
 /// `the_crest_threshold_and_the_memory_are_one_choice`:
 ///
@@ -92,9 +97,11 @@ pub fn decay_per_tick() -> f32 {
 /// 0.40   8.70%    0.46  4.10%    0.54  0.70%
 /// ```
 ///
-/// **0.45**, which lands at 4.73% — inside the 4–7% band `scene.slang`'s
-/// whitecap calibration measured off a top-down render, and the band a
-/// photographed Beaufort 8 sea covers.
+/// **0.45**, which lands at 4.73% — the band a photographed Beaufort 8 sea
+/// covers. (That used to cite `scene.slang`'s own 4–7% top-down figure as
+/// agreeing with it. The whitecap calibration there has been re-measured on the
+/// derived sea since and no longer quotes a 4–7% band, so the photograph is what
+/// this rests on now.)
 pub const FOAM_CREST_BREAK: f32 = 0.45;
 
 /// Where the crest deposit reaches full strength. A band rather than a step,

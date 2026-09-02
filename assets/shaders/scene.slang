@@ -5718,13 +5718,16 @@ WaterOutput waterVertexMain(uint vertexID: SV_VertexID) {
         // remembering wetness is what turned the sea white.**
         //
         // `FoamField`'s own `FOAM_CREST_BREAK` says the sentence this used to
-        // get wrong: *"`WATER_FOAM_BREAK` = 0.33 is where a crest is drawn
-        // white now; where it leaves a raft still there eight seconds later is
-        // a different question, and using one number for both is what turns a
-        // sea white."* This asked the memory question with the number one rung
-        // BELOW the one it warns about — `WATER_FOAM_WET` = 0.22, which is
-        // *wet*, not broken — so a crest that merely steepened left 3.3 s of
-        // coverage behind it.
+        // get wrong: *"`WATER_FOAM_BREAK` is where a crest is drawn white now;
+        // where it leaves a raft still there eight seconds later is a different
+        // question, and using one number for both is what turns a sea white."*
+        // This asked the memory question with the number one rung BELOW the one
+        // it warns about — `WATER_FOAM_WET`, which is *wet*, not broken — so a
+        // crest that merely steepened left 3.3 s of coverage behind it. (The
+        // pair has since moved from 0.22 / 0.33 down to 0.13 / 0.24 for
+        // coverage, which widens the gap to `FOAM_CREST_BREAK` = 0.45 and makes
+        // the argument here stronger, not weaker: the rung this must not use is
+        // now further below the one it must.)
         //
         // What that cost, measured on `lucent --sim 300` at 1280x720:
         // `in.foamHist` was above 0.05 on **100% of the water** at a mean of
@@ -6009,14 +6012,39 @@ static const float WATER_REFLECT_RANGE = 25.0;
 // contour of the fold, which reads as drawn rather than as a crest's shape.
 // Between them the noise erodes; above the upper one foam wins outright.
 //
-// Set from σ(fold) = 0.189 on the seven-wave `ocean`: 0.22 is 1.17σ and 0.33
-// is 1.75σ. Measured coverage from a top-down render is 4.0–7.0% of surface
-// area. **That is a stylised sea's calibration, not a fitted physical law.**
+// **The pair was 0.22 / 0.33 and is now 0.13 / 0.24, because the sea was too
+// thin against the reference.** The old numbers were set from σ(fold) = 0.189
+// on the seven-wave `ocean` — 1.17σ and 1.75σ — and they were the last lever
+// left after the mask, the silhouette, the band limit, the blur, the texture
+// and `WATER_FOAM_TEX_BIAS` had all been spent on *how* foam is drawn. This is
+// the one that decides how much of the sea qualifies as foamy at all. The gap
+// is unchanged at 0.11, so the ramp between wet and white has exactly the shape
+// it had; both ends moved down together by 0.09, which is 0.48σ.
+//
+// The move is calibrated on the *derived* sea rather than on the authored one,
+// because a spectrum is what every scene built after ADR 0076 has.
+// `loom_water`'s `the_derived_sea_breaks_without_a_hand_authoring_it` renders
+// U10 = 18 m/s at unlimited fetch over 160,801 points and reports painted
+// coverage of **0.19% before and 3.26% after** — a 17x rise on a surface whose
+// `mu_max` mean, rms and max are bit for bit identical, which is what says the
+// thresholds are the only thing that moved.
+//
+// **That is a stylised sea's calibration, not a fitted physical law**, but it
+// is now on the right side of physics rather than two orders below it.
 // Monahan's whitecap relation goes as U10^3.52 — a 25x swing between a breeze
 // and a storm — while a sum of ≤16 linear Gerstner waves can only move σ by
-// about 1.4x under the fold bound, so no fixed threshold can track it. It is
-// an order-of-magnitude check only, and 4–7% against Monahan's 3.2% at this
-// scene's 14 m/s passes it.
+// about 1.4x under the fold bound, so no fixed threshold can track it. It is an
+// order-of-magnitude check only: Monahan gives 7.3% at 18 m/s against this 3.26%
+// (under by 2.2x, where the old pair was under by 39x), and 70.7% at `lucent`'s
+// 35 m/s against its 25.4% painted.
+//
+// **Where over-foaming starts, measured rather than guessed.** Lowering the pair
+// a further step to 0.10 / 0.21 puts white streaks in `whitecaps`'s near-left
+// trough and paints `ocean`'s wave *flanks* rather than its crests. At 0.13 /
+// 0.24 both are still clean, and every dead-calm scene — `pool`, `plough` — is
+// numerically unchanged at every step, because their foam is the advected field
+// and the impact deposits rather than this gate. The sweep is in
+// `.superpowers/sdd/foam-threshold-report.md`.
 /// Metres of water a ray crosses in a trough **when there is no bed to
 /// measure** — the open-sea fallback, and nothing else uses it now that
 /// `waterBehind` returns the real column.
@@ -6131,8 +6159,8 @@ static const float WATER_CONTACT_OPACITY = 0.55;
 /// for tens of metres in a row.
 static const float WATER_CONTACT_INTRUDE = 0.5;
 
-static const float WATER_FOAM_WET = 0.22;
-static const float WATER_FOAM_BREAK = 0.33;
+static const float WATER_FOAM_WET = 0.13;
+static const float WATER_FOAM_BREAK = 0.24;
 /// Where a broken crest is white along its whole length, on `mu_max` — the far
 /// end of the pair `WATER_FOAM_BREAK` opens. It was a bare `0.50` at its one
 /// use; it has two now.
@@ -8700,9 +8728,15 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // rests on, spent here as a skip. Two `loom_value_noise` taps are not
     // cheap: unconditional they cost **+0.181 ms** of the water pass on
     // `ocean_fft_boat` at 1920x1080 (0.256 -> 0.437, min of 80 frames), which
-    // is as much as evaluating the whole cascade per fragment would. Past 0.22
-    // is 9.9% of a wind sea's samples (`WaterSample::mu_max`'s own table), so
-    // most quads skip both.
+    // is as much as evaluating the whole cascade per fragment would.
+    //
+    // **The skip got less effective when the pair moved to 0.13 and it is still
+    // worth having.** `WaterSample::mu_max`'s own table says a wind sea is past
+    // 0.22 on 9.90% of its samples and past 0.15 on 23.86%, so dropping the gate
+    // to 0.13 roughly triples the quads that take both taps. Re-measured the same
+    // way — same scene, same camera, same 80 frames, min of each: **0.347 ->
+    // 0.361 ms, +0.014 ms**. An eighth of what removing the branch costs, so the
+    // branch stays.
     float breakUp = 0.0;
     float instant = 0.0;
     if (in.breakMu > WATER_FOAM_WET) {
