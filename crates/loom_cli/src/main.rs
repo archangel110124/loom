@@ -6340,8 +6340,18 @@ mod tests {
             }
             world.propagate_transforms();
             let m = world.global_transform(boat).expect("a pose").matrix;
+            // **The instant comes from the ocean, not from arithmetic.**
+            // `sample_water` debug-asserts the tiles were evolved to exactly the
+            // tick it is asked about, and `tick as f32 / 60.0` is not the same
+            // float as the fixed step's `tick * (1.0/60.0)` — 5.0333333 against
+            // 5.033334 at tick 302, which panics in a debug build. Asking the
+            // cascade what it holds is both correct and the only spelling that
+            // cannot drift; a Gerstner body has no cascade and takes the
+            // arithmetic, where any instant is answerable.
             #[allow(clippy::cast_precision_loss)]
-            let t = tick as f32 / 60.0;
+            let t = runner
+                .sea()
+                .map_or_else(|| tick as f32 / 60.0, loom_water::ocean::Ocean::evolved_at);
             let surface = loom_water::sample_water(
                 &water,
                 runner.sea(),
