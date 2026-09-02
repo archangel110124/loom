@@ -6861,6 +6861,10 @@ float waterFoamErode(float4 w) {
 /// never how many. Without it the coverage would have moved on every water
 /// scene in the repository and no number above would have meant what it says.
 static const float WATER_FOAM_TEX_AMPLITUDE = 0.544;
+/// Coverage the correlated texture costs against the noise it replaced — see
+/// the composite. Subtracted from the threshold, so it restores *how many*
+/// pixels are foam without touching which pattern decides *which*.
+static const float WATER_FOAM_TEX_BIAS = 0.034;
 /// How far the *texture* is combed along the wind, and it is not
 /// `WATER_FOAM_STREAK`.
 ///
@@ -8652,6 +8656,23 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
     // How wide the coverage is eroded through: 0.15 while the lace is whole,
     // opening out to the noise's own spread as the ladder retires it.
     float ferode = waterFoamErode(fw);
+    // **Stage 3 restored the pattern's coverage, not just its spread.**
+    // `WATER_FOAM_TEX_AMPLITUDE` matched the texture's standard deviation to
+    // the noise it replaced, and the composition is mean-preserving — measured,
+    // the shipped PNG is mean 0.5, sd 0.2887 exactly. Both are right, and the
+    // coverage still fell 5.20% -> 4.46% of frame on `lucent`.
+    //
+    // The cause is spatial correlation, which neither number describes. The
+    // texture has coherent filaments where `loom_value_noise` speckled, so a
+    // region is now all-above or all-below the threshold where it used to be
+    // half-and-half — which is the whole point of the texture, and it moves the
+    // area above the threshold as a side effect. So the stated property,
+    // "swapping the pattern changes which pixels are foam and never how many",
+    // needed one more term to actually hold.
+    //
+    // Solved rather than tuned: the bias that returns `cover%` to its
+    // pre-texture value on `lucent --sim 300` at 1280x720.
+    fnoise -= WATER_FOAM_TEX_BIAS;
     // **The trail is the coverage's floor, not an addition to it.** A point
     // under a steepening crest is foamy because of the crest; a point the
     // crest has left is foamy because of what the crest did. Taking the
