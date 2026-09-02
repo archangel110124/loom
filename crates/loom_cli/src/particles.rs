@@ -1342,6 +1342,93 @@ mod tests {
         }
     }
 
+    /// **`heave.loom` peaks where its header says it does, or the scene is a lie.**
+    ///
+    /// The whole point of that scene is that a *single* Gerstner wave makes the
+    /// fold a clean sinusoid: the ceiling is `Q·k·A` exactly and the crest
+    /// recurs on the wave's own period, so `--sim 405` can be aimed at the
+    /// event. Every one of those claims is arithmetic on four authored numbers,
+    /// and every one of them dies silently if somebody tidies `126.4661` to
+    /// `126` — the picture still renders, the spray still fires somewhere, and
+    /// only the tick in the header is wrong.
+    ///
+    /// So this pins the four numbers the header quotes, measured off the scene
+    /// as it loads:
+    ///
+    /// ```text
+    /// tick     135      405        350 / 460       349 / 461
+    /// fold  -0.30000  +0.30000   over SPRAY_BREAK  under it
+    /// ```
+    ///
+    /// `peak_fold` is asserted beside them because it is the *analytic* ceiling
+    /// — `Σ Q·k·A`, true before a tick has run — and the sample at 405 is the
+    /// surface actually reaching it. Two routes to one number is what says the
+    /// header's arithmetic and the engine's agree.
+    #[test]
+    fn heave_peaks_at_the_tick_its_header_names() {
+        const CEILING: f32 = 0.30;
+        const CREST: u16 = 405;
+        const TROUGH: u16 = 135;
+
+        let source = std::fs::read_to_string("../../assets/test/heave.loom").expect("fixture");
+        let world = World::from_scene(&loom_scene::Scene::parse(&source).expect("valid scene"));
+        let wind = crate::weather::wind_of_world(&world);
+        let body = crate::weather::water_of(&world, &wind).expect("heave has water");
+
+        assert_eq!(body.waves.waves.len(), 1, "heave is one wave or it is not this scene");
+        let analytic = loom_water::spray::peak_fold(&body);
+        assert!(
+            (analytic - CEILING).abs() < 1e-4,
+            "the authored wave folds at most {analytic}, not {CEILING}"
+        );
+
+        // The reference column is the camera's own, which is what makes the
+        // droplet count peak on the same tick the fold does — see the header.
+        let fold = |tick: u16| {
+            loom_water::sample_water(
+                &body,
+                None,
+                [0.0, 0.0],
+                f32::from(tick) / 60.0,
+                loom_voxel::heightfield::NO_GROUND,
+                [0.0; 3],
+                [0.0; 3],
+            )
+            .fold
+        };
+
+        assert!(
+            (fold(CREST) - CEILING).abs() < 1e-4,
+            "tick {CREST} reads {}, not the ceiling {CEILING}",
+            fold(CREST)
+        );
+        assert!(
+            (fold(TROUGH) + CEILING).abs() < 1e-4,
+            "tick {TROUGH} reads {}, not the trough {}",
+            fold(TROUGH),
+            -CEILING
+        );
+
+        // And the gate is *swept*, which is the scene: 111 ticks of every 540
+        // over `SPRAY_BREAK` and the rest under it. The edges are asserted one
+        // tick either side, so a wave that got steeper or flatter fails here
+        // rather than quietly widening the band the header counts.
+        for on in [350_u16, CREST, 460] {
+            assert!(
+                fold(on) > loom_water::spray::SPRAY_BREAK,
+                "tick {on} should be throwing and folds only {}",
+                fold(on)
+            );
+        }
+        for off in [349_u16, 461, TROUGH] {
+            assert!(
+                fold(off) <= loom_water::spray::SPRAY_BREAK,
+                "tick {off} should be dry and folds {}",
+                fold(off)
+            );
+        }
+    }
+
     /// **A Beaufort-4 sea does not spit, and it is a real scene that says so.**
     ///
     /// `SPRAY_BREAK` is the whole population gate, so lowering it is a

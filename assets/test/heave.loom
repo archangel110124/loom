@@ -1,0 +1,253 @@
+# **One wave, one crest, one number.** A diagnostic: fold sweeps up through
+# `SPRAY_BREAK`, the crest throws, fold comes back down, the sea goes quiet —
+# on a known, repeating tick.
+#
+#     loom render assets/test/heave.loom --sim 405 --size 1920x1080 -o /tmp/crest.png   # peak
+#     loom render assets/test/heave.loom --sim 135 --size 1920x1080 -o /tmp/trough.png  # dry
+#     loom render assets/test/heave.loom --frames 72 --step 8 --spin 0 -o /tmp/seq/h.png
+#     loom-scene heave --play
+#
+# `ocean_fft_storm` is the only other place spray can be judged, and on a
+# Beaufort-10 crossing sea you cannot say which crest fired or whether it fired
+# at the right moment. This scene answers both by arithmetic, and every number
+# below was read back out of the engine rather than derived and hoped.
+#
+# **Not in `GOLDEN`.** It adds no rendering path — `spindrift` already
+# references the spray sprite and `whitecaps` the foam — and a reference of it
+# would move whenever either did. It is in `SCENES` so it keeps loading,
+# validating and drawing clean.
+#
+# # The arithmetic, and why it is exact
+#
+# `WaterSample::fold` is `Σ Q·k·A·sin φ` with `φ = k·(d·x) − ωt`. For **one**
+# wave that is a clean sinusoid in time: its ceiling is `Q·k·A` exactly, and it
+# recurs on the wave`s own period. So both halves of the question — how steep
+# does it get, and when — are authored rather than discovered.
+#
+#     steepness Q     1.0            <- so the ceiling is just k*A
+#     wavelength      126.4661 m     <- solved from the period, see below
+#     amplitude       6.0383 m       <- solved from the ceiling, see below
+#     k = 2*pi/lam    0.0496828 rad/m
+#     omega = sqrt(g*k)  0.698132 rad/s   (g = 9.81, `loom_water::GRAVITY`)
+#     period T        9.000 s = 540 ticks
+#     phase speed     14.05 m/s
+#     wave height H   12.077 m  (2A — a Gerstner crest is +A and a trough −A)
+#
+# **The wavelength is solved from the period**: `omega = sqrt(g*k)` is the deep-water
+# dispersion relation the engine implements, so `T = sqrt(2*pi*lam/g)` and
+# `lam = g*T^2/(2*pi)`. At `T = 9 s` that is 126.4661 m — a measured number, not a
+# tidy one; rounding it to 126 moves the peak off its tick. Nine seconds is
+# chosen because `T/4` must be a whole number of 60 Hz ticks or the crest lands
+# between two frames: 9.000 s gives 135 ticks, and every event below is an
+# integer.
+#
+# **The amplitude is solved from the fold ceiling**: `A = C/(Q*k)` for a chosen
+# `C`. **`C = 0.30`, which is 1.25 x `SPRAY_BREAK`.** The validator refuses
+# `Q*k*A > 1/N` (self-intersection) and `N = 1` here, so 0.30 uses under a third
+# of the budget.
+#
+# **Measured at the reference column x = 0, z = 0 — which is the camera`s own
+# column — with `loom water --at 0,0 --sim <tick>`:**
+#
+#     tick     0      135      270      405      540      675
+#     fold  +0.00000 -0.30000 +0.00000 +0.30000 -0.00000 -0.30000
+#     height 0.0000  -6.0383   0.0000  +6.0383  -0.0000  -6.0383
+#
+# **The crest peaks at tick 405, and every 540 ticks after it.** The trough is
+# tick 135. The ceiling the arithmetic predicts and the ceiling the engine
+# reports are the same number to five decimals.
+#
+# **It is over `SPRAY_BREAK` for ticks 350 to 460 inclusive** — 111 ticks of
+# 540, against the 110.6 the closed form gives (`(pi − 2*asin(0.24/0.30))/2pi`).
+# Measured: 0.23854 at 349, 0.24064 at 350, 0.24064 at 460, 0.23854 at 461. So
+# the gate is *swept through*, twice per period, and that sweep is the scene.
+#
+# **`mu_max` and `fold` are the same number here, which is a property of using
+# one wave.** The whitecaps read the eigenvalue of the compression and the spray
+# reads its trace; on a single direction the off-diagonal is zero and the trace
+# *is* the eigenvalue. Measured: `mu_max` 0.30000 at tick 405 and 0.0 at 135,
+# beside the folds above. `WATER_FOAM_BREAK` is 0.24 too, so foam and droplets
+# fire together and cannot be confused for each other`s absence.
+#
+# # Why the wave is twelve metres tall, which is not an aesthetic choice
+#
+# **`loom_water::spray::SPRAY_RANGE` is 50 m**, and the population is a disc of
+# that radius around the eye. The firing band — where `fold > SPRAY_BREAK` — is
+# `+/-10.24%` of a wavelength wide, so on a short wave the disc holds several
+# bands at once and the droplet count stops being a function of the tick at all:
+# one band leaves the disc as the next enters. Measured, on this scene`s first
+# draft at `lam = 99.92 m`:
+#
+#     lam 99.92 m    crest 7,959 droplets    trough 3,255    ratio 2.4x
+#     lam 126.47 m   crest 15,414 droplets   trough 378      ratio 41x
+#
+# The condition for the trough to be genuinely empty is that a band centred half
+# a wavelength away clears the disc: `lam*(0.5 − 0.10242) > 50`, so **`lam > 125.8 m`**.
+# 126.4661 clears it by 0.28 m. And `H = C*lam/pi`, so a scene that shows spray
+# switching off is forced to a twelve-metre swell — the height is what the
+# engine`s spray radius costs, not a mood. **Anything that moves `SPRAY_RANGE`
+# moves this scene`s contrast**; that constant has already moved once (34 -> 50).
+#
+# The 378 droplets left at the trough are not band leakage. `SPRAY_LIFETIME` is
+# 0.9 s, and 0.9 s earlier the band was 12.6 m closer — they are the previous
+# slot`s crowns still in the air, which is the honest answer.
+#
+# # The counts this scene exists to report
+#
+# `loom render --sim <tick>`, and the fraction is `loom compare` at zero
+# tolerance against the same frame with `spray = 0.0`:
+#
+#     tick 135 (trough)      378 droplets
+#     tick 270 (mid, rising) 3,864
+#     tick 405 (crest)    15,414 droplets   0.894% of frame, mean 0.179, worst 166
+#     tick 675 (trough)      567 droplets
+#     `spray = 0.0`            0 droplets    — the population gate, checked
+#
+# For scale: `lucent`, the showcase, puts 2,583 droplets over 0.50% of its frame.
+#
+# # The camera looks ALONG the crest, not across it
+#
+# **Forced, and worth understanding before moving it.** The droplet count peaks
+# when the firing band is centred on the *eye* — the disc is centred there — so
+# the camera has to sit within 2.3 m of the crest line for the count and the
+# fold to peak on the same tick. That rules out standing back and watching the
+# crest arrive: a camera 30 m behind the crest has the trough`s band 33 m
+# *behind* it, inside the disc, spraying where nobody can see it.
+#
+# So the camera sits on the crest line at `yaw = -90`, looking down its length
+# along +X. Three consequences, all good: the whole visible corridor is inside
+# the band, so a large share of the population is in frame rather than out to
+# the sides; the sun at 17.5 deg of elevation is nearly behind the droplets, which
+# is the light spray is legible in (`spindrift`s header: front-lit droplets
+# against a bright sky are nothing); and the band sweeps across frame at 14 m/s
+# rather than toward the lens, so the sequence shows it arrive and leave.
+#
+# The head-on version was rendered and rejected: at the crest tick it is a grey
+# descending face with the crest under the lens and out of frame.
+#
+# **The lens never goes under.** The eye is at y = 10 and the surface can never
+# exceed +6.0383 — a single wave`s ceiling is its own amplitude — so the lens is
+# 3.96 m clear at the crest and 16.0 m clear at the trough. That swing is the
+# wave, and it is read against the staff.
+#
+# # A staff, not a buoy
+#
+# `ocean_fft` uses a floating sphere and `lucent` a fixed pile; this takes the
+# pile, 0.5 m square and 18 m tall, spanning y −7 to +11 so it is never entirely
+# under water and never hanging in air over a 12 m sea. **A ruler has to stay
+# put.** The scene`s claim is that the surface at a named column reaches a known
+# height at a known tick, and the way a human checks that in a frame is to read
+# it off something that does not move: 4.9 m of staff shows at the crest and
+# 17 m at the trough. A buoy rides the surface — it hides exactly the number
+# being claimed — and over 540 ticks of orbital motion it would drift out of
+# shot as well. Measured at the staff`s own column (`--at 26,-8`): the surface
+# is +5.5676 m at tick 405 and −5.5676 m at tick 135, so 5.4 m of staff shows
+# at the crest and 16.6 m at the trough.
+#
+# # Two traps
+#
+# **`spray` must sit above the first sub-table header**, as `lucent`s header
+# says at length: written after `[...WaterBody.waves]` it parses as
+# `waves.spray`, is dropped, and the scene renders `particles: 0` with no error.
+#
+# **`loom render --frames` double-counts `--sim`, so the sequence above passes
+# no `--sim` at all.** The frame loop`s water, wind and spray clock is
+# `wind_seconds + elapsed/60` where both terms are seeded from `--sim`, while
+# the particle and rain clocks use `elapsed` alone. Measured on this scene:
+# `--sim 405 --frames 1` is **byte-identical** to a still at `--sim 810`
+# (`loom compare` fraction 0.0000), and the JSON beside it reports the still
+# path`s 15,414 droplets while the frame it wrote holds 6,825. So a sequence`s
+# frame `i` is at tick `2*sim + i*step`. With no `--sim` it is `i*step`, which
+# is what the command at the top uses: **frame 17 is the trough (tick 136) and
+# frame 50 the crest (tick 400)**, and 72 frames at 8 ticks covers 576 — one
+# period and a bit. This is an engine defect, not a property of the scene.
+#
+# **In the window there is no tick to aim at — `Viewer::wind_seconds` is a wall
+# clock** (`run.rs`, `self.wind_seconds += dt.min(0.1)`), so `--frames N` buys
+# `N x` the mean frame time and not `N` ticks. At 8.3 ms/frame on this box:
+# `--frames 812` lands at about 6.75 s, which is the crest, and `--frames 271`
+# at about 2.25 s, which is the trough. The band is 1.85 s wide, so there is
+# about +/-110 frames of slack; a slower box needs fewer frames, not more.
+
+[scene]
+format = 1
+id = "0c7d1a56-9f42-4e83-b6d1-3a8e5c2740b9"
+
+[[node]]
+name = "Sea"
+
+  [node.components.Environment]
+  sun_direction = [0.86, 0.30, -0.41]
+  sun_strength = 1.6
+  sun_color = [1.0, 0.94, 0.84]
+  ambient = 0.38
+  sky_zenith = [0.10, 0.24, 0.50]
+  sky_horizon = [0.56, 0.64, 0.72]
+  fog_density = 0.004
+  fog_falloff = 0.03
+
+  [node.components.Wind]
+  direction_degrees = 0.0
+  speed = 12.0
+  gustiness = 0.8
+  turbulence = 0.8
+
+[[node]]
+name = "Water"
+parent = "Sea"
+
+  [node.components.WaterBody]
+  kind = "ocean"
+  surface_height = 0.0
+  density = 1025.0
+  drag = 2.0
+  spray = 8.0
+
+  [[node.components.WaterBody.waves.waves]]
+  wavelength = 126.4661
+  amplitude = 6.0383
+  steepness = 1.0
+  direction = [0.0, 1.0]
+  speed_scale = 1.0
+
+[[node]]
+name = "Spray"
+parent = "Sea/Water"
+
+  [node.components.ParticleEmitter]
+  rate = 0.0
+  burst = 70
+  lifetime = 0.8
+  lifetime_jitter = 0.4
+  speed = 4.5
+  spread_degrees = 55.0
+  radius = 0.4
+  gravity = -9.0
+  drag = 0.5
+  turbulence = 0.6
+  turbulence_scale = 0.8
+  size = [0.22, 0.06]
+  color_start = [0.95, 0.98, 1.0]
+  color_end = [0.70, 0.80, 0.88]
+  alpha = [0.9, 0.0]
+  seed = 73
+
+[[node]]
+name = "Staff"
+parent = "Sea"
+transform = { pos = [26.0, 2.0, -8.0], scale = [0.25, 9.0, 0.25] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.Material]
+  albedo = [0.17, 0.15, 0.13]
+  roughness = 0.85
+
+[[node]]
+name = "Camera"
+parent = "Sea"
+transform = { pos = [0.0, 10.0, 0.0], rot_euler = [-13.0, -90.0, 0.0] }
+
+  [node.components.Camera]
+  fov_y_degrees = 34.0

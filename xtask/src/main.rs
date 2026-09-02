@@ -38,7 +38,7 @@ use std::process::{Command, Output};
 ///
 /// `smoke.loom` is the only scene that exercises the particle pipeline — a
 /// second pipeline, alpha blending, and a draw with no vertex buffer at all.
-const SCENES: [&str; 80] = [
+const SCENES: [&str; 81] = [
     // The mood ladder — ADR 0069. In `GOLDEN` too, where the reasoning is.
     "assets/test/mood_deep.loom",
     // A sphere dropped into a still pool. **In GOLDEN now** (W9): the impact
@@ -307,6 +307,19 @@ const SCENES: [&str; 80] = [
     // ever look at a droplet. It is a CPU particle population derived from the
     // `fold` threshold rather than from an emitter, which nothing else here is.
     "assets/test/spindrift.loom",
+    // The spray *diagnostic* beside it — one Gerstner wave, so the fold is a
+    // clean sinusoid whose ceiling is `Q*k*A` and whose crest recurs on a known
+    // tick (405 of every 540). `spindrift` and `lucent` throw spray off seas
+    // nobody can aim at; this is the one whose crest can be pointed at, and it
+    // is what a human checks the viewer`s crest spray in.
+    //
+    // **In `SCENES` and not `GOLDEN`, on the stated rule**: `spindrift` already
+    // references the spray sprite and `whitecaps` the foam, and a reference of
+    // an aesthetic deliverable is the human`s to bless. What this line guards
+    // is that a single-wave sea still loads, validates and draws clean — the
+    // one wave-set shape every other water scene in this list has more than one
+    // of.
+    "assets/test/heave.loom",
     // The only scene with rain: a third pass in the frame, a pipeline with no
     // depth attachment at all, and the depth buffer sampled as a texture
     // rather than tested against. None of the twenty-three above records a
