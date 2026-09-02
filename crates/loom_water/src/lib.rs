@@ -476,8 +476,12 @@ fn breaking(sxx: f32, szz: f32, sxz: f32) -> (f32, [f32; 2]) {
 /// the answer is then the still surface — flat, motionless, unbroken.** It is not a
 /// fallback to the sixteen waves, deliberately: a second sea that looks plausible at the
 /// point of use is the boat-above-its-water defect this crate's header opens on, and a
-/// mirror is unmistakable. One caller reaches here that way on purpose — `loom_cli`'s
-/// underwater-eye flag, which has no ocean until the render half of ADR 0076 lands.
+/// mirror is unmistakable. It is reached that way by a render that never stepped, which
+/// is honest: a spectrum sea nobody has evolved has no waves on it yet.
+///
+/// (`loom_cli`'s underwater-eye flag used to be listed here as the deliberate `None`. It
+/// is not one any more — it takes the run's cascade at [`ocean::Ocean::evolved_at`], and
+/// on `lucent` the mirror it was reading put the flag up to a metre of water late.)
 ///
 /// (It used to be two. [`spray::spray`] samples the surface at each droplet's *birth*
 /// time, could not read a tile evolved to the current tick, and so was handed the mirror

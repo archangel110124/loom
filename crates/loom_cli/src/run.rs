@@ -1828,6 +1828,7 @@ impl ApplicationHandler for App {
                     &mut environment,
                     world,
                     &wind,
+                    self.play.as_ref().and_then(crate::play::Play::sea),
                     self.terrain.as_ref(),
                     camera.eye,
                     self.wind_seconds,

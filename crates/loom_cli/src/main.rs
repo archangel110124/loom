@@ -977,7 +977,15 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     let (mut environment, grade) =
         environment_with_mood(&world, &weather, wind_seconds, dread);
     stamp_engine_textures(&mut environment, &material_library);
-    submerge_eye(&mut environment, &world, &weather, terrain.as_ref(), camera.eye, wind_seconds);
+    submerge_eye(
+        &mut environment,
+        &world,
+        &weather,
+        warmed.as_ref().and_then(crate::play::Runner::sea),
+        terrain.as_ref(),
+        camera.eye,
+        wind_seconds,
+    );
     let rain_drops =
         rain_at_eye(&mut environment, rain.as_ref(), &weather, camera.eye, wind_seconds);
     // Where the rain is landing is no longer decided here. Splashes are
@@ -1359,6 +1367,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                         &mut renderer.environment,
                         &world,
                         &weather,
+                        runner.sea(),
                         terrain.as_ref(),
                         camera.eye,
                         moment,
@@ -3506,10 +3515,39 @@ fn add_water(
 /// "below" with nothing in between, which is also why there is no hysteresis:
 /// a camera bobbing exactly at the waterline flips, and that is what water at
 /// your eyeline actually does.
+///
+/// **`sea` is the FFT cascade, and passing `None` here was the defect.** Every
+/// caller of this function had the cascade in scope — `loom render` beside its
+/// spray call, `loom render --frames` beside its own, and the window beside the
+/// tile upload — and all three handed over `None`, so a `spectrum` body was
+/// tested against its *still* level. On `lucent` (`Hs` 1.28 m, crest +1.12 m)
+/// an eye 25 cm above the still line sits under the sea for a good part of
+/// every wave period and read dry for all of it; the flag only came on once
+/// the eye had sunk past y = 0, up to a metre of water late. That is the
+/// "it doesn't go underwater until you go below a certain point" report.
+///
+/// **The flip stays hard, and the height is the whole fix.** What the human saw
+/// was not a hard edge, it was an edge in the wrong *place* — a blend across the
+/// last few centimetres of the wrong surface would still have been dry under a
+/// crest. And there is no honest half-state to blend toward: `eyeUnderwater()`
+/// switches the fog medium, the sky pass and the water surface's whole BRDF
+/// (Snell's window, total internal reflection), and a lerp between a sky
+/// reflection and a Snell's window is not a thing water does. The real
+/// intermediate is a lens *half* under — a screen-space split, not a uniform
+/// mix — and that is a different feature nobody has asked for. Measured on the
+/// scene below, at the worst height for it — the still line, where the sea
+/// spends half its time either side — the flag crosses **4 times in three
+/// seconds**, which is a wave passing your eye and not a strobe. The bound is
+/// asserted in `the_underwater_flag_engages_under_a_crest_not_under_the_still_line`;
+/// a blend, or a Schmitt trigger, is what that number would have to argue for.
+///
+/// `.superpowers/sdd/waterline/lucent_waterline.loom` is `lucent` with its lens
+/// at y = 0.25, which is the camera that shows it.
 pub(crate) fn submerge_eye(
     env: &mut loom_render::EnvironmentData,
     world: &World,
     wind: &loom_field::wind::Wind,
+    sea: Option<&loom_water::ocean::Ocean>,
     terrain: Option<&loom_voxel::heightfield::HeightField>,
     eye: Vec3,
     seconds: f32,
@@ -3521,19 +3559,34 @@ pub(crate) fn submerge_eye(
     // taper flattens the waves over it — off the grid it is bottomless, which
     // is what an open ocean wants.
     let ground = terrain.map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(eye.x, eye.z));
-    // **No cascade here, and a `spectrum` body therefore reads its still level.** This
-    // is the render path, which has no ocean until ADR 0076's GPU half lands (Task 3):
-    // building one per frame is three `amplitude_field` passes, and reading the
-    // simulation's would mean this function could see the runner, which it cannot. The
-    // answer is right whenever the eye is not within a wave height of the surface, which
-    // is every camera in the repository; it is wrong for a camera *in* an FFT sea, and
-    // that is the case Task 3 fixes rather than a bound this can tighten.
+    // **The cascade's own instant, not the caller's clock.** The tiles carry no
+    // time of their own, so `sample_water` asserts (debug-only) that it is asked
+    // about the tick they were evolved to — and not one of this function's three
+    // callers can spell that instant the same way the simulation did. The still
+    // path computes `ticks / 60.0` against the step's `tick * (1.0 / 60.0)` and
+    // is a last-bit apart at almost every tick (at `--sim 300`: 5.0000005
+    // against 5.0); the fly-through's `moment` runs a whole tick ahead of the
+    // runner it draws; and the window's `wind_seconds` is a *wall clock* and
+    // never lands on a tick boundary at all. Asking the ocean is not papering
+    // over that — it is the right question. The tiles this reads are the tiles
+    // the GPU was handed, so the flag and the surface it is a fact about are one
+    // instant by construction rather than by three callers agreeing.
+    //
+    // For a `gerstner` body `sea` is `None` and the caller's clock is the only
+    // one there is, which is every scene that predates ADR 0076 — untouched.
+    let t = sea.map_or(seconds, loom_water::ocean::Ocean::evolved_at);
+    // **The cascade the run is holding**, which is what makes this the same
+    // surface the buoyancy solver and the audio listener read (`play.rs`'s
+    // `sample_water` call, `buoyancy.rs`'s `sea` argument). `None` only for a
+    // `gerstner` body, and for an unwarmed still — a `spectrum` sea nobody has
+    // evolved is flat, and a flat sea's still level *is* its surface, so that
+    // case is right by accident and by construction at once.
     let under = loom_water::buoyancy::submersion_at(
         &body,
-        None,
+        sea,
         eye.to_array(),
         0.0,
-        seconds,
+        t,
         ground,
         [0.0; 3],
     );
@@ -6579,7 +6632,7 @@ mod tests {
         let flag = |y: f32| {
             let mut env = environment_with_wind_at(&world, &wind, 0.0, None);
             assert_eq!(env.water[1], 0.0, "the flag must start off");
-            submerge_eye(&mut env, &world, &wind, None, Vec3::new(3.0, y, -4.0), 0.0);
+            submerge_eye(&mut env, &world, &wind, None, None, Vec3::new(3.0, y, -4.0), 0.0);
             env.water[1]
         };
 
@@ -6588,6 +6641,116 @@ mod tests {
         // Well above the swell this wind builds, which is what every scene
         // authored before the underwater path renders from.
         assert_eq!(flag(40.0), 0.0);
+    }
+
+    /// **The flag has to come on under a CREST, not under the still line.**
+    ///
+    /// This is the defect the human reported as "you go slightly under the
+    /// waterline and it doesn't give you the underwater look until you go below
+    /// a certain point", and it was `submerge_eye` passing `None` where the
+    /// cascade goes: a `spectrum` body with no `sea` falls back to its authored
+    /// wave list, which for an FFT sea is *empty*, so the surface it was tested
+    /// against was the still plane at `surface_height`.
+    ///
+    /// `lucent` at `--sim 60` puts its sea at **y = +0.3118 m** over the lens's
+    /// column, so an eye at y = 0.25 is 6 cm under water and read dry. The two
+    /// halves below are one assertion and its own negative control: with the
+    /// cascade the flag is on, and with `None` — which is HEAD — it is off on
+    /// the same eye at the same instant. **Watched to fail**: reverting the
+    /// `sea` argument to `None` in `submerge_eye` fails the first assertion
+    /// with `the crest is 0.0619 m over the eye and the flag says dry`.
+    ///
+    /// The two ends are asserted at the same instant on the same sea, because a
+    /// change that submerged everything would pass the crest half alone.
+    #[test]
+    fn the_underwater_flag_engages_under_a_crest_not_under_the_still_line() {
+        /// The tick `lucent`'s sea puts a crest over this column at. Any tick
+        /// where the surface is above the eye would do; this one is measured.
+        const TICK: u16 = 60;
+        /// Metres. `lucent`'s lens moved down to the waterline —
+        /// `.superpowers/sdd/waterline/lucent_waterline.loom` is the same edit
+        /// as a scene, and is what the windowed before/after shots were taken
+        /// through. Above the still line, under the crest: the whole defect.
+        const EYE_Y: f32 = 0.25;
+
+        let src = std::fs::read_to_string("../../assets/test/lucent.loom").expect("the scene");
+        let scene = Scene::parse(&src).expect("valid scene");
+        let world = World::from_scene(&scene);
+        let wind = crate::weather::wind_of_world(&world);
+        let body = crate::weather::water_of(&world, &wind).expect("lucent has water");
+
+        // Warmed exactly as `--sim 60` warms it — `Sim::evolve_sea` calls
+        // `evolve` once a tick. No `keep`: this reads the surface *now*, which
+        // is the tiles themselves and not the ring spray reads a birth out of.
+        let mut sea = crate::weather::sea_of_body(&body, &wind).expect("a spectrum sea");
+        let seconds = f32::from(TICK) / 60.0;
+        for tick in 0..=TICK {
+            sea.evolve(f32::from(tick) / 60.0);
+        }
+
+        let eye = Vec3::new(0.0, EYE_Y, 16.0);
+        // **`t` is the ocean's own instant, not a second clock.** `sample_water`
+        // asserts the tiles were evolved to exactly the time it is asked about,
+        // which is the whole reason the cascade has to be threaded rather than
+        // rebuilt — and this closure passing its own constant is what tripped it.
+        let flag = |sea: Option<&loom_water::ocean::Ocean>, at: Vec3, t: f32| {
+            let mut env = environment_with_wind_at(&world, &wind, t, None);
+            assert_eq!(env.water[1], 0.0, "the flag must start off");
+            submerge_eye(&mut env, &world, &wind, sea, None, at, t);
+            env.water[1]
+        };
+
+        // What the sea is actually doing over that column, from the same call
+        // the buoyancy solver makes — so the assertion below is measured rather
+        // than hoped, and the failure message can say by how much.
+        let surface = loom_water::sample_water(
+            &body,
+            Some(&sea),
+            [eye.x, eye.z],
+            seconds,
+            loom_voxel::heightfield::NO_GROUND,
+            [0.0; 3],
+            [0.0; 3],
+        )
+        .height;
+        assert!(
+            surface > EYE_Y,
+            "the scene moved: tick {TICK} no longer puts a crest over the eye ({surface} m)",
+        );
+        assert_eq!(
+            flag(Some(&sea), eye, seconds),
+            1.0,
+            "the crest is {:.4} m over the eye and the flag says dry",
+            surface - EYE_Y,
+        );
+        // HEAD, on the same eye at the same instant. Not a bug being preserved
+        // — it is what says the cascade is what changed the answer, and it is
+        // the still level `surface_height = 0.0` this used to be tested against.
+        assert_eq!(flag(None, eye, seconds), 0.0, "the still-level answer was never wet here");
+
+        // **And the two ends still read the way they always did.** A metre of
+        // sea cannot reach either of these: `Hs` is 1.28 m and the tallest
+        // crest this cascade puts up is under 1.4 m.
+        assert_eq!(flag(Some(&sea), Vec3::new(0.0, -6.0, 16.0), seconds), 1.0, "six metres down is wet");
+        assert_eq!(flag(Some(&sea), Vec3::new(0.0, 40.0, 16.0), seconds), 0.0, "forty metres up is dry");
+
+        // **How often it flips, which is the evidence for keeping the flip
+        // hard.** At the worst height for it — the still line, where the sea
+        // spends half its time either side — the flag crosses a handful of
+        // times a second. That is a wave passing your eye, which is what the
+        // shading is meant to say; it is not the per-frame strobe that would
+        // argue for a blend or a Schmitt trigger. A cascade whose short band
+        // leaked into this would blow the bound rather than look worse.
+        let mut crossings = 0_u32;
+        let mut was = false;
+        for tick in 0..=180_u16 {
+            let t = f32::from(tick) / 60.0;
+            sea.evolve(t);
+            let now = flag(Some(&sea), Vec3::new(0.0, 0.0, 16.0), t) > 0.5;
+            crossings += u32::from(tick > 0 && now != was);
+            was = now;
+        }
+        assert!(crossings <= 15, "the waterline flag chatters: {crossings} flips in three seconds");
     }
 
     /// **`ocean_under` renders from under the water, and this is what keeps it
@@ -6619,8 +6782,14 @@ mod tests {
                 world.active_camera().expect("an authored camera").eye,
             );
 
+            // **No cascade, and that is what these two scenes render with.**
+            // Both are `wave_model = "spectrum"` and both are in `SCENES` with
+            // no `--sim`, so the tiles — which are built inside the fixed step —
+            // are never built: the render draws the flat plane, and the flat
+            // plane is what this margin has to be measured against. See the
+            // `ocean_fft` note in `xtask`'s `SCENES` for the same two branches.
             let mut env = environment_with_wind_at(&world, &wind, 0.0, None);
-            submerge_eye(&mut env, &world, &wind, None, eye, 0.0);
+            submerge_eye(&mut env, &world, &wind, None, None, eye, 0.0);
 
             assert_eq!(
                 env.water[1], submerged,
