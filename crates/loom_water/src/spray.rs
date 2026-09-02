@@ -38,12 +38,43 @@ use loom_scene::components::{WaterBody, WaveModel};
 
 /// Fold at which a crest starts throwing droplets.
 ///
-/// **`WATER_FOAM_BREAK` in `scene.slang`, spelled again.** The two numbers are
-/// one decision — where a crest is breaking — and if they drift the spray comes
-/// off water that is not white and the foam appears where nothing sprays. Set
-/// from σ(fold) = 0.189 on the seven-wave `ocean`, which makes this 1.75σ: the
-/// steepest few percent of the surface, not every crest.
-pub const SPRAY_BREAK: f32 = 0.33;
+/// **`WATER_FOAM_BREAK` in `scene.slang`, spelled again — and 0.24 is that
+/// number.** The two are one decision, where a crest is breaking: if they
+/// drift the spray comes off water that is not white, or the foam appears
+/// where nothing sprays. `13e824b` moved the foam pair 0.22/0.33 -> 0.13/0.24
+/// and deliberately left this at 0.33, because the coupling breaks safe in
+/// that direction and the population cost wanted its own sweep. This is that
+/// sweep landing.
+///
+/// **What it was worth is a multiple, not a nudge.** Droplets in the air on
+/// `ocean_fft_storm`, `loom render --sim N`, at the threshold alone with
+/// [`SPRAY_RANGE`] still 34 m:
+///
+/// ```text
+/// tick        120    200    300    400    700    900
+/// 0.33       2604   2877    567    147   1470   2562
+/// 0.24       5208   5901   1764   1008   3822   5502
+/// 0.20       6825   7980   2604   1764   5439   6888
+/// 0.16       8862  10878   3654   2793   7350   8547
+/// ```
+///
+/// The knee is between 0.24 and 0.20 and it is not in the count — it is where
+/// a crown starts landing in water the foam term has not whitened. At 0.18,
+/// photographed at 3x on the storm's near trough, clusters sit on plain grey
+/// water; at 0.24 they sit on or immediately behind a foam slash. **So the
+/// floor is `WATER_FOAM_BREAK` and it is a floor for a reason, not a
+/// coincidence of two tuned numbers.**
+///
+/// **The two gates still read different quantities and that is the open
+/// question here.** Foam is gated on `WaterSample::mu_max`, the largest
+/// eigenvalue of the horizontal compression; this reads `WaterSample::fold`,
+/// its trace. On a crossing sea the trace is nearly blind to the difference
+/// between one sea and two (`ocean_fft_storm`'s header measures 0.88% past
+/// 0.45 on the trace against 0.10% on the eigenvalue), so equal numbers are
+/// not equal surfaces. Moving this to `mu_max` would make the coupling
+/// structural instead of numerical — and it would throw far less, so it is a
+/// sweep of its own and not a tidy-up.
+pub const SPRAY_BREAK: f32 = 0.24;
 
 /// Metres per candidate cell. One crown per cell per [`SPRAY_PERIOD`] at most.
 pub const SPRAY_CELL: f32 = 1.5;
@@ -61,7 +92,53 @@ pub const SPRAY_LIFETIME: f32 = 0.9;
 ///
 /// Beyond this a droplet is well under a pixel and costs a sample to decide
 /// not to draw. The same argument `loom_rain::SPLASH_RANGE` makes.
-pub const SPRAY_RANGE: f32 = 34.0;
+///
+/// **34 m was over-cautious and the pixel it argues from is measurable.** A
+/// droplet is drawn at `Visual::size`, 0.16 m for a sea that authors no splash
+/// and 0.22 m for `lucent`, and at 1920x1080 with a 50° vertical field one
+/// metre subtends `1080 / (2·tan 25°) = 1158` px at one metre. So a default
+/// droplet is 5.4 px across at 34 m, **3.7 px at 50 m** and 2.6 px at 70 m —
+/// nowhere near "well under a pixel" at any of them.
+///
+/// 50 m, because the population grows as the square of this and the picture
+/// does not: on `ocean_fft_storm` at tick 200, 34 -> 50 m is 5,901 -> 12,747
+/// droplets and takes the fraction of the frame spray occupies from 0.564% to
+/// 0.731%, while 70 m is 23,625 droplets for 0.856%. The first step buys the
+/// mid-field — this camera looks at a boat 66 m away and a 34 m disc put every
+/// droplet in the bottom strip of the frame, which is most of why a storm
+/// looked bare. The second step mostly buys droplets behind the camera.
+///
+/// **The droplets are free and the *search* is not, which is the opposite of
+/// where the cost was expected.** Forward pass on the storm at 1920x1080, min
+/// of 30 frames: 0.248 ms at 2,877 droplets, 0.253 ms at 12,747, 0.251 ms at
+/// 20,391 — flat. These are one-to-five-pixel sprites and the overdraw that
+/// costs `emberfall` 0.430 ms is not what they are.
+///
+/// What costs is [`spray`]'s cell sweep on the CPU, which is `πr²/SPRAY_CELL²`
+/// candidates a frame each paying a cascade sample to decide it will not throw.
+/// Measured at 320x180 so the PNG encoder is not the whole reading —
+/// `(t(--frames 101) − t(--frames 1)) / 100`, `--step 0`, ms per frame:
+///
+/// ```text
+///                        SPRAY_BREAK / SPRAY_RANGE
+///                        0.33 / 34   0.24 / 34   0.24 / 50
+/// ocean_fft_storm          0.78        0.97        1.84
+/// lucent                   1.36        1.38        2.61
+/// ```
+///
+/// So the threshold is +0.19 ms and this constant is +0.87 ms on the storm,
+/// +1.23 ms on `lucent` — about 6% of a 16.7 ms frame, paid only by scenes that
+/// author spray. It is defensible at that and it is the thing to watch: the
+/// next step to 70 m would be another 2x on the same term.
+///
+// ponytail: the sweep is a disc around the eye and a 50° frustum can see about
+// a seventh of it, so roughly six candidates in seven are sampled to place a
+// droplet nobody can look at. A cheap frustum reject before `sample_water_born`
+// would take this term back under HEAD's cost at any range. Not done here
+// because the returned order *is* the additive draw order (see [`spray`]), so a
+// cull has to be proven not to reorder, and because it makes the population
+// depend on the view direction as well as the eye — `--yaw` would change it.
+pub const SPRAY_RANGE: f32 = 50.0;
 
 /// Droplets per crown.
 ///
@@ -1068,10 +1145,17 @@ mod tests {
         // The largest cascade's patch: `shipping_stack`'s 2048 m, and therefore the
         // period of the whole summed field.
         let step = 2048.0 / f32::from(SIDE);
-        // A sea that breaks and one that cannot be seen to. `u10 = 2` is the gentle
-        // half and it is measured, not guessed: its ceiling wanders 0.212..0.289 over
+        // A sea that breaks and one that cannot be seen to. `u10 = 1` is the gentle
+        // half and it is measured, not guessed: its ceiling wanders 0.0688..0.0902 over
         // forty quarter-seconds, under `SPRAY_BREAK` at every one of them.
-        for (u10, breaks) in [(2.0_f32, false), (18.0, true)] {
+        //
+        // **It was `u10 = 2` and that stopped being gentle when `SPRAY_BREAK`
+        // moved to 0.24.** A 2 m/s cascade wanders 0.212..0.289, which straddles
+        // the new gate — so the control was one that only just cleared the old
+        // one. The halving is not a weakening of the test: what it asserts is
+        // that a sea the ceiling calls dry *is* dry, and that needs a sea the
+        // ceiling calls dry at every instant rather than most of them.
+        for (u10, breaks) in [(1.0_f32, false), (18.0, true)] {
             let body = WaterBody {
                 wave_model: WaveModel::Spectrum,
                 spray: 8.0,

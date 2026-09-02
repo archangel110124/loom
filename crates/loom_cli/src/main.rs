@@ -8752,13 +8752,13 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         /// `spray::SPRAY_BREAK` in `loom_water`, spelled here so this test
         /// says what it is measuring against rather than importing it.
         ///
-        /// **It used to be `WATER_FOAM_BREAK` as well and no longer is.** The
-        /// two were one decision — where a crest is breaking — until the foam
-        /// pair moved to 0.13 / 0.24 to raise coverage; spray stayed at 0.33,
-        /// so the sentence below about "both numbers are 0.33" now holds only
-        /// for the spray half. The foam half of this test's claim is
-        /// `past(weather::FOAM_WET)` in the report line, and it is the number
-        /// that moved.
+        /// **It is `WATER_FOAM_BREAK` again.** The two were one decision —
+        /// where a crest is breaking — until `13e824b` moved the foam pair to
+        /// 0.13 / 0.24 and left spray at 0.33; spray has now followed to 0.24,
+        /// so both numbers are 0.24. The foam half of this test's claim is
+        /// `past(weather::FOAM_WET)` in the report line. **The two gates still
+        /// read different quantities** — this column is `mu_max` and spray
+        /// tests `fold` — so equal thresholds are not equal surfaces.
         const BREAK: f32 = loom_water::spray::SPRAY_BREAK;
         const SIDE: u16 = 251;
         /// Metres. The water the camera can actually see — 146 m of shelf in

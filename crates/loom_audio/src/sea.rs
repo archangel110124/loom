@@ -57,9 +57,10 @@ pub struct SeaState {
     /// Fraction of the surface past the breaking threshold, `0.0` to `1.0`.
     ///
     /// A real sea reaches only the low end of that: `loom_water::spray`'s
-    /// `SPRAY_BREAK` sits at 1.75σ of the fold distribution, which its own
-    /// documentation calls "the steepest few percent of the surface, not every
-    /// crest". [`BREAK_FULL`] is sized for that.
+    /// `SPRAY_BREAK` is 0.24, which is 1.27σ of the fold distribution on the
+    /// seven-wave `ocean` (σ = 0.189) — the steepest few percent of the
+    /// surface, not every crest. [`BREAK_FULL`] is sized for that and its
+    /// headroom absorbed the move down from 1.75σ.
     pub breaking: f32,
     /// Wind speed at 10 m, in m/s. Colour only — see [`HISS_GALE_HZ`].
     pub wind: f32,
@@ -82,9 +83,10 @@ pub const WIND_FULL: f32 = 18.0;
 /// The breaking fraction at which the hiss reaches full level.
 ///
 /// **Sized from the water, not chosen.** `loom_water::spray::SPRAY_BREAK` is
-/// 1.75σ of the fold distribution — a one-tailed 4% of a Gaussian surface — so
-/// a steep sea presents a few percent and a generous worst case is a few times
-/// that. 0.25 puts every sea the engine builds on the steep part of the
+/// 1.27σ of the fold distribution — a one-tailed 10% of a Gaussian surface —
+/// so a steep sea presents a few percent and a generous worst case is a few
+/// times that. (It was 1.75σ when this was chosen; the threshold moved down
+/// and 0.25 still sits above every sea the engine builds.) 0.25 puts every sea the engine builds on the steep part of the
 /// square-root curve below, while leaving the top of the legal `[0, 1]` range
 /// in range rather than clipped off.
 pub const BREAK_FULL: f32 = 0.25;

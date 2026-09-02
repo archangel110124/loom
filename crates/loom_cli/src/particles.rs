@@ -1312,8 +1312,15 @@ mod tests {
                 fetch: Some(50_000.0),
                 ..body.clone()
             };
+            // **1.0 m/s, and it was 2.0 until `SPRAY_BREAK` moved to 0.24.** A
+            // 2 m/s cascade's ceiling is 0.2633 — under the old 0.33 and over
+            // the new gate, so the final assertion below stopped holding while
+            // the loop above it still passed. That is the assertion doing its
+            // job: it is there to say this control is *provably* dry rather
+            // than dry by luck over 24 ticks, and a control that only just
+            // clears the gate is not one. At 1.0 m/s the ceiling is 0.0773.
             let mut calm_sea =
-                loom_water::ocean::Ocean::for_body(&gentle, 2.0, [1.0, 0.0]).expect("a cascade");
+                loom_water::ocean::Ocean::for_body(&gentle, 1.0, [1.0, 0.0]).expect("a cascade");
             let deep = |_x: f32, _z: f32| -1000.0_f32;
             for tick in 0..24_u16 {
                 let t = f32::from(tick) / 60.0;
@@ -1332,6 +1339,120 @@ mod tests {
                 "the gentle control is not gentle: {}",
                 calm_sea.peak_fold()
             );
+        }
+    }
+
+    /// **A Beaufort-4 sea does not spit, and it is a real scene that says so.**
+    ///
+    /// `SPRAY_BREAK` is the whole population gate, so lowering it is a
+    /// multiple rather than a nudge — `ocean_fft_storm` went from 147 droplets
+    /// to 1,008 at one step of the sweep — and the failure mode of moving it
+    /// too far is not a cost, it is a gentle sea throwing water. That is the
+    /// same failure `weather::the_gentle_sea_still_foams_nowhere` guards for
+    /// the foam gate, and this is the spray half of it.
+    ///
+    /// **`ocean_tropical.loom` and not a hand-built body.** Its wind is 6.6 m/s
+    /// free-stream, which is `U10 = 5.99` — Beaufort 4, the sea the scene's own
+    /// header calls a light chop. It authors no `spray`, so as it ships it is
+    /// dry by the *authoring* switch and proves nothing about the threshold;
+    /// this forces `spray` to the schema's ceiling of 8.0, which is the only
+    /// way the gate under test is the one being measured.
+    ///
+    /// **Watched failing.** At `SPRAY_BREAK = 0.05` this scene throws 63
+    /// droplets at tick 240 and the assertion names the ceiling it read.
+    /// **A Beaufort-4 sea must not start spitting**, and the guard is a ratio
+    /// rather than a zero, because a zero is not true of this sea and never
+    /// was.
+    ///
+    /// `SPRAY_BREAK` is the whole population gate, so moving it is a multiple:
+    /// `ocean_fft_storm` went 147 -> 1,008 droplets at `--sim 400` on the step
+    /// this commit takes. The failure mode of going too far is not a cost, it
+    /// is a gentle sea throwing water — the same failure
+    /// `weather::the_gentle_sea_still_foams_nowhere` guards for the foam gate.
+    ///
+    /// **The obvious test is wrong and measuring it is what showed that.**
+    /// `ocean_tropical` is Beaufort 4 (`Wind.speed = 6.6` free-stream, so
+    /// `U10 = 5.99`) and it authors no `spray`, so as it ships it is dry by the
+    /// *authoring* switch and proves nothing. Force `spray` to the schema's
+    /// ceiling and its cascade ceiling is **0.6256** — over `SPRAY_BREAK` at
+    /// 0.33 as well as at 0.24 — and it throws on 53 of 241 ticks *at the old
+    /// threshold*. An `assert_eq!(thrown, 0)` here would have been red at HEAD.
+    /// A short cascade band is steep at any wind; what a light wind buys is
+    /// that very little of the surface is in it.
+    ///
+    /// So the property that is actually true, and actually the one worth
+    /// keeping, is that the two seas stay far apart. Droplets summed over 241
+    /// ticks from one eye, both at `spray = 8.0`, as a percentage of the
+    /// storm's:
+    ///
+    /// ```text
+    /// SPRAY_BREAK   0.33    0.24    0.20    0.16    0.13    0.10
+    /// tropical %   0.116   0.940   2.354   6.270  11.677  19.532
+    /// ```
+    ///
+    /// **2% is one step below what ships**, the same margin `13e824b` left
+    /// itself on the foam pair. Watched failing at `SPRAY_BREAK = 0.20`, which
+    /// reads 2.354%.
+    ///
+    /// `pool` and `mirrorpool` are the other end and they are exact: flat water
+    /// has no fold at all, so no threshold this side of zero can make them
+    /// throw.
+    #[test]
+    fn a_beaufort_four_sea_stays_a_hundred_times_drier_than_a_storm() {
+        /// Percent of the storm's droplets a Beaufort-4 sea may throw.
+        const CEILING: f64 = 2.0;
+
+        // 241 ticks — four seconds, several crown lifetimes, and long enough
+        // that a lull in either sea is averaged over rather than sampled.
+        let thrown_by = |scene: &str| -> usize {
+            let source = std::fs::read_to_string(format!("../../assets/test/{scene}.loom"))
+                .expect("fixture");
+            let world = World::from_scene(&loom_scene::Scene::parse(&source).expect("valid"));
+            let wind = crate::weather::wind_of_world(&world);
+            let body = loom_scene::components::WaterBody {
+                // **Forced on, or the gate under test is the authoring switch
+                // rather than the threshold.** Every one of these scenes but
+                // the storm authors no spray.
+                spray: 8.0,
+                ..crate::weather::water_of(&world, &wind).expect("the scene has water")
+            };
+            let mut sea = crate::weather::sea_of_body(&body, &wind);
+            let deep = |_x: f32, _z: f32| -1000.0_f32;
+            (0..=240_u16)
+                .map(|tick| {
+                    let t = f32::from(tick) / 60.0;
+                    if let Some(sea) = sea.as_mut() {
+                        sea.evolve(t);
+                        // The ring `spray` reads a droplet's birth instant out
+                        // of is filled on `Sim::evolve_sea`'s stride and no
+                        // other; skipping it measures a sea with no past.
+                        if tick % 8 == 0 {
+                            sea.keep();
+                        }
+                    }
+                    spray(&world, &body, sea.as_ref(), &deep, [0.0, 3.0, 0.0], t).len()
+                })
+                .sum()
+        };
+
+        let storm = thrown_by("ocean_fft_storm");
+        let gentle = thrown_by("ocean_tropical");
+        assert!(storm > 0, "the storm threw nothing, so the ratio below means nothing");
+        #[allow(clippy::cast_precision_loss)]
+        let share = gentle as f64 * 100.0 / storm as f64;
+        assert!(
+            share < CEILING,
+            "a Beaufort-4 sea threw {gentle} droplets against the storm's {storm} — \
+             {share:.3}% of it, past the {CEILING}% this gate allows. SPRAY_BREAK is \
+             {}, and it has been lowered far enough to flatten the difference between \
+             a light chop and a storm.",
+            loom_water::spray::SPRAY_BREAK
+        );
+
+        // Flat water is exact at any threshold, which is the other end of the
+        // same guard and the one that cannot drift.
+        for still in ["pool", "mirrorpool"] {
+            assert_eq!(thrown_by(still), 0, "{still} threw spray");
         }
     }
 

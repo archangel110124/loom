@@ -496,12 +496,12 @@ fn break_wander(xz: [f32; 2], seconds: f32) -> f32 {
 pub(crate) const FOAM_WET: f32 = 0.13;
 /// `WATER_FOAM_BREAK`: where a crest is drawn white. See [`FOAM_WET`].
 ///
-/// **No longer equal to [`loom_water::spray::SPRAY_BREAK`], which stayed at
-/// 0.33.** They were one decision — "where a crest is breaking" — and this
-/// commit split them deliberately: the foam pair moved to raise coverage, and
+/// **Equal to [`loom_water::spray::SPRAY_BREAK`] again.** `13e824b` moved this
+/// pair to raise foam coverage and deliberately left spray at 0.33, because
 /// how many crests *throw droplets* is a separate look judgement with its own
-/// cost. Whether spray follows is the human's call; see the foam-threshold
-/// report.
+/// population cost. That sweep has now run and spray followed to 0.24 — see
+/// `SPRAY_BREAK`'s own docs for the table and for the one thing that is still
+/// not shared: this gate reads `mu_max` and that one reads `fold`.
 pub(crate) const FOAM_BREAK: f32 = 0.24;
 
 /// The whitecap coverage a crest of this steepness is drawn with right now.
