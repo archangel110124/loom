@@ -1216,7 +1216,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                     // run rather than from zero beside it, so the runner's own
                     // event ticks need no shifting to line up with it.
                     #[allow(clippy::cast_possible_truncation)]
-                    let particles = particles::simulate(
+                    let mut particles = particles::simulate(
                         &world,
                         &weather,
                         Some(elapsed as u32),
@@ -1316,6 +1316,41 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                             pitch.unwrap_or(28.0),
                         ),
                     };
+
+                    // **Spray off the breaking crests, which this loop drew
+                    // none of.** The still path appends it a few hundred lines
+                    // up; this one rebuilt `particles` from `simulate` alone
+                    // and stopped there, so **no sequence this engine has ever
+                    // produced contained a droplet of crest spray** — not
+                    // `cargo xtask flythrough`, not `tools/watch.sh`, not the
+                    // `--frames 72 --spin 0 --step 3` a human is asked to judge
+                    // spray in. The JSON still reported a `particles` count off
+                    // the still path, so the number said 12,747 while the
+                    // pictures held zero: a metric reporting a subject the
+                    // frames do not contain, which is the same failure mode as
+                    // the fly-through that framed `meadow` with no grass in it.
+                    //
+                    // It has to sit after the camera, because the population is
+                    // bounded by `SPRAY_RANGE` around the eye and the eye is
+                    // what this loop moves. `moment` rather than `wind_seconds`
+                    // for the same reason the wind uses it — a frozen crown
+                    // over a moving sea is exactly the artifact a still cannot
+                    // show and this tool exists for.
+                    if let Some(body) = weather::water_of(&world, &weather) {
+                        let ground = |x: f32, z: f32| {
+                            terrain
+                                .as_ref()
+                                .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(x, z))
+                        };
+                        particles.extend(particles::spray(
+                            &world,
+                            &body,
+                            runner.sea(),
+                            &ground,
+                            camera.eye.to_array(),
+                            moment,
+                        ));
+                    }
 
                     // After the camera, because it is a fact about the camera:
                     // a fly-through that starts under a wave crest and ends
