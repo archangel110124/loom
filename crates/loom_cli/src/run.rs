@@ -1852,7 +1852,41 @@ impl ApplicationHandler for App {
                 // back inside the fixed step and appended here so it goes
                 // through the one particle renderer like everything else
                 // (ADR 0047's rule) — the same list the headless path builds.
-                let crowns: Vec<loom_render::ParticleInstance> = fluid_spray;
+                let mut crowns: Vec<loom_render::ParticleInstance> = fluid_spray;
+                // **And the crest spray, which this window has never drawn.**
+                // `fluid_spray` above is the *cinematic* tier's readback alone
+                // — ADR 0053's GPU-stateful path — so a `WaterBody` authoring
+                // `spray = N` on the ordinary tiers threw nothing here, while
+                // the headless still (`main.rs`, beside `water_of`) and
+                // `--frames` (fixed in 592f605) both appended it. `loom run`
+                // is what a human opens to judge the sea, so every judgement
+                // ever made about spray was made on a view that was not
+                // drawing it — the third path of the same defect, and the
+                // reason it survived all four gates is that not one of them
+                // photographs a window.
+                //
+                // After the camera and on `wind_seconds`, for the two reasons
+                // the headless paths give: the population is bounded by
+                // `SPRAY_RANGE` around the eye, and a crown frozen over a
+                // moving sea is the artifact. `Play::sea` is the same accessor
+                // the ocean upload below uses, and is `None` in edit mode —
+                // where a spectrum body throws nothing, which is the honest
+                // answer for a sea nobody has evolved.
+                if let Some(body) = crate::weather::water_of(world, &wind) {
+                    let ground = |x: f32, z: f32| {
+                        self.terrain
+                            .as_ref()
+                            .map_or(loom_voxel::heightfield::NO_GROUND, |g| g.at(x, z))
+                    };
+                    crowns.extend(crate::particles::spray(
+                        world,
+                        &body,
+                        self.play.as_ref().and_then(crate::play::Play::sea),
+                        &ground,
+                        camera.eye.to_array(),
+                        self.wind_seconds,
+                    ));
+                }
                 let combined;
                 let particles: &[loom_render::ParticleInstance] = if crowns.is_empty() {
                     particles
