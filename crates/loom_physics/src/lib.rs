@@ -1176,6 +1176,19 @@ impl Physics {
         self.bodies.len()
     }
 
+    /// The body's mass, in kilograms — every collider hung on it included.
+    ///
+    /// **Asked of rapier rather than of the scene**, because a hull is one box
+    /// for its inertia and two dozen for the deck a player walks on, and the
+    /// authored `RigidBody.mass` is only the first of them. The added-mass
+    /// term in `loom_water::buoyancy::solve` divides by this, so a second
+    /// opinion about it would put a hull's heave period somewhere the section
+    /// table does not predict.
+    #[must_use]
+    pub fn mass(&self, handle: RigidBodyHandle) -> Option<f32> {
+        Some(self.bodies.get(handle)?.mass())
+    }
+
     /// Where a body's mass actually is, in world space.
     ///
     /// The point a torque acts about, which is not the node's origin whenever

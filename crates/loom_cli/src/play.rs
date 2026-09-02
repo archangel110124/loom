@@ -1195,6 +1195,7 @@ impl Sim {
                 &floating.buoyancy,
                 &floating.states,
                 centre,
+                self.physics.mass(floating.body).unwrap_or(0.0),
                 0.0,
             );
             self.physics
@@ -1412,6 +1413,7 @@ impl Sim {
                 &floating.buoyancy,
                 &floating.states,
                 centre,
+                self.physics.mass(floating.body).unwrap_or(0.0),
                 t,
             );
             self.physics

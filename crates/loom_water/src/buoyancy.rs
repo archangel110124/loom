@@ -99,6 +99,24 @@ pub struct Wrench {
     /// so any single point is right in one orientation and wrong in the others,
     /// whereas the pontoons turn with the body and the fraction turns with them.
     pub submerged: f32,
+    /// The water this body is dragging with it, in kilograms — its **added
+    /// mass**, and the reason the forces above are not simply what Archimedes
+    /// and the damping came to.
+    ///
+    /// **Derived, never authored.** A sphere accelerating through a fluid
+    /// carries half its own displaced volume with it — the exact potential-flow
+    /// result, `m_a = ½ρV`, with no coefficient to get wrong — so the pontoon
+    /// set the section table solved *is* the derivation. `jib_vi` reads 28.8 t
+    /// at her designed waterline against 57.6 t of hull and 55.4 t when she is
+    /// wholly under, which is the "of order one times displacement" a hull's
+    /// heave added mass is known to be.
+    ///
+    /// **[`solve`] has already applied it** — see the `mass` parameter. It
+    /// rides out here for the same reason [`Self::submerged`] does: the heave
+    /// period `T = 2π√((m + m_a)/(ρgA_w))` is the test that would have caught
+    /// the original defect, and a second opinion about `m_a` computed beside
+    /// the solver would be free to disagree with the force actually applied.
+    pub added_mass: f32,
 }
 
 /// Volume of the part of a sphere below `surface_y`, in cubic metres.
@@ -154,6 +172,13 @@ pub fn submerged_volume(radius: f32, centre_y: f32, surface_y: f32) -> f32 {
 /// `sea` is the FFT cascade for a `spectrum` body, evolved to this same `t` by the
 /// simulation that owns it — ADR 0076 and [`crate::ocean::Ocean::for_body`]. `None` for
 /// every `gerstner` body, which is every scene but one.
+///
+/// `mass` is the body's, in kilograms — rapier's own figure, every collider hung
+/// on the body included. It is here for one term: the **added mass** the hull
+/// drags with it, which is derived from the wetted pontoon volume and applied by
+/// scaling the wrench (see the end of this function). Pass `0.0` and the term
+/// switches itself off, which is what a caller with no body behind its pontoons
+/// wants and what every unit test below does.
 #[must_use]
 pub fn solve(
     water: &WaterBody,
@@ -161,6 +186,7 @@ pub fn solve(
     buoyancy: &Buoyancy,
     pontoons: &[PontoonState],
     centre_of_mass: [f32; 3],
+    mass: f32,
     t: f32,
 ) -> Wrench {
     let mut wrench = Wrench::default();
@@ -217,16 +243,47 @@ pub fn solve(
         // settled at 0.08 m/s against a 2.24 m/s current, because the damping
         // outweighed the drag by a factor of twenty-five.
         //
-        // **Only the current is subtracted, deliberately, and not the waves'
-        // orbital motion.** A crate riding a swell really is moving through the
-        // water — that is what makes it bob rather than sit still while the
-        // wave passes under it — and §5.5's whole subject is damping that
-        // motion. Every scene that predates rivers has a zero current here, so
-        // this is bit-for-bit what it was.
+        // **Vertically the water's own motion is subtracted, waves included,
+        // and that is the fix for a hull that could be held under the sea.**
+        //
+        // This used to subtract `flow` alone — the river's current — on the
+        // argument that "a crate riding a swell really is moving through the
+        // water". In heave it is not. A deep-water wave carries its surface
+        // particles with the surface, so a body riding a crest has no vertical
+        // velocity relative to the water and should feel no damping at all;
+        // and the *radiation* damping this coefficient stands for genuinely
+        // vanishes as the frequency does, because a slowly heaving hull makes
+        // no waves. A constant coefficient on the body's **absolute** vertical
+        // velocity is therefore unphysical in a long swell — and it is a brake
+        // bolted to the seabed.
+        //
+        // What it cost, measured on `ocean_fft_storm.loom` (`Hs` 6.1 m) over
+        // 3600 ticks: the damping on a fully-immersed `jib_vi` is
+        // `rho.V.damp_linear` = 236 kN per m/s against a hull weighing 565 kN,
+        // and a crest in that sea rises at 5 m/s. She could not follow it. The
+        // sea closed over her, she rose at a terminal 1.003 m/s, and her worst
+        // excursion below her own local surface was **7.64 m** — the hull
+        // buried twice over. It is **0.98 m** here.
+        //
+        // **Horizontally the current alone is still what is subtracted, and
+        // that is a deliberate corner rather than an oversight.** Taking surge
+        // and sway to the water's frame as well removes everything that
+        // resists a wave's orbital motion, so a floating body accumulates
+        // Stokes drift with nothing to oppose it: measured on
+        // `deeper_demo.loom`, a boat lying at her quay walks 0.20 m off her
+        // berth in 30 s and is still accelerating. Station-keeping is a
+        // mooring's job and this engine has no mooring.
+        // ponytail: horizontal damping is against the world, which is a mooring
+        // in disguise. Move it to the water's frame the day a scene can author
+        // a mooring line — the one-line change is the two `flow` reads below.
+        //
+        // Every flat-water scene is bit-identical either way: with no waves
+        // `sample_water` returns `velocity == flow` by construction, which is
+        // what keeps a river's crate on the arithmetic it had.
         let v = pontoon.velocity;
         let carried = [
             v[0] - pontoon.flow[0],
-            v[1] - pontoon.flow[1],
+            v[1] - surface.velocity[1],
             v[2] - pontoon.flow[2],
         ];
         let speed =
@@ -281,6 +338,45 @@ pub fn solve(
     } else {
         0.0
     };
+
+    // **The water the hull drags with it.** `m_a = ½ρV` is the exact
+    // potential-flow added mass of a sphere, so the pontoon set the section
+    // table solved is the whole derivation and there is no coefficient to
+    // author. It is taken off the summed `wet_volume` rather than accumulated
+    // per pontoon because it is a property of the set, and one multiply cannot
+    // reorder what sixteen additions already fixed.
+    wrench.added_mass = 0.5 * water.density * wet_volume;
+
+    // **And what it does to the body, exactly.** The equation of motion a hull
+    // obeys is `(m + m_a)·a = F_water + m·g`; rapier's is `m·a = F_applied +
+    // m·g`. Equating them gives `F_applied = κ·F_water + (κ − 1)·m·g` with
+    // `κ = m/(m + m_a)` — a scaling of the wrench plus an upward correction,
+    // no new state, nothing differenced, and nothing that can go unstable the
+    // way an explicit `−m_a·dv/dt` does at `m_a ≈ m`.
+    //
+    // **Equilibrium is untouched and that is the check on the algebra**: put
+    // `F_water = −m·g` in and `F_applied` comes back `−m·g` for any κ. So a
+    // hull's settled waterline is exactly where it was and only her *response*
+    // changed — which is the whole point, because the response is what the
+    // heave period measures and the waterline is what Task 2 already settled.
+    //
+    // **The torque is left alone.** A sphere's added mass is a translational
+    // quantity; the added *moment of inertia* of the water a hull rolls is a
+    // different number that this derivation does not contain, and authoring
+    // one is exactly what Task 3 forbids. So the linear response carries the
+    // entrained water and the angular response does not — which is what an
+    // added-mass tensor does anyway, since heave, sway, roll and pitch each
+    // have their own coefficient. It also leaves the righting moment exactly
+    // where the pontoon set puts it, which is what the `GZ` sweep measures.
+    //
+    // Isotropic, for the same reason: the derivation is a sphere's, and a
+    // sphere's added mass is the same in every direction. A hull's is not —
+    // surge is nearer 0.05 of displacement than 1.0 — and closing that gap is
+    // a directional term, not a bigger scalar.
+    if mass > 0.0 && wrench.added_mass > 0.0 {
+        let kappa = mass / (mass + wrench.added_mass);
+        wrench.force[1] = wrench.force[1].mul_add(kappa, (1.0 - kappa) * mass * GRAVITY);
+    }
     wrench
 }
 
@@ -450,7 +546,7 @@ mod tests {
             ground: DEEP, flow: [0.0; 3], wavelet: [0.0; 3],
         }];
 
-        let w = solve(&water, None, &buoyancy, &pontoons, [0.0; 3], 0.0);
+        let w = solve(&water, None, &buoyancy, &pontoons, [0.0; 3], 0.0, 0.0);
 
         let expected = 1000.0 * (2.0 / 3.0 * std::f32::consts::PI) * GRAVITY;
         assert!((w.force[1] - expected).abs() < 1.0, "{w:?} vs {expected}");
@@ -481,7 +577,7 @@ mod tests {
             })
             .collect();
 
-        let four = solve(&water, None, &buoyancy, &tilted, [0.0; 3], 0.0);
+        let four = solve(&water, None, &buoyancy, &tilted, [0.0; 3], 0.0, 0.0);
         // Right-hand rule: the deeper +X side pushed up is a torque about −Z...
         assert!(
             four.torque[2].abs() > 1.0,
@@ -502,6 +598,7 @@ mod tests {
                 ground: DEEP, flow: [0.0; 3], wavelet: [0.0; 3],
             }],
             [0.0; 3],
+            0.0,
             0.0,
         );
         assert_eq!(one.torque, [0.0; 3], "one pontoon cannot right anything");
@@ -530,6 +627,7 @@ mod tests {
                     ground: DEEP, flow: [0.0; 3], wavelet: [0.0; 3],
                 }],
                 [0.0; 3],
+                0.0,
                 0.0,
             )
             .force[1]
@@ -563,6 +661,7 @@ mod tests {
                 ground: DEEP, flow: [0.0; 3], wavelet: [0.0; 3],
             }],
             [0.0; 3],
+            0.0,
             0.0,
         );
 
@@ -603,6 +702,7 @@ mod tests {
             &[PontoonState { at, radius: 0.5, velocity: [0.0; 3], ground: DEEP, flow: [0.0; 3], wavelet: [0.0; 3] }],
             [0.0; 3],
             0.0,
+            0.0,
         );
 
         assert!(flow[0].abs() > 1e-3, "the fixture has no orbital motion to drag with");
@@ -639,16 +739,16 @@ mod tests {
             wavelet: [0.0; 3],
         };
 
-        let still = solve(&water, None, &buoyancy, &[pontoon([0.0; 3])], [0.0; 3], 0.0);
+        let still = solve(&water, None, &buoyancy, &[pontoon([0.0; 3])], [0.0; 3], 0.0, 0.0);
         assert_eq!(still.force, [0.0; 3], "flat water with no current is not still");
 
-        let carried = solve(&water, None, &buoyancy, &[pontoon([2.0, 0.0, 0.0])], [0.0; 3], 0.0);
+        let carried = solve(&water, None, &buoyancy, &[pontoon([2.0, 0.0, 0.0])], [0.0; 3], 0.0, 0.0);
         assert!(carried.force[0] > 1e-3, "the current does not push: {:?}", carried.force);
         assert_eq!(carried.force[2], 0.0, "a current along X pushes along Z");
 
         // And it pushes *harder* when it runs faster, which is what makes
         // `FlowField::speed` a knob rather than a switch.
-        let faster = solve(&water, None, &buoyancy, &[pontoon([4.0, 0.0, 0.0])], [0.0; 3], 0.0);
+        let faster = solve(&water, None, &buoyancy, &[pontoon([4.0, 0.0, 0.0])], [0.0; 3], 0.0, 0.0);
         assert!(
             (faster.force[0] - 2.0 * carried.force[0]).abs() < 1e-3,
             "drag against the current is not linear: {} then {}",
@@ -682,8 +782,8 @@ mod tests {
             })
             .collect();
 
-        let a = solve(&water, None, &Buoyancy::default(), &pontoons, [0.0; 3], 3.5);
-        let b = solve(&water, None, &Buoyancy::default(), &pontoons, [0.0; 3], 3.5);
+        let a = solve(&water, None, &Buoyancy::default(), &pontoons, [0.0; 3], 0.0, 3.5);
+        let b = solve(&water, None, &Buoyancy::default(), &pontoons, [0.0; 3], 0.0, 3.5);
         assert_eq!(a.force[1].to_bits(), b.force[1].to_bits());
         assert_eq!(a.torque[0].to_bits(), b.torque[0].to_bits());
     }
@@ -709,10 +809,10 @@ mod tests {
         };
 
         // Well clear of the water, on it, and well under it.
-        assert_eq!(solve(&water, None, &buoyancy, &at(6.0), [0.0; 3], 0.0).submerged, 0.0);
-        let half = solve(&water, None, &buoyancy, &at(0.0), [0.0; 3], 0.0).submerged;
+        assert_eq!(solve(&water, None, &buoyancy, &at(6.0), [0.0; 3], 0.0, 0.0).submerged, 0.0);
+        let half = solve(&water, None, &buoyancy, &at(0.0), [0.0; 3], 0.0, 0.0).submerged;
         assert!((half - 0.5).abs() < 1e-5, "spheres centred on the surface: {half}");
-        assert_eq!(solve(&water, None, &buoyancy, &at(-6.0), [0.0; 3], 0.0).submerged, 1.0);
+        assert_eq!(solve(&water, None, &buoyancy, &at(-6.0), [0.0; 3], 0.0, 0.0).submerged, 1.0);
 
         // And it is the *fraction of the body*, not of the wet pontoons: two
         // corners under and two out is half a body, not a whole one.
@@ -720,7 +820,7 @@ mod tests {
         for (index, state) in tilted.iter_mut().enumerate() {
             state.at[1] = if index < 2 { -6.0 } else { 6.0 };
         }
-        let split = solve(&water, None, &buoyancy, &tilted, [0.0; 3], 0.0).submerged;
+        let split = solve(&water, None, &buoyancy, &tilted, [0.0; 3], 0.0, 0.0).submerged;
         assert!((split - 0.5).abs() < 1e-5, "two of four under is half: {split}");
     }
 
@@ -729,7 +829,7 @@ mod tests {
     /// every script that reads it.
     #[test]
     fn a_body_with_no_pontoons_is_dry_rather_than_nan() {
-        let w = solve(&still(), None, &Buoyancy::default(), &[], [0.0; 3], 0.0);
+        let w = solve(&still(), None, &Buoyancy::default(), &[], [0.0; 3], 0.0, 0.0);
 
         assert_eq!(w.submerged, 0.0);
         assert!(w.submerged.is_finite());
@@ -812,6 +912,361 @@ mod tests {
             "a single threshold should chatter, and this test proves nothing if \
              it does not: {} changes",
             single.len()
+        );
+    }
+
+
+    /// **JIB VI's sixteen pontoons**, as `assets/prefabs/jib_vi.loom` solves
+    /// them from her section curve: eight pairs, one per slab of equal
+    /// displaced volume, each pair reproducing that slab's displacement *and*
+    /// its waterplane area. `(offset, radius)` in the body's own frame.
+    ///
+    /// **Copied, and the copy is the point.** The three tests below are
+    /// closed-form predictions about a hull of this shape; reading the scene
+    /// would make them fail the day somebody re-solves the boat, which is the
+    /// coupling that makes a physics test useless as a bound. Her own numbers
+    /// are asserted in the prefab.
+    const JIB_VI: [([f32; 3], f32); 16] = [
+        ([-5.9109, 0.2683, -1.1518], 1.3462),
+        ([-5.9109, 0.2683, 1.1518], 1.3462),
+        ([-3.859, -0.0247, -1.2271], 1.1859),
+        ([-3.859, -0.0247, 1.2271], 1.1859),
+        ([-2.1885, -0.1309, -1.2711], 1.1364),
+        ([-2.1885, -0.1309, 1.2711], 1.1364),
+        ([-0.6905, -0.1917, -1.2959], 1.1104),
+        ([-0.6905, -0.1917, 1.2959], 1.1104),
+        ([0.7407, -0.2109, -1.2908], 1.1025),
+        ([0.7407, -0.2109, 1.2908], 1.1025),
+        ([2.1844, -0.2104, -1.2481], 1.1027),
+        ([2.1844, -0.2104, 1.2481], 1.1027),
+        ([3.7571, -0.1602, -1.1291], 1.1236),
+        ([3.7571, -0.1602, 1.1291], 1.1236),
+        ([5.9667, 0.058, -0.7255], 1.2278),
+        ([5.9667, 0.058, 0.7255], 1.2278),
+    ];
+
+    /// Her mass, from the prefab: the hull's own measured displacement.
+    const JIB_VI_MASS: f32 = 57_636.0;
+
+    /// The hull rigid, at heave `y` and heel `phi` radians about +X, in still
+    /// water at `y = 0`. Nothing is moving unless `heave_rate` says so.
+    fn jib_vi_at(y: f32, phi: f32, heave_rate: f32) -> Vec<PontoonState> {
+        JIB_VI
+            .iter()
+            .map(|(offset, radius)| {
+                let (s, c) = phi.sin_cos();
+                PontoonState {
+                    at: [
+                        offset[0],
+                        y + offset[1] * c - offset[2] * s,
+                        offset[1] * s + offset[2] * c,
+                    ],
+                    radius: *radius,
+                    velocity: [0.0, heave_rate, 0.0],
+                    ground: DEEP,
+                    flow: [0.0; 3],
+                    wavelet: [0.0; 3],
+                }
+            })
+            .collect()
+    }
+
+    /// **The added mass is derived, not authored**: half the water each
+    /// pontoon has pushed aside, which is the exact potential-flow answer for
+    /// a sphere and therefore has no coefficient in it at all.
+    ///
+    /// Checked at the two ends and in between, because `½ρV` is only worth
+    /// asserting if `V` is the *wetted* volume: a body in the air drags
+    /// nothing, and a body wholly under drags half of its whole self.
+    #[test]
+    fn the_added_mass_is_half_the_water_the_hull_has_pushed_aside() {
+        let water = still();
+        let buoyancy = Buoyancy::default();
+        let mass_at = |y: f32| {
+            solve(
+                &water,
+                None,
+                &buoyancy,
+                &jib_vi_at(y, 0.0, 0.0),
+                [0.0; 3],
+                JIB_VI_MASS,
+                0.0,
+            )
+        };
+
+        assert_eq!(mass_at(40.0).added_mass, 0.0, "in the air she drags nothing");
+
+        // At her designed line the set displaces the hull's own 57.636 m^3, so
+        // half of it is 29.5 t of this fixture's sea water against 57.6 t of
+        // boat — the "of order one times displacement" a hull's heave added
+        // mass is known to be.
+        let designed = mass_at(0.0);
+        assert!(
+            (designed.added_mass - 0.5 * water.density * 57.636).abs() < 60.0,
+            "half of 57.636 m^3 at density {}: {}",
+            water.density,
+            designed.added_mass
+        );
+
+        // Wholly under, the sixteen whole spheres are 108.0 m^3, so the water
+        // she carries is very nearly her own mass.
+        let under = mass_at(-30.0);
+        let whole: f32 = JIB_VI
+            .iter()
+            .map(|(_, r)| 4.0 / 3.0 * std::f32::consts::PI * r.powi(3))
+            .sum();
+        assert!(
+            (under.added_mass - 0.5 * water.density * whole).abs() < 60.0,
+            "{} against half of {whole} m^3",
+            under.added_mass
+        );
+    }
+
+    /// **The added mass changes the response and not the waterline**, which
+    /// is the check on the algebra rather than on the physics.
+    ///
+    /// `F_applied = κ·F_water + (κ−1)·m·g`, so the *net* of applied force and
+    /// gravity is `κ·(F_water + m·g)` — scaled everywhere, and zero exactly
+    /// where it was zero. A hull therefore settles at the draft the pontoon
+    /// set says she does, however much water she is carrying, and Task 2 does
+    /// not have to be re-argued. Bisected rather than asserted at a point,
+    /// because "the zero has not moved" is the claim.
+    #[test]
+    fn the_added_mass_moves_the_response_and_not_the_waterline() {
+        let water = still();
+        let buoyancy = Buoyancy {
+            damp_linear: 0.0,
+            damp_quadratic: 0.0,
+            ..Buoyancy::default()
+        };
+        // The net a body of JIB VI's weight feels at heave `y`, when the solver
+        // is told her mass is `told`.
+        let net = |y: f32, told: f32| {
+            solve(&water, None, &buoyancy, &jib_vi_at(y, 0.0, 0.0), [0.0; 3], told, 0.0).force[1]
+                - JIB_VI_MASS * GRAVITY
+        };
+        let settles = |told: f32| {
+            let (mut low, mut high) = (-2.0_f32, 2.0_f32);
+            for _ in 0..60 {
+                let mid = 0.5 * (low + high);
+                // Deeper is more lift, so the net falls as `y` rises.
+                if net(mid, told) > 0.0 { low = mid } else { high = mid }
+            }
+            0.5 * (low + high)
+        };
+
+        let bare = settles(0.0);
+        let carried = settles(JIB_VI_MASS);
+        assert!(
+            (carried - bare).abs() < 1.0e-4,
+            "the waterline moved with the added mass: {carried} against {bare}"
+        );
+        // And the response *did* change: a metre down, the net that drives her
+        // back up is smaller by exactly κ.
+        let (deep_bare, deep_carried) = (net(-1.0, 0.0), net(-1.0, JIB_VI_MASS));
+        let added = solve(
+            &water,
+            None,
+            &buoyancy,
+            &jib_vi_at(-1.0, 0.0, 0.0),
+            [0.0; 3],
+            JIB_VI_MASS,
+            0.0,
+        )
+        .added_mass;
+        let kappa = JIB_VI_MASS / (JIB_VI_MASS + added);
+        assert!(
+            (deep_carried - kappa * deep_bare).abs() < 1.0,
+            "{deep_carried} against κ·{deep_bare} with κ = {kappa}"
+        );
+    }
+
+    /// **The heave natural period is the one the section table predicts** —
+    /// `T = 2π√((m + m_a)/(ρgA_w))`, and this is the test that would have
+    /// caught the original defect.
+    ///
+    /// The hull is released 5 cm above her designed line and integrated
+    /// semi-implicit Euler at the engine's own 1/60 s, which is what rapier
+    /// does to a free body under an applied force. Damping is turned down to
+    /// 0.2 for the measurement and for no other reason: at the shipped 4.0 the
+    /// motion is nearly critically damped and a period is not observable in
+    /// it. The period is a property of mass and stiffness, not of damping.
+    ///
+    /// **It fails without the added mass**, which is the only thing that makes
+    /// it worth writing: 57.6 t alone predicts 1.86 s, 57.6 + 28.8 predicts
+    /// 2.28 s, and the engine measures 2.22 s.
+    #[test]
+    fn the_heave_period_is_the_one_the_section_table_predicts() {
+        const DT: f32 = 1.0 / 60.0;
+        let water = still();
+        let buoyancy = Buoyancy {
+            damp_linear: 0.2,
+            damp_quadratic: 0.0,
+            ..Buoyancy::default()
+        };
+
+        let mut y = 0.05_f32;
+        let mut v = 0.0_f32;
+        let mut extrema: Vec<u32> = Vec::new();
+        let (mut last, mut prev_rise) = (y, 0.0_f32);
+        for tick in 0..900_u32 {
+            let mut states = jib_vi_at(y, 0.0, v);
+            for state in &mut states {
+                state.velocity = [0.0, v, 0.0];
+            }
+            let w = solve(&water, None, &buoyancy, &states, [0.0; 3], JIB_VI_MASS, 0.0);
+            // Semi-implicit Euler, gravity and the water in one step.
+            v += DT * (w.force[1] / JIB_VI_MASS - GRAVITY);
+            y += DT * v;
+            let rise = y - last;
+            if tick > 1 && rise * prev_rise < 0.0 {
+                extrema.push(tick);
+            }
+            prev_rise = rise;
+            last = y;
+        }
+
+        assert!(extrema.len() >= 4, "she did not oscillate: {extrema:?}");
+        // The first three half-cycles, before the drift the integrator's own
+        // rectification puts into a long run — see `assets/prefabs/jib_vi.loom`.
+        let halves: Vec<f32> = extrema
+            .windows(2)
+            .take(3)
+            .map(|w| f32::from(u16::try_from(w[1] - w[0]).unwrap_or(u16::MAX)) * DT)
+            .collect();
+        let measured = 2.0 * halves.iter().sum::<f32>() / 3.0;
+
+        // The closed form, from the section table: the set's own displacement
+        // and its own waterplane area, both read off the same spheres.
+        let (mut volume, mut waterplane) = (0.0_f32, 0.0_f32);
+        for (offset, r) in JIB_VI {
+            volume += submerged_volume(r, offset[1], 0.0);
+            waterplane += std::f32::consts::PI * (r * r - offset[1] * offset[1]).max(0.0);
+        }
+        let stiffness = water.density * GRAVITY * waterplane;
+        let with = std::f32::consts::TAU
+            * ((JIB_VI_MASS + 0.5 * water.density * volume) / stiffness).sqrt();
+        let without = std::f32::consts::TAU * (JIB_VI_MASS / stiffness).sqrt();
+
+        assert!(
+            (measured - with).abs() < 0.15,
+            "heave period {measured} s against the closed form's {with} s \
+             (A_w {waterplane} m^2, V {volume} m^3)"
+        );
+        // And the mutation: the same run with no added mass would land on
+        // `without`, which this bound excludes by a wide margin.
+        assert!(
+            (measured - without).abs() > 0.25,
+            "the period is indistinguishable from the one with no added mass \
+             ({without} s) — the term is not reaching the response"
+        );
+    }
+
+    /// **A hull riding a crest is not damped against the seabed**, which is
+    /// the defect that let her be held under a twenty-foot sea.
+    ///
+    /// Two pontoons in identical water, one still and one moving upward at
+    /// exactly the water's own vertical velocity. The second is going *with*
+    /// the water, so the water must not be resisting it.
+    #[test]
+    fn a_hull_moving_with_the_water_is_not_damped_by_it() {
+        let mut water = WaterBody {
+            drag: 0.0,
+            ..WaterBody::default()
+        };
+        water.waves.waves.push(GerstnerWave {
+            wavelength: 90.0,
+            amplitude: 3.0,
+            steepness: 0.3,
+            direction: [1.0, 0.0],
+            speed_scale: 1.0,
+        });
+        let buoyancy = Buoyancy {
+            coefficient: 0.0, // buoyancy off, so only the damping shows
+            damp_linear: 4.0,
+            damp_quadratic: 1.0,
+            ..Buoyancy::default()
+        };
+        // Off the origin and off the crest, where the orbital motion is
+        // genuinely vertical rather than zero.
+        let at = [11.0, -1.0, 0.0];
+        let rising = sample_water(&water, None, [at[0], at[2]], 0.0, DEEP, [0.0; 3], [0.0; 3])
+            .velocity[1];
+        assert!(rising.abs() > 0.2, "the fixture has no vertical motion: {rising}");
+
+        let pontoon = |vy: f32| PontoonState {
+            at,
+            radius: 1.5,
+            velocity: [0.0, vy, 0.0],
+            ground: DEEP,
+            flow: [0.0; 3],
+            wavelet: [0.0; 3],
+        };
+        let force = |vy: f32| {
+            solve(&water, None, &buoyancy, &[pontoon(vy)], [0.0; 3], 0.0, 0.0).force[1]
+        };
+
+        assert!(
+            force(rising).abs() < 1.0,
+            "a pontoon travelling with the water is being damped: {}",
+            force(rising)
+        );
+        // And one held still while the water rises past it is dragged along
+        // with it, which is the same term doing the job it exists for.
+        assert!(
+            force(0.0) * rising > 0.0 && force(0.0).abs() > 1.0,
+            "still water rising past a still body does nothing: {}",
+            force(0.0)
+        );
+    }
+
+    /// **The righting arm stays positive through the working range** — the
+    /// fourth acceptance of `docs/design/SEA-BOAT-PLAN.md`.
+    ///
+    /// Heeled about +X in one-degree steps and released, the pontoon set has
+    /// to push back the whole way: a torque about −X (the right-hand rule's
+    /// answer for a hull rolled toward +Z) at every angle out to sixty
+    /// degrees, and `GZ = torque / (m·g)` at its largest somewhere in the
+    /// middle rather than at the origin.
+    ///
+    /// Free of the added mass by construction, because that term is on the
+    /// force alone — which is one of the reasons it is.
+    #[test]
+    fn the_righting_arm_is_positive_through_the_working_range() {
+        let water = still();
+        let buoyancy = Buoyancy {
+            damp_linear: 0.0,
+            damp_quadratic: 0.0,
+            ..Buoyancy::default()
+        };
+        let mut best = (0.0_f32, 0.0_f32);
+        for degrees in 1_u8..=60 {
+            let phi = f32::from(degrees).to_radians();
+            let w = solve(
+                &water,
+                None,
+                &buoyancy,
+                &jib_vi_at(0.0, phi, 0.0),
+                [0.0; 3],
+                JIB_VI_MASS,
+                0.0,
+            );
+            // Rolled toward +Z, so the righting torque is about −X.
+            let gz = -w.torque[0] / (JIB_VI_MASS * GRAVITY);
+            assert!(
+                gz > 0.0,
+                "GZ went negative at {degrees} deg: {gz} m (torque {:?})",
+                w.torque
+            );
+            if gz > best.1 {
+                best = (f32::from(degrees), gz);
+            }
+        }
+        assert!(
+            best.0 > 5.0 && best.0 < 60.0,
+            "the largest righting arm is at {} deg, which is an end of the \
+             sweep rather than a maximum inside it",
+            best.0
         );
     }
 
