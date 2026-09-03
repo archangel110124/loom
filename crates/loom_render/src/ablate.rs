@@ -36,6 +36,7 @@ pub const ABLATIONS: &[(&str, u32)] = &[
     ("ocean_spectrum", 1 << 1),
     ("water_glow", 1 << 2),
     ("spray_haze", 1 << 3),
+    ("spray_droplets", 1 << 4),
 ];
 
 /// The bit for whitecap and swash foam on the water surface.
@@ -83,6 +84,24 @@ pub const WATER_GLOW: u32 = 1 << 2;
 /// [`ABLATIONS`] above; nothing checks that these two agree.
 pub const SPRAY_HAZE: u32 = 1 << 3;
 
+/// The bit for the thrown spray droplets — the particles a breaking crest launches.
+///
+/// **The one ablation with no `LOOM_ABLATE_` constant in `scene.slang`, and that is not an
+/// oversight.** Every other effect here is a term in a shader; this one is a CPU particle
+/// population built in `loom_cli::particles::spray`, so the switch is an early return
+/// there rather than a branch the GPU takes. The warning on [`ABLATIONS`] about keeping
+/// the Slang constant in step does not apply — there is nothing to keep it in step with,
+/// and adding one would create the mismatch it warns about.
+///
+/// It is read through [`mask`] rather than [`ablation_mask`], off the same `OnceLock`, so
+/// the CPU and the shader cannot disagree about what this process is ablating.
+///
+/// Ablating it removes the droplets and leaves the haze alone — the two halves of spray
+/// are separately measurable, which is the point of splitting them: a medium and a
+/// particle population fail in different ways, and one covering for the other is exactly
+/// the false negative this harness exists to catch.
+pub const SPRAY_DROPLETS: u32 = 1 << 4;
+
 /// Parse a `LOOM_ABLATE` value into a mask.
 ///
 /// Comma-separated, whitespace around each name ignored, repeats idempotent. `None` and
@@ -106,25 +125,34 @@ pub fn parse_ablations(spec: Option<&str>) -> Result<u32, String> {
     Ok(mask)
 }
 
-/// The mask this process is running with, for `viewport.w`.
+/// The mask this process is running with.
 ///
 /// Read once, like [`crate::renderer::ao_rays`] and for the same reason: nothing polls it,
 /// and re-reading the environment per frame would be a syscall in the hot path for a value
 /// that cannot change.
 ///
-/// **Panics** on an unknown name, at the first frame, with the list of valid ones. A
-/// measurement tool that carried on after being misconfigured would report a number
-/// nobody could trust.
-pub(crate) fn ablation_mask() -> f32 {
+/// **Public, because not every ablatable effect is a shader term.** [`SPRAY_DROPLETS`] is a
+/// CPU particle population, and its switch is an early return in `loom_cli`. Sharing this
+/// `OnceLock` rather than parsing `LOOM_ABLATE` a second time over there is what stops the
+/// two halves of the frame disagreeing about what is being measured.
+///
+/// **Panics** on an unknown name, at first use, with the list of valid ones. A measurement
+/// tool that carried on after being misconfigured would report a number nobody could trust.
+pub fn mask() -> u32 {
     static MASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    #[allow(clippy::cast_precision_loss)]
-    let mask = *MASK.get_or_init(|| {
-        match parse_ablations(std::env::var("LOOM_ABLATE").ok().as_deref()) {
+    *MASK.get_or_init(
+        || match parse_ablations(std::env::var("LOOM_ABLATE").ok().as_deref()) {
             Ok(mask) => mask,
             Err(message) => panic!("{message}"),
-        }
-    });
-    mask as f32
+        },
+    )
+}
+
+/// The same mask as [`mask`], carried to the shader in `viewport.w`.
+pub(crate) fn ablation_mask() -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    let carried = mask() as f32;
+    carried
 }
 
 #[cfg(test)]
@@ -144,6 +172,7 @@ mod tests {
         assert_eq!(parse_ablations(Some("ocean_spectrum")), Ok(OCEAN_SPECTRUM));
         assert_eq!(parse_ablations(Some("water_glow")), Ok(WATER_GLOW));
         assert_eq!(parse_ablations(Some("spray_haze")), Ok(SPRAY_HAZE));
+        assert_eq!(parse_ablations(Some("spray_droplets")), Ok(SPRAY_DROPLETS));
         assert_eq!(
             parse_ablations(Some("water_foam,ocean_spectrum")),
             Ok(WATER_FOAM | OCEAN_SPECTRUM)

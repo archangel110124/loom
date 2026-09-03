@@ -1428,7 +1428,29 @@ const GOLDEN_SIZE: &str = "320x200";
 /// the loudest sea in the repository by amplitude — `mean` 18.7 against `lucent`'s 3.42 —
 /// which is the property `ABLATE` rows are chosen on.
 ///
-const ABLATE: [(&str, &str, &str, &[&str], f64); 4] = [
+/// **`heave` / `spray_droplets`.** The thrown droplets a breaking crest launches — the
+/// other half of spray, and the half that is CPU particles rather than a shader term.
+/// Measured at `GOLDEN_SIZE`: `loom render assets/test/heave.loom --sim 405 --size 320x200`
+/// with and without `LOOM_ABLATE=spray_droplets`, then `loom compare`, gives
+/// `fraction = 0.0745` (`differing` 4768 of 64000, `worst` 120). 0.035 is roughly half of
+/// that, on the same rule every row above uses.
+///
+/// **This row is on `heave` and at tick 405 specifically, and neither is arbitrary.**
+/// `heave` is one Gerstner wave with a 9.000 s period, built so that spray has a scene
+/// whose maximum is a known instant rather than whatever a storm happened to be doing;
+/// 405 of every 540 is its crest, where the population peaks at 15,414 droplets against
+/// 378 in the trough. A gate belongs at an effect's strongest moment — that is when its
+/// absence is loudest. Measured against the alternatives at their own registered ticks:
+/// `lucent` 0.0480 and `spindrift` 0.0147, both under half this. **And the tick is held by
+/// a test, not by this comment**: `heave_peaks_at_the_tick_its_header_names` asserts it, so
+/// a wave phase that drifts fails there, naming the cause, instead of failing here as an
+/// effect that appears to have stopped drawing.
+///
+/// **The one row whose effect has no `LOOM_ABLATE_` constant in `scene.slang`**, because
+/// the switch is an early return in `loom_cli::particles::spray` rather than a branch the
+/// GPU takes. See `loom_render::ablate::SPRAY_DROPLETS`.
+///
+const ABLATE: [(&str, &str, &str, &[&str], f64); 5] = [
     (
         "whitecaps",
         "assets/test/whitecaps.loom",
@@ -1456,6 +1478,13 @@ const ABLATE: [(&str, &str, &str, &[&str], f64); 4] = [
         "spray_haze",
         &["--sim", "400"],
         0.28,
+    ),
+    (
+        "heave",
+        "assets/test/heave.loom",
+        "spray_droplets",
+        &["--sim", "405"],
+        0.035,
     ),
 ];
 

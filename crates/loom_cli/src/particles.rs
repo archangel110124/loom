@@ -849,6 +849,19 @@ pub(crate) fn spray(
     eye: [f32; 3],
     seconds: f32,
 ) -> Vec<ParticleInstance> {
+    // **Ablated here, above the call, and not by discarding what it returns.** The
+    // block below warns when a frame throws nothing, and an ablated run throws nothing
+    // by construction — so filtering afterwards would print "this sea is not breaking"
+    // about a sea that is breaking fine, which is the measurement tool manufacturing
+    // exactly the false report it exists to catch. Returning early also means the
+    // ablated frame does not pay for the population it is about to drop.
+    //
+    // The bit comes off `loom_render`'s own `OnceLock`, so the droplets and the shader
+    // read one parse of `LOOM_ABLATE` — see `ablate::SPRAY_DROPLETS`, which is the one
+    // ablation with no Slang half.
+    if loom_render::ablate::mask() & loom_render::ablate::SPRAY_DROPLETS != 0 {
+        return Vec::new();
+    }
     let droplets = loom_water::spray::spray(water, sea, wind, eye, seconds, ground);
     if droplets.is_empty() {
         // **A sea too gentle to break can never spray, and nothing else would say
