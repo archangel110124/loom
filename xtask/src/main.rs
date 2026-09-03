@@ -1407,7 +1407,28 @@ const GOLDEN_SIZE: &str = "320x200";
 /// worst channel goes 57 → 117 and the zero-tolerance area 15.4% → 16.8%, because a
 /// young spectrum sea presents far steeper faces to a 6.9° sun than three waves did.
 /// Both sides byte-identical across two runs.
-const ABLATE: [(&str, &str, &str, &[&str], f64); 3] = [
+///
+/// **`lucent` / `water_glow` now measures 0.081, and the floor still does not move.** The
+/// spray haze veils part of the backlit sea, so ablating the subsurface term changes less
+/// of the frame than it did: 0.105 → 0.081, against a floor of 0.05. Recorded here rather
+/// than acted on — the row is measuring the same term through a hazier medium, which is
+/// what the scene now looks like.
+///
+/// **`ocean_fft_storm` / `spray_haze`.** The sea-spray haze, measured at `GOLDEN_SIZE`:
+/// `loom render assets/test/ocean_fft_storm.loom --sim 400 --size 320x200` with and without
+/// `LOOM_ABLATE=spray_haze`, then `loom compare`, gives `fraction = 0.5683125`
+/// (`differing` 36372 of 64000, `mean` 18.70, `worst` 102). Both sides byte-identical
+/// across two runs. 0.28 is roughly half of that, on the same rule the three rows above use.
+///
+/// **This row is on `ocean_fft_storm` and not on `whitecaps`, and the reason is Monahan.**
+/// The haze goes as `U10^3.41`, which spans four orders across this repository's seas —
+/// `whitecaps` at U10 16.4 measures **0.00525**, nineteen times below `lucent`'s 0.681 and a
+/// hundred below this row. A gate parked on a Beaufort 7 scene would sit under any floor
+/// worth having and would pass on an effect that had stopped drawing everywhere. This is
+/// the loudest sea in the repository by amplitude — `mean` 18.7 against `lucent`'s 3.42 —
+/// which is the property `ABLATE` rows are chosen on.
+///
+const ABLATE: [(&str, &str, &str, &[&str], f64); 4] = [
     (
         "whitecaps",
         "assets/test/whitecaps.loom",
@@ -1428,6 +1449,13 @@ const ABLATE: [(&str, &str, &str, &[&str], f64); 3] = [
         "water_glow",
         &["--sim", "300"],
         0.05,
+    ),
+    (
+        "ocean_fft_storm",
+        "assets/test/ocean_fft_storm.loom",
+        "spray_haze",
+        &["--sim", "400"],
+        0.28,
     ),
 ];
 

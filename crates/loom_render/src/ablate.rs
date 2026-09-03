@@ -31,8 +31,12 @@
 ///
 /// Bits are assigned explicitly rather than by position, so reordering this table cannot
 /// silently repoint an existing name at a different effect.
-pub const ABLATIONS: &[(&str, u32)] =
-    &[("water_foam", 1 << 0), ("ocean_spectrum", 1 << 1), ("water_glow", 1 << 2)];
+pub const ABLATIONS: &[(&str, u32)] = &[
+    ("water_foam", 1 << 0),
+    ("ocean_spectrum", 1 << 1),
+    ("water_glow", 1 << 2),
+    ("spray_haze", 1 << 3),
+];
 
 /// The bit for whitecap and swash foam on the water surface.
 ///
@@ -65,6 +69,19 @@ pub const OCEAN_SPECTRUM: u32 = 1 << 1;
 /// Must equal `LOOM_ABLATE_WATER_GLOW` in `assets/shaders/scene.slang` — see the warning on
 /// [`ABLATIONS`] above; nothing checks that these two agree.
 pub const WATER_GLOW: u32 = 1 << 2;
+
+/// The bit for the wind-blown sea-spray haze — the second exponential layer in
+/// `fogAmount`.
+///
+/// Ablating it skips that layer's optical depth and leaves the atmosphere term untouched,
+/// so what is measured is the haze alone. **The registered scene is `ocean_fft_storm`**:
+/// Monahan's `U10^3.41` spans four orders across this repository's seas, so the gate has to
+/// sit on a storm or it would pass on an effect that had stopped drawing everywhere below
+/// a gale — `whitecaps`, at U10 16.4, moves 0.5% of its frame.
+///
+/// Must equal `LOOM_ABLATE_SPRAY_HAZE` in `assets/shaders/scene.slang` — see the warning on
+/// [`ABLATIONS`] above; nothing checks that these two agree.
+pub const SPRAY_HAZE: u32 = 1 << 3;
 
 /// Parse a `LOOM_ABLATE` value into a mask.
 ///
@@ -126,6 +143,7 @@ mod tests {
         assert_eq!(parse_ablations(Some("water_foam")), Ok(WATER_FOAM));
         assert_eq!(parse_ablations(Some("ocean_spectrum")), Ok(OCEAN_SPECTRUM));
         assert_eq!(parse_ablations(Some("water_glow")), Ok(WATER_GLOW));
+        assert_eq!(parse_ablations(Some("spray_haze")), Ok(SPRAY_HAZE));
         assert_eq!(
             parse_ablations(Some("water_foam,ocean_spectrum")),
             Ok(WATER_FOAM | OCEAN_SPECTRUM)

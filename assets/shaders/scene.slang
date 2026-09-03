@@ -852,6 +852,99 @@ float valueNoise(float2 p) {
 /// How fast density decays with altitude, per metre. The scale height is its
 /// reciprocal — about 33 m here, so a hill twice that stands well clear.
 
+/// How fast the spray haze thins with height above the waterline, per metre.
+///
+/// The reciprocal is the scale height — **1.5 m**, against the atmosphere's
+/// ~33 m, and that ratio is the whole reason this is a second layer rather
+/// than a bigger `fog_density`. Wind-blown spray is a skin on the sea: a ship's
+/// bridge at 7 m stands in 1% of the density its waterline sits in, so the
+/// horizon whites out while the sky above it stays clean. One layer cannot do
+/// both, because one layer has one scale height.
+static const float SPRAY_HAZE_FALLOFF = 1.0 / 1.5;
+
+/// Extinction per metre at the waterline, per unit of Monahan whitecap coverage.
+///
+/// **Monahan gives coverage, not extinction**, so this is the factor that turns
+/// one into the other, and it is the look dial for the whole effect. The
+/// physical anchor is the fine droplet tail: 10 um mist carries beta ~ 0.15/m
+/// while the 500 um spume a particle system would draw carries ~3e-3 — two
+/// orders apart, which is why the white-out is a medium and not sprites.
+///
+/// **That anchor is 10x too strong for this engine, and the frames are what
+/// said so.** 0.20 puts `lucent` (W = 0.71) at exactly 0.15/m and the sea is
+/// gone: `ocean_fft_storm` renders as a white sheet with a ship's mast and one
+/// crest standing out of it. 0.03 still flattens its near-left trough into a
+/// featureless slab — which is the "the winning variant won by deleting the
+/// subject" failure this project has already paid a night for once. Four values
+/// were rendered at 640x400 and looked at, `--sim` as `GOLDEN`; against the
+/// unhazed tree, `loom compare` at its default tolerance:
+///
+/// ```text
+///        ocean_fft_storm (U10 25)   lucent (U10 35)   whitecaps (U10 16.4)
+///        frac   mean   worst        frac   mean       frac     mean  worst
+/// 0.20   0.590  27.00  119          0.760  17.04      0.697    2.96   26
+/// 0.02   0.568  19.06  103          0.678   3.44      0.0059   0.32   15
+/// ```
+///
+/// **0.02 is where mist lies in the troughs and the crests stay legible.** 0.03
+/// erases the mid-ground; 0.01 is barely a veil at Beaufort 10.
+///
+/// **`whitecaps` is nearly untouched and that is Monahan, not a bug.** Its U10
+/// of 16.4 is 5.3% whitecap coverage against `lucent`'s 70.6% — a 13x span the
+/// 3.41 power puts there. Beaufort 7 is a brisk sea and not a storm, so the
+/// scene that reads as a white-out here is `ocean_fft_storm` and nothing
+/// milder. Any future tuning of this number has to be judged on that scene and
+/// on a calm one together; raising it until `whitecaps` hazes takes the storm
+/// back to a white sheet.
+static const float SPRAY_HAZE_EXTINCT = 0.02;
+
+/// Extinction per metre at the waterline from wind-blown spray.
+///
+/// Monahan and O'Muircheartaigh's whitecap relation, `W = 3.84e-6 * U10^3.41`,
+/// which this file already cites where the foam thresholds are calibrated. The
+/// cube-and-a-half law is what makes a dead-calm sea free: it is not clamped or
+/// gated to keep `pool` clear, it is 1e-6 there because the wind is 0.9 m/s.
+///
+/// **`wind.z` is the free-stream speed and NOT U10.** The height profile is
+/// `ground_drag + (1 - ground_drag) * h/(h+2)` (`loom_field::wind`), so at the
+/// meteorological 10 m the field is ~0.908 of what the scene authored, and
+/// feeding the raw value to a 3.41 power would over-read the haze by 40%.
+/// `weather.y` is that drag, so the conversion is exact rather than the 0.908
+/// the scene comments quote for their own authored drag.
+///
+/// **Zero unless the scene has water**, which is what keeps every non-water
+/// reference bit-identical: the caller skips the layer entirely rather than
+/// adding a zero, so no exponential of a depth below a waterline that does not
+/// exist can reach the sum.
+float sprayHaze() {
+    if (!waterPresent()) {
+        return 0.0;
+    }
+    float drag = push.environment[0].weather.y;
+    float u10 = abs(push.environment[0].wind.z) * (drag + (1.0 - drag) * (10.0 / 12.0));
+    return SPRAY_HAZE_EXTINCT * 3.84e-6 * pow(u10, 3.41);
+}
+
+/// Optical depth along a ray through one exponentially-decaying layer.
+///
+/// `density * exp(-falloff * (y - baseY))` integrated from `from` to `to` — the
+/// closed form, not a march. **Two layers compose by summing their depths**,
+/// because optical depth is what is additive; transmittances multiply and
+/// `1 - exp(-(a+b))` is exactly that product. That is the whole mechanism by
+/// which the spray sits on top of the atmosphere with no new maths.
+float fogLayerDepth(float density, float falloff, float baseY, float fromY,
+                    float riseRate, float distance) {
+    float atOrigin = density * exp(-falloff * (fromY - baseY));
+    // A near-horizontal ray stays at one altitude, and the general form
+    // divides by the climb rate — which for that ray is zero. The limit is
+    // just constant density times distance.
+    if (abs(riseRate) < 1e-4) {
+        return atOrigin * distance;
+    }
+    float climb = falloff * riseRate;
+    return atOrigin * (1.0 - exp(-climb * distance)) / climb;
+}
+
 /// Fraction of a surface's colour replaced by fog, for a ray between two
 /// points.
 ///
@@ -895,17 +988,31 @@ float3 fogAmount(float3 from, float3 to) {
     }
 
     float riseRate = delta.y / distance;
-    float atOrigin = fogDensity() * exp(-fogFalloff() * from.y);
 
-    float depth;
-    // A near-horizontal ray stays at one altitude, and the general form
-    // divides by the climb rate — which for that ray is zero. The limit is
-    // just constant density times distance.
-    if (abs(riseRate) < 1e-4) {
-        depth = atOrigin * distance;
-    } else {
-        float climb = fogFalloff() * riseRate;
-        depth = atOrigin * (1.0 - exp(-climb * distance)) / climb;
+    // The atmosphere, based at y = 0. `baseY` is a literal zero here, so this
+    // is `exp(-fogFalloff() * from.y)` and every non-water frame is what it
+    // was, bit for bit.
+    float depth = fogLayerDepth(fogDensity(), fogFalloff(), 0.0, from.y, riseRate, distance);
+
+    // **Sea spray, based at the waterline.** A second exponential layer, summed
+    // in optical depth — see `fogLayerDepth`. **Skipped rather than added as a
+    // zero**: with no water in the scene there is no waterline, `stillWaterLevel()`
+    // is 0.0 by default and a ray far below it would exponentiate to infinity,
+    // and `0 * inf` is a NaN in a frame that is meant to be untouched.
+    float spray = sprayHaze();
+    if (spray > 0.0 && !ablated(LOOM_ABLATE_SPRAY_HAZE)) {
+        // **The origin is clamped to the waterline, and only for this layer.**
+        // `eyeUnderwater()` returned above, but `from` is not always the eye —
+        // a reflection ray starts on the surface it bounced off — and a scene
+        // may perch its water above the camera (a header pool feeding a
+        // cascade). Below the waterline the exponential runs the wrong way and
+        // 20 m under it is a factor of 7e5, which is a white frame. Spray is a
+        // skin ON the sea: `spray` is the most density there can be anywhere,
+        // so capping the origin there is the physical statement as well as the
+        // safe one. The atmosphere layer is untouched by this, which is what
+        // keeps a valley floor below y = 0 rendering exactly as before.
+        depth += fogLayerDepth(spray, SPRAY_HAZE_FALLOFF, stillWaterLevel(),
+                               max(from.y, stillWaterLevel()), riseRate, distance);
     }
     // One scalar splatted: air's extinction has no colour in this engine, and
     // splatting it is what keeps every above-water frame identical.
@@ -6398,6 +6505,20 @@ static const uint LOOM_ABLATE_OCEAN_SPECTRUM = 2u;
 /// never crosses `WATER_FOLD_REF`, so the old gate drew literally nothing there and a
 /// reference image of it would have recorded the absence and passed for ever.
 static const uint LOOM_ABLATE_WATER_GLOW = 4u;
+
+/// The bit for the wind-blown sea-spray haze — the second fog layer in `fogAmount`.
+///
+/// **Must equal `spray_haze`'s bit in `ABLATIONS`
+/// (`crates/loom_render/src/ablate.rs`)**, on exactly the warning above: this is the third
+/// of the three places that bit is written down and nothing checks the three agree.
+///
+/// Ablating it skips the spray layer's optical depth, leaving the atmosphere term alone —
+/// so what is measured is the haze and nothing else. **The registered scene is
+/// `ocean_fft_storm`**, whose U10 of 25 m/s makes it the loudest sea here by amplitude
+/// (`mean` 18.7 against `lucent`'s 3.42). Monahan's `U10^3.41` spans four orders across
+/// this repository's seas — `whitecaps` measures 0.5% of the frame — so a gate parked on
+/// anything below a gale would pass on an effect that had stopped drawing.
+static const uint LOOM_ABLATE_SPRAY_HAZE = 8u;
 
 bool ablated(uint bit) {
     return (uint(push.environment[0].viewport.w) & bit) != 0u;
