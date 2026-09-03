@@ -3429,7 +3429,31 @@ static const float FIRE_NYQUIST_HIGH = 0.50;
 /// of 255, and they are the stripes — and at 48 there are none. 64 is no better
 /// than 48. The cost is paid in flame pixels only and is measured in the commit
 /// message.
-static const int FIRE_STEPS = 48;
+///
+/// **48 was measured against the wrong artifact and 96 is the number.** The
+/// paragraph above compares 32 with 48 and asks about horizontal striations on
+/// the flanks; it never compared 48 with a converged march, and ADR 0020
+/// separately recorded the nested contour arcs inside a tongue as *unfixable* —
+/// "the domain warp's fold seen in depth… the only cure is lowering the fold
+/// amplitude, which is what the silhouette is made of."
+///
+/// **That attribution is false.** Rendered on `campfire` at 1920x1080, tick
+/// 120, with nothing else changed: at 48 the body carries the wood-grain rings;
+/// at 96 they are gone from the body and faint in one tongue; at 192 there is
+/// nothing. A property of the integral does not disappear when you sample the
+/// integral more finely — an aliasing artifact of the quadrature does. They ARE
+/// the fold, but as the march undersampling it, not as the answer it converges
+/// to: the warp's gradient multiplies the field's along-ray frequency by up to
+/// about 2.7, so the finest octave's period (0.11 m) falls to ~0.04 m in a
+/// folded region against a 48-step `dt` of 0.047 m — under Nyquist.
+///
+/// **Retiring the octave does not reach it, and that was measured too.**
+/// Tripling the step bound's safety factor (`dField` to 0.39) leaves the rings
+/// untouched, because `fireFbm` fades only its LAST octave and the middle one
+/// is under Nyquist in a fold as well. Replacing the trapezoid with the exact
+/// integral of the clamped ramp over each segment leaves them untouched for the
+/// same reason: the sub-step content is not linear, it is unresolved.
+static const int FIRE_STEPS = 96;
 /// The marched volume, as a fraction of `half_h`. **The quad's inscribed
 /// sphere, and that is arithmetic rather than taste** — `particleVertexMain`
 /// builds the quad as `right * spun.x + up * spun.y` scaled by `half_h` over
@@ -3522,7 +3546,13 @@ static const float FIRE_SOOT_H = 0.30;
 /// highlight rather than a core; at 0.90 nothing reaches it and the fire is one
 /// flat orange. 1.15 puts white above heat 0.87, which in these two scenes is
 /// the core alone.
-static const float FIRE_HEAT = 1.15;
+///
+/// **1.15 was calibrated against a `heat` that had no interior gradient**, and
+/// `FIRE_CORE_W` gave it one — which drops `heat` over the body by roughly the
+/// mean skin factor and would otherwise have left the whole fire down at the
+/// deep-orange rung with no core at all (rendered; it is a red lump). 1.90 puts
+/// the white rung back where the sentence above wants it: the core alone.
+static const float FIRE_HEAT = 1.90;
 /// Cooling with height and at the fuel line. Both are physical and neither
 /// falls out of the integral: a flame is dimmer and redder low down because it
 /// has not finished mixing, and cooler at the tip because it is running out.
@@ -3531,6 +3561,29 @@ static const float FIRE_HEAT = 1.15;
 static const float FIRE_TAU_H = 0.42;
 static const float FIRE_TAU_BASE = 0.45;
 static const float FIRE_TAU_BASE_H = 0.18;
+/// **How deep inside the level set a sample has to be to burn at full
+/// temperature**, in field units, and how cool the skin is at zero depth.
+///
+/// Without it the flame's body sat CLIPPED at the top of `fireRamp`. `hot`
+/// saturates at `FIRE_DENS_W` = 0.05, so every sample more than a twentieth of
+/// a field unit inside the tongue was the same temperature, `heat` came out at
+/// 0.85-1.0 over most of the fire, and `heat * FIRE_HEAT` then clamped: the
+/// five-rung ladder from ember through amber to white was being exercised only
+/// in a rim a few pixels wide. Rendered as a greyscale of `saturate(heat *
+/// FIRE_HEAT)`, `lanternhead`'s brazier is a flat white slab — which is exactly
+/// what it looked like in colour, an orange lump with a hard edge.
+///
+/// `s.e` is a signed distance from the level set and it is already computed, so
+/// depth costs one `lerp`. A ray clipping a tongue's flank crosses only skin, a
+/// ray down the middle crosses core, and the ramp gets its whole range back.
+///
+/// **This is not `FIRE_DENS_W` widened, and it must not become that.**
+/// `FIRE_DENS_W` owns the silhouette through `sigma` and stays narrow for the
+/// reason its own comment gives. This term touches `temp` only — what the
+/// material radiates, never where it is — so the edge is bit-for-bit the same
+/// shape it was.
+static const float FIRE_CORE_W = 0.30;
+static const float FIRE_SKIN = 0.35;
 /// Peak occlusion, so a flame is never quite a wall.
 static const float FIRE_OPACITY = 0.92;
 
@@ -4019,7 +4072,8 @@ float4 flameColor(ParticleOutput in, float3 toEye) {
     FireSample s = fireField(w0 + dir * t0, half_h, t, dField, dWarp);
     float hotPrev = saturate(s.e / FIRE_DENS_W);
     float sootPrev = saturate(s.es / FIRE_SOOT_W) * saturate(s.h / FIRE_SOOT_H);
-    float tempPrev = hotPrev * (1.0 - FIRE_TAU_H * s.h)
+    float tempPrev = hotPrev * lerp(FIRE_SKIN, 1.0, saturate(s.e / FIRE_CORE_W))
+                   * (1.0 - FIRE_TAU_H * s.h)
                    * lerp(FIRE_TAU_BASE, 1.0, saturate(s.h / FIRE_TAU_BASE_H));
 
     // Rolled, deliberately. Fully unrolling 48 iterations of seven noise
@@ -4036,7 +4090,11 @@ float4 flameColor(ParticleOutput in, float3 toEye) {
         // sample** — a sum of ramp colours mixes hues and comes out muddy. It
         // is applied once, to the integral, which is what keeps its authored
         // ladder from ember through amber to white intact.
-        float temp = hot * (1.0 - FIRE_TAU_H * s.h)
+        //
+        // **Depth into the tongue, then height** — see `FIRE_CORE_W` for why
+        // the depth term is on `temp` and not on `hot`.
+        float temp = hot * lerp(FIRE_SKIN, 1.0, saturate(s.e / FIRE_CORE_W))
+                   * (1.0 - FIRE_TAU_H * s.h)
                    * lerp(FIRE_TAU_BASE, 1.0, saturate(s.h / FIRE_TAU_BASE_H));
 
         float sigma = FIRE_SIGMA * 0.5 * (hot + hotPrev)
