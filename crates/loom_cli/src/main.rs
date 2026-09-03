@@ -948,6 +948,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
             &world,
             &body,
             warmed.as_ref().and_then(crate::play::Runner::sea),
+            &weather,
             &ground,
             camera.eye.to_array(),
             wind_seconds,
@@ -1354,6 +1355,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
                             &world,
                             &body,
                             runner.sea(),
+                            &weather,
                             &ground,
                             camera.eye.to_array(),
                             moment,
@@ -9207,7 +9209,7 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         // it, so it is not a property of the sea alone.
         let eye = [0.0, 4.5, 16.0];
         let thrown =
-            crate::particles::spray(&world, &body, Some(&sea), &ground, eye, t).len();
+            crate::particles::spray(&world, &body, Some(&sea), &wind, &ground, eye, t).len();
 
         println!(
             "lucent  mu_max mean {mean:.4}  past {} {:.3}%  past {BREAK} \

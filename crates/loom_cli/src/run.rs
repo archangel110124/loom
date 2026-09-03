@@ -1883,6 +1883,7 @@ impl ApplicationHandler for App {
                         world,
                         &body,
                         self.play.as_ref().and_then(crate::play::Play::sea),
+                        &wind,
                         &ground,
                         camera.eye.to_array(),
                         self.wind_seconds,

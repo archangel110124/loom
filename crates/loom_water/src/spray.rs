@@ -171,16 +171,86 @@ pub const SPRAY_CROWN: usize = 21;
 /// as the crest sucking water back in.
 const SPRAY_SPREAD: f32 = 0.55;
 
-/// Metres per second outward and upward at a fold of exactly 1.0 — the cusp.
+/// Fraction of the crest's *relative* air speed a torn droplet leaves with,
+/// upward and outward.
 ///
-/// Scaled by how far past [`SPRAY_BREAK`] the crest actually is, so a swell
-/// that barely breaks lifts a puff and a storm crest throws.
-const SPRAY_OUT: f32 = 1.9;
-const SPRAY_UP: f32 = 3.4;
+/// **The referent is the wind, and it has to be.** These used to be metres per
+/// second "at a fold of exactly 1.0 — the cusp", scaled by
+/// `(fold − SPRAY_BREAK) / (1 − SPRAY_BREAK)`. **That denominator is a ceiling
+/// no sea in this repository reaches**: `heave`'s authored ceiling is 0.30 and
+/// `ocean_fft_storm` measures about 0.92, so the fraction on the diagnostic
+/// scene is `0.06/0.76 = 0.079`, the upward launch was `3.4 × 0.079 = 0.27`
+/// m/s and the arc was **3.7 mm**. Every crest droplet this engine has ever
+/// drawn was a half-disc cut flat by the waterline it never cleared.
+///
+/// **`fold` was never the right quantity for this.** It says *whether* a crest
+/// is breaking — which is exactly the job [`SPRAY_BREAK`] still gives it, and
+/// the job the population gate below still gives it. It says nothing about how
+/// hard the air is pulling, and the air is what tears water off a crest: spume
+/// is a shear instability at the interface, so the velocity scale is the air's
+/// speed *relative to the water surface*, `|U_air − u_water|` at the crest.
+/// That is a real quantity with a real magnitude — 11.2 m/s at `heave`'s crest,
+/// 20 m/s in the storm — and it is measured at the crest each crown throws
+/// from, gusts and all, rather than assumed.
+///
+/// **What sets 0.30.** A torn ligament does not leave at the wind speed; it
+/// leaves slowly and is then accelerated by the air, which is what
+/// [`SPRAY_TAU_FINE`] models. The fraction is the share of the relative wind
+/// the tear itself imparts, and 0.30 is chosen so that `heave` — whose whole
+/// purpose is to be the scene where the arithmetic is checkable — throws
+/// `0.30 × 11.2 = 3.4 m/s` upward. **That is the same 3.4 m/s the constant it
+/// replaces was written to produce**, which is the evidence that 1.9 and 3.4
+/// were sound numbers behind a broken scaling rather than numbers to re-tune:
+/// the fix is the referent, not the magnitude. The storm, at nearly twice the
+/// relative wind, now throws nearly twice as hard, which the fold fraction
+/// could not express.
+///
+/// The out:up ratio is `1.9 : 3.4` unchanged — a crown taller than it is wide.
+const SPRAY_TEAR_UP: f32 = 0.30;
+const SPRAY_TEAR_OUT: f32 = 0.17;
 
-/// Gravity on a droplet. Plain `g` — a water droplet this size is ballistic
-/// over a metre, and air drag on it is a term nobody can see.
+/// Gravity on a droplet. Plain `g`, and the drag is [`SPRAY_TAU_COARSE`]'s.
 const SPRAY_GRAVITY: f32 = crate::GRAVITY;
+
+/// Velocity relaxation time of the two droplet populations, in seconds.
+///
+/// **A droplet's velocity decays toward the air's, and that is what makes
+/// spindrift blow downwind instead of flying ballistically.** Linear (Stokes)
+/// drag: `dv/dt = −(v − U_air)/τ + g`, whose closed form is [`blown`] — the
+/// same shape the ballistic pair already has, so this is still a pure function
+/// of `(cell, slot, i, age)` and still nothing an assertion can see.
+///
+/// **τ is not free: it is the terminal fall speed over `g`**, and terminal fall
+/// speeds of water drops are tabulated (Gunn & Kinzer 1949). So:
+///
+/// ```text
+///                   drop        v_terminal      τ = v_t/g
+/// coarse  ligament fragment   ~1.5 mm   5.4 m/s    0.55 s
+/// fine    spume              ~150 µm    0.6 m/s    0.06 s
+/// ```
+///
+/// **Two populations, because tearing a sheet makes two.** The coarse one is
+/// what the crown's arc is made of — `τ` is most of a droplet's whole life, so
+/// it is very nearly ballistic and falls back into the wave. The fine one
+/// reaches the air's velocity in about 0.2 s and then simply *is* the wind: it
+/// hangs, sinks at 0.6 m/s and blows seven metres downwind in a lifetime. One
+/// population cannot be both, and the half that was missing is the half that
+/// reads as spindrift.
+///
+/// **The drawn size does not follow `d ∝ √τ`, deliberately.** A sprite here is
+/// 0.16–0.22 m across, four orders of magnitude over a real spume drop — it is
+/// a *cluster*, not a drop — so scaling the quad by the physical diameter ratio
+/// would be applying a real number to an imaginary one, and it would put the
+/// fine population under a pixel at every range.
+const SPRAY_TAU_COARSE: f32 = 0.55;
+const SPRAY_TAU_FINE: f32 = 0.06;
+
+/// Share of a crown that is the fine population.
+///
+/// A real spume size spectrum is steep and the fine mode dominates the *count*
+/// by orders of magnitude; half is a look rather than that number, because a
+/// crown with no coarse arc left in it is a smoke puff.
+const SPRAY_FINE_SHARE: f32 = 0.5;
 
 /// One droplet in flight.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -284,6 +354,7 @@ pub fn peak_fold(body: &WaterBody) -> f32 {
 pub fn spray(
     body: &WaterBody,
     sea: Option<&Ocean>,
+    wind: &loom_field::wind::Wind,
     eye: [f32; 3],
     t: f32,
     ground: &dyn Fn(f32, f32) -> f32,
@@ -317,7 +388,7 @@ pub fn spray(
             // Two slots is the whole history: a droplet outlives its slot by
             // less than one more.
             for slot in (slot_now - 1)..=slot_now {
-                crown_in(body, sea, [ix, iz], slot, eye, t, ground, &mut out);
+                crown_in(body, sea, wind, [ix, iz], slot, eye, t, ground, &mut out);
             }
         }
     }
@@ -332,6 +403,7 @@ pub fn spray(
 fn crown_in(
     body: &WaterBody,
     sea: Option<&Ocean>,
+    wind: &loom_field::wind::Wind,
     cell: [i32; 2],
     slot: i32,
     eye: [f32; 3],
@@ -403,7 +475,7 @@ fn crown_in(
         return;
     }
 
-    // The crest's own velocity carries the crown downwind — the orbital motion
+    // The crest's own velocity carries the crown — the orbital motion
     // `sample_water` already computed, not a second wind term.
     let drift = [surface.velocity[0], surface.velocity[2]];
     let base = [
@@ -411,7 +483,28 @@ fn crown_in(
         surface.height,
         at[1] + surface.displacement[2],
     ];
+    // **The air at the crest, at the instant the crown left it** — the same
+    // "sampled at birth, not now" rule the surface above obeys, for the same
+    // reason. Once per crown rather than once per droplet: twenty-one droplets
+    // are torn off one square metre of one crest by one gust, and the cell
+    // sweep is already this file's cost centre (see [`SPRAY_RANGE`]).
+    //
+    // `at`, not `sheltered`: this is open water, and a spray region that
+    // marched the voxel SDF twenty-one thousand times a frame would be a
+    // different cost class entirely.
+    let air = wind.at(base, born);
+    // **The shear that does the tearing is the air's speed relative to the
+    // water, not its speed over the ground.** A crest running downwind at
+    // 4.2 m/s feels 4.2 m/s less wind than one standing still, and it is the
+    // difference the interface is unstable to. See [`SPRAY_TEAR_UP`].
+    let shear = (air[0] - drift[0]).hypot(air[2] - drift[1]);
     let spin = unit(5) * std::f32::consts::TAU;
+    // **One `exp` per population per crown, not one per droplet.** `age` is a
+    // property of the crown and there are exactly two relaxation times, so the
+    // whole transcendental cost of [`blown`] is two calls for twenty-one
+    // droplets — which is why drag is affordable at fifteen thousand of them.
+    let decay_coarse = (-age / SPRAY_TAU_COARSE).exp();
+    let decay_fine = (-age / SPRAY_TAU_FINE).exp();
     for i in 0..SPRAY_CROWN {
         // **Four independent draws per droplet, off the cell's own seed.** The
         // offset is `i` scaled past the shifts used above so no droplet can
@@ -426,16 +519,22 @@ fn crown_in(
         // The cone — see [`SPRAY_SPREAD`]. Two draws rather than one, so a
         // droplet thrown far is not also thrown high and the crown gains a
         // depth a scaled ring cannot have.
-        let outward = SPRAY_OUT * strength * SPRAY_SPREAD.mul_add(d(0).mul_add(2.0, -1.0), 1.0);
-        let up = SPRAY_UP * strength * SPRAY_SPREAD.mul_add(d(1).mul_add(2.0, -1.0), 1.0);
+        let outward = SPRAY_TEAR_OUT * shear * SPRAY_SPREAD.mul_add(d(0).mul_add(2.0, -1.0), 1.0);
+        let up = SPRAY_TEAR_UP * shear * SPRAY_SPREAD.mul_add(d(1).mul_add(2.0, -1.0), 1.0);
         let v = [
             drift[0] + angle.cos() * outward,
             up,
             drift[1] + angle.sin() * outward,
         ];
+        // Coarse or fine — see [`SPRAY_TAU_COARSE`]. A fifth draw off the same
+        // per-droplet block, so it is still a pure function of `(cell, slot, i)`.
+        let fine = d(4) < SPRAY_FINE_SHARE;
+        let tau = if fine { SPRAY_TAU_FINE } else { SPRAY_TAU_COARSE };
+        let decay = if fine { decay_fine } else { decay_coarse };
+        let (position, velocity) = blown(base, v, air, tau, age, decay);
         out.push(Droplet {
-            position: ballistic(base, v, age),
-            velocity: ballistic_velocity(v, age),
+            position,
+            velocity,
             fraction: age / SPRAY_LIFETIME,
             // The other half of breaking the necklace, and it is the same pair
             // [`crown`] uses for the same stated reason — a band of a crown
@@ -448,6 +547,42 @@ fn crown_in(
             alpha: 0.45f32.mul_add(d(3).mul_add(2.0, -1.0), 0.55),
         });
     }
+}
+
+/// Where a droplet launched at `v` from `base` is after `age` seconds, and how
+/// fast it is going, when the air is pulling on it.
+///
+/// **[`ballistic`] with one more term, and it is still one closed form.** Linear
+/// drag toward the air gives `dv/dt = −(v − air)/τ + g`, whose steady state is
+/// `v∞ = air + gτ` and whose solution is `v∞ + (v₀ − v∞)·e^{−t/τ}`; the position
+/// is that integrated once. Both are returned together because they share the
+/// one exponential, and `decay` is passed in because the caller has already
+/// computed `e^{−age/τ}` for the whole crown.
+///
+/// The pair still cannot drift apart — the velocity is the exact derivative of
+/// the position, as it was before.
+///
+/// **Only the crest crown uses this.** The impact crown and the sheet below are
+/// millimetre drops thrown a metre by something falling in; over that flight
+/// drag is a term nobody can see, and they keep [`ballistic`].
+fn blown(
+    base: [f32; 3],
+    v: [f32; 3],
+    air: [f32; 3],
+    tau: f32,
+    age: f32,
+    decay: f32,
+) -> ([f32; 3], [f32; 3]) {
+    let mut position = [0.0_f32; 3];
+    let mut velocity = [0.0_f32; 3];
+    for axis in 0..3 {
+        let gravity = if axis == 1 { -SPRAY_GRAVITY } else { 0.0 };
+        let settled = gravity.mul_add(tau, air[axis]);
+        let excess = v[axis] - settled;
+        velocity[axis] = excess.mul_add(decay, settled);
+        position[axis] = (excess * tau).mul_add(1.0 - decay, settled.mul_add(age, base[axis]));
+    }
+    (position, velocity)
 }
 
 /// How fast a droplet launched at `v` is going after `age` seconds.
@@ -951,6 +1086,19 @@ mod tests {
         -1000.0
     }
 
+    /// The wind these unit seas are torn by.
+    ///
+    /// **Beaufort 7 — a near gale, and the sea below it is authored steep to
+    /// match.** [`SPRAY_TEAR_UP`] scales the launch by the air's speed relative
+    /// to the water, so a test sea handed a dead calm now throws droplets that
+    /// go nowhere, and every assertion in this module about *how* a crown moves
+    /// would be measuring an airless one. `Wind::default` is Beaufort 4, which
+    /// is the wind `a_beaufort_four_sea_stays_a_hundred_times_drier_than_a_storm`
+    /// exists to show does not make a sea like this.
+    fn blow() -> loom_field::wind::Wind {
+        loom_field::wind::Wind::new(0.0, 16.0, 0.8, 0.8, 0.45)
+    }
+
     /// **A mirror throws nothing**, which is also the test that every scene
     /// with flat water in it renders as it did before spray existed.
     #[test]
@@ -959,7 +1107,7 @@ mod tests {
         for tick in 0..120 {
             #[allow(clippy::cast_precision_loss)]
             let t = tick as f32 / 60.0;
-            assert!(spray(&flat, None, [0.0, 2.0, 0.0], t, &deep).is_empty());
+            assert!(spray(&flat, None, &blow(), [0.0, 2.0, 0.0], t, &deep).is_empty());
         }
     }
 
@@ -972,7 +1120,7 @@ mod tests {
         for tick in 0..600 {
             #[allow(clippy::cast_precision_loss)]
             let t = tick as f32 / 60.0;
-            assert!(spray(&storm, None, [0.0, 2.0, 0.0], t, &deep).is_empty());
+            assert!(spray(&storm, None, &blow(), [0.0, 2.0, 0.0], t, &deep).is_empty());
         }
     }
 
@@ -984,7 +1132,7 @@ mod tests {
         let storm = sea(0.55, 0.85);
         let count = |body: &WaterBody| {
             (0..240)
-                .map(|tick| spray(body, None, [0.0, 2.0, 0.0], tick as f32 / 60.0, &deep).len())
+                .map(|tick| spray(body, None, &blow(), [0.0, 2.0, 0.0], tick as f32 / 60.0, &deep).len())
                 .sum::<usize>()
         };
 
@@ -997,8 +1145,8 @@ mod tests {
     #[test]
     fn the_same_second_gives_the_same_spray() {
         let storm = sea(0.55, 0.85);
-        let a = spray(&storm, None, [3.0, 2.0, -4.0], 5.25, &deep);
-        let b = spray(&storm, None, [3.0, 2.0, -4.0], 5.25, &deep);
+        let a = spray(&storm, None, &blow(), [3.0, 2.0, -4.0], 5.25, &deep);
+        let b = spray(&storm, None, &blow(), [3.0, 2.0, -4.0], 5.25, &deep);
 
         assert!(!a.is_empty(), "the sea threw nothing to compare");
         assert_eq!(a, b);
@@ -1017,7 +1165,7 @@ mod tests {
         let storm = sea(0.55, 0.85);
         // One crown, isolated: `spray` returns cell-then-slot order, so the
         // first SPRAY_CROWN droplets are one cell's throw.
-        let all = spray(&storm, None, [0.0, 2.0, 0.0], 5.25, &deep);
+        let all = spray(&storm, None, &blow(), [0.0, 2.0, 0.0], 5.25, &deep);
         assert!(all.len() >= SPRAY_CROWN, "the sea threw no whole crown");
         let crown = &all[..SPRAY_CROWN];
 
@@ -1049,7 +1197,7 @@ mod tests {
         let mut early = f32::NEG_INFINITY;
         let mut late = f32::NEG_INFINITY;
         for tick in 0..600 {
-            for d in spray(&storm, None, [0.0, 2.0, 0.0], tick as f32 / 60.0, &deep) {
+            for d in spray(&storm, None, &blow(), [0.0, 2.0, 0.0], tick as f32 / 60.0, &deep) {
                 if d.fraction < 0.15 {
                     early = early.max(d.position[1]);
                 } else if d.fraction > 0.85 {
@@ -1068,7 +1216,7 @@ mod tests {
     fn spray_stays_near_the_eye() {
         let storm = sea(0.55, 0.85);
         let eye = [40.0, 2.0, -20.0];
-        let out = spray(&storm, None, eye, 9.0, &deep);
+        let out = spray(&storm, None, &blow(), eye, 9.0, &deep);
         assert!(!out.is_empty());
         for d in &out {
             let distance = (d.position[0] - eye[0]).hypot(d.position[2] - eye[2]);
@@ -1108,7 +1256,7 @@ mod tests {
                     .map(|tick| {
                         #[allow(clippy::cast_precision_loss)]
                         let t = tick as f32 / 60.0;
-                        spray(&body, None, [0.0, 2.0, 0.0], t, &deep).len()
+                        spray(&body, None, &blow(), [0.0, 2.0, 0.0], t, &deep).len()
                     })
                     .sum();
                 assert_eq!(thrown, 0, "a sea under the ceiling threw {thrown} droplets");
@@ -1211,7 +1359,7 @@ mod tests {
                     if tick % 8 == 0 {
                         kept.keep();
                     }
-                    thrown += spray(&body, Some(&kept), [0.0, 2.0, 0.0], t, &deep).len();
+                    thrown += spray(&body, Some(&kept), &blow(), [0.0, 2.0, 0.0], t, &deep).len();
                 }
                 assert_eq!(thrown, 0, "a cascade under the ceiling threw {thrown} droplets");
             }
@@ -1229,7 +1377,7 @@ mod tests {
         let land = |_x: f32, _z: f32| 1.0_f32;
 
         for tick in 0..240 {
-            let out = spray(&shore, None, [0.0, 2.0, 0.0], tick as f32 / 60.0, &land);
+            let out = spray(&shore, None, &blow(), [0.0, 2.0, 0.0], tick as f32 / 60.0, &land);
             assert!(out.is_empty(), "spray on dry land: {out:?}");
         }
     }
@@ -1274,14 +1422,14 @@ mod tests {
         let t = at_tick(ticks);
 
         assert!(
-            spray(&body, None, eye, t, &deep).is_empty(),
+            spray(&body, None, &blow(), eye, t, &deep).is_empty(),
             "a spectrum body with no ocean invented a surface to spray off"
         );
 
-        let thrown = spray(&body, Some(&sea), eye, t, &deep);
+        let thrown = spray(&body, Some(&sea), &blow(), eye, t, &deep);
         assert!(!thrown.is_empty(), "a 25 m/s sea with spray = 8 threw nothing");
         assert_eq!(thrown.len() % SPRAY_CROWN, 0, "a partial crown");
-        assert_eq!(thrown, spray(&body, Some(&sea), eye, t, &deep), "not reproducible");
+        assert_eq!(thrown, spray(&body, Some(&sea), &blow(), eye, t, &deep), "not reproducible");
 
         // The same sea, evolved identically and never kept: the ring is empty, every
         // birth is older than nothing, and no crown is thrown.
@@ -1290,7 +1438,7 @@ mod tests {
             unkept.evolve(at_tick(tick));
         }
         assert!(
-            spray(&body, Some(&unkept), eye, t, &deep).is_empty(),
+            spray(&body, Some(&unkept), &blow(), eye, t, &deep).is_empty(),
             "spray read tiles nobody kept"
         );
     }
@@ -1322,7 +1470,7 @@ mod tests {
                     tick += 1;
                 }
             }
-            spray(&body, Some(&sea), [0.0, 4.0, 0.0], at_tick(96), &deep)
+            spray(&body, Some(&sea), &blow(), [0.0, 4.0, 0.0], at_tick(96), &deep)
         };
 
         let one_at_a_time = run(1);

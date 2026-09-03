@@ -844,11 +844,12 @@ pub(crate) fn spray(
     world: &World,
     water: &loom_scene::components::WaterBody,
     sea: Option<&loom_water::ocean::Ocean>,
+    wind: &loom_field::wind::Wind,
     ground: &dyn Fn(f32, f32) -> f32,
     eye: [f32; 3],
     seconds: f32,
 ) -> Vec<ParticleInstance> {
-    let droplets = loom_water::spray::spray(water, sea, eye, seconds, ground);
+    let droplets = loom_water::spray::spray(water, sea, wind, eye, seconds, ground);
     if droplets.is_empty() {
         // **A sea too gentle to break can never spray, and nothing else would say
         // so.** `fold` is `Σ Q·k·A·sin φ`, so `Σ Q·k·A` is its ceiling; under
@@ -1329,7 +1330,8 @@ mod tests {
                     calm_sea.keep();
                 }
                 assert!(
-                    spray(&world, &gentle, Some(&calm_sea), &deep, [0.0, 4.0, 0.0], t).is_empty(),
+                    spray(&world, &gentle, Some(&calm_sea), &wind, &deep, [0.0, 4.0, 0.0], t)
+                        .is_empty(),
                     "a sea folding at most {} threw spray",
                     calm_sea.peak_fold()
                 );
@@ -1429,6 +1431,100 @@ mod tests {
         }
     }
 
+    /// **Spray has to leave the water, and this is the number that says so.**
+    ///
+    /// The defect this guards is [`loom_water::spray`]'s launch speed having
+    /// been a fraction of `(fold − SPRAY_BREAK) / (1 − SPRAY_BREAK)` — a
+    /// denominator no sea in this repository reaches. On `heave`, whose fold
+    /// ceiling is an authored 0.30, that fraction is 0.079, the upward launch
+    /// was 3.4 × 0.079 = 0.27 m/s and the arc was **3.7 mm**. Every droplet was
+    /// a half-disc cut flat by the waterline it never cleared, on both scenes,
+    /// and no gate in this project could see it.
+    ///
+    /// **Clearance, not rise.** The peak of `droplet y − the surface under it`
+    /// over the whole live population, which is the acceptance question
+    /// ("does a droplet leave the water") asked of the picture's own geometry
+    /// rather than of a launch point that is not in the returned struct. It
+    /// reads the *undisplaced* column under the droplet, so on a Gerstner sea
+    /// it is out by the crest's own horizontal displacement — under a metre
+    /// here, and in neither direction systematically. Do not read it as a
+    /// ballistic apex; read it against the floor below.
+    ///
+    /// Measured before the wind anchor landed: **heave 0.106 m, storm 0.554 m**
+    /// — and the storm's is not the drop clearing anything, it is the *swell*
+    /// under a droplet thrown off a chop crest a few metres away. After:
+    /// heave 0.71 m, storm 2.44 m.
+    #[test]
+    fn crest_spray_clears_the_water() {
+        /// Metres a droplet must get clear of the water somewhere in the
+        /// population. A droplet is drawn 0.16–0.22 m across, so this is about
+        /// two of its own diameters — small enough that it is not a tuning
+        /// knob and large enough that the 3.7 mm defect is red.
+        const FLOOR: f32 = 0.40;
+
+        let peak = |scene: &str, ticks: u16, eye: [f32; 3]| -> (usize, f32, f32) {
+            let source = std::fs::read_to_string(format!("../../assets/test/{scene}.loom"))
+                .expect("fixture");
+            let world = World::from_scene(&loom_scene::Scene::parse(&source).expect("valid"));
+            let wind = crate::weather::wind_of_world(&world);
+            let body = crate::weather::water_of(&world, &wind).expect("the scene has water");
+            let mut sea = crate::weather::sea_of_body(&body, &wind);
+            let deep = |_x: f32, _z: f32| -1000.0_f32;
+            // The cascade has to be walked to the tick, not jumped to it: the
+            // ring `spray` reads a droplet's birth instant out of is filled on
+            // `Sim::evolve_sea`'s stride of eight and no other.
+            for tick in 0..=ticks {
+                if let Some(sea) = sea.as_mut() {
+                    sea.evolve(f32::from(tick) / 60.0);
+                    if tick % 8 == 0 {
+                        sea.keep();
+                    }
+                }
+            }
+            let t = f32::from(ticks) / 60.0;
+            let drops = loom_water::spray::spray(&body, sea.as_ref(), &wind, eye, t, &deep);
+            let clear = |d: &loom_water::spray::Droplet| {
+                d.position[1]
+                    - loom_water::sample_water(
+                        &body,
+                        sea.as_ref(),
+                        [d.position[0], d.position[2]],
+                        t,
+                        loom_voxel::heightfield::NO_GROUND,
+                        [0.0; 3],
+                        [0.0; 3],
+                    )
+                    .height
+            };
+            // The fastest upward launch anywhere in the population, as the
+            // kinematic half of the same question: a droplet's vertical speed
+            // only ever falls, so the maximum over droplets of every age is the
+            // maximum a crest threw. Before the wind anchor: 0.42 m/s on
+            // `heave` and 4.66 m/s on the storm. After: 5.15 and 9.87.
+            let launch = drops.iter().map(|d| d.velocity[1]).fold(f32::MIN, f32::max);
+            (drops.len(), drops.iter().map(clear).fold(f32::MIN, f32::max), launch)
+        };
+
+        // Both scenes at their own camera and their own crest tick — `heave`'s
+        // header names 405, and 200 is where `ocean_fft_storm`'s own header
+        // measures its population.
+        for (scene, ticks, eye) in [
+            ("heave", 405_u16, [0.0, 10.0, 0.0]),
+            ("ocean_fft_storm", 200, [-52.0, 6.0, 40.0]),
+        ] {
+            let (drops, clear, launch) = peak(scene, ticks, eye);
+            eprintln!(
+                "{scene} tick {ticks}: {drops} droplets, peak clearance {clear} m, \
+                 peak upward launch {launch} m/s"
+            );
+            assert!(drops > 1000, "{scene} threw only {drops} droplets, so the peak means little");
+            assert!(
+                clear > FLOOR,
+                "{scene} at tick {ticks}: the highest of {drops} droplets is {clear} m above                  the water, under the {FLOOR} m floor. Spray that does not clear the surface                  is drawn as a half-disc and reads as a stain on the wave."
+            );
+        }
+    }
+
     /// **A Beaufort-4 sea does not spit, and it is a real scene that says so.**
     ///
     /// `SPRAY_BREAK` is the whole population gate, so lowering it is a
@@ -1517,7 +1613,7 @@ mod tests {
                             sea.keep();
                         }
                     }
-                    spray(&world, &body, sea.as_ref(), &deep, [0.0, 3.0, 0.0], t).len()
+                    spray(&world, &body, sea.as_ref(), &wind, &deep, [0.0, 3.0, 0.0], t).len()
                 })
                 .sum()
         };
@@ -1633,7 +1729,7 @@ mod tests {
         for tick in [0_u32, 60, 300, 900] {
             #[allow(clippy::cast_precision_loss)]
             let t = f32::from(u16::try_from(tick).expect("small")) / 60.0;
-            assert!(spray(&world, &body, None, &deep, eye, t).is_empty(), "tick {tick}");
+            assert!(spray(&world, &body, None, &calm(), &deep, eye, t).is_empty(), "tick {tick}");
         }
 
         // **Authored on is not enough — the sea also has to break, and
@@ -1650,7 +1746,7 @@ mod tests {
             #[allow(clippy::cast_precision_loss)]
             let t = f32::from(u16::try_from(tick).expect("small")) / 60.0;
             assert!(
-                spray(&world, &body, None, &deep, eye, t).is_empty(),
+                spray(&world, &body, None, &calm(), &deep, eye, t).is_empty(),
                 "a sea whose fold never reaches SPRAY_BREAK sprayed at tick {tick}"
             );
         }
@@ -1669,7 +1765,7 @@ mod tests {
             .map(|tick| {
                 #[allow(clippy::cast_precision_loss)]
                 let t = tick as f32 / 60.0;
-                spray(&world, &body, None, &deep, eye, t).len()
+                spray(&world, &body, None, &calm(), &deep, eye, t).len()
             })
             .sum();
         assert!(thrown > 0, "a breaking sea threw no spray in ten seconds");
@@ -1681,7 +1777,7 @@ mod tests {
             .flat_map(|tick| {
                 #[allow(clippy::cast_precision_loss)]
                 let t = tick as f32 / 60.0;
-                spray(&world, &body, None, &deep, eye, t)
+                spray(&world, &body, None, &calm(), &deep, eye, t)
             })
             .collect();
         let first = drops.first().expect("droplets");
