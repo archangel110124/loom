@@ -806,12 +806,9 @@ float cloudErosion(float3 p, float t) {
 /// the shape is already weak.** Weighting it by `1 - shape` frays the edges into
 /// wisps while leaving the core solid, where a plain multiply would thin the
 /// whole cloud uniformly and give back the flat grey this replaces.
-float cloudDensity(float3 p, float t, float type, float base, float top) {
-    float h = saturate((p.y - base) / max(top - base, 1.0));
-    float profile = cloudProfile(h, type);
-    if (profile <= 0.0) {
-        return 0.0;
-    }
+float cloudDensity(float3 p, float t, float type, float base, float top, out float coverage) {
+    coverage = 0.0;
+    float thickness = max(top - base, 1.0);
 
     // **Coverage says WHERE, raw density says HOW MUCH — and using only the
     // first is what made an overcast deck render as a flat sheet.**
@@ -829,9 +826,28 @@ float cloudDensity(float3 p, float t, float type, float base, float top) {
     // full cover it is 1 everywhere and `n` is the only thing left carrying
     // structure. A deck therefore has an interior at every cover.
     float3 got = cloudFieldAt(p, t);
-    float mask = got.x * lerp(0.30, 1.0, saturate(got.y));
+    // **Handed back so the light march does not pay for it again.** See
+    // `cloudSunlight` for why reusing it there is sound and what it saved.
+    coverage = got.x * lerp(0.30, 1.0, saturate(got.y));
 
-    float shape = mask * profile;
+    // **The underside is not flat, and at full cover it is the only structure
+    // there is.** A slab with a constant base and top has constant optical
+    // depth wherever coverage saturates, and a sun march through constant depth
+    // returns a constant answer — so `mood_deep` at cover 1.0 rendered as a
+    // smooth grey nothing, worse than the flat projection it replaced. Real
+    // overcast is lumpy underneath; that is what a ceiling looks like from
+    // below.
+    //
+    // Riding the raw fBm rather than a new noise, because it is already in hand
+    // and it is the field's own low-frequency shape — the lumps then line up
+    // with the masses instead of crossing them.
+    float h = saturate((p.y - base) / thickness - (got.y - 0.5) * CLOUD_UNDERSIDE);
+    float profile = cloudProfile(h, type);
+    if (profile <= 0.0) {
+        return 0.0;
+    }
+
+    float shape = coverage * profile;
     if (shape <= 0.0) {
         return 0.0;
     }
@@ -881,6 +897,97 @@ static const float CLOUD_DEPTH_SOLID = 4.0;
 /// detail it was trying to resolve, and the noise aliased into vertical streaks.
 static const float CLOUD_MARCH_MAX = 4000.0;
 
+/// Steps toward the sun from each dense sample of the view ray.
+///
+/// **Six, exponentially spaced.** The near shadow is what shapes a cloud's
+/// underside and wants resolution; the far one only says whether there is more
+/// mass in that direction and does not. Uniform spacing spends the same samples
+/// getting the far half right, which nothing can see.
+static const int CLOUD_LIGHT_STEPS = 6;
+
+/// The first light step, as a fraction of slab thickness, and the ratio each
+/// step grows by. Together they reach about 2.5 thicknesses along the sun ray —
+/// far enough that a tall cumulus shadows its own base.
+static const float CLOUD_LIGHT_FIRST = 0.06;
+static const float CLOUD_LIGHT_GROWTH = 1.8;
+
+/// How much of the sun's light a fully-lit face returns.
+///
+/// **A gain rather than an albedo**, because `smokePhase` is normalised so
+/// isotropic is 1 rather than 1/4pi: at `SMOKE_G = 0.42` it runs 0.29 backward
+/// to 4.23 forward, and this is what maps that range onto the palette. Cloud
+/// albedo really is near 1 — they are white because they scatter almost
+/// everything — so the number is doing presentation, not physics.
+static const float CLOUD_SUN_GAIN = 0.30;
+
+/// How far the deck's underside wanders, as a fraction of slab thickness.
+///
+/// At full cover this is the *only* source of structure — see `cloudDensity`.
+/// Large enough to break up a ceiling, small enough that the profile's shape
+/// still reads: half a thickness of wander on a slab whose profile occupies
+/// roughly two thirds of it.
+static const float CLOUD_UNDERSIDE = 0.45;
+
+/// How strongly the powder term darkens.
+///
+/// **An approximation of multiple scattering, not a derivation** — the same
+/// standing this file gives the soot volume's constants. Beer-Lambert alone
+/// makes a cloud brightest exactly where it is thinnest, so a lit edge blows
+/// out and the mass behind it reads flat; real clouds are *darker* at a thin
+/// edge facing the light, because there is not enough material there to scatter
+/// light back out. Schneider's term multiplies by `1 - exp(-2*d)`, which is
+/// zero at zero density and one when solid.
+static const float CLOUD_POWDER = 0.7;
+
+/// Light reaching a point inside the deck, 0 to 1.
+///
+/// Beer-Lambert along the sun ray — so a cloud shadows itself with the shape it
+/// actually has, rather than with the one-tap density comparison ADR 0015 had to
+/// settle for.
+///
+/// **The weather map is sampled once, by the caller, and carried in.** That is
+/// the difference between this being affordable and not. `cloudDensity` calls
+/// `cloudFieldAt`, which is `clouds_at` — twelve noise evaluations, because the
+/// expression tree has no common-subexpression elimination across octaves. Six
+/// light steps at every one of 48 view steps would be 175 million evaluations
+/// for one 1024x512 map, and measured as such: the sun march took the deck from
+/// 0.75 ms to 5.3 ms.
+///
+/// Reusing the view point's coverage costs almost nothing in the picture and
+/// three quarters of the time. Coverage is the *low-frequency* half of the field
+/// — it says which region of the sky has cloud in it, over hundreds of metres —
+/// and a light ray 2.5 slab-thicknesses long stays inside one such region. The
+/// structure that varies along that ray is the height profile and the erosion,
+/// and both are still evaluated per step. This is the same split Nubis makes
+/// when it drops octaves for the light march.
+float cloudSunlight(
+    float3 p,
+    float coverage,
+    float t,
+    float type,
+    float base,
+    float top,
+    float sigma
+) {
+    float3 sun = sunDirection();
+    float thickness = max(top - base, 1.0);
+    float step = thickness * CLOUD_LIGHT_FIRST;
+    float travelled = 0.0;
+    float depth = 0.0;
+    for (int i = 0; i < CLOUD_LIGHT_STEPS; ++i) {
+        travelled += step;
+        float3 q = p + sun * travelled;
+        float h = saturate((q.y - base) / thickness);
+        float shape = coverage * cloudProfile(h, type);
+        if (shape > 0.0) {
+            float erode = cloudErosion(q, t);
+            depth += saturate(shape - erode * CLOUD_EROSION * (1.0 - shape)) * step;
+        }
+        step *= CLOUD_LIGHT_GROWTH;
+    }
+    return exp(-sigma * depth);
+}
+
 /// March the slab. Returns cover and body colour, exactly as the projection does.
 ///
 /// **Lighting here is deliberately flat.** The body colour comes from the mean
@@ -912,9 +1019,15 @@ CloudLook cloudLookVolume(float3 dir) {
     float litSum = 0.0;
     float weightSum = 0.0;
 
+    // **One phase evaluation for the whole ray**, because it depends only on
+    // the angle between the view and the sun, and neither changes along a
+    // straight ray. Inside the loop it would be 48 identical `pow` calls.
+    float phase = smokePhase(dot(dir, sunDirection()));
+
     for (int i = 0; i < CLOUD_STEPS; ++i) {
         float3 p = eye + dir * (enter + (float(i) + 0.5) * step);
-        float density = cloudDensity(p, t, type, base, top);
+        float coverage = 0.0;
+        float density = cloudDensity(p, t, type, base, top, coverage);
         if (density <= 0.0) {
             continue;
         }
@@ -922,7 +1035,18 @@ CloudLook cloudLookVolume(float3 dir) {
         // sees comes from here — extinction times what still reaches it.
         float extinct = exp(-sigma * density * step);
         float weight = transmittance * (1.0 - extinct);
-        litSum += weight * saturate((p.y - base) / max(top - base, 1.0));
+
+        // **The light march, and it is what C2's height proxy stood in for.**
+        // C2 shaded by the mean height of the material a ray saw, which gave
+        // form but no direction: an overcast deck came out one flat tone
+        // whatever the sun was doing, and `lanternhead` rendered as a bright
+        // grey wash. This asks the field itself how much sun reaches the point.
+        float sunlight = cloudSunlight(p, coverage, t, type, base, top, sigma);
+        // Powder: darker where there is too little material to scatter back.
+        float powder = 1.0 - exp(-2.0 * sigma * density * step * float(CLOUD_STEPS));
+        float lit = sunlight * lerp(1.0, powder, CLOUD_POWDER) * phase * CLOUD_SUN_GAIN;
+
+        litSum += weight * lit;
         weightSum += weight;
         transmittance *= extinct;
         if (transmittance < CLOUD_T_MIN) {
@@ -932,15 +1056,10 @@ CloudLook cloudLookVolume(float3 dir) {
 
     look.cover = (1.0 - transmittance) * horizonFade(dir);
     if (weightSum > 0.0) {
-        // **Spread across the palette rather than sitting in the middle of it.**
-        // The mean height of the material a ray sees clusters hard around 0.5 —
-        // it is an average over a slab — so feeding it to the lerp raw produced
-        // one flat mid-grey and threw away the tonal range the two constants
-        // exist to provide. The smoothstep pushes undersides toward CLOUD_DARK
-        // and tops toward CLOUD_LIT. A curve on a flat approximation, not a
-        // lighting model; C3 replaces the whole thing with a sun march.
-        look.body = lerp(CLOUD_DARK, CLOUD_LIT,
-                         smoothstep(0.25, 0.72, litSum / weightSum));
+        // The same two constants the projection uses, so ablating the volume
+        // changes the geometry and the lighting model and *not* the palette —
+        // three things at once would make the gate's number unreadable.
+        look.body = lerp(CLOUD_DARK, CLOUD_LIT, saturate(litSum / weightSum));
     }
     return look;
 }
@@ -1018,9 +1137,6 @@ CloudLook cloudLook(float3 dir) {
     }
     if (dir.y <= 0.0 || push.environment[0].eye.y >= cloudBase(cloudType())) {
         return cloudLookFlat(dir);
-    }
-    if (push.environment[0].cloudMap == 0u) {
-        return cloudLookVolume(dir);
     }
     float4 got = cloudMapTex.SampleLevel(cloudMapUv(dir), 0.0);
     CloudLook look;

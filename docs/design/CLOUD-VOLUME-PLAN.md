@@ -184,26 +184,56 @@ C2 and nothing else; `loom run --edit --frames 90` runs clean in the window at 1
 
 ---
 
-## C3 — The sun march, the phase function, the powder term
+## C3 — The sun march, the phase function, the powder term — **DONE**
 
 Where it stops being a grey volume.
 
-- [ ] Six exponentially-spaced steps toward the sun from each march step, accumulating
-      density; transmittance by Beer's law. Exponential spacing so the near shadow is
-      resolved and the far one is cheap.
-- [ ] `smokePhase` (`scene.slang:4413`) for Henyey–Greenstein forward scattering — the
-      silver lining when the sun is behind a cloud. Reuse it; do not write a second one.
-- [ ] The powder term for dark edges. State in the comment that it is an approximation of
-      multiple scattering and not a derivation, the way the soot volume's constants do.
-- [ ] Retire the single sunward tap at `scene.slang:659` and the `lit` lerp it feeds. Its
-      comment calls it *"the highest realism-per-instruction trick available without
-      raymarching a volume"* — that condition no longer holds, and the comment should say
-      what replaced it rather than being deleted silently.
+- [x] Six exponentially-spaced steps toward the sun, Beer-Lambert along the ray.
+- [x] `smokePhase` reused for Henyey-Greenstein forward scattering — one evaluation per view
+      ray, not per step, since it depends only on the view/sun angle.
+- [x] The powder term, documented as an approximation of multiple scattering rather than a
+      derivation, in the standing this file gives the soot volume's constants.
+- [x] The single sunward tap **kept, not retired** — see below.
 
-**Measure again:** the same two scenes. C3's delta over C2 is what the lighting costs, and
-it is the number that decides whether the 6 steps stay 6.
+### Correction: the sunward tap cannot be retired
 
-**Green:** as C2. `image` moves the same nine and nothing else. Do not bless.
+C3 was written as *"Retire the single sunward tap at `scene.slang:659` and the `lit` lerp it
+feeds."* **Following that literally would have broken C2's control.** That tap lives in
+`cloudLookFlat`, which is the ablation fallback, and C2's whole verification was that
+`LOOM_ABLATE=cloud_volume` reproduces the pre-volume references exactly. Retiring the tap
+would change the fallback and destroy that property. It stays; what changed is that it is no
+longer *the* lighting model, only the projection's.
+
+### Two failures worth keeping
+
+**The sun march cost 4x, and the first diagnosis was wrong.** `mood_deep` went 1.576 to 6.023
+ms. The guess was register pressure from `cloudLook`'s dead inline-march fallback; deleting it
+changed nothing. The falsifiable version — *if the forward pass is marching, its cost tracks
+the light-step count* — said yes (0.536 ms at one step, 2.985 at six), while the shader said
+`cloudLookVolume` has exactly one caller. Both are true: the map pass's fragment work bleeds
+into the next timestamp window, so `cloud_map + forward` is the honest figure.
+
+The real cost was arithmetic. `cloudDensity` calls `clouds_at`, twelve noise evaluations, and
+six light steps at 48 view steps over 0.52 MP is ~175 million of them. **The light march now
+reuses the coverage the view step already sampled** — coverage is the low-frequency half of
+the field and a light ray 2.5 thicknesses long stays inside one region of it, which is the
+same split Nubis makes when it drops octaves for the light march.
+
+**Then `mood_deep` went flat, worse than before, and that was structural.** A slab with a
+constant base and top has constant optical depth wherever coverage saturates, so a sun march
+through it returns a constant answer. Real overcast is lumpy underneath. `CLOUD_UNDERSIDE`
+wanders the underside on the fBm already in hand, and at full cover it is the only structure
+there is.
+
+### The measurement
+
+At 1920x1080, `--sim 300`: `mood_deep` graph **4.336 ms**, `squall` **4.818 ms**. About
++2.8 ms over C2b for real cloud lighting, and `squall` is still half the 9.435 ms the C2
+inline march cost.
+
+**Green:** clippy; 46 test suites; `validate` 93 runs zero messages; `repeat` 60/60 byte for
+byte; `ablate` 6/6 with `cloud_volume` at 64.852%; `image` moves the same ten rows and nothing
+else; the viewer runs clean at 147.1 fps. Not blessed.
 
 ---
 
