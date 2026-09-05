@@ -3887,9 +3887,13 @@ transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
         );
         // **The gap has to WIDEN with the crossing**, or the trace's
         // over-report is just the directional spread and this sea proves
-        // nothing about eigenvalues. Measured 5.2x aligned against 8.7x at
-        // 60°, and the mechanism is that the eigenvalue drops 43% while the
-        // trace drops 3.6%.
+        // nothing about eigenvalues. Measured **12.2x aligned against 15.6x at
+        // 60°** — the trace counts the same 1387 cells either way and cannot
+        // tell the two seas apart at all, while the eigenvalue falls 114 -> 89.
+        //
+        // Those figures were 5.2x and 8.7x while `spectrum::SPREAD_PEAK` was a
+        // flat `cos²`. Concentrating the peak made each sea more one-axis, so
+        // the trace's blindness to heading costs it more, not less.
         assert!(
             trace_two / eigen_two > trace_al / eigen_al,
             "turning the swell 60° across the wind left the trace and the \
@@ -3900,10 +3904,18 @@ transform = { pos = [0.0, 6.0, 0.0], scale = [0.5, 0.5, 0.5] }
             trace_al / eigen_al,
             trace_two / eigen_two
         );
+        // **0.85, and it was 0.75 against a flat `cos²` spread.** The drop is
+        // 22% now (114 -> 89) where it was 43%, and the reason is the same
+        // narrowing that widened the ratio above: a more directional sea folds
+        // harder along its *own* axis, so the crossing case's larger eigenvalue
+        // keeps more of what the aligned case has. The claim being made here is
+        // only that the eigenvalue notices the crossing **at all** — the trace,
+        // at an identical 1387 cells either way, does not. The size of the
+        // notice is the assertion above, and it got stronger.
         assert!(
-            eigen_two < eigen_al * 0.75,
+            eigen_two < eigen_al * 0.85,
             "the eigenvalue read {eigen_two:.4}% on the crossing sea against \
-             {eigen_al:.4}% on the aligned one, measured 43% down. A crossing \
+             {eigen_al:.4}% on the aligned one, measured 22% down. A crossing \
              sea compresses two axes at once and neither has folded as far as \
              the one axis did — an eigenvalue that does not notice is a trace"
         );

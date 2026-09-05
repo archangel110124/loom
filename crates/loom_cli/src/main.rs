@@ -7733,7 +7733,13 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
             // would move every water scene in the repository at once — which
             // is exactly what this loop would report, one scene before it got
             // here.
-            ("ocean_fft", "81da154e01fda3ab"),
+            // **Re-pinned when `spectrum::SPREAD_PEAK` made the directional
+            // spread a function of frequency.** `ocean_fft` is the only scene
+            // here that derives its waves from a spectrum — the other four
+            // author their wave lists — so it is the only hash that could move,
+            // and the fact that exactly one did is the check that the change
+            // reached the spectrum path and nothing else.
+            ("ocean_fft", "6f49146e9c07417a"),
         ] {
             let path = format!("../../assets/test/{scene}.loom");
             // **Cinematic water is barred from a pinned hash** — ADR 0053 §3:

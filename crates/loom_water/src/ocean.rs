@@ -1509,6 +1509,20 @@ mod tests {
             hs[0], hs[1]
         );
 
+        // **Asserted at the threshold the engine reads, as well as at the tail.**
+        // `WATER_FOAM_BREAK` and `SPRAY_BREAK` are both 0.24, so `thresholds[1]` is
+        // where foam and spray are actually decided and it is the number this test
+        // is about. The 0.45 bucket below is the rare tail — kept because a sea that
+        // stopped producing *any* extreme fold would be a real loss, but it is a
+        // hundredth the size and moves for reasons the visible sea does not.
+        assert!(
+            report[1][1] > 0.05 && report[1][1] > report[0][1] * 5.0,
+            "at the threshold foam and spray read ({}), the wind sea covers {:.3}%              against the swell's {:.3}% — that ratio is the whole effect",
+            thresholds[1],
+            report[1][1] * 100.0,
+            report[0][1] * 100.0
+        );
+
         let (before, after) = (report[0][3], report[1][3]);
         assert!(
             before < 1.0e-4,
@@ -1516,8 +1530,22 @@ mod tests {
              this test is the acceptance for is not present",
             before * 100.0
         );
+        // **4e-4, and it was 1e-3 while the directional spread was a flat `cos²`.**
+        // Concentrating the peak (`spectrum::SPREAD_PEAK`) thinned this tail by
+        // more than half and left everything the engine reads alone — measured, at
+        // the four thresholds above, wind sea before against after:
+        //
+        //     0.15   23.86% -> 24.92%      0.30   2.92% -> 2.25%
+        //     0.22    9.90% ->  9.39%      0.45  0.133% -> 0.059%
+        //
+        // with `mu_max` mean identical at 0.083. The extreme fold is many
+        // differently-headed waves crossing at one point, and a narrower peak has
+        // fewer such crossings to offer; the broadened short-wave tail is what puts
+        // the 0.15 bucket *up*. The distribution tightened rather than weakened, so
+        // the bound follows the tail down rather than pinning the sea to a shape it
+        // no longer has.
         assert!(
-            after > 1.0e-3,
+            after > 4.0e-4,
             "the wind sea breaks over only {:.4}% of the surface against {:.4}% without \
              it — a wind sea is supposed to be what makes a sea break",
             after * 100.0,
@@ -1539,6 +1567,39 @@ mod tests {
         let mut o = Ocean::new(&[Cascade::whole(256.0, 32)], 0.0, 100_000.0, [1.0, 0.0], 2);
         o.evolve(9.0);
         assert!(o.significant_height() < 0.05, "Hs {} in no wind", o.significant_height());
+    }
+
+    /// **The configuration that ships, held to the spectrum it claims to be.**
+    ///
+    /// `spectrum::amplitude_field_agrees_with_wave_set_fetch` asks the same question
+    /// of a *single* grid at `n` 32–64 and patches of 200–800 m, where `Δk` is
+    /// within a factor of a few of `k_peak` and a concentrated directional lobe is
+    /// sampled by a handful of cells — so its coarse points carry a 30% bound.
+    /// Nothing held the three-cascade stack to anything, and that is the one an
+    /// author actually looks at: its peak sits in a 2048 m cascade at
+    /// `Δk = 0.0031 rad/m`, hundreds of cells out, and it lands within 2%.
+    ///
+    /// Written when `SPREAD_PEAK` made the peak lobe narrower than `cos²`. That
+    /// change moved the coarse test to 22% and this one not at all, which is the
+    /// measurement that said the 22% was the grid and not the sea.
+    #[test]
+    fn the_shipping_stack_carries_the_spectrums_own_height() {
+        for (u10, fetch) in [(12.0_f32, 200_000.0_f32), (18.0, 440_000.0), (25.0, 500_000.0), (35.0, 600_000.0)] {
+            let mut sea = Ocean::new(&shipping_stack(SHIPPING_N), u10, fetch, [1.0, 0.0], 7);
+            sea.evolve(0.0);
+            let target = crate::spectrum::significant_height(&crate::spectrum::wave_set_fetch(
+                u10,
+                [1.0, 0.0],
+                fetch,
+            ));
+            let error = (sea.significant_height() - target).abs() / target;
+            assert!(
+                error < 0.05,
+                "u10 {u10}: the stack carries Hs {} where the spectrum says {target} ({:.1}% off)",
+                sea.significant_height(),
+                error * 100.0
+            );
+        }
     }
 
     /// Sampling between grid nodes must be continuous across a tile seam, because the
@@ -2067,3 +2128,4 @@ mod tests {
         }
     }
 }
+
