@@ -1028,6 +1028,32 @@ static const int RAIN_CURTAIN_STEPS = 16;
 /// for the overcast case and understated for the backlit one.
 static const float RAIN_CURTAIN_LIT = 0.34;
 
+/// `smokePhase` at full forward scatter, which is its maximum.
+///
+/// **The phase function is normalised so isotropic is 1, not so its peak is** —
+/// at `SMOKE_G = 0.42` it runs 0.29 backward to 4.23 forward. Dividing by that
+/// peak is what lets the gain below use the whole tonal range without any
+/// possibility of saturating.
+///
+/// This constant was arrived at by measurement, and the two attempts before it
+/// were both wrong in the same way — by guessing a gain instead. At 0.55 every
+/// lit sample pinned to white and the shaft read as a flat bright band; at 0.12
+/// the shaft's contrast measured 6.75 against a composite ceiling of 15.60,
+/// using 43% of what was available. Normalising removes the guess.
+static const float RAIN_CURTAIN_PHASE_PEAK = 4.23;
+
+/// The shaft's tone with no sun on it at all.
+static const float RAIN_CURTAIN_DARK = 0.10;
+
+/// How far a sunlit shaft rises above that — ADR 0080.
+///
+/// With the phase normalised, `DARK + 1.0 * GAIN` is the brightest a shaft can
+/// be, so this pair sets the range directly: 0.24 unlit to 0.89 fully lit and
+/// facing the sun. A shaft with the sun behind the camera lands near 0.29,
+/// because back-scatter is 0.29/4.23 of the peak — and that asymmetry between
+/// looking toward the sun and away from it is what a god ray *is*.
+static const float RAIN_CURTAIN_SUN = 0.90;
+
 /// How much denser the shaft is just under the cloud than at the water.
 ///
 /// Rain spreads and thins as it falls, and the top of a shaft is where it has
@@ -1050,6 +1076,42 @@ float rainCurtainRate() {
     return saturate(push.environment[0].rain.w / RAIN_FULL_RATE);
 }
 
+/// How much sun reaches a point *below* the deck, 0 to 1 — ADR 0080.
+///
+/// **A slab intersection, not a march.** The sun ray from a shaft point crosses
+/// the cloud slab at a computable pair of distances, and everything between the
+/// point and that crossing is clear air. At `lanternhead`'s 10-degree sun a
+/// point at sea level under a 700 m base is 4.1 km from the cloud that shadows
+/// it — so a march would spend every step on nothing and still not arrive.
+/// ADR 0080 §2 has the arithmetic.
+///
+/// Four samples rather than the deck's six: this asks the coarse question — *is
+/// there cloud that way* — across a slab it crosses obliquely and therefore
+/// samples widely on its own.
+float cloudShadowFromBelow(float3 p, float t, float type, float base, float top) {
+    float3 sun = sunDirection();
+    if (sun.y <= 0.01) {
+        // Sun on or under the horizon. No light, and no division either.
+        return 0.0;
+    }
+    float enter = (base - p.y) / sun.y;
+    float exit = (top - p.y) / sun.y;
+    if (exit <= enter) {
+        return 1.0;
+    }
+
+    const int SHADOW_STEPS = 4;
+    float step = (exit - enter) / float(SHADOW_STEPS);
+    float sigma = CLOUD_DEPTH_SOLID / max(top - base, 1.0);
+    float depth = 0.0;
+    for (int i = 0; i < SHADOW_STEPS; ++i) {
+        float3 q = p + sun * (enter + (float(i) + 0.5) * step);
+        float unused = 0.0;
+        depth += cloudDensity(q, t, type, base, top, unused) * step;
+    }
+    return exp(-sigma * depth);
+}
+
 /// How much of the view a shower hides, along one ray — ADR 0079.
 ///
 /// **Separate from the deck's march, and `horizonFade` is why.** That fade takes
@@ -1062,10 +1124,10 @@ float rainCurtainRate() {
 /// Marched from the eye out to the cloud base, which is the space a shaft can
 /// occupy: `enter` is where the ray reaches the deck, so everything before it is
 /// under cloud.
-float rainCurtainCover(float3 dir, float enter, float base, float t) {
+float2 rainCurtainLook(float3 dir, float enter, float base, float top, float type, float t) {
     float rate = rainCurtainRate();
     if (rate <= 0.0) {
-        return 0.0;
+        return float2(0.0, 0.0);
     }
     float3 eye = push.environment[0].eye.xyz;
     float waterY = stillWaterLevel();
@@ -1078,6 +1140,12 @@ float rainCurtainCover(float3 dir, float enter, float base, float t) {
     float step = reach / float(RAIN_CURTAIN_STEPS);
     float sigma = RAIN_CURTAIN_DEPTH / column;
     float transmittance = 1.0;
+    float litSum = 0.0;
+    float weightSum = 0.0;
+    // One phase evaluation for the ray, as the deck does: the view/sun angle is
+    // constant along a straight line.
+    float phase = smokePhase(dot(dir, sunDirection()));
+
     for (int i = 0; i < RAIN_CURTAIN_STEPS; ++i) {
         float3 p = eye + dir * ((float(i) + 0.5) * step);
         if (p.y < waterY) {
@@ -1092,12 +1160,26 @@ float rainCurtainCover(float3 dir, float enter, float base, float t) {
         if (density <= 0.0) {
             continue;
         }
-        transmittance *= exp(-sigma * density * step);
+        float extinct = exp(-sigma * density * step);
+        float weight = transmittance * (1.0 - extinct);
+
+        // **A shaft is lit by the gap it falls through** — ADR 0080. Sun that
+        // clears the deck reaches this drop of the shower and scatters forward;
+        // sun that does not leaves it the grey it was.
+        float sunlight = cloudShadowFromBelow(p, t, type, base, top);
+        litSum += weight * (RAIN_CURTAIN_DARK
+                          + sunlight * (phase / RAIN_CURTAIN_PHASE_PEAK)
+                            * RAIN_CURTAIN_SUN);
+        weightSum += weight;
+
+        transmittance *= extinct;
         if (transmittance < CLOUD_T_MIN) {
             break;
         }
     }
-    return 1.0 - transmittance;
+
+    float lit = weightSum > 0.0 ? saturate(litSum / weightSum) : RAIN_CURTAIN_LIT;
+    return float2(1.0 - transmittance, lit);
 }
 
 /// March the slab. Returns cover and body colour, exactly as the projection does.
@@ -1178,9 +1260,10 @@ CloudLook cloudLookVolume(float3 dir) {
     // **The shower goes in front, over the finished deck** — ADR 0079. A dry
     // scene skips the march entirely and this whole block collapses to nothing,
     // so a scene that does not rain renders exactly as it did.
-    float curtain = rainCurtainCover(dir, enter, base, t);
+    float2 shower = rainCurtainLook(dir, enter, base, top, type, t);
+    float curtain = shower.x;
     if (curtain > 0.0) {
-        float3 grey = lerp(CLOUD_DARK, CLOUD_LIT, RAIN_CURTAIN_LIT);
+        float3 grey = lerp(CLOUD_DARK, CLOUD_LIT, shower.y);
         float behind = look.cover * (1.0 - curtain);
         float total = curtain + behind;
         if (total > 0.0) {
