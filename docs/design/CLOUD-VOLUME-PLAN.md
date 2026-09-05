@@ -108,42 +108,57 @@ moved, findable now rather than tangled into C2.
 
 ---
 
-## C2 — The march, and the switch that undoes it
+## C2 — The march, and the switch that undoes it — **DONE**
 
 Where parallax appears.
 
-- [ ] `cloud_volume` joins `ABLATIONS` in `ablate.rs` with the next free bit, and gets its
-      `LOOM_ABLATE_CLOUD_VOLUME` Slang constant — unlike `spray_droplets`, this one is a
-      shader switch, so it follows the ordinary pattern rather than that row's exception.
-- [ ] `skyColor` routes cloud sampling through one call site with two implementations.
-      Ablated, the projection path runs and must be **byte-identical to today** on all nine
-      cloud scenes. Verify that before building the volume, not after.
-- [ ] `cloudType()`, beside `cloudCover()` at `scene.slang:388`: returns `cloud.w`, or the
-      cover→type curve when it is negative. **C1 moved this here** — state the curve, say
-      that low cover is a cumulus field and full cover an overcast ceiling because that is
-      what those numbers physically mean, and pin its endpoints in the comment.
-- [ ] The slab: `base` and `top` from type per ADR 0078 §3, entry/exit closed-form,
-      `dir.y > 0` only, total march length capped, `horizonFade` reused unchanged.
-      One branch falls back to the projection when `eye.y >= base` (ADR 0078 §4).
-- [ ] `density(p) = coverage(p.xz) · profile(h, type) · erosion(p)`. `coverage` is
-      `clouds_at` at the step's world `xz`. `profile` lerps the stratus and cumulus height
-      gradients by type. `erosion` is ridged fBm from `loom_value_noise`, advected on the
-      same wind the deck drifts on, biting hardest where the profile is already weak.
-- [ ] Accumulate transmittance with Beer–Lambert and an early-out, following
-      `SMOKE_STEPS`/`SMOKE_T_MIN`. Light it with the existing `CLOUD_DARK`/`CLOUD_LIT` pair
-      driven by accumulated density — **flat lighting on purpose**; the sun march is C3, and
-      keeping them apart is what makes it possible to say which one bought the look.
-- [ ] Set the ablate floor from the measured change, not from a guess.
+- [x] `cloud_volume` in `ABLATIONS` at bit 5, with `LOOM_ABLATE_CLOUD_VOLUME = 32u` in
+      Slang and a row in `xtask`'s table. Note the gap: bit 16 is `spray_droplets`, which is
+      a CPU early return and the one row with no Slang constant.
+- [x] `skyColor` routes through `cloudLook`, with `cloudLookFlat` and `cloudLookVolume`
+      behind it. **Verified before the volume was trusted:** `LOOM_ABLATE=cloud_volume`
+      renders 60/60 against the pre-C2 references, so the restructure moved nothing.
+- [x] `cloudType()` beside `cloudCover()`, resolving the sentinel against the effective
+      cover. Crossing band 0.5-0.9.
+- [x] The slab, entry/exit closed-form, `dir.y > 0`, capped span, `horizonFade` reused, and
+      the fallback branch when `eye.y >= base`.
+- [x] `density = mask * profile - erosion`, and the ablate floor set from the measurement.
+- [x] Beer-Lambert with an early-out; flat height-based lighting, deliberately.
 
-**Measure here and write the number down:** frame time on `squall` and `mood_deep`, with and
-without `LOOM_ABLATE=cloud_volume`. That difference is the feature's cost and it is the
-number ADR 0015 said this engine did not have.
+### Four renders, and each wrong one is recorded rather than tidied away
 
-**Green:** clippy; `cargo test --workspace`; `validate`; `ablate` with the new row passing;
-`repeat` byte-identical across three fresh processes. **`image` will move the nine cloud
-scenes and must move nothing else** — that containment is the check. Do not bless.
+The first three versions were all wrong, in ways worth keeping because two of them were
+failures of *this plan's own reasoning*, not of the code.
 
----
+1. **A flat wash.** `CLOUD_SIGMA = 0.01` made a density-0.2 column 96% opaque, so every
+   cloudy pixel saturated. Fixed by deriving the figure instead of picking it.
+2. **Vertical streaks.** The ray was capped at 12 km over 28 steps — 429 m per step against
+   a 260 m detail scale. More than half that budget was spent on ray `horizonFade` had
+   already deleted; the cap is now derived from the fade.
+3. **Mush at small `cloud_scale`.** The slab was up to 1600 m thick while `squall`'s masses
+   are 260 m across, so every cloud was six times taller than it was wide. **ADR 0078 §6
+   called this a C4 re-authoring problem and that was wrong** — thickness follows
+   `cloud_scale`, and Addendum 1 records why re-authoring could never have fixed it.
+4. **Wash at high cover.** The mask used coverage alone, which saturates. ADR 0015 had
+   already written this trap down for the shading tap and this plan did not carry it
+   forward. Addendum 2.
+
+### What is still wrong, and is C3's
+
+**`lanternhead` reads worse than the plane deck** — a uniform bright grey. Its failure is
+tone, not form, which is what the sun march, the phase function and the powder term exist
+to fix. Named here rather than blessed away; the references still hold the plane version.
+
+### The measurement
+
+At 960x640, `--sim 300`. Forward 0.040 -> 0.438 ms on `squall`. **The water pass is 83% of
+`mood_deep`'s added cost** (0.191 -> 1.66 ms) because reflections call `skyColor`, so the
+march runs per water pixel too — unpredicted, and it changes which escalation ADR 0078 §5
+should reach for. See Addendum 3. Roughly +4.7 ms at 1080p.
+
+**Green:** clippy clean; `cargo test --workspace` 46 suites; `validate` 93 runs zero
+messages; `repeat` 60/60 byte for byte; `ablate` 6/6 with `cloud_volume` at 67.098% against
+a 30% floor; `image` moves ten rows and nothing else. Not blessed.
 
 ## C3 — The sun march, the phase function, the powder term
 

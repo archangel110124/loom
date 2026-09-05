@@ -617,6 +617,27 @@ float cloudCoverAtTime(float3 world, float t) {
     return clouds_at(float3(world.x, 0.0, world.z), t, params).x;
 }
 
+/// Both channels of the weather map at a world position: x coverage, y raw fBm.
+///
+/// **`cloudCoverAtTime` cannot be reused here**, and the reason is its
+/// short-circuit: at `cover >= 1.0` it returns a flat 1.0 without evaluating the
+/// field at all. That is right for the rain — a solid deck rains everywhere, and
+/// skipping the evaluation is what keeps a scene authoring no cover costing what
+/// it did — and it is precisely wrong for a volume, which needs the interior
+/// structure that the short-circuit discards.
+float3 cloudFieldAt(float3 world, float t) {
+    float4 cloud = push.environment[0].cloud;
+    float4 wind = push.environment[0].wind;
+    CloudsParams params;
+    params.cloud_cover = cloud.x;
+    params.cloud_scale = cloud.y;
+    params.cloud_drift = cloud.z;
+    params.dir_x = wind.x;
+    params.dir_z = wind.y;
+    params.speed = wind.z;
+    return clouds_at(float3(world.x, 0.0, world.z), t, params);
+}
+
 /// Cover over a point now. The same clock the grass bends on.
 float cloudCoverAt(float3 world) {
     return cloudCoverAtTime(world, push.environment[0].weather.z);
@@ -640,27 +661,300 @@ float2 cloudSample(float3 dir) {
     return float2(got.x * horizonFade(dir), got.y);
 }
 
-float3 skyColor(float3 dir) {
-    float3 base = skyGradient(dir);
-    float toSun = max(dot(dir, sunDirection()), 0.0);
-    // A tight disc inside a wide glow. Both are additive and modest — a sun
-    // that blows out to white makes every screenshot harder to read, which is
-    // the opposite of what this render path is for.
-    float glow = pow(toSun, 8.0) * 0.18;
-    float disc = pow(toSun, 512.0) * 0.9;
+// ---------------------------------------------------------------------------
+// The deck as a volume — ADR 0078.
+//
+// `cloudSample` above projects a view direction onto a plane; everything below
+// marches a slab instead. The weather map is the same `clouds_at` in both, and
+// that is the point: the field the rain reads is untouched, and the third
+// dimension is invented here out of a height profile and frozen noise.
+// ---------------------------------------------------------------------------
+
+/// A cloud deck, as the sky pass needs it: how much of the pixel it covers, and
+/// what colour its body is.
+///
+/// **Two implementations, one call site.** The projection and the march both
+/// return this, so `skyColor` composites identically either way and
+/// `LOOM_ABLATE=cloud_volume` swaps one for the other with no third path.
+struct CloudLook {
+    float cover;
+    float3 body;
+};
+
+/// Overcast grey through to a sunlit top. Deliberately not pure white: a white
+/// that clips reads as a blown highlight rather than as cloud, and the range is
+/// narrow because a real deck is a small spread of greys.
+///
+/// Shared by both paths so that ablating the volume changes the *geometry* and
+/// nothing else — a fallback that also changed the palette would measure two
+/// things at once, which is the mistake the grass AA table made twice.
+static const float3 CLOUD_DARK = float3(0.29, 0.30, 0.34);
+static const float3 CLOUD_LIT = float3(0.78, 0.78, 0.79);
+
+/// What kind of cloud, `0` flat stratus through `1` towering cumulus.
+///
+/// **Negative means derive it from cover**, which is what a scene authoring no
+/// `cloud_type` sends — see `loom_render::CLOUD_TYPE_DERIVE` for why the
+/// resolution is here and not on the CPU. The short version: the effective cover
+/// is not known until after the rain floor, and the rain floor runs in a function
+/// that returns early for every dry scene.
+///
+/// The curve is meteorological rather than tuned. A sky 30-40% covered is a
+/// cumulus field almost by definition — that is what broken cover *is* — and one
+/// fully covered is a ceiling. The crossing band is 0.5 to 0.9, so `cascade`
+/// (0.35), `croft` (0.38) and `squall` (0.45) stay cumulus, `rain_pool` and
+/// `lanternhead` (0.85) are nearly overcast, and `puddles` and `mood_deep`'s
+/// deepest rung (1.0) are flat ceilings.
+float cloudType() {
+    float authored = push.environment[0].cloud.w;
+    if (authored >= 0.0) {
+        return saturate(authored);
+    }
+    return 1.0 - smoothstep(0.5, 0.9, cloudCover());
+}
+
+/// Metres above sea level where the deck starts, and how thick it is.
+///
+/// Type drives both, because it physically does: a stratus sheet sits low and is
+/// a few hundred metres thick, a cumulus field has a higher base and towers. One
+/// authored scalar therefore moves altitude, thickness and shape together rather
+/// than leaving three knobs to be kept consistent by hand.
+///
+/// **Thickness follows `cloud_scale`, and that is the fix the first two renders
+/// needed.** A cloud is roughly as tall as it is wide. Fixed altitudes gave a
+/// 1600 m slab, and `squall` authors masses 260 m across — so every mass was six
+/// times taller than it was wide, every ray crossed several of them, and the
+/// integral averaged the weather map into a grey mush hung with vertical streaks
+/// from the noise column. The plane projection never met this because it had no
+/// thickness to disagree with.
+///
+/// ADR 0078 §6 files `cloud_scale` doing double duty as a C4 problem to be solved
+/// by re-authoring scenes. It is not: tying the vertical extent to the horizontal
+/// one makes the deck read correctly at *every* authored scale, including the
+/// 90 m of `rain_pool`, which no re-authoring could have fixed without breaking
+/// the rain footprint that number is actually chosen for.
+float cloudBase(float type) { return lerp(700.0, 950.0, type); }
+
+float cloudThickness(float type) {
+    float scale = max(push.environment[0].cloud.y, 1.0);
+    // Stratus is a sheet and spreads far wider than it is deep; cumulus is
+    // closer to isotropic. The clamp keeps a 90 m scene from a slab too thin to
+    // march and a 20 km one from a wall.
+    return clamp(scale * lerp(0.35, 0.90, type), 120.0, 1200.0);
+}
+
+float cloudTop(float type) { return cloudBase(type) + cloudThickness(type); }
+
+/// `x` mapped from `[a, b]` onto `[c, d]`, unclamped. Slang has no `remap`.
+float cloudRemap(float x, float a, float b, float c, float d) {
+    return c + (x - a) * (d - c) / (b - a);
+}
+
+/// The vertical density profile, `h` running 0 at the base to 1 at the top.
+///
+/// **This is the term that makes a volume read as cloud rather than as fog**, and
+/// the two shapes are genuinely different solids. Stratus fills from its base
+/// almost immediately and is cut off flat — that hard top is what an overcast
+/// ceiling looks like from underneath. Cumulus starts narrow, bulges through the
+/// middle and rounds off, which is the cauliflower silhouette.
+float cloudProfile(float h, float type) {
+    float stratus = saturate(cloudRemap(h, 0.0, 0.08, 0.0, 1.0))
+                  * saturate(cloudRemap(h, 0.55, 0.75, 1.0, 0.0));
+    float cumulus = saturate(cloudRemap(h, 0.0, 0.28, 0.0, 1.0))
+                  * saturate(cloudRemap(h, 0.55, 1.00, 1.0, 0.0));
+    return lerp(stratus, cumulus, type);
+}
+
+/// The coarsest erosion octave, as a fraction of one cloud mass.
+///
+/// **A fraction rather than metres.** Erosion says how ragged an edge is, which
+/// is a property of the cloud relative to its own size — a fixed 260 m bit deep
+/// into `rain_pool`'s 90 m masses and barely touched `croft`'s 900 m ones.
+static const float CLOUD_DETAIL_FRACTION = 0.28;
+
+/// How deep the detail noise can bite into the shape.
+static const float CLOUD_EROSION = 0.55;
+
+/// Three octaves of the frozen lattice noise, advected on the deck's own drift.
+///
+/// **The same wind and the same drift multiplier the weather map uses**, so the
+/// inside of a cloud travels with its outside instead of boiling in place.
+float cloudErosion(float3 p, float t) {
+    float4 wind = push.environment[0].wind;
+    float travel = wind.z * push.environment[0].cloud.z * t;
+    float3 drift = float3(wind.x, 0.0, wind.y) * travel;
+    float detail = max(push.environment[0].cloud.y * CLOUD_DETAIL_FRACTION, 8.0);
+    float3 q = (p - drift) / detail;
+    return loom_value_noise(q) * 0.53
+         + loom_value_noise(q * 3.1) * 0.31
+         + loom_value_noise(q * 8.7) * 0.16;
+}
+
+/// Density at a point inside the slab, 0 to 1.
+///
+/// `coverage · profile · erosion`, and the erosion is subtractive rather than
+/// multiplicative for the reason Schneider gives: **it has to bite hardest where
+/// the shape is already weak.** Weighting it by `1 - shape` frays the edges into
+/// wisps while leaving the core solid, where a plain multiply would thin the
+/// whole cloud uniformly and give back the flat grey this replaces.
+float cloudDensity(float3 p, float t, float type, float base, float top) {
+    float h = saturate((p.y - base) / max(top - base, 1.0));
+    float profile = cloudProfile(h, type);
+    if (profile <= 0.0) {
+        return 0.0;
+    }
+
+    // **Coverage says WHERE, raw density says HOW MUCH — and using only the
+    // first is what made an overcast deck render as a flat sheet.**
+    //
+    // This is ADR 0015's lesson arriving a second time in a new place. Its own
+    // words: "Coverage saturates, so under an overcast sky both taps read 1.0,
+    // every difference is zero and the deck shades to one flat tone." That was
+    // written about the sunward shading tap; it is just as true of the march.
+    // `lanternhead` at cover 0.85 and `mood_deep` at 1.0 both came back as
+    // featureless wash while `squall` at 0.45 looked right, which is exactly the
+    // signature of a saturating mask.
+    //
+    // So the horizontal term keeps the raw fBm underneath the coverage curve. At
+    // low cover, coverage is doing the work and gates whole regions to zero; at
+    // full cover it is 1 everywhere and `n` is the only thing left carrying
+    // structure. A deck therefore has an interior at every cover.
+    float3 got = cloudFieldAt(p, t);
+    float mask = got.x * lerp(0.30, 1.0, saturate(got.y));
+
+    float shape = mask * profile;
+    if (shape <= 0.0) {
+        return 0.0;
+    }
+    float erode = cloudErosion(p, t);
+    return saturate(shape - erode * CLOUD_EROSION * (1.0 - shape));
+}
+
+/// Steps along the view ray. The soot volume ships 20; a deck is bigger and
+/// smoother, and this is the number C2 measures rather than the number it
+/// assumes.
+static const int CLOUD_STEPS = 48;
+
+/// Stop marching once this little light is still coming through.
+static const float CLOUD_T_MIN = 0.02;
+
+/// Extinction per metre at full density.
+///
+/// **The first value here was 0.01 and it was the bug that made the first render
+/// a flat wash.** At that figure a column of density 0.2 straight up through a
+/// 1600 m cumulus slab is already 96% opaque, so every pixel with any cloud in it
+/// saturated and the deck lost its silhouette entirely — `mood_deep` and
+/// `lanternhead` rendered as featureless grey.
+///
+/// **Expressed as optical depth through the slab, not extinction per metre**, so
+/// that it survives the thickness following `cloud_scale`. A fixed per-metre
+/// figure means a 90 m deck is a haze and a 1200 m one is a wall; what should be
+/// constant is that *solid cloud is opaque through its own thickness*, whatever
+/// that thickness is.
+///
+/// 4.0 leaves the useful range where the densities actually are: full density
+/// reads 0.982 opaque, half reads 0.865, a fifth reads 0.551. Cloud and gap stay
+/// distinguishable, which is the whole point of a volume.
+static const float CLOUD_DEPTH_SOLID = 4.0;
+
+/// The longest ray the march will follow, in metres.
+///
+/// **The slab crossing runs to infinity at the horizon**, which is the same
+/// degeneracy `cloudPlane` has and which `horizonFade` already exists to hide.
+/// Capping the ray keeps the step size finite; the fade takes the deck out before
+/// the cap is visible as a boundary.
+///
+/// **Derived from the fade rather than picked.** `horizonFade` is zero below
+/// `dir.y = 0.30`, so the longest ray that survives to be drawn crosses the slab
+/// at that elevation — at the 1200 m thickness cap, 4000 m. The first version
+/// capped at 12000, which spent more than half the step budget on ray the fade
+/// had already deleted: at 28 steps that was 429 m per step, coarser than the
+/// detail it was trying to resolve, and the noise aliased into vertical streaks.
+static const float CLOUD_MARCH_MAX = 4000.0;
+
+/// March the slab. Returns cover and body colour, exactly as the projection does.
+///
+/// **Lighting here is deliberately flat.** The body colour comes from the mean
+/// *height* of the material the ray actually saw — tops bright, undersides dark —
+/// which is enough to show that the volume has form, and is not a light march.
+/// Keeping C3's sun march out of this is what makes it possible to say afterwards
+/// which of the two bought the picture.
+CloudLook cloudLookVolume(float3 dir) {
+    CloudLook look;
+    look.cover = 0.0;
+    look.body = CLOUD_DARK;
+
+    float type = cloudType();
+    float base = cloudBase(type);
+    float top = cloudTop(type);
+    float3 eye = push.environment[0].eye.xyz;
+    float t = push.environment[0].weather.z;
+
+    float enter = (base - eye.y) / dir.y;
+    float exit = (top - eye.y) / dir.y;
+    float span = min(exit - enter, CLOUD_MARCH_MAX);
+    if (span <= 0.0) {
+        return look;
+    }
+
+    float step = span / float(CLOUD_STEPS);
+    float sigma = CLOUD_DEPTH_SOLID / max(top - base, 1.0);
+    float transmittance = 1.0;
+    float litSum = 0.0;
+    float weightSum = 0.0;
+
+    for (int i = 0; i < CLOUD_STEPS; ++i) {
+        float3 p = eye + dir * (enter + (float(i) + 0.5) * step);
+        float density = cloudDensity(p, t, type, base, top);
+        if (density <= 0.0) {
+            continue;
+        }
+        // Beer-Lambert over this step, and the weight is how much of what the eye
+        // sees comes from here — extinction times what still reaches it.
+        float extinct = exp(-sigma * density * step);
+        float weight = transmittance * (1.0 - extinct);
+        litSum += weight * saturate((p.y - base) / max(top - base, 1.0));
+        weightSum += weight;
+        transmittance *= extinct;
+        if (transmittance < CLOUD_T_MIN) {
+            break;
+        }
+    }
+
+    look.cover = (1.0 - transmittance) * horizonFade(dir);
+    if (weightSum > 0.0) {
+        // **Spread across the palette rather than sitting in the middle of it.**
+        // The mean height of the material a ray sees clusters hard around 0.5 —
+        // it is an average over a slab — so feeding it to the lerp raw produced
+        // one flat mid-grey and threw away the tonal range the two constants
+        // exist to provide. The smoothstep pushes undersides toward CLOUD_DARK
+        // and tops toward CLOUD_LIT. A curve on a flat approximation, not a
+        // lighting model; C3 replaces the whole thing with a sun march.
+        look.body = lerp(CLOUD_DARK, CLOUD_LIT,
+                         smoothstep(0.25, 0.72, litSum / weightSum));
+    }
+    return look;
+}
+
+/// The deck as a plane — what this was before ADR 0078, kept verbatim as the
+/// ablation's fallback and as the path for a camera above the base.
+CloudLook cloudLookFlat(float3 dir) {
+    CloudLook look;
+    look.cover = 0.0;
+    look.body = CLOUD_DARK;
 
     float2 deck = cloudSample(dir);
-    float cover = deck.x;
-    if (cover <= 0.0) {
-        return base + float3(1.0, 0.94, 0.82) * (glow + disc);
+    if (deck.x <= 0.0) {
+        return look;
     }
 
     // **One extra tap toward the sun, and it is what makes clouds read as
     // clouds.** Sample the deck again a little way along the sun direction: if
     // it is *denser* that way, this patch is behind its own mass and goes grey;
-    // if thinner, it is lit and goes white. Cheap fake self-shadowing, and the
-    // highest realism-per-instruction trick available without raymarching a
-    // volume (ADR 0015).
+    // if thinner, it is lit and goes white. Cheap fake self-shadowing, and it was
+    // the highest realism-per-instruction trick available *without* raymarching a
+    // volume — which is exactly the condition that no longer holds. C3 replaces
+    // it with a real light march; this stays as the fallback's lighting.
     //
     // **Density, not coverage.** Coverage saturates, so under an overcast sky
     // both taps read 1.0, every difference is zero and the deck shades to one
@@ -670,12 +964,41 @@ float3 skyColor(float3 dir) {
     float shadow = cloudSample(sunward).y;
     float lit = saturate(0.5 - (shadow - deck.y) * 5.0);
 
-    // Overcast grey through to a sunlit top. Deliberately not pure white: a
-    // white that clips reads as a blown highlight rather than as cloud, and the
-    // range is narrow because a real deck is a small spread of greys.
-    const float3 CLOUD_DARK = float3(0.29, 0.30, 0.34);
-    const float3 CLOUD_LIT = float3(0.78, 0.78, 0.79);
-    float3 body = lerp(CLOUD_DARK, CLOUD_LIT, lit);
+    look.cover = deck.x;
+    look.body = lerp(CLOUD_DARK, CLOUD_LIT, lit);
+    return look;
+}
+
+/// The one call site. **The march unless something says otherwise**, and the two
+/// things that say otherwise are the ablation switch and a camera that has climbed
+/// above the cloud base — ADR 0078 §4 takes the second as a licence for the cheap
+/// slab march, and this branch is what keeps that from being a crash rather than a
+/// degrade.
+CloudLook cloudLook(float3 dir) {
+    if (ablated(LOOM_ABLATE_CLOUD_VOLUME)) {
+        return cloudLookFlat(dir);
+    }
+    if (dir.y <= 0.0 || push.environment[0].eye.y >= cloudBase(cloudType())) {
+        return cloudLookFlat(dir);
+    }
+    return cloudLookVolume(dir);
+}
+
+float3 skyColor(float3 dir) {
+    float3 base = skyGradient(dir);
+    float toSun = max(dot(dir, sunDirection()), 0.0);
+    // A tight disc inside a wide glow. Both are additive and modest — a sun
+    // that blows out to white makes every screenshot harder to read, which is
+    // the opposite of what this render path is for.
+    float glow = pow(toSun, 8.0) * 0.18;
+    float disc = pow(toSun, 512.0) * 0.9;
+
+    CloudLook deck = cloudLook(dir);
+    float cover = deck.cover;
+    if (cover <= 0.0) {
+        return base + float3(1.0, 0.94, 0.82) * (glow + disc);
+    }
+    float3 body = deck.body;
 
     // **The sun goes behind the cloud, rather than through it.** This is the
     // whole point of the coupling: rain falling out of a clear sky with a
@@ -6519,6 +6842,18 @@ static const uint LOOM_ABLATE_WATER_GLOW = 4u;
 /// this repository's seas — `whitecaps` measures 0.5% of the frame — so a gate parked on
 /// anything below a gale would pass on an effect that had stopped drawing.
 static const uint LOOM_ABLATE_SPRAY_HAZE = 8u;
+
+/// The bit for the marched cloud deck — ADR 0078.
+///
+/// **Must equal `cloud_volume`'s bit in `ABLATIONS`
+/// (`crates/loom_render/src/ablate.rs`)**, on exactly the warning above. Note the gap: bit
+/// 16 is `spray_droplets`, which is a CPU-side early return in `loom_cli::particles::spray`
+/// and therefore the one row with no constant here. This is 32, not 16.
+///
+/// Ablating it takes `cloudSample`'s projection path instead of the march, which is what
+/// this deck was before ADR 0078 — so the measurement is *what the volume adds over the
+/// plane*, not what clouds add over a clear sky.
+static const uint LOOM_ABLATE_CLOUD_VOLUME = 32u;
 
 bool ablated(uint bit) {
     return (uint(push.environment[0].viewport.w) & bit) != 0u;

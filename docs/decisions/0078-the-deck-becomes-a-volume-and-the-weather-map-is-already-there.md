@@ -248,8 +248,80 @@ first already handles.
   sky. Once the deck is world-space geometry that one number controls both the rain
   footprint and the cloud silhouette, which want different values. **This tension is
   pre-existing and deliberate** — ADR 0016 made them the same field on purpose, and that
-  argument has not weakened. The march only makes it visible. Scenes are re-authored; the
-  parameter is not split. Reopening trigger: a scene that cannot satisfy both at any value.
+  argument has not weakened. The march only makes it visible.
+  ~~Scenes are re-authored; the parameter is not split.~~ **FALSE WHEN WRITTEN — see
+  Addendum 1.** Reopening trigger: a scene that cannot satisfy both at any value.
+
+---
+
+## Addendum 1 — `cloud_scale` is not a C4 authoring problem, it is the slab's thickness
+
+**Date:** 2026-09-05, on building C2.
+
+§6 above filed `cloud_scale`'s double duty as a look problem to be settled later by
+re-authoring the nine scenes. Three renders say that was wrong in both halves.
+
+The deck was built with fixed altitudes — base 600–1000 m, top 1000–2600 m — giving a slab
+up to 1600 m thick. `squall` authors masses **260 m** across. So every cloud was six times
+taller than it was wide, every view ray crossed several of them, and the integral averaged
+the weather map into grey mush hung with vertical streaks off the noise column. The plane
+projection never met this, because it had no thickness to disagree with.
+
+**A cloud is roughly as tall as it is wide**, so the vertical extent follows the authored
+horizontal one: `thickness = cloud_scale · lerp(0.35, 0.90, type)`, clamped to
+`[120, 1200]` m. Extinction follows it too, expressed as optical depth *through the slab*
+(`CLOUD_DEPTH_SOLID = 4.0`) rather than per metre — a fixed per-metre figure would make a
+90 m deck a haze and a 1200 m one a wall.
+
+**And re-authoring could not have fixed it.** `rain_pool`'s 90 m is chosen to make rain vary
+across a small scene; raising it to look like sky would break the thing the number is for.
+The parameter still is not split — it now means the same thing in both jobs, which is what
+ADR 0016 always intended.
+
+## Addendum 2 — coverage saturates, and the march met that trap a second time
+
+**Date:** 2026-09-05, on building C2.
+
+The march first masked density with the coverage channel alone. `squall` at cover 0.45
+looked right; `lanternhead` at 0.85 and `mood_deep` at 1.0 came back as featureless wash.
+
+That is the signature ADR 0015 already recorded, in its own words: *"Coverage saturates, so
+under an overcast sky both taps read 1.0, every difference is zero and the deck shades to
+one flat tone. That is not a hypothetical: it is what the first version of this did."* It
+wrote that about the sunward shading tap. It is equally true of a volume, and this ADR did
+not carry the warning forward — so the same trap was walked into in a new place.
+
+`clouds_at` returns density beside coverage for exactly this reason. The march's horizontal
+mask is now `coverage · lerp(0.30, 1.0, density)`, so coverage gates whole regions to zero
+at low cover and the raw fBm carries the interior at high cover. **A deck has structure at
+every cover.**
+
+`cloudCoverAtTime` cannot be reused for it: at `cover >= 1.0` it short-circuits to a flat
+1.0 without evaluating the field. That is right for the rain and discards precisely what a
+volume needs, so the march has its own accessor.
+
+## Addendum 3 — the cost is dominated by reflections, not by the sky
+
+**Date:** 2026-09-05. The measurement §5 asked for, at 960x640, `--sim 300`:
+
+| | forward | water | graph |
+|---|---|---|---|
+| `squall` plane | 0.040 ms | — | 2.21 ms |
+| `squall` volume | 0.438 ms | — | 3.61 ms |
+| `mood_deep` plane | 0.068 ms | 0.191 ms | 0.398 ms |
+| `mood_deep` volume | 0.368 ms | 1.66 ms | 1.81 ms |
+
+**The water pass is 83% of `mood_deep`'s added cost**, and that was not predicted anywhere
+in this ADR. Water reflections call `skyColor`, so the march runs once per water pixel as
+well as once per background pixel. Scaled to 1920x1080 the deck costs on the order of
+**+4.7 ms**, which is over a quarter of a 16.7 ms frame.
+
+**This changes which escalation §5 should reach for.** A half-resolution screen-space pass —
+the first option §5 names — would optimise the *smaller* half and do nothing at all for a
+reflection ray, which is not indexed by screen position. The escalation that matches the
+measurement is a direction-indexed low-resolution cloud map that both the background and
+every reflected ray sample. §5's ordering stands as written for the sky; it was silent on
+reflections because this ADR did not know they were the cost.
 
 ---
 

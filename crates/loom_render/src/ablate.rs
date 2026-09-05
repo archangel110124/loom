@@ -37,6 +37,7 @@ pub const ABLATIONS: &[(&str, u32)] = &[
     ("water_glow", 1 << 2),
     ("spray_haze", 1 << 3),
     ("spray_droplets", 1 << 4),
+    ("cloud_volume", 1 << 5),
 ];
 
 /// The bit for whitecap and swash foam on the water surface.
@@ -101,6 +102,19 @@ pub const SPRAY_HAZE: u32 = 1 << 3;
 /// particle population fail in different ways, and one covering for the other is exactly
 /// the false negative this harness exists to catch.
 pub const SPRAY_DROPLETS: u32 = 1 << 4;
+
+/// The bit for the marched cloud deck — ADR 0078.
+///
+/// **Ablating it restores the sky-plane projection, not a clear sky**, which makes this the
+/// one row here that measures a *replacement* rather than a removal. The two paths draw the
+/// same weather from the same `clouds_at`; what the volume adds is parallax, thickness, a
+/// silhouette and an underside. So the floor is what those are worth in a frame, and a
+/// volume that had quietly collapsed back onto its own fallback — the likeliest way this
+/// feature dies — scores zero and fails.
+///
+/// Must equal `LOOM_ABLATE_CLOUD_VOLUME` in `assets/shaders/scene.slang` — see the warning
+/// on [`ABLATIONS`] above; nothing checks that these two agree.
+pub const CLOUD_VOLUME: u32 = 1 << 5;
 
 /// Parse a `LOOM_ABLATE` value into a mask.
 ///

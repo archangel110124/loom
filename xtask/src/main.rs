@@ -1450,7 +1450,7 @@ const GOLDEN_SIZE: &str = "320x200";
 /// the switch is an early return in `loom_cli::particles::spray` rather than a branch the
 /// GPU takes. See `loom_render::ablate::SPRAY_DROPLETS`.
 ///
-const ABLATE: [(&str, &str, &str, &[&str], f64); 5] = [
+const ABLATE: [(&str, &str, &str, &[&str], f64); 6] = [
     (
         "whitecaps",
         "assets/test/whitecaps.loom",
@@ -1485,6 +1485,20 @@ const ABLATE: [(&str, &str, &str, &[&str], f64); 5] = [
         "spray_droplets",
         &["--sim", "405"],
         0.035,
+    ),
+    (
+        // **The one row that measures a replacement rather than a removal.**
+        // Ablating the volume restores the sky-plane projection, so what is
+        // scored is what thickness, parallax and a silhouette are worth — not
+        // what clouds are worth. `squall` is the registered scene because its
+        // cover of 0.45 is broken cloud: at full cover the coverage field is 1
+        // everywhere and both paths draw a ceiling, which would park this gate
+        // on the one sky where the two agree most.
+        "squall",
+        "assets/test/squall.loom",
+        "cloud_volume",
+        &["--sim", "300"],
+        0.30,
     ),
 ];
 
