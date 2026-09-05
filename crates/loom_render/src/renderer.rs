@@ -313,7 +313,7 @@ pub struct EnvironmentData {
     /// middle would move `waves` and pad besides.
     pub eye_step: [f32; 4],
     /// x cloud cover 0..1, y metres across a cloud mass, z drift multiplier on
-    /// the wind, w unused.
+    /// the wind, w cloud type — see [`CLOUD_TYPE_DERIVE`].
     ///
     /// Feeds the generated `clouds_at`. Cover is the *effective* value — the
     /// authored one already raised to the floor rain puts under it — because
@@ -532,6 +532,26 @@ pub struct PointLight {
 /// ADR rather than a bigger array here.
 pub const MAX_LIGHTS: usize = 8;
 
+/// `cloud.w` when the scene authored no cloud type: **derive it from cover.**
+///
+/// A sentinel rather than a resolved number, and the reason is where the
+/// *effective* cover is decided. A scene that rains and authors no cover has
+/// its deck forced solid in `rain_at_eye` — long after the environment is
+/// built, in a function that returns early for every dry scene, called from
+/// three places with no common point after it. Resolving on the CPU would
+/// therefore have to happen either before the cover is final, which is wrong
+/// for exactly the downpours that most want a flat ceiling, or at a choke
+/// point that does not exist.
+///
+/// The shader has the final cover in `cloud.x` and resolves there, in one
+/// uniform branch. **Nothing on the CPU reads cloud type** — the rain reads
+/// cover, not type — so there is no twin to keep in step and no agreement test
+/// owed. See ADR 0078 §3.
+///
+/// Negative because the authored range is `0..=1`, so no valid value can
+/// collide with it.
+pub const CLOUD_TYPE_DERIVE: f32 = -1.0;
+
 /// The cap on summed waves, mirroring `loom_scene::components::MAX_WAVES` and
 /// the generated shader's `LOOM_MAX_WAVES`.
 ///
@@ -598,7 +618,7 @@ impl Default for EnvironmentData {
             // reference.
             eye_step: [0.0; 4],
             // Clear sky, and the same scale `loom_field::cloud_defaults` uses.
-            cloud: [0.0, 1200.0, 2.5, 0.0],
+            cloud: [0.0, 1200.0, 2.5, crate::CLOUD_TYPE_DERIVE],
             lights: [PointLight::default(); MAX_LIGHTS],
             light_count: 0,
             fire_flipbook: crate::NO_TEXTURE,

@@ -55,32 +55,56 @@ each. Do not build them here and do not half-build them.
 | file | responsibility |
 |---|---|
 | `assets/shaders/scene.slang` | The march. `cloudPlane`/`cloudSample` keep working as the fallback; the volume is a sibling and one switch chooses. |
-| `crates/loom_scene/src/components.rs` | `Sky.cloud_type: Option<f32>`, and the two load-time refusals. |
-| `crates/loom_render/src/renderer.rs` | Derive type from cover when `None`; pack into `cloud.w`. |
+| `crates/loom_scene/src/components.rs` | `Environment.cloud_type: Option<f32>`, and the load-time refusal. |
+| `crates/loom_render/src/renderer.rs` | `CLOUD_TYPE_DERIVE`, the sentinel `cloud.w` carries when a scene authors no type. |
+| `crates/loom_cli/src/main.rs` | Pack it: `environment_of_inner`'s `cloud` vec4. |
 | `crates/loom_render/src/ablate.rs` | `cloud_volume` row and its mask bit. |
 | `xtask/src/main.rs` | The `ABLATE` entry and its floor. |
 
 ---
 
-## C1 — Type reaches the shader, and no pixel moves
+## C1 — Type reaches the shader, and no pixel moves — **DONE**
 
 The plumbing, alone, so that the task which changes the picture changes only the picture.
 
-- [ ] `Sky` gains `cloud_type: Option<f32>`, mirroring the `Option<f32>` override pattern
-      `components.rs:1163` already uses for `cloud_cover`. Document it as one scalar driving
-      base altitude, thickness and profile shape together, and say why those are coupled.
-- [ ] When `None`, derive on the **CPU at scene load** from cover: low cover is a cumulus
-      field, high cover is an overcast ceiling. The shader gets a plain float — no sentinel,
-      no per-pixel branch. Unit-test the mapping's endpoints, the way `coverage_shape` pins
-      the coverage curve's.
-- [ ] Two load-time refusals, each naming the authored value in the message (ADR 0078 §5):
-      `cloud_type` outside `[0, 1]`; `cloud_scale <= 0`. Test both refuse.
-- [ ] Pack into `cloud.w`. Assert the `EnvironmentGpu` layout test is untouched.
+- [x] `Environment` gains `cloud_type: Option<f32>`. Documented as one scalar driving base
+      altitude, thickness and profile shape together, and why those are coupled.
+- [x] `CLOUD_TYPE_DERIVE = -1.0` in `loom_render`, written to `cloud.w` when the scene
+      authors nothing. **Resolution is the shader's, not the CPU's — corrected while
+      building; see below.**
+- [x] Load-time refusal on `cloud_type` outside `[0, 1]`, with a test that also pins *why*
+      it needs testing: the range attribute is wrapped in an `Option`, and whether it
+      survives that is `schemars`' business, not this crate's.
+- [x] `cloud_scale <= 0` — **already refused** by `range(min = 50.0, max = 20000.0)`,
+      which predates this plan and is stricter. Pinned by a test rather than duplicated into
+      a second mechanism that would disagree the first time one of them moved.
+- [x] Packed into `cloud.w`. The `EnvironmentGpu` layout test is untouched.
 
-**Green:** `cargo clippy --workspace -- -D warnings`; `cargo test --workspace`;
+### Correction: the derivation is the shader's job
+
+This task was written as *"derive on the **CPU** at scene load … no sentinel, no per-pixel
+branch."* **That is not buildable, and the reason is worth keeping.**
+
+The type has to be derived from the *effective* cover, and cover is not final when the
+environment is built. A scene that rains and authors no cover has its deck forced solid in
+`rain_at_eye` (`main.rs:3679`) — which returns early for every dry scene, and is called from
+three places with no common point after it, one of them `run.rs`, which this plan may not
+touch. Deriving in `environment_of_inner` would therefore read cover `0.0` for exactly the
+downpours that most want a flat ceiling.
+
+So the CPU carries the authored value or a negative sentinel, and the shader resolves in one
+uniform branch against the `cloud.x` it already has. **No twin is created**: nothing on the
+CPU reads cloud type — the rain reads cover — so there is no second implementation to keep
+in step and no agreement test owed. The `Option` on the component and the sentinel in the
+buffer are the same fact written on the two sides of four floats that cannot carry a `None`.
+
+**Consequence for C2:** the cover→type curve now lands there, in Slang, and its proof is a
+picture rather than a unit test. C2 owns stating what the curve is and why.
+
+**Green:** `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`;
 `cargo xtask validate`; **`cargo xtask image` 60/60 unchanged.** That last one is the point
-of the task — nothing reads `.w` yet, so a moved reference here means something else moved
-and the cause is findable now rather than tangled into C2.
+of the task — nothing reads `.w` yet, so a moved reference here would mean something else
+moved, findable now rather than tangled into C2.
 
 ---
 
@@ -94,6 +118,10 @@ Where parallax appears.
 - [ ] `skyColor` routes cloud sampling through one call site with two implementations.
       Ablated, the projection path runs and must be **byte-identical to today** on all nine
       cloud scenes. Verify that before building the volume, not after.
+- [ ] `cloudType()`, beside `cloudCover()` at `scene.slang:388`: returns `cloud.w`, or the
+      cover→type curve when it is negative. **C1 moved this here** — state the curve, say
+      that low cover is a cumulus field and full cover an overcast ceiling because that is
+      what those numbers physically mean, and pin its endpoints in the comment.
 - [ ] The slab: `base` and `top` from type per ADR 0078 §3, entry/exit closed-form,
       `dir.y > 0` only, total march length capped, `horizonFade` reused unchanged.
       One branch falls back to the projection when `eye.y >= base` (ADR 0078 §4).

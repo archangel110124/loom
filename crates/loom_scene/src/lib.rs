@@ -460,6 +460,58 @@ name = \"Root\"
         assert_eq!(errs[0].error, "field_out_of_range");
     }
 
+    /// A cloud type outside `0..=1` is refused, and the refusal is worth its
+    /// own test because the field is an `Option<f32>` rather than an `f32`.
+    ///
+    /// `loom_reflect::bounds` reads `minimum`/`maximum` off the field's schema
+    /// node directly, so whether a range attribute survives being wrapped in an
+    /// `Option` is a property of how `schemars` shapes a nullable — not
+    /// something this crate controls, and not something to assume. If this test
+    /// fails, the range attribute is decorative and the check has to be written
+    /// by hand the way `check_moods` is; that is the whole reason it exists.
+    #[test]
+    fn a_cloud_type_outside_its_range_is_rejected() {
+        let reg = components::registry();
+
+        let errs = reg
+            .validate("Environment", &serde_json::json!({ "cloud_type": 2.0 }))
+            .expect_err("cloud type is a 0..=1 blend from stratus to cumulus");
+
+        assert_eq!(errs[0].error, "field_out_of_range");
+        assert_eq!(errs[0].field, "Environment.cloud_type");
+    }
+
+    /// A `cloud_scale` of zero is refused, and by an attribute that predates
+    /// this change.
+    ///
+    /// `CLOUD-VOLUME-PLAN.md` C1 asked for a load-time refusal on
+    /// `cloud_scale <= 0` because it is a divisor inside `clouds_at`. Checking
+    /// rather than writing it found `range(min = 50.0)` already there and
+    /// already stricter, so the refusal is pinned here instead of duplicated
+    /// into a second mechanism that would disagree the first time one moved.
+    #[test]
+    fn a_cloud_scale_of_zero_is_already_rejected() {
+        let reg = components::registry();
+
+        for scale in [0.0, -5.0, 49.0] {
+            let errs = reg
+                .validate("Environment", &serde_json::json!({ "cloud_scale": scale }))
+                .expect_err("cloud scale divides inside `clouds_at`");
+            assert_eq!(errs[0].error, "field_out_of_range", "at scale {scale}");
+        }
+    }
+
+    /// The absent case is not a rejection. `None` means "derive it from cover"
+    /// and is what every scene authored before ADR 0078 says, so a validator
+    /// that treated the range as mandatory would refuse the entire library.
+    #[test]
+    fn an_absent_cloud_type_is_accepted() {
+        let reg = components::registry();
+
+        reg.validate("Environment", &serde_json::json!({ "cloud_cover": 0.4 }))
+            .expect("a scene may author cover and say nothing about type");
+    }
+
     /// Albedo is a linear factor, not 0-255. Same trap as `Light::color`,
     /// which is why it carries the same range.
     #[test]

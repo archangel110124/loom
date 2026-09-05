@@ -124,9 +124,9 @@ pub use fluid::{
 };
 pub use fluid_surface::FluidVertex;
 pub use material::{FLAG_TRIPLANAR, MaterialData, NO_TEXTURE};
-pub use renderer::{PointLight, MAX_LIGHTS, 
-    Camera, EnvironmentData, GrassBlade, MAX_WAVES, Object, ParticleInstance, RenderError,
-    Renderer, WaterWave,
+pub use renderer::{PointLight, MAX_LIGHTS,
+    CLOUD_TYPE_DERIVE, Camera, EnvironmentData, GrassBlade, MAX_WAVES, Object, ParticleInstance,
+    RenderError, Renderer, WaterWave,
 };
 pub use renderer::{MIN_VIEWPORT, ViewportPlacement};
 pub use tonemap::Grade;

@@ -1023,6 +1023,27 @@ pub struct Environment {
     /// Metres across one cloud mass. Larger is a broader, slower deck.
     #[schemars(range(min = 50.0, max = 20000.0))]
     pub cloud_scale: f32,
+    /// What *kind* of cloud: `0.0` a flat stratus ceiling, `1.0` towering
+    /// cumulus. `None` derives it from [`Self::cloud_cover`] — ADR 0078 §3.
+    ///
+    /// **One scalar drives base altitude, thickness and profile shape
+    /// together**, because a stratus deck really is lower and thinner than a
+    /// cumulus field and splitting them into three knobs would be three ways
+    /// for a scene to author a cloud that does not occur.
+    ///
+    /// **`None` is not a magic 0.5.** Cover already says most of what type
+    /// would: a sky 30% covered is a cumulus field almost by definition, and
+    /// one fully covered is an overcast ceiling. Deriving the default from it
+    /// means the nine scenes authoring cover before this existed each get a
+    /// sky consistent with the number they already chose, and none of them has
+    /// to be re-authored. Author it only to contradict that — and say in the
+    /// scene why the derived value was wrong.
+    ///
+    /// **Inert until the deck is a volume.** Nothing reads it while clouds are
+    /// the sky-plane projection: a flat deck has no vertical profile to shape,
+    /// so this changes no pixel until ADR 0078's C2 lands.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub cloud_type: Option<f32>,
     /// What the whole frame is multiplied by before the tonemap's shoulder.
     ///
     /// **The knob a scene turns when its lights are right and its frame is
@@ -1162,6 +1183,16 @@ pub struct EnvironmentPatch {
     pub fog_falloff: Option<f32>,
     pub cloud_cover: Option<f32>,
     pub cloud_scale: Option<f32>,
+    /// **Two meanings of absent collapse into one here, and that is a real
+    /// limit.** On `Environment`, `None` means "derive from cover"; on a patch,
+    /// `None` means "this stage does not move it". So a ladder can ramp a sky
+    /// from stratus to cumulus, and cannot ramp one *back* to derived — it
+    /// would have to name the number the derivation would have produced.
+    ///
+    /// Left as-is rather than given a second sentinel: a stage that names type
+    /// at one rung and wants it derived at another is asking for the curve, and
+    /// the honest fix for that is to author cover and say nothing about type.
+    pub cloud_type: Option<f32>,
     pub exposure: Option<f32>,
 }
 
@@ -1250,6 +1281,9 @@ impl Default for Environment {
             // the one deliberate change to existing scenes.
             cloud_cover: 0.0,
             cloud_scale: 1200.0,
+            // Derived from cover, which is what `None` means. Not a number,
+            // because there is no type a clear sky has.
+            cloud_type: None,
             // Unit: the identity leg of the shoulder, so every scene authored
             // before the tonemap existed renders unchanged.
             exposure: 1.0,

@@ -3212,6 +3212,11 @@ pub(crate) fn mood_of(
         put("fog_falloff", mix1(a.fog_falloff, b.fog_falloff, "fog_falloff"));
         put("cloud_cover", mix1(a.cloud_cover, b.cloud_cover, "cloud_cover"));
         put("cloud_scale", mix1(a.cloud_scale, b.cloud_scale, "cloud_scale"));
+        // A scene that authors no type has `null` in the base, so `mix1`'s
+        // fallback is `None`, `put` skips the key, and `scalar` downstream
+        // falls through to `CLOUD_TYPE_DERIVE` — the sentinel survives a mood
+        // ladder untouched, which is what every scene in the library needs.
+        put("cloud_type", mix1(a.cloud_type, b.cloud_type, "cloud_type"));
         put("exposure", mix1(a.exposure, b.exposure, "exposure"));
     }
 
@@ -3874,11 +3879,15 @@ fn environment_of_inner(world: &World, dread: Option<f32>) -> loom_render::Envir
         // `environment_with_wind`**, which is the caller that knows whether the
         // scene rains; putting it here would need this function to reach for a
         // component it otherwise has no business reading.
+        // `cloud_type` is `Option<f32>`, so an unauthored one is absent from
+        // the merged map and `scalar` falls through to the sentinel — the
+        // `Option` and the sentinel are the same fact written on the two sides
+        // of a buffer that cannot carry a `None`.
         cloud: [
             scalar("cloud_cover", defaults.cloud_cover),
             scalar("cloud_scale", defaults.cloud_scale),
             2.5,
-            0.0,
+            scalar("cloud_type", loom_render::CLOUD_TYPE_DERIVE),
         ],
         exposure: scalar("exposure", defaults.exposure),
         // The sky is this function's business; the weather is filled in by
@@ -6468,6 +6477,74 @@ mod tests {
         let scene = loom_scene::Scene::parse(text).expect("valid scene");
         let world = World::from_scene(&scene);
         environment_with_wind_at(&world, &crate::weather::wind_of(&scene), 0.0, None)
+    }
+
+    /// Cloud type reaches `cloud.w`, and its absence reaches it as the
+    /// sentinel — ADR 0078 §3.
+    ///
+    /// **The absent case is the one worth pinning.** `cloud_type` is an
+    /// `Option<f32>` and the buffer is four floats with nowhere to put a
+    /// `None`, so the two sides agree by `scalar` falling through to
+    /// `CLOUD_TYPE_DERIVE`. If the field were ever changed to a plain `f32`
+    /// with a default, that fall-through would quietly start delivering `0.0` —
+    /// a flat stratus ceiling over every scene in the library — and nothing
+    /// else would fail.
+    #[test]
+    fn a_scene_says_what_kind_of_cloud_or_says_nothing() {
+        let head = "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e51\"\n\n\
+             [[node]]\nname = \"R\"\n\n  [node.components.Environment]\n  cloud_cover = 0.4\n";
+
+        let silent = environment_of_text(head);
+        assert!(
+            (silent.cloud[3] - loom_render::CLOUD_TYPE_DERIVE).abs() < 1e-6,
+            "an unauthored type must arrive as the sentinel, got {}",
+            silent.cloud[3]
+        );
+
+        let authored = environment_of_text(&format!("{head}  cloud_type = 0.75\n"));
+        assert!(
+            (authored.cloud[3] - 0.75).abs() < 1e-6,
+            "an authored type must arrive verbatim, got {}",
+            authored.cloud[3]
+        );
+
+        // Cover is untouched by either, which is what keeps the rain reading
+        // the same number it read before this field existed.
+        assert!((silent.cloud[0] - 0.4).abs() < 1e-6);
+        assert!((authored.cloud[0] - 0.4).abs() < 1e-6);
+    }
+
+    /// **A mood ladder must not resolve the sentinel behind the scene's back.**
+    ///
+    /// `EnvironmentPatch` gained `cloud_type` so a stage can move it, and the
+    /// ramp runs before `environment_of_inner` reads a single key. The failure
+    /// this guards is silent and total: if `mix1` fell back to `0.0` for a
+    /// ladder that never names type, every staged scene — `mood_deep` and
+    /// `deeper_demo`, the two most authored skies in the library — would render
+    /// a flat stratus ceiling and nothing would report it.
+    #[test]
+    fn a_mood_ladder_that_never_names_a_cloud_type_leaves_it_derived() {
+        let staged = "[scene]\nformat = 1\nid = \"0f9c1a3e-4b2d-4c1a-9e7f-8a1b2c3d4e52\"\n\n\
+             [[node]]\nname = \"R\"\n\n  [node.components.Environment]\n  \
+             cloud_cover = 0.4\n  dread = 0.5\n\n    \
+             [[node.components.Environment.stages]]\n    name = \"near\"\n    at = 0.0\n      \
+             [node.components.Environment.stages.environment]\n      cloud_cover = 0.2\n\n    \
+             [[node.components.Environment.stages]]\n    name = \"far\"\n    at = 1.0\n      \
+             [node.components.Environment.stages.environment]\n      cloud_cover = 1.0\n";
+
+        let env = environment_of_text(staged);
+        assert!(
+            (env.cloud[3] - loom_render::CLOUD_TYPE_DERIVE).abs() < 1e-6,
+            "a ladder that never names type must leave the sentinel, got {}",
+            env.cloud[3]
+        );
+        // And the ladder is genuinely running, or the assertion above would
+        // pass for the wrong reason.
+        assert!(
+            (env.cloud[0] - 0.6).abs() < 1e-6,
+            "cover should be ramped to the midpoint, got {}",
+            env.cloud[0]
+        );
     }
 
     /// **The ramp is continuous across a stage boundary even for a key nobody
