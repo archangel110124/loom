@@ -1450,7 +1450,7 @@ const GOLDEN_SIZE: &str = "320x200";
 /// the switch is an early return in `loom_cli::particles::spray` rather than a branch the
 /// GPU takes. See `loom_render::ablate::SPRAY_DROPLETS`.
 ///
-const ABLATE: [(&str, &str, &str, &[&str], f64); 6] = [
+const ABLATE: [(&str, &str, &str, &[&str], f64); 7] = [
     (
         "whitecaps",
         "assets/test/whitecaps.loom",
@@ -1499,6 +1499,19 @@ const ABLATE: [(&str, &str, &str, &[&str], f64); 6] = [
         "cloud_volume",
         &["--sim", "300"],
         0.30,
+    ),
+    (
+        // **`squall` again, and deliberately the same scene as `cloud_volume`.**
+        // The two rows measure different halves of one sky — the deck above and
+        // the shower under it — and a scene that has both is the only place
+        // either can be checked against the other. Cover 0.45 is broken cloud,
+        // so there are gaps for a shaft to be distinct against; at full cover a
+        // curtain is a uniform veil and the row would be measuring haze.
+        "squall",
+        "assets/test/squall.loom",
+        "rain_curtain",
+        &["--sim", "300"],
+        0.25,
     ),
 ];
 

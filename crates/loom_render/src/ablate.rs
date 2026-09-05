@@ -38,6 +38,7 @@ pub const ABLATIONS: &[(&str, u32)] = &[
     ("spray_haze", 1 << 3),
     ("spray_droplets", 1 << 4),
     ("cloud_volume", 1 << 5),
+    ("rain_curtain", 1 << 6),
 ];
 
 /// The bit for whitecap and swash foam on the water surface.
@@ -115,6 +116,18 @@ pub const SPRAY_DROPLETS: u32 = 1 << 4;
 /// Must equal `LOOM_ABLATE_CLOUD_VOLUME` in `assets/shaders/scene.slang` — see the warning
 /// on [`ABLATIONS`] above; nothing checks that these two agree.
 pub const CLOUD_VOLUME: u32 = 1 << 5;
+
+/// The bit for the distant rain curtain — ADR 0079.
+///
+/// **Its own row rather than a share of [`CLOUD_VOLUME`], because the two fail
+/// apart.** A curtain that stopped drawing would leave the deck still scoring
+/// around 65% against its floor and nothing would report it — which is exactly
+/// the false negative this whole harness exists to prevent. The same reasoning
+/// split `spray_droplets` from `spray_haze` in `aa0bd9e`.
+///
+/// Must equal `LOOM_ABLATE_RAIN_CURTAIN` in `assets/shaders/scene.slang` — see
+/// the warning on [`ABLATIONS`] above; nothing checks that these two agree.
+pub const RAIN_CURTAIN: u32 = 1 << 6;
 
 /// Parse a `LOOM_ABLATE` value into a mask.
 ///

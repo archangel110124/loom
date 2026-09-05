@@ -988,6 +988,118 @@ float cloudSunlight(
     return exp(-sigma * depth);
 }
 
+// ---------------------------------------------------------------------------
+// The shower, as a medium — ADR 0079.
+//
+// A distant curtain of rain is not drops. `RAIN_BOX` is 64 m across and a
+// shower is kilometres away; covering that with particles is 110,000x the drop
+// budget at 2 km, every one sub-pixel. So it is a participating medium hanging
+// between the water and the cloud base, marched in the same loop as the deck
+// above it, from the same `clouds_at` — which is what makes a shower sit under
+// a cloud and travel with it by construction rather than by arrangement.
+// ---------------------------------------------------------------------------
+
+/// Optical depth through a full column of rain at the scene's full rate.
+///
+/// **Far thinner than cloud.** `CLOUD_DEPTH_SOLID` is 4.0, which is opaque;
+/// 1.2 leaves 30% of the light through a whole shaft, so a shower greys the
+/// horizon and hides what is behind it without becoming a wall. Rain you cannot
+/// see through is fog.
+static const float RAIN_CURTAIN_DEPTH = 1.2;
+
+/// The furthest a shower is marched, in metres.
+///
+/// Beyond this the atmosphere's own haze has taken over anyway — `fogAmount`
+/// is doing that job and doing it in closed form, which is cheaper than any
+/// number of steps here.
+static const float RAIN_CURTAIN_MAX = 8000.0;
+
+/// Steps through the shaft. Fewer than the deck's: a curtain has no interior
+/// structure to resolve — its density varies with `clouds_at` horizontally and
+/// smoothly with height, and there is no erosion noise in it at all.
+static const int RAIN_CURTAIN_STEPS = 16;
+
+/// How light the shaft reads, on the same `CLOUD_DARK`..`CLOUD_LIT` axis the
+/// deck is shaded on.
+///
+/// **A constant, and §6 of ADR 0079 records that as a known limit.** Rain does
+/// scatter sunlight — that is what a sunlit shaft against a dark sky is — and
+/// this does not march the sun. It reads as grey water in air, which is right
+/// for the overcast case and understated for the backlit one.
+static const float RAIN_CURTAIN_LIT = 0.34;
+
+/// How much denser the shaft is just under the cloud than at the water.
+///
+/// Rain spreads and thins as it falls, and the top of a shaft is where it has
+/// spread least. Not zero at the bottom: rain reaching the sea is the case the
+/// drop layer draws, and the two have to meet.
+float rainCurtainFall(float h) {
+    return lerp(0.55, 1.0, saturate(h));
+}
+
+/// The scene's rain rate as a 0..1 factor, or zero when it is not raining.
+///
+/// `rain.w` is the **uncovered** rate at the eye — `rain_at_eye` passes no deck
+/// deliberately, because cover is a property of where a drop is rather than of
+/// where the camera stands. Multiplying it by `clouds_at` per march point is
+/// what turns one scalar into a shower with edges.
+float rainCurtainRate() {
+    if (ablated(LOOM_ABLATE_RAIN_CURTAIN)) {
+        return 0.0;
+    }
+    return saturate(push.environment[0].rain.w / RAIN_FULL_RATE);
+}
+
+/// How much of the view a shower hides, along one ray — ADR 0079.
+///
+/// **Separate from the deck's march, and `horizonFade` is why.** That fade takes
+/// the deck out below `dir.y = 0.30` because a plane projection degenerates
+/// there and a real deck hazes out anyway. A shower does the opposite: it lives
+/// near the horizon, because that is where "two kilometres away" is. Folding the
+/// curtain into the deck's transmittance would have erased the feature exactly
+/// where it exists — the fade is the deck's, and only the deck's.
+///
+/// Marched from the eye out to the cloud base, which is the space a shaft can
+/// occupy: `enter` is where the ray reaches the deck, so everything before it is
+/// under cloud.
+float rainCurtainCover(float3 dir, float enter, float base, float t) {
+    float rate = rainCurtainRate();
+    if (rate <= 0.0) {
+        return 0.0;
+    }
+    float3 eye = push.environment[0].eye.xyz;
+    float waterY = stillWaterLevel();
+    float column = max(base - waterY, 1.0);
+    float reach = min(enter, RAIN_CURTAIN_MAX);
+    if (reach <= 0.0) {
+        return 0.0;
+    }
+
+    float step = reach / float(RAIN_CURTAIN_STEPS);
+    float sigma = RAIN_CURTAIN_DEPTH / column;
+    float transmittance = 1.0;
+    for (int i = 0; i < RAIN_CURTAIN_STEPS; ++i) {
+        float3 p = eye + dir * ((float(i) + 0.5) * step);
+        if (p.y < waterY) {
+            continue;
+        }
+        float h = saturate((p.y - waterY) / column);
+        // **The same `clouds_at` the deck is marched from.** This is the whole
+        // argument of ADR 0079: a shower is under a cloud and moves with it
+        // because it *is* the cloud's field, not because anything keeps them in
+        // step.
+        float density = rate * cloudCoverAtTime(p, t) * rainCurtainFall(h);
+        if (density <= 0.0) {
+            continue;
+        }
+        transmittance *= exp(-sigma * density * step);
+        if (transmittance < CLOUD_T_MIN) {
+            break;
+        }
+    }
+    return 1.0 - transmittance;
+}
+
 /// March the slab. Returns cover and body colour, exactly as the projection does.
 ///
 /// **Lighting here is deliberately flat.** The body colour comes from the mean
@@ -1018,6 +1130,7 @@ CloudLook cloudLookVolume(float3 dir) {
     float transmittance = 1.0;
     float litSum = 0.0;
     float weightSum = 0.0;
+
 
     // **One phase evaluation for the whole ray**, because it depends only on
     // the angle between the view and the sun, and neither changes along a
@@ -1060,6 +1173,20 @@ CloudLook cloudLookVolume(float3 dir) {
         // changes the geometry and the lighting model and *not* the palette —
         // three things at once would make the gate's number unreadable.
         look.body = lerp(CLOUD_DARK, CLOUD_LIT, saturate(litSum / weightSum));
+    }
+
+    // **The shower goes in front, over the finished deck** — ADR 0079. A dry
+    // scene skips the march entirely and this whole block collapses to nothing,
+    // so a scene that does not rain renders exactly as it did.
+    float curtain = rainCurtainCover(dir, enter, base, t);
+    if (curtain > 0.0) {
+        float3 grey = lerp(CLOUD_DARK, CLOUD_LIT, RAIN_CURTAIN_LIT);
+        float behind = look.cover * (1.0 - curtain);
+        float total = curtain + behind;
+        if (total > 0.0) {
+            look.body = (grey * curtain + look.body * behind) / total;
+        }
+        look.cover = total;
     }
     return look;
 }
@@ -7045,6 +7172,13 @@ static const uint LOOM_ABLATE_SPRAY_HAZE = 8u;
 /// this deck was before ADR 0078 — so the measurement is *what the volume adds over the
 /// plane*, not what clouds add over a clear sky.
 static const uint LOOM_ABLATE_CLOUD_VOLUME = 32u;
+
+/// The bit for the distant rain curtain — ADR 0079.
+///
+/// **Must equal `rain_curtain`'s bit in `ABLATIONS`
+/// (`crates/loom_render/src/ablate.rs`)**, on the warning above. 64, and the
+/// gap at 16 is still `spray_droplets`, the one row with no constant here.
+static const uint LOOM_ABLATE_RAIN_CURTAIN = 64u;
 
 bool ablated(uint bit) {
     return (uint(push.environment[0].viewport.w) & bit) != 0u;
