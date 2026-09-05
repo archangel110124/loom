@@ -228,7 +228,16 @@ struct EnvironmentData {
     /// `loom_water::flow` derives from the bed; nothing here writes it, and
     /// what it drives is texture rather than force.
     float2* flowVelocity;
-    uint2 flowPad;
+    /// Non-zero when the cloud map has been marched and bound for this frame.
+    ///
+    /// **A flag, not a bindless index**, unlike `fireFlipbook` and
+    /// `foamTexture` beside it: the map is a render target this renderer owns
+    /// and binds on set 3, not an asset a scene loaded. It rides one lane of
+    /// what was `flowPad`, so the struct's stride and every offset in the
+    /// layout test are unchanged — the same trick `foamTexture` played on
+    /// `foamPad`.
+    uint cloudMap;
+    uint flowPad;
     /// The advected foam field: xy world origin, z metres between samples,
     /// w samples per axis. **Zero samples means this water has no field**, and
     /// the foam is then the closed-form trail alone, bit for bit as it was.
@@ -969,11 +978,40 @@ CloudLook cloudLookFlat(float3 dir) {
     return look;
 }
 
-/// The one call site. **The march unless something says otherwise**, and the two
-/// things that say otherwise are the ablation switch and a camera that has climbed
-/// above the cloud base — ADR 0078 §4 takes the second as a licence for the cheap
-/// slab march, and this branch is what keeps that from being a crash rather than a
-/// degrade.
+/// Direction to a texel of the cloud map, and back.
+///
+/// Equirectangular over the **upper hemisphere only**: the deck is never below
+/// the eye (ADR 0078 §4), so spending half the map on ground would halve the
+/// vertical resolution for nothing.
+float2 cloudMapUv(float3 dir) {
+    float az = atan2(dir.x, dir.z);
+    return float2(az * (0.5 / 3.14159265) + 0.5,
+                  saturate(asin(saturate(dir.y)) * (2.0 / 3.14159265)));
+}
+
+float3 cloudMapDir(float2 uv) {
+    float az = (uv.x - 0.5) * (2.0 * 3.14159265);
+    float el = uv.y * (3.14159265 * 0.5);
+    float ce = cos(el);
+    return float3(ce * sin(az), sin(el), ce * cos(az));
+}
+
+/// The one call site. **The map unless something says otherwise.**
+///
+/// Three things say otherwise. The ablation switch restores the projection. A
+/// camera above the cloud base takes the projection too — ADR 0078 §4 uses "the
+/// eye is always below the deck" as the licence for the cheap slab march, and
+/// this branch keeps that from being a crash rather than a degrade. And a frame
+/// with no map bound at all marches directly, which is what the map's own pass
+/// does when it fills the thing.
+///
+/// **The map is eye-centred and reflections use it anyway**, which is an
+/// approximation worth naming. A reflected ray leaves a water pixel, not the
+/// eye; the map was marched from the eye. The deck is ~1 km up and the water in
+/// frame is tens of metres away, so the parallax between those two origins is
+/// under a degree — far below the map's own 0.35° texel. What it buys is that a
+/// reflected ray costs one texture fetch instead of forty-eight march steps,
+/// and the water pass was 83% of this feature's cost (ADR 0078 Addendum 3).
 CloudLook cloudLook(float3 dir) {
     if (ablated(LOOM_ABLATE_CLOUD_VOLUME)) {
         return cloudLookFlat(dir);
@@ -981,7 +1019,44 @@ CloudLook cloudLook(float3 dir) {
     if (dir.y <= 0.0 || push.environment[0].eye.y >= cloudBase(cloudType())) {
         return cloudLookFlat(dir);
     }
-    return cloudLookVolume(dir);
+    if (push.environment[0].cloudMap == 0u) {
+        return cloudLookVolume(dir);
+    }
+    float4 got = cloudMapTex.SampleLevel(cloudMapUv(dir), 0.0);
+    CloudLook look;
+    look.body = got.rgb;
+    look.cover = got.a;
+    return look;
+}
+
+// ---------------------------------------------------------------------------
+// The cloud map's own pass. Two entry points in this module rather than a
+// second shader file, so the march, the weather map and the whole push block
+// are the ones the scene already uses — there is no second implementation to
+// keep in step. `-fvk-use-entrypoint-name` is what makes that work.
+// ---------------------------------------------------------------------------
+
+struct CloudMapVertex {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+[shader("vertex")]
+CloudMapVertex cloudMapVertexMain(uint id: SV_VertexID) {
+    // The standard oversized triangle. Three vertices, no buffers.
+    float2 uv = float2((id << 1) & 2, id & 2);
+    CloudMapVertex out;
+    out.uv = uv;
+    out.position = float4(uv * 2.0 - 1.0, 0.0, 1.0);
+    return out;
+}
+
+[shader("fragment")]
+float4 cloudMapFragmentMain(CloudMapVertex in) : SV_Target {
+    // **`cloudLookVolume`, never `cloudLook`** — going through the front door
+    // here would sample the map this pass is in the middle of writing.
+    CloudLook look = cloudLookVolume(cloudMapDir(in.uv));
+    return float4(look.body, look.cover);
 }
 
 float3 skyColor(float3 dir) {
@@ -7934,6 +8009,17 @@ float2 rainRingsAt(float2 xz, float t, float gate, out float envelope) {
 /// per-sample fetch — the resolve IS the mechanism.
 [[vk::binding(0, 3)]] Sampler2D opaqueColor;
 [[vk::binding(1, 3)]] Sampler2D opaqueDepth;
+
+/// The cloud deck, marched once per frame into a direction-indexed map.
+///
+/// **Set 3 because it is the same kind of thing the other two are** — a render
+/// target the scene shader samples — and because the reflection path that most
+/// needs it is already binding this set.
+///
+/// Upper hemisphere only, equirectangular: `u` is azimuth over the full turn,
+/// `v` is elevation from the horizon to the zenith. Wrapping in `u` and clamped
+/// in `v`, so the azimuth seam is continuous and the zenith does not fold.
+[[vk::binding(2, 3)]] Sampler2D cloudMapTex;
 
 /// How far light travels through water between the surface and whatever is
 /// behind it, and how much survives the trip.

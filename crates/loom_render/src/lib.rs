@@ -89,6 +89,7 @@
 //! pre-1.3 style and should be reconsidered.
 
 pub mod ablate;
+mod cloud_map;
 mod cmaa2;
 mod debug_names;
 mod device;
@@ -905,6 +906,13 @@ mod tests {
         assert_eq!(
             transitions,
             [
+                // **The cloud map is first, and its two entries are the whole
+                // shape of the escalation** (ADR 0078 Addendum 3): the deck is
+                // marched once into its own target, then read by everything
+                // that wants sky. Before this it was re-marched per background
+                // pixel and again per water pixel.
+                ("cloud_map", "loom.cloud_map"),
+                ("forward", "loom.cloud_map"),
                 ("forward", "loom.color_target"),
                 // The multisampled pair, which the graph must move out of
                 // UNDEFINED every frame. Rendering without these transitions
@@ -1197,14 +1205,23 @@ mod tests {
             .map(|t| (t.pass, t.image))
             .collect();
 
-        // **The first six entries are the split, in order.** The opaque half
+        // **The cloud map, then the split, in order.** The deck is marched into
+        // its own target first and the opaque half reads it; then that half
         // moves the multisampled pair out of UNDEFINED and writes its two
         // resolve targets; the water block then moves those same two targets
         // into a readable layout before it draws. Everything after is the
         // water block's own attachments and the post chain.
+        //
+        // **Note what is absent: there is no `("water", "loom.cloud_map")`.**
+        // The water block samples the map too, and needs no barrier to, because
+        // the forward pass already left it in `SHADER_READ_ONLY_OPTIMAL` and
+        // read-after-read in one layout is free. The graph knowing that is the
+        // property this list exists to keep visible.
         assert_eq!(
-            &transitions[..6],
+            &transitions[..8],
             [
+                ("cloud_map", "loom.cloud_map"),
+                ("forward", "loom.cloud_map"),
                 ("forward", "loom.msaa_color"),
                 ("forward", "loom.msaa_depth"),
                 ("forward", "loom.scene_opaque"),

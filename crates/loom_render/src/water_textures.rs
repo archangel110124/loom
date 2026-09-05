@@ -38,6 +38,11 @@ pub(crate) struct WaterTextures {
     set: vk::DescriptorSet,
     color_sampler: vk::Sampler,
     depth_sampler: vk::Sampler,
+    /// **Wraps in `u` and clamps in `v`, which the other two do not.** The
+    /// cloud map is equirectangular: azimuth is periodic, so the seam at the
+    /// back of the sky must wrap or a hard line appears there; elevation is
+    /// not, so the zenith row must clamp rather than fold onto the horizon.
+    cloud_sampler: vk::Sampler,
 }
 
 impl WaterTextures {
@@ -49,14 +54,14 @@ impl WaterTextures {
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT)
         };
-        let bindings = [binding(0), binding(1)];
+        let bindings = [binding(0), binding(1), binding(2)];
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         // SAFETY: `bindings` outlives the call.
         let layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }?;
 
         let size = vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(2);
+            .descriptor_count(3);
         let sizes = [size];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&sizes)
@@ -84,6 +89,11 @@ impl WaterTextures {
         let color_sampler = unsafe { device.create_sampler(&sampler(vk::Filter::LINEAR), None) }?;
         // SAFETY: as above.
         let depth_sampler = unsafe { device.create_sampler(&sampler(vk::Filter::NEAREST), None) }?;
+        let cloud_info = sampler(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+        // SAFETY: as above.
+        let cloud_sampler = unsafe { device.create_sampler(&cloud_info, None) }?;
 
         Ok(Self {
             device: device.clone(),
@@ -92,13 +102,14 @@ impl WaterTextures {
             set,
             color_sampler,
             depth_sampler,
+            cloud_sampler,
         })
     }
 
     /// Point the set at the opaque pair. Called at startup and again on every
     /// resize, because both images are recreated with the multisampled pair
     /// they live beside and the old views are destroyed under the descriptor.
-    pub(crate) fn bind(&self, color: vk::ImageView, depth: vk::ImageView) {
+    pub(crate) fn bind(&self, color: vk::ImageView, depth: vk::ImageView, cloud: vk::ImageView) {
         let color_info = vk::DescriptorImageInfo::default()
             .sampler(self.color_sampler)
             .image_view(color)
@@ -107,8 +118,13 @@ impl WaterTextures {
             .sampler(self.depth_sampler)
             .image_view(depth)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        let cloud_image = vk::DescriptorImageInfo::default()
+            .sampler(self.cloud_sampler)
+            .image_view(cloud)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         let colors = [color_info];
         let depths = [depth_info];
+        let clouds = [cloud_image];
         let writes = [
             vk::WriteDescriptorSet::default()
                 .dst_set(self.set)
@@ -122,6 +138,12 @@ impl WaterTextures {
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(&depths),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.set)
+                .dst_binding(2)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&clouds),
         ];
         // SAFETY: both views are live and the infos outlive the call.
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
@@ -140,6 +162,7 @@ impl Drop for WaterTextures {
     fn drop(&mut self) {
         // SAFETY: the caller has already waited for the device to be idle.
         unsafe {
+            self.device.destroy_sampler(self.cloud_sampler, None);
             self.device.destroy_sampler(self.color_sampler, None);
             self.device.destroy_sampler(self.depth_sampler, None);
             self.device.destroy_descriptor_pool(self.pool, None);

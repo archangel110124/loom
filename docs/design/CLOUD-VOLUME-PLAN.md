@@ -160,6 +160,30 @@ should reach for. See Addendum 3. Roughly +4.7 ms at 1080p.
 messages; `repeat` 60/60 byte for byte; `ablate` 6/6 with `cloud_volume` at 67.098% against
 a 30% floor; `image` moves ten rows and nothing else. Not blessed.
 
+## C2b — The deck is marched once into a direction-indexed map — **DONE**
+
+Not a task this plan planned. It came out of ADR 0078 Addendum 3's measurement and the
+human's instruction to escalate, and it is recorded here so the plan is not read as if
+C2 went straight to C3.
+
+- [x] `crates/loom_render/src/cloud_map.rs` — a 1024x512 `R16G16B16A16_SFLOAT` target and
+      the pipeline that fills it, from two entry points added to `scene.slang` itself.
+- [x] `cloudMapTex` on set 3 binding 2, wrapping in `u` and clamped in `v`.
+- [x] `cloud_map` rides one lane of `flow_pad`; the layout pin is still 1168 bytes.
+- [x] One `CloudMap` type, **both render paths**, both calling the same `record`.
+- [x] The pass is skipped entirely when the volume is ablated.
+- [x] Both pinned barrier lists updated, and mutation-checked: removing the `ShaderRead`
+      declaration fails `the_water_block_reads_what_the_opaque_half_left`, restoring it
+      passes.
+
+**3.0x on `mood_deep` and 2.5x on `squall` at 1080p** — the table is in Addendum 4.
+
+**Green:** clippy; 46 test suites; `validate` 93 runs zero messages; `repeat` 60/60 byte
+for byte; `ablate` 6/6 with `cloud_volume` at 67.058%; `image` moves the same ten rows as
+C2 and nothing else; `loom run --edit --frames 90` runs clean in the window at 146.8 fps.
+
+---
+
 ## C3 — The sun march, the phase function, the powder term
 
 Where it stops being a grey volume.

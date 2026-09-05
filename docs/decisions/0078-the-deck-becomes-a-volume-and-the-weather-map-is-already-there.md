@@ -366,3 +366,46 @@ Recorded verbatim so far, from 2026-09-05:
 **The last clause is not delivered by this ADR** and should not be read as approved by it.
 Rain leaving the deck is §6's second bullet, it is ADR 0016's unbuilt step 5, and it is a
 separate decision with its own record.
+
+## Addendum 4 — the escalation is a direction-indexed map, and it is 3x
+
+**Date:** 2026-09-05. Built on the human's instruction to escalate.
+
+Addendum 3 measured the cost and said §5's ordering was wrong for it. This is what
+was built instead: the deck is marched **once per frame** into a 1024x512 equirectangular
+`R16G16B16A16_SFLOAT` image, and the background and every reflected ray sample it.
+
+**Measured at 1920x1080, `--sim 300`, 20 frames, before and after, from two builds:**
+
+| | forward | water | cloud_map | graph |
+|---|---|---|---|---|
+| `mood_deep` inline march | 0.981 | 3.428 | — | **4.801 ms** |
+| `mood_deep` map | 0.132 | 0.298 | 0.754 | **1.576 ms** |
+| `squall` inline march | 3.793 | 5.135 | — | **9.435 ms** |
+| `squall` map | 0.074 | 2.439 | 0.710 | **3.724 ms** |
+
+**3.0x and 2.5x**, and the shape matters more than the ratio: the march is now a
+*fixed* 0.71-0.75 ms that does not scale with output resolution or with how much
+water is on screen. `squall`'s residual 2.4 ms of water pass is the FFT ocean, not
+the sky.
+
+**1024x512 is derived, not picked.** `squall`'s 260 m masses subtend ~5 degrees at
+3 km; the map gives 0.352 deg/texel, so 14 texels across the tightest mass this
+repository authors. 2048x1024 would be 2.10 MP of marching against a 1080p frame's
+2.07 MP — no saving at all. Upper hemisphere only, because §4's constraint says the
+deck is never below the eye.
+
+**The predicted quality cost did not materialise at the size it was predicted at.**
+The estimate here was 7.5x softer than a per-pixel march, from texel-versus-pixel
+angular size. That arithmetic is right and the conclusion was wrong: clouds are
+low-frequency, and at 14 texels per mass with bilinear filtering the map renders are
+not visually distinguishable from the inline march on `squall` or `cascade`.
+`lanternhead` is unchanged — still the C2 regression, still C3's to fix.
+
+**One thing this ADR reasoned wrongly about Vulkan, caught by the layers.** The map
+pass was written binding no descriptor set, on the reasoning that
+`cloudMapFragmentMain` samples nothing. `VUID-vkCmdDraw-None-08600` refused it: Slang
+compiles `scene.slang` as one module and set 3 counts as statically used. Set 3 is now
+bound and never accessed, which is the same shape `renderer.rs` already documents for
+the water draw. Recorded because CLAUDE.md's never-do #5 exists for exactly this and
+the reasoning looked sound right up until it was run.

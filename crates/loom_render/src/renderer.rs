@@ -383,8 +383,22 @@ pub struct EnvironmentData {
     /// only: the current the buoyancy solver integrates is `FlowGrid::at` on
     /// the CPU, and this is the copy the shader advects its noise with.
     pub flow_velocities: vk::DeviceAddress,
+    /// Non-zero once the cloud map has been marched and bound for this frame.
+    ///
+    /// **A flag rather than a bindless index**, unlike [`Self::fire_flipbook`]
+    /// and [`Self::foam_texture`]: the map is a render target this renderer owns
+    /// and binds on set 3, not an asset a scene loaded. Zero means "no map — do
+    /// the march inline", which is what the map's own pass needs while it is
+    /// filling the thing, and what every path without the pass gets.
+    ///
+    /// **Stamped by the renderer, never by a caller**, like [`Self::eye_step`].
+    ///
+    /// It rides one lane of what was `flow_pad`, so the struct's stride and
+    /// every offset in the layout test are unchanged — the same trick
+    /// [`Self::foam_texture`] played on `foam_pad`.
+    pub cloud_map: u32,
     /// Keeps the struct's stride 16-byte aligned, as `wavelet_pad` does.
-    pub flow_pad: [u32; 2],
+    pub flow_pad: [u32; 1],
     /// The advected foam field: xy world origin, z metres between samples,
     /// w samples per axis. **`w == 0` means this water has no foam field**,
     /// which is every scene with no water at all, and is how the shader skips
@@ -631,7 +645,8 @@ impl Default for EnvironmentData {
             wavelet_pad: [0; 2],
             flow: [0.0, 0.0, 1.0, 0.0],
             flow_velocities: 0,
-            flow_pad: [0; 2],
+            cloud_map: 0,
+            flow_pad: [0; 1],
             foam: [0.0, 0.0, 1.0, 0.0],
             foam_coverage: 0,
             foam_edge_cells: 1.0,
@@ -1313,6 +1328,11 @@ pub struct Renderer {
     /// The scene's depth, as a descriptor the rain fragment shader samples.
     scene_depth: crate::scene_depth::SceneDepth,
     water_textures: crate::water_textures::WaterTextures,
+    /// The marched cloud deck, one direction-indexed map per frame — ADR 0078
+    /// Addendum 3. **The `Viewer` owns one of these too**, and both call
+    /// `CloudMap::record`; the `render-in-both-paths` skill lists four defects
+    /// that shipped from mirroring draw wiring instead of sharing it.
+    cloud_map: crate::cloud_map::CloudMap,
     max_particles: usize,
     /// Alpha-blended, depth-tested but not depth-writing.
     particle_pipeline: vk::Pipeline,
@@ -1685,15 +1705,6 @@ impl Renderer {
         // The offscreen renderer's targets are fixed at construction, so this
         // is the only time the set has to be pointed anywhere.
         scene_depth.bind(depth_view);
-        // The opaque pair lives inside `Msaa`, so it only exists when
-        // multisampling does — and the split only happens then either. At one
-        // sample the descriptor points at the depth view, which is never read
-        // because the water block never runs.
-        if let Some(m) = msaa.as_ref() {
-            water_textures.bind(m.opaque_color_view, m.opaque_depth_view);
-        } else {
-            water_textures.bind(depth_view, depth_view);
-        }
         let cache_path = pipeline_cache_path(instance, device);
         let (pipeline_layout, pipeline, pipeline_cache) =
             create_pipeline(
@@ -1706,6 +1717,26 @@ impl Renderer {
                 water_textures.descriptor_layout(),
                 MSAA_SAMPLES,
             )?;
+        // **After the layout, and the descriptor bind after this.** The map's
+        // pipeline borrows the scene's layout, and set 3 cannot be pointed at
+        // the map until the map exists — which is why the `water_textures.bind`
+        // that used to sit above `create_pipeline` now sits below both.
+        let cloud_map = crate::cloud_map::CloudMap::new(
+            &raw,
+            &mut allocator,
+            pipeline_cache,
+            pipeline_layout,
+            &names,
+        )?;
+        // The opaque pair lives inside `Msaa`, so it only exists when
+        // multisampling does — and the split only happens then either. At one
+        // sample the descriptor points at the depth view, which is never read
+        // because the water block never runs.
+        if let Some(m) = msaa.as_ref() {
+            water_textures.bind(m.opaque_color_view, m.opaque_depth_view, cloud_map.view());
+        } else {
+            water_textures.bind(depth_view, depth_view, cloud_map.view());
+        }
         let blended_pipeline = create_blended_pipeline(
             &raw,
             pipeline_layout,
@@ -2002,6 +2033,7 @@ impl Renderer {
             gpu_particle_tick: 0,
             scene_depth,
             water_textures,
+            cloud_map,
             max_particles: MAX_PARTICLES,
             particle_pipeline,
             rt_positions,
@@ -2553,6 +2585,13 @@ impl Renderer {
         // would send last frame's eye — a specular highlight one frame stale,
         // which is invisible in a still and wrong in motion.
         self.environment.eye = camera.eye.extend(0.0).to_array();
+        // **The map is marched before the forward pass, so the flag is true for
+        // the whole frame.** `cloudMapFragmentMain` calls `cloudLookVolume`
+        // directly rather than going through `cloudLook`, so it is unaffected by
+        // its own flag — and every other consumer wants the map. Stamped here,
+        // above the upload, for the reason the eye is (`8c2bcb6`).
+        self.environment.cloud_map =
+            u32::from(crate::ablate::mask() & crate::ablate::CLOUD_VOLUME == 0);
         // Stamped here for the same reason and from the same camera, so the two
         // can never describe different frames.
         self.environment.eye_step = self.eye_tracker.step(camera.eye, self.rain_tick);
@@ -2637,6 +2676,19 @@ impl Renderer {
         // is declared; what that requires is derived.
         let mut graph = RenderGraph::new();
         let color = graph.import("loom.color_target", self.color);
+        // The cloud deck's own target — ADR 0078 Addendum 3. Imported like every
+        // other image so the graph owns its transitions (never-do #4): UNDEFINED
+        // to COLOR_ATTACHMENT_OPTIMAL for the march, then to
+        // SHADER_READ_ONLY_OPTIMAL for the passes that sample it.
+        //
+        // **Skipped entirely when the volume is ablated.** `cloudLook` returns
+        // the projection before it ever reaches the map, so marching one would
+        // be a whole pass computing something nothing reads — and it would put
+        // a fixed 0.75 ms into the ablated half of `cargo xtask ablate`, which
+        // is meant to measure the feature's absence.
+        let cloud_marched =
+            crate::ablate::mask() & crate::ablate::CLOUD_VOLUME == 0;
+        let cloud_id = graph.import("loom.cloud_map", self.cloud_map.image());
         let depth = graph.import("loom.depth_target", self.depth);
         // **The multisampled pair goes through the graph like anything else.**
         // never-do #4: barriers are the graph's, and these images start
@@ -2828,6 +2880,12 @@ impl Renderer {
         let split = (water_verts > 0 || fluid_verts > 0) && msaa_ids.is_some();
         let water_set = self.water_textures.descriptor_set();
         let mut forward_uses = Vec::new();
+        // Sampled through set 3 by the sky in the forward pass and by the
+        // water's reflection. Declared, so the graph moves it out of
+        // COLOR_ATTACHMENT_OPTIMAL after the march above.
+        if cloud_marched {
+            forward_uses.push((cloud_id, Access::ShaderRead));
+        }
         if !rain_resolves && !split {
             forward_uses.push((color, Access::ColorWrite));
         }
@@ -2847,6 +2905,29 @@ impl Renderer {
             }
         } else {
             forward_uses.push((depth, Access::DepthWrite));
+        }
+        // **March the deck before anything samples it.** One pass per frame at
+        // a fixed 1024x512, replacing a per-pixel march in the background AND a
+        // per-water-pixel march in the reflection — which measured as 83% of the
+        // feature's cost, and which no screen-space target could have helped.
+        if cloud_marched {
+            let (cloud_pass, cloud_push, cloud_layout) =
+                (&self.cloud_map, base_push, self.pipeline_layout);
+            // Set 3 only: it is the one the layers name, and the map pass reads
+            // nothing from any of them.
+            let cloud_sets = [(3u32, water_set)];
+            graph.pass(
+                "cloud_map",
+                &[(cloud_id, Access::ColorWrite)],
+                move |d, cmd| {
+                    // SAFETY: the graph has put the map in
+                    // COLOR_ATTACHMENT_OPTIMAL, and `cmd` is recording outside
+                    // any rendering block.
+                    unsafe {
+                        cloud_pass.record(d, cmd, cloud_layout, &cloud_push, &cloud_sets)
+                    };
+                },
+            );
         }
         graph.pass_with(
             "forward",
@@ -3099,6 +3180,11 @@ impl Renderer {
             }
             // The depth resolve lands here rather than in the opaque half, so
             // the depth rain samples includes the water surface.
+            // The reflection samples the map here, exactly as the sky does
+            // above. Read-after-read costs nothing.
+            if cloud_marched {
+                water_uses.push((cloud_id, Access::ShaderRead));
+            }
             water_uses.push((depth, Access::DepthResolve));
             if !rain_resolves {
                 water_uses.push((color, Access::ColorWrite));
@@ -3652,6 +3738,12 @@ impl Drop for Renderer {
                 (self.ripple_alloc.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
+            }
+            // The map's own allocation, before the allocator goes. `CloudMap`
+            // destroys its image and view in its own `Drop`; only the memory
+            // has to come back here, because the allocator outlives neither.
+            if let Some(allocator) = self.allocator.as_mut() {
+                self.cloud_map.free(allocator);
             }
             if let (Some(allocation), Some(allocator)) =
                 (self.flow_alloc.take(), self.allocator.as_mut())
