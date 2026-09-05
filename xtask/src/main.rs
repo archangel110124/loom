@@ -2068,7 +2068,18 @@ fn validate() -> std::process::ExitCode {
     // teardown bug so far has lived: swapchain, surface, egui, and the
     // instance-before-device destruction that crashed the driver. A headless
     // render touches none of it.
-    if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
+    //
+    // **On its own display where one can be had**, because twelve windows
+    // stealing focus is what makes this gate something you avoid running while
+    // you work — see [`HiddenDisplay`] for what that trades away. Falling back
+    // to the ambient display keeps every machine that has no `Xvfb` behaving
+    // exactly as it did.
+    let hidden = HiddenDisplay::start();
+    let hidden_name = hidden.as_ref().map(HiddenDisplay::name);
+    if hidden.is_some()
+        || std::env::var_os("DISPLAY").is_some()
+        || std::env::var_os("WAYLAND_DISPLAY").is_some()
+    {
         let frames = WINDOWED_FRAMES.to_string();
         // **`meadow` is here for the pipelines the other two never bind.** A
         // pipeline's rasterisation sample count must match its attachment, and
@@ -2120,7 +2131,8 @@ fn validate() -> std::process::ExitCode {
                 continue;
             }
             checked += 1;
-            let result = run(&loom, &root, &["run", scene, "--edit", "--frames", &frames]);
+            let result =
+                run_windowed(&loom, &root, &["run", scene, "--edit", "--frames", &frames], hidden_name.as_deref());
             collect(&mut failures, &format!("run --edit {scene}"), &result);
         }
 
@@ -2187,8 +2199,12 @@ fn validate() -> std::process::ExitCode {
                 continue;
             }
             checked += 1;
-            let result =
-                run(&loom, &root, &["run", scene, "--edit", "--play", "--frames", &frames]);
+            let result = run_windowed(
+                &loom,
+                &root,
+                &["run", scene, "--edit", "--play", "--frames", &frames],
+                hidden_name.as_deref(),
+            );
             collect(&mut failures, &format!("run --play {scene}"), &result);
 
             let text = result.as_ref().map_or_else(
@@ -2636,6 +2652,160 @@ fn run_env(loom: &Path, root: &Path, args: &[&str], env: &[(&str, &str)]) -> Res
     command.args(args).current_dir(root);
     for (key, value) in env {
         command.env(key, value);
+    }
+    command.output().map_err(|e| e.to_string())
+}
+
+/// A private X display for the windowed checks, so they never open on a screen
+/// somebody is working on.
+///
+/// **The windowed checks cannot be deleted and cannot be made headless.** Their
+/// own comments say why: nothing headless resizes, so nothing headless catches a
+/// descriptor left pointing at a destroyed view, and `--play` is the only way
+/// into the branch that builds the viewer's own ripple buffer. Every swapchain,
+/// surface, egui and teardown bug this project has had was caught here. So the
+/// window has to exist — it just does not have to be *visible*.
+///
+/// Twelve scenes at ninety frames each is twelve windows stealing focus, which
+/// is enough to make the gate something you run when you are not at the machine.
+/// That is the wrong incentive for the one check that opens a window at all.
+///
+/// **What this costs, stated rather than buried.** `Xvfb` is an X server, so the
+/// children run against `VK_KHR_xlib_surface` instead of the Wayland WSI they
+/// would use on this desktop. A teardown bug specific to `VK_KHR_wayland_surface`
+/// would stop being caught here. Everything the block is documented to be for —
+/// swapchain lifetime, surface loss, egui, destroying the instance before the
+/// device — is WSI-agnostic and still covered, and the Wayland path is exercised
+/// every time anybody actually runs the editor.
+///
+/// A nested Wayland compositor would keep that coverage and was tried first:
+/// `weston --backend=headless` fails these scenes with `ERROR_SURFACE_LOST_KHR`
+/// and leaked buffers, because its default renderer is pixman and does not carry
+/// Vulkan WSI. Worth revisiting with a GL/dmabuf renderer; not worth blocking on.
+struct HiddenDisplay {
+    server: std::process::Child,
+    number: u32,
+}
+
+impl HiddenDisplay {
+    /// Start one, or `None` if `Xvfb` is not installed or will not come up.
+    ///
+    /// **`None` is not a failure**, it is "carry on as before" — the caller falls
+    /// back to whatever display the environment already has, which is exactly
+    /// what this gate did before this existed.
+    fn start() -> Option<Self> {
+        // Away from :0 and :1, and skipped if something already holds the lock.
+        for number in 99..109 {
+            if Path::new(&format!("/tmp/.X{number}-lock")).exists() {
+                continue;
+            }
+            let Ok(server) = Command::new("Xvfb")
+                .args([
+                    &format!(":{number}"),
+                    "-screen",
+                    "0",
+                    // Large enough that nothing the editor asks for is clamped;
+                    // an off-screen framebuffer costs only memory.
+                    "1920x1080x24",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            else {
+                // Not installed. Say so once, because a gate that silently
+                // changed which surface it exercises would be worse than one
+                // that opens windows.
+                println!("xtask: Xvfb not available — windowed checks will use the current display");
+                return None;
+            };
+
+            let mut display = Self { server, number };
+            if display.wait_ready() {
+                println!("xtask: windowed checks on a private display :{number} (Xvfb)");
+                return Some(display);
+            }
+            // Came up unusable: stop it and try the next number rather than
+            // leaving a stray server behind.
+            display.stop();
+            std::mem::forget(display);
+        }
+        println!("xtask: no free Xvfb display — windowed checks will use the current display");
+        None
+    }
+
+    /// Poll for the server's socket. **The socket, not `xdpyinfo`** — that is not
+    /// installed on every machine this runs on, and a readiness check that
+    /// silently always fails is worse than none: it races the server and the
+    /// child dies with "Failed to open connection to X server".
+    fn wait_ready(&mut self) -> bool {
+        let socket = format!("/tmp/.X11-unix/X{}", self.number);
+        for _ in 0..100 {
+            if Path::new(&socket).exists() {
+                return true;
+            }
+            if matches!(self.server.try_wait(), Ok(Some(_))) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    fn name(&self) -> String {
+        format!(":{}", self.number)
+    }
+}
+
+impl Drop for HiddenDisplay {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+impl HiddenDisplay {
+    /// **SIGTERM, and only then SIGKILL.**
+    ///
+    /// `Child::kill` sends SIGKILL, and an `Xvfb` killed that way never removes
+    /// `/tmp/.X<n>-lock` or its socket. Measured: four gate runs left three dead
+    /// display numbers behind, and `start`'s scan skips a number whose lock
+    /// exists — so ten runs would have exhausted the range and silently gone
+    /// back to opening windows on somebody's screen. A leak that degrades into
+    /// the exact behaviour the type exists to prevent is worth the extra call.
+    fn stop(&mut self) {
+        let pid = self.server.id().to_string();
+        let termed = Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .is_ok_and(|status| status.success());
+        if termed {
+            for _ in 0..40 {
+                if matches!(self.server.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+        let _ = self.server.kill();
+        let _ = self.server.wait();
+    }
+}
+
+/// `loom`, pointed at a display of our choosing.
+///
+/// **`WAYLAND_DISPLAY` is removed, not merely overridden.** `winit` prefers
+/// Wayland when both are set, so leaving it in place would send the child
+/// straight back to the compositor whose screen this exists to keep clear.
+fn run_windowed(
+    loom: &Path,
+    root: &Path,
+    args: &[&str],
+    display: Option<&str>,
+) -> Result<Output, String> {
+    let mut command = Command::new(loom);
+    command.args(args).current_dir(root);
+    if let Some(name) = display {
+        command.env("DISPLAY", name);
+        command.env_remove("WAYLAND_DISPLAY");
     }
     command.output().map_err(|e| e.to_string())
 }
