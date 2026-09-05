@@ -237,20 +237,40 @@ else; the viewer runs clean at 147.1 fps. Not blessed.
 
 ---
 
-## C4 — The scenes, the numbers, and the hand-off
+## C4 — The scenes, the numbers, and the hand-off — **DONE**
 
-- [ ] Re-author `cloud_scale` where the march has exposed it. `rain_pool` at 90 m and
-      `lanternhead`/`squall` at 260 m were tuned to make *rain* vary across a small scene
-      and will read as grain once the deck is world-space geometry. **Change the scene, not
-      the parameter** — ADR 0078 §6 explains why splitting it is refused, and each scene's
-      comment already explains what its number was chosen for, so the edit has to answer
-      that comment rather than overwrite it.
-- [ ] Author `cloud_type` explicitly only where the derived default is wrong, and say in the
-      scene comment why it was wrong. A scene that does not need it does not get it.
-- [ ] Add the measured costs to ADR 0078 as an addendum — the C2 and C3 numbers, the step
-      counts they were taken at, and whether either escalation in §5 is now triggered.
-- [ ] Hand to the human: the nine moved references for blessing, and ADR 0078 for
-      promotion. **A builder does neither.**
+- [x] **Re-author `cloud_scale` — refused, because it is not needed.** All nine scenes
+      authoring cover were rendered and looked at. None shows the grain ADR 0078 §6 predicted;
+      Addendum 1's thickness coupling fixed it structurally, at every authored scale from
+      `rain_pool`'s 90 m to `croft`'s 900 m. **No scene file is edited by this task.**
+- [x] **Author `cloud_type` where the default is wrong — nowhere.** The cover-derived default
+      is right in all nine: 0.35-0.45 come out cumulus and read as broken cloud, 0.85-1.00
+      come out stratus and read as ceilings. The rule was "a scene that does not need it does
+      not get it".
+- [x] The measured costs are in ADR 0078 Addendum 5, min of 3 reps because single shots on
+      this box spread up to 55%.
+- [x] Hand-off below.
 
-**Green:** the full six. clippy, `validate`, `test --workspace`, `image` (moving the nine),
-`repeat`, `ablate`.
+### The one thing worth knowing that C4 found
+
+**A clear sky is byte-identical with the feature on and off.** `loom compare --channel 0
+--fraction 0 --worst 0` reports 0 differing pixels on `deeper_demo` at its authored rung and
+on `materials`. The `cover <= 0` short-circuit holds all the way through, so the whole deck
+costs nothing and changes nothing in a scene without cloud.
+
+### The hand-off — **both are the human's, and a builder does neither**
+
+1. **Ten golden rows await a bless**, unblessed deliberately across all four commits so the
+   review happens once: `lanternhead`, `mood_deep`, `cascade`, `rain_pool`, `squall`,
+   `puddles`, plus `rain_overhang`, `rain_impact`, `rain_gantry` and `homestead` — the last
+   four rain but author no cover, so the rain floor gives them a solid deck.
+2. **ADR 0078 is `proposed`**, with five addenda, three of which correct something the ADR
+   itself got wrong.
+
+### What this plan did NOT deliver, and it is half the original ask
+
+The human asked for *"real clouds that have real rain that come out of them"*. The clouds are
+built. **The rain still does not come out of them**: drops spawn in a ~72 m box around the
+camera and are modulated by cover, which is ADR 0016's step 5, unbuilt since P4. Distant rain
+curtains — a squall visibly crossing a bay — are ADR 0016's own "separate feature needing its
+own ADR", and the sky pass is now a volume march, which is where such a curtain would live.

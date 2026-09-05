@@ -409,3 +409,59 @@ compiles `scene.slang` as one module and set 3 counts as statically used. Set 3 
 bound and never accessed, which is the same shape `renderer.rs` already documents for
 the water draw. Recorded because CLAUDE.md's never-do #5 exists for exactly this and
 the reasoning looked sound right up until it was run.
+
+## Addendum 5 — what it finally costs, and the two authoring tasks that were not needed
+
+**Date:** 2026-09-05, on finishing C4.
+
+### The cost, min of 3 reps, 24 frames, 1920x1080, `--sim 300`
+
+| scene | projection | volume | the deck |
+|---|---|---|---|
+| `mood_deep` | 0.879 ms | 3.833 ms | **+2.95 ms** |
+| `squall` | 3.017 ms | 4.837 ms | **+1.82 ms** |
+| `lanternhead` | 4.529 ms | 6.342 ms | **+1.81 ms** |
+
+**Min of three, and that matters here.** Single-shot readings of the same binary spread up
+to 55% — `squall` measured 4.837 and 7.486 minutes apart. Any figure in this ADR taken as one
+sample should be read as indicative; these three are not.
+
+So the finished deck is **+1.8 to +3.0 ms**, 11-18% of a 16.7 ms frame, for parallax, a
+silhouette, an underside, self-shadowing by a real light march, and forward scattering.
+
+### §5's remaining escalations are not triggered
+
+The direction-indexed map (Addendum 4) was the escalation and it is built. Neither of §5's
+others — half-resolution with a depth-aware upsample, or temporal reprojection under ADR 0073
+— is warranted at this cost, and neither should be built without a new measurement saying so.
+**The reopening trigger is a frame that cannot afford 3 ms**, which on this hardware at this
+resolution is not the case.
+
+### A clear sky is byte-identical, and that is checked rather than assumed
+
+`loom compare --channel 0 --fraction 0 --worst 0` reports **0 differing pixels** between the
+volume and `LOOM_ABLATE=cloud_volume` on `deeper_demo` at its authored rung (a clear sky) and
+on `materials` (which never mentions clouds). The feature costs nothing and changes nothing
+where there is no cloud — the `cover <= 0` short-circuit holds all the way through.
+
+### Both of C4's authoring tasks turned out to be unnecessary
+
+**Re-authoring `cloud_scale` is not needed, and §6 predicted wrongly that it would be.** All
+nine scenes authoring cover were rendered and looked at. None shows the grain §6 feared:
+`rain_pool` at 90 m and `lanternhead` and `squall` at 260 m all read as cloud rather than as
+texture, because Addendum 1 made thickness follow `cloud_scale` and the masses are therefore
+roughly isotropic at every authored scale. **Not one scene file is edited by C4.**
+
+**No scene needs an explicit `cloud_type` either.** The cover-derived default is right
+everywhere it was checked: `cascade` 0.35, `croft` 0.38, `mountain_pass` 0.45 and `squall`
+0.45 all come out cumulus and read as broken cloud; `lanternhead` and `rain_pool` at 0.85 and
+`puddles` at 1.00 come out stratus and read as ceilings. The plan's rule was *"a scene that
+does not need it does not get it"*, and none does.
+
+**One honest limit, recorded rather than fixed.** `rain_pool` (90 m masses) and `puddles`
+(solid cover) render as smooth overcast with little visible structure. That is partly correct
+— a solid ceiling has little structure from below — and partly the map's 0.352 deg/texel
+filtering out masses that subtend under a degree at distance. It is the one place Addendum 4's
+resolution choice is visible. Neither scene is about its sky, so it is not worth a re-author;
+if a scene ever wants fine cloud texture *and* small masses, that is the trigger to revisit the
+map's resolution.
