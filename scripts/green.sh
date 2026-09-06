@@ -430,11 +430,20 @@ DEMO_FIGHT_HEAD="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531
   --assert "Rig/Boat.x > 29.0" >/dev/null
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold "move_z=1,fire=1" \
   --assert "events.bite >= 1" >/dev/null
-# And the third number in the same block: the wheel is answering at tick 356,
-# and it is not at 350. The file said 240 for three rounds.
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 356 --hold move_z=1 \
+# And the third number in the same block: the wheel is answering at tick 191,
+# and it is not at 190. The file said 240 for three rounds, then 356.
+#
+# **356/350 was stale in both directions and the pair hid it.** The walk got
+# faster — he is aboard by 125 where the scene file said 180 — so `at_helm` is
+# 1 from tick 191, and *both* old rows read 1: the negative control at 350
+# failed honestly while the positive one at 356 went on passing for the wrong
+# reason, a true answer to a question about the wrong tick. That is the failure
+# mode a positive-and-negative pair exists to prevent, and it only works while
+# the negative sits just under the crossing. These two are 190/191, which is
+# the crossing itself, so the next drift of even one tick fails here.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 191 --hold move_z=1 \
   --assert "state.at_helm == 1" >/dev/null
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 350 --hold move_z=1 \
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 190 --hold move_z=1 \
   --assert "state.at_helm == 0" >/dev/null
 
 # **THE BOARDING LANE, BOTH EDGES.** Round 4 shipped a lane about six degrees
@@ -502,8 +511,16 @@ DEMO_FIGHT_HEAD="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531
 "$LOOM" sim assets/test/rig_drive.loom --ticks 900 --hold move_z=1 \
   --assert "Rig/Boat.x > 40.0" --assert "Rig/Boat.y > -0.4" \
   --assert "Rig/Player.y > 1.2" >/dev/null
+# **-18.0 and not the -20.0 it was, and the reason is 13,860 kg.** `de97324`
+# corrected the hull's mass from 43,776 kg to 57,636 kg — the old figure was a
+# guessed 38,000 scaled by a previous hull's volume, and 24% light. She is 32%
+# heavier and makes correspondingly less way in 900 ticks: 21.8 m astern from
+# x = 3.0 where this row wanted 23. Ahead is unaffected at this threshold and
+# still clears 40.0 with 1.6 m in hand (41.628). The claim is "she makes way
+# astern under her own helm", not the decimal; -18.0 keeps the same ~4% margin
+# the ahead row carries, and a boat that has lost reverse sits near x = 3.
 "$LOOM" sim assets/test/rig_drive.loom --ticks 900 --hold move_z=-1 \
-  --assert "Rig/Boat.x < -20.0" --assert "Rig/Boat.y > -0.4" \
+  --assert "Rig/Boat.x < -18.0" --assert "Rig/Boat.y > -0.4" \
   --assert "Rig/Player.y > 1.2" >/dev/null
 #
 # **`state.at_helm == 1` at the end of a turn is the property these two rows
@@ -518,12 +535,22 @@ DEMO_FIGHT_HEAD="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531
 # Straight ahead on the same tape is z = -40.02, so these two are +10.8 and
 # -10.8 from it — mirrored to two decimal places, which is what makes the pair
 # a claim about the wheel rather than about this hull's handedness.
+# **Both windows re-derived 2026-09-06, on a hull that keeps its wheel.** They
+# read 11 m of swing either side of z = -40, and that was measured while the
+# helmsman was still coming off the mat mid-turn — the very thing the
+# `at_helm == 1` assertion beside them was added to catch, and which it did
+# catch: before `deeper_player.rhai`'s mat hold, this row reported `at_helm 0`,
+# z -39.882 and x 7.201, a boat that never turned because nobody was steering
+# it. Holding the wheel for the full 900 she swings 15.4 m to starboard and
+# 16.1 m to port, and makes x 36.582 / 36.622 — within 4 cm of each other,
+# which is what makes the mirror a claim about the wheel rather than the hull.
+# Same +/-3 m half-width as before, now centred on that.
 "$LOOM" sim assets/test/rig_drive.loom --ticks 900 --hold "move_z=1,move_x=1" \
-  --assert "Rig/Boat.z > -32.0" --assert "Rig/Boat.z < -26.0" \
+  --assert "Rig/Boat.z > -28.0" --assert "Rig/Boat.z < -22.0" \
   --assert "Rig/Boat.x > 20.0" \
   --assert "Rig/Player.y > 1.2" --assert "state.at_helm == 1" >/dev/null
 "$LOOM" sim assets/test/rig_drive.loom --ticks 900 --hold "move_z=1,move_x=-1" \
-  --assert "Rig/Boat.z < -48.0" --assert "Rig/Boat.z > -54.0" \
+  --assert "Rig/Boat.z < -53.0" --assert "Rig/Boat.z > -59.0" \
   --assert "Rig/Boat.x > 20.0" \
   --assert "Rig/Player.y > 1.2" --assert "state.at_helm == 1" >/dev/null
 # **The long turn, which is the row that actually fails without the clamp.**
@@ -802,9 +829,23 @@ DEMO_BOX="$DEMO_FIGHT; 1900:move_x=-1,interact=1; 1901:move_x=-1; \
 DEMO_HELM="$DEMO_FIGHT; 1900:move_x=-1,interact=1; 1901:move_x=-1; \
 1950:move_z=-1; 2000:move_z=1,interact=1; 2001:move_z=1; 2035:move_x=1; 2060:; \
 2100:move_z=1"
-DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2600:; 2660:jump=1; 2670:move_z=-1; \
-2750:move_x=-1,move_z=-0.15; 3550:move_z=-1,move_x=-0.3; \
-3740:move_z=-1,move_x=-0.3,interact=1; 3741:move_z=-1,move_x=-0.3"
+# **Re-authored 2026-09-06: she is 32% heavier and the old tape never berthed
+# her.** `de97324` corrected the hull's mass from 43,776 kg to 57,636 kg, and
+# this tape gave the astern leg 400 ticks (2200-2600) on the light hull. On the
+# corrected one she is doing 0 kn 16 m short when the wheel is released, so
+# ALONGSIDE never fires, the man steps off into the gap, and every row below
+# read BLOCKED. Astern now runs to 2850 — measured: she is alongside at 2800
+# and sitting at 0 kn against the berth from 3000, so the release has room
+# either side of it rather than landing on the moment.
+#
+# **The walk to the crate is shorter, not shifted, because the berth moved.**
+# The old walk went west (`move_x=-1`) along the wharf. She now lies with the
+# crate 2.4 m east and 1.3 m north of where he steps off, so west walked him
+# into the water; `move_z=-1` alone closes it to 1.49 m by tick 3050 and the
+# crate's own collider stops him there. Held any longer he reads BLOCKED, so
+# the keys come off at 3060 and E is at 3100.
+DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2850:; 2910:jump=1; 2920:move_z=-1; \
+3060:; 3100:interact=1; 3101:"
 
 # 5d. **THE PLAYER FISHES, WITH HIS OWN HANDS, AND NOTHING HERE HAD EVER DONE
 #     THAT.** Every landing in this file until now was `Rig/Pilot/skilled` —
@@ -1380,12 +1421,19 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #     the **hull** — the same distance `ALONGSIDE` judges the delivery by —
 #     rather than from a man standing seven metres forward of her origin, and
 #     because the key it names is a fact about which way *she* points.
+# **Four numbers below move with the hull's corrected mass** (`de97324`,
+# 43,776 -> 57,636 kg). None is a behaviour change: the crate reads 12 m rather
+# than 5 at the same tick, HOME 25 m rather than 19, HOME 115 m rather than 122
+# with her at x 106.9 rather than past 110, and the engine note rises to
+# local_y -1.255 rather than clearing -1.0, and she is doing 4 kn at 2600
+# rather than 5. The moored reading is -11.998, so
+# the pair this row exists to keep apart is still ten metres apart.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2120 --hold "$DEMO_BOX" \
   --assert "state.stowed == 1" --assert "state.aboard == 1" \
-  | grep -q '"message": "1 BELOW   the crate is 5 m behind you, on your left'
+  | grep -q '"message": "1 BELOW   the crate is 12 m behind you, on your left'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2200 --hold "$DEMO_HELM" \
   --assert "state.stowed == 1" --assert "state.at_helm == 1" \
-  | grep -q '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   HOME 19 m — hold S"'
+  | grep -q '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   HOME 25 m — hold S"'
 
 # 5i. **AND THE TWO SENTENCES THAT GET HIM THERE, ASSERTED AS SENTENCES.**
 #     `--assert` has no `message` axis, so the same `grep` the two fight endings
@@ -1564,7 +1612,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 300 \
   --assert "Rig/Boat/Engine.local_y < -11.0" >/dev/null
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
-  --assert "Rig/Boat/Engine.local_y > -1.0" --assert "state.knots > 5.0" >/dev/null
+  --assert "Rig/Boat/Engine.local_y > -1.4" --assert "state.knots > 5.0" >/dev/null
 
 # **THE LOOP, END TO END, IN ONE PROCESS.** Five rounds built four features and
 # nothing had ever crossed from one to the next: no run in this file had taken
@@ -1829,19 +1877,23 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #     beat it pays off, and no branch anywhere said to get out of her.
 #
 #     The tape itself is `DEMO_HOME`, declared with its three siblings above 5d.
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 2500 --hold "$DEMO_HOME" \
-  --assert "state.stowed == 1" --assert "state.at_helm == 1" \
-  | grep -q '"message": "THE HELM   ASTERN   wheel amidships   3 kn   SPACE lets go   ALONGSIDE — press SPACE"'
+#     **Both ticks and both numbers move with the tape above.** She comes
+#     alongside at 2800 rather than 2500 and does it at 2 kn rather than 3 —
+#     the same 32% of mass, arriving slower — and he steps off at 3050 with the
+#     crate 1 m behind him rather than 5, because the berth moved.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2800 --hold "$DEMO_HOME" \
+  --assert "state.stowed == 1" --assert "state.at_helm == 1" \
+  | grep -q '"message": "THE HELM   ASTERN   wheel amidships   2 kn   SPACE lets go   ALONGSIDE — press SPACE"'
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 3050 --hold "$DEMO_HOME" \
   --assert "state.stowed == 1" --assert "state.at_helm == 0" \
-  | grep -q '"message": "1 BELOW   SHE IS ALONGSIDE — step off, E at the crate 5 m dead behind you"'
+  | grep -q '"message": "1 BELOW   SHE IS ALONGSIDE — step off, E at the crate 1 m dead behind you"'
 #     **`events.take` has left this row and `events.refused` has joined it.**
 #     The conger this tape lands will not go in the creel, so the first E is
 #     refused and she stays on the line — and the second E, at the fish box,
 #     takes her off it and puts her below in the one press. That is the escape
 #     hatch working, and it is why the hatch reads `online` as well as the
 #     creel. `take` is covered where it can happen, in 5b4.
-"$LOOM" sim assets/games/deeper_demo.loom --ticks 3800 --hold "$DEMO_HOME" \
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 3150 --hold "$DEMO_HOME" \
   --assert "events.landed >= 1" --assert "events.refused >= 1" \
   --assert "events.stow >= 1" --assert "events.deliver >= 1" \
   --assert "events.use == 3" \
@@ -1920,8 +1972,8 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1600 --hold move_z=1 \
   | grep -q '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   HOME 72 m — hold S"'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2600 --hold move_z=1 \
-  --assert "Rig/Boat.x > 110.0" \
-  | grep -q '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   HOME 122 m — hold S"'
+  --assert "Rig/Boat.x > 105.0" \
+  | grep -q '"message": "THE HELM   AHEAD   wheel amidships   4 kn   SPACE lets go   HOME 115 m — hold S"'
 
 # 8g. **Walk into a wall ashore, two ways.** Hold S from the spawn and back into
 #     the north rail; hold D and strafe into the shed. Both used to print
