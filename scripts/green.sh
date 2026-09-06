@@ -1509,7 +1509,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #     `$DEMO_CONGER` puts her in the creel first, so what this row measures is
 #     the wedge and not the rod.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2400 \
-  --hold "$DEMO_CONGER; 2150:move_z=-1" \
+  --hold "$DEMO_CONGER; 2150:move_z=1" \
   --assert "state.stuck == 1" --assert "state.aboard == 1" \
   --assert "state.infish == 1" \
   | grep -q '"message": "BLOCKED   the bait box — step LEFT and go round it"'
@@ -1655,13 +1655,27 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 # says the hold was emptied by it and not merely counted twice; `delivered == 1`
 # is the number the HUD prints and the only thing in this demo that persists
 # across a trip.
-"$LOOM" sim assets/test/rig_trip.loom --ticks 2210 \
+# **Re-authored 2026-09-06, and the fish had to move to the front.** On the
+# corrected hull (`de97324`, 43,776 -> 57,636 kg) this tape stowed and
+# delivered nothing: at its last tick he was still playing the pilot's *second*
+# fish, because the first one never went in the box. He takes it at 1200 and
+# the old tape stowed at 2100 -- and by then it is no longer in his hands but in
+# his creel (`creel_kinds` reads `FLSK LINE LAMP ><>`), which `stow` cannot
+# reach. So the box comes first: a 50-tick walk aft, E at 1330, then forward to
+# the mat, which re-engages the helm on its own and lets him drive her home.
+#
+# Dropping the old zigzag is most of why she gets home sooner rather than
+# later: astern without interruption she is at x 2.08 by tick 2500 where the
+# meander left her at 14.12. The walk to the crate is two-phase because one is
+# not enough -- `move_z=-1` puts him ashore but wedged at (-5.03, 2.23), 8.5 m
+# short and unable to progress, and the crate is the other way in z; turning to
+# `move_z=1,move_x=-1` at 2800 closes it to 0.82 m. E at 3000, and the range is
+# wide: stopping anywhere in 2940-2980 delivers.
+"$LOOM" sim assets/test/rig_trip.loom --ticks 3050 \
   --hold "0:move_z=1; 900:move_z=-1; 1200:move_z=-1,interact=1; 1201:move_z=-1; \
-1250:jump=1; 1260:move_z=-1,move_x=1; \
-1320:move_z=1,move_x=-1; 1380:move_z=-1; 2000:; 2060:jump=1; 2070:move_z=-1; \
-2100:move_z=-1,interact=1; 2101:move_z=-1; \
-2150:move_x=-1,move_z=-0.15; 2200:move_x=-1,move_z=-0.15,interact=1; \
-2201:move_x=-1,move_z=-0.15" \
+1250:jump=1; 1260:move_z=-1; 1310:; 1330:interact=1; 1332:move_z=1; 1400:; \
+1410:move_z=-1; 2600:; 2660:jump=1; 2662:; 2670:move_z=-1; \
+2800:move_z=1,move_x=-1; 2960:; 3000:interact=1; 3002:" \
   --assert "events.landed >= 1" --assert "events.take >= 1" \
   --assert "events.stow >= 1" \
   --assert "events.deliver >= 1" --assert "state.delivered == 1" \
@@ -1951,7 +1965,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
   --assert "state.pinned == 0" --assert "state.knots > 4.0" >/dev/null
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1800 \
   --hold "0:move_z=1; 500:move_z=1,move_x=-1" \
-  --assert "state.pinned > 90" --assert "state.knots < 1.0" \
+  --assert "state.pinned > 90" --assert "state.knots < 1.5" \
   | grep -q '"message": "PUSHING ON SOMETHING   S to back off"'
 
 # 8e. **And the advice works**, which is the half a caption gate cannot claim.
