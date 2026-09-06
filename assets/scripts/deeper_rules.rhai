@@ -1603,15 +1603,31 @@ if hub {
     //
     // This is the boat's own speed, which is the fact the caption needed, and
     // it is measured *here* because `positions` is the only place it exists.
-    // One knot, because she is over that within ten ticks of the throttle going
-    // ahead (0.06 kn at tick 356, 3.79 at 374) and never under it again while
-    // she is swimming. Ninety ticks — a second and a half — because contact
-    // with a buoy jitters and a caption that flickers is worse than none.
+    // Ninety ticks — a second and a half — because contact with a buoy jitters
+    // and a caption that flickers is worse than none.
+    //
+    // **Two knots, and it was one until 2026-09-06, when the detector was dead.**
+    // The threshold has to sit between "pivoting on a mark" and "under way",
+    // and `de97324` moved the first of those: it corrected the hull's mass from
+    // 43,776 kg to 57,636 kg, and on the same tape she now pivots at 1.508 kn
+    // decaying to 1.036 rather than the 0.89-to-0.58 measured above. At one
+    // knot she never crosses it — 1,000 ticks of running into `Mark5` with
+    // `jammed` flat at 0 the whole time and the caption still reading
+    // `AHEAD   wheel to port`, which is exactly the first-timer this block was
+    // written for, told nothing again.
+    //
+    // Two rather than 1.5 because 1.508 is a reading on this tape and a
+    // threshold must not sit on one. The separation either side is measured:
+    // open sea on the mirrored input is **4.960 kn**, and she crosses 2 kn
+    // within about a dozen ticks of the throttle going ahead (0.06 kn at tick
+    // 356, 3.79 at 374) — nowhere near `PINNED_TICKS`. Astern cannot reach this
+    // at all: `drive` is signed and reads -1.0 going back, so the 2.862 kn she
+    // makes coming alongside is excluded by the condition and not by the number.
     let PINNED_TICKS = 90;
     let pinned = if "pinned" in state { state.pinned } else { 0 };
     // Clamped one past the threshold rather than counted forever: the number is
     // a latch, and an unbounded one reads like a distance in `--assert` output.
-    if at_helm > 0 && drive > 0.0 && knots < 1.0 {
+    if at_helm > 0 && drive > 0.0 && knots < 2.0 {
         if pinned <= PINNED_TICKS { pinned += 1; }
     } else {
         pinned = 0;
@@ -1899,7 +1915,16 @@ if hub {
     // So the level keeps its dogleg and **the sentence stops pretending it does
     // not exist** — said *before* he walks into it rather than four seconds
     // after. `+/- 0.40` on the x band is a hair over the capsule's 0.35 radius.
-    let baffled = aboard_frame && plz < -0.78 && plx > -8.80 && plx < -6.80;
+    // **The east edge is -6.70 and was -6.80, which the wedge missed by a
+    // centimetre.** `de97324` moved the deck under this zone, and the bait
+    // box now stops him at `plx` -6.79 pressing forward: one centimetre
+    // outside a two-metre box drawn for exactly that contact, so the caption
+    // fell through to the generic branch and named neither the thing nor the
+    // hand. The helm mat is still well clear -- he stands at -6.32 there, 38 cm
+    // east of the new edge. The west edge is untouched: pressing west he wedges
+    // at -9.13, against a different collider, and that one *should* get the
+    // unnamed sentence.
+    let baffled = aboard_frame && plz < -0.78 && plx > -8.80 && plx < -6.70;
     // Which hand that is. Her port side is -x; the right-hand axis of a man
     // facing (bfx, bfz) is (-bfz, bfx), so the sign of `bfz` is the whole
     // answer. Facing her bow — the heading the demo teaches, and the only one

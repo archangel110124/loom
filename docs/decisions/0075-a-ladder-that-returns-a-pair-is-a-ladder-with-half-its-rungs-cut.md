@@ -347,17 +347,49 @@ faster; both old rows read 1, so the negative control failed honestly while the
 positive one passed for the wrong reason), astern clears **−18.0** and not −20.0,
 and the turn windows move from 11 m of swing either side to 15.4 / 16.1 m.
 
-**Ten rows still fail and they are one pre-existing fault, not ten.** All sit in
-the return leg, all pass their `--assert`s and fail only a `grep` on the teaching
-HUD's text, and the text differs because the boat is behind where the tape
-expects her. She never reaches ALONGSIDE: the tape drives her astern for 400
-ticks, she is doing 0 kn 16 m short when it releases the wheel, and everything
-downstream reads BLOCKED. That is the demo's scripted return no longer
-completing on a 32% heavier hull, and repairing it is a change to the tape or to
-her astern thrust — a design decision on the demo, left to the human.
+**Ten rows still failed at that point, and every one of them was the hull's
+corrected mass arriving somewhere nobody had re-measured.** `de97324` took her
+from 43,776 kg to 57,636 kg — the old figure a guessed 38,000 scaled by a
+previous hull's volume, and 24% light — and the demo's tapes, thresholds and
+teaching text were all calibrated on the light boat. All ten are now closed:
 
-One further fragility, unrelated and untouched: several of those rows pipe
-`loom sim` into `grep -q`, which exits on first match and SIGPIPEs the writer.
-Under `set -o pipefail` that panics the pipeline on output large enough to
-outlive the match. It is latent, load-dependent, and it masked the real failures
-above until `pipefail` was dropped to see past it.
+- **The return leg never berthed her.** 400 ticks of astern (2200–2600) left her
+  at 0 kn 16 m short, so ALONGSIDE never fired and everything after it read
+  BLOCKED. Astern runs to 2850 now; she is alongside at 2800 and against the
+  berth from 3000. The walk to the crate is `move_z=-1` alone — the berth moved,
+  and the old westward walk put him in the water.
+- **Four stale numbers** re-pinned with their measurements beside them: the
+  crate 12 m rather than 5, HOME 25 m rather than 19, HOME 115 m at 4 kn rather
+  than 122 at 5, and the engine note rising to −1.4 rather than clearing −1.0.
+- **`pinned` had gone dead, and that is the one worth reading.** It exists
+  because the stall limiter *cannot* see a hull pivoting on a mark: the helmsman
+  stands seven metres off her centre, so he keeps walking and `jammed` never
+  latches. Its one-knot gate was measured on a hull that pivoted at 0.89 down to
+  0.58 kn. The corrected one pivots at 1.508 decaying to 1.036 and never crosses
+  it — 1,000 ticks of running into `Mark5` with the caption still reading
+  `AHEAD   wheel to port`, which is the first-timer that block was written for,
+  told nothing again. The gate is 2 kn now: open sea on the mirrored input is
+  4.960 kn, she crosses 2 within about a dozen ticks of the throttle going
+  ahead, and astern is excluded by `drive`'s sign rather than by the number.
+- **The bait-box caption missed its own zone by a centimetre.** `baffled` is a
+  box in the boat's frame; the deck moved under it and the bait box now stops
+  him at `plx` −6.79 against an edge of −6.80, so the caption fell through to
+  the branch that names neither the obstacle nor the hand. Edge moved to −6.70;
+  the helm mat is 38 cm clear of it, and the west edge is untouched because the
+  wedge at −9.13 is a different collider and *should* get the unnamed sentence.
+- **`rig_trip`'s loop stowed nothing**, because the fish was in his creel rather
+  than his hands by the time the old tape reached the box — `stow` cannot reach
+  it there. The box comes first now, at tick 1330, and dropping the old zigzag
+  is most of why she gets home sooner rather than later.
+
+**A rule the ten of them share.** Every one was a number describing the boat,
+written down once, in a place that could not see the boat change: a tick in a
+tape, an edge in a zone, a threshold in a detector, a distance in a caption. The
+mass commit was careful and right, and it moved all of them at once. Where a
+number like that survives, it is worth asking what it is a function of.
+
+One fragility, unrelated and untouched: several rows pipe `loom sim` into
+`grep -q`, which exits on first match and SIGPIPEs the writer. Under
+`set -o pipefail` that panics the pipeline on output large enough to outlive the
+match. It is latent, load-dependent, and it masked the real failures above until
+`pipefail` was dropped to see past them.
