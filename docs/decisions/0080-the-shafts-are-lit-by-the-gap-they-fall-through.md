@@ -140,9 +140,8 @@ rain shaft can be translucent or it can have beams, not both.
 
 ## 5. What this does not settle
 
-- **The sun disc is not occluded by the shaft.** It is drawn additively in `skyColor` after the
-  deck composites. Reopening trigger: a scene where the sun sits behind a heavy shaft and stays
-  at full brightness.
+- ~~**The sun disc is not occluded by the shaft.**~~ **FALSE WHEN WRITTEN — see Addendum 1.**
+  It is occluded, by 25 levels of luma, and was already.
 - **No shafts on the ground.** A god ray that lands is a bright patch on the sea, and nothing
   here writes to water or terrain. That belongs with cloud shadows on the world (ADR 0078 §6,
   unbuilt).
@@ -182,3 +181,47 @@ measurement, not before.
 0078, 0079, 0080 and 0081 together, after the whole series was green on all six checks and
 after the measurement corrections each of them carries were made. Recorded verbatim per this
 project's rule, so the scope of what was accepted is not relitigable later.
+
+---
+
+## Addendum 1 — the sun disc was already occluded, and §5 misread its own code
+
+**Date:** 2026-09-05, on going to build it.
+
+§5 said the sun disc is not dimmed by a shower, reasoning that it *"is drawn additively in
+`skyColor` after the deck composites."* The first half of that is true and the conclusion does
+not follow. The term reads:
+
+```hlsl
+float3 sun = float3(1.0, 0.94, 0.82) * (glow * (1.0 - cover * 0.75) + disc * (1.0 - cover));
+```
+
+**`disc` is multiplied by `1 - cover`, and `cover` has included the shower since ADR 0079**
+composited the curtain in front of the deck into the same `CloudLook.cover`. So the disc was
+occluded by rain from the moment the curtain existed — before this ADR was written.
+
+**Measured on `lanternhead` at `--sim 2400`, camera yawed to put the sun in frame.** The
+brightest 0.5% of sky pixels, 0-255 luma:
+
+| | brightest 0.5% |
+|---|---|
+| everything on | **207.6** |
+| `LOOM_ABLATE=rain_curtain` | 233.1 |
+| `LOOM_ABLATE=cloud_volume,rain_curtain` | 241.2 |
+
+The shower takes 25 levels off the sun and the volumetric deck a further 8. Raw peak luma is
+244 in all three and is useless here — it is the brazier, not the sun — which is why the
+0.5% mean is the figure quoted.
+
+**Two things about the method are worth keeping.** Finding the sun took a yaw sweep, because
+neither scene points at it; and the first sweep was run on `squall`, where all eight yaws came
+back **byte-identical**. That is not a broken flag — `--yaw` abandons the authored camera and
+orbits the scene's *bounds*, and `squall` is open sea with no bounded geometry, so every yaw is
+the same view. `croft` moves 23,095 pixels between yaw 0 and 90, which is how the flag was
+cleared of suspicion before the scene was.
+
+**Nothing was built.** This is the fourth gap in this series to be found already closed on
+inspection — after distance wetting, and alongside the penumbra, which was built, measured and
+reverted. The pattern is that a §"what this does not settle" bullet written at design time is
+a *hypothesis about the code*, and by the time anyone acts on it two more ADRs may have made it
+false.
