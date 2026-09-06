@@ -413,7 +413,7 @@ impl RainSim {
         )?;
         // SAFETY: the caller has waited for the device to be idle before
         // changing the world, and `upload` waited on its own submit.
-        unsafe { self.field.destroy(&self.device, allocator) };
+        unsafe { self.field.destroy(&self.device, Some(&mut *allocator)) };
         self.field = field;
         self.bind_field();
         self.tick = None;
@@ -562,7 +562,7 @@ impl RainSim {
 
     /// # Safety
     /// Nothing may still be in flight against these.
-    pub(crate) unsafe fn destroy(&mut self, allocator: &mut Allocator) {
+    pub(crate) unsafe fn destroy(&mut self, mut allocator: Option<&mut Allocator>) {
         // SAFETY: the caller guarantees nothing is in flight.
         unsafe {
             self.device.destroy_pipeline(self.simulate, None);
@@ -572,22 +572,24 @@ impl RainSim {
             self.device.destroy_descriptor_pool(self.pool, None);
             self.device.destroy_descriptor_set_layout(self.set_layout, None);
             self.device.destroy_sampler(self.sampler, None);
-            self.field.destroy(&self.device, allocator);
+            self.field.destroy(&self.device, allocator.as_deref_mut());
             self.device.destroy_buffer(self.drops, None);
             self.device.destroy_buffer(self.splashes, None);
             self.device.destroy_buffer(self.args, None);
             self.device.destroy_buffer(self.water, None);
         }
-        for allocation in [
-            self.drops_alloc.take(),
-            self.splashes_alloc.take(),
-            self.args_alloc.take(),
-            self.water_alloc.take(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let _ = allocator.free(allocation);
+        if let Some(allocator) = allocator {
+            for allocation in [
+                self.drops_alloc.take(),
+                self.splashes_alloc.take(),
+                self.args_alloc.take(),
+                self.water_alloc.take(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let _ = allocator.free(allocation);
+            }
         }
     }
 }
@@ -731,13 +733,13 @@ impl Field {
 
     /// # Safety
     /// Nothing may still be in flight against this image.
-    unsafe fn destroy(&mut self, device: &ash::Device, allocator: &mut Allocator) {
+    unsafe fn destroy(&mut self, device: &ash::Device, allocator: Option<&mut Allocator>) {
         // SAFETY: the caller guarantees nothing is in flight.
         unsafe {
             device.destroy_image_view(self.view, None);
             device.destroy_image(self.image, None);
         }
-        if let Some(allocation) = self.allocation.take() {
+        if let (Some(allocation), Some(allocator)) = (self.allocation.take(), allocator) {
             let _ = allocator.free(allocation);
         }
     }

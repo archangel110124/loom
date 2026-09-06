@@ -282,7 +282,7 @@ impl Cmaa2 {
             }
             Err(e) => {
                 // SAFETY: nothing recorded against any of this yet.
-                unsafe { this.destroy(device, allocator) };
+                unsafe { this.destroy(device, Some(&mut *allocator)) };
                 return Err(e);
             }
         }
@@ -291,7 +291,7 @@ impl Cmaa2 {
         // that does not exist yet.
         if let Err(e) = unsafe { this.rebind(device, allocator, names, source, width, height) } {
             // SAFETY: as above.
-            unsafe { this.destroy(device, allocator) };
+            unsafe { this.destroy(device, Some(&mut *allocator)) };
             return Err(e);
         }
 
@@ -326,7 +326,7 @@ impl Cmaa2 {
         height: u32,
     ) -> Result<(), RenderError> {
         // SAFETY: the caller guarantees nothing is in flight.
-        unsafe { self.destroy_edges(device, allocator) };
+        unsafe { self.destroy_edges(Some(&mut *allocator), device) };
 
         let (edges, allocation) = create_image(
             device,
@@ -487,7 +487,7 @@ impl Cmaa2 {
 
     /// # Safety
     /// No command buffer referencing the edge image may be in flight.
-    unsafe fn destroy_edges(&mut self, device: &ash::Device, allocator: &mut Allocator) {
+    unsafe fn destroy_edges(&mut self, allocator: Option<&mut Allocator>, device: &ash::Device) {
         // SAFETY: the caller guarantees nothing is in flight.
         unsafe {
             if self.edges_view != vk::ImageView::null() {
@@ -499,17 +499,17 @@ impl Cmaa2 {
         }
         self.edges_view = vk::ImageView::null();
         self.edges = vk::Image::null();
-        if let Some(allocation) = self.edges_alloc.take() {
+        if let (Some(allocation), Some(allocator)) = (self.edges_alloc.take(), allocator) {
             let _ = allocator.free(allocation);
         }
     }
 
     /// # Safety
     /// The device must be idle.
-    pub(crate) unsafe fn destroy(&mut self, device: &ash::Device, allocator: &mut Allocator) {
+    pub(crate) unsafe fn destroy(&mut self, device: &ash::Device, allocator: Option<&mut Allocator>) {
         // SAFETY: the caller has idled the device and these handles are ours.
         unsafe {
-            self.destroy_edges(device, allocator);
+            self.destroy_edges(allocator, device);
             if self.blend_pipeline != vk::Pipeline::null() {
                 device.destroy_pipeline(self.blend_pipeline, None);
             }

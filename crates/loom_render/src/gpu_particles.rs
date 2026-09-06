@@ -385,7 +385,7 @@ impl GpuParticles {
 
     /// # Safety
     /// Nothing may still be in flight against these.
-    pub(crate) unsafe fn destroy(&mut self, allocator: &mut Allocator) {
+    pub(crate) unsafe fn destroy(&mut self, allocator: Option<&mut Allocator>) {
         // SAFETY: the caller guarantees nothing is in flight.
         unsafe {
             self.device.destroy_pipeline(self.simulate, None);
@@ -395,15 +395,17 @@ impl GpuParticles {
             self.device.destroy_buffer(self.instances, None);
             self.device.destroy_buffer(self.params, None);
         }
-        for allocation in [
-            self.pool_alloc.take(),
-            self.instances_alloc.take(),
-            self.params_alloc.take(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let _ = allocator.free(allocation);
+        if let Some(allocator) = allocator {
+            for allocation in [
+                self.pool_alloc.take(),
+                self.instances_alloc.take(),
+                self.params_alloc.take(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let _ = allocator.free(allocation);
+            }
         }
     }
 }

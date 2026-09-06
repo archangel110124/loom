@@ -238,7 +238,7 @@ impl Raytracer {
         ranges: &[MeshRange],
         vertex_count: u32,
     ) -> Result<(), RenderError> {
-        self.free_blas(allocator);
+        self.free_blas(Some(&mut *allocator));
         // Every instance key holds a BLAS address, and these are the addresses
         // being freed. A new BLAS can land on a freed one, so the keys cannot
         // be trusted across this.
@@ -409,7 +409,7 @@ impl Raytracer {
         // Retire the previous TLAS only once the new one exists, so a failed
         // build leaves the last good structure in place rather than none.
         if let Some(old) = self.tlas.replace(structure) {
-            self.free_structure(allocator, old);
+            self.free_structure(Some(&mut *allocator), old);
         }
         self.write_descriptor();
         Ok(())
@@ -599,35 +599,37 @@ impl Raytracer {
         Ok(())
     }
 
-    fn free_structure(&self, allocator: &mut Allocator, mut structure: Structure) {
+    fn free_structure(&self, allocator: Option<&mut Allocator>, mut structure: Structure) {
         // SAFETY: nothing references this structure; builds are fenced.
         unsafe {
             self.accel
                 .destroy_acceleration_structure(structure.handle, None);
             self.device.destroy_buffer(structure.buffer, None);
         }
-        if let Some(allocation) = structure.allocation.take() {
+        if let (Some(allocation), Some(allocator)) = (structure.allocation.take(), allocator) {
             let _ = allocator.free(allocation);
         }
     }
 
-    fn free_blas(&mut self, allocator: &mut Allocator) {
+    fn free_blas(&mut self, mut allocator: Option<&mut Allocator>) {
         for structure in std::mem::take(&mut self.blas) {
-            self.free_structure(allocator, structure);
+            self.free_structure(allocator.as_deref_mut(), structure);
         }
     }
 
     /// Release everything. Called before the allocator itself goes away.
-    pub(crate) fn destroy(&mut self, allocator: &mut Allocator) {
-        self.free_blas(allocator);
+    pub(crate) fn destroy(&mut self, mut allocator: Option<&mut Allocator>) {
+        self.free_blas(allocator.as_deref_mut());
         if let Some(tlas) = self.tlas.take() {
-            self.free_structure(allocator, tlas);
+            self.free_structure(allocator.as_deref_mut(), tlas);
         }
-        if let Some(allocation) = self.instances_alloc.take() {
-            let _ = allocator.free(allocation);
-        }
-        if let Some(allocation) = self.scratch_alloc.take() {
-            let _ = allocator.free(allocation);
+        if let Some(allocator) = allocator {
+            if let Some(allocation) = self.instances_alloc.take() {
+                let _ = allocator.free(allocation);
+            }
+            if let Some(allocation) = self.scratch_alloc.take() {
+                let _ = allocator.free(allocation);
+            }
         }
         // SAFETY: every structure above is already destroyed, and the device is
         // idle — the caller waits before tearing down.

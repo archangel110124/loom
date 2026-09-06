@@ -899,7 +899,7 @@ impl Msaa {
     ///
     /// The device must be idle: these images are attachments of every frame
     /// still in flight.
-    pub(crate) unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
+    pub(crate) unsafe fn destroy(self, device: &ash::Device, allocator: Option<&mut Allocator>) {
         // SAFETY: the caller has idled the device, so nothing references these.
         unsafe {
             device.destroy_image_view(self.view, None);
@@ -911,10 +911,12 @@ impl Msaa {
             device.destroy_image(self.opaque_color, None);
             device.destroy_image(self.opaque_depth, None);
         }
-        let _ = allocator.free(self.alloc);
-        let _ = allocator.free(self.depth_allocation);
-        let _ = allocator.free(self.opaque_color_alloc);
-        let _ = allocator.free(self.opaque_depth_alloc);
+        if let Some(allocator) = allocator {
+            let _ = allocator.free(self.alloc);
+            let _ = allocator.free(self.depth_allocation);
+            let _ = allocator.free(self.opaque_color_alloc);
+            let _ = allocator.free(self.opaque_depth_alloc);
+        }
     }
 }
 
@@ -3676,46 +3678,40 @@ impl Drop for Renderer {
             }
             // Before the allocator goes away: acceleration structures own both
             // Vulkan handles and allocations from it.
-            if let (Some(rt), Some(allocator)) =
-                (self.raytracer.as_mut(), self.allocator.as_mut())
-            {
-                rt.destroy(allocator);
+            if let Some(rt) = self.raytracer.as_mut() {
+                rt.destroy(self.allocator.as_mut());
             }
             // After the idle wait, for the same reason: these are images the
             // fragment shader was sampling one frame ago.
-            if let Some(allocator) = self.allocator.as_mut() {
-                self.materials.destroy(allocator);
-            }
-            if let (Some((buffer, allocation, _)), Some(allocator)) =
-                (self.rt_positions.take(), self.allocator.as_mut())
-            {
-                let _ = allocator.free(allocation);
+            self.materials.destroy(self.allocator.as_mut());
+            if let Some((buffer, allocation, _)) = self.rt_positions.take() {
+                if let Some(allocator) = self.allocator.as_mut() {
+                    let _ = allocator.free(allocation);
+                }
                 self.device.destroy_buffer(buffer, None);
             }
             self.device.destroy_pipeline(self.particle_pipeline, None);
             // Before the AA pass, which is the reverse of creation order.
             self.tonemap.destroy(&self.device);
-            if let (Some((mut pass, image, view, allocation)), Some(allocator)) =
-                (self.aa.take(), self.allocator.as_mut())
-            {
-                pass.destroy(&self.device, allocator);
+            if let Some((mut pass, image, view, allocation)) = self.aa.take() {
+                pass.destroy(&self.device, self.allocator.as_mut());
                 self.device.destroy_image_view(view, None);
                 self.device.destroy_image(image, None);
-                let _ = allocator.free(allocation);
+                if let Some(allocator) = self.allocator.as_mut() {
+                    let _ = allocator.free(allocation);
+                }
             }
-            if let (Some(msaa), Some(allocator)) = (self.msaa.take(), self.allocator.as_mut()) {
+            if let Some(msaa) = self.msaa.take() {
                 // SAFETY: the device was idled at the top of this teardown.
-                msaa.destroy(&self.device, allocator);
+                msaa.destroy(&self.device, self.allocator.as_mut());
             }
             self.device.destroy_pipeline(self.grass_pipeline, None);
             self.device.destroy_pipeline(self.water_pipeline, None);
             self.device.destroy_pipeline(self.fluid_pipeline, None);
             self.device.destroy_pipeline(self.rain_pipeline, None);
             self.device.destroy_pipeline(self.rain_splash_pipeline, None);
-            if let Some(allocator) = self.allocator.as_mut() {
-                self.rain_sim.destroy(allocator);
-                self.gpu_particles.destroy(allocator);
-            }
+            self.rain_sim.destroy(self.allocator.as_mut());
+            self.gpu_particles.destroy(self.allocator.as_mut());
             self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.terrain_buffer, None);
             self.device.destroy_buffer(self.ripple_buffer, None);

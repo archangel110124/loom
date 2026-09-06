@@ -479,7 +479,7 @@ impl Materials {
         self.address
     }
 
-    pub(crate) fn destroy(&mut self, allocator: &mut Allocator) {
+    pub(crate) fn destroy(&mut self, allocator: Option<&mut Allocator>) {
         // SAFETY: the caller has waited for the device to go idle.
         unsafe {
             for texture in &self.textures {
@@ -491,6 +491,7 @@ impl Materials {
             self.device.destroy_descriptor_set_layout(self.layout, None);
             self.device.destroy_buffer(self.buffer, None);
         }
+        let Some(allocator) = allocator else { return };
         for texture in &mut self.textures {
             if let Some(allocation) = texture.allocation.take() {
                 let _ = allocator.free(allocation);

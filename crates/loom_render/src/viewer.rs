@@ -2755,7 +2755,7 @@ impl Viewer {
             // attachment, never a descriptor — so rebuilding is all it needs.
             if let Some(msaa) = self.msaa.take() {
                 // SAFETY: the device was idled at the top of this function.
-                unsafe { msaa.destroy(&self.device, allocator) };
+                unsafe { msaa.destroy(&self.device, Some(&mut *allocator)) };
                 self.msaa = crate::renderer::Msaa::new(
                     &self.device,
                     allocator,
@@ -2883,29 +2883,25 @@ impl Drop for Viewer {
         // gone there is no outstanding present to wait on anything.
         unsafe {
             let _ = self.device.device_wait_idle();
-            if let (Some(rt), Some(allocator)) =
-                (self.raytracer.as_mut(), self.allocator.as_mut())
-            {
-                rt.destroy(allocator);
+            if let Some(rt) = self.raytracer.as_mut() {
+                rt.destroy(self.allocator.as_mut());
             }
             // After the idle wait, for the same reason: these are images the
             // fragment shader was sampling one frame ago.
-            if let Some(allocator) = self.allocator.as_mut() {
-                self.materials.destroy(allocator);
-            }
+            self.materials.destroy(self.allocator.as_mut());
             if let (Some((buffer, allocation, _)), Some(allocator)) =
                 (self.readback.take(), self.allocator.as_mut())
             {
                 let _ = allocator.free(allocation);
                 self.device.destroy_buffer(buffer, None);
             }
-            if let (Some((mut pass, image, view, allocation)), Some(allocator)) =
-                (self.aa.take(), self.allocator.as_mut())
-            {
-                pass.destroy(&self.device, allocator);
+            if let Some((mut pass, image, view, allocation)) = self.aa.take() {
+                pass.destroy(&self.device, self.allocator.as_mut());
                 self.device.destroy_image_view(view, None);
                 self.device.destroy_image(image, None);
-                let _ = allocator.free(allocation);
+                if let Some(allocator) = self.allocator.as_mut() {
+                    let _ = allocator.free(allocation);
+                }
             }
             // The tonemap holds a descriptor pointing at the scene view, so it
             // goes before the image it reads.
@@ -2917,9 +2913,9 @@ impl Drop for Viewer {
             {
                 let _ = allocator.free(allocation);
             }
-            if let (Some(msaa), Some(allocator)) = (self.msaa.take(), self.allocator.as_mut()) {
+            if let Some(msaa) = self.msaa.take() {
                 // SAFETY: the device was idled at the top of this block.
-                msaa.destroy(&self.device, allocator);
+                msaa.destroy(&self.device, self.allocator.as_mut());
             }
             self.device.destroy_pipeline(self.particle_pipeline, None);
             self.device.destroy_buffer(self.particle_buffer, None);
@@ -2936,10 +2932,8 @@ impl Drop for Viewer {
             }
             self.device.destroy_pipeline(self.rain_pipeline, None);
             self.device.destroy_pipeline(self.rain_splash_pipeline, None);
-            if let Some(allocator) = self.allocator.as_mut() {
-                self.rain_sim.destroy(allocator);
-                self.gpu_particles.destroy(allocator);
-            }
+            self.rain_sim.destroy(self.allocator.as_mut());
+            self.gpu_particles.destroy(self.allocator.as_mut());
             self.device.destroy_buffer(self.grass_buffer, None);
             self.device.destroy_buffer(self.terrain_buffer, None);
             self.device.destroy_buffer(self.ripple_buffer, None);
