@@ -3,12 +3,47 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# **A reader that stops early can kill the writer, and that is how this file
+# hid eight hundred lines of itself.** `grep -q` exits on its first match and
+# closes the pipe. Rust's stdout is line-buffered *even when piped*, so `loom`
+# can still be mid-write when that happens; it takes an EPIPE and panics with
+# `failed printing to stdout: Broken pipe`. Under `set -o pipefail` the pipeline
+# then fails whatever `grep` decided, and with `set -e` the run stops there --
+# taking every row below it with it. It fired twice in one sweep, and the rows
+# after it went unrun and unreported: the gate said "failed" where it meant
+# "failed, and I never looked at the rest". Five real failures were sitting
+# behind it.
+#
+# It is a race and a narrow one -- `loom sim` writes about 2.6 KB, well inside
+# a 64 KB pipe buffer, so it normally finishes before `grep` can exit, and it
+# survives being run on its own five times out of five. That is the argument
+# *for* fixing it rather than against: it appears only under the load of a full
+# sweep, which is the one run whose result anybody reads.
+#
+# `grep -c` reads to EOF, so the writer is never interrupted, and it answers the
+# same question -- 0 when something matched, 1 when nothing did. Measured, on
+# bash, which is what runs this file:
+#
+#     seq 1 500000 | grep -q '^1$'             PIPESTATUS  141 0
+#     seq 1 500000 | grep -c '^1$' >/dev/null   PIPESTATUS    0 0
+#     seq 1 100    | grep -c '^NOPE$'           exit 1, as it should
+#
+# **The worst instance of this was line 11, and it fails *open*.** The xtask
+# guard pipes `cargo metadata` -- 40,914 bytes today, 62% of a 64 KB pipe
+# buffer and growing with every crate -- into this test, inside an `if`
+# condition, where `set -e` does not apply. The day that output crosses the
+# buffer, `grep -q` kills `cargo metadata`, the condition goes false, and the
+# script takes its else branch: "skip: cargo xtask validate". Four of the six
+# checks would stop running and the gate would still say green. That is why
+# this is defined at the top of the file rather than beside `LOOM`.
+contains() { grep -c -e "$1" >/dev/null; }
+
 ./scripts/check-deps.sh
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
 # Vulkan validation. Needs a GPU + the layers; skips honestly without either.
-if cargo metadata --no-deps --format-version 1 | grep -q '"name":"xtask"'; then
+if cargo metadata --no-deps --format-version 1 | contains '"name":"xtask"'; then
   cargo xtask validate
   # The pixel diff. Clippy catches what the compiler misses, the validation
   # layers catch what clippy misses, the determinism hashes catch a simulation
@@ -237,7 +272,7 @@ fi
 # **`--assert` has no string axis** — see `GameState::text` — so this is a grep,
 # which is how every caption in this file is already pinned.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 240 --hold move_z=1 \
-  | grep -q '"creel_cells": "abc/d\.\./\.\.\."'
+  | contains '"creel_cells": "abc/d\.\./\.\.\."'
 
 # **THE PACKER'S TWO SELF-CHECKS, AND THEY ARE THE HALF OF THIS THAT IS PROVED
 # RATHER THAN SAMPLED.**
@@ -371,7 +406,7 @@ DEMO_FIGHT_HEAD="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531
   --hold "0:move_z=1; 550:bag=1; 551:" \
   --assert "state.at_helm == 1" --assert "state.creel_open == 0" \
   --assert "state.creel_refused == 3" --assert "events.creelbusy == 1" \
-  | grep -q '"message": "HANDS ON THE WHEEL   SPACE lets go, then TAB opens the creel"' 
+  | contains '"message": "HANDS ON THE WHEEL   SPACE lets go, then TAB opens the creel"' 
 
 # **THE CURSOR: ONE TAP IS ONE CELL, A HELD KEY REPEATS TO THE WALL AND STOPS.**
 # `move_x`/`move_z` are analogue axes and nothing else in this engine has ever
@@ -759,7 +794,7 @@ DEMO_FIGHT_HEAD="0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531
   --hold "1200:interact=1; 1201:; 2600:interact=1; 2601:" \
   --assert "state.infish == 2" --assert "state.online == 0" \
   --assert "state.creel_free == 4" --assert "state.creel_drift == 0" \
-  | grep -q '"creel_cells": "eab/cd\./\.\.\."'
+  | contains '"creel_cells": "eab/cd\./\.\.\."'
 
 #      **And the way out is the box, which takes a catch off the line as well as
 #      out of your hands.** That is why the E ladder tests the box *before* the
@@ -876,7 +911,7 @@ DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2850:; 2910:jump=1; 2920:move_z=-1; \
   --assert "events.hooked >= 1" --assert "events.landed >= 1" \
   --assert "state.online == 1" --assert "state.infish == 0" \
   --assert "state.carried == 3" --assert "state.fishsize == 6" \
-  | grep -q '"message": "SHE IS ON   press E to take her off the line"'
+  | contains '"message": "SHE IS ON   press E to take her off the line"'
 
 # 5b3. **AND SHE DOES NOT FIT, WHICH IS THE WHOLE CREEL IN ONE ROW.**
 #
@@ -911,7 +946,7 @@ DEMO_HOME="$DEMO_HELM; 2200:move_z=-1; 2850:; 2910:jump=1; 2920:move_z=-1; \
   --assert "events.refused >= 1" --assert "state.online == 1" \
   --assert "state.infish == 0" --assert "state.creel_hand == 0" \
   --assert "state.creel_free == 6" --assert "state.carried == 3" \
-  | grep -q '"creel_cells": "a\.b/c\.\./\.\.\."'
+  | contains '"creel_cells": "a\.b/c\.\./\.\.\."'
 
 #      **And the hatch is the way out that needs no packing at all.**
 #      `DEMO_BOX` is the same tape plus the dogleg round the bait box and one E
@@ -951,12 +986,12 @@ DEMO_CONGER="$DEMO_FIGHT; 1900:interact=1; 1901:; 1910:bag=1; 1911:; \
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2070 --hold "$DEMO_CONGER" \
   --assert "events.ditched == 1" --assert "state.line == 0" \
   --assert "state.creel_used == 2" \
-  | grep -q '"creel_cells": "a\.\./b\.\./\.\.\."'
+  | contains '"creel_cells": "a\.\./b\.\./\.\.\."'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2110 --hold "$DEMO_CONGER" \
   --assert "state.creel_open == 0" --assert "state.online == 0" \
   --assert "state.infish == 1" --assert "state.creel_free == 1" \
   --assert "state.creel_drift == 0" \
-  | grep -q '"creel_cells": "acc/bcc/\.cc"'
+  | contains '"creel_cells": "acc/bcc/\.cc"'
 
 # 5b5. **LIFT, PLACE, AND THE TWO REFUSALS.** The same three keys on a quiet
 #      deck, where the shapes are all one cell and only the rules are under
@@ -969,7 +1004,7 @@ DEMO_CONGER="$DEMO_FIGHT; 1900:interact=1; 1901:; 1910:bag=1; 1911:; \
   --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:" \
   --assert "state.creel_hand == 1" --assert "state.creel_used == 3" \
   --assert "events.lift == 1" --assert "state.creel_drift == 0" \
-  | grep -q '"creel_hand_label": "FLSK"'
+  | contains '"creel_hand_label": "FLSK"'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
   --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 300:interact=1; 301:" \
@@ -1012,7 +1047,7 @@ creel_state=$("$LOOM" sim assets/games/deeper_demo.loom --ticks 400 \
   --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:")
 for name in creel_cells creel_kinds creel_open creel_cx creel_cy \
             creel_hand creel_hand_label creel_hand_w creel_hand_h creel_fits; do
-  printf '%s\n' "$creel_state" | grep -q "\"$name\":" || {
+  printf '%s\n' "$creel_state" | contains "\"$name\":" || {
     echo "green: the creel overlay reads state.$name and the game does not export it" >&2
     exit 1
   }
@@ -1053,7 +1088,7 @@ unset creel_state
   --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 300:sprint=1" \
   --assert "state.creel_ditching == 0" --assert "events.ditched == 1" \
-  | grep -q '"message": "OVER THE SIDE   the thermos is gone"' 
+  | contains '"message": "OVER THE SIDE   the thermos is gone"' 
 #      **And notice 11 could not reach the screen while the creel was open at
 #      all** — the open grid owns the caption line and never consulted the
 #      notices, so a bar that had been filling for a second vanished into the
@@ -1064,7 +1099,7 @@ unset creel_state
 300:sprint=1; 370:" \
   --assert "events.ditched == 1" --assert "state.creel_hand == 0" \
   --assert "state.thermos == 0" --assert "state.creel_used == 3" \
-  | grep -q '"message": "OVER THE SIDE   the thermos is gone"' 
+  | contains '"message": "OVER THE SIDE   the thermos is gone"' 
 
 # 5b7. **SHUTTING IT PUTS WHAT IS IN YOUR HAND BACK.** A held item has no
 #      picture and no verb outside the grid, so walking away with one is state
@@ -1112,13 +1147,13 @@ DEMO_TURNED="$DEMO_FIGHT; 1900:interact=1; 1901:; 1910:bag=1; 1911:; \
 1930:sprint=1; 2000:; 2050:bag=1; 2051:; 2090:interact=1; 2091:" \
   --assert "events.ditched == 1" --assert "state.thermos == 0" \
   --assert "state.online == 1" --assert "state.infish == 0" \
-  | grep -q '"creel_cells": "\.\.a/b\.\./\.\.\."'
+  | contains '"creel_cells": "\.\.a/b\.\./\.\.\."'
 
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2110 --hold "$DEMO_TURNED" \
   --assert "events.ditched == 1" --assert "state.lantern == 0" \
   --assert "state.online == 0" --assert "state.infish == 1" \
   --assert "state.creel_free == 1" --assert "state.creel_drift == 0" \
-  | grep -q '"creel_cells": "a\.b/ccc/ccc"'
+  | contains '"creel_cells": "a\.b/ccc/ccc"'
 
 #      **And LMB, which is the only key in the creel with no coverage at all.**
 #      Lift the turned conger back out — she keeps the way up she was packed,
@@ -1140,7 +1175,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
   --hold "$DEMO_TURN_VERB; 2200:fire=1; 2201:; 2220:interact=1; 2221:" \
   --assert "events.turn == 2" --assert "events.place == 1" \
   --assert "state.creel_hand == 0" --assert "state.creel_drift == 0" \
-  | grep -q '"creel_cells": "a\.b/ccc/ccc"'
+  | contains '"creel_cells": "a\.b/ccc/ccc"'
 
 # 5b10. **THE REFUSAL EXPIRES WHEN THE CURSOR LEAVES THE CELL IT WAS ABOUT.**
 #
@@ -1184,7 +1219,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
   --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:interact=1; 261:; \
 280:fire=1; 281:" \
   --assert "state.creel_refused == 5" --assert "state.creel_hand == 1" \
-  | grep -q '"message": "IT IS ONE CELL   turning it would change nothing"'
+  | contains '"message": "IT IS ONE CELL   turning it would change nothing"'
 
 #      **Code 4, which exists because code 2 was lying.** LMB with an empty hand
 #      used to answer `NOTHING IN THAT CELL`. The cursor is on the FLSK: there
@@ -1195,7 +1230,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
   --hold "0:move_z=1; 240:jump=1; 245:; 250:bag=1; 251:; 260:fire=1; 261:" \
   --assert "state.creel_refused == 4" --assert "state.creel_hand == 0" \
   --assert "events.turn == 1" \
-  | grep -q '"message": "NOTHING IN YOUR HAND   E lifts it out first, then LMB turns it"'
+  | contains '"message": "NOTHING IN YOUR HAND   E lifts it out first, then LMB turns it"'
 
 # 5d2. **YOU CAN CAST FROM ANYWHERE ABOARD, AND NOTHING SAID SO.** The engine
 #      has gated the cast on `aboard` rather than on a station since the day it
@@ -1210,7 +1245,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 610 \
   --hold "0:move_z=1; 420:jump=1; 430:move_x=1; 560:; 600:fire=1; 606:" \
   --assert "state.phase == 1" --assert "state.plx > 1.0" \
-  | grep -q '"message": "LINE OUT, BAITED   a take is close"'
+  | contains '"message": "LINE OUT, BAITED   a take is close"'
 
 #      **And the control, which is the other half of "anywhere aboard".** Hold
 #      the trigger from the spawn without ever boarding: no `angler` event is
@@ -1238,7 +1273,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 \
   --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:; 540:sprint=1" \
   --assert "events.snap >= 1" --assert "state.bait == 0" \
-  | grep -q '"message": "THE LINE SNAPPED'
+  | contains '"message": "THE LINE SNAPPED'
 #     **900, not 1400, and this row has never once passed.** It shipped with
 #     the round that wrote it and nobody re-ran the block: a hub times a
 #     finished fight out after `OVER_TICKS` (180) and hands the line back to the
@@ -1252,7 +1287,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 \
   --hold "0:move_z=1; 420:jump=1; 430:; 460:fire=1; 466:; 525:fire=1; 531:" \
   --assert "events.escaped >= 1" --assert "state.bait == 0" \
-  | grep -q '"message": "IT THREW THE HOOK'
+  | contains '"message": "IT THREW THE HOOK'
 
 # 5f. **The float and the fish, which are the only things in the player's own
 #     frame that say any of the above is happening.** Rendered from
@@ -1430,10 +1465,10 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 # the pair this row exists to keep apart is still ten metres apart.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2120 --hold "$DEMO_BOX" \
   --assert "state.stowed == 1" --assert "state.aboard == 1" \
-  | grep -q '"message": "1 BELOW   the crate is 12 m behind you, on your left'
+  | contains '"message": "1 BELOW   the crate is 12 m behind you, on your left'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2200 --hold "$DEMO_HELM" \
   --assert "state.stowed == 1" --assert "state.at_helm == 1" \
-  | grep -q '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   HOME 25 m — hold S"'
+  | contains '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   HOME 25 m — hold S"'
 
 # 5i. **AND THE TWO SENTENCES THAT GET HIM THERE, ASSERTED AS SENTENCES.**
 #     `--assert` has no `message` axis, so the same `grep` the two fight endings
@@ -1465,7 +1500,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #     is: the hand is a thing that exists only while the grid is open.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2250 --hold "$DEMO_CONGER" \
   --assert "state.fishheld == 1" --assert "state.stuck == 0" \
-  | grep -q '"message": "FISH IN THE CREEL   go LEFT round the bait box'
+  | contains '"message": "FISH IN THE CREEL   go LEFT round the bait box'
 
 #     **And the other half: once he is round it, the steerable bearing is back.**
 #     Ten ticks after the A the route hint is gone and the metres are counting
@@ -1478,7 +1513,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2260 \
   --hold "$DEMO_CONGER; 2110:move_x=-1; 2200:move_z=-1" \
   --assert "state.fishheld == 1" --assert "state.stuck == 0" \
-  | grep -q '"message": "FISH IN THE CREEL   E at the YELLOW FISH BOX — 1 m ahead on your right"'
+  | contains '"message": "FISH IN THE CREEL   E at the YELLOW FISH BOX — 1 m ahead on your right"'
 
 #     **And the sentence a player meets when she will not go in.** Notice 4,
 #     with her size in it: "full" was the only thing four slots could ever say,
@@ -1487,7 +1522,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1960 \
   --hold "$DEMO_FIGHT; 1900:move_x=-1,interact=1; 1901:move_x=-1; 1950:move_z=-1" \
   --assert "state.online == 1" --assert "state.infish == 0" \
-  | grep -q '"message": "SHE WILL NOT FIT   that conger is 2x3 — TAB to make room, or E at the YELLOW FISH BOX"'
+  | contains '"message": "SHE WILL NOT FIT   that conger is 2x3 — TAB to make room, or E at the YELLOW FISH BOX"'
 
 #     **Two: a player wedged aboard is told he is wedged.** `deeper_player.rhai`
 #     could not fire `stuck` aboard at all — the flag existed and the one place
@@ -1512,7 +1547,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
   --hold "$DEMO_CONGER; 2150:move_z=1" \
   --assert "state.stuck == 1" --assert "state.aboard == 1" \
   --assert "state.infish == 1" \
-  | grep -q '"message": "BLOCKED   the bait box — step LEFT and go round it"'
+  | contains '"message": "BLOCKED   the bait box — step LEFT and go round it"'
 
 #     **And the control that keeps that honest**: the one gesture this demo
 #     teaches must *not* trip it. Boarding, the capsule stands still for eighty
@@ -1531,7 +1566,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #     inventory. The numbers row changed; nothing told him to look at it.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 40 --hold move_z=1 \
   --assert "state.carried == 2" \
-  | grep -q '"message": "PICKED UP BAIT'
+  | contains '"message": "PICKED UP BAIT'
 
 # 5l. **THE CREEL ITSELF, AS A PICTURE, WHICH NOTHING ELSE CAN SEE.**
 #
@@ -1552,20 +1587,20 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #     conger the demo's own tape lands — three, with the hole the spent bait
 #     left and a fish in his hands that will not go in it.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 40 --hold move_z=1 \
-  | grep -q '"creel_cells": "ab\./\.\.\./\.\.\."'
+  | contains '"creel_cells": "ab\./\.\.\./\.\.\."'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=1 \
   --assert "state.creel_free == 5" \
-  | grep -q '"creel_kinds": "FLSK BAIT LINE LAMP"'
+  | contains '"creel_kinds": "FLSK BAIT LINE LAMP"'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1910 \
   --hold "$DEMO_FIGHT; 1900:interact=1; 1901:" \
   --assert "state.online == 1" \
-  | grep -q '"creel_cells": "a\.b/c\.\./\.\.\."'
+  | contains '"creel_cells": "a\.b/c\.\./\.\.\."'
 #     And the hand's own label, from the one place a fish is ever in it: lifted
 #     back out of a cell with the grid open.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2180 \
   --hold "$DEMO_CONGER; 2120:bag=1; 2121:; 2140:move_x=1; 2148:; \
 2170:interact=1; 2171:" \
-  | grep -q '"creel_hand_label": "><>"'
+  | contains '"creel_hand_label": "><>"'
 
 # 5k. **THE HELM SAYS WHAT IT IS SET TO.** The old caption listed four bindings
 #     and a speed and never once stated the state of either control, so a player
@@ -1578,13 +1613,13 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #     with the wheel over it names both settings, and astern is the other sign.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 500 --hold "0:move_z=1; 400:" \
   --assert "state.at_helm == 1" \
-  | grep -q '"message": "THE HELM   W ahead  S astern'
+  | contains '"message": "THE HELM   W ahead  S astern'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 600 \
   --hold "0:move_z=1; 400:move_z=1,move_x=1" --assert "state.at_helm == 1" \
-  | grep -q '"message": "THE HELM   AHEAD   wheel to starboard'
+  | contains '"message": "THE HELM   AHEAD   wheel to starboard'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 600 \
   --hold "0:move_z=1; 400:move_z=-1,move_x=-1" --assert "state.at_helm == 1" \
-  | grep -q '"message": "THE HELM   ASTERN   wheel to port'
+  | contains '"message": "THE HELM   ASTERN   wheel to port'
 
 # 6. **"Am I moving?" as a number, because the picture will not say.** From the
 #    helm at the opening yaw a frame after forty-five metres of travel differs
@@ -1718,7 +1753,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
   --assert "events.stow >= 1" --assert "state.stowed == 1" \
   --assert "events.deliver == 0" --assert "state.delivered == 0" \
   --assert "Rig/Player.y > 2.2" \
-  | grep -q '"message": "THE CATCH IS IN HER HOLD   bring her alongside first"'
+  | contains '"message": "THE CATCH IS IN HER HOLD   bring her alongside first"'
 
 # **THE DECK STILL CARRIES A MAN WHEN THE WEATHER GETS UP, AND NOTHING ELSE
 # HERE CAN SEE THAT.** ADR 0060 states an acceptance — 50 mm net drift and
@@ -1840,7 +1875,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 "$LOOM" sim assets/test/rig_reboard.loom --ticks 240 \
   --assert "Rig/Player.y > -1.0" --assert "Rig/Player.y < 0.0" >/dev/null
 "$LOOM" sim assets/test/rig_reboard.loom --ticks 60 \
-  | grep -q '"message": "IN THE WATER   swim east to her stern ladder"'
+  | contains '"message": "IN THE WATER   swim east to her stern ladder"'
 "$LOOM" sim assets/test/rig_reboard.loom --ticks 900 --hold move_x=1 \
   --assert "Rig/Player.y > 0.9" --assert "state.aboard == 1" >/dev/null
 
@@ -1897,10 +1932,10 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #     crate 1 m behind him rather than 5, because the berth moved.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2800 --hold "$DEMO_HOME" \
   --assert "state.stowed == 1" --assert "state.at_helm == 1" \
-  | grep -q '"message": "THE HELM   ASTERN   wheel amidships   2 kn   SPACE lets go   ALONGSIDE — press SPACE"'
+  | contains '"message": "THE HELM   ASTERN   wheel amidships   2 kn   SPACE lets go   ALONGSIDE — press SPACE"'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 3050 --hold "$DEMO_HOME" \
   --assert "state.stowed == 1" --assert "state.at_helm == 0" \
-  | grep -q '"message": "1 BELOW   SHE IS ALONGSIDE — step off, E at the crate 1 m dead behind you"'
+  | contains '"message": "1 BELOW   SHE IS ALONGSIDE — step off, E at the crate 1 m dead behind you"'
 #     **`events.take` has left this row and `events.refused` has joined it.**
 #     The conger this tape lands will not go in the creel, so the first E is
 #     refused and she stays on the line — and the second E, at the fish box,
@@ -1912,7 +1947,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
   --assert "events.stow >= 1" --assert "events.deliver >= 1" \
   --assert "events.use == 3" \
   --assert "state.delivered == 1" --assert "state.stowed == 0" \
-  | grep -q '"message": "IN THE CRATE   that is a trip. Take bait and go again"'
+  | contains '"message": "IN THE CRATE   that is a trip. Take bait and go again"'
 
 # 8b. **Press nothing for twenty seconds.** The one thing a stranger who has
 #     read nothing will do first. He keeps the supply he spawned on top of and
@@ -1926,7 +1961,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #     this row is also what would catch it following him to the berth.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1200 --hold "0:" \
   --assert "Rig/Player.y > 2.2" --assert "state.carried == 1" \
-  | grep -q '"message": "WALK FORWARD TO THE BOAT   — turn around: there is a GLASS on the shed"'
+  | contains '"message": "WALK FORWARD TO THE BOAT   — turn around: there is a GLASS on the shed"'
 
 # 8c. **Press everything at once.** W, D, SPACE, SHIFT and the trigger, held for
 #     thirty seconds. He sprints diagonally off the rig into the sea — and the
@@ -1939,7 +1974,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1800 \
   --hold "0:move_z=1,move_x=1,jump=1,sprint=1,fire=1" \
   --assert "Rig/Player.y > -1.0" --assert "state.swimming == 1" \
-  | grep -q '"message": "IN THE WATER   swim south-west to the ramp"'
+  | contains '"message": "IN THE WATER   swim south-west to the ramp"'
 
 # 8d. **Hard over, both ways, and they are not the same.** Board on W, then hold
 #     the wheel hard across. To starboard is open sea and she keeps making way.
@@ -1966,7 +2001,7 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1800 \
   --hold "0:move_z=1; 500:move_z=1,move_x=-1" \
   --assert "state.pinned > 90" --assert "state.knots < 1.5" \
-  | grep -q '"message": "PUSHING ON SOMETHING   S to back off"'
+  | contains '"message": "PUSHING ON SOMETHING   S to back off"'
 
 # 8e. **And the advice works**, which is the half a caption gate cannot claim.
 #     Same tape, S from 1500: she backs off the mark and is 27 m clear of it by
@@ -1984,10 +2019,10 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #     "astern" are ninety degrees apart and only one of them is a throttle
 #     setting.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 1600 --hold move_z=1 \
-  | grep -q '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   HOME 72 m — hold S"'
+  | contains '"message": "THE HELM   AHEAD   wheel amidships   5 kn   SPACE lets go   HOME 72 m — hold S"'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 2600 --hold move_z=1 \
   --assert "Rig/Boat.x > 105.0" \
-  | grep -q '"message": "THE HELM   AHEAD   wheel amidships   4 kn   SPACE lets go   HOME 115 m — hold S"'
+  | contains '"message": "THE HELM   AHEAD   wheel amidships   4 kn   SPACE lets go   HOME 115 m — hold S"'
 
 # 8g. **Walk into a wall ashore, two ways.** Hold S from the spawn and back into
 #     the north rail; hold D and strafe into the shed. Both used to print
@@ -1997,10 +2032,10 @@ DEMO_TURN_VERB="$DEMO_TURNED; 2120:bag=1; 2121:; 2140:interact=1; 2141:; \
 #     computed since round 9; that asymmetry was the bug.
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_z=-1 \
   --assert "state.stuck == 1" \
-  | grep -q '"message": "BLOCKED   something has you — she is 10 m straight ahead"'
+  | contains '"message": "BLOCKED   something has you — she is 10 m straight ahead"'
 "$LOOM" sim assets/games/deeper_demo.loom --ticks 900 --hold move_x=1 \
   --assert "state.stuck == 1" \
-  | grep -q '"message": "BLOCKED   something has you — she is 19 m ahead on your left"'
+  | contains '"message": "BLOCKED   something has you — she is 19 m ahead on your left"'
 
 # **The interact channel (E), which is the sixth digital one.** The engine does
 # nothing with `interact` by itself — a script is the only thing that can — so
