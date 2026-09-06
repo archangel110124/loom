@@ -960,6 +960,63 @@ impl Sim {
             }
         }
 
+        // **Joints last, because a constraint needs two bodies and the second
+        // may be authored later in the file.** Everything above builds bodies;
+        // nothing above can safely resolve `connected`.
+        for entity in world.entities() {
+            let Some(raw) = world.joint(*entity) else {
+                continue;
+            };
+            let joint: loom_scene::components::Joint =
+                match serde_json::from_value(raw.clone()) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        crate::log::warn(format!(
+                            "{}: Joint is malformed ({e}); it constrains nothing",
+                            world.path(*entity).unwrap_or("?")
+                        ));
+                        continue;
+                    }
+                };
+            let Some((_, body1)) = dynamic.iter().find(|(e, _)| e == entity) else {
+                crate::log::warn(format!(
+                    "{}: Joint needs a dynamic RigidBody on its own node;                      a joint on a static body constrains nothing",
+                    world.path(*entity).unwrap_or("?")
+                ));
+                continue;
+            };
+            let body2 = if joint.connected.is_empty() {
+                // The world end of the constraint: a fixed body at this node's
+                // own position, with no collider. See `add_world_anchor`.
+                let at = world
+                    .global_transform(*entity)
+                    .map(|g| {
+                        let m = Mat4::from_cols_array(&g.matrix);
+                        m.to_scale_rotation_translation().2.to_array()
+                    })
+                    .unwrap_or([0.0, 0.0, 0.0]);
+                physics.add_world_anchor(at)
+            } else {
+                let other = world
+                    .entities()
+                    .iter()
+                    .find(|e| world.path(**e) == Some(joint.connected.as_str()))
+                    .and_then(|e| dynamic.iter().find(|(d, _)| d == e));
+                match other {
+                    Some((_, handle)) => *handle,
+                    None => {
+                        crate::log::warn(format!(
+                            "{}: Joint names `{}`, which has no dynamic body;                              it constrains nothing",
+                            world.path(*entity).unwrap_or("?"),
+                            joint.connected
+                        ));
+                        continue;
+                    }
+                }
+            };
+            physics.add_joint(*body1, body2, &joint);
+        }
+
         let fluid = water
             .as_ref()
             .filter(|w| w.simulation == loom_scene::components::WaterSimTier::Cinematic)

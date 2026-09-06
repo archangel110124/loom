@@ -18,7 +18,7 @@ pub use nav::{NavAgent, NavGrid};
 pub use sanity::{Severity, check_scene};
 // Re-exported so callers can hold a body handle without taking a direct
 // dependency on rapier. The engine choice stays behind this crate's door.
-pub use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
+pub use rapier3d::prelude::{ColliderHandle, ImpulseJointHandle, RigidBodyHandle};
 
 use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
 use rapier3d::prelude::*;
@@ -386,6 +386,82 @@ impl Physics {
         self.colliders
             .insert_with_parent(collider, handle, &mut self.bodies);
         handle
+    }
+
+    /// Tie two bodies together with an authored [`loom_scene::components::Joint`].
+    ///
+    /// **`ImpulseJointSet` was constructed and stepped here from the beginning
+    /// and nothing could put anything in it.** Every hinge in the project was a
+    /// script writing a transform, which does not resist, does not carry
+    /// momentum and cannot be pushed by what hits it. This is the other half.
+    ///
+    /// The axis is normalised rather than refused: `[0, 2, 0]` is the same
+    /// hinge as `[0, 1, 0]`, and a zero axis falls back to +Y because a hinge
+    /// about nothing is not a constraint the solver can express, and a silent
+    /// no-op is the failure mode this engine spends its gates avoiding.
+    pub fn add_joint(
+        &mut self,
+        body1: RigidBodyHandle,
+        body2: RigidBodyHandle,
+        joint: &loom_scene::components::Joint,
+    ) -> ImpulseJointHandle {
+        use loom_scene::components::JointKind;
+        let a1 = Vector::new(joint.anchor[0], joint.anchor[1], joint.anchor[2]);
+        let a2 = Vector::new(
+            joint.other_anchor[0],
+            joint.other_anchor[1],
+            joint.other_anchor[2],
+        );
+        let raw = Vector::new(joint.axis[0], joint.axis[1], joint.axis[2]);
+        let axis = if raw.length() > 1.0e-6 {
+            raw.normalize()
+        } else {
+            Vector::new(0.0, 1.0, 0.0)
+        };
+        let data: GenericJoint = match joint.kind {
+            JointKind::Fixed => FixedJointBuilder::new()
+                .local_anchor1(a1)
+                .local_anchor2(a2)
+                .into(),
+            JointKind::Spherical => SphericalJointBuilder::new()
+                .local_anchor1(a1)
+                .local_anchor2(a2)
+                .into(),
+            JointKind::Revolute => {
+                let mut b = RevoluteJointBuilder::new(axis)
+                    .local_anchor1(a1)
+                    .local_anchor2(a2);
+                if let Some([lo, hi]) = joint.limits {
+                    b = b.limits([lo, hi]);
+                }
+                b.into()
+            }
+            JointKind::Prismatic => {
+                let mut b = PrismaticJointBuilder::new(axis)
+                    .local_anchor1(a1)
+                    .local_anchor2(a2);
+                if let Some([lo, hi]) = joint.limits {
+                    b = b.limits([lo, hi]);
+                }
+                b.into()
+            }
+        };
+        // `wake_up: true` — a joint added to sleeping bodies that then never
+        // move is a constraint nobody can see working.
+        self.impulse_joints.insert(body1, body2, data, true)
+    }
+
+    /// A body with no collider, for anchoring a joint to the world.
+    ///
+    /// A joint needs two bodies; "attached to the world" is spelled in rapier
+    /// as a fixed body at the anchor point. Authoring a static `RigidBody` and
+    /// a collider for that would put an invisible box in the scene, so this
+    /// makes the anchor without one.
+    pub fn add_world_anchor(&mut self, position: [f32; 3]) -> RigidBodyHandle {
+        let body = RigidBodyBuilder::fixed()
+            .translation(Vector::new(position[0], position[1], position[2]))
+            .build();
+        self.bodies.insert(body)
     }
 
     /// A static sphere.
@@ -1357,6 +1433,44 @@ impl Physics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A joint that does not constrain is indistinguishable from no joint,
+    /// and free fall is how you tell.** `ImpulseJointSet` was stepped here from
+    /// the beginning with nothing in it, so the risk this guards is not that the
+    /// solver is wrong but that the constraint never reached it.
+    ///
+    /// A bob is released level with a hinge 2 m to its +X. Held, it swings
+    /// inside that radius for ever. Unheld, one second of gravity is 4.9 m and
+    /// ten is 490 — so the assertion needs no tolerance and cannot be satisfied
+    /// by an unconstrained body.
+    #[test]
+    fn a_revolute_joint_holds_a_bob_against_gravity() {
+        use loom_scene::components::{Joint, JointKind};
+        let mut physics = Physics::new(1.0 / 60.0);
+        let bob = physics.add_box_body([0.0, 5.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.25; 3], 5.0);
+        let anchor = physics.add_world_anchor([0.0, 5.0, 0.0]);
+        physics.add_joint(
+            bob,
+            anchor,
+            &Joint {
+                kind: JointKind::Revolute,
+                connected: String::new(),
+                anchor: [2.0, 0.0, 0.0],
+                other_anchor: [2.0, 0.0, 0.0],
+                axis: [0.0, 0.0, 1.0],
+                limits: None,
+            },
+        );
+        for _ in 0..600 {
+            physics.step();
+        }
+        let y = physics.bodies[bob].translation().y;
+        assert!(
+            y > 3.0 && y < 5.2,
+            "a held bob stays inside the hinge's 2 m radius; got y = {y} \
+             (free fall for ten seconds is about -485)"
+        );
+    }
 
     /// **The mass-leak tripwire.** `attach_box` exists so a hull can be one box
     /// for its inertia and two dozen for the deck a player stands on, and that

@@ -1,0 +1,54 @@
+# **A joint that actually constrains, which nothing in this engine could author
+# until now.** `rapier3d`'s `ImpulseJointSet` was built and stepped from the
+# start and had no way in; every hinge was a script writing a transform, which
+# does not resist and cannot be pushed by what hits it.
+#
+# **The pendulum is chosen because free fall is unmistakable.** `Bob` starts at
+# y = 5 with the pivot 2 m to +X at the same height, so it is released
+# horizontally and swings. Held, it can never leave a 2 m radius of the pivot:
+# y stays inside [3, 5]. Unheld, it is in free fall, and ten seconds of that is
+# y = 5 - 0.5 * 9.81 * 100 = **-485**. There is no tolerance to argue about and
+# no way for a broken joint to look like a working one.
+#
+# The second row is what stops a *frozen* body passing: at tick 120 it must have
+# swung measurably below its start. A static body would satisfy the first row
+# and fail this one.
+
+[scene]
+format = 1
+id = "b4303451-c421-4422-ada5-e091f169715c"
+
+[[node]]
+name = "Rig"
+
+[[node]]
+name = "Ground"
+parent = "Rig"
+transform = { pos = [0.0, -1.0, 0.0] }
+
+  [node.components.BoxCollider]
+  half_extents = [50.0, 1.0, 50.0]
+
+[[node]]
+name = "Bob"
+parent = "Rig"
+transform = { pos = [0.0, 5.0, 0.0] }
+
+  [node.components.MeshRenderer]
+  mesh = { asset = "box" }
+
+  [node.components.BoxCollider]
+  half_extents = [0.25, 0.25, 0.25]
+
+  [node.components.RigidBody]
+  dynamic = true
+  mass = 5.0
+
+  # Pivot 2 m to +X of the bob, at the same height. Both anchors name the same
+  # world point from their own body's frame: the world anchor sits at this
+  # node's position, so [2, 0, 0] on each puts the hinge at (2, 5, 0).
+  [node.components.Joint]
+  kind = "revolute"
+  anchor = [2.0, 0.0, 0.0]
+  other_anchor = [2.0, 0.0, 0.0]
+  axis = [0.0, 0.0, 1.0]

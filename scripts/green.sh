@@ -158,6 +158,26 @@ if (( ALL )) && [ ! -x "$LOOM" ]; then
   exit 1
 fi
 
+# **JOINTS, AND FREE FALL IS THE CONTROL.** `rapier3d`'s `ImpulseJointSet` was
+# constructed and stepped since the physics crate was written and nothing could
+# put anything in it, so every hinge in this project was a script writing a
+# transform — which does not resist, carries no momentum, and cannot be pushed
+# by the thing that hits it. `Joint` is the authorable end of that set.
+#
+# `joint_pendulum` releases a bob horizontally from a hinge 2 m to its +X. Held,
+# it cannot leave a 2 m radius, so y stays inside [3, 5]. Unheld it is in free
+# fall, and ten seconds of that is y = 5 - 0.5 * 9.81 * 100 = -485. Measured
+# with the component deleted: **-485.706**. There is no tolerance to argue over
+# and no way for a broken joint to resemble a working one.
+#
+# **The second row is what a frozen body fails.** A static bob would satisfy the
+# radius and never swing; at tick 120 it must have dropped measurably below its
+# start. Measured: 4.458 at 120, 4.755 at 600.
+"$LOOM" sim assets/test/joint_pendulum.loom --ticks 600 \
+  --assert "Rig/Bob.y > 3.0" --assert "Rig/Bob.y < 5.2" >/dev/null
+"$LOOM" sim assets/test/joint_pendulum.loom --ticks 120 \
+  --assert "Rig/Bob.y < 4.9" >/dev/null
+
 # **The fight, five pilots, one model.** `loom sim` never calls `set_input`, so
 # headless input is zeros forever; the fight is tested by swapping the pilot
 # and never the model. Each scene differs from the next by one word — the name

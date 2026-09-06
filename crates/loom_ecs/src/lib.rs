@@ -127,6 +127,11 @@ pub struct World {
     voxel_recipe: Storage<serde_json::Value>,
     /// Authored `BoxCollider` half-extents, when a node declares them.
     collider: Storage<[f32; 3]>,
+    /// The `Joint` component, verbatim, for the same reason as `emitter`:
+    /// turning it into a constraint needs two body handles, which exist only
+    /// once physics has been built, which is a crate this one does not depend
+    /// on. Carried here so the builder does not have to walk the scene twice.
+    joint: Storage<serde_json::Value>,
     /// The asset alias a node's `MeshRenderer` names.
     mesh_asset: Storage<String>,
     /// The `Deform` component, verbatim. Carried rather than resolved for the
@@ -452,6 +457,9 @@ impl World {
             }
             if let Some(emitter) = node.components.get("ParticleEmitter") {
                 world.emitter.insert(entity, emitter.clone());
+            }
+            if let Some(joint) = node.components.get("Joint") {
+                world.joint.insert(entity, joint.clone());
             }
             if let Some(deform) = node.components.get("Deform") {
                 world.deform.insert(entity, deform.clone());
@@ -783,6 +791,13 @@ impl World {
     #[must_use]
     pub fn collider_half_extents(&self, entity: Entity) -> Option<[f32; 3]> {
         self.collider.get(entity).copied()
+    }
+
+    /// The `Joint` a node authored, verbatim. Deserialised by whoever has the
+    /// body handles to build it with — see ADR 0083.
+    #[must_use]
+    pub fn joint(&self, entity: Entity) -> Option<&serde_json::Value> {
+        self.joint.get(entity)
     }
 
     /// This entity's `VoxelVolume` recipe, if it has one.

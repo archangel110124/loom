@@ -393,6 +393,93 @@ impl Default for RigidBody {
     }
 }
 
+/// Which degrees of freedom a [`Joint`] leaves alone.
+///
+/// **Named for the motion that survives, not the axes removed.** A reader
+/// authoring a door wants the word "hinge", and every physics engine spells
+/// that differently; these are rapier's names because that is what the
+/// constraint actually becomes, and a scene that says `revolute` and a solver
+/// that builds a revolute joint cannot drift apart in the way a friendly alias
+/// eventually does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JointKind {
+    /// Welded: all six degrees of freedom removed. Two parts that must travel
+    /// as one but are authored, meshed or destroyed separately.
+    #[default]
+    Fixed,
+    /// A hinge about `axis`. One rotation survives — a door, a hatch, a lid,
+    /// a lever.
+    Revolute,
+    /// A ball. Three rotations survive, no translation — a chain link, a
+    /// pendant lamp, a rope treated as a chain of these.
+    Spherical,
+    /// A slider along `axis`. One translation survives — a drawer, a piston,
+    /// a sash window.
+    Prismatic,
+}
+
+/// A constraint tying this node's body to another's.
+///
+/// **`rapier3d`'s `ImpulseJointSet` has been constructed and stepped since the
+/// physics crate was written, and nothing could put anything in it.** Every
+/// hinge in this project was therefore a script moving a transform each tick,
+/// which is not the same thing: a scripted door does not resist, does not carry
+/// momentum, and cannot be pushed by the boat that hits it. This component is
+/// the missing half — the authorable end of a set the solver already had.
+///
+/// **It hangs on the node that moves.** `connected` names the node it is
+/// attached *to*, so a cabin door carries the joint and names the hull. That
+/// direction is deliberate: it keeps the moving part's whole definition —
+/// mesh, collider, body, constraint — in one place in the file, and it means
+/// deleting the door deletes its hinge rather than leaving a dangling
+/// reference in the hull.
+///
+/// **An empty `connected` anchors to the world**, which is a fixed point rather
+/// than a body: a swinging sign on a wall that is not itself simulated. That is
+/// the common case and it should not require authoring a static body to hang
+/// from.
+///
+/// Both bodies must exist and at least one must be dynamic — a joint between
+/// two static bodies constrains nothing and is refused at load rather than
+/// silently doing nothing, which is the failure this registry exists to stop.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Joint {
+    /// Which motion survives. See [`JointKind`].
+    pub kind: JointKind,
+    /// Path of the node this attaches to. Empty anchors to the world.
+    pub connected: String,
+    /// Anchor point in **this** body's local frame, metres.
+    pub anchor: [f32; 3],
+    /// Anchor point in the **connected** body's local frame, metres. For a
+    /// door this is the hinge's position on the hull.
+    pub other_anchor: [f32; 3],
+    /// Hinge or slider axis in local space. Ignored by `fixed` and `spherical`,
+    /// and normalised on load — an axis of `[0, 2, 0]` is the same hinge as
+    /// `[0, 1, 0]`, and refusing it would be pedantry rather than safety.
+    pub axis: [f32; 3],
+    /// Travel limits: **radians** for `revolute`, **metres** for `prismatic`,
+    /// ignored by the other two. Absent means free travel — a door that swings
+    /// all the way through its own wall, which is usually not wanted.
+    pub limits: Option<[f32; 2]>,
+}
+
+impl Default for Joint {
+    fn default() -> Self {
+        Self {
+            kind: JointKind::Fixed,
+            connected: String::new(),
+            anchor: [0.0, 0.0, 0.0],
+            other_anchor: [0.0, 0.0, 0.0],
+            // **+Y, because a door is the case that matters** and a door hinges
+            // about the vertical. A zero axis would be a silent no-op hinge.
+            axis: [0.0, 1.0, 0.0],
+            limits: None,
+        }
+    }
+}
+
 /// A destructible voxel volume, stored as a **recipe** rather than voxels.
 ///
 /// never-do #11: a 512³ volume is 134 million voxels and must never enter a
@@ -2867,6 +2954,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<BoxCollider>("BoxCollider");
     reg.register::<Light>("Light");
     reg.register::<RigidBody>("RigidBody");
+    reg.register::<Joint>("Joint");
     reg.register::<VoxelVolume>("VoxelVolume");
     reg.register::<Material>("Material");
     reg.register::<ParticleEmitter>("ParticleEmitter");
