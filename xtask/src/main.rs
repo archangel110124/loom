@@ -505,7 +505,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 61] = [
+const GOLDEN: [(&str, &str, &[&str]); 62] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -1179,6 +1179,18 @@ const GOLDEN: [(&str, &str, &[&str]); 61] = [
     // deck is broken enough to have silhouette and the shower has gaps to be
     // distinct against.
     ("deeper_demo_squall", "assets/games/deeper_demo.loom", &["--sim", "300", "--dread", "0.85"]),
+    // **A landscape, and it is here because cloud shadows need one** — ADR
+    // 0081. A shadow only exists where a scene is large against its
+    // `cloud_scale`: `croft` is fifty metres of ground under 900 m masses, so
+    // it sits inside 5% of one cloud and is uniformly lit whatever the sky
+    // does. `mountain_pass` is kilometres wide and the shadow crosses it,
+    // moving 61.1% of the frame when the effect is ablated.
+    //
+    // It was already the registered scene for `cloud_shadow` in the ABLATE
+    // table while having **no reference image at all** — so the one gate that
+    // could see the feature stop drawing existed, and the one that could see it
+    // draw *differently* did not. That asymmetry is what this row closes.
+    ("mountain_pass", "assets/test/mountain_pass.loom", &["--sim", "300"]),
     // The only picture of a UV-mapped, normal-mapped imported mesh anywhere in
     // the library. Delete the albedo_map and this row still draws timber-shaped
     // geometry at the right height — so what it actually guards is the TEXTURE
