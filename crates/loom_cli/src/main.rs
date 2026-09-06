@@ -242,6 +242,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
             ("--out", true), ("--size", true), ("--sim", true), ("--yaw", true),
             ("--pitch", true), ("--frames", true), ("--spin", true), ("--step", true),
             ("--dolly", true), ("--viewport", true), ("--hold", true),
+            ("--dread", true),
         ],
     ),
     (
@@ -964,11 +965,38 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // rules script owns it; otherwise the scene's authored value does.
     // The script's copy is eased on the fixed tick inside the script, so
     // `--sim N` and the window agree at the same tick count.
+    // **`--dread` overrides the script's rung, and without it a whole class of
+    // scene is unrenderable headless.** `deeper_demo` authors its cloud cover
+    // only inside `Environment.stages` — 0.30, 0.55, 0.85, 1.00 — so at the
+    // rung its script starts on the sky is clear and every weather feature this
+    // engine has is invisible in the one scene that is an actual game. The
+    // ladder was reachable from `loom run` and from nothing a gate can call.
+    //
+    // An override rather than a default: absent, the script's own value stands,
+    // so every existing render and every golden row is unchanged.
     #[allow(clippy::cast_possible_truncation)]
-    let dread = warmed
-        .as_ref()
-        .and_then(|r| r.state().number("dread"))
-        .map(|v| v as f32);
+    let dread = match flag(args, "--dread") {
+        Some(text) => match text.parse::<f32>() {
+            // **Refused rather than clamped.** A golden row taken at `--dread
+            // 1.5` that silently photographed rung 1.0 would record the right
+            // picture under the wrong name, and nothing downstream could tell.
+            Ok(value) if (0.0..=1.0).contains(&value) => Some(value),
+            _ => {
+                return (
+                    2,
+                    json_line(&serde_json::json!({
+                        "error": "bad_argument",
+                        "value": text,
+                        "hint": "--dread takes a rung on the mood ladder, 0.0 to 1.0",
+                    })),
+                );
+            }
+        },
+        None => warmed
+            .as_ref()
+            .and_then(|r| r.state().number("dread"))
+            .map(|v| v as f32),
+    };
     // **The ladder's rung, resolved once, before anything reads the weather.**
     // `environment_with_mood` has always substituted the ramped wind for the
     // sea *privately*, and the four consumers below kept the file's — so the

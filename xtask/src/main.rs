@@ -505,7 +505,7 @@ fn main() -> std::process::ExitCode {
 /// Small on purpose. 320x200 is enough to catch a shader change and keeps
 /// each reference a few kilobytes, which is the difference between committing
 /// them and bloating history with them.
-const GOLDEN: [(&str, &str, &[&str]); 60] = [
+const GOLDEN: [(&str, &str, &[&str]); 61] = [
     // **The editor's sub-rectangle, which no other reference can see.** The
     // scene is `materials` deliberately — this entry is not about content, it
     // is about *where the content lands*: that the tonemap copies the scene to
@@ -1166,6 +1166,19 @@ const GOLDEN: [(&str, &str, &[&str]); 60] = [
     // `Script` in the repository sits on a `CharacterController`.
     ("gleamsprat_cruise", "assets/test/gleamsprat_cruise.loom", &["--sim", "60"]),
     ("homestead", "assets/test/homestead.loom", &["--sim", "1800"]),
+    // **The game, at a rung where its weather exists** — and until `--dread`
+    // landed this row was unwritable. `deeper_demo` authors cloud cover only
+    // inside `Environment.stages`, so at the rung its script starts on the sky
+    // is clear: every reference of it ever taken has photographed a fine day,
+    // and the whole cloud, shower and god-ray stack was invisible in the one
+    // scene that is an actual game.
+    //
+    // 0.85 rather than 1.00: the top rung is a solid overcast, which is the one
+    // sky where the volumetric deck and the flat projection agree most, so a
+    // row parked there would be the weakest possible test of it. At 0.85 the
+    // deck is broken enough to have silhouette and the shower has gaps to be
+    // distinct against.
+    ("deeper_demo_squall", "assets/games/deeper_demo.loom", &["--sim", "300", "--dread", "0.85"]),
     // The only picture of a UV-mapped, normal-mapped imported mesh anywhere in
     // the library. Delete the albedo_map and this row still draws timber-shaped
     // geometry at the right height — so what it actually guards is the TEXTURE
