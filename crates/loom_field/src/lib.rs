@@ -463,9 +463,50 @@ pub fn clouds() -> Field {
     let u = (Expr::X - dir_x * travel.clone()) / scale.clone();
     let v = (Expr::Z - dir_z * travel) / scale;
 
-    // Three octaves. The fourth is below the resolution of a sky gradient and
-    // costs a full noise evaluation per pixel to prove it.
-    let n = fbm(u, c(0.0), v, 3);
+    // **Three octaves, respent — the biggest amplitude at the LONGEST wavelength.**
+    // ADR 0082.
+    //
+    // `fbm` cannot express this and that is the whole point of writing the terms
+    // out. It only ever *raises* frequency — amplitudes 1, 1/2, 1/4 at frequencies
+    // 1, 2, 4 — so the field it builds has **no spectral power below one
+    // `cloud_scale`**, and 57% of its variance sits at that single wavelength. A
+    // field with one correlation length, thresholded at any level, gives about one
+    // blob per correlation cell: there is no mechanism by which a mass can be an
+    // order of magnitude larger than its neighbours, because nothing varies at a
+    // scale larger than a cloud. Measured on `croft`: about twenty blobs of
+    // similar size, the largest holding 22% of the cloud.
+    //
+    // **Contrast cannot fix that, provably.** Thresholding is invariant under any
+    // monotone reshape — `{g(n) > u}` is `{n > g⁻¹(u)}` — so steepening the
+    // coverage curve, raising `n` to a power or narrowing `BAND` all give
+    // bit-identical components. Clumping is *power at a wavelength longer than a
+    // cloud*, and only the spectrum can supply it.
+    //
+    // Amplitude 1.5 at frequency 1/3 puts half the amplitude at three times the
+    // wavelength: largest-blob share 22.5% -> 50.8%, blobs per frame 34 -> 11,
+    // half-mass blob 1.77 -> 11.97 cells². Eleven and not one, which is the
+    // shape the meteorology measures — big masses with small satellites (Zhu et
+    // al. 1992: large clouds near-randomly placed, small ones clustered about
+    // them) rather than a blanket.
+    //
+    // **Three `Noise` nodes, exactly as before**, so the generated `clouds_at`
+    // still emits twelve `loom_value_noise` calls and this costs nothing.
+    // `fbm` itself is deliberately untouched: the 10k-tick wind hash is pinned on
+    // `wind()`, which uses it.
+    //
+    // The `1/3` normaliser is `1/(1.5 + 1.0 + 0.5)` — the same divide-by-sum rule
+    // `fbm` applies, and the reason `n` stays in `[0, 1)`. That range is what
+    // makes the coverage curve's endpoints exact, so it is not a tidiness
+    // constant: change it and cover 1.0 stops meaning *solid*.
+    let octave = |f: f32| {
+        Expr::Noise(
+            Box::new(u.clone() * c(f)),
+            Box::new(c(0.0)),
+            Box::new(v.clone() * c(f)),
+        )
+    };
+    let n = (c(1.5) * octave(1.0 / 3.0) + c(1.0) * octave(1.0) + c(0.5) * octave(2.0))
+        * c(1.0 / 3.0);
 
     // **The coverage curve.** `cover` slides the threshold rather than scaling
     // the result, which is what makes partial cover look like separate clouds

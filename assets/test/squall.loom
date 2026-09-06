@@ -14,12 +14,14 @@
 # shape for.
 #
 #     loom sim assets/test/squall.loom --ticks 1 \
-#       --assert "rain@-120,4,0.rate > 6.5" \
+#       --assert "rain@-200,4,0.rate > 7.5" \
 #       --assert "rain@0,4,0.rate < 0.05" \
-#       --assert "rain@-120,4,0.exposure > 0.99" \
+#       --assert "rain@-200,4,0.exposure > 0.99" \
 #       --assert "rain@0,4,0.exposure > 0.99"
 #
-#   * Under the cloud mass, most of the authored 8 mm/h arrives.
+#   * Under the cloud mass, ALL of the authored 8 mm/h arrives — 8.00, not the
+#     6.73 this read before ADR 0082 respent the octaves. A mass is a coherent
+#     region now rather than a speckle, so a point inside one is fully under it.
 #   * A hundred and twenty metres away, under a gap in the same deck, none does.
 #
 # **And the ground remembers, which is the other half.** At tick 600 the deck
@@ -27,7 +29,7 @@
 # a rate of 0.0 by then. The wetness does not:
 #
 #     loom sim assets/test/squall.loom --ticks 600 \
-#       --assert "wetness@-120,4,0.film > 0.5" \
+#       --assert "wetness@-200,4,0.film > 0.5" \
 #       --assert "wetness@0,4,0.film < 0.05"
 #
 # One was rained on during the last forty seconds and one was not. Wetness is an
@@ -35,6 +37,20 @@
 # on the cover now — `loom_rain::cover_recent`. Gating on the instantaneous
 # value would make the ground brighten and darken as cloud shadows crossed it,
 # which is what lit ground does and not what wet ground does.
+#
+# **The wet point moved from x=-120 to x=-200 with ADR 0082**, and the reason is
+# the point of that ADR. The field's dominant wavelength went from one
+# `cloud_scale` to three, so the masses are larger and land elsewhere; scanning
+# the rate along x at tick 1 now gives 8.00 at -240 and -200, 5.68 at -160, 2.99
+# at -120 and exactly 0.00 from -40 onward. That is a coherent mass with a sharp
+# edge, which is what the change was for — the old -120 sat inside a speckle and
+# now sits on the shoulder of a real one.
+#
+# `cloud_scale` came down 260 -> 87 in the same commit, which is ADR 0082 §5's
+# re-authoring rule: a third of the parameter, because the mass is three times
+# the parameter. The gap geometry this scene was authored around is therefore
+# preserved, and so is the deck's thickness — ADR 0078 Addendum 1's coupling now
+# measures against the mass rather than the parameter for exactly this reason.
 #
 # **The last two assertions are the ones that make the first two mean
 # something.** There is no roof anywhere in this scene and no voxel volume at
@@ -89,7 +105,7 @@ name = "Weather"
   # weather state — and a solid deck rains uniformly. Saying 0.45 is how a
   # scene asks for weather that has edges.
   cloud_cover = 0.45
-  cloud_scale = 260.0
+  cloud_scale = 87.0
 
   [node.components.Rain]
   intensity = 8.0

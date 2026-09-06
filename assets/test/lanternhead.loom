@@ -152,7 +152,7 @@ name = "Lanternhead"
   # instead was the other option and is worse: the sky is drawn to the horizon,
   # where a deck small enough to vary across 51 m of quay reads as noise.
   cloud_cover = 0.85
-  cloud_scale = 260.0
+  cloud_scale = 87.0
   # **The first scene in the library to author this**, and it is 1.0 — the
   # identity leg of the shoulder. It is written out rather than left to the
   # default because this is the scene where somebody will want to reach for it,

@@ -69,7 +69,7 @@ name = "Pool"
   # variation in the density across a twelve-metre pool without any part of it
   # going dry.
   cloud_cover = 0.85
-  cloud_scale = 90.0
+  cloud_scale = 50.0
 
   [node.components.Rain]
   # Heavy. The subject is impacts, and at 4 mm/h there are not enough of them

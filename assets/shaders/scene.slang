@@ -791,11 +791,27 @@ float cloudType() {
 /// the rain footprint that number is actually chosen for.
 float cloudBase(float type) { return lerp(700.0, 950.0, type); }
 
+/// How many `cloud_scale` the dominant visible mass actually spans — ADR 0082.
+///
+/// **Not one, since the field was respent.** `clouds()` puts half its amplitude
+/// at a third of the frequency, so the mass a viewer reads as "a cloud" is about
+/// three `cloud_scale` across. Addendum 1 of ADR 0078 set the thickness on the
+/// argument that *a cloud is roughly as tall as it is wide*, and that argument is
+/// still right — it was the width that moved.
+static const float CLOUD_MASS_SCALES = 3.0;
+
 float cloudThickness(float type) {
-    float scale = max(push.environment[0].cloud.y, 1.0);
+    float scale = max(push.environment[0].cloud.y, 1.0) * CLOUD_MASS_SCALES;
     // Stratus is a sheet and spreads far wider than it is deep; cumulus is
     // closer to isotropic. The clamp keeps a 90 m scene from a slab too thin to
     // march and a 20 km one from a wall.
+    //
+    // **Measuring against the mass rather than the parameter is what keeps this
+    // stable under re-authoring.** A scene that divides `cloud_scale` by three to
+    // restore its old gap geometry gets its old thickness back exactly — `squall`
+    // 234 m before and after, `croft` 810 — where measuring against the parameter
+    // would have shrunk its deck threefold at the same time. Both directions of
+    // that mistake produce a pancake; this produces neither.
     return clamp(scale * lerp(0.35, 0.90, type), 120.0, 1200.0);
 }
 
