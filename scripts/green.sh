@@ -1,7 +1,64 @@
 #!/usr/bin/env bash
 # The definition of green. All four, every time. `cargo check` passing is not green.
+# Usage: scripts/green.sh [--all]   `--all` reports every failure, not just the first.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# **`--all` reports every failing command instead of stopping at the first.**
+#
+# The default is fail-fast and stays that way: it is the right shape for a gate
+# you run to decide whether to commit, and it is the fastest answer to "is this
+# green". But fail-fast reports a *position*, not a count, and this file learned
+# the difference the hard way. A `grep -q` that killed its writer around line
+# 1129 was reported as one failure with **five real ones sitting behind it**,
+# unrun and invisible; they surfaced only when the run was forced to continue.
+# "Failed" meant "failed, and I never looked at the rest".
+#
+# **It costs exactly one pass and cannot cost less.** Reporting every failure
+# means running every check, and each is run once either way -- on a passing
+# tree `--all` and the default do identical work, because the only thing `--all`
+# changes is whether a non-zero exit stops the script. Measured: the CLI
+# sections are 168 `loom` invocations, 284.8 s, mean 1.70 s, longest 6.13 s.
+# The single case where it could waste time is a broken build, where all 168
+# would fail for one reason, and that is guarded at the binary check below
+# rather than left to print 168 lines of the same news.
+ALL=0
+for arg in "$@"; do
+  case "$arg" in
+    --all) ALL=1 ;;
+    *) echo "green.sh: unknown argument '$arg' -- the only flag is --all" >&2
+       exit 2 ;;
+  esac
+done
+
+FAILED=()
+if (( ALL )); then
+  # `set +e` so a failure does not end the run, and an ERR trap to record where
+  # it was. **Deliberately without `set -E`:** `contains` is a function, and
+  # errtrace would record one failure twice -- once inside it and again at the
+  # pipeline that called it. `set -u` stays on, because a typo'd variable is a
+  # bug in the gate rather than a failure the gate is reporting, and should
+  # still stop the run.
+  set +e
+  trap 'FAILED+=("green.sh:$LINENO")' ERR
+fi
+
+# Returns non-zero when anything failed, so the last line of this file makes it
+# the exit status. In the default mode it returns 0 immediately -- a fail-fast
+# run that reaches the end had nothing to report.
+summary() {
+  (( ALL )) || return 0
+  if (( ${#FAILED[@]} == 0 )); then
+    echo
+    echo "green --all: every check passed"
+    return 0
+  fi
+  echo
+  echo "green --all: ${#FAILED[@]} failing command(s), in the order they ran:"
+  printf '  %s
+' "${FAILED[@]}"
+  return 1
+}
 
 # **A reader that stops early can kill the writer, and that is how this file
 # hid eight hundred lines of itself.** `grep -q` exits on its first match and
@@ -89,6 +146,16 @@ fi
 LOOM="${LOOM:-./target/release/loom}"
 if [ ! -x "$LOOM" ]; then
   cargo build --release -j 3 -p loom_cli
+fi
+
+# **The one place `--all` stops early, and it is an optimisation.** Everything
+# below needs this binary. Without it all 168 rows fail for the same reason, so
+# reporting them individually is 168 lines saying one thing and about five
+# minutes spent saying it.
+if (( ALL )) && [ ! -x "$LOOM" ]; then
+  FAILED+=("green.sh: no release binary -- the CLI sections could not run")
+  summary
+  exit 1
 fi
 
 # **The fight, five pilots, one model.** `loom sim` never calls `set_input`, so
@@ -2371,3 +2438,5 @@ if [ "$one" != "$five" ]; then
   exit 1
 fi
 echo "per-frame work: cave bakes $one volumes at 1 frame and at 5"
+
+summary
