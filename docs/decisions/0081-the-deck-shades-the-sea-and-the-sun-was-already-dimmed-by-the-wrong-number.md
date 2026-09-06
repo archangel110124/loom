@@ -121,9 +121,9 @@ records and passes for ever.
 
 ## 5. What this does not settle
 
-- **No penumbra.** A cloud edge's shadow softens with the distance it has fallen; this one is
-  as sharp as the coverage curve. Reopening trigger: the boundary reads as a hard line rather
-  than an edge.
+- ~~**No penumbra.**~~ **Built, measured, and reverted — see Addendum 1.** A physically correct
+  penumbra is smaller than the softness the coverage curve already has, and changes 61 of 62
+  golden rows by nothing at all.
 - **The shadow does not darken the rain.** ADR 0080 lights the shafts from the deck; this
   lights the ground from the deck; a shaft standing in another shower's shadow is not modelled.
 - **No shadow from the shower itself**, only from the cloud that made it. A heavy shaft really
@@ -162,3 +162,47 @@ then cloud shadows on the world"*.
 0078, 0079, 0080 and 0081 together, after the whole series was green on all six checks and
 after the measurement corrections each of them carries were made. Recorded verbatim per this
 project's rule, so the scope of what was accepted is not relitigable later.
+
+---
+
+## Addendum 1 — the penumbra is real, correct, and below this engine's own softness floor
+
+**Date:** 2026-09-05, firing §5's first trigger.
+
+The sun is not a point: its angular radius is 0.265 degrees, so a shadow edge blurs by the
+distance the light has travelled since the occluder. That distance is long here — the cloud
+shadowing a point is kilometres away at any low sun — so the penumbra was expected to matter.
+
+**The arithmetic says otherwise, and the arithmetic is checkable before writing code:**
+
+| scene | cloud to ground | penumbra radius | as a fraction of one cloud mass |
+|---|---|---|---|
+| `squall` | 2722 m | 12.6 m | 5% |
+| `lanternhead` | 4296 m | 19.9 m | 8% |
+| `mountain_pass` | 1900 m | 8.8 m | 1% |
+
+One to eight percent of a mass — and `clouds_at`'s coverage curve already carries a fade band
+of 0.18 of the noise range, which spans considerably more ground than that. **The penumbra was
+predicted to be subsumed by softness the deck already has.**
+
+### Built as a probe, measured across every row, reverted
+
+Five taps across the sun's angular radius, then every one of the 62 `GOLDEN` rows rendered **at
+its own gate arguments** and compared:
+
+**One row moves.** `squall`, 4.42% of pixels at worst channel 21. The other sixty-one are
+within tolerance, most at worst channel 0.
+
+So a correct penumbra costs five cover taps where there was one, and buys a 4% change on a
+single scene. It is reverted, and the revert is verified byte-identical rather than assumed.
+
+**§5's trigger is answered rather than left open.** It read *"the boundary reads as a hard line
+rather than an edge"* — it does not, because the coverage curve's own fade is already wider
+than the sun's penumbra. If a future change sharpens that curve, this becomes worth revisiting;
+as the deck stands, there is nothing to soften.
+
+**Driving the sweep from the `GOLDEN` table rather than typing arguments by hand is what made
+it trustworthy.** Three separate measurements in this ADR series were taken at ticks the gate
+never renders — `--sim 300` against a row gated at 2400, 900 against one gated at 120 — each
+time producing a large and meaningless number. Reading the arguments from the table removes
+that error class entirely, and should be how any sweep here is run.
