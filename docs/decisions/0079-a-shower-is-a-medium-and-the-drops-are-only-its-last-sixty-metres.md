@@ -154,9 +154,8 @@ it rather than adding a flag on spec."* No scene needs it; it becomes an error.
   extinguishes and scatters ambient; it does not sample the sun the way ADR 0078's C3 march
   does. Reopening trigger: **a scene where the sun is low and behind a shower**, which is
   exactly `lanternhead`'s camera, so this may not stay shut long.
-- **No wind shear.** A real shaft leans and trails downwind, and this one falls straight. The
-  deck already advects on the wind so the shaft moves with it; what is missing is the *lean*.
-  Reopening trigger: it reads as a column rather than a veil at high wind speed.
+- ~~**No wind shear.** A real shaft leans and trails downwind, and this one falls straight.~~
+  **BUILT — see Addendum 1.**
 - **The shower does not wet what it falls on at distance.** `loom_rain::wetness` is per-scene
   scalars gated per pixel by cover, which is right and unchanged. A distant island darkening as
   a squall crosses it is not delivered.
@@ -204,3 +203,70 @@ Recorded verbatim, from 2026-09-05:
 
 **ADR 0078 §8 explicitly disclaimed the rain half of that ask.** This ADR is where it is
 answered, and it should be read as the second of the two.
+
+---
+
+## Addendum 1 — the shaft leans, and the lean has a maximum the field imposes
+
+**Date:** 2026-09-05, firing §6's wind-shear gap.
+
+A drop leaving the cloud base takes `(base - y) / RAIN_TERMINAL` seconds to reach altitude
+`y`, and the wind pushes it for every one of them. So the rain at a point came from cloud
+**upwind** of that point, by further and further the lower you look — and finding it is a
+sample-position offset, not new machinery: `cloudCoverAtTime(p - drift, t)`.
+
+The geometry is not subtle. At `squall`'s 7 m/s ground wind, a drop sees about 12 m/s
+averaged over the fall (the deck drifts at 2.5x the ground wind and a drop crosses the whole
+gradient), which over a 950 m base is **1.4 km of drift — a 57-degree lean off vertical.**
+That is why rain shafts in photographs are so obviously slanted, and why one falling straight
+looked wrong.
+
+### The lean stops at the field's own coherence length
+
+Drift grows with depth, so consecutive samples down a view ray read the weather map at
+positions `lean` apart. **Once that exceeds a cloud mass they are reading unrelated cloud**,
+the ray integrates decorrelated noise, and the shower loses contrast. Measured at 320x200 on
+`squall`'s shaft band, standard deviation in luma:
+
+| | stdev |
+|---|---|
+| no shear | 12.77 |
+| shear, uncapped | **11.46** |
+| shear, capped at 2x `cloud_scale` | 12.84 |
+
+A field cannot be sheared by more than its own coherence without being smeared, so the lean
+stops at `RAIN_SHEAR_COHERENCE = 2.0` masses. Scenes with real cloud scales keep their full
+physical slant; the ones that authored a small scale for the *rain footprint* — ADR 0078 §6's
+standing tension — keep their shower instead. `rain_pool` at 90 m masses moves **2 pixels**.
+
+### Two measurement errors on the way, both recorded because both nearly shipped
+
+**A phantom 5x collapse.** The cap was first justified by a reading that `rain_pool`'s shaft
+band went from stdev 16.39 to 2.96 under uncapped shear. **That number was an artifact and is
+withdrawn.** The script took its crop box from the reference's dimensions (320x200) and
+applied it to a render at 960x640, so it measured a small corner of sky — uniform, hence the
+low spread. Re-measured at matched size, uncapped shear leaves `rain_pool` at 16.39,
+unchanged. The cap survives on `squall`'s 10% loss above, which is a tenth of the effect
+claimed for it.
+
+**A metric that could not see the change.** Band standard deviation said capped shear was
+nearly a no-op — 12.84 against 12.77. `loom compare` disagreed, because a lean *relocates* a
+shaft rather than sharpening it, and standard deviation measures contrast and not position.
+The metric had been chosen for ADR 0080's "is there a beam" question and was carried,
+unexamined, to a question it cannot answer.
+
+**And the third error was measuring at the wrong tick.** The first `loom compare` figures —
+85% of `squall`'s pixels at worst channel 204, 35% of `lanternhead`'s — were taken at
+`--sim 300`, which is **a tick the gate never renders.** `loom-diagnosing-a-render-defect` §1
+says to reproduce at the exact gate arguments and this did not. At the arguments `GOLDEN`
+actually uses:
+
+| scene | gate args | moves |
+|---|---|---|
+| `squall` | `--sim 900` | **34.5% of pixels, worst 26** |
+| `lanternhead` | `--sim 2400` | 0.0%, worst 1 — within tolerance |
+| `rain_pool` | `--sim 300` | 0.0%, worst 6 |
+| `puddles` | `--sim 900` | 0.0%, worst 0 |
+
+**One row moves, not four**, and by a quarter of the amount first claimed. The shear is real
+and it is smaller than three successive measurements of it said.

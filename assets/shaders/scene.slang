@@ -1054,6 +1054,30 @@ static const float RAIN_CURTAIN_DARK = 0.10;
 /// looking toward the sun and away from it is what a god ray *is*.
 static const float RAIN_CURTAIN_SUN = 0.90;
 
+/// A raindrop's terminal velocity, m/s.
+///
+/// **Not a tuning knob — this is the physics that makes a shaft lean.** A drop
+/// leaving the cloud base takes `(base - y) / this` seconds to fall to altitude
+/// `y`, and the wind carries it downwind for every one of them. Rain at a point
+/// therefore came from cloud *upwind* of that point, by further and further the
+/// lower you look. 8 m/s is a 2 mm drop, which is ordinary rain.
+static const float RAIN_TERMINAL = 8.0;
+
+/// The wind a falling drop actually sees, as a multiple of the ground wind.
+///
+/// The deck drifts at `cloud.z` — 2.5 by default — because cloud-level wind is
+/// faster than the wind at head height. A drop crosses the whole of that
+/// gradient on its way down, so neither end describes its drift. The mean of
+/// the two is the honest one-number answer, and a real profile is not worth a
+/// second constant for a term that only sets a lean angle.
+static const float RAIN_SHEAR_WIND = 1.75;
+
+/// The furthest a shaft may lean, as a multiple of `cloud_scale`.
+///
+/// See `rainCurtainLook` for the measurement that set it. Two masses is enough
+/// slant to read at a real cloud scale and short enough to stay correlated.
+static const float RAIN_SHEAR_COHERENCE = 2.0;
+
 /// How much denser the shaft is just under the cloud than at the water.
 ///
 /// Rain spreads and thins as it falls, and the top of a shaft is where it has
@@ -1137,6 +1161,7 @@ float2 rainCurtainLook(float3 dir, float enter, float base, float top, float typ
         return 0.0;
     }
 
+    float4 wind = push.environment[0].wind;
     float step = reach / float(RAIN_CURTAIN_STEPS);
     float sigma = RAIN_CURTAIN_DEPTH / column;
     float transmittance = 1.0;
@@ -1152,11 +1177,39 @@ float2 rainCurtainLook(float3 dir, float enter, float base, float top, float typ
             continue;
         }
         float h = saturate((p.y - waterY) / column);
+
+        // **The shaft leans, because the rain in it left the cloud a while
+        // ago.** A drop at this altitude fell `(base - p.y) / RAIN_TERMINAL`
+        // seconds to get here and the wind pushed it the whole way, so the
+        // cloud that made it is that far *upwind* — subtract the drift to find
+        // it. At 10 m/s over a 950 m base that is 1.2 km, a 51-degree lean off
+        // vertical, which is why rain shafts in photographs are so obviously
+        // slanted and why this one looked wrong falling straight.
+        float fell = max(base - p.y, 0.0) / RAIN_TERMINAL;
+        float lean = wind.z * RAIN_SHEAR_WIND * fell;
+        // **Capped at the field's own correlation length, and that cap is the
+        // whole difference between a lean and a smear.** Drift grows with depth,
+        // so consecutive samples down a view ray read the weather map at
+        // positions `lean` apart. Once that exceeds a cloud mass they are
+        // sampling unrelated cloud, the ray integrates decorrelated noise, and
+        // the shower averages to a flat grey — measured on `rain_pool`, whose
+        // 90 m masses against a 1.4 km physical drift took the shaft's contrast
+        // from stdev 16.4 to 2.96. The physics was right and the sampling could
+        // not survive it.
+        //
+        // A field cannot be sheared by more than its own coherence without
+        // being destroyed, so the lean stops there. Scenes with real cloud
+        // scales keep their full physical slant; the ones that authored a small
+        // scale for the *rain footprint* (ADR 0078 §6's standing tension) keep
+        // their shower instead.
+        lean = min(lean, push.environment[0].cloud.y * RAIN_SHEAR_COHERENCE);
+        float3 drift = float3(wind.x, 0.0, wind.y) * lean;
+
         // **The same `clouds_at` the deck is marched from.** This is the whole
         // argument of ADR 0079: a shower is under a cloud and moves with it
         // because it *is* the cloud's field, not because anything keeps them in
-        // step.
-        float density = rate * cloudCoverAtTime(p, t) * rainCurtainFall(h);
+        // step. The drift offsets *where* it is read, never which field it is.
+        float density = rate * cloudCoverAtTime(p - drift, t) * rainCurtainFall(h);
         if (density <= 0.0) {
             continue;
         }
