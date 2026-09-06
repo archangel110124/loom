@@ -157,9 +157,9 @@ it rather than adding a flag on spec."* No scene needs it; it becomes an error.
   exactly `lanternhead`'s camera, so this may not stay shut long.
 - ~~**No wind shear.** A real shaft leans and trails downwind, and this one falls straight.~~
   **BUILT — see Addendum 1.**
-- **The shower does not wet what it falls on at distance.** `loom_rain::wetness` is per-scene
-  scalars gated per pixel by cover, which is right and unchanged. A distant island darkening as
-  a squall crosses it is not delivered.
+- ~~**The shower does not wet what it falls on at distance.**~~ **PARTLY FALSE WHEN WRITTEN —
+  see Addendum 2.** The mechanism exists and is strong; what is unproven is whether it produces
+  a *moving* wet patch on the timescales scenes actually run.
 - **No hail, no snow, no virga.** Virga — rain that evaporates before landing — is the one that
   is nearly free, since it is `fall(p.y)` reaching zero above the water. Not built.
 - **The map's resolution binds here too.** ADR 0078 Addendum 5 recorded that masses under a
@@ -276,3 +276,49 @@ actually uses:
 
 **One row moves, not four**, and by a quarter of the amount first claimed. The shear is real
 and it is smaller than three successive measurements of it said.
+
+---
+
+## Addendum 2 — distance wetting was already built, and §6 was wrong about it
+
+**Date:** 2026-09-05, on going to build it.
+
+§6 listed distance wetting as not delivered. **The mechanism was already there.** `wetGate`
+multiplies the scene's film and soak by `cloudCoverRecent(worldPos)` — the forty-second
+averaged cover *at that surface* — and the film and soak it gates are computed from the
+**uncovered** rate, not from the rate at the camera. So a surface under a shower two
+kilometres away is wet whether or not it is raining where the eye stands.
+
+**And it is strong, not marginal.** On `lanternhead` at tick 2400, with cloud shadows ablated
+so only wetness could move the picture, ground luma:
+
+| authored cover | ground mean |
+|---|---|
+| 0.05 | 160.1 |
+| 1.00 | 103.0 |
+
+Fifty-seven levels. Cover drives wetness hard.
+
+### What is genuinely not established
+
+Two things, and neither is what §6 claimed.
+
+**The visible time-variation in a drifting scene is cloud shadow, not wetness.** Same scene at
+cover 0.50, sampled across ticks 400 to 2200: with ADR 0081's shadows on, the ground swings
+33 levels (135.3 / 102.4 / 102.7 / 118.3); with them ablated it moves 6 (134.8 / 135.3 /
+134.6 / 140.9), and that residue is soak accumulating with elapsed time rather than anything
+positional. So *a squall visibly darkening ground as it passes* is currently delivered by the
+shadow, and the wetness underneath it is near-constant.
+
+**Why the wetness term does not visibly move was not determined.** The leading hypothesis was
+that `WET_COVER_WINDOW` at 40 s is too long: `lanternhead`'s deck drifts at 17.5 m/s, so the
+window averages 700 m — 2.7 of its 260 m masses — which would erase exactly the variation it
+averages. **That was tested and not confirmed**: at `cloud_scale = 3000`, where the deck covers
+only 0.23 masses per window, the ground is still flat across 2800 ticks. The test may simply be
+too short — 2800 ticks is 47 seconds and moves the deck 0.27 of a mass — so the hypothesis is
+neither confirmed nor refuted and should not be repeated without a longer run.
+
+**Nothing was built.** The honest state is that positional wetting works as a function of cover
+and has not been shown to produce a moving wet patch. Reopening trigger: a scene run long
+enough for the deck to carry a mass clean across it, which is minutes at these drifts and which
+no gate currently renders.
