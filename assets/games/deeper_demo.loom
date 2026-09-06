@@ -276,7 +276,7 @@
 #
 #   1. You spawn on the rig facing a boat, and **hold W**. Four supplies lie
 #      along the walk, alternating sides of the lane, so the taught gesture
-#      fills the whole hold on the way. Aboard by tick 180, at the wheel by 356.
+#      fills the whole hold on the way. Aboard by tick 125, at the wheel by 191.
 #   2. You are at the wheel and under way; channel marks stream past to port
 #      about one every 2.7 s, which is how you can see that you are moving.
 #      `Rig/Boat.x` reaches 29.89 by tick 900.
@@ -513,10 +513,15 @@
 # 5. **`state.aboard` is stale by about eighty ticks** after you step ashore, so
 #    the arrival caption uses the aboard branch while you stand on the wharf.
 #    Both branches now say the same useful thing, so it is cosmetic.
-# 6. **A hard turn can bounce the helmsman off the mat.** `at_helm` flickers for
-#    about seventy-five ticks and the caption drops back to the teaching line —
-#    which also resets `state.pinned`, so issue 4's warning can flicker mid-jam.
-#    He is never in danger and steps back on by himself.
+# 6. **FIXED 2026-09-06. A hard turn used to bounce the helmsman off the mat**,
+#    and it had stopped being the harmless flicker recorded here: off the mat
+#    the held W is his legs rather than the throttle, so it walked him further
+#    out — 0.37 m in 20 ticks against 0.02 m in the previous 140 — and by tick
+#    2400 he was off the boat entirely. `dread` froze with the hull, which is
+#    what `green.sh`'s offshore wind-and-rain row was failing on. At the helm
+#    his legs do not exist, so the only thing that can move him off the mat is
+#    the boat: `deeper_player.rhai` now holds the mat until *he* lets go.
+#    See ADR 0075 Addendum 1. The slide itself is unchanged and unexplained.
 # 7. **Hold W and SPACE together from the spawn and you wedge for ever.** SPACE
 #    on the mat is hands-off, so the throttle never opens and the pair pushes
 #    into the cockpit geometry. Releasing either key clears it.

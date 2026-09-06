@@ -274,7 +274,52 @@ memory.mat_was = mat_was;
 
 let latched = off_boat_for <= ABOARD_LATCH && position[1] > SWIM_LINE;
 let aboard = on_boat || latched;
-let on_mat = if on_boat { on_mat_now } else { latched && mat_was };
+// **Once he has the wheel, only he lets go of it — not the sea.**
+//
+// Issue 6 in `deeper_demo.loom` recorded a hard turn bouncing the helmsman off
+// the mat as benign: *"he is never in danger and steps back on by himself"*.
+// That stopped being true, and it took two goes to see why. The visible half
+// is a feedback loop: holding W he stands at `stand_local[0]` -6.32 against a
+// `HELM_X_MAX` of -6.10 and moves 0.02 m in 140 ticks; a turn carries him over
+// the edge; `at_helm` goes false, which hands the held W to his legs, which
+// walks him out at walking pace — 0.37 m in the next 20 ticks — and by tick
+// 2400 he is off the boat entirely under WALK FORWARD TO THE BOAT.
+//
+// Breaking that loop with a 90-tick latch was tried and is *not* enough: he
+// keeps the boat but still loses the wheel by 2400, because underneath the
+// loop the deck is genuinely sliding him out of the rectangle.
+//
+// **So the rectangle is the wrong question while he is steering.** At the helm
+// his legs do not exist — W is the throttle, not a step (see `speed` below) —
+// so the only thing that can move him off the mat is the boat. Re-testing his
+// footing against it is therefore testing for a bug and not for intent, and
+// the honest reading is: he holds the wheel until *he* lets go.
+//
+// The three ways off are all still instant, and none of them is the sea:
+// Space (`hands_off`, below), stepping off the boat, and going in the water.
+// Space clears the hold on the tick it is pressed; he is then standing on the
+// mat with his legs live, exactly as the jump comment further down describes,
+// and walking off clears `on_mat_now` under him.
+// **He has to have settled at it, not merely crossed it.** The boarding walk
+// clips the corner of the rectangle: latching on first contact put `at_helm`
+// at 1 by tick 330, and `green.sh`'s pair of tapes — 0 at tick 350, 1 at 356 —
+// exists precisely to pin the tick he takes the wheel. So the hold engages
+// only after `MAT_SETTLE` continuous ticks on the mat, and it gates the *hold*
+// alone: `on_mat_now` still answers for itself, so the tick he arrives is
+// unmoved and only the leaving is changed.
+let MAT_SETTLE = 30;     // half a second, as `ABOARD_LATCH` above.
+let held_wheel = if "hands_off" in memory { !memory.hands_off } else { true };
+let on_mat_for = if "on_mat_for" in memory { memory.on_mat_for } else { 0 };
+if on_boat && on_mat_now { on_mat_for += 1; } else { on_mat_for = 0; }
+memory.on_mat_for = on_mat_for;
+
+let mat_hold = if "mat_hold" in memory { memory.mat_hold } else { false };
+if !on_boat { mat_hold = false; }
+else if on_mat_for >= MAT_SETTLE { mat_hold = true; }
+else if !held_wheel { mat_hold = false; }
+memory.mat_hold = mat_hold;
+
+let on_mat = if on_boat { on_mat_now || mat_hold } else { latched && mat_was };
 
 // ---------------------------------------------------------------------------
 // **Space is hands off the wheel**, and it is the only way off the mat that is

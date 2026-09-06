@@ -237,3 +237,127 @@ and the fetch are one number in two places and must move together.
 **A seventh argument to `Sound::update`.** clippy is right about the arity, and
 a field written immediately before the read it feeds has none of the staleness
 that made this a bug.
+
+## Addendum 1 — the organ that gave out was the instrument, not the man
+
+**Date:** 2026-09-06. Decision 3 stands; the measurement behind its ceiling does
+not, and `green.sh:314` was failing on it.
+
+### What was failing
+
+`scripts/green.sh:314` runs `deeper_demo` to tick 3000 holding W and asserts
+`wind@3,3,-200.speed > 8.0` and `rain@3,3,-200.rate > 20.0`. Its own comment
+records the table it was written against — tick 3000, dread 0.942, wind 11.372,
+rain 25.928. Measured before this addendum: **wind 5.286, rain 0.210, dread
+0.487**. Both assertions fail.
+
+`dread` freezes because the boat stops, and the boat stops because `at_helm`
+goes 1 → 0 between ticks 1800 and 2400:
+
+    tick        600    1200    1800    2400    3000
+    at_helm     1.0     1.0     1.0     0.0     0.0
+    dread     0.000   0.075   0.312   0.487   0.487
+
+**This predates the session that found it, and the work in that session made it
+better rather than worse.** At `8886281` the helm was already gone *before* tick
+1800 and `dread` froze at 0.312; the clumping and cloud work moved the loss from
+before 1800 to 2400 and the freeze from 0.312 to 0.487. Both assertions were
+already failing on HEAD.
+
+### The rung is not the variable, which is what made this worth chasing
+
+This file's `theedge` note derives a footing ceiling between top rung 16 and 17,
+and the obvious reading was that the ceiling had moved. It has not. Halving the
+top rung changes nothing at all:
+
+    top rung        16.0        8.0
+    at_helm @2400    0.0        0.0
+    dread   @2400   0.487      0.487
+
+Identical to three decimals. At tick 1800 the wind is about 5 m/s — the
+`underway`/`outofsight` region, nowhere near 16 — so whatever takes him off the
+mat is not the sea state the ceiling was measured on.
+
+### The mechanism: a feedback loop over a category error
+
+Instrumented by emitting `stand_local` per tick (temporary; reverted). Against a
+`HELM_X_MAX` of −6.10:
+
+    tick     1900    2000    2040    2060    2080    2100    2140
+    x      −6.317  −6.344  −6.340  −6.318  −6.158  −5.790  −5.620
+    at_helm     1       1       1       1       1       0       0
+
+He stands 0.2 m inside the edge and moves **0.02 m in 140 ticks**. He crosses,
+and then moves **0.37 m in the next 20** — walking pace. That is the loop: off
+the mat, the held W is no longer the throttle but his legs, which walk him
+further out, which keeps him off. By 2400 he is off the boat entirely under
+`WALK FORWARD TO THE BOAT`, and `events.station` counts 11 where it should count
+about 4 — the same strobe `deeper_player.rhai`'s `ABOARD_LATCH` comment was
+written about, one rectangle further in.
+
+**A 90-tick latch on the rectangle was built first and is not enough.** It keeps
+the boat — `aboard` is 1 at tick 3600 where it was 0 — but the wheel still goes
+by 2400, because underneath the loop the deck is genuinely sliding him out.
+Recorded because it was tried and because it is the obvious fix.
+
+The category error is underneath both. **At the helm his legs do not exist** —
+W is the throttle, not a step — so the only thing that can move him off the mat
+is the boat. Re-testing his footing against the rectangle there is testing for a
+bug, not for intent. So the mat is latched until *he* lets go: Space, stepping
+off the boat, or going in the water, all of which stay instant.
+
+    tick          2400    3000    3600
+    at_helm        1.0     1.0     0.0
+    dread        0.617   0.880   0.990
+
+He comes off at 3600, which is what this file's own `theedge` note says happens
+at rung 16 — *"he comes off at tick 3600, by which point she has stopped at
+x = 158 anyway"*. `green.sh:314` passes on both assertions with its probe point
+and thresholds unchanged.
+
+### Two things this does not settle
+
+**Why the deck slides him at all.** `de97324` corrected the hull's mass from
+43,776 kg to **57,636 kg** — the old figure was a guessed 38,000 scaled by a
+previous hull's volume, and 24% light — and it landed after this ADR derived
+its ceiling. A 32% heavier hull is a sufficient mechanism for the rest of the
+damage found alongside this, and that half is measured: `rig_drive` makes 21.8 m
+astern in 900 ticks where the gate wanted 23, and the demo's return leg stalls
+16 m short of home on a tape that allows it 400 ticks. **The slide itself was
+not bisected**, so the mass is a named mechanism rather than a proven one for
+that specific symptom. Nothing here changes the slide; it stops the slide from
+costing him the wheel.
+
+**Decision 3's ceiling is now measured on a different organ.** The 16/17
+crossing was read off a footing failure that was partly this loop, so the sweep
+behind it should be re-run before that number is quoted again.
+
+### What this repaired in `green.sh`, and what it did not
+
+Collected by running §6 and §7 to completion with `set -e` off, on this change
+and on the unmodified script, so the two lists are comparable. **The mat hold
+repairs five rows and breaks none**: the offshore wind-and-rain pair, the
+`rig_drive` astern row, both halves of the mirrored turn pair — which had been
+reporting `at_helm 0`, z −39.882 and x 7.201, a boat that never turned because
+nobody was steering it — and one row in the stall block.
+
+Three further rows were stale rather than broken and are re-pinned in place with
+their measurements: the wheel answers at tick **191** and not 356 (the walk got
+faster; both old rows read 1, so the negative control failed honestly while the
+positive one passed for the wrong reason), astern clears **−18.0** and not −20.0,
+and the turn windows move from 11 m of swing either side to 15.4 / 16.1 m.
+
+**Ten rows still fail and they are one pre-existing fault, not ten.** All sit in
+the return leg, all pass their `--assert`s and fail only a `grep` on the teaching
+HUD's text, and the text differs because the boat is behind where the tape
+expects her. She never reaches ALONGSIDE: the tape drives her astern for 400
+ticks, she is doing 0 kn 16 m short when it releases the wheel, and everything
+downstream reads BLOCKED. That is the demo's scripted return no longer
+completing on a 32% heavier hull, and repairing it is a change to the tape or to
+her astern thrust — a design decision on the demo, left to the human.
+
+One further fragility, unrelated and untouched: several of those rows pipe
+`loom sim` into `grep -q`, which exits on first match and SIGPIPEs the writer.
+Under `set -o pipefail` that panics the pipeline on output large enough to
+outlive the match. It is latent, load-dependent, and it masked the real failures
+above until `pipefail` was dropped to see past it.
