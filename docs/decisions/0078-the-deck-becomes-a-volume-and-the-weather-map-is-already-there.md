@@ -1,7 +1,8 @@
 # ADR 0078 — The deck becomes a volume, and the weather map was already there
 
 - **Date:** 2026-09-05
-- **Status:** **proposed.**
+- **Status:** **accepted** (2026-09-05, human — "promote the four ADRs to accepted"). Built and green on all six
+  checks at the time of acceptance.
 - **Decision touched:** none of CLAUDE.md's locked decisions. No new pass, no post-process,
   no new resource type, no new dependency, no GPU state. **Governed by ADR 0045:** this is
   rendering-only, produces no force, is unreadable by `loom sim --assert` and by `rhai`,
@@ -221,11 +222,14 @@ first already handles.
 
 ## 6. What this does not settle
 
-- **Cloud shadows on the world, and god rays.** ADR 0016's sentence stands. The march makes
-  both *possible* — there is now a real transmittance along the sun ray — and neither is
-  built here.
-- **Rain leaving the deck.** ADR 0016 step 5 is still unbuilt: drops still spawn in a ~72 m
-  box around the camera and are modulated by cover. Its own note that *"a distant curtain of
+- ~~**Cloud shadows on the world, and god rays.**~~ **Both built, and both are why this
+  section should be read with its dates.** The march made them possible by giving the sun ray a
+  real transmittance, and each became its own ADR once the trigger fired: god rays are
+  **ADR 0080**, cloud shadows on the world are **ADR 0081**. ADR 0016's sentence no longer
+  stands.
+- ~~**Rain leaving the deck.**~~ **Built as ADR 0079**, which refuses ADR 0016 step 5 as
+  literally written and builds the shower as a medium instead. Drops still spawn in their own
+  ~64 m box and are modulated by cover — deliberately, and 0079 §3 says why. Its own note that *"a distant curtain of
   rain crossing a bay would have to be drawn in the sky pass, and is a separate feature
   needing its own ADR"* is still owed, and the sky pass is now a volume march, which is
   where such a curtain would go.
@@ -366,6 +370,11 @@ Recorded verbatim so far, from 2026-09-05:
 **The last clause is not delivered by this ADR** and should not be read as approved by it.
 Rain leaving the deck is §6's second bullet, it is ADR 0016's unbuilt step 5, and it is a
 separate decision with its own record.
+
+**Accepted 2026-09-05.** The human's words, verbatim: *"promote the four ADRs to accepted"* —
+0078, 0079, 0080 and 0081 together, after the whole series was green on all six checks and
+after the measurement corrections each of them carries were made. Recorded verbatim per this
+project's rule, so the scope of what was accepted is not relitigable later.
 
 ## Addendum 4 — the escalation is a direction-indexed map, and it is 3x
 

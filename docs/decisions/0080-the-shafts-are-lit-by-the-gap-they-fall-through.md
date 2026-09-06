@@ -1,7 +1,8 @@
 # ADR 0080 — The shafts are lit by the gap they fall through, and that is worth about six percent
 
 - **Date:** 2026-09-05
-- **Status:** **proposed.**
+- **Status:** **accepted** (2026-09-05, human — "promote the four ADRs to accepted"). Built and green on all six
+  checks at the time of acceptance.
 - **Decision touched:** none of CLAUDE.md's locked decisions. No new pass, no new resource, no
   new dependency, no GPU state, no post-process. **Governed by ADR 0045:** rendering-only, no
   force, unreadable by `loom sim --assert` and by `rhai`, no state.
@@ -176,3 +177,8 @@ Recorded verbatim, 2026-09-05: the human chose *"God rays through the shafts"*, 
 the first result was subtle and three explanations for it had failed, *"Dig further into why
 beams don't form"* — which is what produced §4. The decision to land it came after that
 measurement, not before.
+
+**Accepted 2026-09-05.** The human's words, verbatim: *"promote the four ADRs to accepted"* —
+0078, 0079, 0080 and 0081 together, after the whole series was green on all six checks and
+after the measurement corrections each of them carries were made. Recorded verbatim per this
+project's rule, so the scope of what was accepted is not relitigable later.

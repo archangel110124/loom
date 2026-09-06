@@ -1,7 +1,8 @@
 # ADR 0079 — A shower is a medium, and the drops are only its last sixty metres
 
 - **Date:** 2026-09-05
-- **Status:** **proposed.**
+- **Status:** **accepted** (2026-09-05, human — "promote the four ADRs to accepted"). Built and green on all six
+  checks at the time of acceptance.
 - **Decision touched:** none of CLAUDE.md's locked decisions. No new pass, no new resource, no
   new dependency, no GPU state, no post-process. **Governed by ADR 0045:** rendering-only,
   produces no force, unreadable by `loom sim --assert` and by `rhai`, adds no state — a frame
@@ -203,6 +204,11 @@ Recorded verbatim, from 2026-09-05:
 
 **ADR 0078 §8 explicitly disclaimed the rain half of that ask.** This ADR is where it is
 answered, and it should be read as the second of the two.
+
+**Accepted 2026-09-05.** The human's words, verbatim: *"promote the four ADRs to accepted"* —
+0078, 0079, 0080 and 0081 together, after the whole series was green on all six checks and
+after the measurement corrections each of them carries were made. Recorded verbatim per this
+project's rule, so the scope of what was accepted is not relitigable later.
 
 ---
 

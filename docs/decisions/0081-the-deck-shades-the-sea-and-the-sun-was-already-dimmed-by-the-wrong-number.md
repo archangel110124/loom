@@ -1,7 +1,8 @@
 # ADR 0081 — The deck shades the sea, and the sun was already dimmed by the wrong number
 
 - **Date:** 2026-09-05
-- **Status:** **proposed.**
+- **Status:** **accepted** (2026-09-05, human — "promote the four ADRs to accepted"). Built and green on all six
+  checks at the time of acceptance.
 - **Decision touched:** none of CLAUDE.md's locked decisions. No new pass, no new resource, no
   new dependency, no GPU state, no post-process. **Governed by ADR 0045:** rendering-only.
   ADR 0015 verified that nothing in `loom_script`, `loom_ecs` or `play.rs` reads sun strength,
@@ -156,3 +157,8 @@ series. The cost objection this section originally carried is withdrawn — see 
 
 Recorded verbatim, 2026-09-05: chosen from the options after the wind shear landed, as *"Bless,
 then cloud shadows on the world"*.
+
+**Accepted 2026-09-05.** The human's words, verbatim: *"promote the four ADRs to accepted"* —
+0078, 0079, 0080 and 0081 together, after the whole series was green on all six checks and
+after the measurement corrections each of them carries were made. Recorded verbatim per this
+project's rule, so the scope of what was accepted is not relitigable later.
