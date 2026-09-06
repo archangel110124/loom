@@ -1,7 +1,8 @@
 # ADR 0082 — Clumping is power at a wavelength longer than a cloud
 
 - **Date:** 2026-09-06
-- **Status:** **proposed.**
+- **Status:** **accepted** (2026-09-06, human — *"Bless the nine golden rows and do ADR
+  0082"*). Built, green on all six checks, and the nine rows blessed in the same breath.
 - **Decision touched:** none of CLAUDE.md's locked decisions. No new pass, no new resource, no
   new dependency, no new `Param`. **But this is not rendering-only** — `clouds_at` is the field
   the rain reads (ADR 0016), so this crosses into simulation-visible territory and every
@@ -193,4 +194,11 @@ every scene with weather and moves a field the simulation reads.
 Recorded verbatim, 2026-09-06: the human asked for *"research actual cloud formations, and make
 our clouds into those formations maybe using some mathematical equations"*, for a workflow to do
 it, and for *"a fable agent review it"* — then chose **"ADR then build it"** from the options
-once the review came back.
+once the review came back, then **"Ship it, and re-author the small-scale scenes too"** once the
+before-and-after renders were in front of them, and finally accepted it with *"Bless the nine
+golden rows and do ADR 0082"*.
+
+**Accepted with its corrections intact**, not a tidied version: §6.1's `Sin` trap, the
+withdrawn percolation measurement, and the fact that the model's predicted 50.8% did not
+transfer through the render pipeline all stand as written. The change was judged on the
+pictures and on `squall`'s rain scan, not on the number the research predicted.
