@@ -39,6 +39,7 @@ pub const ABLATIONS: &[(&str, u32)] = &[
     ("spray_droplets", 1 << 4),
     ("cloud_volume", 1 << 5),
     ("rain_curtain", 1 << 6),
+    ("cloud_shadow", 1 << 7),
 ];
 
 /// The bit for whitecap and swash foam on the water surface.
@@ -128,6 +129,17 @@ pub const CLOUD_VOLUME: u32 = 1 << 5;
 /// Must equal `LOOM_ABLATE_RAIN_CURTAIN` in `assets/shaders/scene.slang` — see
 /// the warning on [`ABLATIONS`] above; nothing checks that these two agree.
 pub const RAIN_CURTAIN: u32 = 1 << 6;
+
+/// The bit for cloud shadows on the world — ADR 0081.
+///
+/// **Ablating it puts the sun back on the scene's global cover**, which is what
+/// ADR 0015 shipped and what every reference before 0081 recorded: a frame lit
+/// flatly under a deck with a silhouette. That is the failure this row exists
+/// to catch, and it is one a reference image records and passes for ever.
+///
+/// Must equal `LOOM_ABLATE_CLOUD_SHADOW` in `assets/shaders/scene.slang` — see
+/// the warning on [`ABLATIONS`] above; nothing checks that these two agree.
+pub const CLOUD_SHADOW: u32 = 1 << 7;
 
 /// Parse a `LOOM_ABLATE` value into a mask.
 ///

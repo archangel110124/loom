@@ -1463,7 +1463,7 @@ const GOLDEN_SIZE: &str = "320x200";
 /// the switch is an early return in `loom_cli::particles::spray` rather than a branch the
 /// GPU takes. See `loom_render::ablate::SPRAY_DROPLETS`.
 ///
-const ABLATE: [(&str, &str, &str, &[&str], f64); 7] = [
+const ABLATE: [(&str, &str, &str, &[&str], f64); 8] = [
     (
         "whitecaps",
         "assets/test/whitecaps.loom",
@@ -1525,6 +1525,19 @@ const ABLATE: [(&str, &str, &str, &[&str], f64); 7] = [
         "rain_curtain",
         &["--sim", "300"],
         0.25,
+    ),
+    (
+        // **`mountain_pass`, and the scene choice is the whole measurement.** A
+        // cloud shadow only exists where a scene is large against its
+        // `cloud_scale`: `croft` is 50 m of ground under 900 m masses, so it
+        // sits inside 5% of one cloud and is uniformly lit whatever the sky is
+        // doing — correctly, and uselessly for a gate. `mountain_pass` is a
+        // landscape, and the shadow crosses it.
+        "mountain_pass",
+        "assets/test/mountain_pass.loom",
+        "cloud_shadow",
+        &["--sim", "300"],
+        0.20,
     ),
 ];
 

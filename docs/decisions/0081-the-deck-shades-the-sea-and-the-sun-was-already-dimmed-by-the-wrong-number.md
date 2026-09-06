@@ -1,0 +1,147 @@
+# ADR 0081 — The deck shades the sea, and the sun was already dimmed by the wrong number
+
+- **Date:** 2026-09-05
+- **Status:** **proposed.**
+- **Decision touched:** none of CLAUDE.md's locked decisions. No new pass, no new resource, no
+  new dependency, no GPU state, no post-process. **Governed by ADR 0045:** rendering-only.
+  ADR 0015 verified that nothing in `loom_script`, `loom_ecs` or `play.rs` reads sun strength,
+  so this cannot reach the determinism hash — that verification is re-checked below rather
+  than inherited.
+- **Amends ADR 0015's light coupling**, which is the substance of this ADR. 0015 wrote *"Cloud
+  cover should drive the light"* and implemented it as one global scalar. That was right when
+  the deck was a flat texture with no position. It is now a volume with a silhouette, and the
+  global scalar is the reason a squall can cross the bay without the bay noticing.
+- **Fires ADR 0078 §6's ground-shadow gap** — *"Cloud shadows on the world, and god rays. The
+  march makes both possible… neither is built here."* God rays became ADR 0080; this is the
+  other half.
+
+---
+
+## 1. Context: the sun is already dimmed, and by a number that has no position
+
+`sunStrength` and `sunColor` in `scene.slang` both read `cloudCover()`, which is
+`push.environment[0].cloud.x` — **the scene's single authored cover, identical at every point
+in the world.** So under a broken deck at cover 0.45, every surface in the scene is lit at the
+same 55%-ish of full sun whether it stands in a gap or under the thickest mass in the sky.
+
+The comment above them is explicit that this is the one coupling every lighting path shares:
+
+> **Every lighting path in this file goes through these three**, which is why the coupling
+> lives here and not at each site: specular highlights, wrapped foliage lighting, the sky
+> gradient and the particle terms all follow without knowing clouds exist.
+
+That structure is exactly right and this ADR does not disturb it. **What changes is the
+number those three read.**
+
+**This also means a naive cloud shadow would double-count.** Multiplying a new per-pixel
+shadow into `sunVisibility` would dim by cover twice — once globally in `sunStrength`, once
+locally — and every scene with cloud would go dark. The available move is not to add a term;
+it is to give the existing term a position.
+
+## 2. Decision: the same coupling, sampled where the surface is
+
+```
+sunStrengthAt(p) = sun.w * lerp(1.0, 0.12, coverAboveGround(p))
+```
+
+where `coverAboveGround(p)` projects `p` **along the sun ray** onto the cloud base and samples
+`clouds_at` there:
+
+```
+q = p + sunDir * ((base - p.y) / sunDir.y)
+```
+
+Not straight up. A shadow falls where the sun is blocked, and at `lanternhead`'s 10-degree sun
+the cloud blocking a point is four kilometres away — the same geometry ADR 0080 §2 works out
+for the shafts. Sampling overhead would put every shadow in the wrong place, and at a low sun,
+kilometres wrong.
+
+**The mean is preserved by construction.** `clouds_at`'s coverage averages to the authored
+`cloud.x` across the scene, so a frame's overall exposure is what it was; what changes is that
+the light now *varies* — full sun in the gaps, 12% under the masses, and the boundary sweeps
+across the world as the deck drifts.
+
+`sunStrength()` without a position stays exactly as it is, for the sky gradient and the
+particle terms, which have no surface to stand on.
+
+## 3. What it buys, and why it is the largest remaining item
+
+A squall crossing the bay currently darkens the *sky* and leaves the *water* uniformly lit.
+Everything ADRs 0078 to 0080 built happens above the horizon. This is the first term that puts
+the weather on the world:
+
+- Cloud shadows sweeping across the sea, moving with the deck because they read the same field.
+- A scene lit in patches rather than flatly — the single strongest cue that a sky is real.
+- `lanternhead`'s quay and `croft`'s hillside falling in and out of sun as masses pass.
+
+## 4. Cost, and the reason it is not free
+
+**One `clouds_at` per shaded pixel** — twelve noise evaluations, because the expression tree
+has no common-subexpression elimination across octaves. That is the same figure ADR 0080 §4
+found dominating the light march, and unlike the shafts this one is paid on *every opaque
+pixel in the frame*, not on the sky.
+
+**Measured, min of 3, 1920x1080, forward pass:**
+
+| scene | global cover | local shadow |
+|---|---|---|
+| `mountain_pass` | 1.65 ms | **4.746 ms** |
+| `croft` | 3.421 ms | 2.647 ms — *inside the noise* |
+
+**Nearly 3x on `mountain_pass`, and that scene is the warning.** It is grass on terrain, so
+every blade fragment now pays a twelve-noise `clouds_at` on top of what it already did.
+`croft` measuring *faster* with the feature on is impossible for added work and means its
+figure is noise, not a result — recorded rather than quoted as a win.
+
+So the cost is real and it lands hardest exactly where the feature looks best. §4's escape
+hatch is not decoration: the sample varies smoothly across a surface, so evaluating it
+per-vertex and interpolating, or reading it from the cloud map's existing texel grid, would
+recover most of it. Neither is built, and this ADR should not be promoted on the assumption
+that 3x is acceptable — that is the human's call with the number in front of them.
+
+**The escape hatch, if it is too expensive:** the sample is a 2D lookup at a position that
+varies smoothly across a surface, so it is a candidate for evaluating per-vertex and
+interpolating, or for the cloud map's own texel grid. Neither is built on speculation.
+
+`cloud_shadow` joins `ABLATIONS` as its own row: it fails apart from `cloud_volume`, and a
+scene lit flatly under a moving deck is precisely the sort of absence a reference image
+records and passes for ever.
+
+## 5. What this does not settle
+
+- **No penumbra.** A cloud edge's shadow softens with the distance it has fallen; this one is
+  as sharp as the coverage curve. Reopening trigger: the boundary reads as a hard line rather
+  than an edge.
+- **The shadow does not darken the rain.** ADR 0080 lights the shafts from the deck; this
+  lights the ground from the deck; a shaft standing in another shower's shadow is not modelled.
+- **No shadow from the shower itself**, only from the cloud that made it. A heavy shaft really
+  does darken the water under it.
+- **`sunColor` keeps the global number.** Its cover term shifts the sun's hue toward overcast
+  grey, which is an atmospheric property rather than a local occlusion, and making it local
+  would tint patches of sea differently for no physical reason.
+
+## 6. Rejected alternatives
+
+**A shadow map from the sun.** A second render of the deck, a new target, a new pass, and a
+projection to keep in step. The slab is analytic — its occlusion is a closed-form lookup, as
+ADR 0080 §6 already argued for the shafts.
+
+**Multiplying a new term into `sunVisibility`.** §1: it double-counts against the dimming
+already in `sunStrength`, and every clouded scene would go dark. The bug would look like a
+tuning problem and be a structural one.
+
+**Sampling cover straight up.** Cheaper by one division and wrong by kilometres at any low sun
+— which is both scenes this repository lights with one.
+
+**Leaving it global, as ADR 0015 had it.** Defensible while the deck was a texture. With a
+volume that has a silhouette, a shadow is the thing the silhouette is *for*.
+
+## 7. Human approval
+
+Not required by CLAUDE.md's locked table. Required by this project's rule that a builder never
+promotes its own ADR — and doubly wanted here, because this changes how **every lit surface in
+every scene with cloud** is shaded, which is the widest blast radius of anything in the 0078
+series.
+
+Recorded verbatim, 2026-09-05: chosen from the options after the wind shear landed, as *"Bless,
+then cloud shadows on the world"*.

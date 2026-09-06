@@ -418,6 +418,53 @@ float cloudCover() { return saturate(push.environment[0].cloud.x); }
 float sunStrength() {
     return push.environment[0].sun.w * lerp(1.0, 0.12, cloudCover());
 }
+
+/// How much of the deck stands between a world point and the sun — ADR 0081.
+///
+/// **Along the sun ray, never straight up.** A shadow falls where the light is
+/// blocked, and at `lanternhead`'s ten-degree sun the cloud blocking a point on
+/// the quay is four kilometres away. Sampling overhead would put every shadow
+/// in the wrong place, and at a low sun, kilometres wrong. Same geometry ADR
+/// 0080 §2 works out for the shafts.
+///
+/// Returns the scene's own cover when there is nothing to project onto — sun at
+/// the horizon, or a point already above the deck — so the caller degrades to
+/// exactly the global coupling ADR 0015 shipped.
+float coverAboveGround(float3 p) {
+    if (ablated(LOOM_ABLATE_CLOUD_SHADOW)) {
+        return cloudCover();
+    }
+    float3 sun = sunDirection();
+    if (sun.y <= 0.05) {
+        return cloudCover();
+    }
+    float base = cloudBase(cloudType());
+    if (p.y >= base) {
+        return cloudCover();
+    }
+    float3 q = p + sun * ((base - p.y) / sun.y);
+    return cloudCoverAt(q);
+}
+
+/// The sun's strength **where a surface actually stands** — ADR 0081.
+///
+/// The same coupling `sunStrength` has, reading the cover above *this point*
+/// rather than the scene's single authored number. ADR 0015 built that coupling
+/// global because the deck was a flat texture with no position; it has a
+/// silhouette now, and a shadow is what a silhouette is for.
+///
+/// **This replaces the global term rather than multiplying into it.** A cloud
+/// shadow applied on top of `sunStrength` would dim by cover twice — once
+/// globally, once locally — and every clouded scene would go dark, in a way
+/// that reads as a tuning problem and is a structural one.
+///
+/// The mean is preserved by construction: `clouds_at`'s coverage averages to
+/// the authored `cloud.x`, so a frame's overall exposure is what it was. What
+/// changes is that the light now *varies*, and the boundary sweeps across the
+/// world as the deck drifts.
+float sunStrengthAt(float3 p) {
+    return push.environment[0].sun.w * lerp(1.0, 0.12, coverAboveGround(p));
+}
 float3 sunColor() {
     return lerp(push.environment[0].sunColor.rgb, float3(0.70, 0.75, 0.82),
                 cloudCover() * 0.85);
@@ -3839,9 +3886,15 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     float3 diffuseColor = albedo * (1.0 - metallic);
     float3 f0 = lerp(float3(0.04), albedo, metallic);
 
-    float3 lit = diffuseColor * (ambient + sunStrength() * diffuse * sun);
+    // **`sunStrengthAt`, not `sunStrength` — ADR 0081.** The cover over *this*
+    // surface rather than the scene's single authored number, so a deck with a
+    // silhouette casts one. Substituted rather than multiplied in: the global
+    // term already dims by cover, and doing both would darken every clouded
+    // scene twice.
+    float sunHere = sunStrengthAt(in.worldPos);
+    float3 lit = diffuseColor * (ambient + sunHere * diffuse * sun);
     float3 view = normalize(push.environment[0].eye.xyz - in.worldPos);
-    lit += specular(normal, view, sunDirection(), roughness, f0) * sunStrength() * diffuse * sun;
+    lit += specular(normal, view, sunDirection(), roughness, f0) * sunHere * diffuse * sun;
 
     // **Without this a metal renders black.** Metals have no diffuse response,
     // so a fully metallic surface lit by one directional sun is unlit
@@ -5912,7 +5965,12 @@ float4 grassFragmentMain(GrassOutput in) : SV_Target {
     // sky.
     float occlusion = lerp(0.35, 1.0, in.uv.y * in.uv.y);
 
-    float3 lit = albedo * (ambientStrength() * occlusion + sunStrength() * wrapped * occlusion);
+    // **The same local sun the ground under it uses — ADR 0081.** A blade lit by
+    // the scene's global cover while the soil it stands in is lit by the cloud
+    // actually overhead would disagree about the weather by exactly the amount
+    // the shadow is worth, and `mountain_pass` is grass on terrain.
+    float3 lit = albedo
+               * (ambientStrength() * occlusion + sunStrengthAt(in.worldPos) * wrapped * occlusion);
     // A touch of translucency at the tip, where a blade is thin enough to
     // transmit — grass is not opaque and looks wrong when treated as if it is.
     lit += albedo * sunColor() * pow(saturate(dot(-sunDirection(), normalize(in.worldPos - push.environment[0].eye.xyz))), 4.0) * in.uv.y * 0.25;
@@ -7315,6 +7373,9 @@ static const uint LOOM_ABLATE_CLOUD_VOLUME = 32u;
 /// (`crates/loom_render/src/ablate.rs`)**, on the warning above. 64, and the
 /// gap at 16 is still `spray_droplets`, the one row with no constant here.
 static const uint LOOM_ABLATE_RAIN_CURTAIN = 64u;
+
+/// The bit for cloud shadows on the world — ADR 0081. 128.
+static const uint LOOM_ABLATE_CLOUD_SHADOW = 128u;
 
 bool ablated(uint bit) {
     return (uint(push.environment[0].viewport.w) & bit) != 0u;
@@ -9613,9 +9674,12 @@ float4 waterFragmentMain(WaterOutput in) : SV_Target {
                    + QuadReadAcrossDiagonal(env)) * 0.25;
     }
     float3 lit = lerp(through, env, fresnel);
+    // **ADR 0081 on the sea, which is the surface the whole feature is for.**
+    // A squall crossing the bay that leaves the bay evenly lit is the thing
+    // ADR 0016 named as the point of a cloud field and could never show.
     lit += specular(normal, view, sunDirection(),
                     waterFilteredRoughness(WATER_ROUGHNESS, specVar), float3(0.02))
-         * sunColor() * sunStrength() * toSun;
+         * sunColor() * sunStrengthAt(in.worldPos) * toSun;
 
     // **Whitecaps.** See the constants above for why the threshold is absolute.
     //
