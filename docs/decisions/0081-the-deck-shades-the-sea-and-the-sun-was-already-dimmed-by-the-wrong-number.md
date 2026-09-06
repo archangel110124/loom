@@ -81,27 +81,38 @@ has no common-subexpression elimination across octaves. That is the same figure 
 found dominating the light march, and unlike the shafts this one is paid on *every opaque
 pixel in the frame*, not on the sky.
 
-**Measured, min of 3, 1920x1080, forward pass:**
+**Measured, and the first measurement was wrong.**
 
-| scene | global cover | local shadow |
+Two min-of-3 samples first read `mountain_pass`'s forward pass at 1.65 ms ablated against
+4.746 ms with shadows, and this ADR carried a warning built on that ~~3x~~. **It is
+withdrawn.** Re-measured interleaved, five reps each, 1920x1080, forward pass in ms:
+
+| rep | ablated | shadows |
 |---|---|---|
-| `mountain_pass` | 1.65 ms | **4.746 ms** |
-| `croft` | 3.421 ms | 2.647 ms — *inside the noise* |
+| 1 | 2.898 | 1.999 |
+| 2 | 2.569 | 2.638 |
+| 3 | 2.130 | 1.666 |
+| 4 | 2.131 | 1.848 |
+| 5 | 2.553 | 1.677 |
 
-**Nearly 3x on `mountain_pass`, and that scene is the warning.** It is grass on terrain, so
-every blade fragment now pays a twelve-noise `clouds_at` on top of what it already did.
-`croft` measuring *faster* with the feature on is impossible for added work and means its
-figure is noise, not a result — recorded rather than quoted as a win.
+**The shadowed build is consistently the faster one**, which is impossible for added work — so
+the whole difference is noise, and the noise band on this box spans 1.67 to 2.90 ms. Four
+scenes at min-of-3 agree: `meadow` 0.496 -> 0.494, `mountain_pass` 1.684 -> 1.682, `stoneyard`
+0.759 -> 0.760, `cave` 0.420 -> 0.419. **1.00x on every one.**
 
-So the cost is real and it lands hardest exactly where the feature looks best. §4's escape
-hatch is not decoration: the sample varies smoothly across a surface, so evaluating it
-per-vertex and interpolating, or reading it from the cloud map's existing texel grid, would
-recover most of it. Neither is built, and this ADR should not be promoted on the assumption
-that 3x is acceptable — that is the human's call with the number in front of them.
+The cost is real arithmetic and it is below what this box can measure. That is consistent
+rather than surprising: one `clouds_at` is twelve noise evaluations against a forward pass
+already firing sixteen AO rays, which ADR 0019 measured as two thirds of the cost of ray
+tracing here.
 
-**The escape hatch, if it is too expensive:** the sample is a 2D lookup at a position that
-varies smoothly across a surface, so it is a candidate for evaluating per-vertex and
-interpolating, or for the cloud map's own texel grid. Neither is built on speculation.
+**The lesson is the interleaving.** Two consecutive min-of-3 batches, taken minutes apart, are
+two draws from a drifting distribution and not a comparison. Alternating the two builds within
+one run is what made the answer obvious, and it is the protocol any figure in this series
+should have been taken with.
+
+**The escape hatch, if a slower machine ever needs one:** the sample is a 2D lookup at a
+position that varies smoothly across a surface, so it is a candidate for evaluating per-vertex
+and interpolating. Not built, and on this hardware there is nothing to recover.
 
 `cloud_shadow` joins `ABLATIONS` as its own row: it fails apart from `cloud_volume`, and a
 scene lit flatly under a moving deck is precisely the sort of absence a reference image
@@ -141,7 +152,7 @@ volume that has a silhouette, a shadow is the thing the silhouette is *for*.
 Not required by CLAUDE.md's locked table. Required by this project's rule that a builder never
 promotes its own ADR — and doubly wanted here, because this changes how **every lit surface in
 every scene with cloud** is shaded, which is the widest blast radius of anything in the 0078
-series.
+series. The cost objection this section originally carried is withdrawn — see §4.
 
 Recorded verbatim, 2026-09-05: chosen from the options after the wind shear landed, as *"Bless,
 then cloud shadows on the world"*.
