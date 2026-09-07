@@ -88,6 +88,4 @@ None is hard to reverse.
 - **Viewport view modes** — wireframe, unlit, normals, overdraw. I deliberately
   did not start this: it needs shader work plus the four-site ablation registry,
   and I did not want to land render-path changes unreviewed overnight.
-- **Opening a different scene from inside the editor.** Today the scene comes
-  from the command line and switching means restarting.
 - Material graph, terrain sculpting, particle authoring, multi-scene editing.

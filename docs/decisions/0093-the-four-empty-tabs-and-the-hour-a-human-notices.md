@@ -71,6 +71,18 @@ smoothed the same way. These are the two numbers `--frames` prints on the way
 out, and until now the only way to see which half of a frame to fix was to close
 the editor and read a terminal.
 
+**Opening another scene**, from a list of the scenes beside the open one in the
+Project panel. Until now the scene came from the command line and switching
+meant restarting, which makes an editor a viewer. **Refused while there are
+unsaved edits** — the alternative is a confirmation dialog, and the alternative
+to that is losing somebody's work to a misclick in a file list.
+
+One directory, not a recursive walk: a project's scenes live together, and a
+walk under `assets/` would list 137 files of which 130 are test fixtures. Cached
+on scene change rather than listed per frame — a `read_dir` at 144 Hz to draw a
+row of buttons is a filesystem call per frame for a list that changes when
+somebody adds a file.
+
 **Select all, and deselect.** Escape empties the selection rather than resetting
 it to the first node: "nothing is selected" is a state a human asks for, because
 it is how you stop the gizmo drawing over the thing you are looking at.

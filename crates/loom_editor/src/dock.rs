@@ -692,12 +692,18 @@ mod tests {
         let redo = ["Undone thing".to_owned()];
         let paths = ["Root".to_owned()];
         let history = ["Did a thing".to_owned()];
+        let scenes = [
+            "assets/games/deeper_demo.loom".to_owned(),
+            "assets/games/fishing.loom".to_owned(),
+        ];
 
         for tab in Tab::ALL {
             let panels = PanelState {
                 snap: crate::gizmo::Snap::default(),
                 filter: "",
                 problems: &problems,
+                scenes: &scenes,
+                open_scene: "assets/games/deeper_demo.loom",
                 agent_log: &agent_log,
                 redo_history: &redo,
                 scene: &scene,
@@ -749,6 +755,8 @@ mod tests {
                 snap: crate::gizmo::Snap::default(),
                 filter,
                 problems: &[],
+                scenes: &[],
+                open_scene: "",
                 agent_log: &[],
                 redo_history: &[],
                 scene: &scene,
@@ -799,6 +807,8 @@ mod tests {
             snap: crate::gizmo::Snap::default(),
             filter: "",
             problems: &[],
+            scenes: &[],
+            open_scene: "",
             agent_log: &[],
             redo_history: &[],
             scene: &scene,

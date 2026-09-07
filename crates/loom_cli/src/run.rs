@@ -633,6 +633,12 @@ struct App {
     /// edited eleven nodes while the human read the inspector used to leave
     /// nothing behind to review.
     agent_log: Vec<(crate::scene_view::Change, std::time::Instant)>,
+    /// Scene files beside the open one — ADR 0093.
+    ///
+    /// **Cached, not listed per frame.** A `read_dir` at 144 Hz to draw a row
+    /// of buttons is a filesystem call per frame for a list that changes when
+    /// somebody adds a file.
+    scenes: Vec<String>,
     /// Copied subtrees, one per selected node — ADR 0093.
     ///
     /// **The nodes, not their paths.** A clipboard holding paths would paste
@@ -872,6 +878,7 @@ impl App {
             snap: gizmo::Snap::default(),
             hierarchy_filter: String::new(),
             clipboard: Vec::new(),
+            scenes: Vec::new(),
             problems: Vec::new(),
             agent_log: Vec::new(),
             handles: Vec::new(),
@@ -1079,6 +1086,7 @@ impl App {
         }
         self.view = view;
         self.recompute_problems();
+        self.scenes = self.sibling_scenes();
         // Grass is placed from the scene the same way the meshes are, so a
         // reload has to re-place it or the window keeps showing the old field.
         self.upload_grass();
@@ -1723,6 +1731,7 @@ impl ApplicationHandler for App {
                 // faded entries, so it needs `&mut self`.
                 let marks = self.agent_marks(&projection, now);
 
+
                 let drawn = match self.play.as_ref() {
                     Some(_) => &self.play_objects,
                     None => &self.view.objects,
@@ -1840,6 +1849,8 @@ impl ApplicationHandler for App {
                 let state = PanelState {
                     snap: self.snap,
                     problems: &self.problems,
+                    scenes: &self.scenes,
+                    open_scene: self.scene_path.to_str().unwrap_or_default(),
                     cpu_ms: self.cpu_ms,
                     draw_ms: self.draw_ms,
                     agent_log: &agent_log,
@@ -2405,6 +2416,7 @@ impl App {
             UiAction::AddChild(parent) => self.add_child(&parent),
             UiAction::AddPrefabInstance(key) => self.add_prefab_instance(&key),
             UiAction::CreatePrimitive(shape) => self.create_primitive(&shape),
+            UiAction::OpenScene(path) => self.open_scene(&path),
             UiAction::Copy => self.copy_selection(),
             UiAction::Paste => self.paste_clipboard(),
             UiAction::Duplicate => self.duplicate_selection(),
@@ -3171,6 +3183,66 @@ impl App {
     }
 
 
+
+
+    /// Scene files beside the open one, for the Project panel — ADR 0093.
+    ///
+    /// One directory, not a recursive walk: a project's scenes live together,
+    /// and a walk that found every `.loom` under `assets/` would list 137 files
+    /// of which 130 are test fixtures.
+    fn sibling_scenes(&self) -> Vec<String> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.base) else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "loom")
+                && let Some(text) = path.to_str()
+            {
+                found.push(text.to_owned());
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// Open a different scene — ADR 0093.
+    ///
+    /// **Refused while there are unsaved edits.** The alternative is a
+    /// confirmation dialog, and the alternative to that is losing somebody's
+    /// work to a misclick in a file list. Save, then switch.
+    fn open_scene(&mut self, path: &str) {
+        if self.dirty {
+            crate::log::warn("save first — opening another scene would lose unsaved edits".to_owned());
+            return;
+        }
+        let path = std::path::PathBuf::from(path);
+        let text = match loom_asset::pack::read_text(&path) {
+            Ok(text) => text,
+            Err(e) => {
+                crate::log::error(format!("{}: {e}", path.display()));
+                return;
+            }
+        };
+
+        // Everything keyed to the old file goes at once. A base left pointing
+        // at the previous directory would resolve the new scene's meshes
+        // against the wrong folder and silently substitute boxes.
+        self.base = path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        self.scene_path = path.clone();
+        self.session = Some(loom_scene::edit::Session::from_text(&path, text.clone()));
+        // Play holds a world built from the scene that is going away.
+        self.play = None;
+        self.selected.clear();
+        self.agent_log.clear();
+        self.agent_changes.clear();
+        self.show(&text);
+        crate::log::info(format!("opened {}", path.display()));
+    }
 
     /// Create a node that draws `shape`, under the selection — ADR 0093.
     ///

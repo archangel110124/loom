@@ -47,6 +47,9 @@ pub enum UiAction {
     AddChild(String),
     /// Instance a prefab by its file-local alias, under the selection — ADR 0093.
     AddPrefabInstance(String),
+    /// Open a different scene file — ADR 0093. Refused while there are
+    /// unsaved edits.
+    OpenScene(String),
     /// Create a node that draws something, in one step — ADR 0093.
     ///
     /// The mesh alias, which doubles as the name: `box`, `sphere`, `plane`,
@@ -150,6 +153,10 @@ pub struct PanelState<'a> {
     pub filter: &'a str,
     /// What is wrong with the scene, recomputed when it changes — ADR 0093.
     pub problems: &'a [Problem],
+    /// Scene files found beside this one, for the Project panel — ADR 0093.
+    pub scenes: &'a [String],
+    /// Which of `scenes` is open.
+    pub open_scene: &'a str,
     /// What somebody else changed, newest first, kept after the marks fade.
     pub agent_log: &'a [AgentEdit],
     /// Labels of transactions that were undone and can be redone, newest last.
@@ -764,6 +771,37 @@ pub(crate) fn inspector(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
 /// Unity's Project panel, cut to what this engine has: the assets the scene
 /// actually resolved. Clicking one points the selection at it.
 pub(crate) fn assets(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+    // **Scenes first, because switching between them used to mean restarting.**
+    // A project is more than one file and an editor that can only ever show the
+    // one named on the command line is a viewer.
+    if !state.scenes.is_empty() {
+        ui.heading("Scenes");
+        if state.dirty {
+            ui.weak("save first — opening another scene would lose unsaved edits");
+        }
+        egui::ScrollArea::horizontal().id_salt("scene_list").show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for scene in state.scenes {
+                    let open = scene == state.open_scene;
+                    let name = scene.rsplit('/').next().unwrap_or(scene);
+                    let button = egui::Button::new(if open {
+                        format!("▶ {name}")
+                    } else {
+                        format!("  {name}")
+                    });
+                    if ui
+                        .add_enabled(!open && !state.dirty, button)
+                        .on_hover_text(scene)
+                        .clicked()
+                    {
+                        actions.push(UiAction::OpenScene(scene.clone()));
+                    }
+                }
+            });
+        });
+        ui.separator();
+    }
+
     ui.heading("Assets");
     ui.separator();
     egui::ScrollArea::horizontal().show(ui, |ui| {
