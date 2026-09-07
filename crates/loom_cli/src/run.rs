@@ -3217,7 +3217,16 @@ impl App {
             crate::log::warn("save first — opening another scene would lose unsaved edits".to_owned());
             return;
         }
-        let path = std::path::PathBuf::from(path);
+        // A prefab declares its path relative to the scene that names it, so
+        // "open the prefab" resolves against the current base rather than the
+        // working directory — which is what makes the Prefabs panel's Open
+        // button work from anywhere.
+        let candidate = std::path::Path::new(path);
+        let path = if candidate.is_absolute() || candidate.exists() {
+            candidate.to_path_buf()
+        } else {
+            self.base.join(candidate)
+        };
         let text = match loom_asset::pack::read_text(&path) {
             Ok(text) => text,
             Err(e) => {

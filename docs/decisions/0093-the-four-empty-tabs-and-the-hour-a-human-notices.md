@@ -83,6 +83,12 @@ on scene change rather than listed per frame — a `read_dir` at 144 Hz to draw 
 row of buttons is a filesystem call per frame for a list that changes when
 somebody adds a file.
 
+**Prefab edit mode, which turned out to be free.** A prefab *is* a scene —
+`assets/prefabs/deckhand.loom` validates as one — so editing a prefab is opening
+it, and the Prefabs panel grew an Open button. Its declared `path` is a hint for
+finding the file (§3), resolved against the current scene's directory, which is
+what makes the button work regardless of where the editor was started.
+
 **Select all, and deselect.** Escape empties the selection rather than resetting
 it to the first node: "nothing is selected" is a state a human asks for, because
 it is how you stop the gizmo drawing over the thing you are looking at.
@@ -131,8 +137,6 @@ snapping), the filter predicate, and the undo/redo label round trip.
 
 `docs/design/EDITOR-SCOPE.md` §2 has the full ranked list. The notable ones:
 
-- **Prefab edit mode** — opening a prefab as its own document rather than
-  editing one instance's overrides.
 - **A stats readout.** `run.rs` already prints `cpu N ms/frame`; nothing
   surfaces it in the UI.
 - **Viewport view modes** — wireframe, unlit, normals, overdraw. The renderer's

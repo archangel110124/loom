@@ -921,6 +921,21 @@ pub(crate) fn prefabs(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut V
                 {
                     actions.push(UiAction::AddPrefabInstance(decl.key.clone()));
                 }
+                // **A prefab is a scene**, so editing one is opening it — which
+                // is prefab edit mode in the only form this format needs. The
+                // path is a hint for finding the file (§3), and finding the
+                // file is exactly what this does with it.
+                if ui
+                    .add_enabled(!state.dirty, egui::Button::new("Open"))
+                    .on_hover_text(if state.dirty {
+                        "save first"
+                    } else {
+                        "edit the prefab itself, not this instance"
+                    })
+                    .clicked()
+                {
+                    actions.push(UiAction::OpenScene(decl.path.clone()));
+                }
                 for path in instances.iter().take(6) {
                     let name = path.rsplit('/').next().unwrap_or(path);
                     if ui.small_button(name).on_hover_text(*path).clicked() {

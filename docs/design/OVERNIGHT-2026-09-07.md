@@ -83,8 +83,6 @@ None is hard to reverse.
 
 `docs/design/EDITOR-SCOPE.md` has the full ranked list. Top of it:
 
-- **Prefab edit mode** — opening a prefab as its own document rather than
-  editing an instance's overrides.
 - **Viewport view modes** — wireframe, unlit, normals, overdraw. I deliberately
   did not start this: it needs shader work plus the four-site ablation registry,
   and I did not want to land render-path changes unreviewed overnight.
