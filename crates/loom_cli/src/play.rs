@@ -1955,6 +1955,9 @@ impl Sim {
         world: &mut World,
         tick: u64,
         input: loom_script::Motion,
+        // What each other character is being asked to do — ADR 0091. Empty
+        // in a single-player game.
+        driven: &std::collections::BTreeMap<usize, loom_script::Motion>,
         mut velocity_for: impl FnMut(
             loom_ecs::Entity,
             &loom_script::Motion,
@@ -1977,18 +1980,19 @@ impl Sim {
 
         for (index, walker) in self.characters.iter_mut().enumerate() {
             let target = if Some(index) == player_index { None } else { player };
-            // State from the controller, input from whoever is driving.
-            // Every character gets the same input for now: "which character
-            // the human is possessing" is a game-state question, and there is
-            // exactly one character in a scene until there is a reason for
-            // more.
+            // State from the controller, input from whoever is driving this
+            // one. **Co-op is the reason this is a lookup** — see ADR 0091.
+            // A character nobody is driving gets `input`, which is what a
+            // single-player scene has always done and is all-zero for a
+            // character no human is possessing.
+            let asked = driven.get(&index).unwrap_or(&input);
             let motion = loom_script::Motion {
                 tick,
                 dt: TICK_SECONDS,
                 position: walker.character.position(),
                 velocity: walker.velocity,
                 grounded: walker.grounded,
-                ..input.clone()
+                ..asked.clone()
             };
 
             // Where this character is looking, resolved here because a script
@@ -2636,6 +2640,15 @@ pub struct Runner {
     /// pressing keys for `loom sim`, and a scene must simulate the same way
     /// whether or not a window is open.
     pub input: loom_script::Motion,
+    /// What each *other* character is being asked to do, by character index —
+    /// ADR 0091.
+    ///
+    /// **Empty in a single-player game**, which is why `input` is still the
+    /// field everything else writes: one human driving one character needs no
+    /// map. Co-op is the reason there is now more than one driver, and lockstep
+    /// is what makes it safe — every peer fills this with the same intents on
+    /// the same tick, so every machine drives every character identically.
+    pub driven: std::collections::BTreeMap<usize, loom_script::Motion>,
 }
 
 impl Runner {
@@ -2783,6 +2796,7 @@ impl Runner {
             pending_blasts,
             events: loom_script::EventLog::default(),
             input: loom_script::Motion::default(),
+            driven: std::collections::BTreeMap::new(),
         })
     }
 
@@ -2985,6 +2999,7 @@ impl Runner {
             pending_blasts: Vec::new(),
             events: loom_script::EventLog::default(),
             input: loom_script::Motion::default(),
+            driven: std::collections::BTreeMap::new(),
         }
     }
 
@@ -3038,9 +3053,10 @@ impl Runner {
             let host = &self.host;
             let scripts = &self.character_scripts;
             let input = self.input.clone();
+            let driven = self.driven.clone();
             let (detonations, raised) =
                 self.physics
-                    .drive_characters(world, tick, input, |entity, motion, memory| {
+                    .drive_characters(world, tick, input, &driven, |entity, motion, memory| {
                         match scripts.get(&entity) {
                             Some(script) => host.motion(script, motion, memory),
                             // No script, so no movement model — it falls and
@@ -4460,6 +4476,133 @@ transform = { pos = [0.0, 4.0, 0.0], rot_euler = [0.0, 0.0, 45.0], scale = [0.7,
     /// a comment because an assertion that cannot fail is decoration. The
     /// threshold sits at 14 — well clear of both numbers — so a real slowdown
     /// fails it and float noise does not.
+    /// **The claim networking actually makes.** ADR 0091: two machines that
+    /// step the same scene with the same inputs have the same world, so the
+    /// wire carries intents and never state.
+    ///
+    /// This is that sentence as a test. Two real `Session`s over a real socket,
+    /// two independent `Runner`s, different intents from each peer, and the
+    /// only thing tying them together is the exchange. If the worlds ever
+    /// disagree, lockstep is not a design this engine can use — so nothing
+    /// about it is worth trusting until this passes.
+    #[test]
+    fn two_lockstep_peers_simulate_the_same_world() {
+        use loom_net::{Intent, Session};
+
+        let mut host = Session::host("127.0.0.1:0").expect("bind");
+        let address = host.address().expect("address");
+        let mut client = Session::join(address).expect("connect");
+        for _ in 0..200 {
+            host.poll(0);
+            client.poll(0);
+            if client.me() != u8::MAX && host.roster().len() == 2 && client.roster().len() == 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(host.roster().len(), 2, "both peers are on the roster");
+
+        let source =
+            std::fs::read_to_string("../../assets/games/proving_ground.loom").expect("fixture");
+        let base = std::path::Path::new("../../assets/games");
+        let mut seen = std::collections::BTreeSet::new();
+        let mut peers = Vec::new();
+        for _ in 0..2 {
+            let world = World::from_scene(&Scene::parse(&source).expect("valid scene"));
+            let runner = Runner::new(&world, base).expect("scripts load");
+            peers.push((world, runner));
+        }
+
+        // Two humans doing different things, changing over time — a constant
+        // input would pass even if the intents were being dropped.
+        let intent = |peer: u8, tick: u64| {
+            let phase = (tick as f32) * 0.05 + f32::from(peer);
+            Intent {
+                move_axis: [phase.sin(), phase.cos()],
+                forward: [0.0, 0.0, 1.0],
+                right: [1.0, 0.0, 0.0],
+                aim: [0.0, 0.0, 1.0],
+                buttons: 0,
+            }
+            .with_buttons(tick % 37 == u64::from(peer), false, tick.is_multiple_of(53), false)
+        };
+
+        for tick in 0..(loom_net::INPUT_DELAY + 120) {
+            host.send_intent(tick, intent(0, tick));
+            client.send_intent(tick, intent(1, tick));
+
+            if tick < loom_net::INPUT_DELAY {
+                continue;
+            }
+
+            // Wait for the tick to be complete on both machines. A missing
+            // input is a wait, not a skip.
+            let mut ready = None;
+            for _ in 0..500 {
+                host.poll(tick);
+                client.poll(tick);
+                if let (Some(a), Some(b)) = (host.ready(tick), client.ready(tick)) {
+                    assert_eq!(a, b, "both machines see the same inputs at {tick}");
+                    ready = Some(a);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let inputs = ready.unwrap_or_else(|| panic!("tick {tick} never completed"));
+
+            let mut hashes = Vec::new();
+            for (world, runner) in &mut peers {
+                runner.driven.clear();
+                for (peer, asked) in &inputs {
+                    let motion = loom_script::Motion {
+                        move_axis: asked.move_axis,
+                        forward: asked.forward,
+                        right: asked.right,
+                        aim: asked.aim,
+                        jump: asked.jump(),
+                        sprint: asked.sprint(),
+                        fire: asked.fire(),
+                        interact: asked.interact(),
+                        ..loom_script::Motion::default()
+                    };
+                    if *peer == 0 {
+                        runner.input = motion.clone();
+                    }
+                    runner.driven.insert(usize::from(*peer), motion);
+                }
+                runner.tick(world, tick).expect("tick");
+                hashes.push(world.state_hash());
+            }
+
+            assert_eq!(
+                hashes[0], hashes[1],
+                "the two peers disagree about the world at tick {tick}"
+            );
+            seen.insert(hashes[0]);
+            host.report(tick, hashes[0]);
+            client.report(tick, hashes[1]);
+        }
+
+        // **Two worlds that never moved agree trivially.** Without this the
+        // test would pass on a scene with no characters, a runner that failed
+        // to load, or a loop that never ran — which is the shape of a check
+        // that proves nothing.
+        assert!(
+            seen.len() > 100,
+            "the world should be changing every tick; saw {} distinct states",
+            seen.len()
+        );
+
+        // And the sessions agree too, which is the check a real game ships with.
+        let desyncs: Vec<_> = host
+            .drain()
+            .into_iter()
+            .chain(client.drain())
+            .filter(|e| matches!(e, loom_net::Event::Desync { .. }))
+            .collect();
+        assert!(desyncs.is_empty(), "hash exchange reported a desync: {desyncs:?}");
+    }
+
     #[test]
     fn a_crate_dropped_in_a_river_ends_up_downstream() {
         let source = std::fs::read_to_string("../../assets/test/river.loom").expect("fixture");
