@@ -621,6 +621,8 @@ struct App {
     /// Increment snapping for the gizmo — ADR 0093. Off by default; Ctrl
     /// inverts whatever it is set to.
     snap: gizmo::Snap,
+    /// What the viewport draws — ADR 0097.
+    view_mode: loom_render::ablate::ViewMode,
     /// What the hierarchy is filtered to — ADR 0093. UI state, so it lives
     /// here rather than in the scene.
     hierarchy_filter: String,
@@ -876,6 +878,7 @@ impl App {
             play: None,
             mode: Mode::Move,
             snap: gizmo::Snap::default(),
+            view_mode: loom_render::ablate::ViewMode::default(),
             hierarchy_filter: String::new(),
             clipboard: Vec::new(),
             scenes: Vec::new(),
@@ -1848,6 +1851,7 @@ impl ApplicationHandler for App {
                     .collect();
                 let state = PanelState {
                     snap: self.snap,
+                    view_mode: self.view_mode,
                     problems: &self.problems,
                     scenes: &self.scenes,
                     open_scene: self.scene_path.to_str().unwrap_or_default(),
@@ -2404,6 +2408,12 @@ impl App {
             }
             UiAction::SetMode(mode) => self.mode = mode,
             UiAction::SetFilter(text) => self.hierarchy_filter = text,
+            UiAction::SetViewMode(mode) => {
+                self.view_mode = mode;
+                if let Some(viewer) = self.viewer.as_mut() {
+                    viewer.set_view_mode(mode);
+                }
+            }
             UiAction::SetSnap(on) => self.snap.enabled = on,
             UiAction::SetSnapStep(mode, step) => match mode {
                 Mode::Move => self.snap.translate = step,

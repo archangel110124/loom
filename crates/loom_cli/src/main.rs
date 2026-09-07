@@ -253,7 +253,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
             ("--out", true), ("--size", true), ("--sim", true), ("--yaw", true),
             ("--pitch", true), ("--frames", true), ("--spin", true), ("--step", true),
             ("--dolly", true), ("--viewport", true), ("--hold", true),
-            ("--dread", true),
+            ("--dread", true), ("--view", true),
         ],
     ),
     (
@@ -708,7 +708,37 @@ fn describe(name: &str) -> (u8, String) {
 ///
 /// Brief §7.1: this is the agent's eyes, and it runs the *same* path a windowed
 /// renderer would — there is no separate preview renderer to drift.
+/// A `--view` name, or `Shaded` when none was asked for — ADR 0097.
+fn view_mode_arg(args: &[String]) -> Result<loom_render::ablate::ViewMode, String> {
+    let Some(name) = flag(args, "--view") else {
+        return Ok(loom_render::ablate::ViewMode::default());
+    };
+    loom_render::ablate::ViewMode::ALL
+        .into_iter()
+        .find(|mode| mode.label().eq_ignore_ascii_case(&name))
+        .ok_or_else(|| {
+            let names: Vec<&str> = loom_render::ablate::ViewMode::ALL
+                .iter()
+                .map(|m| m.label())
+                .collect();
+            format!("one of: {}", names.join(", "))
+        })
+}
+
 fn render(path: &str, args: &[String]) -> (u8, String) {
+    let view_mode = match view_mode_arg(args) {
+        Ok(mode) => mode,
+        Err(constraint) => {
+            return (
+                2,
+                json_line(&serde_json::json!({
+                    "error": "unknown_flag_value",
+                    "value": flag(args, "--view").unwrap_or_default(),
+                    "constraint": constraint,
+                })),
+            );
+        }
+    };
     let out = flag(args, "--out").unwrap_or_else(|| "render.png".to_owned());
     let (width, height) = match flag(args, "--size") {
         Some(spec) => match parse_size(&spec) {
@@ -1076,6 +1106,10 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         renderer.environment = environment;
         renderer.grade = grade;
         renderer.set_placement(viewport);
+        // **A debug view is reachable headlessly** — ADR 0097. Otherwise the
+        // only way to see one is to open the editor and click, which is not a
+        // thing a gate row or an agent can do.
+        renderer.set_view_mode(view_mode);
         // Placement is a pure function of position, so the blades go up once
         // and the vertex shader re-expands and re-bends them every frame.
         let blades = grass_blades(&scene);

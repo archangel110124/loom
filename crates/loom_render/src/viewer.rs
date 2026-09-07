@@ -29,6 +29,8 @@ const INITIAL_OBJECTS: usize = 4096;
 /// A window's swapchain and everything needed to draw into it.
 pub struct Viewer {
     device: ash::Device,
+    /// What the viewport draws — ADR 0097. Packed beside the ablation bits.
+    view_mode: crate::ablate::ViewMode,
     /// Where in the swapchain the scene is drawn. `None` fills the window.
     ///
     /// Only consulted when [`Self::dock_viewport`] is false; in the editor the
@@ -761,6 +763,7 @@ impl Viewer {
         }
 
         Ok(Self {
+            view_mode: crate::ablate::ViewMode::default(),
             placement: None,
             last_placement: None,
             dock_viewport: false,
@@ -1015,6 +1018,11 @@ impl Viewer {
     /// has touched. The window has to make the same call the headless path does
     /// or the two disagree about where the water is — and the disagreement is
     /// silent, because a wake the surface does not draw is still felt by the
+    /// Choose what the viewport draws — ADR 0097.
+    pub fn set_view_mode(&mut self, mode: crate::ablate::ViewMode) {
+        self.view_mode = mode;
+    }
+
     /// buoyancy solver.
     ///
     /// # Errors
@@ -1741,7 +1749,7 @@ impl Viewer {
                 self.extent.width as f32,
                 self.extent.height as f32,
                 crate::renderer::ao_rays(),
-                crate::ablate::ablation_mask(),
+                crate::ablate::ablation_mask() + self.view_mode.bits() as f32,
             ];
         }
         // Stamped rather than assigned by the caller, exactly as in

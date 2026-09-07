@@ -701,6 +701,7 @@ mod tests {
             let panels = PanelState {
                 snap: crate::gizmo::Snap::default(),
                 filter: "",
+                view_mode: loom_render::ablate::ViewMode::default(),
                 problems: &problems,
                 scenes: &scenes,
                 open_scene: "assets/games/deeper_demo.loom",
@@ -752,6 +753,7 @@ mod tests {
         let paths = ["Root".to_owned(), "Root/Boat".to_owned()];
         for filter in ["", "boat", "nothing-matches-this"] {
             let panels = PanelState {
+                view_mode: loom_render::ablate::ViewMode::default(),
                 snap: crate::gizmo::Snap::default(),
                 filter,
                 problems: &[],
@@ -806,6 +808,7 @@ mod tests {
         let panels = PanelState {
             snap: crate::gizmo::Snap::default(),
             filter: "",
+            view_mode: loom_render::ablate::ViewMode::default(),
             problems: &[],
             scenes: &[],
             open_scene: "",

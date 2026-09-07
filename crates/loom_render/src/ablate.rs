@@ -201,6 +201,52 @@ pub fn mask() -> u32 {
 }
 
 /// The same mask as [`mask`], carried to the shader in `viewport.w`.
+/// How a debug view mode is packed beside the ablation bits — ADR 0097.
+///
+/// **Bits 12-15, not somewhere roomier.** The mask travels to the shader as an
+/// `f32`, which holds integers exactly only to 2^24; at this shift the largest
+/// value the word can carry is 61,696, well inside that. Bits 0-8 are
+/// [`ABLATIONS`].
+pub const VIEW_SHIFT: u32 = 12;
+
+/// What the viewport draws — ADR 0097.
+///
+/// Debug views, applied in the fragment shader after everything else, so there
+/// is no second pipeline and no shader variant to keep in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    /// Lit and textured — what the game looks like.
+    #[default]
+    Shaded,
+    /// Albedo with no lighting on it.
+    Unlit,
+    /// World normal as colour: a face pointing +X reads red, a flipped one cyan.
+    Normals,
+    /// Untextured grey lambert — the blockout view.
+    Plain,
+}
+
+impl ViewMode {
+    /// Every mode, for a menu.
+    pub const ALL: [Self; 4] = [Self::Shaded, Self::Unlit, Self::Normals, Self::Plain];
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Shaded => "Shaded",
+            Self::Unlit => "Unlit",
+            Self::Normals => "Normals",
+            Self::Plain => "Plain",
+        }
+    }
+
+    /// Its bits, already shifted into place.
+    #[must_use]
+    pub fn bits(self) -> u32 {
+        (self as u32) << VIEW_SHIFT
+    }
+}
+
 pub(crate) fn ablation_mask() -> f32 {
     #[allow(clippy::cast_precision_loss)]
     let carried = mask() as f32;

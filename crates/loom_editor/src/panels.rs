@@ -38,6 +38,8 @@ pub enum UiAction {
     SetMode(Mode),
     /// Narrow the hierarchy to nodes matching this text — ADR 0093.
     SetFilter(String),
+    /// Choose what the viewport draws — ADR 0097.
+    SetViewMode(loom_render::ablate::ViewMode),
     /// Turn increment snapping on or off — ADR 0093.
     SetSnap(bool),
     /// Change the increment for the mode currently selected.
@@ -151,6 +153,8 @@ pub struct PanelState<'a> {
     pub snap: crate::gizmo::Snap,
     /// What the hierarchy is filtered to. Empty shows everything.
     pub filter: &'a str,
+    /// What the viewport is drawing — ADR 0097.
+    pub view_mode: loom_render::ablate::ViewMode,
     /// What is wrong with the scene, recomputed when it changes — ADR 0093.
     pub problems: &'a [Problem],
     /// Scene files found beside this one, for the Project panel — ADR 0093.
@@ -300,6 +304,23 @@ pub(crate) fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
             {
                 actions.push(UiAction::SetSnapStep(state.mode, step));
             }
+
+            ui.separator();
+
+            // **A debug view is a question about the geometry**, so it sits
+            // beside the tools that move it rather than in a menu.
+            egui::ComboBox::from_id_salt("view_mode")
+                .selected_text(state.view_mode.label())
+                .show_ui(ui, |ui| {
+                    for mode in loom_render::ablate::ViewMode::ALL {
+                        if ui
+                            .selectable_label(state.view_mode == mode, mode.label())
+                            .clicked()
+                        {
+                            actions.push(UiAction::SetViewMode(mode));
+                        }
+                    }
+                });
 
             ui.separator();
             if ui

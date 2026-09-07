@@ -2392,6 +2392,22 @@ test -n "$walked"
 test "$walked" = "$whole"
 rm -rf /tmp/loom-reach-check
 
+# **A debug view that silently stopped being applied would look like a working
+# editor.** ADR 0097. The mode is a uint packed into the same float word as the
+# ablation bits and unpacked in the fragment shader — three places to get a
+# shift wrong, and the failure is a viewport that just keeps drawing shaded.
+#
+# So: render the same scene twice and require the pictures to DIFFER. The image
+# gate covers the other direction, that Shaded still looks like itself.
+"$LOOM" render assets/test/tower.loom --sim 30 --view Shaded --out /tmp/loom-view-shaded.png > /dev/null
+"$LOOM" render assets/test/tower.loom --sim 30 --view Normals --out /tmp/loom-view-normals.png > /dev/null
+# **`|| true` because differing is the pass here.** `loom compare` exits
+# nonzero when the pictures differ, which is exactly what this row wants, and
+# `pipefail` would otherwise fail the pipeline on the success case.
+{ "$LOOM" compare /tmp/loom-view-shaded.png /tmp/loom-view-normals.png || true; } \
+  | contains '"ok": false'
+rm -f /tmp/loom-view-shaded.png /tmp/loom-view-normals.png
+
 # **And the creel's interactive half, which the run above cannot reach.** That
 # tape holds W and never presses TAB, so it covers the auto-place and the
 # packer's self-check and none of the verbs. This one opens the grid, walks the

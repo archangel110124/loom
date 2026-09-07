@@ -1184,6 +1184,9 @@ pub struct Renderer {
     device: ash::Device,
     queue: vk::Queue,
     allocator: Option<Allocator>,
+    /// What the viewport draws — ADR 0097. Shaded unless a human asked
+    /// otherwise; it rides to the shader packed beside the ablation bits.
+    view_mode: crate::ablate::ViewMode,
 
     /// Where in the target the scene lands. `None` fills it, which is
     /// byte-identical to the behaviour before placements existed — and that
@@ -2018,6 +2021,7 @@ impl Renderer {
         };
 
         Ok(Self {
+            view_mode: crate::ablate::ViewMode::default(),
             placement: None,
             timers,
             print_timing,
@@ -2270,6 +2274,11 @@ impl Renderer {
     ///
     /// # Errors
     /// If the buffer is gone, which means the renderer is being torn down.
+    /// Choose what the viewport draws — ADR 0097.
+    pub fn set_view_mode(&mut self, mode: crate::ablate::ViewMode) {
+        self.view_mode = mode;
+    }
+
     pub fn set_wavelets(&mut self, events: &[[f32; WAVELET_FLOATS]]) -> Result<(), RenderError> {
         // Truncated rather than refused: the CPU ring is the same size, so a
         // longer slice is a mismatch between two copies of one constant and the
@@ -2650,8 +2659,14 @@ impl Renderer {
         self.environment.eye_step = self.eye_tracker.step(camera.eye, self.rain_tick);
         #[allow(clippy::cast_precision_loss)]
         {
-            self.environment.viewport =
-                [self.width as f32, self.height as f32, ao_rays(), crate::ablate::ablation_mask()];
+            // The ablation bits and the debug view mode share one word — see
+            // `ablate::VIEW_SHIFT` for why the mode sits at bit 12.
+            self.environment.viewport = [
+                self.width as f32,
+                self.height as f32,
+                ao_rays(),
+                crate::ablate::ablation_mask() + self.view_mode.bits() as f32,
+            ];
         }
         // **Stamped here for the same reason the eye is.** `environment` is a
         // public field callers assign wholesale every frame, and the terrain

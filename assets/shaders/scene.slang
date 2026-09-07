@@ -4029,7 +4029,9 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     if (in.material != NO_TEXTURE) {
         opacity = push.materials[in.material].misc.x;
     }
-    return float4(lit, opacity);
+    // **Last, after fog and everything else.** A debug view that still had the
+    // fog on it would be answering a different question from the one asked.
+    return float4(applyViewMode(lit, albedo, normal), opacity);
 }
 
 // ---------------------------------------------------------------------------
@@ -7450,6 +7452,57 @@ static const uint LOOM_ABLATE_LAMP_SHADOW = 256u;
 
 bool ablated(uint bit) {
     return (uint(push.environment[0].viewport.w) & bit) != 0u;
+}
+
+// ---------------------------------------------------------------------------
+// Debug view modes — ADR 0097.
+//
+// **Packed into the same word as the ablation bits, above bit 8.** That word
+// travels as a float, and an f32 holds integers exactly only to 2^24, so the
+// mode lives at bits 12-15 rather than somewhere roomier: the largest value
+// this can carry is 256 + (15 << 12) = 61,696, which is exact.
+// ---------------------------------------------------------------------------
+static const uint LOOM_VIEW_SHIFT = 12u;
+/// Lit, textured — what the game looks like.
+static const uint LOOM_VIEW_SHADED = 0u;
+/// Albedo with no lighting, for reading a texture without the sun on it.
+static const uint LOOM_VIEW_UNLIT = 1u;
+/// World normal as colour, for finding a flipped or unsmoothed face.
+static const uint LOOM_VIEW_NORMALS = 2u;
+/// Untextured grey lambert — the blockout view, where form is the only thing
+/// left to look at.
+static const uint LOOM_VIEW_PLAIN = 3u;
+
+uint viewMode() {
+    return (uint(push.environment[0].viewport.w) >> LOOM_VIEW_SHIFT) & 0xFu;
+}
+
+/// Replace a shaded colour with whatever the current view mode asks for.
+///
+/// One function so every pipeline that adopts a view mode answers identically,
+/// rather than each growing its own slightly different idea of "normals".
+float3 applyViewMode(float3 lit, float3 albedo, float3 normal) {
+    uint mode = viewMode();
+    if (mode == LOOM_VIEW_UNLIT) {
+        return albedo;
+    }
+    if (mode == LOOM_VIEW_NORMALS) {
+        // -1..1 into 0..1, the convention every DCC uses, so a face pointing
+        // +X reads red and a flipped one reads cyan.
+        return normal * 0.5 + 0.5;
+    }
+    if (mode == LOOM_VIEW_PLAIN) {
+        // **Hemisphere plus sun, not sun alone.** A pure lambert puts every
+        // face turned away from the sun at the floor value, and a hull in
+        // shadow reads as a silhouette — which is the one thing a blockout view
+        // must not do, since form is all it has left to show. The sky term
+        // brightens upward-facing surfaces so a deck, a wall and a soffit stay
+        // three different greys whichever way the sun happens to point.
+        float ndotl = max(dot(normal, sunDirection()), 0.0);
+        float sky = 0.5 + 0.5 * normal.y;
+        return float3(0.80, 0.80, 0.82) * (0.34 + 0.34 * sky + 0.32 * ndotl);
+    }
+    return lit;
 }
 
 // ---------------------------------------------------------------------------
