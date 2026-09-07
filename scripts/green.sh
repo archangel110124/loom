@@ -2316,6 +2316,37 @@ cmp /tmp/loom-demo-1.json /tmp/loom-demo-2.json
 cmp /tmp/loom-demo-2.json /tmp/loom-demo-3.json
 rm -f /tmp/loom-demo-1.json /tmp/loom-demo-2.json /tmp/loom-demo-3.json
 
+# **A save is only a save if the game continues the same way.** ADR 0088. The
+# instant is the easy half: restoring the transforms made `state_hash` match at
+# the tick of the load while the run diverged immediately after, which is the
+# shape every miss in this feature took. So this compares the *whole state* 600
+# ticks past the load — a straight 1000-tick run against a 400-tick save resumed
+# for 600 — byte for byte.
+#
+# Four things were a tick behind and invisible to a same-instant check: the sim's
+# own tick counter (the ocean is a function of it, so a load put the boat on the
+# wave phase of `t = 0`), the live helm thrust the step applies one tick after
+# the script writes it, a kinematic body's pending target, and the character
+# controller's position, which the body follows rather than owns.
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 400 --hold move_z=1 --save /tmp/loom-save-400.json > /dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 1000 --hold move_z=1 --save /tmp/loom-straight.json > /dev/null
+"$LOOM" sim assets/games/deeper_demo.loom --ticks 600 --hold move_z=1 \
+    --load /tmp/loom-save-400.json --save /tmp/loom-resumed.json > /dev/null
+cmp /tmp/loom-straight.json /tmp/loom-resumed.json
+
+# **And a game that was already over when it was saved.** `proving_ground` ends
+# at tick 278, so this loads a finished game. It caught the loop checking
+# `is_over` *after* the tick rather than before: a load of an ended game
+# simulated one tick past its own ending and reported a state the run it
+# continued had never been in.
+"$LOOM" sim assets/games/proving_ground.loom --ticks 400 --hold move_z=1 --save /tmp/loom-over-400.json > /dev/null
+"$LOOM" sim assets/games/proving_ground.loom --ticks 700 --hold move_z=1 --save /tmp/loom-over-straight.json > /dev/null
+"$LOOM" sim assets/games/proving_ground.loom --ticks 300 --hold move_z=1 \
+    --load /tmp/loom-over-400.json --save /tmp/loom-over-resumed.json > /dev/null
+cmp /tmp/loom-over-straight.json /tmp/loom-over-resumed.json
+rm -f /tmp/loom-save-400.json /tmp/loom-straight.json /tmp/loom-resumed.json \
+    /tmp/loom-over-400.json /tmp/loom-over-straight.json /tmp/loom-over-resumed.json
+
 # **And the creel's interactive half, which the run above cannot reach.** That
 # tape holds W and never presses TAB, so it covers the auto-place and the
 # packer's self-check and none of the verbs. This one opens the grid, walks the

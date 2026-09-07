@@ -1553,6 +1553,7 @@ dependencies = [
  "loom_scene",
  "rhai",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

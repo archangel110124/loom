@@ -2249,6 +2249,236 @@ impl Sim {
     pub fn state_hash(&self) -> u64 {
         self.physics.state_hash()
     }
+
+    /// Everything the simulation carries that a save has to keep — ADR 0088.
+    ///
+    /// **Keyed by node path, not by handle.** A `RigidBodyHandle` is an index
+    /// into a set built at load, so it is stable within one run and meaningless
+    /// across two. A path is what the scene calls the thing, which is the only
+    /// name a save and a fresh load can both resolve.
+    #[must_use]
+    pub fn save_state(&self, world: &loom_ecs::World) -> serde_json::Value {
+        let mut bodies = serde_json::Map::new();
+        for (entity, handle) in &self.dynamic {
+            let (Some(path), Some(state)) =
+                (world.path(*entity), self.physics.body_state(*handle))
+            else {
+                continue;
+            };
+            bodies.insert(path.to_owned(), serde_json::json!(state));
+        }
+        let mut memories = serde_json::Map::new();
+        for walker in &self.characters {
+            let Some(path) = world.path(walker.entity) else {
+                continue;
+            };
+            // **A character is not in `dynamic` and has a body all the same.**
+            // Saving only `dynamic` left every walker — including the player —
+            // wherever the scene spawns them, which the state hash caught
+            // immediately: 4d7dfc1d against ffc7c7d0 on a `deeper_demo` save
+            // that looked complete.
+            let body_pose = self.physics.body_state(walker.character.body()).map_or(
+                serde_json::Value::Null,
+                |state| serde_json::json!({ "position": state.position, "rotation": state.rotation }),
+            );
+            memories.insert(
+                path.to_owned(),
+                serde_json::json!({
+                    "memory": walker.memory.to_json(),
+                    // **Pose only: a kinematic body's velocity is derived, not
+                    // owned.** rapier recomputes it each step from the pending
+                    // target and ignores anything written to it, so keeping it
+                    // here would put a number in the file that loading cannot
+                    // reproduce — and it did: a game saved after it had ended
+                    // never steps again, so the reloaded velocities stayed zero
+                    // while the run they continued still held its last values.
+                    "body": body_pose,
+                    "velocity": walker.velocity,
+                    "grounded": walker.grounded,
+                    "char_pos": walker.character.position(),
+                    "char_grounded": walker.character.is_grounded(),
+                    "goal": walker.goal,
+                    "route": walker.route,
+                }),
+            );
+        }
+        let (packed, shed_tick) = self.wavelets.snapshot();
+        serde_json::json!({
+            // **The sim's own tick, which is not the caller's.** Water is a
+            // function of position and `self.tick * TICK_SECONDS`, and this
+            // counter only ever counted up from zero — so a loaded game put its
+            // boat on the wave phase of `t = 0` while the run it continued was
+            // ten seconds into the swell. The boat lost 0.29 m/s in the first
+            // tick after an otherwise exact load.
+            "tick": self.tick,
+            // **Live thrust, which is a tick behind by design.** The step runs
+            // before the scripts that steer, so every step applies the helm
+            // vector the *previous* tick wrote. A load that started from the
+            // authored `Propulsion` dropped one tick of the propeller: 934 kN
+            // on a 57 t hull, which came out as the boat being 0.27 m/s slow
+            // one tick after an otherwise exact load.
+            "propelled": self
+                .propelled
+                .iter()
+                .filter_map(|(body, force, torque)| {
+                    let entity = self.dynamic.iter().find(|(_, h)| h == body)?.0;
+                    Some((world.path(entity)?.to_owned(), serde_json::json!([force, torque])))
+                })
+                .collect::<serde_json::Map<_, _>>(),
+            "bodies": bodies,
+            "characters": memories,
+            "wavelets": { "events": packed, "sigma": self.wavelets.snapshot_sigma(), "shed": shed_tick },
+            "floating": self
+                .floating
+                .iter()
+                .map(|f| (f.path.clone(), serde_json::json!([f.fraction, f.submerged])))
+                .collect::<serde_json::Map<_, _>>(),
+        })
+    }
+
+    /// Put the simulation back where a save says it was.
+    ///
+    /// **A body the save does not name is left alone rather than reset.** A
+    /// save written before a scene gained a crate should load into that scene
+    /// with the crate where the scene puts it, not teleported to the origin —
+    /// and a name the scene no longer has is skipped rather than being an
+    /// error, because a scene may legitimately have lost a node since.
+    pub fn restore_state(&mut self, world: &loom_ecs::World, value: &serde_json::Value) {
+        if let Some(tick) = value.get("tick").and_then(serde_json::Value::as_u64) {
+            self.tick = tick;
+        }
+        if let Some(saved) = value.get("propelled").and_then(serde_json::Value::as_object) {
+            for (entity, body) in self.dynamic.clone() {
+                let Some(pair) = world
+                    .path(entity)
+                    .and_then(|path| saved.get(path))
+                    .and_then(serde_json::Value::as_array)
+                else {
+                    continue;
+                };
+                let vec3 = |i: usize| {
+                    pair.get(i)
+                        .and_then(|v| serde_json::from_value::<[f32; 3]>(v.clone()).ok())
+                        .unwrap_or([0.0; 3])
+                };
+                Self::set_thrust(
+                    &mut self.propelled,
+                    body,
+                    loom_script::Helm { force: vec3(0), torque: vec3(1) },
+                );
+            }
+        }
+        if let Some(w) = value.get("wavelets") {
+            let packed = w
+                .get("events")
+                .and_then(|v| serde_json::from_value::<Vec<[f32; 4]>>(v.clone()).ok())
+                .unwrap_or_default();
+            let sigma = w
+                .get("sigma")
+                .and_then(|v| serde_json::from_value::<Vec<f32>>(v.clone()).ok())
+                .unwrap_or_default();
+            let shed = w.get("shed").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            self.wavelets.restore(&packed, &sigma, u32::try_from(shed).unwrap_or(0));
+        }
+        if let Some(saved) = value.get("floating").and_then(serde_json::Value::as_object) {
+            for floating in &mut self.floating {
+                let Some(pair) = saved.get(&floating.path).and_then(serde_json::Value::as_array)
+                else {
+                    continue;
+                };
+                if let Some(f) = pair.first().and_then(serde_json::Value::as_f64) {
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        floating.fraction = f as f32;
+                    }
+                }
+                if let Some(s) = pair.get(1).and_then(serde_json::Value::as_bool) {
+                    floating.submerged = s;
+                }
+            }
+        }
+        if let Some(bodies) = value.get("bodies").and_then(serde_json::Value::as_object) {
+            for (entity, handle) in &self.dynamic {
+                let Some(path) = world.path(*entity) else {
+                    continue;
+                };
+                let Some(state) = bodies
+                    .get(path)
+                    .and_then(|v| serde_json::from_value::<loom_physics::BodyState>(v.clone()).ok())
+                else {
+                    continue;
+                };
+                self.physics.set_body_state(*handle, &state);
+            }
+        }
+        if let Some(memories) = value
+            .get("characters")
+            .and_then(serde_json::Value::as_object)
+        {
+            for walker in &mut self.characters {
+                let Some(path) = world.path(walker.entity) else {
+                    continue;
+                };
+                let Some(saved) = memories.get(path) else {
+                    continue;
+                };
+                if let Some(memory) = saved.get("memory") {
+                    walker.memory.restore(memory);
+                }
+                if let Some(body) = saved.get("body") {
+                    let pose = |key: &str| {
+                        body.get(key)
+                            .and_then(|v| serde_json::from_value::<Vec<f32>>(v.clone()).ok())
+                    };
+                    if let (Some(position), Some(rotation)) = (pose("position"), pose("rotation")) {
+                        let state = loom_physics::BodyState {
+                            position: [position[0], position[1], position[2]],
+                            rotation: [rotation[0], rotation[1], rotation[2], rotation[3]],
+                            linear: [0.0; 3],
+                            angular: [0.0; 3],
+                        };
+                        self.physics.set_body_state(walker.character.body(), &state);
+                    }
+                }
+                if let Some(v) = saved
+                    .get("velocity")
+                    .and_then(|v| serde_json::from_value::<[f32; 3]>(v.clone()).ok())
+                {
+                    walker.velocity = v;
+                }
+                if let Some(g) = saved.get("grounded").and_then(serde_json::Value::as_bool) {
+                    walker.grounded = g;
+                }
+                // The character's own position, which is the authority the
+                // body follows — see `Character::place`.
+                if let Some(p) = saved
+                    .get("char_pos")
+                    .and_then(|v| serde_json::from_value::<[f32; 3]>(v.clone()).ok())
+                {
+                    let g = saved
+                        .get("char_grounded")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    // The body is already back in place from `body` above; the
+                    // character's position is where the next step must carry it.
+                    walker.character.place(p, g);
+                    self.physics.arm_kinematic(walker.character.body(), p);
+                }
+                // The route is a cache, but not a re-derivable one: a walker
+                // partway along a path replans from where it stands, and the
+                // replan is not the tail of the original route.
+                if let Some(goal) = saved.get("goal") {
+                    walker.goal = serde_json::from_value(goal.clone()).unwrap_or(None);
+                }
+                if let Some(route) = saved
+                    .get("route")
+                    .and_then(|v| serde_json::from_value::<Vec<[f32; 3]>>(v.clone()).ok())
+                {
+                    walker.route = route;
+                }
+            }
+        }
+    }
 }
 
 /// The inverse of a parent's global transform, or identity when it has none
@@ -2556,6 +2786,86 @@ impl Runner {
         })
     }
 
+    /// Everything a save has to keep — ADR 0088.
+    ///
+    /// The rules' state, every dynamic body, and every character's script
+    /// memory: the three places a running game keeps anything a script can read
+    /// back. The tick is the caller's, because a `Runner` does not own a clock.
+    #[must_use]
+    pub fn save_state(&self, world: &loom_ecs::World) -> serde_json::Value {
+        // **Node transforms, because a node script's memory *is* its
+        // transform.** `host.tick` reads the node's current position and
+        // returns the next one; it keeps nothing between ticks. So the
+        // deckhand's 44 parts, the wheel and every other scripted node remember
+        // where they are only by being there, and a save that omitted this
+        // reloaded them at their scene pose — which the state hash caught.
+        let mut transforms = serde_json::Map::new();
+        for entity in world.entities() {
+            let (Some(path), Some(t)) = (world.path(*entity), world.transform(*entity)) else {
+                continue;
+            };
+            transforms.insert(
+                path.to_owned(),
+                serde_json::json!({
+                    "pos": t.pos,
+                    "rot": t.rot_euler,
+                    "scale": t.scale,
+                }),
+            );
+        }
+        serde_json::json!({
+            "rules": self.state.to_json(),
+            "sim": self.physics.save_state(world),
+            "transforms": transforms,
+            "events": self.events.to_json(),
+        })
+    }
+
+    /// Restore it.
+    ///
+    /// **Takes the world mutably and leaves it consistent.** Bodies move
+    /// underneath the scene graph, so a restore that stopped at the physics set
+    /// would leave every node transform — and therefore the determinism hash,
+    /// every `--assert`, and the picture — describing where things were before
+    /// the save was loaded. Writing back here rather than asking the caller to
+    /// remember is what makes "loaded" and "consistent" the same event.
+    pub fn restore_state(&mut self, world: &mut loom_ecs::World, value: &serde_json::Value) {
+        if let Some(rules) = value.get("rules") {
+            self.state.restore(rules);
+        }
+        // Transforms first, then physics: `write_back` overwrites the nodes
+        // that have bodies, and it should win — a body's position is the
+        // authority for anything that has one.
+        if let Some(transforms) = value.get("transforms").and_then(serde_json::Value::as_object) {
+            for entity in world.entities().to_vec() {
+                let Some(path) = world.path(entity).map(str::to_owned) else {
+                    continue;
+                };
+                let Some(saved) = transforms.get(&path) else {
+                    continue;
+                };
+                if let Some(t) = world.transform_mut(entity) {
+                    if let Some(v) = saved.get("pos").and_then(|v| serde_json::from_value(v.clone()).ok()) {
+                        t.pos = v;
+                    }
+                    if let Some(v) = saved.get("rot").and_then(|v| serde_json::from_value(v.clone()).ok()) {
+                        t.rot_euler = v;
+                    }
+                    if let Some(v) = saved.get("scale").and_then(|v| serde_json::from_value(v.clone()).ok()) {
+                        t.scale = v;
+                    }
+                }
+            }
+            world.propagate_transforms();
+        }
+        if let Some(events) = value.get("events") {
+            self.events.restore(events);
+        }
+        if let Some(sim) = value.get("sim") {
+            self.physics.restore_state(world, sim);
+            self.physics.write_back(world);
+        }
+    }
     /// The game's state: status, message and whatever the rules are keeping.
     #[must_use]
     pub fn state(&self) -> &loom_script::GameState {

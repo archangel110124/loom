@@ -79,7 +79,13 @@ USAGE:
         answer: whether the water in a named band is turquoise or grey.
 
     loom sim <scene.loom> [--ticks <n>] [--assert <expr>] [--hold <k=v,..>]
-        Step physics deterministically and print the state hash. --hold writes
+                          [--save <f.json>] [--load <f.json>]
+        Step physics deterministically and print the state hash. --save writes
+        the whole running state to a file after the run; --load reads one back
+        before it, so --ticks means `and then this many more` and a save is
+        continued rather than replayed. Resuming a save reproduces the run it
+        was taken from state for state, not merely pose for pose (ADR 0088).
+        --hold writes
         `Runner::input` — the field `loom run` writes when a human holds a key
         — for every tick of the run, so it is the only way to test a mapping
         *from* a press rather than something downstream of one:
@@ -249,7 +255,19 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
         "compare",
         &[("--channel", true), ("--fraction", true), ("--worst", true), ("--rect", true)],
     ),
-    ("sim", &[("--ticks", true), ("--assert", true), ("--hold", true)]),
+    (
+        "sim",
+        &[
+            ("--ticks", true),
+            ("--assert", true),
+            ("--hold", true),
+            // ADR 0088. `--load` runs first, then `--ticks` more ticks, then
+            // `--save` writes what that left -- so the two compose into
+            // "continue from here" without a third verb.
+            ("--save", true),
+            ("--load", true),
+        ],
+    ),
     ("scene", &[("--tx", true), ("--dry-run", false)]),
     ("place", &[("--op", true), ("--dry-run", false), ("--expect-version", true)]),
     ("measure", &[("--node", true), ("--shape", false)]),
@@ -4150,7 +4168,41 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
     // Elapsed time is fed in as an exact constant, never read from the wall
     // clock (never-do #8). That is what makes this reproducible, and it is why
     // `advance` takes the delta as an argument.
+    // **`--load` before the loop, so `--ticks` means "and then this many
+    // more".** Loading and simulating are separate verbs everywhere else in
+    // this CLI; making them compose here is what lets a save be continued
+    // without inventing a third command.
+    if let Some(from) = flag(args, "--load") {
+        match std::fs::read_to_string(&from)
+            .map_err(|e| e.to_string())
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).map_err(|e| e.to_string()))
+        {
+            Ok(save) => {
+                if let Some(tick) = save.get("tick").and_then(serde_json::Value::as_u64) {
+                    clock.tick = tick;
+                }
+                runner.restore_state(&mut world, save.get("state").unwrap_or(&save));
+            }
+            Err(e) => {
+                return (
+                    2,
+                    json_line(&serde_json::json!({
+                        "error": "io_error", "path": from, "constraint": e,
+                    })),
+                );
+            }
+        }
+    }
+
     for _ in 0..ticks {
+        // **Checked before the tick, not after.** A fresh run cannot start
+        // finished, so this breaks on exactly the same tick the old check did —
+        // but a `--load` of a game that was already over used to simulate one
+        // tick past its own ending before noticing, and reported a state the
+        // run it continued had never been in.
+        if runner.state().status().is_over() {
+            break;
+        }
         clock.advance(clock.step_seconds());
         // Written before the tick it applies to, so segment `900:` is the
         // first tick the new keys are down on rather than the one after.
@@ -4160,13 +4212,6 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
         }
         if clock.tick > window_opens {
             record_travel(&world, &mut travel);
-        }
-        // A finished game stops. Running past the end would let the world
-        // drift on after the result was decided, so a `--ticks` that happened
-        // to be generous would report a different final state than one that
-        // was exact — and both would claim to be the same run.
-        if runner.state().status().is_over() {
-            break;
         }
     }
 
@@ -4363,6 +4408,28 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
             "game": game,
             "failed_assertions": failures,
         })));
+    }
+
+    // **Written after the ticks, and the hash goes in it.** A save records the
+    // state it was taken from; storing the hash of that state is what lets a
+    // load prove it restored the same world rather than a plausible one. ADR
+    // 0088.
+    if let Some(to) = flag(args, "--save") {
+        let save = serde_json::json!({
+            "format": 1,
+            "scene": path,
+            "tick": clock.tick,
+            "state_hash": format!("{:016x}", world.state_hash()),
+            "state": runner.save_state(&world),
+        });
+        if let Err(e) = std::fs::write(&to, format!("{save:#}\n")) {
+            return (
+                2,
+                json_line(&serde_json::json!({
+                    "error": "io_error", "path": to, "constraint": e.to_string(),
+                })),
+            );
+        }
     }
 
     (

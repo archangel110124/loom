@@ -20,6 +20,16 @@ pub use sanity::{Severity, check_scene};
 // dependency on rapier. The engine choice stays behind this crate's door.
 pub use rapier3d::prelude::{ColliderHandle, ImpulseJointHandle, RigidBodyHandle};
 
+/// Everything about a rigid body that the next tick depends on — ADR 0088.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BodyState {
+    pub position: [f32; 3],
+    /// Quaternion, xyzw.
+    pub rotation: [f32; 4],
+    pub linear: [f32; 3],
+    pub angular: [f32; 3],
+}
+
 use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
 use rapier3d::prelude::*;
 
@@ -121,6 +131,23 @@ impl Character {
     pub fn shape(&self) -> CharacterShape {
         self.shape
     }
+
+/// Put a character somewhere outright, for a load — ADR 0088.
+///
+/// **A character's position lives here, not in its body.** The body is
+/// kinematic and follows `position` every step, so restoring the body alone
+/// was silently undone by the next move, which starts from this field: a
+/// loaded game put the player back at their spawn one tick after the load,
+/// with the save's own state hash matching at the instant of the load and
+/// diverging immediately after.
+///
+/// The body is teleported rather than swept, because a load is not a move —
+/// a kinematic sweep from the spawn to the saved position would drag
+/// everything it touched along the way.
+pub fn place(&mut self, position: [f32; 3], grounded: bool) {
+    self.position = position;
+    self.grounded = grounded;
+}
 }
 
 /// What one step of movement actually did.
@@ -462,6 +489,62 @@ impl Physics {
             .translation(Vector::new(position[0], position[1], position[2]))
             .build();
         self.bodies.insert(body)
+    }
+
+    /// A body's full dynamic state: position, rotation, linear and angular
+    /// velocity — ADR 0088.
+    ///
+    /// **The same four quantities the determinism hash covers**, and for the
+    /// same reason: position alone is not the state. A body settled in the same
+    /// place spinning a different way, or passing through the same point at a
+    /// different speed, is a different simulation. A save that stores less than
+    /// the hash reads is a save the hash will refuse on load, which is exactly
+    /// the check that makes this verifiable.
+    #[must_use]
+    pub fn body_state(&self, handle: RigidBodyHandle) -> Option<BodyState> {
+        let body = self.bodies.get(handle)?;
+        let t = body.translation();
+        let r = body.rotation();
+        let v = body.linvel();
+        let w = body.angvel();
+        Some(BodyState {
+            position: [t.x, t.y, t.z],
+            rotation: [r.x, r.y, r.z, r.w],
+            linear: [v.x, v.y, v.z],
+            angular: [w.x, w.y, w.z],
+        })
+    }
+
+    /// Put a body back where a save says it was.
+    ///
+    /// `wake_up` is true: a restored body that stays asleep does not respond to
+    /// the first thing that touches it, which reads as the save having loaded a
+    /// world made of scenery.
+    pub fn set_body_state(&mut self, handle: RigidBodyHandle, state: &BodyState) {
+        let Some(body) = self.bodies.get_mut(handle) else {
+            return;
+        };
+        body.set_translation(
+            Vector::new(state.position[0], state.position[1], state.position[2]),
+            true,
+        );
+        body.set_rotation(
+            Rotation::from_xyzw(
+                state.rotation[0],
+                state.rotation[1],
+                state.rotation[2],
+                state.rotation[3],
+            ),
+            true,
+        );
+        body.set_linvel(
+            Vector::new(state.linear[0], state.linear[1], state.linear[2]),
+            true,
+        );
+        body.set_angvel(
+            Vector::new(state.angular[0], state.angular[1], state.angular[2]),
+            true,
+        );
     }
 
     /// A static sphere.
@@ -1316,6 +1399,22 @@ impl Physics {
             .get(handle)?
             .velocity_at_point(Vector::new(point[0], point[1], point[2]));
         Some([v.x, v.y, v.z])
+    }
+
+    /// Re-arm a kinematic body's pending move, for a load — ADR 0088.
+    ///
+    /// **A kinematic body's target survives the step that consumes it.** The
+    /// tick steps the solver *before* it moves characters, so every step works
+    /// off the target the previous tick left behind; a freshly loaded body has
+    /// none, so rapier derived a velocity of zero, the player stopped shoving
+    /// the boat for exactly one tick, and the boat came out 0.27 m/s slow.
+    ///
+    /// The target is the character's own position, which already leads the
+    /// body's by one tick — see `Character::place`.
+    pub fn arm_kinematic(&mut self, handle: RigidBodyHandle, target: [f32; 3]) {
+        if let Some(body) = self.bodies.get_mut(handle) {
+            body.set_next_kinematic_translation(Vector::new(target[0], target[1], target[2]));
+        }
     }
 
     /// Apply one force and one torque to a body for exactly this step.

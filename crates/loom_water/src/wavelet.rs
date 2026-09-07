@@ -275,7 +275,46 @@ impl WaveletField {
         self.events.retain(|e| t - e.t0 <= LIFE_SECONDS);
     }
 
-    /// The events, oldest first — what the renderer uploads.
+    /// The whole pool, for a save — ADR 0088.
+    ///
+    /// **A wake has memory.** The events feed back into the buoyancy solver as
+    /// surface height and orbital flow, so a game reloaded onto flat water
+    /// pushes its boat differently from the one that saved: the boat's velocity
+    /// came out ~11% off one tick after a load that was otherwise exact.
+    ///
+    /// Raw numbers rather than serde, so this crate keeps its dependency list —
+    /// the caller owns the file format.
+    #[must_use]
+    pub fn snapshot(&self) -> (Vec<[f32; 4]>, u32) {
+        (
+            self.events.iter().map(|e| [e.at[0], e.at[1], e.t0, e.volume]).collect(),
+            self.shed_tick,
+        )
+    }
+
+    /// The sigmas, which do not fit in the quad above.
+    #[must_use]
+    pub fn snapshot_sigma(&self) -> Vec<f32> {
+        self.events.iter().map(|e| e.sigma).collect()
+    }
+
+    /// Put a saved pool back, oldest first.
+    pub fn restore(&mut self, packed: &[[f32; 4]], sigma: &[f32], shed_tick: u32) {
+        self.events = packed
+            .iter()
+            .zip(sigma)
+            .map(|(q, &sigma)| Event {
+                at: [q[0], q[1]],
+                t0: q[2],
+                volume: q[3],
+                sigma,
+                pad: [0.0; 3],
+            })
+            .collect();
+        self.shed_tick = shed_tick;
+    }
+
+        /// The events, oldest first — what the renderer uploads.
     #[must_use]
     pub fn events(&self) -> &[Event] {
         &self.events

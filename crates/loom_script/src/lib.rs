@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 
 use rhai::{Dynamic, Engine, EvalAltResult, Scope, AST};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Hard limits. Every one of these is a way an agent-written script can hang
 /// or exhaust the engine, so none of them is optional.
@@ -322,6 +322,95 @@ impl ScriptMemory {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// This memory as JSON, for a save file — ADR 0088.
+    ///
+    /// **Opaque to the host stops being tenable the moment a game can be
+    /// saved.** A script's memory is where a door remembers it is open and a
+    /// helmsman remembers he has the wheel; a save that omits it reloads into a
+    /// world that looks right and has forgotten what it was doing.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        map_to_json(&self.0)
+    }
+
+    /// Restore what [`to_json`](Self::to_json) wrote.
+    pub fn restore(&mut self, value: &serde_json::Value) {
+        self.0 = json_to_map(value);
+    }
+}
+
+/// A rhai value as JSON.
+///
+/// **Lossy in exactly one direction, and it is named rather than discovered.**
+/// rhai distinguishes an integer from a float; JSON does not, so an `INT` that
+/// round-trips comes back as whatever `serde_json` decides a whole number is.
+/// Every other type a script here uses — bool, string, array, map, unit — is
+/// exact. A type outside that set becomes its `to_string`, which is wrong to
+/// restore and right to see in a save file rather than have vanish.
+fn dynamic_to_json(value: &rhai::Dynamic) -> serde_json::Value {
+    use serde_json::Value;
+    if value.is_unit() {
+        return Value::Null;
+    }
+    if let Ok(b) = value.as_bool() {
+        return Value::Bool(b);
+    }
+    if let Ok(i) = value.as_int() {
+        return Value::from(i);
+    }
+    if let Ok(f) = value.as_float() {
+        return serde_json::Number::from_f64(f).map_or(Value::Null, Value::Number);
+    }
+    if value.is_string() {
+        return value.clone().into_string().map_or(Value::Null, Value::String);
+    }
+    if let Some(array) = value.clone().try_cast::<rhai::Array>() {
+        return Value::Array(array.iter().map(dynamic_to_json).collect());
+    }
+    if let Some(map) = value.clone().try_cast::<rhai::Map>() {
+        return map_to_json(&map);
+    }
+    Value::String(value.to_string())
+}
+
+fn map_to_json(map: &rhai::Map) -> serde_json::Value {
+    serde_json::Value::Object(
+        map.iter()
+            .map(|(k, v)| (k.to_string(), dynamic_to_json(v)))
+            .collect(),
+    )
+}
+
+/// The inverse, as far as JSON allows.
+fn json_to_dynamic(value: &serde_json::Value) -> rhai::Dynamic {
+    use serde_json::Value;
+    match value {
+        Value::Null => rhai::Dynamic::UNIT,
+        Value::Bool(b) => rhai::Dynamic::from(*b),
+        // **Integers first.** A script that counts ticks stores an `INT`, and
+        // handing it back a `FLOAT` makes `memory.n += 1` a float add whose
+        // comparisons against integer literals then miss.
+        Value::Number(n) => n.as_i64().map_or_else(
+            || rhai::Dynamic::from(n.as_f64().unwrap_or(0.0)),
+            rhai::Dynamic::from,
+        ),
+        Value::String(s) => rhai::Dynamic::from(s.clone()),
+        Value::Array(items) => {
+            rhai::Dynamic::from(items.iter().map(json_to_dynamic).collect::<rhai::Array>())
+        }
+        Value::Object(_) => rhai::Dynamic::from(json_to_map(value)),
+    }
+}
+
+fn json_to_map(value: &serde_json::Value) -> rhai::Map {
+    let mut map = rhai::Map::new();
+    if let Some(object) = value.as_object() {
+        for (k, v) in object {
+            map.insert(k.as_str().into(), json_to_dynamic(v));
+        }
+    }
+    map
 }
 
 /// How a game ended, or that it has not.
@@ -330,7 +419,7 @@ impl ScriptMemory {
 /// can be over and which way — enough to stop the simulation, report a result
 /// and let an assertion check it. What counts as a win is a rule, and rules
 /// are authored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     #[default]
@@ -371,7 +460,41 @@ pub struct GameState {
 }
 
 impl GameState {
+    /// The whole of this state as JSON, for a save file — ADR 0088.
+    ///
+    /// Values, status and message: everything a rules script can read back,
+    /// which is the contract "everything the game reads" turns into here.
     #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "values": map_to_json(&self.values),
+            "status": self.status,
+            "message": self.message,
+        })
+    }
+
+    /// Restore what [`to_json`](Self::to_json) wrote.
+    ///
+    /// **Absent fields leave the current value alone rather than clearing it.**
+    /// A save written by an older build is missing whatever was added since,
+    /// and defaulting those to empty would turn "we did not record this" into
+    /// "this is empty", which is the difference between an incomplete save and
+    /// a wrong one.
+    pub fn restore(&mut self, value: &serde_json::Value) {
+        if let Some(values) = value.get("values") {
+            self.values = json_to_map(values);
+        }
+        if let Some(status) = value
+            .get("status")
+            .and_then(|s| serde_json::from_value::<Status>(s.clone()).ok())
+        {
+            self.status = status;
+        }
+        if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
+            self.message = message.to_owned();
+        }
+    }
+
     pub fn status(&self) -> Status {
         self.status
     }
@@ -453,7 +576,7 @@ impl GameState {
 /// Two runs producing the same sequence is a stronger claim than two runs
 /// producing the same state hash, and unlike a hash it says where they
 /// diverged.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     /// The tick it happened on. Never a wall-clock time (never-do #8).
     pub tick: u64,
@@ -491,6 +614,24 @@ pub struct EventLog {
 }
 
 impl EventLog {
+    /// The whole log, for a save — ADR 0088.
+    ///
+    /// **Cumulative, so it cannot be re-derived.** Rules read counts across the
+    /// entire run — `events.pickup >= 4` — so a resumed game whose log started
+    /// empty would re-earn things it had already done, and re-fire the rules
+    /// that watch for them.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!(self.events)
+    }
+
+    /// Restore it.
+    pub fn restore(&mut self, value: &serde_json::Value) {
+        if let Ok(events) = serde_json::from_value::<Vec<Event>>(value.clone()) {
+            self.events = events;
+        }
+    }
+
     pub fn push(&mut self, event: Event) {
         self.events.push(event);
     }
@@ -1061,6 +1202,33 @@ impl ScriptWatcher {
 
 #[cfg(test)]
 mod tests {
+    /// **A save is a promise that the numbers come back.** ADR 0088. This value
+    /// is one a `proving_ground` hunter actually stored in `last_seen`, and it
+    /// came back one ULP low through save -> load -> save, which is enough to
+    /// make a byte-identical gate row fail on a game that never ran a tick.
+    #[test]
+    fn a_float_survives_the_round_trip_through_json_and_rhai() {
+        for value in [
+            0.968_054_234_981_536_9_f64,
+            0.918_099_999_427_795_4,
+            -0.000_821_595_021_989_196_5,
+        ] {
+            let mut map = rhai::Map::new();
+            map.insert("v".into(), rhai::Dynamic::from(value));
+
+            let text = serde_json::to_string(&map_to_json(&map)).expect("serialise");
+            let parsed: serde_json::Value = serde_json::from_str(&text).expect("parse");
+            let back = json_to_map(&parsed);
+            let out = back["v"].as_float().expect("still a float");
+
+            assert_eq!(
+                out.to_bits(),
+                value.to_bits(),
+                "{value:?} came back as {out:?} (text was {text})"
+            );
+        }
+    }
+
     /// stdout carries one JSON document per `loom` invocation. A script that
     /// prints must not land in it.
     #[test]

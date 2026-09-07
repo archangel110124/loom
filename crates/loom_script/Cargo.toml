@@ -14,6 +14,12 @@ loom_scene = { version = "0.0.0", path = "../loom_scene" }
 # the machine is, which is never-do #8 and would quietly break every `--assert`.
 rhai = { version = "=1.25.1", features = ["no_time"] }
 serde = { version = "=1.0.229", features = ["derive"] }
+# `float_roundtrip` because serde_json's default parser is not correctly
+# rounded: it reads `0.9680542349815369` — a value a `proving_ground` hunter
+# really stored — as the f64 one ULP below, so a save did not survive being
+# loaded. Rust's own `str::parse::<f64>` gets it right; this feature makes
+# serde_json do the same. ADR 0088.
+serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
 
 [lints]
 workspace = true
