@@ -25,4 +25,4 @@ pub use theme::{Tokens, apply as apply_theme, tokens};
 pub use gizmo::{Handle, Mode};
 // No `draw`: the dock is the layout, and a second entry point that laid the
 // same panels out differently is exactly the drift `Dock` exists to prevent.
-pub use panels::{AgentEdit, AgentMark, PanelState, Problem, UiAction};
+pub use panels::{AgentEdit, AgentMark, PRIMITIVES, PanelState, Problem, UiAction};

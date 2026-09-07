@@ -61,6 +61,20 @@ prefabs left in it.
 
 **The Agent panel** — the one worth most, and §3.
 
+**A Create menu**, in the toolbar and on every hierarchy row. Making a cube —
+the most common operation in a blockout editor — used to be three steps: add an
+empty child, add a `MeshRenderer`, point it at an alias. It is now one, and one
+transaction, so it is one Ctrl+Z rather than three.
+
+**Frame cost in the status bar.** `cpu` and `draw` milliseconds beside the fps,
+smoothed the same way. These are the two numbers `--frames` prints on the way
+out, and until now the only way to see which half of a frame to fix was to close
+the editor and read a terminal.
+
+**Select all, and deselect.** Escape empties the selection rather than resetting
+it to the first node: "nothing is selected" is a state a human asks for, because
+it is how you stop the gizmo drawing over the thing you are looking at.
+
 ## 3. The agent panel is the human's half
 
 Unity, Unreal and Godot have bolted assistants on: a chat box that emits code

@@ -698,6 +698,13 @@ struct App {
     /// Smoothed, because a number that changes sixty times a second is not a
     /// number anyone can read.
     fps: f32,
+    /// Smoothed per-frame cost, milliseconds — ADR 0093.
+    ///
+    /// **The same two numbers `--frames` prints on the way out**, live in the
+    /// status bar. Until now the only way to see which half of a frame to fix
+    /// was to close the editor and read the terminal.
+    cpu_ms: f32,
+    draw_ms: f32,
     /// What somebody else changed, and when we noticed.
     ///
     /// The whole premise of this editor is that an agent is authoring the file
@@ -903,6 +910,8 @@ impl App {
             last_frame: std::time::Instant::now(),
             wind_seconds: 0.0,
             fps: 0.0,
+            cpu_ms: 0.0,
+            draw_ms: 0.0,
             frames_left: None,
             script: Script::default(),
             autoplay: false,
@@ -1831,6 +1840,8 @@ impl ApplicationHandler for App {
                 let state = PanelState {
                     snap: self.snap,
                     problems: &self.problems,
+                    cpu_ms: self.cpu_ms,
+                    draw_ms: self.draw_ms,
                     agent_log: &agent_log,
                     redo_history: self
                         .session
@@ -2074,6 +2085,12 @@ impl ApplicationHandler for App {
                 self.cpu_total_ms += cpu_ms;
                 #[allow(clippy::cast_possible_truncation)]
                 {
+                    // Smoothed the same way `fps` is, so the three numbers
+                    // beside each other settle at the same rate.
+                    self.cpu_ms = self.cpu_ms.mul_add(0.9, cpu_ms as f32 * 0.1);
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                {
                     self.cpu_worst_ms = self.cpu_worst_ms.max(cpu_ms as f32);
                 }
 
@@ -2226,7 +2243,12 @@ impl ApplicationHandler for App {
                     (Some(viewer), _, _) => viewer.draw(drawn, &camera),
                     _ => Ok(()),
                 };
-                self.draw_total_ms += draw_started.elapsed().as_secs_f64() * 1000.0;
+                let this_draw_ms = draw_started.elapsed().as_secs_f64() * 1000.0;
+                self.draw_total_ms += this_draw_ms;
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    self.draw_ms = self.draw_ms.mul_add(0.9, this_draw_ms as f32 * 0.1);
+                }
                 #[allow(clippy::disallowed_methods)]
                 let ended = std::time::Instant::now();
                 if let Some(previous) = self.wall_last.replace(ended) {
@@ -2382,6 +2404,7 @@ impl App {
             }
             UiAction::AddChild(parent) => self.add_child(&parent),
             UiAction::AddPrefabInstance(key) => self.add_prefab_instance(&key),
+            UiAction::CreatePrimitive(shape) => self.create_primitive(&shape),
             UiAction::Copy => self.copy_selection(),
             UiAction::Paste => self.paste_clipboard(),
             UiAction::Duplicate => self.duplicate_selection(),
@@ -3148,6 +3171,30 @@ impl App {
     }
 
 
+
+    /// Create a node that draws `shape`, under the selection — ADR 0093.
+    ///
+    /// One transaction, so it is one Ctrl+Z rather than three.
+    fn create_primitive(&mut self, shape: &str) {
+        let parent = self.selected.first().cloned().unwrap_or_default();
+        let name = self.free_name(&parent, shape);
+        let path = if parent.is_empty() {
+            name.clone()
+        } else {
+            format!("{parent}/{name}")
+        };
+        self.transact(
+            format!("Create {shape}"),
+            vec![loom_scene::SceneOp::SpawnNode {
+                parent,
+                name,
+                mesh: Some(shape.to_owned()),
+                prefab: None,
+            }],
+        );
+        self.selected = vec![path];
+    }
+
     /// Spawn a prefab instance under the selection — ADR 0093.
     fn add_prefab_instance(&mut self, key: &str) {
         let parent = self.selected.first().cloned().unwrap_or_default();
@@ -3544,6 +3591,7 @@ impl App {
         let (undo, redo, save) = (act("undo"), act("redo"), act("save"));
         let (duplicate, delete) = (act("duplicate"), act("delete"));
         let (copy, paste) = (act("copy"), act("paste"));
+        let (select_all, deselect) = (act("select_all"), act("deselect"));
         let mode = if act("mode_move") {
             Some(Mode::Move)
         } else if act("mode_rotate") {
@@ -3566,6 +3614,15 @@ impl App {
         }
         if duplicate {
             self.duplicate_selection();
+        }
+        if select_all {
+            self.selected = self.view.paths.clone();
+        }
+        if deselect {
+            // **Emptied, not reset to the first node.** "Nothing is selected"
+            // is a state a human asks for — it is how you stop the gizmo
+            // drawing over the thing you are looking at.
+            self.selected.clear();
         }
         if copy {
             self.copy_selection();

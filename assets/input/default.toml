@@ -62,6 +62,9 @@ mode_rotate   = [{ button = "Digit2", trigger = "pressed" }]
 mode_scale    = [{ button = "Digit3", trigger = "pressed" }]
 
 duplicate     = [{ button = "KeyD", modifiers = ["ControlLeft"], trigger = "pressed" }]
+# Selection, and getting out of one — ADR 0093.
+select_all    = [{ button = "KeyA", modifiers = ["ControlLeft"], trigger = "pressed" }]
+deselect      = [{ button = "Escape", trigger = "pressed" }]
 # The clipboard carries whole subtrees — ADR 0093.
 copy          = [{ button = "KeyC", modifiers = ["ControlLeft"], trigger = "pressed" }]
 paste         = [{ button = "KeyV", modifiers = ["ControlLeft"], trigger = "pressed" }]

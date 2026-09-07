@@ -47,6 +47,11 @@ pub enum UiAction {
     AddChild(String),
     /// Instance a prefab by its file-local alias, under the selection — ADR 0093.
     AddPrefabInstance(String),
+    /// Create a node that draws something, in one step — ADR 0093.
+    ///
+    /// The mesh alias, which doubles as the name: `box`, `sphere`, `plane`,
+    /// `cylinder`, `capsule`.
+    CreatePrimitive(String),
     /// Put the selection on the clipboard, subtrees included — ADR 0093.
     Copy,
     /// Paste the clipboard under the selection — ADR 0093.
@@ -156,6 +161,10 @@ pub struct PanelState<'a> {
     /// edge-on, and an index would then highlight a different one.
     pub dragging: Option<usize>,
     pub fps: f32,
+    /// Smoothed per-frame cost in milliseconds — ADR 0093. Which half of a
+    /// frame to fix, without closing the editor to read a terminal.
+    pub cpu_ms: f32,
+    pub draw_ms: f32,
     /// What somebody else just changed: screen-space box, label, and how
     /// faded it is (1.0 fresh, 0.0 gone).
     pub agent_marks: &'a [AgentMark],
@@ -185,6 +194,13 @@ pub struct AgentMark {
     /// 1.0 when it just happened, fading to 0.0.
     pub freshness: f32,
 }
+
+/// The shapes `loom_asset::primitives` can make without an asset file.
+///
+/// Named here rather than imported because `loom_editor` depends on
+/// `loom_scene`, `loom_reflect` and `loom_render` only — reaching into
+/// `loom_asset` for five strings would buy a crate edge for nothing.
+pub const PRIMITIVES: &[&str] = &["box", "plane", "sphere", "cylinder", "capsule"];
 
 const AXIS_COLORS: [egui::Color32; 3] = [
     egui::Color32::from_rgb(226, 84, 79),
@@ -286,6 +302,18 @@ pub(crate) fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
             {
                 actions.push(UiAction::Focus);
             }
+            ui.add_enabled_ui(editing, |ui| {
+                ui.menu_button("Create", |ui| {
+                    for shape in PRIMITIVES {
+                        if ui.button(*shape).clicked() {
+                            actions.push(UiAction::CreatePrimitive((*shape).to_owned()));
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("a node that draws something, under the selection");
+            });
             if ui
                 .add_enabled(editing, egui::Button::new("Duplicate"))
                 .on_hover_text("Ctrl+D — children go with it")
@@ -364,8 +392,10 @@ pub(crate) fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(format!(
-                        "{:.0} fps · {} nodes · {} draws",
+                        "{:.0} fps · cpu {:.1} · draw {:.1} ms · {} nodes · {} draws",
                         state.fps,
+                        state.cpu_ms,
+                        state.draw_ms,
                         state.paths.len(),
                         state.object_count
                     ))
@@ -584,6 +614,22 @@ pub(crate) fn hierarchy(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
                 }
                 if state.editable {
                     response.context_menu(|ui| {
+                        // **The most common operation in a blockout editor,
+                        // in one step.** It used to be three: add an empty
+                        // child, add a `MeshRenderer`, then point it at an
+                        // alias — for a cube.
+                        ui.menu_button("Create", |ui| {
+                            for shape in PRIMITIVES {
+                                if ui.button(*shape).clicked() {
+                                    actions.push(UiAction::Select {
+                                        path: path.clone(),
+                                        extend: false,
+                                    });
+                                    actions.push(UiAction::CreatePrimitive((*shape).to_owned()));
+                                    ui.close();
+                                }
+                            }
+                        });
                         if ui.button("Add child").clicked() {
                             actions.push(UiAction::AddChild(path.clone()));
                             ui.close();
