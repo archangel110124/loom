@@ -255,7 +255,7 @@ impl CloudMap {
             device.cmd_push_constants(
                 cmd,
                 layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                crate::renderer::PUSH_STAGES,
                 0,
                 bytes,
             );

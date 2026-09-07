@@ -73,6 +73,20 @@ pub(crate) const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 pub(crate) const SIM_DT: f32 = 1.0 / 60.0;
 pub(crate) const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
+/// Every stage that reads the push block, in one place.
+///
+/// **A push must name every stage of the range it overlaps** — 
+/// `VUID-vkCmdPushConstants-offset-01796` — so the range and all fourteen
+/// call sites have to agree exactly. They did not: widening the range for the
+/// Hi-Z reduction (ADR 0084) left every existing push naming two stages of
+/// three, and the layers reported it at each one. A constant is the only shape
+/// that cannot drift.
+pub(crate) const PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
+    vk::ShaderStageFlags::VERTEX.as_raw()
+        | vk::ShaderStageFlags::FRAGMENT.as_raw()
+        | vk::ShaderStageFlags::COMPUTE.as_raw(),
+);
+
 /// One object to draw.
 #[derive(Debug, Clone, Copy)]
 pub struct Object {
@@ -151,11 +165,25 @@ pub struct ParticleInstance {
 pub(crate) struct MeshRange {
     first_index: u32,
     index_count: u32,
+    /// The mesh's object-space bounding box, taken from the source vertices
+    /// before packing.
+    ///
+    /// **From the vertices and not from `PackedBounds`**, which describes the
+    /// *quantisation* grid rather than the geometry: its extent is whatever the
+    /// 16-bit range covers, a conservative box around the mesh rather than the
+    /// mesh's own. A cull wants the tight one.
+    min: [f32; 3],
+    max: [f32; 3],
 }
 
 impl MeshRange {
     pub(crate) fn first_index(self) -> u32 {
         self.first_index
+    }
+
+    /// Object-space bounds, for the frustum test — ADR 0084.
+    pub(crate) fn bounds(self) -> ([f32; 3], [f32; 3]) {
+        (self.min, self.max)
     }
 
     pub(crate) fn index_count(self) -> u32 {
@@ -364,10 +392,15 @@ pub struct EnvironmentData {
     /// forbids. `loom_water` cannot import `ash` at all, which is what makes
     /// that structural rather than a convention.
     pub wavelet_events: vk::DeviceAddress,
-    /// Keeps the struct 16-byte aligned, as `light_pad` above does. The array
-    /// is indexed in the shader (`push.environment[0]`), so its stride has to
-    /// match on both sides even though only element zero is ever read.
-    pub wavelet_pad: [u32; 2],
+    /// Address of the Hi-Z grid the depth reduction writes — ADR 0084.
+    ///
+    /// **Rides what was `wavelet_pad`**, so the struct's stride does not move
+    /// and no blessed reference can shift underneath the change. Two lanes
+    /// because a `vk::DeviceAddress` is 64 bits; low word first, matching how
+    /// the shader reassembles it. Zero means "no grid this frame", which is the
+    /// first frame of every render and the whole reason the goldens cannot see
+    /// this feature work.
+    pub hiz_address: vk::DeviceAddress,
     /// The river's current: xy world origin, z metres between nodes, w nodes
     /// per axis. **`w < 2` means this water has no current**, which is every
     /// scene that does not author `WaterBody.flow` — and every one of them then
@@ -642,7 +675,7 @@ impl Default for EnvironmentData {
             light_pad: [0; 1],
             wavelet: [0.0; 4],
             wavelet_events: 0,
-            wavelet_pad: [0; 2],
+            hiz_address: 0,
             flow: [0.0, 0.0, 1.0, 0.0],
             flow_velocities: 0,
             cloud_map: 0,
@@ -1335,6 +1368,8 @@ pub struct Renderer {
     /// `CloudMap::record`; the `render-in-both-paths` skill lists four defects
     /// that shipped from mirroring draw wiring instead of sharing it.
     cloud_map: crate::cloud_map::CloudMap,
+    /// Hi-Z occlusion, reading last frame's depth — ADR 0084.
+    hiz: crate::hiz::HiZ,
     max_particles: usize,
     /// Alpha-blended, depth-tested but not depth-writing.
     particle_pipeline: vk::Pipeline,
@@ -1730,6 +1765,13 @@ impl Renderer {
             pipeline_layout,
             &names,
         )?;
+        let hiz = crate::hiz::HiZ::new(
+            &raw,
+            &mut allocator,
+            pipeline_cache,
+            pipeline_layout,
+            &names,
+        )?;
         // The opaque pair lives inside `Msaa`, so it only exists when
         // multisampling does — and the split only happens then either. At one
         // sample the descriptor points at the depth view, which is never read
@@ -2036,6 +2078,7 @@ impl Renderer {
             scene_depth,
             water_textures,
             cloud_map,
+            hiz,
             max_particles: MAX_PARTICLES,
             particle_pipeline,
             rt_positions,
@@ -2536,7 +2579,11 @@ impl Renderer {
         // Grow rather than refuse, matching the windowed path. A ceiling the
         // caller cannot see is not a useful answer to "draw my scene".
         // One slot past the objects, for the particle pass's view-projection.
-        self.reserve_objects(objects.len() + 1)?;
+        // **Last frame's reduction, before this frame's cull reads it.** No
+        // stall: the fence for that frame has already been waited on, so this
+        // is a plain memcpy out of a mapped buffer.
+        self.hiz.read_back();
+                self.reserve_objects(objects.len() + 1)?;
         if objects.len() > self.max_objects {
             return Err(RenderError::Allocator(format!(
                 "{} objects exceeds the {} the object buffer was sized for",
@@ -2594,6 +2641,10 @@ impl Renderer {
         // above the upload, for the reason the eye is (`8c2bcb6`).
         self.environment.cloud_map =
             u32::from(crate::ablate::mask() & crate::ablate::CLOUD_VOLUME == 0);
+        // **The Hi-Z grid this frame will write, stamped above the upload for
+        // the same reason.** The reduction reads it as a pointer; the cull that
+        // consumes it reads last frame's copy off the CPU. See ADR 0084.
+        self.environment.hiz_address = self.hiz.address();
         // Stamped here for the same reason and from the same camera, so the two
         // can never describe different frames.
         self.environment.eye_step = self.eye_tracker.step(camera.eye, self.rain_tick);
@@ -2639,7 +2690,16 @@ impl Renderer {
         // without reordering it -- see `split_by_blend`.
         let blend_flags: Vec<bool> =
             sorted.iter().map(|o| self.materials.is_blended(o.material)).collect();
-        let (batches, blended) = split_by_blend(&sorted, &blend_flags, camera.eye.to_array());
+        let frustum = Frustum::from_view_proj(view_proj);
+        let visible = visible_objects(
+            &sorted,
+            &self.ranges,
+            &frustum,
+            view_proj,
+            self.hiz.grid(),
+        );
+        let (batches, blended) =
+            split_by_blend(&sorted, &blend_flags, camera.eye.to_array(), &visible);
         write_slice(
             self.objects_alloc
                 .as_ref()
@@ -3036,7 +3096,7 @@ impl Renderer {
                         d.cmd_push_constants(
                             cmd,
                             layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            PUSH_STAGES,
                             0,
                             bytes,
                         );
@@ -3078,7 +3138,7 @@ impl Renderer {
                         d.cmd_push_constants(
                             cmd,
                             layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            PUSH_STAGES,
                             0,
                             bytes,
                         );
@@ -3113,7 +3173,7 @@ impl Renderer {
                             d.cmd_push_constants(
                                 cmd,
                                 layout,
-                                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                                PUSH_STAGES,
                                 0,
                                 bytes,
                             );
@@ -3355,7 +3415,7 @@ impl Renderer {
                         d.cmd_push_constants(
                             cmd,
                             layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            PUSH_STAGES,
                             0,
                             push.bytes(),
                         );
@@ -3469,6 +3529,29 @@ impl Renderer {
             None => ldr,
         };
 
+        // **Hi-Z, last: the whole opaque scene's depth, reduced for the next
+        // frame's cull.** After every geometry pass, so the grid describes what
+        // was actually drawn rather than a prefix of it. It writes through a
+        // pointer in the environment block, null on the first frame of any
+        // render -- which is every golden image, and why no reference can move.
+        // See ADR 0084.
+        {
+            let hiz = &self.hiz;
+            let hiz_layout = self.pipeline_layout;
+            let hiz_push = base_push;
+            let hiz_sets = [(3u32, water_set)];
+            graph.pass(
+                "hiz",
+                &[(opaque_depth_id, Access::DepthSample)],
+                // The graph has put the opaque depth in SHADER_READ_ONLY_OPTIMAL
+                // before this runs, and it records outside any rendering block.
+                // `record` owns the unsafety and documents it there.
+                move |_d, cmd| {
+                    hiz.record(cmd, hiz_layout, &hiz_sets, &hiz_push);
+                },
+            );
+        }
+
         graph.pass("readback", &[(readback_source, Access::TransferSrc)], move |d, cmd| {
             let region = vk::BufferImageCopy::default()
                 .buffer_offset(0)
@@ -3512,6 +3595,18 @@ impl Renderer {
         }
 
         self.last_transitions = graph.execute(d, cmd);
+        // **Only when the depth this reduction reads was actually written.**
+        // `opaqueDepth` — set 3, binding 1, the one shader-visible depth — is
+        // resolved into only on the split path, which needs water *and* MSAA.
+        // Every other scene leaves it untouched, and reducing an untouched
+        // image yields a grid of 0.0: "everything is at the near plane", which
+        // culls the whole scene. Measured before this guard, on
+        // `proving_ground`: seven of eight objects deleted and the picture down
+        // to bare ground. So a scene that did not resolve gets no grid, and its
+        // cull stays frustum-only.
+        if split {
+            self.hiz.mark_primed();
+        }
 
         // SAFETY: recording is complete; nothing else uses this buffer.
         unsafe {
@@ -3741,6 +3836,9 @@ impl Drop for Renderer {
             if let Some(allocator) = self.allocator.as_mut() {
                 self.cloud_map.free(allocator);
             }
+            if let Some(allocator) = self.allocator.as_mut() {
+                self.hiz.free(allocator);
+            }
             if let (Some(allocation), Some(allocator)) =
                 (self.flow_alloc.take(), self.allocator.as_mut())
             {
@@ -3886,7 +3984,7 @@ pub(crate) unsafe fn draw_sky(
         d.cmd_push_constants(
             cmd,
             layout,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            PUSH_STAGES,
             0,
             push.bytes(),
         );
@@ -3985,7 +4083,7 @@ pub(crate) unsafe fn draw_water_and_particles(
             d.cmd_push_constants(
                 cmd,
                 layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                PUSH_STAGES,
                 0,
                 bytes,
             );
@@ -4005,7 +4103,7 @@ pub(crate) unsafe fn draw_water_and_particles(
             d.cmd_push_constants(
                 cmd,
                 layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                PUSH_STAGES,
                 0,
                 bytes,
             );
@@ -4034,7 +4132,7 @@ pub(crate) unsafe fn draw_water_and_particles(
             d.cmd_push_constants(
                 cmd,
                 layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                PUSH_STAGES,
                 0,
                 bytes,
             );
@@ -4065,7 +4163,7 @@ pub(crate) unsafe fn draw_water_and_particles(
             d.cmd_push_constants(
                 cmd,
                 layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                PUSH_STAGES,
                 0,
                 bytes,
             );
@@ -4345,9 +4443,22 @@ pub(crate) fn combine(
         });
 
         indices.extend(mesh.indices.iter().map(|i| i + base));
+        // An empty mesh gets an inverted box, which every frustum test rejects
+        // — the right answer for geometry with no triangles, and better than a
+        // zero box at the origin that would be drawn for ever.
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for v in &mesh.vertices {
+            for axis in 0..3 {
+                min[axis] = min[axis].min(v.position[axis]);
+                max[axis] = max[axis].max(v.position[axis]);
+            }
+        }
         ranges.push(MeshRange {
             first_index,
             index_count: u32::try_from(mesh.indices.len()).unwrap_or(0),
+            min,
+            max,
         });
     }
 
@@ -4443,14 +4554,188 @@ pub(crate) type OpaqueBatch = (u32, u32, u32);
 /// `(mesh, object_index)` — one transparent object, drawn on its own.
 pub(crate) type BlendedDraw = (u32, u32);
 
+/// The six planes of a view-projection, outward normals, for the frustum test.
+///
+/// Gribb-Hartmann: each plane is a sum or difference of two rows of the
+/// view-projection, which is why this needs no camera parameters of its own and
+/// cannot disagree with the matrix the vertices are actually transformed by.
+/// Deriving it from anything else is how a cull comes to disagree with the
+/// rasteriser at the edges.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Frustum {
+    planes: [[f32; 4]; 6],
+}
+
+impl Frustum {
+    pub(crate) fn from_view_proj(m: Mat4) -> Self {
+        let c = m.to_cols_array();
+        // Column-major: c[col * 4 + row]. Row `r` of the matrix is
+        // (c[r], c[4 + r], c[8 + r], c[12 + r]).
+        let row = |r: usize| [c[r], c[4 + r], c[8 + r], c[12 + r]];
+        let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+        let add = |a: [f32; 4], b: [f32; 4]| [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]];
+        let sub = |a: [f32; 4], b: [f32; 4]| [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]];
+        Self {
+            planes: [
+                add(r3, r0),
+                sub(r3, r0),
+                add(r3, r1),
+                sub(r3, r1),
+                // Reverse-Z / zero-to-one depth: the near plane is `r2` alone
+                // rather than `r3 + r2`. Taking the OpenGL form here culls a
+                // slab in front of the camera, which reads as geometry vanishing
+                // as you walk into it.
+                r2,
+                sub(r3, r2),
+            ],
+        }
+    }
+
+    /// Is any part of this world-space box inside?
+    ///
+    /// The standard conservative test: for each plane, take the box corner
+    /// furthest along the plane normal, and reject only when even that corner
+    /// is outside. Never rejects something visible; may keep something that is
+    /// not, which is the correct direction to be wrong in.
+    pub(crate) fn intersects(&self, min: [f32; 3], max: [f32; 3]) -> bool {
+        for p in &self.planes {
+            let far = [
+                if p[0] >= 0.0 { max[0] } else { min[0] },
+                if p[1] >= 0.0 { max[1] } else { min[1] },
+                if p[2] >= 0.0 { max[2] } else { min[2] },
+            ];
+            if p[0].mul_add(far[0], p[1].mul_add(far[1], p[2] * far[2])) + p[3] < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Which objects the frustum can see — ADR 0084.
+///
+/// **Two things move geometry after this test and both are accounted for.**
+/// `sway` bends a trunk and `deform` runs a travelling wave down a body, and
+/// both happen in the vertex shader, after any decision made here. An object
+/// that does either gets its box grown by a quarter of its largest extent,
+/// which is far more than either can displace and cheap to be wrong about: a
+/// margin costs a draw, and a missing margin pops a tree at the screen edge.
+pub(crate) fn visible_objects(
+    objects: &[Object],
+    ranges: &[MeshRange],
+    frustum: &Frustum,
+    view_proj: Mat4,
+    hiz: Option<&[f32]>,
+) -> Vec<bool> {
+    let out = objects
+        .iter()
+        .map(|object| {
+            let Some(range) = ranges.get(object.mesh as usize) else {
+                // A mesh index with no range draws nothing; keeping it costs a
+                // batch and losing it would be a silent deletion.
+                return true;
+            };
+            let (lo, hi) = range.bounds();
+            if lo[0] > hi[0] {
+                return false; // empty mesh: the inverted box
+            }
+            // The eight corners through the model matrix, then their bounds.
+            let mut min = [f32::INFINITY; 3];
+            let mut max = [f32::NEG_INFINITY; 3];
+            for i in 0..8 {
+                let corner = Vec3::new(
+                    if i & 1 == 0 { lo[0] } else { hi[0] },
+                    if i & 2 == 0 { lo[1] } else { hi[1] },
+                    if i & 4 == 0 { lo[2] } else { hi[2] },
+                );
+                let w = object.model.transform_point3(corner);
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(w[axis]);
+                    max[axis] = max[axis].max(w[axis]);
+                }
+            }
+            let moves = object.sway != 0.0 || object.deform[0] != 0.0;
+            if moves {
+                let extent = (max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]);
+                let margin = extent * 0.25;
+                for axis in 0..3 {
+                    min[axis] -= margin;
+                    max[axis] += margin;
+                }
+            }
+            if !frustum.intersects(min, max) {
+                return false;
+            }
+            let Some(grid) = hiz else {
+                return true;
+            };
+            // **Occlusion, against last frame's depth.** A cell holds the
+            // farthest depth drawn in it, so this object is hidden only if its
+            // nearest point is behind *every* cell it covers — which is the
+            // same as being behind the largest of them. Anything that cannot be
+            // proved hidden is kept.
+            let mut lo = [f32::INFINITY; 2];
+            let mut hi = [f32::NEG_INFINITY; 2];
+            let mut nearest = f32::INFINITY;
+            for i in 0..8 {
+                let corner = Vec3::new(
+                    if i & 1 == 0 { min[0] } else { max[0] },
+                    if i & 2 == 0 { min[1] } else { max[1] },
+                    if i & 4 == 0 { min[2] } else { max[2] },
+                );
+                let clip = view_proj * corner.extend(1.0);
+                // Straddling the near plane makes the divide meaningless. Keep
+                // the object rather than reason about a projected point that
+                // has wrapped around behind the eye.
+                if clip.w <= 1.0e-6 {
+                    return true;
+                }
+                let ndc = Vec3::new(clip.x, clip.y, clip.z) / clip.w;
+                lo[0] = lo[0].min(ndc.x);
+                hi[0] = hi[0].max(ndc.x);
+                lo[1] = lo[1].min(ndc.y);
+                hi[1] = hi[1].max(ndc.y);
+                nearest = nearest.min(ndc.z);
+            }
+            let dim = crate::hiz::HIZ_DIM as f32;
+            // NDC xy is -1..1; the grid is indexed 0..DIM across the screen.
+            let cell = |v: f32| ((v * 0.5 + 0.5) * dim).floor().clamp(0.0, dim - 1.0) as usize;
+            let (x0, x1) = (cell(lo[0]), cell(hi[0]));
+            let (y0, y1) = (cell(lo[1]), cell(hi[1]));
+            let mut farthest_cell = 0.0_f32;
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    farthest_cell =
+                        farthest_cell.max(grid[y * crate::hiz::HIZ_DIM + x]);
+                }
+            }
+            nearest <= farthest_cell
+        })
+        .collect::<Vec<bool>>();
+    if std::env::var_os("LOOM_CULL_PROBE").is_some() {
+        let kept = out.iter().filter(|v| **v).count();
+        eprintln!("loom: cull {} of {} objects drawn", kept, out.len());
+    }
+    out
+}
+
 pub(crate) fn split_by_blend(
     objects: &[Object],
     transparent: &[bool],
     eye: [f32; 3],
+    visible: &[bool],
 ) -> (Vec<OpaqueBatch>, Vec<BlendedDraw>) {
     let mut opaque: Vec<OpaqueBatch> = Vec::new();
     let mut blended: Vec<(u32, u32, f32)> = Vec::new();
     for (index, object) in objects.iter().enumerate() {
+        // **Culled objects stay in the buffer and lose only their draw.**
+        // `first_instance` addresses the object buffer directly, so compacting
+        // it would renumber every object after the first cull. Skipping the
+        // draw breaks the instanced run instead, which this loop already
+        // handles for transparency, and leaves every index meaning what it did.
+        if !visible.get(index).copied().unwrap_or(true) {
+            continue;
+        }
         let index = u32::try_from(index).unwrap_or(0);
         if transparent.get(index as usize).copied().unwrap_or(false) {
             let p = object.model.w_axis;
@@ -4849,7 +5134,10 @@ pub(crate) fn create_pipeline(
     let module = create_shader_module(device, crate::SCENE_SPV)?;
 
     let push_range = vk::PushConstantRange::default()
-        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+        // COMPUTE joins the graphics stages so the Hi-Z reduction can reuse this
+        // layout rather than duplicating it — ADR 0084. Adding a stage to a
+        // range costs nothing for pipelines that do not read it.
+        .stage_flags(PUSH_STAGES)
         .offset(0)
         .size(u32::try_from(size_of::<Push>()).unwrap_or(128));
     let ranges = [push_range];
@@ -5639,6 +5927,56 @@ mod ao_dial_tests {
         assert_eq!(parse_ao_rays(Some("4096")), 64.0, "converged long before here");
         assert_eq!(parse_ao_rays(Some("four")), 4.0, "a typo renders, it does not fail");
         assert_eq!(parse_ao_rays(Some("-1")), 4.0, "and neither does a negative one");
+    }
+}
+
+#[cfg(test)]
+mod frustum_tests {
+    use super::{Frustum, Mat4, Vec3};
+
+    /// **A cull that never culls passes every golden image**, which is exactly
+    /// why the 62 references matching is not on its own evidence that this
+    /// works. These three cases are the ones a broken plane extraction gets
+    /// wrong, and each fails in a different direction.
+    #[test]
+    fn the_frustum_keeps_what_is_in_front_and_drops_what_is_not() {
+        let view = Mat4::look_at_rh(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), Vec3::Y);
+        // Zero-to-one depth, which is what this engine renders with and what the
+        // near-plane row in `from_view_proj` assumes.
+        let proj = Mat4::perspective_rh(60_f32.to_radians(), 1.0, 0.1, 100.0);
+        let f = Frustum::from_view_proj(proj * view);
+
+        assert!(
+            f.intersects([-1.0, -1.0, -11.0], [1.0, 1.0, -9.0]),
+            "a box ten metres down the view axis is plainly visible"
+        );
+        assert!(
+            !f.intersects([-1.0, -1.0, 9.0], [1.0, 1.0, 11.0]),
+            "a box ten metres BEHIND the eye must be culled — the case a wrong \
+             near-plane sign silently keeps, making the cull a no-op"
+        );
+        assert!(
+            !f.intersects([99.0, -1.0, -11.0], [101.0, 1.0, -9.0]),
+            "a box a hundred metres off to the side must be culled"
+        );
+        assert!(
+            !f.intersects([-1.0, -1.0, -1000.0], [1.0, 1.0, -999.0]),
+            "a box past the far plane must be culled"
+        );
+    }
+
+    /// The conservative direction, stated as a test: a box that straddles a
+    /// plane is kept. Rejecting it would delete geometry the rasteriser would
+    /// have clipped correctly, which is the failure mode that shows as objects
+    /// vanishing at the screen edge.
+    #[test]
+    fn a_box_straddling_the_edge_is_kept() {
+        let view = Mat4::look_at_rh(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), Vec3::Y);
+        let proj = Mat4::perspective_rh(60_f32.to_radians(), 1.0, 0.1, 100.0);
+        let f = Frustum::from_view_proj(proj * view);
+        // Centred on the right-hand edge at ten metres: half in, half out.
+        let edge = 10.0 * (30_f32.to_radians()).tan();
+        assert!(f.intersects([edge - 0.5, -1.0, -10.5], [edge + 0.5, 1.0, -9.5]));
     }
 }
 

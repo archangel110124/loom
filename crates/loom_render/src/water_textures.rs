@@ -52,7 +52,14 @@ impl WaterTextures {
                 .binding(slot)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                // **COMPUTE as well as FRAGMENT, and the omission was silent.**
+                // The Hi-Z reduction (ADR 0084) samples binding 1 from a
+                // compute shader; a set whose bindings name only FRAGMENT
+                // cannot legally be read there, and the read comes back as
+                // zero rather than as an error you can see. Measured: the grid
+                // filled with 0.0, which reads as "everything is at the near
+                // plane" and culled seven of eight objects.
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE)
         };
         let bindings = [binding(0), binding(1), binding(2)];
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);

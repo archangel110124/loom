@@ -219,7 +219,10 @@ struct EnvironmentData {
     /// Keeps the struct's stride 16-byte aligned on both sides. `environment`
     /// is an array in the push block, so the stride has to match even though
     /// only element zero is read.
-    uint2 waveletPad;
+    /// The Hi-Z grid this frame's depth reduction writes, and the previous
+    /// frame's reduction read back on the CPU — ADR 0084. Null on the first
+    /// frame of any render, which is every golden image.
+    float* hizGrid;
     /// The river's current: xy world origin, z metres between nodes, w nodes
     /// per axis. **Under two nodes means this water has no current**, which is
     /// every scene that does not author `WaterBody.flow`.
@@ -10308,4 +10311,45 @@ float4 rainSplashFragmentMain(SplashOutput in) : SV_Target {
         discard;
     }
     return float4(sky * (1.0 - fog) * alpha, 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// **Hi-Z: this frame's depth, reduced for the next frame's cull — ADR 0084.**
+//
+// Standard depth here (`CompareOp::LESS`, viewport 0..1), so *far* is the
+// larger value and a conservative cell keeps the **farthest** depth it covers.
+// An object is occluded only when its nearest point is behind that, which is
+// the direction that can never delete something visible.
+//
+// **Sixteen taps per cell, not one.** A single tap is a point sample of a
+// region and can miss a near occluder entirely, which would record the cell as
+// farther than it is and cull something in front of it. Sixteen is not exact
+// either — nothing short of a full reduction is — which is why the cull that
+// reads this treats the grid as a hint and still keeps anything it cannot
+// prove hidden.
+static const uint HIZ_DIM = 64u;
+static const uint HIZ_TAPS = 4u;
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void hizReduceMain(uint3 tid: SV_DispatchThreadID) {
+    float* grid = push.environment[0].hizGrid;
+    // Null on the first frame of any render — every golden image is one frame,
+    // so this pass writes nothing there and the references cannot move.
+    if (grid == nullptr) {
+        return;
+    }
+    uint2 cell = tid.xy;
+    if (cell.x >= HIZ_DIM || cell.y >= HIZ_DIM) {
+        return;
+    }
+    float farthest = 0.0;
+    for (uint sy = 0u; sy < HIZ_TAPS; ++sy) {
+        for (uint sx = 0u; sx < HIZ_TAPS; ++sx) {
+            float2 offset = (float2(float(sx), float(sy)) + 0.5) / float(HIZ_TAPS);
+            float2 uv = (float2(float(cell.x), float(cell.y)) + offset) / float(HIZ_DIM);
+            farthest = max(farthest, opaqueDepth.SampleLevel(uv, 0).r);
+        }
+    }
+    grid[cell.y * HIZ_DIM + cell.x] = farthest;
 }

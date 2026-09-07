@@ -96,6 +96,7 @@ mod device;
 mod fluid;
 pub mod fluid_surface;
 mod gpu_particles;
+mod hiz;
 mod instance;
 mod material;
 mod rain;
@@ -946,6 +947,14 @@ mod tests {
                 ("cmaa2_edges", "loom.aa_edges"),
                 ("cmaa2", "loom.aa_edges"),
                 ("cmaa2", "loom.aa_target"),
+                // **The Hi-Z reduction, and it is last for a reason** — ADR
+                // 0084. It samples the opaque depth after every geometry pass,
+                // so the grid describes what was drawn rather than a prefix of
+                // it. On this scene the image it reads is never resolved into
+                // (no water, so no split), which is exactly why the renderer
+                // refuses to trust the grid unless the frame resolved: the
+                // barrier is real, the data behind it is not.
+                ("hiz", "loom.depth_opaque"),
                 ("readback", "loom.aa_target"),
             ],
             "graph did not place the expected barriers"

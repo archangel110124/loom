@@ -173,7 +173,16 @@ impl Device {
         // in any of the versioned ones. Anisotropic filtering is not optional
         // here: every scene in this project is a ground plane viewed at a
         // grazing angle, which is exactly where trilinear filtering blurs out.
-        let base_features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
+        // **`shader_int64` because a pointer in a shader is 64-bit arithmetic.**
+        // Slang compiles `float* grid` in the Hi-Z reduction (ADR 0084) to
+        // SPIR-V that declares the `Int64` capability, and declaring a
+        // capability the device did not enable is
+        // VUID-VkShaderModuleCreateInfo-pCode-08740 — caught by `cargo test`,
+        // which asserts validation silence, and invisible to a release render
+        // with the layers off.
+        let base_features = vk::PhysicalDeviceFeatures::default()
+            .sampler_anisotropy(true)
+            .shader_int64(true);
 
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)

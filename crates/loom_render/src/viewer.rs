@@ -1694,8 +1694,29 @@ impl Viewer {
         // same order -- see `split_by_blend`.
         let blend_flags: Vec<bool> =
             sorted.iter().map(|o| self.materials.is_blended(o.material)).collect();
-        let (batches, blended) =
-            crate::renderer::split_by_blend(&sorted, &blend_flags, camera.eye.to_array());
+        // The same cull as the offscreen path, from the same matrix — a window
+        // that culled differently from the golden images would make every
+        // reference a lie about what the viewer draws.
+        let frustum = crate::renderer::Frustum::from_view_proj(view_proj);
+        // **Frustum only in the window, deliberately, for now.** The Hi-Z grid
+        // lives on `Renderer` and the viewer has no instance of its own, so it
+        // passes `None` and culls on the frustum alone. That is the honest
+        // state rather than a silently different cull: ADR 0084 names it as the
+        // follow-up, and the window is where occlusion would actually pay,
+        // since it is the path with a previous frame every frame.
+        let visible = crate::renderer::visible_objects(
+            &sorted,
+            &self.ranges,
+            &frustum,
+            view_proj,
+            None,
+        );
+        let (batches, blended) = crate::renderer::split_by_blend(
+            &sorted,
+            &blend_flags,
+            camera.eye.to_array(),
+            &visible,
+        );
         // **Before the upload, not after**, the same as the offscreen path. The
         // camera moved into this buffer when the push block ran out of room, and
         // it was being written a line *below* the upload — so the window drew
@@ -2116,7 +2137,7 @@ impl Viewer {
                         d.cmd_push_constants(
                             cmd,
                             layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            crate::renderer::PUSH_STAGES,
                             0,
                             bytes,
                         );
@@ -2148,7 +2169,7 @@ impl Viewer {
                         d.cmd_push_constants(
                             cmd,
                             layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            crate::renderer::PUSH_STAGES,
                             0,
                             push.bytes(),
                         );
@@ -2178,7 +2199,7 @@ impl Viewer {
                             d.cmd_push_constants(
                                 cmd,
                                 layout,
-                                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                                crate::renderer::PUSH_STAGES,
                                 0,
                                 bytes,
                             );
@@ -2393,7 +2414,7 @@ impl Viewer {
                         d.cmd_push_constants(
                             cmd,
                             layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            crate::renderer::PUSH_STAGES,
                             0,
                             push.bytes(),
                         );
