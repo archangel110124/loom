@@ -23,6 +23,19 @@ struct Source {
     /// Last solve, reused on the ticks this source is not the one being
     /// re-measured.
     acoustics: Acoustics,
+    /// Where this source was relative to the listener last tick, in world
+    /// space, and how fast that is changing — ADR 0090.
+    ///
+    /// **World space, not the listener's frame.** The rotated vector changes
+    /// when the player merely turns their head, and differencing that would
+    /// pitch-shift every sound in the scene for turning round.
+    ///
+    /// `None` until the first update, because one sample is not a velocity: a
+    /// source's first tick would otherwise read as having crossed the whole
+    /// offset in one frame.
+    previous_offset: Option<[f32; 3]>,
+    /// Metres per second, positive away from the listener along the line to it.
+    closing: [f32; 3],
 }
 
 /// Everything audible in a scene.
@@ -160,6 +173,8 @@ impl Sound {
             entity,
             at,
             range,
+            previous_offset: None,
+            closing: [0.0; 3],
             acoustics: Acoustics {
                 occlusion: 0.0,
                 muffling: 0.0,
@@ -251,6 +266,25 @@ impl Sound {
             if let Some(global) = world.global_transform(source.entity) {
                 source.at = [global.matrix[12], global.matrix[13], global.matrix[14]];
             }
+            // **Differenced, not plumbed.** A source's velocity is not a
+            // thing the scene declares — some sources ride a rigid body, some
+            // are carried by a character, some are nodes a script moves — and
+            // the one quantity all of them share is where they ended up. The
+            // tick is fixed, so a difference is a velocity.
+            let offset = [
+                source.at[0] - listener[0],
+                source.at[1] - listener[1],
+                source.at[2] - listener[2],
+            ];
+            source.closing = source.previous_offset.map_or([0.0; 3], |was| {
+                [
+                    (offset[0] - was[0]) / crate::play::TICK_SECONDS,
+                    (offset[1] - was[1]) / crate::play::TICK_SECONDS,
+                    (offset[2] - was[2]) / crate::play::TICK_SECONDS,
+                ]
+            });
+            source.previous_offset = Some(offset);
+
             source.acoustics.reverb_delay = room.reverb_delay;
             source.acoustics.reverb_gain = room.reverb_gain;
             source.acoustics.openness = room.openness;
@@ -264,6 +298,7 @@ impl Sound {
         }
 
         let sources = &self.sources;
+        let speed_of_sound = self.ears.speed_of_sound;
         self.audio.update(|voice_index, voice| {
             let Some(source) = sources.get(voice_index) else {
                 return;
@@ -283,6 +318,7 @@ impl Sound {
                 dot(offset, forward),
             ];
             voice.range = source.range;
+            voice.doppler = loom_audio::doppler(offset, source.closing, speed_of_sound);
             voice.acoustics = source.acoustics;
             voice.acoustics.distance = distance;
         });

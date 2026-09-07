@@ -368,8 +368,104 @@ fn normalize(a: [f32; 3]) -> [f32; 3] {
     scale(a, 1.0 / len)
 }
 
+/// The frequency ratio a moving source and a moving listener produce — ADR 0090.
+///
+/// `relative` is where the source is from the listener; `closing` is the
+/// source's velocity **relative to the listener**, in the same frame. Both in
+/// metres and metres per second.
+///
+/// **Sign matters more than the formula.** A source receding stretches the
+/// wave and the ratio drops below one; closing, it rises. Getting that
+/// backwards is inaudible in a still scene and unmistakable the first time
+/// something passes you.
+///
+/// Clamped, because the arithmetic has a pole at the speed of sound and a game
+/// is free to throw something through it. A boat cannot go supersonic; a
+/// scripted projectile can, and a divide by zero is not the sound anybody
+/// wants.
+#[must_use]
+pub fn doppler(relative: [f32; 3], closing: [f32; 3], speed_of_sound: f32) -> f32 {
+    let length =
+        (relative[0] * relative[0] + relative[1] * relative[1] + relative[2] * relative[2]).sqrt();
+    // On top of the listener there is no radial direction, so there is no
+    // shift — and normalising would divide by zero to find that out.
+    if length <= f32::EPSILON || speed_of_sound <= 0.0 {
+        return 1.0;
+    }
+    let toward = [relative[0] / length, relative[1] / length, relative[2] / length];
+    // Positive is receding: the component of the source's motion along the
+    // line from the listener out to it.
+    let radial = closing[0] * toward[0] + closing[1] * toward[1] + closing[2] * toward[2];
+    (speed_of_sound / (speed_of_sound + radial)).clamp(0.25, 4.0)
+}
+
+/// Metres over which air has taken most of the top end.
+///
+/// Not a measured coefficient: real absorption is a function of frequency,
+/// humidity and temperature, and this is one number driving a one-pole filter.
+/// Chosen so that a source at the far end of the default 60 m listening range
+/// is clearly duller than a near one without being muffled.
+const AIR_HALF_DISTANCE: f32 = 45.0;
+
+/// How much of the top end survives `distance` metres of air — ADR 0090.
+///
+/// **Distance already cuts the gain, and that alone sounds wrong.** A quiet
+/// near sound and a distant one are not the same thing, and the difference the
+/// ear actually uses is the top end: air absorbs high frequencies as the sound
+/// travels, which is why thunder rumbles and the strike beside you cracks.
+///
+/// Returns a multiplier for a one-pole cutoff — one at the listener, falling
+/// toward zero with distance, never reaching it.
+#[must_use]
+pub fn air_absorption(distance: f32) -> f32 {
+    1.0 / (1.0 + distance.max(0.0) / AIR_HALF_DISTANCE)
+}
+
 #[cfg(test)]
 mod tests {
+    /// **Sign, which is the half that is easy to get backwards.** A source
+    /// coming at you is higher; going away it is lower. In a still scene both
+    /// look identical, so this is the check that matters.
+    #[test]
+    fn closing_raises_the_pitch_and_receding_lowers_it() {
+        let ahead = [0.0, 0.0, 10.0];
+        let closing = super::doppler(ahead, [0.0, 0.0, -30.0], 343.0);
+        let receding = super::doppler(ahead, [0.0, 0.0, 30.0], 343.0);
+        assert!(closing > 1.0, "a source closing should rise: {closing}");
+        assert!(receding < 1.0, "a source receding should fall: {receding}");
+        // 30 m/s against 343 is about a 9% shift each way.
+        assert!((closing - 343.0 / 313.0).abs() < 1e-4, "{closing}");
+        assert!((receding - 343.0 / 373.0).abs() < 1e-4, "{receding}");
+    }
+
+    /// Motion across the line of sight is not motion along it.
+    #[test]
+    fn crossing_in_front_does_not_shift() {
+        let shift = super::doppler([0.0, 0.0, 10.0], [40.0, 0.0, 0.0], 343.0);
+        assert!((shift - 1.0).abs() < 1e-6, "a crossing source should not shift: {shift}");
+    }
+
+    /// **The arithmetic has a pole at the speed of sound.** A scripted
+    /// projectile is free to reach it, and a divide by zero is not a sound.
+    #[test]
+    fn a_supersonic_source_is_clamped_rather_than_infinite() {
+        for speed in [-343.0_f32, -343.0 * 2.0, 343.0 * 10.0] {
+            let shift = super::doppler([0.0, 0.0, 10.0], [0.0, 0.0, speed], 343.0);
+            assert!(shift.is_finite(), "{speed} m/s gave {shift}");
+            assert!((0.25..=4.0).contains(&shift), "{speed} m/s gave {shift}");
+        }
+    }
+
+    /// Distance takes the top end, and never all of it.
+    #[test]
+    fn air_takes_the_top_end_with_distance() {
+        let near = super::air_absorption(0.0);
+        let far = super::air_absorption(60.0);
+        assert!((near - 1.0).abs() < 1e-6, "at the listener nothing is absorbed: {near}");
+        assert!(far < near, "distance should dull: {far} vs {near}");
+        assert!(far > 0.0, "air should not silence entirely: {far}");
+    }
+
     use super::*;
 
     const FLAT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];

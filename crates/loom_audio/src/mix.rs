@@ -18,6 +18,32 @@
 
 use crate::Acoustics;
 
+/// Samples of history kept per voice, for the interaural delay.
+///
+/// The largest delay a head can impose is about 0.66 ms — 32 samples at 48 kHz,
+/// 64 at 96. This is the next power of two above that, so the ring never wraps
+/// into a delay still being read.
+const HEAD_HISTORY: usize = 256;
+
+/// Metres per second, for the head geometry only.
+///
+/// **Deliberately not `Ears::speed_of_sound`.** That one is the scene's, and a
+/// scene is free to be on another planet — but the listener's head is the same
+/// head, and the shift it imposes is a property of the ears, not the air. A
+/// mixer that resized the player's skull when the wind changed would be a
+/// stranger bug than the one it fixed.
+const SPEED_OF_SOUND: f32 = 343.0;
+
+/// Half the distance between the ears, metres. A head, roughly.
+const HEAD_RADIUS: f32 = 0.0875;
+
+/// How much of the top end the head takes from the far ear.
+///
+/// Not measured — the real shadow is a function of frequency and angle. One
+/// number driving a one-pole is enough to tell front from side from behind-
+/// the-other-ear, which is the cue this exists to give.
+const SHADOW_STRENGTH: f32 = 0.82;
+
 /// One sound playing somewhere in the world.
 pub struct Voice {
     /// Mono source samples.
@@ -36,9 +62,23 @@ pub struct Voice {
     pub acoustics: Acoustics,
     /// Distance at which it has faded to nothing.
     pub range: f32,
+    /// Frequency ratio from relative motion — ADR 0090. One is a source and
+    /// listener holding still; above one is closing, below one is receding.
+    ///
+    /// **It multiplies `step`, because a pitch shift and a resample are the
+    /// same operation.** Nothing else in here has to know what a doppler shift
+    /// is: the cursor advances faster and the sound is higher.
+    pub doppler: f32,
     /// Low-pass state, carried between buffers. A filter reset every buffer
     /// clicks at every boundary.
     lowpass: [f32; 2],
+    /// Recent shaped samples, so one ear can hear what the other heard a
+    /// fraction of a millisecond ago — ADR 0090. Carried between buffers for
+    /// the same reason `lowpass` is.
+    history: [f32; HEAD_HISTORY],
+    history_at: usize,
+    /// Head-shadow filter state, one per ear.
+    shadow: [f32; 2],
 }
 
 impl Voice {
@@ -66,7 +106,11 @@ impl Voice {
                 distance: 0.0,
             },
             range,
+            doppler: 1.0,
             lowpass: [0.0; 2],
+            history: [0.0; HEAD_HISTORY],
+            history_at: 0,
+            shadow: [0.0; 2],
         }
     }
 
@@ -76,6 +120,53 @@ impl Voice {
         {
             !self.looping && self.cursor >= self.samples.len() as f64
         }
+    }
+
+    /// One ear's sample, `delay` samples behind the newest — ADR 0090.
+    fn delayed(&self, delay: usize) -> f32 {
+        self.history[(self.history_at + HEAD_HISTORY - delay) % HEAD_HISTORY]
+    }
+
+    /// How many samples late each ear is — ADR 0090.
+    ///
+    /// **Woodworth**: around a sphere the extra path to the far ear is
+    /// `(r/c)(θ + sin θ)`, which is the classic approximation and is within
+    /// tens of microseconds of a measured head at the angles that matter.
+    ///
+    /// The near ear is not early — it is on time, and the far one is late. A
+    /// delay is only ever added, because there is nothing before the start of
+    /// a buffer to read.
+    fn interaural_delay(&self, sample_rate: u32) -> (usize, usize) {
+        let direction = normalized(self.relative);
+        // **The lateral angle, not the azimuth.** Woodworth holds to a quarter
+        // turn; past that `atan2` keeps growing and the delay runs off the end
+        // of a head — 112 degrees asked for 71 samples where the geometry
+        // allows 63. Taking `asin` of the sideways component folds front and
+        // back onto the same angle, which is bounded by construction.
+        //
+        // It also means a source behind you has the same delay as one in front
+        // at the same lateral angle. That is not a bug in the arithmetic, it is
+        // what interaural delay actually is — front-back confusion is the cue
+        // this model does not carry, and the reason measured HRTFs exist.
+        let lateral = direction[0].clamp(-1.0, 1.0).asin();
+        let path = HEAD_RADIUS / SPEED_OF_SOUND * (lateral.abs() + lateral.abs().sin());
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let samples = ((path * sample_rate as f32).round() as usize).min(HEAD_HISTORY - 1);
+        if direction[0] >= 0.0 {
+            // Source on the right: the left ear is the far one.
+            (samples, 0)
+        } else {
+            (0, samples)
+        }
+    }
+
+    /// The one-pole cutoff for each ear, closing on whichever is in shadow.
+    fn head_shadow(&self) -> (f32, f32) {
+        let side = normalized(self.relative)[0].clamp(-1.0, 1.0);
+        // A source hard right shadows the left ear fully, and vice versa.
+        let left = 1.0 - side.max(0.0) * SHADOW_STRENGTH;
+        let right = 1.0 - (-side).max(0.0) * SHADOW_STRENGTH;
+        (left, right)
     }
 
     /// How loud this voice is, per ear, after everything the world does.
@@ -135,7 +226,16 @@ impl Mixer {
             // A low-pass that closes as material thickens. `muffling` of zero
             // leaves the signal alone; one takes almost everything above a
             // few hundred hertz, which is what a closed door does.
-            let cutoff = 1.0 - voice.acoustics.muffling.clamp(0.0, 1.0) * 0.97;
+            // **And air, which is the other thing between a sound and an
+            // ear.** Distance already cuts the gain; on its own that makes a
+            // far-off sound a quiet near one, and the ear does not believe it.
+            // Air absorbs the top end as it goes, so distance also closes this
+            // filter — which is most of why thunder rumbles and a nearby strike
+            // cracks. See `crate::air_absorption`.
+            let cutoff = (1.0 - voice.acoustics.muffling.clamp(0.0, 1.0) * 0.97)
+                * crate::air_absorption(voice.acoustics.distance);
+            let (left_delay, right_delay) = voice.interaural_delay(self.sample_rate);
+            let (left_cutoff, right_cutoff) = voice.head_shadow();
             let send = voice.acoustics.reverb_gain * (1.0 - voice.acoustics.openness);
             let delay = self.delay_samples(voice.acoustics.reverb_delay);
 
@@ -148,8 +248,21 @@ impl Mixer {
                 voice.lowpass[1] += (voice.lowpass[0] - voice.lowpass[1]) * cutoff;
                 let shaped = voice.lowpass[1];
 
-                frame[0] += shaped * left_gain;
-                frame[1] += shaped * right_gain;
+                // **The two ears stop hearing the same thing here.** Panning
+                // alone puts a sound inside the head: both ears get one signal
+                // at two volumes, which never happens in a room. What makes a
+                // sound sit *out there* is that it reaches one ear first and
+                // arrives duller at the other, and that is these two lines.
+                voice.history[voice.history_at] = shaped;
+                let left_raw = voice.delayed(left_delay);
+                let right_raw = voice.delayed(right_delay);
+                voice.history_at = (voice.history_at + 1) % HEAD_HISTORY;
+
+                voice.shadow[0] += (left_raw - voice.shadow[0]) * left_cutoff;
+                voice.shadow[1] += (right_raw - voice.shadow[1]) * right_cutoff;
+
+                frame[0] += voice.shadow[0] * left_gain;
+                frame[1] += voice.shadow[1] * right_gain;
 
                 if send > 1e-4 {
                     let at = (self.reverb_at + delay) % self.reverb.len();
@@ -217,7 +330,8 @@ impl Voice {
         };
         #[allow(clippy::cast_possible_truncation)]
         let out = a + (b - a) * fraction as f32;
-        self.cursor += self.step;
+        // The one place motion becomes pitch — see `Voice::doppler`.
+        self.cursor += self.step * f64::from(self.doppler);
         Some(out)
     }
 }
@@ -232,6 +346,88 @@ fn normalized(v: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
+    /// **The near ear hears it first.** This is the cue that puts a sound
+    /// outside the head rather than between the ears, and it is the one thing
+    /// constant-power panning cannot do at any volume.
+    #[test]
+    fn the_far_ear_is_late() {
+        let mut right = placed();
+        right.relative = [1.0, 0.0, 0.0];
+        let (left_delay, right_delay) = right.interaural_delay(48_000);
+        assert_eq!(right_delay, 0, "the near ear is on time");
+        assert!(left_delay > 0, "the far ear is late: {left_delay}");
+
+        let mut left = placed();
+        left.relative = [-1.0, 0.0, 0.0];
+        let (left_delay, right_delay) = left.interaural_delay(48_000);
+        assert_eq!(left_delay, 0, "the near ear is on time");
+        assert!(right_delay > 0, "the far ear is late: {right_delay}");
+    }
+
+    /// Straight ahead is the one direction with no difference at all.
+    #[test]
+    fn a_sound_in_front_reaches_both_ears_together() {
+        let mut ahead = placed();
+        ahead.relative = [0.0, 0.0, 1.0];
+        assert_eq!(ahead.interaural_delay(48_000), (0, 0));
+        let (left, right) = ahead.head_shadow();
+        assert!((left - right).abs() < 1e-6, "no shadow in front: {left} vs {right}");
+    }
+
+    /// **A head is not 34 metres wide.** The delay is bounded by the geometry,
+    /// and a ring that wrapped would read a sample from the future.
+    #[test]
+    fn the_delay_never_outruns_the_history() {
+        for angle in 0..360 {
+            let radians = f32::from(u16::try_from(angle).unwrap_or(0)).to_radians();
+            let mut v = placed();
+            v.relative = [radians.sin(), 0.0, radians.cos()];
+            let (left, right) = v.interaural_delay(96_000);
+            assert!(left < super::HEAD_HISTORY, "{angle} deg: {left}");
+            assert!(right < super::HEAD_HISTORY, "{angle} deg: {right}");
+            // (r/c)(pi/2 + 1) is 0.656 ms, which is 63 samples at 96 kHz.
+            assert!(left.max(right) <= 64, "{angle} deg gave {left}/{right}");
+        }
+    }
+
+    /// The ear in shadow loses the top end; the near one does not.
+    #[test]
+    fn the_far_ear_is_duller() {
+        let mut v = placed();
+        v.relative = [1.0, 0.0, 0.0];
+        let (left, right) = v.head_shadow();
+        assert!(left < right, "the shadowed ear is duller: {left} vs {right}");
+        assert!(left > 0.0, "and not silent: {left}");
+    }
+
+    /// A voice with no samples worth hearing — these checks are about geometry.
+    fn placed() -> super::Voice {
+        super::Voice::new(std::sync::Arc::new(vec![0.0; 16]), 48_000, 48_000, 1.0, 0.0)
+    }
+
+    /// **A pitch shift is a resample, and this proves the knob is connected.**
+    /// The maths of `doppler` is checked in `lib.rs`; what this checks is that
+    /// the ratio reaches the cursor at all — a shift nothing applies is a
+    /// feature that exists only in its own unit test.
+    #[test]
+    fn a_doppler_ratio_moves_the_cursor_faster() {
+        let samples = std::sync::Arc::new((0..1000).map(|i| i as f32 * 0.001).collect::<Vec<_>>());
+        let mut still = super::Voice::new(std::sync::Arc::clone(&samples), 48_000, 48_000, 1.0, 0.0);
+        let mut closing = super::Voice::new(std::sync::Arc::clone(&samples), 48_000, 48_000, 1.0, 0.0);
+        closing.doppler = 2.0;
+
+        for _ in 0..100 {
+            still.sample();
+            closing.sample();
+        }
+        assert!(
+            (closing.cursor - still.cursor * 2.0).abs() < 1e-9,
+            "a doubled ratio should consume the source twice as fast: {} vs {}",
+            closing.cursor,
+            still.cursor
+        );
+    }
+
     use super::*;
 
     fn tone(length: usize) -> std::sync::Arc<Vec<f32>> {
