@@ -107,8 +107,131 @@ pub fn library_for(
     let base = scene_path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let mut library = Library::new();
     let mut seen = BTreeSet::new();
-    collect(scene, base, &mut library, &mut seen)?;
+    collect(scene, base, base, &mut library, &mut seen)?;
     Ok(library)
+}
+
+/// Components whose `path` field names a file rather than a scene node.
+///
+/// Exactly three, checked against `components.rs`: everything else with a
+/// `path` is a node path, and rewriting one of those would break a reference
+/// rather than fix it.
+const PATH_COMPONENTS: [&str; 3] = ["Script", "GameRules", "Bindings"];
+
+/// Normalise a path lexically — no filesystem, no symlinks.
+fn lexical(path: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                // A leading `..` has nothing to pop and must be kept, or the
+                // path silently climbs one level less than it asked to.
+                if parts.last().is_some_and(|p| p != ".." ) {
+                    parts.pop();
+                } else {
+                    parts.push("..".into());
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => parts.push(other.as_os_str().to_owned()),
+        }
+    }
+    parts
+}
+
+/// Rewrite `path`, written relative to `from`, so it means the same file when
+/// resolved relative to `to` — ADR 0094.
+///
+/// **Relative, never absolute.** The result can be written into a scene file by
+/// the unpack op, and an absolute path there would be correct on exactly one
+/// machine.
+///
+/// `None` when the path is absolute (already unambiguous) or when the two
+/// directories share no root, which is the case where there is no honest
+/// relative answer.
+#[must_use]
+pub(crate) fn rebase_relative(path: &str, from: &std::path::Path, to: &std::path::Path) -> Option<String> {
+    let candidate = std::path::Path::new(path);
+    if candidate.is_absolute() {
+        return None;
+    }
+    let target = lexical(&from.join(candidate));
+    let base = lexical(to);
+
+    let shared = target.iter().zip(&base).take_while(|(a, b)| a == b).count();
+    // Neither may still be climbing out of its own root at the split point, or
+    // the `..` count below is measured against a directory nobody named.
+    if target.get(shared).is_some_and(|p| p == "..") || base.get(shared).is_some_and(|p| p == "..") {
+        return None;
+    }
+
+    let mut out = std::path::PathBuf::new();
+    for _ in shared..base.len() {
+        out.push("..");
+    }
+    for part in &target[shared..] {
+        out.push(part);
+    }
+    // Same directory: a bare filename, not an empty string.
+    let text = out.to_str()?.to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Rewrite every file path a prefab's nodes declare so they resolve from the
+/// consuming scene's directory — ADR 0094.
+///
+/// **A prefab is written relative to itself.** `deckhand.loom` says
+/// `../scripts/deckhand_hips.rhai`, meaning "beside my own folder" — but the
+/// scene that instances it resolves that string against *its* directory. Every
+/// shipped scene happens to sit one level under `assets/`, so the two agree and
+/// nothing here has ever noticed. A prefab library kept anywhere else breaks,
+/// and it breaks as a missing script rather than as a path problem.
+///
+/// Text in, text out, so this needs no mutable access to a parsed `Scene` and
+/// cannot leave the document and its nodes disagreeing.
+#[must_use]
+pub(crate) fn rebase_prefab_paths(text: &str, from: &std::path::Path, to: &std::path::Path) -> String {
+    if from == to {
+        return text.to_owned();
+    }
+    let Ok(mut doc) = text.parse::<toml_edit::DocumentMut>() else {
+        // Unparseable text is `Scene::parse`'s error to report, with a line
+        // number. Swallowing it here would turn it into a missing prefab.
+        return text.to_owned();
+    };
+
+    let Some(nodes) = doc.get_mut("node").and_then(|n| n.as_array_of_tables_mut()) else {
+        return text.to_owned();
+    };
+    for node in nodes.iter_mut() {
+        let Some(components) = node.get_mut("components").and_then(toml_edit::Item::as_table_mut)
+        else {
+            continue;
+        };
+        for name in PATH_COMPONENTS {
+            let Some(field) = components
+                .get_mut(name)
+                .and_then(toml_edit::Item::as_table_like_mut)
+            else {
+                continue;
+            };
+            let Some(current) = field.get("path").and_then(|p| p.as_str()).map(str::to_owned)
+            else {
+                continue;
+            };
+            if let Some(rebased) = rebase_relative(&current, from, to)
+                && let Some(toml_edit::Item::Value(slot)) = field.get_mut("path")
+            {
+                // **The value only, never the key.** `insert` replaces the key
+                // too and takes its decor with it, which is where the author's
+                // indentation lives — the rewritten line came back flush left.
+                let decor = slot.decor().clone();
+                *slot = toml_edit::Value::from(rebased);
+                *slot.decor_mut() = decor;
+            }
+        }
+    }
+    doc.to_string()
 }
 
 /// Depth-first, guarded by `seen` on the prefab id. The guard is for repeated
@@ -117,6 +240,9 @@ pub fn library_for(
 fn collect(
     scene: &Scene,
     base: &std::path::Path,
+    // The directory of the scene at the top of this load — what every path in
+    // the resolved result will be read relative to. ADR 0094.
+    top: &std::path::Path,
     library: &mut Library,
     seen: &mut BTreeSet<String>,
 ) -> Result<(), Vec<SceneError>> {
@@ -150,10 +276,13 @@ fn collect(
             ));
             vec![err]
         })?;
-        let parsed = Scene::parse(&text)?;
-
+        // **Rebased before it is parsed**, so everything downstream — the
+        // resolver, the unpack op, the editor — sees paths that already mean
+        // the right file from where the consuming scene sits.
         let nested = file.parent().unwrap_or(base).to_path_buf();
-        collect(&parsed, &nested, library, seen)?;
+        let parsed = Scene::parse(&rebase_prefab_paths(&text, &nested, top))?;
+
+        collect(&parsed, &nested, top, library, seen)?;
         library.insert(decl.id, parsed);
     }
     Ok(())
@@ -744,6 +873,81 @@ fn json_to_toml(value: &Value) -> Option<toml_edit::Value> {
 
 #[cfg(test)]
 mod tests {
+
+    use std::path::Path;
+
+    /// **The case that has always worked, and must keep working.** Every
+    /// shipped scene sits one level under `assets/`, so a prefab in
+    /// `assets/prefabs` and a scene in `assets/games` resolve
+    /// `../scripts/x.rhai` identically. If this changed, every scene in the
+    /// repository would break at once.
+    #[test]
+    fn a_sibling_directory_rebases_to_itself() {
+        let out = super::rebase_relative(
+            "../scripts/deckhand_hips.rhai",
+            Path::new("assets/prefabs"),
+            Path::new("assets/games"),
+        );
+        assert_eq!(out.as_deref(), Some("../scripts/deckhand_hips.rhai"));
+    }
+
+    /// **The case that was broken.** A prefab library kept anywhere else meant
+    /// the script resolved against the *scene's* directory and was not there.
+    #[test]
+    fn a_prefab_kept_elsewhere_rebases_to_reach_its_own_scripts() {
+        let out = super::rebase_relative(
+            "../scripts/x.rhai",
+            Path::new("/lib/prefabs"),
+            Path::new("/game/assets/games"),
+        );
+        // From the scene, climb to the root and back down to the library.
+        assert_eq!(out.as_deref(), Some("../../../lib/scripts/x.rhai"));
+    }
+
+    #[test]
+    fn a_path_beside_the_prefab_still_points_at_it() {
+        let out = super::rebase_relative("gait.rhai", Path::new("a/prefabs"), Path::new("a/games"));
+        assert_eq!(out.as_deref(), Some("../prefabs/gait.rhai"));
+    }
+
+    /// An absolute path is already unambiguous and is left alone.
+    #[test]
+    fn an_absolute_path_is_not_rebased() {
+        assert_eq!(super::rebase_relative("/opt/x.rhai", Path::new("a"), Path::new("b")), None);
+    }
+
+    /// **Only the three components whose `path` is a file.** Rewriting a node
+    /// path would break a reference rather than fix one.
+    #[test]
+    fn only_file_paths_are_rewritten() {
+        let text = "\
+[scene]
+format = 1
+
+[[node]]
+name = \"Walker\"
+  [node.components.Script]
+  path = \"../scripts/x.rhai\"
+  [node.components.CharacterController]
+  height = 1.8
+";
+        let out = super::rebase_prefab_paths(text, Path::new("/lib/prefabs"), Path::new("/g/games"));
+        assert!(out.contains("../../lib/scripts/x.rhai"), "{out}");
+        assert!(
+            out.contains("  path = "),
+            "the author's indentation survives the rewrite: {out}"
+        );
+        assert!(out.contains("height = 1.8"), "the rest of the file is untouched: {out}");
+    }
+
+    /// Same directory in and out changes nothing at all — not even formatting,
+    /// which a round trip through `toml_edit` could otherwise disturb.
+    #[test]
+    fn rebasing_onto_the_same_directory_is_the_identity() {
+        let text = "[scene]\nformat = 1\n\n# a comment\n[[node]]\nname = \"A\"\n";
+        assert_eq!(super::rebase_prefab_paths(text, Path::new("x"), Path::new("x")), text);
+    }
+
     use super::*;
 
     const LAMP_ID: &str = "3f1c9a20-77bd-4e11-9c02-51ad6e7b8c44";
