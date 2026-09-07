@@ -159,9 +159,9 @@ pub fn mip_chain(level0: Vec<u8>, width: u32, height: u32, space: ColorSpace) ->
 /// [`AssetError::Io`] if the file cannot be read, [`AssetError::Unsupported`]
 /// if it is not a PNG this can turn into RGBA8.
 pub fn load(path: &std::path::Path, space: ColorSpace) -> Result<Texture, AssetError> {
-    let file = std::fs::File::open(path).map_err(AssetError::Io)?;
+    let bytes = crate::pack::read_bytes(path).map_err(AssetError::Io)?;
     decode(
-        std::io::BufReader::new(file),
+        std::io::Cursor::new(bytes),
         space,
         &path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned()),
         &path.display().to_string(),

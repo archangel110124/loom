@@ -481,13 +481,15 @@ fn main() -> std::process::ExitCode {
         "shimmer" => shimmer(),
         "repeat" => repeat(),
         "ablate" => ablate(),
+        "dist" => dist(),
         other => {
             eprintln!(
                 "unknown task {other:?}\n\nUSAGE:\n    cargo xtask validate\n    \
                  cargo xtask image [--bless]\n    cargo xtask flythrough
     cargo xtask shimmer
     cargo xtask repeat
-    cargo xtask ablate"
+    cargo xtask ablate
+      cargo xtask dist"
             );
             std::process::ExitCode::from(2)
         }
@@ -3399,4 +3401,185 @@ impl Drop for GateLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// The game as a stranger receives it — ADR 0089.
+///
+/// **A build tree is not a product.** Everything up to here proves the engine
+/// works on a machine that has the repository, a Rust toolchain and a shader
+/// compiler. A player has none of those, and until this task existed there was
+/// no answer to "how do I give this to someone".
+///
+/// What goes in is the binary, the assets it opens at runtime, and a launcher.
+/// What stays out is anything only a build reads: `assets/shaders` is Slang
+/// source that `build.rs` already compiled into the binary through
+/// `include_bytes!`, so shipping it would be shipping source nothing loads.
+/// Notes (`.md`) stay out for the same reason.
+///
+/// **Asset paths are scene-relative** (`../meshes/gleamsprat_chrome.obj`), so
+/// the tree only has to keep its shape — there is no root to configure and no
+/// working directory to be in. That is why the launcher can `exec` from
+/// anywhere and why the dist is checked from `/` below.
+fn dist() -> std::process::ExitCode {
+    let root = repo_root();
+    let loom = match build_release(&root) {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("xtask: {message}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    // Under `target/`, so it is a build output like any other and `cargo clean`
+    // takes it. Rebuilt from scratch each time: a dist that kept yesterday's
+    // stale asset beside today's binary is the exact failure this task exists
+    // to prevent.
+    let out = root.join("target/dist/deeper");
+    let _ = std::fs::remove_dir_all(&out);
+    if let Err(e) = std::fs::create_dir_all(&out) {
+        eprintln!("xtask: cannot create {}: {e}", out.display());
+        return std::process::ExitCode::from(2);
+    }
+
+    if let Err(e) = std::fs::copy(&loom, out.join("loom")) {
+        eprintln!("xtask: cannot copy the binary: {e}");
+        return std::process::ExitCode::from(2);
+    }
+
+    // Staged, then packed: the filter is policy about this game and belongs
+    // here, while `loom pack` is a general command that folds whatever tree it
+    // is given. Staging costs one copy of the assets and keeps the two apart.
+    let staging = root.join("target/dist/staging/assets");
+    let _ = std::fs::remove_dir_all(root.join("target/dist/staging"));
+    let mut copied = Files::default();
+    if let Err(e) = copy_tree(&root.join("assets"), &staging, &mut copied) {
+        eprintln!("xtask: {e}");
+        return std::process::ExitCode::from(2);
+    }
+
+    let packed = Command::new(&loom)
+        .arg("pack")
+        .arg(&staging)
+        .arg(out.join("assets.pack"))
+        .status();
+    match packed {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!("xtask: loom pack {status}");
+            return std::process::ExitCode::from(1);
+        }
+        Err(e) => {
+            eprintln!("xtask: cannot run loom pack: {e}");
+            return std::process::ExitCode::from(1);
+        }
+    }
+    let _ = std::fs::remove_dir_all(root.join("target/dist/staging"));
+
+    // `$0` rather than a hardcoded path, and `exec` rather than a subshell, so
+    // the launcher works from any working directory and the game is the process
+    // the player's window manager sees.
+    let launcher = out.join("play.sh");
+    let script = "#!/bin/sh\n\
+        # DEEPER. Run it from anywhere — the assets resolve relative to this file.\n\
+        here=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
+        exec \"$here/loom\" run \"$here/assets/games/deeper_demo.loom\" --menu \"$@\"\n";
+    if let Err(e) = std::fs::write(&launcher, script) {
+        eprintln!("xtask: cannot write the launcher: {e}");
+        return std::process::ExitCode::from(2);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+        {
+            eprintln!("xtask: cannot make the launcher executable: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    }
+
+    let binary = std::fs::metadata(out.join("loom")).map_or(0, |m| m.len());
+    let pack = std::fs::metadata(out.join("assets.pack")).map_or(0, |m| m.len());
+    println!(
+        "dist: {} — {} binary, {} asset file(s) packed into {}",
+        out.display(),
+        human(binary),
+        copied.files,
+        human(pack),
+    );
+
+    // `tar` rather than a crate: it is on every machine that can run the game,
+    // and a dependency to write a file format the system already writes is the
+    // kind of thing this project does not do.
+    let archive = root.join("target/dist/deeper-linux-x86_64.tar.zst");
+    let tarred = Command::new("tar")
+        .arg("--zstd")
+        .arg("-cf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(root.join("target/dist"))
+        .arg("deeper")
+        .status();
+    match tarred {
+        Ok(status) if status.success() => {
+            let size = std::fs::metadata(&archive).map_or(0, |m| m.len());
+            println!("dist: {} — {}", archive.display(), human(size));
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(status) => {
+            eprintln!("xtask: tar {status}");
+            std::process::ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("xtask: cannot run tar: {e}");
+            std::process::ExitCode::from(1)
+        }
+    }
+}
+
+/// What a copy moved, for the one line the task prints.
+#[derive(Default)]
+struct Files {
+    files: usize,
+    bytes: u64,
+}
+
+/// Copy `from` to `to`, leaving behind what only a build reads.
+fn copy_tree(from: &Path, to: &Path, tally: &mut Files) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+    let entries =
+        std::fs::read_dir(from).map_err(|e| format!("cannot read {}: {e}", from.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read {}: {e}", from.display()))?;
+        let name = entry.file_name();
+        let path = entry.path();
+
+        // Slang source is compiled into the binary; notes are for whoever has
+        // the repository, who by definition is not the person holding a dist.
+        if name == "shaders" || path.extension().is_some_and(|e| e == "md") {
+            continue;
+        }
+
+        let target = to.join(&name);
+        if path.is_dir() {
+            copy_tree(&path, &target, tally)?;
+        } else {
+            let bytes = std::fs::copy(&path, &target)
+                .map_err(|e| format!("cannot copy {}: {e}", path.display()))?;
+            tally.files += 1;
+            tally.bytes += bytes;
+        }
+    }
+    Ok(())
+}
+
+/// Bytes as a human reads them.
+fn human(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let bytes = bytes as f64;
+    for (limit, unit) in [(1e9, "GB"), (1e6, "MB"), (1e3, "kB")] {
+        if bytes >= limit {
+            return format!("{:.1} {unit}", bytes / limit);
+        }
+    }
+    format!("{bytes:.0} B")
 }

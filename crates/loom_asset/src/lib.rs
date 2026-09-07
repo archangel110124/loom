@@ -6,6 +6,7 @@
 //! shipped — no parallel system, no surprise at ship time.
 
 pub mod mesh;
+pub mod pack;
 pub mod packed;
 pub mod meta;
 pub mod primitives;

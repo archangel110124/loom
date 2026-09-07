@@ -14,6 +14,33 @@ pub use ops::{Applied, SceneOp, Transaction, TransactionError, VersionToken, app
 pub use place::{Anchor, Axis, PlaceOp};
 pub use scene::{Node, PrefabDecl, Scene, SceneError};
 
+/// How this crate reads a file — ADR 0089.
+///
+/// **A hook rather than a dependency.** Prefab resolution has to open files,
+/// and packed builds keep those files inside one archive that `loom_asset`
+/// knows how to read. This crate may depend on `loom_reflect` and nothing else
+/// in the workspace (LOOM-BUILD-BRIEF §3), so it cannot call that reader — and
+/// inverting it, by threading a source through every prefab signature, would
+/// spend a large refactor on a rule that exists to keep this crate a leaf.
+///
+/// So the reader is injected: whoever mounts a pack sets this, and everyone
+/// else gets `std::fs`. Set once at startup, like a logger.
+static READER: std::sync::OnceLock<fn(&std::path::Path) -> std::io::Result<String>> =
+    std::sync::OnceLock::new();
+
+/// Tell this crate how to read files. The first call wins; later ones do
+/// nothing, so a second mount cannot change what a scene already loaded.
+pub fn set_reader(reader: fn(&std::path::Path) -> std::io::Result<String>) {
+    let _ = READER.set(reader);
+}
+
+/// Read a file the way this crate has been told to.
+pub(crate) fn read_text(path: &std::path::Path) -> std::io::Result<String> {
+    READER
+        .get()
+        .map_or_else(|| std::fs::read_to_string(path), |reader| reader(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

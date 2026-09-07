@@ -234,7 +234,7 @@ impl Audio {
     /// Never: a poisoned lock is reported as failure, not unwrapped.
     pub fn use_rain_recording(&self, path: &std::path::Path) -> bool {
         // Read and decode here, on the caller's thread. See `rain_recording`.
-        let Ok(bytes) = std::fs::read(path) else {
+        let Ok(bytes) = loom_asset::pack::read_bytes(path) else {
             return false;
         };
         let Ok((samples, rate, channels)) = crate::Clip::decode_interleaved(&bytes) else {

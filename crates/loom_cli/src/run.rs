@@ -3544,7 +3544,8 @@ pub fn open_scene(
     autoplay: bool,
     script: Script,
 ) -> Result<(), String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let src = loom_asset::pack::read_text(std::path::Path::new(path))
+        .map_err(|e| format!("{path}: {e}"))?;
     let base = std::path::Path::new(path)
         .parent()
         .unwrap_or(std::path::Path::new("."));

@@ -135,7 +135,7 @@ fn collect(
             base.join(candidate)
         };
 
-        let text = std::fs::read_to_string(&file).map_err(|e| {
+        let text = crate::read_text(&file).map_err(|e| {
             let mut err = SceneError::new("io_error", "");
             err.constraint = format!("{}: {e}", file.display());
             err.field = "prefab".to_owned();

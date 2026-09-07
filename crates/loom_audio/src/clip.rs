@@ -50,7 +50,7 @@ impl Clip {
     /// is a warning to the caller, not a reason to refuse to run — the same
     /// reasoning as a missing texture.
     pub fn load(path: &std::path::Path) -> Result<Self, ClipError> {
-        let bytes = std::fs::read(path).map_err(|e| ClipError {
+        let bytes = loom_asset::pack::read_bytes(path).map_err(|e| ClipError {
             error: "io_error",
             detail: e.to_string(),
         })?;

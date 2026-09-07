@@ -606,7 +606,7 @@ name = \"Desk\"
             "../../assets/test/proving_ground.loom",
             "../../assets/games/proving_ground.loom",
         ] {
-            let Ok(text) = std::fs::read_to_string(scene) else {
+            let Ok(text) = loom_asset::pack::read_text(std::path::Path::new(scene)) else {
                 continue;
             };
             let base = std::path::Path::new(scene).parent().unwrap();

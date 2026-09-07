@@ -2347,6 +2347,29 @@ cmp /tmp/loom-over-straight.json /tmp/loom-over-resumed.json
 rm -f /tmp/loom-save-400.json /tmp/loom-straight.json /tmp/loom-resumed.json \
     /tmp/loom-over-400.json /tmp/loom-over-straight.json /tmp/loom-over-resumed.json
 
+# **A packed build reads what a loose one reads.** ADR 0089. A shipped game is
+# one archive, not a tree of files, and the engine reads assets out of it — so
+# every loader has to go through the pack. The failure mode is silent and only
+# happens to strangers: a new `std::fs::read` works perfectly in a checkout,
+# which has the loose tree, and the packed build it breaks is the only one
+# anybody outside this repository ever runs.
+#
+# So: pack the tree, put the pack beside a copy of the binary, and run the same
+# scene from `/` with no assets directory anywhere near it. Same hash or the
+# packed build is reading something it should not have.
+rm -rf /tmp/loom-pack-check
+mkdir -p /tmp/loom-pack-check
+cp "$LOOM" /tmp/loom-pack-check/loom
+"$LOOM" pack assets /tmp/loom-pack-check/assets.pack > /dev/null
+loose=$("$LOOM" sim assets/games/deeper_demo.loom --ticks 120 --hold move_z=1 \
+    | grep -o '"state_hash": "[0-9a-f]*"')
+packed=$(cd / && /tmp/loom-pack-check/loom sim \
+    /tmp/loom-pack-check/assets/games/deeper_demo.loom --ticks 120 --hold move_z=1 \
+    | grep -o '"state_hash": "[0-9a-f]*"')
+test -n "$loose"
+test "$loose" = "$packed"
+rm -rf /tmp/loom-pack-check
+
 # **And the creel's interactive half, which the run above cannot reach.** That
 # tape holds W and never presses TAB, so it covers the auto-place and the
 # packer's self-check and none of the verbs. This one opens the grid, walks the

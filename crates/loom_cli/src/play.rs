@@ -2652,7 +2652,7 @@ impl Runner {
             let Some(script) = world.script_path(*entity) else {
                 continue;
             };
-            let source = std::fs::read_to_string(base.join(script)).map_err(|e| {
+            let source = loom_asset::pack::read_text(&base.join(script)).map_err(|e| {
                 crate::json_line(&serde_json::json!({
                     "error": "io_error", "script": script, "constraint": e.to_string(),
                 }))
@@ -2709,7 +2709,7 @@ impl Runner {
                     ),
                 })));
             }
-            let source = std::fs::read_to_string(base.join(path)).map_err(|e| {
+            let source = loom_asset::pack::read_text(&base.join(path)).map_err(|e| {
                 crate::json_line(&serde_json::json!({
                     "error": "io_error", "script": path, "constraint": e.to_string(),
                 }))

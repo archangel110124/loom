@@ -78,6 +78,11 @@ USAGE:
         which is the question a hue acceptance test asks and the diff cannot
         answer: whether the water in a named band is turquoise or grey.
 
+    loom pack <assets-dir> <out.pack>
+        Fold an asset tree into one file. A binary with `assets.pack` beside it
+        reads from it instead of the tree, so a shipped game is one archive
+        rather than a directory of loose files. `cargo xtask dist` does this.
+
     loom sim <scene.loom> [--ticks <n>] [--assert <expr>] [--hold <k=v,..>]
                           [--save <f.json>] [--load <f.json>]
         Step physics deterministically and print the state hash. --save writes
@@ -321,6 +326,13 @@ fn unknown_flag(command: &str, args: &[String]) -> Option<(String, Vec<&'static 
 }
 
 fn main() -> ExitCode {
+    // **Before anything opens a file.** A packed build keeps its assets in
+    // one archive beside the binary; a checkout has a loose tree and no pack,
+    // and finds none here. `loom_scene` cannot call the reader itself — it may
+    // depend on `loom_reflect` and nothing else — so it is handed one.
+    loom_asset::pack::mount_beside_exe();
+    loom_scene::set_reader(loom_asset::pack::read_text);
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (code, output) = run(&args);
     if !output.is_empty() {
@@ -383,6 +395,10 @@ fn run(args: &[String]) -> (u8, String) {
         Some("sim") => match args.get(1) {
             Some(path) => sim(path, args),
             None => (2, USAGE.to_owned()),
+        },
+        Some("pack") => match (args.get(1), args.get(2)) {
+            (Some(dir), Some(out)) => pack(dir, out),
+            _ => (2, USAGE.to_owned()),
         },
         Some("scene") => match args.get(1) {
             Some(path) => scene_tx(path, args),
@@ -471,7 +487,7 @@ fn run(args: &[String]) -> (u8, String) {
 }
 
 fn validate(path: &str) -> (u8, String) {
-    let src = match std::fs::read_to_string(path) {
+    let src = match loom_asset::pack::read_text(std::path::Path::new(path)) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -746,7 +762,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         None => None,
     };
 
-    let src = match std::fs::read_to_string(path) {
+    let src = match loom_asset::pack::read_text(std::path::Path::new(path)) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -4105,7 +4121,7 @@ fn sim(path: &str, args: &[String]) -> (u8, String) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(60);
 
-    let src = match std::fs::read_to_string(path) {
+    let src = match loom_asset::pack::read_text(std::path::Path::new(path)) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -6389,6 +6405,29 @@ fn to_parent_space(ops: &mut [loom_scene::SceneOp], world: &World) {
 
 fn json_line<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+}
+
+/// Fold an asset tree into one file the engine can read — ADR 0089.
+///
+/// Separate from `cargo xtask dist` because `xtask` deliberately has no
+/// dependencies: the format lives in `loom_asset`, so the thing that knows how
+/// to write it is this binary, and `xtask` calls it the same way it calls every
+/// other engine command.
+fn pack(dir: &str, out: &str) -> (u8, String) {
+    match loom_asset::pack::write(std::path::Path::new(dir), std::path::Path::new(out)) {
+        Ok((files, bytes)) => (
+            0,
+            json_line(&serde_json::json!({
+                "packed": out, "files": files, "bytes": bytes,
+            })),
+        ),
+        Err(e) => (
+            1,
+            json_line(&serde_json::json!({
+                "error": "io_error", "path": out, "constraint": e.to_string(),
+            })),
+        ),
+    }
 }
 
 #[cfg(test)]

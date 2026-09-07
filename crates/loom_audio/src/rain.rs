@@ -262,7 +262,7 @@ impl RainBed {
     ///
     /// Missing is not an error — see [`Self::use_recording`].
     pub fn use_recording_at(&mut self, path: &std::path::Path) -> bool {
-        std::fs::read(path).is_ok_and(|bytes| self.use_recording(&bytes))
+        loom_asset::pack::read_bytes(path).is_ok_and(|bytes| self.use_recording(&bytes))
     }
 
     /// Add `seconds` of rain into `out`, which is interleaved stereo.

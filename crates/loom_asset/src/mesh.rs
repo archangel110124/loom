@@ -141,7 +141,7 @@ pub fn import_obj_object(
     path: &std::path::Path,
     object: Option<&str>,
 ) -> Result<Mesh, AssetError> {
-    let text = std::fs::read_to_string(path).map_err(AssetError::Io)?;
+    let text = crate::pack::read_text(path).map_err(AssetError::Io)?;
 
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
