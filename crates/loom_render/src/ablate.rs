@@ -40,6 +40,7 @@ pub const ABLATIONS: &[(&str, u32)] = &[
     ("cloud_volume", 1 << 5),
     ("rain_curtain", 1 << 6),
     ("cloud_shadow", 1 << 7),
+    ("lamp_shadow", 1 << 8),
 ];
 
 /// The bit for whitecap and swash foam on the water surface.
@@ -117,6 +118,18 @@ pub const SPRAY_DROPLETS: u32 = 1 << 4;
 /// Must equal `LOOM_ABLATE_CLOUD_VOLUME` in `assets/shaders/scene.slang` — see the warning
 /// on [`ABLATIONS`] above; nothing checks that these two agree.
 pub const CLOUD_VOLUME: u32 = 1 << 5;
+
+/// The bit for shadows cast by point lights — ADR 0085.
+///
+/// **The row this feature could have shipped without, and should not have.** A lamp that
+/// lights everything near it and casts nothing looks *plausible*; the absence is only
+/// obvious beside the presence, which is exactly the failure a reference image cannot
+/// report — it records the absence and passes for ever. Ablating it puts `campfire`'s
+/// stones and log back to flat lighting and moves 3.1% of the frame.
+///
+/// Must equal `LOOM_ABLATE_LAMP_SHADOW` in `assets/shaders/scene.slang` — see the warning
+/// on [`ABLATIONS`] above; nothing checks that these two agree.
+pub const LAMP_SHADOW: u32 = 1 << 8;
 
 /// The bit for the distant rain curtain — ADR 0079.
 ///

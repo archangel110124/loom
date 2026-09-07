@@ -1475,7 +1475,7 @@ const GOLDEN_SIZE: &str = "320x200";
 /// the switch is an early return in `loom_cli::particles::spray` rather than a branch the
 /// GPU takes. See `loom_render::ablate::SPRAY_DROPLETS`.
 ///
-const ABLATE: [(&str, &str, &str, &[&str], f64); 8] = [
+const ABLATE: [(&str, &str, &str, &[&str], f64); 9] = [
     (
         "whitecaps",
         "assets/test/whitecaps.loom",
@@ -1550,6 +1550,21 @@ const ABLATE: [(&str, &str, &str, &[&str], f64); 8] = [
         "cloud_shadow",
         &["--sim", "300"],
         0.20,
+    ),
+    (
+        // **A fire in the dark, which is the only place the feature is
+        // legible.** `lanternhead` moves more of its frame, but most of that is
+        // a quay wall changing brightness; `campfire` has two stones and a log
+        // on open ground, so what the ablation removes is unmistakably the
+        // shadows themselves. Measured at 3.1% of the frame when lamp shadows
+        // were switched on, so the floor is half that.
+        "campfire",
+        "assets/test/campfire.loom",
+        "lamp_shadow",
+        &["--sim", "200"],
+        // Measured 3.069%. The floor is a fraction, not a percentage -- 1.5
+        // here would read as 150% and fail every run.
+        0.015,
     ),
 ];
 

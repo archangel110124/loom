@@ -502,6 +502,51 @@ static const float LIGHT_MAX = 4096.0;
 /// light came out at sRGB (185, 143, 109), a hard white-hot bead floating over
 /// the sea. The mean irradiance on a ball of radius R from a light at distance
 /// d goes as `1 / max(d, R)^2`, and that is all this is.
+/// As below, with a shadow ray toward each light — ADR 0085.
+///
+/// **`shadowBias` of zero means no ray**, which is how the volume and particle
+/// callers keep exactly the behaviour they had: a shadow ray per light per
+/// smoke puff is thousands of traversals for a contribution already softened by
+/// the medium, and the TLAS holds no smoke to be shadowed by anyway.
+///
+/// The ray is bounded at the light rather than infinite. A sun ray asks "is
+/// anything in this direction"; a lamp ray asks "is anything *between us*", and
+/// an unbounded one would find the wall behind the lamp and put every surface
+/// in shadow.
+float3 pointLights(float3 worldPos, float3 normal, float minDist, float shadowBias) {
+    float3 sum = float3(0.0, 0.0, 0.0);
+    uint count = min(push.environment[0].lightCount, LOOM_MAX_LIGHTS);
+    for (uint i = 0; i < count; ++i) {
+        LoomPointLight l = push.environment[0].lights[i];
+        float3 toLight = l.position.xyz - worldPos;
+        float d2 = dot(toLight, toLight);
+        float radius = max(l.color.w, 1e-3);
+        if (d2 >= radius * radius) {
+            continue;
+        }
+        float d = sqrt(max(d2, 1e-8));
+        float window = saturate(1.0 - pow(d / radius, 4.0));
+        float atten = window * window / max(d2, minDist * minDist);
+        float ndotl = max(dot(normal, toLight / d), 0.0);
+        // **Before the ray, not after.** A surface facing away from the lamp
+        // contributes nothing whether or not something blocks it, and tracing
+        // to discover that is the most expensive way to multiply by zero.
+        if (ndotl <= 0.0 || atten <= 0.0) {
+            continue;
+        }
+        if (shadowBias > 0.0 && !ablated(LOOM_ABLATE_LAMP_SHADOW)) {
+            // `d - shadowBias` so the ray stops short of the light itself;
+            // geometry *at* the lamp would otherwise shadow it from itself.
+            if (anyHit(worldPos + normal * shadowBias, toLight / d, shadowBias,
+                       max(d - shadowBias, shadowBias))) {
+                continue;
+            }
+        }
+        sum += min(l.color.rgb * (l.position.w * atten * ndotl), LIGHT_MAX);
+    }
+    return sum;
+}
+
 float3 pointLights(float3 worldPos, float3 normal, float minDist) {
     float3 sum = float3(0.0, 0.0, 0.0);
     uint count = min(push.environment[0].lightCount, LOOM_MAX_LIGHTS);
@@ -3883,12 +3928,18 @@ float4 fragmentMain(VSOutput in) : SV_Target {
     float3 ambient = hemisphereAmbient(normal) * ambientStrength()
                    * ambientVisibility(in.rayOrigin, geometric, in.shadowBias, in.position.xy,
                                       !cutoutMaterial);
-    // **Point lights, added to the ambient term.** They are unshadowed: a
-    // shadowed point light needs a cube map or a ray per light per pixel, and
-    // the ray tracer here is aimed at the sun. For a fire in the dark that is
-    // the right trade — what a campfire mostly does is light everything near
-    // it, and the shape it casts matters far less than that it lights at all.
-    ambient += pointLights(in.worldPos, normal);
+    // **Point lights, added to the ambient term, and they cast now — ADR
+    // 0085.** This comment used to say they were unshadowed because "a shadowed
+    // point light needs a cube map or a ray per light per pixel, and the ray
+    // tracer here is aimed at the sun". The second half was the mistaken part:
+    // the TLAS is built and traced every frame already, and a lamp ray is the
+    // sun's ray with `TMax` at the lamp instead of the horizon. There is no
+    // cube map, no atlas, no bias table and no new pass.
+    //
+    // What a campfire mostly does is still light everything near it. What it
+    // could not do before is put anything *behind* something else, which is the
+    // whole vocabulary of a dark room with a lantern in it.
+    ambient += pointLights(in.worldPos, normal, 0.01, in.shadowBias);
     // Only trace where the sun could reach anyway: a face turned away from the
     // sun is already dark, and tracing from it costs a ray to learn nothing.
     //
@@ -7395,6 +7446,7 @@ static const uint LOOM_ABLATE_RAIN_CURTAIN = 64u;
 
 /// The bit for cloud shadows on the world — ADR 0081. 128.
 static const uint LOOM_ABLATE_CLOUD_SHADOW = 128u;
+static const uint LOOM_ABLATE_LAMP_SHADOW = 256u;
 
 bool ablated(uint bit) {
     return (uint(push.environment[0].viewport.w) & bit) != 0u;
