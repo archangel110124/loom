@@ -397,7 +397,7 @@ fn run(args: &[String]) -> (u8, String) {
             None => (2, USAGE.to_owned()),
         },
         Some("pack") => match (args.get(1), args.get(2)) {
-            (Some(dir), Some(out)) => pack(dir, out),
+            (Some(dir), Some(out)) => pack(dir, out, flag(args, "--from").as_deref()),
             _ => (2, USAGE.to_owned()),
         },
         Some("scene") => match args.get(1) {
@@ -6407,14 +6407,147 @@ fn json_line<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
 }
 
+/// Every file a scene actually opens, transitively — ADR 0095.
+///
+/// **A shipped game needs what its scene reaches, not the whole tree.** Packing
+/// everything ships 137 scenes of which 130 are test fixtures; walking from the
+/// game's own scene ships what it uses, and — the part worth more than the
+/// bytes — *fails loudly when a scene references a file that is not there*.
+///
+/// The edges are: `[[prefab]]` declarations (which is also how `extends`
+/// resolves), `[[asset]]` declarations, and the three components whose `path`
+/// names a file. Meshes are read directly and do not pull in `.mtl`, so an OBJ
+/// is a leaf.
+///
+/// Missing files are collected rather than thrown, so one run names all of them.
+/// Resolve `.` and `..` without touching the filesystem — ADR 0095.
+///
+/// **The pack keys on a normalised path**, so a file found as
+/// `assets/games/../prefabs/jib_vi.loom` must be *stored* as
+/// `prefabs/jib_vi.loom` or it is written under a key nothing ever looks up.
+/// The scene format is full of `..`, so this is every prefab in the game.
+fn normalise(path: &std::path::Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn reachable_from(scene: &std::path::Path) -> (std::collections::BTreeSet<std::path::PathBuf>, Vec<String>) {
+    let mut found = std::collections::BTreeSet::new();
+    let mut missing = Vec::new();
+    let mut queue = vec![normalise(scene)];
+
+    while let Some(file) = queue.pop() {
+        if !found.insert(file.clone()) {
+            continue;
+        }
+        let base = file.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let Ok(text) = loom_asset::pack::read_text(&file) else {
+            missing.push(file.display().to_string());
+            found.remove(&file);
+            continue;
+        };
+        // Only a `.loom` file has references to follow; everything else is a
+        // leaf, and parsing an OBJ as TOML would be a confusing way to say so.
+        if file.extension().is_none_or(|e| e != "loom") {
+            continue;
+        }
+        let Ok(parsed) = Scene::parse(&text) else {
+            // A scene that will not parse is `loom validate`'s error to report,
+            // with a line number. Here it is simply a leaf.
+            continue;
+        };
+
+        let mut refer = |path: &str, is_scene: bool| {
+            let candidate = std::path::Path::new(path);
+            let resolved = normalise(&if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                base.join(candidate)
+            });
+            if is_scene {
+                queue.push(resolved);
+            } else if resolved.is_file() {
+                found.insert(resolved);
+            } else {
+                missing.push(resolved.display().to_string());
+            }
+        };
+
+        for decl in parsed.prefabs() {
+            refer(&decl.path, true);
+        }
+        for decl in parsed.assets() {
+            // `mesh.obj#Object` selects one object out of a file; the file is
+            // what gets packed.
+            let path = decl.path.split('#').next().unwrap_or(&decl.path);
+            // **A primitive is built, not read.** `deeper_demo` declares
+            // `path = "box"`, which is a shape this engine makes procedurally
+            // and not a file anybody can ship — the same escape `alias_report`
+            // has, for the same reason.
+            if loom_asset::primitives::build(path).is_some() {
+                continue;
+            }
+            refer(path, false);
+        }
+        for node in parsed.nodes() {
+            for component in ["Script", "GameRules", "Bindings"] {
+                if let Some(path) = node
+                    .components
+                    .get(component)
+                    .and_then(|c| c.get("path"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|p| !p.is_empty())
+                {
+                    refer(path, false);
+                }
+            }
+        }
+    }
+    (found, missing)
+}
+
 /// Fold an asset tree into one file the engine can read — ADR 0089.
 ///
 /// Separate from `cargo xtask dist` because `xtask` deliberately has no
 /// dependencies: the format lives in `loom_asset`, so the thing that knows how
 /// to write it is this binary, and `xtask` calls it the same way it calls every
 /// other engine command.
-fn pack(dir: &str, out: &str) -> (u8, String) {
-    match loom_asset::pack::write(std::path::Path::new(dir), std::path::Path::new(out)) {
+fn pack(dir: &str, out: &str, from: Option<&str>) -> (u8, String) {
+    let root = std::path::Path::new(dir);
+    let written = match from {
+        Some(scene) => {
+            let (files, missing) = reachable_from(std::path::Path::new(scene));
+            if !missing.is_empty() {
+                // **The reason to walk, not the cost of walking.** A scene
+                // naming a file that is not there ships as a box the player
+                // sees and nobody explained.
+                return (
+                    1,
+                    json_line(&serde_json::json!({
+                        "error": "unreachable_asset",
+                        "scene": scene,
+                        "constraint": "every referenced file must exist",
+                        "missing": missing,
+                    })),
+                );
+            }
+            let list: Vec<std::path::PathBuf> = files.into_iter().collect();
+            loom_asset::pack::write_selected(root, &list, std::path::Path::new(out))
+        }
+        None => loom_asset::pack::write(root, std::path::Path::new(out)),
+    };
+    match written {
         Ok((files, bytes)) => (
             0,
             json_line(&serde_json::json!({

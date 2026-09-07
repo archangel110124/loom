@@ -2370,6 +2370,28 @@ test -n "$loose"
 test "$loose" = "$packed"
 rm -rf /tmp/loom-pack-check
 
+# **And the pack a dist actually ships, which is a walk rather than a copy.**
+# ADR 0095. `--from` follows prefabs, assets and script paths out of the game's
+# own scene: 90 files against 355, 8.8 MB against 240. The reason to walk is not
+# the bytes — it is that a scene naming a file that is not there fails the build
+# here, instead of shipping as a substituted box the player sees and nobody
+# explained.
+#
+# Same scene, same hash, run from `/` with no assets directory anywhere near it.
+rm -rf /tmp/loom-reach-check
+mkdir -p /tmp/loom-reach-check
+cp "$LOOM" /tmp/loom-reach-check/loom
+"$LOOM" pack assets /tmp/loom-reach-check/assets.pack \
+    --from assets/games/deeper_demo.loom > /dev/null
+walked=$(cd / && /tmp/loom-reach-check/loom sim \
+    /tmp/loom-reach-check/assets/games/deeper_demo.loom --ticks 120 --hold move_z=1 \
+    | grep -o '"state_hash": "[0-9a-f]*"')
+whole=$("$LOOM" sim assets/games/deeper_demo.loom --ticks 120 --hold move_z=1 \
+    | grep -o '"state_hash": "[0-9a-f]*"')
+test -n "$walked"
+test "$walked" = "$whole"
+rm -rf /tmp/loom-reach-check
+
 # **And the creel's interactive half, which the run above cannot reach.** That
 # tape holds W and never presses TAB, so it covers the auto-place and the
 # packer's self-check and none of the verbs. This one opens the grid, walks the

@@ -3403,6 +3403,9 @@ impl Drop for GateLock {
     }
 }
 
+/// The scene a dist is built around, and the root of the reachability walk.
+const GAME_SCENE: &str = "assets/games/deeper_demo.loom";
+
 /// The game as a stranger receives it — ADR 0089.
 ///
 /// **A build tree is not a product.** Everything up to here proves the engine
@@ -3446,21 +3449,21 @@ fn dist() -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     }
 
-    // Staged, then packed: the filter is policy about this game and belongs
-    // here, while `loom pack` is a general command that folds whatever tree it
-    // is given. Staging costs one copy of the assets and keeps the two apart.
-    let staging = root.join("target/dist/staging/assets");
-    let _ = std::fs::remove_dir_all(root.join("target/dist/staging"));
-    let mut copied = Files::default();
-    if let Err(e) = copy_tree(&root.join("assets"), &staging, &mut copied) {
-        eprintln!("xtask: {e}");
-        return std::process::ExitCode::from(2);
-    }
-
+    // **Walked from the game's own scene, not copied wholesale** — ADR 0095.
+    // Packing the tree shipped 355 files and 240 MB, of which 130 scenes are
+    // test fixtures the game never opens. The walk ships 90 files and 8.8 MB,
+    // and — worth more than the bytes — *fails the build* when a scene names a
+    // file that is not there, which otherwise ships as a substituted box.
+    //
+    // No staging step any more: shaders and notes are unreachable from a scene,
+    // so the filter that needed a copy of the assets is now a consequence of
+    // the walk.
     let packed = Command::new(&loom)
         .arg("pack")
-        .arg(&staging)
+        .arg(root.join("assets"))
         .arg(out.join("assets.pack"))
+        .arg("--from")
+        .arg(root.join(GAME_SCENE))
         .status();
     match packed {
         Ok(status) if status.success() => {}
@@ -3473,7 +3476,6 @@ fn dist() -> std::process::ExitCode {
             return std::process::ExitCode::from(1);
         }
     }
-    let _ = std::fs::remove_dir_all(root.join("target/dist/staging"));
 
     // `$0` rather than a hardcoded path, and `exec` rather than a subshell, so
     // the launcher works from any working directory and the game is the process
@@ -3500,10 +3502,9 @@ fn dist() -> std::process::ExitCode {
     let binary = std::fs::metadata(out.join("loom")).map_or(0, |m| m.len());
     let pack = std::fs::metadata(out.join("assets.pack")).map_or(0, |m| m.len());
     println!(
-        "dist: {} — {} binary, {} asset file(s) packed into {}",
+        "dist: {} — {} binary, {} of assets reachable from {GAME_SCENE}",
         out.display(),
         human(binary),
-        copied.files,
         human(pack),
     );
 
@@ -3534,42 +3535,6 @@ fn dist() -> std::process::ExitCode {
             std::process::ExitCode::from(1)
         }
     }
-}
-
-/// What a copy moved, for the one line the task prints.
-#[derive(Default)]
-struct Files {
-    files: usize,
-    bytes: u64,
-}
-
-/// Copy `from` to `to`, leaving behind what only a build reads.
-fn copy_tree(from: &Path, to: &Path, tally: &mut Files) -> Result<(), String> {
-    std::fs::create_dir_all(to).map_err(|e| format!("cannot create {}: {e}", to.display()))?;
-    let entries =
-        std::fs::read_dir(from).map_err(|e| format!("cannot read {}: {e}", from.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("cannot read {}: {e}", from.display()))?;
-        let name = entry.file_name();
-        let path = entry.path();
-
-        // Slang source is compiled into the binary; notes are for whoever has
-        // the repository, who by definition is not the person holding a dist.
-        if name == "shaders" || path.extension().is_some_and(|e| e == "md") {
-            continue;
-        }
-
-        let target = to.join(&name);
-        if path.is_dir() {
-            copy_tree(&path, &target, tally)?;
-        } else {
-            let bytes = std::fs::copy(&path, &target)
-                .map_err(|e| format!("cannot copy {}: {e}", path.display()))?;
-            tally.files += 1;
-            tally.bytes += bytes;
-        }
-    }
-    Ok(())
 }
 
 /// Bytes as a human reads them.

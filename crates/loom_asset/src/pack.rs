@@ -114,9 +114,40 @@ impl Pack {
 pub fn write(root: &Path, out: &Path) -> std::io::Result<(usize, u64)> {
     let mut entries = Vec::new();
     collect(root, root, &mut entries)?;
+    write_entries(entries, out)
+}
+
+/// Pack only `files`, each of which must live under `root` — ADR 0095.
+///
+/// **For a reachability walk**: a shipped game needs the files its scene
+/// actually opens, not every file in the tree. Anything outside `root`, or that
+/// does not exist, is skipped rather than being an error — the caller's job is
+/// to decide what is reachable, and this one's is to write it down.
+///
+/// # Errors
+/// If the pack cannot be written.
+pub fn write_selected(root: &Path, files: &[PathBuf], out: &Path) -> std::io::Result<(usize, u64)> {
+    let mut entries = Vec::new();
+    for path in files {
+        let Ok(rest) = path.strip_prefix(root) else { continue };
+        if !path.is_file() {
+            continue;
+        }
+        let key = rest
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect::<Vec<_>>()
+            .join("/");
+        entries.push((key, path.clone()));
+    }
+    write_entries(entries, out)
+}
+
+fn write_entries(mut entries: Vec<(String, PathBuf)>, out: &Path) -> std::io::Result<(usize, u64)> {
     // Sorted, so packing the same tree twice gives the same bytes. A build
     // output that changes without its input changing is one nobody can check.
     entries.sort();
+    entries.dedup();
 
     let mut index_len = 8 + 4 + 4;
     for (key, _) in &entries {
