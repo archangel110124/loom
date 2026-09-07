@@ -36,9 +36,21 @@ pub enum UiAction {
     /// Empty `field` reverts the whole instance.
     RevertOverride(String, String),
     SetMode(Mode),
+    /// Narrow the hierarchy to nodes matching this text — ADR 0093.
+    SetFilter(String),
+    /// Turn increment snapping on or off — ADR 0093.
+    SetSnap(bool),
+    /// Change the increment for the mode currently selected.
+    SetSnapStep(Mode, f32),
     /// Frame the selection.
     Focus,
     AddChild(String),
+    /// Instance a prefab by its file-local alias, under the selection — ADR 0093.
+    AddPrefabInstance(String),
+    /// Put the selection on the clipboard, subtrees included — ADR 0093.
+    Copy,
+    /// Paste the clipboard under the selection — ADR 0093.
+    Paste,
     Duplicate,
     Delete,
     /// Point the selection's `MeshRenderer` at an asset alias.
@@ -63,6 +75,36 @@ pub enum UiAction {
     /// One tick, whether paused or not.
     StepOnce,
     Stop,
+}
+
+/// One thing wrong with the scene — ADR 0093.
+///
+/// **The editor reports what `loom validate` reports**, from the same sources:
+/// a prefab override that points at nothing, an asset alias that resolves to
+/// nothing, a voxel op that will not parse. Until now all three were reachable
+/// only from a terminal, so a scene was validated by leaving the editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// True for something that stops the scene working, false for a warning.
+    pub blocking: bool,
+    /// The node it is about, for the click-to-select.
+    pub node: String,
+    /// One line, in the language of the file.
+    pub message: String,
+}
+
+/// One edit somebody else made to the scene — ADR 0093.
+///
+/// **The marks over the viewport fade after six seconds**, which is right for
+/// an overlay and useless as a record. An agent that edited eleven nodes while
+/// the human was reading the inspector left nothing behind to review. This is
+/// that record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentEdit {
+    pub node: String,
+    /// Added, Removed, Moved, Edited — the same coarse kinds the marks use.
+    pub kind: String,
+    pub seconds_ago: f32,
 }
 
 /// State the panels need that is not in the scene.
@@ -97,6 +139,16 @@ pub struct PanelState<'a> {
     pub editable: bool,
     pub registry: &'a loom_reflect::TypeRegistry,
     pub mode: Mode,
+    /// Increment snapping, so the toolbar can show and change it — ADR 0093.
+    pub snap: crate::gizmo::Snap,
+    /// What the hierarchy is filtered to. Empty shows everything.
+    pub filter: &'a str,
+    /// What is wrong with the scene, recomputed when it changes — ADR 0093.
+    pub problems: &'a [Problem],
+    /// What somebody else changed, newest first, kept after the marks fade.
+    pub agent_log: &'a [AgentEdit],
+    /// Labels of transactions that were undone and can be redone, newest last.
+    pub redo_history: &'a [String],
     /// Gizmo handles in **window pixels**, as the viewport computed them.
     pub handles: &'a [Handle],
     /// The **axis** being dragged, so its handle can be drawn as grabbed.
@@ -191,6 +243,42 @@ pub(crate) fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
             }
 
             ui.separator();
+
+            // **The step shown is the one for the current mode**, because a
+            // toolbar with three boxes for a thing that applies to one of them
+            // at a time is three chances to type into the wrong one.
+            let mut on = state.snap.enabled;
+            if ui
+                .checkbox(&mut on, "Snap")
+                .on_hover_text("land on the grid — hold Ctrl to invert for one drag")
+                .changed()
+            {
+                actions.push(UiAction::SetSnap(on));
+            }
+            let mut step = match state.mode {
+                Mode::Move => state.snap.translate,
+                Mode::Rotate => state.snap.rotate,
+                Mode::Scale => state.snap.scale,
+            };
+            let suffix = match state.mode {
+                Mode::Move => " m",
+                Mode::Rotate => "°",
+                Mode::Scale => "×",
+            };
+            if ui
+                .add(
+                    egui::DragValue::new(&mut step)
+                        .speed(0.05)
+                        .range(0.0..=90.0)
+                        .suffix(suffix),
+                )
+                .on_hover_text("increment for the current tool; zero is no snapping")
+                .changed()
+            {
+                actions.push(UiAction::SetSnapStep(state.mode, step));
+            }
+
+            ui.separator();
             if ui
                 .button("Focus")
                 .on_hover_text("F — frame the selection")
@@ -200,10 +288,24 @@ pub(crate) fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
             }
             if ui
                 .add_enabled(editing, egui::Button::new("Duplicate"))
-                .on_hover_text("Ctrl+D")
+                .on_hover_text("Ctrl+D — children go with it")
                 .clicked()
             {
                 actions.push(UiAction::Duplicate);
+            }
+            if ui
+                .add_enabled(editing, egui::Button::new("Copy"))
+                .on_hover_text("Ctrl+C — the selection and everything under it")
+                .clicked()
+            {
+                actions.push(UiAction::Copy);
+            }
+            if ui
+                .add_enabled(editing, egui::Button::new("Paste"))
+                .on_hover_text("Ctrl+V — into the selection, or beside the original")
+                .clicked()
+            {
+                actions.push(UiAction::Paste);
             }
             if ui
                 .add_enabled(editing, egui::Button::new("Delete"))
@@ -397,11 +499,47 @@ pub(crate) fn conflict_banner(root: &mut egui::Ui, actions: &mut Vec<UiAction>) 
     });
 }
 
+/// Whether a node belongs in a filtered hierarchy.
+///
+/// **Case-insensitive, over the whole path**, so `boat/helm` finds the helm and
+/// `helm` finds it too. Matching only the leaf name would make a filter useless
+/// on a scene whose interesting nodes are called `Body` eleven times.
+#[must_use]
+pub fn matches_filter(path: &str, filter: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    path.to_lowercase().contains(&filter.to_lowercase())
+}
+
 pub(crate) fn hierarchy(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
     ui.heading("Hierarchy");
+
+    // **`deeper_demo` has 260 nodes.** Without this, finding `Rig/Boat/Helm`
+    // is scrolling, and scrolling is what a human does instead of working.
+    let mut filter = state.filter.to_owned();
+    ui.horizontal(|ui| {
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut filter)
+                .hint_text("filter…")
+                .desired_width(f32::INFINITY),
+        );
+        if response.changed() {
+            actions.push(UiAction::SetFilter(filter.clone()));
+        }
+    });
+    if !state.filter.is_empty() {
+        let shown = state.paths.iter().filter(|p| matches_filter(p, state.filter)).count();
+        ui.horizontal(|ui| {
+            ui.weak(format!("{shown} of {}", state.paths.len()));
+            if ui.small_button("clear").clicked() {
+                actions.push(UiAction::SetFilter(String::new()));
+            }
+        });
+    }
     ui.separator();
     egui::ScrollArea::vertical().show(ui, |ui| {
-        for path in state.paths {
+        for path in state.paths.iter().filter(|p| matches_filter(p, state.filter)) {
             // Indent by depth, so the hierarchy reads as a tree rather
             // than a flat list of slash-separated strings.
             let depth = path.matches('/').count();
@@ -456,6 +594,22 @@ pub(crate) fn hierarchy(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
                                 extend: false,
                             });
                             actions.push(UiAction::Duplicate);
+                            ui.close();
+                        }
+                        if ui.button("Copy").clicked() {
+                            actions.push(UiAction::Select {
+                                path: path.clone(),
+                                extend: false,
+                            });
+                            actions.push(UiAction::Copy);
+                            ui.close();
+                        }
+                        if ui.button("Paste into").clicked() {
+                            actions.push(UiAction::Select {
+                                path: path.clone(),
+                                extend: false,
+                            });
+                            actions.push(UiAction::Paste);
                             ui.close();
                         }
                         if ui.button("Delete").clicked() {
@@ -643,6 +797,220 @@ pub(crate) fn console_column(
 }
 
 /// The transaction log: every change to the scene, by its label.
+/// The prefabs this scene declares, and who instances them — ADR 0093.
+///
+/// **Read from the *unresolved* file.** `prefab_load::for_reading` replaces an
+/// instance with the subtree it stood for, so the resolved scene the inspector
+/// reads has no prefabs left in it at all — the same reason the override
+/// markers need their own map.
+pub(crate) fn prefabs(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+    ui.heading("Prefabs");
+    ui.separator();
+
+    let declared = state.scene.prefabs();
+    if declared.is_empty() {
+        ui.weak("this scene declares no prefabs");
+        return;
+    }
+
+    egui::ScrollArea::vertical().id_salt("prefab_scroll").show(ui, |ui| {
+        for decl in &declared {
+            let instances: Vec<&String> = state
+                .scene
+                .nodes()
+                .iter()
+                .filter(|n| n.prefab.as_deref() == Some(decl.key.as_str()))
+                .map(|n| &n.path)
+                .collect();
+
+            ui.horizontal(|ui| {
+                ui.strong(&decl.key);
+                ui.weak(format!("{} instance(s)", instances.len()));
+            });
+            ui.weak(&decl.path).on_hover_text(format!("id {}", decl.id));
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(state.editable, egui::Button::new("Add instance"))
+                    .on_hover_text("spawn one under the selection")
+                    .clicked()
+                {
+                    actions.push(UiAction::AddPrefabInstance(decl.key.clone()));
+                }
+                for path in instances.iter().take(6) {
+                    let name = path.rsplit('/').next().unwrap_or(path);
+                    if ui.small_button(name).on_hover_text(*path).clicked() {
+                        actions.push(UiAction::Select {
+                            path: (*path).clone(),
+                            extend: false,
+                        });
+                    }
+                }
+            });
+            ui.separator();
+        }
+    });
+}
+
+/// The undo stack, with the cursor in it — ADR 0093.
+///
+/// **`Transactions` is a log; this is a position.** The log answers "what has
+/// happened", which is the wrong question when the thing you want is "how far
+/// back can I go, and what is waiting to come forward". Clicking a row walks
+/// the cursor to it, which is undo and redo without counting steps.
+pub(crate) fn history(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+    ui.heading("History");
+    ui.separator();
+
+    if state.history.is_empty() && state.redo_history.is_empty() {
+        ui.weak("no edits yet");
+        return;
+    }
+
+    egui::ScrollArea::vertical().id_salt("history_scroll").show(ui, |ui| {
+        // Done, oldest first. Clicking one walks back to just after it.
+        for (index, label) in state.history.iter().enumerate() {
+            let steps = state.history.len() - index - 1;
+            let row = ui.selectable_label(false, format!("{:>3}  {label}", index + 1));
+            if steps > 0 {
+                row.on_hover_text(format!("undo {steps} step(s) to here"))
+                    .clicked()
+                    .then(|| {
+                        for _ in 0..steps {
+                            actions.push(UiAction::Undo);
+                        }
+                    });
+            }
+        }
+
+        // The cursor: everything above has happened, everything below has not.
+        ui.horizontal(|ui| {
+            ui.add(egui::Separator::default().horizontal());
+        });
+        ui.weak("— now —");
+
+        // Undone, nearest first. `redo_labels` is newest-last, so the next one
+        // to come back is the end of it.
+        for (offset, label) in state.redo_history.iter().rev().enumerate() {
+            let steps = offset + 1;
+            let row = ui.selectable_label(
+                false,
+                egui::RichText::new(format!("     {label}")).weak(),
+            );
+            row.on_hover_text(format!("redo {steps} step(s) to here"))
+                .clicked()
+                .then(|| {
+                    for _ in 0..steps {
+                        actions.push(UiAction::Redo);
+                    }
+                });
+        }
+    });
+}
+
+/// What the agent has been doing — ADR 0093.
+///
+/// **This is the human's half of the conversation.** The agent already drives
+/// the same transactions the UI does, through `loom_agent`'s MCP tools over the
+/// same CLI commands. What was missing was anywhere for a human to *see* it:
+/// the viewport marks fade in six seconds, and the console interleaves agent
+/// edits with everything else.
+///
+/// Every row selects its node, so reviewing what changed is one click per row
+/// rather than a search through the hierarchy.
+pub(crate) fn agent(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+    ui.heading("Agent");
+    ui.separator();
+
+    if state.agent_log.is_empty() {
+        ui.weak("no edits from outside this window yet");
+        ui.add_space(6.0);
+        ui.weak(
+            "An agent edits through the same transactions this editor does — \
+             `loom scene --tx`, `loom place --op` — so anything it changes \
+             lands here, is undoable, and shows in History.",
+        );
+        return;
+    }
+
+    ui.horizontal(|ui| {
+        ui.label(format!("{} edit(s)", state.agent_log.len()));
+        if let Some(last) = state.agent_log.first() {
+            ui.weak(format!("last {:.0}s ago", last.seconds_ago));
+        }
+    });
+    ui.separator();
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for edit in state.agent_log {
+            let selected = state.selected.contains(&edit.node);
+            let name = edit.node.rsplit('/').next().unwrap_or(&edit.node);
+            // Fresh edits read brighter, so "what just happened" is legible
+            // without reading timestamps.
+            let fresh = edit.seconds_ago < 10.0;
+            let row = ui.selectable_label(
+                selected,
+                egui::RichText::new(format!(
+                    "{name}  ·  {}  ·  {:.0}s",
+                    edit.kind, edit.seconds_ago
+                ))
+                .color(if fresh {
+                    egui::Color32::from_rgb(150, 200, 255)
+                } else {
+                    egui::Color32::GRAY
+                }),
+            );
+            if row.on_hover_text(&edit.node).clicked() {
+                actions.push(UiAction::Select {
+                    path: edit.node.clone(),
+                    extend: false,
+                });
+            }
+        }
+    });
+}
+
+/// What is wrong with the scene — ADR 0093.
+///
+/// Clicking a row selects the node it is about, because a problem you cannot
+/// navigate to is a problem you read and then go looking for by hand.
+pub(crate) fn problems(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+    ui.heading("Problems");
+    ui.separator();
+    if state.problems.is_empty() {
+        ui.weak("nothing to report");
+        return;
+    }
+    let blocking = state.problems.iter().filter(|p| p.blocking).count();
+    ui.horizontal(|ui| {
+        if blocking > 0 {
+            ui.colored_label(egui::Color32::from_rgb(230, 110, 100), format!("{blocking} error(s)"));
+        }
+        let warnings = state.problems.len() - blocking;
+        if warnings > 0 {
+            ui.weak(format!("{warnings} warning(s)"));
+        }
+    });
+    ui.separator();
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for problem in state.problems {
+            let marker = if problem.blocking { "✖" } else { "▲" };
+            let label = if problem.node.is_empty() {
+                format!("{marker} {}", problem.message)
+            } else {
+                format!("{marker} {}  —  {}", problem.node, problem.message)
+            };
+            let row = ui.selectable_label(false, label);
+            if row.clicked() && !problem.node.is_empty() {
+                actions.push(UiAction::Select {
+                    path: problem.node.clone(),
+                    extend: false,
+                });
+            }
+        }
+    });
+}
+
 pub(crate) fn transactions(ui: &mut egui::Ui, history: &[String]) {
     ui.heading("Transactions");
     ui.separator();
@@ -1312,6 +1680,24 @@ impl egui::Widget for ColourButton<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::matches_filter;
+
+    /// The filter reads the whole path, not the leaf. A scene with eleven
+    /// nodes called `Body` is exactly when somebody reaches for a filter.
+    #[test]
+    fn a_filter_matches_anywhere_in_the_path_and_ignores_case() {
+        assert!(matches_filter("Rig/Boat/Helm", "helm"));
+        assert!(matches_filter("Rig/Boat/Helm", "BOAT/HELM"));
+        assert!(matches_filter("Rig/Boat/Helm", "rig"));
+        assert!(!matches_filter("Rig/Boat/Helm", "creel"));
+    }
+
+    /// An empty filter is not a filter that matches nothing.
+    #[test]
+    fn an_empty_filter_shows_everything() {
+        assert!(matches_filter("anything/at/all", ""));
+    }
+
     use super::{default_entry, default_for, looks_like_a_colour, range_note};
 
 

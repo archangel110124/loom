@@ -599,7 +599,7 @@ fn validate(path: &str) -> (u8, String) {
 /// box, and carries on (design doc §2.6: degrade, do not crash) — which is
 /// right for a render and useless as feedback, because a scene full of
 /// stand-in boxes looks exactly like a scene that loaded.
-fn alias_report(
+pub(crate) fn alias_report(
     scene: &Scene,
     base: &std::path::Path,
 ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {

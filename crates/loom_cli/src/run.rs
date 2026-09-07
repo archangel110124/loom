@@ -618,6 +618,27 @@ struct App {
     play: Option<crate::play::Play>,
     /// What the gizmo edits: Unity's W/E/R, on digits here.
     mode: Mode,
+    /// Increment snapping for the gizmo — ADR 0093. Off by default; Ctrl
+    /// inverts whatever it is set to.
+    snap: gizmo::Snap,
+    /// What the hierarchy is filtered to — ADR 0093. UI state, so it lives
+    /// here rather than in the scene.
+    hierarchy_filter: String,
+    /// What is wrong with the scene, recomputed on change — ADR 0093.
+    problems: Vec<loom_editor::Problem>,
+    /// Every edit from outside this window, newest last — ADR 0093.
+    ///
+    /// **Separate from `agent_changes`, which fades in six seconds.** That is
+    /// right for a viewport overlay and useless as a record: an agent that
+    /// edited eleven nodes while the human read the inspector used to leave
+    /// nothing behind to review.
+    agent_log: Vec<(crate::scene_view::Change, std::time::Instant)>,
+    /// Copied subtrees, one per selected node — ADR 0093.
+    ///
+    /// **The nodes, not their paths.** A clipboard holding paths would paste
+    /// nothing after the original was deleted, which is exactly when somebody
+    /// reaches for cut-and-paste.
+    clipboard: Vec<Vec<loom_scene::Node>>,
     /// Draw calls for the simulated world, refreshed only on ticks that
     /// actually ran.
     play_objects: Vec<loom_render::Object>,
@@ -841,6 +862,11 @@ impl App {
             gesture_epoch: 0,
             play: None,
             mode: Mode::Move,
+            snap: gizmo::Snap::default(),
+            hierarchy_filter: String::new(),
+            clipboard: Vec::new(),
+            problems: Vec::new(),
+            agent_log: Vec::new(),
             handles: Vec::new(),
             play_objects: Vec::new(),
             sound: None,
@@ -980,6 +1006,16 @@ impl App {
             #[allow(clippy::disallowed_methods)]
             let now = std::time::Instant::now();
             self.agent_changes = changes.into_iter().map(|c| (c, now)).collect();
+            self.agent_log
+                .extend(self.agent_changes.iter().map(|(c, at)| (c.clone(), *at)));
+            // A session that ran all evening should not carry every edit it
+            // ever saw; the panel shows the recent ones and that is what it is
+            // for.
+            const KEEP: usize = 200;
+            if self.agent_log.len() > KEEP {
+                let excess = self.agent_log.len() - KEEP;
+                self.agent_log.drain(0..excess);
+            }
         }
     }
 
@@ -1033,6 +1069,7 @@ impl App {
             self.selected.extend(view.paths.first().cloned());
         }
         self.view = view;
+        self.recompute_problems();
         // Grass is placed from the scene the same way the meshes are, so a
         // reload has to re-place it or the window keeps showing the old field.
         self.upload_grass();
@@ -1780,7 +1817,26 @@ impl ApplicationHandler for App {
                     .as_ref()
                     .map(|s| crate::override_map(s.text()))
                     .unwrap_or_default();
+                // Newest first, which is the order somebody reviewing asks for.
+                let agent_log: Vec<loom_editor::AgentEdit> = self
+                    .agent_log
+                    .iter()
+                    .rev()
+                    .map(|(change, at)| loom_editor::AgentEdit {
+                        node: change.path.clone(),
+                        kind: change.kind.label().to_owned(),
+                        seconds_ago: now.duration_since(*at).as_secs_f32(),
+                    })
+                    .collect();
                 let state = PanelState {
+                    snap: self.snap,
+                    problems: &self.problems,
+                    agent_log: &agent_log,
+                    redo_history: self
+                        .session
+                        .as_ref()
+                        .map_or(&[][..], loom_scene::edit::Session::redo_labels),
+                    filter: &self.hierarchy_filter,
                     agent_marks: &marks,
                     console: &console,
                     overrides: &overrides,
@@ -2314,10 +2370,20 @@ impl App {
                 );
             }
             UiAction::SetMode(mode) => self.mode = mode,
+            UiAction::SetFilter(text) => self.hierarchy_filter = text,
+            UiAction::SetSnap(on) => self.snap.enabled = on,
+            UiAction::SetSnapStep(mode, step) => match mode {
+                Mode::Move => self.snap.translate = step,
+                Mode::Rotate => self.snap.rotate = step,
+                Mode::Scale => self.snap.scale = step,
+            },
             UiAction::Focus => {
                 self.camera = FlyCamera::framing_at(self.focus_bounds(), self.camera.fov_y_degrees);
             }
             UiAction::AddChild(parent) => self.add_child(&parent),
+            UiAction::AddPrefabInstance(key) => self.add_prefab_instance(&key),
+            UiAction::Copy => self.copy_selection(),
+            UiAction::Paste => self.paste_clipboard(),
             UiAction::Duplicate => self.duplicate_selection(),
             UiAction::Delete => self.delete_selection(),
             UiAction::AssignMesh(asset) => self.assign_mesh(&asset),
@@ -2962,44 +3028,71 @@ impl App {
         self.selected = vec![format!("{parent}/{name}")];
     }
 
-    /// Copy the selection, offset a little so the copy is visible.
+    /// Every node at or under `root`, shallowest first.
     ///
-    /// Built out of the ops that already exist rather than a `DuplicateNode`
-    /// op: spawn, then set what the original had. One transaction, so it is
-    /// still one Ctrl+Z.
-    fn duplicate_selection(&mut self) {
-        let mut ops = Vec::new();
-        let mut created = Vec::new();
-        for path in self.selected.clone() {
-            let Some(node) = self.view.scene.nodes().iter().find(|n| n.path == path) else {
-                continue;
-            };
-            let (parent, name) = match path.rsplit_once('/') {
-                Some((parent, name)) => (parent.to_owned(), name.to_owned()),
-                // A root node has nowhere to be a sibling of.
-                None => {
-                    crate::log::warn(format!("{path} is a root node; nothing to duplicate it into"));
-                    continue;
-                }
-            };
-            let mut copy = format!("{name}Copy");
-            let mut n = 1;
-            while self.view.paths.iter().any(|p| p == &format!("{parent}/{copy}")) {
-                n += 1;
-                copy = format!("{name}Copy{n}");
-            }
-            let new_path = format!("{parent}/{copy}");
+    /// **Shallowest first matters**: a child cannot be spawned before its
+    /// parent exists, and `SpawnNode` is refused if the parent is missing.
+    fn subtree(&self, root: &str) -> Vec<loom_scene::Node> {
+        let prefix = format!("{root}/");
+        let mut nodes: Vec<loom_scene::Node> = self
+            .view
+            .scene
+            .nodes()
+            .iter()
+            .filter(|n| n.path == root || n.path.starts_with(&prefix))
+            .cloned()
+            .collect();
+        nodes.sort_by_key(|n| n.path.matches('/').count());
+        nodes
+    }
 
+    /// Ops that recreate `nodes` — a subtree captured by [`Self::subtree`] —
+    /// underneath `parent`, with the root renamed to `name`.
+    ///
+    /// **One function for duplicate and for paste**, because they are the same
+    /// operation with a different source. Duplicate used to spawn the node and
+    /// none of its children, so duplicating a rig produced an empty rig; this is
+    /// where that is fixed, once, for both.
+    fn respawn_ops(
+        nodes: &[loom_scene::Node],
+        parent: &str,
+        name: &str,
+    ) -> (Vec<loom_scene::SceneOp>, String) {
+        let mut ops = Vec::new();
+        let Some(root) = nodes.first() else {
+            return (ops, String::new());
+        };
+        let new_root = if parent.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{parent}/{name}")
+        };
+
+        for node in nodes {
+            // Where this node lands: the root becomes `new_root`, and everything
+            // under it keeps its shape.
+            let new_path = if node.path == root.path {
+                new_root.clone()
+            } else {
+                let tail = node.path.strip_prefix(&format!("{}/", root.path)).unwrap_or(&node.path);
+                format!("{new_root}/{tail}")
+            };
+            let (into, leaf) = match new_path.rsplit_once('/') {
+                Some((into, leaf)) => (into.to_owned(), leaf.to_owned()),
+                None => (String::new(), new_path.clone()),
+            };
             ops.push(loom_scene::SceneOp::SpawnNode {
-                parent: parent.clone(),
-                name: copy.clone(),
+                parent: into,
+                name: leaf,
                 mesh: None,
-                prefab: None,
+                // A prefab instance pastes as an instance, not as a flattened
+                // copy of whatever it happened to expand to.
+                prefab: node.prefab.clone(),
             });
             let t = &node.transform;
             ops.push(transform_op(
                 &new_path,
-                Some([t.pos[0] + 1.0, t.pos[1], t.pos[2]]),
+                Some(t.pos),
                 Some(t.rot_euler),
                 Some(t.scale),
             ));
@@ -3014,7 +3107,144 @@ impl App {
                     }
                 }
             }
-            created.push(new_path);
+            // Deviations from the prefab travel with the instance; a copy that
+            // dropped them would silently revert to the prefab's values.
+            for (field, value) in &node.overrides {
+                ops.push(loom_scene::SceneOp::SetField {
+                    node: new_path.clone(),
+                    field: field.clone(),
+                    value: value.clone(),
+                });
+            }
+        }
+        (ops, new_root)
+    }
+
+    /// A name like `name`, `nameCopy`, `nameCopy2` — whichever is free.
+    fn free_name(&self, parent: &str, name: &str) -> String {
+        let taken = |candidate: &str| {
+            let path = if parent.is_empty() {
+                candidate.to_owned()
+            } else {
+                format!("{parent}/{candidate}")
+            };
+            self.view.paths.contains(&path)
+        };
+        if !taken(name) {
+            return name.to_owned();
+        }
+        let mut n = 1;
+        loop {
+            let candidate = if n == 1 {
+                format!("{name}Copy")
+            } else {
+                format!("{name}Copy{n}")
+            };
+            if !taken(&candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+
+    /// Spawn a prefab instance under the selection — ADR 0093.
+    fn add_prefab_instance(&mut self, key: &str) {
+        let parent = self.selected.first().cloned().unwrap_or_default();
+        let name = self.free_name(&parent, key);
+        let path = if parent.is_empty() {
+            name.clone()
+        } else {
+            format!("{parent}/{name}")
+        };
+        self.transact(
+            format!("Add {key} instance"),
+            vec![loom_scene::SceneOp::SpawnNode {
+                parent,
+                name,
+                mesh: None,
+                prefab: Some(key.to_owned()),
+            }],
+        );
+        self.selected = vec![path];
+    }
+
+    /// Put the selection on the clipboard, subtrees and all — ADR 0093.
+    fn copy_selection(&mut self) {
+        self.clipboard = self
+            .selected
+            .iter()
+            .map(|path| self.subtree(path))
+            .filter(|nodes| !nodes.is_empty())
+            .collect();
+        let count = self.clipboard.len();
+        let nodes: usize = self.clipboard.iter().map(Vec::len).sum();
+        crate::log::info(format!("copied {count} selection(s), {nodes} node(s)"));
+    }
+
+    /// Paste under the selection, or beside the original when nothing is
+    /// selected.
+    fn paste_clipboard(&mut self) {
+        if self.clipboard.is_empty() {
+            crate::log::warn("nothing on the clipboard".to_owned());
+            return;
+        }
+        let clipboard = self.clipboard.clone();
+        let mut ops = Vec::new();
+        let mut created = Vec::new();
+        for nodes in &clipboard {
+            let Some(root) = nodes.first() else { continue };
+            // Into the selection when there is one, so paste is "put it in
+            // here"; otherwise beside where it came from.
+            let parent = self.selected.first().cloned().unwrap_or_else(|| {
+                root.path.rsplit_once('/').map_or(String::new(), |(p, _)| p.to_owned())
+            });
+            let name = self.free_name(&parent, &root.name);
+            let (mut node_ops, new_root) = Self::respawn_ops(nodes, &parent, &name);
+            ops.append(&mut node_ops);
+            created.push(new_root);
+        }
+        if created.is_empty() {
+            return;
+        }
+        self.transact(format!("Paste {} node(s)", created.len()), ops);
+        self.selected = created;
+    }
+
+    /// Duplicate the selection, **children included**.
+    ///
+    /// Built out of the ops that already exist rather than a `DuplicateNode`
+    /// op: spawn, then set what the original had. One transaction, so it is
+    /// still one Ctrl+Z.
+    ///
+    /// This used to spawn the node and none of its descendants, so duplicating
+    /// a rig produced an empty rig — see `respawn_ops`, which both this and
+    /// paste now go through.
+    fn duplicate_selection(&mut self) {
+        let mut ops = Vec::new();
+        let mut created = Vec::new();
+        for path in self.selected.clone() {
+            let nodes = self.subtree(&path);
+            let Some(root) = nodes.first() else { continue };
+            let Some((parent, name)) = path.rsplit_once('/') else {
+                // A root node has nowhere to be a sibling of.
+                crate::log::warn(format!("{path} is a root node; nothing to duplicate it into"));
+                continue;
+            };
+            let (parent, name) = (parent.to_owned(), name.to_owned());
+            let copy = self.free_name(&parent, &name);
+            let (mut node_ops, new_root) = Self::respawn_ops(&nodes, &parent, &copy);
+            // Offset so the copy is visible rather than exactly inside the
+            // original, which is what the old code did and is why it was here.
+            let t = &root.transform;
+            node_ops.push(transform_op(
+                &new_root,
+                Some([t.pos[0] + 1.0, t.pos[1], t.pos[2]]),
+                Some(t.rot_euler),
+                Some(t.scale),
+            ));
+            ops.append(&mut node_ops);
+            created.push(new_root);
         }
         if created.is_empty() {
             return;
@@ -3104,6 +3334,12 @@ impl App {
 
         let (axis, node) = (drag.handle.axis, drag.node.clone());
         let (start_pos, start_rot, start_scale) = (drag.start[0], drag.start[1], drag.start[2]);
+        // Ctrl inverts the toggle rather than setting it, so somebody working
+        // on the grid can step off it for one drag — see `gizmo::Snap`.
+        let inverted = self.input.held("ControlLeft") || self.input.held("ControlRight");
+        let step = self.snap.step(self.mode, inverted);
+        let round = |value: f32| step.map_or(value, |step| gizmo::snap(value, step));
+
         let (label, op) = match self.mode {
             Mode::Move => {
                 // The handle points along a **world** axis; the node stores a
@@ -3121,15 +3357,15 @@ impl App {
                     .transform_vector3(world_delta);
 
                 let pos = [
-                    start_pos[0] + local_delta.x,
-                    start_pos[1] + local_delta.y,
-                    start_pos[2] + local_delta.z,
+                    round(start_pos[0] + local_delta.x),
+                    round(start_pos[1] + local_delta.y),
+                    round(start_pos[2] + local_delta.z),
                 ];
                 (format!("Move {node}"), transform_op(&node, Some(pos), None, None))
             }
             Mode::Rotate => {
                 let mut rot = start_rot;
-                rot[axis] += travelled * ROTATE_PER_UNIT;
+                rot[axis] = round(start_rot[axis] + travelled * ROTATE_PER_UNIT);
                 (
                     format!("Rotate {node}"),
                     transform_op(&node, None, Some(rot), None),
@@ -3139,7 +3375,7 @@ impl App {
                 let mut scale = start_scale;
                 // Additive, not multiplicative: a scale of zero would otherwise
                 // be a trap you cannot drag back out of.
-                scale[axis] = (start_scale[axis] + travelled).max(0.01);
+                scale[axis] = round(start_scale[axis] + travelled).max(0.01);
                 (
                     format!("Scale {node}"),
                     transform_op(&node, None, None, Some(scale)),
@@ -3213,6 +3449,76 @@ impl App {
         }
     }
 
+
+    /// What is wrong with the scene, for the Problems panel — ADR 0093.
+    ///
+    /// **The same three sources `loom validate` reads**, so the panel and the
+    /// command cannot disagree: an asset alias that resolves to nothing, a
+    /// voxel op list that will not parse, and a prefab override pointing at a
+    /// child that no longer exists.
+    ///
+    /// Recomputed when the scene changes rather than every frame. A scene of
+    /// 260 nodes is cheap to walk once and wasteful to walk at 144 Hz.
+    fn recompute_problems(&mut self) {
+        let mut problems = Vec::new();
+        let base = self
+            .scene_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+
+        let (errors, warnings) = crate::alias_report(&self.view.scene, &base);
+        let field = |value: &serde_json::Value, key: &str| {
+            value.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned()
+        };
+        for (list, blocking) in [(errors, true), (warnings, false)] {
+            for entry in list {
+                let message = match (field(&entry, "constraint"), field(&entry, "error")) {
+                    (c, e) if c.is_empty() => e,
+                    (c, _) => c,
+                };
+                problems.push(loom_editor::Problem {
+                    blocking,
+                    node: field(&entry, "node"),
+                    message,
+                });
+            }
+        }
+
+        for node in self.view.scene.nodes() {
+            if let Some(component) = node.components.get("VoxelVolume")
+                && let Err(e) = crate::parse_ops(component)
+            {
+                problems.push(loom_editor::Problem {
+                    blocking: true,
+                    node: node.path.clone(),
+                    message: format!("VoxelVolume: {e}"),
+                });
+            }
+        }
+
+        // Overrides that point at nothing. The map is keyed by resolved path,
+        // so a key with no node behind it is an override the prefab no longer
+        // has a home for — §5 says that is a loud warning, never a silent drop.
+        let overrides = self
+            .session
+            .as_ref()
+            .map(|session| crate::override_map(session.text()))
+            .unwrap_or_default();
+        for path in overrides.keys() {
+            if !self.view.paths.iter().any(|p| p == path) {
+                problems.push(loom_editor::Problem {
+                    blocking: false,
+                    node: path.clone(),
+                    message: "override targets a node that is not in the scene".to_owned(),
+                });
+            }
+        }
+
+        problems.sort_by(|a, b| b.blocking.cmp(&a.blocking).then(a.node.cmp(&b.node)));
+        self.problems = problems;
+    }
+
     /// Editing actions bound to keys.
     fn handle_editing(&mut self) {
         if self.session.is_none() || self.view.paths.is_empty() {
@@ -3237,6 +3543,7 @@ impl App {
         ) * NUDGE;
         let (undo, redo, save) = (act("undo"), act("redo"), act("save"));
         let (duplicate, delete) = (act("duplicate"), act("delete"));
+        let (copy, paste) = (act("copy"), act("paste"));
         let mode = if act("mode_move") {
             Some(Mode::Move)
         } else if act("mode_rotate") {
@@ -3259,6 +3566,12 @@ impl App {
         }
         if duplicate {
             self.duplicate_selection();
+        }
+        if copy {
+            self.copy_selection();
+        }
+        if paste {
+            self.paste_clipboard();
         }
         if delete {
             self.delete_selection();

@@ -180,6 +180,13 @@ pub struct Session {
     redo: Vec<String>,
     /// Labels, newest last — this is what the human's log panel shows.
     history: Vec<String>,
+    /// Labels for the transactions that have been undone, newest last.
+    ///
+    /// **Undo used to pop a label that redo never put back**, so undoing and
+    /// redoing left the log one row shorter than the scene it described, for
+    /// good. Keeping the labels on their own stack is what lets the History
+    /// panel show where the cursor is rather than only what is behind it.
+    redo_labels: Vec<String>,
     /// The gesture the last transaction belonged to, if it was part of one.
     gesture: Option<String>,
     /// The version this session last read from, or wrote to, the file.
@@ -204,6 +211,7 @@ impl Session {
             text,
             undo: Vec::new(),
             redo: Vec::new(),
+            redo_labels: Vec::new(),
             history: Vec::new(),
             gesture: None,
         })
@@ -219,6 +227,7 @@ impl Session {
             text,
             undo: Vec::new(),
             redo: Vec::new(),
+            redo_labels: Vec::new(),
             history: Vec::new(),
             gesture: None,
         }
@@ -238,6 +247,12 @@ impl Session {
     #[must_use]
     pub fn history(&self) -> &[String] {
         &self.history
+    }
+
+    /// Labels of transactions that were undone and can be redone, newest last.
+    #[must_use]
+    pub fn redo_labels(&self) -> &[String] {
+        &self.redo_labels
     }
 
     #[must_use]
@@ -304,6 +319,7 @@ impl Session {
         // A new edit invalidates the redo branch. Keeping it would let a user
         // redo their way into a history that never happened.
         self.redo.clear();
+        self.redo_labels.clear();
         self.history.push(applied.label.clone());
         self.text = applied.scene.clone();
         self.version = applied.version.clone();
@@ -318,7 +334,9 @@ impl Session {
         };
         self.redo.push(std::mem::replace(&mut self.text, previous));
         self.version = VersionToken::of(&self.text);
-        self.history.pop();
+        if let Some(label) = self.history.pop() {
+            self.redo_labels.push(label);
+        }
         true
     }
 
@@ -329,6 +347,9 @@ impl Session {
         };
         self.undo.push(std::mem::replace(&mut self.text, next));
         self.version = VersionToken::of(&self.text);
+        if let Some(label) = self.redo_labels.pop() {
+            self.history.push(label);
+        }
         true
     }
 
@@ -401,6 +422,7 @@ impl Session {
         // user undo their way onto someone else's work.
         self.undo.clear();
         self.redo.clear();
+        self.redo_labels.clear();
         self.gesture = None;
         Ok(())
     }
@@ -408,6 +430,43 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+
+    /// **Undo used to eat a label for good.** `undo` popped from `history` and
+    /// `redo` never pushed one back, so a scene that had been undone and redone
+    /// described itself with one row missing from the log — permanently, and
+    /// more with every round trip.
+    #[test]
+    fn undo_and_redo_leave_the_log_where_it_started() {
+        let mut session = session();
+        session.apply(spawn("Lamp")).expect("applies");
+        session.apply(spawn("Chair")).expect("applies");
+        let before = session.history().to_vec();
+        assert_eq!(before.len(), 2, "{before:?}");
+
+        assert!(session.undo());
+        assert_eq!(session.history().len(), 1);
+        assert_eq!(session.redo_labels().len(), 1, "the label is kept, not dropped");
+
+        assert!(session.redo());
+        assert_eq!(session.history(), before.as_slice(), "the log comes back intact");
+        assert!(session.redo_labels().is_empty());
+    }
+
+    /// A fresh edit abandons the redo branch, and its labels with it — a log
+    /// that kept them would offer to redo something that no longer exists.
+    #[test]
+    fn a_new_edit_discards_the_undone_branch() {
+        let mut session = session();
+        session.apply(spawn("Lamp")).expect("applies");
+        session.apply(spawn("Chair")).expect("applies");
+        assert!(session.undo());
+        assert_eq!(session.redo_labels().len(), 1);
+
+        session.apply(spawn("Third")).expect("applies");
+        assert!(session.redo_labels().is_empty(), "the branch is gone");
+        assert!(!session.can_redo());
+    }
+
     use super::*;
     use crate::SceneOp;
 

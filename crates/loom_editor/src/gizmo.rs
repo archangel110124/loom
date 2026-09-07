@@ -227,9 +227,119 @@ pub fn drag_distance(handle: &Handle, from: (f32, f32), to: (f32, f32)) -> f32 {
     ((to.0 - from.0) * ux + (to.1 - from.1) * uy) * handle.scale
 }
 
+/// Increment snapping for the gizmo — ADR 0093.
+///
+/// **The result is snapped, not the movement.** Snapping the drag delta gives
+/// increments *from wherever the node happened to be*, so a node at x = 0.37
+/// steps to 0.87 and never reaches a round number. Snapping the result is what
+/// makes a grid a grid: a deck laid out with this has its planks on whole
+/// metres, which is the entire reason a human wants it.
+///
+/// Applied per component, to the number the *file* stores — the local
+/// transform, which is what the inspector shows. Snapping in world space would
+/// put a node under a turned parent on values that look arbitrary in every
+/// place they are displayed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Snap {
+    /// Metres. Zero or less disables it.
+    pub translate: f32,
+    /// Degrees.
+    pub rotate: f32,
+    /// Scale factor.
+    pub scale: f32,
+    /// Whether it applies at all. Held modifiers invert this rather than set
+    /// it, so a human who works on the grid can drop off it for one drag.
+    pub enabled: bool,
+}
+
+impl Default for Snap {
+    fn default() -> Self {
+        // A quarter metre and fifteen degrees: fine enough to place a crate,
+        // coarse enough that a deck lines up. Both are what a human would
+        // otherwise type into the box first.
+        Self { translate: 0.25, rotate: 15.0, scale: 0.25, enabled: false }
+    }
+}
+
+impl Snap {
+    /// The increment for a mode, or `None` when snapping is off.
+    #[must_use]
+    pub fn step(&self, mode: Mode, inverted: bool) -> Option<f32> {
+        if self.enabled == inverted {
+            return None;
+        }
+        let step = match mode {
+            Mode::Move => self.translate,
+            Mode::Rotate => self.rotate,
+            Mode::Scale => self.scale,
+        };
+        (step > 0.0).then_some(step)
+    }
+}
+
+/// Round `value` to the nearest multiple of `step`.
+///
+/// A `step` of zero or less is no snapping, because a step of zero would
+/// divide by nothing and a negative one is a typo, not an instruction.
+#[must_use]
+pub fn snap(value: f32, step: f32) -> f32 {
+    if step <= 0.0 || !step.is_finite() {
+        return value;
+    }
+    (value / step).round() * step
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapping_rounds_to_the_nearest_multiple() {
+        assert!((snap(1.13, 0.25) - 1.25).abs() < 1e-6);
+        assert!((snap(1.12, 0.25) - 1.0).abs() < 1e-6);
+        assert!((snap(-1.13, 0.25) + 1.25).abs() < 1e-6);
+        assert!((snap(0.0, 0.25) - 0.0).abs() < 1e-6);
+    }
+
+    /// **A step of zero must not divide by nothing**, and a negative one is a
+    /// typo rather than an instruction to snap backwards.
+    #[test]
+    fn a_useless_step_leaves_the_value_alone() {
+        for step in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let out = snap(3.7, step);
+            assert!((out - 3.7).abs() < 1e-6, "step {step} gave {out}");
+        }
+    }
+
+    /// The result lands on the grid, which is the whole point — a node at an
+    /// arbitrary offset must reach round numbers, not merely move in round
+    /// increments away from where it started.
+    #[test]
+    fn snapping_the_result_reaches_round_numbers_from_anywhere() {
+        let start = 0.37_f32;
+        let dragged = start + 0.6;
+        assert!((snap(dragged, 0.25) - 1.0).abs() < 1e-6, "{}", snap(dragged, 0.25));
+    }
+
+    /// A held modifier inverts the toggle, so somebody working on the grid can
+    /// step off it for one drag without changing a setting.
+    #[test]
+    fn a_modifier_inverts_the_toggle_rather_than_setting_it() {
+        let on = Snap { enabled: true, ..Snap::default() };
+        let off = Snap { enabled: false, ..Snap::default() };
+        assert_eq!(on.step(Mode::Move, false), Some(0.25));
+        assert_eq!(on.step(Mode::Move, true), None, "held modifier drops off the grid");
+        assert_eq!(off.step(Mode::Move, false), None);
+        assert_eq!(off.step(Mode::Move, true), Some(0.25), "held modifier snaps for one drag");
+        assert_eq!(on.step(Mode::Rotate, false), Some(15.0));
+    }
+
+    /// A step that was cleared to zero in the box is not snapping.
+    #[test]
+    fn a_zeroed_step_is_off_even_when_enabled() {
+        let snap = Snap { translate: 0.0, enabled: true, ..Snap::default() };
+        assert_eq!(snap.step(Mode::Move, false), None);
+    }
 
     fn view() -> View {
         View::new(

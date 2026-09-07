@@ -297,6 +297,17 @@ impl InputState {
         }
     }
 
+    /// Whether a named button is down *right now*, by its raw name.
+    ///
+    /// **Deliberately not an action.** Actions are the rebindable game surface;
+    /// this is for the editor asking "is Ctrl held", which is a modifier on a
+    /// mouse gesture rather than a thing a player would ever rebind. Routing it
+    /// through `ActionMap` would put "snap to grid" in the same list as "jump".
+    #[must_use]
+    pub fn held(&self, button: &str) -> bool {
+        self.held.contains(button)
+    }
+
     /// Record an analog source's deflection, -1..1 for a stick, 0..1 for a
     /// trigger.
     ///

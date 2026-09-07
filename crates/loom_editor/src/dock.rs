@@ -194,13 +194,13 @@ impl TabViewer for Shell<'_, '_> {
             Tab::Project => panels::assets(ui, self.state, &mut self.actions),
             Tab::Console => panels::console_column(ui, self.state.console, &mut self.actions),
             Tab::Transactions => panels::transactions(ui, self.state.history),
-            // Bodies land in Stage 4 (Problems, History), Stage 6 (Agent) and
-            // Stage 7 (Prefabs). A named empty tab is deliberate: the eleven
-            // variants are fixed once because adding one invalidates every
-            // saved layout, so the tab exists before its panel does.
-            Tab::Problems | Tab::History | Tab::Prefabs | Tab::Agent => {
-                ui.weak("not built yet");
-            }
+            // All eleven have bodies now — ADR 0093. The variants were fixed
+            // once because adding one invalidates every saved layout, so these
+            // four existed as named holes until they were filled.
+            Tab::Problems => panels::problems(ui, self.state, &mut self.actions),
+            Tab::Agent => panels::agent(ui, self.state, &mut self.actions),
+            Tab::History => panels::history(ui, self.state, &mut self.actions),
+            Tab::Prefabs => panels::prefabs(ui, self.state, &mut self.actions),
         }
     }
 
@@ -657,6 +657,132 @@ mod tests {
         assert_eq!(tabs_of(&from_json(&json, 900.0)), expected);
     }
 
+    /// **Every tab draws, with something in it.** Four of the eleven rendered
+    /// the string "not built yet" until ADR 0093, so nothing had ever exercised
+    /// them; a panel that panics on its first non-empty state is a panel nobody
+    /// finds until a human opens the tab.
+    ///
+    /// Drawn one tab at a time so a failure names the tab.
+    #[test]
+    fn every_tab_draws_with_content() {
+        let scene = loom_scene::Scene::parse(
+            "[scene]\nformat = 1\n\n[[prefab]]\nkey = \"crate\"\n\
+             id = \"7a41c0de-5b2e-4f18-9d63-2c8ae5f10b47\"\npath = \"../p/crate.loom\"\n\
+             \n[[node]]\nname = \"Root\"\n",
+        )
+        .expect("a scene with a prefab");
+        let registry = loom_reflect::TypeRegistry::new();
+        let problems = [
+            crate::panels::Problem {
+                blocking: true,
+                node: "Root".to_owned(),
+                message: "mesh alias resolves to nothing".to_owned(),
+            },
+            crate::panels::Problem {
+                blocking: false,
+                node: String::new(),
+                message: "a warning with no node".to_owned(),
+            },
+        ];
+        let agent_log = [crate::panels::AgentEdit {
+            node: "Root/Thing".to_owned(),
+            kind: "Edited".to_owned(),
+            seconds_ago: 3.0,
+        }];
+        let redo = ["Undone thing".to_owned()];
+        let paths = ["Root".to_owned()];
+        let history = ["Did a thing".to_owned()];
+
+        for tab in Tab::ALL {
+            let panels = PanelState {
+                snap: crate::gizmo::Snap::default(),
+                filter: "",
+                problems: &problems,
+                agent_log: &agent_log,
+                redo_history: &redo,
+                scene: &scene,
+                paths: &paths,
+                picks: &std::collections::BTreeMap::new(),
+                assets: &["box".to_owned()],
+                object_count: 1,
+                selected: &paths,
+                history: &history,
+                can_undo: true,
+                can_redo: true,
+                dirty: true,
+                conflict: false,
+                editable: true,
+                registry: &registry,
+                mode: crate::gizmo::Mode::Move,
+                handles: &[],
+                dragging: None,
+                fps: 60.0,
+                agent_marks: &[],
+                overrides: &std::collections::BTreeMap::new(),
+                console: &[],
+                tick_seconds: 1.0 / 60.0,
+                playing: None,
+            };
+            let mut dock = Dock {
+                state: DockState::new(vec![tab]),
+                was_playing: false,
+                persist: false,
+            };
+            egui::__run_test_ui(|root| {
+                dock.draw(root, &panels);
+            });
+        }
+    }
+
+    /// A filtered hierarchy draws, and an unmatchable filter draws nothing
+    /// rather than panicking on an empty list.
+    #[test]
+    fn a_filtered_hierarchy_draws() {
+        let scene = loom_scene::Scene::parse("[scene]\nformat = 1\n\n[[node]]\nname = \"Root\"\n")
+            .expect("a one-node scene");
+        let registry = loom_reflect::TypeRegistry::new();
+        let paths = ["Root".to_owned(), "Root/Boat".to_owned()];
+        for filter in ["", "boat", "nothing-matches-this"] {
+            let panels = PanelState {
+                snap: crate::gizmo::Snap::default(),
+                filter,
+                problems: &[],
+                agent_log: &[],
+                redo_history: &[],
+                scene: &scene,
+                paths: &paths,
+                picks: &std::collections::BTreeMap::new(),
+                assets: &[],
+                object_count: 0,
+                selected: &[],
+                history: &[],
+                can_undo: false,
+                can_redo: false,
+                dirty: false,
+                conflict: false,
+                editable: true,
+                registry: &registry,
+                mode: crate::gizmo::Mode::Move,
+                handles: &[],
+                dragging: None,
+                fps: 60.0,
+                agent_marks: &[],
+                overrides: &std::collections::BTreeMap::new(),
+                console: &[],
+                tick_seconds: 1.0 / 60.0,
+                playing: None,
+            };
+            let mut dock = Dock {
+                state: DockState::new(vec![Tab::Hierarchy]),
+                was_playing: false,
+                persist: false,
+            };
+            egui::__run_test_ui(|root| {
+                dock.draw(root, &panels);
+            });
+        }
+    }
+
     /// Draw a dock over egui's test context and report what the root `Ui` has
     /// left afterwards — which is the rectangle the renderer draws into, the
     /// one `is_pointer_over_egui` compares a click against, and the one the HUD
@@ -666,6 +792,11 @@ mod tests {
             .expect("a one-node scene");
         let registry = loom_reflect::TypeRegistry::new();
         let panels = PanelState {
+            snap: crate::gizmo::Snap::default(),
+            filter: "",
+            problems: &[],
+            agent_log: &[],
+            redo_history: &[],
             scene: &scene,
             paths: &[],
             picks: &std::collections::BTreeMap::new(),
