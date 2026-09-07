@@ -1,7 +1,18 @@
 # Default input bindings. Rebind by editing this file — no rebuild.
 #
 # Button names are winit `KeyCode` variants (KeyW, ShiftLeft, ArrowUp, Escape)
-# plus MouseLeft / MouseRight. An action fires if ANY of its bindings fires.
+# plus MouseLeft / MouseRight, and gamepad buttons as `Pad` + gilrs's own name:
+# PadSouth, PadEast, PadStart, PadLeftTrigger2. An action fires if ANY of its
+# bindings fires.
+#
+# An `[contexts.*.axes]` table binds an action to an analog source instead —
+# PadLeftStickX, PadRightStickY, and the triggers, which report travel as well
+# as a press. `scale = -1.0` inverts, which is not taste: a stick pushed forward
+# reports NEGATIVE Y, so every scheme that wants forward-is-positive says so.
+# `dead_zone` defaults to 0.15, because a stick at rest wanders to about 0.08
+# and without it a character walks across the room on its own.
+#
+# Keyboard and stick do not add: whichever is deflected further wins.
 #
 # trigger:  held (default) · pressed (the frame it goes down) · released
 # modifiers: buttons that must ALSO be held. A requirement, not an exclusion —
@@ -66,8 +77,8 @@ move_back    = [{ button = "KeyS" }, { button = "ArrowDown" }]
 move_left    = [{ button = "KeyA" }, { button = "ArrowLeft" }]
 move_right   = [{ button = "KeyD" }, { button = "ArrowRight" }]
 # Pressed, not held: holding jump must not re-fire the instant you land.
-jump         = [{ button = "Space", trigger = "pressed" }]
-sprint       = [{ button = "ShiftLeft" }, { button = "ShiftRight" }]
+jump         = [{ button = "Space", trigger = "pressed" }, { button = "PadSouth", trigger = "pressed" }]
+sprint       = [{ button = "ShiftLeft" }, { button = "ShiftRight" }, { button = "PadLeftThumb" }]
 # Escape is NOT here. It is `quit` in the `fly` context, read once per frame
 # whatever is running, because one key cannot mean two things at one moment:
 # playing it opens the pause menu, and otherwise it closes the window. A `play`
@@ -90,3 +101,23 @@ interact     = [{ button = "KeyE", trigger = "pressed" }]
 # Pressed, not held, for `interact`'s reason twice over: an inventory bound to a
 # held key opens and shuts sixty times a second, which is a strobe.
 bag          = [{ button = "Tab", trigger = "pressed" }]
+
+# ---------------------------------------------------------------------------
+# Gamepad sticks. Buttons live beside their keyboard equivalents above; only the
+# analog sources need a table of their own, because a stick is not a button.
+#
+# The left stick drives movement in both contexts. Look is on the right stick in
+# `play` and deliberately absent in `fly`: the viewer's look is hold-to-orbit on
+# the right mouse button, and a stick that orbits whenever it is touched would
+# fight the gizmo drag that shares the screen.
+[contexts.play.axes]
+move_forward = [{ axis = "PadLeftStickY", scale = -1.0 }]
+move_right   = [{ axis = "PadLeftStickX" }]
+
+[contexts.fly.axes]
+move_forward = [{ axis = "PadLeftStickY", scale = -1.0 }]
+move_right   = [{ axis = "PadLeftStickX" }]
+# Triggers rise and fall rather than switch, so they suit a climb better than a
+# pair of buttons does.
+move_up      = [{ axis = "PadRightTrigger2" }]
+move_down    = [{ axis = "PadLeftTrigger2" }]

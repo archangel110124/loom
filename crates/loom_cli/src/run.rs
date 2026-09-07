@@ -645,6 +645,10 @@ struct App {
     /// Loaded from TOML, so rebinding needs no rebuild.
     bindings: ActionMap,
     input: InputState,
+    /// Gamepads, when the platform has any — ADR 0086. `None` on a headless
+    /// box, in a container with no `/dev/input`, or on CI, none of which should
+    /// stop a scene from opening.
+    gamepads: Option<loom_input::Gamepads>,
     window: Option<Arc<Window>>,
     viewer: Option<Viewer>,
     /// Kept alive for the whole session: destroying the device before the
@@ -792,6 +796,17 @@ impl App {
         // A read-only viewer or a `--play` session is the one that could host;
         // an `--edit` session is somebody authoring the file.
         let room_code = session.is_none().then(generate_code).flatten();
+        // Before the struct takes `view`: the scene names its own scheme.
+        let bindings = load_bindings(&view);
+        let gamepads = match loom_input::Gamepads::open() {
+            Ok(pads) => Some(pads),
+            Err(e) => {
+                // Reported once, at startup, rather than per frame: a machine
+                // with no pads is the normal case and must not be noisy.
+                eprintln!("loom: no gamepad support ({e}); keyboard and mouse only");
+                None
+            }
+        };
         Self {
             // The scene's own camera when it has one, the whole scene framed
             // when it does not.
@@ -842,8 +857,9 @@ impl App {
             next_watch: std::time::Instant::now(),
             // Prefer a project-local file, fall back to the shipped defaults,
             // so a fresh checkout has a working camera with no config to write.
-            bindings: load_bindings(),
+            bindings,
             input: InputState::new(),
+            gamepads,
             window: None,
             viewer: None,
             dock: None,
@@ -1482,6 +1498,14 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
+                // **Drained here, before anything reads a binding.** Both
+                // `step_camera` and the play input path consult the action map
+                // further down this frame; an event pumped after either of them
+                // waits a whole frame, which on a stick is stale deflection and
+                // on a button is a press the player made and did not get.
+                if let Some(pads) = self.gamepads.as_mut() {
+                    pads.pump(&mut self.input);
+                }
                 // The frame's one application of whatever the mouse did since
                 // the last one. Absolute from the drag's start rather than
                 // accumulated, so collapsing events loses nothing.
@@ -3380,15 +3404,49 @@ fn build_viewer(
 /// The on-disk file wins so rebinding needs no rebuild — which is the point of
 /// M6. A malformed file is reported and then ignored rather than being fatal:
 /// losing your camera because of a typo in a config is a bad trade.
-fn load_bindings() -> ActionMap {
-    let path = std::path::Path::new("assets/input/default.toml");
-    if path.exists() {
-        match ActionMap::load(path) {
-            Ok(map) => return map,
-            Err(e) => eprintln!("loom: {}: {e}; using built-in bindings", path.display()),
+/// The control scheme, in three layers — ADR 0086.
+///
+/// **Engine, then game, then player, each replacing the last per action.** It
+/// used to be one fixed path, so a scene could not ship its own scheme without
+/// replacing everyone else's, and a player could not rebind anything without
+/// editing the file the game shipped.
+///
+/// A layer that fails to load is reported and skipped rather than fatal: a
+/// player with a typo in their bindings should get the game's controls and a
+/// message, not a window that will not open.
+fn load_bindings(view: &SceneView) -> ActionMap {
+    let mut map = ActionMap::from_toml(loom_input::DEFAULT_BINDINGS).unwrap_or_default();
+    let mut overlay_from = |path: &std::path::Path, what: &str| {
+        if !path.exists() {
+            return;
         }
+        match ActionMap::load(path) {
+            Ok(other) => map.overlay(other),
+            Err(e) => eprintln!("loom: {} ({what}): {e}; ignored", path.display()),
+        }
+    };
+    // The engine's project-local file, kept for every scene that names nothing.
+    overlay_from(std::path::Path::new("assets/input/default.toml"), "defaults");
+    // The scene's own scheme.
+    if let Some(scene_path) = view.world().bindings_path() {
+        overlay_from(std::path::Path::new(scene_path), "scene");
     }
-    ActionMap::from_toml(loom_input::DEFAULT_BINDINGS).unwrap_or_default()
+    // The player's, last, so it wins.
+    if let Some(user) = user_bindings_path() {
+        overlay_from(&user, "yours");
+    }
+    map
+}
+
+/// Where a player's own bindings live.
+///
+/// `$XDG_CONFIG_HOME/loom/bindings.toml`, falling back to `~/.config`. Absent is
+/// the normal case and means "no rebindings", not an error.
+fn user_bindings_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
+    Some(base.join("loom").join("bindings.toml"))
 }
 
 /// Open a window showing `path`.

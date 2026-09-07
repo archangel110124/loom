@@ -433,6 +433,7 @@ name = \"Root\"
             "Script",
             "RigidBody",
             "Joint",
+            "Bindings",
             "Material",
             "ParticleEmitter",
             "Camera",

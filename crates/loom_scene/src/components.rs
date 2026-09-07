@@ -393,6 +393,33 @@ impl Default for RigidBody {
     }
 }
 
+/// The control scheme this scene ships with — ADR 0086.
+///
+/// **A game's controls belong to the game, and its player's belong to the
+/// player.** Bindings used to come from one engine-wide path, so a scene could
+/// not ship its own scheme without replacing everyone else's. This names a
+/// file; the engine's built-in defaults sit underneath it and the player's own
+/// file sits on top, layered per action so rebinding `jump` costs you nothing
+/// else.
+///
+/// A path rather than the bindings inline: a control scheme is its own
+/// document, edited and diffed on its own, and inlining it in a scene would put
+/// a hundred lines of key names in the middle of a level.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Bindings {
+    /// Path to a bindings TOML, relative to the working directory.
+    pub path: String,
+}
+
+impl Default for Bindings {
+    fn default() -> Self {
+        Self {
+            path: "assets/input/default.toml".to_owned(),
+        }
+    }
+}
+
 /// Which degrees of freedom a [`Joint`] leaves alone.
 ///
 /// **Named for the motion that survives, not the axes removed.** A reader
@@ -2955,6 +2982,7 @@ pub fn registry() -> TypeRegistry {
     reg.register::<Light>("Light");
     reg.register::<RigidBody>("RigidBody");
     reg.register::<Joint>("Joint");
+    reg.register::<Bindings>("Bindings");
     reg.register::<VoxelVolume>("VoxelVolume");
     reg.register::<Material>("Material");
     reg.register::<ParticleEmitter>("ParticleEmitter");

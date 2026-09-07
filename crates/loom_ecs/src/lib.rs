@@ -132,6 +132,9 @@ pub struct World {
     /// once physics has been built, which is a crate this one does not depend
     /// on. Carried here so the builder does not have to walk the scene twice.
     joint: Storage<serde_json::Value>,
+    /// The `Bindings` component, verbatim — ADR 0086. Scene-global in practice,
+    /// carried per entity because that is what a component is.
+    bindings: Storage<serde_json::Value>,
     /// The asset alias a node's `MeshRenderer` names.
     mesh_asset: Storage<String>,
     /// The `Deform` component, verbatim. Carried rather than resolved for the
@@ -460,6 +463,9 @@ impl World {
             }
             if let Some(joint) = node.components.get("Joint") {
                 world.joint.insert(entity, joint.clone());
+            }
+            if let Some(bindings) = node.components.get("Bindings") {
+                world.bindings.insert(entity, bindings.clone());
             }
             if let Some(deform) = node.components.get("Deform") {
                 world.deform.insert(entity, deform.clone());
@@ -791,6 +797,17 @@ impl World {
     #[must_use]
     pub fn collider_half_extents(&self, entity: Entity) -> Option<[f32; 3]> {
         self.collider.get(entity).copied()
+    }
+
+    /// The control scheme this scene ships, if it names one — ADR 0086.
+    /// First match wins; a scene with two is authoring a contradiction.
+    #[must_use]
+    pub fn bindings_path(&self) -> Option<&str> {
+        self.entities()
+            .iter()
+            .find_map(|e| self.bindings.get(*e))
+            .and_then(|v| v.get("path"))
+            .and_then(serde_json::Value::as_str)
     }
 
     /// The `Joint` a node authored, verbatim. Deserialised by whoever has the
